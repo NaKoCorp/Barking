@@ -48,3 +48,6 @@ pub const MAILBOX: &[u8] = b"barking/v0/mailbox";
 
 /// Contexte BLAKE3 de la boîte aux lettres d'introduction (premier message).
 pub const INTRO_MAILBOX_CONTEXT: &str = "barking/v0/intro-mailbox";
+
+/// Contexte BLAKE3 de l'identifiant de paquet dérivé du secret d'accusé.
+pub const ACK_CONTEXT: &str = "barking/v0/ack";

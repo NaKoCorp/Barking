@@ -5,6 +5,7 @@ pub mod error;
 pub mod handshake;
 pub mod identity;
 pub mod mailbox;
+pub mod packet;
 pub mod ratchet;
 
 pub use error::{CoreError, Result};
