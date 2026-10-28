@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS seen (
     packet_id BLOB PRIMARY KEY NOT NULL,
     at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS outbox (
+    packet_id BLOB PRIMARY KEY NOT NULL,
+    bytes BLOB NOT NULL,
+    kind INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS transparency (
     id INTEGER PRIMARY KEY,
     at INTEGER NOT NULL,

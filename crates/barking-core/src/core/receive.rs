@@ -102,6 +102,7 @@ impl Core {
                 return Ok(ReceiveOutcome::Duplicate);
             }
             tx.set_status_by_packet(acked, MessageStatus::Delivered)?;
+            tx.outbox_remove(acked)?;
             log(
                 tx,
                 now,
@@ -421,6 +422,13 @@ fn accept(
     )?;
     let alias = Core::alias_in(q, row.contact_fp)?;
     let ack = Packet::ack(packet, env.ack_secret, now, rng);
+    q.outbox_put(
+        ack.id,
+        &ack.encode(),
+        ack.kind,
+        u64::from(ack.expires_at),
+        now,
+    )?;
     Ok((
         ReceiveOutcome::Message {
             from: row.contact_fp,

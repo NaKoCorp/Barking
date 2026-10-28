@@ -272,3 +272,38 @@ fn remove_then_readd() {
     });
     assert!(delivered);
 }
+
+#[test]
+fn outbox_rewrites_unacked_packets() {
+    let ((da, a), (db, b)) = pair();
+    let out_a = da.path().join("out");
+    let out_b = db.path().join("out");
+    let again = da.path().join("again");
+
+    ok(&a, &["send", "bob", "salut", "--out", path_arg(&out_a)]);
+    let pkts = packets(&out_a);
+    assert_eq!(pkts.len(), 1);
+
+    // Non acquitté : le paquet est réécrit à l'identique.
+    let listed = ok(&a, &["outbox", "--out", path_arg(&again)]);
+    assert!(listed.contains("1 paquet"), "{listed}");
+    let rewritten = packets(&again);
+    assert_eq!(rewritten.len(), 1);
+    assert_eq!(rewritten[0].file_name(), pkts[0].file_name());
+    assert_eq!(
+        fs::read(&rewritten[0]).unwrap(),
+        fs::read(&pkts[0]).unwrap()
+    );
+
+    // Après l'accusé, la file est vide.
+    ok(
+        &b,
+        &["receive", path_arg(&pkts[0]), "--out", path_arg(&out_b)],
+    );
+    let acks = packets(&out_b);
+    ok(&a, &["receive", path_arg(&acks[0])]);
+    let empty = da.path().join("empty");
+    let listed = ok(&a, &["outbox", "--out", path_arg(&empty)]);
+    assert!(listed.contains("0 paquet"), "{listed}");
+    assert!(packets(&empty).is_empty());
+}

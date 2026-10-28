@@ -390,6 +390,20 @@ impl Core {
             .collect()
     }
 
+    /// Purge les paquets expirés de la file d'envoi puis rend les octets à
+    /// (re)transmettre, du plus ancien au plus récent. Un paquet y reste
+    /// jusqu'à son accusé de réception ou son expiration.
+    pub fn pending_outbox(&mut self, now: u64) -> Result<Vec<Vec<u8>>> {
+        self.store.transaction(|tx| {
+            tx.outbox_purge_expired(now)?;
+            Ok(tx
+                .outbox_pending(now)?
+                .into_iter()
+                .map(|(_, bytes)| bytes)
+                .collect())
+        })
+    }
+
     /// Historique avec un contact, du plus ancien au plus récent.
     pub fn messages_with(&self, contact: &Fingerprint) -> Result<Vec<MessageRow>> {
         self.store.messages_with(*contact)

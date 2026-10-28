@@ -910,3 +910,62 @@ fn revoked_device_refused_for_normal_and_initial() {
         .collect();
     assert_eq!(texts, vec!["i1", "n0"]);
 }
+
+#[test]
+fn outbox_survives_reopen() {
+    let (mut a, b, mut rng) = pair();
+    let p = one(a.send(&b.fp(), "ne me perds pas", NOW, &mut rng));
+    assert_eq!(a.core.pending_outbox(NOW).unwrap(), vec![p.encode()]);
+    a.reopen();
+    assert_eq!(a.core.pending_outbox(NOW).unwrap(), vec![p.encode()]);
+}
+
+#[test]
+fn ack_clears_outbox() {
+    let (mut a, mut b, mut rng) = pair();
+    let p = one(a.send(&b.fp(), "accuse-moi", NOW, &mut rng));
+    let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
+    assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 1);
+    assert!(matches!(
+        a.recv(&ack, NOW + 1, &mut rng),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    assert!(a.core.pending_outbox(NOW + 1).unwrap().is_empty());
+}
+
+#[test]
+fn expired_leaves_outbox() {
+    let (mut a, b, mut rng) = pair();
+    one(a.send(&b.fp(), "trop tard", NOW, &mut rng));
+    assert_eq!(
+        a.core.pending_outbox(NOW + DEFAULT_TTL_SECS).unwrap().len(),
+        1
+    );
+    assert!(
+        a.core
+            .pending_outbox(NOW + DEFAULT_TTL_SECS + 1)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn emitted_ack_is_queued() {
+    let (mut a, mut b, mut rng) = pair();
+    let p = one(a.send(&b.fp(), "salut", NOW, &mut rng));
+    let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
+    assert_eq!(b.core.pending_outbox(NOW).unwrap(), vec![ack.encode()]);
+}
+
+#[test]
+fn send_rollback_leaves_no_outbox_row() {
+    let (mut a, b, mut rng) = pair();
+    let too_long = "x".repeat(100_000);
+    assert!(a.core.send_text(&b.fp(), &too_long, NOW, &mut rng).is_err());
+    let stranger = Fingerprint([9; 32]);
+    assert_eq!(
+        a.core.send_text(&stranger, "?", NOW, &mut rng).unwrap_err(),
+        CoreError::UnknownContact
+    );
+    assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
+}

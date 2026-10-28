@@ -77,6 +77,11 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
+    /// Réécrit les paquets en attente d'accusé (à retransmettre).
+    Outbox {
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
     /// Affiche le code de sécurité d'un contact.
     Safety {
         contact: String,
@@ -290,6 +295,22 @@ fn run(cli: Cli) -> CliResult<()> {
             }
         }
         Command::Receive { files, out } => return receive(&home, &files, out.as_deref()),
+        Command::Outbox { out } => {
+            let mut core = open_core(&home)?;
+            let pending = core.pending_outbox(now())?;
+            fs::create_dir_all(&out)?;
+            for bytes in &pending {
+                let packet = Packet::decode(bytes)
+                    .map_err(|e| CliError(format!("Paquet en file illisible : {e}")))?;
+                let path = write_packet(&out, &packet)?;
+                println!("{}", path.display());
+            }
+            match pending.len() {
+                0 => println!("0 paquet en attente"),
+                1 => println!("1 paquet en attente"),
+                n => println!("{n} paquets en attente"),
+            }
+        }
         Command::Safety { contact, verified } => {
             let mut core = open_core(&home)?;
             let fp = resolve(&core, &contact)?;

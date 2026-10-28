@@ -111,6 +111,13 @@ impl Core {
                     now,
                     Some(packet.id),
                 )?;
+                tx.outbox_put(
+                    packet.id,
+                    &packet.encode(),
+                    packet.kind,
+                    u64::from(packet.expires_at),
+                    now,
+                )?;
                 let size = u32::try_from(packet.tier.size()).unwrap_or(u32::MAX);
                 log(
                     tx,

@@ -220,3 +220,47 @@ fn recent_events_newest_window_in_order() {
     );
     assert_eq!(store.recent_events(10).unwrap().len(), 5);
 }
+
+#[test]
+fn outbox_put_pending_remove_purge() {
+    use crate::packet::Kind;
+    let (_d, _p, store) = open_tmp();
+    let (a, b, c) = (PacketId([1; 16]), PacketId([2; 16]), PacketId([3; 16]));
+    store.outbox_put(b, b"bb", Kind::Message, 500, 20).unwrap();
+    store.outbox_put(a, b"aa", Kind::Message, 500, 10).unwrap();
+    store.outbox_put(c, b"cc", Kind::Ack, 100, 30).unwrap();
+    // Du plus ancien au plus récent.
+    assert_eq!(
+        store.outbox_pending(50).unwrap(),
+        vec![
+            (a, b"aa".to_vec()),
+            (b, b"bb".to_vec()),
+            (c, b"cc".to_vec())
+        ]
+    );
+    // Une entrée expirée n'est plus rendue.
+    assert_eq!(store.outbox_pending(101).unwrap().len(), 2);
+    assert_eq!(store.outbox_purge_expired(101).unwrap(), 1);
+    assert_eq!(store.outbox_purge_expired(101).unwrap(), 0);
+    assert!(store.outbox_remove(a).unwrap());
+    assert!(!store.outbox_remove(a).unwrap());
+    assert_eq!(
+        store.outbox_pending(101).unwrap(),
+        vec![(b, b"bb".to_vec())]
+    );
+    // Réinsérer le même identifiant ne duplique pas la ligne.
+    store.outbox_put(b, b"bb", Kind::Message, 500, 20).unwrap();
+    assert_eq!(store.outbox_pending(101).unwrap().len(), 1);
+}
+
+#[test]
+fn outbox_put_rolls_back_with_transaction() {
+    use crate::packet::Kind;
+    let (_d, _p, mut store) = open_tmp();
+    let r: crate::Result<()> = store.transaction(|tx| {
+        tx.outbox_put(PacketId([1; 16]), b"x", Kind::Message, 500, 1)?;
+        Err(CoreError::Store("boom".into()))
+    });
+    assert!(r.is_err());
+    assert!(store.outbox_pending(2).unwrap().is_empty());
+}

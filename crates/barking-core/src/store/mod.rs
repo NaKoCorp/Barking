@@ -19,7 +19,7 @@ use zeroize::Zeroize;
 
 use crate::identity::device::DeviceId;
 use crate::identity::root::Fingerprint;
-use crate::packet::PacketId;
+use crate::packet::{Kind, PacketId};
 use crate::{CoreError, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,6 +421,74 @@ pub trait Queries {
     fn purge_seen(&self, before: u64) -> Result<usize> {
         self.conn()
             .execute("DELETE FROM seen WHERE at < ?1", params![to_i64(before)])
+            .map_err(map_err)
+    }
+
+    /// Met un paquet en file d'envoi ; sans effet s'il y est déjà.
+    fn outbox_put(
+        &self,
+        packet_id: PacketId,
+        bytes: &[u8],
+        kind: Kind,
+        expires_at: u64,
+        now: u64,
+    ) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO outbox(packet_id, bytes, kind, expires_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(packet_id) DO NOTHING",
+                params![
+                    packet_id.0.as_slice(),
+                    bytes,
+                    kind as i64,
+                    to_i64(expires_at),
+                    to_i64(now)
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Retire un paquet de la file ; `true` s'il y était.
+    fn outbox_remove(&self, packet_id: PacketId) -> Result<bool> {
+        let n = self
+            .conn()
+            .execute(
+                "DELETE FROM outbox WHERE packet_id = ?1",
+                params![packet_id.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(n > 0)
+    }
+
+    /// Paquets non expirés (`expires_at >= now`), du plus ancien au plus récent.
+    fn outbox_pending(&self, now: u64) -> Result<Vec<(PacketId, Vec<u8>)>> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT packet_id, bytes FROM outbox WHERE expires_at >= ?1
+                 ORDER BY created_at, rowid",
+            )
+            .map_err(map_err)?;
+        let raws = stmt
+            .query_map(params![to_i64(now)], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        raws.into_iter()
+            .map(|(id, bytes)| Ok((PacketId(arr(id)?), bytes)))
+            .collect()
+    }
+
+    /// Supprime les paquets expirés ; renvoie le nombre de lignes supprimées.
+    fn outbox_purge_expired(&self, now: u64) -> Result<usize> {
+        self.conn()
+            .execute(
+                "DELETE FROM outbox WHERE expires_at < ?1",
+                params![to_i64(now)],
+            )
             .map_err(map_err)
     }
 
