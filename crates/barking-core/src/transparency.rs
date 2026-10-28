@@ -22,6 +22,8 @@ pub enum TransparencyEvent {
         mailbox: MailboxId,
         expires_at: u32,
         recipient_device: DeviceId,
+        /// Premier message d'une session (boîte aux lettres d'introduction).
+        first_contact: bool,
     },
     PacketOpened {
         packet_id: PacketId,
@@ -48,8 +50,25 @@ pub enum TransparencyEvent {
     },
 }
 
-const RELAYS_SEE_NOTHING_PERSONAL: &str =
-    "Ils ne voient pas : qui tu es, à qui tu écris, le contenu.";
+/// Ce que tout relais lit dans l'en-tête en clair d'un paquet.
+const RELAYS_SEE: &str = "Les relais voient : la taille, le type (message ou accusé), \
+    le nombre de sauts, un identifiant de paquet, la boîte aux lettres, l'expiration.";
+
+/// Ce que les relais ne voient pas (identité réelle, destinataire réel, contenu).
+const RELAYS_DONT_SEE: &str = "Ils ne voient pas : qui tu es, à qui tu écris, le contenu.";
+
+/// Liaison message / accusé, visible des relais.
+const ACK_LINK: &str = "L'identifiant du paquet permet aux relais de relier un message à son \
+    accusé, et l'accusé reprend la boîte aux lettres du message : ils peuvent donc relier \
+    les deux, sans apprendre l'identité réelle de personne.";
+
+fn tier_label(tier: Tier) -> &'static str {
+    match tier {
+        Tier::S => "petit",
+        Tier::M => "moyen",
+        Tier::L => "grand",
+    }
+}
 
 impl TransparencyEvent {
     /// Texte français destiné à l'utilisateur. N'inclut jamais de texte de
@@ -81,36 +100,45 @@ impl TransparencyEvent {
                 tier,
                 size,
                 expires_at,
+                first_contact,
                 ..
-            } => format!(
-                "Paquet chiffré de {size} octets (palier {tier:?}) vers une boîte aux lettres \
-                 temporaire (valable aujourd'hui seulement), expire le {}. \
-                 Les relais voient : la taille, la boîte aux lettres, l'expiration. \
-                 {RELAYS_SEE_NOTHING_PERSONAL}",
-                format_utc(*expires_at)
-            ),
+            } => {
+                let mailbox = if *first_contact {
+                    "Premier message d'une session : la boîte aux lettres d'introduction est \
+                     calculée à partir de la clé publique de l'appareil destinataire et du \
+                     jour. Quiconque possède sa carte de contact peut donc reconnaître ce \
+                     paquet comme un premier message adressé à cette personne."
+                } else {
+                    "La boîte aux lettres est temporaire : elle change chaque jour et ne \
+                     révèle pas l'identité réelle de ton contact."
+                };
+                format!(
+                    "Paquet chiffré de {size} octets (palier {}), expire le {}. {mailbox} \
+                     {RELAYS_SEE} {RELAYS_DONT_SEE}",
+                    tier_label(*tier),
+                    format_utc(*expires_at)
+                )
+            }
             Self::PacketOpened {
                 sender, transport, ..
             } => format!(
                 "Paquet reçu par {transport} et déchiffré : il vient de {sender}. \
-                 Les relais qui l'ont transporté ont vu : la taille, la boîte aux lettres, \
-                 l'expiration. {RELAYS_SEE_NOTHING_PERSONAL}"
+                 Les relais qui l'ont transporté ont pu lire son en-tête. {RELAYS_SEE} \
+                 {RELAYS_DONT_SEE}"
             ),
             Self::AckEmitted { for_packet } => format!(
-                "Accusé de réception publié pour le paquet {}. Les relais voient un secret \
-                 qui leur permet de supprimer leurs copies ; ils ne voient pas qui accuse \
-                 réception.",
+                "Accusé de réception publié pour le paquet {}. {RELAYS_SEE} {ACK_LINK} \
+                 Le secret de l'accusé leur permet de supprimer leurs copies.",
                 hex(&for_packet.0[..4])
             ),
             Self::AckVerified { for_packet } => format!(
                 "Ton paquet {} est arrivé : l'accusé de réception a été vérifié. \
-                 Les relais n'ont pas appris qui l'a émis.",
+                 {RELAYS_SEE} {ACK_LINK}",
                 hex(&for_packet.0[..4])
             ),
             Self::DecryptFailed { packet_id, reason } => format!(
                 "Paquet {} impossible à déchiffrer ({reason}). Il a été ignoré. \
-                 Les relais voient seulement qu'un paquet a circulé ; \
-                 ils ne savent pas s'il a été lu.",
+                 {RELAYS_SEE} Ils ne savent pas s'il a été lu.",
                 hex(&packet_id.0[..4])
             ),
             Self::DuplicateIgnored { packet_id } => format!(
@@ -171,6 +199,29 @@ mod tests {
             mailbox: MailboxId([1; 16]),
             expires_at: 1_700_000_000,
             recipient_device: DeviceId([2; 16]),
+            first_contact: false,
+        }
+    }
+    fn sealed_first() -> TransparencyEvent {
+        match sealed() {
+            TransparencyEvent::PacketSealed {
+                packet_id,
+                tier,
+                size,
+                mailbox,
+                expires_at,
+                recipient_device,
+                ..
+            } => TransparencyEvent::PacketSealed {
+                packet_id,
+                tier,
+                size,
+                mailbox,
+                expires_at,
+                recipient_device,
+                first_contact: true,
+            },
+            _ => unreachable!(),
         }
     }
 
@@ -233,6 +284,37 @@ mod tests {
                 assert!(d.contains("relais"), "{d}");
             }
         }
+    }
+
+    #[test]
+    fn describe_lists_all_visible_header_fields() {
+        let ack = TransparencyEvent::AckEmitted { for_packet: pid() }.describe();
+        for d in [sealed().describe(), ack] {
+            for w in [
+                "type",
+                "sauts",
+                "identifiant",
+                "boîte aux lettres",
+                "expiration",
+            ] {
+                assert!(d.contains(w), "{w} manque : {d}");
+            }
+        }
+        assert!(!sealed().describe().contains("Tier"));
+        assert!(sealed().describe().contains("moyen"));
+    }
+
+    #[test]
+    fn describe_ack_states_linkability() {
+        let d = TransparencyEvent::AckVerified { for_packet: pid() }.describe();
+        assert!(d.contains("relier"), "{d}");
+    }
+
+    #[test]
+    fn describe_first_contact_mentions_contact_card() {
+        let d = sealed_first().describe();
+        assert!(d.contains("carte de contact"), "{d}");
+        assert!(!sealed().describe().contains("carte de contact"));
     }
 
     #[test]
