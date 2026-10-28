@@ -1,0 +1,31 @@
+[package]
+name = "barking-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.barking-core]
+path = ".."
+
+[[bin]]
+name = "packet_decode"
+path = "fuzz_targets/packet_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reassemble"
+path = "fuzz_targets/reassemble.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

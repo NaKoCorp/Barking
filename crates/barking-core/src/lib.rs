@@ -2,6 +2,7 @@
 
 pub mod crypto;
 pub mod error;
+pub mod fragment;
 pub mod handshake;
 pub mod identity;
 pub mod mailbox;
