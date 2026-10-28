@@ -1,6 +1,7 @@
 //! barking-core : cœur de la messagerie Barking (sans réseau ni plateforme).
 
 pub mod contact;
+pub mod core;
 pub mod crypto;
 pub mod envelope;
 pub mod error;
@@ -13,4 +14,5 @@ pub mod ratchet;
 pub mod store;
 pub mod transparency;
 
+pub use self::core::{ContactSummary, Core, ReceiveOutcome};
 pub use error::{CoreError, Result};

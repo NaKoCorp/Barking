@@ -7,7 +7,7 @@ use core::fmt;
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Taille maximale du nom d'un appareil, en octets.
 pub const MAX_NAME_LEN: usize = 64;
@@ -91,6 +91,29 @@ impl DeviceKeys {
         let mut b = [0u8; 32];
         rng.fill_bytes(&mut a);
         rng.fill_bytes(&mut b);
+        let keys = DeviceKeys {
+            signing: SigningKey::from_bytes(&a),
+            dh: x25519_dalek::StaticSecret::from(b),
+        };
+        a.zeroize();
+        b.zeroize();
+        keys
+    }
+
+    /// Clés secrètes `signature(32) || dh(32)`, pour le stockage chiffré uniquement.
+    pub(crate) fn to_bytes(&self) -> Zeroizing<[u8; 64]> {
+        let mut out = Zeroizing::new([0u8; 64]);
+        out[..32].copy_from_slice(&self.signing.to_bytes());
+        out[32..].copy_from_slice(self.dh.as_bytes());
+        out
+    }
+
+    /// Inverse de [`DeviceKeys::to_bytes`].
+    pub(crate) fn from_bytes(bytes: &[u8; 64]) -> DeviceKeys {
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        a.copy_from_slice(&bytes[..32]);
+        b.copy_from_slice(&bytes[32..]);
         let keys = DeviceKeys {
             signing: SigningKey::from_bytes(&a),
             dh: x25519_dalek::StaticSecret::from(b),

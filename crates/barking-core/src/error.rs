@@ -24,6 +24,8 @@ pub enum CoreError {
     Store(String),
     #[error("phrase de récupération invalide")]
     InvalidPhrase,
+    #[error("cet appareil ne détient pas la clé racine")]
+    NotAdmin,
 }
 
 pub type Result<T> = core::result::Result<T, CoreError>;

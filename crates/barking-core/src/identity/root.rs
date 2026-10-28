@@ -7,7 +7,7 @@ use core::fmt;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Phrase de récupération (24 mots anglais BIP39). Effacée à la destruction.
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -90,6 +90,18 @@ impl RootIdentity {
         let identity = Self::derive(&entropy);
         entropy.zeroize();
         Ok(identity)
+    }
+
+    /// Graine secrète, pour le stockage chiffré uniquement.
+    pub(crate) fn to_seed(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.key.to_bytes())
+    }
+
+    /// Inverse de [`RootIdentity::to_seed`].
+    pub(crate) fn from_seed(seed: &[u8; 32]) -> RootIdentity {
+        RootIdentity {
+            key: SigningKey::from_bytes(seed),
+        }
     }
 
     pub fn public(&self) -> RootPublic {

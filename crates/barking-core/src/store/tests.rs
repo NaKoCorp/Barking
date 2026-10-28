@@ -140,3 +140,71 @@ fn debug_hides_key() {
     let s = format!("{store:?}");
     assert!(!s.contains("0707"));
 }
+
+#[test]
+fn seen_check_and_purge() {
+    let (_d, _p, store) = open_tmp();
+    let old = PacketId([1; 16]);
+    let new = PacketId([2; 16]);
+    assert!(!store.is_seen(old).unwrap());
+    store.mark_seen(old, 10).unwrap();
+    store.mark_seen(new, 100).unwrap();
+    assert!(store.is_seen(old).unwrap());
+    assert_eq!(store.purge_seen(50).unwrap(), 1);
+    assert!(!store.is_seen(old).unwrap());
+    assert!(store.is_seen(new).unwrap());
+}
+
+#[test]
+fn message_lookup_and_deletions() {
+    let (_d, _p, store) = open_tmp();
+    let fp = Fingerprint([4; 32]);
+    let pid = PacketId([2; 16]);
+    assert!(store.message_by_packet(pid).unwrap().is_none());
+    store
+        .insert_message(fp, Direction::Out, "x", MessageStatus::Sent, 5, Some(pid))
+        .unwrap();
+    let m = store.message_by_packet(pid).unwrap().unwrap();
+    assert_eq!(m.direction, Direction::Out);
+    assert_eq!(m.status, MessageStatus::Sent);
+
+    store.upsert_contact(fp, b"c", "a", false).unwrap();
+    let dev = crate::identity::device::DeviceId([5; 16]);
+    let row = |sid: u8| SessionRow {
+        contact_device: dev,
+        contact_fp: fp,
+        session_id: [sid; 16],
+        state: vec![],
+        mailbox_secret: [0; 32],
+        ad: vec![],
+        pending_initial: None,
+        last_rx: 0,
+        created_at: u64::from(sid),
+    };
+    store.put_session(&row(1)).unwrap();
+    store.put_session(&row(2)).unwrap();
+    store.delete_session(dev, &[1; 16]).unwrap();
+    assert_eq!(store.sessions_for(dev).unwrap().len(), 1);
+    store.put_session(&row(3)).unwrap();
+    store.delete_sessions_for_device(dev).unwrap();
+    assert!(store.sessions_for(dev).unwrap().is_empty());
+    store.put_session(&row(4)).unwrap();
+    store.delete_contact(fp).unwrap();
+    assert!(store.get_contact(fp).unwrap().is_none());
+    assert!(store.all_sessions().unwrap().is_empty());
+    // L'historique reste.
+    assert_eq!(store.messages_with(fp).unwrap().len(), 1);
+}
+
+#[test]
+fn recent_events_newest_window_in_order() {
+    let (_d, _p, store) = open_tmp();
+    for i in 0..5u8 {
+        store.append_event(u64::from(i), None, &[i]).unwrap();
+    }
+    assert_eq!(
+        store.recent_events(2).unwrap(),
+        vec![(3, vec![3]), (4, vec![4])]
+    );
+    assert_eq!(store.recent_events(10).unwrap().len(), 5);
+}

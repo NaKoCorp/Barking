@@ -9,6 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+rand = "0.10.3"
+tempfile = "3.20.0"
 
 [dependencies.barking-core]
 path = ".."
@@ -23,6 +25,13 @@ bench = false
 [[bin]]
 name = "reassemble"
 path = "fuzz_targets/reassemble.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive"
+path = "fuzz_targets/receive.rs"
 test = false
 doc = false
 bench = false

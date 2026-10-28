@@ -382,33 +382,11 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         let raws = stmt
-            .query_map(params![contact_fp.0.as_slice()], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, Option<Vec<u8>>>(6)?,
-                ))
-            })
+            .query_map(params![contact_fp.0.as_slice()], message_raw)
             .map_err(map_err)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map_err)?;
-        raws.into_iter()
-            .map(|(id, fp, dir, body, st, at, pid)| {
-                Ok(MessageRow {
-                    id,
-                    contact_fp: Fingerprint(arr(fp)?),
-                    direction: Direction::from_i64(dir)?,
-                    body,
-                    status: MessageStatus::from_i64(st)?,
-                    at: to_u64(at),
-                    packet_id: pid.map(|p| arr(p).map(PacketId)).transpose()?,
-                })
-            })
-            .collect()
+        raws.into_iter().map(message_from_raw).collect()
     }
 
     /// `true` si le paquet est nouveau, `false` s'il était déjà vu.
@@ -421,6 +399,99 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         Ok(n == 1)
+    }
+
+    /// `true` si le paquet a déjà été vu (sans l'enregistrer).
+    fn is_seen(&self, packet_id: PacketId) -> Result<bool> {
+        let n: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM seen WHERE packet_id = ?1",
+                params![packet_id.0.as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        Ok(n > 0)
+    }
+
+    /// Supprime les paquets vus avant `before` ; renvoie le nombre de lignes supprimées.
+    fn purge_seen(&self, before: u64) -> Result<usize> {
+        self.conn()
+            .execute("DELETE FROM seen WHERE at < ?1", params![to_i64(before)])
+            .map_err(map_err)
+    }
+
+    /// Message portant l'identifiant de paquet `packet_id`, s'il existe.
+    fn message_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageRow>> {
+        let raw = self
+            .conn()
+            .query_row(
+                "SELECT id, contact_fp, direction, body, status, at, packet_id \
+                 FROM messages WHERE packet_id = ?1",
+                params![packet_id.0.as_slice()],
+                message_raw,
+            )
+            .optional()
+            .map_err(map_err)?;
+        raw.map(message_from_raw).transpose()
+    }
+
+    /// Supprime un contact et toutes ses sessions (l'historique est gardé).
+    fn delete_contact(&self, fp: Fingerprint) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM sessions WHERE contact_fp = ?1",
+                params![fp.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        self.conn()
+            .execute(
+                "DELETE FROM contacts WHERE fp = ?1",
+                params![fp.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Supprime une session.
+    fn delete_session(&self, device: DeviceId, session_id: &[u8; 16]) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM sessions WHERE contact_device = ?1 AND session_id = ?2",
+                params![device.0.as_slice(), session_id.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Supprime toutes les sessions avec un appareil (appareil révoqué).
+    fn delete_sessions_for_device(&self, device: DeviceId) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM sessions WHERE contact_device = ?1",
+                params![device.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Les `limit` événements les plus récents, du plus ancien au plus récent.
+    fn recent_events(&self, limit: usize) -> Result<Vec<(u64, Vec<u8>)>> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT at, event FROM (SELECT id, at, event FROM transparency \
+                 ORDER BY id DESC LIMIT ?1) ORDER BY id",
+            )
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![to_i64(limit as u64)], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        Ok(rows.into_iter().map(|(a, e)| (to_u64(a), e)).collect())
     }
 
     /// Ajoute un événement de transparence (postcard opaque ici).
@@ -461,6 +532,32 @@ impl Queries for Tx<'_> {
     fn conn(&self) -> &Connection {
         self.conn
     }
+}
+
+type MessageRaw = (i64, Vec<u8>, i64, String, i64, i64, Option<Vec<u8>>);
+
+fn message_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRaw> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+    ))
+}
+
+fn message_from_raw((id, fp, dir, body, st, at, pid): MessageRaw) -> Result<MessageRow> {
+    Ok(MessageRow {
+        id,
+        contact_fp: Fingerprint(arr(fp)?),
+        direction: Direction::from_i64(dir)?,
+        body,
+        status: MessageStatus::from_i64(st)?,
+        at: to_u64(at),
+        packet_id: pid.map(|p| arr(p).map(PacketId)).transpose()?,
+    })
 }
 
 type ContactRaw = (Vec<u8>, Vec<u8>, String, bool);

@@ -199,8 +199,16 @@ pub fn open_initial(me: &DeviceKeys, ek: &[u8; 32], sealed_init: &[u8]) -> Resul
 /// ou texte trop long), car le message vient bien de l'interlocuteur.
 pub fn open(msg: &RatchetMessage, ratchet: &mut RatchetState, ad: &[u8]) -> Result<Envelope> {
     let pt = Zeroizing::new(ratchet.decrypt(msg, ad)?);
+    decode(&pt)
+}
+
+/// Décode et valide une enveloppe déjà déchiffrée et authentifiée.
+///
+/// Séparé de [`open`] pour que l'appelant distingue un échec de déchiffrement
+/// (ratchet inchangé) d'un contenu authentifié mais refusé (ratchet avancé).
+pub fn decode(pt: &[u8]) -> Result<Envelope> {
     let (env, rest): (Envelope, _) =
-        postcard::take_from_bytes(&pt).map_err(|_| CoreError::Malformed("enveloppe"))?;
+        postcard::take_from_bytes(pt).map_err(|_| CoreError::Malformed("enveloppe"))?;
     if !rest.is_empty() {
         return Err(CoreError::Malformed("octets en trop dans l'enveloppe"));
     }

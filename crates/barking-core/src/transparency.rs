@@ -29,6 +29,8 @@ pub enum TransparencyEvent {
         packet_id: PacketId,
         sender: Fingerprint,
         transport: String,
+        /// Le paquet ouvrait une session (boîte aux lettres d'introduction).
+        first_contact: bool,
     },
     AckEmitted {
         for_packet: PacketId,
@@ -56,6 +58,11 @@ const RELAYS_SEE: &str = "Les relais voient : la taille, le type (message ou acc
 
 /// Ce que les relais ne voient pas (identité réelle, destinataire réel, contenu).
 const RELAYS_DONT_SEE: &str = "Ils ne voient pas : qui tu es, à qui tu écris, le contenu.";
+
+/// Variante pour un premier message : la boîte d'introduction désigne le destinataire.
+const RELAYS_DONT_SEE_FIRST: &str = "Ils ne voient ni qui tu es, ni le contenu. Mais \
+    quiconque possède la carte de contact du destinataire peut savoir que c'est un premier \
+    message pour cette personne.";
 
 /// Liaison message / accusé, visible des relais.
 const ACK_LINK: &str = "L'identifiant du paquet permet aux relais de relier un message à son \
@@ -103,29 +110,49 @@ impl TransparencyEvent {
                 first_contact,
                 ..
             } => {
-                let mailbox = if *first_contact {
-                    "Premier message d'une session : la boîte aux lettres d'introduction est \
-                     calculée à partir de la clé publique de l'appareil destinataire et du \
-                     jour. Quiconque possède sa carte de contact peut donc reconnaître ce \
-                     paquet comme un premier message adressé à cette personne."
+                let (mailbox, hidden) = if *first_contact {
+                    (
+                        "Premier message d'une session : la boîte aux lettres d'introduction \
+                         est calculée à partir de la clé publique de l'appareil destinataire \
+                         et du jour.",
+                        RELAYS_DONT_SEE_FIRST,
+                    )
                 } else {
-                    "La boîte aux lettres est temporaire : elle change chaque jour et ne \
-                     révèle pas l'identité réelle de ton contact."
+                    (
+                        "La boîte aux lettres est temporaire : elle change chaque jour et ne \
+                         révèle pas l'identité réelle de ton contact.",
+                        RELAYS_DONT_SEE,
+                    )
                 };
                 format!(
                     "Paquet chiffré de {size} octets (palier {}), expire le {}. {mailbox} \
-                     {RELAYS_SEE} {RELAYS_DONT_SEE}",
+                     {RELAYS_SEE} {hidden}",
                     tier_label(*tier),
                     format_utc(*expires_at)
                 )
             }
             Self::PacketOpened {
-                sender, transport, ..
-            } => format!(
-                "Paquet reçu par {transport} et déchiffré : il vient de {sender}. \
-                 Les relais qui l'ont transporté ont pu lire son en-tête. {RELAYS_SEE} \
-                 {RELAYS_DONT_SEE}"
-            ),
+                sender,
+                transport,
+                first_contact,
+                ..
+            } => {
+                let (intro, hidden) = if *first_contact {
+                    (
+                        " Il ouvrait une session : il est arrivé dans ta boîte aux lettres \
+                         d'introduction, calculée à partir de la clé publique de ton appareil \
+                         et du jour.",
+                        RELAYS_DONT_SEE_FIRST,
+                    )
+                } else {
+                    ("", RELAYS_DONT_SEE)
+                };
+                format!(
+                    "Paquet reçu par {transport} et déchiffré : il vient de {sender}.{intro} \
+                     Les relais qui l'ont transporté ont pu lire son en-tête. {RELAYS_SEE} \
+                     {hidden}"
+                )
+            }
             Self::AckEmitted { for_packet } => format!(
                 "Accusé de réception publié pour le paquet {}. {RELAYS_SEE} {ACK_LINK} \
                  Le secret de l'accusé leur permet de supprimer leurs copies.",
@@ -238,6 +265,13 @@ mod tests {
                 packet_id: pid(),
                 sender: fp(3),
                 transport: "fichier".into(),
+                first_contact: false,
+            },
+            TransparencyEvent::PacketOpened {
+                packet_id: pid(),
+                sender: fp(3),
+                transport: "fichier".into(),
+                first_contact: true,
             },
             TransparencyEvent::AckEmitted { for_packet: pid() },
             TransparencyEvent::AckVerified { for_packet: pid() },
@@ -315,6 +349,24 @@ mod tests {
         let d = sealed_first().describe();
         assert!(d.contains("carte de contact"), "{d}");
         assert!(!sealed().describe().contains("carte de contact"));
+    }
+
+    #[test]
+    fn describe_first_contact_does_not_claim_recipient_hidden() {
+        let opened = |first_contact| TransparencyEvent::PacketOpened {
+            packet_id: pid(),
+            sender: fp(3),
+            transport: "fichier".into(),
+            first_contact,
+        };
+        for d in [sealed_first().describe(), opened(true).describe()] {
+            assert!(!d.contains("à qui tu écris"), "{d}");
+            assert!(d.contains("carte de contact"), "{d}");
+            assert!(d.contains("Les relais voient"), "{d}");
+            assert!(d.contains("qui tu es"), "{d}");
+        }
+        assert!(sealed().describe().contains("à qui tu écris"));
+        assert!(!opened(false).describe().contains("carte de contact"));
     }
 
     #[test]
