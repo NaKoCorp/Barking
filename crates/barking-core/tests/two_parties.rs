@@ -504,7 +504,8 @@ fn multi_device_fanout() {
     let req = bob2.device_link_request("pc-bob", NOW).unwrap();
     bob1.link_device(&req).unwrap();
     let card = bob1.contact_card("Bob").unwrap();
-    assert_eq!(card.devices.version, 2);
+    // Liste initiale signée à la version `NOW`, puis `version + 1` à la liaison.
+    assert_eq!(card.devices.version, NOW + 1);
     assert_eq!(card.devices.certs.len(), 2);
     assert_eq!(card.bundles.len(), 2);
     card.verify().unwrap();
@@ -914,7 +915,7 @@ fn revoked_device_refused_for_normal_and_initial() {
     // Avant révocation, un message normal de Bob2 passe.
     assert_eq!(expect_msg(alice.recv(&n0, NOW, &mut rng)).2, "n0");
 
-    // Bob révoque Bob2 : liste v3 sans lui.
+    // Bob révoque Bob2 : liste suivante sans lui.
     let root = RootIdentity::from_phrase(phrase.as_str()).unwrap();
     let bob1_cert = v2.devices.certs[0].clone();
     let bob1_bundle = v2
@@ -923,7 +924,7 @@ fn revoked_device_refused_for_normal_and_initial() {
         .find(|b| b.device == bob1_cert.device)
         .unwrap()
         .clone();
-    let v3 = DeviceList::sign(&root, 3, vec![bob1_cert]).unwrap();
+    let v3 = DeviceList::sign(&root, v2.devices.version + 1, vec![bob1_cert]).unwrap();
     let card3 = ContactCard::sign(&root, "Bob", v3, vec![bob1_bundle]).unwrap();
     alice.core.add_contact(&card3, Some("bob")).unwrap();
 
@@ -1008,4 +1009,52 @@ fn send_rollback_leaves_no_outbox_row() {
         CoreError::UnknownContact
     );
     assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
+}
+
+#[test]
+fn recovered_identity_reachable_by_existing_contact() {
+    let mut a = Party::new("tel-alice", 1);
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(21);
+    let (mut bob1, phrase) =
+        Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
+    let bob_fp = bob1.fingerprint();
+    a.core
+        .add_contact(&bob1.contact_card("Bob").unwrap(), Some("bob"))
+        .unwrap();
+    bob1.add_contact(&a.card("Alice"), Some("alice")).unwrap();
+    let p = one(a.send(&bob_fp, "avant", NOW, &mut rng));
+    expect_msg(bob1.receive(&p.encode(), T, NOW, &mut rng).unwrap());
+
+    // Bob perd son téléphone et retrouve son identité plus tard.
+    let later = NOW + 30 * DAY;
+    let mut bob2 = Core::recover(
+        &dir.path().join("b2"),
+        &[3; 32],
+        phrase.as_str(),
+        "b2",
+        later,
+        &mut rng,
+    )
+    .unwrap();
+    assert_eq!(bob2.fingerprint(), bob_fp);
+    // Alice ajoute la nouvelle carte sans retirer l'ancienne.
+    assert_eq!(
+        a.core
+            .add_contact(&bob2.contact_card("Bob").unwrap(), Some("bob"))
+            .unwrap(),
+        bob_fp
+    );
+    bob2.add_contact(&a.card("Alice"), Some("alice")).unwrap();
+
+    let p = one(a.send(&bob_fp, "après", later, &mut rng));
+    let (from, _, text, _) = expect_msg(bob2.receive(&p.encode(), T, later, &mut rng).unwrap());
+    assert_eq!((from, text.as_str()), (a.fp(), "après"));
+    let r = one(bob2
+        .send_text(&a.fp(), "bien reçu", later + 1, &mut rng)
+        .unwrap());
+    let (from, alias, text, _) = expect_msg(a.recv(&r, later + 1, &mut rng));
+    assert_eq!(from, bob_fp);
+    assert_eq!(alias.as_deref(), Some("bob"));
+    assert_eq!(text, "bien reçu");
 }

@@ -140,7 +140,8 @@ impl fmt::Debug for Core {
 }
 
 impl Core {
-    /// Nouvelle identité : racine, phrase de récupération, appareil, liste v1.
+    /// Nouvelle identité : racine, phrase de récupération, appareil, liste
+    /// initiale (version `max(1, now)`).
     pub fn create(
         path: &Path,
         db_key: &[u8; 32],
@@ -156,7 +157,9 @@ impl Core {
     }
 
     /// Nouvel appareil pour une identité existante, à partir de sa phrase.
-    /// Les contacts ne sont pas restaurés (v0).
+    /// Les contacts ne sont pas restaurés (v0). La liste d'appareils est
+    /// signée avec la version `max(1, now)` : elle remplace chez les contacts
+    /// la liste de l'appareil perdu (signée plus tôt).
     pub fn recover(
         path: &Path,
         db_key: &[u8; 32],
@@ -182,7 +185,9 @@ impl Core {
         // Pas de clé à usage unique : les cartes sont publiques et réutilisées.
         let prekeys = PrekeySecrets::generate(rng, 0);
         let cert = DeviceCertificate::issue(&root, &device, device_name, now)?;
-        let devices = DeviceList::sign(&root, 1, vec![cert])?;
+        // Version = horodatage (au moins 1) : une récupération ultérieure
+        // remplace la liste connue des contacts, `link_device` reste monotone.
+        let devices = DeviceList::sign(&root, now.max(1), vec![cert])?;
         let linked_bundles: Vec<PrekeyBundle> = Vec::new();
         store.transaction(|tx| {
             tx.put_meta(META_ROOT, &*root.to_seed())?;
