@@ -1,5 +1,6 @@
 //! barking-core : cœur de la messagerie Barking (sans réseau ni plateforme).
 
+pub mod contact;
 pub mod crypto;
 pub mod envelope;
 pub mod error;
