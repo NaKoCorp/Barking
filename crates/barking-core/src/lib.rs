@@ -10,5 +10,6 @@ pub mod identity;
 pub mod mailbox;
 pub mod packet;
 pub mod ratchet;
+pub mod store;
 
 pub use error::{CoreError, Result};
