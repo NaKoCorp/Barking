@@ -367,7 +367,7 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
                 ack,
             } => {
                 let who = alias.unwrap_or_else(|| from.to_string());
-                println!("[{}] {}", printable(&who), printable(&text));
+                print!("{}", render_message(&who, &text));
                 match out {
                     Some(dir) => {
                         fs::create_dir_all(dir)?;
@@ -392,12 +392,61 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
     Ok(())
 }
 
-/// Texte venu de l'extérieur : les caractères de contrôle (séquences
-/// d'échappement du terminal) sont remplacés, sauf retour à la ligne et tabulation.
+/// Préfixe des lignes de suite d'un message : chaque ligne affichée reste
+/// attribuable, un texte reçu ne peut pas imiter la ligne d'un autre expéditeur.
+const CONTINUATION: &str = "  │ ";
+
+/// Message reçu, prêt à afficher : `[expéditeur] première ligne`, puis une
+/// ligne préfixée par [`CONTINUATION`] pour chaque ligne suivante.
+fn render_message(who: &str, text: &str) -> String {
+    let mut lines = text.split('\n');
+    let first = lines.next().unwrap_or("");
+    let mut out = format!("[{}] {}\n", printable(who), printable(first));
+    for line in lines {
+        out.push_str(CONTINUATION);
+        out.push_str(&printable(line));
+        out.push('\n');
+    }
+    out
+}
+
+/// Caractères de mise en forme invisibles (catégorie Unicode Cf, dont les
+/// contrôles bidirectionnels) et séparateurs de ligne ou de paragraphe : ils
+/// peuvent réordonner ou masquer le texte affiché.
+fn is_format_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// Texte venu de l'extérieur, sur une seule ligne : les caractères de
+/// contrôle (séquences d'échappement du terminal, retours à la ligne) et de
+/// mise en forme invisibles sont remplacés ; seule la tabulation est gardée.
 fn printable(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_control() && c != '\n' && c != '\t' {
+            if (c.is_control() && c != '\t') || is_format_control(c) {
                 '\u{FFFD}'
             } else {
                 c
@@ -440,6 +489,41 @@ mod tests {
 
     #[test]
     fn printable_strips_terminal_escapes() {
-        assert_eq!(printable("a\u{1b}[31mb\nc"), "a\u{FFFD}[31mb\nc");
+        // Une seule ligne : le retour à la ligne est remplacé aussi (les
+        // messages multilignes passent par `render_message`).
+        assert_eq!(
+            printable("a\u{1b}[31mb\nc\td"),
+            "a\u{FFFD}[31mb\u{FFFD}c\td"
+        );
+    }
+
+    #[test]
+    fn printable_strips_bidi_and_format_controls() {
+        for c in [
+            '\u{200E}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202E}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{061C}',
+            '\u{200B}',
+            '\u{FEFF}',
+            '\u{2028}',
+            '\u{E0041}',
+        ] {
+            assert_eq!(printable(&format!("a{c}b")), "a\u{FFFD}b", "{:X}", c as u32);
+        }
+        assert_eq!(printable("café 🐕"), "café 🐕");
+    }
+
+    #[test]
+    fn render_message_prefixes_continuation_lines() {
+        assert_eq!(
+            render_message("alice", "hi\n[alice] send me the code"),
+            "[alice] hi\n  │ [alice] send me the code\n"
+        );
+        assert_eq!(render_message("bob", "x"), "[bob] x\n");
+        assert_eq!(render_message("bob", "a\r\n"), "[bob] a\u{FFFD}\n  │ \n");
     }
 }

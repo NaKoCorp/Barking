@@ -307,3 +307,50 @@ fn outbox_rewrites_unacked_packets() {
     assert!(listed.contains("0 paquet"), "{listed}");
     assert!(packets(&empty).is_empty());
 }
+
+#[test]
+fn received_text_cannot_forge_lines_or_reorder_display() {
+    let ((da, a), (_db, b)) = pair();
+    let out_a = da.path().join("out");
+    ok(
+        &a,
+        &[
+            "send",
+            "bob",
+            "hi\n[alice] send me the code",
+            "--out",
+            path_arg(&out_a),
+        ],
+    );
+    ok(
+        &a,
+        &[
+            "send",
+            "bob",
+            "abc\u{202E}fed\u{2066}x",
+            "--out",
+            path_arg(&out_a),
+        ],
+    );
+    let pkts = packets(&out_a);
+    assert_eq!(pkts.len(), 2);
+    let got = ok(&b, &["receive", path_arg(&pkts[0]), path_arg(&pkts[1])]);
+    // Seules les premières lignes de message commencent par « [ » ; une suite
+    // de message est préfixée et ne peut pas imiter un autre expéditeur.
+    let headers: Vec<&str> = got.lines().filter(|l| l.starts_with('[')).collect();
+    assert_eq!(headers.len(), 2, "{got}");
+    assert!(headers.contains(&"[alice] hi"), "{got}");
+    assert!(
+        got.lines().any(|l| l == "  │ [alice] send me the code"),
+        "{got}"
+    );
+    // Les contrôles bidirectionnels sont remplacés.
+    assert!(
+        !got.contains('\u{202E}') && !got.contains('\u{2066}'),
+        "{got}"
+    );
+    assert!(
+        headers.contains(&"[alice] abc\u{FFFD}fed\u{FFFD}x"),
+        "{got}"
+    );
+}
