@@ -170,7 +170,7 @@ impl Core {
                 Ok(Wire::Normal { msg }) if !matching.is_empty() => {
                     // Les sessions ayant reçu le plus récemment d'abord.
                     matching.sort_by_key(|s| core::cmp::Reverse((s.last_rx, s.created_at)));
-                    open_normal(matching, &msg)?
+                    open_normal(matching, &msg, now)?
                 }
                 Ok(_) => Err(R_UNEXPECTED),
             };
@@ -257,7 +257,7 @@ fn open_initial(
         .find(|s| s.session_id == sid)
     {
         let mut ratchet = de_state(&row.state)?;
-        return Ok(match ratchet.decrypt(msg, &row.ad) {
+        return Ok(match ratchet.decrypt(msg, &row.ad, now) {
             Ok(pt) => Ok(Opened {
                 row,
                 ratchet,
@@ -289,7 +289,7 @@ fn open_new_session(
     };
     let mut ratchet = RatchetState::init_responder(&secrets.sk, pk.spk());
     let ad = session_ad(&secrets.ad, &peer_id, &device.public().id());
-    let Ok(pt) = ratchet.decrypt(msg, &ad) else {
+    let Ok(pt) = ratchet.decrypt(msg, &ad, now) else {
         return Ok(Err(R_UNDECRYPTABLE));
     };
     let row = SessionRow {
@@ -316,10 +316,11 @@ fn open_new_session(
 fn open_normal(
     candidates: Vec<SessionRow>,
     msg: &RatchetMessage,
+    now: u64,
 ) -> Result<core::result::Result<Opened, &'static str>> {
     for row in candidates {
         let mut ratchet = de_state(&row.state)?;
-        if let Ok(pt) = ratchet.decrypt(msg, &row.ad) {
+        if let Ok(pt) = ratchet.decrypt(msg, &row.ad, now) {
             return Ok(Ok(Opened {
                 row,
                 ratchet,

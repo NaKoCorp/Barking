@@ -1058,3 +1058,33 @@ fn recovered_identity_reachable_by_existing_contact() {
     assert_eq!(alias.as_deref(), Some("bob"));
     assert_eq!(text, "bien reçu");
 }
+
+#[test]
+fn skipped_keys_expire_after_seven_days() {
+    let (mut a, mut b, mut rng) = pair();
+    let p = one(a.send(&b.fp(), "ouverture", NOW, &mut rng));
+    expect_msg(b.recv(&p, NOW, &mut rng));
+    let r = one(b.send(&a.fp(), "ok", NOW, &mut rng));
+    expect_msg(a.recv(&r, NOW, &mut rng));
+
+    // L'horloge d'Alice avance d'un jour sur celle de Bob.
+    let s = NOW + 100;
+    let q0 = one(a.send(&b.fp(), "q0", s, &mut rng));
+    let q1 = one(a.send(&b.fp(), "q1", s, &mut rng));
+    let p2 = one(a.send(&b.fp(), "p2", s + 1, &mut rng));
+    assert!(!is_initial(&q0));
+    // Bob reçoit p2 en premier : les clés de q0 et q1 sont sautées à `stored`.
+    let stored = s + 1 - DAY;
+    assert_eq!(expect_msg(b.recv(&p2, stored, &mut rng)).2, "p2");
+    // Clé sautée de moins de 7 jours : encore utilisable.
+    assert_eq!(expect_msg(b.recv(&q1, stored + 3 * DAY, &mut rng)).2, "q1");
+    // Clé sautée de plus de 7 jours : purgée, alors que le paquet n'est pas
+    // encore expiré et que son horodatage reste frais.
+    let late = s + DEFAULT_TTL_SECS;
+    assert!(late - stored > 7 * DAY);
+    assert!(u64::from(q0.expires_at) >= late);
+    match b.recv(&q0, late, &mut rng) {
+        ReceiveOutcome::Quarantined { .. } | ReceiveOutcome::NotForUs => {}
+        other => panic!("clé sautée expirée, obtenu {other:?}"),
+    }
+}

@@ -20,3 +20,7 @@ pub const MAX_SKIP: u32 = 1000;
 
 /// Nombre maximal de clés sautées gardées au total ; au-delà, les plus anciennes sont supprimées.
 pub const MAX_SKIPPED_TOTAL: usize = 2000;
+
+/// Durée de conservation d'une clé sautée (spec §11 : 7 jours au maximum),
+/// comptée depuis sa mise de côté.
+pub const MAX_SKIPPED_AGE_SECS: u64 = 7 * 86_400;

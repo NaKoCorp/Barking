@@ -1,7 +1,7 @@
 //! État du double ratchet (variante « header encryption » de Signal, §4).
 
 use super::header::{ENC_HEADER_LEN, Header, RatchetMessage};
-use super::{MAX_SKIP, MAX_SKIPPED_TOTAL};
+use super::{MAX_SKIP, MAX_SKIPPED_AGE_SECS, MAX_SKIPPED_TOTAL};
 use crate::crypto::aead::{open, seal};
 use crate::crypto::kdf::{hkdf_sha256, hmac_sha256};
 use crate::crypto::labels;
@@ -18,6 +18,8 @@ pub(super) struct SkippedKey {
     pub hk: [u8; 32],
     pub n: u32,
     pub mk: [u8; 32],
+    /// Mise de côté (secondes Unix, horloge du destinataire).
+    pub stored_at: u64,
 }
 
 /// État d'une session de double ratchet.
@@ -130,31 +132,35 @@ impl RatchetState {
     }
 
     /// RatchetDecryptHE, transactionnelle : en cas d'échec, `self` est inchangé.
-    pub fn decrypt(&mut self, msg: &RatchetMessage, ad: &[u8]) -> Result<Vec<u8>> {
+    ///
+    /// `now` (secondes Unix) date les clés sautées ; celles mises de côté
+    /// depuis plus de `MAX_SKIPPED_AGE_SECS` sont effacées avant tout essai.
+    pub fn decrypt(&mut self, msg: &RatchetMessage, ad: &[u8], now: u64) -> Result<Vec<u8>> {
         let mut next = self.clone();
-        let pt = next.decrypt_in_place(msg, ad)?;
+        let pt = next.decrypt_in_place(msg, ad, now)?;
         // L'ancien état est effacé à la destruction (`ZeroizeOnDrop`).
         *self = next;
         Ok(pt)
     }
 
-    fn decrypt_in_place(&mut self, msg: &RatchetMessage, ad: &[u8]) -> Result<Vec<u8>> {
+    fn decrypt_in_place(&mut self, msg: &RatchetMessage, ad: &[u8], now: u64) -> Result<Vec<u8>> {
         if msg.enc_header.len() != ENC_HEADER_LEN {
             return Err(CoreError::Malformed("taille de l'en-tête chiffré"));
         }
+        self.purge_skipped(now);
         if let Some(pt) = self.try_skipped_message_keys(msg, ad)? {
             return Ok(pt);
         }
         let (header, dh_ratchet) = self.decrypt_header(&msg.enc_header)?;
         if dh_ratchet {
-            self.skip_message_keys(header.pn)?;
+            self.skip_message_keys(header.pn, now)?;
             self.receive_ratchet(&header)?;
         }
         if header.n < self.nr {
             // Message déjà déchiffré (rejeu) ou clé sautée évincée.
             return Err(CoreError::Crypto);
         }
-        self.skip_message_keys(header.n)?;
+        self.skip_message_keys(header.n, now)?;
         let ckr = self.ckr.ok_or(CoreError::Crypto)?;
         let (ck, mk) = kdf_ck(&ckr);
         self.ckr = Some(*ck);
@@ -206,8 +212,16 @@ impl RatchetState {
             .map_err(|_| CoreError::Crypto)
     }
 
+    /// Efface les clés sautées mises de côté depuis plus de
+    /// `MAX_SKIPPED_AGE_SECS` (une horloge revenue en arrière n'efface rien).
+    fn purge_skipped(&mut self, now: u64) {
+        // Les éléments retirés sont effacés à la destruction.
+        self.mkskipped
+            .retain(|k| now.saturating_sub(k.stored_at) <= MAX_SKIPPED_AGE_SECS);
+    }
+
     /// SkipMessageKeysHE : au plus `MAX_SKIP` clés d'avance dans la chaîne.
-    fn skip_message_keys(&mut self, until: u32) -> Result<()> {
+    fn skip_message_keys(&mut self, until: u32, now: u64) -> Result<()> {
         if u64::from(self.nr) + u64::from(MAX_SKIP) < u64::from(until) {
             return Err(CoreError::TooLarge);
         }
@@ -221,6 +235,7 @@ impl RatchetState {
                 hk: hkr,
                 n: self.nr,
                 mk: *mk,
+                stored_at: now,
             });
             self.nr += 1;
         }
