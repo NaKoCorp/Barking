@@ -12,12 +12,13 @@ impl Packet {
     /// Encode sur exactement `tier.size()` octets.
     ///
     /// Invariant de l'appelant : `payload.len() <= tier.size() - 42`
-    /// (`Tier::fit` le garantit). Au-delà, la charge est tronquée plutôt que de
-    /// paniquer ; `decode` ne produit jamais un tel paquet.
+    /// (`Tier::fit` le garantit). Au-delà, la charge est tronquée (sans
+    /// paniquer, en debug comme en release) afin que la sortie fasse toujours
+    /// exactement `tier.size()` octets ; `decode` ne produit jamais un tel paquet.
     pub fn encode(&self) -> Vec<u8> {
         let size = self.tier.size();
-        debug_assert!(self.payload.len() <= size - OVERHEAD);
-        let len = u16::try_from(self.payload.len().min(size - OVERHEAD)).unwrap_or(u16::MAX);
+        let n = self.payload.len().min(size - OVERHEAD);
+        let len = u16::try_from(n).unwrap_or(u16::MAX);
         let mut out = Vec::with_capacity(size);
         out.push(VERSION);
         out.push(self.kind as u8);
@@ -27,7 +28,7 @@ impl Packet {
         out.extend_from_slice(&self.expires_at.to_be_bytes());
         out.extend_from_slice(&self.mailbox.0);
         out.extend_from_slice(&len.to_be_bytes());
-        out.extend_from_slice(&self.payload);
+        out.extend_from_slice(&self.payload[..n]);
         out.resize(size, 0);
         out
     }

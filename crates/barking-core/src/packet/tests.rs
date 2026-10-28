@@ -133,6 +133,15 @@ fn decode_rejects_nonzero_padding() {
     assert!(Packet::decode(&e).is_err());
 }
 
+#[test]
+fn encode_oversized_payload_truncates_to_tier_size() {
+    let p = sample(Tier::S, 500);
+    let e = p.encode();
+    assert_eq!(e.len(), Tier::S.size());
+    let d = Packet::decode(&e).unwrap();
+    assert_eq!(d.payload, p.payload[..203].to_vec());
+}
+
 proptest! {
     #[test]
     fn proptest_decode_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..20000)) {
@@ -140,11 +149,19 @@ proptest! {
     }
 
     #[test]
-    fn proptest_decode_never_panics_with_valid_prefix(
-        tier in 0u8..3, tail in proptest::collection::vec(any::<u8>(), 0..300)
+    fn proptest_decode_exact_size_never_panics(
+        tier in 0u8..3,
+        kind in 0u8..3,
+        len in any::<u16>(),
+        body in proptest::collection::vec(any::<u8>(), 0..300),
+        pad_byte in any::<u8>(),
     ) {
-        let mut b = vec![0u8, 0, 8, tier];
-        b.extend(tail);
+        let size = [245usize, 1024, 16384][tier as usize];
+        let mut b = vec![0u8, kind, 8, tier];
+        b.extend_from_slice(&[0u8; 36]);
+        b.extend_from_slice(&len.to_be_bytes());
+        b.extend(body);
+        b.resize(size, pad_byte % 2);
         let _ = Packet::decode(&b);
     }
 }
