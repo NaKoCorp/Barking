@@ -12,7 +12,7 @@ use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
 use crate::identity::{DeviceKeys, DevicePublic, Fingerprint};
-use crate::mailbox::{candidate_days, intro_mailbox, session_mailbox};
+use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{Kind, Packet, PacketId, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
 use crate::store::{Direction, MessageStatus, Queries, SessionRow};
@@ -128,7 +128,7 @@ impl Core {
         } = self;
         let me = device.public();
         let my_id = me.id();
-        let days = candidate_days(now);
+        let days = accepted_days(now);
         let to_intro = days
             .iter()
             .any(|d| intro_mailbox(&me, *d) == packet.mailbox);
@@ -184,6 +184,17 @@ impl Core {
         }
         Ok(outcome)
     }
+}
+
+/// Jours dont une boîte (session ou introduction) est acceptée à la
+/// réception : toute la fenêtre de fraîcheur, du jour de `now - MAX_AGE_SECS`
+/// au lendemain de `now`. La boîte d'un paquet est fixée au jour de son
+/// scellement ; un paquet livré en retard (file d'envoi de 7 jours) doit
+/// rester lisible. `watched_mailboxes` (relève) garde trois jours.
+fn accepted_days(now: u64) -> Vec<u32> {
+    let first = day_of(now.saturating_sub(MAX_AGE_SECS));
+    let last = day_of(now).saturating_add(1);
+    (first..=last).collect()
 }
 
 /// Copie des secrets de paquets de clés (aller-retour par la forme stockée) :

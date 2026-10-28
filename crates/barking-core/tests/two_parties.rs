@@ -260,21 +260,61 @@ fn expired_packet() {
 }
 
 #[test]
-fn clock_skew_one_day_ok_two_days_not() {
+fn late_delivery_within_freshness_window() {
     let (mut a, mut b, mut rng) = pair();
+    // Initial livré 5 jours après l'envoi : boîte d'introduction du jour d'envoi.
+    let p1 = one(a.send(&b.fp(), "cinq jours de retard", NOW, &mut rng));
+    assert_eq!(
+        expect_msg(b.recv(&p1, NOW + 5 * DAY, &mut rng)).2,
+        "cinq jours de retard"
+    );
+    // Session établie dans les deux sens.
+    let r = one(b.send(&a.fp(), "reçu", NOW + 5 * DAY, &mut rng));
+    expect_msg(a.recv(&r, NOW + 5 * DAY, &mut rng));
+    // Message normal (boîte de session) livré 5 jours après l'envoi.
+    let t = NOW + 5 * DAY + 10;
+    let p2 = one(a.send(&b.fp(), "normal en retard", t, &mut rng));
+    assert!(!is_initial(&p2));
+    assert_eq!(
+        expect_msg(b.recv(&p2, t + 5 * DAY, &mut rng)).2,
+        "normal en retard"
+    );
+    // Au-delà de la fenêtre de fraîcheur : expiré.
+    let p3 = one(a.send(&b.fp(), "trop tard", t + 1, &mut rng));
+    assert!(matches!(
+        b.recv(&p3, t + 1 + DEFAULT_TTL_SECS + DAY + 1, &mut rng),
+        ReceiveOutcome::Expired
+    ));
+    // Même avec une expiration réécrite par un relais : la boîte du jour
+    // d'envoi est hors de la fenêtre acceptée.
+    let p4 = one(a.send(&b.fp(), "réécrit", t + 2, &mut rng));
+    let later = t + 2 + DEFAULT_TTL_SECS + 2 * DAY;
+    let mut rewritten = p4.clone();
+    rewritten.expires_at = u32::try_from(later + DEFAULT_TTL_SECS).unwrap();
+    assert!(matches!(
+        b.recv(&rewritten, later, &mut rng),
+        ReceiveOutcome::NotForUs
+    ));
+}
+
+#[test]
+fn clock_skew_one_day_ok() {
+    let (mut a, mut b, mut rng) = pair();
+    // Horloge de Bob en avance d'un jour.
     let p1 = one(a.send(&b.fp(), "décalé d'un jour", NOW, &mut rng));
     assert_eq!(
         expect_msg(b.recv(&p1, NOW + DAY, &mut rng)).2,
         "décalé d'un jour"
     );
-    let p2 = one(a.send(&b.fp(), "décalé de deux jours", NOW, &mut rng));
-    assert!(matches!(
-        b.recv(&p2, NOW + 2 * DAY, &mut rng),
-        ReceiveOutcome::NotForUs
-    ));
-    // Et dans l'autre sens (horloge de Bob en retard d'un jour).
+    // Horloge de Bob en retard d'un jour : boîte du lendemain pour Alice.
     let p3 = one(b.send(&a.fp(), "retour", NOW + DAY, &mut rng));
     assert_eq!(expect_msg(a.recv(&p3, NOW, &mut rng)).2, "retour");
+    // Deux jours d'avance de l'expéditeur : boîte hors fenêtre.
+    let p4 = one(b.send(&a.fp(), "trop en avance", NOW + 3 * DAY, &mut rng));
+    assert!(matches!(
+        a.recv(&p4, NOW, &mut rng),
+        ReceiveOutcome::NotForUs
+    ));
 }
 
 #[test]
