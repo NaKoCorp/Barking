@@ -69,12 +69,10 @@ fn ack_packet_carries_id_and_secret() {
     let mut acked = sample(Tier::M, 50);
     acked.id = ack::packet_id_for(&secret);
     let now = 1_000_000;
-    // Boîte de destination explicite (celle que relève l'expéditeur d'origine).
-    let dest = MailboxId([42; 16]);
-    let a = Packet::ack(&acked, dest, secret, now, &mut rng);
+    let a = Packet::ack(&acked, secret, now, &mut rng);
     assert_eq!(a.kind, Kind::Ack);
     assert_eq!(a.tier, Tier::S);
-    assert_eq!(a.mailbox, dest);
+    assert_eq!(a.mailbox, acked.mailbox);
     assert_eq!(a.hops, DEFAULT_HOPS);
     assert_eq!(a.expires_at as u64, now + DEFAULT_TTL_SECS);
     assert_ne!(a.id, acked.id);
@@ -82,7 +80,7 @@ fn ack_packet_carries_id_and_secret() {
     assert_eq!(&a.payload[16..], &secret);
     assert_eq!(Packet::decode(&a.encode()).unwrap(), a);
     // saturation
-    let late = Packet::ack(&acked, dest, secret, u64::MAX, &mut rng);
+    let late = Packet::ack(&acked, secret, u64::MAX, &mut rng);
     assert_eq!(late.expires_at, u32::MAX);
 }
 

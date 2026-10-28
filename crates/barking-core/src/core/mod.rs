@@ -31,7 +31,7 @@ use crate::identity::{
     RootIdentity, safety_number,
 };
 use crate::mailbox::{MailboxId, candidate_days, intro_mailbox, session_mailbox};
-use crate::packet::{DEFAULT_TTL_SECS, Packet, PacketId};
+use crate::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId};
 use crate::ratchet::RatchetState;
 use crate::store::{MessageRow, Queries, Store};
 use crate::transparency::TransparencyEvent;
@@ -338,8 +338,9 @@ impl Core {
         Ok(())
     }
 
-    /// Boîtes aux lettres à relever (veille, jour, lendemain) : la boîte
-    /// d'introduction de cet appareil et celles de chaque session.
+    /// Boîtes aux lettres à relever : la boîte d'introduction de cet appareil
+    /// et celles de chaque session (veille, jour, lendemain), plus la boîte de
+    /// chacun de mes messages en attente d'accusé, où l'accusé arrivera.
     ///
     /// En cas d'erreur de lecture du stockage, seules les boîtes
     /// d'introduction sont renvoyées (`receive` refait le calcul lui-même).
@@ -360,6 +361,15 @@ impl Core {
             for s in &sessions {
                 for d in days {
                     push(session_mailbox(&s.mailbox_secret, &my_id, d));
+                }
+            }
+        }
+        if let Ok(pending) = self.store.outbox_pending(now) {
+            for (_, bytes) in pending {
+                if let Ok(p) = Packet::decode(&bytes)
+                    && p.kind == Kind::Message
+                {
+                    push(p.mailbox);
                 }
             }
         }

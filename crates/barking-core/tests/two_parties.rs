@@ -1090,23 +1090,26 @@ fn skipped_keys_expire_after_seven_days() {
 }
 
 #[test]
-fn ack_addressed_to_a_mailbox_the_sender_watches() {
+fn ack_goes_to_the_original_mailbox_which_the_sender_watches_until_acked() {
     let (mut a, mut b, mut rng) = pair();
-    // Accusé d'un Initial.
+    // Accusé d'un Initial : même boîte que le message, relevée par A tant
+    // que le message attend son accusé.
     let p = one(a.send(&b.fp(), "ouverture", NOW, &mut rng));
+    assert!(a.core.watched_mailboxes(NOW).contains(&p.mailbox));
     let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
-    assert_ne!(ack.mailbox, p.mailbox);
-    assert!(a.core.watched_mailboxes(NOW).contains(&ack.mailbox));
-    assert!(!b.core.watched_mailboxes(NOW).contains(&ack.mailbox));
+    assert_eq!(ack.mailbox, p.mailbox);
     // Accusé d'un message normal, dans l'autre sens.
     let r = one(b.send(&a.fp(), "réponse", NOW + 1, &mut rng));
     let (_, _, _, ack_r) = expect_msg(a.recv(&r, NOW + 1, &mut rng));
+    assert_eq!(ack_r.mailbox, r.mailbox);
     assert!(b.core.watched_mailboxes(NOW + 1).contains(&ack_r.mailbox));
-    // Accusé d'un message livré en retard : boîte du jour de l'accusé.
+    // Message livré trois jours plus tard : sa boîte sort de la fenêtre de
+    // trois jours, mais A la relève toujours tant qu'il attend l'accusé.
     let q = one(a.send(&b.fp(), "en retard", NOW + 2, &mut rng));
     assert!(!is_initial(&q));
     let late = NOW + 3 * DAY;
     let (_, _, _, ack_q) = expect_msg(b.recv(&q, late, &mut rng));
+    assert_eq!(ack_q.mailbox, q.mailbox);
     assert!(a.core.watched_mailboxes(late).contains(&ack_q.mailbox));
     // Les accusés se vérifient toujours par l'identifiant et le secret.
     for (ack, at, id) in [(ack, late, p.id), (ack_q, late, q.id)] {
@@ -1115,6 +1118,8 @@ fn ack_addressed_to_a_mailbox_the_sender_watches() {
             other => panic!("AckReceived attendu, obtenu {other:?}"),
         }
     }
+    // Accusé reçu : A ne relève plus la boîte du message en retard.
+    assert!(!a.core.watched_mailboxes(late).contains(&q.mailbox));
     assert!(matches!(
         b.recv(&ack_r, NOW + 2, &mut rng),
         ReceiveOutcome::AckReceived { .. }
