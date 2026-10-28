@@ -8,6 +8,7 @@ use rand_core::CryptoRng;
 
 use super::{DEFAULT_HOPS, Kind, Packet, PacketId, Tier, default_expiry};
 use crate::crypto::labels;
+use crate::mailbox::MailboxId;
 
 /// Tire un secret d'accusé aléatoire.
 pub fn new_secret(rng: &mut impl CryptoRng) -> [u8; 16] {
@@ -38,8 +39,15 @@ pub fn verify(id: &PacketId, secret: &[u8; 16]) -> bool {
 }
 
 impl Packet {
-    /// Accusé pour `acked` : palier S, même boîte, charge `acked.id || secret`.
-    pub fn ack(acked: &Packet, secret: [u8; 16], now: u64, rng: &mut impl CryptoRng) -> Packet {
+    /// Accusé pour `acked` : palier S, adressé à `mailbox` (une boîte que
+    /// l'expéditeur d'origine relève), charge `acked.id || secret`.
+    pub fn ack(
+        acked: &Packet,
+        mailbox: MailboxId,
+        secret: [u8; 16],
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Packet {
         let mut id = [0u8; 16];
         rng.fill_bytes(&mut id);
         let mut payload = Vec::with_capacity(32);
@@ -51,7 +59,7 @@ impl Packet {
             tier: Tier::S,
             id: PacketId(id),
             expires_at: default_expiry(now),
-            mailbox: acked.mailbox,
+            mailbox,
             payload,
         }
     }

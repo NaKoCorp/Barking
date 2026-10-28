@@ -1088,3 +1088,35 @@ fn skipped_keys_expire_after_seven_days() {
         other => panic!("clé sautée expirée, obtenu {other:?}"),
     }
 }
+
+#[test]
+fn ack_addressed_to_a_mailbox_the_sender_watches() {
+    let (mut a, mut b, mut rng) = pair();
+    // Accusé d'un Initial.
+    let p = one(a.send(&b.fp(), "ouverture", NOW, &mut rng));
+    let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
+    assert_ne!(ack.mailbox, p.mailbox);
+    assert!(a.core.watched_mailboxes(NOW).contains(&ack.mailbox));
+    assert!(!b.core.watched_mailboxes(NOW).contains(&ack.mailbox));
+    // Accusé d'un message normal, dans l'autre sens.
+    let r = one(b.send(&a.fp(), "réponse", NOW + 1, &mut rng));
+    let (_, _, _, ack_r) = expect_msg(a.recv(&r, NOW + 1, &mut rng));
+    assert!(b.core.watched_mailboxes(NOW + 1).contains(&ack_r.mailbox));
+    // Accusé d'un message livré en retard : boîte du jour de l'accusé.
+    let q = one(a.send(&b.fp(), "en retard", NOW + 2, &mut rng));
+    assert!(!is_initial(&q));
+    let late = NOW + 3 * DAY;
+    let (_, _, _, ack_q) = expect_msg(b.recv(&q, late, &mut rng));
+    assert!(a.core.watched_mailboxes(late).contains(&ack_q.mailbox));
+    // Les accusés se vérifient toujours par l'identifiant et le secret.
+    for (ack, at, id) in [(ack, late, p.id), (ack_q, late, q.id)] {
+        match a.recv(&ack, at, &mut rng) {
+            ReceiveOutcome::AckReceived { packet_id } => assert_eq!(packet_id, id),
+            other => panic!("AckReceived attendu, obtenu {other:?}"),
+        }
+    }
+    assert!(matches!(
+        b.recv(&ack_r, NOW + 2, &mut rng),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+}

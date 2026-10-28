@@ -433,7 +433,11 @@ fn accept(
         },
     )?;
     let alias = Core::alias_in(q, row.contact_fp)?;
-    let ack = Packet::ack(packet, env.ack_secret, now, rng);
+    // Adressé à la boîte de session de l'expéditeur pour le jour de l'accusé :
+    // il la relève (`watched_mailboxes`), y compris après un Initial, puisque
+    // la session existe désormais des deux côtés.
+    let ack_mailbox = session_mailbox(&row.mailbox_secret, &row.contact_device, day_of(now));
+    let ack = Packet::ack(packet, ack_mailbox, env.ack_secret, now, rng);
     q.outbox_put(
         ack.id,
         &ack.encode(),
