@@ -51,3 +51,7 @@ pub const INTRO_MAILBOX_CONTEXT: &str = "barking/v0/intro-mailbox";
 
 /// Contexte BLAKE3 de l'identifiant de paquet dérivé du secret d'accusé.
 pub const ACK_CONTEXT: &str = "barking/v0/ack";
+
+/// Scellement du message initial : `key(32) || nonce(12)` dérivés de
+/// `DH(e_seal, IK_B)`, avec une éphémère propre à chaque paquet Initial.
+pub const INITIAL_SEAL: &[u8] = b"barking/v0/initial-seal";
