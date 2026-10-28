@@ -121,7 +121,7 @@ impl RootPublic {
 }
 
 /// Empreinte de la clé racine publique.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct Fingerprint(pub [u8; 32]);
 
 impl fmt::Display for Fingerprint {
