@@ -303,8 +303,8 @@ pub trait Queries {
                 "INSERT INTO sessions(contact_device, contact_fp, session_id, state, \
                  mailbox_secret, ad, pending_initial, last_rx, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
-                 ON CONFLICT(contact_device, session_id) DO UPDATE SET \
-                 contact_fp = excluded.contact_fp, state = excluded.state, \
+                 ON CONFLICT(contact_fp, contact_device, session_id) DO UPDATE SET \
+                 state = excluded.state, \
                  mailbox_secret = excluded.mailbox_secret, ad = excluded.ad, \
                  pending_initial = excluded.pending_initial, \
                  last_rx = excluded.last_rx, created_at = excluded.created_at",
@@ -324,11 +324,14 @@ pub trait Queries {
         Ok(())
     }
 
-    fn sessions_for(&self, device: DeviceId) -> Result<Vec<SessionRow>> {
+    /// Sessions avec l'appareil `device` du contact `contact_fp`. Une session
+    /// appartient toujours à un couple (contact, appareil) : un même appareil
+    /// revendiqué par deux contacts ne partage jamais de session.
+    fn sessions_for(&self, contact_fp: Fingerprint, device: DeviceId) -> Result<Vec<SessionRow>> {
         query_sessions(
             self.conn(),
-            "WHERE contact_device = ?1 ORDER BY created_at, session_id",
-            params![device.0.as_slice()],
+            "WHERE contact_fp = ?1 AND contact_device = ?2 ORDER BY created_at, session_id",
+            params![contact_fp.0.as_slice(), device.0.as_slice()],
         )
     }
 
@@ -454,22 +457,32 @@ pub trait Queries {
     }
 
     /// Supprime une session.
-    fn delete_session(&self, device: DeviceId, session_id: &[u8; 16]) -> Result<()> {
+    fn delete_session(
+        &self,
+        contact_fp: Fingerprint,
+        device: DeviceId,
+        session_id: &[u8; 16],
+    ) -> Result<()> {
         self.conn()
             .execute(
-                "DELETE FROM sessions WHERE contact_device = ?1 AND session_id = ?2",
-                params![device.0.as_slice(), session_id.as_slice()],
+                "DELETE FROM sessions WHERE contact_fp = ?1 AND contact_device = ?2 \
+                 AND session_id = ?3",
+                params![
+                    contact_fp.0.as_slice(),
+                    device.0.as_slice(),
+                    session_id.as_slice()
+                ],
             )
             .map_err(map_err)?;
         Ok(())
     }
 
-    /// Supprime toutes les sessions avec un appareil (appareil révoqué).
-    fn delete_sessions_for_device(&self, device: DeviceId) -> Result<()> {
+    /// Supprime toutes les sessions avec un appareil d'un contact (appareil révoqué).
+    fn delete_sessions_for_device(&self, contact_fp: Fingerprint, device: DeviceId) -> Result<()> {
         self.conn()
             .execute(
-                "DELETE FROM sessions WHERE contact_device = ?1",
-                params![device.0.as_slice()],
+                "DELETE FROM sessions WHERE contact_fp = ?1 AND contact_device = ?2",
+                params![contact_fp.0.as_slice(), device.0.as_slice()],
             )
             .map_err(map_err)?;
         Ok(())

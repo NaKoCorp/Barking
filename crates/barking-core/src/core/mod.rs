@@ -20,13 +20,14 @@ use core::fmt;
 use std::path::Path;
 
 use rand_core::CryptoRng;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::contact::ContactCard;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
 use crate::identity::{
-    DeviceCertificate, DeviceKeys, DeviceList, DevicePublic, Fingerprint, RecoveryPhrase,
+    DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint, RecoveryPhrase,
     RootIdentity, safety_number,
 };
 use crate::mailbox::{MailboxId, candidate_days, intro_mailbox, session_mailbox};
@@ -103,6 +104,18 @@ impl fmt::Debug for ReceiveOutcome {
     }
 }
 
+/// Demande de liaison d'un nouvel appareil (voir [`Core::device_link_request`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LinkRequest {
+    pub device: DevicePublic,
+    pub bundle: PrekeyBundle,
+    pub name: String,
+    pub issued_at: u64,
+    /// Preuve de possession (`DeviceKeys::possession_proof`).
+    #[serde(with = "crate::identity::device::sig_bytes")]
+    pub device_sig: [u8; 64],
+}
+
 /// Cœur de la messagerie pour un appareil.
 pub struct Core {
     store: Store,
@@ -168,7 +181,7 @@ impl Core {
         let device = DeviceKeys::generate(rng);
         // Pas de clé à usage unique : les cartes sont publiques et réutilisées.
         let prekeys = PrekeySecrets::generate(rng, 0);
-        let cert = DeviceCertificate::issue(&root, device.public(), device_name, now)?;
+        let cert = DeviceCertificate::issue(&root, &device, device_name, now)?;
         let devices = DeviceList::sign(&root, 1, vec![cert])?;
         let linked_bundles: Vec<PrekeyBundle> = Vec::new();
         store.transaction(|tx| {
@@ -249,40 +262,52 @@ impl Core {
     }
 
     /// Demande de liaison : ce qu'un nouvel appareil transmet à l'appareil
-    /// administrateur (hors bande ; le flux QR/Noise de la spec viendra plus tard).
-    pub fn device_link_request(&self) -> (DevicePublic, PrekeyBundle) {
-        (
-            self.device.public(),
-            self.prekeys.bundle(&self.device, false),
-        )
+    /// administrateur (hors bande ; le flux QR/Noise de la spec viendra plus
+    /// tard). Contient la preuve de possession signée par cet appareil.
+    pub fn device_link_request(&self, name: &str, now: u64) -> Result<LinkRequest> {
+        let device_sig = self
+            .device
+            .possession_proof(&self.devices.root, name, now)?;
+        Ok(LinkRequest {
+            device: self.device.public(),
+            bundle: self.prekeys.bundle(&self.device, false),
+            name: name.to_owned(),
+            issued_at: now,
+            device_sig,
+        })
     }
 
-    /// Ajoute un appareil à mon identité : certificat, liste `version + 1`
-    /// signée, paquet de clés gardé pour `contact_card`.
-    pub fn link_device(
-        &mut self,
-        device: DevicePublic,
-        bundle: PrekeyBundle,
-        name: &str,
-        now: u64,
-    ) -> Result<()> {
+    /// Ajoute un appareil à mon identité : vérifie sa preuve de possession,
+    /// émet son certificat, signe la liste `version + 1` et garde son paquet
+    /// de clés pour `contact_card`.
+    pub fn link_device(&mut self, req: &LinkRequest) -> Result<()> {
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
-        bundle.verify()?;
-        if bundle.device != device {
+        let device = req.device;
+        req.bundle.verify()?;
+        if req.bundle.device != device {
             return Err(CoreError::Malformed("paquet de clés d'un autre appareil"));
         }
-        if bundle.opk.is_some() {
+        if req.bundle.opk.is_some() {
             return Err(CoreError::Malformed("clé à usage unique interdite"));
         }
         if device == self.device.public() {
             return Err(CoreError::Malformed("appareil déjà lié"));
+        }
+        if contacts::claimed_by_other(&self.store, None, &[device])? {
+            return Err(CoreError::Malformed("appareil déjà associé à un contact"));
         }
         let version = self
             .devices
             .version
             .checked_add(1)
             .ok_or(CoreError::TooLarge)?;
-        let cert = DeviceCertificate::issue(root, device, name, now)?;
+        let cert = DeviceCertificate::issue_with_proof(
+            root,
+            device,
+            &req.name,
+            req.issued_at,
+            req.device_sig,
+        )?;
         let mut certs: Vec<DeviceCertificate> = self
             .devices
             .certs
@@ -298,7 +323,7 @@ impl Core {
             .filter(|b| b.device != device)
             .cloned()
             .collect();
-        linked.push(bundle);
+        linked.push(req.bundle.clone());
         self.store.transaction(|tx| {
             tx.put_meta(META_DEVICE_LIST, &devices)?;
             tx.put_meta(META_LINKED_BUNDLES, &linked)
@@ -385,6 +410,22 @@ fn session_id(ek: &[u8; 32]) -> [u8; 16] {
     let mut id = [0u8; 16];
     id.copy_from_slice(&blake3::hash(ek).as_bytes()[..16]);
     id
+}
+
+/// Données associées du ratchet : `IK_A || IK_B` (PQXDH), puis les
+/// identifiants complets des deux appareils (initiateur, répondeur).
+///
+/// La preuve de possession d'un certificat ne couvre que la clé de signature,
+/// pas la clé X25519 : une carte pourrait associer sa propre clé de signature
+/// à la clé `dh` d'un tiers. L'identifiant d'appareil hache les deux clés ;
+/// le lier ici fait échouer toute session dont les deux côtés ne voient pas
+/// exactement les mêmes appareils.
+fn session_ad(pqxdh_ad: &[u8], initiator: &DeviceId, responder: &DeviceId) -> Vec<u8> {
+    let mut ad = Vec::with_capacity(pqxdh_ad.len() + 32);
+    ad.extend_from_slice(pqxdh_ad);
+    ad.extend_from_slice(&initiator.0);
+    ad.extend_from_slice(&responder.0);
+    ad
 }
 
 fn log(

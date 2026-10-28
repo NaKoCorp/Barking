@@ -14,5 +14,5 @@ pub mod ratchet;
 pub mod store;
 pub mod transparency;
 
-pub use self::core::{ContactSummary, Core, ReceiveOutcome};
+pub use self::core::{ContactSummary, Core, LinkRequest, ReceiveOutcome};
 pub use error::{CoreError, Result};

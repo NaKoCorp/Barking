@@ -19,6 +19,10 @@ pub const SAFETY_NUMBER: &[u8] = b"barking/v0/safety-number";
 /// Domaine de signature du certificat d'appareil par la racine.
 pub const DEVICE_CERT: &[u8] = b"barking/v0/device-cert";
 
+/// Preuve de possession : l'appareil signe son propre certificat (racine,
+/// clés publiques, nom, date) avec sa clé de signature.
+pub const DEVICE_POSSESSION: &[u8] = b"barking/v0/device-possession";
+
 /// Domaine de signature de la liste d'appareils par la racine.
 pub const DEVICE_LIST: &[u8] = b"barking/v0/device-list";
 

@@ -2,7 +2,7 @@
 
 use rand_core::CryptoRng;
 
-use super::{Core, de_init, de_state, load_card, log, ser_init, ser_state, session_id};
+use super::{Core, de_init, de_state, load_card, log, ser_init, ser_state, session_ad, session_id};
 use crate::envelope::{self, Body, Envelope, MAX_TEXT_LEN};
 use crate::handshake::pqxdh;
 use crate::identity::Fingerprint;
@@ -38,7 +38,7 @@ impl Core {
             for cert in &card.devices.certs {
                 let peer = cert.device;
                 let peer_id = peer.id();
-                let sessions = tx.sessions_for(peer_id)?;
+                let sessions = tx.sessions_for(*to, peer_id)?;
                 // Session reçue le plus récemment, sinon créée le plus récemment.
                 let chosen = sessions
                     .into_iter()
@@ -62,7 +62,7 @@ impl Core {
                             session_id: session_id(&init.ek),
                             state: Vec::new(),
                             mailbox_secret: secrets.mailbox_secret,
-                            ad: secrets.ad.clone(),
+                            ad: session_ad(&secrets.ad, &device.public().id(), &peer_id),
                             pending_initial: Some(ser_init(&init)?),
                             last_rx: 0,
                             created_at: now,

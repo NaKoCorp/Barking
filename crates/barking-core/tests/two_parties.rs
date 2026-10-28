@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use barking_core::contact::ContactCard;
 use barking_core::envelope::{Wire, parse_wire};
-use barking_core::identity::Fingerprint;
+use barking_core::identity::{DeviceCertificate, DeviceList, Fingerprint, RootIdentity};
 use barking_core::mailbox::{MailboxId, day_of, intro_mailbox};
 use barking_core::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId, Tier};
 use barking_core::store::{Direction, MessageStatus};
@@ -461,8 +461,8 @@ fn multi_device_fanout() {
     let mut bob2 = Core::recover(&p2, &[3; 32], phrase.as_str(), "pc-bob", NOW, &mut rng).unwrap();
     assert_eq!(bob1.fingerprint(), bob2.fingerprint());
 
-    let (dev2, bundle2) = bob2.device_link_request();
-    bob1.link_device(dev2, bundle2, "pc-bob", NOW).unwrap();
+    let req = bob2.device_link_request("pc-bob", NOW).unwrap();
+    bob1.link_device(&req).unwrap();
     let card = bob1.contact_card("Bob").unwrap();
     assert_eq!(card.devices.version, 2);
     assert_eq!(card.devices.certs.len(), 2);
@@ -510,8 +510,8 @@ fn device_list_rollback_refused() {
         &mut rng,
     )
     .unwrap();
-    let (d, bnd) = bob2.device_link_request();
-    bob1.link_device(d, bnd, "b2", NOW).unwrap();
+    let req = bob2.device_link_request("b2", NOW).unwrap();
+    bob1.link_device(&req).unwrap();
     let new_card = bob1.contact_card("Bob").unwrap();
     a.core.add_contact(&new_card, Some("bob")).unwrap();
     // Une carte avec une liste plus ancienne est refusée.
@@ -751,4 +751,162 @@ fn receive_arbitrary_bytes_always_ok() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn link_request_proof_is_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(12);
+    let (mut bob1, phrase) =
+        Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
+    let bob2 = Core::recover(
+        &dir.path().join("b2"),
+        &[3; 32],
+        phrase.as_str(),
+        "b2",
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    let good = bob2.device_link_request("b2", NOW).unwrap();
+    for tamper in 0..3 {
+        let mut req = good.clone();
+        match tamper {
+            0 => req.device_sig[0] ^= 1,
+            1 => req.name = "autre".into(),
+            _ => req.issued_at += 1,
+        }
+        assert!(bob1.link_device(&req).is_err(), "falsification {tamper}");
+    }
+    bob1.link_device(&good).unwrap();
+}
+
+#[test]
+fn card_claiming_another_contacts_device_rejected() {
+    // Mallory veut revendiquer l'appareil d'Alice sous sa propre racine.
+    let (_a, mut b, mut rng) = pair();
+    let alice_card = _a.card("Alice");
+    let alice_cert = alice_card.devices.certs[0].clone();
+    let dir = tempfile::tempdir().unwrap();
+    let (mallory, phrase) =
+        Core::create(&dir.path().join("m"), &[5; 32], "m", NOW, &mut rng).unwrap();
+    let mroot = RootIdentity::from_phrase(phrase.as_str()).unwrap();
+    // 1. La preuve de possession d'Alice est liée à sa racine.
+    assert_eq!(
+        DeviceCertificate::issue_with_proof(
+            &mroot,
+            alice_cert.device,
+            &alice_cert.name,
+            alice_cert.issued_at,
+            alice_cert.device_sig,
+        )
+        .err(),
+        Some(CoreError::InvalidSignature)
+    );
+    // 2. Le certificat d'Alice tel quel ne peut pas entrer dans la liste de Mallory.
+    let mut forged = mallory.contact_card("Alice").unwrap();
+    assert!(DeviceList::sign(&mroot, 2, vec![alice_cert.clone()]).is_err());
+    forged.devices.certs.push(alice_cert);
+    assert!(b.core.add_contact(&forged, Some("alice2")).is_err());
+    // 3. Les messages d'Alice restent attribués à Alice.
+    let mut a = _a;
+    let p = one(a.send(&b.fp(), "c'est Alice", NOW, &mut rng));
+    let (from, alias, ..) = expect_msg(b.recv(&p, NOW, &mut rng));
+    assert_eq!((from, alias.as_deref()), (a.fp(), Some("alice")));
+}
+
+#[test]
+fn revoked_device_refused_for_normal_and_initial() {
+    let mut alice = Party::new("tel-alice", 1);
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(13);
+    let (mut bob1, phrase) =
+        Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
+    let mut bob2 = Core::recover(
+        &dir.path().join("b2"),
+        &[3; 32],
+        phrase.as_str(),
+        "b2",
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    bob1.link_device(&bob2.device_link_request("b2", NOW).unwrap())
+        .unwrap();
+    let v2 = bob1.contact_card("Bob").unwrap();
+    let bob_fp = alice.core.add_contact(&v2, Some("bob")).unwrap();
+    let alice_card = alice.card("Alice");
+    bob2.add_contact(&alice_card, Some("alice")).unwrap();
+
+    // Bob2 ouvre la session (deux Initial), Alice en reçoit un et répond.
+    let i1 = bob2
+        .send_text(&alice.fp(), "i1", NOW, &mut rng)
+        .unwrap()
+        .remove(0);
+    let i2 = bob2
+        .send_text(&alice.fp(), "i2", NOW, &mut rng)
+        .unwrap()
+        .remove(0);
+    assert!(is_initial(&i1) && is_initial(&i2));
+    assert_eq!(expect_msg(alice.recv(&i1, NOW, &mut rng)).2, "i1");
+    // Un paquet par appareil de Bob ; Bob2 déchiffre le sien (sa session
+    // n'est plus en attente : il enverra ensuite des messages normaux).
+    let replies = alice.send(&bob_fp, "r", NOW, &mut rng);
+    let opened = replies
+        .iter()
+        .filter(|p| {
+            matches!(
+                bob2.receive(&p.encode(), T, NOW, &mut rng).unwrap(),
+                ReceiveOutcome::Message { .. }
+            )
+        })
+        .count();
+    assert_eq!(opened, 1);
+    let n0 = bob2
+        .send_text(&alice.fp(), "n0", NOW, &mut rng)
+        .unwrap()
+        .remove(0);
+    let n1 = bob2
+        .send_text(&alice.fp(), "n1", NOW, &mut rng)
+        .unwrap()
+        .remove(0);
+    assert!(!is_initial(&n0) && !is_initial(&n1));
+    // Avant révocation, un message normal de Bob2 passe.
+    assert_eq!(expect_msg(alice.recv(&n0, NOW, &mut rng)).2, "n0");
+
+    // Bob révoque Bob2 : liste v3 sans lui.
+    let root = RootIdentity::from_phrase(phrase.as_str()).unwrap();
+    let bob1_cert = v2.devices.certs[0].clone();
+    let bob1_bundle = v2
+        .bundles
+        .iter()
+        .find(|b| b.device == bob1_cert.device)
+        .unwrap()
+        .clone();
+    let v3 = DeviceList::sign(&root, 3, vec![bob1_cert]).unwrap();
+    let card3 = ContactCard::sign(&root, "Bob", v3, vec![bob1_bundle]).unwrap();
+    alice.core.add_contact(&card3, Some("bob")).unwrap();
+
+    // Ni le message normal, ni l'Initial de l'appareil révoqué ne passent.
+    let normal = alice.recv(&n1, NOW, &mut rng);
+    assert!(
+        matches!(
+            normal,
+            ReceiveOutcome::NotForUs | ReceiveOutcome::Quarantined { .. }
+        ),
+        "{normal:?}"
+    );
+    match alice.recv(&i2, NOW, &mut rng) {
+        ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("inconnu"), "{reason}"),
+        other => panic!("Quarantined attendu, obtenu {other:?}"),
+    }
+    let texts: Vec<String> = alice
+        .core
+        .messages_with(&bob_fp)
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.direction == Direction::In)
+        .map(|m| m.body)
+        .collect();
+    assert_eq!(texts, vec!["i1", "n0"]);
 }

@@ -134,7 +134,7 @@ mod tests {
         let (root, _) = RootIdentity::generate(&mut rng);
         let dev = DeviceKeys::generate(&mut rng);
         let secrets = PrekeySecrets::generate(&mut rng, 2);
-        let cert = DeviceCertificate::issue(&root, dev.public(), "tel", 1).unwrap();
+        let cert = DeviceCertificate::issue(&root, &dev, "tel", 1).unwrap();
         let list = DeviceList::sign(&root, 1, vec![cert]).unwrap();
         Fixture {
             root,

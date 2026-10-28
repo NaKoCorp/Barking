@@ -6,7 +6,7 @@ use zeroize::Zeroizing;
 
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, ReceiveOutcome, SEEN_RETENTION_SECS,
-    de_state, load_card, log, ser_state, session_id,
+    de_state, load_card, log, ser_state, session_ad, session_id,
 };
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
@@ -24,6 +24,7 @@ const R_UNREADABLE: &str = "contenu illisible";
 const R_UNEXPECTED: &str = "contenu inattendu pour cette boîte aux lettres";
 const R_UNDECRYPTABLE: &str = "déchiffrement impossible";
 const R_UNKNOWN_SENDER: &str = "expéditeur inconnu";
+const R_AMBIGUOUS_SENDER: &str = "expéditeur ambigu";
 const R_HANDSHAKE: &str = "ouverture de session impossible";
 const R_BAD_CONTENT: &str = "contenu authentifié mais mal formé";
 const R_ID_MISMATCH: &str = "identifiant de paquet incohérent";
@@ -194,14 +195,25 @@ fn copy_prekeys(p: &PrekeySecrets) -> Result<PrekeySecrets> {
 }
 
 /// Appareil d'un contact connu dont la clé X25519 d'identité est `ik`.
-fn find_sender(q: &impl Queries, ik: &[u8; 32]) -> Result<Option<(Fingerprint, DevicePublic)>> {
+///
+/// Exige une correspondance unique : si deux contacts revendiquaient la même
+/// clé (`add_contact` l'interdit), l'expéditeur serait ambigu et le paquet refusé
+/// plutôt qu'attribué au premier trouvé.
+fn find_sender(
+    q: &impl Queries,
+    ik: &[u8; 32],
+) -> Result<core::result::Result<(Fingerprint, DevicePublic), &'static str>> {
+    let mut found = None;
     for row in q.list_contacts()? {
         let card = load_card(&row.card)?;
-        if let Some(c) = card.devices.certs.iter().find(|c| c.device.dh == *ik) {
-            return Ok(Some((row.fp, c.device)));
+        for c in card.devices.certs.iter().filter(|c| c.device.dh == *ik) {
+            if found.is_some() {
+                return Ok(Err(R_AMBIGUOUS_SENDER));
+            }
+            found = Some((row.fp, c.device));
         }
     }
-    Ok(None)
+    Ok(found.ok_or(R_UNKNOWN_SENDER))
 }
 
 /// `Wire::Initial` : ouvre le message initial scellé, identifie l'expéditeur,
@@ -221,13 +233,14 @@ fn open_initial(
     };
     // Pas de demandes de contact en v0 : seul un appareil d'un contact connu
     // peut ouvrir une session.
-    let Some((contact_fp, peer)) = find_sender(q, &init.ik)? else {
-        return Ok(Err(R_UNKNOWN_SENDER));
+    let (contact_fp, peer) = match find_sender(q, &init.ik)? {
+        Ok(found) => found,
+        Err(reason) => return Ok(Err(reason)),
     };
     let peer_id = peer.id();
     let sid = session_id(&init.ek);
     if let Some(row) = q
-        .sessions_for(peer_id)?
+        .sessions_for(contact_fp, peer_id)?
         .into_iter()
         .find(|s| s.session_id == sid)
     {
@@ -263,7 +276,8 @@ fn open_new_session(
         return Ok(Err(R_HANDSHAKE));
     };
     let mut ratchet = RatchetState::init_responder(&secrets.sk, pk.spk());
-    let Ok(pt) = ratchet.decrypt(msg, &secrets.ad) else {
+    let ad = session_ad(&secrets.ad, &peer_id, &device.public().id());
+    let Ok(pt) = ratchet.decrypt(msg, &ad) else {
         return Ok(Err(R_UNDECRYPTABLE));
     };
     let row = SessionRow {
@@ -272,7 +286,7 @@ fn open_new_session(
         session_id: sid,
         state: Vec::new(),
         mailbox_secret: secrets.mailbox_secret,
-        ad: secrets.ad.clone(),
+        ad,
         pending_initial: None,
         last_rx: now,
         created_at: now,
@@ -335,12 +349,16 @@ fn accept(
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
     let env = match envelope::decode(&o.pt) {
-        Err(_) => return reject_authenticated(q, packet, o, now, R_BAD_CONTENT),
-        Ok(env) => match check_envelope(q, packet, env, now)? {
-            Ok(env) => env,
-            Err(reason) => return reject_authenticated(q, packet, o, now, reason),
-        },
+        // Pas de secret d'accusé authentifié : rien à marquer comme vu.
+        Err(_) => return reject_authenticated(q, packet, o, now, R_BAD_CONTENT, None),
+        Ok(env) => env,
     };
+    // Seul l'identifiant dérivé du contenu authentifié est marqué vu, jamais
+    // l'identifiant de l'en-tête en clair (qu'un relais peut réécrire).
+    let authenticated_id = ack::packet_id_for(&env.ack_secret);
+    if let Err(reason) = check_envelope(q, packet, &env, now)? {
+        return reject_authenticated(q, packet, o, now, reason, Some(authenticated_id));
+    }
     let Opened {
         mut row,
         ratchet,
@@ -419,9 +437,9 @@ fn accept(
 fn check_envelope(
     q: &impl Queries,
     packet: &Packet,
-    env: Envelope,
+    env: &Envelope,
     now: u64,
-) -> Result<core::result::Result<Envelope, &'static str>> {
+) -> Result<core::result::Result<(), &'static str>> {
     if !ack::verify(&packet.id, &env.ack_secret) {
         return Ok(Err(R_ID_MISMATCH));
     }
@@ -433,7 +451,7 @@ fn check_envelope(
     if q.message_by_packet(packet.id)?.is_some() {
         return Ok(Err(R_ID_REUSED));
     }
-    Ok(Ok(env))
+    Ok(Ok(()))
 }
 
 /// Contenu authentifié mais refusé. Le ratchet a avancé : on garde cet état
@@ -446,13 +464,16 @@ fn reject_authenticated(
     o: Opened,
     now: u64,
     reason: &'static str,
+    seen: Option<PacketId>,
 ) -> Result<RxOut> {
     if o.new_session.is_none() {
         let mut row = o.row;
         row.state = ser_state(&o.ratchet)?;
         q.put_session(&row)?;
     }
-    q.mark_seen(packet.id, now)?;
+    if let Some(id) = seen {
+        q.mark_seen(id, now)?;
+    }
     quarantine(q, packet, now, reason)
 }
 
@@ -460,14 +481,14 @@ fn reject_authenticated(
 /// en comptant `new` : supprime d'abord celles sans réception récente.
 fn prune_sessions(q: &impl Queries, new: &SessionRow) -> Result<()> {
     let mut others: Vec<SessionRow> = q
-        .sessions_for(new.contact_device)?
+        .sessions_for(new.contact_fp, new.contact_device)?
         .into_iter()
         .filter(|s| s.session_id != new.session_id)
         .collect();
     others.sort_by_key(|s| (s.last_rx, s.created_at));
     while others.len() >= MAX_SESSIONS_PER_DEVICE {
         let oldest = others.remove(0);
-        q.delete_session(oldest.contact_device, &oldest.session_id)?;
+        q.delete_session(oldest.contact_fp, oldest.contact_device, &oldest.session_id)?;
     }
     Ok(())
 }

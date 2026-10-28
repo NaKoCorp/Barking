@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use super::{Core, load_card, log};
 use crate::contact::ContactCard;
-use crate::identity::{DeviceId, Fingerprint};
+use crate::identity::{DeviceId, DevicePublic, Fingerprint};
 use crate::store::Queries;
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
@@ -40,6 +40,17 @@ impl Core {
         if fp == self.fingerprint() {
             return Err(CoreError::Malformed("carte de ma propre identité"));
         }
+        let claimed: Vec<DevicePublic> = card.devices.certs.iter().map(|c| c.device).collect();
+        if self
+            .devices
+            .certs
+            .iter()
+            .any(|mine| claimed.iter().any(|d| overlaps(d, &mine.device)))
+        {
+            return Err(CoreError::Malformed(
+                "carte revendiquant un de mes appareils",
+            ));
+        }
         let alias = alias.map(str::trim).filter(|a| !a.is_empty());
         if alias.is_some_and(|a| a.len() > MAX_ALIAS_LEN) {
             return Err(CoreError::TooLarge);
@@ -54,6 +65,14 @@ impl Core {
             .max()
             .unwrap_or(0);
         self.store.transaction(|tx| {
+            // Un appareil (identifiant, clé de signature ou clé X25519) n'appartient
+            // qu'à un seul contact : sinon un contact pourrait se faire attribuer
+            // les messages d'un autre.
+            if claimed_by_other(tx, Some(fp), &claimed)? {
+                return Err(CoreError::Malformed(
+                    "appareil déjà associé à un autre contact",
+                ));
+            }
             let mut verified = false;
             let mut stored_alias = alias.unwrap_or("").to_owned();
             if let Some(old) = tx.get_contact(fp)? {
@@ -70,7 +89,7 @@ impl Core {
                         let id = c.device.id();
                         if !kept.contains(&id) {
                             // Appareil révoqué : plus aucune session avec lui.
-                            tx.delete_sessions_for_device(id)?;
+                            tx.delete_sessions_for_device(fp, id)?;
                         }
                     }
                 }
@@ -139,6 +158,34 @@ impl Core {
     pub(super) fn alias_in(q: &impl Queries, fp: Fingerprint) -> Result<Option<String>> {
         Ok(q.get_contact(fp)?.and_then(|c| alias_of(&c.alias)))
     }
+}
+
+/// Deux appareils partagent-ils un identifiant ou une clé publique ?
+fn overlaps(a: &DevicePublic, b: &DevicePublic) -> bool {
+    a.id() == b.id() || a.dh == b.dh || a.sig == b.sig
+}
+
+/// Vrai si un contact autre que `except` revendique l'un de ces appareils.
+pub(super) fn claimed_by_other(
+    q: &impl Queries,
+    except: Option<Fingerprint>,
+    devices: &[DevicePublic],
+) -> Result<bool> {
+    for row in q.list_contacts()? {
+        if Some(row.fp) == except {
+            continue;
+        }
+        let card = load_card(&row.card)?;
+        if card
+            .devices
+            .certs
+            .iter()
+            .any(|c| devices.iter().any(|d| overlaps(d, &c.device)))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Inverse de `Display` pour `Fingerprint` : base32 minuscule, groupes séparés par `-`.

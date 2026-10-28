@@ -86,7 +86,7 @@ mod tests {
 
     fn cert(root: &RootIdentity, seed: u64, name: &str) -> DeviceCertificate {
         let dev = DeviceKeys::generate(&mut StdRng::seed_from_u64(seed));
-        DeviceCertificate::issue(root, dev.public(), name, 1).unwrap()
+        DeviceCertificate::issue(root, &dev, name, 1).unwrap()
     }
 
     fn root(seed: u64) -> RootIdentity {

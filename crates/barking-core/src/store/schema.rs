@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     pending_initial BLOB,
     last_rx INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
-    PRIMARY KEY (contact_device, session_id)
+    PRIMARY KEY (contact_fp, contact_device, session_id)
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,

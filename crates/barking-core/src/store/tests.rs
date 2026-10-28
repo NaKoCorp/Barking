@@ -102,7 +102,7 @@ fn contacts_sessions_messages_events() {
     row.last_rx = 77;
     row.pending_initial = None;
     store.put_session(&row).unwrap();
-    assert_eq!(store.sessions_for(dev).unwrap(), vec![row.clone()]);
+    assert_eq!(store.sessions_for(fp, dev).unwrap(), vec![row.clone()]);
     assert_eq!(store.all_sessions().unwrap().len(), 1);
 
     let pid = PacketId([2; 16]);
@@ -183,13 +183,25 @@ fn message_lookup_and_deletions() {
     };
     store.put_session(&row(1)).unwrap();
     store.put_session(&row(2)).unwrap();
-    store.delete_session(dev, &[1; 16]).unwrap();
-    assert_eq!(store.sessions_for(dev).unwrap().len(), 1);
+    store.delete_session(fp, dev, &[1; 16]).unwrap();
+    assert_eq!(store.sessions_for(fp, dev).unwrap().len(), 1);
     store.put_session(&row(3)).unwrap();
-    store.delete_sessions_for_device(dev).unwrap();
-    assert!(store.sessions_for(dev).unwrap().is_empty());
+    store.delete_sessions_for_device(fp, dev).unwrap();
+    assert!(store.sessions_for(fp, dev).unwrap().is_empty());
     store.put_session(&row(4)).unwrap();
+    // Même appareil, autre contact : sessions distinctes, jamais écrasées.
+    let other = Fingerprint([9; 32]);
+    let mut foreign = row(4);
+    foreign.contact_fp = other;
+    store.put_session(&foreign).unwrap();
+    assert_eq!(store.sessions_for(fp, dev).unwrap().len(), 1);
+    assert_eq!(store.sessions_for(other, dev).unwrap().len(), 1);
+    store.delete_sessions_for_device(other, dev).unwrap();
+    assert_eq!(store.sessions_for(fp, dev).unwrap().len(), 1);
+    store.put_session(&foreign).unwrap();
     store.delete_contact(fp).unwrap();
+    assert_eq!(store.all_sessions().unwrap().len(), 1);
+    store.delete_contact(other).unwrap();
     assert!(store.get_contact(fp).unwrap().is_none());
     assert!(store.all_sessions().unwrap().is_empty());
     // L'historique reste.
