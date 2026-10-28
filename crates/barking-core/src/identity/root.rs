@@ -6,6 +6,7 @@ use bip39::{Language, Mnemonic};
 use core::fmt;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand_core::CryptoRng;
+use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Phrase de récupération (24 mots anglais BIP39). Effacée à la destruction.
@@ -102,7 +103,7 @@ impl RootIdentity {
 }
 
 /// Clé racine publique (32 octets).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct RootPublic(pub [u8; 32]);
 
 impl RootPublic {

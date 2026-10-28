@@ -15,3 +15,12 @@ pub const FINGERPRINT_CONTEXT: &str = "barking/v0/fingerprint";
 
 /// Domaine du code de sécurité (hash des deux empreintes triées).
 pub const SAFETY_NUMBER: &[u8] = b"barking/v0/safety-number";
+
+/// Domaine de signature du certificat d'appareil par la racine.
+pub const DEVICE_CERT: &[u8] = b"barking/v0/device-cert";
+
+/// Domaine de signature de la liste d'appareils par la racine.
+pub const DEVICE_LIST: &[u8] = b"barking/v0/device-list";
+
+/// Contexte BLAKE3 de l'identifiant d'appareil.
+pub const DEVICE_ID_CONTEXT: &str = "barking/v0/device-id";
