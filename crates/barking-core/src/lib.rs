@@ -4,5 +4,6 @@ pub mod crypto;
 pub mod error;
 pub mod handshake;
 pub mod identity;
+pub mod ratchet;
 
 pub use error::{CoreError, Result};

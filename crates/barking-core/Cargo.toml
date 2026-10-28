@@ -21,5 +21,7 @@ x25519-dalek = { version = "3.0.0", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
 
 [dev-dependencies]
+chacha20 = { version = "0.10.2", features = ["rng"] }
 hex-literal = "1.1.0"
+proptest = "1.12.0"
 rand = "0.10.3"

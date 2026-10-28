@@ -33,3 +33,12 @@ pub const PQXDH_SK: &[u8] = b"barking/v0/pqxdh-sk";
 
 /// Dérivation du secret des boîtes aux lettres à l'ouverture de session.
 pub const PQXDH_MAILBOX: &[u8] = b"barking/v0/pqxdh-mailbox";
+
+/// Clés d'en-tête initiales du double ratchet (`shared_hka || shared_nhkb`).
+pub const RATCHET_HK: &[u8] = b"barking/v0/ratchet-hk";
+
+/// KDF_RK du double ratchet : `RK' || CK || NHK`.
+pub const RATCHET_RK: &[u8] = b"barking/v0/ratchet-rk";
+
+/// Clé et nonce du corps d'un message, dérivés de la clé de message.
+pub const RATCHET_MK: &[u8] = b"barking/v0/ratchet-mk";
