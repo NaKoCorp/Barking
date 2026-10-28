@@ -151,7 +151,11 @@ fn default_home() -> CliResult<PathBuf> {
 /// Phrase de passe : `BARKING_PASSPHRASE`, sinon saisie masquée.
 fn read_passphrase(confirm: bool) -> CliResult<Zeroizing<String>> {
     if let Ok(p) = std::env::var("BARKING_PASSPHRASE") {
-        return Ok(Zeroizing::new(p));
+        let p = Zeroizing::new(p);
+        if p.is_empty() {
+            return fail("La phrase de passe ne peut pas être vide");
+        }
+        return Ok(p);
     }
     let first = Zeroizing::new(rpassword::prompt_password("Phrase de passe : ")?);
     if confirm {

@@ -264,3 +264,33 @@ fn outbox_put_rolls_back_with_transaction() {
     assert!(r.is_err());
     assert!(store.outbox_pending(2).unwrap().is_empty());
 }
+
+#[test]
+fn secure_delete_enabled() {
+    let (_d, _p, store) = open_tmp();
+    let on: i64 = store
+        .conn()
+        .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(on, 1);
+}
+
+#[test]
+fn message_row_debug_hides_body() {
+    let (_d, _p, store) = open_tmp();
+    let fp = Fingerprint([4; 32]);
+    store
+        .insert_message(
+            fp,
+            Direction::In,
+            "secret du corps",
+            MessageStatus::Delivered,
+            5,
+            None,
+        )
+        .unwrap();
+    let row = store.messages_with(fp).unwrap().remove(0);
+    let dbg = format!("{row:?}");
+    assert!(!dbg.contains("secret du corps"), "{dbg}");
+    assert!(dbg.contains("15 octets"), "{dbg}");
+}

@@ -308,7 +308,7 @@ mod tests {
             panic!("Initial attendu");
         };
         let ad = s.sa.ad.clone();
-        assert_eq!(open(&msg, &mut s.b, &ad, 0).unwrap(), e0);
+        assert_eq!(open(&msg, &mut s.b, &ad, NOW).unwrap(), e0);
 
         for (i, (from_b, text)) in [(true, "salut"), (false, "ça va ?"), (true, "oui")]
             .into_iter()
@@ -329,7 +329,7 @@ mod tests {
             let Wire::Normal { msg } = parse_wire(&decoded.payload).unwrap() else {
                 panic!("Normal attendu");
             };
-            assert_eq!(open(&msg, rcv, &ad, 0).unwrap(), e);
+            assert_eq!(open(&msg, rcv, &ad, NOW).unwrap(), e);
         }
     }
 
@@ -352,7 +352,7 @@ mod tests {
         let init = open_initial(&s.bob, &ek, &sealed_init).unwrap();
         assert_eq!(init, s.init);
         let ad = s.sa.ad.clone();
-        assert_eq!(open(&msg, &mut s.b, &ad, 0).unwrap(), e);
+        assert_eq!(open(&msg, &mut s.b, &ad, NOW).unwrap(), e);
     }
 
     #[test]
@@ -418,7 +418,7 @@ mod tests {
         else {
             panic!("Initial attendu");
         };
-        open(&msg, &mut s.b, &ad, 0).unwrap();
+        open(&msg, &mut s.b, &ad, NOW).unwrap();
         let e = env(&mut s.rng, "réponse");
         let p1 = seal(&e, &mut s.a, &ad, None, MB, NOW, &mut s.rng)
             .unwrap()
@@ -446,7 +446,6 @@ mod tests {
         let mut s = setup(7);
         let e = env(&mut s.rng, "x");
         let p = send_initial(&mut s, &e);
-        eprintln!("initial payload = {} octets", p.payload.len());
         assert_eq!(p.tier, Tier::L);
     }
 
@@ -460,21 +459,16 @@ mod tests {
         let Wire::Initial { msg, .. } = parse_wire(&p0.payload).unwrap() else {
             panic!("Initial attendu");
         };
-        open(&msg, &mut s.b, &ad, 0).unwrap();
+        open(&msg, &mut s.b, &ad, NOW).unwrap();
         for (len, tier) in [(60, Tier::S), (120, Tier::M)] {
             let e = env(&mut s.rng, &"a".repeat(len));
             let p = seal(&e, &mut s.b, &ad, None, MB, NOW, &mut s.rng).unwrap();
-            eprintln!(
-                "texte {len} o -> payload {} o, paquet {:?}",
-                p.payload.len(),
-                p.tier
-            );
             assert_eq!(p.tier, tier);
             let decoded = Packet::decode(&p.encode()).unwrap();
             let Wire::Normal { msg } = parse_wire(&decoded.payload).unwrap() else {
                 panic!("Normal attendu");
             };
-            assert_eq!(open(&msg, &mut s.a, &ad, 0).unwrap(), e);
+            assert_eq!(open(&msg, &mut s.a, &ad, NOW).unwrap(), e);
         }
     }
 
@@ -511,7 +505,7 @@ mod tests {
         // Contenu chiffré authentique mais qui n'est pas une enveloppe.
         let msg = s.a.encrypt(b"\xff\xff\xff", &ad, &mut s.rng).unwrap();
         assert!(matches!(
-            open(&msg, &mut s.b, &ad, 0),
+            open(&msg, &mut s.b, &ad, NOW),
             Err(CoreError::Malformed(_))
         ));
         // Mauvaises données associées.
@@ -520,8 +514,8 @@ mod tests {
         let Wire::Normal { msg } = parse_wire(&p.payload).unwrap() else {
             panic!("Normal attendu");
         };
-        assert_eq!(open(&msg, &mut s.b, b"autre", 0), Err(CoreError::Crypto));
-        assert_eq!(open(&msg, &mut s.b, &ad, 0).unwrap(), e);
+        assert_eq!(open(&msg, &mut s.b, b"autre", NOW), Err(CoreError::Crypto));
+        assert_eq!(open(&msg, &mut s.b, &ad, NOW).unwrap(), e);
     }
 
     #[test]
@@ -531,7 +525,7 @@ mod tests {
         let e = env(&mut s.rng, &"a".repeat(MAX_TEXT_LEN + 1));
         let pt = postcard::to_allocvec(&e).unwrap();
         let msg = s.a.encrypt(&pt, &ad, &mut s.rng).unwrap();
-        assert_eq!(open(&msg, &mut s.b, &ad, 0), Err(CoreError::TooLarge));
+        assert_eq!(open(&msg, &mut s.b, &ad, NOW), Err(CoreError::TooLarge));
     }
 
     #[test]

@@ -115,12 +115,7 @@ mod tests {
     fn list_rejects_cert_from_other_root() {
         let r = root(1);
         let other = root(2);
-        let list = DeviceList::sign(&r, 1, vec![cert(&r, 10, "a"), cert(&other, 11, "b")]);
-        // Soit refusé à la signature, soit à la vérification.
-        match list {
-            Err(_) => {}
-            Ok(l) => assert!(l.verify().is_err()),
-        }
+        assert!(DeviceList::sign(&r, 1, vec![cert(&r, 10, "a"), cert(&other, 11, "b")]).is_err());
     }
 
     #[test]
@@ -136,11 +131,7 @@ mod tests {
     fn list_rejects_duplicate_device() {
         let r = root(1);
         let c = cert(&r, 10, "a");
-        let list = DeviceList::sign(&r, 1, vec![c.clone(), c]);
-        match list {
-            Err(_) => {}
-            Ok(l) => assert!(l.verify().is_err()),
-        }
+        assert!(DeviceList::sign(&r, 1, vec![c.clone(), c]).is_err());
     }
 
     #[test]

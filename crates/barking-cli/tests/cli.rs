@@ -354,3 +354,16 @@ fn received_text_cannot_forge_lines_or_reorder_display() {
         "{got}"
     );
 }
+
+#[test]
+fn empty_env_passphrase_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    barking(&home)
+        .env("BARKING_PASSPHRASE", "")
+        .args(["init", "--name", "tel"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("vide"));
+    assert!(!home.join("barking.db").exists());
+}

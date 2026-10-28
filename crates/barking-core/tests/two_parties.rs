@@ -1120,3 +1120,32 @@ fn ack_addressed_to_a_mailbox_the_sender_watches() {
         ReceiveOutcome::AckReceived { .. }
     ));
 }
+
+#[test]
+fn removed_or_replaced_contact_leaves_no_outbox_rows() {
+    // Suppression : messages et accusés en attente pour Bob disparaissent.
+    let (mut a, mut b, mut rng) = pair();
+    one(a.send(&b.fp(), "en attente", NOW, &mut rng));
+    let q = one(b.send(&a.fp(), "de Bob", NOW, &mut rng));
+    expect_msg(a.recv(&q, NOW, &mut rng));
+    let carol = Party::new("tel-carol", 5);
+    a.core
+        .add_contact(&carol.card("Carol"), Some("carol"))
+        .unwrap();
+    let c = one(a.send(&carol.fp(), "pour Carol", NOW, &mut rng));
+    assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 3);
+    a.core.remove_contact(&b.fp()).unwrap();
+    assert_eq!(a.core.pending_outbox(NOW).unwrap(), vec![c.encode()]);
+
+    // Remplacement par alias : idem pour l'ancien contact.
+    let (mut a, mut b, mut rng) = pair();
+    one(a.send(&b.fp(), "en attente", NOW, &mut rng));
+    let q = one(b.send(&a.fp(), "de Bob", NOW, &mut rng));
+    expect_msg(a.recv(&q, NOW, &mut rng));
+    assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 2);
+    let mallory = Party::new("tel-mallory", 4);
+    a.core
+        .add_contact(&mallory.card("Bob"), Some("bob"))
+        .unwrap();
+    assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
+}

@@ -19,7 +19,7 @@ use zeroize::Zeroize;
 
 use crate::identity::device::DeviceId;
 use crate::identity::root::Fingerprint;
-use crate::packet::{Kind, PacketId};
+use crate::packet::{Kind, Packet, PacketId};
 use crate::{CoreError, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +104,7 @@ impl Drop for SessionRow {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MessageRow {
     pub id: i64,
     pub contact_fp: Fingerprint,
@@ -113,6 +113,21 @@ pub struct MessageRow {
     pub status: MessageStatus,
     pub at: u64,
     pub packet_id: Option<PacketId>,
+}
+
+impl fmt::Debug for MessageRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Le texte du message n'apparaît jamais : seulement sa taille.
+        f.debug_struct("MessageRow")
+            .field("id", &self.id)
+            .field("contact_fp", &self.contact_fp)
+            .field("direction", &self.direction)
+            .field("body", &format_args!("<{} octets>", self.body.len()))
+            .field("status", &self.status)
+            .field("at", &self.at)
+            .field("packet_id", &self.packet_id)
+            .finish()
+    }
 }
 
 fn map_err(e: rusqlite::Error) -> CoreError {
@@ -172,6 +187,9 @@ impl Store {
             r.get::<_, i64>(0)
         })
         .map_err(map_err)?;
+        // Pages libérées écrasées par des zéros (messages, sessions supprimés).
+        conn.execute_batch("PRAGMA secure_delete = ON;")
+            .map_err(map_err)?;
         let store = Store { conn };
         store.apply_schema()?;
         Ok(store)
@@ -507,8 +525,46 @@ pub trait Queries {
         raw.map(message_from_raw).transpose()
     }
 
-    /// Supprime un contact et toutes ses sessions (l'historique est gardé).
+    /// Supprime un contact, toutes ses sessions et ses paquets en file
+    /// d'envoi : mes messages pour lui et mes accusés de ses messages
+    /// (l'historique est gardé).
     fn delete_contact(&self, fp: Fingerprint) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM outbox WHERE packet_id IN \
+                 (SELECT packet_id FROM messages \
+                  WHERE contact_fp = ?1 AND direction = ?2 AND packet_id IS NOT NULL)",
+                params![fp.0.as_slice(), Direction::Out as i64],
+            )
+            .map_err(map_err)?;
+        // Un accusé porte l'identifiant du message reçu qu'il confirme.
+        let acks = {
+            let mut stmt = self
+                .conn()
+                .prepare("SELECT packet_id, bytes FROM outbox WHERE kind = ?1")
+                .map_err(map_err)?;
+            stmt.query_map(params![Kind::Ack as i64], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?
+        };
+        for (id, bytes) in acks {
+            let Some(acked) = Packet::decode(&bytes)
+                .ok()
+                .and_then(|p| p.payload.get(..16).map(<[u8; 16]>::try_from))
+                .and_then(core::result::Result::ok)
+            else {
+                continue;
+            };
+            if self
+                .message_by_packet(PacketId(acked))?
+                .is_some_and(|m| m.contact_fp == fp && m.direction == Direction::In)
+            {
+                self.outbox_remove(PacketId(arr(id)?))?;
+            }
+        }
         self.conn()
             .execute(
                 "DELETE FROM sessions WHERE contact_fp = ?1",

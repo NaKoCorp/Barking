@@ -4,9 +4,6 @@
 //! forme `b"barking/v0/<usage>"`, centralisée ici. Les tâches suivantes y
 //! ajoutent leurs propres constantes.
 
-/// Étiquette de test de la couche de dérivation (exemple de la convention).
-pub const KDF_SELFTEST: &[u8] = b"barking/v0/kdf-selftest";
-
 /// Graine de l'identité racine dérivée de l'entropie de la phrase de récupération.
 pub const ROOT_FROM_ENTROPY: &[u8] = b"barking/v0/root-from-entropy";
 

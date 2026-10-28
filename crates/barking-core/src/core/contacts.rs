@@ -120,8 +120,9 @@ impl Core {
         })
     }
 
-    /// Supprime un contact, ses sessions et sa carte stockée, en une seule
-    /// transaction. L'historique des messages est conservé. Sert à se
+    /// Supprime un contact, ses sessions, sa carte stockée et ses paquets en
+    /// file d'envoi, en une seule transaction. L'historique des messages est
+    /// conservé. Sert à se
     /// débloquer après l'ajout d'une carte frauduleuse qui revendiquait les
     /// clés d'un vrai contact. Inconnu : `UnknownContact`.
     pub fn remove_contact(&mut self, contact: &Fingerprint) -> Result<()> {
