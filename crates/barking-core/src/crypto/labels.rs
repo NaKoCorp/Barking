@@ -42,3 +42,9 @@ pub const RATCHET_RK: &[u8] = b"barking/v0/ratchet-rk";
 
 /// Clé et nonce du corps d'un message, dérivés de la clé de message.
 pub const RATCHET_MK: &[u8] = b"barking/v0/ratchet-mk";
+
+/// Domaine de la boîte aux lettres de session (hash à clé par `mailbox_secret`).
+pub const MAILBOX: &[u8] = b"barking/v0/mailbox";
+
+/// Contexte BLAKE3 de la boîte aux lettres d'introduction (premier message).
+pub const INTRO_MAILBOX_CONTEXT: &str = "barking/v0/intro-mailbox";
