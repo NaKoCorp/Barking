@@ -120,6 +120,17 @@ impl Core {
         })
     }
 
+    /// Supprime un contact, ses sessions et sa carte stockée, en une seule
+    /// transaction. L'historique des messages est conservé. Sert à se
+    /// débloquer après l'ajout d'une carte frauduleuse qui revendiquait les
+    /// clés d'un vrai contact. Inconnu : `UnknownContact`.
+    pub fn remove_contact(&mut self, contact: &Fingerprint) -> Result<()> {
+        self.store.transaction(|tx| {
+            tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
+            tx.delete_contact(*contact)
+        })
+    }
+
     /// Trouve un contact par alias, sinon par empreinte (forme affichée, avec
     /// ou sans tirets). Inconnu : `UnknownContact`.
     pub fn resolve(&self, fp_or_alias: &str) -> Result<Fingerprint> {

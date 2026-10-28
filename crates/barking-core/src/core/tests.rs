@@ -419,3 +419,27 @@ fn session_to_mixed_device_fails_at_its_real_owner() {
             .is_empty()
     );
 }
+
+#[test]
+fn remove_contact_deletes_contact_card_and_sessions_but_keeps_history() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    assert!(!p.a.store.all_sessions().unwrap().is_empty());
+    assert!(!p.a.messages_with(&bob).unwrap().is_empty());
+    p.a.remove_contact(&bob).unwrap();
+    assert!(p.a.contacts().unwrap().is_empty());
+    assert_eq!(p.a.resolve("bob"), Err(CoreError::UnknownContact));
+    assert!(p.a.store.get_contact(bob).unwrap().is_none());
+    assert!(p.a.store.all_sessions().unwrap().is_empty());
+    assert!(!p.a.messages_with(&bob).unwrap().is_empty());
+    // Inconnu : erreur, rien n'est cassé.
+    assert_eq!(p.a.remove_contact(&bob), Err(CoreError::UnknownContact));
+    // On peut le rajouter, puis lui écrire (nouvelle session).
+    p.a.add_contact(&p.b.contact_card("Bob").unwrap(), Some("bob"))
+        .unwrap();
+    let out = p.a.send_text(&bob, "retour", NOW, &mut p.rng).unwrap();
+    assert!(matches!(
+        p.b.receive(&out[0].encode(), "t", NOW, &mut p.rng).unwrap(),
+        ReceiveOutcome::Message { .. }
+    ));
+}
