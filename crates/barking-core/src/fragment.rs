@@ -240,7 +240,10 @@ mod tests {
         assert!(r.push(&frames[0], 0).unwrap().is_none());
         assert!(r.push(&frames[1], 10).unwrap().is_none());
         assert_eq!(r.pending(), 1);
-        // Après expiration, l'entrée est purgée : le dernier fragment seul ne complète rien.
+        // Une trame invalide déclenche la purge sans rien ajouter.
+        assert!(r.push(&[0; 3], 100).is_err());
+        assert_eq!(r.pending(), 0);
+        // Le dernier fragment seul ne complète rien.
         assert!(r.push(&frames[2], 100).unwrap().is_none());
         assert_eq!(r.pending(), 1);
     }
@@ -254,6 +257,13 @@ mod tests {
             assert!(r.pending() <= 4);
         }
         assert_eq!(r.pending(), 4);
+        // Le plus ancien (0) a été évincé, le plus récent (9) survit.
+        let f0 = fragment(&bytes(500, 0), &pid(0), 200).unwrap();
+        assert!(r.push(&f0[1], 20).unwrap().is_none());
+        assert!(r.push(&f0[2], 20).unwrap().is_none());
+        let f9 = fragment(&bytes(500, 9), &pid(9), 200).unwrap();
+        assert!(r.push(&f9[1], 20).unwrap().is_none());
+        assert_eq!(r.push(&f9[2], 20).unwrap().unwrap(), bytes(500, 9));
     }
 
     #[test]
@@ -310,6 +320,66 @@ mod tests {
             for (f, t) in frames.iter().zip(times.iter()) {
                 let _ = r.push(f, *t);
                 prop_assert!(r.pending() <= 4);
+            }
+        }
+
+        #[test]
+        fn proptest_structured_never_panics(
+            ops in proptest::collection::vec(
+                (0u8..3, 0u8..7, 0u8..8, 0usize..4, 0u64..40, any::<u8>()),
+                0..120,
+            ),
+        ) {
+            const LENS: [usize; 4] = [0, 1, 5, 64];
+            let mut r = Reassembler::new(2, 30);
+            let mut now = 0u64;
+            for (k, count, index, li, dt, fill) in ops {
+                now += dt;
+                let mut f = vec![k; 8];
+                f.push(index);
+                f.push(count);
+                f.extend(std::iter::repeat_n(fill, LENS[li]));
+                if let Ok(Some(out)) = r.push(&f, now) {
+                    prop_assert!(!out.is_empty() || count <= 1);
+                }
+                prop_assert!(r.pending() <= 2);
+            }
+        }
+
+        #[test]
+        fn proptest_corrupted_frames_never_panic(
+            len in 1usize..3000,
+            mtu in 74usize..300,
+            drops in proptest::collection::vec(any::<bool>(), 64),
+            dups in proptest::collection::vec(0usize..3, 64),
+            flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 0..6),
+            seed in any::<u64>(),
+        ) {
+            let pkt = bytes(len, 5);
+            let Ok(mut frames) = fragment(&pkt, &pid(1), mtu) else { return Ok(()); };
+            // Ordre mélangé (déterministe selon la graine).
+            let n = frames.len();
+            for i in (1..n).rev() {
+                let j = (seed.wrapping_mul(6364136223846793005).wrapping_add(i as u64) >> 33) as usize % (i + 1);
+                frames.swap(i, j);
+            }
+            // Un jeu complet, mélangé : doit toujours se réassembler.
+            let mut r = Reassembler::new(4, 60);
+            let mut out = None;
+            for f in &frames { out = r.push(f, 0).unwrap(); }
+            prop_assert_eq!(out.unwrap(), pkt);
+            // Même jeu avec pertes, doublons et corruption : aucune panique.
+            let mut r = Reassembler::new(4, 60);
+            for (i, f) in frames.iter().enumerate() {
+                if drops[i % 64] { continue; }
+                let mut f = f.clone();
+                for (pos, b) in &flips {
+                    if !f.is_empty() { let p = pos % f.len(); f[p] ^= b; }
+                }
+                for _ in 0..=dups[i % 64] {
+                    let _ = r.push(&f, i as u64);
+                    prop_assert!(r.pending() <= 4);
+                }
             }
         }
 
