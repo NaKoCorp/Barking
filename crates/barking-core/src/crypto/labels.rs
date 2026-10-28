@@ -24,3 +24,12 @@ pub const DEVICE_LIST: &[u8] = b"barking/v0/device-list";
 
 /// Contexte BLAKE3 de l'identifiant d'appareil.
 pub const DEVICE_ID_CONTEXT: &str = "barking/v0/device-id";
+
+/// Domaine de signature d'un paquet de clés par l'appareil.
+pub const PREKEYS: &[u8] = b"barking/v0/prekeys";
+
+/// Dérivation de la clé de session PQXDH.
+pub const PQXDH_SK: &[u8] = b"barking/v0/pqxdh-sk";
+
+/// Dérivation du secret des boîtes aux lettres à l'ouverture de session.
+pub const PQXDH_MAILBOX: &[u8] = b"barking/v0/pqxdh-mailbox";

@@ -2,6 +2,7 @@
 
 pub mod crypto;
 pub mod error;
+pub mod handshake;
 pub mod identity;
 
 pub use error::{CoreError, Result};
