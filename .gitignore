@@ -1,2 +1,4 @@
 target/
 dist/
+crates/barking-core/fuzz/artifacts/
+crates/barking-core/fuzz/target/

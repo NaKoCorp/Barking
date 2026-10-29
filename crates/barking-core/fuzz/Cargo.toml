@@ -12,6 +12,10 @@ libfuzzer-sys = "0.4"
 rand = "0.10.3"
 tempfile = "3.20.0"
 
+[lib]
+name = "barking_core_fuzz"
+path = "src/lib.rs"
+
 [dependencies.barking-core]
 path = ".."
 
@@ -32,6 +36,21 @@ bench = false
 [[bin]]
 name = "receive"
 path = "fuzz_targets/receive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_frame"
+path = "fuzz_targets/receive_frame.rs"
+test = false
+doc = false
+bench = false
+
+# Pas une cible de fuzzing : écrit le corpus initial.
+[[bin]]
+name = "seed"
+path = "src/seed.rs"
 test = false
 doc = false
 bench = false
