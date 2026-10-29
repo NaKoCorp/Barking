@@ -628,8 +628,9 @@ impl Core {
         };
         let bundle = seal_bundle(&offer.secret, &root_pub, root, &device.id(), &plain, rng)?;
         // Refusé avant la transaction : T refuserait ce paquet à la lecture,
-        // et l'offre serait perdue pour rien.
-        if bundle.0.len() > bundle_max() {
+        // et l'offre serait perdue pour rien. Comparé comme le lecteur
+        // (`LinkBundle::from_bytes`) : sur le fichier encodé, préfixe compris.
+        if bundle.to_bytes().len() > bundle_max() {
             return Err(CoreError::Link("paquet de liaison trop volumineux"));
         }
         // L'archive ne porte que les messages des contacts copiés : T refuse
@@ -1405,5 +1406,30 @@ mod tests {
         );
         assert_eq!(a.devices.certs.len(), 1);
         a.link_device(&req, false, NOW, &mut rng).unwrap();
+    }
+
+    #[test]
+    fn bundle_limit_applies_to_encoded_file() {
+        // Deux liaisons identiques (même graine) : même taille de fichier.
+        let run = |max: Option<usize>| {
+            let d = tempfile::tempdir().unwrap();
+            let mut rng = StdRng::seed_from_u64(15);
+            let mut a = admin(&d, "a", 1, &mut rng);
+            let offer = a.link_offer(NOW, &mut rng).unwrap();
+            let (_t, req) =
+                Core::begin_link(&d.path().join("t"), &[8; 32], &offer, "t", NOW, &mut rng)
+                    .unwrap();
+            BUNDLE_MAX_OVERRIDE.with(|c| c.set(max));
+            let r = a.link_device(&req, false, NOW, &mut rng);
+            BUNDLE_MAX_OVERRIDE.with(|c| c.set(None));
+            r.map(|out| out.bundle.to_bytes().len())
+        };
+        let len = run(None).unwrap();
+        // Un octet de moins que le fichier (préfixe de longueur compris) : refusé.
+        assert_eq!(
+            run(Some(len - 1)).err(),
+            Some(CoreError::Link("paquet de liaison trop volumineux"))
+        );
+        assert_eq!(run(Some(len)), Ok(len));
     }
 }
