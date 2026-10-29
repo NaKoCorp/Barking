@@ -619,6 +619,94 @@ fn sent_on_a_appears_on_t() {
 }
 
 #[test]
+fn sent_on_t_reaches_bob_and_a() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(23);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let mut bob = create(d.path(), "bob", 3, &mut rng);
+    let alice_fp = bob
+        .core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, &mut rng)
+        .unwrap();
+    let bob_fp = a
+        .core
+        .add_contact(
+            &bob.core.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+
+    // T écrit à Bob : un paquet pour Bob, une copie `SyncSent` pour A.
+    let pkts = t
+        .core
+        .send_text(&bob_fp, "de la tablette", NOW, &mut rng)
+        .unwrap();
+    assert_eq!(pkts.len(), 2);
+    let sent = t.core.messages_with(&bob_fp).unwrap();
+    assert_eq!(sent.len(), 1);
+    let (mut at_bob, mut at_a) = (0, 0);
+    for p in &pkts {
+        match bob.core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
+            ReceiveOutcome::Message { from, text, .. } => {
+                assert_eq!((from, text.as_str()), (alice_fp, "de la tablette"));
+                at_bob += 1;
+            }
+            ReceiveOutcome::NotForUs => {}
+            o => panic!("inattendu chez Bob : {o:?}"),
+        }
+        match a.core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
+            ReceiveOutcome::Synced { kind } => {
+                assert_eq!(kind, SyncKind::Sent);
+                at_a += 1;
+            }
+            ReceiveOutcome::NotForUs => {}
+            o => panic!("inattendu chez A : {o:?}"),
+        }
+    }
+    assert_eq!((at_bob, at_a), (1, 1));
+    let on_a = a.core.messages_with(&bob_fp).unwrap();
+    assert_eq!(on_a.len(), 1);
+    assert_eq!(
+        (on_a[0].direction, on_a[0].body.as_str(), on_a[0].message_id),
+        (Direction::Out, "de la tablette", sent[0].message_id)
+    );
+
+    // La réponse de Bob arrive sur T (et sur A).
+    let reply = bob
+        .core
+        .send_text(&alice_fp, "reçu", NOW, &mut rng)
+        .unwrap();
+    assert_eq!(reply.len(), 2);
+    for dev in [&mut t, &mut a] {
+        let opened = reply
+            .iter()
+            .filter(|p| {
+                matches!(
+                    dev.core.receive(&p.encode(), T, NOW, &mut rng).unwrap(),
+                    ReceiveOutcome::Message { ref text, .. } if text == "reçu"
+                )
+            })
+            .count();
+        assert_eq!(opened, 1);
+    }
+
+    // Les accusés vident toutes les files ; le message de T est livré.
+    deliver_all(&mut [&mut a, &mut t, &mut bob], &mut rng);
+    for dev in [&mut a, &mut t, &mut bob] {
+        assert_eq!(unacked(dev), 0);
+    }
+    assert_eq!(
+        t.core.messages_with(&bob_fp).unwrap()[0].status,
+        MessageStatus::Delivered
+    );
+    // Sur A, la copie reste « envoyée » : seul T reçoit l'accusé de Bob.
+    assert_eq!(on_a[0].status, MessageStatus::Sent);
+}
+
+#[test]
 fn contact_ops_sync() {
     let d = dir();
     let mut rng = StdRng::seed_from_u64(21);

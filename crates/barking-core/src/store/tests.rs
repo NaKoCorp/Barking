@@ -694,6 +694,69 @@ fn migration_v1_keeps_history_and_acks() {
 }
 
 #[test]
+fn migration_from_pre_1a_database() {
+    // Base v1 telle qu'écrite avant le lot 1A : pas de colonne `class` au
+    // journal, pas de `schema_version`.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("v1-pre-1a.sqlite");
+    let fp = Fingerprint([4; 32]);
+    let pre_1a = schema::SCHEMA_V1_LEGACY.replace(
+        ",\n    -- 0 : courant, 1 : sécurité (voir `EventClass`).\n    \
+         class INTEGER NOT NULL DEFAULT 0",
+        "",
+    );
+    assert!(!pre_1a.contains("class INTEGER"));
+    {
+        let raw = raw_conn(&path);
+        raw.execute_batch(&pre_1a).unwrap();
+        raw.execute(
+            "INSERT INTO messages(contact_fp, direction, body, status, at, packet_id) \
+             VALUES (?1, 1, 'ancien', 3, 10, ?2)",
+            params![fp.0.as_slice(), [1u8; 16].as_slice()],
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO transparency(at, packet_id, event) VALUES (7, NULL, x'02')",
+            [],
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(2));
+    let m = store.messages_with(fp).unwrap();
+    assert_eq!(m.len(), 1);
+    assert_eq!(
+        (m[0].body.as_str(), m[0].direction, m[0].status, m[0].at),
+        ("ancien", Direction::In, MessageStatus::Delivered, 10)
+    );
+    assert_eq!(
+        m[0].message_id,
+        MessageId::legacy_from_packet(PacketId([1; 16]))
+    );
+    // Ancien journal conservé, classé courant ; les nouvelles tables servent.
+    assert_eq!(store.events(10).unwrap(), vec![(7, vec![2])]);
+    assert_eq!(count_class(&store, EventClass::Routine), 1);
+    store
+        .append_event(8, None, EventClass::Security, b"s")
+        .unwrap();
+    assert_eq!(count_class(&store, EventClass::Security), 1);
+    store
+        .record_inbound(PacketId([9; 16]), m[0].message_id)
+        .unwrap();
+    assert!(
+        store
+            .message_by_packet(PacketId([1; 16]))
+            .unwrap()
+            .is_some()
+    );
+    // Réouverture : rien n'est rejoué.
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.messages_with(fp).unwrap().len(), 1);
+    assert_eq!(store.events(10).unwrap().len(), 2);
+}
+
+#[test]
 fn inbound_packets_map_to_their_message() {
     let (_d, _p, store) = open_tmp();
     let fp = Fingerprint([4; 32]);
