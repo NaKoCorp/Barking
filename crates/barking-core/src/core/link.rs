@@ -12,10 +12,15 @@
 //!    la liste `version + 1` et rend le paquet de liaison, chiffré par
 //!    XChaCha20-Poly1305 avec une clé dérivée du secret (`LINK_BUNDLE`). Les
 //!    données associées lient le paquet à la racine et à l'appareil T.
-//!    L'offre est consommée (effacée) dans la même transaction.
+//!    L'offre est consommée (effacée) dans la même transaction, à condition
+//!    d'y être encore et que la liste stockée n'ait pas changé. Une offre
+//!    expirée est effacée dès qu'elle est trouvée (ici et à l'ouverture).
 //! 4. **Fin** (T) : [`Core::finish_link`] déchiffre, vérifie la liste (racine
 //!    attendue, T présent), la carte, les paquets de clés et chaque contact,
 //!    puis enregistre tout et efface le secret dans une seule transaction.
+//!    T refuse de terminer plus d'un jour après l'expiration de l'offre
+//!    ([`PENDING_LINK_GRACE_SECS`]) : la liaison en attente a une durée de vie
+//!    bornée, au-delà il faut recommencer.
 //!
 //! Tout refus rend `CoreError::Link(raison)` (ou l'erreur de vérification
 //! sous-jacente) sans modifier aucun état. Le secret n'est jamais affiché
@@ -44,7 +49,7 @@ use super::{
 };
 use crate::contact::ContactCard;
 use crate::crypto::aead::{xopen, xseal};
-use crate::crypto::kdf::hmac_sha256;
+use crate::crypto::kdf::{hmac_sha256, hmac_sha256_verify};
 use crate::crypto::labels;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
 use crate::identity::device::sig_bytes;
@@ -154,28 +159,33 @@ struct MacInput<'a> {
     device_sig: [u8; 64],
 }
 
+fn mac_key(secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(blake3::derive_key(labels::LINK_MAC, secret))
+}
+
 impl LinkRequest {
-    fn compute_mac(&self, secret: &[u8; 32]) -> Result<[u8; 32]> {
-        let input = postcard::to_allocvec(&MacInput {
+    fn mac_input(&self) -> Result<Vec<u8>> {
+        postcard::to_allocvec(&MacInput {
             device: &self.device,
             bundle: &self.bundle,
             name: &self.name,
             issued_at: self.issued_at,
             device_sig: self.device_sig,
         })
-        .map_err(|_| CoreError::Malformed("demande non sérialisable"))?;
-        let key = Zeroizing::new(blake3::derive_key(labels::LINK_MAC, secret));
-        Ok(hmac_sha256(&*key, &input))
+        .map_err(|_| CoreError::Malformed("demande non sérialisable"))
     }
 
-    /// Vérifie le MAC en temps constant.
+    fn compute_mac(&self, secret: &[u8; 32]) -> Result<[u8; 32]> {
+        Ok(hmac_sha256(&*mac_key(secret), &self.mac_input()?))
+    }
+
+    /// Vérifie le MAC en temps constant (`Mac::verify_slice`).
     fn mac_ok(&self, secret: &[u8; 32]) -> Result<bool> {
-        let expected = self.compute_mac(secret)?;
-        Ok(expected
-            .iter()
-            .zip(self.mac.iter())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0)
+        Ok(hmac_sha256_verify(
+            &*mac_key(secret),
+            &self.mac_input()?,
+            &self.mac,
+        ))
     }
 
     /// Octets du fichier de demande (postcard).
@@ -254,6 +264,26 @@ struct PendingLink {
     secret: [u8; 32],
     #[zeroize(skip)]
     root: RootPublic,
+    /// Expiration de l'offre (horloge de A, recopiée de l'offre).
+    expires_at: u64,
+}
+
+/// Durée de vie d'une liaison en attente sur T au-delà de l'expiration de
+/// l'offre : un jour, pour tolérer un décalage d'horloge entre A et T et le
+/// délai de transfert des fichiers. Passé ce délai, `finish_link` refuse
+/// (« offre expirée ») et T reste en attente : il faut recréer sa base et
+/// recommencer avec une nouvelle offre.
+pub(super) const PENDING_LINK_GRACE_SECS: u64 = 86_400;
+
+/// Efface l'offre en attente si elle a expiré à `now` (son secret ne sert
+/// plus à rien). Appelé par `link_device` et à l'ouverture.
+pub(super) fn purge_expired_offer(q: &impl Queries, now: u64) -> Result<()> {
+    if q.get_meta::<StoredOffer>(META_LINK_OFFER)?
+        .is_some_and(|o| now > o.expires_at)
+    {
+        q.delete_meta(META_LINK_OFFER)?;
+    }
+    Ok(())
 }
 
 /// Données associées du paquet de liaison : racine et appareil T.
@@ -356,6 +386,7 @@ impl Core {
         let pending = PendingLink {
             secret: *offer.secret,
             root: offer.root,
+            expires_at: offer.expires_at,
         };
         let mut store = Store::open(path, db_key)?;
         ensure_empty(&store)?;
@@ -380,8 +411,15 @@ impl Core {
 
     /// Étape 3 (A) : accepte une demande de liaison. Vérifie l'offre en
     /// attente, le MAC, la preuve de possession ; signe la liste `version + 1`
-    /// et rend le paquet de liaison chiffré. L'offre est consommée.
-    /// `with_history` est encore ignoré (l'archive viendra plus tard).
+    /// et rend le paquet de liaison chiffré. `with_history` est encore ignoré
+    /// (l'archive viendra plus tard).
+    ///
+    /// L'offre est consommée dans la transaction qui enregistre la nouvelle
+    /// liste : elle doit y être encore présente et identique, et la liste
+    /// stockée ne doit pas avoir changé depuis sa lecture (une autre ouverture
+    /// de la même base a pu lier un appareil entre-temps) ; sinon « offre
+    /// absente ou déjà utilisée », sans rien écrire. Seule exception à « un
+    /// refus ne modifie rien » : une offre trouvée expirée est effacée.
     pub fn link_device(
         &mut self,
         req: &LinkRequest,
@@ -398,21 +436,30 @@ impl Core {
             .get_meta::<StoredOffer>(META_LINK_OFFER)?
             .ok_or(CoreError::Link("offre absente ou déjà utilisée"))?;
         if now > offer.expires_at {
+            purge_expired_offer(&self.store, now)?;
             return Err(CoreError::Link("offre expirée"));
         }
         if !req.mac_ok(&offer.secret)? {
             return Err(CoreError::Link("MAC invalide"));
         }
         let device = req.device;
+        // Aucune clé (identifiant, signature, X25519) d'un de mes appareils,
+        // moi compris : un appareil déjà lié n'est pas relié une seconde fois.
+        if self
+            .devices
+            .certs
+            .iter()
+            .any(|c| overlaps(&c.device, &device))
+            || overlaps(&self.device.public(), &device)
+        {
+            return Err(CoreError::Malformed("appareil déjà lié"));
+        }
         req.bundle.verify()?;
         if req.bundle.device != device {
             return Err(CoreError::Malformed("paquet de clés d'un autre appareil"));
         }
         if req.bundle.opk.is_some() {
             return Err(CoreError::Malformed("clé à usage unique interdite"));
-        }
-        if device == self.device.public() {
-            return Err(CoreError::Malformed("appareil déjà lié"));
         }
         if claimed_by_other(&self.store, None, &[device])? {
             return Err(CoreError::Malformed("appareil déjà associé à un contact"));
@@ -429,13 +476,7 @@ impl Core {
             req.issued_at,
             req.device_sig,
         )?;
-        let mut certs: Vec<DeviceCertificate> = self
-            .devices
-            .certs
-            .iter()
-            .filter(|c| c.device != device)
-            .cloned()
-            .collect();
+        let mut certs = self.devices.certs.clone();
         certs.push(cert);
         if certs.len() > MAX_DEVICES {
             return Err(CoreError::TooLarge);
@@ -484,20 +525,30 @@ impl Core {
             contacts,
         };
         let bundle = seal_bundle(&offer.secret, &root_pub, &device.id(), &plain, rng)?;
-        drop(offer);
 
         let event = TransparencyEvent::DeviceLinked {
             device: device.id(),
             name: req.name.clone(),
         };
+        let read_version = self.devices.version;
         self.store.transaction(|tx| {
+            const USED: CoreError = CoreError::Link("offre absente ou déjà utilisée");
+            let same_offer = tx
+                .get_meta::<StoredOffer>(META_LINK_OFFER)?
+                .is_some_and(|o| o.secret == offer.secret && o.expires_at == offer.expires_at);
+            let same_list = tx
+                .get_meta::<DeviceList>(META_DEVICE_LIST)?
+                .is_some_and(|l| l.version == read_version);
+            // Offre consommée : le secret disparaît de la base.
+            if !same_offer || !same_list || !tx.delete_meta(META_LINK_OFFER)? {
+                return Err(USED);
+            }
             tx.put_meta(META_DEVICE_LIST, &devices)?;
             tx.put_meta(META_LINKED_BUNDLES, &linked)?;
             tx.put_meta(META_OWN_CARD, &card)?;
-            // Offre consommée : le secret disparaît de la base.
-            tx.delete_meta(META_LINK_OFFER)?;
             log(tx, now, None, &event)
         })?;
+        drop(offer);
         self.devices = devices;
         self.linked_bundles = linked;
         Ok(LinkOutcome {
@@ -525,6 +576,9 @@ impl Core {
             .store
             .get_meta::<PendingLink>(META_PENDING_LINK)?
             .ok_or(CoreError::Link("aucune liaison en attente"))?;
+        if now > pending.expires_at.saturating_add(PENDING_LINK_GRACE_SECS) {
+            return Err(CoreError::Link("offre expirée"));
+        }
         let me = self.device.public();
         let key = bundle_key(&pending.secret);
         let pt = Zeroizing::new(
@@ -866,6 +920,194 @@ mod tests {
                 .get_meta::<PendingLink>(META_PENDING_LINK)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// Demande construite à la main pour `device` (MAC correct, preuve de
+    /// possession signée par `signer`).
+    fn forged_request(
+        offer: &LinkOffer,
+        device: DevicePublic,
+        signer: &DeviceKeys,
+        rng: &mut StdRng,
+    ) -> LinkRequest {
+        let pre = PrekeySecrets::generate(rng, 0);
+        let mut bundle = pre.bundle(signer, false);
+        bundle.device = device;
+        bundle.sig = signer.sign(labels::PREKEYS, &bundle.signed_bytes());
+        let mut req = LinkRequest {
+            device,
+            bundle,
+            name: "t".into(),
+            issued_at: NOW,
+            device_sig: signer.possession_proof(&offer.root, "t", NOW).unwrap(),
+            mac: [0; 32],
+        };
+        req.mac = req.compute_mac(&offer.secret).unwrap();
+        req
+    }
+
+    #[test]
+    fn expired_offer_is_deleted() {
+        let d = tempfile::tempdir().unwrap();
+        let mut rng = StdRng::seed_from_u64(6);
+        let path = d.path().join("a");
+        let mut a = Core::create(&path, &[1; 32], "a", NOW, &mut rng).unwrap().0;
+        let offer = a.link_offer(NOW, &mut rng).unwrap();
+        let (_t, req) =
+            Core::begin_link(&d.path().join("t"), &[9; 32], &offer, "t", NOW, &mut rng).unwrap();
+        assert_eq!(
+            a.link_device(&req, false, NOW + LINK_OFFER_TTL_SECS + 1, &mut rng)
+                .err(),
+            Some(CoreError::Link("offre expirée"))
+        );
+        // Le secret a disparu : même une horloge revenue en arrière n'y peut rien.
+        assert!(
+            a.store
+                .get_meta::<StoredOffer>(META_LINK_OFFER)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            a.link_device(&req, false, NOW, &mut rng).err(),
+            Some(CoreError::Link("offre absente ou déjà utilisée"))
+        );
+        // À l'ouverture aussi.
+        a.link_offer(NOW, &mut rng).unwrap();
+        drop(a);
+        let a = Core::open(&path, &[1; 32], NOW + 10).unwrap();
+        assert!(
+            a.store
+                .get_meta::<StoredOffer>(META_LINK_OFFER)
+                .unwrap()
+                .is_some()
+        );
+        drop(a);
+        let a = Core::open(&path, &[1; 32], NOW + LINK_OFFER_TTL_SECS + 1).unwrap();
+        assert!(
+            a.store
+                .get_meta::<StoredOffer>(META_LINK_OFFER)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pending_link_lifetime_bounded() {
+        let d = tempfile::tempdir().unwrap();
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut a = admin(&d, "a", 1, &mut rng);
+        let offer = a.link_offer(NOW, &mut rng).unwrap();
+        let (mut t, req) =
+            Core::begin_link(&d.path().join("t"), &[9; 32], &offer, "t", NOW, &mut rng).unwrap();
+        let stored = t
+            .store
+            .get_meta::<PendingLink>(META_PENDING_LINK)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.expires_at, offer.expires_at);
+        let out = a.link_device(&req, false, NOW, &mut rng).unwrap();
+        let late = offer.expires_at + PENDING_LINK_GRACE_SECS + 1;
+        assert_eq!(
+            t.finish_link(&out.bundle, None, late),
+            Err(CoreError::Link("offre expirée"))
+        );
+        assert_still_pending(&mut t, &mut rng);
+        // Dans le délai de grâce : accepté.
+        t.finish_link(&out.bundle, None, late - 1).unwrap();
+    }
+
+    #[test]
+    fn link_device_refuses_keys_of_my_devices() {
+        let d = tempfile::tempdir().unwrap();
+        let mut rng = StdRng::seed_from_u64(8);
+        let mut a = admin(&d, "a", 1, &mut rng);
+        let offer = a.link_offer(NOW, &mut rng).unwrap();
+        let (t, req) =
+            Core::begin_link(&d.path().join("t"), &[9; 32], &offer, "t", NOW, &mut rng).unwrap();
+        a.link_device(&req, false, NOW, &mut rng).unwrap();
+        let offer = a.link_offer(NOW, &mut rng).unwrap();
+        let fresh = DeviceKeys::generate(&mut rng);
+        let t_dev = t.device.public();
+        let a_dev = a.device.public();
+        let cases = [
+            // T lui-même (nouvelle demande, nouvelle offre).
+            forged_request(&offer, t_dev, &t.device, &mut rng),
+            // Ma clé X25519, avec une autre clé de signature.
+            forged_request(
+                &offer,
+                DevicePublic {
+                    sig: fresh.public().sig,
+                    dh: t_dev.dh,
+                },
+                &fresh,
+                &mut rng,
+            ),
+            forged_request(
+                &offer,
+                DevicePublic {
+                    sig: fresh.public().sig,
+                    dh: a_dev.dh,
+                },
+                &fresh,
+                &mut rng,
+            ),
+            // Ma clé de signature, avec une autre clé X25519.
+            forged_request(
+                &offer,
+                DevicePublic {
+                    sig: t_dev.sig,
+                    dh: fresh.public().dh,
+                },
+                &t.device,
+                &mut rng,
+            ),
+        ];
+        let before = a.devices.clone();
+        for (i, req) in cases.iter().enumerate() {
+            assert_eq!(
+                a.link_device(req, false, NOW, &mut rng).err(),
+                Some(CoreError::Malformed("appareil déjà lié")),
+                "cas {i}"
+            );
+        }
+        assert_eq!(a.devices, before);
+    }
+
+    #[test]
+    fn stale_device_list_does_not_consume_offer() {
+        // Deux ouvertures de la même base : la seconde lie T1, la première
+        // (liste d'appareils périmée en mémoire) ne doit pas écraser ce lien.
+        let d = tempfile::tempdir().unwrap();
+        let mut rng = StdRng::seed_from_u64(9);
+        let path = d.path().join("a");
+        let mut a1 = Core::create(&path, &[1; 32], "a", NOW, &mut rng).unwrap().0;
+        let mut a2 = Core::open(&path, &[1; 32], NOW).unwrap();
+        let o1 = a2.link_offer(NOW, &mut rng).unwrap();
+        let (_t1, r1) =
+            Core::begin_link(&d.path().join("t1"), &[8; 32], &o1, "t1", NOW, &mut rng).unwrap();
+        a2.link_device(&r1, false, NOW, &mut rng).unwrap();
+        let o2 = a1.link_offer(NOW, &mut rng).unwrap();
+        let (_t2, r2) =
+            Core::begin_link(&d.path().join("t2"), &[7; 32], &o2, "t2", NOW, &mut rng).unwrap();
+        let before = a1.devices.clone();
+        assert_eq!(
+            a1.link_device(&r2, false, NOW, &mut rng).err(),
+            Some(CoreError::Link("offre absente ou déjà utilisée"))
+        );
+        assert_eq!(a1.devices, before);
+        // Rien n'a été écrit : la liste stockée est celle de a2, l'offre reste.
+        let stored = a1
+            .store
+            .get_meta::<DeviceList>(META_DEVICE_LIST)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, a2.devices);
+        assert!(
+            a1.store
+                .get_meta::<StoredOffer>(META_LINK_OFFER)
+                .unwrap()
+                .is_some()
         );
     }
 }

@@ -21,6 +21,14 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
+/// Vérifie `tag = HMAC-SHA256(key, data)` en temps constant (`verify_slice`).
+pub fn hmac_sha256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> bool {
+    let mut mac =
+        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepte toute taille de clé");
+    mac.update(data);
+    mac.verify_slice(tag).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

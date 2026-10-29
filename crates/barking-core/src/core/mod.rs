@@ -290,7 +290,10 @@ impl Core {
         let linked_bundles = store
             .get_meta::<Vec<PrekeyBundle>>(META_LINKED_BUNDLES)?
             .unwrap_or_default();
-        store.transaction(|tx| sweep_skipped(tx, now))?;
+        store.transaction(|tx| {
+            link::purge_expired_offer(tx, now)?;
+            sweep_skipped(tx, now)
+        })?;
         Ok(Core::assemble(
             store,
             root,

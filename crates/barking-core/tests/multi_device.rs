@@ -313,11 +313,6 @@ fn link_rejects_bad_mac_expired_wrong_root() {
             "falsification {tamper}"
         );
     }
-    // Offre expirée (11 minutes plus tard).
-    assert_eq!(
-        link_err(a.core.link_device(&req, false, NOW + 11 * 60, &mut rng)),
-        "offre expirée"
-    );
     // Aucun état modifié : même carte, et l'offre est toujours valable.
     assert_eq!(a.core.contact_card("A").unwrap(), card);
 
@@ -353,6 +348,20 @@ fn link_rejects_bad_mac_expired_wrong_root() {
     assert!(events(&t.core).is_empty());
     // Le bon paquet passe ensuite.
     t.core.finish_link(&good.bundle, None, NOW).unwrap();
+
+    // Offre expirée (11 minutes plus tard) : refusée, puis effacée.
+    let card = a.core.contact_card("A").unwrap();
+    let offer = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (_t3, req) = begin(d.path(), "t3", 13, &offer, &mut rng);
+    assert_eq!(
+        link_err(a.core.link_device(&req, false, NOW + 11 * 60, &mut rng)),
+        "offre expirée"
+    );
+    assert_eq!(
+        link_err(a.core.link_device(&req, false, NOW, &mut rng)),
+        "offre absente ou déjà utilisée"
+    );
+    assert_eq!(a.core.contact_card("A").unwrap(), card);
 }
 
 #[test]
