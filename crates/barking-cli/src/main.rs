@@ -12,7 +12,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use barking_core::contact::ContactCard;
 use barking_core::identity::Fingerprint;
 use barking_core::packet::Packet;
-use barking_core::{Core, CoreError, ReceiveOutcome};
+use barking_core::store::{Direction, MessageStatus};
+use barking_core::{
+    Core, CoreError, HistoryArchive, LinkBundle, LinkOffer, LinkRequest, MAX_ARCHIVE_BYTES,
+    MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES, ReceiveOutcome,
+};
 use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
@@ -94,6 +98,53 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_LOG_LIMIT)]
         limit: usize,
     },
+    /// Affiche les messages échangés avec un contact : une ligne par message.
+    Messages { contact: String },
+    /// Change l'alias d'un contact (un alias vide le retire).
+    Alias { contact: String, alias: String },
+    /// Lie un nouvel appareil à cette identité.
+    #[command(subcommand)]
+    Link(LinkCommand),
+}
+
+#[derive(Subcommand)]
+enum LinkCommand {
+    /// Sur l'appareil administrateur : écrit une offre de liaison (valable 10 minutes).
+    Offer {
+        #[arg(long, value_name = "FICHIER")]
+        out: PathBuf,
+    },
+    /// Sur le nouvel appareil : crée le dossier de données et écrit la demande de liaison.
+    Request {
+        #[arg(long, value_name = "FICHIER")]
+        offer: PathBuf,
+        #[arg(long, value_name = "APPAREIL")]
+        name: String,
+        #[arg(long, value_name = "FICHIER")]
+        out: PathBuf,
+    },
+    /// Sur l'appareil administrateur : accepte la demande et écrit le paquet de liaison.
+    Accept {
+        #[arg(long, value_name = "FICHIER")]
+        request: PathBuf,
+        #[arg(long, value_name = "FICHIER")]
+        out: PathBuf,
+        /// Écrit aussi l'historique chiffré dans ce fichier.
+        #[arg(long, value_name = "FICHIER")]
+        history: Option<PathBuf>,
+        /// Dossier où écrire les paquets à envoyer (comme `send --out`) ;
+        /// sans lui, ils restent en attente (`barking outbox`).
+        #[arg(long, value_name = "DIR")]
+        packets: Option<PathBuf>,
+    },
+    /// Sur le nouvel appareil : termine la liaison avec le paquet reçu.
+    Finish {
+        #[arg(long, value_name = "FICHIER")]
+        bundle: PathBuf,
+        /// Historique chiffré remis avec le paquet de liaison.
+        #[arg(long, value_name = "FICHIER")]
+        history: Option<PathBuf>,
+    },
 }
 
 /// Erreur affichée sur la sortie d'erreur ; le programme sort avec le code 1.
@@ -107,6 +158,10 @@ impl From<CoreError> for CliError {
             CoreError::InvalidPhrase => "Phrase de récupération invalide".to_owned(),
             CoreError::NotAdmin => "Cet appareil ne détient pas la clé racine".to_owned(),
             CoreError::TooLarge => "Texte trop long".to_owned(),
+            CoreError::LinkPending => {
+                "Cet appareil attend la fin de sa liaison : lance `barking link finish`".to_owned()
+            }
+            CoreError::Link(reason) => format!("Liaison refusée : {reason}"),
             other => format!("Erreur : {other}"),
         })
     }
@@ -332,8 +387,191 @@ fn run(cli: Cli) -> CliResult<()> {
                 println!("[{}] {}", format_time(at), event.describe());
             }
         }
+        Command::Messages { contact } => {
+            let core = open_core(&home)?;
+            let fp = resolve(&core, &contact)?;
+            for m in core.messages_with(&fp)? {
+                println!("{}", render_row(m.at, m.direction, m.status, &m.body));
+            }
+        }
+        Command::Alias { contact, alias } => {
+            let mut core = open_core(&home)?;
+            let fp = resolve(&core, &contact)?;
+            core.set_alias(&fp, &alias, now(), &mut rand::rng())
+                .map_err(|e| match e {
+                    CoreError::TooLarge => CliError("Alias trop long".to_owned()),
+                    other => other.into(),
+                })?;
+            println!("Alias de {fp} : {}", printable(&alias));
+        }
+        Command::Link(cmd) => link(&home, cmd)?,
     }
     Ok(())
+}
+
+fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
+    match cmd {
+        LinkCommand::Offer { out } => {
+            let mut core = open_core(home)?;
+            let offer = core.link_offer(now(), &mut rand::rng())?;
+            // Le fichier contient le secret de liaison : jamais affiché.
+            write_private(&out, &offer.to_bytes())?;
+            println!("Offre de liaison écrite : {}", out.display());
+            println!("Elle est valable 10 minutes et ne sert qu'une fois.");
+            println!("Remets ce fichier au nouvel appareil par un canal que tu maîtrises.");
+        }
+        LinkCommand::Request { offer, name, out } => {
+            // Tout est lu et vérifié avant de créer le dossier.
+            let bytes = Zeroizing::new(read_limited(&offer, MAX_LINK_FILE_BYTES)?);
+            let offer = LinkOffer::from_bytes(&bytes)?;
+            drop(bytes);
+            let pass = read_passphrase(true)?;
+            let existed = home.exists();
+            let salt = prepare_new_home(home)?;
+            let key = passphrase::derive_key(&pass, &salt);
+            let request = match Core::begin_link(
+                &home.join(DB_FILE),
+                &key,
+                &offer,
+                &name,
+                now(),
+                &mut rand::rng(),
+            ) {
+                Ok((_core, request)) => request,
+                Err(e) => {
+                    // Rien n'a été créé : on ne laisse pas un dossier à moitié prêt.
+                    let _ = fs::remove_file(home.join(SALT_FILE));
+                    if !existed {
+                        let _ = fs::remove_dir(home);
+                    }
+                    return Err(e.into());
+                }
+            };
+            write_private(&out, &request.to_bytes())?;
+            println!("Demande de liaison écrite : {}", out.display());
+            println!("Remets-la à l'appareil administrateur (`barking link accept`).");
+        }
+        LinkCommand::Accept {
+            request,
+            out,
+            history,
+            packets,
+        } => {
+            let bytes = read_limited(&request, MAX_LINK_FILE_BYTES)?;
+            let request = LinkRequest::from_bytes(&bytes)?;
+            let mut core = open_core(home)?;
+            let outcome = core.link_device(&request, history.is_some(), now(), &mut rand::rng())?;
+            write_private(&out, &outcome.bundle.to_bytes())?;
+            if let (Some(path), Some(archive)) = (&history, &outcome.history) {
+                write_private(path, &archive.to_bytes())?;
+            }
+            println!("Appareil lié : {}", printable(&request.name));
+            println!("Paquet de liaison écrit : {}", out.display());
+            if let Some(path) = &history {
+                println!("Historique écrit : {}", path.display());
+            }
+            match packets {
+                Some(dir) => {
+                    fs::create_dir_all(&dir)?;
+                    for p in &outcome.packets {
+                        println!("{}", write_packet(&dir, p)?.display());
+                    }
+                }
+                None if !outcome.packets.is_empty() => {
+                    println!(
+                        "{} paquet(s) à envoyer à tes contacts et appareils : `barking outbox`",
+                        outcome.packets.len()
+                    );
+                }
+                None => {}
+            }
+        }
+        LinkCommand::Finish { bundle, history } => {
+            let bytes = read_limited(&bundle, MAX_LINK_BUNDLE_BYTES)?;
+            let bundle = LinkBundle::from_bytes(&bytes)?;
+            let archive = match &history {
+                Some(path) => Some(HistoryArchive::from_bytes(&read_limited(
+                    path,
+                    MAX_ARCHIVE_BYTES,
+                )?)?),
+                None => None,
+            };
+            let mut core = open_core(home)?;
+            core.finish_link(&bundle, archive.as_ref(), now())?;
+            println!("Liaison terminée.");
+            show_created(&core);
+        }
+    }
+    Ok(())
+}
+
+/// Lit un fichier d'au plus `max` octets : la taille est vérifiée avant la
+/// lecture, et la lecture elle-même est bornée.
+fn read_limited(path: &Path, max: usize) -> CliResult<Vec<u8>> {
+    let too_large = || {
+        CliError(format!(
+            "{} : fichier trop volumineux (au plus {max} octets)",
+            path.display()
+        ))
+    };
+    let meta = fs::metadata(path)
+        .map_err(|e| CliError(format!("{} : lecture impossible ({e})", path.display())))?;
+    if !meta.is_file() {
+        return fail(format!("{} : ce n'est pas un fichier", path.display()));
+    }
+    if meta.len() > max as u64 {
+        return Err(too_large());
+    }
+    let mut buf = Vec::new();
+    fs::File::open(path)?
+        .take(max as u64 + 1)
+        .read_to_end(&mut buf)?;
+    if buf.len() > max {
+        return Err(too_large());
+    }
+    Ok(buf)
+}
+
+/// Écrit un fichier lisible par son seul propriétaire (0600).
+fn write_private(path: &Path, bytes: &[u8]) -> CliResult<()> {
+    use std::io::Write;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Un fichier déjà présent garde ses droits à l'ouverture.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+/// Une ligne par message : `date  sens  statut  texte`. Le texte est
+/// assaini : un message ne peut ni ajouter de ligne ni piloter le terminal.
+fn render_row(at: u64, direction: Direction, status: MessageStatus, body: &str) -> String {
+    let arrow = match direction {
+        Direction::Out => "→",
+        Direction::In => "←",
+    };
+    let status = match (direction, status) {
+        (Direction::In, _) => "reçu",
+        (_, MessageStatus::Queued) => "en attente",
+        (_, MessageStatus::Sent) => "envoyé",
+        (_, MessageStatus::Delivered) => "livré",
+        (_, MessageStatus::Failed) => "échec",
+    };
+    format!(
+        "{}  {arrow}  {status}  {}",
+        format_time(at),
+        printable(body)
+    )
 }
 
 fn resolve(core: &Core, who: &str) -> CliResult<Fingerprint> {
@@ -532,6 +770,21 @@ mod tests {
             assert_eq!(printable(&format!("a{c}b")), "a\u{FFFD}b", "{:X}", c as u32);
         }
         assert_eq!(printable("café 🐕"), "café 🐕");
+    }
+
+    #[test]
+    fn render_row_is_one_sanitized_line() {
+        let line = render_row(
+            0,
+            Direction::Out,
+            MessageStatus::Delivered,
+            "a\n[bob] x\u{1b}[31m",
+        );
+        assert_eq!(
+            line,
+            "1970-01-01 00:00:00  →  livré  a\u{FFFD}[bob] x\u{FFFD}[31m"
+        );
+        assert!(!line.contains('\n'));
     }
 
     #[test]

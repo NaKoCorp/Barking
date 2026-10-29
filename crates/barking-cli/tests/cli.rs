@@ -367,3 +367,246 @@ fn empty_env_passphrase_refused() {
         .stderr(predicate::str::contains("vide"));
     assert!(!home.join("barking.db").exists());
 }
+
+/// Les lignes de `barking messages <contact>`.
+fn message_lines(home: &Path, contact: &str) -> Vec<String> {
+    ok(home, &["messages", contact])
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Remet tous les paquets d'un dossier à `home` (les paquets qui ne lui sont
+/// pas destinés sont simplement ignorés) et rend la sortie.
+fn deliver(home: &Path, from: &Path, out: &Path) -> String {
+    let mut all = String::new();
+    for p in packets(from) {
+        all.push_str(&ok(
+            home,
+            &["receive", path_arg(&p), "--out", path_arg(out)],
+        ));
+    }
+    all
+}
+
+#[test]
+fn multi_device_end_to_end() {
+    let ((da, alice), (db, bob)) = pair();
+    let out_a = da.path().join("out");
+    let out_b = db.path().join("out");
+    let dt = tempfile::tempdir().unwrap();
+    let tablet = dt.path().join("home");
+    let out_t = dt.path().join("out");
+
+    // 1. Alice et Bob échangent un message avant la liaison.
+    ok(
+        &alice,
+        &["send", "bob", "avant la liaison", "--out", path_arg(&out_a)],
+    );
+    deliver(&bob, &out_a, &out_b);
+    deliver(&alice, &out_b, &out_a);
+    ok(
+        &bob,
+        &["send", "alice", "réponse de bob", "--out", path_arg(&out_b)],
+    );
+    // Les paquets de Bob reçus par Alice (l'accusé précédent est déjà traité).
+    let got = deliver(&alice, &out_b, &out_a);
+    assert!(got.contains("[bob] réponse de bob"), "{got}");
+    let before = message_lines(&alice, "bob");
+    assert_eq!(before.len(), 2, "{before:?}");
+
+    // 2. Liaison de la tablette, avec l'historique.
+    let files = dt.path().join("files");
+    fs::create_dir_all(&files).unwrap();
+    let offer = files.join("offre.bin");
+    let request = files.join("demande.bin");
+    let bundle = files.join("liaison.bin");
+    let history = files.join("historique.bin");
+    let shown = ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
+    let secret = fs::read(&offer).unwrap();
+    assert!(!shown.is_empty());
+    assert!(
+        !shown
+            .as_bytes()
+            .windows(8)
+            .any(|w| secret.windows(8).any(|s| s == w)),
+        "l'offre ne doit pas être affichée"
+    );
+    ok(
+        &tablet,
+        &[
+            "link",
+            "request",
+            "--offer",
+            path_arg(&offer),
+            "--name",
+            "tablette",
+            "--out",
+            path_arg(&request),
+        ],
+    );
+    let link_out = da.path().join("link-out");
+    let accepted = ok(
+        &alice,
+        &[
+            "link",
+            "accept",
+            "--request",
+            path_arg(&request),
+            "--out",
+            path_arg(&bundle),
+            "--history",
+            path_arg(&history),
+            "--packets",
+            path_arg(&link_out),
+        ],
+    );
+    assert!(accepted.contains("Appareil lié"), "{accepted}");
+    // La tablette refuse d'agir avant la fin de la liaison.
+    barking(&tablet)
+        .args(["messages", "bob"])
+        .assert()
+        .failure();
+    ok(
+        &tablet,
+        &[
+            "link",
+            "finish",
+            "--bundle",
+            path_arg(&bundle),
+            "--history",
+            path_arg(&history),
+        ],
+    );
+
+    // 3. Bob reçoit la nouvelle carte d'Alice, puis lui écrit : la tablette reçoit.
+    let got = deliver(&bob, &link_out, &out_b);
+    assert!(got.contains("liste d'appareils"), "{got}");
+    let to_alice = db.path().join("to-alice");
+    ok(
+        &bob,
+        &[
+            "send",
+            "alice",
+            "bonjour aux deux",
+            "--out",
+            path_arg(&to_alice),
+        ],
+    );
+    assert_eq!(packets(&to_alice).len(), 2);
+    let got_t = deliver(&tablet, &to_alice, &out_t);
+    assert!(got_t.contains("[bob] bonjour aux deux"), "{got_t}");
+    let got_a = deliver(&alice, &to_alice, &out_a);
+    assert!(got_a.contains("[bob] bonjour aux deux"), "{got_a}");
+
+    // 4. Alice écrit depuis le téléphone : la tablette voit le message.
+    let from_a = da.path().join("from-a");
+    ok(
+        &alice,
+        &[
+            "send",
+            "bob",
+            "depuis le téléphone",
+            "--out",
+            path_arg(&from_a),
+        ],
+    );
+    let got_t = deliver(&tablet, &from_a, &out_t);
+    assert!(got_t.contains("synchronisé"), "{got_t}");
+    deliver(&bob, &from_a, &out_b);
+
+    // 5. Historique présent sur la tablette, une ligne par message.
+    let on_t = message_lines(&tablet, "bob");
+    let on_a = message_lines(&alice, "bob");
+    assert_eq!(on_t.len(), 4, "{on_t:?}");
+    assert_eq!(on_a.len(), 4, "{on_a:?}");
+    for text in [
+        "avant la liaison",
+        "réponse de bob",
+        "bonjour aux deux",
+        "depuis le téléphone",
+    ] {
+        assert_eq!(
+            on_t.iter().filter(|l| l.contains(text)).count(),
+            1,
+            "{text} : {on_t:?}"
+        );
+    }
+    // Le sens est affiché.
+    assert!(
+        on_t.iter()
+            .any(|l| l.contains('→') && l.contains("avant la liaison"))
+    );
+    assert!(
+        on_t.iter()
+            .any(|l| l.contains('←') && l.contains("réponse de bob"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn link_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let (d, alice) = party("tel-a");
+    let offer = d.path().join("offre.bin");
+    ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
+    let mode = fs::metadata(&offer).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn link_request_refuses_existing_home_and_oversized_files() {
+    let (d, alice) = party("tel-a");
+    let offer = d.path().join("offre.bin");
+    ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
+    // Le dossier contient déjà une identité : rien n'est modifié.
+    let before = ok(&alice, &["whoami"]);
+    barking(&alice)
+        .args([
+            "link",
+            "request",
+            "--offer",
+            path_arg(&offer),
+            "--name",
+            "x",
+            "--out",
+        ])
+        .arg(d.path().join("demande.bin"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("existe déjà"));
+    assert_eq!(ok(&alice, &["whoami"]), before);
+    // Fichier démesuré : refusé avant lecture, avant de créer le dossier.
+    let big = d.path().join("gros.bin");
+    fs::write(&big, vec![0u8; 100 * 1024]).unwrap();
+    let tablet = d.path().join("tablette");
+    barking(&tablet)
+        .args([
+            "link",
+            "request",
+            "--offer",
+            path_arg(&big),
+            "--name",
+            "x",
+            "--out",
+        ])
+        .arg(d.path().join("demande.bin"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("trop volumineux"));
+    assert!(!tablet.exists());
+}
+
+#[test]
+fn alias_command_renames_contact() {
+    let ((_da, alice), (_db, _bob)) = pair();
+    ok(&alice, &["alias", "bob", "robert"]);
+    let list = ok(&alice, &["contacts"]);
+    assert!(list.contains("robert"), "{list}");
+    assert!(!list.contains("bob "), "{list}");
+    barking(&alice)
+        .args(["alias", "inconnu", "x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Contact inconnu"));
+}
