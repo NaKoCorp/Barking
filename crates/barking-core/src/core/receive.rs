@@ -205,7 +205,17 @@ impl Core {
             };
             match opened {
                 Err(reason) => quarantine(tx, log_limiter, packet, now, reason),
-                Ok(o) => accept(tx, log_limiter, packet, o, &me, &my_fp, transport, now, rng),
+                Ok(o) => accept(
+                    tx,
+                    log_limiter,
+                    packet,
+                    o,
+                    device,
+                    &my_fp,
+                    transport,
+                    now,
+                    rng,
+                ),
             }
         })?;
         if let Some(p) = new_prekeys {
@@ -435,12 +445,13 @@ fn accept(
     limiter: &mut LogLimiter,
     packet: &Packet,
     o: Opened,
-    me: &DevicePublic,
+    device: &DeviceKeys,
     my_fp: &Fingerprint,
     transport: &str,
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
+    let me = &device.public();
     let env = match envelope::decode(&o.pt) {
         // Pas de secret d'accusé authentifié : rien à marquer comme vu.
         Err(_) => return reject_authenticated(q, limiter, packet, o, now, R_BAD_CONTENT, None),
@@ -455,7 +466,7 @@ fn accept(
     let from_me = o.row.contact_fp == *my_fp;
     let text = match (&env.body, from_me) {
         (Body::CardUpdate(card), false) => {
-            return accept_card_update(q, limiter, packet, o, &env, card, now, rng);
+            return accept_card_update(q, limiter, packet, o, &env, card, device, now, rng);
         }
         // Ma propre carte circule par `SyncDevices`, jamais par `CardUpdate`.
         (Body::CardUpdate(_), true) => {
@@ -535,6 +546,9 @@ fn accept(
 /// compris celle de l'expéditeur s'il est retiré), dans la transaction de la
 /// réception. Une carte de même racine déjà connue ou plus ancienne
 /// (dépassée) : doublon, accusé ; autre racine ou autre empreinte : refus.
+///
+/// Nouveaux appareils du contact : ma carte actuelle leur est envoyée
+/// (`sync::send_own_card`, liaisons croisées).
 #[allow(clippy::too_many_arguments)]
 fn accept_card_update(
     q: &impl Queries,
@@ -543,6 +557,7 @@ fn accept_card_update(
     o: Opened,
     env: &Envelope,
     card: &ContactCard,
+    device: &DeviceKeys,
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
@@ -584,11 +599,12 @@ fn accept_card_update(
         &TransparencyEvent::ContactCardUpdated {
             contact: fp,
             alias: current.alias.clone(),
-            added,
+            added: u32::try_from(added.len()).unwrap_or(u32::MAX),
             removed,
         },
     )?;
     emit_ack(q, packet, env.ack_secret, now, rng)?;
+    sync::send_own_card(q, device, fp, &added, now, rng)?;
     let alias = Core::alias_in(q, fp)?;
     Ok((ReceiveOutcome::CardUpdated { from: fp, alias }, new_prekeys))
 }

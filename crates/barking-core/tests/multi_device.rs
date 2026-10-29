@@ -1303,3 +1303,131 @@ fn history_empty_and_without_history() {
         Some(&TransparencyEvent::HistoryImported { count: 0 })
     );
 }
+
+/// Livre chaque paquet en file de chaque appareil à tous les autres, par
+/// tours, jusqu'à ce qu'un tour ne produise plus rien de nouveau (messages,
+/// cartes, synchronisations, premiers accusés). Les paquets refusés
+/// (expéditeur encore inconnu) restent en file et sont rejoués au tour suivant.
+fn deliver_all(devs: &mut [&mut Dev], rng: &mut StdRng) {
+    for _ in 0..12 {
+        let mut progress = false;
+        let outboxes: Vec<Vec<Vec<u8>>> = devs
+            .iter_mut()
+            .map(|d| d.core.pending_outbox(NOW).unwrap())
+            .collect();
+        for (from, out) in outboxes.iter().enumerate() {
+            for bytes in out {
+                for (to, dev) in devs.iter_mut().enumerate() {
+                    if to == from {
+                        continue;
+                    }
+                    match dev.core.receive(bytes, T, NOW, rng).unwrap() {
+                        ReceiveOutcome::Duplicate
+                        | ReceiveOutcome::NotForUs
+                        | ReceiveOutcome::Quarantined { .. } => {}
+                        _ => progress = true,
+                    }
+                }
+            }
+        }
+        if !progress {
+            return;
+        }
+    }
+    panic!("la livraison ne converge pas");
+}
+
+/// Paquets de type message encore en file (les accusés n'attendent rien).
+fn unacked(dev: &mut Dev) -> usize {
+    dev.core
+        .pending_outbox(NOW)
+        .unwrap()
+        .iter()
+        .filter(|b| Packet::decode(b).unwrap().kind == Kind::Message)
+        .count()
+}
+
+/// Nombre d'appareils (parmi `to`) qui déchiffrent `text` dans `pkts`.
+fn opened_by(pkts: &[Packet], to: &mut [&mut Dev], text: &str, rng: &mut StdRng) -> usize {
+    let mut n = 0;
+    for dev in to.iter_mut() {
+        for p in pkts {
+            if let ReceiveOutcome::Message { text: got, .. } =
+                dev.core.receive(&p.encode(), T, NOW, rng).unwrap()
+            {
+                assert_eq!(got, text);
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn crossing_links_converge_to_full_mesh() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(43);
+    let mut a = create(d.path(), "a", 1, &mut rng);
+    let mut b1 = create(d.path(), "b1", 3, &mut rng);
+    let alice_fp = b1
+        .core
+        .add_contact(
+            &a.core.contact_card("Alice").unwrap(),
+            Some("alice"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    let bob_fp = a
+        .core
+        .add_contact(
+            &b1.core.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+
+    // Bob lie B2 ; sa mise à jour de carte pour A reste en file (retardée).
+    let offer = b1.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut b2, req) = begin(d.path(), "b2", 4, &offer, &mut rng);
+    let out = b1.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    b2.core.finish_link(&out.bundle, None, NOW).unwrap();
+    // Alice lie T : son instantané porte l'ancienne carte de Bob (B1 seul),
+    // et la mise à jour d'Alice ne part que vers B1.
+    let offer = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
+    let out = a.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    assert_eq!(out.packets.len(), 1);
+    t.core.finish_link(&out.bundle, None, NOW).unwrap();
+
+    deliver_all(&mut [&mut a, &mut t, &mut b1, &mut b2], &mut rng);
+
+    // Chaque appareil d'Alice chiffre pour les deux appareils de Bob (plus
+    // une copie pour son autre appareil), et réciproquement.
+    for (i, text) in ["de A", "de T"].into_iter().enumerate() {
+        let from = if i == 0 { &mut a } else { &mut t };
+        let pkts = from.core.send_text(&bob_fp, text, NOW, &mut rng).unwrap();
+        assert_eq!(pkts.len(), 3, "{text}");
+        assert_eq!(
+            opened_by(&pkts, &mut [&mut b1, &mut b2], text, &mut rng),
+            2,
+            "{text}"
+        );
+    }
+    for (i, text) in ["de B1", "de B2"].into_iter().enumerate() {
+        let from = if i == 0 { &mut b1 } else { &mut b2 };
+        let pkts = from.core.send_text(&alice_fp, text, NOW, &mut rng).unwrap();
+        assert_eq!(pkts.len(), 3, "{text}");
+        assert_eq!(
+            opened_by(&pkts, &mut [&mut a, &mut t], text, &mut rng),
+            2,
+            "{text}"
+        );
+    }
+    // Tout est accusé : plus aucun message en file.
+    deliver_all(&mut [&mut a, &mut t, &mut b1, &mut b2], &mut rng);
+    for dev in [&mut a, &mut t, &mut b1, &mut b2] {
+        assert_eq!(unacked(dev), 0);
+    }
+}

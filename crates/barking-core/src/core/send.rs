@@ -21,6 +21,9 @@ use crate::{CoreError, Result};
 pub(super) enum Target {
     /// Chaque appareil de la carte du contact.
     Contact(Fingerprint),
+    /// Seulement ces appareils de la carte du contact (ses nouveaux
+    /// appareils, voir `sync::send_own_card`).
+    ContactDevices(Fingerprint, Vec<DeviceId>),
     /// Chacun de mes autres appareils (ma liste, sauf cet appareil). Les
     /// sessions sont rangées sous ma propre empreinte. Utilisé par les
     /// contenus de synchronisation (`Sync*`, voir `sync.rs`).
@@ -68,7 +71,7 @@ pub(super) fn seal_for(
     let SealTime { now, sent_at } = time;
     let me = device.public();
     let (fp, peers): (Fingerprint, Vec<(DevicePublic, Option<PrekeyBundle>)>) = match target {
-        Target::Contact(fp) => {
+        Target::Contact(fp) | Target::ContactDevices(fp, _) => {
             let contact = q.get_contact(*fp)?.ok_or(CoreError::UnknownContact)?;
             // Carte vérifiée à l'ajout (`add_contact`) : chaque paquet de clés
             // est lié à un appareil certifié par la racine du contact.
@@ -77,6 +80,10 @@ pub(super) fn seal_for(
                 .devices
                 .certs
                 .iter()
+                .filter(|c| match target {
+                    Target::ContactDevices(_, only) => only.contains(&c.device.id()),
+                    _ => true,
+                })
                 .map(|c| {
                     let bundle = card.bundles.iter().find(|b| b.device == c.device).cloned();
                     (c.device, bundle)

@@ -99,6 +99,54 @@ pub(super) fn send_card_update(
     Ok(out)
 }
 
+/// Met en file ma carte actuelle (`CardUpdate`) pour les seuls appareils
+/// `devices` du contact `fp` : ses nouveaux appareils, appris par une mise à
+/// jour de sa carte. Ils ont pu être liés avec une copie de ma carte plus
+/// ancienne que celle que j'ai envoyée à ses autres appareils (deux liaisons
+/// croisées) ; sans cela, ils ne connaîtraient mes nouveaux appareils qu'au
+/// prochain changement de ma liste. Une carte déjà connue est un doublon
+/// accusé chez eux.
+///
+/// Sans carte stockée (aucune liaison sur ce compte : mes contacts ont la
+/// carte que je leur ai donnée) ou carte trop grande pour un paquet, rien
+/// n'est envoyé : la réception ne doit jamais échouer pour autant.
+pub(super) fn send_own_card(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    fp: Fingerprint,
+    devices: &[DeviceId],
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<()> {
+    if devices.is_empty() {
+        return Ok(());
+    }
+    let Some(card) = q.get_meta::<ContactCard>(META_OWN_CARD)? else {
+        return Ok(());
+    };
+    let body = Body::CardUpdate(Box::new(card));
+    if !envelope::fits_in_packet(&body) {
+        return Ok(());
+    }
+    let mut id = [0u8; 16];
+    rng.fill_bytes(&mut id);
+    let message_id = MessageId(id);
+    let target = Target::ContactDevices(fp, devices.to_vec());
+    let sealed = seal_for(
+        q,
+        device,
+        &target,
+        &body,
+        message_id,
+        SealTime::at(now),
+        rng,
+    )?;
+    for (packet, peer) in sealed {
+        q.add_delivery(message_id, packet.id, peer, false)?;
+    }
+    Ok(())
+}
+
 /// Met en file l'opération `op` pour chacun de mes autres appareils, sous un
 /// identifiant de message neuf (sans ligne de message). `time.sent_at` est
 /// la date de l'opération (horloge du contact, voir [`touch`]).

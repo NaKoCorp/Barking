@@ -364,7 +364,8 @@ pub(super) enum CardUpdate {
 /// Nouvelle carte entièrement vérifiée, prête à être écrite.
 pub(super) struct VerifiedCard {
     checked: Checked,
-    added: u32,
+    /// Appareils absents de la carte connue.
+    added: Vec<DeviceId>,
 }
 
 /// Vérifie la nouvelle carte `card` d'un contact connu (`current`), reçue de
@@ -408,30 +409,23 @@ pub(super) fn verify_card_update(
         .devices
         .certs
         .iter()
-        .filter(|n| {
-            !old.devices
-                .certs
-                .iter()
-                .any(|o| o.device.id() == n.device.id())
-        })
-        .count();
-    Ok(Ok(CardUpdate::Newer(VerifiedCard {
-        checked,
-        added: u32::try_from(added).unwrap_or(u32::MAX),
-    })))
+        .map(|n| n.device.id())
+        .filter(|id| !old.devices.certs.iter().any(|o| o.device.id() == *id))
+        .collect();
+    Ok(Ok(CardUpdate::Newer(VerifiedCard { checked, added })))
 }
 
 /// Applique une mise à jour de carte vérifiée par [`verify_card_update`] :
 /// la carte est remplacée (alias et statut vérifié gardés : même racine) et
 /// les sessions des appareils retirés sont supprimées, y compris celle de
-/// l'appareil qui l'a envoyée s'il en fait partie. Renvoie le nombre
-/// d'appareils ajoutés et retirés. À appeler dans la transaction de la
+/// l'appareil qui l'a envoyée s'il en fait partie. Renvoie les appareils
+/// ajoutés et le nombre d'appareils retirés. À appeler dans la transaction de la
 /// réception, après l'écriture de la session. Aucune erreur due au contenu.
 pub(super) fn apply_card_update(
     q: &impl Queries,
     current: &ContactRow,
     verified: VerifiedCard,
-) -> Result<(u32, u32)> {
+) -> Result<(Vec<DeviceId>, u32)> {
     let c = verified.checked;
     for id in &c.revoked {
         q.delete_sessions_for_device(c.fp, *id)?;
