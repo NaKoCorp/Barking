@@ -761,15 +761,16 @@ fn offline_five_days_still_watches_missed_days() {
 }
 
 #[test]
-fn polling_window_capped_at_eight_days() {
+fn polling_window_capped_at_nine_days() {
     let (_a, mut b, _rng) = pair();
     let bob_dev = b.card("Bob").devices.certs[0].device;
     b.core.mark_polled(NOW).unwrap();
     let later = NOW + 20 * DAY;
     let watched = b.core.watched_mailboxes(later);
-    assert_eq!(watched.len(), 8);
+    // 7 jours en arrière, le jour même et le lendemain.
+    assert_eq!(watched.len(), 9);
     let last = day_of(later) + 1;
-    for d in last - 7..=last {
+    for d in last - 8..=last {
         assert!(watched.contains(&intro_mailbox(&bob_dev, d)), "jour {d}");
     }
 }

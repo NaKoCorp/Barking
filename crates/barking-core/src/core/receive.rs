@@ -200,7 +200,7 @@ impl Core {
 /// au lendemain de `now`. La boîte d'un paquet est fixée au jour de son
 /// scellement ; un paquet livré en retard (file d'envoi de 7 jours) doit
 /// rester lisible. `watched_mailboxes` (relève) couvre de la dernière relève
-/// au lendemain, 8 jours au plus.
+/// au lendemain, 9 jours au plus.
 fn accepted_days(now: u64) -> Vec<u32> {
     let first = day_of(now.saturating_sub(MAX_AGE_SECS));
     let last = day_of(now).saturating_add(1);

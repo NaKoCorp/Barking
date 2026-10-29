@@ -55,7 +55,9 @@ const META_DEVICE_LIST: &str = "device_list";
 const META_LINKED_BUNDLES: &str = "linked_bundles";
 /// Dernier jour (numéro de jour) où cet appareil a relevé ses boîtes.
 const META_LAST_POLLED: &str = "last_polled_day";
-/// Fenêtre de relève : 7 jours en arrière, plus le lendemain = 8 jours au plus.
+/// Fenêtre de relève : 7 jours en arrière, le jour même et le lendemain =
+/// 9 jours au plus. Couvre chaque jour de `accepted_days` (réception) qui peut
+/// encore contenir un paquet non expiré (durée de vie de 7 jours).
 const MAX_POLL_BACK_DAYS: u32 = 7;
 
 /// Âge maximal accepté d'un message (horodatage authentifié de l'enveloppe) :
@@ -366,7 +368,7 @@ impl Core {
     }
 
     /// Boîtes aux lettres à relever : la boîte d'introduction de cet appareil
-    /// et celles de chaque session (de la dernière relève au lendemain, 8 jours
+    /// et celles de chaque session (de la dernière relève au lendemain, 9 jours
     /// au plus ; veille, jour et lendemain sans relève enregistrée), plus la boîte de
     /// chacun de mes messages en attente d'accusé, où l'accusé arrivera.
     ///
@@ -412,7 +414,7 @@ impl Core {
     }
 
     /// Jours à relever : de la dernière relève (ou de la veille) au lendemain,
-    /// 8 jours au plus. Une lecture ratée ou une relève datée du futur
+    /// 9 jours au plus. Une lecture ratée ou une relève datée du futur
     /// (horloge reculée) ramène à la fenêtre normale.
     fn watched_days(&self, now: u64) -> Vec<u32> {
         let today = day_of(now);
@@ -422,7 +424,7 @@ impl Core {
             Ok(Some(last)) if last <= end => last.min(normal),
             _ => normal,
         };
-        let start = start.max(end.saturating_sub(MAX_POLL_BACK_DAYS));
+        let start = start.max(today.saturating_sub(MAX_POLL_BACK_DAYS));
         (start..=end).collect()
     }
 
