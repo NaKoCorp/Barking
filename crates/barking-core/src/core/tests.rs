@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::contact::ContactCard;
-use crate::envelope::{Body, Envelope, Wire};
+use crate::envelope::{Body, Envelope, SyncOp, Wire};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{
     DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic, RootIdentity,
@@ -11,6 +11,7 @@ use crate::identity::{
 use crate::mailbox::day_of;
 use crate::packet::{DEFAULT_HOPS, Kind, Tier, ack};
 use crate::store::{Direction, MessageId, SessionRow};
+use crate::transparency::SyncKind;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tempfile::TempDir;
@@ -35,10 +36,20 @@ struct Pair {
 fn pair() -> Pair {
     let (da, mut a) = party("a", 1);
     let (db, mut b) = party("b", 2);
-    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"))
-        .unwrap();
-    b.add_contact(&a.contact_card("Alice").unwrap(), Some("alice"))
-        .unwrap();
+    a.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
+    b.add_contact(
+        &a.contact_card("Alice").unwrap(),
+        Some("alice"),
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
     let mut rng = StdRng::seed_from_u64(42);
     let p = a.send_text(&b.fingerprint(), "x", NOW, &mut rng).unwrap();
     assert!(matches!(
@@ -199,10 +210,20 @@ fn stale_or_future_sent_at_quarantined() {
 fn at_most_two_sessions_per_device() {
     let (_da, mut a) = party("a", 1);
     let (_db, mut b) = party("b", 2);
-    a.add_contact(&b.contact_card("Bob").unwrap(), None)
-        .unwrap();
-    b.add_contact(&a.contact_card("Alice").unwrap(), None)
-        .unwrap();
+    a.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        None,
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
+    b.add_contact(
+        &a.contact_card("Alice").unwrap(),
+        None,
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
     let a_dev = a.device.public().id();
     let b_dev = b.device.public().id();
     let mut rng = StdRng::seed_from_u64(3);
@@ -257,8 +278,13 @@ fn seen_rows_are_purged_after_retention() {
 fn session_id_uses_inner_pqxdh_ek() {
     let (_da, mut a) = party("a", 1);
     let (_db, b) = party("b", 2);
-    a.add_contact(&b.contact_card("Bob").unwrap(), None)
-        .unwrap();
+    a.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        None,
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
     let mut rng = StdRng::seed_from_u64(5);
     let p = a.send_text(&b.fingerprint(), "x", NOW, &mut rng).unwrap();
     let row = best_session(&a);
@@ -343,17 +369,23 @@ fn card_sharing_a_contacts_dh_key_rejected() {
     let alice_dev = p.a.device.public();
     let card = mixed_card(&alice_dev, None, &mut p.rng);
     assert_eq!(
-        p.b.add_contact(&card, Some("mallory")),
+        p.b.add_contact(&card, Some("mallory"), NOW, &mut p.rng),
         Err(CoreError::Malformed(
             "appareil déjà associé à un autre contact"
         ))
     );
     // Ni sous l'alias d'Alice (changement de clé simulé).
-    assert!(p.b.add_contact(&card, Some("alice")).is_err());
+    assert!(
+        p.b.add_contact(&card, Some("alice"), NOW, &mut p.rng)
+            .is_err()
+    );
     assert_eq!(p.b.contacts().unwrap().len(), 1);
     // Ma propre clé non plus.
     let mine = mixed_card(&p.b.device.public(), None, &mut p.rng);
-    assert!(p.b.add_contact(&mine, Some("moi")).is_err());
+    assert!(
+        p.b.add_contact(&mine, Some("moi"), NOW, &mut p.rng)
+            .is_err()
+    );
 }
 
 #[test]
@@ -362,10 +394,20 @@ fn ambiguous_sender_never_misattributed() {
     // (vérification d'ajout contournée), l'Initial d'Alice n'est pas attribué à Mallory.
     let (_da, mut a) = party("a", 1);
     let (_db, mut b) = party("b", 2);
-    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"))
-        .unwrap();
-    b.add_contact(&a.contact_card("Alice").unwrap(), Some("zz-alice"))
-        .unwrap();
+    a.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
+    b.add_contact(
+        &a.contact_card("Alice").unwrap(),
+        Some("zz-alice"),
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
     let mut rng = StdRng::seed_from_u64(31);
     let card = mixed_card(&a.device.public(), None, &mut rng);
     // Alias trié en premier : l'ancien code l'aurait choisi.
@@ -397,7 +439,12 @@ fn session_to_mixed_device_fails_at_its_real_owner() {
     let (_da, mut alice) = party("a", 1);
     let (_dc, mut carol) = party("c", 3);
     alice
-        .add_contact(&carol.contact_card("Carol").unwrap(), Some("carol"))
+        .add_contact(
+            &carol.contact_card("Carol").unwrap(),
+            Some("carol"),
+            NOW,
+            &mut StdRng::seed_from_u64(0),
+        )
         .unwrap();
     let mut rng = StdRng::seed_from_u64(32);
     let alice_card = alice.contact_card("Alice").unwrap();
@@ -406,7 +453,9 @@ fn session_to_mixed_device_fails_at_its_real_owner() {
         Some(&alice_card.bundles[0]),
         &mut rng,
     );
-    let mallory = carol.add_contact(&card, Some("mallory")).unwrap();
+    let mallory = carol
+        .add_contact(&card, Some("mallory"), NOW, &mut rng)
+        .unwrap();
     let p = carol
         .send_text(&mallory, "pour Mallory", NOW, &mut rng)
         .unwrap();
@@ -429,17 +478,25 @@ fn remove_contact_deletes_contact_card_and_sessions_but_keeps_history() {
     let bob = p.a.resolve("bob").unwrap();
     assert!(!p.a.store.all_sessions().unwrap().is_empty());
     assert!(!p.a.messages_with(&bob).unwrap().is_empty());
-    p.a.remove_contact(&bob).unwrap();
+    p.a.remove_contact(&bob, NOW, &mut p.rng).unwrap();
     assert!(p.a.contacts().unwrap().is_empty());
     assert_eq!(p.a.resolve("bob"), Err(CoreError::UnknownContact));
     assert!(p.a.store.get_contact(bob).unwrap().is_none());
     assert!(p.a.store.all_sessions().unwrap().is_empty());
     assert!(!p.a.messages_with(&bob).unwrap().is_empty());
     // Inconnu : erreur, rien n'est cassé.
-    assert_eq!(p.a.remove_contact(&bob), Err(CoreError::UnknownContact));
+    assert_eq!(
+        p.a.remove_contact(&bob, NOW, &mut p.rng),
+        Err(CoreError::UnknownContact)
+    );
     // On peut le rajouter, puis lui écrire (nouvelle session).
-    p.a.add_contact(&p.b.contact_card("Bob").unwrap(), Some("bob"))
-        .unwrap();
+    p.a.add_contact(
+        &p.b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW,
+        &mut p.rng,
+    )
+    .unwrap();
     let out = p.a.send_text(&bob, "retour", NOW, &mut p.rng).unwrap();
     assert!(matches!(
         p.b.receive(&out[0].encode(), "t", NOW, &mut p.rng).unwrap(),
@@ -559,10 +616,15 @@ fn open_purges_skipped_keys() {
     let mut rng = StdRng::seed_from_u64(2);
     let (mut b, _) = Core::create(&path, &key, "b", NOW, &mut rng).unwrap();
     let (_da, mut a) = party("a", 1);
-    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"))
+    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"), NOW, &mut rng)
         .unwrap();
-    b.add_contact(&a.contact_card("Alice").unwrap(), Some("alice"))
-        .unwrap();
+    b.add_contact(
+        &a.contact_card("Alice").unwrap(),
+        Some("alice"),
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
     let mut pkts = Vec::new();
     for t in ["1", "2", "3"] {
         let v = a.send_text(&b.fingerprint(), t, NOW, &mut rng).unwrap();
@@ -609,10 +671,15 @@ fn corrupt_session_row_does_not_block_open() {
     let mut rng = StdRng::seed_from_u64(2);
     let (mut b, _) = Core::create(&path, &key, "b", NOW, &mut rng).unwrap();
     let (_da, mut a) = party("a", 1);
-    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"))
+    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"), NOW, &mut rng)
         .unwrap();
-    b.add_contact(&a.contact_card("Alice").unwrap(), Some("alice"))
-        .unwrap();
+    b.add_contact(
+        &a.contact_card("Alice").unwrap(),
+        Some("alice"),
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
     let mut pkts = Vec::new();
     for t in ["1", "2", "3"] {
         let v = a.send_text(&b.fingerprint(), t, NOW, &mut rng).unwrap();
@@ -658,10 +725,20 @@ fn bob_with_security_events() -> Pair {
     let mut p = pair();
     let (_dc, c) = party("c", 3);
     let (_dd, d) = party("d", 4);
-    p.b.add_contact(&c.contact_card("Carol").unwrap(), Some("carol"))
-        .unwrap();
-    p.b.add_contact(&d.contact_card("Dave").unwrap(), Some("carol"))
-        .unwrap();
+    p.b.add_contact(
+        &c.contact_card("Carol").unwrap(),
+        Some("carol"),
+        NOW,
+        &mut p.rng,
+    )
+    .unwrap();
+    p.b.add_contact(
+        &d.contact_card("Dave").unwrap(),
+        Some("carol"),
+        NOW,
+        &mut p.rng,
+    )
+    .unwrap();
     assert_eq!(
         count_events(&p.b, |e| matches!(
             e,
@@ -789,10 +866,20 @@ fn corrupt_session_row_does_not_abort_receive() {
 fn corrupt_session_row_quarantines_resent_initial() {
     let (_da, mut a) = party("a", 1);
     let (_db, mut b) = party("b", 2);
-    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"))
-        .unwrap();
-    b.add_contact(&a.contact_card("Alice").unwrap(), Some("alice"))
-        .unwrap();
+    a.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
+    b.add_contact(
+        &a.contact_card("Alice").unwrap(),
+        Some("alice"),
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
     let mut rng = StdRng::seed_from_u64(9);
     let p1 = a.send_text(&b.fingerprint(), "1", NOW, &mut rng).unwrap();
     let p2 = a.send_text(&b.fingerprint(), "2", NOW, &mut rng).unwrap();
@@ -884,9 +971,9 @@ fn contact_claiming_own_device_refused() {
     assert!(contacts::claimed_by_other(&a.store, None, &[t_dev]).unwrap());
     assert!(contacts::claimed_by_other(&t.store, None, &[a_dev]).unwrap());
     let card = mixed_card(&t_dev, None, &mut rng);
-    assert!(a.add_contact(&card, Some("faux")).is_err());
+    assert!(a.add_contact(&card, Some("faux"), NOW, &mut rng).is_err());
     let card = mixed_card(&a_dev, None, &mut rng);
-    assert!(t.add_contact(&card, Some("faux")).is_err());
+    assert!(t.add_contact(&card, Some("faux"), NOW, &mut rng).is_err());
     assert!(a.contacts().unwrap().is_empty());
     assert!(t.contacts().unwrap().is_empty());
 }
@@ -942,10 +1029,20 @@ fn message_ids_scoped_to_sender() {
     let (_dc, mut c) = party("c", 3);
     let b_fp = p.b.fingerprint();
     let a_fp = p.a.fingerprint();
-    p.b.add_contact(&c.contact_card("Carol").unwrap(), Some("carol"))
-        .unwrap();
-    c.add_contact(&p.b.contact_card("Bob").unwrap(), Some("bob"))
-        .unwrap();
+    p.b.add_contact(
+        &c.contact_card("Carol").unwrap(),
+        Some("carol"),
+        NOW,
+        &mut p.rng,
+    )
+    .unwrap();
+    c.add_contact(
+        &p.b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW,
+        &mut p.rng,
+    )
+    .unwrap();
     // Identifiant d'un message reçu par Bob (d'Alice), et d'un message de Bob.
     let from_a = p.b.messages_with(&a_fp).unwrap();
     let in_id = from_a
@@ -977,4 +1074,225 @@ fn message_ids_scoped_to_sender() {
     }
     assert_eq!(p.b.messages_with(&a_fp).unwrap(), from_a);
     assert_eq!(p.b.messages_with(&c.fingerprint()).unwrap().len(), 3);
+}
+
+/// Raison de quarantaine d'une synchronisation venue d'ailleurs que de mes appareils.
+const NOT_MINE: &str = "synchronisation d'un appareil qui n'est pas à moi";
+
+#[test]
+fn sync_from_contact_quarantined() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let b_fp = p.b.fingerprint();
+    let card = p.b.contact_card("Bob").unwrap();
+    let bodies = [
+        Body::SyncSent {
+            to: b_fp,
+            text: "faux".into(),
+        },
+        Body::SyncContact(SyncOp::Remove(b_fp)),
+        Body::SyncContact(SyncOp::MarkVerified(b_fp)),
+        Body::SyncDevices {
+            devices: Box::new(p.a.devices.clone()),
+            card: Box::new(card),
+            own_bundles: Vec::new(),
+        },
+    ];
+    let before = p.a.messages_with(&b_fp).unwrap().len();
+    for (i, body) in bodies.iter().enumerate() {
+        let id = MessageId([i as u8 + 1; 16]);
+        let out = seal_body(&mut p.b, &send::Target::Contact(a_fp), body, id, &mut p.rng);
+        let r =
+            p.a.receive(&out[0].0.encode(), "t", NOW, &mut p.rng)
+                .unwrap();
+        assert_eq!(reason(r), NOT_MINE, "cas {i}");
+    }
+    assert_eq!(p.a.messages_with(&b_fp).unwrap().len(), before);
+    assert!(p.a.contacts().unwrap()[0].fingerprint == b_fp);
+    assert!(!p.a.contacts().unwrap()[0].verified);
+}
+
+/// A lié à T1 puis à T2 ; T1 ne connaît encore que la liste de sa liaison.
+fn linked_twice() -> (TempDir, Core, Core, Core, StdRng) {
+    let (dir, mut a, t1, mut rng) = linked();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut t2, req) = Core::begin_link(
+        &dir.path().join("t2"),
+        &[3; 32],
+        &offer,
+        "t2",
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    let out = a.link_device(&req, false, NOW, &mut rng).unwrap();
+    t2.finish_link(&out.bundle, None, NOW).unwrap();
+    (dir, a, t1, t2, rng)
+}
+
+/// `SyncDevices` scellé par A pour `to` (un de ses autres appareils).
+fn devices_packet(
+    a: &mut Core,
+    to: &Core,
+    devices: DeviceList,
+    card: ContactCard,
+    own_bundles: Vec<PrekeyBundle>,
+    id: u8,
+    rng: &mut StdRng,
+) -> Packet {
+    let body = Body::SyncDevices {
+        devices: Box::new(devices),
+        card: Box::new(card),
+        own_bundles,
+    };
+    let to_id = to.device.public().id();
+    seal_body(
+        a,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([id; 16]),
+        rng,
+    )
+    .into_iter()
+    .find(|(_, d)| *d == to_id)
+    .unwrap()
+    .0
+}
+
+/// Paquets de clés de tous les appareils de A sauf `except`.
+fn bundles_except(a: &Core, except: &Core) -> Vec<PrekeyBundle> {
+    let skip = except.device.public();
+    let mut all = vec![a.prekeys.bundle(&a.device, false)];
+    all.extend(a.linked_bundles.iter().cloned());
+    all.into_iter().filter(|b| b.device != skip).collect()
+}
+
+#[test]
+fn sync_devices_requires_newer_signed_list() {
+    let (_d, mut a, mut t1, t2, mut rng) = linked_twice();
+    let me = a.fingerprint();
+    let t1_before = t1.devices.clone();
+    let stored = |c: &Core| {
+        c.store
+            .get_meta::<DeviceList>(META_DEVICE_LIST)
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(stored(&t1), t1_before);
+    assert_eq!(t1_before.certs.len(), 2);
+    let card = a.contact_card("").unwrap();
+    let bundles = bundles_except(&a, &t1);
+    // Version égale à celle de T1, signée par ma racine : refusée.
+    let same_version = {
+        let root_id = a.root.as_ref().unwrap();
+        DeviceList::sign(root_id, t1_before.version, a.devices.certs.clone()).unwrap()
+    };
+    // Signée par une autre racine, version supérieure : refusée.
+    let (other_root, _) = RootIdentity::generate(&mut rng);
+    let foreign = DeviceList::sign(&other_root, a.devices.version + 5, a.devices.certs.clone());
+    // Version supérieure qui ne contient pas T1 : refusée.
+    let without_t1 = {
+        let root_id = a.root.as_ref().unwrap();
+        let certs = a
+            .devices
+            .certs
+            .iter()
+            .filter(|c| c.device != t1.device.public())
+            .cloned()
+            .collect();
+        DeviceList::sign(root_id, a.devices.version + 1, certs).unwrap()
+    };
+    let mut cases = vec![same_version, without_t1];
+    if let Ok(f) = foreign {
+        cases.push(f);
+    }
+    let mut forged_root = a.devices.clone();
+    forged_root.version += 10;
+    cases.push(forged_root);
+    for (i, list) in cases.into_iter().enumerate() {
+        let pkt = devices_packet(
+            &mut a,
+            &t1,
+            list,
+            card.clone(),
+            bundles.clone(),
+            10 + i as u8,
+            &mut rng,
+        );
+        let r = t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap();
+        assert_eq!(reason(r), "liste d'appareils refusée", "cas {i}");
+        assert_eq!(t1.devices, t1_before, "cas {i}");
+        assert_eq!(stored(&t1), t1_before, "cas {i}");
+    }
+
+    // La vraie liste, plus récente : appliquée, T1 peut joindre T2.
+    let current = a.devices.clone();
+    let pkt = devices_packet(
+        &mut a,
+        &t1,
+        current,
+        card.clone(),
+        bundles.clone(),
+        30,
+        &mut rng,
+    );
+    match t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap() {
+        ReceiveOutcome::Synced { kind } => assert_eq!(kind, SyncKind::Devices),
+        other => panic!("Synced attendu, obtenu {other:?}"),
+    }
+    assert_eq!(t1.devices, a.devices);
+    assert_eq!(stored(&t1), a.devices);
+    let out = seal_body(
+        &mut t1,
+        &send::Target::OwnDevices,
+        &Body::Text("x".into()),
+        MessageId([40; 16]),
+        &mut rng,
+    );
+    assert_eq!(out.len(), 2);
+    let t2_id = t2.device.public().id();
+    assert!(out.iter().any(|(_, d)| *d == t2_id));
+    assert!(!t1.store.sessions_for(me, t2_id).unwrap().is_empty());
+
+    // Une liste plus récente qui retire T2 : les sessions de T1 avec T2 disparaissent.
+    let shrunk = {
+        let root_id = a.root.as_ref().unwrap();
+        let certs = a
+            .devices
+            .certs
+            .iter()
+            .filter(|c| c.device != t2.device.public())
+            .cloned()
+            .collect();
+        DeviceList::sign(root_id, a.devices.version + 1, certs).unwrap()
+    };
+    let shrunk_card = ContactCard::sign(
+        a.root.as_ref().unwrap(),
+        "",
+        shrunk.clone(),
+        vec![a.prekeys.bundle(&a.device, false)],
+    )
+    .unwrap();
+    let a_bundle = vec![a.prekeys.bundle(&a.device, false)];
+    let pkt = devices_packet(
+        &mut a,
+        &t1,
+        shrunk.clone(),
+        shrunk_card,
+        a_bundle,
+        50,
+        &mut rng,
+    );
+    assert!(matches!(
+        t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Synced { .. }
+    ));
+    assert_eq!(t1.devices, shrunk);
+    assert!(t1.store.sessions_for(me, t2_id).unwrap().is_empty());
+    assert!(
+        !t1.store
+            .sessions_for(me, a.device.public().id())
+            .unwrap()
+            .is_empty()
+    );
 }

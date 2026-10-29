@@ -61,10 +61,10 @@ pub fn fixture() -> Fixture {
     let card_a = alice.contact_card("Alice").expect("carte d'Alice");
     let card_b = bob.contact_card("Bob").expect("carte de Bob");
     let fp_b = alice
-        .add_contact(&card_b, Some("bob"))
+        .add_contact(&card_b, Some("bob"), NOW, &mut rng)
         .expect("contact Bob");
     let fp_a = bob
-        .add_contact(&card_a, Some("alice"))
+        .add_contact(&card_a, Some("alice"), NOW, &mut rng)
         .expect("contact Alice");
 
     // Alice -> Bob (Initial), puis Bob -> Alice : la session est ouverte dans les deux sens.

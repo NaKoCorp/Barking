@@ -16,6 +16,6 @@ pub mod transparency;
 
 pub use self::core::{
     ContactSummary, Core, HistoryArchive, LinkBundle, LinkOffer, LinkOutcome, LinkRequest,
-    ReceiveOutcome,
+    ReceiveOutcome, SyncKind,
 };
 pub use error::{CoreError, Result};

@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use barking_core::contact::ContactCard;
 use barking_core::identity::Fingerprint;
 use barking_core::packet::Packet;
-use barking_core::{Core, CoreError, ReceiveOutcome};
+use barking_core::{Core, CoreError, ReceiveOutcome, SyncKind};
 use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
@@ -263,7 +263,7 @@ fn run(cli: Cli) -> CliResult<()> {
                 .map_err(|e| CliError(format!("Carte de contact invalide : {e}")))?;
             let mut core = open_core(&home)?;
             let fp = core
-                .add_contact(&card, alias.as_deref())
+                .add_contact(&card, alias.as_deref(), now(), &mut rand::rng())
                 .map_err(|e| match e {
                     CoreError::StoreLocked => CliError::from(e),
                     other => CliError(format!("Carte de contact invalide : {other}")),
@@ -273,7 +273,7 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Remove { contact } => {
             let mut core = open_core(&home)?;
             let fp = resolve(&core, &contact)?;
-            core.remove_contact(&fp)?;
+            core.remove_contact(&fp, now(), &mut rand::rng())?;
             println!("Contact supprimé : {fp} (l'historique est conservé)");
         }
         Command::Contacts => {
@@ -319,7 +319,7 @@ fn run(cli: Cli) -> CliResult<()> {
             let mut core = open_core(&home)?;
             let fp = resolve(&core, &contact)?;
             if verified {
-                core.mark_verified(&fp)?;
+                core.mark_verified(&fp, now(), &mut rand::rng())?;
             }
             println!("{}", core.safety_number(&fp)?);
             if verified {
@@ -388,6 +388,14 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
             ReceiveOutcome::Expired => println!("{label} : expiré"),
             ReceiveOutcome::Quarantined { reason } => {
                 println!("{label} : mis en quarantaine : {reason}");
+            }
+            ReceiveOutcome::Synced { kind } => {
+                let what = match kind {
+                    SyncKind::Sent => "message envoyé",
+                    SyncKind::Contact => "contact",
+                    SyncKind::Devices => "liste d'appareils",
+                };
+                println!("{label} : synchronisé depuis un de tes appareils ({what})");
             }
         }
     }

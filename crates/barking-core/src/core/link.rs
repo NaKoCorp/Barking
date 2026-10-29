@@ -45,7 +45,7 @@ use super::contacts::{MAX_ALIAS_LEN, claimed_by_other, overlaps};
 use super::history::HistoryArchive;
 use super::{
     Core, META_DEVICE, META_DEVICE_LIST, META_DEVICE_NAME, META_LINKED_BUNDLES, META_PREKEYS,
-    ensure_empty, log,
+    ensure_empty, log, sync,
 };
 use crate::contact::ContactCard;
 use crate::crypto::aead::{xopen, xseal};
@@ -531,7 +531,7 @@ impl Core {
             name: req.name.clone(),
         };
         let read_version = self.devices.version;
-        self.store.transaction(|tx| {
+        let written = self.store.transaction(|tx| {
             const USED: CoreError = CoreError::Link("offre absente ou déjà utilisée");
             let same_offer = tx
                 .get_meta::<StoredOffer>(META_LINK_OFFER)?
@@ -546,8 +546,17 @@ impl Core {
             tx.put_meta(META_DEVICE_LIST, &devices)?;
             tx.put_meta(META_LINKED_BUNDLES, &linked)?;
             tx.put_meta(META_OWN_CARD, &card)?;
+            sync::purge_removed_own_sessions(tx, &devices)?;
             log(tx, now, None, &event)
-        })?;
+        });
+        if let Err(e) = written {
+            // Liste périmée en mémoire (une autre ouverture de la base a lié
+            // un appareil) : relue, pour qu'un nouvel essai parte de la bonne.
+            if matches!(e, CoreError::Link(_)) {
+                self.reload_own_devices()?;
+            }
+            return Err(e);
+        }
         drop(offer);
         self.devices = devices;
         self.linked_bundles = linked;
@@ -631,6 +640,7 @@ impl Core {
             tx.put_meta(META_DEVICE_LIST, &plain.devices)?;
             tx.put_meta(META_LINKED_BUNDLES, &plain.own_bundles)?;
             tx.put_meta(META_OWN_CARD, &plain.card)?;
+            sync::purge_removed_own_sessions(tx, &plain.devices)?;
             // Liaison terminée : le secret disparaît de la base.
             tx.delete_meta(META_PENDING_LINK)?;
             log(tx, now, None, &event)
@@ -814,7 +824,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2);
         let mut a = admin(&d, "a", 1, &mut rng);
         let c1 = admin(&d, "c1", 3, &mut rng);
-        a.add_contact(&c1.contact_card("C1").unwrap(), Some("c1"))
+        a.add_contact(&c1.contact_card("C1").unwrap(), Some("c1"), NOW, &mut rng)
             .unwrap();
         let offer = a.link_offer(NOW, &mut rng).unwrap();
         let (mut t, req) =
@@ -835,7 +845,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(3);
         let mut a = admin(&d, "a", 1, &mut rng);
         let c = admin(&d, "c", 3, &mut rng);
-        a.add_contact(&c.contact_card("C").unwrap(), Some("c"))
+        a.add_contact(&c.contact_card("C").unwrap(), Some("c"), NOW, &mut rng)
             .unwrap();
         let offer = a.link_offer(NOW, &mut rng).unwrap();
         // Demande fabriquée avec les clés de l'appareil de C (MAC correct :
@@ -1090,12 +1100,13 @@ mod tests {
         let o2 = a1.link_offer(NOW, &mut rng).unwrap();
         let (_t2, r2) =
             Core::begin_link(&d.path().join("t2"), &[7; 32], &o2, "t2", NOW, &mut rng).unwrap();
-        let before = a1.devices.clone();
         assert_eq!(
             a1.link_device(&r2, false, NOW, &mut rng).err(),
             Some(CoreError::Link("offre absente ou déjà utilisée"))
         );
-        assert_eq!(a1.devices, before);
+        // La liste en mémoire est relue depuis la base après le refus.
+        assert_eq!(a1.devices, a2.devices);
+        assert_eq!(a1.linked_bundles, a2.linked_bundles);
         // Rien n'a été écrit : la liste stockée est celle de a2, l'offre reste.
         let stored = a1
             .store
@@ -1109,5 +1120,8 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        // Liste rafraîchie : un nouvel essai avec la même offre aboutit.
+        a1.link_device(&r2, false, NOW, &mut rng).unwrap();
+        assert_eq!(a1.devices.certs.len(), 3);
     }
 }

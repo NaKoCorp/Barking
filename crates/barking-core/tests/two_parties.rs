@@ -83,8 +83,18 @@ fn pair() -> (Party, Party, StdRng) {
     let mut b = Party::new("tel-bob", 2);
     let ca = a.card("Alice");
     let cb = b.card("Bob");
-    assert_eq!(a.core.add_contact(&cb, Some("bob")).unwrap(), b.fp());
-    assert_eq!(b.core.add_contact(&ca, Some("alice")).unwrap(), a.fp());
+    assert_eq!(
+        a.core
+            .add_contact(&cb, Some("bob"), NOW, &mut StdRng::seed_from_u64(0))
+            .unwrap(),
+        b.fp()
+    );
+    assert_eq!(
+        b.core
+            .add_contact(&ca, Some("alice"), NOW, &mut StdRng::seed_from_u64(0))
+            .unwrap(),
+        a.fp()
+    );
     (a, b, StdRng::seed_from_u64(99))
 }
 
@@ -424,7 +434,10 @@ fn tampered_body_quarantined_then_original_ok() {
 fn unknown_sender_quarantined() {
     let (_a, mut b, mut rng) = pair();
     let mut carol = Party::new("tel-carol", 3);
-    carol.core.add_contact(&b.card("Bob"), Some("bob")).unwrap();
+    carol
+        .core
+        .add_contact(&b.card("Bob"), Some("bob"), NOW, &mut rng)
+        .unwrap();
     let p = one(carol.send(&b.fp(), "coucou, c'est Carol", NOW, &mut rng));
     match b.recv(&p, NOW, &mut rng) {
         ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("inconnu"), "{reason}"),
@@ -523,10 +536,15 @@ fn multi_device_fanout() {
     assert_eq!(card.bundles.len(), 2);
     card.verify().unwrap();
 
-    let bob_fp = a.core.add_contact(&card, Some("bob")).unwrap();
+    let bob_fp = a
+        .core
+        .add_contact(&card, Some("bob"), NOW, &mut rng)
+        .unwrap();
     let alice_card = a.card("Alice");
-    bob1.add_contact(&alice_card, Some("alice")).unwrap();
-    bob2.add_contact(&alice_card, Some("alice")).unwrap();
+    bob1.add_contact(&alice_card, Some("alice"), NOW, &mut rng)
+        .unwrap();
+    bob2.add_contact(&alice_card, Some("alice"), NOW, &mut rng)
+        .unwrap();
 
     let pkts = a.send(&bob_fp, "à tous tes appareils", NOW, &mut rng);
     assert_eq!(pkts.len(), 2);
@@ -556,10 +574,15 @@ fn send_to_multi_device_contact_is_one_message() {
         Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
     let mut bob2 = link_new(&mut bob1, &dir.path().join("b2"), [3; 32], "b2", &mut rng);
     let card = bob1.contact_card("Bob").unwrap();
-    let bob = a.core.add_contact(&card, Some("bob")).unwrap();
+    let bob = a
+        .core
+        .add_contact(&card, Some("bob"), NOW, &mut rng)
+        .unwrap();
     let alice_card = a.card("Alice");
-    bob1.add_contact(&alice_card, Some("alice")).unwrap();
-    bob2.add_contact(&alice_card, Some("alice")).unwrap();
+    bob1.add_contact(&alice_card, Some("alice"), NOW, &mut rng)
+        .unwrap();
+    bob2.add_contact(&alice_card, Some("alice"), NOW, &mut rng)
+        .unwrap();
 
     let pkts = a.send(&bob, "un seul message", NOW, &mut rng);
     assert_eq!(pkts.len(), 2);
@@ -594,9 +617,15 @@ fn device_list_rollback_refused() {
     let old_card = bob1.contact_card("Bob").unwrap();
     let _bob2 = link_new(&mut bob1, &dir.path().join("b2"), [3; 32], "b2", &mut rng);
     let new_card = bob1.contact_card("Bob").unwrap();
-    a.core.add_contact(&new_card, Some("bob")).unwrap();
+    a.core
+        .add_contact(&new_card, Some("bob"), NOW, &mut rng)
+        .unwrap();
     // Une carte avec une liste plus ancienne est refusée.
-    assert!(a.core.add_contact(&old_card, Some("bob")).is_err());
+    assert!(
+        a.core
+            .add_contact(&old_card, Some("bob"), NOW, &mut rng)
+            .is_err()
+    );
     let pkts = a.send(&bob1.fingerprint(), "x", NOW, &mut rng);
     assert_eq!(pkts.len(), 2);
 }
@@ -604,7 +633,9 @@ fn device_list_rollback_refused() {
 #[test]
 fn contact_key_change_flagged() {
     let (mut a, b, _rng) = pair();
-    a.core.mark_verified(&b.fp()).unwrap();
+    a.core
+        .mark_verified(&b.fp(), NOW, &mut StdRng::seed_from_u64(0))
+        .unwrap();
     assert!(a.core.contacts().unwrap()[0].verified);
     assert_eq!(
         a.core.safety_number(&b.fp()).unwrap(),
@@ -614,7 +645,12 @@ fn contact_key_change_flagged() {
     let mallory = Party::new("tel-mallory", 4);
     let new_fp = a
         .core
-        .add_contact(&mallory.card("Bob"), Some("bob"))
+        .add_contact(
+            &mallory.card("Bob"),
+            Some("bob"),
+            NOW,
+            &mut StdRng::seed_from_u64(0),
+        )
         .unwrap();
     assert_eq!(new_fp, mallory.fp());
     let contacts = a.core.contacts().unwrap();
@@ -653,10 +689,23 @@ fn resolve_by_alias_or_fingerprint() {
 #[test]
 fn own_card_and_tampered_card_refused() {
     let (mut a, b, _) = pair();
-    assert!(a.core.add_contact(&a.card("Alice"), Some("moi")).is_err());
+    assert!(
+        a.core
+            .add_contact(
+                &a.card("Alice"),
+                Some("moi"),
+                NOW,
+                &mut StdRng::seed_from_u64(0)
+            )
+            .is_err()
+    );
     let mut card = b.card("Bob");
     card.display_name = "Bobby".into();
-    assert!(a.core.add_contact(&card, Some("bob2")).is_err());
+    assert!(
+        a.core
+            .add_contact(&card, Some("bob2"), NOW, &mut StdRng::seed_from_u64(0))
+            .is_err()
+    );
 }
 
 #[test]
@@ -933,7 +982,11 @@ fn card_claiming_another_contacts_device_rejected() {
     let mut forged = mallory.contact_card("Alice").unwrap();
     assert!(DeviceList::sign(&mroot, 2, vec![alice_cert.clone()]).is_err());
     forged.devices.certs.push(alice_cert);
-    assert!(b.core.add_contact(&forged, Some("alice2")).is_err());
+    assert!(
+        b.core
+            .add_contact(&forged, Some("alice2"), NOW, &mut rng)
+            .is_err()
+    );
     // 3. Les messages d'Alice restent attribués à Alice.
     let mut a = _a;
     let p = one(a.send(&b.fp(), "c'est Alice", NOW, &mut rng));
@@ -950,9 +1003,13 @@ fn revoked_device_refused_for_normal_and_initial() {
         Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
     let mut bob2 = link_new(&mut bob1, &dir.path().join("b2"), [3; 32], "b2", &mut rng);
     let v2 = bob1.contact_card("Bob").unwrap();
-    let bob_fp = alice.core.add_contact(&v2, Some("bob")).unwrap();
+    let bob_fp = alice
+        .core
+        .add_contact(&v2, Some("bob"), NOW, &mut rng)
+        .unwrap();
     let alice_card = alice.card("Alice");
-    bob2.add_contact(&alice_card, Some("alice")).unwrap();
+    bob2.add_contact(&alice_card, Some("alice"), NOW, &mut rng)
+        .unwrap();
 
     // Bob2 ouvre la session (deux Initial), Alice en reçoit un et répond.
     let i1 = bob2
@@ -1001,7 +1058,10 @@ fn revoked_device_refused_for_normal_and_initial() {
         .clone();
     let v3 = DeviceList::sign(&root, v2.devices.version + 1, vec![bob1_cert]).unwrap();
     let card3 = ContactCard::sign(&root, "Bob", v3, vec![bob1_bundle]).unwrap();
-    alice.core.add_contact(&card3, Some("bob")).unwrap();
+    alice
+        .core
+        .add_contact(&card3, Some("bob"), NOW, &mut rng)
+        .unwrap();
 
     // Ni le message normal, ni l'Initial de l'appareil révoqué ne passent.
     let normal = alice.recv(&n1, NOW, &mut rng);
@@ -1095,9 +1155,15 @@ fn recovered_identity_reachable_by_existing_contact() {
         Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
     let bob_fp = bob1.fingerprint();
     a.core
-        .add_contact(&bob1.contact_card("Bob").unwrap(), Some("bob"))
+        .add_contact(
+            &bob1.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
         .unwrap();
-    bob1.add_contact(&a.card("Alice"), Some("alice")).unwrap();
+    bob1.add_contact(&a.card("Alice"), Some("alice"), NOW, &mut rng)
+        .unwrap();
     let p = one(a.send(&bob_fp, "avant", NOW, &mut rng));
     expect_msg(bob1.receive(&p.encode(), T, NOW, &mut rng).unwrap());
 
@@ -1116,11 +1182,17 @@ fn recovered_identity_reachable_by_existing_contact() {
     // Alice ajoute la nouvelle carte sans retirer l'ancienne.
     assert_eq!(
         a.core
-            .add_contact(&bob2.contact_card("Bob").unwrap(), Some("bob"))
+            .add_contact(
+                &bob2.contact_card("Bob").unwrap(),
+                Some("bob"),
+                NOW,
+                &mut rng
+            )
             .unwrap(),
         bob_fp
     );
-    bob2.add_contact(&a.card("Alice"), Some("alice")).unwrap();
+    bob2.add_contact(&a.card("Alice"), Some("alice"), NOW, &mut rng)
+        .unwrap();
 
     let p = one(a.send(&bob_fp, "après", later, &mut rng));
     let (from, _, text, _) = expect_msg(bob2.receive(&p.encode(), T, later, &mut rng).unwrap());
@@ -1210,11 +1282,11 @@ fn removed_or_replaced_contact_leaves_no_outbox_rows() {
     expect_msg(a.recv(&q, NOW, &mut rng));
     let carol = Party::new("tel-carol", 5);
     a.core
-        .add_contact(&carol.card("Carol"), Some("carol"))
+        .add_contact(&carol.card("Carol"), Some("carol"), NOW, &mut rng)
         .unwrap();
     let c = one(a.send(&carol.fp(), "pour Carol", NOW, &mut rng));
     assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 3);
-    a.core.remove_contact(&b.fp()).unwrap();
+    a.core.remove_contact(&b.fp(), NOW, &mut rng).unwrap();
     assert_eq!(a.core.pending_outbox(NOW).unwrap(), vec![c.encode()]);
 
     // Remplacement par alias : idem pour l'ancien contact.
@@ -1225,7 +1297,7 @@ fn removed_or_replaced_contact_leaves_no_outbox_rows() {
     assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 2);
     let mallory = Party::new("tel-mallory", 4);
     a.core
-        .add_contact(&mallory.card("Bob"), Some("bob"))
+        .add_contact(&mallory.card("Bob"), Some("bob"), NOW, &mut rng)
         .unwrap();
     assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
 }

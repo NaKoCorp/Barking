@@ -113,7 +113,10 @@ fn contacts_sessions_messages_events() {
             .unwrap()
     );
     store.add_delivery(mid, pid, dev).unwrap();
-    assert_eq!(store.mark_delivered_by_packet(pid).unwrap(), Some(mid));
+    assert_eq!(
+        store.mark_delivered_by_packet(pid, true).unwrap(),
+        Some(mid)
+    );
     let m = store.messages_with(fp).unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(m[0].status, MessageStatus::Delivered);
@@ -680,7 +683,9 @@ fn migration_v1_keeps_history_and_acks() {
     assert_eq!((got.body.as_str(), got.direction), ("reçu", Direction::In));
     // L'accusé du paquet v1 en attente marque le message livré.
     assert_eq!(
-        store.mark_delivered_by_packet(PacketId(pout)).unwrap(),
+        store
+            .mark_delivered_by_packet(PacketId(pout), true)
+            .unwrap(),
         Some(m[1].message_id)
     );
     let after = store.messages_with(fp).unwrap();
@@ -712,7 +717,7 @@ fn inbound_packets_map_to_their_message() {
     assert!(!store.is_my_packet(PacketId([1; 16])).unwrap());
     assert!(
         store
-            .mark_delivered_by_packet(PacketId([1; 16]))
+            .mark_delivered_by_packet(PacketId([1; 16]), true)
             .unwrap()
             .is_none()
     );

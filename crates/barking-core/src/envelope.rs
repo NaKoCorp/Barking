@@ -14,11 +14,13 @@ use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
+use crate::contact::ContactCard;
 use crate::crypto::aead;
 use crate::crypto::kdf::hkdf_sha256;
 use crate::crypto::labels;
+use crate::handshake::PrekeyBundle;
 use crate::handshake::pqxdh::InitialMessage;
-use crate::identity::DeviceKeys;
+use crate::identity::{DeviceKeys, DeviceList, Fingerprint};
 use crate::mailbox::MailboxId;
 use crate::packet::{DEFAULT_HOPS, Kind, Packet, Tier, ack, default_expiry};
 use crate::ratchet::{RatchetMessage, RatchetState};
@@ -27,10 +29,42 @@ use crate::{CoreError, Result};
 /// Taille maximale d'un texte, en octets.
 pub const MAX_TEXT_LEN: usize = 4000;
 
-/// Contenu d'un message.
+/// Contenu d'un message. Nouvelles variantes : toujours à la fin (format
+/// postcard, indice de variante).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Body {
     Text(String),
+    /// Copie d'un message que j'ai envoyé à `to` depuis un autre de mes
+    /// appareils. L'identifiant et la date sont ceux de l'enveloppe.
+    SyncSent {
+        to: Fingerprint,
+        text: String,
+    },
+    /// Opération sur mes contacts faite sur un autre de mes appareils.
+    SyncContact(SyncOp),
+    /// Nouvelle liste de mes appareils, signée par ma racine, avec ma carte
+    /// et les paquets de clés de mes autres appareils.
+    /// Liste et carte en boîte (taille de l'enum) ; même format postcard.
+    SyncDevices {
+        devices: Box<DeviceList>,
+        card: Box<ContactCard>,
+        own_bundles: Vec<PrekeyBundle>,
+    },
+}
+
+/// Opération sur les contacts, rejouée sur mes autres appareils.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SyncOp {
+    /// Ajout ou mise à jour ; `alias` vide : pas d'alias (l'alias connu est
+    /// gardé). Carte en boîte (taille de l'enum) ; même format postcard.
+    Add {
+        card: Box<ContactCard>,
+        alias: String,
+    },
+    Remove(Fingerprint),
+    /// Nouvel alias ; vide : l'alias est retiré.
+    SetAlias(Fingerprint, String),
+    MarkVerified(Fingerprint),
 }
 
 /// Contenu chiffré d'un paquet. Aucune identité d'expéditeur.
@@ -48,7 +82,24 @@ impl fmt::Debug for Body {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Body::Text(t) => write!(f, "Text(<{} octets>)", t.len()),
+            Body::SyncSent { text, .. } => write!(f, "SyncSent(<{} octets>)", text.len()),
+            Body::SyncContact(op) => write!(f, "SyncContact({op:?})"),
+            Body::SyncDevices { devices, .. } => {
+                write!(f, "SyncDevices(version {})", devices.version)
+            }
         }
+    }
+}
+
+impl fmt::Debug for SyncOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Ni carte, ni alias, ni empreinte : seulement le type d'opération.
+        f.write_str(match self {
+            SyncOp::Add { .. } => "Add",
+            SyncOp::Remove(_) => "Remove",
+            SyncOp::SetAlias(..) => "SetAlias",
+            SyncOp::MarkVerified(_) => "MarkVerified",
+        })
     }
 }
 
@@ -82,8 +133,10 @@ impl Body {
     /// Refuse un texte de plus de [`MAX_TEXT_LEN`] octets.
     fn check(&self) -> Result<()> {
         match self {
-            Body::Text(t) if t.len() > MAX_TEXT_LEN => Err(CoreError::TooLarge),
-            Body::Text(_) => Ok(()),
+            Body::Text(t) | Body::SyncSent { text: t, .. } if t.len() > MAX_TEXT_LEN => {
+                Err(CoreError::TooLarge)
+            }
+            _ => Ok(()),
         }
     }
 }

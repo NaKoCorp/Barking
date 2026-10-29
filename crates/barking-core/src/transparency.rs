@@ -64,6 +64,18 @@ pub enum TransparencyEvent {
         device_count: u32,
         contacts: u32,
     },
+    /// Contenu de synchronisation reçu d'un de mes appareils et appliqué.
+    SyncApplied {
+        kind: SyncKind,
+    },
+}
+
+/// Type de synchronisation entre mes appareils.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SyncKind {
+    Sent,
+    Contact,
+    Devices,
 }
 
 /// Ce que tout relais lit dans l'en-tête en clair d'un paquet.
@@ -222,6 +234,14 @@ impl TransparencyEvent {
                 "Cet appareil est maintenant lié à ton compte ({device_count} appareils, \
                  {contacts} contacts copiés). La clé racine n'a pas été copiée."
             ),
+            Self::SyncApplied { kind } => {
+                let what = match kind {
+                    SyncKind::Sent => "message envoyé",
+                    SyncKind::Contact => "contact",
+                    SyncKind::Devices => "liste d'appareils",
+                };
+                format!("Synchronisé depuis un de tes appareils : {what}.")
+            }
         }
     }
 }
@@ -340,7 +360,39 @@ mod tests {
                 device_count: 2,
                 contacts: 3,
             },
+            TransparencyEvent::SyncApplied {
+                kind: SyncKind::Sent,
+            },
+            TransparencyEvent::SyncApplied {
+                kind: SyncKind::Contact,
+            },
+            TransparencyEvent::SyncApplied {
+                kind: SyncKind::Devices,
+            },
         ]
+    }
+
+    #[test]
+    fn describe_sync_applied_exact() {
+        let d = |kind| TransparencyEvent::SyncApplied { kind }.describe();
+        assert_eq!(
+            d(SyncKind::Sent),
+            "Synchronisé depuis un de tes appareils : message envoyé."
+        );
+        assert_eq!(
+            d(SyncKind::Contact),
+            "Synchronisé depuis un de tes appareils : contact."
+        );
+        assert_eq!(
+            d(SyncKind::Devices),
+            "Synchronisé depuis un de tes appareils : liste d'appareils."
+        );
+        assert!(
+            !TransparencyEvent::SyncApplied {
+                kind: SyncKind::Devices
+            }
+            .is_security()
+        );
     }
 
     #[test]

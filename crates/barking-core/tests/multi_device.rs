@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 
 use barking_core::core::{LinkBundle, LinkOffer};
-use barking_core::transparency::TransparencyEvent;
+use barking_core::identity::Fingerprint;
+use barking_core::store::{Direction, MessageStatus};
+use barking_core::transparency::{SyncKind, TransparencyEvent};
 use barking_core::{Core, CoreError, LinkRequest, ReceiveOutcome};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -66,13 +68,18 @@ fn admin_with_contacts(d: &Path, rng: &mut StdRng) -> (Dev, Dev, Dev) {
     let alice = create(d, "alice", 2, rng);
     let bob = create(d, "bob", 3, rng);
     a.core
-        .add_contact(&alice.core.contact_card("Alice").unwrap(), Some("alice"))
+        .add_contact(
+            &alice.core.contact_card("Alice").unwrap(),
+            Some("alice"),
+            NOW,
+            rng,
+        )
         .unwrap();
     let bob_fp = a
         .core
-        .add_contact(&bob.core.contact_card("Bob").unwrap(), None)
+        .add_contact(&bob.core.contact_card("Bob").unwrap(), None, NOW, rng)
         .unwrap();
-    a.core.mark_verified(&bob_fp).unwrap();
+    a.core.mark_verified(&bob_fp, NOW, rng).unwrap();
     (a, alice, bob)
 }
 
@@ -135,7 +142,8 @@ fn link_full_flow() {
     let mut t2 = Core::open(&t.path, &t.key, NOW + 3).unwrap();
     assert_eq!(t2.fingerprint(), a.core.fingerprint());
     assert_eq!(t2.contacts().unwrap().len(), 2);
-    // T peut écrire à Alice (un paquet par appareil d'Alice).
+    // T peut écrire à Alice (un paquet par appareil d'Alice), plus une copie
+    // `SyncSent` pour A.
     let pkts = t2
         .send_text(
             &alice.core.fingerprint(),
@@ -144,7 +152,7 @@ fn link_full_flow() {
             &mut rng,
         )
         .unwrap();
-    assert_eq!(pkts.len(), 1);
+    assert_eq!(pkts.len(), 2);
     // Une seconde fin de liaison est refusée.
     assert_eq!(
         link_err(t2.finish_link(&bundle, None, NOW + 4)),
@@ -165,10 +173,15 @@ fn linked_device_receives_from_contact() {
     t.core.finish_link(&out.bundle, None, NOW).unwrap();
     let me = alice
         .core
-        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"))
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, &mut rng)
         .unwrap();
     t.core
-        .add_contact(&alice.core.contact_card("Alice").unwrap(), Some("alice"))
+        .add_contact(
+            &alice.core.contact_card("Alice").unwrap(),
+            Some("alice"),
+            NOW,
+            &mut rng,
+        )
         .unwrap();
     let pkts = alice
         .core
@@ -208,8 +221,12 @@ fn pending_device_cannot_send_or_receive() {
         Err(CoreError::LinkPending)
     ));
     assert_eq!(
-        t.core
-            .add_contact(&alice.core.contact_card("Alice").unwrap(), None),
+        t.core.add_contact(
+            &alice.core.contact_card("Alice").unwrap(),
+            None,
+            NOW,
+            &mut rng
+        ),
         Err(CoreError::LinkPending)
     );
     assert_eq!(t.core.contact_card("T"), Err(CoreError::LinkPending));
@@ -459,4 +476,212 @@ fn link_refuses_seventeenth_device() {
         Some(CoreError::TooLarge)
     );
     assert_eq!(a.core.contact_card("A").unwrap().devices.certs.len(), 16);
+}
+
+/// A lié à T, sans contact.
+fn admin_and_tablet(d: &Path, rng: &mut StdRng) -> (Dev, Dev) {
+    let mut a = create(d, "a", 1, rng);
+    let offer = a.core.link_offer(NOW, rng).unwrap();
+    let (mut t, req) = begin(d, "t", 9, &offer, rng);
+    let out = a.core.link_device(&req, false, NOW, rng).unwrap();
+    t.core.finish_link(&out.bundle, None, NOW).unwrap();
+    (a, t)
+}
+
+/// Livre à `to` chaque paquet de la file d'envoi de `from`, puis rend à
+/// `from` les accusés de `to`. Renvoie les synchronisations appliquées.
+fn sync_round(from: &mut Dev, to: &mut Dev, rng: &mut StdRng) -> Vec<SyncKind> {
+    let mut applied = Vec::new();
+    for bytes in from.core.pending_outbox(NOW).unwrap() {
+        if let ReceiveOutcome::Synced { kind } = to.core.receive(&bytes, T, NOW, rng).unwrap() {
+            applied.push(kind);
+        }
+    }
+    for bytes in to.core.pending_outbox(NOW).unwrap() {
+        from.core.receive(&bytes, T, NOW, rng).unwrap();
+    }
+    applied
+}
+
+fn contact_state(core: &Core) -> Vec<(Fingerprint, Option<String>, bool)> {
+    core.contacts()
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.fingerprint, c.alias, c.verified))
+        .collect()
+}
+
+#[test]
+fn sent_on_a_appears_on_t() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(20);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let mut bob = create(d.path(), "bob", 3, &mut rng);
+    bob.core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, &mut rng)
+        .unwrap();
+    let bob_fp = a
+        .core
+        .add_contact(
+            &bob.core.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    assert_eq!(
+        sync_round(&mut a, &mut t, &mut rng),
+        vec![SyncKind::Contact]
+    );
+    assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
+
+    // Un paquet pour Bob, un `SyncSent` pour T, le même identifiant.
+    let pkts = a.core.send_text(&bob_fp, "bonjour", NOW, &mut rng).unwrap();
+    assert_eq!(pkts.len(), 2);
+    let sent = a.core.messages_with(&bob_fp).unwrap();
+    assert_eq!(sent.len(), 1);
+    let mut on_t = Vec::new();
+    for p in &pkts {
+        match t.core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
+            ReceiveOutcome::Synced { kind } => on_t.push((kind, p.id)),
+            ReceiveOutcome::NotForUs => {}
+            other => panic!("inattendu : {other:?}"),
+        }
+    }
+    assert_eq!(on_t.len(), 1);
+    assert_eq!(on_t[0].0, SyncKind::Sent);
+    let rows = t.core.messages_with(&bob_fp).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (
+            rows[0].direction,
+            rows[0].body.as_str(),
+            rows[0].message_id,
+            rows[0].at
+        ),
+        (Direction::Out, "bonjour", sent[0].message_id, NOW)
+    );
+    assert!(events(&t.core).contains(&TransparencyEvent::SyncApplied {
+        kind: SyncKind::Sent
+    }));
+    // Reçu deux fois : toujours une ligne.
+    for p in &pkts {
+        let r = t.core.receive(&p.encode(), T, NOW, &mut rng).unwrap();
+        assert!(matches!(
+            r,
+            ReceiveOutcome::Duplicate | ReceiveOutcome::NotForUs
+        ));
+    }
+    assert_eq!(t.core.messages_with(&bob_fp).unwrap().len(), 1);
+
+    // L'accusé de T retire le `SyncSent` de la file de A, mais le message
+    // pour Bob n'est pas livré pour autant.
+    let sync_id = on_t[0].1;
+    let mut acked = Vec::new();
+    for bytes in t.core.pending_outbox(NOW).unwrap() {
+        if let ReceiveOutcome::AckReceived { packet_id } =
+            a.core.receive(&bytes, T, NOW, &mut rng).unwrap()
+        {
+            acked.push(packet_id);
+        }
+    }
+    assert_eq!(acked, vec![sync_id]);
+    assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 1);
+    assert_eq!(
+        a.core.messages_with(&bob_fp).unwrap()[0].status,
+        MessageStatus::Sent
+    );
+    // L'accusé de Bob, lui, le marque livré.
+    let to_bob = pkts.iter().find(|p| p.id != sync_id).unwrap();
+    assert!(matches!(
+        bob.core
+            .receive(&to_bob.encode(), T, NOW, &mut rng)
+            .unwrap(),
+        ReceiveOutcome::Message { .. }
+    ));
+    for bytes in bob.core.pending_outbox(NOW).unwrap() {
+        a.core.receive(&bytes, T, NOW, &mut rng).unwrap();
+    }
+    assert_eq!(
+        a.core.messages_with(&bob_fp).unwrap()[0].status,
+        MessageStatus::Delivered
+    );
+    assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
+}
+
+#[test]
+fn contact_ops_sync() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(21);
+    // Sans autre appareil : aucune synchronisation en file.
+    let mut solo = create(d.path(), "solo", 4, &mut rng);
+    let x = create(d.path(), "x", 5, &mut rng);
+    solo.core
+        .add_contact(&x.core.contact_card("X").unwrap(), Some("x"), NOW, &mut rng)
+        .unwrap();
+    assert!(solo.core.pending_outbox(NOW).unwrap().is_empty());
+
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let carol = create(d.path(), "carol", 6, &mut rng);
+    let card = carol.core.contact_card("Carol").unwrap();
+    let carol_fp = a
+        .core
+        .add_contact(&card, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    assert_eq!(
+        sync_round(&mut a, &mut t, &mut rng),
+        vec![SyncKind::Contact]
+    );
+    assert_eq!(
+        contact_state(&t.core),
+        vec![(carol_fp, Some("carol".to_owned()), false)]
+    );
+    a.core.set_alias(&carol_fp, "caro", NOW, &mut rng).unwrap();
+    assert_eq!(
+        sync_round(&mut a, &mut t, &mut rng),
+        vec![SyncKind::Contact]
+    );
+    assert_eq!(
+        contact_state(&t.core),
+        vec![(carol_fp, Some("caro".to_owned()), false)]
+    );
+    a.core.mark_verified(&carol_fp, NOW, &mut rng).unwrap();
+    assert_eq!(
+        sync_round(&mut a, &mut t, &mut rng),
+        vec![SyncKind::Contact]
+    );
+    assert_eq!(
+        contact_state(&t.core),
+        vec![(carol_fp, Some("caro".to_owned()), true)]
+    );
+    assert_eq!(contact_state(&t.core), contact_state(&a.core));
+    a.core.remove_contact(&carol_fp, NOW, &mut rng).unwrap();
+    assert_eq!(
+        sync_round(&mut a, &mut t, &mut rng),
+        vec![SyncKind::Contact]
+    );
+    assert!(contact_state(&t.core).is_empty());
+    // Chaque accusé de T a vidé la file de A.
+    assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
+
+    // Dans l'autre sens : une opération sur T arrive sur A.
+    t.core.add_contact(&card, None, NOW, &mut rng).unwrap();
+    t.core.set_alias(&carol_fp, "c", NOW, &mut rng).unwrap();
+    assert_eq!(
+        sync_round(&mut t, &mut a, &mut rng),
+        vec![SyncKind::Contact, SyncKind::Contact]
+    );
+    assert_eq!(
+        contact_state(&a.core),
+        vec![(carol_fp, Some("c".to_owned()), false)]
+    );
+    // `set_alias` : contact inconnu, alias trop long.
+    assert_eq!(
+        a.core.set_alias(&Fingerprint([9; 32]), "z", NOW, &mut rng),
+        Err(CoreError::UnknownContact)
+    );
+    assert_eq!(
+        a.core.set_alias(&carol_fp, &"z".repeat(65), NOW, &mut rng),
+        Err(CoreError::TooLarge)
+    );
 }

@@ -543,10 +543,45 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Marque la livraison `packet_id` livrée, et le message `Delivered`
-    /// (un accusé d'un seul appareil suffit). Renvoie le message concerné, ou
-    /// `None` si aucune livraison ne porte ce paquet.
-    fn mark_delivered_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageId>> {
+    /// Message et appareil destinataire de la livraison `packet_id`.
+    fn delivery_by_packet(&self, packet_id: PacketId) -> Result<Option<(MessageId, DeviceId)>> {
+        let row: Option<(Vec<u8>, Vec<u8>)> = self
+            .conn()
+            .query_row(
+                "SELECT message_id, device FROM deliveries WHERE packet_id = ?1",
+                params![packet_id.0.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(map_err)?;
+        row.map(|(m, d)| Ok((MessageId(arr(m)?), DeviceId(arr(d)?))))
+            .transpose()
+    }
+
+    /// `true` si un paquet reçu portant le message `message_id` est déjà
+    /// inscrit dans `inbound`.
+    fn inbound_has_message(&self, message_id: MessageId) -> Result<bool> {
+        let n: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM inbound WHERE message_id = ?1",
+                params![message_id.0.as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        Ok(n > 0)
+    }
+
+    /// Marque la livraison `packet_id` livrée et, si `aggregate`, le message
+    /// `Delivered` (un accusé d'un seul appareil du destinataire suffit ;
+    /// l'accusé d'un de mes appareils, pour une copie `SyncSent`, ne compte
+    /// pas). Renvoie le message concerné, ou `None` si aucune livraison ne
+    /// porte ce paquet.
+    fn mark_delivered_by_packet(
+        &self,
+        packet_id: PacketId,
+        aggregate: bool,
+    ) -> Result<Option<MessageId>> {
         let mid: Option<Vec<u8>> = self
             .conn()
             .query_row(
@@ -565,12 +600,14 @@ pub trait Queries {
                 params![MessageStatus::Delivered as i64, packet_id.0.as_slice()],
             )
             .map_err(map_err)?;
-        self.conn()
-            .execute(
-                "UPDATE messages SET status = ?1 WHERE message_id = ?2 AND direction = ?3",
-                params![MessageStatus::Delivered as i64, mid, Direction::Out as i64],
-            )
-            .map_err(map_err)?;
+        if aggregate {
+            self.conn()
+                .execute(
+                    "UPDATE messages SET status = ?1 WHERE message_id = ?2 AND direction = ?3",
+                    params![MessageStatus::Delivered as i64, mid, Direction::Out as i64],
+                )
+                .map_err(map_err)?;
+        }
         Ok(Some(MessageId(arr(mid)?)))
     }
 

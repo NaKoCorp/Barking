@@ -2,8 +2,11 @@
 
 use std::collections::HashSet;
 
-use super::{Core, OwnDevices, load_card, log};
+use rand_core::CryptoRng;
+
+use super::{Core, OwnDevices, load_card, log, sync};
 use crate::contact::ContactCard;
+use crate::envelope::SyncOp;
 use crate::identity::{DeviceId, DevicePublic, Fingerprint};
 use crate::store::Queries;
 use crate::transparency::TransparencyEvent;
@@ -34,89 +37,25 @@ impl Core {
     ///   remplacer (`supersedes`) ; les sessions des appareils retirés sont supprimées.
     /// - Alias déjà pris par une autre empreinte : événement `ContactKeyChanged`,
     ///   l'ancien contact est remplacé et le nouveau n'est pas vérifié.
-    pub fn add_contact(&mut self, card: &ContactCard, alias: Option<&str>) -> Result<Fingerprint> {
+    ///
+    /// L'opération est mise en file pour chacun de mes autres appareils
+    /// (`SyncContact`), dans la même transaction.
+    pub fn add_contact(
+        &mut self,
+        card: &ContactCard,
+        alias: Option<&str>,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Fingerprint> {
         self.ensure_linked()?;
-        card.verify()?;
-        let fp = card.fingerprint();
-        if fp == self.fingerprint() {
-            return Err(CoreError::Malformed("carte de ma propre identité"));
-        }
-        let claimed: Vec<DevicePublic> = card.devices.certs.iter().map(|c| c.device).collect();
-        if self
-            .devices
-            .certs
-            .iter()
-            .any(|mine| claimed.iter().any(|d| overlaps(d, &mine.device)))
-        {
-            return Err(CoreError::Malformed(
-                "carte revendiquant un de mes appareils",
-            ));
-        }
-        let alias = alias.map(str::trim).filter(|a| !a.is_empty());
-        if alias.is_some_and(|a| a.len() > MAX_ALIAS_LEN) {
-            return Err(CoreError::TooLarge);
-        }
-        let bytes = postcard::to_allocvec(card).map_err(|_| CoreError::Malformed("carte"))?;
-        // Horodatage du journal : aucune horloge ici, on reprend celui de la liste.
-        let at = card
-            .devices
-            .certs
-            .iter()
-            .map(|c| c.issued_at)
-            .max()
-            .unwrap_or(0);
-        self.store.transaction(|tx| {
-            // Un appareil (identifiant, clé de signature ou clé X25519) n'appartient
-            // qu'à un seul contact : sinon un contact pourrait se faire attribuer
-            // les messages d'un autre.
-            if claimed_by_other(tx, Some(fp), &claimed)? {
-                return Err(CoreError::Malformed(
-                    "appareil déjà associé à un autre contact",
-                ));
-            }
-            let mut verified = false;
-            let mut stored_alias = alias.unwrap_or("").to_owned();
-            if let Some(old) = tx.get_contact(fp)? {
-                let old_card = load_card(&old.card)?;
-                if card.devices != old_card.devices {
-                    if !card.devices.supersedes(&old_card.devices) {
-                        return Err(CoreError::Malformed(
-                            "liste d'appareils plus ancienne ou divergente",
-                        ));
-                    }
-                    let kept: HashSet<DeviceId> =
-                        card.devices.certs.iter().map(|c| c.device.id()).collect();
-                    for c in &old_card.devices.certs {
-                        let id = c.device.id();
-                        if !kept.contains(&id) {
-                            // Appareil révoqué : plus aucune session avec lui.
-                            tx.delete_sessions_for_device(fp, id)?;
-                        }
-                    }
-                }
-                verified = old.verified;
-                if alias.is_none() {
-                    stored_alias = old.alias.clone();
-                }
-            }
-            if let Some(a) = alias
-                && let Some(other) = tx.find_contact_by_alias(a)?
-                && other.fp != fp
-            {
-                log(
-                    tx,
-                    at,
-                    None,
-                    &TransparencyEvent::ContactKeyChanged {
-                        alias: a.to_owned(),
-                        old: other.fp,
-                        new: fp,
-                    },
-                )?;
-                tx.delete_contact(other.fp)?;
-                verified = false;
-            }
-            tx.upsert_contact(fp, &bytes, &stored_alias, verified)?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            let (fp, alias) = add_in(tx, card, alias)?;
+            let op = SyncOp::Add {
+                card: Box::new(card.clone()),
+                alias,
+            };
+            sync::send_op(tx, device, op, now, rng)?;
             Ok(fp)
         })
     }
@@ -125,11 +64,52 @@ impl Core {
     /// file d'envoi, en une seule transaction. L'historique des messages est
     /// conservé. Sert à se débloquer après l'ajout d'une carte frauduleuse
     /// qui revendiquait les clés d'un vrai contact. Inconnu : `UnknownContact`.
-    pub fn remove_contact(&mut self, contact: &Fingerprint) -> Result<()> {
+    /// Synchronisé avec mes autres appareils.
+    pub fn remove_contact(
+        &mut self,
+        contact: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<()> {
         self.ensure_linked()?;
-        self.store.transaction(|tx| {
-            tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
-            tx.delete_contact(*contact)
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            remove_in(tx, *contact)?;
+            sync::send_op(tx, device, SyncOp::Remove(*contact), now, rng)
+        })
+    }
+
+    /// Marque le contact comme vérifié (code de sécurité comparé).
+    /// Synchronisé avec mes autres appareils.
+    pub fn mark_verified(
+        &mut self,
+        contact: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<()> {
+        self.ensure_linked()?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            verify_in(tx, *contact)?;
+            sync::send_op(tx, device, SyncOp::MarkVerified(*contact), now, rng)
+        })
+    }
+
+    /// Change l'alias d'un contact connu ; un alias vide le retire. Alias
+    /// trop long : `TooLarge` ; déjà pris par un autre contact : refusé.
+    /// Synchronisé avec mes autres appareils.
+    pub fn set_alias(
+        &mut self,
+        contact: &Fingerprint,
+        alias: &str,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<()> {
+        self.ensure_linked()?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            let alias = set_alias_in(tx, *contact, alias)?;
+            sync::send_op(tx, device, SyncOp::SetAlias(*contact, alias), now, rng)
         })
     }
 
@@ -173,6 +153,137 @@ impl Core {
     }
 }
 
+/// Ajout (ou mise à jour) d'un contact dans `q`, avec toutes les
+/// vérifications d'`add_contact` ; partagé avec la synchronisation. Toute
+/// vérification précède la première écriture : une erreur de contenu ne
+/// laisse rien d'écrit. Renvoie l'empreinte et l'alias stocké (vide : aucun).
+pub(super) fn add_in(
+    q: &impl Queries,
+    card: &ContactCard,
+    alias: Option<&str>,
+) -> Result<(Fingerprint, String)> {
+    card.verify()?;
+    let fp = card.fingerprint();
+    let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
+    if fp == own.list.root.fingerprint() {
+        return Err(CoreError::Malformed("carte de ma propre identité"));
+    }
+    let claimed: Vec<DevicePublic> = card.devices.certs.iter().map(|c| c.device).collect();
+    if own
+        .list
+        .certs
+        .iter()
+        .any(|mine| claimed.iter().any(|d| overlaps(d, &mine.device)))
+    {
+        return Err(CoreError::Malformed(
+            "carte revendiquant un de mes appareils",
+        ));
+    }
+    let alias = alias.map(str::trim).filter(|a| !a.is_empty());
+    if alias.is_some_and(|a| a.len() > MAX_ALIAS_LEN) {
+        return Err(CoreError::TooLarge);
+    }
+    let bytes = postcard::to_allocvec(card).map_err(|_| CoreError::Malformed("carte"))?;
+    // Horodatage du journal : on reprend celui de la liste.
+    let at = card
+        .devices
+        .certs
+        .iter()
+        .map(|c| c.issued_at)
+        .max()
+        .unwrap_or(0);
+    // Un appareil (identifiant, clé de signature ou clé X25519) n'appartient
+    // qu'à un seul contact : sinon un contact pourrait se faire attribuer
+    // les messages d'un autre.
+    if claimed_by_contact(q, Some(fp), &claimed)? {
+        return Err(CoreError::Malformed(
+            "appareil déjà associé à un autre contact",
+        ));
+    }
+    let mut verified = false;
+    let mut stored_alias = alias.unwrap_or("").to_owned();
+    let old = q.get_contact(fp)?;
+    let mut revoked = Vec::new();
+    if let Some(old) = &old {
+        let old_card = load_card(&old.card)?;
+        if card.devices != old_card.devices {
+            if !card.devices.supersedes(&old_card.devices) {
+                return Err(CoreError::Malformed(
+                    "liste d'appareils plus ancienne ou divergente",
+                ));
+            }
+            let kept: HashSet<DeviceId> =
+                card.devices.certs.iter().map(|c| c.device.id()).collect();
+            revoked = old_card
+                .devices
+                .certs
+                .iter()
+                .map(|c| c.device.id())
+                .filter(|id| !kept.contains(id))
+                .collect();
+        }
+        verified = old.verified;
+        if alias.is_none() {
+            stored_alias = old.alias.clone();
+        }
+    }
+    // Écritures, une fois tout vérifié.
+    for id in revoked {
+        // Appareil révoqué : plus aucune session avec lui.
+        q.delete_sessions_for_device(fp, id)?;
+    }
+    if let Some(a) = alias
+        && let Some(other) = q.find_contact_by_alias(a)?
+        && other.fp != fp
+    {
+        log(
+            q,
+            at,
+            None,
+            &TransparencyEvent::ContactKeyChanged {
+                alias: a.to_owned(),
+                old: other.fp,
+                new: fp,
+            },
+        )?;
+        q.delete_contact(other.fp)?;
+        verified = false;
+    }
+    q.upsert_contact(fp, &bytes, &stored_alias, verified)?;
+    Ok((fp, stored_alias))
+}
+
+/// Supprime un contact connu de `q` (voir `remove_contact`).
+pub(super) fn remove_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
+    q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
+    q.delete_contact(fp)
+}
+
+/// Marque vérifié un contact connu de `q`.
+pub(super) fn verify_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
+    let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
+    q.upsert_contact(row.fp, &row.card, &row.alias, true)
+}
+
+/// Change l'alias d'un contact connu de `q` ; renvoie l'alias stocké.
+pub(super) fn set_alias_in(q: &impl Queries, fp: Fingerprint, alias: &str) -> Result<String> {
+    let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
+    let alias = alias.trim();
+    if alias.len() > MAX_ALIAS_LEN {
+        return Err(CoreError::TooLarge);
+    }
+    if !alias.is_empty()
+        && q.find_contact_by_alias(alias)?
+            .is_some_and(|other| other.fp != fp)
+    {
+        return Err(CoreError::Malformed(
+            "alias déjà utilisé par un autre contact",
+        ));
+    }
+    q.upsert_contact(row.fp, &row.card, alias, row.verified)?;
+    Ok(alias.to_owned())
+}
+
 /// Deux appareils partagent-ils un identifiant ou une clé publique ?
 pub(super) fn overlaps(a: &DevicePublic, b: &DevicePublic) -> bool {
     a.id() == b.id() || a.dh == b.dh || a.sig == b.sig
@@ -196,6 +307,15 @@ pub(super) fn claimed_by_other(
     {
         return Ok(true);
     }
+    claimed_by_contact(q, except, devices)
+}
+
+/// Vrai si un contact autre que `except` revendique l'un de ces appareils.
+pub(super) fn claimed_by_contact(
+    q: &impl Queries,
+    except: Option<Fingerprint>,
+    devices: &[DevicePublic],
+) -> Result<bool> {
     for row in q.list_contacts()? {
         if Some(row.fp) == except {
             continue;

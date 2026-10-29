@@ -9,7 +9,8 @@
 //! Découpage : `contacts.rs` (cartes, alias, vérification), `send.rs`
 //! (`send_text`), `receive.rs` (`receive`), `frames.rs` (fragmentation et
 //! réassemblage des trames), `link.rs` (liaison d'un nouvel appareil),
-//! `history.rs` (archive de l'historique transférée à la liaison).
+//! `history.rs` (archive de l'historique transférée à la liaison), `sync.rs`
+//! (synchronisation entre mes appareils).
 
 mod contacts;
 mod frames;
@@ -18,6 +19,7 @@ mod link;
 mod log_limit;
 mod receive;
 mod send;
+mod sync;
 
 #[cfg(test)]
 mod tests;
@@ -43,6 +45,7 @@ use crate::store::{EventClass, MessageRow, Queries, Store};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
+pub use crate::transparency::SyncKind;
 pub use contacts::ContactSummary;
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
 pub use history::HistoryArchive;
@@ -98,6 +101,11 @@ pub enum ReceiveOutcome {
     Quarantined {
         reason: String,
     },
+    /// Synchronisation venue d'un de mes appareils, appliquée ; son accusé
+    /// est en file d'envoi.
+    Synced {
+        kind: SyncKind,
+    },
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -123,6 +131,7 @@ impl fmt::Debug for ReceiveOutcome {
                 .debug_struct("Quarantined")
                 .field("reason", reason)
                 .finish(),
+            Self::Synced { kind } => f.debug_struct("Synced").field("kind", kind).finish(),
         }
     }
 }
@@ -305,6 +314,17 @@ impl Core {
         ))
     }
 
+    /// Relit ma liste d'appareils et les paquets de clés de mes autres
+    /// appareils depuis la base (après une `SyncDevices`, ou une liaison
+    /// refusée parce qu'une autre ouverture de la base a changé la liste).
+    fn reload_own_devices(&mut self) -> Result<()> {
+        if let Some(own) = OwnDevices::read(&self.store)? {
+            self.devices = own.list;
+            self.linked_bundles = own.bundles;
+        }
+        Ok(())
+    }
+
     /// Empreinte de mon identité (racine).
     pub fn fingerprint(&self) -> Fingerprint {
         self.devices.root.fingerprint()
@@ -395,15 +415,6 @@ impl Core {
             .get_contact(*contact)?
             .ok_or(CoreError::UnknownContact)?;
         Ok(safety_number(&self.fingerprint(), contact))
-    }
-
-    /// Marque le contact comme vérifié (code de sécurité comparé).
-    pub fn mark_verified(&mut self, contact: &Fingerprint) -> Result<()> {
-        self.ensure_linked()?;
-        self.store.transaction(|tx| {
-            let row = tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
-            tx.upsert_contact(row.fp, &row.card, &row.alias, true)
-        })
     }
 
     /// Les `limit` événements les plus récents, du plus ancien au plus récent.

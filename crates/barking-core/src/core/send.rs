@@ -5,7 +5,7 @@ use rand_core::CryptoRng;
 
 use super::{
     Core, OwnDevices, de_init, de_state, load_card, log, ser_init, ser_state, session_ad,
-    session_id,
+    session_id, sync,
 };
 use crate::envelope::{self, Body, Envelope, MAX_TEXT_LEN};
 use crate::handshake::{PrekeyBundle, pqxdh};
@@ -23,8 +23,7 @@ pub(super) enum Target {
     Contact(Fingerprint),
     /// Chacun de mes autres appareils (ma liste, sauf cet appareil). Les
     /// sessions sont rangées sous ma propre empreinte. Utilisé par les
-    /// contenus de synchronisation (`Sync*`, lot 1B, tâche suivante).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// contenus de synchronisation (`Sync*`, voir `sync.rs`).
     OwnDevices,
 }
 
@@ -170,7 +169,9 @@ pub(super) fn seal_for(
 impl Core {
     /// Chiffre `text` pour chaque appareil de la liste du contact ; un paquet
     /// par appareil joignable. Un seul message (un identifiant tiré au
-    /// hasard), une livraison par paquet. Tout est écrit dans une seule
+    /// hasard), une livraison par paquet. Une copie `SyncSent`, de même
+    /// identifiant, est aussi chiffrée pour chacun de mes autres appareils
+    /// (paquets rendus après ceux du contact). Tout est écrit dans une seule
     /// transaction, y compris l'état du ratchet avancé, avant que les paquets
     /// ne soient rendus.
     pub fn send_text(
@@ -214,7 +215,14 @@ impl Core {
             for (packet, peer_id) in &sealed {
                 tx.add_delivery(message_id, packet.id, *peer_id)?;
             }
-            Ok(sealed.into_iter().map(|(p, _)| p).collect())
+            let copy = Body::SyncSent {
+                to: *to,
+                text: text.to_owned(),
+            };
+            let mine = sync::seal_to_own(tx, device, &copy, message_id, now, rng)?;
+            let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
+            out.extend(mine);
+            Ok(out)
         })
     }
 }

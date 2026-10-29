@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 use super::log_limit::{LogLimiter, log_limited};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
-    SEEN_RETENTION_SECS, de_state, load_card, log, ser_state, session_ad, session_id,
+    SEEN_RETENTION_SECS, de_state, load_card, log, ser_state, session_ad, session_id, sync,
 };
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
@@ -17,7 +17,7 @@ use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{Kind, Packet, PacketId, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
 use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow};
-use crate::transparency::TransparencyEvent;
+use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
 // Raisons de quarantaine : textes fixes, jamais de contenu ni de clé.
@@ -70,7 +70,18 @@ impl Core {
         }
         match packet.kind {
             Kind::Ack => self.receive_ack(&packet, now),
-            Kind::Message => self.receive_message(&packet, transport, now, rng),
+            Kind::Message => {
+                let outcome = self.receive_message(&packet, transport, now, rng)?;
+                if matches!(
+                    outcome,
+                    ReceiveOutcome::Synced {
+                        kind: SyncKind::Devices
+                    }
+                ) {
+                    self.reload_own_devices()?;
+                }
+                Ok(outcome)
+            }
         }
     }
 
@@ -91,12 +102,12 @@ impl Core {
             store, log_limiter, ..
         } = self;
         store.transaction(|tx| {
-            let Some(msg) = tx.message_by_packet(acked)? else {
+            // Une livraison est toujours un de mes paquets envoyés : un
+            // message pour un contact, ou une synchronisation pour un de mes
+            // appareils (sans ligne de message pour `SyncContact`/`SyncDevices`).
+            let Some((_, to_device)) = tx.delivery_by_packet(acked)? else {
                 return Ok(ReceiveOutcome::NotForUs);
             };
-            if msg.direction != Direction::Out {
-                return Ok(ReceiveOutcome::NotForUs);
-            }
             if tx.delivery_acked(acked)? {
                 // Un accusé rejoué (identifiant et expiration réécrits à
                 // volonté) : regroupé au journal.
@@ -111,7 +122,11 @@ impl Core {
                 )?;
                 return Ok(ReceiveOutcome::Duplicate);
             }
-            tx.mark_delivered_by_packet(acked)?;
+            // L'accusé d'un de mes appareils (copie `SyncSent`) ne rend pas
+            // le message livré : seul compte celui d'un appareil du contact.
+            let own = OwnDevices::read(tx)?
+                .is_some_and(|o| o.list.certs.iter().any(|c| c.device.id() == to_device));
+            tx.mark_delivered_by_packet(acked, !own)?;
             tx.outbox_remove(acked)?;
             log(
                 tx,
@@ -189,7 +204,7 @@ impl Core {
             };
             match opened {
                 Err(reason) => quarantine(tx, log_limiter, packet, now, reason),
-                Ok(o) => accept(tx, log_limiter, packet, o, &my_fp, transport, now, rng),
+                Ok(o) => accept(tx, log_limiter, packet, o, &me, &my_fp, transport, now, rng),
             }
         })?;
         if let Some(p) = new_prekeys {
@@ -410,12 +425,16 @@ fn quarantine(
 /// fois (renvoi, nouveau paquet) n'est pas réinséré : `Duplicate`, mais la
 /// session avance et l'accusé de ce nouveau paquet est tout de même émis
 /// (mis en file d'envoi), pour que l'expéditeur cesse de le renvoyer.
+///
+/// Un texte n'est accepté que d'un contact, une synchronisation que d'un de
+/// mes appareils (`accept_sync`).
 #[allow(clippy::too_many_arguments)]
 fn accept(
     q: &impl Queries,
     limiter: &mut LogLimiter,
     packet: &Packet,
     o: Opened,
+    me: &DevicePublic,
     my_fp: &Fingerprint,
     transport: &str,
     now: u64,
@@ -432,52 +451,24 @@ fn accept(
     if let Err(reason) = check_envelope(q, packet, &env, now)? {
         return reject_authenticated(q, limiter, packet, o, now, reason, Some(authenticated_id));
     }
-    // Mes appareils ne s'échangent pas de textes : un texte venant de moi est
-    // inattendu (les contenus de synchronisation passent par d'autres `Body`).
-    if o.row.contact_fp == *my_fp && matches!(env.body, Body::Text(_)) {
-        return reject_authenticated(
-            q,
-            limiter,
-            packet,
-            o,
-            now,
-            R_UNEXPECTED,
-            Some(authenticated_id),
-        );
-    }
-    let Opened {
-        mut row,
-        ratchet,
-        new_session,
-        first_contact,
-        ..
-    } = o;
-    let new_prekeys = match new_session {
-        Some(pk) => {
-            prune_sessions(q, &row)?;
-            q.put_meta(META_PREKEYS, &pk)?;
-            log(
-                q,
-                now,
-                None,
-                &TransparencyEvent::SessionEstablished {
-                    contact: row.contact_fp,
-                    device: row.contact_device,
-                    initiator: false,
-                    post_quantum: true,
-                },
-            )?;
-            Some(pk)
+    let from_me = o.row.contact_fp == *my_fp;
+    let text = match (&env.body, from_me) {
+        (Body::Text(t), false) => t.clone(),
+        // Mes appareils ne s'échangent pas de textes : un texte venant de moi
+        // est inattendu (les copies passent par `SyncSent`).
+        (Body::Text(_), true) => {
+            let id = Some(authenticated_id);
+            return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
         }
-        None => None,
+        (_, false) => {
+            let id = Some(authenticated_id);
+            return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
+        }
+        (_, true) => return accept_sync(q, limiter, packet, o, &env, me, my_fp, now, rng),
     };
-    row.state = ser_state(&ratchet)?;
-    row.pending_initial = None;
-    row.last_rx = now;
-    q.put_session(&row)?;
+    let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
     // Avant `insert_message` (identifiant de paquet unique).
     q.mark_seen(packet.id, now)?;
-    let Body::Text(text) = env.body;
     let message_id = MessageId::incoming(&row.contact_fp, &env.message_id);
     let inserted = q.insert_message(
         row.contact_fp,
@@ -512,25 +503,8 @@ fn accept(
             },
         )?;
     }
-    log(
-        q,
-        now,
-        Some(packet.id),
-        &TransparencyEvent::AckEmitted {
-            for_packet: packet.id,
-        },
-    )?;
+    let ack = emit_ack(q, packet, env.ack_secret, now, rng)?;
     let alias = Core::alias_in(q, row.contact_fp)?;
-    // Dans la boîte du message : y répondre ailleurs relierait les deux sens
-    // de la conversation, et les nœuds qui gardent le message ne le verraient pas.
-    let ack = Packet::ack(packet, env.ack_secret, now, rng);
-    q.outbox_put(
-        ack.id,
-        &ack.encode(),
-        ack.kind,
-        u64::from(ack.expires_at),
-        now,
-    )?;
     if !inserted {
         return Ok((ReceiveOutcome::Duplicate, new_prekeys));
     }
@@ -543,6 +517,140 @@ fn accept(
         },
         new_prekeys,
     ))
+}
+
+/// Synchronisation authentifiée venue d'un de mes appareils : appliquée avec
+/// les contrôles de l'opération locale (refus : quarantaine, ratchet gardé),
+/// une seule fois par identifiant d'enveloppe (table `inbound`, identifiant
+/// dérivé de mon empreinte). Accusée comme un message.
+#[allow(clippy::too_many_arguments)]
+fn accept_sync(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    me: &DevicePublic,
+    my_fp: &Fingerprint,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let sync_id = MessageId::incoming(my_fp, &env.message_id);
+    let kind = if q.inbound_has_message(sync_id)? {
+        None
+    } else {
+        match sync::apply(q, me, env)? {
+            Ok(kind) => Some(kind),
+            Err(reason) => {
+                let id = Some(ack::packet_id_for(&env.ack_secret));
+                return reject_authenticated(q, limiter, packet, o, now, reason, id);
+            }
+        }
+    };
+    let (_, new_prekeys, _) = commit_session(q, o, now)?;
+    if kind == Some(SyncKind::Devices) {
+        // La nouvelle liste peut retirer l'appareil expéditeur : sa session,
+        // que `commit_session` vient de réécrire, disparaît aussi.
+        if let Some(own) = OwnDevices::read(q)? {
+            sync::purge_removed_own_sessions(q, &own.list)?;
+        }
+    }
+    q.mark_seen(packet.id, now)?;
+    q.record_inbound(packet.id, sync_id)?;
+    match kind {
+        Some(kind) => log(
+            q,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::SyncApplied { kind },
+        )?,
+        None => log_limited(
+            q,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DuplicateIgnored {
+                packet_id: packet.id,
+            },
+        )?,
+    }
+    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    let outcome = match kind {
+        Some(kind) => ReceiveOutcome::Synced { kind },
+        None => ReceiveOutcome::Duplicate,
+    };
+    Ok((outcome, new_prekeys))
+}
+
+/// Enregistre la session qui a authentifié le message : nouvelle session
+/// (paquets de clés consommés, sessions en trop supprimées) ou état avancé.
+/// Renvoie la ligne écrite, les nouveaux secrets de paquets de clés et
+/// « premier message d'une session ».
+fn commit_session(
+    q: &impl Queries,
+    o: Opened,
+    now: u64,
+) -> Result<(SessionRow, Option<PrekeySecrets>, bool)> {
+    let Opened {
+        mut row,
+        ratchet,
+        new_session,
+        first_contact,
+        ..
+    } = o;
+    let new_prekeys = match new_session {
+        Some(pk) => {
+            prune_sessions(q, &row)?;
+            q.put_meta(META_PREKEYS, &pk)?;
+            log(
+                q,
+                now,
+                None,
+                &TransparencyEvent::SessionEstablished {
+                    contact: row.contact_fp,
+                    device: row.contact_device,
+                    initiator: false,
+                    post_quantum: true,
+                },
+            )?;
+            Some(pk)
+        }
+        None => None,
+    };
+    row.state = ser_state(&ratchet)?;
+    row.pending_initial = None;
+    row.last_rx = now;
+    q.put_session(&row)?;
+    Ok((row, new_prekeys, first_contact))
+}
+
+/// Accusé de réception du paquet, mis en file d'envoi. Dans la boîte du
+/// message : y répondre ailleurs relierait les deux sens de la
+/// conversation, et les nœuds qui gardent le message ne le verraient pas.
+fn emit_ack(
+    q: &impl Queries,
+    packet: &Packet,
+    ack_secret: [u8; 16],
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Packet> {
+    log(
+        q,
+        now,
+        Some(packet.id),
+        &TransparencyEvent::AckEmitted {
+            for_packet: packet.id,
+        },
+    )?;
+    let ack = Packet::ack(packet, ack_secret, now, rng);
+    q.outbox_put(
+        ack.id,
+        &ack.encode(),
+        ack.kind,
+        u64::from(ack.expires_at),
+        now,
+    )?;
+    Ok(ack)
 }
 
 /// Contrôles d'un contenu authentifié : identifiant lié au secret d'accusé,
