@@ -42,15 +42,71 @@ exiger_cle_publique() { # $1 = fichier
     || erreur "la clé publique $1 est vide ou invalide : le mainteneur doit d'abord y publier sa clé minisign (voir keys/README.md). Ou passez une clé avec --pubkey <fichier>."
 }
 
+# Environnement macOS de la CI, lu dans un fichier .xcode-version (lignes « clé=valeur »).
+# Positionne XCODE_ATTENDU et SDK_ATTENDU ; code 1 si le fichier est absent ou incomplet.
+lire_xcode_version() { # $1 = fichier
+  XCODE_ATTENDU=""; SDK_ATTENDU=""
+  [ -f "$1" ] || return 1
+  XCODE_ATTENDU="$(sed -n 's/^xcode=//p' "$1" | head -n1)"
+  SDK_ATTENDU="$(sed -n 's/^sdk=//p' "$1" | head -n1)"
+  [ -n "$XCODE_ATTENDU" ] && [ -n "$SDK_ATTENDU" ]
+}
+
+# Cette machine peut-elle reproduire le binaire macOS de la CI ? Il faut rustup (la chaîne officielle
+# épinglée par rust-toolchain.toml, pas le rustc de Homebrew) et exactement l'Xcode et le SDK de la CI.
+# Code 0 si oui ; sinon 1, avec la raison dans RAISON_DARWIN.
+environnement_darwin_conforme() { # $1 = fichier .xcode-version
+  local xcode sdk
+  RAISON_DARWIN=""
+  if ! command -v rustup >/dev/null 2>&1; then
+    RAISON_DARWIN="rustup absent (le rustc de Homebrew n'est pas la chaîne officielle épinglée)"
+    return 1
+  fi
+  if ! lire_xcode_version "$1"; then
+    RAISON_DARWIN="fichier $1 absent ou incomplet (Xcode de la CI inconnu)"
+    return 1
+  fi
+  xcode="$(xcodebuild -version 2>/dev/null | sed -n 's/^Xcode //p' | head -n1 || true)"
+  sdk="$(xcrun --show-sdk-version 2>/dev/null || true)"
+  if [ "$xcode" != "$XCODE_ATTENDU" ] || [ "$sdk" != "$SDK_ATTENDU" ]; then
+    RAISON_DARWIN="SDK/Xcode différent de celui de la CI (ici : Xcode ${xcode:-inconnu}, SDK ${sdk:-inconnu} ; CI : Xcode $XCODE_ATTENDU, SDK $SDK_ATTENDU, voir .xcode-version)"
+    return 1
+  fi
+  return 0
+}
+
+# Fichier .xcode-version qui décrit l'environnement macOS attendu : celui du tag de la version
+# (voir fichier_xcode_du_tag et recompiler_localement), sinon celui de l'arbre de travail.
+XCODE_VERSION_FICHIER=""
+AVIS_DARWIN_DONNE=0
+
+# Prend le .xcode-version enregistré dans le tag v<version>, s'il existe.
+fichier_xcode_du_tag() { # $1 = racine du dépôt, $2 = version, $3 = répertoire de travail
+  if git -C "$1" show "v$2:.xcode-version" > "$3/xcode-version-du-tag" 2>/dev/null; then
+    XCODE_VERSION_FICHIER="$3/xcode-version-du-tag"
+  else
+    XCODE_VERSION_FICHIER="$1/.xcode-version"
+  fi
+}
+
 # Cibles compilables sur cette machine : cibles Linux musl de l'architecture de l'hôte
-# (via Docker) ; aarch64-apple-darwin seulement sur macOS arm64.
+# (via Docker) ; aarch64-apple-darwin seulement sur macOS arm64, avec rustup et l'Xcode/SDK de la CI.
 cible_compilable_ici() {
   local os arch
   os="$(uname -s)"; arch="$(uname -m)"
   case "$1" in
     x86_64-unknown-linux-musl)  case "$arch" in x86_64|amd64) return 0 ;; esac ;;
     aarch64-unknown-linux-musl) case "$arch" in arm64|aarch64) return 0 ;; esac ;;
-    aarch64-apple-darwin)       [ "$os" = "Darwin" ] && case "$arch" in arm64|aarch64) return 0 ;; esac ;;
+    aarch64-apple-darwin)
+      [ "$os" = "Darwin" ] || return 1
+      case "$arch" in arm64|aarch64) ;; *) return 1 ;; esac
+      environnement_darwin_conforme "$XCODE_VERSION_FICHIER" && return 0
+      if [ "$AVIS_DARWIN_DONNE" -eq 0 ]; then
+        AVIS_DARWIN_DONNE=1
+        echo "avis : aarch64-apple-darwin n'est pas recompilé sur cette machine : $RAISON_DARWIN." >&2
+        echo "avis : pour cette cible, la confiance repose sur le double build de la CI, l'attestation de provenance et les reconstructions indépendantes (barking-rebuilds). Seules les cibles Linux de cette machine sont recompilées et comparées." >&2
+      fi
+      ;;
   esac
   return 1
 }
@@ -105,14 +161,25 @@ comparer_reconstruction() { # $1 = répertoire de la version, $2 = répertoire r
 }
 
 # Recompile avec repro-build.sh chaque cible listée compilable ici, dans $3.
-recompiler_localement() { # $1 = racine du dépôt, $2 = version, $3 = répertoire de sortie
-  local racine="$1" version="$2" out="$3" nom cible
-  mkdir -p "$out"
+# L'environnement de build (scripts/, docker/, .xcode-version, rust-toolchain.toml) est celui enregistré
+# dans le tag v<version>, extrait dans $4 : jamais celui de l'arbre de travail.
+recompiler_localement() { # $1 = racine du dépôt, $2 = version, $3 = répertoire de sortie, $4 = répertoire de travail
+  local racine="$1" version="$2" out="$3" env="$4/env-du-tag" nom cible chemin
+  git -C "$racine" rev-parse --verify --quiet "v$version^{commit}" >/dev/null \
+    || erreur "le tag v$version est introuvable dans ce clone (git fetch --tags)"
+  for chemin in scripts/repro-build.sh scripts/release-lib.sh docker/repro.Dockerfile .xcode-version rust-toolchain.toml; do
+    git -C "$racine" cat-file -e "v$version:$chemin" 2>/dev/null \
+      || erreur "le tag v$version ne contient pas $chemin : son environnement de build n'est pas enregistré (version antérieure à cette procédure). Recompilez à la main depuis le tag (voir docs/VERIFYING.md)."
+  done
+  mkdir -p "$env" "$out"
+  git -C "$racine" archive --format=tar "v$version" scripts docker .xcode-version rust-toolchain.toml \
+    | tar -x -C "$env" || erreur "extraction de l'environnement de build du tag v$version échouée"
+  XCODE_VERSION_FICHIER="$env/.xcode-version"
   for nom in $NOMS_LISTES; do
     cible="${nom#"barking-cli-${version}-"}"
     cible_compilable_ici "$cible" || continue
-    echo "recompilation de $cible…" >&2
-    "$racine/scripts/repro-build.sh" --target "$cible" --ref "v$version" --out "$out" >/dev/null \
+    echo "recompilation de $cible (environnement de build du tag v$version)…" >&2
+    "$env/scripts/repro-build.sh" --git-dir "$racine" --target "$cible" --ref "v$version" --out "$out" >/dev/null \
       || erreur "la recompilation de $cible a échoué"
   done
 }

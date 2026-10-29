@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Test : signature et vérification des versions (sign-release.sh, verify-release.sh).
-# Lancé depuis l'hôte, il se relance lui-même dans un conteneur (minisign, aucun réseau requis).
+# Lancé depuis l'hôte, il se relance lui-même dans un conteneur (minisign, git, aucun réseau requis).
+# Les scripts testés tournent depuis un dépôt git jetable (tag v0.0.1), jamais depuis le dépôt réel :
+# aucun cas ne dépend de keys/maintainer.pub ni des tags du dépôt.
 set -euo pipefail
 
 racine="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,8 +19,6 @@ if [ -z "${BARKING_TEST_DANS_CONTENEUR:-}" ]; then
     -w /repo "$image" bash /repo/scripts/tests/release-scripts.sh
 fi
 
-sign="$racine/scripts/sign-release.sh"
-verify="$racine/scripts/verify-release.sh"
 version="0.0.1"
 t_x86="x86_64-unknown-linux-musl"
 t_arm="aarch64-unknown-linux-musl"
@@ -26,6 +26,24 @@ t_mac="aarch64-apple-darwin"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/barking-release-test.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
+
+# Dépôt jetable : copie des scripts, un commit, le tag v$version.
+git_test() { git -c user.name=test -c user.email=test@example.invalid -c init.defaultBranch=main "$@"; }
+copier_scripts() { # $1 = répertoire de destination
+  mkdir -p "$1/keys"
+  cp -R "$racine/scripts" "$1/"
+  cp "$racine/.xcode-version" "$racine/rust-toolchain.toml" "$1/"
+  : > "$1/keys/maintainer.pub"
+}
+depot="$tmp/depot"
+copier_scripts "$depot"
+git_test -C "$depot" init -q
+git_test -C "$depot" add -A
+git_test -C "$depot" commit -q -m "version de test"
+git_test -C "$depot" tag "v$version"
+commit_tag="$(git -C "$depot" rev-parse "v$version^{commit}")"
+sign="$depot/scripts/sign-release.sh"
+verify="$depot/scripts/verify-release.sh"
 
 # Clés jetables, créées ici et nulle part ailleurs.
 mkdir -p "$tmp/cles"
@@ -84,7 +102,11 @@ falsifier_minisig() {
 
 cas_sign_then_verify_ok() {
   nouveau; signer_ok || return 1
-  verifier "$tmp/cles/bonne.pub"; attendre_code 0 && attendre_texte "vérifiée"
+  attendre_texte "commit du tag v$version : $commit_tag" || return 1
+  minisign -V -m "$D/SHA256SUMS" -x "$D/SHA256SUMS.minisig" -p "$tmp/cles/bonne.pub" 2>&1 \
+    | grep -qxF "Trusted comment: barking v$version commit $commit_tag" \
+    || { echo "    commentaire signé inattendu" >&2; return 1; }
+  verifier "$tmp/cles/bonne.pub"; attendre_code 0 && attendre_texte "vérifiée" && attendre_texte "identique"
 }
 cas_sign_then_verify_rebuild_ok() {
   nouveau; signer_ok || return 1
@@ -148,10 +170,48 @@ cas_verify_rebuilt_mismatch_rejected() {
   printf 'autre\n' > "$R/barking-cli-$version-$t_x86"
   verifier "$tmp/cles/bonne.pub" --rebuilt-dir "$R"; attendre_code 1 && attendre_texte "diffère"
 }
+signer_avec_commentaire() { # $1 = commentaire signé
+  minisign -S -m "$D/SHA256SUMS" -s "$tmp/cles/bonne.key" -t "$1" -x "$D/SHA256SUMS.minisig" >/dev/null
+}
 cas_trusted_comment_other_version_rejected() {
-  nouveau
-  minisign -S -m "$D/SHA256SUMS" -s "$tmp/cles/bonne.key" -t "barking v9.9.9" -x "$D/SHA256SUMS.minisig" >/dev/null
+  nouveau; signer_avec_commentaire "barking v9.9.9 commit $commit_tag"
   verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "commentaire signé"
+}
+cas_trusted_comment_without_commit_rejected() {
+  nouveau; signer_avec_commentaire "barking v$version"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "commentaire signé" || return 1
+  nouveau; signer_avec_commentaire "barking v$version commit ${commit_tag:0:39}"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "commentaire signé" || return 1
+  # La version est comparée littéralement (le point n'est pas un joker).
+  nouveau; signer_avec_commentaire "barking v0x0x1 commit $commit_tag"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "commentaire signé"
+}
+cas_signed_commit_differs_from_local_tag_rejected() {
+  nouveau; signer_ok || return 1
+  # Autre clone où le tag v$version désigne un autre commit.
+  local autre="$tmp/autre-clone"
+  rm -rf "$autre"
+  git clone -q "$depot" "$autre"
+  git_test -C "$autre" commit -q --allow-empty -m "autre commit"
+  git_test -C "$autre" tag -f "v$version" >/dev/null
+  lancer "$autre/scripts/verify-release.sh" "$version" --from-dir "$D" --pubkey "$tmp/cles/bonne.pub" --skip-attestation
+  attendre_code 1 && attendre_texte "tag déplacé" && attendre_texte "$commit_tag"
+}
+cas_signed_commit_unchecked_without_local_tag() {
+  nouveau; signer_ok || return 1
+  # Scripts hors de tout dépôt git : le commit ne peut pas être comparé, c'est annoncé.
+  local sans_git="$tmp/sans-git"
+  [ -d "$sans_git" ] || copier_scripts "$sans_git"
+  lancer "$sans_git/scripts/verify-release.sh" "$version" --from-dir "$D" --pubkey "$tmp/cles/bonne.pub" --skip-attestation
+  attendre_code 0 && attendre_texte "n'a pas pu être comparé" && attendre_texte "commit signé par le mainteneur : $commit_tag"
+}
+cas_sign_refuses_without_local_tag() {
+  nouveau
+  local sans_git="$tmp/sans-git"
+  [ -d "$sans_git" ] || copier_scripts "$sans_git"
+  lancer "$sans_git/scripts/sign-release.sh" "$version" --from-dir "$D" --rebuilt-dir "$R" \
+    --seckey "$tmp/cles/bonne.key" --pubkey "$tmp/cles/bonne.pub"
+  attendre_code 1 && attendre_texte "tag v$version est introuvable" && sans_minisig
 }
 cas_comment_only_pubkey_rejected() {
   nouveau; signer_ok || return 1
@@ -163,11 +223,18 @@ cas_sign_wrong_seckey_refused() {
   nouveau
   signer "$tmp/cles/intruse.key"; attendre_code 1 && attendre_texte "ne correspond pas" && sans_minisig
 }
+cas_rebuild_refuses_tag_without_build_env() {
+  nouveau; signer_ok || return 1
+  # Le tag du dépôt jetable n'enregistre pas docker/repro.Dockerfile : la recompilation doit refuser
+  # plutôt que d'utiliser l'environnement de l'arbre de travail.
+  verifier "$tmp/cles/bonne.pub" --rebuild
+  attendre_code 1 && attendre_texte "ne contient pas docker/repro.Dockerfile"
+}
 cas_empty_pubkey_rejected() {
   nouveau; signer_ok || return 1
-  [ ! -s "$racine/keys/maintainer.pub" ] || { echo "    keys/maintainer.pub devrait être vide" >&2; return 1; }
-  lancer "$verify" "$version" --from-dir "$D" --skip-attestation
-  attendre_code 1 && attendre_texte "keys/README.md"
+  : > "$tmp/vide.pub"
+  verifier "$tmp/vide.pub"; attendre_code 1 && attendre_texte "keys/README.md" || return 1
+  signer "$tmp/cles/bonne.key" "$tmp/vide.pub"; attendre_code 1 && attendre_texte "keys/README.md"
 }
 
 echecs=0
@@ -175,6 +242,9 @@ for cas in sign_then_verify_ok sign_then_verify_rebuild_ok forged_signature_reje
            tampered_binary_rejected tampered_sums_rejected extra_or_missing_binary_rejected \
            sign_refuses_on_mismatch sign_refuses_missing_or_unlisted sign_refuses_without_rebuilt_counterpart \
            verify_rebuilt_mismatch_rejected trusted_comment_other_version_rejected \
+           trusted_comment_without_commit_rejected signed_commit_differs_from_local_tag_rejected \
+           signed_commit_unchecked_without_local_tag sign_refuses_without_local_tag \
+           rebuild_refuses_tag_without_build_env \
            comment_only_pubkey_rejected sign_wrong_seckey_refused empty_pubkey_rejected; do
   if "cas_$cas"; then echo "PASS $cas"; else echo "FAIL $cas"; echecs=$((echecs + 1)); fi
 done

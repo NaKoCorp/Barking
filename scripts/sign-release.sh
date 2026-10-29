@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Signature d'une version (mainteneur) : recompile, compare, puis signe SHA256SUMS avec minisign.
+# Le commentaire signé est « barking v<version> commit <commit du tag local> ».
 # Usage : scripts/sign-release.sh <version> --seckey <fichier> [--from-dir <dir>] [--rebuilt-dir <dir>]
 #           [--pubkey <fichier>] [--repo <owner/repo>]
 set -euo pipefail
@@ -31,8 +32,15 @@ command -v minisign >/dev/null 2>&1 || erreur "minisign est requis"
 # La signature produite est contrôlée avant tout dépôt : la clé publique doit donc être valable.
 exiger_cle_publique "$pubkey"
 
+# Le commit du tag local est lié à la signature (commentaire signé) : il doit être connu ici.
+commit="$(git -C "$racine" rev-parse --verify --quiet "v$version^{commit}" 2>/dev/null || true)"
+[[ $commit =~ ^[0-9a-f]{40}$ ]] \
+  || erreur "le tag v$version est introuvable dans ce clone : récupérez-le (git fetch --tags) avant de signer"
+echo "commit du tag v$version : $commit" >&2
+
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/barking-sign.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
+fichier_xcode_du_tag "$racine" "$version" "$tmp"
 # Tout est contrôlé, puis signé, sur cette copie unique.
 dir="$tmp/assets"; mkdir -p "$dir"
 
@@ -60,14 +68,14 @@ if [ -n "$rebuilt_dir" ]; then
   rebuilt="$(cd "$rebuilt_dir" && pwd)"
 else
   rebuilt="$tmp/rebuilt"
-  recompiler_localement "$racine" "$version" "$rebuilt"
+  recompiler_localement "$racine" "$version" "$rebuilt" "$tmp"
 fi
 comparer_reconstruction "$dir" "$rebuilt" "$version"
 
 # 3. Signature (la sortie de minisign reste visible : invite de mot de passe d'une vraie clé),
 #    contrôlée avec la clé publique avant tout déplacement ou dépôt.
 sig="$tmp/SHA256SUMS.minisig"
-minisign -S -m "$dir/SHA256SUMS" -s "$seckey" -t "barking v$version" -x "$sig" >&2 \
+minisign -S -m "$dir/SHA256SUMS" -s "$seckey" -t "barking v$version commit $commit" -x "$sig" >&2 \
   || erreur "la signature a échoué"
 [ -s "$sig" ] || erreur "signature vide"
 minisign -V -m "$dir/SHA256SUMS" -x "$sig" -p "$pubkey" >/dev/null 2>&1 \

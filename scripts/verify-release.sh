@@ -43,6 +43,7 @@ exiger_cle_publique "$pubkey"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/barking-verify.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
+fichier_xcode_du_tag "$racine" "$version" "$tmp"
 # Toutes les étapes travaillent sur cette copie unique (pas de relecture du répertoire d'origine).
 dir="$tmp/assets"; mkdir -p "$dir"
 
@@ -67,8 +68,22 @@ etape "1/4 signature de SHA256SUMS…" "signature"
 [ -f "$dir/SHA256SUMS.minisig" ] || erreur "SHA256SUMS.minisig absent de $dir"
 sortie_min="$(minisign -V -m "$dir/SHA256SUMS" -x "$dir/SHA256SUMS.minisig" -p "$pubkey" 2>&1)" \
   || erreur "signature invalide ou clé différente de $pubkey : $sortie_min"
-printf '%s\n' "$sortie_min" | grep -qxF "Trusted comment: barking v$version" \
-  || erreur "le commentaire signé n'est pas « barking v$version » (signature d'une autre version ?)"
+# Commentaire signé attendu : « barking v<version> commit <40 hexa> » (version comparée littéralement).
+commentaire="$(printf '%s\n' "$sortie_min" | sed -n 's/^Trusted comment: //p' | head -n1)"
+prefixe="barking v$version commit "
+commit_signe=""
+case "$commentaire" in "$prefixe"*) commit_signe="${commentaire#"$prefixe"}" ;; esac
+[[ $commit_signe =~ ^[0-9a-f]{40}$ ]] \
+  || erreur "le commentaire signé « $commentaire » n'est pas « barking v$version commit <commit> » (signature d'une autre version ?)"
+echo "commit signé par le mainteneur : $commit_signe" >&2
+commit_local="$(git -C "$racine" rev-parse --verify --quiet "v$version^{commit}" 2>/dev/null || true)"
+if [ -n "$commit_local" ]; then
+  [ "$commit_local" = "$commit_signe" ] \
+    || erreur "le tag v$version de ce clone désigne le commit $commit_local, mais le mainteneur a signé le commit $commit_signe (tag déplacé ?)"
+  echo "commit du tag v$version dans ce clone : identique" >&2
+else
+  echo "avis : le tag v$version est absent de ce clone ; le commit signé n'a pas pu être comparé localement (git fetch --tags)" >&2
+fi
 
 # Étape 2 : empreintes des binaires, sans fichier manquant ni en trop.
 etape "2/4 empreintes des binaires…" "empreintes"
@@ -84,7 +99,7 @@ else
   for nom in $NOMS_LISTES; do
     gh attestation verify "$dir/$nom" -R "$REPO" \
       --signer-workflow "$REPO/.github/workflows/release.yml" \
-      --source-ref "refs/tags/v$version" >/dev/null 2>"$tmp/err" \
+      --source-ref "refs/tags/v$version" --deny-self-hosted-runners >/dev/null 2>"$tmp/err" \
       || erreur "attestation refusée pour $nom : $(cat "$tmp/err")"
   done
 fi
@@ -97,7 +112,7 @@ if [ "$rebuild" -eq 1 ]; then
     rebuilt="$(cd "$rebuilt_dir" && pwd)"
   else
     rebuilt="$tmp/rebuilt"
-    recompiler_localement "$racine" "$version" "$rebuilt"
+    recompiler_localement "$racine" "$version" "$rebuilt" "$tmp"
   fi
   comparer_reconstruction "$dir" "$rebuilt" "$version"
 else
