@@ -550,7 +550,7 @@ fn accept_sync(
     let kind = if q.inbound_has_message(sync_id)? {
         None
     } else {
-        match sync::apply(q, me, env)? {
+        match sync::apply(q, me, o.row.contact_device, env)? {
             Ok(kind) => Some(kind),
             Err(reason) => {
                 let id = Some(ack::packet_id_for(&env.ack_secret));

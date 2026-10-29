@@ -97,7 +97,8 @@ CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries(message_id);
 ///
 /// `contact_clock` : pour chaque empreinte, date (horodatage d'enveloppe ou
 /// heure locale) de la dernière opération sur ce contact, et si c'était une
-/// suppression (pierre tombale). Dernier écrivain gagnant entre mes appareils.
+/// suppression (pierre tombale), et l'appareil qui l'a faite (départage à
+/// date égale). Dernier écrivain gagnant entre mes appareils.
 pub const SCHEMA_V2_INBOUND: &str = "
 CREATE TABLE IF NOT EXISTS inbound (
     packet_id BLOB PRIMARY KEY NOT NULL,
@@ -106,13 +107,19 @@ CREATE TABLE IF NOT EXISTS inbound (
 CREATE TABLE IF NOT EXISTS contact_clock (
     fp BLOB PRIMARY KEY NOT NULL,
     at INTEGER NOT NULL,
-    removed INTEGER NOT NULL
+    removed INTEGER NOT NULL,
+    writer BLOB NOT NULL DEFAULT x'00000000000000000000000000000000'
 );
 ";
 
 /// Colonne `own` de `deliveries`, pour une base v2 créée avant son ajout.
 pub const DELIVERIES_ADD_OWN: &str =
     "ALTER TABLE deliveries ADD COLUMN own INTEGER NOT NULL DEFAULT 0;";
+
+/// Colonne `writer` de `contact_clock`, pour une base v2 créée avant son
+/// ajout (auteur inconnu : identifiant nul).
+pub const CONTACT_CLOCK_ADD_WRITER: &str = "ALTER TABLE contact_clock ADD COLUMN writer BLOB \
+     NOT NULL DEFAULT x'00000000000000000000000000000000';";
 
 /// Contexte de dérivation d'un identifiant de message à partir d'un
 /// identifiant de paquet (messages v1 et messages reçus avant le lot 1B).

@@ -13,14 +13,14 @@ use std::collections::HashSet;
 use rand_core::CryptoRng;
 
 use super::link::META_OWN_CARD;
-use super::send::{Target, seal_for};
+use super::send::{SealTime, Target, seal_for};
 use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts, load_card, log};
 use crate::contact::ContactCard;
 use crate::envelope::{self, Body, Envelope, SyncOp};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint};
 use crate::packet::Packet;
-use crate::store::{Direction, MessageId, MessageStatus, Queries};
+use crate::store::{ContactClock, Direction, MessageId, MessageStatus, Queries};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -42,7 +42,7 @@ pub(super) fn seal_to_own(
     body: &Body,
     kind: SyncKind,
     message_id: MessageId,
-    now: u64,
+    time: SealTime,
     rng: &mut impl CryptoRng,
 ) -> Result<Vec<Packet>> {
     let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
@@ -50,10 +50,10 @@ pub(super) fn seal_to_own(
         return Ok(Vec::new());
     }
     if !envelope::fits_in_packet(body) {
-        log(q, now, None, &TransparencyEvent::SyncSkipped { kind })?;
+        log(q, time.now, None, &TransparencyEvent::SyncSkipped { kind })?;
         return Ok(Vec::new());
     }
-    let sealed = seal_for(q, device, &Target::OwnDevices, body, message_id, now, rng)?;
+    let sealed = seal_for(q, device, &Target::OwnDevices, body, message_id, time, rng)?;
     for (packet, peer) in &sealed {
         q.add_delivery(message_id, packet.id, *peer, true)?;
     }
@@ -61,18 +61,27 @@ pub(super) fn seal_to_own(
 }
 
 /// Met en file l'opération `op` pour chacun de mes autres appareils, sous un
-/// identifiant de message neuf (sans ligne de message).
+/// identifiant de message neuf (sans ligne de message). `time.sent_at` est
+/// la date de l'opération (horloge du contact, voir [`touch`]).
 pub(super) fn send_op(
     q: &impl Queries,
     device: &DeviceKeys,
     op: SyncOp,
-    now: u64,
+    time: SealTime,
     rng: &mut impl CryptoRng,
 ) -> Result<()> {
     let mut id = [0u8; 16];
     rng.fill_bytes(&mut id);
     let body = Body::SyncContact(op);
-    seal_to_own(q, device, &body, SyncKind::Contact, MessageId(id), now, rng)?;
+    seal_to_own(
+        q,
+        device,
+        &body,
+        SyncKind::Contact,
+        MessageId(id),
+        time,
+        rng,
+    )?;
     Ok(())
 }
 
@@ -81,7 +90,7 @@ pub(super) fn send_state(
     q: &impl Queries,
     device: &DeviceKeys,
     fp: Fingerprint,
-    now: u64,
+    time: SealTime,
     rng: &mut impl CryptoRng,
 ) -> Result<()> {
     let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
@@ -90,28 +99,44 @@ pub(super) fn send_state(
         alias: row.alias.clone(),
         verified: row.verified,
     };
-    send_op(q, device, op, now, rng)
+    send_op(q, device, op, time, rng)
 }
 
-/// Opération locale sur le contact `fp` à `now` : l'horloge du contact
-/// avance strictement (une opération locale l'emporte sur tout ce que cet
-/// appareil connaît déjà), et `removed` pose ou lève la pierre tombale.
-/// Renvoie la date de l'opération, à utiliser comme `sent_at` de sa copie.
-pub(super) fn touch(q: &impl Queries, fp: Fingerprint, now: u64, removed: bool) -> Result<u64> {
+/// Opération locale de l'appareil `me` sur le contact `fp` à `now` :
+/// l'horloge du contact avance strictement (une opération locale l'emporte
+/// sur tout ce que cet appareil connaît déjà), et `removed` pose ou lève la
+/// pierre tombale. Renvoie les dates du scellement de sa copie : `sent_at`
+/// est la date de l'opération, `now` reste l'horloge murale.
+pub(super) fn touch(
+    q: &impl Queries,
+    fp: Fingerprint,
+    now: u64,
+    removed: bool,
+    me: DeviceId,
+) -> Result<SealTime> {
     let at = match q.contact_clock(fp)? {
-        Some((last, _)) if last >= now => last.saturating_add(1),
+        Some(last) if last.at >= now => last.at.saturating_add(1),
         _ => now,
     };
-    q.set_contact_clock(fp, at, removed)?;
-    Ok(at)
+    let clock = ContactClock {
+        at,
+        removed,
+        writer: me,
+    };
+    q.set_contact_clock(fp, &clock)?;
+    Ok(SealTime { now, sent_at: at })
 }
 
 /// Applique un contenu de synchronisation authentifié, venu d'un de mes
 /// appareils. Toute vérification précède la première écriture : un refus
 /// (`Ok(Err(raison))`) ne laisse rien d'écrit. `Err` : échec local seulement.
+///
+/// `sender` : l'appareil (des miens) qui a authentifié le contenu ; il
+/// départage deux opérations de même date sur un contact.
 pub(super) fn apply(
     q: &impl Queries,
     me: &DevicePublic,
+    sender: DeviceId,
     env: &Envelope,
 ) -> Result<core::result::Result<SyncKind, &'static str>> {
     match &env.body {
@@ -134,7 +159,7 @@ pub(super) fn apply(
             Ok(Ok(SyncKind::Sent))
         }
         Body::SyncContact(op) => {
-            Ok(content(apply_op(q, op, env.sent_at))?.map(|()| SyncKind::Contact))
+            Ok(content(apply_op(q, op, env.sent_at, sender))?.map(|()| SyncKind::Contact))
         }
         Body::SyncDevices { card } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
@@ -165,36 +190,41 @@ fn content<T>(r: Result<T>) -> Result<core::result::Result<T, &'static str>> {
     }
 }
 
-/// État d'un contact, dernier écrivain gagnant sur `at` (horodatage
-/// authentifié de l'enveloppe), par empreinte. Une opération plus ancienne
-/// que la dernière connue est sans effet (acceptée et accusée) ; à date
-/// égale, une suppression l'emporte sur un état présent, dans les deux
-/// ordres d'arrivée. La pierre tombale d'une suppression empêche un état
-/// plus ancien de ressusciter le contact ; un état plus récent la lève.
-fn apply_op(q: &impl Queries, op: &SyncOp, at: u64) -> Result<()> {
+/// État d'un contact, dernier écrivain gagnant par empreinte, sur
+/// `(at, supprimé, auteur)` ([`ContactClock`]) : `at` est l'horodatage
+/// authentifié de l'enveloppe, `sender` l'appareil qui l'a envoyée. Une
+/// opération qui ne l'emporte pas sur la dernière connue est sans effet
+/// (acceptée et accusée). À date égale, une suppression l'emporte sur un état
+/// présent, puis l'appareil d'identifiant le plus grand : tous mes appareils
+/// tranchent pareil, quel que soit l'ordre d'arrivée. La pierre tombale d'une
+/// suppression empêche un état plus ancien de ressusciter le contact ; un
+/// état plus récent la lève.
+fn apply_op(q: &impl Queries, op: &SyncOp, at: u64, sender: DeviceId) -> Result<()> {
     let (fp, removing) = match op {
         SyncOp::Upsert { card, .. } => (card.fingerprint(), false),
         SyncOp::Remove(fp) => (*fp, true),
     };
-    if let Some((last, removed)) = q.contact_clock(fp)? {
-        let stale = at < last || (at == last && removed && !removing);
-        if stale {
-            return Ok(());
-        }
+    let clock = ContactClock {
+        at,
+        removed: removing,
+        writer: sender,
+    };
+    if !clock.newer_than(q.contact_clock(fp)?.as_ref()) {
+        return Ok(());
     }
     match op {
         SyncOp::Upsert {
             card,
             alias,
             verified,
-        } => contacts::upsert_in(q, card, alias, *verified)?,
+        } => contacts::upsert_in(q, card, alias, *verified, &clock)?,
         SyncOp::Remove(fp) => {
             if q.get_contact(*fp)?.is_some() {
                 q.delete_contact(*fp)?;
             }
         }
     }
-    q.set_contact_clock(fp, at, removing)
+    q.set_contact_clock(fp, &clock)
 }
 
 /// Nouvelle carte acceptable : liste signée par ma racine, de version

@@ -67,6 +67,30 @@ pub struct ContactRow {
     pub verified: bool,
 }
 
+/// Dernière opération connue sur un contact (dernier écrivain gagnant entre
+/// mes appareils). L'ordre est `(at, removed, writer)` : à date égale, une
+/// suppression l'emporte, puis l'appareil d'identifiant le plus grand, pour
+/// que tous mes appareils tranchent de la même façon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContactClock {
+    pub at: u64,
+    pub removed: bool,
+    /// Appareil auteur de l'opération (zéro : inconnu, base antérieure).
+    pub writer: DeviceId,
+}
+
+impl ContactClock {
+    /// Clé de comparaison : `(at, removed, writer)`.
+    pub fn key(&self) -> (u64, bool, [u8; 16]) {
+        (self.at, self.removed, self.writer.0)
+    }
+
+    /// `true` si `self` l'emporte strictement sur `other` (absent : toujours).
+    pub fn newer_than(&self, other: Option<&ContactClock>) -> bool {
+        other.is_none_or(|o| self.key() > o.key())
+    }
+}
+
 /// Session stockée. `state` est le postcard de `RatchetState` et
 /// `pending_initial` celui de `InitialMessage` ; Core les (dé)sérialise.
 /// Ne dérive pas `Debug` : contient des secrets.
@@ -324,6 +348,20 @@ impl Store {
         if !has_own {
             self.conn
                 .execute_batch(schema::DELIVERIES_ADD_OWN)
+                .map_err(map_err)?;
+        }
+        let has_writer: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('contact_clock') \
+                 WHERE name = 'writer'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_writer {
+            self.conn
+                .execute_batch(schema::CONTACT_CLOCK_ADD_WRITER)
                 .map_err(map_err)?;
         }
         self.conn
@@ -607,28 +645,41 @@ pub trait Queries {
         Ok(Some(MessageId(arr(mid)?)))
     }
 
-    /// Dernière opération connue sur le contact `fp` : `(date, supprimé)`.
-    fn contact_clock(&self, fp: Fingerprint) -> Result<Option<(u64, bool)>> {
-        let row: Option<(i64, i64)> = self
+    /// Dernière opération connue sur le contact `fp`.
+    fn contact_clock(&self, fp: Fingerprint) -> Result<Option<ContactClock>> {
+        let row: Option<(i64, i64, Vec<u8>)> = self
             .conn()
             .query_row(
-                "SELECT at, removed FROM contact_clock WHERE fp = ?1",
+                "SELECT at, removed, writer FROM contact_clock WHERE fp = ?1",
                 params![fp.0.as_slice()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(map_err)?;
-        Ok(row.map(|(at, removed)| (to_u64(at), removed != 0)))
+        row.map(|(at, removed, writer)| {
+            Ok(ContactClock {
+                at: to_u64(at),
+                removed: removed != 0,
+                writer: DeviceId(arr(writer)?),
+            })
+        })
+        .transpose()
     }
 
     /// Enregistre la dernière opération sur le contact `fp` (`removed` :
     /// pierre tombale d'une suppression).
-    fn set_contact_clock(&self, fp: Fingerprint, at: u64, removed: bool) -> Result<()> {
+    fn set_contact_clock(&self, fp: Fingerprint, clock: &ContactClock) -> Result<()> {
         self.conn()
             .execute(
-                "INSERT INTO contact_clock(fp, at, removed) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(fp) DO UPDATE SET at = excluded.at, removed = excluded.removed",
-                params![fp.0.as_slice(), to_i64(at), i64::from(removed)],
+                "INSERT INTO contact_clock(fp, at, removed, writer) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(fp) DO UPDATE SET at = excluded.at, removed = excluded.removed, \
+                 writer = excluded.writer",
+                params![
+                    fp.0.as_slice(),
+                    to_i64(clock.at),
+                    i64::from(clock.removed),
+                    clock.writer.0.as_slice()
+                ],
             )
             .map_err(map_err)?;
         Ok(())

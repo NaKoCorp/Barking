@@ -805,3 +805,85 @@ fn contact_sync_is_order_independent() {
     assert_eq!(left.len(), 1);
     assert_eq!(Packet::decode(&left[0]).unwrap().kind, Kind::Ack);
 }
+
+/// A et T, avec Carol et Dave connus des deux (ajoutés sur A à `NOW`, copiés
+/// sur T).
+fn pair_with_two_contacts(d: &Path, rng: &mut StdRng) -> (Dev, Dev, Fingerprint, Fingerprint) {
+    let (mut a, mut t) = admin_and_tablet(d, rng);
+    let carol = create(d, "carol", 6, rng)
+        .core
+        .contact_card("Carol")
+        .unwrap();
+    let dave = create(d, "dave", 7, rng).core.contact_card("Dave").unwrap();
+    let carol_fp = a.core.add_contact(&carol, Some("carol"), NOW, rng).unwrap();
+    let dave_fp = a.core.add_contact(&dave, Some("dave"), NOW, rng).unwrap();
+    sync_round(&mut a, &mut t, rng);
+    assert_eq!(contact_state(&a.core), contact_state(&t.core));
+    (a, t, carol_fp, dave_fp)
+}
+
+#[test]
+fn same_second_edits_converge() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(30);
+    let (mut a, mut t, carol, _) = pair_with_two_contacts(d.path(), &mut rng);
+    // Même seconde, deux appareils, deux alias différents pour Carol.
+    let mut r2 = StdRng::seed_from_u64(2);
+    let from_a = produced(&mut a, |c| {
+        c.set_alias(&carol, "x", NOW + 10, &mut r2).unwrap()
+    });
+    let from_t = produced(&mut t, |c| {
+        c.set_alias(&carol, "y", NOW + 10, &mut r2).unwrap()
+    });
+    assert_eq!((from_a.len(), from_t.len()), (1, 1));
+    deliver(&mut t, &from_a[0], &mut rng);
+    deliver(&mut a, &from_t[0], &mut rng);
+    assert_eq!(contact_state(&a.core), contact_state(&t.core));
+}
+
+#[test]
+fn concurrent_alias_move_converges() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(31);
+    let (mut a, mut t, carol, dave) = pair_with_two_contacts(d.path(), &mut rng);
+    let mut r2 = StdRng::seed_from_u64(3);
+    // A donne « z » à Carol ; T, plus tard, donne « z » à Dave.
+    let from_a = produced(&mut a, |c| {
+        c.set_alias(&carol, "z", NOW + 10, &mut r2).unwrap()
+    });
+    let from_t = produced(&mut t, |c| {
+        c.set_alias(&dave, "z", NOW + 20, &mut r2).unwrap()
+    });
+    deliver(&mut t, &from_a[0], &mut rng);
+    deliver(&mut a, &from_t[0], &mut rng);
+    // L'opération la plus récente garde l'alias, partout.
+    let expected = vec![(carol, None, false), (dave, Some("z".to_owned()), false)];
+    let mut sa = contact_state(&a.core);
+    let mut st = contact_state(&t.core);
+    let mut expected = expected;
+    for v in [&mut sa, &mut st, &mut expected] {
+        v.sort_by_key(|c| c.0.0);
+    }
+    assert_eq!(sa, expected);
+    assert_eq!(st, expected);
+}
+
+#[test]
+fn bumped_clock_only_moves_envelope_date() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(32);
+    let (mut a, _t, carol, _) = pair_with_two_contacts(d.path(), &mut rng);
+    let mut r2 = StdRng::seed_from_u64(4);
+    // Plusieurs opérations dans la même seconde : l'horloge du contact avance
+    // (NOW + 1, NOW + 2…), mais l'expiration du paquet suit l'horloge murale.
+    for alias in ["a", "b", "c"] {
+        let p = produced(&mut a, |c| {
+            c.set_alias(&carol, alias, NOW, &mut r2).unwrap()
+        });
+        let packet = Packet::decode(&p[0]).unwrap();
+        assert_eq!(
+            u64::from(packet.expires_at),
+            NOW + barking_core::packet::DEFAULT_TTL_SECS
+        );
+    }
+}

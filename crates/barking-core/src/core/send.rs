@@ -27,6 +27,24 @@ pub(super) enum Target {
     OwnDevices,
 }
 
+/// Dates d'un scellement : `now` (horloge murale) fixe le jour de la boîte,
+/// l'expiration du paquet, la création d'une session, la file d'envoi et le
+/// journal ; `sent_at` est la seule date portée par l'enveloppe. Elles ne
+/// diffèrent que pour une copie de synchronisation de contact, datée de
+/// l'horloge du contact (qui peut dépasser `now` de quelques secondes).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SealTime {
+    pub now: u64,
+    pub sent_at: u64,
+}
+
+impl SealTime {
+    /// Enveloppe datée de l'horloge murale.
+    pub fn at(now: u64) -> Self {
+        SealTime { now, sent_at: now }
+    }
+}
+
 fn new_message_id(rng: &mut impl CryptoRng) -> MessageId {
     let mut id = [0u8; 16];
     rng.fill_bytes(&mut id);
@@ -44,9 +62,10 @@ pub(super) fn seal_for(
     target: &Target,
     body: &Body,
     message_id: MessageId,
-    now: u64,
+    time: SealTime,
     rng: &mut impl CryptoRng,
 ) -> Result<Vec<(Packet, DeviceId)>> {
+    let SealTime { now, sent_at } = time;
     let me = device.public();
     let (fp, peers): (Fingerprint, Vec<(DevicePublic, Option<PrekeyBundle>)>) = match target {
         Target::Contact(fp) => {
@@ -123,7 +142,7 @@ pub(super) fn seal_for(
             session_mailbox(&row.mailbox_secret, &peer_id, day)
         };
         let env = Envelope {
-            sent_at: now,
+            sent_at,
             ack_secret: ack::new_secret(rng),
             message_id: message_id.0,
             body: body.clone(),
@@ -195,7 +214,7 @@ impl Core {
                 &Target::Contact(*to),
                 &body,
                 message_id,
-                now,
+                SealTime::at(now),
                 rng,
             )?;
             if sealed.is_empty() {
@@ -219,7 +238,15 @@ impl Core {
                 to: *to,
                 text: text.to_owned(),
             };
-            let mine = sync::seal_to_own(tx, device, &copy, SyncKind::Sent, message_id, now, rng)?;
+            let mine = sync::seal_to_own(
+                tx,
+                device,
+                &copy,
+                SyncKind::Sent,
+                message_id,
+                SealTime::at(now),
+                rng,
+            )?;
             let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
             out.extend(mine);
             Ok(out)

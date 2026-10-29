@@ -8,7 +8,7 @@ use super::{Core, OwnDevices, load_card, log, sync};
 use crate::contact::ContactCard;
 use crate::envelope::SyncOp;
 use crate::identity::{DeviceId, DevicePublic, Fingerprint};
-use crate::store::{ContactRow, Queries};
+use crate::store::{ContactClock, ContactRow, Queries};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
@@ -51,13 +51,14 @@ impl Core {
         self.ensure_linked()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
+            let me = device.public().id();
             let (fp, replaced) = add_in(tx, card, alias)?;
             if let Some(old) = replaced {
-                let at = sync::touch(tx, old, now, true)?;
-                sync::send_op(tx, device, SyncOp::Remove(old), at, rng)?;
+                let time = sync::touch(tx, old, now, true, me)?;
+                sync::send_op(tx, device, SyncOp::Remove(old), time, rng)?;
             }
-            let at = sync::touch(tx, fp, now, false)?;
-            sync::send_state(tx, device, fp, at, rng)?;
+            let time = sync::touch(tx, fp, now, false, me)?;
+            sync::send_state(tx, device, fp, time, rng)?;
             Ok(fp)
         })
     }
@@ -77,8 +78,8 @@ impl Core {
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             remove_in(tx, *contact)?;
-            let at = sync::touch(tx, *contact, now, true)?;
-            sync::send_op(tx, device, SyncOp::Remove(*contact), at, rng)
+            let time = sync::touch(tx, *contact, now, true, device.public().id())?;
+            sync::send_op(tx, device, SyncOp::Remove(*contact), time, rng)
         })
     }
 
@@ -94,8 +95,8 @@ impl Core {
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             verify_in(tx, *contact)?;
-            let at = sync::touch(tx, *contact, now, false)?;
-            sync::send_state(tx, device, *contact, at, rng)
+            let time = sync::touch(tx, *contact, now, false, device.public().id())?;
+            sync::send_state(tx, device, *contact, time, rng)
         })
     }
 
@@ -113,8 +114,8 @@ impl Core {
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             set_alias_in(tx, *contact, alias)?;
-            let at = sync::touch(tx, *contact, now, false)?;
-            sync::send_state(tx, device, *contact, at, rng)
+            let time = sync::touch(tx, *contact, now, false, device.public().id())?;
+            sync::send_state(tx, device, *contact, time, rng)
         })
     }
 
@@ -295,16 +296,22 @@ pub(super) fn add_in(
 
 /// État d'un contact reçu d'un de mes appareils (`SyncOp::Upsert`) : carte
 /// (gardée si la carte connue est plus récente), alias exact (vide : aucun),
-/// statut vérifié fusionné par « ou ». Un autre contact qui portait cet alias
-/// le perd (sa suppression arrive par sa propre opération). Toute
-/// vérification précède la première écriture.
+/// statut vérifié fusionné par « ou ». Toute vérification précède la
+/// première écriture.
+///
+/// Alias porté par un autre contact : si l'opération (`clock`) l'emporte sur
+/// la dernière opération connue sur cet autre contact, il le perd ; sinon
+/// l'alias reçu est abandonné (le contact n'en a plus). Ainsi l'alias va à
+/// l'opération la plus récente sur tous mes appareils, quel que soit l'ordre
+/// d'arrivée.
 pub(super) fn upsert_in(
     q: &impl Queries,
     card: &ContactCard,
     alias: &str,
     verified: bool,
+    clock: &ContactClock,
 ) -> Result<()> {
-    let alias = clean_alias(alias)?;
+    let mut alias = clean_alias(alias)?;
     let fp = card.fingerprint();
     let known = q.get_contact(fp)?;
     // Carte connue plus récente (déjà mise à jour) : seul l'état change.
@@ -321,13 +328,21 @@ pub(super) fn upsert_in(
         let c = check_card(q, card)?;
         (c.bytes, c.revoked, c.old)
     };
-    for id in &revoked {
-        q.delete_sessions_for_device(fp, *id)?;
-    }
+    let mut strip = None;
     if !alias.is_empty()
         && let Some(other) = q.find_contact_by_alias(alias)?
         && other.fp != fp
     {
+        if clock.newer_than(q.contact_clock(other.fp)?.as_ref()) {
+            strip = Some(other);
+        } else {
+            alias = "";
+        }
+    }
+    for id in &revoked {
+        q.delete_sessions_for_device(fp, *id)?;
+    }
+    if let Some(other) = strip {
         q.upsert_contact(other.fp, &other.card, "", other.verified)?;
     }
     let verified = verified || old.is_some_and(|o| o.verified);

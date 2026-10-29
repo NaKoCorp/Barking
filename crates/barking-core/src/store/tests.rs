@@ -782,12 +782,47 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
     raw.execute_batch(
         "DROP TABLE deliveries; CREATE TABLE deliveries (message_id BLOB NOT NULL, \
          packet_id BLOB UNIQUE NOT NULL, device BLOB NOT NULL, status INTEGER NOT NULL); \
-         DROP TABLE contact_clock;",
+         DROP TABLE contact_clock; \
+         CREATE TABLE contact_clock (fp BLOB PRIMARY KEY NOT NULL, at INTEGER NOT NULL, \
+         removed INTEGER NOT NULL); \
+         INSERT INTO contact_clock(fp, at, removed) VALUES (x'0909090909090909090909090909090909090909090909090909090909090909', 3, 0);",
     )
     .unwrap();
     drop(raw);
     let store = Store::open(&path, &KEY).unwrap();
     store.add_delivery(mid, to_me, mine, true).unwrap();
-    store.set_contact_clock(fp, 7, true).unwrap();
-    assert_eq!(store.contact_clock(fp).unwrap(), Some((7, true)));
+    // Colonne `writer` ajoutée : auteur inconnu (nul) pour l'ancienne ligne.
+    let zero = crate::identity::device::DeviceId([0; 16]);
+    assert_eq!(
+        store.contact_clock(Fingerprint([9; 32])).unwrap(),
+        Some(ContactClock {
+            at: 3,
+            removed: false,
+            writer: zero
+        })
+    );
+    let clock = ContactClock {
+        at: 7,
+        removed: true,
+        writer: mine,
+    };
+    store.set_contact_clock(fp, &clock).unwrap();
+    assert_eq!(store.contact_clock(fp).unwrap(), Some(clock));
+}
+
+#[test]
+fn contact_clock_order_breaks_ties() {
+    let d = |b| crate::identity::device::DeviceId([b; 16]);
+    let c = |at, removed, w| ContactClock {
+        at,
+        removed,
+        writer: d(w),
+    };
+    assert!(c(1, false, 0).newer_than(None));
+    assert!(c(2, false, 0).newer_than(Some(&c(1, true, 9))));
+    assert!(c(2, true, 0).newer_than(Some(&c(2, false, 9))));
+    assert!(c(2, false, 5).newer_than(Some(&c(2, false, 4))));
+    assert!(!c(2, false, 4).newer_than(Some(&c(2, false, 5))));
+    // La même opération n'est pas plus récente qu'elle-même.
+    assert!(!c(2, false, 4).newer_than(Some(&c(2, false, 4))));
 }

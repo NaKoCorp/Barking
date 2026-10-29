@@ -919,7 +919,17 @@ fn seal_body(
 ) -> Vec<(Packet, DeviceId)> {
     let Core { store, device, .. } = from;
     store
-        .transaction(|tx| send::seal_for(tx, device, target, body, message_id, NOW, rng))
+        .transaction(|tx| {
+            send::seal_for(
+                tx,
+                device,
+                target,
+                body,
+                message_id,
+                send::SealTime::at(NOW),
+                rng,
+            )
+        })
         .unwrap()
 }
 
@@ -1494,7 +1504,7 @@ fn oversized_sync_is_skipped_not_fatal() {
     let sessions = a.store.all_sessions().unwrap().len();
     let Core { store, device, .. } = &mut a;
     store
-        .transaction(|tx| sync::send_op(tx, device, op, NOW, &mut rng))
+        .transaction(|tx| sync::send_op(tx, device, op, send::SealTime::at(NOW), &mut rng))
         .unwrap();
     // Rien de scellé, aucune session ouverte, l'événement est journalisé.
     assert_eq!(a.pending_outbox(NOW).unwrap().len(), before);

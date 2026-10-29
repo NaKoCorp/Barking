@@ -11,10 +11,16 @@ use std::collections::HashSet;
 
 /// Préfixe du format texte.
 pub const CARD_PREFIX: &str = "barking1:";
-/// Taille maximale d'une carte décodée (octets).
-const MAX_CARD_BYTES: usize = 64 * 1024;
-/// Taille maximale du texte (base64url sans remplissage de `MAX_CARD_BYTES`).
-const MAX_TEXT_LEN: usize = CARD_PREFIX.len() + MAX_CARD_BYTES.div_ceil(3) * 4;
+/// Taille maximale d'une carte décodée (octets) : celle d'un paquet de palier
+/// L (16 Kio). Une carte plus grande ne pourrait pas être envoyée par une mise
+/// à jour de carte ou une synchronisation. La plus lourde possible
+/// (`MAX_DEVICES` appareils, noms à leur taille maximale) fait environ
+/// 13,5 Kio (test `max_card_text_roundtrip`).
+pub const MAX_CARD_BYTES: usize = 16 * 1024;
+/// Taille maximale du texte (base64url sans remplissage de `MAX_CARD_BYTES`,
+/// environ 22 000 caractères), propre à la carte : sans rapport avec la
+/// taille maximale d'un message texte.
+pub const MAX_TEXT_LEN: usize = CARD_PREFIX.len() + MAX_CARD_BYTES.div_ceil(3) * 4;
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ContactCard {
@@ -211,6 +217,39 @@ mod tests {
         let mut c = card(&f);
         c.display_name = long;
         assert!(c.verify().is_err());
+    }
+
+    /// Carte la plus lourde : `MAX_DEVICES` appareils, noms à leur taille maximale.
+    fn max_card() -> ContactCard {
+        let mut rng = StdRng::seed_from_u64(12);
+        let (root, _) = RootIdentity::generate(&mut rng);
+        let mut certs = Vec::new();
+        let mut bundles = Vec::new();
+        for i in 0..MAX_DEVICES {
+            let d = DeviceKeys::generate(&mut rng);
+            let name = format!("{i:0>width$}", width = MAX_NAME_LEN);
+            certs.push(DeviceCertificate::issue(&root, &d, &name, u64::MAX).unwrap());
+            bundles.push(PrekeySecrets::generate(&mut rng, 0).bundle(&d, false));
+        }
+        let list = DeviceList::sign(&root, u64::MAX, certs).unwrap();
+        ContactCard::sign(&root, &"x".repeat(MAX_NAME_LEN), list, bundles).unwrap()
+    }
+
+    #[test]
+    fn max_card_text_roundtrip() {
+        let c = max_card();
+        let t = c.to_text();
+        assert!(postcard::to_allocvec(&c).unwrap().len() <= MAX_CARD_BYTES);
+        assert!(t.len() <= MAX_TEXT_LEN, "{} > {MAX_TEXT_LEN}", t.len());
+        // Bien au-delà de la taille d'un message texte (4 000 octets).
+        assert!(t.len() > crate::envelope::MAX_TEXT_LEN);
+        assert_eq!(ContactCard::from_text(&t).unwrap(), c);
+        // Un caractère de plus que la limite : refusé avant décodage.
+        let over = format!(
+            "{CARD_PREFIX}{}",
+            "A".repeat(MAX_TEXT_LEN - CARD_PREFIX.len() + 1)
+        );
+        assert_eq!(ContactCard::from_text(&over), Err(CoreError::TooLarge));
     }
 
     #[test]
