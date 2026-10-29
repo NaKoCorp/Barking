@@ -15,6 +15,15 @@ pub const REASON_BAD_HASH: &str = "hash de trame incorrect";
 
 /// Raison d'erreur : deux trames d'une même clé se contredisent.
 pub const REASON_CONTRADICTORY: &str = "trames contradictoires";
+/// Plus grand paquet décodable (palier L), en octets.
+pub const MAX_PACKET_LEN: usize = 16_384;
+
+/// Longueur maximale d'une trame : le plus grand paquet décodable (palier L)
+/// tient en une seule trame avec son en-tête. `fragment` ne produit jamais de
+/// trame plus longue, quelle que soit la MTU demandée, et le réassemblage
+/// refuse toute trame plus longue.
+pub const MAX_FRAME_LEN: usize = MAX_PACKET_LEN + FRAG_HEADER_LEN;
+
 /// MTU minimale acceptée : en-tête + 64 octets de données.
 const MIN_MTU: usize = 74;
 
@@ -28,12 +37,14 @@ pub fn frame_key(packet: &[u8]) -> [u8; 8] {
 
 /// Découpe `packet` en trames d'au plus `mtu` octets (en-tête de trame compris).
 ///
-/// Exige `mtu >= 74` et au plus 255 trames, sinon `TooLarge`. Un paquet vide
-/// donne tout de même une trame.
+/// Exige `mtu >= 74`, un paquet d'au plus `MAX_PACKET_LEN` octets et au plus
+/// 255 trames, sinon `TooLarge`. Une MTU plus grande que `MAX_FRAME_LEN` est
+/// ramenée à `MAX_FRAME_LEN`. Un paquet vide donne tout de même une trame.
 pub fn fragment(packet: &[u8], mtu: usize) -> Result<Vec<Vec<u8>>> {
-    if mtu < MIN_MTU {
+    if mtu < MIN_MTU || packet.len() > MAX_PACKET_LEN {
         return Err(CoreError::TooLarge);
     }
+    let mtu = mtu.min(MAX_FRAME_LEN);
     let chunk = mtu - FRAG_HEADER_LEN;
     let count = packet.len().div_ceil(chunk).max(1);
     let count_u8 = u8::try_from(count).map_err(|_| CoreError::TooLarge)?;
@@ -66,7 +77,10 @@ struct Entry {
 }
 
 /// Réassemble des trames. Mémoire bornée : au plus `max_pending` paquets
-/// incomplets, chacun d'au plus 255 morceaux de longueur cohérente.
+/// incomplets, chacun d'au plus 255 morceaux de longueur cohérente, dont
+/// `count - 1` morceaux pleins tiennent dans `MAX_PACKET_LEN` : une entrée
+/// garde au plus `MAX_PACKET_LEN` octets plus un morceau (moins de 32 Kio),
+/// soit environ 2 Mio pour 64 paquets en attente.
 pub struct Reassembler {
     max_pending: usize,
     ttl_secs: u64,
@@ -96,6 +110,9 @@ impl Reassembler {
         if frame.len() < FRAG_HEADER_LEN {
             return Err(CoreError::Malformed("trame trop courte"));
         }
+        if frame.len() > MAX_FRAME_LEN {
+            return Err(CoreError::Malformed("trame trop longue"));
+        }
         let mut key = [0u8; 8];
         key.copy_from_slice(&frame[..8]);
         let index = usize::from(frame[8]);
@@ -109,6 +126,13 @@ impl Reassembler {
         }
         if chunk.is_empty() && count > 1 {
             return Err(CoreError::Malformed("fragment vide"));
+        }
+        // Budget d'une entrée : les `count - 1` premiers morceaux ont tous la
+        // longueur du plus long, donc `(count - 1) * len` ne dépasse jamais un
+        // paquet décodable si la trame est légitime. Vaut pour le dernier
+        // morceau aussi (il n'est pas plus long que les autres).
+        if (count - 1).saturating_mul(chunk.len()) > MAX_PACKET_LEN {
+            return Err(CoreError::Malformed("fragments trop volumineux"));
         }
         if count == 1 {
             if frame_key(chunk) != key {
@@ -305,6 +329,10 @@ mod tests {
     fn too_many_fragments_rejected() {
         assert_eq!(fragment(&bytes(64 * 256, 0), 74), Err(CoreError::TooLarge));
         assert_eq!(fragment(&bytes(64 * 255, 0), 74).unwrap().len(), 255);
+        assert_eq!(
+            fragment(&bytes(MAX_PACKET_LEN + 1, 0), MAX_FRAME_LEN),
+            Err(CoreError::TooLarge)
+        );
     }
 
     #[test]
@@ -397,6 +425,57 @@ mod tests {
         assert_eq!(r.pending(), 1);
         assert!(r.push(&frames[0], 0).unwrap().is_none());
         assert_eq!(r.push(&frames[2], 0).unwrap().unwrap(), p);
+    }
+
+    #[test]
+    fn oversized_frame_refused() {
+        let mut r = Reassembler::new(4, 60);
+        // 64 Ko annoncés comme premier morceau d'un paquet en deux trames.
+        let mut f = vec![7u8; 8];
+        f.extend_from_slice(&[0, 2]);
+        f.extend(std::iter::repeat_n(0xaa, 64 * 1024));
+        assert!(matches!(r.push(&f, 0), Err(CoreError::Malformed(_))));
+        assert_eq!(r.pending(), 0);
+        // Même chose en une seule trame : refusée avant tout calcul de hash.
+        let mut f = vec![7u8; 8];
+        f.extend_from_slice(&[0, 1]);
+        f.extend(std::iter::repeat_n(0xaa, 64 * 1024));
+        assert!(matches!(r.push(&f, 0), Err(CoreError::Malformed(_))));
+        assert_eq!(r.pending(), 0);
+    }
+
+    #[test]
+    fn entry_byte_budget_enforced() {
+        let mut r = Reassembler::new(4, 60);
+        // 255 morceaux de 1 000 octets : bien plus qu'un paquet de palier L.
+        let mut f = vec![9u8; 8];
+        f.extend_from_slice(&[0, 255]);
+        f.extend(std::iter::repeat_n(0x55, 1000));
+        assert!(matches!(r.push(&f, 0), Err(CoreError::Malformed(_))));
+        assert_eq!(r.pending(), 0);
+        // Le dernier morceau seul est soumis au même budget.
+        let mut f = vec![9u8; 8];
+        f.extend_from_slice(&[254, 255]);
+        f.extend(std::iter::repeat_n(0x55, 1000));
+        assert!(matches!(r.push(&f, 0), Err(CoreError::Malformed(_))));
+        assert_eq!(r.pending(), 0);
+    }
+
+    #[test]
+    fn largest_packet_still_reassembles() {
+        // Un paquet de palier L passe le budget, pour toute MTU qui le découpe en
+        // 255 trames au plus (dès 75 octets).
+        let p = bytes(Tier::L.size(), 3);
+        for mtu in [75, 200, 255, 1500, MAX_FRAME_LEN, 100_000] {
+            let frames = fragment(&p, mtu).unwrap();
+            assert!(frames.iter().all(|f| f.len() <= MAX_FRAME_LEN));
+            let mut r = Reassembler::new(4, 60);
+            let mut out = None;
+            for f in &frames {
+                out = r.push(f, 0).unwrap();
+            }
+            assert_eq!(out.unwrap(), p, "mtu {mtu}");
+        }
     }
 
     proptest! {
@@ -505,6 +584,39 @@ mod tests {
                 for _ in 0..=dups[i % 64] {
                     let _ = r.push(&f, i as u64);
                     prop_assert!(r.pending() <= 4);
+                }
+            }
+        }
+
+        #[test]
+        fn proptest_corruption_never_yields_wrong_packet(
+            len in 1usize..3000,
+            mtu in 74usize..300,
+            drops in proptest::collection::vec(any::<bool>(), 64),
+            dups in proptest::collection::vec(0usize..3, 64),
+            flips in proptest::collection::vec((any::<usize>(), any::<usize>(), 1u8..=255), 1..6),
+            seed in any::<u64>(),
+        ) {
+            let pkt = bytes(len, 13);
+            let Ok(mut frames) = fragment(&pkt, mtu) else { return Ok(()); };
+            let n = frames.len();
+            for i in (1..n).rev() {
+                let j = (seed.wrapping_mul(6364136223846793005).wrapping_add(i as u64) >> 33) as usize % (i + 1);
+                frames.swap(i, j);
+            }
+            // Corruption d'octets quelconques (en-tête compris) de trames quelconques.
+            for (fi, pos, b) in &flips {
+                let f = &mut frames[fi % n];
+                let p = pos % f.len();
+                f[p] ^= b;
+            }
+            let mut r = Reassembler::new(4, 60);
+            for (i, f) in frames.iter().enumerate() {
+                if drops[i % 64] { continue; }
+                for _ in 0..=dups[i % 64] {
+                    if let Ok(Some(out)) = r.push(f, 0) {
+                        prop_assert_eq!(&out, &pkt);
+                    }
                 }
             }
         }
