@@ -16,7 +16,7 @@ use crate::identity::{DeviceKeys, DevicePublic, Fingerprint};
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{Kind, Packet, PacketId, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
-use crate::store::{Direction, MessageStatus, Queries, SessionRow};
+use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
@@ -94,7 +94,7 @@ impl Core {
             if msg.direction != Direction::Out {
                 return Ok(ReceiveOutcome::NotForUs);
             }
-            if msg.status == MessageStatus::Delivered {
+            if tx.delivery_acked(acked)? {
                 // Un accusé rejoué (identifiant et expiration réécrits à
                 // volonté) : regroupé au journal.
                 log_limited(
@@ -108,7 +108,7 @@ impl Core {
                 )?;
                 return Ok(ReceiveOutcome::Duplicate);
             }
-            tx.set_status_by_packet(acked, MessageStatus::Delivered)?;
+            tx.mark_delivered_by_packet(acked)?;
             tx.outbox_remove(acked)?;
             log(
                 tx,
@@ -446,7 +446,7 @@ fn accept(
         &text,
         MessageStatus::Delivered,
         now,
-        Some(packet.id),
+        MessageId::legacy_from_packet(packet.id),
     )?;
     log(
         q,
@@ -505,7 +505,7 @@ fn check_envelope(
     {
         return Ok(Err(R_STALE));
     }
-    if q.message_by_packet(packet.id)?.is_some() {
+    if q.is_my_packet(packet.id)? {
         return Ok(Err(R_ID_REUSED));
     }
     Ok(Ok(()))

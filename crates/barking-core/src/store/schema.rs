@@ -1,8 +1,12 @@
-//! Schéma SQL v1 du stockage.
+//! Schéma SQL du stockage (v2) et migration depuis la v1.
 
-pub const SCHEMA_VERSION: u32 = 1;
+use rusqlite::{Connection, params};
 
-pub const SCHEMA_V1: &str = "
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// Schéma v1 (lot 1A), conservé pour la migration et pour ses tests : une
+/// base v1 est ouverte avec ce schéma, puis migrée.
+pub const SCHEMA_V1_LEGACY: &str = "
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY NOT NULL,
     v BLOB NOT NULL
@@ -54,6 +58,98 @@ CREATE TABLE IF NOT EXISTS transparency (
     class INTEGER NOT NULL DEFAULT 0
 );
 ";
+
+/// Tables de la v2 : un message par identifiant logique, une livraison par
+/// paquet (donc par appareil destinataire).
+pub const SCHEMA_V2_TABLES: &str = "
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY,
+    message_id BLOB UNIQUE NOT NULL,
+    contact_fp BLOB NOT NULL,
+    direction INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS deliveries (
+    message_id BLOB NOT NULL,
+    packet_id BLOB UNIQUE NOT NULL,
+    device BLOB NOT NULL,
+    status INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries(message_id);
+";
+
+/// Contexte de dérivation d'un identifiant de message à partir d'un
+/// identifiant de paquet (messages v1 et messages reçus avant le lot 1B).
+pub const LEGACY_MESSAGE_ID_CONTEXT: &str = "barking/v0/legacy-message-id";
+
+/// Statuts persistés (voir `MessageStatus`) utilisés par la migration.
+const STATUS_DELIVERED: i64 = 3;
+const DIRECTION_OUT: i64 = 0;
+
+/// Migre une base v1 en v2, dans une seule transaction : les lignes de
+/// `messages` reçoivent un `message_id` dérivé de leur `packet_id` (ou de
+/// leur `id` s'il est nul), les messages sortants ayant un paquet reçoivent
+/// la livraison correspondante, puis `schema_version` passe à 2.
+pub fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch("ALTER TABLE messages RENAME TO messages_v1;")?;
+    tx.execute_batch(SCHEMA_V2_TABLES)?;
+    {
+        let mut old = tx.prepare(
+            "SELECT id, contact_fp, direction, body, status, at, packet_id \
+             FROM messages_v1 ORDER BY id",
+        )?;
+        let rows = old
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, Option<Vec<u8>>>(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, fp, dir, body, status, at, packet) in rows {
+            let material = packet.clone().unwrap_or_else(|| id.to_le_bytes().to_vec());
+            let full = blake3::derive_key(LEGACY_MESSAGE_ID_CONTEXT, &material);
+            let mid = &full[..16];
+            tx.execute(
+                "INSERT INTO messages(id, message_id, contact_fp, direction, body, status, at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, mid, fp, dir, body, status, at],
+            )?;
+            if let (DIRECTION_OUT, Some(pid)) = (dir, packet) {
+                // L'appareil destinataire d'un paquet v1 n'est pas connu.
+                tx.execute(
+                    "INSERT INTO deliveries(message_id, packet_id, device, status) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![mid, pid, [0u8; 16].as_slice(), delivery_status(status)],
+                )?;
+            }
+        }
+    }
+    tx.execute_batch("DROP TABLE messages_v1;")?;
+    let version = postcard::to_allocvec(&SCHEMA_VERSION).unwrap_or_default();
+    tx.execute(
+        "INSERT INTO meta(k, v) VALUES ('schema_version', ?1) \
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        params![version],
+    )?;
+    tx.commit()
+}
+
+fn delivery_status(message_status: i64) -> i64 {
+    if message_status == STATUS_DELIVERED {
+        STATUS_DELIVERED
+    } else {
+        1
+    }
+}
 
 /// Migration dans le schéma v1 : colonne `class` du journal, pour une base
 /// créée avant son ajout. Appliquée à l'ouverture si la colonne manque.

@@ -165,7 +165,7 @@ fn ack_marks_delivered() {
     let p = one(a.send(&b.fp(), "accuse-moi", NOW, &mut rng));
     let sent = a.core.messages_with(&b.fp()).unwrap();
     assert_eq!(sent[0].status, MessageStatus::Sent);
-    assert_eq!(sent[0].packet_id, Some(p.id));
+    assert_eq!(sent.len(), 1);
 
     let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
     assert_eq!(ack.kind, Kind::Ack);
@@ -531,6 +531,53 @@ fn multi_device_fanout() {
             }
         }
         assert_eq!(opened, 1, "chaque appareil déchiffre exactement un paquet");
+    }
+}
+
+#[test]
+fn send_to_multi_device_contact_is_one_message() {
+    let mut a = Party::new("tel-alice", 1);
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(9);
+    let (mut bob1, phrase) =
+        Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
+    let mut bob2 = Core::recover(
+        &dir.path().join("b2"),
+        &[3; 32],
+        phrase.as_str(),
+        "b2",
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    let req = bob2.device_link_request("b2", NOW).unwrap();
+    bob1.link_device(&req).unwrap();
+    let card = bob1.contact_card("Bob").unwrap();
+    let bob = a.core.add_contact(&card, Some("bob")).unwrap();
+    let alice_card = a.card("Alice");
+    bob1.add_contact(&alice_card, Some("alice")).unwrap();
+    bob2.add_contact(&alice_card, Some("alice")).unwrap();
+
+    let pkts = a.send(&bob, "un seul message", NOW, &mut rng);
+    assert_eq!(pkts.len(), 2);
+    let rows = a.core.messages_with(&bob).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, MessageStatus::Sent);
+    for core in [&mut bob1, &mut bob2] {
+        let mut ack = None;
+        for p in &pkts {
+            if let ReceiveOutcome::Message { ack: k, .. } =
+                core.receive(&p.encode(), T, NOW, &mut rng).unwrap()
+            {
+                ack = Some(k);
+            }
+        }
+        let ack = ack.expect("chaque appareil ouvre un paquet");
+        let out = a.core.receive(&ack.encode(), T, NOW + 1, &mut rng).unwrap();
+        assert!(matches!(out, ReceiveOutcome::AckReceived { .. }), "{out:?}");
+        let rows = a.core.messages_with(&bob).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, MessageStatus::Delivered);
     }
 }
 

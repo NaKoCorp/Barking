@@ -23,7 +23,7 @@ fn reopen_persists() {
         store.get_meta::<Vec<u8>>("hello").unwrap(),
         Some(vec![1, 2, 3])
     );
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(1));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(2));
     assert_eq!(store.get_meta::<u32>("absent").unwrap(), None);
 }
 
@@ -106,20 +106,14 @@ fn contacts_sessions_messages_events() {
     assert_eq!(store.all_sessions().unwrap().len(), 1);
 
     let pid = PacketId([2; 16]);
-    let id = store
-        .insert_message(
-            fp,
-            Direction::Out,
-            "salut",
-            MessageStatus::Queued,
-            5,
-            Some(pid),
-        )
-        .unwrap();
-    assert!(id > 0);
-    store
-        .set_status_by_packet(pid, MessageStatus::Delivered)
-        .unwrap();
+    let mid = MessageId([6; 16]);
+    assert!(
+        store
+            .insert_message(fp, Direction::Out, "salut", MessageStatus::Queued, 5, mid)
+            .unwrap()
+    );
+    store.add_delivery(mid, pid, dev).unwrap();
+    assert_eq!(store.mark_delivered_by_packet(pid).unwrap(), Some(mid));
     let m = store.messages_with(fp).unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(m[0].status, MessageStatus::Delivered);
@@ -166,9 +160,24 @@ fn message_lookup_and_deletions() {
     let pid = PacketId([2; 16]);
     assert!(store.message_by_packet(pid).unwrap().is_none());
     store
-        .insert_message(fp, Direction::Out, "x", MessageStatus::Sent, 5, Some(pid))
+        .insert_message(
+            fp,
+            Direction::Out,
+            "x",
+            MessageStatus::Sent,
+            5,
+            MessageId([6; 16]),
+        )
+        .unwrap();
+    store
+        .add_delivery(
+            MessageId([6; 16]),
+            pid,
+            crate::identity::device::DeviceId([5; 16]),
+        )
         .unwrap();
     let m = store.message_by_packet(pid).unwrap().unwrap();
+    assert_eq!(m.message_id, MessageId([6; 16]));
     assert_eq!(m.direction, Direction::Out);
     assert_eq!(m.status, MessageStatus::Sent);
 
@@ -292,7 +301,7 @@ fn message_row_debug_hides_body() {
             "secret du corps",
             MessageStatus::Delivered,
             5,
-            None,
+            MessageId([1; 16]),
         )
         .unwrap();
     let row = store.messages_with(fp).unwrap().remove(0);
@@ -571,4 +580,111 @@ fn log_purge_tolerates_clock_behind() {
         .append_event(0, None, EventClass::Routine, b"c")
         .unwrap();
     assert_eq!(store.events(10).unwrap().len(), 3);
+}
+
+#[test]
+fn insert_message_duplicate_id_returns_false() {
+    let (_d, _p, store) = open_tmp();
+    let fp = Fingerprint([4; 32]);
+    let mid = MessageId([3; 16]);
+    let ins = |body: &str| {
+        store
+            .insert_message(fp, Direction::In, body, MessageStatus::Delivered, 5, mid)
+            .unwrap()
+    };
+    assert!(ins("a"));
+    assert!(!ins("b"));
+    assert_eq!(store.messages_with(fp).unwrap().len(), 1);
+}
+
+#[test]
+fn newer_schema_refused() {
+    let (_d, path, store) = open_tmp();
+    store.put_meta("schema_version", &3u32).unwrap();
+    drop(store);
+    assert!(matches!(
+        Store::open(&path, &KEY),
+        Err(CoreError::Store(m)) if m.contains("plus récent")
+    ));
+    // Rien n'a été modifié.
+    let raw = raw_conn(&path);
+    let n: i64 = raw
+        .query_row("SELECT count(*) FROM meta", [], |r| r.get(0))
+        .unwrap();
+    assert!(n >= 1);
+}
+
+fn raw_conn(path: &std::path::Path) -> Connection {
+    let conn = Connection::open(path).unwrap();
+    let hex = data_encoding::HEXLOWER.encode(&KEY);
+    conn.execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))
+        .unwrap();
+    conn
+}
+
+#[test]
+fn migration_v1_keeps_history_and_acks() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("v1.sqlite");
+    let fp = Fingerprint([4; 32]);
+    let (pin, pout, pnull) = ([1u8; 16], [2u8; 16], [3u8; 16]);
+    {
+        let raw = raw_conn(&path);
+        raw.execute_batch(schema::SCHEMA_V1_LEGACY).unwrap();
+        raw.execute(
+            "INSERT INTO meta(k, v) VALUES ('schema_version', x'01')",
+            [],
+        )
+        .unwrap();
+        let ins = |dir: i64, body: &str, st: i64, at: i64, pid: Option<&[u8]>| {
+            raw.execute(
+                "INSERT INTO messages(contact_fp, direction, body, status, at, packet_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![fp.0.as_slice(), dir, body, st, at, pid],
+            )
+            .unwrap();
+        };
+        ins(1, "reçu", 3, 10, Some(&pin));
+        ins(0, "en attente", 1, 20, Some(&pout));
+        ins(1, "sans paquet", 3, 30, None);
+        raw.execute(
+            "INSERT INTO outbox(packet_id, bytes, kind, expires_at, created_at) \
+             VALUES (?1, x'00', 0, 999, 20)",
+            params![pout.as_slice()],
+        )
+        .unwrap();
+        let _ = pnull;
+    }
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(2));
+    let m = store.messages_with(fp).unwrap();
+    let bodies: Vec<_> = m
+        .iter()
+        .map(|r| (r.body.as_str(), r.direction, r.status))
+        .collect();
+    assert_eq!(
+        bodies,
+        vec![
+            ("reçu", Direction::In, MessageStatus::Delivered),
+            ("en attente", Direction::Out, MessageStatus::Sent),
+            ("sans paquet", Direction::In, MessageStatus::Delivered),
+        ]
+    );
+    assert_eq!(
+        m[1].message_id,
+        MessageId::legacy_from_packet(PacketId(pout))
+    );
+    assert_eq!(store.outbox_pending(0).unwrap().len(), 1);
+    // L'accusé du paquet v1 en attente marque le message livré.
+    assert_eq!(
+        store.mark_delivered_by_packet(PacketId(pout)).unwrap(),
+        Some(m[1].message_id)
+    );
+    let after = store.messages_with(fp).unwrap();
+    assert_eq!(after.len(), 3);
+    assert_eq!(after[1].status, MessageStatus::Delivered);
+    // Réouverture : la migration n'est pas rejouée.
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.messages_with(fp).unwrap().len(), 3);
 }

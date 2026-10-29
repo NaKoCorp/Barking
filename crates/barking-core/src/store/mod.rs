@@ -104,6 +104,34 @@ impl Drop for SessionRow {
     }
 }
 
+/// Identifiant logique d'un message (16 octets), commun à tous les paquets
+/// (un par appareil destinataire) qui le portent.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MessageId(pub [u8; 16]);
+
+impl MessageId {
+    /// Identifiant dérivé d'un identifiant de paquet : messages migrés de la
+    /// v1 et, jusqu'à ce que l'enveloppe porte son propre identifiant, messages
+    /// reçus.
+    #[must_use]
+    pub fn legacy_from_packet(packet_id: PacketId) -> MessageId {
+        let full = blake3::derive_key(schema::LEGACY_MESSAGE_ID_CONTEXT, &packet_id.0);
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&full[..16]);
+        MessageId(id)
+    }
+}
+
+impl fmt::Debug for MessageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "MessageId({})",
+            data_encoding::HEXLOWER.encode(&self.0[..4])
+        )
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct MessageRow {
     pub id: i64,
@@ -112,7 +140,7 @@ pub struct MessageRow {
     pub body: String,
     pub status: MessageStatus,
     pub at: u64,
-    pub packet_id: Option<PacketId>,
+    pub message_id: MessageId,
 }
 
 impl fmt::Debug for MessageRow {
@@ -125,7 +153,7 @@ impl fmt::Debug for MessageRow {
             .field("body", &format_args!("<{} octets>", self.body.len()))
             .field("status", &self.status)
             .field("at", &self.at)
-            .field("packet_id", &self.packet_id)
+            .field("message_id", &self.message_id)
             .finish()
     }
 }
@@ -222,9 +250,33 @@ impl Store {
     }
 
     fn apply_schema(&self) -> Result<()> {
-        self.conn
-            .execute_batch(schema::SCHEMA_V1)
+        // Version déjà écrite : une base plus récente que le code est refusée
+        // avant toute écriture.
+        let has_meta: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+                [],
+                |r| r.get(0),
+            )
             .map_err(map_err)?;
+        let stored = if has_meta {
+            self.get_meta::<u32>("schema_version")?
+        } else {
+            None
+        };
+        if stored.is_some_and(|v| v > schema::SCHEMA_VERSION) {
+            return Err(CoreError::Store(
+                "base de données plus récente que cette version de Barking".into(),
+            ));
+        }
+        // Une base neuve (ou v1 sans version) passe par le schéma v1, puis
+        // la migration : un seul chemin pour toutes les bases à migrer.
+        if stored.is_none_or(|v| v < 2) {
+            self.conn
+                .execute_batch(schema::SCHEMA_V1_LEGACY)
+                .map_err(map_err)?;
+        }
         // Colonne `class` du journal, ajoutée au schéma v1 après coup : une
         // base créée avant la reçoit ici (idempotent) ; ses entrées existantes
         // sont classées courantes.
@@ -242,12 +294,12 @@ impl Store {
                 .execute_batch(schema::TRANSPARENCY_ADD_CLASS)
                 .map_err(map_err)?;
         }
+        if stored.is_none_or(|v| v < 2) {
+            schema::migrate_v1_to_v2(&self.conn).map_err(map_err)?;
+        }
         self.conn
             .execute_batch(schema::TRANSPARENCY_INDEXES)
             .map_err(map_err)?;
-        if self.get_meta::<u32>("schema_version")?.is_none() {
-            self.put_meta("schema_version", &schema::SCHEMA_VERSION)?;
-        }
         Ok(())
     }
 
@@ -403,6 +455,7 @@ pub trait Queries {
         query_sessions(self.conn(), "ORDER BY created_at, session_id", [])
     }
 
+    /// Insère un message. `false` si `message_id` existe déjà (rien n'est écrit).
     fn insert_message(
         &self,
         contact_fp: Fingerprint,
@@ -410,33 +463,104 @@ pub trait Queries {
         body: &str,
         status: MessageStatus,
         at: u64,
-        packet_id: Option<PacketId>,
-    ) -> Result<i64> {
-        self.conn()
+        message_id: MessageId,
+    ) -> Result<bool> {
+        let n = self
+            .conn()
             .execute(
-                "INSERT INTO messages(contact_fp, direction, body, status, at, packet_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR IGNORE INTO messages(message_id, contact_fp, direction, body, \
+                 status, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
+                    message_id.0.as_slice(),
                     contact_fp.0.as_slice(),
                     direction as i64,
                     body,
                     status as i64,
-                    to_i64(at),
-                    packet_id.map(|p| p.0.to_vec())
+                    to_i64(at)
                 ],
             )
             .map_err(map_err)?;
-        Ok(self.conn().last_insert_rowid())
+        Ok(n == 1)
     }
 
-    fn set_status_by_packet(&self, packet_id: PacketId, status: MessageStatus) -> Result<()> {
+    /// Enregistre le paquet `packet_id`, destiné à l'appareil `device`, comme
+    /// livraison (en attente d'accusé) du message `message_id`.
+    fn add_delivery(
+        &self,
+        message_id: MessageId,
+        packet_id: PacketId,
+        device: DeviceId,
+    ) -> Result<()> {
         self.conn()
             .execute(
-                "UPDATE messages SET status = ?1 WHERE packet_id = ?2",
-                params![status as i64, packet_id.0.as_slice()],
+                "INSERT INTO deliveries(message_id, packet_id, device, status) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    message_id.0.as_slice(),
+                    packet_id.0.as_slice(),
+                    device.0.as_slice(),
+                    MessageStatus::Sent as i64
+                ],
             )
             .map_err(map_err)?;
         Ok(())
+    }
+
+    /// Marque la livraison `packet_id` livrée, et le message `Delivered`
+    /// (un accusé d'un seul appareil suffit). Renvoie le message concerné, ou
+    /// `None` si aucune livraison ne porte ce paquet.
+    fn mark_delivered_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageId>> {
+        let mid: Option<Vec<u8>> = self
+            .conn()
+            .query_row(
+                "SELECT message_id FROM deliveries WHERE packet_id = ?1",
+                params![packet_id.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(map_err)?;
+        let Some(mid) = mid else {
+            return Ok(None);
+        };
+        self.conn()
+            .execute(
+                "UPDATE deliveries SET status = ?1 WHERE packet_id = ?2",
+                params![MessageStatus::Delivered as i64, packet_id.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        self.conn()
+            .execute(
+                "UPDATE messages SET status = ?1 WHERE message_id = ?2",
+                params![MessageStatus::Delivered as i64, mid],
+            )
+            .map_err(map_err)?;
+        Ok(Some(MessageId(arr(mid)?)))
+    }
+
+    /// `true` si la livraison portant `packet_id` a déjà reçu son accusé.
+    fn delivery_acked(&self, packet_id: PacketId) -> Result<bool> {
+        let n: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM deliveries WHERE packet_id = ?1 AND status = ?2",
+                params![packet_id.0.as_slice(), MessageStatus::Delivered as i64],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        Ok(n > 0)
+    }
+
+    /// `true` si `packet_id` est l'un de mes paquets envoyés (une livraison).
+    fn is_my_packet(&self, packet_id: PacketId) -> Result<bool> {
+        let n: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM deliveries WHERE packet_id = ?1",
+                params![packet_id.0.as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        Ok(n > 0)
     }
 
     /// Messages d'un contact, du plus ancien au plus récent.
@@ -444,7 +568,7 @@ pub trait Queries {
         let mut stmt = self
             .conn()
             .prepare(
-                "SELECT id, contact_fp, direction, body, status, at, packet_id \
+                "SELECT id, contact_fp, direction, body, status, at, message_id \
                  FROM messages WHERE contact_fp = ?1 ORDER BY at, id",
             )
             .map_err(map_err)?;
@@ -556,18 +680,40 @@ pub trait Queries {
             .map_err(map_err)
     }
 
-    /// Message portant l'identifiant de paquet `packet_id`, s'il existe.
+    /// Message lié à l'identifiant de paquet `packet_id`. Sortant : via la
+    /// table `deliveries`. Entrant : l'identifiant du message est (jusqu'à ce
+    /// que l'enveloppe porte le sien) dérivé de l'identifiant du paquet reçu,
+    /// sans dépendre de `seen` qui est purgée.
     fn message_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageRow>> {
-        let raw = self
+        const COLS: &str = "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, \
+                            m.message_id FROM messages m";
+        let out = self
             .conn()
             .query_row(
-                "SELECT id, contact_fp, direction, body, status, at, packet_id \
-                 FROM messages WHERE packet_id = ?1",
+                &format!(
+                    "{COLS} JOIN deliveries d ON d.message_id = m.message_id \
+                     WHERE d.packet_id = ?1"
+                ),
                 params![packet_id.0.as_slice()],
                 message_raw,
             )
             .optional()
             .map_err(map_err)?;
+        let raw = match out {
+            Some(r) => Some(r),
+            None => self
+                .conn()
+                .query_row(
+                    &format!("{COLS} WHERE m.message_id = ?1 AND m.direction = ?2"),
+                    params![
+                        MessageId::legacy_from_packet(packet_id).0.as_slice(),
+                        Direction::In as i64
+                    ],
+                    message_raw,
+                )
+                .optional()
+                .map_err(map_err)?,
+        };
         raw.map(message_from_raw).transpose()
     }
 
@@ -578,8 +724,9 @@ pub trait Queries {
         self.conn()
             .execute(
                 "DELETE FROM outbox WHERE packet_id IN \
-                 (SELECT packet_id FROM messages \
-                  WHERE contact_fp = ?1 AND direction = ?2 AND packet_id IS NOT NULL)",
+                 (SELECT d.packet_id FROM deliveries d \
+                  JOIN messages m ON m.message_id = d.message_id \
+                  WHERE m.contact_fp = ?1 AND m.direction = ?2)",
                 params![fp.0.as_slice(), Direction::Out as i64],
             )
             .map_err(map_err)?;
@@ -780,7 +927,7 @@ impl Queries for Tx<'_> {
     }
 }
 
-type MessageRaw = (i64, Vec<u8>, i64, String, i64, i64, Option<Vec<u8>>);
+type MessageRaw = (i64, Vec<u8>, i64, String, i64, i64, Vec<u8>);
 
 fn message_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRaw> {
     Ok((
@@ -794,7 +941,7 @@ fn message_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRaw> {
     ))
 }
 
-fn message_from_raw((id, fp, dir, body, st, at, pid): MessageRaw) -> Result<MessageRow> {
+fn message_from_raw((id, fp, dir, body, st, at, mid): MessageRaw) -> Result<MessageRow> {
     Ok(MessageRow {
         id,
         contact_fp: Fingerprint(arr(fp)?),
@@ -802,7 +949,7 @@ fn message_from_raw((id, fp, dir, body, st, at, pid): MessageRaw) -> Result<Mess
         body,
         status: MessageStatus::from_i64(st)?,
         at: to_u64(at),
-        packet_id: pid.map(|p| arr(p).map(PacketId)).transpose()?,
+        message_id: MessageId(arr(mid)?),
     })
 }
 

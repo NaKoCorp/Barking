@@ -9,9 +9,15 @@ use crate::identity::Fingerprint;
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{Packet, ack};
 use crate::ratchet::RatchetState;
-use crate::store::{Direction, MessageStatus, Queries, SessionRow};
+use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
+
+fn new_message_id(rng: &mut impl CryptoRng) -> MessageId {
+    let mut id = [0u8; 16];
+    rng.fill_bytes(&mut id);
+    MessageId(id)
+}
 
 impl Core {
     /// Chiffre `text` pour chaque appareil de la liste du contact ; un paquet
@@ -35,6 +41,9 @@ impl Core {
             let card = load_card(&contact.card)?;
             let day = day_of(now);
             let mut out = Vec::with_capacity(card.devices.certs.len());
+            // Un seul message logique, créé au premier paquet ; une livraison par paquet.
+            let message_id = new_message_id(rng);
+            let mut inserted = false;
             for cert in &card.devices.certs {
                 let peer = cert.device;
                 let peer_id = peer.id();
@@ -103,14 +112,18 @@ impl Core {
                 )?;
                 row.state = ser_state(&ratchet)?;
                 tx.put_session(&row)?;
-                tx.insert_message(
-                    *to,
-                    Direction::Out,
-                    text,
-                    MessageStatus::Sent,
-                    now,
-                    Some(packet.id),
-                )?;
+                if !inserted {
+                    tx.insert_message(
+                        *to,
+                        Direction::Out,
+                        text,
+                        MessageStatus::Sent,
+                        now,
+                        message_id,
+                    )?;
+                    inserted = true;
+                }
+                tx.add_delivery(message_id, packet.id, peer_id)?;
                 tx.outbox_put(
                     packet.id,
                     &packet.encode(),
