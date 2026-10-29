@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use barking_core::contact::ContactCard;
 use barking_core::identity::Fingerprint;
 use barking_core::packet::Packet;
-use barking_core::{Core, CoreError, ReceiveOutcome, SyncKind};
+use barking_core::{Core, CoreError, ReceiveOutcome};
 use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
@@ -389,14 +389,10 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
             ReceiveOutcome::Quarantined { reason } => {
                 println!("{label} : mis en quarantaine : {reason}");
             }
-            ReceiveOutcome::Synced { kind } => {
-                let what = match kind {
-                    SyncKind::Sent => "message envoyé",
-                    SyncKind::Contact => "contact",
-                    SyncKind::Devices => "liste d'appareils",
-                };
-                println!("{label} : synchronisé depuis un de tes appareils ({what})");
-            }
+            ReceiveOutcome::Synced { kind } => println!(
+                "{label} : synchronisé depuis un de tes appareils ({})",
+                kind.label()
+            ),
         }
     }
     if failed {

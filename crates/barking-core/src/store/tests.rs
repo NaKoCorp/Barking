@@ -112,11 +112,8 @@ fn contacts_sessions_messages_events() {
             .insert_message(fp, Direction::Out, "salut", MessageStatus::Queued, 5, mid)
             .unwrap()
     );
-    store.add_delivery(mid, pid, dev).unwrap();
-    assert_eq!(
-        store.mark_delivered_by_packet(pid, true).unwrap(),
-        Some(mid)
-    );
+    store.add_delivery(mid, pid, dev, false).unwrap();
+    assert_eq!(store.mark_delivered_by_packet(pid).unwrap(), Some(mid));
     let m = store.messages_with(fp).unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(m[0].status, MessageStatus::Delivered);
@@ -177,6 +174,7 @@ fn message_lookup_and_deletions() {
             MessageId([6; 16]),
             pid,
             crate::identity::device::DeviceId([5; 16]),
+            false,
         )
         .unwrap();
     let m = store.message_by_packet(pid).unwrap().unwrap();
@@ -683,9 +681,7 @@ fn migration_v1_keeps_history_and_acks() {
     assert_eq!((got.body.as_str(), got.direction), ("reçu", Direction::In));
     // L'accusé du paquet v1 en attente marque le message livré.
     assert_eq!(
-        store
-            .mark_delivered_by_packet(PacketId(pout), true)
-            .unwrap(),
+        store.mark_delivered_by_packet(PacketId(pout)).unwrap(),
         Some(m[1].message_id)
     );
     let after = store.messages_with(fp).unwrap();
@@ -717,7 +713,7 @@ fn inbound_packets_map_to_their_message() {
     assert!(!store.is_my_packet(PacketId([1; 16])).unwrap());
     assert!(
         store
-            .mark_delivered_by_packet(PacketId([1; 16]), true)
+            .mark_delivered_by_packet(PacketId([1; 16]))
             .unwrap()
             .is_none()
     );
@@ -745,4 +741,53 @@ fn v2_database_without_inbound_gets_it() {
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn own_delivery_never_aggregates_and_survives_contact_removal() {
+    let (_d, path, store) = open_tmp();
+    let fp = Fingerprint([4; 32]);
+    let mid = MessageId([6; 16]);
+    let dev = crate::identity::device::DeviceId([5; 16]);
+    let mine = crate::identity::device::DeviceId([8; 16]);
+    let (to_bob, to_me) = (PacketId([1; 16]), PacketId([2; 16]));
+    store
+        .insert_message(fp, Direction::Out, "x", MessageStatus::Sent, 5, mid)
+        .unwrap();
+    store.add_delivery(mid, to_bob, dev, false).unwrap();
+    store.add_delivery(mid, to_me, mine, true).unwrap();
+    for id in [to_bob, to_me] {
+        store.outbox_put(id, b"p", Kind::Message, 999, 5).unwrap();
+    }
+    // L'accusé de mon appareil : livraison notée, message toujours `Sent`.
+    assert_eq!(store.mark_delivered_by_packet(to_me).unwrap(), Some(mid));
+    assert!(store.delivery_acked(to_me).unwrap());
+    assert_eq!(
+        store.messages_with(fp).unwrap()[0].status,
+        MessageStatus::Sent
+    );
+    // Suppression du contact : la copie pour mon appareil reste en file.
+    store.upsert_contact(fp, b"c", "", false).unwrap();
+    store.delete_contact(fp).unwrap();
+    let left: Vec<PacketId> = store
+        .outbox_pending(0)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(left, vec![to_me]);
+    // Base v2 créée avant la colonne `own` : elle est ajoutée à l'ouverture.
+    drop(store);
+    let raw = raw_conn(&path);
+    raw.execute_batch(
+        "DROP TABLE deliveries; CREATE TABLE deliveries (message_id BLOB NOT NULL, \
+         packet_id BLOB UNIQUE NOT NULL, device BLOB NOT NULL, status INTEGER NOT NULL); \
+         DROP TABLE contact_clock;",
+    )
+    .unwrap();
+    drop(raw);
+    let store = Store::open(&path, &KEY).unwrap();
+    store.add_delivery(mid, to_me, mine, true).unwrap();
+    store.set_contact_clock(fp, 7, true).unwrap();
+    assert_eq!(store.contact_clock(fp).unwrap(), Some((7, true)));
 }

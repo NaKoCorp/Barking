@@ -105,9 +105,9 @@ impl Core {
             // Une livraison est toujours un de mes paquets envoyés : un
             // message pour un contact, ou une synchronisation pour un de mes
             // appareils (sans ligne de message pour `SyncContact`/`SyncDevices`).
-            let Some((_, to_device)) = tx.delivery_by_packet(acked)? else {
+            if !tx.is_my_packet(acked)? {
                 return Ok(ReceiveOutcome::NotForUs);
-            };
+            }
             if tx.delivery_acked(acked)? {
                 // Un accusé rejoué (identifiant et expiration réécrits à
                 // volonté) : regroupé au journal.
@@ -122,11 +122,10 @@ impl Core {
                 )?;
                 return Ok(ReceiveOutcome::Duplicate);
             }
-            // L'accusé d'un de mes appareils (copie `SyncSent`) ne rend pas
-            // le message livré : seul compte celui d'un appareil du contact.
-            let own = OwnDevices::read(tx)?
-                .is_some_and(|o| o.list.certs.iter().any(|c| c.device.id() == to_device));
-            tx.mark_delivered_by_packet(acked, !own)?;
+            // L'accusé d'un de mes appareils (copie `SyncSent`, livraison
+            // `own`) ne rend pas le message livré : seul compte celui d'un
+            // appareil du contact.
+            tx.mark_delivered_by_packet(acked)?;
             tx.outbox_remove(acked)?;
             log(
                 tx,
@@ -535,6 +534,18 @@ fn accept_sync(
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
+    // L'appareil expéditeur doit être dans ma liste actuelle (pas seulement
+    // avoir gardé une session d'avant son retrait).
+    let listed = OwnDevices::read(q)?.is_some_and(|own| {
+        own.list
+            .certs
+            .iter()
+            .any(|c| c.device.id() == o.row.contact_device)
+    });
+    if !listed {
+        let id = Some(ack::packet_id_for(&env.ack_secret));
+        return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
+    }
     let sync_id = MessageId::incoming(my_fp, &env.message_id);
     let kind = if q.inbound_has_message(sync_id)? {
         None

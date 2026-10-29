@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use barking_core::core::{LinkBundle, LinkOffer};
 use barking_core::identity::Fingerprint;
+use barking_core::identity::device_list::MAX_DEVICES;
+use barking_core::packet::{Kind, Packet};
 use barking_core::store::{Direction, MessageStatus};
 use barking_core::transparency::{SyncKind, TransparencyEvent};
 use barking_core::{Core, CoreError, LinkRequest, ReceiveOutcome};
@@ -459,23 +461,29 @@ fn link_secret_not_in_debug_or_log() {
 }
 
 #[test]
-fn link_refuses_seventeenth_device() {
+fn link_refuses_device_beyond_cap() {
     let d = dir();
     let mut rng = StdRng::seed_from_u64(10);
     let mut a = create(d.path(), "a", 1, &mut rng);
-    for i in 0..15u8 {
+    for i in 1..MAX_DEVICES {
         let offer = a.core.link_offer(NOW, &mut rng).unwrap();
-        let (_t, req) = begin(d.path(), &format!("t{i}"), 20 + i, &offer, &mut rng);
+        let (_t, req) = begin(d.path(), &format!("t{i}"), 20 + i as u8, &offer, &mut rng);
         a.core.link_device(&req, false, NOW, &mut rng).unwrap();
     }
-    assert_eq!(a.core.contact_card("A").unwrap().devices.certs.len(), 16);
+    assert_eq!(
+        a.core.contact_card("A").unwrap().devices.certs.len(),
+        MAX_DEVICES
+    );
     let offer = a.core.link_offer(NOW, &mut rng).unwrap();
-    let (_t, req) = begin(d.path(), "t16", 99, &offer, &mut rng);
+    let (_t, req) = begin(d.path(), "trop", 99, &offer, &mut rng);
     assert_eq!(
         a.core.link_device(&req, false, NOW, &mut rng).err(),
         Some(CoreError::TooLarge)
     );
-    assert_eq!(a.core.contact_card("A").unwrap().devices.certs.len(), 16);
+    assert_eq!(
+        a.core.contact_card("A").unwrap().devices.certs.len(),
+        MAX_DEVICES
+    );
 }
 
 /// A lié à T, sans contact.
@@ -684,4 +692,116 @@ fn contact_ops_sync() {
         a.core.set_alias(&carol_fp, &"z".repeat(65), NOW, &mut rng),
         Err(CoreError::TooLarge)
     );
+}
+
+/// Paquets de la file de `dev` produits par `op`.
+fn produced(dev: &mut Dev, op: impl FnOnce(&mut Core)) -> Vec<Vec<u8>> {
+    let before = dev.core.pending_outbox(NOW).unwrap();
+    op(&mut dev.core);
+    dev.core
+        .pending_outbox(NOW)
+        .unwrap()
+        .into_iter()
+        .filter(|b| !before.contains(b))
+        .collect()
+}
+
+fn deliver(to: &mut Dev, bytes: &[u8], rng: &mut StdRng) -> ReceiveOutcome {
+    to.core.receive(bytes, T, NOW, rng).unwrap()
+}
+
+#[test]
+fn contact_sync_is_order_independent() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(22);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let carol = create(d.path(), "carol", 6, &mut rng)
+        .core
+        .contact_card("Carol")
+        .unwrap();
+    let dave = create(d.path(), "dave", 7, &mut rng)
+        .core
+        .contact_card("Dave")
+        .unwrap();
+    let carol_fp = carol.fingerprint();
+    let dave_fp = dave.fingerprint();
+    let mut r2 = StdRng::seed_from_u64(1);
+
+    // Ajout puis suppression, livrés à l'envers : la suppression d'un contact
+    // inconnu est appliquée (et accusée), l'ajout plus ancien n'y change rien.
+    let add = produced(&mut a, |c| {
+        c.add_contact(&carol, Some("carol"), NOW, &mut r2).unwrap();
+    });
+    let rm = produced(&mut a, |c| {
+        c.remove_contact(&carol_fp, NOW + 1, &mut r2).unwrap()
+    });
+    assert_eq!((add.len(), rm.len()), (1, 1));
+    for p in rm.iter().chain(&add) {
+        assert!(matches!(
+            deliver(&mut t, p, &mut rng),
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Contact
+            }
+        ));
+    }
+    assert!(contact_state(&t.core).is_empty());
+    // Le même paquet une seconde fois : doublon, rien ne change.
+    assert!(matches!(
+        deliver(&mut t, &add[0], &mut rng),
+        ReceiveOutcome::Duplicate
+    ));
+    assert!(contact_state(&t.core).is_empty());
+
+    // État vérifié livré avant l'ajout : le contact est vérifié, l'ajout
+    // plus ancien ne le dé-vérifie pas.
+    let add = produced(&mut a, |c| {
+        c.add_contact(&dave, Some("dave"), NOW + 2, &mut r2)
+            .unwrap();
+    });
+    let ver = produced(&mut a, |c| {
+        c.mark_verified(&dave_fp, NOW + 3, &mut r2).unwrap()
+    });
+    for p in ver.iter().chain(&add) {
+        deliver(&mut t, p, &mut rng);
+    }
+    assert_eq!(
+        contact_state(&t.core),
+        vec![(dave_fp, Some("dave".to_owned()), true)]
+    );
+    // La même opération refaite (nouveau paquet) : même état.
+    let again = produced(&mut a, |c| {
+        c.mark_verified(&dave_fp, NOW + 4, &mut r2).unwrap()
+    });
+    deliver(&mut t, &again[0], &mut rng);
+    assert_eq!(contact_state(&t.core), contact_state(&a.core));
+
+    // Un ajout plus récent que la suppression rend le contact.
+    let re = produced(&mut a, |c| {
+        c.add_contact(&carol, Some("carol"), NOW + 5, &mut r2)
+            .unwrap();
+    });
+    deliver(&mut t, &re[0], &mut rng);
+    assert_eq!(contact_state(&t.core), contact_state(&a.core));
+    assert_eq!(contact_state(&t.core).len(), 2);
+
+    // Opérations locales : une suppression sur T (plus récente) l'emporte
+    // sur un changement d'alias de A plus ancien, livré ensuite.
+    let late = produced(&mut a, |c| {
+        c.set_alias(&carol_fp, "c", NOW + 6, &mut r2).unwrap()
+    });
+    t.core.remove_contact(&carol_fp, NOW + 7, &mut r2).unwrap();
+    deliver(&mut t, &late[0], &mut rng);
+    assert_eq!(
+        contact_state(&t.core),
+        vec![(dave_fp, Some("dave".to_owned()), true)]
+    );
+
+    // Tous les accusés de T vident la file de A : il n'y reste que l'accusé
+    // de la suppression faite sur T.
+    for bytes in t.core.pending_outbox(NOW).unwrap() {
+        a.core.receive(&bytes, T, NOW, &mut rng).unwrap();
+    }
+    let left = a.core.pending_outbox(NOW).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(Packet::decode(&left[0]).unwrap().kind, Kind::Ack);
 }

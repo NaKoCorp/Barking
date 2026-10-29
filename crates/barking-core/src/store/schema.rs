@@ -83,20 +83,36 @@ CREATE TABLE IF NOT EXISTS deliveries (
     message_id BLOB NOT NULL,
     packet_id BLOB UNIQUE NOT NULL,
     device BLOB NOT NULL,
-    status INTEGER NOT NULL
+    status INTEGER NOT NULL,
+    -- 1 : copie de synchronisation pour un de mes appareils (son accusé ne
+    -- rend jamais le message livré).
+    own INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries(message_id);
 ";
 
-/// Table `inbound` de la v2, à part : appliquée à chaque ouverture
-/// (idempotent), car des bases v2 de développement ont été créées avant son
-/// ajout. La migration v1 → v2 la crée aussi, avant de la remplir.
+/// Tables de la v2 ajoutées après coup : appliquées à chaque ouverture
+/// (idempotent), car des bases v2 de développement ont été créées avant leur
+/// ajout. La migration v1 → v2 les crée aussi, avant de remplir `inbound`.
+///
+/// `contact_clock` : pour chaque empreinte, date (horodatage d'enveloppe ou
+/// heure locale) de la dernière opération sur ce contact, et si c'était une
+/// suppression (pierre tombale). Dernier écrivain gagnant entre mes appareils.
 pub const SCHEMA_V2_INBOUND: &str = "
 CREATE TABLE IF NOT EXISTS inbound (
     packet_id BLOB PRIMARY KEY NOT NULL,
     message_id BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS contact_clock (
+    fp BLOB PRIMARY KEY NOT NULL,
+    at INTEGER NOT NULL,
+    removed INTEGER NOT NULL
+);
 ";
+
+/// Colonne `own` de `deliveries`, pour une base v2 créée avant son ajout.
+pub const DELIVERIES_ADD_OWN: &str =
+    "ALTER TABLE deliveries ADD COLUMN own INTEGER NOT NULL DEFAULT 0;";
 
 /// Contexte de dérivation d'un identifiant de message à partir d'un
 /// identifiant de paquet (messages v1 et messages reçus avant le lot 1B).

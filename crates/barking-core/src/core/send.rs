@@ -14,7 +14,7 @@ use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{Packet, ack};
 use crate::ratchet::RatchetState;
 use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow};
-use crate::transparency::TransparencyEvent;
+use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
 /// Destinataires d'un envoi.
@@ -213,13 +213,13 @@ impl Core {
                 return Err(CoreError::Store("identifiant de message en double".into()));
             }
             for (packet, peer_id) in &sealed {
-                tx.add_delivery(message_id, packet.id, *peer_id)?;
+                tx.add_delivery(message_id, packet.id, *peer_id, false)?;
             }
             let copy = Body::SyncSent {
                 to: *to,
                 text: text.to_owned(),
             };
-            let mine = sync::seal_to_own(tx, device, &copy, message_id, now, rng)?;
+            let mine = sync::seal_to_own(tx, device, &copy, SyncKind::Sent, message_id, now, rng)?;
             let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
             out.extend(mine);
             Ok(out)

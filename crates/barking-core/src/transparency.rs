@@ -68,6 +68,10 @@ pub enum TransparencyEvent {
     SyncApplied {
         kind: SyncKind,
     },
+    /// Copie de synchronisation non envoyée : trop volumineuse pour un paquet.
+    SyncSkipped {
+        kind: SyncKind,
+    },
 }
 
 /// Type de synchronisation entre mes appareils.
@@ -76,6 +80,17 @@ pub enum SyncKind {
     Sent,
     Contact,
     Devices,
+}
+
+impl SyncKind {
+    /// Nom affiché : « message envoyé », « contact », « liste d'appareils ».
+    pub fn label(self) -> &'static str {
+        match self {
+            SyncKind::Sent => "message envoyé",
+            SyncKind::Contact => "contact",
+            SyncKind::Devices => "liste d'appareils",
+        }
+    }
 }
 
 /// Ce que tout relais lit dans l'en-tête en clair d'un paquet.
@@ -235,13 +250,13 @@ impl TransparencyEvent {
                  {contacts} contacts copiés). La clé racine n'a pas été copiée."
             ),
             Self::SyncApplied { kind } => {
-                let what = match kind {
-                    SyncKind::Sent => "message envoyé",
-                    SyncKind::Contact => "contact",
-                    SyncKind::Devices => "liste d'appareils",
-                };
-                format!("Synchronisé depuis un de tes appareils : {what}.")
+                format!("Synchronisé depuis un de tes appareils : {}.", kind.label())
             }
+            Self::SyncSkipped { kind } => format!(
+                "Copie vers tes autres appareils non envoyée ({}) : trop volumineuse. \
+                 Tes appareils peuvent différer sur ce point.",
+                kind.label()
+            ),
         }
     }
 }
@@ -369,6 +384,9 @@ mod tests {
             TransparencyEvent::SyncApplied {
                 kind: SyncKind::Devices,
             },
+            TransparencyEvent::SyncSkipped {
+                kind: SyncKind::Contact,
+            },
         ]
     }
 
@@ -393,6 +411,18 @@ mod tests {
             }
             .is_security()
         );
+        let skipped = |kind| TransparencyEvent::SyncSkipped { kind };
+        assert_eq!(
+            skipped(SyncKind::Contact).describe(),
+            "Copie vers tes autres appareils non envoyée (contact) : trop volumineuse. \
+             Tes appareils peuvent différer sur ce point."
+        );
+        assert_eq!(
+            skipped(SyncKind::Devices).describe(),
+            "Copie vers tes autres appareils non envoyée (liste d'appareils) : trop \
+             volumineuse. Tes appareils peuvent différer sur ce point."
+        );
+        assert!(!skipped(SyncKind::Sent).is_security());
     }
 
     #[test]

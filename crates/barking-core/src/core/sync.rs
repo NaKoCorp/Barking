@@ -14,14 +14,14 @@ use rand_core::CryptoRng;
 
 use super::link::META_OWN_CARD;
 use super::send::{Target, seal_for};
-use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts};
+use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts, load_card, log};
 use crate::contact::ContactCard;
-use crate::envelope::{Body, Envelope, SyncOp};
+use crate::envelope::{self, Body, Envelope, SyncOp};
 use crate::handshake::PrekeyBundle;
-use crate::identity::{DeviceId, DeviceKeys, DeviceList, DevicePublic};
+use crate::identity::{DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint};
 use crate::packet::Packet;
 use crate::store::{Direction, MessageId, MessageStatus, Queries};
-use crate::transparency::SyncKind;
+use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
 // Raisons de quarantaine : textes fixes.
@@ -30,20 +30,32 @@ pub(super) const R_SYNC_REFUSED: &str = "synchronisation refusée";
 pub(super) const R_DEVICES_REFUSED: &str = "liste d'appareils refusée";
 
 /// Scelle `body` pour chacun de mes autres appareils ; chaque paquet est
-/// enregistré comme livraison de `message_id` (à destination d'un de mes
-/// appareils : son accusé ne rend pas le message « livré »). Sans autre
-/// appareil, rien n'est fait.
+/// enregistré comme livraison `own` de `message_id` (son accusé ne rend pas
+/// le message « livré »). Sans autre appareil, rien n'est fait.
+///
+/// Un contenu trop volumineux pour un paquet n'est pas envoyé : l'opération
+/// locale réussit quand même, et `SyncSkipped` est journalisé. La taille est
+/// vérifiée avant `seal_for`, qui écrit déjà sessions et journal.
 pub(super) fn seal_to_own(
     q: &impl Queries,
     device: &DeviceKeys,
     body: &Body,
+    kind: SyncKind,
     message_id: MessageId,
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<Vec<Packet>> {
+    let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
+    if own.others(&device.public()).is_empty() {
+        return Ok(Vec::new());
+    }
+    if !envelope::fits_in_packet(body) {
+        log(q, now, None, &TransparencyEvent::SyncSkipped { kind })?;
+        return Ok(Vec::new());
+    }
     let sealed = seal_for(q, device, &Target::OwnDevices, body, message_id, now, rng)?;
     for (packet, peer) in &sealed {
-        q.add_delivery(message_id, packet.id, *peer)?;
+        q.add_delivery(message_id, packet.id, *peer, true)?;
     }
     Ok(sealed.into_iter().map(|(p, _)| p).collect())
 }
@@ -59,8 +71,39 @@ pub(super) fn send_op(
 ) -> Result<()> {
     let mut id = [0u8; 16];
     rng.fill_bytes(&mut id);
-    seal_to_own(q, device, &Body::SyncContact(op), MessageId(id), now, rng)?;
+    let body = Body::SyncContact(op);
+    seal_to_own(q, device, &body, SyncKind::Contact, MessageId(id), now, rng)?;
     Ok(())
+}
+
+/// Met en file l'état stocké du contact `fp` (`SyncOp::Upsert`).
+pub(super) fn send_state(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    fp: Fingerprint,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<()> {
+    let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
+    let op = SyncOp::Upsert {
+        card: Box::new(load_card(&row.card)?),
+        alias: row.alias.clone(),
+        verified: row.verified,
+    };
+    send_op(q, device, op, now, rng)
+}
+
+/// Opération locale sur le contact `fp` à `now` : l'horloge du contact
+/// avance strictement (une opération locale l'emporte sur tout ce que cet
+/// appareil connaît déjà), et `removed` pose ou lève la pierre tombale.
+/// Renvoie la date de l'opération, à utiliser comme `sent_at` de sa copie.
+pub(super) fn touch(q: &impl Queries, fp: Fingerprint, now: u64, removed: bool) -> Result<u64> {
+    let at = match q.contact_clock(fp)? {
+        Some((last, _)) if last >= now => last.saturating_add(1),
+        _ => now,
+    };
+    q.set_contact_clock(fp, at, removed)?;
+    Ok(at)
 }
 
 /// Applique un contenu de synchronisation authentifié, venu d'un de mes
@@ -90,20 +133,24 @@ pub(super) fn apply(
             )?;
             Ok(Ok(SyncKind::Sent))
         }
-        Body::SyncContact(op) => Ok(content(apply_op(q, op))?.map(|()| SyncKind::Contact)),
-        Body::SyncDevices {
-            devices,
-            card,
-            own_bundles,
-        } => {
+        Body::SyncContact(op) => {
+            Ok(content(apply_op(q, op, env.sent_at))?.map(|()| SyncKind::Contact))
+        }
+        Body::SyncDevices { card } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
-            if !devices_ok(q, &own.list, me, devices, card, own_bundles)? {
+            if !devices_ok(q, &own.list, me, card)? {
                 return Ok(Err(R_DEVICES_REFUSED));
             }
-            q.put_meta(META_DEVICE_LIST, devices)?;
-            q.put_meta(META_LINKED_BUNDLES, own_bundles)?;
+            let others: Vec<PrekeyBundle> = card
+                .bundles
+                .iter()
+                .filter(|b| b.device != *me)
+                .cloned()
+                .collect();
+            q.put_meta(META_DEVICE_LIST, &card.devices)?;
+            q.put_meta(META_LINKED_BUNDLES, &others)?;
             q.put_meta(META_OWN_CARD, card)?;
-            purge_removed_own_sessions(q, devices)?;
+            purge_removed_own_sessions(q, &card.devices)?;
             Ok(Ok(SyncKind::Devices))
         }
     }
@@ -118,47 +165,55 @@ fn content<T>(r: Result<T>) -> Result<core::result::Result<T, &'static str>> {
     }
 }
 
-fn apply_op(q: &impl Queries, op: &SyncOp) -> Result<()> {
-    match op {
-        SyncOp::Add { card, alias } => {
-            contacts::add_in(q, card, Some(alias.as_str()).filter(|a| !a.is_empty()))?;
-            Ok(())
+/// État d'un contact, dernier écrivain gagnant sur `at` (horodatage
+/// authentifié de l'enveloppe), par empreinte. Une opération plus ancienne
+/// que la dernière connue est sans effet (acceptée et accusée) ; à date
+/// égale, une suppression l'emporte sur un état présent, dans les deux
+/// ordres d'arrivée. La pierre tombale d'une suppression empêche un état
+/// plus ancien de ressusciter le contact ; un état plus récent la lève.
+fn apply_op(q: &impl Queries, op: &SyncOp, at: u64) -> Result<()> {
+    let (fp, removing) = match op {
+        SyncOp::Upsert { card, .. } => (card.fingerprint(), false),
+        SyncOp::Remove(fp) => (*fp, true),
+    };
+    if let Some((last, removed)) = q.contact_clock(fp)? {
+        let stale = at < last || (at == last && removed && !removing);
+        if stale {
+            return Ok(());
         }
-        SyncOp::Remove(fp) => contacts::remove_in(q, *fp),
-        SyncOp::SetAlias(fp, alias) => contacts::set_alias_in(q, *fp, alias).map(|_| ()),
-        SyncOp::MarkVerified(fp) => contacts::verify_in(q, *fp),
     }
+    match op {
+        SyncOp::Upsert {
+            card,
+            alias,
+            verified,
+        } => contacts::upsert_in(q, card, alias, *verified)?,
+        SyncOp::Remove(fp) => {
+            if q.get_contact(*fp)?.is_some() {
+                q.delete_contact(*fp)?;
+            }
+        }
+    }
+    q.set_contact_clock(fp, at, removing)
 }
 
-/// Nouvelle liste acceptable : signée par ma racine, de version strictement
-/// supérieure, contenant cet appareil ; carte cohérente ; paquets de clés de
-/// mes autres appareils valides ; aucun nouvel appareil revendiqué par un contact.
+/// Nouvelle carte acceptable : liste signée par ma racine, de version
+/// strictement supérieure, contenant cet appareil ; carte vérifiée, avec un
+/// paquet de clés pour cet appareil ; aucun nouvel appareil revendiqué par un
+/// contact.
 fn devices_ok(
     q: &impl Queries,
     current: &DeviceList,
     me: &DevicePublic,
-    devices: &DeviceList,
     card: &ContactCard,
-    own_bundles: &[PrekeyBundle],
 ) -> Result<bool> {
+    let devices = &card.devices;
     if !devices.supersedes(current)
-        || devices.verify().is_err()
-        || !devices.certs.iter().any(|c| c.device == *me)
         || card.verify().is_err()
-        || card.devices != *devices
+        || !devices.certs.iter().any(|c| c.device == *me)
+        || !card.bundles.iter().any(|b| b.device == *me)
     {
         return Ok(false);
-    }
-    let mut seen = HashSet::new();
-    for b in own_bundles {
-        if b.verify().is_err()
-            || b.device == *me
-            || b.opk.is_some()
-            || !seen.insert(b.device.id())
-            || !devices.certs.iter().any(|c| c.device == b.device)
-        {
-            return Ok(false);
-        }
     }
     let added: Vec<DevicePublic> = devices
         .certs
@@ -168,7 +223,6 @@ fn devices_ok(
         .collect();
     Ok(!contacts::claimed_by_contact(q, None, &added)?)
 }
-
 /// Supprime les sessions rangées sous mon empreinte avec un appareil absent
 /// de `list` (ma nouvelle liste).
 pub(super) fn purge_removed_own_sessions(q: &impl Queries, list: &DeviceList) -> Result<()> {

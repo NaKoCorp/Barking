@@ -18,9 +18,8 @@ use crate::contact::ContactCard;
 use crate::crypto::aead;
 use crate::crypto::kdf::hkdf_sha256;
 use crate::crypto::labels;
-use crate::handshake::PrekeyBundle;
 use crate::handshake::pqxdh::InitialMessage;
-use crate::identity::{DeviceKeys, DeviceList, Fingerprint};
+use crate::identity::{DeviceKeys, Fingerprint};
 use crate::mailbox::MailboxId;
 use crate::packet::{DEFAULT_HOPS, Kind, Packet, Tier, ack, default_expiry};
 use crate::ratchet::{RatchetMessage, RatchetState};
@@ -40,31 +39,30 @@ pub enum Body {
         to: Fingerprint,
         text: String,
     },
-    /// Opération sur mes contacts faite sur un autre de mes appareils.
+    /// État d'un de mes contacts après une opération faite sur un autre de
+    /// mes appareils (dernier écrivain gagnant, voir `core/sync.rs`).
     SyncContact(SyncOp),
-    /// Nouvelle liste de mes appareils, signée par ma racine, avec ma carte
-    /// et les paquets de clés de mes autres appareils.
-    /// Liste et carte en boîte (taille de l'enum) ; même format postcard.
+    /// Nouvelle liste de mes appareils : ma carte, signée par ma racine, qui
+    /// porte la liste et un paquet de clés par appareil.
     SyncDevices {
-        devices: Box<DeviceList>,
         card: Box<ContactCard>,
-        own_bundles: Vec<PrekeyBundle>,
     },
 }
 
-/// Opération sur les contacts, rejouée sur mes autres appareils.
+/// État d'un contact, rejoué sur mes autres appareils. Idempotent : le même
+/// état appliqué deux fois ne change rien.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncOp {
-    /// Ajout ou mise à jour ; `alias` vide : pas d'alias (l'alias connu est
-    /// gardé). Carte en boîte (taille de l'enum) ; même format postcard.
-    Add {
+    /// Contact présent avec cette carte, cet alias (vide : aucun) et ce
+    /// statut vérifié (fusionné par « ou »). Carte en boîte (taille de
+    /// l'enum) ; même format postcard.
+    Upsert {
         card: Box<ContactCard>,
         alias: String,
+        verified: bool,
     },
+    /// Contact supprimé (sans effet s'il est inconnu).
     Remove(Fingerprint),
-    /// Nouvel alias ; vide : l'alias est retiré.
-    SetAlias(Fingerprint, String),
-    MarkVerified(Fingerprint),
 }
 
 /// Contenu chiffré d'un paquet. Aucune identité d'expéditeur.
@@ -84,8 +82,8 @@ impl fmt::Debug for Body {
             Body::Text(t) => write!(f, "Text(<{} octets>)", t.len()),
             Body::SyncSent { text, .. } => write!(f, "SyncSent(<{} octets>)", text.len()),
             Body::SyncContact(op) => write!(f, "SyncContact({op:?})"),
-            Body::SyncDevices { devices, .. } => {
-                write!(f, "SyncDevices(version {})", devices.version)
+            Body::SyncDevices { card } => {
+                write!(f, "SyncDevices(version {})", card.devices.version)
             }
         }
     }
@@ -95,10 +93,8 @@ impl fmt::Debug for SyncOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Ni carte, ni alias, ni empreinte : seulement le type d'opération.
         f.write_str(match self {
-            SyncOp::Add { .. } => "Add",
+            SyncOp::Upsert { .. } => "Upsert",
             SyncOp::Remove(_) => "Remove",
-            SyncOp::SetAlias(..) => "SetAlias",
-            SyncOp::MarkVerified(_) => "MarkVerified",
         })
     }
 }
@@ -139,6 +135,30 @@ impl Body {
             _ => Ok(()),
         }
     }
+}
+
+/// Majorant de ce qu'ajoute la charge `Wire::Initial` (la plus lourde) à
+/// l'enveloppe sérialisée : étiquette, `ek` (32), message initial scellé
+/// (clés, identifiants, chiffré ML-KEM de 1088 octets, étiquette AEAD,
+/// longueurs ≈ 1 190), en-tête chiffré (80) et étiquette du corps (16),
+/// longueurs comprises. Vérifié par un test sur de vrais paquets.
+pub const MAX_WIRE_OVERHEAD: usize = 1_340;
+
+/// Le contenu tient-il dans un seul paquet (palier L), quelle que soit la
+/// session (ouverture comprise) ? Calcul sans rien écrire ni faire avancer :
+/// à appeler avant `seal`, qui refuserait (`TooLarge`) après coup.
+pub fn fits_in_packet(body: &Body) -> bool {
+    // Horodatage maximal : l'entier variable le plus long.
+    let env = Envelope {
+        sent_at: u64::MAX,
+        ack_secret: [0; 16],
+        message_id: [0; 16],
+        body: body.clone(),
+    };
+    postcard::to_allocvec(&env)
+        .ok()
+        .and_then(|b| b.len().checked_add(MAX_WIRE_OVERHEAD))
+        .is_some_and(|len| Tier::fit(len).is_ok())
 }
 
 /// Sortie X25519 non nulle (sinon point d'ordre faible : échange non contributif).

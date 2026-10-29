@@ -313,6 +313,19 @@ impl Store {
         self.conn
             .execute_batch(schema::SCHEMA_V2_INBOUND)
             .map_err(map_err)?;
+        let has_own: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('deliveries') WHERE name = 'own'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_own {
+            self.conn
+                .execute_batch(schema::DELIVERIES_ADD_OWN)
+                .map_err(map_err)?;
+        }
         self.conn
             .execute_batch(schema::TRANSPARENCY_INDEXES)
             .map_err(map_err)?;
@@ -521,41 +534,29 @@ pub trait Queries {
     }
 
     /// Enregistre le paquet `packet_id`, destiné à l'appareil `device`, comme
-    /// livraison (en attente d'accusé) du message `message_id`.
+    /// livraison (en attente d'accusé) du message `message_id`. `own` : copie
+    /// de synchronisation pour un de mes appareils.
     fn add_delivery(
         &self,
         message_id: MessageId,
         packet_id: PacketId,
         device: DeviceId,
+        own: bool,
     ) -> Result<()> {
         self.conn()
             .execute(
-                "INSERT INTO deliveries(message_id, packet_id, device, status) \
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO deliveries(message_id, packet_id, device, status, own) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     message_id.0.as_slice(),
                     packet_id.0.as_slice(),
                     device.0.as_slice(),
-                    MessageStatus::Sent as i64
+                    MessageStatus::Sent as i64,
+                    i64::from(own)
                 ],
             )
             .map_err(map_err)?;
         Ok(())
-    }
-
-    /// Message et appareil destinataire de la livraison `packet_id`.
-    fn delivery_by_packet(&self, packet_id: PacketId) -> Result<Option<(MessageId, DeviceId)>> {
-        let row: Option<(Vec<u8>, Vec<u8>)> = self
-            .conn()
-            .query_row(
-                "SELECT message_id, device FROM deliveries WHERE packet_id = ?1",
-                params![packet_id.0.as_slice()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(map_err)?;
-        row.map(|(m, d)| Ok((MessageId(arr(m)?), DeviceId(arr(d)?))))
-            .transpose()
     }
 
     /// `true` si un paquet reçu portant le message `message_id` est déjà
@@ -572,26 +573,21 @@ pub trait Queries {
         Ok(n > 0)
     }
 
-    /// Marque la livraison `packet_id` livrée et, si `aggregate`, le message
-    /// `Delivered` (un accusé d'un seul appareil du destinataire suffit ;
-    /// l'accusé d'un de mes appareils, pour une copie `SyncSent`, ne compte
-    /// pas). Renvoie le message concerné, ou `None` si aucune livraison ne
-    /// porte ce paquet.
-    fn mark_delivered_by_packet(
-        &self,
-        packet_id: PacketId,
-        aggregate: bool,
-    ) -> Result<Option<MessageId>> {
-        let mid: Option<Vec<u8>> = self
+    /// Marque la livraison `packet_id` livrée et le message `Delivered` (un
+    /// accusé d'un seul appareil du destinataire suffit ; celui d'une copie
+    /// pour un de mes appareils, `own`, ne compte jamais). Renvoie le message
+    /// concerné, ou `None` si aucune livraison ne porte ce paquet.
+    fn mark_delivered_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageId>> {
+        let row: Option<(Vec<u8>, i64)> = self
             .conn()
             .query_row(
-                "SELECT message_id FROM deliveries WHERE packet_id = ?1",
+                "SELECT message_id, own FROM deliveries WHERE packet_id = ?1",
                 params![packet_id.0.as_slice()],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
             .map_err(map_err)?;
-        let Some(mid) = mid else {
+        let Some((mid, own)) = row else {
             return Ok(None);
         };
         self.conn()
@@ -600,7 +596,7 @@ pub trait Queries {
                 params![MessageStatus::Delivered as i64, packet_id.0.as_slice()],
             )
             .map_err(map_err)?;
-        if aggregate {
+        if own == 0 {
             self.conn()
                 .execute(
                     "UPDATE messages SET status = ?1 WHERE message_id = ?2 AND direction = ?3",
@@ -609,6 +605,33 @@ pub trait Queries {
                 .map_err(map_err)?;
         }
         Ok(Some(MessageId(arr(mid)?)))
+    }
+
+    /// Dernière opération connue sur le contact `fp` : `(date, supprimé)`.
+    fn contact_clock(&self, fp: Fingerprint) -> Result<Option<(u64, bool)>> {
+        let row: Option<(i64, i64)> = self
+            .conn()
+            .query_row(
+                "SELECT at, removed FROM contact_clock WHERE fp = ?1",
+                params![fp.0.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(map_err)?;
+        Ok(row.map(|(at, removed)| (to_u64(at), removed != 0)))
+    }
+
+    /// Enregistre la dernière opération sur le contact `fp` (`removed` :
+    /// pierre tombale d'une suppression).
+    fn set_contact_clock(&self, fp: Fingerprint, at: u64, removed: bool) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO contact_clock(fp, at, removed) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(fp) DO UPDATE SET at = excluded.at, removed = excluded.removed",
+                params![fp.0.as_slice(), to_i64(at), i64::from(removed)],
+            )
+            .map_err(map_err)?;
+        Ok(())
     }
 
     /// `true` si la livraison portant `packet_id` a déjà reçu son accusé.
@@ -792,14 +815,15 @@ pub trait Queries {
 
     /// Supprime un contact, toutes ses sessions et ses paquets en file
     /// d'envoi : mes messages pour lui et mes accusés de ses messages
-    /// (l'historique est gardé).
+    /// (l'historique est gardé). Les copies `SyncSent` de mes messages pour
+    /// mes autres appareils restent en file.
     fn delete_contact(&self, fp: Fingerprint) -> Result<()> {
         self.conn()
             .execute(
                 "DELETE FROM outbox WHERE packet_id IN \
                  (SELECT d.packet_id FROM deliveries d \
                   JOIN messages m ON m.message_id = d.message_id \
-                  WHERE m.contact_fp = ?1 AND m.direction = ?2)",
+                  WHERE m.contact_fp = ?1 AND m.direction = ?2 AND d.own = 0)",
                 params![fp.0.as_slice(), Direction::Out as i64],
             )
             .map_err(map_err)?;

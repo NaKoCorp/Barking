@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::contact::ContactCard;
-use crate::envelope::{Body, Envelope, SyncOp, Wire};
+use crate::envelope::{Body, Envelope, SyncOp, Wire, parse_wire};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{
     DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic, RootIdentity,
@@ -1091,11 +1091,13 @@ fn sync_from_contact_quarantined() {
             text: "faux".into(),
         },
         Body::SyncContact(SyncOp::Remove(b_fp)),
-        Body::SyncContact(SyncOp::MarkVerified(b_fp)),
+        Body::SyncContact(SyncOp::Upsert {
+            card: Box::new(card.clone()),
+            alias: "x".into(),
+            verified: true,
+        }),
         Body::SyncDevices {
-            devices: Box::new(p.a.devices.clone()),
             card: Box::new(card),
-            own_bundles: Vec::new(),
         },
     ];
     let before = p.a.messages_with(&b_fp).unwrap().len();
@@ -1108,8 +1110,12 @@ fn sync_from_contact_quarantined() {
         assert_eq!(reason(r), NOT_MINE, "cas {i}");
     }
     assert_eq!(p.a.messages_with(&b_fp).unwrap().len(), before);
-    assert!(p.a.contacts().unwrap()[0].fingerprint == b_fp);
-    assert!(!p.a.contacts().unwrap()[0].verified);
+    let c = p.a.contacts().unwrap();
+    assert_eq!(c.len(), 1);
+    assert_eq!(
+        (c[0].fingerprint, c[0].alias.as_deref(), c[0].verified),
+        (b_fp, Some("bob"), false)
+    );
 }
 
 /// A lié à T1 puis à T2 ; T1 ne connaît encore que la liste de sa liaison.
@@ -1131,19 +1137,9 @@ fn linked_twice() -> (TempDir, Core, Core, Core, StdRng) {
 }
 
 /// `SyncDevices` scellé par A pour `to` (un de ses autres appareils).
-fn devices_packet(
-    a: &mut Core,
-    to: &Core,
-    devices: DeviceList,
-    card: ContactCard,
-    own_bundles: Vec<PrekeyBundle>,
-    id: u8,
-    rng: &mut StdRng,
-) -> Packet {
+fn devices_packet(a: &mut Core, to: &Core, card: ContactCard, id: u8, rng: &mut StdRng) -> Packet {
     let body = Body::SyncDevices {
-        devices: Box::new(devices),
         card: Box::new(card),
-        own_bundles,
     };
     let to_id = to.device.public().id();
     seal_body(
@@ -1159,17 +1155,33 @@ fn devices_packet(
     .0
 }
 
-/// Paquets de clés de tous les appareils de A sauf `except`.
-fn bundles_except(a: &Core, except: &Core) -> Vec<PrekeyBundle> {
-    let skip = except.device.public();
+/// Carte de `root` pour `list`, avec les paquets de clés (parmi `all`) des
+/// appareils de la liste, sauf `skip`.
+fn card_for(
+    root: &RootIdentity,
+    list: DeviceList,
+    all: &[PrekeyBundle],
+    skip: Option<&DevicePublic>,
+) -> ContactCard {
+    let bundles = all
+        .iter()
+        .filter(|b| list.certs.iter().any(|c| c.device == b.device))
+        .filter(|b| Some(&b.device) != skip)
+        .cloned()
+        .collect();
+    ContactCard::sign(root, "", list, bundles).unwrap()
+}
+
+/// Paquets de clés de tous les appareils de A.
+fn all_bundles(a: &Core) -> Vec<PrekeyBundle> {
     let mut all = vec![a.prekeys.bundle(&a.device, false)];
     all.extend(a.linked_bundles.iter().cloned());
-    all.into_iter().filter(|b| b.device != skip).collect()
+    all
 }
 
 #[test]
 fn sync_devices_requires_newer_signed_list() {
-    let (_d, mut a, mut t1, t2, mut rng) = linked_twice();
+    let (_d, mut a, mut t1, mut t2, mut rng) = linked_twice();
     let me = a.fingerprint();
     let t1_before = t1.devices.clone();
     let stored = |c: &Core| {
@@ -1180,68 +1192,56 @@ fn sync_devices_requires_newer_signed_list() {
     };
     assert_eq!(stored(&t1), t1_before);
     assert_eq!(t1_before.certs.len(), 2);
-    let card = a.contact_card("").unwrap();
-    let bundles = bundles_except(&a, &t1);
-    // Version égale à celle de T1, signée par ma racine : refusée.
-    let same_version = {
-        let root_id = a.root.as_ref().unwrap();
-        DeviceList::sign(root_id, t1_before.version, a.devices.certs.clone()).unwrap()
-    };
-    // Signée par une autre racine, version supérieure : refusée.
-    let (other_root, _) = RootIdentity::generate(&mut rng);
-    let foreign = DeviceList::sign(&other_root, a.devices.version + 5, a.devices.certs.clone());
-    // Version supérieure qui ne contient pas T1 : refusée.
-    let without_t1 = {
-        let root_id = a.root.as_ref().unwrap();
-        let certs = a
-            .devices
-            .certs
-            .iter()
-            .filter(|c| c.device != t1.device.public())
-            .cloned()
-            .collect();
-        DeviceList::sign(root_id, a.devices.version + 1, certs).unwrap()
-    };
-    let mut cases = vec![same_version, without_t1];
-    if let Ok(f) = foreign {
-        cases.push(f);
-    }
-    let mut forged_root = a.devices.clone();
-    forged_root.version += 10;
-    cases.push(forged_root);
-    for (i, list) in cases.into_iter().enumerate() {
-        let pkt = devices_packet(
-            &mut a,
-            &t1,
-            list,
-            card.clone(),
-            bundles.clone(),
-            10 + i as u8,
-            &mut rng,
-        );
+    let all = all_bundles(&a);
+    let root = a.root.take().unwrap();
+    let t1_dev = t1.device.public();
+    let certs = a.devices.certs.clone();
+    let v = a.devices.version;
+    let mut cases = Vec::new();
+    // Version égale à celle de T1, signée par ma racine.
+    let same = DeviceList::sign(&root, t1_before.version, certs.clone()).unwrap();
+    cases.push(card_for(&root, same, &all, None));
+    // Version supérieure qui ne contient pas T1.
+    let without: Vec<_> = certs
+        .iter()
+        .filter(|c| c.device != t1_dev)
+        .cloned()
+        .collect();
+    let list = DeviceList::sign(&root, v + 1, without).unwrap();
+    cases.push(card_for(&root, list, &all, None));
+    // Signature de liste invalide (version réécrite).
+    let mut forged = a.devices.clone();
+    forged.version += 10;
+    cases.push(card_for(&root, forged, &all, None));
+    // Carte d'une autre racine.
+    let (other, _) = RootIdentity::generate(&mut rng);
+    let oc = DeviceCertificate::issue(&other, &t1.device, "t1", NOW).unwrap();
+    let ol = DeviceList::sign(&other, v + 5, vec![oc]).unwrap();
+    cases.push(card_for(&other, ol, &all, None));
+    // Liste valide et plus récente, mais pas de paquet de clés pour T1.
+    let list = DeviceList::sign(&root, v + 1, certs.clone()).unwrap();
+    cases.push(card_for(&root, list, &all, Some(&t1_dev)));
+    a.root = Some(root);
+    for (i, card) in cases.into_iter().enumerate() {
+        let pkt = devices_packet(&mut a, &t1, card, 10 + i as u8, &mut rng);
         let r = t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap();
         assert_eq!(reason(r), "liste d'appareils refusée", "cas {i}");
         assert_eq!(t1.devices, t1_before, "cas {i}");
         assert_eq!(stored(&t1), t1_before, "cas {i}");
     }
 
-    // La vraie liste, plus récente : appliquée, T1 peut joindre T2.
-    let current = a.devices.clone();
-    let pkt = devices_packet(
-        &mut a,
-        &t1,
-        current,
-        card.clone(),
-        bundles.clone(),
-        30,
-        &mut rng,
-    );
+    // La vraie carte, plus récente : appliquée, T1 peut joindre T2.
+    let card = a.contact_card("").unwrap();
+    let pkt = devices_packet(&mut a, &t1, card, 30, &mut rng);
     match t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap() {
         ReceiveOutcome::Synced { kind } => assert_eq!(kind, SyncKind::Devices),
         other => panic!("Synced attendu, obtenu {other:?}"),
     }
     assert_eq!(t1.devices, a.devices);
     assert_eq!(stored(&t1), a.devices);
+    // Les paquets de mes autres appareils viennent de la carte, sans le mien.
+    assert_eq!(t1.linked_bundles.len(), 2);
+    assert!(t1.linked_bundles.iter().all(|b| b.device != t1_dev));
     let out = seal_body(
         &mut t1,
         &send::Target::OwnDevices,
@@ -1254,9 +1254,9 @@ fn sync_devices_requires_newer_signed_list() {
     assert!(out.iter().any(|(_, d)| *d == t2_id));
     assert!(!t1.store.sessions_for(me, t2_id).unwrap().is_empty());
 
-    // Une liste plus récente qui retire T2 : les sessions de T1 avec T2 disparaissent.
+    // Une carte plus récente qui retire T2 : les sessions de T1 avec T2 disparaissent.
     let shrunk = {
-        let root_id = a.root.as_ref().unwrap();
+        let root = a.root.as_ref().unwrap();
         let certs = a
             .devices
             .certs
@@ -1264,30 +1264,15 @@ fn sync_devices_requires_newer_signed_list() {
             .filter(|c| c.device != t2.device.public())
             .cloned()
             .collect();
-        DeviceList::sign(root_id, a.devices.version + 1, certs).unwrap()
+        let list = DeviceList::sign(root, a.devices.version + 1, certs).unwrap();
+        card_for(root, list, &all, None)
     };
-    let shrunk_card = ContactCard::sign(
-        a.root.as_ref().unwrap(),
-        "",
-        shrunk.clone(),
-        vec![a.prekeys.bundle(&a.device, false)],
-    )
-    .unwrap();
-    let a_bundle = vec![a.prekeys.bundle(&a.device, false)];
-    let pkt = devices_packet(
-        &mut a,
-        &t1,
-        shrunk.clone(),
-        shrunk_card,
-        a_bundle,
-        50,
-        &mut rng,
-    );
+    let pkt = devices_packet(&mut a, &t1, shrunk.clone(), 50, &mut rng);
     assert!(matches!(
         t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap(),
         ReceiveOutcome::Synced { .. }
     ));
-    assert_eq!(t1.devices, shrunk);
+    assert_eq!(t1.devices, shrunk.devices);
     assert!(t1.store.sessions_for(me, t2_id).unwrap().is_empty());
     assert!(
         !t1.store
@@ -1295,4 +1280,236 @@ fn sync_devices_requires_newer_signed_list() {
             .unwrap()
             .is_empty()
     );
+
+    // T2, retiré, envoie encore une synchronisation à T1 : refusée.
+    let op = Body::SyncContact(SyncOp::Remove(Fingerprint([9; 32])));
+    let out = seal_body(
+        &mut t2,
+        &send::Target::OwnDevices,
+        &op,
+        MessageId([60; 16]),
+        &mut rng,
+    );
+    let t1_id = t1.device.public().id();
+    let to_t1 = &out.iter().find(|(_, d)| *d == t1_id).unwrap().0;
+    let r = t1.receive(&to_t1.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(
+        matches!(
+            r,
+            ReceiveOutcome::NotForUs | ReceiveOutcome::Quarantined { .. }
+        ),
+        "{r:?}"
+    );
+    assert!(
+        t1.store
+            .contact_clock(Fingerprint([9; 32]))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn sync_from_removed_device_with_session_refused() {
+    // Session T1 ↔ T2 établie, puis T2 retiré de la liste de T1 sans que
+    // la session ne soit purgée (état d'avant la purge) : la synchronisation
+    // est tout de même refusée, car T2 n'est plus dans ma liste.
+    let (_d, mut a, mut t1, mut t2, mut rng) = linked_twice();
+    let card = a.contact_card("").unwrap();
+    let pkt = devices_packet(&mut a, &t1, card, 1, &mut rng);
+    t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap();
+    let t1_id = t1.device.public().id();
+    let op = |fp: u8| Body::SyncContact(SyncOp::Remove(Fingerprint([fp; 32])));
+    let out = seal_body(
+        &mut t2,
+        &send::Target::OwnDevices,
+        &op(1),
+        MessageId([2; 16]),
+        &mut rng,
+    );
+    let p = &out.iter().find(|(_, d)| *d == t1_id).unwrap().0;
+    assert!(matches!(
+        t1.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Synced { .. }
+    ));
+    // Réponse de T1 : la session de T2 n'attend plus d'Initial.
+    let t2_id = t2.device.public().id();
+    let back = seal_body(
+        &mut t1,
+        &send::Target::OwnDevices,
+        &op(5),
+        MessageId([6; 16]),
+        &mut rng,
+    );
+    let p = &back.iter().find(|(_, d)| *d == t2_id).unwrap().0;
+    assert!(matches!(
+        t2.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Synced { .. }
+    ));
+    // Liste réécrite en base sans T2 (sessions gardées).
+    let root = a.root.as_ref().unwrap();
+    let certs = a
+        .devices
+        .certs
+        .iter()
+        .filter(|c| c.device != t2.device.public())
+        .cloned()
+        .collect();
+    let list = DeviceList::sign(root, a.devices.version + 1, certs).unwrap();
+    t1.store.put_meta(META_DEVICE_LIST, &list).unwrap();
+    let out = seal_body(
+        &mut t2,
+        &send::Target::OwnDevices,
+        &op(3),
+        MessageId([4; 16]),
+        &mut rng,
+    );
+    let p = &out.iter().find(|(_, d)| *d == t1_id).unwrap().0;
+    assert_eq!(
+        reason(t1.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
+        NOT_MINE
+    );
+    assert!(
+        t1.store
+            .contact_clock(Fingerprint([3; 32]))
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Carte de `n` appareils aux noms de taille maximale.
+fn max_card(n: usize, rng: &mut StdRng) -> ContactCard {
+    let (root, _) = RootIdentity::generate(rng);
+    let mut certs = Vec::new();
+    let mut bundles = Vec::new();
+    for i in 0..n {
+        let d = DeviceKeys::generate(rng);
+        let name = format!("{i:0>64}");
+        certs.push(DeviceCertificate::issue(&root, &d, &name, u64::MAX).unwrap());
+        bundles.push(crate::handshake::PrekeySecrets::generate(rng, 0).bundle(&d, false));
+    }
+    let list = DeviceList::sign(&root, u64::MAX, certs).unwrap();
+    ContactCard::sign(&root, &"x".repeat(64), list, bundles).unwrap()
+}
+
+/// Contenus les plus lourds qui transportent une carte. La mise à jour de
+/// carte d'un contact (`CardUpdate`, tâche suivante) a la taille de
+/// `SyncDevices` : une étiquette et la carte.
+fn card_bodies(card: &ContactCard) -> [Body; 2] {
+    [
+        Body::SyncContact(SyncOp::Upsert {
+            card: Box::new(card.clone()),
+            alias: "a".repeat(crate::core::contacts::MAX_ALIAS_LEN),
+            verified: true,
+        }),
+        Body::SyncDevices {
+            card: Box::new(card.clone()),
+        },
+    ]
+}
+
+#[test]
+fn device_cap_fits_one_packet() {
+    use crate::identity::device_list::MAX_DEVICES;
+    let mut rng = StdRng::seed_from_u64(5);
+    let card = max_card(MAX_DEVICES, &mut rng);
+    for body in card_bodies(&card) {
+        assert!(crate::envelope::fits_in_packet(&body), "{body:?}");
+    }
+    // Un appareil de plus ne tiendrait pas : la liste est refusée à la signature.
+    let mut bigger = card.clone();
+    let extra = max_card(1, &mut rng);
+    bigger.devices.certs.push(extra.devices.certs[0].clone());
+    bigger.bundles.push(extra.bundles[0].clone());
+    for body in card_bodies(&bigger) {
+        assert!(!crate::envelope::fits_in_packet(&body), "{body:?}");
+    }
+    let (root, _) = RootIdentity::generate(&mut rng);
+    let certs = (0..=MAX_DEVICES)
+        .map(|_| {
+            DeviceCertificate::issue(&root, &DeviceKeys::generate(&mut rng), "d", NOW).unwrap()
+        })
+        .collect();
+    assert_eq!(
+        DeviceList::sign(&root, 1, certs).err(),
+        Some(CoreError::TooLarge)
+    );
+}
+
+#[test]
+fn wire_overhead_bound_holds() {
+    // Ouverture de session (Wire::Initial, la plus lourde) avec la plus grosse carte.
+    let (_d, mut a, _t, mut rng) = linked();
+    let card = max_card(crate::identity::device_list::MAX_DEVICES, &mut rng);
+    for body in card_bodies(&card) {
+        let out = seal_body(
+            &mut a,
+            &send::Target::OwnDevices,
+            &body,
+            MessageId([1; 16]),
+            &mut rng,
+        );
+        let env = Envelope {
+            sent_at: NOW,
+            ack_secret: [0; 16],
+            message_id: [1; 16],
+            body,
+        };
+        let env_len = postcard::to_allocvec(&env).unwrap().len();
+        let packet = &out[0].0;
+        assert!(matches!(
+            parse_wire(&packet.payload).unwrap(),
+            Wire::Initial { .. }
+        ));
+        assert!(
+            packet.payload.len() <= env_len + crate::envelope::MAX_WIRE_OVERHEAD,
+            "{} > {} + {}",
+            packet.payload.len(),
+            env_len,
+            crate::envelope::MAX_WIRE_OVERHEAD
+        );
+        // Session ouverte : on en refait une neuve pour le contenu suivant.
+        for s in a.store.all_sessions().unwrap() {
+            a.store
+                .delete_session(s.contact_fp, s.contact_device, &s.session_id)
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn oversized_sync_is_skipped_not_fatal() {
+    let (_d, mut a, _t, mut rng) = linked();
+    let before = a.pending_outbox(NOW).unwrap().len();
+    // Carte qui ne tient pas dans un paquet (non signable telle quelle :
+    // forgée pour le seul calcul de taille).
+    let mut big = max_card(crate::identity::device_list::MAX_DEVICES, &mut rng);
+    let extra = max_card(1, &mut rng);
+    big.devices.certs.push(extra.devices.certs[0].clone());
+    big.bundles.push(extra.bundles[0].clone());
+    let op = SyncOp::Upsert {
+        card: Box::new(big),
+        alias: String::new(),
+        verified: false,
+    };
+    let sessions = a.store.all_sessions().unwrap().len();
+    let Core { store, device, .. } = &mut a;
+    store
+        .transaction(|tx| sync::send_op(tx, device, op, NOW, &mut rng))
+        .unwrap();
+    // Rien de scellé, aucune session ouverte, l'événement est journalisé.
+    assert_eq!(a.pending_outbox(NOW).unwrap().len(), before);
+    assert_eq!(a.store.all_sessions().unwrap().len(), sessions);
+    let events: Vec<_> = a
+        .transparency_log(100)
+        .unwrap()
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect();
+    assert!(events.contains(&TransparencyEvent::SyncSkipped {
+        kind: SyncKind::Contact
+    }));
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        TransparencyEvent::SessionEstablished { .. } | TransparencyEvent::PacketSealed { .. }
+    )));
 }

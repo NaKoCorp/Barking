@@ -8,8 +8,13 @@ use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// Nombre maximal d'appareils par identité.
-pub const MAX_DEVICES: usize = 16;
+/// Nombre maximal d'appareils par identité : le plus grand nombre dont la
+/// carte (noms à leur taille maximale), dans le contenu le plus lourd qui la
+/// transporte (`SyncContact`, `SyncDevices`, mise à jour de carte), tient dans
+/// un seul paquet de palier L (16 Kio). Mesuré par
+/// `core::tests::device_cap_fits_one_packet`. Des contenus sur plusieurs
+/// paquets viendront plus tard.
+pub const MAX_DEVICES: usize = 8;
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DeviceList {
@@ -119,12 +124,18 @@ mod tests {
     }
 
     #[test]
-    fn list_rejects_17_devices() {
+    fn list_rejects_devices_beyond_cap() {
         let r = root(1);
-        let certs: Vec<_> = (0..17).map(|i| cert(&r, 100 + i, "d")).collect();
-        assert!(DeviceList::sign(&r, 1, certs).is_err());
-        let certs16: Vec<_> = (0..16).map(|i| cert(&r, 100 + i, "d")).collect();
-        assert!(DeviceList::sign(&r, 1, certs16).is_ok());
+        let n = MAX_DEVICES as u64;
+        let over: Vec<_> = (0..=n).map(|i| cert(&r, 100 + i, "d")).collect();
+        assert!(DeviceList::sign(&r, 1, over.clone()).is_err());
+        let full: Vec<_> = (0..n).map(|i| cert(&r, 100 + i, "d")).collect();
+        let list = DeviceList::sign(&r, 1, full).unwrap();
+        // Une liste signée au-delà du plafond (ancienne version) est refusée à la vérification.
+        let mut big = list.clone();
+        big.certs = over;
+        assert!(big.verify().is_err());
+        assert!(list.verify().is_ok());
     }
 
     #[test]
