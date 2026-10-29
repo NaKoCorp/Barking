@@ -38,6 +38,9 @@ pub enum Body {
 pub struct Envelope {
     pub sent_at: u64,
     pub ack_secret: [u8; 16],
+    /// Identifiant logique du message, choisi par l'expéditeur : le même pour
+    /// chaque paquet (un par appareil destinataire) et pour chaque renvoi.
+    pub message_id: [u8; 16],
     pub body: Body,
 }
 
@@ -53,6 +56,10 @@ impl fmt::Debug for Envelope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Envelope")
             .field("sent_at", &self.sent_at)
+            .field(
+                "message_id",
+                &data_encoding::HEXLOWER.encode(&self.message_id[..4]),
+            )
             .field("body", &self.body)
             .finish_non_exhaustive()
     }
@@ -274,6 +281,7 @@ mod tests {
         Envelope {
             sent_at: NOW,
             ack_secret: ack::new_secret(rng),
+            message_id: [7; 16],
             body: Body::Text(text.to_owned()),
         }
     }

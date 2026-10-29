@@ -5,10 +5,12 @@ use super::*;
 use crate::contact::ContactCard;
 use crate::envelope::{Body, Envelope, Wire};
 use crate::handshake::PrekeyBundle;
-use crate::identity::{DeviceCertificate, DeviceKeys, DeviceList, DevicePublic, RootIdentity};
+use crate::identity::{
+    DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic, RootIdentity,
+};
 use crate::mailbox::day_of;
 use crate::packet::{DEFAULT_HOPS, Kind, Tier, ack};
-use crate::store::SessionRow;
+use crate::store::{Direction, MessageId, SessionRow};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tempfile::TempDir;
@@ -90,6 +92,7 @@ fn envelope_bytes(secret: [u8; 16], sent_at: u64, text: &str) -> Vec<u8> {
     postcard::to_allocvec(&Envelope {
         sent_at,
         ack_secret: secret,
+        message_id: secret,
         body: Body::Text(text.into()),
     })
     .unwrap()
@@ -802,4 +805,176 @@ fn corrupt_session_row_quarantines_resent_initial() {
         b.receive(&p2[0].encode(), "t", NOW, &mut rng).unwrap(),
         ReceiveOutcome::Quarantined { .. }
     ));
+}
+
+// --- Lot 1B, tâche 3 : identifiant de message, sessions entre mes appareils.
+
+/// A (administrateur) et T, lié à A.
+fn linked() -> (TempDir, Core, Core, StdRng) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(77);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) =
+        Core::begin_link(&dir.path().join("t"), &[2; 32], &offer, "t", NOW, &mut rng).unwrap();
+    let out = a.link_device(&req, false, NOW, &mut rng).unwrap();
+    t.finish_link(&out.bundle, None, NOW).unwrap();
+    (dir, a, t, rng)
+}
+
+/// Scelle `body` pour `target` depuis `from`, dans une transaction.
+fn seal_body(
+    from: &mut Core,
+    target: &send::Target,
+    body: &Body,
+    message_id: MessageId,
+    rng: &mut StdRng,
+) -> Vec<(Packet, DeviceId)> {
+    let Core { store, device, .. } = from;
+    store
+        .transaction(|tx| send::seal_for(tx, device, target, body, message_id, NOW, rng))
+        .unwrap()
+}
+
+#[test]
+fn own_devices_open_sessions() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let me = a.fingerprint();
+    let body = Body::Text("interne".into());
+    // A → T : une session ouverte avec mon autre appareil, rangée sous mon empreinte.
+    let out = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([1; 16]),
+        &mut rng,
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].1, t.device.public().id());
+    let sessions = a.store.all_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].contact_fp, me);
+    // T l'ouvre et reconnaît l'expéditeur (moi) : un texte venant de moi est
+    // inattendu, mais il a bien été authentifié et attribué.
+    assert!(t.watched_mailboxes(NOW).contains(&out[0].0.mailbox));
+    let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(r), "contenu inattendu pour cette boîte aux lettres");
+    // T → A, dans l'autre sens.
+    let back = seal_body(
+        &mut t,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([2; 16]),
+        &mut rng,
+    );
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].1, a.device.public().id());
+    let r = a.receive(&back[0].0.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(r), "contenu inattendu pour cette boîte aux lettres");
+    assert!(t.messages_with(&me).unwrap().is_empty());
+    assert!(a.messages_with(&me).unwrap().is_empty());
+}
+
+#[test]
+fn contact_claiming_own_device_refused() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let t_dev = t.device.public();
+    let a_dev = a.device.public();
+    // Lu dans la base : vrai sur A comme sur T.
+    assert!(contacts::claimed_by_other(&a.store, None, &[t_dev]).unwrap());
+    assert!(contacts::claimed_by_other(&t.store, None, &[a_dev]).unwrap());
+    let card = mixed_card(&t_dev, None, &mut rng);
+    assert!(a.add_contact(&card, Some("faux")).is_err());
+    let card = mixed_card(&a_dev, None, &mut rng);
+    assert!(t.add_contact(&card, Some("faux")).is_err());
+    assert!(a.contacts().unwrap().is_empty());
+    assert!(t.contacts().unwrap().is_empty());
+}
+
+#[test]
+fn message_id_dedups_resend() {
+    let mut p = pair();
+    let b_fp = p.b.fingerprint();
+    let a_fp = p.a.fingerprint();
+    p.a.send_text(&b_fp, "une fois", NOW, &mut p.rng).unwrap();
+    // Dernier message de A pour B : on le renvoie, même identifiant, nouveau paquet.
+    let first =
+        p.a.send_text(&b_fp, "unique", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    assert!(matches!(
+        p.b.receive(&first.encode(), "t", NOW, &mut p.rng).unwrap(),
+        ReceiveOutcome::Message { .. }
+    ));
+    let mid = p.a.messages_with(&b_fp).unwrap().last().unwrap().message_id;
+    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let again = seal_body(
+        &mut p.a,
+        &send::Target::Contact(b_fp),
+        &Body::Text("unique".into()),
+        mid,
+        &mut p.rng,
+    )
+    .remove(0)
+    .0;
+    assert_ne!(again.id, first.id);
+    assert!(matches!(
+        p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap(),
+        ReceiveOutcome::Duplicate
+    ));
+    assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before);
+    // Le doublon est tout de même accusé : l'expéditeur cesse de le renvoyer.
+    let acks: Vec<Packet> =
+        p.b.pending_outbox(NOW)
+            .unwrap()
+            .iter()
+            .map(|b| Packet::decode(b).unwrap())
+            .filter(|q| q.kind == Kind::Ack && q.payload[..16] == again.id.0)
+            .collect();
+    assert_eq!(acks.len(), 1);
+}
+
+#[test]
+fn message_ids_scoped_to_sender() {
+    // Un contact choisit librement l'identifiant de ses messages : il ne peut
+    // ni effacer ni écraser un message d'un autre contact, ni un des miens.
+    let mut p = pair();
+    let (_dc, mut c) = party("c", 3);
+    let b_fp = p.b.fingerprint();
+    let a_fp = p.a.fingerprint();
+    p.b.add_contact(&c.contact_card("Carol").unwrap(), Some("carol"))
+        .unwrap();
+    c.add_contact(&p.b.contact_card("Bob").unwrap(), Some("bob"))
+        .unwrap();
+    // Identifiant d'un message reçu par Bob (d'Alice), et d'un message de Bob.
+    let from_a = p.b.messages_with(&a_fp).unwrap();
+    let in_id = from_a
+        .iter()
+        .find(|m| m.direction == Direction::In)
+        .unwrap();
+    let out_id = from_a
+        .iter()
+        .find(|m| m.direction == Direction::Out)
+        .unwrap();
+    let a_mid = p.a.messages_with(&b_fp).unwrap()[0].message_id;
+    for (i, mid) in [a_mid, in_id.message_id, out_id.message_id]
+        .into_iter()
+        .enumerate()
+    {
+        let pk = seal_body(
+            &mut c,
+            &send::Target::Contact(b_fp),
+            &Body::Text(format!("carol {i}")),
+            mid,
+            &mut p.rng,
+        )
+        .remove(0)
+        .0;
+        assert!(matches!(
+            p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap(),
+            ReceiveOutcome::Message { .. }
+        ));
+    }
+    assert_eq!(p.b.messages_with(&a_fp).unwrap(), from_a);
+    assert_eq!(p.b.messages_with(&c.fingerprint()).unwrap().len(), 3);
 }

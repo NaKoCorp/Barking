@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use super::{Core, load_card, log};
+use super::{Core, OwnDevices, load_card, log};
 use crate::contact::ContactCard;
 use crate::identity::{DeviceId, DevicePublic, Fingerprint};
 use crate::store::Queries;
@@ -178,12 +178,24 @@ pub(super) fn overlaps(a: &DevicePublic, b: &DevicePublic) -> bool {
     a.id() == b.id() || a.dh == b.dh || a.sig == b.sig
 }
 
-/// Vrai si un contact autre que `except` revendique l'un de ces appareils.
+/// Vrai si un contact autre que `except`, ou si ma propre liste d'appareils
+/// (lue dans la base, sur l'administrateur comme sur un appareil lié),
+/// revendique l'un de ces appareils. Mes appareils ouvrent des sessions entre
+/// eux : un contact qui en revendiquait un pourrait se faire passer pour moi.
 pub(super) fn claimed_by_other(
     q: &impl Queries,
     except: Option<Fingerprint>,
     devices: &[DevicePublic],
 ) -> Result<bool> {
+    if let Some(own) = OwnDevices::read(q)?
+        && own
+            .list
+            .certs
+            .iter()
+            .any(|c| devices.iter().any(|d| overlaps(d, &c.device)))
+    {
+        return Ok(true);
+    }
     for row in q.list_contacts()? {
         if Some(row.fp) == except {
             continue;

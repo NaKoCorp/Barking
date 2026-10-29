@@ -110,12 +110,25 @@ impl Drop for SessionRow {
 pub struct MessageId(pub [u8; 16]);
 
 impl MessageId {
-    /// Identifiant dérivé d'un identifiant de paquet : messages migrés de la
-    /// v1 et, jusqu'à ce que l'enveloppe porte son propre identifiant, messages
-    /// reçus.
+    /// Identifiant dérivé d'un identifiant de paquet : messages migrés de la v1.
     #[must_use]
     pub fn legacy_from_packet(packet_id: PacketId) -> MessageId {
         let full = blake3::derive_key(schema::LEGACY_MESSAGE_ID_CONTEXT, &packet_id.0);
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&full[..16]);
+        MessageId(id)
+    }
+
+    /// Identifiant stocké d'un message reçu de `sender` avec l'identifiant
+    /// d'enveloppe `envelope_id` (choisi par l'expéditeur) : voir
+    /// `schema::SCHEMA_V2_TABLES`. Deux paquets du même message (renvoi) ont
+    /// le même identifiant stocké ; deux expéditeurs, jamais.
+    #[must_use]
+    pub fn incoming(sender: &Fingerprint, envelope_id: &[u8; 16]) -> MessageId {
+        let mut material = [0u8; 48];
+        material[..32].copy_from_slice(&sender.0);
+        material[32..].copy_from_slice(envelope_id);
+        let full = blake3::derive_key(crate::crypto::labels::MESSAGE_ID_IN, &material);
         let mut id = [0u8; 16];
         id.copy_from_slice(&full[..16]);
         MessageId(id)
@@ -355,11 +368,13 @@ pub trait Queries {
         out
     }
 
-    fn delete_meta(&self, k: &str) -> Result<()> {
-        self.conn()
+    /// Supprime une entrée ; `true` si elle existait.
+    fn delete_meta(&self, k: &str) -> Result<bool> {
+        let n = self
+            .conn()
             .execute("DELETE FROM meta WHERE k = ?1", params![k])
             .map_err(map_err)?;
-        Ok(())
+        Ok(n == 1)
     }
 
     fn upsert_contact(
@@ -490,6 +505,18 @@ pub trait Queries {
         Ok(n == 1)
     }
 
+    /// Enregistre que le paquet reçu `packet_id` portait le message
+    /// `message_id` (un renvoi ajoute une ligne pour le même message).
+    fn record_inbound(&self, packet_id: PacketId, message_id: MessageId) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT OR IGNORE INTO inbound(packet_id, message_id) VALUES (?1, ?2)",
+                params![packet_id.0.as_slice(), message_id.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
     /// Enregistre le paquet `packet_id`, destiné à l'appareil `device`, comme
     /// livraison (en attente d'accusé) du message `message_id`.
     fn add_delivery(
@@ -537,8 +564,8 @@ pub trait Queries {
             .map_err(map_err)?;
         self.conn()
             .execute(
-                "UPDATE messages SET status = ?1 WHERE message_id = ?2",
-                params![MessageStatus::Delivered as i64, mid],
+                "UPDATE messages SET status = ?1 WHERE message_id = ?2 AND direction = ?3",
+                params![MessageStatus::Delivered as i64, mid, Direction::Out as i64],
             )
             .map_err(map_err)?;
         Ok(Some(MessageId(arr(mid)?)))
@@ -688,9 +715,8 @@ pub trait Queries {
     }
 
     /// Message lié à l'identifiant de paquet `packet_id`. Sortant : via la
-    /// table `deliveries`. Entrant : l'identifiant du message est (jusqu'à ce
-    /// que l'enveloppe porte le sien) dérivé de l'identifiant du paquet reçu,
-    /// sans dépendre de `seen` qui est purgée.
+    /// table `deliveries`. Entrant : via la table `inbound` (jamais purgée,
+    /// contrairement à `seen`).
     fn message_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageRow>> {
         const COLS: &str = "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, \
                             m.message_id FROM messages m";
@@ -699,9 +725,9 @@ pub trait Queries {
             .query_row(
                 &format!(
                     "{COLS} JOIN deliveries d ON d.message_id = m.message_id \
-                     WHERE d.packet_id = ?1"
+                     WHERE d.packet_id = ?1 AND m.direction = ?2"
                 ),
-                params![packet_id.0.as_slice()],
+                params![packet_id.0.as_slice(), Direction::Out as i64],
                 message_raw,
             )
             .optional()
@@ -711,11 +737,11 @@ pub trait Queries {
             None => self
                 .conn()
                 .query_row(
-                    &format!("{COLS} WHERE m.message_id = ?1 AND m.direction = ?2"),
-                    params![
-                        MessageId::legacy_from_packet(packet_id).0.as_slice(),
-                        Direction::In as i64
-                    ],
+                    &format!(
+                        "{COLS} JOIN inbound i ON i.message_id = m.message_id \
+                         WHERE i.packet_id = ?1 AND m.direction = ?2"
+                    ),
+                    params![packet_id.0.as_slice(), Direction::In as i64],
                     message_raw,
                 )
                 .optional()

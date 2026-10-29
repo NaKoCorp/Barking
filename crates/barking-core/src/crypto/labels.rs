@@ -72,3 +72,9 @@ pub const LINK_BUNDLE: &str = "barking/v0/link/bundle";
 
 /// Contexte BLAKE3 de la clé de l'archive d'historique (dérivée du secret de liaison).
 pub const LINK_HISTORY: &str = "barking/v0/link/history";
+
+/// Contexte BLAKE3 de l'identifiant stocké d'un message reçu :
+/// `derive_key(MESSAGE_ID_IN, empreinte de l'expéditeur || identifiant de
+/// l'enveloppe)[..16]`. L'expéditeur choisit l'identifiant de l'enveloppe ;
+/// le lier à son empreinte l'empêche d'atteindre les messages d'un autre.
+pub const MESSAGE_ID_IN: &str = "barking/v0/message-id/in";

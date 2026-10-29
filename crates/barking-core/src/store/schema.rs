@@ -60,7 +60,15 @@ CREATE TABLE IF NOT EXISTS transparency (
 ";
 
 /// Tables de la v2 : un message par identifiant logique, une livraison par
-/// paquet (donc par appareil destinataire).
+/// paquet (donc par appareil destinataire), et pour chaque paquet reçu le
+/// message qu'il porte (`inbound`, retrouvé par l'accusé que j'ai émis).
+///
+/// Unicité de `messages.message_id` : un message sortant porte l'identifiant
+/// tiré par un de mes appareils ; un message reçu, l'identifiant dérivé de
+/// l'empreinte de l'expéditeur et de l'identifiant de son enveloppe
+/// (`MessageId::incoming`). Un contact ne peut donc ni masquer ni écraser un
+/// message d'un autre contact ou un des miens : seul un renvoi de ses propres
+/// messages entre en collision (doublon).
 pub const SCHEMA_V2_TABLES: &str = "
 CREATE TABLE messages (
     id INTEGER PRIMARY KEY,
@@ -78,6 +86,10 @@ CREATE TABLE IF NOT EXISTS deliveries (
     status INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries(message_id);
+CREATE TABLE IF NOT EXISTS inbound (
+    packet_id BLOB PRIMARY KEY NOT NULL,
+    message_id BLOB NOT NULL
+);
 ";
 
 /// Contexte de dérivation d'un identifiant de message à partir d'un
@@ -91,7 +103,8 @@ const DIRECTION_OUT: i64 = 0;
 /// Migre une base v1 en v2, dans une seule transaction : les lignes de
 /// `messages` reçoivent un `message_id` dérivé de leur `packet_id` (ou de
 /// leur `id` s'il est nul), les messages sortants ayant un paquet reçoivent
-/// la livraison correspondante, puis `schema_version` passe à 2.
+/// la livraison correspondante, les messages reçus ayant un paquet sont
+/// inscrits dans `inbound`, puis `schema_version` passe à 2.
 pub fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch("ALTER TABLE messages RENAME TO messages_v1;")?;
@@ -123,13 +136,22 @@ pub fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![id, mid, fp, dir, body, status, at],
             )?;
-            if let (DIRECTION_OUT, Some(pid)) = (dir, packet) {
-                // L'appareil destinataire d'un paquet v1 n'est pas connu.
-                tx.execute(
-                    "INSERT INTO deliveries(message_id, packet_id, device, status) \
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![mid, pid, [0u8; 16].as_slice(), delivery_status(status)],
-                )?;
+            match (dir, packet) {
+                (_, None) => {}
+                (DIRECTION_OUT, Some(pid)) => {
+                    // L'appareil destinataire d'un paquet v1 n'est pas connu.
+                    tx.execute(
+                        "INSERT INTO deliveries(message_id, packet_id, device, status) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![mid, pid, [0u8; 16].as_slice(), delivery_status(status)],
+                    )?;
+                }
+                (_, Some(pid)) => {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO inbound(packet_id, message_id) VALUES (?1, ?2)",
+                        params![pid, mid],
+                    )?;
+                }
             }
         }
     }

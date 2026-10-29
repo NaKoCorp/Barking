@@ -6,8 +6,8 @@ use zeroize::Zeroizing;
 
 use super::log_limit::{LogLimiter, log_limited};
 use super::{
-    Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, ReceiveOutcome, SEEN_RETENTION_SECS,
-    de_state, load_card, log, ser_state, session_ad, session_id,
+    Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
+    SEEN_RETENTION_SECS, de_state, load_card, log, ser_state, session_ad, session_id,
 };
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
@@ -130,6 +130,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<ReceiveOutcome> {
+        let my_fp = self.fingerprint();
         let Core {
             store,
             device,
@@ -188,7 +189,7 @@ impl Core {
             };
             match opened {
                 Err(reason) => quarantine(tx, log_limiter, packet, now, reason),
-                Ok(o) => accept(tx, log_limiter, packet, o, transport, now, rng),
+                Ok(o) => accept(tx, log_limiter, packet, o, &my_fp, transport, now, rng),
             }
         })?;
         if let Some(p) = new_prekeys {
@@ -219,16 +220,29 @@ fn copy_prekeys(p: &PrekeySecrets) -> Result<PrekeySecrets> {
     postcard::from_bytes(&bytes).map_err(|_| CoreError::Store("sérialisation".into()))
 }
 
-/// Appareil d'un contact connu dont la clé X25519 d'identité est `ik`.
+/// Appareil d'un contact connu, ou un de mes autres appareils (rendu avec
+/// ma propre empreinte), dont la clé X25519 d'identité est `ik`. Cet appareil
+/// (`me`) n'est jamais un expéditeur.
 ///
-/// Exige une correspondance unique : si deux contacts revendiquaient la même
-/// clé (`add_contact` l'interdit), l'expéditeur serait ambigu et le paquet refusé
-/// plutôt qu'attribué au premier trouvé.
+/// Exige une correspondance unique : si deux contacts (ou un contact et un de
+/// mes appareils) revendiquaient la même clé (`add_contact` et
+/// `claimed_by_other` l'interdisent), l'expéditeur serait ambigu et le paquet
+/// refusé plutôt qu'attribué au premier trouvé.
 fn find_sender(
     q: &impl Queries,
     ik: &[u8; 32],
+    me: &DevicePublic,
 ) -> Result<core::result::Result<(Fingerprint, DevicePublic), &'static str>> {
     let mut found = None;
+    if let Some(own) = OwnDevices::read(q)? {
+        let my_fp = own.list.root.fingerprint();
+        for (d, _) in own.others(me).into_iter().filter(|(d, _)| d.dh == *ik) {
+            if found.is_some() {
+                return Ok(Err(R_AMBIGUOUS_SENDER));
+            }
+            found = Some((my_fp, d));
+        }
+    }
     for row in q.list_contacts()? {
         let card = load_card(&row.card)?;
         for c in card.devices.certs.iter().filter(|c| c.device.dh == *ik) {
@@ -256,9 +270,9 @@ fn open_initial(
     let Ok(init) = envelope::open_initial(device, ek, sealed_init) else {
         return Ok(Err(R_UNDECRYPTABLE));
     };
-    // Pas de demandes de contact en v0 : seul un appareil d'un contact connu
-    // peut ouvrir une session.
-    let (contact_fp, peer) = match find_sender(q, &init.ik)? {
+    // Pas de demandes de contact en v0 : seul un appareil d'un contact connu,
+    // ou un de mes autres appareils, peut ouvrir une session.
+    let (contact_fp, peer) = match find_sender(q, &init.ik, &device.public())? {
         Ok(found) => found,
         Err(reason) => return Ok(Err(reason)),
     };
@@ -390,11 +404,19 @@ fn quarantine(
 }
 
 /// Message authentifié par une session : vérifie le contenu, puis enregistre.
+///
+/// Identifiant du message : celui de l'enveloppe, lié à l'empreinte de
+/// l'expéditeur (`MessageId::incoming`). Un même message reçu une seconde
+/// fois (renvoi, nouveau paquet) n'est pas réinséré : `Duplicate`, mais la
+/// session avance et l'accusé de ce nouveau paquet est tout de même émis
+/// (mis en file d'envoi), pour que l'expéditeur cesse de le renvoyer.
+#[allow(clippy::too_many_arguments)]
 fn accept(
     q: &impl Queries,
     limiter: &mut LogLimiter,
     packet: &Packet,
     o: Opened,
+    my_fp: &Fingerprint,
     transport: &str,
     now: u64,
     rng: &mut impl CryptoRng,
@@ -409,6 +431,19 @@ fn accept(
     let authenticated_id = ack::packet_id_for(&env.ack_secret);
     if let Err(reason) = check_envelope(q, packet, &env, now)? {
         return reject_authenticated(q, limiter, packet, o, now, reason, Some(authenticated_id));
+    }
+    // Mes appareils ne s'échangent pas de textes : un texte venant de moi est
+    // inattendu (les contenus de synchronisation passent par d'autres `Body`).
+    if o.row.contact_fp == *my_fp && matches!(env.body, Body::Text(_)) {
+        return reject_authenticated(
+            q,
+            limiter,
+            packet,
+            o,
+            now,
+            R_UNEXPECTED,
+            Some(authenticated_id),
+        );
     }
     let Opened {
         mut row,
@@ -443,25 +478,40 @@ fn accept(
     // Avant `insert_message` (identifiant de paquet unique).
     q.mark_seen(packet.id, now)?;
     let Body::Text(text) = env.body;
-    q.insert_message(
+    let message_id = MessageId::incoming(&row.contact_fp, &env.message_id);
+    let inserted = q.insert_message(
         row.contact_fp,
         Direction::In,
         &text,
         MessageStatus::Delivered,
         now,
-        MessageId::legacy_from_packet(packet.id),
+        message_id,
     )?;
-    log(
-        q,
-        now,
-        Some(packet.id),
-        &TransparencyEvent::PacketOpened {
-            packet_id: packet.id,
-            sender: row.contact_fp,
-            transport: transport.to_owned(),
-            first_contact,
-        },
-    )?;
+    // Paquet → message : retrouvé par l'accusé émis (`delete_contact`).
+    q.record_inbound(packet.id, message_id)?;
+    if inserted {
+        log(
+            q,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::PacketOpened {
+                packet_id: packet.id,
+                sender: row.contact_fp,
+                transport: transport.to_owned(),
+                first_contact,
+            },
+        )?;
+    } else {
+        log_limited(
+            q,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DuplicateIgnored {
+                packet_id: packet.id,
+            },
+        )?;
+    }
     log(
         q,
         now,
@@ -481,6 +531,9 @@ fn accept(
         u64::from(ack.expires_at),
         now,
     )?;
+    if !inserted {
+        return Ok((ReceiveOutcome::Duplicate, new_prekeys));
+    }
     Ok((
         ReceiveOutcome::Message {
             from: row.contact_fp,

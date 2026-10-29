@@ -675,6 +675,9 @@ fn migration_v1_keeps_history_and_acks() {
         MessageId::legacy_from_packet(PacketId(pout))
     );
     assert_eq!(store.outbox_pending(0).unwrap().len(), 1);
+    // Le paquet v1 reçu retrouve son message (accusé émis, suppression du contact).
+    let got = store.message_by_packet(PacketId(pin)).unwrap().unwrap();
+    assert_eq!((got.body.as_str(), got.direction), ("reçu", Direction::In));
     // L'accusé du paquet v1 en attente marque le message livré.
     assert_eq!(
         store.mark_delivered_by_packet(PacketId(pout)).unwrap(),
@@ -687,4 +690,30 @@ fn migration_v1_keeps_history_and_acks() {
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
     assert_eq!(store.messages_with(fp).unwrap().len(), 3);
+}
+
+#[test]
+fn inbound_packets_map_to_their_message() {
+    let (_d, _p, store) = open_tmp();
+    let fp = Fingerprint([4; 32]);
+    let mid = MessageId::incoming(&fp, &[1; 16]);
+    // Lié à l'expéditeur : un autre expéditeur, même identifiant d'enveloppe, autre message.
+    assert_ne!(mid, MessageId::incoming(&Fingerprint([5; 32]), &[1; 16]));
+    store
+        .insert_message(fp, Direction::In, "x", MessageStatus::Delivered, 5, mid)
+        .unwrap();
+    // Le message et son renvoi (deux paquets) mènent au même message.
+    for pid in [PacketId([1; 16]), PacketId([2; 16])] {
+        store.record_inbound(pid, mid).unwrap();
+        let m = store.message_by_packet(pid).unwrap().unwrap();
+        assert_eq!((m.message_id, m.direction), (mid, Direction::In));
+    }
+    // Un paquet reçu n'est jamais une de mes livraisons.
+    assert!(!store.is_my_packet(PacketId([1; 16])).unwrap());
+    assert!(
+        store
+            .mark_delivered_by_packet(PacketId([1; 16]))
+            .unwrap()
+            .is_none()
+    );
 }

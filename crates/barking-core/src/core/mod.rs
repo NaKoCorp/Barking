@@ -33,8 +33,8 @@ use crate::fragment::Reassembler;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
 use crate::identity::{
-    DeviceCertificate, DeviceId, DeviceKeys, DeviceList, Fingerprint, RecoveryPhrase, RootIdentity,
-    safety_number,
+    DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint, RecoveryPhrase,
+    RootIdentity, safety_number,
 };
 use crate::mailbox::{MailboxId, day_of, intro_mailbox, session_mailbox};
 use crate::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId};
@@ -503,6 +503,40 @@ fn log(
         EventClass::Routine
     };
     q.append_event(at, packet, class, &bytes)
+}
+
+/// Mes appareils tels que stockés : ma liste signée et les paquets de clés
+/// de mes autres appareils. Même source sur l'administrateur (`link_device`)
+/// et sur un appareil lié (`finish_link`) ; absente tant qu'une liaison est
+/// en attente.
+pub(super) struct OwnDevices {
+    pub list: DeviceList,
+    pub bundles: Vec<PrekeyBundle>,
+}
+
+impl OwnDevices {
+    pub fn read(q: &impl Queries) -> Result<Option<OwnDevices>> {
+        let Some(list) = q.get_meta::<DeviceList>(META_DEVICE_LIST)? else {
+            return Ok(None);
+        };
+        let bundles = q
+            .get_meta::<Vec<PrekeyBundle>>(META_LINKED_BUNDLES)?
+            .unwrap_or_default();
+        Ok(Some(OwnDevices { list, bundles }))
+    }
+
+    /// Mes autres appareils (tous sauf `me`), avec leur paquet de clés s'il est connu.
+    pub fn others(&self, me: &DevicePublic) -> Vec<(DevicePublic, Option<PrekeyBundle>)> {
+        self.list
+            .certs
+            .iter()
+            .filter(|c| c.device != *me)
+            .map(|c| {
+                let bundle = self.bundles.iter().find(|b| b.device == c.device).cloned();
+                (c.device, bundle)
+            })
+            .collect()
+    }
 }
 
 fn load_card(bytes: &[u8]) -> Result<ContactCard> {
