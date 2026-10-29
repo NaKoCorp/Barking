@@ -266,7 +266,11 @@ fn open_initial(
         .into_iter()
         .find(|s| s.session_id == sid)
     {
-        let mut ratchet = de_state(&row.state)?;
+        // Ligne illisible : refus, sans erreur ni nouvelle session (rouvrir
+        // la session à partir d'un Initial rejouable n'est pas une réparation).
+        let Ok(mut ratchet) = de_state(&row.state) else {
+            return Ok(Err(R_UNDECRYPTABLE));
+        };
         if !ratchet.could_open(msg) {
             return Ok(Err(R_UNDECRYPTABLE));
         }
@@ -335,7 +339,10 @@ fn open_normal(
     now: u64,
 ) -> Result<core::result::Result<Opened, &'static str>> {
     for row in candidates {
-        let mut ratchet = de_state(&row.state)?;
+        // Une ligne illisible est ignorée (comme dans `sweep_skipped`).
+        let Ok(mut ratchet) = de_state(&row.state) else {
+            continue;
+        };
         if !ratchet.could_open(msg) {
             continue;
         }

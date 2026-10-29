@@ -762,3 +762,44 @@ fn replayed_packets_and_acks_are_coalesced() {
     p.b.receive(&m.encode(), "t", later, &mut p.rng).unwrap();
     assert_eq!(dup(&p.b), 2);
 }
+
+#[test]
+fn corrupt_session_row_does_not_abort_receive() {
+    let mut p = pair();
+    // Ligne de session illisible, même boîte, essayée en premier.
+    let mut bad = best_session(&p.b);
+    bad.session_id = [0xee; 16];
+    bad.state = vec![0xff; 7];
+    bad.last_rx = NOW + 1_000;
+    p.b.store.put_session(&bad).unwrap();
+    let m =
+        p.a.send_text(&p.b.fingerprint(), "toujours là", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    assert!(matches!(
+        p.b.receive(&m.encode(), "t", NOW, &mut p.rng).unwrap(),
+        ReceiveOutcome::Message { .. }
+    ));
+}
+
+#[test]
+fn corrupt_session_row_quarantines_resent_initial() {
+    let (_da, mut a) = party("a", 1);
+    let (_db, mut b) = party("b", 2);
+    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"))
+        .unwrap();
+    b.add_contact(&a.contact_card("Alice").unwrap(), Some("alice"))
+        .unwrap();
+    let mut rng = StdRng::seed_from_u64(9);
+    let p1 = a.send_text(&b.fingerprint(), "1", NOW, &mut rng).unwrap();
+    let p2 = a.send_text(&b.fingerprint(), "2", NOW, &mut rng).unwrap();
+    b.receive(&p1[0].encode(), "t", NOW, &mut rng).unwrap();
+    // La session ouverte par le premier Initial devient illisible.
+    let mut row = best_session(&b);
+    row.state = vec![0xff; 7];
+    b.store.put_session(&row).unwrap();
+    assert!(matches!(
+        b.receive(&p2[0].encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Quarantined { .. }
+    ));
+}
