@@ -51,8 +51,8 @@ const META_DEVICE_LIST: &str = "device_list";
 const META_LINKED_BUNDLES: &str = "linked_bundles";
 /// Dernier jour (numéro de jour) où cet appareil a relevé ses boîtes.
 const META_LAST_POLLED: &str = "last_polled_day";
-/// Fenêtre de relève : 8 jours au plus.
-const MAX_POLL_SPAN_DAYS: u32 = 7;
+/// Fenêtre de relève : 7 jours en arrière, plus le lendemain = 8 jours au plus.
+const MAX_POLL_BACK_DAYS: u32 = 7;
 
 /// Âge maximal accepté d'un message (horodatage authentifié de l'enveloppe) :
 /// durée de vie d'un paquet plus un jour de décalage d'horloge.
@@ -226,12 +226,12 @@ impl Core {
     }
 
     /// Rouvre une base existante. Mauvaise clé : `StoreLocked`.
-    pub fn open(path: &Path, db_key: &[u8; 32]) -> Result<Core> {
+    pub fn open(path: &Path, db_key: &[u8; 32], now: u64) -> Result<Core> {
         // Ne pas créer de base vide en cherchant à en ouvrir une.
         if !path.exists() {
             return Err(CoreError::Store("base absente".into()));
         }
-        let store = Store::open(path, db_key)?;
+        let mut store = Store::open(path, db_key)?;
         let dev = Zeroizing::new(
             store
                 .get_meta::<Vec<u8>>(META_DEVICE)?
@@ -255,6 +255,7 @@ impl Core {
         let linked_bundles = store
             .get_meta::<Vec<PrekeyBundle>>(META_LINKED_BUNDLES)?
             .unwrap_or_default();
+        store.transaction(|tx| sweep_skipped(tx, now))?;
         Ok(Core {
             store,
             root,
@@ -396,7 +397,9 @@ impl Core {
         out
     }
 
-    /// Enregistre que les boîtes ont été relevées à `now`.
+    /// Enregistre que les boîtes ont été relevées à `now`. À appeler après
+    /// avoir relevé toutes les boîtes avec succès ; écrase volontairement la
+    /// valeur précédente (une valeur antérieure ne fait qu'élargir la fenêtre).
     pub fn mark_polled(&mut self, now: u64) -> Result<()> {
         self.store.put_meta(META_LAST_POLLED, &day_of(now))
     }
@@ -412,7 +415,7 @@ impl Core {
             Ok(Some(last)) if last <= end => last.min(normal),
             _ => normal,
         };
-        let start = start.max(end.saturating_sub(MAX_POLL_SPAN_DAYS));
+        let start = start.max(end.saturating_sub(MAX_POLL_BACK_DAYS));
         (start..=end).collect()
     }
 
@@ -451,6 +454,7 @@ impl Core {
     pub fn pending_outbox(&mut self, now: u64) -> Result<Vec<Vec<u8>>> {
         self.store.transaction(|tx| {
             tx.outbox_purge_expired(now)?;
+            sweep_skipped(tx, now)?;
             Ok(tx
                 .outbox_pending(now)?
                 .into_iter()
@@ -463,6 +467,19 @@ impl Core {
     pub fn messages_with(&self, contact: &Fingerprint) -> Result<Vec<MessageRow>> {
         self.store.messages_with(*contact)
     }
+}
+
+/// Purge les clés sautées trop anciennes de toutes les sessions, même
+/// inactives ; ne réécrit que les sessions modifiées.
+fn sweep_skipped(q: &impl Queries, now: u64) -> Result<()> {
+    for mut row in q.all_sessions()? {
+        let mut state = de_state(&row.state)?;
+        if state.purge_skipped(now) {
+            row.state = ser_state(&state)?;
+            q.put_session(&row)?;
+        }
+    }
+    Ok(())
 }
 
 /// Refuse d'écraser une base déjà initialisée.

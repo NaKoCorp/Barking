@@ -509,3 +509,69 @@ fn valid_header_bad_body_keeps_session() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Bob reçoit seulement le 3e message d'Alice : 2 clés sautées, datées de NOW.
+fn bob_with_two_skipped() -> Pair {
+    let mut p = pair();
+    let mut pkts = Vec::new();
+    for t in ["1", "2", "3"] {
+        let v =
+            p.a.send_text(&p.b.fingerprint(), t, NOW, &mut p.rng)
+                .unwrap();
+        pkts.push(v.into_iter().next().unwrap());
+    }
+    let out =
+        p.b.receive(&pkts[2].encode(), "t", NOW, &mut p.rng)
+            .unwrap();
+    assert!(matches!(out, ReceiveOutcome::Message { .. }));
+    assert_eq!(skipped_total(&p.b), 2);
+    p
+}
+
+fn skipped_total(c: &Core) -> usize {
+    c.store
+        .all_sessions()
+        .unwrap()
+        .iter()
+        .map(|s| de_state(&s.state).unwrap().skipped_len())
+        .sum()
+}
+
+#[test]
+fn idle_session_purges_skipped_keys() {
+    let mut p = bob_with_two_skipped();
+    // Contrôle négatif : à 6 jours, les clés sont encore là.
+    p.b.pending_outbox(NOW + 6 * 86_400).unwrap();
+    assert_eq!(skipped_total(&p.b), 2);
+    p.b.pending_outbox(NOW + 8 * 86_400).unwrap();
+    assert_eq!(skipped_total(&p.b), 0);
+}
+
+#[test]
+fn open_purges_skipped_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let key = [2u8; 32];
+    let mut rng = StdRng::seed_from_u64(2);
+    let (mut b, _) = Core::create(&path, &key, "b", NOW, &mut rng).unwrap();
+    let (_da, mut a) = party("a", 1);
+    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"))
+        .unwrap();
+    b.add_contact(&a.contact_card("Alice").unwrap(), Some("alice"))
+        .unwrap();
+    let mut pkts = Vec::new();
+    for t in ["1", "2", "3"] {
+        let v = a.send_text(&b.fingerprint(), t, NOW, &mut rng).unwrap();
+        pkts.push(v.into_iter().next().unwrap());
+    }
+    // L'Initial d'Alice (1er message) établit la session, puis on saute le 2e.
+    b.receive(&pkts[0].encode(), "t", NOW, &mut rng).unwrap();
+    b.receive(&pkts[2].encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(skipped_total(&b), 1);
+    drop(b);
+    let b = Core::open(&path, &key, NOW + 6 * 86_400).unwrap();
+    assert_eq!(skipped_total(&b), 1);
+    drop(b);
+    let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
+    assert_eq!(skipped_total(&b), 0);
+}

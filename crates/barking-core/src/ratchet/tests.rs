@@ -401,3 +401,19 @@ fn could_open_accepts_skipped_chain_header() {
     assert!(b.could_open(&m0));
     assert_eq!(b.decrypt(&m0, AD, T0).unwrap(), b"0");
 }
+
+#[test]
+fn purge_with_clock_behind() {
+    let (mut rng, mut a, mut b) = setup(14);
+    let _m0 = a.encrypt(&msg(0), AD, &mut rng).unwrap();
+    let m1 = a.encrypt(&msg(1), AD, &mut rng).unwrap();
+    assert_eq!(b.decrypt(&m1, AD, T0).unwrap(), msg(1));
+    assert_eq!(b.mkskipped.len(), 1);
+    // Horloge en retard d'un jour : rien n'est retiré, pas de panique.
+    assert!(!b.purge_skipped(T0 - 86_400));
+    assert_eq!(b.mkskipped.len(), 1);
+    // Exactement 7 jours : conservée ; au-delà : retirée.
+    assert!(!b.purge_skipped(T0 + MAX_SKIPPED_AGE_SECS));
+    assert!(b.purge_skipped(T0 + MAX_SKIPPED_AGE_SECS + 1));
+    assert!(b.mkskipped.is_empty());
+}

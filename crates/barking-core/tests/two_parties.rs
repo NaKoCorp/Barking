@@ -53,10 +53,10 @@ impl Party {
 
     fn reopen(&mut self) {
         // L'ancienne connexion est fermée avant la réouverture.
-        let placeholder = Core::open(&self.path, &self.key).unwrap();
+        let placeholder = Core::open(&self.path, &self.key, NOW).unwrap();
         let old = std::mem::replace(&mut self.core, placeholder);
         drop(old);
-        self.core = Core::open(&self.path, &self.key).unwrap();
+        self.core = Core::open(&self.path, &self.key, NOW).unwrap();
     }
 
     fn send(&mut self, to: &Fingerprint, text: &str, now: u64, rng: &mut StdRng) -> Vec<Packet> {
@@ -704,14 +704,14 @@ fn open_wrong_key_and_double_create() {
     let key = a.key;
     drop(a.core);
     assert_eq!(
-        Core::open(&path, &[0xee; 32]).err(),
+        Core::open(&path, &[0xee; 32], NOW).err(),
         Some(CoreError::StoreLocked)
     );
     let mut rng = StdRng::seed_from_u64(1);
     assert!(Core::create(&path, &key, "again", NOW, &mut rng).is_err());
-    assert!(Core::open(&path, &key).is_ok());
+    assert!(Core::open(&path, &key, NOW).is_ok());
     let dir = tempfile::tempdir().unwrap();
-    assert!(Core::open(&dir.path().join("vide.db"), &key).is_err());
+    assert!(Core::open(&dir.path().join("vide.db"), &key, NOW).is_err());
     assert!(
         !dir.path().join("vide.db").exists(),
         "open ne crée pas de base"

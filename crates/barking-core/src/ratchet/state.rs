@@ -250,10 +250,19 @@ impl RatchetState {
 
     /// Efface les clés sautées mises de côté depuis plus de
     /// `MAX_SKIPPED_AGE_SECS` (une horloge revenue en arrière n'efface rien).
-    fn purge_skipped(&mut self, now: u64) {
+    /// Rend vrai si au moins une clé a été retirée.
+    pub(crate) fn purge_skipped(&mut self, now: u64) -> bool {
+        let before = self.mkskipped.len();
         // Les éléments retirés sont effacés à la destruction.
         self.mkskipped
             .retain(|k| now.saturating_sub(k.stored_at) <= MAX_SKIPPED_AGE_SECS);
+        self.mkskipped.len() != before
+    }
+
+    /// Nombre de clés sautées en réserve (tests).
+    #[cfg(test)]
+    pub(crate) fn skipped_len(&self) -> usize {
+        self.mkskipped.len()
     }
 
     /// SkipMessageKeysHE : au plus `MAX_SKIP` clés d'avance dans la chaîne.

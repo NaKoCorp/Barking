@@ -206,7 +206,7 @@ fn open_core(home: &Path) -> CliResult<Core> {
     let salt = read_salt(home)?;
     let pass = read_passphrase(false)?;
     let key = passphrase::derive_key(&pass, &salt);
-    Ok(Core::open(&home.join(DB_FILE), &key)?)
+    Ok(Core::open(&home.join(DB_FILE), &key, now())?)
 }
 
 fn show_created(core: &Core) {
@@ -391,10 +391,10 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
             }
         }
     }
-    core.mark_polled(now())?;
     if failed {
         return fail("Certains fichiers n'ont pas pu être lus");
     }
+    core.mark_polled(now())?;
     Ok(())
 }
 
