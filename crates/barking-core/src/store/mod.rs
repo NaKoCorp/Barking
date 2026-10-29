@@ -151,9 +151,14 @@ fn arr<const N: usize>(b: Vec<u8>) -> Result<[u8; N]> {
 
 /// Âge maximal des entrées du journal de transparence (30 jours).
 pub const LOG_MAX_AGE_SECS: u64 = 30 * 86_400;
-/// Avance maximale, sur l'entrée la plus récente du journal, de l'heure
-/// utilisée pour la purge par âge (1 jour).
-pub const LOG_CLOCK_SLACK_SECS: u64 = 86_400;
+/// Avance maximale de l'horloge de purge du journal par événement (2 jours).
+///
+/// Plus d'un jour : une activité quotidienne fait regagner un jour par jour
+/// à une horloge en retard (après une période d'activité rare), qui rattrape
+/// donc l'heure réelle. Avec exactement un jour, un retard serait permanent.
+pub const LOG_PURGE_CLOCK_STEP_SECS: u64 = 2 * 86_400;
+/// Clé `meta` de l'horloge de purge du journal (u64, monotone).
+const META_LOG_PURGE_CLOCK: &str = "transparency_purge_clock";
 /// Nombre maximal d'entrées courantes conservées dans le journal de transparence.
 pub const LOG_MAX_ROWS: u64 = 10_000;
 /// Nombre maximal d'entrées de sécurité conservées, plafond distinct : les
@@ -680,17 +685,37 @@ pub trait Queries {
         class: EventClass,
         event: &[u8],
     ) -> Result<()> {
-        // Heure de purge bornée à un jour après l'entrée la plus récente :
-        // un seul événement daté du futur lointain (horloge locale déréglée)
-        // ne vide pas le journal. Une horloge qui reste en avance purge au
-        // rythme d'un jour par événement, puis normalement.
-        let newest: Option<i64> = self
-            .conn()
-            .query_row("SELECT max(at) FROM transparency", [], |r| r.get(0))
-            .map_err(map_err)?;
-        let clock = newest.map_or(at, |n| {
-            at.min(to_u64(n).saturating_add(LOG_CLOCK_SLACK_SECS))
-        });
+        // Horloge de purge monotone, stockée dans `meta` (même transaction) :
+        // elle ne recule jamais et n'avance que de LOG_PURGE_CLOCK_STEP_SECS
+        // au plus par événement. Des événements datés du futur lointain
+        // (horloge locale déréglée) ne la font avancer que de 2 jours chacun :
+        // le journal n'est pas vidé. Contrepartie : un journal peu actif (moins
+        // d'un événement tous les 2 jours) garde ses entrées un peu plus de
+        // 30 jours, jusqu'à ce que l'activité fasse rattraper l'horloge (au
+        // plus les plafonds de lignes) ; on préfère garder trop longtemps que
+        // perdre une preuve.
+        let previous: Option<u64> = self.get_meta(META_LOG_PURGE_CLOCK)?;
+        let clock = match previous {
+            Some(p) => at.min(p.saturating_add(LOG_PURGE_CLOCK_STEP_SECS)).max(p),
+            // Première écriture (ou base antérieure à l'horloge) : partir de
+            // l'entrée existante la plus récente, bornée de la même façon.
+            None => {
+                let newest: Option<i64> = self
+                    .conn()
+                    .query_row("SELECT max(at) FROM transparency", [], |r| r.get(0))
+                    .map_err(map_err)?;
+                newest.map_or(at, |n| {
+                    at.min(to_u64(n).saturating_add(LOG_PURGE_CLOCK_STEP_SECS))
+                })
+            }
+        };
+        if previous != Some(clock) {
+            self.put_meta(META_LOG_PURGE_CLOCK, &clock)?;
+        }
+        // Heure de purge : jamais après `at` non plus, pour qu'une horloge
+        // remise à l'heure après une avance ne purge pas aussitôt les
+        // nouvelles entrées.
+        let purge_at = at.min(clock);
         self.conn()
             .execute(
                 "INSERT INTO transparency(at, packet_id, event, class) VALUES (?1, ?2, ?3, ?4)",
@@ -707,7 +732,7 @@ pub trait Queries {
         self.conn()
             .execute(
                 "DELETE FROM transparency WHERE at < ?1",
-                params![to_i64(clock.saturating_sub(LOG_MAX_AGE_SECS))],
+                params![to_i64(purge_at.saturating_sub(LOG_MAX_AGE_SECS))],
             )
             .map_err(map_err)?;
         // Plafond par classe : seule la classe de l'entrée ajoutée a grandi.

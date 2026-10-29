@@ -433,27 +433,102 @@ fn log_far_future_event_does_not_wipe() {
 }
 
 #[test]
-fn log_drops_entries_older_than_30_days() {
+fn log_survives_repeated_far_future_events() {
+    let (_d, _p, mut store) = open_tmp();
+    let t = 1_000_000_000u64;
+    store
+        .transaction(|tx| {
+            for i in 0..100u32 {
+                let class = if i % 10 == 0 {
+                    EventClass::Security
+                } else {
+                    EventClass::Routine
+                };
+                tx.append_event(t, None, class, &i.to_be_bytes())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    // Horloge locale bloquée 10 ans en avance, plusieurs événements de suite.
+    let future = t + 3_650 * 86_400;
+    for _ in 0..5 {
+        store
+            .append_event(future, None, EventClass::Routine, b"futur")
+            .unwrap();
+    }
+    assert_eq!(store.events(1_000).unwrap().len(), 105);
+    assert_eq!(count_class(&store, EventClass::Security), 10);
+}
+
+#[test]
+fn log_still_purges_with_normal_clock() {
     let (_d, _p, store) = open_tmp();
     let t = 1_000_000_000u64;
+    for d in 0..=40u64 {
+        store
+            .append_event(t + d * 86_400, None, EventClass::Routine, &d.to_be_bytes())
+            .unwrap();
+    }
+    let rows = store.events(100).unwrap();
+    // Jour 40 : tout ce qui a plus de 30 jours (jours 0 à 9) est parti.
+    assert_eq!(rows.len(), 31);
+    assert_eq!(rows[0].0, t + 10 * 86_400);
+}
+
+#[test]
+fn log_sparse_retention_lags_then_catches_up() {
+    let (_d, _p, store) = open_tmp();
+    let t = 1_000_000_000u64;
+    let day = 86_400u64;
     store
         .append_event(t, None, EventClass::Routine, b"vieux")
         .unwrap();
-    // Dernière entrée connue récente : l'âge n'est pas borné.
+    // Un événement tous les 10 jours : l'horloge de purge n'avance que de
+    // 2 jours par événement, l'entrée de plus de 30 jours est encore là.
+    for k in 1..=4u64 {
+        store
+            .append_event(t + 10 * k * day, None, EventClass::Routine, b"rare")
+            .unwrap();
+    }
+    let rows = store.events(100).unwrap();
+    assert!(rows.iter().any(|r| r.1 == b"vieux"), "{rows:?}");
+    // Activité quotidienne : l'horloge gagne un jour par jour et rattrape.
+    let mut purged_on = None;
+    for d in 41..=80u64 {
+        store
+            .append_event(t + d * day, None, EventClass::Routine, b"jour")
+            .unwrap();
+        if purged_on.is_none() && !store.events(100).unwrap().iter().any(|r| r.1 == b"vieux") {
+            purged_on = Some(d);
+        }
+    }
+    // Horloge de purge à t + 8 j après le 4e événement rare, puis +2 j par
+    // jour d'activité : elle dépasse t + 30 j au jour 52 (purge), rattrape
+    // l'heure réelle au jour 72 et la suit ensuite.
+    assert_eq!(purged_on, Some(52));
+    let rows = store.events(100).unwrap();
+    assert!(rows.iter().all(|r| r.0 >= t + 50 * day), "{rows:?}");
+}
+
+#[test]
+fn log_clock_set_back_after_future_still_records() {
+    let (_d, _p, store) = open_tmp();
+    let t = 1_000_000_000u64;
     store
-        .append_event(t + 30 * 86_400, None, EventClass::Routine, b"recent")
+        .append_event(t, None, EventClass::Security, b"a")
         .unwrap();
+    for _ in 0..3 {
+        store
+            .append_event(t + 3_650 * 86_400, None, EventClass::Routine, b"futur")
+            .unwrap();
+    }
+    // Horloge corrigée : les nouvelles entrées ne sont pas purgées d'emblée.
     store
-        .append_event(t + 31 * 86_400, None, EventClass::Routine, b"recent2")
+        .append_event(t + 60, None, EventClass::Routine, b"maintenant")
         .unwrap();
     let rows = store.events(10).unwrap();
-    assert_eq!(
-        rows,
-        vec![
-            (t + 30 * 86_400, b"recent".to_vec()),
-            (t + 31 * 86_400, b"recent2".to_vec())
-        ]
-    );
+    assert_eq!(rows.len(), 5);
+    assert!(rows.iter().any(|r| r.1 == b"maintenant"));
 }
 
 #[test]
