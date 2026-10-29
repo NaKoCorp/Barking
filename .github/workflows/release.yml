@@ -1,0 +1,161 @@
+name: release
+
+# Publication reproductible : double build par cible, comparaison octet par octet,
+# attestation de provenance, puis version en brouillon (signée ensuite par le mainteneur).
+on:
+  push:
+    tags: ['v*']
+
+# Deux pushes de tags ne doivent pas se marcher dessus : file d'attente, pas d'annulation.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build:
+    name: build ${{ matrix.target }} (${{ matrix.copie }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04, copie: a }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04, copie: b }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, copie: a }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, copie: b }
+          - { target: aarch64-apple-darwin, runner: macos-14, copie: a }
+          - { target: aarch64-apple-darwin, runner: macos-14, copie: b }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # La cible macOS compile nativement avec rustup : il faut le compilateur épinglé
+      # (rust-toolchain.toml), installé explicitement plutôt que par l'installation automatique.
+      - name: Installer la chaîne Rust épinglée (macOS)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          [ -n "$canal" ] || { echo "canal introuvable dans rust-toolchain.toml" >&2; exit 1; }
+          rustup toolchain install "$canal" --profile minimal \
+            --component rustfmt --component clippy \
+            --target aarch64-apple-darwin \
+            --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+          rustup default "$canal"
+
+      - name: Build reproductible
+        env:
+          TARGET: ${{ matrix.target }}
+          COPIE: ${{ matrix.copie }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          scripts/repro-build.sh --target "$TARGET" --ref "refs/tags/$TAG" \
+            --out "$RUNNER_TEMP/out-$TARGET-$COPIE"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-${{ matrix.target }}-${{ matrix.copie }}
+          path: ${{ runner.temp }}/out-${{ matrix.target }}-${{ matrix.copie }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  compare:
+    name: comparaison des copies
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: build-*
+          path: copies
+
+      - name: Comparer les copies a et b, fusionner SHA256SUMS
+        run: |
+          set -euo pipefail
+          targets="x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
+          mkdir release
+          for t in $targets; do
+            a="copies/build-$t-a"; b="copies/build-$t-b"
+            [ -d "$a" ] && [ -d "$b" ] || { echo "copies manquantes pour $t" >&2; exit 1; }
+            bins_a="$(cd "$a" && ls barking-cli-* 2>/dev/null || true)"
+            bins_b="$(cd "$b" && ls barking-cli-* 2>/dev/null || true)"
+            [ -n "$bins_a" ] && [ "$(printf '%s\n' "$bins_a" | wc -l)" -eq 1 ] \
+              || { echo "il faut exactement un binaire pour $t (copie a) : $bins_a" >&2; exit 1; }
+            [ "$bins_a" = "$bins_b" ] \
+              || { echo "noms de binaires différents pour $t : $bins_a / $bins_b" >&2; exit 1; }
+            case "$bins_a" in *"-$t") ;; *) echo "nom inattendu pour $t : $bins_a" >&2; exit 1 ;; esac
+            cmp "$a/$bins_a" "$b/$bins_a" \
+              || { echo "les deux copies de $t diffèrent : build non reproductible" >&2; exit 1; }
+            cmp "$a/SHA256SUMS" "$b/SHA256SUMS" \
+              || { echo "les SHA256SUMS des copies de $t diffèrent" >&2; exit 1; }
+            (cd "$a" && sha256sum -c SHA256SUMS)
+            cp "$a/$bins_a" release/
+          done
+          chmod 755 release/barking-cli-*
+          [ "$(find release -maxdepth 1 -type f -name 'barking-cli-*' | wc -l)" -eq 3 ] || { echo "3 binaires attendus" >&2; exit 1; }
+          (cd release && sha256sum barking-cli-* | LC_ALL=C sort -k2 > SHA256SUMS && sha256sum -c SHA256SUMS)
+          cat release/SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: attestation et brouillon
+    needs: compare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Le tag correspond à la version de barking-cli
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-cli/Cargo.toml | head -n1)"
+          [ -n "$version" ] || { echo "version introuvable dans crates/barking-cli/Cargo.toml" >&2; exit 1; }
+          if [ "$TAG" != "v$version" ]; then
+            echo "le tag $TAG ne correspond pas à la version v$version de crates/barking-cli/Cargo.toml" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: release
+
+      - name: Les binaires portent la version du tag
+        run: |
+          for f in release/barking-cli-*; do
+            case "$f" in "release/barking-cli-${VERSION}-"*) ;; *) echo "binaire inattendu : $f" >&2; exit 1 ;; esac
+          done
+          (cd release && sha256sum -c SHA256SUMS)
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/barking-cli-*
+
+      - name: Créer la version en brouillon
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          notes="Brouillon : en attente de la signature du mainteneur (\`scripts/sign-release.sh\`)."
+          gh release create "$TAG" --draft --verify-tag -R "$GITHUB_REPOSITORY" \
+            --title "$TAG" --notes "$notes" \
+            release/barking-cli-* release/SHA256SUMS

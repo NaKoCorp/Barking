@@ -82,7 +82,9 @@ else
   exiger_repo
   command -v gh >/dev/null 2>&1 || erreur "gh est requis pour vérifier les attestations (ou --skip-attestation)"
   for nom in $NOMS_LISTES; do
-    gh attestation verify "$dir/$nom" -R "$REPO" >/dev/null 2>"$tmp/err" \
+    gh attestation verify "$dir/$nom" -R "$REPO" \
+      --signer-workflow "$REPO/.github/workflows/release.yml" \
+      --source-ref "refs/tags/v$version" >/dev/null 2>"$tmp/err" \
       || erreur "attestation refusée pour $nom : $(cat "$tmp/err")"
   done
 fi

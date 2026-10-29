@@ -1,0 +1,106 @@
+name: repro-check
+
+on:
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  repro-twice:
+    name: double build (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Deux builds, deux chemins, mêmes empreintes
+        run: scripts/tests/repro-twice.sh
+
+  release-scripts:
+    name: scripts de signature et de vérification
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/tests/release-scripts.sh
+
+  build:
+    name: build ${{ matrix.target }} (${{ matrix.copie }})
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04, copie: a }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04, copie: b }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, copie: a }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, copie: b }
+          - { target: aarch64-apple-darwin, runner: macos-14, copie: a }
+          - { target: aarch64-apple-darwin, runner: macos-14, copie: b }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Installer la chaîne Rust épinglée (macOS)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          [ -n "$canal" ] || { echo "canal introuvable dans rust-toolchain.toml" >&2; exit 1; }
+          rustup toolchain install "$canal" --profile minimal \
+            --component rustfmt --component clippy \
+            --target aarch64-apple-darwin \
+            --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+          rustup default "$canal"
+
+      - name: Build reproductible
+        env:
+          TARGET: ${{ matrix.target }}
+          COPIE: ${{ matrix.copie }}
+        run: |
+          scripts/repro-build.sh --target "$TARGET" --ref "$GITHUB_SHA" \
+            --out "$RUNNER_TEMP/out-$TARGET-$COPIE"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-${{ matrix.target }}-${{ matrix.copie }}
+          path: ${{ runner.temp }}/out-${{ matrix.target }}-${{ matrix.copie }}/
+          if-no-files-found: error
+          retention-days: 3
+
+  compare:
+    name: comparaison des copies
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: build-*
+          path: copies
+
+      - name: Les copies a et b sont identiques
+        run: |
+          set -euo pipefail
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
+            a="copies/build-$t-a"; b="copies/build-$t-b"
+            [ -d "$a" ] && [ -d "$b" ] || { echo "copies manquantes pour $t" >&2; exit 1; }
+            bin="$(cd "$a" && ls barking-cli-*)"
+            [ "$(printf '%s\n' "$bin" | wc -l)" -eq 1 ] || { echo "un seul binaire attendu pour $t" >&2; exit 1; }
+            cmp "$a/$bin" "$b/$bin" || { echo "les deux copies de $t diffèrent : build non reproductible" >&2; exit 1; }
+            cmp "$a/SHA256SUMS" "$b/SHA256SUMS"
+          done
