@@ -149,6 +149,11 @@ fn arr<const N: usize>(b: Vec<u8>) -> Result<[u8; N]> {
         .map_err(|_| CoreError::Store("longueur de champ invalide".into()))
 }
 
+/// Âge maximal des entrées du journal de transparence (30 jours).
+pub const LOG_MAX_AGE_SECS: u64 = 30 * 86_400;
+/// Nombre maximal d'entrées conservées dans le journal de transparence.
+pub const LOG_MAX_ROWS: u64 = 10_000;
+
 fn to_i64(v: u64) -> i64 {
     // Les secondes Unix tiennent largement dans i64.
     i64::try_from(v).unwrap_or(i64::MAX)
@@ -637,6 +642,20 @@ pub trait Queries {
             .execute(
                 "INSERT INTO transparency(at, packet_id, event) VALUES (?1, ?2, ?3)",
                 params![to_i64(at), packet_id.map(|p| p.0.to_vec()), event],
+            )
+            .map_err(map_err)?;
+        // Purge bornée, sur la même connexion (donc dans la même transaction).
+        self.conn()
+            .execute(
+                "DELETE FROM transparency WHERE at < ?1",
+                params![to_i64(at.saturating_sub(LOG_MAX_AGE_SECS))],
+            )
+            .map_err(map_err)?;
+        self.conn()
+            .execute(
+                "DELETE FROM transparency WHERE id <= \
+                 (SELECT id FROM transparency ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+                params![to_i64(LOG_MAX_ROWS)],
             )
             .map_err(map_err)?;
         Ok(())

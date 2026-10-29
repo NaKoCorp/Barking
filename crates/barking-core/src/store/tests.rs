@@ -294,3 +294,43 @@ fn message_row_debug_hides_body() {
     assert!(!dbg.contains("secret du corps"), "{dbg}");
     assert!(dbg.contains("15 octets"), "{dbg}");
 }
+
+#[test]
+fn log_keeps_at_most_max_rows() {
+    let (_d, _p, mut store) = open_tmp();
+    let t = 1_000_000_000u64;
+    store
+        .transaction(|tx| {
+            for i in 0..10_050u32 {
+                tx.append_event(t, None, &i.to_be_bytes())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let rows = store.events(20_000).unwrap();
+    assert_eq!(rows.len(), LOG_MAX_ROWS as usize);
+    assert_eq!(rows[0].1, 50u32.to_be_bytes().to_vec());
+    assert_eq!(rows.last().unwrap().1, 10_049u32.to_be_bytes().to_vec());
+}
+
+#[test]
+fn log_drops_entries_older_than_30_days() {
+    let (_d, _p, store) = open_tmp();
+    let t = 1_000_000_000u64;
+    store.append_event(t, None, b"vieux").unwrap();
+    store
+        .append_event(t + 31 * 86_400, None, b"recent")
+        .unwrap();
+    let rows = store.events(10).unwrap();
+    assert_eq!(rows, vec![(t + 31 * 86_400, b"recent".to_vec())]);
+}
+
+#[test]
+fn log_purge_tolerates_clock_behind() {
+    let (_d, _p, store) = open_tmp();
+    let t = 1_000_000_000u64;
+    store.append_event(t, None, b"a").unwrap();
+    store.append_event(t - 86_400, None, b"b").unwrap();
+    store.append_event(0, None, b"c").unwrap();
+    assert_eq!(store.events(10).unwrap().len(), 3);
+}
