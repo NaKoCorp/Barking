@@ -47,6 +47,10 @@ pub enum Body {
     SyncDevices {
         card: Box<ContactCard>,
     },
+    /// Nouvelle carte d'un contact (nouvelle liste d'appareils), envoyée à
+    /// chacun de ses contacts après une liaison. Carte en boîte (taille de
+    /// l'enum) ; même format postcard que `CardUpdate(ContactCard)`.
+    CardUpdate(Box<ContactCard>),
 }
 
 /// État d'un contact, rejoué sur mes autres appareils. Idempotent : le même
@@ -84,6 +88,9 @@ impl fmt::Debug for Body {
             Body::SyncContact(op) => write!(f, "SyncContact({op:?})"),
             Body::SyncDevices { card } => {
                 write!(f, "SyncDevices(version {})", card.devices.version)
+            }
+            Body::CardUpdate(card) => {
+                write!(f, "CardUpdate(version {})", card.devices.version)
             }
         }
     }

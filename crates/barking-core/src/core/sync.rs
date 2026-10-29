@@ -60,6 +60,45 @@ pub(super) fn seal_to_own(
     Ok(sealed.into_iter().map(|(p, _)| p).collect())
 }
 
+/// Met en file ma nouvelle carte (`CardUpdate`) pour chaque appareil
+/// joignable de chacun de mes contacts, une livraison par paquet (sans ligne
+/// de message, sous un identifiant neuf par contact). Taille vérifiée avant
+/// tout scellement : une carte trop grande pour un paquet (impossible avec le
+/// plafond d'appareils) fait échouer l'appel (`TooLarge`) sans rien écrire.
+pub(super) fn send_card_update(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    card: &ContactCard,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Packet>> {
+    let body = Body::CardUpdate(Box::new(card.clone()));
+    if !envelope::fits_in_packet(&body) {
+        return Err(CoreError::TooLarge);
+    }
+    let mut out = Vec::new();
+    for row in q.list_contacts()? {
+        let mut id = [0u8; 16];
+        rng.fill_bytes(&mut id);
+        let message_id = MessageId(id);
+        let target = Target::Contact(row.fp);
+        let sealed = seal_for(
+            q,
+            device,
+            &target,
+            &body,
+            message_id,
+            SealTime::at(now),
+            rng,
+        )?;
+        for (packet, peer) in sealed {
+            q.add_delivery(message_id, packet.id, peer, false)?;
+            out.push(packet);
+        }
+    }
+    Ok(out)
+}
+
 /// Met en file l'opération `op` pour chacun de mes autres appareils, sous un
 /// identifiant de message neuf (sans ligne de message). `time.sent_at` est
 /// la date de l'opération (horloge du contact, voir [`touch`]).
@@ -140,7 +179,7 @@ pub(super) fn apply(
     env: &Envelope,
 ) -> Result<core::result::Result<SyncKind, &'static str>> {
     match &env.body {
-        Body::Text(_) => Ok(Err(R_SYNC_REFUSED)),
+        Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
         Body::SyncSent { to, text } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
             if *to == own.list.root.fingerprint() {

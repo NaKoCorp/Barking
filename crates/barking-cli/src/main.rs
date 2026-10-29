@@ -393,6 +393,13 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
                 "{label} : synchronisé depuis un de tes appareils ({})",
                 kind.label()
             ),
+            ReceiveOutcome::CardUpdated { from, alias } => {
+                let who = alias.unwrap_or_else(|| from.to_string());
+                println!(
+                    "{label} : {} a mis à jour sa liste d'appareils",
+                    printable(&who)
+                );
+            }
         }
     }
     if failed {

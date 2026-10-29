@@ -1402,9 +1402,9 @@ fn max_card(n: usize, rng: &mut StdRng) -> ContactCard {
 }
 
 /// Contenus les plus lourds qui transportent une carte. La mise à jour de
-/// carte d'un contact (`CardUpdate`, tâche suivante) a la taille de
-/// `SyncDevices` : une étiquette et la carte.
-fn card_bodies(card: &ContactCard) -> [Body; 2] {
+/// carte d'un contact (`CardUpdate`) a la taille de `SyncDevices` : une
+/// étiquette et la carte.
+fn card_bodies(card: &ContactCard) -> [Body; 3] {
     [
         Body::SyncContact(SyncOp::Upsert {
             card: Box::new(card.clone()),
@@ -1414,6 +1414,7 @@ fn card_bodies(card: &ContactCard) -> [Body; 2] {
         Body::SyncDevices {
             card: Box::new(card.clone()),
         },
+        Body::CardUpdate(Box::new(card.clone())),
     ]
 }
 
@@ -1522,4 +1523,159 @@ fn oversized_sync_is_skipped_not_fatal() {
         e,
         TransparencyEvent::SessionEstablished { .. } | TransparencyEvent::PacketSealed { .. }
     )));
+}
+
+// --- Lot 1B, tâche 5 : nouvelle carte envoyée aux contacts.
+
+/// Alice (A, administrateur, liée à T) et Bob, contacts l'un de l'autre. Bob
+/// a appliqué la mise à jour de carte d'Alice (A et T). Rend aussi la carte
+/// d'Alice d'avant la liaison.
+fn alice_tablet_bob() -> (TempDir, Core, Core, Core, ContactCard, StdRng) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(78);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    let (mut b, _) = Core::create(&dir.path().join("b"), &[4; 32], "b", NOW, &mut rng).unwrap();
+    let v1 = a.contact_card("Alice").unwrap();
+    b.add_contact(&v1, Some("alice"), NOW, &mut rng).unwrap();
+    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"), NOW, &mut rng)
+        .unwrap();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) =
+        Core::begin_link(&dir.path().join("t"), &[2; 32], &offer, "t", NOW, &mut rng).unwrap();
+    let out = a.link_device(&req, false, NOW, &mut rng).unwrap();
+    t.finish_link(&out.bundle, None, NOW).unwrap();
+    assert_eq!(out.packets.len(), 1);
+    assert!(matches!(
+        b.receive(&out.packets[0].encode(), "t", NOW, &mut rng)
+            .unwrap(),
+        ReceiveOutcome::CardUpdated { .. }
+    ));
+    (dir, a, t, b, v1, rng)
+}
+
+fn stored_card(c: &Core, fp: Fingerprint) -> ContactCard {
+    load_card(&c.store.get_contact(fp).unwrap().unwrap().card).unwrap()
+}
+
+fn card_update(from: &mut Core, to: Fingerprint, card: ContactCard, rng: &mut StdRng) -> Packet {
+    let body = Body::CardUpdate(Box::new(card));
+    let mut id = [0u8; 16];
+    rand::Rng::fill_bytes(rng, &mut id);
+    seal_body(from, &send::Target::Contact(to), &body, MessageId(id), rng)
+        .remove(0)
+        .0
+}
+
+#[test]
+fn card_update_wrong_root_or_older_ignored() {
+    let (dir, mut a, _t, mut b, v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    let current = stored_card(&b, alice);
+    assert_eq!(current.devices.certs.len(), 2);
+    let (c, _) = Core::create(&dir.path().join("c"), &[5; 32], "c", NOW, &mut rng).unwrap();
+    let carol = c.contact_card("Carol").unwrap();
+    for (card, why) in [(carol, "autre racine"), (v1, "version inférieure")] {
+        let p = card_update(&mut a, bob, card, &mut rng);
+        assert_eq!(
+            reason(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
+            "mise à jour de carte refusée",
+            "{why}"
+        );
+        assert_eq!(stored_card(&b, alice), current, "{why}");
+    }
+    // La même carte une seconde fois : doublon, accusé, rien ne change.
+    let p = card_update(&mut a, bob, current.clone(), &mut rng);
+    assert!(matches!(
+        b.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Duplicate
+    ));
+    assert_eq!(stored_card(&b, alice), current);
+    let _ = c.fingerprint();
+}
+
+#[test]
+fn card_update_removing_sender_device() {
+    let (_d, a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    let t_id = t.device.public().id();
+    // Nouvelle liste d'Alice sans T, envoyée par T lui-même.
+    let root = a.root.as_ref().unwrap();
+    let certs: Vec<_> = a
+        .devices
+        .certs
+        .iter()
+        .filter(|c| c.device.id() != t_id)
+        .cloned()
+        .collect();
+    let list = DeviceList::sign(root, a.devices.version + 1, certs).unwrap();
+    let card = ContactCard::sign(
+        root,
+        "Alice",
+        list,
+        vec![a.prekeys.bundle(&a.device, false)],
+    )
+    .unwrap();
+    let p = card_update(&mut t, bob, card.clone(), &mut rng);
+    assert!(matches!(
+        b.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::CardUpdated { .. }
+    ));
+    assert_eq!(stored_card(&b, alice), card);
+    assert!(b.store.sessions_for(alice, t_id).unwrap().is_empty());
+    assert!(
+        count_events(&b, |e| *e
+            == TransparencyEvent::ContactCardUpdated {
+                contact: alice,
+                added: 0,
+                removed: 1
+            })
+            == 1
+    );
+    // Bob n'écrit plus qu'à A.
+    assert_eq!(b.send_text(&alice, "x", NOW, &mut rng).unwrap().len(), 1);
+}
+
+#[test]
+fn card_update_from_own_device_quarantined() {
+    let (_d, mut a, mut t, _b, _v1, mut rng) = alice_tablet_bob();
+    let card = a.contact_card("Alice").unwrap();
+    let body = Body::CardUpdate(Box::new(card));
+    let out = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([7; 16]),
+        &mut rng,
+    );
+    let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(r), "contenu inattendu pour cette boîte aux lettres");
+}
+
+#[test]
+fn display_name_stored_and_used_for_link() {
+    let (_d, mut a, _t, _b, _v1, _rng) = alice_tablet_bob();
+    // `contact_card` l'a enregistré ; la carte de la liaison le porte.
+    assert_eq!(
+        a.store.get_meta::<String>(META_DISPLAY_NAME).unwrap(),
+        Some("Alice".to_owned())
+    );
+    assert_eq!(
+        a.store
+            .get_meta::<ContactCard>(link::META_OWN_CARD)
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "Alice"
+    );
+    a.set_display_name("Alicia").unwrap();
+    assert_eq!(
+        a.store.get_meta::<String>(META_DISPLAY_NAME).unwrap(),
+        Some("Alicia".to_owned())
+    );
+    assert_eq!(
+        a.set_display_name(&"x".repeat(65)),
+        Err(CoreError::TooLarge)
+    );
 }

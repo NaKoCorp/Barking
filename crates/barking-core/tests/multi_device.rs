@@ -98,7 +98,8 @@ fn link_full_flow() {
     assert_eq!(t.core.fingerprint(), a.core.fingerprint());
     let out = a.core.link_device(&req, false, NOW + 1, &mut rng).unwrap();
     assert!(out.history.is_none());
-    assert!(out.packets.is_empty());
+    // Une mise à jour de carte pour Alice et une pour Bob (un appareil chacun).
+    assert_eq!(out.packets.len(), 2);
     // Passage par les octets, comme dans le CLI.
     let bundle = LinkBundle::from_bytes(&out.bundle.to_bytes()).unwrap();
     t.core.finish_link(&bundle, None, NOW + 2).unwrap();
@@ -886,4 +887,128 @@ fn bumped_clock_only_moves_envelope_date() {
             NOW + barking_core::packet::DEFAULT_TTL_SECS
         );
     }
+}
+
+#[test]
+fn bob_reaches_new_tablet() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(40);
+    let mut alice = create(d.path(), "alice", 1, &mut rng);
+    let mut bob = create(d.path(), "bob", 3, &mut rng);
+    let alice_fp = bob
+        .core
+        .add_contact(
+            &alice.core.contact_card("Alice").unwrap(),
+            Some("alice"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    alice
+        .core
+        .add_contact(
+            &bob.core.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    let before = bob
+        .core
+        .send_text(&alice_fp, "avant", NOW, &mut rng)
+        .unwrap()
+        .len();
+    assert_eq!(before, 1);
+
+    let offer = alice.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
+    let out = alice.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    t.core.finish_link(&out.bundle, None, NOW).unwrap();
+    // Une mise à jour de carte pour l'appareil de Bob ; pas d'autre appareil
+    // à moi que T, qui a tout reçu par le paquet de liaison.
+    assert_eq!(out.packets.len(), 1);
+    let card_update = out.packets[0].encode();
+    assert!(
+        alice
+            .core
+            .pending_outbox(NOW)
+            .unwrap()
+            .contains(&card_update)
+    );
+    match bob.core.receive(&card_update, T, NOW, &mut rng).unwrap() {
+        ReceiveOutcome::CardUpdated { from, alias } => {
+            assert_eq!(from, alice_fp);
+            assert_eq!(alias.as_deref(), Some("alice"));
+        }
+        o => panic!("CardUpdated attendu, obtenu {o:?}"),
+    }
+    // Le nom affiché d'Alice est conservé dans la nouvelle carte.
+    let c = bob.core.contacts().unwrap();
+    assert_eq!(c[0].display_name, "Alice");
+    let updated = TransparencyEvent::ContactCardUpdated {
+        contact: alice_fp,
+        added: 1,
+        removed: 0,
+    };
+    assert!(events(&bob.core).contains(&updated));
+    assert!(updated.is_security());
+
+    // Bob chiffre désormais aussi pour T.
+    let pkts = bob
+        .core
+        .send_text(&alice_fp, "aux deux", NOW, &mut rng)
+        .unwrap();
+    assert_eq!(pkts.len(), before + 1);
+    let opened = pkts
+        .iter()
+        .filter(|p| {
+            matches!(
+                t.core.receive(&p.encode(), T, NOW, &mut rng).unwrap(),
+                ReceiveOutcome::Message { ref text, .. } if text == "aux deux"
+            )
+        })
+        .count();
+    assert_eq!(opened, 1);
+    // L'accusé de Bob retire la mise à jour de la file d'Alice.
+    for bytes in bob.core.pending_outbox(NOW).unwrap() {
+        alice.core.receive(&bytes, T, NOW, &mut rng).unwrap();
+    }
+    assert!(
+        !alice
+            .core
+            .pending_outbox(NOW)
+            .unwrap()
+            .contains(&card_update)
+    );
+}
+
+#[test]
+fn second_link_sends_devices_to_first_tablet() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(41);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let offer = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t2, req) = begin(d.path(), "t2", 10, &offer, &mut rng);
+    let out = a.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    // Un `SyncDevices` pour T, rien pour T2 (ni contact).
+    assert_eq!(out.packets.len(), 1);
+    assert!(matches!(
+        t.core
+            .receive(&out.packets[0].encode(), T, NOW, &mut rng)
+            .unwrap(),
+        ReceiveOutcome::Synced {
+            kind: SyncKind::Devices
+        }
+    ));
+    t2.core.finish_link(&out.bundle, None, NOW).unwrap();
+    // T connaît T2 : une opération sur un contact part vers A et T2.
+    let carol = create(d.path(), "carol", 6, &mut rng)
+        .core
+        .contact_card("Carol")
+        .unwrap();
+    let produced = produced(&mut t, |c| {
+        c.add_contact(&carol, None, NOW, &mut StdRng::seed_from_u64(5))
+            .unwrap();
+    });
+    assert_eq!(produced.len(), 2);
 }

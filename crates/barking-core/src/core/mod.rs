@@ -59,6 +59,10 @@ use log_limit::LogLimiter;
 const META_ROOT: &str = "root_seed";
 const META_DEVICE: &str = "device_keys";
 const META_DEVICE_NAME: &str = "device_name";
+/// Mon nom affiché : dernier nom passé à `contact_card` ou `set_display_name`,
+/// porté par les cartes que le cœur signe lui-même (liaison, mise à jour de
+/// carte envoyée aux contacts). Absent : nom vide.
+const META_DISPLAY_NAME: &str = "display_name";
 const META_PREKEYS: &str = "prekeys";
 const META_DEVICE_LIST: &str = "device_list";
 const META_LINKED_BUNDLES: &str = "linked_bundles";
@@ -106,6 +110,12 @@ pub enum ReceiveOutcome {
     Synced {
         kind: SyncKind,
     },
+    /// Nouvelle carte d'un contact (nouvelle liste d'appareils), appliquée ;
+    /// son accusé est en file d'envoi.
+    CardUpdated {
+        from: Fingerprint,
+        alias: Option<String>,
+    },
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -132,6 +142,11 @@ impl fmt::Debug for ReceiveOutcome {
                 .field("reason", reason)
                 .finish(),
             Self::Synced { kind } => f.debug_struct("Synced").field("kind", kind).finish(),
+            Self::CardUpdated { from, alias } => f
+                .debug_struct("CardUpdated")
+                .field("from", from)
+                .field("alias", alias)
+                .finish(),
         }
     }
 }
@@ -330,7 +345,9 @@ impl Core {
         self.devices.root.fingerprint()
     }
 
-    /// Ma carte de contact signée : liste d'appareils et un paquet de clés par appareil.
+    /// Ma carte de contact signée : liste d'appareils et un paquet de clés par
+    /// appareil. `display_name` est enregistré comme mon nom affiché (repris
+    /// par les cartes que le cœur signe lui-même, voir `set_display_name`).
     pub fn contact_card(&self, display_name: &str) -> Result<ContactCard> {
         self.ensure_linked()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
@@ -341,7 +358,21 @@ impl Core {
                 .filter(|b| self.devices.certs.iter().any(|c| c.device == b.device))
                 .cloned(),
         );
-        ContactCard::sign(root, display_name, self.devices.clone(), bundles)
+        let card = ContactCard::sign(root, display_name, self.devices.clone(), bundles)?;
+        if self.store.get_meta::<String>(META_DISPLAY_NAME)?.as_deref() != Some(display_name) {
+            self.store.put_meta(META_DISPLAY_NAME, &display_name)?;
+        }
+        Ok(card)
+    }
+
+    /// Change mon nom affiché, porté par les cartes que le cœur signe
+    /// lui-même (paquet de liaison, mise à jour de carte envoyée aux
+    /// contacts). Plus de 64 octets : `TooLarge`.
+    pub fn set_display_name(&mut self, name: &str) -> Result<()> {
+        if name.len() > crate::identity::device::MAX_NAME_LEN {
+            return Err(CoreError::TooLarge);
+        }
+        self.store.put_meta(META_DISPLAY_NAME, &name)
     }
 
     /// Boîtes aux lettres à relever : la boîte d'introduction de cet appareil

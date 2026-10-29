@@ -7,8 +7,10 @@ use zeroize::Zeroizing;
 use super::log_limit::{LogLimiter, log_limited};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
-    SEEN_RETENTION_SECS, de_state, load_card, log, ser_state, session_ad, session_id, sync,
+    SEEN_RETENTION_SECS, contacts, de_state, load_card, log, ser_state, session_ad, session_id,
+    sync,
 };
+use crate::contact::ContactCard;
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
@@ -452,6 +454,14 @@ fn accept(
     }
     let from_me = o.row.contact_fp == *my_fp;
     let text = match (&env.body, from_me) {
+        (Body::CardUpdate(card), false) => {
+            return accept_card_update(q, limiter, packet, o, &env, card, now, rng);
+        }
+        // Ma propre carte circule par `SyncDevices`, jamais par `CardUpdate`.
+        (Body::CardUpdate(_), true) => {
+            let id = Some(authenticated_id);
+            return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
+        }
         (Body::Text(t), false) => t.clone(),
         // Mes appareils ne s'échangent pas de textes : un texte venant de moi
         // est inattendu (les copies passent par `SyncSent`).
@@ -516,6 +526,64 @@ fn accept(
         },
         new_prekeys,
     ))
+}
+
+/// Nouvelle carte d'un contact, authentifiée par une session avec un de ses
+/// appareils (spec §3.2). Vérifiée sans rien écrire (`verify_card_update`) ;
+/// refus : quarantaine, ratchet gardé. Acceptée : la session est écrite, puis
+/// la carte remplacée et les sessions des appareils retirés supprimées (y
+/// compris celle de l'expéditeur s'il est retiré), dans la transaction de la
+/// réception. La carte déjà connue (même liste) : doublon, accusé.
+#[allow(clippy::too_many_arguments)]
+fn accept_card_update(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    card: &ContactCard,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let fp = o.row.contact_fp;
+    let id = Some(ack::packet_id_for(&env.ack_secret));
+    let Some(current) = q.get_contact(fp)? else {
+        return reject_authenticated(q, limiter, packet, o, now, contacts::R_CARD_REFUSED, id);
+    };
+    let known = load_card(&current.card)?.devices == card.devices;
+    if !known && let Err(reason) = contacts::verify_card_update(q, &current, card)? {
+        return reject_authenticated(q, limiter, packet, o, now, reason, id);
+    }
+    let (_, new_prekeys, _) = commit_session(q, o, now)?;
+    q.mark_seen(packet.id, now)?;
+    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id))?;
+    if known {
+        log_limited(
+            q,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DuplicateIgnored {
+                packet_id: packet.id,
+            },
+        )?;
+        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        return Ok((ReceiveOutcome::Duplicate, new_prekeys));
+    }
+    let (added, removed) = contacts::apply_card_update(q, &current, card)?;
+    log(
+        q,
+        now,
+        Some(packet.id),
+        &TransparencyEvent::ContactCardUpdated {
+            contact: fp,
+            added,
+            removed,
+        },
+    )?;
+    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    let alias = Core::alias_in(q, fp)?;
+    Ok((ReceiveOutcome::CardUpdated { from: fp, alias }, new_prekeys))
 }
 
 /// Synchronisation authentifiée venue d'un de mes appareils : appliquée avec

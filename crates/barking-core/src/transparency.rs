@@ -72,6 +72,13 @@ pub enum TransparencyEvent {
     SyncSkipped {
         kind: SyncKind,
     },
+    /// Carte d'un contact remplacée par une nouvelle liste d'appareils :
+    /// `added` appareils ajoutés, `removed` retirés.
+    ContactCardUpdated {
+        contact: Fingerprint,
+        added: u32,
+        removed: u32,
+    },
 }
 
 /// Type de synchronisation entre mes appareils.
@@ -120,7 +127,7 @@ fn tier_label(tier: Tier) -> &'static str {
 
 impl TransparencyEvent {
     /// Preuve de sécurité : une session établie, une clé de contact
-    /// changée, un appareil lié à mon compte (côté administrateur) ou une
+    /// changée, la liste d'appareils d'un contact mise à jour, un appareil lié à mon compte (côté administrateur) ou une
     /// liaison terminée (côté nouvel appareil : c'est la preuve de l'identité
     /// qu'il a rejointe). Ces entrées ont leur propre plafond au journal ; les
     /// autres (qu'un tiers peut provoquer en masse) ne les évincent jamais.
@@ -131,6 +138,7 @@ impl TransparencyEvent {
                 | Self::ContactKeyChanged { .. }
                 | Self::DeviceLinked { .. }
                 | Self::LinkFinished { .. }
+                | Self::ContactCardUpdated { .. }
         )
     }
 
@@ -256,6 +264,14 @@ impl TransparencyEvent {
                 "Copie vers tes autres appareils non envoyée ({}) : trop volumineuse. \
                  Tes appareils peuvent différer sur ce point.",
                 kind.label()
+            ),
+            Self::ContactCardUpdated {
+                contact,
+                added,
+                removed,
+            } => format!(
+                "{contact} a mis à jour sa liste d'appareils (+{added}, \u{2212}{removed}). \
+                 Les messages seront aussi chiffrés pour ses nouveaux appareils."
             ),
         }
     }
@@ -387,6 +403,11 @@ mod tests {
             TransparencyEvent::SyncSkipped {
                 kind: SyncKind::Contact,
             },
+            TransparencyEvent::ContactCardUpdated {
+                contact: fp(7),
+                added: 1,
+                removed: 0,
+            },
         ]
     }
 
@@ -509,13 +530,14 @@ mod tests {
     #[test]
     fn security_class_is_session_key_change_and_link_only() {
         let security: Vec<_> = all().into_iter().filter(|e| e.is_security()).collect();
-        assert_eq!(security.len(), 4);
+        assert_eq!(security.len(), 5);
         assert!(security.iter().all(|e| matches!(
             e,
             TransparencyEvent::SessionEstablished { .. }
                 | TransparencyEvent::ContactKeyChanged { .. }
                 | TransparencyEvent::DeviceLinked { .. }
                 | TransparencyEvent::LinkFinished { .. }
+                | TransparencyEvent::ContactCardUpdated { .. }
         )));
     }
 
@@ -538,6 +560,23 @@ mod tests {
             finished.describe(),
             "Cet appareil est maintenant lié à ton compte (2 appareils, 3 contacts copiés). \
              La clé racine n'a pas été copiée."
+        );
+    }
+
+    #[test]
+    fn describe_contact_card_updated_exact() {
+        let e = TransparencyEvent::ContactCardUpdated {
+            contact: fp(7),
+            added: 1,
+            removed: 2,
+        };
+        assert_eq!(
+            e.describe(),
+            format!(
+                "{} a mis à jour sa liste d'appareils (+1, \u{2212}2). \
+                 Les messages seront aussi chiffrés pour ses nouveaux appareils.",
+                fp(7)
+            )
         );
     }
 

@@ -349,6 +349,74 @@ pub(super) fn upsert_in(
     q.upsert_contact(fp, &bytes, alias, verified)
 }
 
+/// Raison de quarantaine d'une mise à jour de carte refusée (texte fixe).
+pub(super) const R_CARD_REFUSED: &str = "mise à jour de carte refusée";
+
+/// Vérifie la nouvelle carte `card` d'un contact connu (`current`), reçue de
+/// lui (`Body::CardUpdate`) : même racine, liste d'appareils de version
+/// strictement supérieure, et toutes les vérifications d'`add_contact`
+/// (`check_card`, partagée : signatures, aucun de mes appareils, aucun
+/// appareil d'un autre contact). N'écrit rien. Refus : `Ok(Err(raison))` ;
+/// `Err` : échec du stockage seulement.
+pub(super) fn verify_card_update(
+    q: &impl Queries,
+    current: &ContactRow,
+    card: &ContactCard,
+) -> Result<core::result::Result<(), &'static str>> {
+    Ok(check_update(q, current, card)?.map(|_| ()))
+}
+
+fn check_update(
+    q: &impl Queries,
+    current: &ContactRow,
+    card: &ContactCard,
+) -> Result<core::result::Result<Checked, &'static str>> {
+    if card.fingerprint() != current.fp {
+        return Ok(Err(R_CARD_REFUSED));
+    }
+    let old = load_card(&current.card)?;
+    if card.devices.root != old.devices.root || card.devices.version <= old.devices.version {
+        return Ok(Err(R_CARD_REFUSED));
+    }
+    match check_card(q, card) {
+        Ok(c) => Ok(Ok(c)),
+        Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => Err(e),
+        Err(_) => Ok(Err(R_CARD_REFUSED)),
+    }
+}
+
+/// Applique une mise à jour de carte vérifiée par [`verify_card_update`] :
+/// la carte est remplacée (alias et statut vérifié gardés : même racine) et
+/// les sessions des appareils retirés sont supprimées, y compris celle de
+/// l'appareil qui l'a envoyée s'il en fait partie. Renvoie le nombre
+/// d'appareils ajoutés et retirés. À appeler dans la transaction de la
+/// réception, après l'écriture de la session.
+pub(super) fn apply_card_update(
+    q: &impl Queries,
+    current: &ContactRow,
+    card: &ContactCard,
+) -> Result<(u32, u32)> {
+    let c = check_update(q, current, card)?.map_err(CoreError::Malformed)?;
+    let old = load_card(&current.card)?;
+    let added = card
+        .devices
+        .certs
+        .iter()
+        .filter(|n| {
+            !old.devices
+                .certs
+                .iter()
+                .any(|o| o.device.id() == n.device.id())
+        })
+        .count();
+    for id in &c.revoked {
+        q.delete_sessions_for_device(c.fp, *id)?;
+    }
+    q.upsert_contact(c.fp, &c.bytes, &current.alias, current.verified)?;
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    Ok((count(added), count(c.revoked.len())))
+}
+
 /// Supprime un contact connu de `q` (voir `remove_contact`).
 pub(super) fn remove_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
     q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;

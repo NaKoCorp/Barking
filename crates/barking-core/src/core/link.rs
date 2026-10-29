@@ -43,21 +43,25 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::contacts::{MAX_ALIAS_LEN, claimed_by_other, overlaps};
 use super::history::HistoryArchive;
+use super::send::SealTime;
 use super::{
-    Core, META_DEVICE, META_DEVICE_LIST, META_DEVICE_NAME, META_LINKED_BUNDLES, META_PREKEYS,
-    ensure_empty, log, sync,
+    Core, META_DEVICE, META_DEVICE_LIST, META_DEVICE_NAME, META_DISPLAY_NAME, META_LINKED_BUNDLES,
+    META_PREKEYS, ensure_empty, log, sync,
 };
 use crate::contact::ContactCard;
 use crate::crypto::aead::{xopen, xseal};
 use crate::crypto::kdf::{hmac_sha256, hmac_sha256_verify};
 use crate::crypto::labels;
+use crate::envelope::Body;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
 use crate::identity::device::sig_bytes;
 use crate::identity::device_list::MAX_DEVICES;
 use crate::identity::root::RootPublic;
 use crate::identity::{DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic};
 use crate::packet::Packet;
+use crate::store::MessageId;
 use crate::store::{Queries, Store};
+use crate::transparency::SyncKind;
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
@@ -247,7 +251,9 @@ pub struct LinkOutcome {
     pub bundle: LinkBundle,
     /// Archive de l'historique (si demandée) ; pas encore produite.
     pub history: Option<HistoryArchive>,
-    /// Paquets à envoyer (nouvelle carte aux contacts) ; pas encore produits.
+    /// Paquets à envoyer, déjà en file d'envoi : `SyncDevices` (ma nouvelle
+    /// carte) pour chacun de mes autres appareils sauf le nouveau, puis
+    /// `CardUpdate` pour chaque appareil joignable de chaque contact.
     pub packets: Vec<Packet>,
 }
 
@@ -414,6 +420,11 @@ impl Core {
     /// et rend le paquet de liaison chiffré. `with_history` est encore ignoré
     /// (l'archive viendra plus tard).
     ///
+    /// Dans la même transaction, ma nouvelle carte (portant mon nom affiché
+    /// enregistré) est mise en file : `SyncDevices` pour mes autres appareils
+    /// sauf T, `CardUpdate` pour chaque appareil joignable de chaque contact
+    /// (spec §3.2). Ces paquets sont rendus dans `LinkOutcome::packets`.
+    ///
     /// L'offre est consommée dans la transaction qui enregistre la nouvelle
     /// liste : elle doit y être encore présente et identique, et la liste
     /// stockée ne doit pas avoir changé depuis sa lecture (une autre ouverture
@@ -503,8 +514,12 @@ impl Core {
             .filter(|b| b.device != device)
             .cloned()
             .collect();
-        // Le nom affiché n'est pas stocké : la carte copiée n'en porte pas.
-        let card = ContactCard::sign(root, "", devices.clone(), bundles)?;
+        // Mon nom affiché enregistré (`contact_card`, `set_display_name`).
+        let display_name = self
+            .store
+            .get_meta::<String>(META_DISPLAY_NAME)?
+            .unwrap_or_default();
+        let card = ContactCard::sign(root, &display_name, devices.clone(), bundles)?;
         let contacts = self
             .store
             .list_contacts()?
@@ -531,6 +546,7 @@ impl Core {
             name: req.name.clone(),
         };
         let read_version = self.devices.version;
+        let me = &self.device;
         let written = self.store.transaction(|tx| {
             const USED: CoreError = CoreError::Link("offre absente ou déjà utilisée");
             let same_offer = tx
@@ -543,27 +559,51 @@ impl Core {
             if !same_offer || !same_list || !tx.delete_meta(META_LINK_OFFER)? {
                 return Err(USED);
             }
+            // Nouvelle carte pour mes autres appareils, scellée avant
+            // l'écriture de la nouvelle liste : T, qui reçoit tout par le
+            // paquet de liaison, n'est pas encore dans la liste stockée.
+            let mut id = [0u8; 16];
+            rng.fill_bytes(&mut id);
+            let devices_body = Body::SyncDevices {
+                card: Box::new(card.clone()),
+            };
+            let mut packets = sync::seal_to_own(
+                tx,
+                me,
+                &devices_body,
+                SyncKind::Devices,
+                MessageId(id),
+                SealTime::at(now),
+                rng,
+            )?;
             tx.put_meta(META_DEVICE_LIST, &devices)?;
             tx.put_meta(META_LINKED_BUNDLES, &linked)?;
             tx.put_meta(META_OWN_CARD, &card)?;
             sync::purge_removed_own_sessions(tx, &devices)?;
-            log(tx, now, None, &event)
+            log(tx, now, None, &event)?;
+            // Et pour chacun de mes contacts (spec §3.2).
+            packets.extend(sync::send_card_update(tx, me, &card, now, rng)?);
+            Ok(packets)
         });
-        if let Err(e) = written {
-            // Liste périmée en mémoire (une autre ouverture de la base a lié
-            // un appareil) : relue, pour qu'un nouvel essai parte de la bonne.
-            if matches!(e, CoreError::Link(_)) {
-                self.reload_own_devices()?;
+        let packets = match written {
+            Ok(packets) => packets,
+            Err(e) => {
+                // Liste périmée en mémoire (une autre ouverture de la base a
+                // lié un appareil) : relue, pour qu'un nouvel essai parte de
+                // la bonne.
+                if matches!(e, CoreError::Link(_)) {
+                    self.reload_own_devices()?;
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
+        };
         drop(offer);
         self.devices = devices;
         self.linked_bundles = linked;
         Ok(LinkOutcome {
             bundle,
             history: None,
-            packets: Vec::new(),
+            packets,
         })
     }
 
