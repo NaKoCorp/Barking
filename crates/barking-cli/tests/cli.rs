@@ -467,7 +467,7 @@ fn multi_device_end_to_end() {
         .args(["messages", "bob"])
         .assert()
         .failure();
-    ok(
+    let finished = ok(
         &tablet,
         &[
             "link",
@@ -477,6 +477,10 @@ fn multi_device_end_to_end() {
             "--history",
             path_arg(&history),
         ],
+    );
+    assert!(
+        finished.contains("Supprime maintenant les fichiers de liaison"),
+        "{finished}"
     );
 
     // 3. Bob reçoit la nouvelle carte d'Alice, puis lui écrit : la tablette reçoit.
@@ -711,4 +715,43 @@ fn link_request_unwritable_output_leaves_no_home() {
         ],
     );
     assert!(out.contains("Supprime"), "{out}");
+}
+
+#[test]
+fn log_neutralises_control_characters_in_names() {
+    // Le nom d'appareil vient de la demande de liaison (choisi par T) et
+    // revient dans le journal de l'administrateur.
+    let (d, alice) = party("tel-a");
+    let offer = d.path().join("offre.bin");
+    let request = d.path().join("demande.bin");
+    let bundle = d.path().join("liaison.bin");
+    let tablet = d.path().join("tablette");
+    ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
+    ok(
+        &tablet,
+        &[
+            "link",
+            "request",
+            "--offer",
+            path_arg(&offer),
+            "--name",
+            "tab\u{1b}[2Jlette",
+            "--out",
+            path_arg(&request),
+        ],
+    );
+    ok(
+        &alice,
+        &[
+            "link",
+            "accept",
+            "--request",
+            path_arg(&request),
+            "--out",
+            path_arg(&bundle),
+        ],
+    );
+    let log = ok(&alice, &["log"]);
+    assert!(!log.contains('\u{1b}'), "{log:?}");
+    assert!(log.contains("tab\u{FFFD}[2Jlette"), "{log}");
 }

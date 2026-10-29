@@ -384,7 +384,8 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Log { limit } => {
             let core = open_core(&home)?;
             for (at, event) in core.transparency_log(limit)? {
-                println!("[{}] {}", format_time(at), event.describe());
+                // Le texte reprend des noms et alias choisis par d'autres.
+                println!("[{}] {}", format_time(at), printable(&event.describe()));
             }
         }
         Command::Messages { contact } => {
@@ -564,6 +565,11 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
             core.finish_link(&bundle, archive.as_ref(), now())?;
             println!("Liaison terminée.");
             show_created(&core);
+            println!(
+                "Supprime maintenant les fichiers de liaison : l'offre, le paquet de liaison \
+                 et l'historique. Ils ne servent plus, et le paquet et l'historique \
+                 contiennent tes contacts et tes messages."
+            );
         }
     }
     Ok(())
