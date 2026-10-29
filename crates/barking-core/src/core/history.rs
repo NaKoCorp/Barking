@@ -1,8 +1,10 @@
 //! Archive de l'historique transférée pendant une liaison (spec §3.4).
 //!
 //! **Production (A, `link_device`).** Le clair est
-//! `postcard(Vec<HistoryEntry>) || blake3(ce postcard)` : le hash occupe les
-//! 32 derniers octets du dernier morceau. Ce clair est découpé en morceaux
+//! `postcard(Vec<HistoryEntry>) || h || sig`, où `h = blake3(ce postcard)` et
+//! `sig` la signature de `h` par la racine (`LINK_HISTORY_SIG`) : hash et
+//! signature occupent les 96 derniers octets. Le secret de liaison seul ne
+//! suffit donc pas à fabriquer une archive. Ce clair est découpé en morceaux
 //! de [`HISTORY_CHUNK_LEN`] octets (64 Kio, le dernier pouvant être plus
 //! court), chacun chiffré par `xseal(derive_key(LINK_HISTORY, secret),
 //! ad = index_u32_be || count_u32_be, morceau)`. Seuls les messages des
@@ -14,7 +16,7 @@
 //! [`MAX_HISTORY_CHUNKS`]), taille de chaque chiffré, déchiffrement de chaque
 //! morceau avec son index et le nombre total dans les données associées (un
 //! morceau manquant, en double, déplacé ou modifié échoue ici), découpage
-//! canonique, hash final, décodage exact, puis chaque entrée : contact
+//! canonique, hash final, signature de la racine attendue, décodage exact, puis chaque entrée : contact
 //! présent dans le paquet de liaison (sinon toute l'archive est refusée, et
 //! pas seulement l'entrée : une archive authentique n'en contient jamais),
 //! identifiants de message uniques. L'insertion se fait ensuite dans la
@@ -46,7 +48,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::aead::{XNONCE_LEN, xopen, xseal};
 use crate::crypto::labels;
-use crate::identity::root::Fingerprint;
+use crate::identity::root::{Fingerprint, RootIdentity, RootPublic};
 use crate::store::{Direction, MessageId, MessageRow, MessageStatus, Queries};
 use crate::{CoreError, Result};
 
@@ -62,6 +64,10 @@ pub const MAX_ARCHIVE_BYTES: usize = MAX_HISTORY_CHUNKS * (HISTORY_CHUNK_LEN + 4
 
 /// Taille du hash BLAKE3 final.
 const HASH_LEN: usize = 32;
+/// Taille de la signature de la racine qui suit le hash.
+const SIG_LEN: usize = 64;
+/// Fin du clair : hash puis signature.
+const TRAILER_LEN: usize = HASH_LEN + SIG_LEN;
 /// Étiquette d'authentification de XChaCha20-Poly1305.
 const TAG_LEN: usize = 16;
 
@@ -224,16 +230,18 @@ pub(super) fn export(
     Ok(out)
 }
 
-/// Chiffre l'archive avec la clé dérivée du secret de liaison. Plus de
-/// [`MAX_HISTORY_CHUNKS`] morceaux → « historique trop volumineux ».
+/// Chiffre l'archive avec la clé dérivée du secret de liaison, signée par
+/// `root`. Plus de [`MAX_HISTORY_CHUNKS`] morceaux → « historique trop
+/// volumineux ».
 pub(super) fn seal_archive(
     secret: &[u8; 32],
+    root: &RootIdentity,
     entries: &[HistoryEntry],
     rng: &mut impl CryptoRng,
 ) -> Result<HistoryArchive> {
     let size = postcard::experimental::serialized_size(entries)
         .map_err(|_| CoreError::Malformed("historique"))?;
-    let total = size.checked_add(HASH_LEN).ok_or(TOO_LARGE)?;
+    let total = size.checked_add(TRAILER_LEN).ok_or(TOO_LARGE)?;
     let count = total.div_ceil(HISTORY_CHUNK_LEN);
     if count > MAX_HISTORY_CHUNKS {
         return Err(TOO_LARGE);
@@ -241,14 +249,17 @@ pub(super) fn seal_archive(
     // Tampon de taille exacte : aucune réallocation ne laisse de copie du
     // clair en mémoire libérée.
     let mut plain = Zeroizing::new(vec![0u8; total]);
-    let (body, hash) = plain.split_at_mut(size);
+    let (body, trailer) = plain.split_at_mut(size);
     let written = postcard::to_slice(entries, body)
         .map_err(|_| CoreError::Malformed("historique"))?
         .len();
     if written != size {
         return Err(CoreError::Malformed("historique"));
     }
-    hash.copy_from_slice(blake3::hash(body).as_bytes());
+    let hash = blake3::hash(body);
+    let (h, sig) = trailer.split_at_mut(HASH_LEN);
+    h.copy_from_slice(hash.as_bytes());
+    sig.copy_from_slice(&root.sign(labels::LINK_HISTORY_SIG, hash.as_bytes()));
     let key = history_key(secret);
     let chunks = plain
         .chunks(HISTORY_CHUNK_LEN)
@@ -258,10 +269,11 @@ pub(super) fn seal_archive(
     Ok(HistoryArchive { chunks })
 }
 
-/// Vérifie et déchiffre toute l'archive (voir la documentation du module).
-/// N'écrit rien.
+/// Vérifie et déchiffre toute l'archive (voir la documentation du module),
+/// signée par `root`. N'écrit rien.
 pub(super) fn open_archive(
     secret: &[u8; 32],
+    root: &RootPublic,
     archive: &HistoryArchive,
 ) -> Result<Vec<HistoryEntry>> {
     let count = archive.chunks.len();
@@ -289,13 +301,17 @@ pub(super) fn open_archive(
         }
         plain.extend_from_slice(&pt);
     }
-    let size = plain.len().checked_sub(HASH_LEN).ok_or(BAD_HISTORY)?;
-    let (body, hash) = plain.split_at(size);
+    let size = plain.len().checked_sub(TRAILER_LEN).ok_or(BAD_HISTORY)?;
+    let (body, trailer) = plain.split_at(size);
+    let (hash, sig) = trailer.split_at(HASH_LEN);
     let hash: [u8; HASH_LEN] = hash.try_into().map_err(|_| BAD_HISTORY)?;
+    let sig: [u8; SIG_LEN] = sig.try_into().map_err(|_| BAD_HISTORY)?;
     // Comparaison en temps constant (`blake3::Hash`).
     if blake3::hash(body) != blake3::Hash::from(hash) {
         return Err(BAD_HISTORY);
     }
+    root.verify(labels::LINK_HISTORY_SIG, &hash, &sig)
+        .map_err(|_| BAD_HISTORY)?;
     match postcard::take_from_bytes::<Vec<HistoryEntry>>(body) {
         Ok((entries, [])) => Ok(entries),
         _ => Err(BAD_HISTORY),
@@ -365,6 +381,11 @@ mod tests {
         fps.iter().map(|&b| fp(b)).collect()
     }
 
+    fn root(seed: u64) -> RootIdentity {
+        use rand::SeedableRng;
+        RootIdentity::generate(&mut rand::rngs::StdRng::seed_from_u64(seed)).0
+    }
+
     #[test]
     fn roundtrip_and_garbage() {
         let a = HistoryArchive {
@@ -397,9 +418,9 @@ mod tests {
         let secret = [5u8; 32];
         let big = "y".repeat(40_000);
         let entries: Vec<_> = (0..5).map(|i| entry(i, 1, &big)).collect();
-        let archive = seal_archive(&secret, &entries, &mut rng).unwrap();
+        let archive = seal_archive(&secret, &root(1), &entries, &mut rng).unwrap();
         assert_eq!(archive.chunks.len(), 4);
-        let back = open_archive(&secret, &archive).unwrap();
+        let back = open_archive(&secret, &root(1).public(), &archive).unwrap();
         assert_eq!(back.len(), 5);
         assert!(
             back.iter()
@@ -409,8 +430,16 @@ mod tests {
                     && a.direction == b.direction
                     && a.at == b.at)
         );
+        // Autre racine attendue : refusé.
+        assert_eq!(
+            open_archive(&secret, &root(2).public(), &archive).err(),
+            Some(BAD_HISTORY)
+        );
         // Autre secret : refusé.
-        assert_eq!(open_archive(&[6u8; 32], &archive).err(), Some(BAD_HISTORY));
+        assert_eq!(
+            open_archive(&[6u8; 32], &root(1).public(), &archive).err(),
+            Some(BAD_HISTORY)
+        );
         // Debug n'affiche pas le texte.
         assert!(!format!("{:?}", back[0]).contains("yyy"));
     }
@@ -421,11 +450,17 @@ mod tests {
         let many = HistoryArchive {
             chunks: vec![Vec::new(); MAX_HISTORY_CHUNKS + 1],
         };
-        assert_eq!(open_archive(&secret, &many).err(), Some(TOO_LARGE));
+        assert_eq!(
+            open_archive(&secret, &root(1).public(), &many).err(),
+            Some(TOO_LARGE)
+        );
         let oversized = HistoryArchive {
             chunks: vec![vec![0u8; HISTORY_CHUNK_LEN + XNONCE_LEN + TAG_LEN + 1]],
         };
-        assert_eq!(open_archive(&secret, &oversized).err(), Some(BAD_HISTORY));
+        assert_eq!(
+            open_archive(&secret, &root(1).public(), &oversized).err(),
+            Some(BAD_HISTORY)
+        );
     }
 
     #[test]
@@ -435,15 +470,22 @@ mod tests {
         let key = history_key(&secret);
         let entries = vec![entry(1, 1, "salut")];
         let size = postcard::experimental::serialized_size(&entries).unwrap();
-        let mut plain = vec![0u8; size + HASH_LEN];
+        let mut plain = vec![0u8; size + TRAILER_LEN];
         postcard::to_slice(&entries, &mut plain[..size]).unwrap();
         let h = blake3::hash(&plain[..size]);
-        plain[size..].copy_from_slice(h.as_bytes());
+        plain[size..size + HASH_LEN].copy_from_slice(h.as_bytes());
+        let sig = root(1).sign(labels::LINK_HISTORY_SIG, h.as_bytes());
+        plain[size + HASH_LEN..].copy_from_slice(&sig);
         // Valide, en un morceau.
         let one = HistoryArchive {
             chunks: vec![xseal(&key, &chunk_ad(0, 1).unwrap(), &plain, &mut rng)],
         };
-        assert_eq!(open_archive(&secret, &one).unwrap().len(), 1);
+        assert_eq!(
+            open_archive(&secret, &root(1).public(), &one)
+                .unwrap()
+                .len(),
+            1
+        );
         // Même clair découpé en deux morceaux non pleins : refusé.
         let (x, y) = plain.split_at(3);
         let split = HistoryArchive {
@@ -452,20 +494,39 @@ mod tests {
                 xseal(&key, &chunk_ad(1, 2).unwrap(), y, &mut rng),
             ],
         };
-        assert_eq!(open_archive(&secret, &split).err(), Some(BAD_HISTORY));
-        // Hash incorrect (chiffrement valide).
+        assert_eq!(
+            open_archive(&secret, &root(1).public(), &split).err(),
+            Some(BAD_HISTORY)
+        );
+        // Signature incorrecte (chiffrement et hash valides).
         let mut wrong = plain.clone();
         let last = wrong.len() - 1;
         wrong[last] ^= 1;
+        let bad_sig = HistoryArchive {
+            chunks: vec![xseal(&key, &chunk_ad(0, 1).unwrap(), &wrong, &mut rng)],
+        };
+        assert_eq!(
+            open_archive(&secret, &root(1).public(), &bad_sig).err(),
+            Some(BAD_HISTORY)
+        );
+        // Hash incorrect (chiffrement valide).
+        let mut wrong = plain.clone();
+        wrong[size] ^= 1;
         let bad = HistoryArchive {
             chunks: vec![xseal(&key, &chunk_ad(0, 1).unwrap(), &wrong, &mut rng)],
         };
-        assert_eq!(open_archive(&secret, &bad).err(), Some(BAD_HISTORY));
+        assert_eq!(
+            open_archive(&secret, &root(1).public(), &bad).err(),
+            Some(BAD_HISTORY)
+        );
         // Clair plus court que le hash.
         let short = HistoryArchive {
             chunks: vec![xseal(&key, &chunk_ad(0, 1).unwrap(), &[1, 2], &mut rng)],
         };
-        assert_eq!(open_archive(&secret, &short).err(), Some(BAD_HISTORY));
+        assert_eq!(
+            open_archive(&secret, &root(1).public(), &short).err(),
+            Some(BAD_HISTORY)
+        );
     }
 
     #[test]
@@ -484,11 +545,11 @@ mod tests {
         let mut rng = rand::rng();
         let secret = [7u8; 32];
         let entries = vec![entry(1, 1, "a"), entry(2, 1, "b"), entry(3, 2, "c")];
-        let archive = seal_archive(&secret, &entries, &mut rng).unwrap();
-        let opened = open_archive(&secret, &archive).unwrap();
+        let archive = seal_archive(&secret, &root(1), &entries, &mut rng).unwrap();
+        let opened = open_archive(&secret, &root(1).public(), &archive).unwrap();
         let n = store.transaction(|tx| import(tx, &opened)).unwrap();
         assert_eq!(n, 3);
-        let again = open_archive(&secret, &archive).unwrap();
+        let again = open_archive(&secret, &root(1).public(), &archive).unwrap();
         let n = store.transaction(|tx| import(tx, &again)).unwrap();
         assert_eq!(n, 0);
         assert_eq!(store.messages_with(fp(1)).unwrap().len(), 2);

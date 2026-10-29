@@ -78,3 +78,12 @@ pub const LINK_HISTORY: &str = "barking/v0/link/history";
 /// l'enveloppe)[..16]`. L'expéditeur choisit l'identifiant de l'enveloppe ;
 /// le lier à son empreinte l'empêche d'atteindre les messages d'un autre.
 pub const MESSAGE_ID_IN: &str = "barking/v0/message-id/in";
+
+/// Domaine de la signature, par la racine, du clair du paquet de liaison
+/// (`BLAKE3(postcard(clair))`) : seul l'administrateur peut le produire, pas
+/// un simple détenteur du secret de liaison.
+pub const LINK_BUNDLE_SIG: &[u8] = b"barking/v0/link/bundle-sig";
+
+/// Domaine de la signature, par la racine, du clair de l'archive d'historique
+/// (`BLAKE3(postcard(entrées))`).
+pub const LINK_HISTORY_SIG: &[u8] = b"barking/v0/link/history-sig";

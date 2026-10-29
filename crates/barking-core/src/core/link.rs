@@ -11,11 +11,16 @@
 //!    non expirée), le MAC (en temps constant), la preuve de possession, signe
 //!    la liste `version + 1` et rend le paquet de liaison, chiffré par
 //!    XChaCha20-Poly1305 avec une clé dérivée du secret (`LINK_BUNDLE`). Les
-//!    données associées lient le paquet à la racine et à l'appareil T.
+//!    données associées lient le paquet à la racine et à l'appareil T. Le
+//!    clair est signé par la racine (`LINK_BUNDLE_SIG`, sur son hash BLAKE3),
+//!    l'archive d'historique aussi (`LINK_HISTORY_SIG`) : connaître le secret
+//!    (canal de liaison compromis) ne permet pas de fabriquer les contacts ni
+//!    l'historique de T.
 //!    L'offre est consommée (effacée) dans la même transaction, à condition
 //!    d'y être encore et que la liste stockée n'ait pas changé. Une offre
 //!    expirée est effacée dès qu'elle est trouvée (ici et à l'ouverture).
-//! 4. **Fin** (T) : [`Core::finish_link`] déchiffre, vérifie la liste (racine
+//! 4. **Fin** (T) : [`Core::finish_link`] déchiffre, vérifie la signature de
+//!    la racine attendue sur le clair, puis la liste (racine
 //!    attendue, T présent), la carte, les paquets de clés et chaque contact,
 //!    puis enregistre tout et efface le secret dans une seule transaction.
 //!    T refuse de terminer plus d'un jour après l'expiration de l'offre
@@ -56,7 +61,7 @@ use crate::envelope::Body;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
 use crate::identity::device::sig_bytes;
 use crate::identity::device_list::MAX_DEVICES;
-use crate::identity::root::{Fingerprint, RootPublic};
+use crate::identity::root::{Fingerprint, RootIdentity, RootPublic};
 use crate::identity::{DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic};
 use crate::packet::Packet;
 use crate::store::MessageId;
@@ -78,6 +83,7 @@ pub(super) const META_OWN_CARD: &str = "own_card";
 const UNREADABLE: CoreError = CoreError::Link("fichier de liaison illisible");
 const BAD_BUNDLE: CoreError = CoreError::Link("paquet de liaison invalide");
 const BAD_CONTACT: CoreError = CoreError::Link("contact invalide dans le paquet de liaison");
+const BAD_SIGNATURE: CoreError = CoreError::Link("paquet de liaison non signé par la racine");
 
 /// Taille maximale d'un fichier d'offre ou de demande de liaison.
 pub const MAX_LINK_FILE_BYTES: usize = 64 * 1024;
@@ -338,19 +344,64 @@ fn bundle_key(secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(blake3::derive_key(labels::LINK_BUNDLE, secret))
 }
 
-/// Chiffre le clair du paquet de liaison pour l'appareil `device`.
+/// Clair chiffré du paquet de liaison : le [`LinkPlain`] sérialisé et la
+/// signature de la racine sur son hash (`LINK_BUNDLE_SIG`). Le secret de
+/// liaison ne suffit donc pas à fabriquer un paquet : T vérifie la signature
+/// avec la racine de l'offre avant de lire quoi que ce soit.
+#[derive(Serialize, Deserialize)]
+struct SignedPlain {
+    plain: Vec<u8>,
+    #[serde(with = "sig_bytes")]
+    sig: [u8; 64],
+}
+
+impl Drop for SignedPlain {
+    fn drop(&mut self) {
+        self.plain.zeroize();
+    }
+}
+
+/// Chiffre le clair du paquet de liaison pour l'appareil `device`, signé
+/// par `signer` (la racine de A ; `root` en est la clé publique, liée aux
+/// données associées).
 fn seal_bundle(
     secret: &[u8; 32],
     root: &RootPublic,
+    signer: &RootIdentity,
     device: &DeviceId,
     plain: &LinkPlain,
     rng: &mut impl CryptoRng,
 ) -> Result<LinkBundle> {
+    let bytes =
+        postcard::to_allocvec(plain).map_err(|_| CoreError::Malformed("paquet de liaison"))?;
+    let sig = signer.sign(labels::LINK_BUNDLE_SIG, blake3::hash(&bytes).as_bytes());
+    let signed = SignedPlain { plain: bytes, sig };
     let pt = Zeroizing::new(
-        postcard::to_allocvec(plain).map_err(|_| CoreError::Malformed("paquet de liaison"))?,
+        postcard::to_allocvec(&signed).map_err(|_| CoreError::Malformed("paquet de liaison"))?,
     );
     let key = bundle_key(secret);
     Ok(LinkBundle(xseal(&key, &bundle_ad(root, device), &pt, rng)))
+}
+
+/// Déchiffre le paquet de liaison et vérifie la signature de `root` sur son
+/// clair, avant tout décodage de celui-ci.
+fn open_bundle(
+    secret: &[u8; 32],
+    root: &RootPublic,
+    device: &DeviceId,
+    bundle: &LinkBundle,
+) -> Result<LinkPlain> {
+    let key = bundle_key(secret);
+    let pt =
+        Zeroizing::new(xopen(&key, &bundle_ad(root, device), &bundle.0).map_err(|_| BAD_BUNDLE)?);
+    let signed: SignedPlain = decode_exact(&pt)?;
+    root.verify(
+        labels::LINK_BUNDLE_SIG,
+        blake3::hash(&signed.plain).as_bytes(),
+        &signed.sig,
+    )
+    .map_err(|_| BAD_SIGNATURE)?;
+    decode_exact(&signed.plain)
 }
 
 /// Liste factice d'un appareil en attente (voir la documentation du module).
@@ -575,7 +626,7 @@ impl Core {
             own_bundles,
             contacts,
         };
-        let bundle = seal_bundle(&offer.secret, &root_pub, &device.id(), &plain, rng)?;
+        let bundle = seal_bundle(&offer.secret, &root_pub, root, &device.id(), &plain, rng)?;
         // Refusé avant la transaction : T refuserait ce paquet à la lecture,
         // et l'offre serait perdue pour rien.
         if bundle.0.len() > bundle_max() {
@@ -610,7 +661,7 @@ impl Core {
             // Archive lue dans la transaction : même état que le reste.
             let history = if with_history {
                 let entries = history::export(tx, &history_contacts)?;
-                Some(history::seal_archive(&offer.secret, &entries, rng)?)
+                Some(history::seal_archive(&offer.secret, root, &entries, rng)?)
             } else {
                 None
             };
@@ -688,15 +739,11 @@ impl Core {
             return Err(CoreError::Link("offre expirée"));
         }
         let me = self.device.public();
-        let key = bundle_key(&pending.secret);
-        let pt = Zeroizing::new(
-            xopen(&key, &bundle_ad(&pending.root, &me.id()), &bundle.0).map_err(|_| BAD_BUNDLE)?,
-        );
-        let plain: LinkPlain = decode_exact(&pt)?;
+        let plain = open_bundle(&pending.secret, &pending.root, &me.id(), bundle)?;
         check_plain(&plain, &pending.root, &me)?;
         let entries = match history {
             Some(archive) => {
-                let entries = history::open_archive(&pending.secret, archive)?;
+                let entries = history::open_archive(&pending.secret, &pending.root, archive)?;
                 let known: HashSet<Fingerprint> = plain
                     .contacts
                     .iter()
@@ -817,7 +864,6 @@ mod tests {
     }
 
     use super::*;
-    use crate::identity::RootIdentity;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use tempfile::TempDir;
@@ -835,17 +881,16 @@ mod tests {
         offer: &LinkOffer,
         t: &Core,
         plain: &LinkPlain,
+        signer: &RootIdentity,
         rng: &mut StdRng,
     ) -> LinkBundle {
         let id = t.device.public().id();
-        seal_bundle(&offer.secret, &offer.root, &id, plain, rng).unwrap()
+        seal_bundle(&offer.secret, &offer.root, signer, &id, plain, rng).unwrap()
     }
 
     /// Clair valide de A pour T, obtenu en ouvrant le vrai paquet.
     fn real_plain(offer: &LinkOffer, t: &Core, bundle: &LinkBundle) -> LinkPlain {
-        let key = bundle_key(&offer.secret);
-        let ad = bundle_ad(&offer.root, &t.device.public().id());
-        postcard::from_bytes(&xopen(&key, &ad, &bundle.0).unwrap()).unwrap()
+        open_bundle(&offer.secret, &offer.root, &t.device.public().id(), bundle).unwrap()
     }
 
     fn assert_still_pending(t: &mut Core, rng: &mut StdRng) {
@@ -896,7 +941,7 @@ mod tests {
             own_bundles: Vec::new(),
             contacts: Vec::new(),
         };
-        let forged = forged_bundle(&offer, &t, &wrong_root, &mut rng);
+        let forged = forged_bundle(&offer, &t, &wrong_root, a.root.as_ref().unwrap(), &mut rng);
         assert_eq!(
             t.finish_link(&forged, None, NOW),
             Err(CoreError::Link("racine inattendue"))
@@ -925,7 +970,7 @@ mod tests {
             own_bundles: Vec::new(),
             contacts: Vec::new(),
         };
-        let forged = forged_bundle(&offer, &t, &missing, &mut rng);
+        let forged = forged_bundle(&offer, &t, &missing, a.root.as_ref().unwrap(), &mut rng);
         assert_eq!(
             t.finish_link(&forged, None, NOW),
             Err(CoreError::Link("appareil absent de la liste"))
@@ -940,7 +985,13 @@ mod tests {
             verified: false,
             added_at: NOW,
         });
-        let forged = forged_bundle(&offer, &t, &bad_contacts, &mut rng);
+        let forged = forged_bundle(
+            &offer,
+            &t,
+            &bad_contacts,
+            a.root.as_ref().unwrap(),
+            &mut rng,
+        );
         assert_eq!(t.finish_link(&forged, None, NOW), Err(BAD_CONTACT));
         assert_still_pending(&mut t, &mut rng);
 
@@ -948,6 +999,80 @@ mod tests {
         t.finish_link(&out.bundle, None, NOW).unwrap();
         assert!(!t.pending);
         assert!(pending_root(&t.store).unwrap().is_none());
+    }
+
+    /// A avec un contact (C1, non vérifié), T en attente, et le vrai paquet.
+    fn link_with_contact(rng: &mut StdRng) -> (TempDir, Core, Core, LinkOffer, LinkBundle) {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = admin(&d, "a", 1, rng);
+        let c1 = admin(&d, "c1", 3, rng);
+        a.add_contact(&c1.contact_card("C1").unwrap(), Some("c1"), NOW, rng)
+            .unwrap();
+        let offer = a.link_offer(NOW, rng).unwrap();
+        let (t, req) =
+            Core::begin_link(&d.path().join("t"), &[9; 32], &offer, "t", NOW, rng).unwrap();
+        let out = a.link_device(&req, false, NOW, rng).unwrap();
+        (d, a, t, offer, out.bundle)
+    }
+
+    #[test]
+    fn finish_rejects_bundle_not_signed_by_root() {
+        // Le détenteur du secret (canal de liaison compromis) rescelle le
+        // paquet avec des contacts modifiés : la signature de la racine
+        // manque, T refuse sans rien écrire.
+        let mut rng = StdRng::seed_from_u64(13);
+        let (_d, _a, mut t, offer, bundle) = link_with_contact(&mut rng);
+        let mut plain = real_plain(&offer, &t, &bundle);
+        plain.contacts[0].verified = true;
+        let (other, _) = RootIdentity::generate(&mut rng);
+        let forged = forged_bundle(&offer, &t, &plain, &other, &mut rng);
+        assert_eq!(t.finish_link(&forged, None, NOW), Err(BAD_SIGNATURE));
+        assert_still_pending(&mut t, &mut rng);
+        // La vraie signature, recollée sur le clair modifié : refusée aussi.
+        let key = bundle_key(&offer.secret);
+        let ad = bundle_ad(&offer.root, &t.device.public().id());
+        let real: SignedPlain = decode_exact(&xopen(&key, &ad, &bundle.0).unwrap()).unwrap();
+        let swapped = SignedPlain {
+            plain: postcard::to_allocvec(&plain).unwrap(),
+            sig: real.sig,
+        };
+        let pt = postcard::to_allocvec(&swapped).unwrap();
+        let forged = LinkBundle(xseal(&key, &ad, &pt, &mut rng));
+        assert_eq!(t.finish_link(&forged, None, NOW), Err(BAD_SIGNATURE));
+        assert_still_pending(&mut t, &mut rng);
+        t.finish_link(&bundle, None, NOW).unwrap();
+        assert!(!t.contacts().unwrap()[0].verified);
+    }
+
+    #[test]
+    fn finish_rejects_history_not_signed_by_root() {
+        // Archive fabriquée avec le bon secret (messages inventés pour C1).
+        let mut rng = StdRng::seed_from_u64(14);
+        let (d, a, mut t, offer, bundle) = link_with_contact(&mut rng);
+        let c1 = a.contacts().unwrap()[0].fingerprint;
+        let mut fake = Store::open(&d.path().join("fake"), &[5; 32]).unwrap();
+        let (other, _) = RootIdentity::generate(&mut rng);
+        let archive = fake
+            .transaction(|tx| {
+                tx.insert_message(
+                    c1,
+                    crate::store::Direction::In,
+                    "inventé",
+                    crate::store::MessageStatus::Delivered,
+                    NOW,
+                    MessageId([7; 16]),
+                )?;
+                let entries = history::export(tx, &HashSet::from([c1]))?;
+                history::seal_archive(&offer.secret, &other, &entries, &mut rng)
+            })
+            .unwrap();
+        assert_eq!(
+            t.finish_link(&bundle, Some(&archive), NOW),
+            Err(CoreError::Link("historique invalide"))
+        );
+        assert_still_pending(&mut t, &mut rng);
+        t.finish_link(&bundle, None, NOW).unwrap();
+        assert!(t.messages_with(&c1).unwrap().is_empty());
     }
 
     #[test]
@@ -966,7 +1091,7 @@ mod tests {
         // Le même contact deux fois, puis deux alias identiques.
         let dup = plain.contacts[0].clone();
         plain.contacts.push(dup);
-        let forged = forged_bundle(&offer, &t, &plain, &mut rng);
+        let forged = forged_bundle(&offer, &t, &plain, a.root.as_ref().unwrap(), &mut rng);
         assert_eq!(t.finish_link(&forged, None, NOW), Err(BAD_CONTACT));
         assert_still_pending(&mut t, &mut rng);
     }
