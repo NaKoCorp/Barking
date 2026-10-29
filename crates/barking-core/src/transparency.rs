@@ -86,6 +86,13 @@ pub enum TransparencyEvent {
     HistoryImported {
         count: u32,
     },
+    /// Ma liste d'appareils a changé, reçue d'un de mes appareils
+    /// (`SyncDevices`) : `added` appareils ajoutés, `removed` retirés.
+    /// Ajouté en dernier : l'ordre des variantes est le format stocké.
+    OwnDevicesUpdated {
+        added: u32,
+        removed: u32,
+    },
 }
 
 /// Type de synchronisation entre mes appareils.
@@ -146,6 +153,7 @@ impl TransparencyEvent {
                 | Self::DeviceLinked { .. }
                 | Self::LinkFinished { .. }
                 | Self::ContactCardUpdated { .. }
+                | Self::OwnDevicesUpdated { .. }
         )
     }
 
@@ -290,6 +298,9 @@ impl TransparencyEvent {
                 "{count} messages de l'historique copiés depuis ton autre appareil. \
                  Ils n'ont transité par aucun nœud."
             ),
+            Self::OwnDevicesUpdated { added, removed } => {
+                format!("Ta liste d'appareils a changé (+{added}, \u{2212}{removed}).")
+            }
         }
     }
 }
@@ -427,6 +438,10 @@ mod tests {
                 removed: 0,
             },
             TransparencyEvent::HistoryImported { count: 3 },
+            TransparencyEvent::OwnDevicesUpdated {
+                added: 1,
+                removed: 0,
+            },
         ]
     }
 
@@ -549,7 +564,7 @@ mod tests {
     #[test]
     fn security_class_is_session_key_change_and_link_only() {
         let security: Vec<_> = all().into_iter().filter(|e| e.is_security()).collect();
-        assert_eq!(security.len(), 5);
+        assert_eq!(security.len(), 6);
         assert!(security.iter().all(|e| matches!(
             e,
             TransparencyEvent::SessionEstablished { .. }
@@ -557,6 +572,7 @@ mod tests {
                 | TransparencyEvent::DeviceLinked { .. }
                 | TransparencyEvent::LinkFinished { .. }
                 | TransparencyEvent::ContactCardUpdated { .. }
+                | TransparencyEvent::OwnDevicesUpdated { .. }
         )));
     }
 
@@ -614,6 +630,19 @@ mod tests {
                  Les messages seront aussi chiffrés pour ses nouveaux appareils.",
                 fp(7)
             )
+        );
+    }
+
+    #[test]
+    fn describe_own_devices_updated_exact() {
+        let e = TransparencyEvent::OwnDevicesUpdated {
+            added: 2,
+            removed: 1,
+        };
+        assert!(e.is_security());
+        assert_eq!(
+            e.describe(),
+            "Ta liste d'appareils a changé (+2, \u{2212}1)."
         );
     }
 

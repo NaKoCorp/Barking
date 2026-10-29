@@ -53,12 +53,17 @@ impl Core {
         store.transaction(|tx| {
             let me = device.public().id();
             let (fp, replaced) = add_in(tx, card, alias)?;
+            // Le nouvel état part avant la suppression du contact remplacé :
+            // reçus dans cet ordre, l'alias passe d'une empreinte à l'autre
+            // chez mes autres appareils, qui journalisent le même
+            // `ContactKeyChanged` (dans l'ordre inverse, l'état final est le
+            // même, sans l'avertissement).
+            let time = sync::touch(tx, fp, now, false, me)?;
+            sync::send_state(tx, device, fp, time, rng)?;
             if let Some(old) = replaced {
                 let time = sync::touch(tx, old, now, true, me)?;
                 sync::send_op(tx, device, SyncOp::Remove(old), time, rng)?;
             }
-            let time = sync::touch(tx, fp, now, false, me)?;
-            sync::send_state(tx, device, fp, time, rng)?;
             Ok(fp)
         })
     }
@@ -334,6 +339,18 @@ pub(super) fn upsert_in(
         && other.fp != fp
     {
         if clock.newer_than(q.contact_clock(other.fp)?.as_ref()) {
+            // L'alias passe à une autre empreinte : même avertissement qu'un
+            // ajout local (`add_in`).
+            log(
+                q,
+                clock.at,
+                None,
+                &TransparencyEvent::ContactKeyChanged {
+                    alias: alias.to_owned(),
+                    old: other.fp,
+                    new: fp,
+                },
+            )?;
             strip = Some(other);
         } else {
             alias = "";

@@ -1319,6 +1319,51 @@ fn sync_devices_requires_newer_signed_list() {
 }
 
 #[test]
+fn older_valid_sync_devices_is_acked_duplicate() {
+    // T1 a appliqué la liste v3 (T2 lié) ; la v2 (celle de sa liaison),
+    // authentique et qui le contient, arrive en retard : doublon accusé,
+    // pas de quarantaine, rien de changé.
+    let (dir, mut a, mut t1, mut rng) = linked();
+    let v2 = a
+        .store
+        .get_meta::<ContactCard>(link::META_OWN_CARD)
+        .unwrap()
+        .unwrap();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (_t2, req) = Core::begin_link(
+        &dir.path().join("t2"),
+        &[3; 32],
+        &offer,
+        "t2",
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    a.link_device(&req, false, NOW, &mut rng).unwrap();
+    let v3 = a.contact_card("").unwrap();
+    let pkt = devices_packet(&mut a, &t1, v3, 1, &mut rng);
+    assert!(matches!(
+        t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Synced {
+            kind: SyncKind::Devices
+        }
+    ));
+    let current = t1.devices.clone();
+    let acks_before = t1.pending_outbox(NOW).unwrap().len();
+    let late = devices_packet(&mut a, &t1, v2, 2, &mut rng);
+    let r = t1.receive(&late.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    assert_eq!(t1.devices, current);
+    // Accusé émis pour ce paquet : A cesse de renvoyer la vieille liste.
+    let acks = t1.pending_outbox(NOW).unwrap();
+    assert_eq!(acks.len(), acks_before + 1);
+    assert!(acks.iter().any(|b| {
+        let p = Packet::decode(b).unwrap();
+        p.kind == Kind::Ack && p.payload[..16] == late.id.0
+    }));
+}
+
+#[test]
 fn sync_from_removed_device_with_session_refused() {
     // Session T1 ↔ T2 établie, puis T2 retiré de la liste de T1 sans que
     // la session ne soit purgée (état d'avant la purge) : la synchronisation

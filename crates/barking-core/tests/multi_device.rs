@@ -824,6 +824,39 @@ fn pair_with_two_contacts(d: &Path, rng: &mut StdRng) -> (Dev, Dev, Fingerprint,
 }
 
 #[test]
+fn alias_replacement_warns_other_devices() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(33);
+    let (mut a, mut t, carol, dave) = pair_with_two_contacts(d.path(), &mut rng);
+    // Sur A, une nouvelle carte prend l'alias de Carol : Carol est remplacée.
+    let eve_card = create(d.path(), "eve", 8, &mut rng)
+        .core
+        .contact_card("Eve")
+        .unwrap();
+    let eve = a
+        .core
+        .add_contact(&eve_card, Some("carol"), NOW + 5, &mut rng)
+        .unwrap();
+    let changed = TransparencyEvent::ContactKeyChanged {
+        alias: "carol".into(),
+        old: carol,
+        new: eve,
+    };
+    assert!(events(&a.core).contains(&changed));
+    sync_round(&mut a, &mut t, &mut rng);
+    // T voit le même avertissement, et le même état.
+    assert!(events(&t.core).contains(&changed));
+    assert!(changed.is_security());
+    let mut sa = contact_state(&a.core);
+    let mut st = contact_state(&t.core);
+    sa.sort_by_key(|c| c.0.0);
+    st.sort_by_key(|c| c.0.0);
+    assert_eq!(sa, st);
+    assert!(sa.iter().all(|c| c.0 != carol));
+    assert!(sa.iter().any(|c| c.0 == dave));
+}
+
+#[test]
 fn same_second_edits_converge() {
     let d = dir();
     let mut rng = StdRng::seed_from_u64(30);
@@ -857,7 +890,19 @@ fn concurrent_alias_move_converges() {
     });
     deliver(&mut t, &from_a[0], &mut rng);
     deliver(&mut a, &from_t[0], &mut rng);
-    // L'opération la plus récente garde l'alias, partout.
+    // L'opération la plus récente garde l'alias, partout. Sur A, l'alias
+    // passe à une autre empreinte : avertissement, comme pour un ajout local.
+    let moved = TransparencyEvent::ContactKeyChanged {
+        alias: "z".into(),
+        old: carol,
+        new: dave,
+    };
+    assert!(events(&a.core).contains(&moved));
+    assert!(
+        !events(&t.core)
+            .iter()
+            .any(|e| matches!(e, TransparencyEvent::ContactKeyChanged { .. }))
+    );
     let expected = vec![(carol, None, false), (dave, Some("z".to_owned()), false)];
     let mut sa = contact_state(&a.core);
     let mut st = contact_state(&t.core);
@@ -1002,6 +1047,13 @@ fn second_link_sends_devices_to_first_tablet() {
         }
     ));
     t2.core.finish_link(&out.bundle, None, NOW).unwrap();
+    // Sur T, le changement de ma liste est une entrée de sécurité.
+    let updated = TransparencyEvent::OwnDevicesUpdated {
+        added: 1,
+        removed: 0,
+    };
+    assert!(events(&t.core).contains(&updated));
+    assert!(updated.is_security());
     // T connaît T2 : une opération sur un contact part vers A et T2.
     let carol = create(d.path(), "carol", 6, &mut rng)
         .core

@@ -14,7 +14,7 @@ use crate::contact::ContactCard;
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
-use crate::identity::{DeviceKeys, DevicePublic, Fingerprint};
+use crate::identity::{DeviceKeys, DeviceList, DevicePublic, Fingerprint};
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{Kind, Packet, PacketId, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
@@ -638,11 +638,13 @@ fn accept_sync(
         return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
     }
     let sync_id = MessageId::incoming(my_fp, &env.message_id);
+    // Ma liste avant application, pour journaliser son changement.
+    let before = OwnDevices::read(q)?.map(|own| own.list);
     let kind = if q.inbound_has_message(sync_id)? {
         None
     } else {
         match sync::apply(q, me, o.row.contact_device, env)? {
-            Ok(kind) => Some(kind),
+            Ok(kind) => kind,
             Err(reason) => {
                 let id = Some(ack::packet_id_for(&env.ack_secret));
                 return reject_authenticated(q, limiter, packet, o, now, reason, id);
@@ -650,11 +652,13 @@ fn accept_sync(
         }
     };
     let (_, new_prekeys, _) = commit_session(q, o, now)?;
+    let mut devices_change = None;
     if kind == Some(SyncKind::Devices) {
         // La nouvelle liste peut retirer l'appareil expéditeur : sa session,
         // que `commit_session` vient de réécrire, disparaît aussi.
         if let Some(own) = OwnDevices::read(q)? {
             sync::purge_removed_own_sessions(q, &own.list)?;
+            devices_change = before.map(|old| device_diff(&old, &own.list));
         }
     }
     q.mark_seen(packet.id, now)?;
@@ -676,12 +680,34 @@ fn accept_sync(
             },
         )?,
     }
+    if let Some((added, removed)) = devices_change {
+        // Preuve de sécurité, comme une liaison vue de l'administrateur.
+        log(
+            q,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::OwnDevicesUpdated { added, removed },
+        )?;
+    }
     emit_ack(q, packet, env.ack_secret, now, rng)?;
     let outcome = match kind {
         Some(kind) => ReceiveOutcome::Synced { kind },
         None => ReceiveOutcome::Duplicate,
     };
     Ok((outcome, new_prekeys))
+}
+
+/// Nombre d'appareils ajoutés et retirés entre deux de mes listes.
+fn device_diff(old: &DeviceList, new: &DeviceList) -> (u32, u32) {
+    let count = |from: &DeviceList, other: &DeviceList| {
+        let n = from
+            .certs
+            .iter()
+            .filter(|c| !other.certs.iter().any(|o| o.device.id() == c.device.id()))
+            .count();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    };
+    (count(new, old), count(old, new))
 }
 
 /// Enregistre la session qui a authentifié le message : nouvelle session

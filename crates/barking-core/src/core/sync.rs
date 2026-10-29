@@ -217,6 +217,9 @@ pub(super) fn touch(
 /// Applique un contenu de synchronisation authentifié, venu d'un de mes
 /// appareils. Toute vérification précède la première écriture : un refus
 /// (`Ok(Err(raison))`) ne laisse rien d'écrit. `Err` : échec local seulement.
+/// `Ok(Ok(None))` : contenu valide mais déjà dépassé (une liste d'appareils
+/// authentique plus ancienne que la mienne), rien d'écrit, à accuser comme
+/// un doublon.
 ///
 /// `sender` : l'appareil (des miens) qui a authentifié le contenu ; il
 /// départage deux opérations de même date sur un contact.
@@ -225,7 +228,7 @@ pub(super) fn apply(
     me: &DevicePublic,
     sender: DeviceId,
     env: &Envelope,
-) -> Result<core::result::Result<SyncKind, &'static str>> {
+) -> Result<core::result::Result<Option<SyncKind>, &'static str>> {
     match &env.body {
         Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
         Body::SyncSent { to, text } => {
@@ -243,13 +246,16 @@ pub(super) fn apply(
                 env.sent_at,
                 MessageId(env.message_id),
             )?;
-            Ok(Ok(SyncKind::Sent))
+            Ok(Ok(Some(SyncKind::Sent)))
         }
         Body::SyncContact(op) => {
-            Ok(content(apply_op(q, op, env.sent_at, sender))?.map(|()| SyncKind::Contact))
+            Ok(content(apply_op(q, op, env.sent_at, sender))?.map(|()| Some(SyncKind::Contact)))
         }
         Body::SyncDevices { card } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
+            if card.devices.root == own.list.root && card.devices.version <= own.list.version {
+                return Ok(older_devices(&own.list, me, card));
+            }
             if !devices_ok(q, &own.list, me, card)? {
                 return Ok(Err(R_DEVICES_REFUSED));
             }
@@ -263,9 +269,27 @@ pub(super) fn apply(
             q.put_meta(META_LINKED_BUNDLES, &others)?;
             q.put_meta(META_OWN_CARD, card)?;
             purge_removed_own_sessions(q, &card.devices)?;
-            Ok(Ok(SyncKind::Devices))
+            Ok(Ok(Some(SyncKind::Devices)))
         }
     }
+}
+
+/// Liste reçue de version inférieure ou égale à la mienne. Authentique (carte
+/// et liste signées par ma racine) et contenant cet appareil : déjà dépassée,
+/// doublon accusé (une copie retardée, comme pour `CardUpdate`). Même
+/// version mais liste différente : équivoque de la racine, refus ; de même
+/// pour une carte invalide ou qui ne me contient pas.
+fn older_devices(
+    current: &DeviceList,
+    me: &DevicePublic,
+    card: &ContactCard,
+) -> core::result::Result<Option<SyncKind>, &'static str> {
+    let equivocation = card.devices.version == current.version && card.devices != *current;
+    if equivocation || card.verify().is_err() || !card.devices.certs.iter().any(|c| c.device == *me)
+    {
+        return Err(R_DEVICES_REFUSED);
+    }
+    Ok(None)
 }
 
 /// Erreur due au contenu → refus ; erreur du stockage → propagée.
