@@ -53,8 +53,8 @@ nouveau() {
   faire_dist "$D"
   cp -R "$D" "$R"
 }
-signer() { # $1 = clé secrète
-  lancer "$sign" "$version" --from-dir "$D" --rebuilt-dir "$R" --seckey "$1"
+signer() { # $1 = clé secrète, $2 = clé publique de contrôle (défaut : la bonne)
+  lancer "$sign" "$version" --from-dir "$D" --rebuilt-dir "$R" --seckey "$1" --pubkey "${2:-$tmp/cles/bonne.pub}"
 }
 verifier() { # $1 = clé publique, options en plus
   local pub="$1"; shift
@@ -96,7 +96,7 @@ cas_forged_signature_rejected() {
   verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "signature invalide"
 }
 cas_other_key_rejected() {
-  nouveau; signer "$tmp/cles/intruse.key"; attendre_code 0 || return 1
+  nouveau; signer "$tmp/cles/intruse.key" "$tmp/cles/intruse.pub"; attendre_code 0 || return 1
   verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "signature invalide"
 }
 cas_tampered_binary_rejected() {
@@ -106,7 +106,8 @@ cas_tampered_binary_rejected() {
 }
 cas_tampered_sums_rejected() {
   nouveau; signer_ok || return 1
-  sed '1s/^./0/;1s/^0/1/' "$D/SHA256SUMS" > "$D/SHA256SUMS.n"
+  c="$(head -c1 "$D/SHA256SUMS")"; n=0; [ "$c" = "0" ] && n=1
+  sed "1s/^./$n/" "$D/SHA256SUMS" > "$D/SHA256SUMS.n"
   cmp -s "$D/SHA256SUMS" "$D/SHA256SUMS.n" && { echo "    falsification sans effet" >&2; return 1; }
   mv "$D/SHA256SUMS.n" "$D/SHA256SUMS"
   verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "signature invalide"
@@ -124,10 +125,10 @@ cas_sign_refuses_on_mismatch() {
   printf 'porte derobee\n' > "$D/barking-cli-$version-$t_x86"
   regenerer_sommes "$D"
   signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "diff" && sans_minisig || return 1
-  # Même chose sans régénérer SHA256SUMS : refusé aussi.
+  # Sans régénérer SHA256SUMS : refusé dès le contrôle des empreintes du répertoire.
   nouveau
   printf 'porte derobee\n' > "$D/barking-cli-$version-$t_arm"
-  signer "$tmp/cles/bonne.key"; attendre_code 1 && sans_minisig
+  signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "empreinte incorrecte" && sans_minisig
 }
 cas_sign_refuses_missing_or_unlisted() {
   nouveau; rm "$D/barking-cli-$version-$t_mac"
@@ -140,7 +141,27 @@ cas_sign_refuses_without_rebuilt_counterpart() {
   # La cible compilable sur cette machine doit avoir une contrepartie reconstruite.
   case "$(uname -m)" in x86_64|amd64) hote="$t_x86" ;; *) hote="$t_arm" ;; esac
   rm "$R/barking-cli-$version-$hote"
-  signer "$tmp/cles/bonne.key"; attendre_code 1 && sans_minisig
+  signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "sans recompilation" && sans_minisig
+}
+cas_verify_rebuilt_mismatch_rejected() {
+  nouveau; signer_ok || return 1
+  printf 'autre\n' > "$R/barking-cli-$version-$t_x86"
+  verifier "$tmp/cles/bonne.pub" --rebuilt-dir "$R"; attendre_code 1 && attendre_texte "diffère"
+}
+cas_trusted_comment_other_version_rejected() {
+  nouveau
+  minisign -S -m "$D/SHA256SUMS" -s "$tmp/cles/bonne.key" -t "barking v9.9.9" -x "$D/SHA256SUMS.minisig" >/dev/null
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "commentaire signé"
+}
+cas_comment_only_pubkey_rejected() {
+  nouveau; signer_ok || return 1
+  printf 'untrusted comment: minisign public key AAAA\n' > "$tmp/commentaire.pub"
+  verifier "$tmp/commentaire.pub"; attendre_code 1 && attendre_texte "keys/README.md" || return 1
+  signer "$tmp/cles/bonne.key" "$tmp/commentaire.pub"; attendre_code 1 && attendre_texte "keys/README.md"
+}
+cas_sign_wrong_seckey_refused() {
+  nouveau
+  signer "$tmp/cles/intruse.key"; attendre_code 1 && attendre_texte "ne correspond pas" && sans_minisig
 }
 cas_empty_pubkey_rejected() {
   nouveau; signer_ok || return 1
@@ -153,7 +174,8 @@ echecs=0
 for cas in sign_then_verify_ok sign_then_verify_rebuild_ok forged_signature_rejected other_key_rejected \
            tampered_binary_rejected tampered_sums_rejected extra_or_missing_binary_rejected \
            sign_refuses_on_mismatch sign_refuses_missing_or_unlisted sign_refuses_without_rebuilt_counterpart \
-           empty_pubkey_rejected; do
+           verify_rebuilt_mismatch_rejected trusted_comment_other_version_rejected \
+           comment_only_pubkey_rejected sign_wrong_seckey_refused empty_pubkey_rejected; do
   if "cas_$cas"; then echo "PASS $cas"; else echo "FAIL $cas"; echecs=$((echecs + 1)); fi
 done
 [ "$echecs" -eq 0 ] || { echo "$echecs cas en échec" >&2; exit 1; }

@@ -10,6 +10,38 @@ sha256_de() {
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
+# Format de version accepté (sert à construire des noms de fichiers et des tags).
+valider_version() {
+  [[ $1 =~ ^[0-9A-Za-z.+-]+$ ]] || erreur "version invalide : « $1 » (caractères autorisés : lettres, chiffres, . + -)"
+}
+
+# Dépôt GitHub pour gh : $1 (--repo), sinon $BARKING_REPO, sinon l'URL de origin (github https ou ssh).
+# Positionne REPO (vide si inconnu). $2 = racine du dépôt git.
+resoudre_repo() {
+  local url
+  REPO="${1:-${BARKING_REPO:-}}"
+  if [ -z "$REPO" ]; then
+    url="$(git -C "$2" remote get-url origin 2>/dev/null || true)"
+    case "$url" in
+      https://github.com/*)   REPO="${url#https://github.com/}" ;;
+      git@github.com:*)       REPO="${url#git@github.com:}" ;;
+      ssh://git@github.com/*) REPO="${url#ssh://git@github.com/}" ;;
+    esac
+    REPO="${REPO%.git}"
+  fi
+  return 0
+}
+exiger_repo() {
+  [ -n "$REPO" ] || erreur "dépôt GitHub inconnu : passez --repo <owner/repo> ou définissez BARKING_REPO"
+}
+
+# Une clé publique minisign contient une ligne « RW… » (56 caractères base64), pas seulement des commentaires.
+exiger_cle_publique() { # $1 = fichier
+  [ -f "$1" ] || erreur "clé publique introuvable : $1"
+  grep -qE '^RW[A-Za-z0-9+/]{54}$' "$1" \
+    || erreur "la clé publique $1 est vide ou invalide : le mainteneur doit d'abord y publier sa clé minisign (voir keys/README.md). Ou passez une clé avec --pubkey <fichier>."
+}
+
 # Cibles compilables sur cette machine : cibles Linux musl de l'architecture de l'hôte
 # (via Docker) ; aarch64-apple-darwin seulement sur macOS arm64.
 cible_compilable_ici() {
@@ -40,7 +72,8 @@ controler_somme_dir() { # $1 = répertoire, $2 = version
     case "$vus" in *"|$nom|"*) erreur "entrée en double dans SHA256SUMS : $nom" ;; esac
     vus="$vus$nom|"
     [ -f "$dir/$nom" ] || erreur "fichier manquant : $nom est listé dans SHA256SUMS mais absent de $dir"
-    reel="$(sha256_de "$dir/$nom")"
+    reel="$(sha256_de "$dir/$nom")" || reel=""
+    [ -n "$reel" ] || erreur "calcul de l'empreinte impossible pour $nom"
     [ "$reel" = "$somme" ] || erreur "empreinte incorrecte pour $nom (SHA256SUMS : $somme, fichier : $reel)"
     NOMS_LISTES="$NOMS_LISTES $nom"
   done < "$sums"
@@ -54,11 +87,14 @@ controler_somme_dir() { # $1 = répertoire, $2 = version
 
 # Compare les binaires de $1 (liste NOMS_LISTES) à ceux d'un répertoire produit par repro-build.sh.
 comparer_reconstruction() { # $1 = répertoire de la version, $2 = répertoire reconstruit, $3 = version
-  local dir="$1" rebuilt="$2" version="$3" nom cible compares=0
+  local dir="$1" rebuilt="$2" version="$3" nom cible compares=0 h_rec h_pub
   for nom in $NOMS_LISTES; do
     cible="${nom#"barking-cli-${version}-"}"
     if [ -f "$rebuilt/$nom" ]; then
-      [ "$(sha256_de "$rebuilt/$nom")" = "$(sha256_de "$dir/$nom")" ] \
+      h_rec="$(sha256_de "$rebuilt/$nom")" || h_rec=""
+      h_pub="$(sha256_de "$dir/$nom")" || h_pub=""
+      if [ -z "$h_rec" ] || [ -z "$h_pub" ]; then erreur "calcul de l'empreinte impossible pour $nom"; fi
+      [ "$h_rec" = "$h_pub" ] \
         || erreur "la recompilation locale diffère du binaire publié pour $nom (build non reproductible ou binaire altéré)"
       compares=$((compares + 1))
     elif cible_compilable_ici "$cible"; then
