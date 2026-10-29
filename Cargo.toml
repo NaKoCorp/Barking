@@ -37,3 +37,11 @@ zeroize = { version = "1.9.1", features = ["derive"] }
 opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
+
+# Build reproductible (spec §15) : un seul module de génération, pas de LTO partiel,
+# pas de symboles (chemins et horodatages absents du binaire).
+[profile.release]
+codegen-units = 1
+lto = "fat"
+strip = "symbols"
+panic = "abort"
