@@ -24,7 +24,7 @@ Dans cet ordre, une seule fois :
 1. Rendre le dépôt GitHub public (les attestations et les reconstructions indépendantes en dépendent).
 2. Créer le ruleset de tags `v*` et la protection de `main` décrits ci-dessus, avec les vérifications de `repro-check` exigées (contrôle Rust, scripts de signature, double build).
 3. Dans les réglages Actions du dépôt, autoriser les workflows à créer des versions (`GITHUB_TOKEN` en écriture pour `release.yml`, qui ne demande `contents: write` que dans son dernier job).
-4. Pousser `main` et vérifier que `repro-check` est vert, y compris la cible `x86_64-unknown-linux-musl`, qui n'a jamais été compilée sur la machine de développement (Mac arm64).
+4. Pousser `main`, puis ouvrir une première pull request et attendre que `repro-check` soit vert : contrôle Rust, scripts de signature, et double build `x86_64-unknown-linux-musl`, qui n'a jamais été compilé sur la machine de développement (Mac arm64). `repro-check` ne se lance pas sur un simple push.
 5. Lancer `repro-check` à la main (`workflow_dispatch`) pour obtenir le double build complet des trois cibles, et vérifier que les copies sont identiques, macOS compris (Xcode de `.xcode-version`).
 6. Générer la clé hors ligne (`keys/README.md`), committer `keys/maintainer.pub` avec relecture par une seconde personne, et publier la ligne `RW…` par un canal indépendant du dépôt.
 7. Faire une répétition complète sur un tag de pré-version, par exemple `0.1.0-rc.1` (version de `crates/barking-cli/Cargo.toml` mise à jour en conséquence) : tag, CI, `sign-release.sh`, puis `verify-release.sh --rebuild`.
