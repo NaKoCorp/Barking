@@ -48,9 +48,10 @@ use crate::{CoreError, Result};
 pub use crate::transparency::SyncKind;
 pub use contacts::ContactSummary;
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
-pub use history::HistoryArchive;
+pub use history::{HistoryArchive, MAX_ARCHIVE_BYTES};
 pub use link::{
     ContactSnapshot, LINK_OFFER_TTL_SECS, LinkBundle, LinkOffer, LinkOutcome, LinkRequest,
+    MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES,
 };
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
 

@@ -55,6 +55,12 @@ pub const HISTORY_CHUNK_LEN: usize = 64 * 1024;
 /// Nombre maximal de morceaux d'une archive : 512, soit 32 Mio de clair.
 pub const MAX_HISTORY_CHUNKS: usize = 512;
 /// Taille du hash BLAKE3 final.
+/// Taille maximale d'un fichier d'archive : chaque morceau chiffré tient dans
+/// `64 Kio + 24 (nonce) + 16 (tag)` plus 3 octets de longueur, plus la
+/// longueur de la liste. Au-delà, l'entrée est refusée avant tout décodage
+/// (des morceaux vides en nombre feraient gonfler la mémoire).
+pub const MAX_ARCHIVE_BYTES: usize = MAX_HISTORY_CHUNKS * (HISTORY_CHUNK_LEN + 43) + 64;
+
 const HASH_LEN: usize = 32;
 /// Étiquette d'authentification de XChaCha20-Poly1305.
 const TAG_LEN: usize = 16;
@@ -85,6 +91,9 @@ impl HistoryArchive {
 
     /// Inverse de [`HistoryArchive::to_bytes`] ; octets en trop refusés.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_ARCHIVE_BYTES {
+            return Err(TOO_LARGE);
+        }
         super::link::decode_exact(bytes)
     }
 }
@@ -364,6 +373,20 @@ mod tests {
         assert_eq!(HistoryArchive::from_bytes(&a.to_bytes()).unwrap(), a);
         assert_eq!(
             HistoryArchive::from_bytes(&[0xff, 0xff]),
+            Err(CoreError::Link("fichier de liaison illisible"))
+        );
+    }
+
+    #[test]
+    fn from_bytes_refuses_oversized_input() {
+        // Des morceaux vides en nombre : peu d'octets, beaucoup de mémoire.
+        let mut bytes = vec![0u8; MAX_ARCHIVE_BYTES + 1];
+        bytes[0] = 0xff;
+        assert_eq!(HistoryArchive::from_bytes(&bytes), Err(TOO_LARGE));
+        // À la limite : décodé (et refusé comme illisible), pas « trop gros ».
+        bytes.truncate(MAX_ARCHIVE_BYTES);
+        assert_eq!(
+            HistoryArchive::from_bytes(&bytes),
             Err(CoreError::Link("fichier de liaison illisible"))
         );
     }

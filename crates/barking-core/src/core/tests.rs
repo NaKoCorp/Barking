@@ -10,7 +10,7 @@ use crate::identity::{
 };
 use crate::mailbox::day_of;
 use crate::packet::{DEFAULT_HOPS, Kind, Tier, ack};
-use crate::store::{Direction, MessageId, SessionRow};
+use crate::store::{Direction, MessageId, MessageStatus, SessionRow};
 use crate::transparency::SyncKind;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -1754,4 +1754,44 @@ fn card_update_same_version_divergent_list_refused() {
         );
         assert_eq!(stored_card(&b, alice), current, "{why}");
     }
+}
+
+#[test]
+fn sync_sent_matching_imported_history_message_not_duplicated() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let bob_fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    let packets = a.send_text(&bob_fp, "salut", NOW + 1, &mut rng).unwrap();
+    let sent = a.messages_with(&bob_fp).unwrap();
+    assert_eq!(sent.len(), 1);
+    // T a déjà ce message (importé avec l'historique), même identifiant.
+    let inserted = t
+        .store
+        .insert_message(
+            bob_fp,
+            Direction::Out,
+            "salut",
+            MessageStatus::Sent,
+            NOW + 1,
+            sent[0].message_id,
+        )
+        .unwrap();
+    assert!(inserted);
+    let mut synced = 0;
+    for p in &packets {
+        if let ReceiveOutcome::Synced { .. } =
+            t.receive(&p.encode(), "t", NOW + 2, &mut rng).unwrap()
+        {
+            synced += 1;
+        }
+    }
+    assert_eq!(synced, 1);
+    assert_eq!(t.messages_with(&bob_fp).unwrap().len(), 1);
 }

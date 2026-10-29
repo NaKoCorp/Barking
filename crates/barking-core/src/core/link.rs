@@ -79,6 +79,22 @@ const UNREADABLE: CoreError = CoreError::Link("fichier de liaison illisible");
 const BAD_BUNDLE: CoreError = CoreError::Link("paquet de liaison invalide");
 const BAD_CONTACT: CoreError = CoreError::Link("contact invalide dans le paquet de liaison");
 
+/// Taille maximale d'un fichier d'offre ou de demande de liaison.
+pub const MAX_LINK_FILE_BYTES: usize = 64 * 1024;
+
+/// Taille maximale d'un paquet de liaison : il porte tous mes contacts (carte,
+/// alias), donc bien plus que l'offre ou la demande.
+pub const MAX_LINK_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Décode exactement `bytes` (postcard), au plus `max` octets ; plus gros →
+/// « fichier de liaison trop volumineux ».
+fn decode_bounded<T: DeserializeOwned>(bytes: &[u8], max: usize) -> Result<T> {
+    if bytes.len() > max {
+        return Err(CoreError::Link("fichier de liaison trop volumineux"));
+    }
+    decode_exact(bytes)
+}
+
 /// Décode exactement `bytes` (postcard) : octets en trop ou illisibles →
 /// « fichier de liaison illisible ». Jamais de panique.
 pub(super) fn decode_exact<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
@@ -126,7 +142,8 @@ impl LinkOffer {
 
     /// Inverse de [`LinkOffer::to_bytes`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let (root, mut secret, expires_at): (RootPublic, [u8; 32], u64) = decode_exact(bytes)?;
+        let (root, mut secret, expires_at): (RootPublic, [u8; 32], u64) =
+            decode_bounded(bytes, MAX_LINK_FILE_BYTES)?;
         let offer = LinkOffer {
             root,
             secret: Zeroizing::new(secret),
@@ -199,7 +216,7 @@ impl LinkRequest {
 
     /// Inverse de [`LinkRequest::to_bytes`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        decode_exact(bytes)
+        decode_bounded(bytes, MAX_LINK_FILE_BYTES)
     }
 }
 
@@ -221,7 +238,7 @@ impl LinkBundle {
 
     /// Inverse de [`LinkBundle::to_bytes`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        decode_exact(bytes)
+        decode_bounded(bytes, MAX_LINK_BUNDLE_BYTES)
     }
 }
 
@@ -763,6 +780,21 @@ fn check_plain(plain: &LinkPlain, root: &RootPublic, me: &DevicePublic) -> Resul
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn link_files_refuse_oversized_input() {
+        let big = vec![0u8; MAX_LINK_FILE_BYTES + 1];
+        let too_large = Err(CoreError::Link("fichier de liaison trop volumineux"));
+        assert_eq!(LinkOffer::from_bytes(&big).map(|_| ()), too_large);
+        assert_eq!(LinkRequest::from_bytes(&big).map(|_| ()), too_large);
+        // Le paquet de liaison accepte davantage (tous mes contacts).
+        assert_eq!(
+            LinkBundle::from_bytes(&big),
+            Err(CoreError::Link("fichier de liaison illisible"))
+        );
+        let huge = vec![0u8; MAX_LINK_BUNDLE_BYTES + 1];
+        assert_eq!(LinkBundle::from_bytes(&huge).map(|_| ()), too_large);
+    }
+
     use super::*;
     use crate::identity::RootIdentity;
     use rand::SeedableRng;
