@@ -163,7 +163,9 @@ impl RatchetState {
         if enc.len() != ENC_HEADER_LEN {
             return false;
         }
-        let mut tried: Vec<[u8; 32]> = Vec::new();
+        // Capacité fixée d'avance : aucune réallocation ne laisse de copie
+        // non effacée des clés d'en-tête.
+        let mut tried: Vec<[u8; 32]> = Vec::with_capacity(self.mkskipped.len());
         let mut skipped_ok = false;
         for entry in &self.mkskipped {
             if tried.contains(&entry.hk) {
@@ -211,7 +213,9 @@ impl RatchetState {
         msg: &RatchetMessage,
         ad: &[u8],
     ) -> Result<Option<Vec<u8>>> {
-        let mut tried: Vec<[u8; 32]> = Vec::new();
+        // Capacité fixée d'avance : aucune réallocation ne laisse de copie
+        // non effacée des clés d'en-tête.
+        let mut tried: Vec<[u8; 32]> = Vec::with_capacity(self.mkskipped.len());
         let mut found = None;
         for entry in &self.mkskipped {
             if tried.contains(&entry.hk) {
