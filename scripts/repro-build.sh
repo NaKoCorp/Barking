@@ -66,14 +66,31 @@ if [ "$cible" = "aarch64-apple-darwin" ]; then
   # Build natif (runner macOS), sans notarisation.
   command -v cargo >/dev/null 2>&1 || erreur "cargo est requis pour la cible $cible"
   [ "$(uname -s)" = "Darwin" ] || erreur "la cible $cible se compile sur macOS"
-  cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-  export RUSTFLAGS="--remap-path-prefix=$src=/build --remap-path-prefix=$cargo_home=/cargo"
-  export CFLAGS="-ffile-prefix-map=$src=/build -ffile-prefix-map=$cargo_home=/cargo"
-  export CARGO_TARGET_DIR="$tmp/target"
-  # Pas d'horodatage de liaison dans l'exécutable, pas de dépendance au SDK local au-delà du nécessaire.
+  # Chemins FIXES : OpenSSL (code C vendorisé) enregistre dans le binaire __FILE__, le répertoire de
+  # sortie et les CFLAGS verbatim. Aucun chemin aléatoire ni propre à la machine ne doit donc apparaître.
+  # Le répertoire est créé atomiquement (verrou) ; s'il existe déjà, un autre build est en cours (ou a planté).
+  fixe="/private/tmp/barking-repro-darwin"
+  mkdir "$fixe" 2>/dev/null \
+    || erreur "$fixe existe déjà : un autre build macOS est en cours, ou un précédent a été interrompu (supprimez ce répertoire)"
+  trap 'rm -rf "$tmp" "$fixe"' EXIT
+  mv "$src" "$fixe/src"
+  src="$fixe/src"
+  export CARGO_HOME="$fixe/cargo"
+  export RUSTFLAGS="--remap-path-prefix=$src=/build --remap-path-prefix=$CARGO_HOME=/cargo"
+  export CFLAGS="-ffile-prefix-map=$src=/build -ffile-prefix-map=$CARGO_HOME=/cargo"
+  export CARGO_TARGET_DIR="$fixe/target"
+  # Pas d'horodatage de liaison dans l'exécutable.
   export ZERO_AR_DATE=1
+  # Cible de déploiement fixe : sinon cc/rustc prennent la version du macOS ou du SDK de la machine.
+  export MACOSX_DEPLOYMENT_TARGET="11.0"
+  # Avec rustup, rust-toolchain.toml fait foi ; sans rustup, le compilateur du PATH doit avoir la même version.
+  if ! command -v rustup >/dev/null 2>&1; then
+    canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$src/rust-toolchain.toml")"
+    [ "$(rustc --version | cut -d' ' -f2)" = "$canal" ] \
+      || erreur "rustc $(rustc --version | cut -d' ' -f2) ne correspond pas à la chaîne épinglée $canal (installez rustup)"
+  fi
   (cd "$src" && cargo build --release --locked -p barking-cli --target "$cible")
-  cp "$tmp/target/$cible/release/barking" "$sortie/$nom"
+  cp "$CARGO_TARGET_DIR/$cible/release/barking" "$sortie/$nom"
 else
   command -v docker >/dev/null 2>&1 || erreur "docker est requis pour la cible $cible"
   empreinte_df="$(sha256_de "$racine/docker/repro.Dockerfile")"

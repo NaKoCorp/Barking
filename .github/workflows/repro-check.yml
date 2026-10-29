@@ -99,8 +99,14 @@ jobs:
           for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
             a="copies/build-$t-a"; b="copies/build-$t-b"
             [ -d "$a" ] && [ -d "$b" ] || { echo "copies manquantes pour $t" >&2; exit 1; }
-            bin="$(cd "$a" && ls barking-cli-*)"
-            [ "$(printf '%s\n' "$bin" | wc -l)" -eq 1 ] || { echo "un seul binaire attendu pour $t" >&2; exit 1; }
+            bins_a="$(cd "$a" && ls barking-cli-* 2>/dev/null || true)"
+            bins_b="$(cd "$b" && ls barking-cli-* 2>/dev/null || true)"
+            [ -n "$bins_a" ] && [ "$(printf '%s\n' "$bins_a" | wc -l)" -eq 1 ] \
+              || { echo "il faut exactement un binaire pour $t (copie a) : $bins_a" >&2; exit 1; }
+            [ "$bins_a" = "$bins_b" ] \
+              || { echo "noms de binaires différents pour $t : $bins_a / $bins_b" >&2; exit 1; }
+            case "$bins_a" in *"-$t") ;; *) echo "nom inattendu pour $t : $bins_a" >&2; exit 1 ;; esac
+            bin="$bins_a"
             cmp "$a/$bin" "$b/$bin" || { echo "les deux copies de $t diffèrent : build non reproductible" >&2; exit 1; }
             cmp "$a/SHA256SUMS" "$b/SHA256SUMS"
           done
