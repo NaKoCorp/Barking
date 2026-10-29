@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use barking_core::core::{LinkBundle, LinkOffer};
+use barking_core::core::{HistoryArchive, LinkBundle, LinkOffer};
 use barking_core::identity::Fingerprint;
 use barking_core::identity::device_list::MAX_DEVICES;
 use barking_core::packet::{Kind, Packet};
@@ -1074,4 +1074,232 @@ fn card_updates_in_reverse_order_converge() {
         .filter(|p| left.contains(&p.encode()))
         .count();
     assert_eq!(card_updates_left, 1, "seul le SyncDevices pour T1 reste");
+}
+
+/// Vue comparable d'une conversation : identifiant, sens, texte, statut, date.
+type MsgView = Vec<([u8; 16], Direction, String, MessageStatus, u64)>;
+
+fn conversation(core: &Core, fp: &Fingerprint) -> MsgView {
+    core.messages_with(fp)
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.message_id.0, m.direction, m.body, m.status, m.at))
+        .collect()
+}
+
+/// A avec trois conversations (Alice, Bob, Carol), dont un message reçu et
+/// un message livré, et assez de texte pour plusieurs morceaux de 64 Kio.
+/// Rend A, T en attente, l'archive et le paquet de liaison.
+fn history_setup(
+    d: &Path,
+    rng: &mut StdRng,
+) -> (Dev, Dev, LinkBundle, HistoryArchive, Vec<Fingerprint>) {
+    let (mut a, mut alice, bob) = admin_with_contacts(d, rng);
+    let carol = create(d, "carol", 4, rng);
+    let carol_fp = a
+        .core
+        .add_contact(
+            &carol.core.contact_card("Carol").unwrap(),
+            Some("carol"),
+            NOW,
+            rng,
+        )
+        .unwrap();
+    let alice_fp = alice.core.fingerprint();
+    let bob_fp = bob.core.fingerprint();
+    // Alice écrit à A ; A lui répond, Alice accuse réception.
+    let a_fp = alice
+        .core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, rng)
+        .unwrap();
+    for p in alice.core.send_text(&a_fp, "bonjour A", NOW, rng).unwrap() {
+        a.core.receive(&p.encode(), T, NOW, rng).unwrap();
+    }
+    for p in a
+        .core
+        .send_text(&alice_fp, "bonjour Alice", NOW + 1, rng)
+        .unwrap()
+    {
+        alice.core.receive(&p.encode(), T, NOW + 1, rng).unwrap();
+    }
+    for bytes in alice.core.pending_outbox(NOW + 1).unwrap() {
+        a.core.receive(&bytes, T, NOW + 1, rng).unwrap();
+    }
+    // Beaucoup de texte vers Bob et Carol : plusieurs morceaux.
+    for i in 0..20u64 {
+        let text = format!("{i:02}{}", "x".repeat(3900));
+        a.core.send_text(&bob_fp, &text, NOW + 2 + i, rng).unwrap();
+        a.core
+            .send_text(&carol_fp, &text, NOW + 2 + i, rng)
+            .unwrap();
+    }
+    let alice_view = conversation(&a.core, &alice_fp);
+    assert!(alice_view.iter().any(|m| m.1 == Direction::In));
+    assert!(alice_view.iter().any(|m| m.3 == MessageStatus::Delivered));
+
+    let offer = a.core.link_offer(NOW, rng).unwrap();
+    let (t, req) = begin(d, "t", 9, &offer, rng);
+    let out = a.core.link_device(&req, true, NOW + 30, rng).unwrap();
+    // Passage par les octets, comme dans le CLI.
+    let archive = HistoryArchive::from_bytes(&out.history.unwrap().to_bytes()).unwrap();
+    assert!(
+        archive.chunks.len() >= 2,
+        "{} morceaux",
+        archive.chunks.len()
+    );
+    (a, t, out.bundle, archive, vec![alice_fp, bob_fp, carol_fp])
+}
+
+/// T toujours en attente : aucun contact, aucun message, aucun événement.
+fn assert_still_pending(t: &mut Dev, fps: &[Fingerprint], rng: &mut StdRng) {
+    assert!(t.core.contacts().unwrap().is_empty());
+    for fp in fps {
+        assert!(t.core.messages_with(fp).unwrap().is_empty());
+    }
+    assert!(events(&t.core).is_empty());
+    assert!(matches!(
+        t.core.send_text(&fps[0], "x", NOW, rng),
+        Err(CoreError::LinkPending)
+    ));
+}
+
+#[test]
+fn history_round_trip() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(40);
+    let (a, mut t, bundle, archive, fps) = history_setup(d.path(), &mut rng);
+    t.core
+        .finish_link(&bundle, Some(&archive), NOW + 31)
+        .unwrap();
+    let mut total = 0;
+    for fp in &fps {
+        let on_a = conversation(&a.core, fp);
+        assert!(!on_a.is_empty());
+        assert_eq!(conversation(&t.core, fp), on_a);
+        total += on_a.len();
+    }
+    assert_eq!(total, 42);
+    // Dernier événement : l'import, après la fin de liaison.
+    let ev = events(&t.core);
+    assert_eq!(
+        ev.last(),
+        Some(&TransparencyEvent::HistoryImported { count: 42 })
+    );
+    assert!(matches!(
+        ev[ev.len() - 2],
+        TransparencyEvent::LinkFinished { .. }
+    ));
+    // Rouvert : l'historique est toujours là.
+    drop(t.core);
+    let t2 = Core::open(&t.path, &t.key, NOW + 32).unwrap();
+    for fp in &fps {
+        assert_eq!(conversation(&t2, fp), conversation(&a.core, fp));
+    }
+}
+
+#[test]
+fn history_truncated_refused() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(41);
+    let (_a, mut t, bundle, archive, fps) = history_setup(d.path(), &mut rng);
+    for cut in [0, 1, archive.chunks.len() - 1] {
+        let mut bad = archive.clone();
+        if cut == 0 {
+            bad.chunks.pop();
+        } else {
+            bad.chunks.truncate(cut);
+        }
+        assert_eq!(
+            link_err(t.core.finish_link(&bundle, Some(&bad), NOW + 31)),
+            "historique invalide",
+            "coupure {cut}"
+        );
+        assert_still_pending(&mut t, &fps, &mut rng);
+    }
+    let empty = HistoryArchive { chunks: Vec::new() };
+    assert_eq!(
+        link_err(t.core.finish_link(&bundle, Some(&empty), NOW + 31)),
+        "historique invalide"
+    );
+    assert_still_pending(&mut t, &fps, &mut rng);
+    // La bonne archive passe ensuite.
+    t.core
+        .finish_link(&bundle, Some(&archive), NOW + 31)
+        .unwrap();
+}
+
+#[test]
+fn history_duplicate_chunk_refused() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(42);
+    let (_a, mut t, bundle, archive, fps) = history_setup(d.path(), &mut rng);
+    // Morceau en double ajouté, morceau remplacé par un autre, ordre inversé.
+    let mut added = archive.clone();
+    added.chunks.insert(1, archive.chunks[1].clone());
+    let mut replaced = archive.clone();
+    replaced.chunks[1] = archive.chunks[0].clone();
+    let mut swapped = archive.clone();
+    swapped.chunks.swap(0, 1);
+    for bad in [added, replaced, swapped] {
+        assert_eq!(
+            link_err(t.core.finish_link(&bundle, Some(&bad), NOW + 31)),
+            "historique invalide"
+        );
+        assert_still_pending(&mut t, &fps, &mut rng);
+    }
+    t.core
+        .finish_link(&bundle, Some(&archive), NOW + 31)
+        .unwrap();
+}
+
+#[test]
+fn history_tampered_refused() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(43);
+    let (mut a, mut t, bundle, archive, fps) = history_setup(d.path(), &mut rng);
+    for (chunk, at) in [(0, 0), (1, 30), (archive.chunks.len() - 1, usize::MAX)] {
+        let mut bad = archive.clone();
+        let c = &mut bad.chunks[chunk];
+        let i = at.min(c.len() - 1);
+        c[i] ^= 1;
+        assert_eq!(
+            link_err(t.core.finish_link(&bundle, Some(&bad), NOW + 31)),
+            "historique invalide"
+        );
+        assert_still_pending(&mut t, &fps, &mut rng);
+    }
+    // Archive d'une autre liaison (autre secret) : refusée.
+    let offer = a.core.link_offer(NOW + 40, &mut rng).unwrap();
+    let (_t2, req) = begin(d.path(), "t2", 10, &offer, &mut rng);
+    let other = a.core.link_device(&req, true, NOW + 41, &mut rng).unwrap();
+    assert_eq!(
+        link_err(
+            t.core
+                .finish_link(&bundle, other.history.as_ref(), NOW + 31)
+        ),
+        "historique invalide"
+    );
+    assert_still_pending(&mut t, &fps, &mut rng);
+    t.core
+        .finish_link(&bundle, Some(&archive), NOW + 31)
+        .unwrap();
+}
+
+#[test]
+fn history_empty_and_without_history() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(44);
+    let mut a = create(d.path(), "a", 1, &mut rng);
+    let offer = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
+    let out = a.core.link_device(&req, true, NOW, &mut rng).unwrap();
+    let archive = out.history.unwrap();
+    assert_eq!(archive.chunks.len(), 1);
+    t.core
+        .finish_link(&out.bundle, Some(&archive), NOW)
+        .unwrap();
+    assert_eq!(
+        events(&t.core).last(),
+        Some(&TransparencyEvent::HistoryImported { count: 0 })
+    );
 }

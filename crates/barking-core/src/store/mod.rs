@@ -728,6 +728,23 @@ pub trait Queries {
         raws.into_iter().map(message_from_raw).collect()
     }
 
+    /// Tous les messages, dans l'ordre d'insertion (archive d'historique).
+    fn all_messages(&self) -> Result<Vec<MessageRow>> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT id, contact_fp, direction, body, status, at, message_id \
+                 FROM messages ORDER BY id",
+            )
+            .map_err(map_err)?;
+        let raws = stmt
+            .query_map([], message_raw)
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        raws.into_iter().map(message_from_raw).collect()
+    }
+
     /// `true` si le paquet est nouveau, `false` s'il était déjà vu.
     fn mark_seen(&self, packet_id: PacketId, at: u64) -> Result<bool> {
         let n = self

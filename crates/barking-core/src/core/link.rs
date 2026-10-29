@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::contacts::{MAX_ALIAS_LEN, claimed_by_other, overlaps};
-use super::history::HistoryArchive;
+use super::history::{self, HistoryArchive};
 use super::send::SealTime;
 use super::{
     Core, META_DEVICE, META_DEVICE_LIST, META_DEVICE_NAME, META_DISPLAY_NAME, META_LINKED_BUNDLES,
@@ -56,7 +56,7 @@ use crate::envelope::Body;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
 use crate::identity::device::sig_bytes;
 use crate::identity::device_list::MAX_DEVICES;
-use crate::identity::root::RootPublic;
+use crate::identity::root::{Fingerprint, RootPublic};
 use crate::identity::{DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic};
 use crate::packet::Packet;
 use crate::store::MessageId;
@@ -249,7 +249,8 @@ struct LinkPlain {
 #[derive(Debug)]
 pub struct LinkOutcome {
     pub bundle: LinkBundle,
-    /// Archive de l'historique (si demandée) ; pas encore produite.
+    /// Archive de l'historique (si demandée), chiffrée avec le secret de
+    /// liaison : à remettre à T hors réseau avec le paquet de liaison.
     pub history: Option<HistoryArchive>,
     /// Paquets à envoyer, déjà en file d'envoi : `SyncDevices` (ma nouvelle
     /// carte) pour chacun de mes autres appareils sauf le nouveau, puis
@@ -417,8 +418,11 @@ impl Core {
 
     /// Étape 3 (A) : accepte une demande de liaison. Vérifie l'offre en
     /// attente, le MAC, la preuve de possession ; signe la liste `version + 1`
-    /// et rend le paquet de liaison chiffré. `with_history` est encore ignoré
-    /// (l'archive viendra plus tard).
+    /// et rend le paquet de liaison chiffré. Si `with_history`, l'archive de
+    /// l'historique (messages des contacts copiés) est produite dans la même
+    /// transaction, avec le même secret (voir `history`). Une archive de plus
+    /// de `MAX_HISTORY_CHUNKS` morceaux fait échouer la liaison (« historique
+    /// trop volumineux ») sans rien écrire ni consommer l'offre.
     ///
     /// Dans la même transaction, ma nouvelle carte (portant mon nom affiché
     /// enregistré) est mise en file : `SyncDevices` pour mes autres appareils
@@ -438,7 +442,6 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<LinkOutcome> {
-        let _ = with_history;
         self.ensure_linked()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
         let root_pub = root.public();
@@ -540,6 +543,13 @@ impl Core {
             contacts,
         };
         let bundle = seal_bundle(&offer.secret, &root_pub, &device.id(), &plain, rng)?;
+        // L'archive ne porte que les messages des contacts copiés : T refuse
+        // une archive qui en mentionne un autre.
+        let history_contacts: HashSet<Fingerprint> = plain
+            .contacts
+            .iter()
+            .map(|s| s.card.fingerprint())
+            .collect();
 
         let event = TransparencyEvent::DeviceLinked {
             device: device.id(),
@@ -559,6 +569,13 @@ impl Core {
             if !same_offer || !same_list || !tx.delete_meta(META_LINK_OFFER)? {
                 return Err(USED);
             }
+            // Archive lue dans la transaction : même état que le reste.
+            let history = if with_history {
+                let entries = history::export(tx, &history_contacts)?;
+                Some(history::seal_archive(&offer.secret, &entries, rng)?)
+            } else {
+                None
+            };
             // Nouvelle carte pour mes autres appareils, scellée avant
             // l'écriture de la nouvelle liste : T, qui reçoit tout par le
             // paquet de liaison, n'est pas encore dans la liste stockée.
@@ -583,10 +600,10 @@ impl Core {
             log(tx, now, None, &event)?;
             // Et pour chacun de mes contacts (spec §3.2).
             packets.extend(sync::send_card_update(tx, me, &card, now, rng)?);
-            Ok(packets)
+            Ok((packets, history))
         });
-        let packets = match written {
-            Ok(packets) => packets,
+        let (packets, history) = match written {
+            Ok(written) => written,
             Err(e) => {
                 // Liste périmée en mémoire (une autre ouverture de la base a
                 // lié un appareil) : relue, pour qu'un nouvel essai parte de
@@ -602,7 +619,7 @@ impl Core {
         self.linked_bundles = linked;
         Ok(LinkOutcome {
             bundle,
-            history: None,
+            history,
             packets,
         })
     }
@@ -610,14 +627,18 @@ impl Core {
     /// Étape 4 (T) : termine la liaison avec le paquet de A. Tout est
     /// vérifié avant d'écrire ; tout est écrit dans une seule transaction.
     /// En cas d'échec, T reste en attente et rien n'est modifié.
-    /// `history` est encore ignoré (l'import viendra plus tard).
+    ///
+    /// Avec `history`, l'archive est entièrement vérifiée et déchiffrée avant
+    /// la transaction (voir `history`), puis ses messages absents sont
+    /// insérés dans la même transaction ; `HistoryImported` est journalisé en
+    /// dernier. Une archive invalide fait échouer toute la liaison
+    /// (« historique invalide »).
     pub fn finish_link(
         &mut self,
         bundle: &LinkBundle,
         history: Option<&HistoryArchive>,
         now: u64,
     ) -> Result<()> {
-        let _ = history;
         if !self.pending {
             return Err(CoreError::Link("aucune liaison en attente"));
         }
@@ -635,6 +656,19 @@ impl Core {
         );
         let plain: LinkPlain = decode_exact(&pt)?;
         check_plain(&plain, &pending.root, &me)?;
+        let entries = match history {
+            Some(archive) => {
+                let entries = history::open_archive(&pending.secret, archive)?;
+                let known: HashSet<Fingerprint> = plain
+                    .contacts
+                    .iter()
+                    .map(|s| s.card.fingerprint())
+                    .collect();
+                history::check_entries(&entries, &known)?;
+                Some(entries)
+            }
+            None => None,
+        };
 
         let my_fp = pending.root.fingerprint();
         let device_count = u32::try_from(plain.devices.certs.len()).unwrap_or(u32::MAX);
@@ -683,7 +717,12 @@ impl Core {
             sync::purge_removed_own_sessions(tx, &plain.devices)?;
             // Liaison terminée : le secret disparaît de la base.
             tx.delete_meta(META_PENDING_LINK)?;
-            log(tx, now, None, &event)
+            log(tx, now, None, &event)?;
+            if let Some(entries) = &entries {
+                let count = history::import(tx, entries)?;
+                log(tx, now, None, &TransparencyEvent::HistoryImported { count })?;
+            }
+            Ok(())
         })?;
         drop(pending);
         self.devices = plain.devices;

@@ -81,6 +81,11 @@ pub enum TransparencyEvent {
         added: u32,
         removed: u32,
     },
+    /// Côté nouvel appareil : `count` messages de l'historique importés
+    /// pendant la liaison (archive hors réseau).
+    HistoryImported {
+        count: u32,
+    },
 }
 
 /// Type de synchronisation entre mes appareils.
@@ -281,6 +286,10 @@ impl TransparencyEvent {
                     alias.clone()
                 }
             ),
+            Self::HistoryImported { count } => format!(
+                "{count} messages de l'historique copiés depuis ton autre appareil. \
+                 Ils n'ont transité par aucun nœud."
+            ),
         }
     }
 }
@@ -417,6 +426,7 @@ mod tests {
                 added: 1,
                 removed: 0,
             },
+            TransparencyEvent::HistoryImported { count: 3 },
         ]
     }
 
@@ -569,6 +579,17 @@ mod tests {
             finished.describe(),
             "Cet appareil est maintenant lié à ton compte (2 appareils, 3 contacts copiés). \
              La clé racine n'a pas été copiée."
+        );
+    }
+
+    #[test]
+    fn describe_history_imported_exact() {
+        let e = TransparencyEvent::HistoryImported { count: 42 };
+        assert!(!e.is_security());
+        assert_eq!(
+            e.describe(),
+            "42 messages de l'historique copiés depuis ton autre appareil. \
+             Ils n'ont transité par aucun nœud."
         );
     }
 
