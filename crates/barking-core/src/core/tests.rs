@@ -533,7 +533,8 @@ fn skipped_total(c: &Core) -> usize {
         .all_sessions()
         .unwrap()
         .iter()
-        .map(|s| de_state(&s.state).unwrap().skipped_len())
+        .filter_map(|s| de_state(&s.state).ok())
+        .map(|st| st.skipped_len())
         .sum()
 }
 
@@ -571,6 +572,55 @@ fn open_purges_skipped_keys() {
     drop(b);
     let b = Core::open(&path, &key, NOW + 6 * 86_400).unwrap();
     assert_eq!(skipped_total(&b), 1);
+    drop(b);
+    let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
+    assert_eq!(skipped_total(&b), 0);
+}
+
+#[test]
+fn corrupt_session_row_does_not_block_pending_outbox() {
+    let mut p = bob_with_two_skipped();
+    // Seconde ligne de session, illisible.
+    let mut bad = best_session(&p.b);
+    bad.session_id = [0xee; 16];
+    bad.state = vec![0xff; 7];
+    p.b.store.put_session(&bad).unwrap();
+    let later = NOW + 8 * 86_400;
+    p.b.pending_outbox(later).unwrap();
+    assert_eq!(skipped_total(&p.b), 0);
+    // La ligne illisible est intacte et n'empêche pas la réouverture.
+    assert!(
+        p.b.store
+            .all_sessions()
+            .unwrap()
+            .iter()
+            .any(|s| s.state == vec![0xff; 7])
+    );
+}
+
+#[test]
+fn corrupt_session_row_does_not_block_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let key = [2u8; 32];
+    let mut rng = StdRng::seed_from_u64(2);
+    let (mut b, _) = Core::create(&path, &key, "b", NOW, &mut rng).unwrap();
+    let (_da, mut a) = party("a", 1);
+    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"))
+        .unwrap();
+    b.add_contact(&a.contact_card("Alice").unwrap(), Some("alice"))
+        .unwrap();
+    let mut pkts = Vec::new();
+    for t in ["1", "2", "3"] {
+        let v = a.send_text(&b.fingerprint(), t, NOW, &mut rng).unwrap();
+        pkts.push(v.into_iter().next().unwrap());
+    }
+    b.receive(&pkts[0].encode(), "t", NOW, &mut rng).unwrap();
+    b.receive(&pkts[2].encode(), "t", NOW, &mut rng).unwrap();
+    let mut bad = best_session(&b);
+    bad.session_id = [0xee; 16];
+    bad.state = vec![0xff; 7];
+    b.store.put_session(&bad).unwrap();
     drop(b);
     let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
     assert_eq!(skipped_total(&b), 0);

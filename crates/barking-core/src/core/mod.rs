@@ -23,7 +23,7 @@ use std::path::Path;
 
 use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::contact::ContactCard;
 use crate::fragment::Reassembler;
@@ -225,7 +225,9 @@ impl Core {
         })
     }
 
-    /// Rouvre une base existante. Mauvaise clé : `StoreLocked`.
+    /// Rouvre une base existante. Mauvaise clé : `StoreLocked`. Les clés
+    /// sautées de plus de 7 jours à `now` sont purgées (irréversible, un `now`
+    /// très éloigné dans le futur y compris, comme au déchiffrement).
     pub fn open(path: &Path, db_key: &[u8; 32], now: u64) -> Result<Core> {
         // Ne pas créer de base vide en cherchant à en ouvrir une.
         if !path.exists() {
@@ -470,12 +472,20 @@ impl Core {
 }
 
 /// Purge les clés sautées trop anciennes de toutes les sessions, même
-/// inactives ; ne réécrit que les sessions modifiées.
+/// inactives ; ne réécrit que les sessions modifiées. Une session illisible
+/// est ignorée (elle ne doit pas bloquer l'ouverture). Un `now` très éloigné
+/// dans le futur purge les clés de façon irréversible, exactement comme le
+/// déchiffrement.
 fn sweep_skipped(q: &impl Queries, now: u64) -> Result<()> {
     for mut row in q.all_sessions()? {
-        let mut state = de_state(&row.state)?;
+        let Ok(mut state) = de_state(&row.state) else {
+            continue;
+        };
         if state.purge_skipped(now) {
-            row.state = ser_state(&state)?;
+            let new = ser_state(&state)?;
+            // L'ancien état sérialisé contient les clés purgées.
+            let mut old = std::mem::replace(&mut row.state, new);
+            old.zeroize();
             q.put_session(&row)?;
         }
     }
