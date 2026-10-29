@@ -22,7 +22,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Le commit du tag est dans l'historique de main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse --verify "refs/tags/$TAG^{commit}")"
+          git rev-parse --verify origin/main >/dev/null \
+            || { echo "origin/main introuvable dans le clone" >&2; exit 1; }
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "le commit $commit du tag $TAG n'est pas un ancêtre de origin/main : publiez depuis main" >&2
+            exit 1
+          fi
+          echo "tag $TAG : commit $commit, ancêtre de origin/main"
 
       - name: Le tag correspond à la version de barking-cli
         env:
@@ -49,8 +64,8 @@ jobs:
           - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04, copie: b }
           - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, copie: a }
           - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, copie: b }
-          - { target: aarch64-apple-darwin, runner: macos-14, copie: a }
-          - { target: aarch64-apple-darwin, runner: macos-14, copie: b }
+          - { target: aarch64-apple-darwin, runner: macos-26, copie: a }
+          - { target: aarch64-apple-darwin, runner: macos-26, copie: b }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -64,11 +79,28 @@ jobs:
         run: |
           canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
           [ -n "$canal" ] || { echo "canal introuvable dans rust-toolchain.toml" >&2; exit 1; }
-          rustup toolchain install "$canal" --profile minimal \
-            --component rustfmt --component clippy \
-            --target aarch64-apple-darwin \
-            --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+          rustup toolchain install "$canal" --profile minimal --target aarch64-apple-darwin
           rustup default "$canal"
+
+      # Le binaire macOS n'est reproductible qu'avec le même Xcode et le même SDK : ceux de .xcode-version.
+      - name: Sélectionner l'Xcode épinglé (macOS)
+        if: matrix.target == 'aarch64-apple-darwin'
+        env:
+          RUNNER_LABEL: ${{ matrix.runner }}
+        run: |
+          set -euo pipefail
+          runner="$(sed -n 's/^runner=//p' .xcode-version | head -n1)"
+          xcode="$(sed -n 's/^xcode=//p' .xcode-version | head -n1)"
+          sdk="$(sed -n 's/^sdk=//p' .xcode-version | head -n1)"
+          [ -n "$runner" ] && [ -n "$xcode" ] && [ -n "$sdk" ] || { echo ".xcode-version incomplet" >&2; exit 1; }
+          [ "$runner" = "$RUNNER_LABEL" ] \
+            || { echo "runner $RUNNER_LABEL différent de celui de .xcode-version ($runner)" >&2; exit 1; }
+          sudo xcode-select -s "/Applications/Xcode_${xcode}.app"
+          reel_xcode="$(xcodebuild -version | sed -n 's/^Xcode //p' | head -n1)"
+          reel_sdk="$(xcrun --show-sdk-version)"
+          echo "Xcode $reel_xcode, SDK $reel_sdk"
+          [ "$reel_xcode" = "$xcode" ] || { echo "Xcode $reel_xcode au lieu de $xcode" >&2; exit 1; }
+          [ "$reel_sdk" = "$sdk" ] || { echo "SDK $reel_sdk au lieu de $sdk" >&2; exit 1; }
 
       - name: Build reproductible
         env:
@@ -170,7 +202,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          set -euo pipefail
+          # Les brouillons n'ont pas de tag publié : on les cherche dans la liste complète des versions.
+          ids="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.tag_name == env.TAG) | .id')" \
+            || { echo "impossible de lister les versions existantes (API GitHub)" >&2; exit 1; }
+          if [ -n "$ids" ]; then
             echo "une version $TAG existe déjà (brouillon d'un run précédent ?) : supprimez-la (gh release delete $TAG) puis relancez le workflow" >&2
             exit 1
           fi
