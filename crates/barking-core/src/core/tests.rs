@@ -625,3 +625,140 @@ fn corrupt_session_row_does_not_block_open() {
     let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
     assert_eq!(skipped_total(&b), 0);
 }
+
+/// Paquet de bruit dans la boîte d'introduction de `to` au jour de `now`.
+fn junk_to_intro(to: &Core, n: u32, now: u64) -> Vec<u8> {
+    let mut id = [0u8; 16];
+    id[..4].copy_from_slice(&n.to_be_bytes());
+    Packet {
+        kind: Kind::Message,
+        hops: DEFAULT_HOPS,
+        tier: Tier::S,
+        id: PacketId(id),
+        expires_at: u32::MAX,
+        mailbox: intro_mailbox(&to.device.public(), day_of(now)),
+        payload: vec![0xa5; 40],
+    }
+    .encode()
+}
+
+fn count_events(c: &Core, f: impl Fn(&TransparencyEvent) -> bool) -> usize {
+    c.transparency_log(100_000)
+        .unwrap()
+        .iter()
+        .filter(|(_, e)| f(e))
+        .count()
+}
+
+/// Bob avec une session établie et une clé de contact changée au journal.
+fn bob_with_security_events() -> Pair {
+    let mut p = pair();
+    let (_dc, c) = party("c", 3);
+    let (_dd, d) = party("d", 4);
+    p.b.add_contact(&c.contact_card("Carol").unwrap(), Some("carol"))
+        .unwrap();
+    p.b.add_contact(&d.contact_card("Dave").unwrap(), Some("carol"))
+        .unwrap();
+    assert_eq!(
+        count_events(&p.b, |e| matches!(
+            e,
+            TransparencyEvent::SessionEstablished { .. }
+                | TransparencyEvent::ContactKeyChanged { .. }
+        )),
+        2
+    );
+    p
+}
+
+#[test]
+fn junk_to_intro_mailbox_is_coalesced_and_keeps_security_events() {
+    let mut p = bob_with_security_events();
+    for i in 0..10_050u32 {
+        let now = NOW + u64::from(i) / 100;
+        let o =
+            p.b.receive(&junk_to_intro(&p.b, i, now), "t", now, &mut p.rng)
+                .unwrap();
+        assert!(matches!(o, ReceiveOutcome::Quarantined { .. }), "{o:?}");
+    }
+    assert_eq!(
+        count_events(&p.b, |e| matches!(
+            e,
+            TransparencyEvent::SessionEstablished { .. }
+        )),
+        1
+    );
+    assert_eq!(
+        count_events(&p.b, |e| matches!(
+            e,
+            TransparencyEvent::ContactKeyChanged { .. }
+        )),
+        1
+    );
+    // 100 s de bruit : une entrée par minute au plus.
+    let failed = count_events(&p.b, |e| {
+        matches!(e, TransparencyEvent::DecryptFailed { .. })
+    });
+    assert!((1..=2).contains(&failed), "{failed}");
+}
+
+#[test]
+fn spaced_junk_fills_log_but_never_evicts_security_events() {
+    let mut p = bob_with_security_events();
+    // Une minute entre deux paquets : rien n'est regroupé, le plafond joue.
+    for i in 0..10_050u32 {
+        let now = NOW + 60 * u64::from(i + 1);
+        p.b.receive(&junk_to_intro(&p.b, i, now), "t", now, &mut p.rng)
+            .unwrap();
+    }
+    let failed = count_events(&p.b, |e| {
+        matches!(e, TransparencyEvent::DecryptFailed { .. })
+    });
+    assert_eq!(failed, crate::store::LOG_MAX_ROWS as usize);
+    assert_eq!(
+        count_events(&p.b, |e| matches!(
+            e,
+            TransparencyEvent::SessionEstablished { .. }
+                | TransparencyEvent::ContactKeyChanged { .. }
+        )),
+        2
+    );
+}
+
+#[test]
+fn replayed_packets_and_acks_are_coalesced() {
+    let mut p = pair();
+    let m =
+        p.a.send_text(&p.b.fingerprint(), "z", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    let ack = match p.b.receive(&m.encode(), "t", NOW, &mut p.rng).unwrap() {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    assert!(matches!(
+        p.a.receive(&ack.encode(), "t", NOW, &mut p.rng).unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    let dup = |c: &Core| {
+        count_events(c, |e| {
+            matches!(e, TransparencyEvent::DuplicateIgnored { .. })
+        })
+    };
+    for i in 0..500u64 {
+        let now = NOW + i / 10;
+        assert!(matches!(
+            p.b.receive(&m.encode(), "t", now, &mut p.rng).unwrap(),
+            ReceiveOutcome::Duplicate
+        ));
+        assert!(matches!(
+            p.a.receive(&ack.encode(), "t", now, &mut p.rng).unwrap(),
+            ReceiveOutcome::Duplicate
+        ));
+    }
+    assert_eq!(dup(&p.b), 1);
+    assert_eq!(dup(&p.a), 1);
+    // Après l'intervalle, une nouvelle entrée.
+    let later = NOW + FRAME_REJECT_LOG_INTERVAL_SECS + 60;
+    p.b.receive(&m.encode(), "t", later, &mut p.rng).unwrap();
+    assert_eq!(dup(&p.b), 2);
+}

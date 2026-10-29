@@ -82,6 +82,16 @@ fn tier_label(tier: Tier) -> &'static str {
 }
 
 impl TransparencyEvent {
+    /// Preuve de sécurité : une session établie ou une clé de contact
+    /// changée. Ces entrées ont leur propre plafond au journal ; les autres
+    /// (qu'un tiers peut provoquer en masse) ne les évincent jamais.
+    pub fn is_security(&self) -> bool {
+        matches!(
+            self,
+            Self::SessionEstablished { .. } | Self::ContactKeyChanged { .. }
+        )
+    }
+
     /// Texte français destiné à l'utilisateur. N'inclut jamais de texte de
     /// message (les événements n'en portent pas).
     pub fn describe(&self) -> String {
@@ -378,6 +388,17 @@ mod tests {
         }
         assert!(sealed().describe().contains("à qui tu écris"));
         assert!(!opened(false).describe().contains("carte de contact"));
+    }
+
+    #[test]
+    fn security_class_is_session_and_key_change_only() {
+        let security: Vec<_> = all().into_iter().filter(|e| e.is_security()).collect();
+        assert_eq!(security.len(), 2);
+        assert!(security.iter().all(|e| matches!(
+            e,
+            TransparencyEvent::SessionEstablished { .. }
+                | TransparencyEvent::ContactKeyChanged { .. }
+        )));
     }
 
     #[test]

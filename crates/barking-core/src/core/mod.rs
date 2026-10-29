@@ -12,6 +12,7 @@
 
 mod contacts;
 mod frames;
+mod log_limit;
 mod receive;
 mod send;
 
@@ -36,12 +37,15 @@ use crate::identity::{
 use crate::mailbox::{MailboxId, day_of, intro_mailbox, session_mailbox};
 use crate::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId};
 use crate::ratchet::RatchetState;
-use crate::store::{MessageRow, Queries, Store};
+use crate::store::{EventClass, MessageRow, Queries, Store};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
 pub use contacts::ContactSummary;
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
+pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
+
+use log_limit::LogLimiter;
 
 const META_ROOT: &str = "root_seed";
 const META_DEVICE: &str = "device_keys";
@@ -140,8 +144,9 @@ pub struct Core {
     linked_bundles: Vec<PrekeyBundle>,
     /// Trames reçues d'un paquet encore incomplet (en mémoire, non persisté).
     frames: Reassembler,
-    /// Dernier journal de `FrameRejected` par raison (hash, contradiction), en mémoire.
-    last_reject_log: [Option<u64>; 2],
+    /// Regroupement des événements bruyants au journal (trames rejetées,
+    /// paquets indéchiffrables, doublons), en mémoire.
+    log_limiter: LogLimiter,
 }
 
 impl fmt::Debug for Core {
@@ -221,7 +226,7 @@ impl Core {
             devices,
             linked_bundles,
             frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
-            last_reject_log: [None; 2],
+            log_limiter: LogLimiter::default(),
         })
     }
 
@@ -266,7 +271,7 @@ impl Core {
             devices,
             linked_bundles,
             frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
-            last_reject_log: [None; 2],
+            log_limiter: LogLimiter::default(),
         })
     }
 
@@ -531,7 +536,12 @@ fn log(
     event: &TransparencyEvent,
 ) -> Result<()> {
     let bytes = postcard::to_allocvec(event).map_err(|_| CoreError::Store("événement".into()))?;
-    q.append_event(at, packet, &bytes)
+    let class = if event.is_security() {
+        EventClass::Security
+    } else {
+        EventClass::Routine
+    };
+    q.append_event(at, packet, class, &bytes)
 }
 
 fn load_card(bytes: &[u8]) -> Result<ContactCard> {

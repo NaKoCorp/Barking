@@ -125,8 +125,12 @@ fn contacts_sessions_messages_events() {
     assert_eq!(m[0].status, MessageStatus::Delivered);
     assert_eq!(m[0].direction, Direction::Out);
 
-    store.append_event(10, Some(pid), b"ev1").unwrap();
-    store.append_event(11, None, b"ev2").unwrap();
+    store
+        .append_event(10, Some(pid), EventClass::Routine, b"ev1")
+        .unwrap();
+    store
+        .append_event(11, None, EventClass::Routine, b"ev2")
+        .unwrap();
     assert_eq!(
         store.events(10).unwrap(),
         vec![(10, b"ev1".to_vec()), (11, b"ev2".to_vec())]
@@ -212,7 +216,9 @@ fn message_lookup_and_deletions() {
 fn recent_events_newest_window_in_order() {
     let (_d, _p, store) = open_tmp();
     for i in 0..5u8 {
-        store.append_event(u64::from(i), None, &[i]).unwrap();
+        store
+            .append_event(u64::from(i), None, EventClass::Routine, &[i])
+            .unwrap();
     }
     assert_eq!(
         store.recent_events(2).unwrap(),
@@ -295,6 +301,18 @@ fn message_row_debug_hides_body() {
     assert!(dbg.contains("15 octets"), "{dbg}");
 }
 
+/// Nombre de lignes de la classe donnée.
+fn count_class(store: &Store, class: EventClass) -> i64 {
+    store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM transparency WHERE class = ?1",
+            params![class as i64],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn log_keeps_at_most_max_rows() {
     let (_d, _p, mut store) = open_tmp();
@@ -302,7 +320,7 @@ fn log_keeps_at_most_max_rows() {
     store
         .transaction(|tx| {
             for i in 0..10_050u32 {
-                tx.append_event(t, None, &i.to_be_bytes())?;
+                tx.append_event(t, None, EventClass::Routine, &i.to_be_bytes())?;
             }
             Ok(())
         })
@@ -314,23 +332,168 @@ fn log_keeps_at_most_max_rows() {
 }
 
 #[test]
+fn log_row_cap_boundary() {
+    for (class, cap) in [
+        (EventClass::Routine, LOG_MAX_ROWS),
+        (EventClass::Security, LOG_MAX_SECURITY_ROWS),
+    ] {
+        let (_d, _p, mut store) = open_tmp();
+        let t = 1_000_000_000u64;
+        let cap = u32::try_from(cap).unwrap();
+        store
+            .transaction(|tx| {
+                for i in 0..cap {
+                    tx.append_event(t, None, class, &i.to_be_bytes())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        // Exactement le plafond : rien n'est supprimé.
+        let rows = store.events(20_000).unwrap();
+        assert_eq!(rows.len(), cap as usize);
+        assert_eq!(rows[0].1, 0u32.to_be_bytes().to_vec());
+        // Une de plus : seule la plus ancienne part.
+        store
+            .append_event(t, None, class, &cap.to_be_bytes())
+            .unwrap();
+        let rows = store.events(20_000).unwrap();
+        assert_eq!(rows.len(), cap as usize);
+        assert_eq!(rows[0].1, 1u32.to_be_bytes().to_vec());
+    }
+}
+
+#[test]
+fn log_cap_spares_security_events() {
+    let (_d, _p, mut store) = open_tmp();
+    let t = 1_000_000_000u64;
+    store
+        .append_event(t, None, EventClass::Security, b"cle changee")
+        .unwrap();
+    store
+        .transaction(|tx| {
+            for i in 0..10_050u32 {
+                tx.append_event(t + 1, None, EventClass::Routine, &i.to_be_bytes())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let rows = store.events(20_000).unwrap();
+    assert_eq!(rows[0], (t, b"cle changee".to_vec()));
+    assert_eq!(
+        count_class(&store, EventClass::Routine),
+        LOG_MAX_ROWS as i64
+    );
+    assert_eq!(count_class(&store, EventClass::Security), 1);
+}
+
+#[test]
+fn log_age_boundary_30_days() {
+    let (_d, _p, store) = open_tmp();
+    let t = 1_000_000_000u64;
+    let day = 86_400u64;
+    for class in [EventClass::Routine, EventClass::Security] {
+        store.append_event(t, None, class, b"vieux").unwrap();
+    }
+    // Horloge qui avance d'un jour au plus par événement : pas de bornage.
+    for d in 1..30 {
+        store
+            .append_event(t + d * day, None, EventClass::Routine, b"jour")
+            .unwrap();
+    }
+    // Exactement 30 jours : conservé.
+    store
+        .append_event(t + 30 * day, None, EventClass::Routine, b"j30")
+        .unwrap();
+    let rows = store.events(100).unwrap();
+    assert_eq!(rows.iter().filter(|r| r.1 == b"vieux").count(), 2);
+    // 30 jours et 1 s : supprimé, sécurité comprise.
+    store
+        .append_event(t + 30 * day + 1, None, EventClass::Routine, b"j30+1")
+        .unwrap();
+    let rows = store.events(100).unwrap();
+    assert!(rows.iter().all(|r| r.1 != b"vieux"), "{rows:?}");
+    assert_eq!(rows.len(), 31);
+}
+
+#[test]
+fn log_far_future_event_does_not_wipe() {
+    let (_d, _p, store) = open_tmp();
+    let t = 1_000_000_000u64;
+    store
+        .append_event(t, None, EventClass::Security, b"a")
+        .unwrap();
+    store
+        .append_event(t + 10, None, EventClass::Routine, b"b")
+        .unwrap();
+    // Horloge locale déréglée : 10 ans d'avance.
+    store
+        .append_event(t + 3_650 * 86_400, None, EventClass::Routine, b"futur")
+        .unwrap();
+    assert_eq!(store.events(10).unwrap().len(), 3);
+}
+
+#[test]
 fn log_drops_entries_older_than_30_days() {
     let (_d, _p, store) = open_tmp();
     let t = 1_000_000_000u64;
-    store.append_event(t, None, b"vieux").unwrap();
     store
-        .append_event(t + 31 * 86_400, None, b"recent")
+        .append_event(t, None, EventClass::Routine, b"vieux")
+        .unwrap();
+    // Dernière entrée connue récente : l'âge n'est pas borné.
+    store
+        .append_event(t + 30 * 86_400, None, EventClass::Routine, b"recent")
+        .unwrap();
+    store
+        .append_event(t + 31 * 86_400, None, EventClass::Routine, b"recent2")
         .unwrap();
     let rows = store.events(10).unwrap();
-    assert_eq!(rows, vec![(t + 31 * 86_400, b"recent".to_vec())]);
+    assert_eq!(
+        rows,
+        vec![
+            (t + 30 * 86_400, b"recent".to_vec()),
+            (t + 31 * 86_400, b"recent2".to_vec())
+        ]
+    );
+}
+
+#[test]
+fn log_class_column_added_to_old_database() {
+    let (_d, path, store) = open_tmp();
+    // Table du journal telle que créée avant la colonne `class`.
+    store
+        .conn()
+        .execute_batch(
+            "DROP TABLE transparency; \
+             CREATE TABLE transparency (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, \
+             packet_id BLOB, event BLOB NOT NULL); \
+             INSERT INTO transparency(at, event) VALUES (5, x'01');",
+        )
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(count_class(&store, EventClass::Routine), 1);
+    store
+        .append_event(6, None, EventClass::Security, b"s")
+        .unwrap();
+    assert_eq!(count_class(&store, EventClass::Security), 1);
+    // Réouverture : la migration est idempotente.
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.events(10).unwrap().len(), 2);
 }
 
 #[test]
 fn log_purge_tolerates_clock_behind() {
     let (_d, _p, store) = open_tmp();
     let t = 1_000_000_000u64;
-    store.append_event(t, None, b"a").unwrap();
-    store.append_event(t - 86_400, None, b"b").unwrap();
-    store.append_event(0, None, b"c").unwrap();
+    store
+        .append_event(t, None, EventClass::Routine, b"a")
+        .unwrap();
+    store
+        .append_event(t - 86_400, None, EventClass::Routine, b"b")
+        .unwrap();
+    store
+        .append_event(0, None, EventClass::Routine, b"c")
+        .unwrap();
     assert_eq!(store.events(10).unwrap().len(), 3);
 }

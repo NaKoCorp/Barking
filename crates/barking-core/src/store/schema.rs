@@ -49,6 +49,21 @@ CREATE TABLE IF NOT EXISTS transparency (
     id INTEGER PRIMARY KEY,
     at INTEGER NOT NULL,
     packet_id BLOB,
-    event BLOB NOT NULL
+    event BLOB NOT NULL,
+    -- 0 : courant, 1 : sécurité (voir `EventClass`).
+    class INTEGER NOT NULL DEFAULT 0
 );
+";
+
+/// Migration dans le schéma v1 : colonne `class` du journal, pour une base
+/// créée avant son ajout. Appliquée à l'ouverture si la colonne manque.
+pub const TRANSPARENCY_ADD_CLASS: &str =
+    "ALTER TABLE transparency ADD COLUMN class INTEGER NOT NULL DEFAULT 0;";
+
+/// Index du journal (après la migration : `class` doit exister). La purge
+/// lit `max(at)` et le plafond parcourt une classe par identifiant à chaque
+/// ajout.
+pub const TRANSPARENCY_INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS transparency_at ON transparency(at);
+CREATE INDEX IF NOT EXISTS transparency_class_id ON transparency(class, id);
 ";

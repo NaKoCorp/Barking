@@ -3,7 +3,8 @@
 
 use rand_core::CryptoRng;
 
-use super::{Core, ReceiveOutcome, log};
+use super::log_limit::{NOISY_EVENT_LOG_INTERVAL_SECS, log_limited};
+use super::{Core, ReceiveOutcome};
 use crate::fragment::{REASON_BAD_HASH, REASON_CONTRADICTORY, fragment};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
@@ -14,8 +15,9 @@ pub const MAX_PENDING_FRAMES: usize = 64;
 /// Durée de vie, en secondes, d'un paquet incomplet.
 pub const FRAME_TTL_SECS: u64 = 3600;
 
-/// Intervalle minimal, par raison, entre deux entrées `FrameRejected` au journal.
-pub const FRAME_REJECT_LOG_INTERVAL_SECS: u64 = 60;
+/// Intervalle minimal, par raison, entre deux entrées `FrameRejected` au journal
+/// (celui de tous les événements bruyants).
+pub const FRAME_REJECT_LOG_INTERVAL_SECS: u64 = NOISY_EVENT_LOG_INTERVAL_SECS;
 
 impl Core {
     /// Découpe un paquet encodé en trames d'au plus `mtu` octets.
@@ -45,22 +47,16 @@ impl Core {
                 // Seuls un hash faux et des trames contradictoires sont
                 // journalisés, et au plus une fois par raison et par minute :
                 // le reste (bruit d'en-tête) est ignoré sans écriture.
-                let (slot, reason) = if r == REASON_BAD_HASH {
-                    (0, REASON_BAD_HASH)
-                } else if r == REASON_CONTRADICTORY {
-                    (1, REASON_CONTRADICTORY)
-                } else {
+                if r != REASON_BAD_HASH && r != REASON_CONTRADICTORY {
                     return Ok(ReceiveOutcome::NotForUs);
-                };
-                let due = self.last_reject_log[slot]
-                    .is_none_or(|last| now.saturating_sub(last) >= FRAME_REJECT_LOG_INTERVAL_SECS);
-                if due {
-                    let event = TransparencyEvent::FrameRejected {
-                        reason: reason.to_owned(),
-                    };
-                    self.store.transaction(|tx| log(tx, now, None, &event))?;
-                    self.last_reject_log[slot] = Some(now);
                 }
+                let event = TransparencyEvent::FrameRejected {
+                    reason: r.to_owned(),
+                };
+                let Core {
+                    store, log_limiter, ..
+                } = self;
+                store.transaction(|tx| log_limited(tx, log_limiter, now, None, &event))?;
                 Ok(ReceiveOutcome::NotForUs)
             }
             Err(e) => Err(e),

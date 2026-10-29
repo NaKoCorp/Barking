@@ -151,8 +151,24 @@ fn arr<const N: usize>(b: Vec<u8>) -> Result<[u8; N]> {
 
 /// Âge maximal des entrées du journal de transparence (30 jours).
 pub const LOG_MAX_AGE_SECS: u64 = 30 * 86_400;
-/// Nombre maximal d'entrées conservées dans le journal de transparence.
+/// Avance maximale, sur l'entrée la plus récente du journal, de l'heure
+/// utilisée pour la purge par âge (1 jour).
+pub const LOG_CLOCK_SLACK_SECS: u64 = 86_400;
+/// Nombre maximal d'entrées courantes conservées dans le journal de transparence.
 pub const LOG_MAX_ROWS: u64 = 10_000;
+/// Nombre maximal d'entrées de sécurité conservées, plafond distinct : les
+/// entrées courantes (qu'un tiers peut provoquer) ne les évincent jamais.
+pub const LOG_MAX_SECURITY_ROWS: u64 = 10_000;
+
+/// Classe d'une entrée du journal (colonne `class`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventClass {
+    /// Entrée courante, soumise au plafond `LOG_MAX_ROWS`.
+    Routine = 0,
+    /// Preuve de sécurité (session établie, clé de contact changée), soumise
+    /// au plafond distinct `LOG_MAX_SECURITY_ROWS`.
+    Security = 1,
+}
 
 fn to_i64(v: u64) -> i64 {
     // Les secondes Unix tiennent largement dans i64.
@@ -203,6 +219,26 @@ impl Store {
     fn apply_schema(&self) -> Result<()> {
         self.conn
             .execute_batch(schema::SCHEMA_V1)
+            .map_err(map_err)?;
+        // Colonne `class` du journal, ajoutée au schéma v1 après coup : une
+        // base créée avant la reçoit ici (idempotent) ; ses entrées existantes
+        // sont classées courantes.
+        let has_class: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('transparency') \
+                 WHERE name = 'class'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_class {
+            self.conn
+                .execute_batch(schema::TRANSPARENCY_ADD_CLASS)
+                .map_err(map_err)?;
+        }
+        self.conn
+            .execute_batch(schema::TRANSPARENCY_INDEXES)
             .map_err(map_err)?;
         if self.get_meta::<u32>("schema_version")?.is_none() {
             self.put_meta("schema_version", &schema::SCHEMA_VERSION)?;
@@ -637,25 +673,54 @@ pub trait Queries {
     }
 
     /// Ajoute un événement de transparence (postcard opaque ici).
-    fn append_event(&self, at: u64, packet_id: Option<PacketId>, event: &[u8]) -> Result<()> {
+    fn append_event(
+        &self,
+        at: u64,
+        packet_id: Option<PacketId>,
+        class: EventClass,
+        event: &[u8],
+    ) -> Result<()> {
+        // Heure de purge bornée à un jour après l'entrée la plus récente :
+        // un seul événement daté du futur lointain (horloge locale déréglée)
+        // ne vide pas le journal. Une horloge qui reste en avance purge au
+        // rythme d'un jour par événement, puis normalement.
+        let newest: Option<i64> = self
+            .conn()
+            .query_row("SELECT max(at) FROM transparency", [], |r| r.get(0))
+            .map_err(map_err)?;
+        let clock = newest.map_or(at, |n| {
+            at.min(to_u64(n).saturating_add(LOG_CLOCK_SLACK_SECS))
+        });
         self.conn()
             .execute(
-                "INSERT INTO transparency(at, packet_id, event) VALUES (?1, ?2, ?3)",
-                params![to_i64(at), packet_id.map(|p| p.0.to_vec()), event],
+                "INSERT INTO transparency(at, packet_id, event, class) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    to_i64(at),
+                    packet_id.map(|p| p.0.to_vec()),
+                    event,
+                    class as i64
+                ],
             )
             .map_err(map_err)?;
         // Purge bornée, sur la même connexion (donc dans la même transaction).
+        // L'âge vaut pour toutes les classes.
         self.conn()
             .execute(
                 "DELETE FROM transparency WHERE at < ?1",
-                params![to_i64(at.saturating_sub(LOG_MAX_AGE_SECS))],
+                params![to_i64(clock.saturating_sub(LOG_MAX_AGE_SECS))],
             )
             .map_err(map_err)?;
+        // Plafond par classe : seule la classe de l'entrée ajoutée a grandi.
+        let cap = match class {
+            EventClass::Routine => LOG_MAX_ROWS,
+            EventClass::Security => LOG_MAX_SECURITY_ROWS,
+        };
         self.conn()
             .execute(
-                "DELETE FROM transparency WHERE id <= \
-                 (SELECT id FROM transparency ORDER BY id DESC LIMIT 1 OFFSET ?1)",
-                params![to_i64(LOG_MAX_ROWS)],
+                "DELETE FROM transparency WHERE class = ?2 AND id <= \
+                 (SELECT id FROM transparency WHERE class = ?2 \
+                 ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+                params![to_i64(cap), class as i64],
             )
             .map_err(map_err)?;
         Ok(())

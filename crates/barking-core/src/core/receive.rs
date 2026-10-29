@@ -4,6 +4,7 @@
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
+use super::log_limit::{LogLimiter, log_limited};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, ReceiveOutcome, SEEN_RETENTION_SECS,
     de_state, load_card, log, ser_state, session_ad, session_id,
@@ -83,7 +84,10 @@ impl Core {
         if !ack::verify(&acked, &secret) {
             return Ok(ReceiveOutcome::NotForUs);
         }
-        self.store.transaction(|tx| {
+        let Core {
+            store, log_limiter, ..
+        } = self;
+        store.transaction(|tx| {
             let Some(msg) = tx.message_by_packet(acked)? else {
                 return Ok(ReceiveOutcome::NotForUs);
             };
@@ -91,8 +95,11 @@ impl Core {
                 return Ok(ReceiveOutcome::NotForUs);
             }
             if msg.status == MessageStatus::Delivered {
-                log(
+                // Un accusé rejoué (identifiant et expiration réécrits à
+                // volonté) : regroupé au journal.
+                log_limited(
                     tx,
+                    log_limiter,
                     now,
                     Some(packet.id),
                     &TransparencyEvent::DuplicateIgnored {
@@ -124,6 +131,7 @@ impl Core {
             store,
             device,
             prekeys,
+            log_limiter,
             ..
         } = self;
         let me = device.public();
@@ -150,8 +158,9 @@ impl Core {
             // marqué vu, sinon un faux paquet portant le même identifiant
             // ferait passer l'original pour un doublon.
             if tx.is_seen(packet.id)? {
-                log(
+                log_limited(
                     tx,
+                    log_limiter,
                     now,
                     Some(packet.id),
                     &TransparencyEvent::DuplicateIgnored {
@@ -175,8 +184,8 @@ impl Core {
                 Ok(_) => Err(R_UNEXPECTED),
             };
             match opened {
-                Err(reason) => quarantine(tx, packet, now, reason),
-                Ok(o) => accept(tx, packet, o, transport, now, rng),
+                Err(reason) => quarantine(tx, log_limiter, packet, now, reason),
+                Ok(o) => accept(tx, log_limiter, packet, o, transport, now, rng),
             }
         })?;
         if let Some(p) = new_prekeys {
@@ -343,10 +352,18 @@ fn open_normal(
     Ok(Err(R_UNDECRYPTABLE))
 }
 
-/// Refus sans déchiffrement : aucun état de session ne change.
-fn quarantine(q: &impl Queries, packet: &Packet, now: u64, reason: &'static str) -> Result<RxOut> {
-    log(
+/// Refus sans déchiffrement : aucun état de session ne change. Au journal,
+/// regroupé par raison (du bruit vers ma boîte d'introduction est gratuit).
+fn quarantine(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    now: u64,
+    reason: &'static str,
+) -> Result<RxOut> {
+    log_limited(
         q,
+        limiter,
         now,
         Some(packet.id),
         &TransparencyEvent::DecryptFailed {
@@ -365,6 +382,7 @@ fn quarantine(q: &impl Queries, packet: &Packet, now: u64, reason: &'static str)
 /// Message authentifié par une session : vérifie le contenu, puis enregistre.
 fn accept(
     q: &impl Queries,
+    limiter: &mut LogLimiter,
     packet: &Packet,
     o: Opened,
     transport: &str,
@@ -373,14 +391,14 @@ fn accept(
 ) -> Result<RxOut> {
     let env = match envelope::decode(&o.pt) {
         // Pas de secret d'accusé authentifié : rien à marquer comme vu.
-        Err(_) => return reject_authenticated(q, packet, o, now, R_BAD_CONTENT, None),
+        Err(_) => return reject_authenticated(q, limiter, packet, o, now, R_BAD_CONTENT, None),
         Ok(env) => env,
     };
     // Seul l'identifiant dérivé du contenu authentifié est marqué vu, jamais
     // l'identifiant de l'en-tête en clair (qu'un relais peut réécrire).
     let authenticated_id = ack::packet_id_for(&env.ack_secret);
     if let Err(reason) = check_envelope(q, packet, &env, now)? {
-        return reject_authenticated(q, packet, o, now, reason, Some(authenticated_id));
+        return reject_authenticated(q, limiter, packet, o, now, reason, Some(authenticated_id));
     }
     let Opened {
         mut row,
@@ -492,6 +510,7 @@ fn check_envelope(
 /// ouvrait n'est pas créée.
 fn reject_authenticated(
     q: &impl Queries,
+    limiter: &mut LogLimiter,
     packet: &Packet,
     o: Opened,
     now: u64,
@@ -506,7 +525,7 @@ fn reject_authenticated(
     if let Some(id) = seen {
         q.mark_seen(id, now)?;
     }
-    quarantine(q, packet, now, reason)
+    quarantine(q, limiter, packet, now, reason)
 }
 
 /// Garde au plus `MAX_SESSIONS_PER_DEVICE` sessions avec l'appareil de `new`,
