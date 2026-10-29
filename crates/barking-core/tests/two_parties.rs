@@ -744,6 +744,44 @@ fn watched_mailboxes_cover_three_days() {
     assert_eq!(b.core.watched_mailboxes(NOW).len(), 6);
 }
 
+#[test]
+fn offline_five_days_still_watches_missed_days() {
+    let (mut a, mut b, mut rng) = pair();
+    let p = one(a.send(&b.fp(), "x", NOW, &mut rng));
+    expect_msg(b.recv(&p, NOW, &mut rng));
+    b.core.mark_polled(NOW).unwrap();
+    let later = NOW + 5 * DAY;
+    let watched = b.core.watched_mailboxes(later);
+    // Alice écrit chaque jour : la boîte du paquet est celle de Bob ce jour-là.
+    for d in day_of(NOW)..=day_of(later) + 1 {
+        let t = u64::from(d) * DAY;
+        let q = one(a.send(&b.fp(), "jour", t, &mut rng));
+        assert!(watched.contains(&q.mailbox), "jour {d} non relevé");
+    }
+}
+
+#[test]
+fn polling_window_capped_at_eight_days() {
+    let (_a, mut b, _rng) = pair();
+    let bob_dev = b.card("Bob").devices.certs[0].device;
+    b.core.mark_polled(NOW).unwrap();
+    let later = NOW + 20 * DAY;
+    let watched = b.core.watched_mailboxes(later);
+    assert_eq!(watched.len(), 8);
+    let last = day_of(later) + 1;
+    for d in last - 7..=last {
+        assert!(watched.contains(&intro_mailbox(&bob_dev, d)), "jour {d}");
+    }
+}
+
+#[test]
+fn polled_in_future_falls_back() {
+    let (_a, mut b, _rng) = pair();
+    let reference = b.core.watched_mailboxes(NOW);
+    b.core.mark_polled(NOW + 10 * DAY).unwrap();
+    assert_eq!(b.core.watched_mailboxes(NOW), reference);
+}
+
 fn arb_packet_bytes(watched: Vec<MailboxId>) -> impl Strategy<Value = Vec<u8>> {
     let n = watched.len();
     prop_oneof![

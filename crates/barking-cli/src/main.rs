@@ -391,6 +391,7 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
             }
         }
     }
+    core.mark_polled(now())?;
     if failed {
         return fail("Certains fichiers n'ont pas pu être lus");
     }

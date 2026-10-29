@@ -33,7 +33,7 @@ use crate::identity::{
     DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint, RecoveryPhrase,
     RootIdentity, safety_number,
 };
-use crate::mailbox::{MailboxId, candidate_days, intro_mailbox, session_mailbox};
+use crate::mailbox::{MailboxId, day_of, intro_mailbox, session_mailbox};
 use crate::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId};
 use crate::ratchet::RatchetState;
 use crate::store::{MessageRow, Queries, Store};
@@ -49,6 +49,10 @@ const META_DEVICE_NAME: &str = "device_name";
 const META_PREKEYS: &str = "prekeys";
 const META_DEVICE_LIST: &str = "device_list";
 const META_LINKED_BUNDLES: &str = "linked_bundles";
+/// Dernier jour (numéro de jour) où cet appareil a relevé ses boîtes.
+const META_LAST_POLLED: &str = "last_polled_day";
+/// Fenêtre de relève : 8 jours au plus.
+const MAX_POLL_SPAN_DAYS: u32 = 7;
 
 /// Âge maximal accepté d'un message (horodatage authentifié de l'enveloppe) :
 /// durée de vie d'un paquet plus un jour de décalage d'horloge.
@@ -354,7 +358,8 @@ impl Core {
     }
 
     /// Boîtes aux lettres à relever : la boîte d'introduction de cet appareil
-    /// et celles de chaque session (veille, jour, lendemain), plus la boîte de
+    /// et celles de chaque session (de la dernière relève au lendemain, 8 jours
+    /// au plus ; veille, jour et lendemain sans relève enregistrée), plus la boîte de
     /// chacun de mes messages en attente d'accusé, où l'accusé arrivera.
     ///
     /// En cas d'erreur de lecture du stockage, seules les boîtes
@@ -362,19 +367,19 @@ impl Core {
     pub fn watched_mailboxes(&self, now: u64) -> Vec<MailboxId> {
         let me = self.device.public();
         let my_id = me.id();
-        let days = candidate_days(now);
+        let days = self.watched_days(now);
         let mut out: Vec<MailboxId> = Vec::new();
         let mut push = |m: MailboxId| {
             if !out.contains(&m) {
                 out.push(m);
             }
         };
-        for d in days {
+        for &d in &days {
             push(intro_mailbox(&me, d));
         }
         if let Ok(sessions) = self.store.all_sessions() {
             for s in &sessions {
-                for d in days {
+                for &d in &days {
                     push(session_mailbox(&s.mailbox_secret, &my_id, d));
                 }
             }
@@ -389,6 +394,26 @@ impl Core {
             }
         }
         out
+    }
+
+    /// Enregistre que les boîtes ont été relevées à `now`.
+    pub fn mark_polled(&mut self, now: u64) -> Result<()> {
+        self.store.put_meta(META_LAST_POLLED, &day_of(now))
+    }
+
+    /// Jours à relever : de la dernière relève (ou de la veille) au lendemain,
+    /// 8 jours au plus. Une lecture ratée ou une relève datée du futur
+    /// (horloge reculée) ramène à la fenêtre normale.
+    fn watched_days(&self, now: u64) -> Vec<u32> {
+        let today = day_of(now);
+        let end = today.saturating_add(1);
+        let normal = today.saturating_sub(1);
+        let start = match self.store.get_meta::<u32>(META_LAST_POLLED) {
+            Ok(Some(last)) if last <= end => last.min(normal),
+            _ => normal,
+        };
+        let start = start.max(end.saturating_sub(MAX_POLL_SPAN_DAYS));
+        (start..=end).collect()
     }
 
     /// Code de sécurité à comparer avec le contact.
