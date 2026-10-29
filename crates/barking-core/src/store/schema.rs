@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS deliveries (
     status INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries(message_id);
+";
+
+/// Table `inbound` de la v2, à part : appliquée à chaque ouverture
+/// (idempotent), car des bases v2 de développement ont été créées avant son
+/// ajout. La migration v1 → v2 la crée aussi, avant de la remplir.
+pub const SCHEMA_V2_INBOUND: &str = "
 CREATE TABLE IF NOT EXISTS inbound (
     packet_id BLOB PRIMARY KEY NOT NULL,
     message_id BLOB NOT NULL
@@ -109,6 +115,7 @@ pub fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch("ALTER TABLE messages RENAME TO messages_v1;")?;
     tx.execute_batch(SCHEMA_V2_TABLES)?;
+    tx.execute_batch(SCHEMA_V2_INBOUND)?;
     {
         let mut old = tx.prepare(
             "SELECT id, contact_fp, direction, body, status, at, packet_id \

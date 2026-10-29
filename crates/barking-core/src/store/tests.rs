@@ -717,3 +717,27 @@ fn inbound_packets_map_to_their_message() {
             .is_none()
     );
 }
+
+#[test]
+fn v2_database_without_inbound_gets_it() {
+    // Base v2 de développement créée avant l'ajout de la table `inbound`.
+    let (_d, path, store) = open_tmp();
+    drop(store);
+    raw_conn(&path)
+        .execute_batch("DROP TABLE inbound;")
+        .unwrap();
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(2));
+    let fp = Fingerprint([4; 32]);
+    let mid = MessageId::incoming(&fp, &[1; 16]);
+    store
+        .insert_message(fp, Direction::In, "x", MessageStatus::Delivered, 5, mid)
+        .unwrap();
+    store.record_inbound(PacketId([1; 16]), mid).unwrap();
+    assert!(
+        store
+            .message_by_packet(PacketId([1; 16]))
+            .unwrap()
+            .is_some()
+    );
+}

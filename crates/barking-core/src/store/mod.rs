@@ -311,6 +311,9 @@ impl Store {
             schema::migrate_v1_to_v2(&self.conn).map_err(map_err)?;
         }
         self.conn
+            .execute_batch(schema::SCHEMA_V2_INBOUND)
+            .map_err(map_err)?;
+        self.conn
             .execute_batch(schema::TRANSPARENCY_INDEXES)
             .map_err(map_err)?;
         Ok(())
