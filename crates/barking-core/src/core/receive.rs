@@ -257,6 +257,9 @@ fn open_initial(
         .find(|s| s.session_id == sid)
     {
         let mut ratchet = de_state(&row.state)?;
+        if !ratchet.could_open(msg) {
+            return Ok(Err(R_UNDECRYPTABLE));
+        }
         return Ok(match ratchet.decrypt(msg, &row.ad, now) {
             Ok(pt) => Ok(Opened {
                 row,
@@ -289,6 +292,9 @@ fn open_new_session(
     };
     let mut ratchet = RatchetState::init_responder(&secrets.sk, pk.spk());
     let ad = session_ad(&secrets.ad, &peer_id, &device.public().id());
+    if !ratchet.could_open(msg) {
+        return Ok(Err(R_UNDECRYPTABLE));
+    }
     let Ok(pt) = ratchet.decrypt(msg, &ad, now) else {
         return Ok(Err(R_UNDECRYPTABLE));
     };
@@ -320,6 +326,9 @@ fn open_normal(
 ) -> Result<core::result::Result<Opened, &'static str>> {
     for row in candidates {
         let mut ratchet = de_state(&row.state)?;
+        if !ratchet.could_open(msg) {
+            continue;
+        }
         if let Ok(pt) = ratchet.decrypt(msg, &row.ad, now) {
             return Ok(Ok(Opened {
                 row,

@@ -443,3 +443,69 @@ fn remove_contact_deletes_contact_card_and_sessions_but_keeps_history() {
         ReceiveOutcome::Message { .. }
     ));
 }
+
+/// Copies d'état de ratchet faites par `decrypt` sur ce fil (compteur par fil,
+/// donc insensible aux tests parallèles).
+fn clones() -> usize {
+    crate::ratchet::STATE_CLONES.with(|c| c.get())
+}
+
+/// Même paquet avec la charge `Wire::Normal` modifiée par `f`.
+fn tamper(p: &Packet, f: impl FnOnce(&mut crate::ratchet::RatchetMessage)) -> Packet {
+    let Wire::Normal { mut msg } = postcard::from_bytes(&p.payload).unwrap() else {
+        panic!("Wire::Normal attendu");
+    };
+    f(&mut msg);
+    let payload = postcard::to_allocvec(&Wire::Normal { msg }).unwrap();
+    Packet {
+        tier: Tier::fit(payload.len()).unwrap(),
+        payload,
+        ..p.clone()
+    }
+}
+
+#[test]
+fn junk_packet_never_clones_state() {
+    use rand_core::Rng;
+    let mut p = pair();
+    let good = forge(&mut p.a, b"x", PacketId([9; 16]), &mut p.rng);
+    for _ in 0..20 {
+        let junk = tamper(&good, |m| {
+            p.rng.fill_bytes(&mut m.enc_header);
+            p.rng.fill_bytes(&mut m.ct);
+        });
+        let before = clones();
+        let out = p.b.receive(&junk.encode(), "t", NOW, &mut p.rng).unwrap();
+        assert!(matches!(
+            out,
+            ReceiveOutcome::Quarantined { .. } | ReceiveOutcome::NotForUs
+        ));
+        assert_eq!(clones(), before, "un paquet piégé ne copie pas l'état");
+    }
+    let before = clones();
+    let next =
+        p.a.send_text(&p.b.fingerprint(), "vrai", NOW, &mut p.rng)
+            .unwrap();
+    assert!(matches!(
+        p.b.receive(&next[0].encode(), "t", NOW, &mut p.rng)
+            .unwrap(),
+        ReceiveOutcome::Message { .. }
+    ));
+    assert_eq!(clones(), before + 1);
+}
+
+#[test]
+fn valid_header_bad_body_keeps_session() {
+    let mut p = pair();
+    let good =
+        p.a.send_text(&p.b.fingerprint(), "vrai", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    let bad = tamper(&good, |m| m.ct[0] ^= 1);
+    let r = reason(p.b.receive(&bad.encode(), "t", NOW, &mut p.rng).unwrap());
+    assert_eq!(r, "déchiffrement impossible");
+    match p.b.receive(&good.encode(), "t", NOW, &mut p.rng).unwrap() {
+        ReceiveOutcome::Message { text, .. } => assert_eq!(text, "vrai"),
+        other => panic!("{other:?}"),
+    }
+}

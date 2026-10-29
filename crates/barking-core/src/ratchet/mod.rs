@@ -14,6 +14,8 @@ mod tests;
 
 pub use header::RatchetMessage;
 pub use state::RatchetState;
+#[cfg(test)]
+pub(crate) use state::STATE_CLONES;
 
 /// Nombre maximal de clés de message sautées dans une même chaîne.
 pub const MAX_SKIP: u32 = 1000;

@@ -367,3 +367,37 @@ proptest! {
         prop_assert!(b.mkskipped.is_empty());
     }
 }
+
+#[test]
+fn could_open_matches_decrypt() {
+    let (mut rng, mut a, mut b) = setup(77);
+    let m = a.encrypt(b"vrai", AD, &mut rng).unwrap();
+    let before = snapshot(&b);
+    assert!(b.could_open(&m));
+    assert_eq!(snapshot(&b), before, "could_open ne modifie rien");
+    for _ in 0..1000 {
+        let mut enc_header = vec![0u8; ENC_HEADER_LEN];
+        rng.fill_bytes(&mut enc_header);
+        let junk = RatchetMessage {
+            enc_header,
+            ct: vec![1; 40],
+        };
+        assert!(!b.could_open(&junk));
+    }
+    assert!(!b.could_open(&RatchetMessage {
+        enc_header: vec![0; ENC_HEADER_LEN - 1],
+        ct: Vec::new(),
+    }));
+    assert_eq!(snapshot(&b), before);
+    assert_eq!(b.decrypt(&m, AD, T0).unwrap(), b"vrai");
+}
+
+#[test]
+fn could_open_accepts_skipped_chain_header() {
+    let (mut rng, mut a, mut b) = setup(78);
+    let m0 = a.encrypt(b"0", AD, &mut rng).unwrap();
+    let m1 = a.encrypt(b"1", AD, &mut rng).unwrap();
+    assert_eq!(b.decrypt(&m1, AD, T0).unwrap(), b"1");
+    assert!(b.could_open(&m0));
+    assert_eq!(b.decrypt(&m0, AD, T0).unwrap(), b"0");
+}

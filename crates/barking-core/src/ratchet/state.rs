@@ -12,6 +12,15 @@ use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+#[cfg(test)]
+thread_local! {
+    /// Nombre de copies d'état faites par `decrypt` sur le fil courant.
+    /// Par fil (et non global) : les tests tournent en parallèle et
+    /// mesurent des écarts sans se gêner.
+    pub(crate) static STATE_CLONES: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+}
+
 /// Clé de message sautée, rangée sous la clé d'en-tête de sa chaîne.
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub(super) struct SkippedKey {
@@ -136,11 +145,38 @@ impl RatchetState {
     /// `now` (secondes Unix) date les clés sautées ; celles mises de côté
     /// depuis plus de `MAX_SKIPPED_AGE_SECS` sont effacées avant tout essai.
     pub fn decrypt(&mut self, msg: &RatchetMessage, ad: &[u8], now: u64) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        STATE_CLONES.with(|c| c.set(c.get() + 1));
         let mut next = self.clone();
         let pt = next.decrypt_in_place(msg, ad, now)?;
         // L'ancien état est effacé à la destruction (`ZeroizeOnDrop`).
         *self = next;
         Ok(pt)
+    }
+
+    /// Pré-contrôle bon marché : l'en-tête chiffré a la bonne taille et
+    /// s'ouvre avec une clé d'en-tête sautée, `hkr` ou `nhkr` (miroir des
+    /// contrôles d'en-tête de `decrypt`, sans la purge par date : `decrypt`
+    /// tranche). Ni copie ni modification.
+    pub(crate) fn could_open(&self, msg: &RatchetMessage) -> bool {
+        let enc = &msg.enc_header;
+        if enc.len() != ENC_HEADER_LEN {
+            return false;
+        }
+        let mut tried: Vec<[u8; 32]> = Vec::new();
+        let mut skipped_ok = false;
+        for entry in &self.mkskipped {
+            if tried.contains(&entry.hk) {
+                continue;
+            }
+            tried.push(entry.hk);
+            if Header::open(&entry.hk, enc).is_ok() {
+                skipped_ok = true;
+                break;
+            }
+        }
+        tried.zeroize();
+        skipped_ok || self.decrypt_header(enc).is_ok()
     }
 
     fn decrypt_in_place(&mut self, msg: &RatchetMessage, ad: &[u8], now: u64) -> Result<Vec<u8>> {
