@@ -8,16 +8,16 @@ Chaque version `vX.Y.Z` publiée sur GitHub contient, par cible, un binaire `bar
 
 Trois contrôles se complètent :
 
-1. **Signature du mainteneur** : `SHA256SUMS.minisig` est une signature minisign de `SHA256SUMS`, vérifiée avec `keys/maintainer.pub`. Le commentaire signé doit être `barking v<version>`.
+1. **Signature du mainteneur** : `SHA256SUMS.minisig` est une signature minisign de `SHA256SUMS`, vérifiée avec `keys/maintainer.pub`. Le commentaire signé doit être exactement `barking v<version> commit <commit>`, où `<commit>` est l'identifiant complet (40 caractères hexadécimaux) du commit du tag `v<version>` chez le mainteneur au moment de signer. Le script affiche ce commit ; si le tag `v<version>` existe dans votre clone, il exige qu'il désigne le même commit (sinon il le signale : le commit n'a pas pu être contrôlé localement).
 2. **Empreintes** : chaque binaire a l'empreinte SHA-256 listée dans `SHA256SUMS`, et aucun fichier n'est en trop ni manquant.
-3. **Attestations de provenance** : GitHub certifie que chaque binaire a été produit par le workflow `.github/workflows/release.yml`, depuis le tag `refs/tags/v<version>` du dépôt. L'attestation est liée au workflow et au nom du tag, pas à l'empreinte d'un commit : un tag déplacé serait accepté, d'où l'importance du ruleset de tags décrit dans `docs/RELEASING.md`.
+3. **Attestations de provenance** : GitHub certifie que chaque binaire a été produit par le workflow `.github/workflows/release.yml`, depuis le tag `refs/tags/v<version>` du dépôt. L'attestation est liée au workflow et au nom du tag, pas à l'empreinte d'un commit : un tag déplacé serait accepté par cette étape seule, d'où l'importance du ruleset de tags décrit dans `docs/RELEASING.md` et du commit lié par la signature (contrôle 1). Les attestations produites sur un runner auto-hébergé sont refusées (`--deny-self-hosted-runners`).
 
-**Ce que la signature atteste vraiment.** Le mainteneur ne signe qu'après avoir recompilé lui-même, sur sa machine, les cibles que celle-ci sait compiler : une machine Linux x86_64 recompile `x86_64-unknown-linux-musl` ; un Mac arm64 recompile `aarch64-apple-darwin` et `aarch64-unknown-linux-musl` (Docker est alors requis). Pour ces cibles, publier un faux binaire exige de compromettre à la fois la CI et la clé hors ligne. Pour les autres cibles, la signature couvre quand même tout `SHA256SUMS`, mais elle repose sur le double build de la CI, l'attestation et l'approbation du mainteneur : une CI compromise suffirait à faire signer un binaire, sauf si quelqu'un recompile cette cible. Les reconstructions indépendantes (voir plus bas) comblent cet écart.
+**Ce que la signature atteste vraiment.** Le mainteneur ne signe qu'après avoir recompilé lui-même, sur sa machine, les cibles que celle-ci sait compiler : une machine Linux x86_64 recompile `x86_64-unknown-linux-musl` ; un Mac arm64 recompile `aarch64-unknown-linux-musl` (Docker est alors requis), et `aarch64-apple-darwin` seulement s'il a `rustup` et exactement l'Xcode et le SDK de la CI (fichier `.xcode-version`) : sinon cette cible est sautée, avec un avis explicite. Pour ces cibles, publier un faux binaire exige de compromettre à la fois la CI et la clé hors ligne. Pour les autres cibles, la signature couvre quand même tout `SHA256SUMS`, mais elle repose sur le double build de la CI, l'attestation et l'approbation du mainteneur : une CI compromise suffirait à faire signer un binaire, sauf si quelqu'un recompile cette cible. Les reconstructions indépendantes (voir plus bas) comblent cet écart.
 
 ## Prérequis
 
-- `git`, `minisign` et `gh` (GitHub CLI, connecté avec `gh auth login`) ;
-- pour la vérification complète : Docker pour les cibles Linux, ou un Mac Apple Silicon pour `aarch64-apple-darwin`.
+- `git`, `minisign` et `gh` (GitHub CLI, connecté avec `gh auth login`), en version 2.68.0 ou plus récente : c'est la première qui accepte `gh attestation verify --source-ref` (`--signer-workflow` et `--deny-self-hosted-runners` sont plus anciens) ;
+- pour la vérification complète : Docker pour les cibles Linux, et Docker aussi sur un Mac Apple Silicon. Pour `aarch64-apple-darwin`, il faut en plus `rustup` et l'Xcode indiqué dans `.xcode-version` (voir « Limites »).
 
 Clonez le dépôt et placez-vous à la racine :
 
@@ -41,7 +41,7 @@ Il se termine par `Version <version> vérifiée ✓` et un code de sortie 0. En 
 
 Options utiles :
 
-- `--from-dir <dir>` : vérifie des fichiers déjà téléchargés (`SHA256SUMS`, `SHA256SUMS.minisig` et les binaires) au lieu de passer par `gh release download` ;
+- `--from-dir <dir>` : vérifie des fichiers déjà téléchargés au lieu de passer par `gh release download`. Le répertoire doit contenir `SHA256SUMS`, `SHA256SUMS.minisig` et **tous** les binaires de la version : un binaire listé dans `SHA256SUMS` mais absent fait échouer la vérification ;
 - `--pubkey <fichier>` : utilise une autre clé publique que `keys/maintainer.pub` ;
 - `--skip-attestation` : saute l'étape 3 (par exemple hors ligne, avec `--from-dir`). Ce contrôle est alors perdu : n'en tirez pas la même confiance.
 
@@ -49,11 +49,11 @@ Options utiles :
 
     scripts/verify-release.sh <version> --rebuild --repo <owner>/barking
 
-En plus des trois contrôles, le script recompile depuis le tag `v<version>` avec `scripts/repro-build.sh`, puis compare les binaires obtenus à ceux de la version. Il recompile chaque cible qu'il sait compiler sur votre machine :
+En plus des trois contrôles, le script recompile depuis le tag `v<version>`, puis compare les binaires obtenus à ceux de la version. La recompilation utilise **l'environnement de build enregistré dans le tag** (`scripts/repro-build.sh`, `docker/repro.Dockerfile`, `.xcode-version`, `rust-toolchain.toml`, extraits du tag avec `git archive`), jamais celui de votre arbre de travail. Si le tag ne contient pas ces fichiers (version antérieure à cette procédure), le script s'arrête et le dit : recompilez alors à la main. Il recompile chaque cible qu'il sait compiler sur votre machine :
 
 - Linux x86_64 : la cible `x86_64-unknown-linux-musl`, via Docker ;
 - Linux arm64 : la cible `aarch64-unknown-linux-musl`, via Docker ;
-- macOS arm64 : la cible `aarch64-apple-darwin`, en natif, **et** la cible `aarch64-unknown-linux-musl`, qui exige Docker : sans Docker, le script échoue sur un Mac arm64.
+- macOS arm64 : la cible `aarch64-unknown-linux-musl`, qui exige Docker (sans Docker, le script échoue sur un Mac arm64) ; et la cible `aarch64-apple-darwin`, en natif, seulement avec `rustup` et l'Xcode/SDK de `.xcode-version`. Sinon, le script annonce que cette cible n'est pas recompilée ici : pour elle, la confiance repose sur le double build de la CI, l'attestation et les reconstructions indépendantes.
 
 Chaque cible Linux est compilée nativement sur son architecture, jamais en émulation. Les autres cibles ne sont pas comparées. Si aucune cible n'est compilable sur votre machine, le script échoue : il n'y a rien eu de recompilé.
 
@@ -75,7 +75,7 @@ Le binaire contient la date du commit (`SOURCE_DATE_EPOCH` est l'horodatage du c
 ### Limites
 
 - **Linux** : le build tourne dans une image Docker épinglée par son empreinte, avec un compilateur Rust 1.94.1 et des paquets pris dans un snapshot Debian daté. Docker est requis.
-- **macOS** : le build est natif, dans le répertoire fixe `/private/tmp/barking-repro-darwin`. Si ce répertoire existe déjà, le script refuse de démarrer : supprimez-le après un build interrompu. La cible de déploiement est fixée à macOS 11.0. **La reproductibilité n'est garantie qu'avec la même version de Xcode et du SDK macOS** que celle de la CI (runner `macos-14`) : avec un autre SDK, une différence ne prouve pas une altération. L'Xcode de l'image `macos-14` évolue avec le temps et `release.yml` ne l'épingle pas : une différence peut donc aussi venir d'une mise à jour de l'image. Sans `rustup`, le `rustc` du `PATH` doit être exactement la version épinglée dans `rust-toolchain.toml` (1.94.1).
+- **macOS** : le build est natif, dans le répertoire fixe `/private/tmp/barking-repro-darwin`. Si ce répertoire existe déjà, le script refuse de démarrer : supprimez-le après un build interrompu. La cible de déploiement est fixée à macOS 11.0. **La reproductibilité n'est garantie qu'avec la même version de Xcode et du SDK macOS que la CI.** Ils sont épinglés dans `.xcode-version` (runner GitHub, version de Xcode, version du SDK) ; les workflows sélectionnent cet Xcode et vérifient le SDK. `repro-build.sh` refuse de compiler cette cible si `xcodebuild -version` ou `xcrun --show-sdk-version` diffèrent (« SDK/Xcode différent de celui de la CI ») : installez cet Xcode et sélectionnez-le avec `sudo xcode-select -s /Applications/Xcode_<version>.app`. `rustup` est aussi requis : le `rustc` de Homebrew, même en 1.94.1, n'est pas la chaîne officielle et ne reproduit pas le binaire. Le script affiche les versions de Xcode, du SDK, de clang et de rustc utilisées.
 
 ## Devenir reconstructeur indépendant
 
@@ -105,6 +105,6 @@ Quand les mises à jour automatiques existeront (le code vient plus tard, le for
 ## Android et iOS
 
 - **Android** : l'APK sera reproductible à l'étape 3 de la feuille de route (spec). On comparera son contenu hors bloc de signature, comme le fait F-Droid.
-- **iOS** : une app installée depuis l'App Store **n'est pas vérifiable**. Apple chiffre chaque binaire puis le re-signe avec ses propres clés, donc l'empreinte de ce que vous installez ne peut pas être comparée à celle du code source. Ce que le projet fait à la place : documenter cette limite ici, et publier, pour les auditeurs, un build iOS construit depuis le code public. Il permettra d'auditer ce code, mais pas de prouver que la version de l'App Store en est issue (Apple chiffre et re-signe).
+- **iOS** : une app installée depuis l'App Store **n'est pas vérifiable**. Apple chiffre chaque binaire puis le re-signe avec ses propres clés, donc l'empreinte de ce que vous installez ne peut pas être comparée à celle du code source. Ce que le projet fait à la place : documenter cette limite ici, et publier, pour les auditeurs, un build iOS construit depuis le code public. Il permettra d'auditer ce code, mais pas de prouver que la version de l'App Store en est issue.
 
 Ces deux applications ne sont pas encore livrées. Aujourd'hui, seul `barking-cli` est prévu dans les versions ; `barking-node` suivra.

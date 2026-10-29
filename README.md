@@ -8,6 +8,6 @@ Prototype : la bibliothèque `barking-core` (protocole et chiffrement) et le cli
 
 ## Vérifier un binaire
 
-La chaîne de publication de `barking-cli` est en place : build reproductible, attestation par la CI GitHub, signature du mainteneur, et scripts pour vérifier et recompiler. Aucune version n'est encore publiée et la clé du mainteneur n'est pas encore publiée. La procédure et ses limites sont dans [docs/VERIFYING.md](docs/VERIFYING.md).
+La chaîne de publication de `barking-cli` est prête, pas encore éprouvée : build reproductible, attestation par la CI GitHub, signature du mainteneur, et scripts pour vérifier et recompiler. Aucune version n'est encore publiée et la clé du mainteneur n'est pas encore publiée. La procédure et ses limites sont dans [docs/VERIFYING.md](docs/VERIFYING.md).
 
 Le mainteneur trouvera la procédure de publication dans [docs/RELEASING.md](docs/RELEASING.md).
