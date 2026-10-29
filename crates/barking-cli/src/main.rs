@@ -413,43 +413,69 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
     match cmd {
         LinkCommand::Offer { out } => {
             let mut core = open_core(home)?;
-            let offer = core.link_offer(now(), &mut rand::rng())?;
+            let mut file = OutFile::open(&out)?;
+            let offer = match core.link_offer(now(), &mut rand::rng()) {
+                Ok(o) => o,
+                Err(e) => {
+                    file.discard();
+                    return Err(e.into());
+                }
+            };
             // Le fichier contient le secret de liaison : jamais affiché.
-            write_private(&out, &offer.to_bytes())?;
+            file.write(&offer.to_bytes())?;
             println!("Offre de liaison écrite : {}", out.display());
             println!("Elle est valable 10 minutes et ne sert qu'une fois.");
             println!("Remets ce fichier au nouvel appareil par un canal que tu maîtrises.");
         }
         LinkCommand::Request { offer, name, out } => {
             // Tout est lu et vérifié avant de créer le dossier.
-            let bytes = Zeroizing::new(read_limited(&offer, MAX_LINK_FILE_BYTES)?);
-            let offer = LinkOffer::from_bytes(&bytes)?;
+            let bytes = read_limited(&offer, MAX_LINK_FILE_BYTES)?;
+            let parsed = LinkOffer::from_bytes(&bytes)?;
             drop(bytes);
             let pass = read_passphrase(true)?;
+            let mut file = OutFile::open(&out)?;
             let existed = home.exists();
-            let salt = prepare_new_home(home)?;
+            let salt = match prepare_new_home(home) {
+                Ok(s) => s,
+                Err(e) => {
+                    file.discard();
+                    return Err(e);
+                }
+            };
             let key = passphrase::derive_key(&pass, &salt);
-            let request = match Core::begin_link(
+            let begun = Core::begin_link(
                 &home.join(DB_FILE),
                 &key,
-                &offer,
+                &parsed,
                 &name,
                 now(),
                 &mut rand::rng(),
-            ) {
-                Ok((_core, request)) => request,
-                Err(e) => {
-                    // Rien n'a été créé : on ne laisse pas un dossier à moitié prêt.
-                    let _ = fs::remove_file(home.join(SALT_FILE));
-                    if !existed {
-                        let _ = fs::remove_dir(home);
-                    }
-                    return Err(e.into());
+            );
+            let written = match begun {
+                Ok((core, request)) => {
+                    drop(core);
+                    file.write(&request.to_bytes())
                 }
+                Err(e) => Err(e.into()),
             };
-            write_private(&out, &request.to_bytes())?;
+            if let Err(e) = written {
+                // Aucun état à moitié prêt : un nouvel essai doit être possible.
+                for suffix in ["", "-wal", "-shm", "-journal"] {
+                    let _ = fs::remove_file(home.join(format!("{DB_FILE}{suffix}")));
+                }
+                let _ = fs::remove_file(home.join(SALT_FILE));
+                if !existed {
+                    let _ = fs::remove_dir(home);
+                }
+                file.discard();
+                return Err(e);
+            }
             println!("Demande de liaison écrite : {}", out.display());
             println!("Remets-la à l'appareil administrateur (`barking link accept`).");
+            println!(
+                "Supprime maintenant le fichier d'offre : {}",
+                offer.display()
+            );
         }
         LinkCommand::Accept {
             request,
@@ -459,11 +485,49 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
         } => {
             let bytes = read_limited(&request, MAX_LINK_FILE_BYTES)?;
             let request = LinkRequest::from_bytes(&bytes)?;
+            if history.as_ref().is_some_and(|h| *h == out) {
+                return fail("--out et --history doivent désigner deux fichiers différents");
+            }
             let mut core = open_core(home)?;
-            let outcome = core.link_device(&request, history.is_some(), now(), &mut rand::rng())?;
-            write_private(&out, &outcome.bundle.to_bytes())?;
-            if let (Some(path), Some(archive)) = (&history, &outcome.history) {
-                write_private(path, &archive.to_bytes())?;
+            // `link_device` consomme l'offre : toutes les sorties sont ouvertes
+            // et validées avant, pour ne pas perdre le paquet sur une erreur
+            // d'écriture.
+            let mut bundle_file = OutFile::open(&out)?;
+            let mut history_file = match &history {
+                Some(path) => match OutFile::open(path) {
+                    Ok(f) => Some(f),
+                    Err(e) => {
+                        bundle_file.discard();
+                        return Err(e);
+                    }
+                },
+                None => None,
+            };
+            let packets_ok = match &packets {
+                Some(dir) => check_packets_dir(dir),
+                None => Ok(()),
+            };
+            if let Err(e) = packets_ok {
+                bundle_file.discard();
+                if let Some(f) = history_file.as_mut() {
+                    f.discard();
+                }
+                return Err(e);
+            }
+            let outcome =
+                match core.link_device(&request, history.is_some(), now(), &mut rand::rng()) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        bundle_file.discard();
+                        if let Some(f) = history_file.as_mut() {
+                            f.discard();
+                        }
+                        return Err(e.into());
+                    }
+                };
+            bundle_file.write(&outcome.bundle.to_bytes())?;
+            if let (Some(file), Some(archive)) = (history_file.as_mut(), &outcome.history) {
+                file.write(&archive.to_bytes())?;
             }
             println!("Appareil lié : {}", printable(&request.name));
             println!("Paquet de liaison écrit : {}", out.display());
@@ -472,7 +536,6 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
             }
             match packets {
                 Some(dir) => {
-                    fs::create_dir_all(&dir)?;
                     for p in &outcome.packets {
                         println!("{}", write_packet(&dir, p)?.display());
                     }
@@ -489,6 +552,7 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
         LinkCommand::Finish { bundle, history } => {
             let bytes = read_limited(&bundle, MAX_LINK_BUNDLE_BYTES)?;
             let bundle = LinkBundle::from_bytes(&bytes)?;
+            drop(bytes);
             let archive = match &history {
                 Some(path) => Some(HistoryArchive::from_bytes(&read_limited(
                     path,
@@ -507,7 +571,7 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
 
 /// Lit un fichier d'au plus `max` octets : la taille est vérifiée avant la
 /// lecture, et la lecture elle-même est bornée.
-fn read_limited(path: &Path, max: usize) -> CliResult<Vec<u8>> {
+fn read_limited(path: &Path, max: usize) -> CliResult<Zeroizing<Vec<u8>>> {
     let too_large = || {
         CliError(format!(
             "{} : fichier trop volumineux (au plus {max} octets)",
@@ -522,7 +586,8 @@ fn read_limited(path: &Path, max: usize) -> CliResult<Vec<u8>> {
     if meta.len() > max as u64 {
         return Err(too_large());
     }
-    let mut buf = Vec::new();
+    // Effacé à la destruction : l'offre contient le secret de liaison.
+    let mut buf = Zeroizing::new(Vec::new());
     fs::File::open(path)?
         .take(max as u64 + 1)
         .read_to_end(&mut buf)?;
@@ -532,24 +597,79 @@ fn read_limited(path: &Path, max: usize) -> CliResult<Vec<u8>> {
     Ok(buf)
 }
 
-/// Écrit un fichier lisible par son seul propriétaire (0600).
-fn write_private(path: &Path, bytes: &[u8]) -> CliResult<()> {
-    use std::io::Write;
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+/// Fichier de sortie ouvert à l'avance, en 0600 : une erreur d'écriture
+/// possible est connue avant toute action irréversible.
+struct OutFile {
+    file: fs::File,
+    path: PathBuf,
+    created: bool,
+}
+
+impl OutFile {
+    /// Ouvre (ou crée) le fichier sans le vider.
+    fn open(path: &Path) -> CliResult<Self> {
+        let created = !path.exists();
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(path).map_err(|e| {
+            CliError(format!(
+                "{} : écriture impossible ({e}) ; rien n'a été modifié",
+                path.display()
+            ))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Un fichier déjà présent garde ses droits à l'ouverture.
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(Self {
+            file,
+            path: path.to_owned(),
+            created,
+        })
     }
-    let mut file = opts.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Un fichier déjà présent garde ses droits à l'ouverture.
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+
+    fn write(&mut self, bytes: &[u8]) -> CliResult<()> {
+        use std::io::Write;
+        let r = (|| {
+            self.file.set_len(0)?;
+            self.file.write_all(bytes)?;
+            self.file.sync_all()
+        })();
+        r.map_err(|e| {
+            CliError(format!(
+                "{} : écriture impossible ({e})",
+                self.path.display()
+            ))
+        })
     }
-    file.write_all(bytes)?;
+
+    /// Abandon : un fichier créé par nous et resté vide est supprimé.
+    fn discard(&mut self) {
+        if self.created {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Crée le dossier des paquets s'il manque et vérifie qu'on peut y écrire.
+fn check_packets_dir(dir: &Path) -> CliResult<()> {
+    let bad = |e: io::Error| {
+        CliError(format!(
+            "{} : dossier des paquets inutilisable ({e}) ; rien n'a été modifié",
+            dir.display()
+        ))
+    };
+    fs::create_dir_all(dir).map_err(bad)?;
+    let probe = dir.join(".barking-sonde");
+    fs::write(&probe, b"").map_err(bad)?;
+    let _ = fs::remove_file(&probe);
     Ok(())
 }
 

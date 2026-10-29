@@ -86,6 +86,22 @@ pub const MAX_LINK_FILE_BYTES: usize = 64 * 1024;
 /// alias), donc bien plus que l'offre ou la demande.
 pub const MAX_LINK_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    /// Limite du paquet de liaison abaissée par les tests.
+    static BUNDLE_MAX_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Taille maximale d'un paquet de liaison à la génération.
+fn bundle_max() -> usize {
+    #[cfg(test)]
+    if let Some(m) = BUNDLE_MAX_OVERRIDE.with(std::cell::Cell::get) {
+        return m;
+    }
+    MAX_LINK_BUNDLE_BYTES
+}
+
 /// Décode exactement `bytes` (postcard), au plus `max` octets ; plus gros →
 /// « fichier de liaison trop volumineux ».
 fn decode_bounded<T: DeserializeOwned>(bytes: &[u8], max: usize) -> Result<T> {
@@ -560,6 +576,11 @@ impl Core {
             contacts,
         };
         let bundle = seal_bundle(&offer.secret, &root_pub, &device.id(), &plain, rng)?;
+        // Refusé avant la transaction : T refuserait ce paquet à la lecture,
+        // et l'offre serait perdue pour rien.
+        if bundle.0.len() > bundle_max() {
+            return Err(CoreError::Link("paquet de liaison trop volumineux"));
+        }
         // L'archive ne porte que les messages des contacts copiés : T refuse
         // une archive qui en mentionne un autre.
         let history_contacts: HashSet<Fingerprint> = plain
@@ -1234,5 +1255,30 @@ mod tests {
         // Liste rafraîchie : un nouvel essai avec la même offre aboutit.
         a1.link_device(&r2, false, NOW, &mut rng).unwrap();
         assert_eq!(a1.devices.certs.len(), 3);
+    }
+
+    #[test]
+    fn oversized_bundle_refused_before_consuming_offer() {
+        let d = tempfile::tempdir().unwrap();
+        let mut rng = StdRng::seed_from_u64(12);
+        let mut a = admin(&d, "a", 1, &mut rng);
+        let offer = a.link_offer(NOW, &mut rng).unwrap();
+        let (_t, req) =
+            Core::begin_link(&d.path().join("t"), &[8; 32], &offer, "t", NOW, &mut rng).unwrap();
+        BUNDLE_MAX_OVERRIDE.with(|c| c.set(Some(10)));
+        let r = a.link_device(&req, false, NOW, &mut rng);
+        BUNDLE_MAX_OVERRIDE.with(|c| c.set(None));
+        assert_eq!(
+            r.err(),
+            Some(CoreError::Link("paquet de liaison trop volumineux"))
+        );
+        assert!(
+            a.store
+                .get_meta::<StoredOffer>(META_LINK_OFFER)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(a.devices.certs.len(), 1);
+        a.link_device(&req, false, NOW, &mut rng).unwrap();
     }
 }

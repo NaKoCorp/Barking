@@ -610,3 +610,105 @@ fn alias_command_renames_contact() {
         .failure()
         .stderr(predicate::str::contains("Contact inconnu"));
 }
+
+#[test]
+fn link_accept_unusable_output_keeps_offer_usable() {
+    let (d, alice) = party("tel-a");
+    let dt = tempfile::tempdir().unwrap();
+    let tablet = dt.path().join("home");
+    let offer = d.path().join("offre.bin");
+    let request = d.path().join("demande.bin");
+    ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
+    ok(
+        &tablet,
+        &[
+            "link",
+            "request",
+            "--offer",
+            path_arg(&offer),
+            "--name",
+            "t",
+            "--out",
+            path_arg(&request),
+        ],
+    );
+    let missing = d.path().join("absent").join("liaison.bin");
+    let bundle = d.path().join("liaison.bin");
+    // Sortie inutilisable : refusé, rien n'est consommé.
+    barking(&alice)
+        .args(["link", "accept", "--request", path_arg(&request), "--out"])
+        .arg(&missing)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("écriture impossible"));
+    // Idem pour le dossier des paquets (un fichier à la place d'un dossier).
+    let blocker = d.path().join("bloque");
+    fs::write(&blocker, b"x").unwrap();
+    barking(&alice)
+        .args(["link", "accept", "--request", path_arg(&request), "--out"])
+        .arg(&bundle)
+        .args(["--packets"])
+        .arg(blocker.join("paquets"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("dossier des paquets"));
+    assert!(!bundle.exists());
+    // Un second accept correct réussit avec la même offre.
+    ok(
+        &alice,
+        &[
+            "link",
+            "accept",
+            "--request",
+            path_arg(&request),
+            "--out",
+            path_arg(&bundle),
+        ],
+    );
+    ok(&tablet, &["link", "finish", "--bundle", path_arg(&bundle)]);
+}
+
+#[cfg(unix)]
+#[test]
+fn link_request_unwritable_output_leaves_no_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let (d, alice) = party("tel-a");
+    let offer = d.path().join("offre.bin");
+    ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
+    let ro = d.path().join("ro");
+    fs::create_dir(&ro).unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap();
+    let tablet = d.path().join("tablette");
+    let r = barking(&tablet)
+        .args([
+            "link",
+            "request",
+            "--offer",
+            path_arg(&offer),
+            "--name",
+            "t",
+            "--out",
+        ])
+        .arg(ro.join("demande.bin"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("écriture impossible"));
+    drop(r);
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!tablet.exists());
+    // Nouvel essai possible, et l'indication de supprimer l'offre s'affiche.
+    let out = ok(
+        &tablet,
+        &[
+            "link",
+            "request",
+            "--offer",
+            path_arg(&offer),
+            "--name",
+            "t",
+            "--out",
+            path_arg(&d.path().join("demande.bin")),
+        ],
+    );
+    assert!(out.contains("Supprime"), "{out}");
+}
