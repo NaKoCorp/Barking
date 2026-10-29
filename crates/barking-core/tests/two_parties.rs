@@ -88,6 +88,22 @@ fn pair() -> (Party, Party, StdRng) {
     (a, b, StdRng::seed_from_u64(99))
 }
 
+/// Lie un nouvel appareil `name` (base `path`) à l'administrateur `admin`,
+/// par le flux complet : offre, demande, acceptation, fin.
+fn link_new(
+    admin: &mut Core,
+    path: &std::path::Path,
+    key: [u8; 32],
+    name: &str,
+    rng: &mut StdRng,
+) -> Core {
+    let offer = admin.link_offer(NOW, rng).unwrap();
+    let (mut t, req) = Core::begin_link(path, &key, &offer, name, NOW, rng).unwrap();
+    let out = admin.link_device(&req, false, NOW, rng).unwrap();
+    t.finish_link(&out.bundle, None, NOW).unwrap();
+    t
+}
+
 /// Déballe un `Message`, sinon échoue.
 fn expect_msg(o: ReceiveOutcome) -> (Fingerprint, Option<String>, String, Packet) {
     match o {
@@ -496,13 +512,10 @@ fn multi_device_fanout() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(7);
     let p1 = dir.path().join("bob1.db");
-    let (mut bob1, phrase) = Core::create(&p1, &[2; 32], "tel-bob", NOW, &mut rng).unwrap();
+    let (mut bob1, _) = Core::create(&p1, &[2; 32], "tel-bob", NOW, &mut rng).unwrap();
     let p2 = dir.path().join("bob2.db");
-    let mut bob2 = Core::recover(&p2, &[3; 32], phrase.as_str(), "pc-bob", NOW, &mut rng).unwrap();
+    let mut bob2 = link_new(&mut bob1, &p2, [3; 32], "pc-bob", &mut rng);
     assert_eq!(bob1.fingerprint(), bob2.fingerprint());
-
-    let req = bob2.device_link_request("pc-bob", NOW).unwrap();
-    bob1.link_device(&req).unwrap();
     let card = bob1.contact_card("Bob").unwrap();
     // Liste initiale signée à la version `NOW`, puis `version + 1` à la liaison.
     assert_eq!(card.devices.version, NOW + 1);
@@ -539,19 +552,9 @@ fn send_to_multi_device_contact_is_one_message() {
     let mut a = Party::new("tel-alice", 1);
     let dir = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(9);
-    let (mut bob1, phrase) =
+    let (mut bob1, _) =
         Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
-    let mut bob2 = Core::recover(
-        &dir.path().join("b2"),
-        &[3; 32],
-        phrase.as_str(),
-        "b2",
-        NOW,
-        &mut rng,
-    )
-    .unwrap();
-    let req = bob2.device_link_request("b2", NOW).unwrap();
-    bob1.link_device(&req).unwrap();
+    let mut bob2 = link_new(&mut bob1, &dir.path().join("b2"), [3; 32], "b2", &mut rng);
     let card = bob1.contact_card("Bob").unwrap();
     let bob = a.core.add_contact(&card, Some("bob")).unwrap();
     let alice_card = a.card("Alice");
@@ -586,20 +589,10 @@ fn device_list_rollback_refused() {
     let mut a = Party::new("tel-alice", 1);
     let dir = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(8);
-    let (mut bob1, phrase) =
+    let (mut bob1, _) =
         Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
     let old_card = bob1.contact_card("Bob").unwrap();
-    let bob2 = Core::recover(
-        &dir.path().join("b2"),
-        &[3; 32],
-        phrase.as_str(),
-        "b2",
-        NOW,
-        &mut rng,
-    )
-    .unwrap();
-    let req = bob2.device_link_request("b2", NOW).unwrap();
-    bob1.link_device(&req).unwrap();
+    let _bob2 = link_new(&mut bob1, &dir.path().join("b2"), [3; 32], "b2", &mut rng);
     let new_card = bob1.contact_card("Bob").unwrap();
     a.core.add_contact(&new_card, Some("bob")).unwrap();
     // Une carte avec une liste plus ancienne est refusée.
@@ -881,21 +874,24 @@ fn receive_arbitrary_bytes_always_ok() {
 }
 
 #[test]
-fn link_request_proof_is_checked() {
+fn link_request_tampering_is_refused() {
+    // Toute falsification de la demande est refusée (par le MAC ; la preuve
+    // de possession sous un MAC valide est testée dans `core/link.rs`), et
+    // la demande intacte passe ensuite : un refus ne consomme pas l'offre.
     let dir = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(12);
-    let (mut bob1, phrase) =
+    let (mut bob1, _) =
         Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
-    let bob2 = Core::recover(
+    let offer = bob1.link_offer(NOW, &mut rng).unwrap();
+    let (_bob2, good) = Core::begin_link(
         &dir.path().join("b2"),
         &[3; 32],
-        phrase.as_str(),
+        &offer,
         "b2",
         NOW,
         &mut rng,
     )
     .unwrap();
-    let good = bob2.device_link_request("b2", NOW).unwrap();
     for tamper in 0..3 {
         let mut req = good.clone();
         match tamper {
@@ -903,9 +899,12 @@ fn link_request_proof_is_checked() {
             1 => req.name = "autre".into(),
             _ => req.issued_at += 1,
         }
-        assert!(bob1.link_device(&req).is_err(), "falsification {tamper}");
+        assert!(
+            bob1.link_device(&req, false, NOW, &mut rng).is_err(),
+            "falsification {tamper}"
+        );
     }
-    bob1.link_device(&good).unwrap();
+    bob1.link_device(&good, false, NOW, &mut rng).unwrap();
 }
 
 #[test]
@@ -949,17 +948,7 @@ fn revoked_device_refused_for_normal_and_initial() {
     let mut rng = StdRng::seed_from_u64(13);
     let (mut bob1, phrase) =
         Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
-    let mut bob2 = Core::recover(
-        &dir.path().join("b2"),
-        &[3; 32],
-        phrase.as_str(),
-        "b2",
-        NOW,
-        &mut rng,
-    )
-    .unwrap();
-    bob1.link_device(&bob2.device_link_request("b2", NOW).unwrap())
-        .unwrap();
+    let mut bob2 = link_new(&mut bob1, &dir.path().join("b2"), [3; 32], "b2", &mut rng);
     let v2 = bob1.contact_card("Bob").unwrap();
     let bob_fp = alice.core.add_contact(&v2, Some("bob")).unwrap();
     let alice_card = alice.card("Alice");

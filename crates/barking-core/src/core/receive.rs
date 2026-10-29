@@ -59,6 +59,9 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<ReceiveOutcome> {
+        // État local (pas le contenu du paquet) : un appareil en attente de
+        // liaison n'a ni liste d'appareils ni contacts.
+        self.ensure_linked()?;
         let Ok(packet) = Packet::decode(bytes) else {
             return Ok(ReceiveOutcome::NotForUs);
         };

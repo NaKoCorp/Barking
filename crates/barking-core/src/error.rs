@@ -26,6 +26,13 @@ pub enum CoreError {
     InvalidPhrase,
     #[error("cet appareil ne détient pas la clé racine")]
     NotAdmin,
+    /// Appareil en attente de liaison (`begin_link` sans `finish_link`) :
+    /// état local, jamais causé par le contenu d'un paquet.
+    #[error("appareil en attente de liaison")]
+    LinkPending,
+    /// Liaison refusée ; la raison est un texte fixe. Aucun état modifié.
+    #[error("liaison refusée : {0}")]
+    Link(&'static str),
 }
 
 pub type Result<T> = core::result::Result<T, CoreError>;

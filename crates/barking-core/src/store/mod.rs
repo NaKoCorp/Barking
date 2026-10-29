@@ -355,6 +355,13 @@ pub trait Queries {
         out
     }
 
+    fn delete_meta(&self, k: &str) -> Result<()> {
+        self.conn()
+            .execute("DELETE FROM meta WHERE k = ?1", params![k])
+            .map_err(map_err)?;
+        Ok(())
+    }
+
     fn upsert_contact(
         &self,
         fp: Fingerprint,

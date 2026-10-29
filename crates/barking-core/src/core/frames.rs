@@ -40,6 +40,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<ReceiveOutcome> {
+        self.ensure_linked()?;
         match self.frames.push(frame, now) {
             Ok(None) => Ok(ReceiveOutcome::Partial),
             Ok(Some(bytes)) => self.receive(&bytes, transport, now, rng),

@@ -54,6 +54,16 @@ pub enum TransparencyEvent {
     FrameRejected {
         reason: String,
     },
+    /// Côté administrateur : un nouvel appareil a été lié à mon compte.
+    DeviceLinked {
+        device: DeviceId,
+        name: String,
+    },
+    /// Côté nouvel appareil : la liaison est terminée.
+    LinkFinished {
+        device_count: u32,
+        contacts: u32,
+    },
 }
 
 /// Ce que tout relais lit dans l'en-tête en clair d'un paquet.
@@ -82,13 +92,18 @@ fn tier_label(tier: Tier) -> &'static str {
 }
 
 impl TransparencyEvent {
-    /// Preuve de sécurité : une session établie ou une clé de contact
-    /// changée. Ces entrées ont leur propre plafond au journal ; les autres
-    /// (qu'un tiers peut provoquer en masse) ne les évincent jamais.
+    /// Preuve de sécurité : une session établie, une clé de contact
+    /// changée, un appareil lié à mon compte (côté administrateur) ou une
+    /// liaison terminée (côté nouvel appareil : c'est la preuve de l'identité
+    /// qu'il a rejointe). Ces entrées ont leur propre plafond au journal ; les
+    /// autres (qu'un tiers peut provoquer en masse) ne les évincent jamais.
     pub fn is_security(&self) -> bool {
         matches!(
             self,
-            Self::SessionEstablished { .. } | Self::ContactKeyChanged { .. }
+            Self::SessionEstablished { .. }
+                | Self::ContactKeyChanged { .. }
+                | Self::DeviceLinked { .. }
+                | Self::LinkFinished { .. }
         )
     }
 
@@ -195,6 +210,17 @@ impl TransparencyEvent {
             Self::FrameRejected { reason } => format!(
                 "Trame rejetée ({reason}) : elle ne correspond pas au paquet annoncé. \
                  Le paquet n'a pas été reconstitué ; l'expéditeur le renverra."
+            ),
+            Self::DeviceLinked { name, .. } => format!(
+                "Nouvel appareil « {name} » lié à ton compte. \
+                 Tes contacts vont recevoir ta nouvelle liste d'appareils."
+            ),
+            Self::LinkFinished {
+                device_count,
+                contacts,
+            } => format!(
+                "Cet appareil est maintenant lié à ton compte ({device_count} appareils, \
+                 {contacts} contacts copiés). La clé racine n'a pas été copiée."
             ),
         }
     }
@@ -306,6 +332,14 @@ mod tests {
             TransparencyEvent::FrameRejected {
                 reason: "hash de trame incorrect".into(),
             },
+            TransparencyEvent::DeviceLinked {
+                device: DeviceId([6; 16]),
+                name: "tablette".into(),
+            },
+            TransparencyEvent::LinkFinished {
+                device_count: 2,
+                contacts: 3,
+            },
         ]
     }
 
@@ -391,14 +425,38 @@ mod tests {
     }
 
     #[test]
-    fn security_class_is_session_and_key_change_only() {
+    fn security_class_is_session_key_change_and_link_only() {
         let security: Vec<_> = all().into_iter().filter(|e| e.is_security()).collect();
-        assert_eq!(security.len(), 2);
+        assert_eq!(security.len(), 4);
         assert!(security.iter().all(|e| matches!(
             e,
             TransparencyEvent::SessionEstablished { .. }
                 | TransparencyEvent::ContactKeyChanged { .. }
+                | TransparencyEvent::DeviceLinked { .. }
+                | TransparencyEvent::LinkFinished { .. }
         )));
+    }
+
+    #[test]
+    fn describe_link_events_exact() {
+        let linked = TransparencyEvent::DeviceLinked {
+            device: DeviceId([6; 16]),
+            name: "tablette".into(),
+        };
+        assert_eq!(
+            linked.describe(),
+            "Nouvel appareil « tablette » lié à ton compte. \
+             Tes contacts vont recevoir ta nouvelle liste d'appareils."
+        );
+        let finished = TransparencyEvent::LinkFinished {
+            device_count: 2,
+            contacts: 3,
+        };
+        assert_eq!(
+            finished.describe(),
+            "Cet appareil est maintenant lié à ton compte (2 appareils, 3 contacts copiés). \
+             La clé racine n'a pas été copiée."
+        );
     }
 
     #[test]

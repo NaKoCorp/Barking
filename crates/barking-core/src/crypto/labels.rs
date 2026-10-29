@@ -62,3 +62,13 @@ pub const CONTACT_CARD: &[u8] = b"barking/v0/contact-card";
 
 /// Contexte BLAKE3 de la clé de trame : 8 octets du hash du paquet entier.
 pub const FRAME_CONTEXT: &str = "barking/v0/frame";
+
+/// Contexte BLAKE3 de la clé du MAC de la demande de liaison (dérivée du
+/// secret de liaison).
+pub const LINK_MAC: &str = "barking/v0/link/mac";
+
+/// Contexte BLAKE3 de la clé du paquet de liaison (dérivée du secret de liaison).
+pub const LINK_BUNDLE: &str = "barking/v0/link/bundle";
+
+/// Contexte BLAKE3 de la clé de l'archive d'historique (dérivée du secret de liaison).
+pub const LINK_HISTORY: &str = "barking/v0/link/history";

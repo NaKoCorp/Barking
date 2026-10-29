@@ -30,6 +30,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<Packet>> {
+        self.ensure_linked()?;
         if text.len() > MAX_TEXT_LEN {
             return Err(CoreError::TooLarge);
         }

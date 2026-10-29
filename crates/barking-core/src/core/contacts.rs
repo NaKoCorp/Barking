@@ -35,6 +35,7 @@ impl Core {
     /// - Alias déjà pris par une autre empreinte : événement `ContactKeyChanged`,
     ///   l'ancien contact est remplacé et le nouveau n'est pas vérifié.
     pub fn add_contact(&mut self, card: &ContactCard, alias: Option<&str>) -> Result<Fingerprint> {
+        self.ensure_linked()?;
         card.verify()?;
         let fp = card.fingerprint();
         if fp == self.fingerprint() {
@@ -125,6 +126,7 @@ impl Core {
     /// conservé. Sert à se débloquer après l'ajout d'une carte frauduleuse
     /// qui revendiquait les clés d'un vrai contact. Inconnu : `UnknownContact`.
     pub fn remove_contact(&mut self, contact: &Fingerprint) -> Result<()> {
+        self.ensure_linked()?;
         self.store.transaction(|tx| {
             tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
             tx.delete_contact(*contact)
@@ -172,7 +174,7 @@ impl Core {
 }
 
 /// Deux appareils partagent-ils un identifiant ou une clé publique ?
-fn overlaps(a: &DevicePublic, b: &DevicePublic) -> bool {
+pub(super) fn overlaps(a: &DevicePublic, b: &DevicePublic) -> bool {
     a.id() == b.id() || a.dh == b.dh || a.sig == b.sig
 }
 

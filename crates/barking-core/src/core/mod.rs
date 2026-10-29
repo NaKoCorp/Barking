@@ -8,10 +8,13 @@
 //!
 //! Découpage : `contacts.rs` (cartes, alias, vérification), `send.rs`
 //! (`send_text`), `receive.rs` (`receive`), `frames.rs` (fragmentation et
-//! réassemblage des trames).
+//! réassemblage des trames), `link.rs` (liaison d'un nouvel appareil),
+//! `history.rs` (archive de l'historique transférée à la liaison).
 
 mod contacts;
 mod frames;
+mod history;
+mod link;
 mod log_limit;
 mod receive;
 mod send;
@@ -23,7 +26,6 @@ use core::fmt;
 use std::path::Path;
 
 use rand_core::CryptoRng;
-use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::contact::ContactCard;
@@ -31,8 +33,8 @@ use crate::fragment::Reassembler;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
 use crate::identity::{
-    DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint, RecoveryPhrase,
-    RootIdentity, safety_number,
+    DeviceCertificate, DeviceId, DeviceKeys, DeviceList, Fingerprint, RecoveryPhrase, RootIdentity,
+    safety_number,
 };
 use crate::mailbox::{MailboxId, day_of, intro_mailbox, session_mailbox};
 use crate::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId};
@@ -43,6 +45,10 @@ use crate::{CoreError, Result};
 
 pub use contacts::ContactSummary;
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
+pub use history::HistoryArchive;
+pub use link::{
+    ContactSnapshot, LINK_OFFER_TTL_SECS, LinkBundle, LinkOffer, LinkOutcome, LinkRequest,
+};
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
 
 use log_limit::LogLimiter;
@@ -121,18 +127,6 @@ impl fmt::Debug for ReceiveOutcome {
     }
 }
 
-/// Demande de liaison d'un nouvel appareil (voir [`Core::device_link_request`]).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct LinkRequest {
-    pub device: DevicePublic,
-    pub bundle: PrekeyBundle,
-    pub name: String,
-    pub issued_at: u64,
-    /// Preuve de possession (`DeviceKeys::possession_proof`).
-    #[serde(with = "crate::identity::device::sig_bytes")]
-    pub device_sig: [u8; 64],
-}
-
 /// Cœur de la messagerie pour un appareil.
 pub struct Core {
     store: Store,
@@ -142,8 +136,13 @@ pub struct Core {
     prekeys: PrekeySecrets,
     /// Ma liste d'appareils signée (la plus récente que je connais).
     devices: DeviceList,
-    /// Paquets de clés de mes autres appareils, reçus par `link_device`.
+    /// Paquets de clés de mes autres appareils (`link_device` sur
+    /// l'administrateur, paquet de liaison sur un appareil lié).
     linked_bundles: Vec<PrekeyBundle>,
+    /// En attente de liaison (`begin_link` sans `finish_link`) : `devices`
+    /// est alors une liste factice (voir `link.rs`) et toute opération qui
+    /// exige un appareil lié renvoie `CoreError::LinkPending`.
+    pending: bool,
     /// Trames reçues d'un paquet encore incomplet (en mémoire, non persisté).
     frames: Reassembler,
     /// Regroupement des événements bruyants au journal (trames rejetées,
@@ -157,6 +156,7 @@ impl fmt::Debug for Core {
             .field("fingerprint", &self.fingerprint().to_string())
             .field("device", &self.device.public().id())
             .field("admin", &self.root.is_some())
+            .field("pending", &self.pending)
             .finish_non_exhaustive()
     }
 }
@@ -220,16 +220,37 @@ impl Core {
             tx.put_meta(META_DEVICE_LIST, &devices)?;
             tx.put_meta(META_LINKED_BUNDLES, &linked_bundles)
         })?;
-        Ok(Core {
+        Ok(Core::assemble(
             store,
-            root: Some(root),
+            Some(root),
             device,
             prekeys,
             devices,
             linked_bundles,
+            false,
+        ))
+    }
+
+    fn assemble(
+        store: Store,
+        root: Option<RootIdentity>,
+        device: DeviceKeys,
+        prekeys: PrekeySecrets,
+        devices: DeviceList,
+        linked_bundles: Vec<PrekeyBundle>,
+        pending: bool,
+    ) -> Core {
+        Core {
+            store,
+            root,
+            device,
+            prekeys,
+            devices,
+            linked_bundles,
+            pending,
             frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
             log_limiter: LogLimiter::default(),
-        })
+        }
     }
 
     /// Rouvre une base existante. Mauvaise clé : `StoreLocked`. Les clés
@@ -258,23 +279,27 @@ impl Core {
         let prekeys = store
             .get_meta::<PrekeySecrets>(META_PREKEYS)?
             .ok_or_else(|| CoreError::Store("paquets de clés absents".into()))?;
-        let devices = store
-            .get_meta::<DeviceList>(META_DEVICE_LIST)?
-            .ok_or_else(|| CoreError::Store("liste d'appareils absente".into()))?;
+        // Appareil en attente de liaison : pas encore de liste signée.
+        let pending_root = link::pending_root(&store)?;
+        let devices = match pending_root {
+            Some(root) => link::pending_devices(root),
+            None => store
+                .get_meta::<DeviceList>(META_DEVICE_LIST)?
+                .ok_or_else(|| CoreError::Store("liste d'appareils absente".into()))?,
+        };
         let linked_bundles = store
             .get_meta::<Vec<PrekeyBundle>>(META_LINKED_BUNDLES)?
             .unwrap_or_default();
         store.transaction(|tx| sweep_skipped(tx, now))?;
-        Ok(Core {
+        Ok(Core::assemble(
             store,
             root,
             device,
             prekeys,
             devices,
             linked_bundles,
-            frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
-            log_limiter: LogLimiter::default(),
-        })
+            pending_root.is_some(),
+        ))
     }
 
     /// Empreinte de mon identité (racine).
@@ -284,6 +309,7 @@ impl Core {
 
     /// Ma carte de contact signée : liste d'appareils et un paquet de clés par appareil.
     pub fn contact_card(&self, display_name: &str) -> Result<ContactCard> {
+        self.ensure_linked()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
         let mut bundles = vec![self.prekeys.bundle(&self.device, false)];
         bundles.extend(
@@ -295,78 +321,6 @@ impl Core {
         ContactCard::sign(root, display_name, self.devices.clone(), bundles)
     }
 
-    /// Demande de liaison : ce qu'un nouvel appareil transmet à l'appareil
-    /// administrateur (hors bande ; le flux QR/Noise de la spec viendra plus
-    /// tard). Contient la preuve de possession signée par cet appareil.
-    pub fn device_link_request(&self, name: &str, now: u64) -> Result<LinkRequest> {
-        let device_sig = self
-            .device
-            .possession_proof(&self.devices.root, name, now)?;
-        Ok(LinkRequest {
-            device: self.device.public(),
-            bundle: self.prekeys.bundle(&self.device, false),
-            name: name.to_owned(),
-            issued_at: now,
-            device_sig,
-        })
-    }
-
-    /// Ajoute un appareil à mon identité : vérifie sa preuve de possession,
-    /// émet son certificat, signe la liste `version + 1` et garde son paquet
-    /// de clés pour `contact_card`.
-    pub fn link_device(&mut self, req: &LinkRequest) -> Result<()> {
-        let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
-        let device = req.device;
-        req.bundle.verify()?;
-        if req.bundle.device != device {
-            return Err(CoreError::Malformed("paquet de clés d'un autre appareil"));
-        }
-        if req.bundle.opk.is_some() {
-            return Err(CoreError::Malformed("clé à usage unique interdite"));
-        }
-        if device == self.device.public() {
-            return Err(CoreError::Malformed("appareil déjà lié"));
-        }
-        if contacts::claimed_by_other(&self.store, None, &[device])? {
-            return Err(CoreError::Malformed("appareil déjà associé à un contact"));
-        }
-        let version = self
-            .devices
-            .version
-            .checked_add(1)
-            .ok_or(CoreError::TooLarge)?;
-        let cert = DeviceCertificate::issue_with_proof(
-            root,
-            device,
-            &req.name,
-            req.issued_at,
-            req.device_sig,
-        )?;
-        let mut certs: Vec<DeviceCertificate> = self
-            .devices
-            .certs
-            .iter()
-            .filter(|c| c.device != device)
-            .cloned()
-            .collect();
-        certs.push(cert);
-        let devices = DeviceList::sign(root, version, certs)?;
-        let mut linked: Vec<PrekeyBundle> = self
-            .linked_bundles
-            .iter()
-            .filter(|b| b.device != device)
-            .cloned()
-            .collect();
-        linked.push(req.bundle.clone());
-        self.store.transaction(|tx| {
-            tx.put_meta(META_DEVICE_LIST, &devices)?;
-            tx.put_meta(META_LINKED_BUNDLES, &linked)
-        })?;
-        self.devices = devices;
-        self.linked_bundles = linked;
-        Ok(())
-    }
-
     /// Boîtes aux lettres à relever : la boîte d'introduction de cet appareil
     /// et celles de chaque session (de la dernière relève au lendemain, 9 jours
     /// au plus ; veille, jour et lendemain sans relève enregistrée), plus la boîte de
@@ -375,6 +329,10 @@ impl Core {
     /// En cas d'erreur de lecture du stockage, seules les boîtes
     /// d'introduction sont renvoyées (`receive` refait le calcul lui-même).
     pub fn watched_mailboxes(&self, now: u64) -> Vec<MailboxId> {
+        // En attente de liaison : rien à relever (`receive` refuserait).
+        if self.pending {
+            return Vec::new();
+        }
         let me = self.device.public();
         let my_id = me.id();
         let days = self.watched_days(now);
@@ -438,6 +396,7 @@ impl Core {
 
     /// Marque le contact comme vérifié (code de sécurité comparé).
     pub fn mark_verified(&mut self, contact: &Fingerprint) -> Result<()> {
+        self.ensure_linked()?;
         self.store.transaction(|tx| {
             let row = tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
             tx.upsert_contact(row.fp, &row.card, &row.alias, true)
