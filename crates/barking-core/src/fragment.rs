@@ -1,31 +1,42 @@
 //! Fragmentation et réassemblage pour les liaisons à petite MTU (LoRa).
 //!
-//! Trame = 8 octets de `PacketId`, `index u8`, `count u8`, puis un morceau du paquet.
+//! Trame = 8 octets de clé (hash du paquet entier), `index u8`, `count u8`,
+//! puis un morceau du paquet. Le réassemblage recalcule la clé : une trame
+//! falsifiée ou contradictoire est détectée et l'entrée abandonnée.
 
+use crate::crypto::labels::FRAME_CONTEXT;
 use crate::error::{CoreError, Result};
-use crate::packet::PacketId;
 
 /// Longueur de l'en-tête de trame.
 pub const FRAG_HEADER_LEN: usize = 10;
 /// MTU minimale acceptée : en-tête + 64 octets de données.
 const MIN_MTU: usize = 74;
 
+/// Clé de trame : 8 premiers octets du hash BLAKE3 du paquet entier.
+pub fn frame_key(packet: &[u8]) -> [u8; 8] {
+    let h = blake3::derive_key(FRAME_CONTEXT, packet);
+    let mut k = [0u8; 8];
+    k.copy_from_slice(&h[..8]);
+    k
+}
+
 /// Découpe `packet` en trames d'au plus `mtu` octets (en-tête de trame compris).
 ///
 /// Exige `mtu >= 74` et au plus 255 trames, sinon `TooLarge`. Un paquet vide
 /// donne tout de même une trame.
-pub fn fragment(packet: &[u8], id: &PacketId, mtu: usize) -> Result<Vec<Vec<u8>>> {
+pub fn fragment(packet: &[u8], mtu: usize) -> Result<Vec<Vec<u8>>> {
     if mtu < MIN_MTU {
         return Err(CoreError::TooLarge);
     }
     let chunk = mtu - FRAG_HEADER_LEN;
     let count = packet.len().div_ceil(chunk).max(1);
     let count_u8 = u8::try_from(count).map_err(|_| CoreError::TooLarge)?;
+    let key = frame_key(packet);
     let mut frames = Vec::with_capacity(count);
     for index in 0..count {
         let part = packet.chunks(chunk).nth(index).unwrap_or(&[]);
         let mut f = Vec::with_capacity(FRAG_HEADER_LEN + part.len());
-        f.extend_from_slice(&id.0[..8]);
+        f.extend_from_slice(&key);
         // `index < count <= 255` : la conversion ne peut pas échouer.
         f.push(index as u8);
         f.push(count_u8);
@@ -94,6 +105,9 @@ impl Reassembler {
             return Err(CoreError::Malformed("fragment vide"));
         }
         if count == 1 {
+            if frame_key(chunk) != key {
+                return Err(CoreError::Malformed("hash de trame incorrect"));
+            }
             return Ok(Some(chunk.to_vec()));
         }
 
@@ -122,8 +136,14 @@ impl Reassembler {
         if entry.count != count {
             return Err(CoreError::Malformed("nombre de fragments incohérent"));
         }
-        if entry.parts[index].is_some() {
-            return Ok(None);
+        if let Some(prev) = &entry.parts[index] {
+            if prev.as_slice() == chunk {
+                return Ok(None);
+            }
+            // Deux contenus pour le même index : l'une des deux trames est
+            // fausse, on abandonne tout le paquet.
+            self.entries.remove(pos);
+            return Err(CoreError::Malformed("trames contradictoires"));
         }
         // Cohérence des longueurs : tous les morceaux sauf le dernier ont la
         // même longueur, et le dernier n'est pas plus long.
@@ -154,6 +174,9 @@ impl Reassembler {
         for p in done.parts.into_iter().flatten() {
             out.extend_from_slice(&p);
         }
+        if frame_key(&out) != done.key {
+            return Err(CoreError::Malformed("hash de trame incorrect"));
+        }
         Ok(Some(out))
     }
 }
@@ -161,7 +184,7 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{Kind, Packet, Tier};
+    use crate::packet::{Kind, Packet, PacketId, Tier};
     use proptest::prelude::*;
 
     fn pid(n: u8) -> PacketId {
@@ -175,7 +198,7 @@ mod tests {
     #[test]
     fn lora_mtu_200() {
         let pkt = bytes(1024, 3);
-        let frames = fragment(&pkt, &pid(1), 200).unwrap();
+        let frames = fragment(&pkt, 200).unwrap();
         assert_eq!(frames.len(), 6);
         assert!(frames.iter().all(|f| f.len() <= 200));
         let mut r = Reassembler::new(8, 60);
@@ -206,7 +229,7 @@ mod tests {
         };
         let enc = p.encode();
         assert_eq!(enc.len(), 245);
-        let frames = fragment(&enc, &p.id, 255).unwrap();
+        let frames = fragment(&enc, 255).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].len(), 255);
     }
@@ -214,7 +237,7 @@ mod tests {
     #[test]
     fn single_frame_when_fits() {
         let pkt = bytes(50, 0);
-        let frames = fragment(&pkt, &pid(3), 255).unwrap();
+        let frames = fragment(&pkt, 255).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0][9], 1);
         let mut r = Reassembler::new(4, 60);
@@ -224,7 +247,7 @@ mod tests {
     #[test]
     fn duplicates_ignored() {
         let pkt = bytes(500, 9);
-        let frames = fragment(&pkt, &pid(4), 200).unwrap();
+        let frames = fragment(&pkt, 200).unwrap();
         let mut r = Reassembler::new(4, 60);
         assert!(r.push(&frames[0], 0).unwrap().is_none());
         assert!(r.push(&frames[0], 0).unwrap().is_none());
@@ -235,7 +258,7 @@ mod tests {
     #[test]
     fn missing_fragment_never_completes_then_expires() {
         let pkt = bytes(500, 9);
-        let frames = fragment(&pkt, &pid(5), 200).unwrap();
+        let frames = fragment(&pkt, 200).unwrap();
         let mut r = Reassembler::new(4, 60);
         assert!(r.push(&frames[0], 0).unwrap().is_none());
         assert!(r.push(&frames[1], 10).unwrap().is_none());
@@ -252,44 +275,35 @@ mod tests {
     fn pending_bounded() {
         let mut r = Reassembler::new(4, 1000);
         for n in 0..10u8 {
-            let frames = fragment(&bytes(500, n), &pid(n), 200).unwrap();
+            let frames = fragment(&bytes(500, n), 200).unwrap();
             assert!(r.push(&frames[0], n as u64).unwrap().is_none());
             assert!(r.pending() <= 4);
         }
         assert_eq!(r.pending(), 4);
         // Le plus ancien (0) a été évincé, le plus récent (9) survit.
-        let f0 = fragment(&bytes(500, 0), &pid(0), 200).unwrap();
+        let f0 = fragment(&bytes(500, 0), 200).unwrap();
         assert!(r.push(&f0[1], 20).unwrap().is_none());
         assert!(r.push(&f0[2], 20).unwrap().is_none());
-        let f9 = fragment(&bytes(500, 9), &pid(9), 200).unwrap();
+        let f9 = fragment(&bytes(500, 9), 200).unwrap();
         assert!(r.push(&f9[1], 20).unwrap().is_none());
         assert_eq!(r.push(&f9[2], 20).unwrap().unwrap(), bytes(500, 9));
     }
 
     #[test]
     fn mtu_too_small_rejected() {
-        assert_eq!(
-            fragment(&bytes(100, 0), &pid(1), 73),
-            Err(CoreError::TooLarge)
-        );
-        assert!(fragment(&bytes(100, 0), &pid(1), 74).is_ok());
+        assert_eq!(fragment(&bytes(100, 0), 73), Err(CoreError::TooLarge));
+        assert!(fragment(&bytes(100, 0), 74).is_ok());
     }
 
     #[test]
     fn too_many_fragments_rejected() {
-        assert_eq!(
-            fragment(&bytes(64 * 256, 0), &pid(1), 74),
-            Err(CoreError::TooLarge)
-        );
-        assert_eq!(
-            fragment(&bytes(64 * 255, 0), &pid(1), 74).unwrap().len(),
-            255
-        );
+        assert_eq!(fragment(&bytes(64 * 256, 0), 74), Err(CoreError::TooLarge));
+        assert_eq!(fragment(&bytes(64 * 255, 0), 74).unwrap().len(), 255);
     }
 
     #[test]
     fn inconsistent_count_rejected() {
-        let frames = fragment(&bytes(500, 1), &pid(6), 200).unwrap();
+        let frames = fragment(&bytes(500, 1), 200).unwrap();
         let mut r = Reassembler::new(4, 60);
         r.push(&frames[0], 0).unwrap();
         let mut bad = frames[1].clone();
@@ -308,6 +322,112 @@ mod tests {
         let mut f = vec![0u8; 8];
         f.extend_from_slice(&[0, 3]); // morceau vide
         assert!(r.push(&f, 0).is_err());
+    }
+
+    #[test]
+    fn frame_key_is_content_hash() {
+        assert_eq!(frame_key(b"abc"), frame_key(b"abc"));
+        assert_ne!(frame_key(b"abc"), frame_key(b"abd"));
+        let p = bytes(500, 2);
+        for f in fragment(&p, 200).unwrap() {
+            assert_eq!(&f[..8], &frame_key(&p));
+        }
+    }
+
+    #[test]
+    fn single_frame_is_hash_checked() {
+        let p = bytes(50, 1);
+        let frames = fragment(&p, 255).unwrap();
+        assert_eq!(frames.len(), 1);
+        let mut r = Reassembler::new(4, 60);
+        assert_eq!(r.push(&frames[0], 0).unwrap(), Some(p));
+        let mut bad = frames[0].clone();
+        bad[FRAG_HEADER_LEN + 3] ^= 1;
+        assert!(r.push(&bad, 0).is_err());
+    }
+
+    #[test]
+    fn tampered_chunk_never_yields() {
+        let p = bytes(500, 4);
+        let mut frames = fragment(&p, 200).unwrap();
+        assert_eq!(frames.len(), 3);
+        frames[1][FRAG_HEADER_LEN + 5] ^= 0x40;
+        let mut r = Reassembler::new(4, 60);
+        let n = frames.len();
+        for (i, f) in frames.iter().enumerate() {
+            let res = r.push(f, 0);
+            assert!(!matches!(res, Ok(Some(_))));
+            if i == n - 1 {
+                assert!(res.is_err());
+            }
+        }
+        assert_eq!(r.pending(), 0);
+    }
+
+    #[test]
+    fn contradictory_index_drops_entry() {
+        let p = bytes(500, 6);
+        let frames = fragment(&p, 200).unwrap();
+        let mut r = Reassembler::new(4, 60);
+        assert!(r.push(&frames[0], 0).unwrap().is_none());
+        assert_eq!(r.pending(), 1);
+        let mut forged = frames[0].clone();
+        forged[FRAG_HEADER_LEN] ^= 1;
+        assert!(matches!(r.push(&forged, 0), Err(CoreError::Malformed(_))));
+        assert_eq!(r.pending(), 0);
+        // Les trames légitimes reconstituent le paquet.
+        assert!(r.push(&frames[0], 0).unwrap().is_none());
+        assert!(r.push(&frames[1], 0).unwrap().is_none());
+        assert_eq!(r.push(&frames[2], 0).unwrap().unwrap(), p);
+    }
+
+    #[test]
+    fn identical_duplicate_ignored() {
+        let p = bytes(500, 8);
+        let frames = fragment(&p, 200).unwrap();
+        let mut r = Reassembler::new(4, 60);
+        assert!(r.push(&frames[1], 0).unwrap().is_none());
+        assert!(r.push(&frames[1], 0).unwrap().is_none());
+        assert_eq!(r.pending(), 1);
+        assert!(r.push(&frames[0], 0).unwrap().is_none());
+        assert_eq!(r.push(&frames[2], 0).unwrap().unwrap(), p);
+    }
+
+    proptest! {
+        #[test]
+        fn any_order_with_duplicates_roundtrips(
+            len in 1usize..4000,
+            mtu in 74usize..=255,
+            seed in any::<u64>(),
+            dups in proptest::collection::vec(0usize..3, 64),
+        ) {
+            let p = bytes(len, 11);
+            let Ok(frames) = fragment(&p, mtu) else { return Ok(()); };
+            let mut seq: Vec<&Vec<u8>> = Vec::new();
+            for (i, f) in frames.iter().enumerate() {
+                // Un paquet d'une trame dupliqué rendrait deux fois le paquet.
+                let extra = if frames.len() > 1 { dups[i % 64] } else { 0 };
+                for _ in 0..=extra { seq.push(f); }
+            }
+            let n = seq.len();
+            for i in (1..n).rev() {
+                let j = (seed.wrapping_mul(6364136223846793005).wrapping_add(i as u64) >> 33) as usize % (i + 1);
+                seq.swap(i, j);
+            }
+            let mut r = Reassembler::new(4, 60);
+            let mut done = 0;
+            for f in seq {
+                // Des doublons arrivant après la complétion repartent sur une
+                // nouvelle entrée qui peut se compléter à son tour : la
+                // déduplication des paquets est l'affaire de la couche
+                // au-dessus. Chaque paquet rendu doit être le bon.
+                if let Some(out) = r.push(f, 0).unwrap() {
+                    prop_assert_eq!(out, p.clone());
+                    done += 1;
+                }
+            }
+            prop_assert!(done >= 1);
+        }
     }
 
     proptest! {
@@ -356,7 +476,7 @@ mod tests {
             seed in any::<u64>(),
         ) {
             let pkt = bytes(len, 5);
-            let Ok(mut frames) = fragment(&pkt, &pid(1), mtu) else { return Ok(()); };
+            let Ok(mut frames) = fragment(&pkt, mtu) else { return Ok(()); };
             // Ordre mélangé (déterministe selon la graine).
             let n = frames.len();
             for i in (1..n).rev() {
@@ -386,7 +506,7 @@ mod tests {
         #[test]
         fn proptest_roundtrip(len in 1usize..3000, mtu in 74usize..400) {
             let pkt = bytes(len, 7);
-            if let Ok(frames) = fragment(&pkt, &pid(9), mtu) {
+            if let Ok(frames) = fragment(&pkt, mtu) {
                 let mut r = Reassembler::new(2, 60);
                 let mut out = None;
                 for f in &frames { out = r.push(f, 0).unwrap(); }

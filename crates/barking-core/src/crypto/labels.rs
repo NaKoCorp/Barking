@@ -59,3 +59,6 @@ pub const INITIAL_SEAL: &[u8] = b"barking/v0/initial-seal";
 
 /// Domaine de signature de la carte de contact par la racine.
 pub const CONTACT_CARD: &[u8] = b"barking/v0/contact-card";
+
+/// Contexte BLAKE3 de la clé de trame : 8 octets du hash du paquet entier.
+pub const FRAME_CONTEXT: &str = "barking/v0/frame";
