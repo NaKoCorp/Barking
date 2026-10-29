@@ -382,6 +382,7 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
                 }
             }
             ReceiveOutcome::AckReceived { .. } => println!("{label} : livré ✓"),
+            ReceiveOutcome::Partial => println!("{label} : trame partielle"),
             ReceiveOutcome::Duplicate => println!("{label} : doublon"),
             ReceiveOutcome::NotForUs => println!("{label} : pas pour toi"),
             ReceiveOutcome::Expired => println!("{label} : expiré"),

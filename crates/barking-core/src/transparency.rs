@@ -50,6 +50,10 @@ pub enum TransparencyEvent {
         old: Fingerprint,
         new: Fingerprint,
     },
+    /// Trame rejetée au réassemblage ; `reason` est un texte fixe.
+    FrameRejected {
+        reason: String,
+    },
 }
 
 /// Ce que tout relais lit dans l'en-tête en clair d'un paquet.
@@ -178,6 +182,10 @@ impl TransparencyEvent {
                  nouvelle {new}). Vérifie le numéro de sécurité avec cette personne \
                  avant de continuer."
             ),
+            Self::FrameRejected { reason } => format!(
+                "Trame rejetée ({reason}) : elle ne correspond pas au paquet annoncé. \
+                 Le paquet n'a pas été reconstitué ; l'expéditeur le renverra."
+            ),
         }
     }
 }
@@ -284,6 +292,9 @@ mod tests {
                 alias: "Alice".into(),
                 old: fp(4),
                 new: fp(5),
+            },
+            TransparencyEvent::FrameRejected {
+                reason: "hash de trame incorrect".into(),
             },
         ]
     }

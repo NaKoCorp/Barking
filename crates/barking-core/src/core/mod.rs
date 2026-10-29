@@ -7,9 +7,11 @@
 //! transaction du stockage.
 //!
 //! Découpage : `contacts.rs` (cartes, alias, vérification), `send.rs`
-//! (`send_text`), `receive.rs` (`receive`).
+//! (`send_text`), `receive.rs` (`receive`), `frames.rs` (fragmentation et
+//! réassemblage des trames).
 
 mod contacts;
+mod frames;
 mod receive;
 mod send;
 
@@ -24,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::contact::ContactCard;
+use crate::fragment::Reassembler;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
 use crate::identity::{
@@ -38,6 +41,7 @@ use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
 pub use contacts::ContactSummary;
+pub use frames::{FRAME_TTL_SECS, MAX_PENDING_FRAMES};
 
 const META_ROOT: &str = "root_seed";
 const META_DEVICE: &str = "device_keys";
@@ -69,6 +73,8 @@ pub enum ReceiveOutcome {
     AckReceived {
         packet_id: PacketId,
     },
+    /// Trame acceptée, mais le paquet qu'elle annonce est encore incomplet.
+    Partial,
     Duplicate,
     NotForUs,
     Expired,
@@ -93,6 +99,7 @@ impl fmt::Debug for ReceiveOutcome {
                 .debug_struct("AckReceived")
                 .field("packet_id", packet_id)
                 .finish(),
+            Self::Partial => f.write_str("Partial"),
             Self::Duplicate => f.write_str("Duplicate"),
             Self::NotForUs => f.write_str("NotForUs"),
             Self::Expired => f.write_str("Expired"),
@@ -127,6 +134,8 @@ pub struct Core {
     devices: DeviceList,
     /// Paquets de clés de mes autres appareils, reçus par `link_device`.
     linked_bundles: Vec<PrekeyBundle>,
+    /// Trames reçues d'un paquet encore incomplet (en mémoire, non persisté).
+    frames: Reassembler,
 }
 
 impl fmt::Debug for Core {
@@ -205,6 +214,7 @@ impl Core {
             prekeys,
             devices,
             linked_bundles,
+            frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
         })
     }
 
@@ -245,6 +255,7 @@ impl Core {
             prekeys,
             devices,
             linked_bundles,
+            frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
         })
     }
 

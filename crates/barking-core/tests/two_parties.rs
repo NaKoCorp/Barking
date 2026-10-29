@@ -1154,3 +1154,100 @@ fn removed_or_replaced_contact_leaves_no_outbox_rows() {
         .unwrap();
     assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
 }
+
+#[test]
+fn large_packet_crosses_lora_mtu() {
+    let (mut a, mut b, mut rng) = pair();
+    let text = "é".repeat(1900);
+    let p = one(a.send(&b.fp(), &text, NOW, &mut rng));
+    assert_eq!(p.tier, Tier::L);
+    let frames = a.core.frames(&p.encode(), 255).unwrap();
+    assert!(frames.len() > 60, "{} trames", frames.len());
+    assert!(frames.iter().all(|f| f.len() <= 255));
+    let n = frames.len();
+    for (i, f) in frames.iter().rev().enumerate() {
+        let out = b.core.receive_frame(f, T, NOW, &mut rng).unwrap();
+        if i + 1 < n {
+            assert!(matches!(out, ReceiveOutcome::Partial), "{out:?}");
+        } else {
+            let (_, _, got, _) = expect_msg(out);
+            assert_eq!(got, text);
+        }
+    }
+}
+
+#[test]
+fn tampered_frame_is_rejected_and_logged() {
+    let (mut a, mut b, mut rng) = pair();
+    let text = "secret-très-privé ".repeat(100);
+    let p = one(a.send(&b.fp(), &text, NOW, &mut rng));
+    let frames = a.core.frames(&p.encode(), 255).unwrap();
+    assert!(frames.len() > 1);
+    let mut bad = frames.clone();
+    let last = bad[1].len() - 1;
+    bad[1][last] ^= 0x01;
+    let n = bad.len();
+    for (i, f) in bad.iter().enumerate() {
+        let out = b.core.receive_frame(f, T, NOW, &mut rng).unwrap();
+        if i + 1 < n {
+            assert!(matches!(out, ReceiveOutcome::Partial), "{out:?}");
+        } else {
+            assert!(matches!(out, ReceiveOutcome::NotForUs), "{out:?}");
+        }
+    }
+    let rejected: Vec<String> = b
+        .events()
+        .iter()
+        .filter(|e| matches!(e, TransparencyEvent::FrameRejected { .. }))
+        .map(|e| e.describe())
+        .collect();
+    assert_eq!(rejected.len(), 1);
+    assert!(
+        rejected[0].contains("hash de trame incorrect"),
+        "{}",
+        rejected[0]
+    );
+    assert!(!rejected[0].contains("secret"));
+    // Les trames d'origine aboutissent.
+    let mut done = None;
+    for f in &frames {
+        let out = b.core.receive_frame(f, T, NOW, &mut rng).unwrap();
+        if !matches!(out, ReceiveOutcome::Partial) {
+            done = Some(out);
+        }
+    }
+    let (_, _, got, _) = expect_msg(done.expect("paquet reconstitué"));
+    assert_eq!(got, text);
+}
+
+#[test]
+fn pending_is_bounded_and_expires() {
+    let (mut a, mut b, mut rng) = pair();
+    let mut firsts = Vec::new();
+    for i in 0..100 {
+        let text = format!("{i} {}", "x".repeat(900));
+        let p = one(a.send(&b.fp(), &text, NOW, &mut rng));
+        let frames = a.core.frames(&p.encode(), 255).unwrap();
+        assert!(frames.len() > 1);
+        let out = b.core.receive_frame(&frames[0], T, NOW, &mut rng).unwrap();
+        assert!(matches!(out, ReceiveOutcome::Partial), "{out:?}");
+        firsts.push(frames);
+    }
+    assert!(b.core.pending_frames() <= 64);
+    assert!(b.core.pending_frames() > 0);
+
+    // Paquet commencé à NOW, fini après le TTL : ne se complète pas.
+    let frames = firsts.last().unwrap();
+    let late = NOW + 3601;
+    for f in &frames[1..] {
+        let out = b.core.receive_frame(f, T, late, &mut rng).unwrap();
+        assert!(matches!(out, ReceiveOutcome::Partial), "{out:?}");
+    }
+    // Une trame tardive redémarre une entrée sans planter ; l'ensemble des
+    // trames reconstitue alors le paquet.
+    let done = frames
+        .iter()
+        .map(|f| b.core.receive_frame(f, T, late, &mut rng).unwrap())
+        .find(|o| !matches!(o, ReceiveOutcome::Partial));
+    expect_msg(done.expect("paquet reconstitué"));
+}
