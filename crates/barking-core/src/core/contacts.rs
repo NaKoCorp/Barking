@@ -354,8 +354,8 @@ pub(super) const R_CARD_REFUSED: &str = "mise à jour de carte refusée";
 
 /// Issue de la vérification d'une mise à jour de carte acceptable.
 pub(super) enum CardUpdate {
-    /// Liste de version inférieure ou égale à celle connue (même racine) :
-    /// déjà dépassée, rien à écrire (doublon accusé).
+    /// Carte valide, de même racine, de version inférieure à celle connue ou
+    /// identique : déjà dépassée, rien à écrire (doublon accusé).
     Superseded,
     /// Plus récente et vérifiée : à appliquer avec [`apply_card_update`].
     Newer(VerifiedCard),
@@ -369,7 +369,8 @@ pub(super) struct VerifiedCard {
 
 /// Vérifie la nouvelle carte `card` d'un contact connu (`current`), reçue de
 /// lui (`Body::CardUpdate`) : même empreinte et même racine (sinon refus) ;
-/// liste de version inférieure ou égale : dépassée ; plus récente : toutes
+/// carte valide de version inférieure, ou de même version et même liste :
+/// dépassée ; même version et liste différente : refus ; plus récente : toutes
 /// les vérifications d'`add_contact` (`check_card`, partagée : signatures,
 /// aucun de mes appareils, aucun appareil d'un autre contact). N'écrit rien.
 /// Refus : `Ok(Err(raison))` ; `Err` : échec du stockage seulement.
@@ -382,8 +383,21 @@ pub(super) fn verify_card_update(
     if card.fingerprint() != current.fp || card.devices.root != old.devices.root {
         return Ok(Err(R_CARD_REFUSED));
     }
-    if card.devices.version <= old.devices.version {
+    let version = card.devices.version;
+    if version < old.devices.version
+        || (version == old.devices.version && card.devices == old.devices)
+    {
+        // Accusée seulement si elle est valide : l'accusé ne couvre jamais
+        // une carte forgée.
+        if card.verify().is_err() {
+            return Ok(Err(R_CARD_REFUSED));
+        }
         return Ok(Ok(CardUpdate::Superseded));
+    }
+    if version == old.devices.version {
+        // Deux listes différentes signées à la même version : équivoque de
+        // la racine, jamais masquée.
+        return Ok(Err(R_CARD_REFUSED));
     }
     let checked = match check_card(q, card) {
         Ok(c) => c,

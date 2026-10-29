@@ -1722,3 +1722,36 @@ fn display_name_stored_and_used_for_link() {
         Err(CoreError::TooLarge)
     );
 }
+
+#[test]
+fn card_update_same_version_divergent_list_refused() {
+    let (_d, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    let current = stored_card(&b, alice);
+    // Autre liste signée par la racine d'Alice, à la même version.
+    let root = a.root.as_ref().unwrap();
+    let a_id = a.device.public().id();
+    let certs: Vec<_> = current
+        .devices
+        .certs
+        .iter()
+        .filter(|c| c.device.id() == a_id)
+        .cloned()
+        .collect();
+    let list = DeviceList::sign(root, current.devices.version, certs).unwrap();
+    let bundles = vec![a.prekeys.bundle(&a.device, false)];
+    let divergent = ContactCard::sign(root, "Alice", list, bundles).unwrap();
+    // Carte dépassée mais invalide (signature altérée) : refusée aussi.
+    let mut forged = current.clone();
+    forged.sig[0] ^= 1;
+    for (card, why) in [(divergent, "liste divergente"), (forged, "signature")] {
+        let p = card_update(&mut a, bob, card, &mut rng);
+        assert_eq!(
+            reason(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
+            "mise à jour de carte refusée",
+            "{why}"
+        );
+        assert_eq!(stored_card(&b, alice), current, "{why}");
+    }
+}
