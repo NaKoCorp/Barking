@@ -21,7 +21,7 @@ Sur une machine déconnectée, avec un mot de passe fort :
 ## Publication de la clé publique
 
 Copier `maintainer.pub` dans `keys/maintainer.pub`, puis faire valider le commit par une seconde
-personne. Publier aussi l'empreinte de la clé (l'identifiant de la deuxième ligne du fichier) par
+personne. Publier aussi la ligne de clé complète (la deuxième ligne du fichier, qui commence par `RW`) par
 un canal indépendant du dépôt (site, annonce de version).
 
 ## Rotation
