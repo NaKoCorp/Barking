@@ -1208,6 +1208,11 @@ fn tampered_frame_is_rejected_and_logged() {
         rejected[0]
     );
     assert!(!rejected[0].contains("secret"));
+    assert_eq!(
+        rejected[0],
+        "Trame rejetée (hash de trame incorrect) : elle ne correspond pas au paquet annoncé. \
+         Le paquet n'a pas été reconstitué ; l'expéditeur le renverra."
+    );
     // Les trames d'origine aboutissent.
     let mut done = None;
     for f in &frames {
@@ -1233,8 +1238,12 @@ fn pending_is_bounded_and_expires() {
         assert!(matches!(out, ReceiveOutcome::Partial), "{out:?}");
         firsts.push(frames);
     }
-    assert!(b.core.pending_frames() <= 64);
-    assert!(b.core.pending_frames() > 0);
+    assert_eq!(b.core.pending_frames(), 64);
+    // Le plus ancien paquet a été évincé : ses trames restantes ne complètent rien.
+    for f in &firsts[0][1..] {
+        let out = b.core.receive_frame(f, T, NOW, &mut rng).unwrap();
+        assert!(matches!(out, ReceiveOutcome::Partial), "{out:?}");
+    }
 
     // Paquet commencé à NOW, fini après le TTL : ne se complète pas.
     let frames = firsts.last().unwrap();
@@ -1250,4 +1259,56 @@ fn pending_is_bounded_and_expires() {
         .map(|f| b.core.receive_frame(f, T, late, &mut rng).unwrap())
         .find(|o| !matches!(o, ReceiveOutcome::Partial));
     expect_msg(done.expect("paquet reconstitué"));
+}
+
+fn frame_rejections(p: &Party) -> usize {
+    p.events()
+        .iter()
+        .filter(|e| matches!(e, TransparencyEvent::FrameRejected { .. }))
+        .count()
+}
+
+#[test]
+fn junk_frames_are_not_logged() {
+    let (_, mut b, mut rng) = pair();
+    let before = b.events().len();
+    let mut junk = StdRng::seed_from_u64(7);
+    for i in 0..1000usize {
+        let mut f = vec![0u8; 32];
+        junk.fill(&mut f[..]);
+        match i % 4 {
+            0 => f.truncate(i % 10), // trop courte
+            1 => f[9] = 0,           // nombre nul
+            2 => {
+                f[9] = 3;
+                f[8] = 3 + (i % 200) as u8; // index hors limites
+            }
+            _ => f.truncate(10), // fragment vide
+        }
+        let out = b.core.receive_frame(&f, T, NOW, &mut rng).unwrap();
+        assert!(matches!(out, ReceiveOutcome::NotForUs), "{out:?}");
+    }
+    assert_eq!(b.events().len(), before);
+}
+
+#[test]
+fn hash_failures_are_rate_limited() {
+    let (mut a, mut b, mut rng) = pair();
+    let p = one(a.send(&b.fp(), &"y".repeat(900), NOW, &mut rng));
+    let mut frames = a.core.frames(&p.encode(), 255).unwrap();
+    let last = frames.len() - 1;
+    let l = frames[last].len() - 1;
+    frames[last][l] ^= 1;
+    let mut run = |b: &mut Party, at: u64| {
+        for f in &frames {
+            let out = b.core.receive_frame(f, T, at, &mut rng).unwrap();
+            assert!(!matches!(out, ReceiveOutcome::Message { .. }), "{out:?}");
+        }
+    };
+    for i in 0..10 {
+        run(&mut b, NOW + i);
+    }
+    assert_eq!(frame_rejections(&b), 1);
+    run(&mut b, NOW + 61);
+    assert_eq!(frame_rejections(&b), 2);
 }

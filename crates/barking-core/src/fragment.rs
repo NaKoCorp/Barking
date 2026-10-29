@@ -9,6 +9,12 @@ use crate::error::{CoreError, Result};
 
 /// Longueur de l'en-tête de trame.
 pub const FRAG_HEADER_LEN: usize = 10;
+
+/// Raison d'erreur : le paquet réassemblé ne correspond pas à la clé de trame.
+pub const REASON_BAD_HASH: &str = "hash de trame incorrect";
+
+/// Raison d'erreur : deux trames d'une même clé se contredisent.
+pub const REASON_CONTRADICTORY: &str = "trames contradictoires";
 /// MTU minimale acceptée : en-tête + 64 octets de données.
 const MIN_MTU: usize = 74;
 
@@ -106,7 +112,7 @@ impl Reassembler {
         }
         if count == 1 {
             if frame_key(chunk) != key {
-                return Err(CoreError::Malformed("hash de trame incorrect"));
+                return Err(CoreError::Malformed(REASON_BAD_HASH));
             }
             return Ok(Some(chunk.to_vec()));
         }
@@ -143,7 +149,7 @@ impl Reassembler {
             // Deux contenus pour le même index : l'une des deux trames est
             // fausse, on abandonne tout le paquet.
             self.entries.remove(pos);
-            return Err(CoreError::Malformed("trames contradictoires"));
+            return Err(CoreError::Malformed(REASON_CONTRADICTORY));
         }
         // Cohérence des longueurs : tous les morceaux sauf le dernier ont la
         // même longueur, et le dernier n'est pas plus long.
@@ -175,7 +181,7 @@ impl Reassembler {
             out.extend_from_slice(&p);
         }
         if frame_key(&out) != done.key {
-            return Err(CoreError::Malformed("hash de trame incorrect"));
+            return Err(CoreError::Malformed(REASON_BAD_HASH));
         }
         Ok(Some(out))
     }

@@ -41,7 +41,7 @@ use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
 pub use contacts::ContactSummary;
-pub use frames::{FRAME_TTL_SECS, MAX_PENDING_FRAMES};
+pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
 
 const META_ROOT: &str = "root_seed";
 const META_DEVICE: &str = "device_keys";
@@ -136,6 +136,8 @@ pub struct Core {
     linked_bundles: Vec<PrekeyBundle>,
     /// Trames reçues d'un paquet encore incomplet (en mémoire, non persisté).
     frames: Reassembler,
+    /// Dernier journal de `FrameRejected` par raison (hash, contradiction), en mémoire.
+    last_reject_log: [Option<u64>; 2],
 }
 
 impl fmt::Debug for Core {
@@ -215,6 +217,7 @@ impl Core {
             devices,
             linked_bundles,
             frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
+            last_reject_log: [None; 2],
         })
     }
 
@@ -256,6 +259,7 @@ impl Core {
             devices,
             linked_bundles,
             frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
+            last_reject_log: [None; 2],
         })
     }
 
