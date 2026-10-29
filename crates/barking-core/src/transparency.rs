@@ -73,9 +73,11 @@ pub enum TransparencyEvent {
         kind: SyncKind,
     },
     /// Carte d'un contact remplacée par une nouvelle liste d'appareils :
-    /// `added` appareils ajoutés, `removed` retirés.
+    /// `added` appareils ajoutés, `removed` retirés. `alias` : celui du
+    /// contact au moment de la mise à jour (vide : aucun).
     ContactCardUpdated {
         contact: Fingerprint,
+        alias: String,
         added: u32,
         removed: u32,
     },
@@ -267,11 +269,17 @@ impl TransparencyEvent {
             ),
             Self::ContactCardUpdated {
                 contact,
+                alias,
                 added,
                 removed,
             } => format!(
-                "{contact} a mis à jour sa liste d'appareils (+{added}, \u{2212}{removed}). \
-                 Les messages seront aussi chiffrés pour ses nouveaux appareils."
+                "{} a mis à jour sa liste d'appareils (+{added}, \u{2212}{removed}). \
+                 Les messages seront aussi chiffrés pour ses nouveaux appareils.",
+                if alias.is_empty() {
+                    contact.to_string()
+                } else {
+                    alias.clone()
+                }
             ),
         }
     }
@@ -405,6 +413,7 @@ mod tests {
             },
             TransparencyEvent::ContactCardUpdated {
                 contact: fp(7),
+                alias: "Alice".into(),
                 added: 1,
                 removed: 0,
             },
@@ -565,13 +574,20 @@ mod tests {
 
     #[test]
     fn describe_contact_card_updated_exact() {
-        let e = TransparencyEvent::ContactCardUpdated {
+        let e = |alias: &str| TransparencyEvent::ContactCardUpdated {
             contact: fp(7),
+            alias: alias.into(),
             added: 1,
             removed: 2,
         };
         assert_eq!(
-            e.describe(),
+            e("Alice").describe(),
+            "Alice a mis à jour sa liste d'appareils (+1, \u{2212}2). \
+             Les messages seront aussi chiffrés pour ses nouveaux appareils."
+        );
+        // Sans alias : l'empreinte.
+        assert_eq!(
+            e("").describe(),
             format!(
                 "{} a mis à jour sa liste d'appareils (+1, \u{2212}2). \
                  Les messages seront aussi chiffrés pour ses nouveaux appareils.",

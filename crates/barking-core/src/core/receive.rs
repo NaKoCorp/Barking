@@ -533,7 +533,8 @@ fn accept(
 /// refus : quarantaine, ratchet gardé. Acceptée : la session est écrite, puis
 /// la carte remplacée et les sessions des appareils retirés supprimées (y
 /// compris celle de l'expéditeur s'il est retiré), dans la transaction de la
-/// réception. La carte déjà connue (même liste) : doublon, accusé.
+/// réception. Une carte de même racine déjà connue ou plus ancienne
+/// (dépassée) : doublon, accusé ; autre racine ou autre empreinte : refus.
 #[allow(clippy::too_many_arguments)]
 fn accept_card_update(
     q: &impl Queries,
@@ -550,14 +551,19 @@ fn accept_card_update(
     let Some(current) = q.get_contact(fp)? else {
         return reject_authenticated(q, limiter, packet, o, now, contacts::R_CARD_REFUSED, id);
     };
-    let known = load_card(&current.card)?.devices == card.devices;
-    if !known && let Err(reason) = contacts::verify_card_update(q, &current, card)? {
-        return reject_authenticated(q, limiter, packet, o, now, reason, id);
-    }
+    let verified = match contacts::verify_card_update(q, &current, card)? {
+        Err(reason) => {
+            return reject_authenticated(q, limiter, packet, o, now, reason, id);
+        }
+        Ok(contacts::CardUpdate::Superseded) => None,
+        Ok(contacts::CardUpdate::Newer(v)) => Some(v),
+    };
     let (_, new_prekeys, _) = commit_session(q, o, now)?;
     q.mark_seen(packet.id, now)?;
     q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id))?;
-    if known {
+    let Some(verified) = verified else {
+        // Carte déjà connue ou dépassée : accusée pour que l'expéditeur
+        // cesse de la renvoyer, rien n'est écrit.
         log_limited(
             q,
             limiter,
@@ -569,14 +575,15 @@ fn accept_card_update(
         )?;
         emit_ack(q, packet, env.ack_secret, now, rng)?;
         return Ok((ReceiveOutcome::Duplicate, new_prekeys));
-    }
-    let (added, removed) = contacts::apply_card_update(q, &current, card)?;
+    };
+    let (added, removed) = contacts::apply_card_update(q, &current, verified)?;
     log(
         q,
         now,
         Some(packet.id),
         &TransparencyEvent::ContactCardUpdated {
             contact: fp,
+            alias: current.alias.clone(),
             added,
             removed,
         },

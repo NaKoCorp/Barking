@@ -352,52 +352,44 @@ pub(super) fn upsert_in(
 /// Raison de quarantaine d'une mise à jour de carte refusée (texte fixe).
 pub(super) const R_CARD_REFUSED: &str = "mise à jour de carte refusée";
 
+/// Issue de la vérification d'une mise à jour de carte acceptable.
+pub(super) enum CardUpdate {
+    /// Liste de version inférieure ou égale à celle connue (même racine) :
+    /// déjà dépassée, rien à écrire (doublon accusé).
+    Superseded,
+    /// Plus récente et vérifiée : à appliquer avec [`apply_card_update`].
+    Newer(VerifiedCard),
+}
+
+/// Nouvelle carte entièrement vérifiée, prête à être écrite.
+pub(super) struct VerifiedCard {
+    checked: Checked,
+    added: u32,
+}
+
 /// Vérifie la nouvelle carte `card` d'un contact connu (`current`), reçue de
-/// lui (`Body::CardUpdate`) : même racine, liste d'appareils de version
-/// strictement supérieure, et toutes les vérifications d'`add_contact`
-/// (`check_card`, partagée : signatures, aucun de mes appareils, aucun
-/// appareil d'un autre contact). N'écrit rien. Refus : `Ok(Err(raison))` ;
-/// `Err` : échec du stockage seulement.
+/// lui (`Body::CardUpdate`) : même empreinte et même racine (sinon refus) ;
+/// liste de version inférieure ou égale : dépassée ; plus récente : toutes
+/// les vérifications d'`add_contact` (`check_card`, partagée : signatures,
+/// aucun de mes appareils, aucun appareil d'un autre contact). N'écrit rien.
+/// Refus : `Ok(Err(raison))` ; `Err` : échec du stockage seulement.
 pub(super) fn verify_card_update(
     q: &impl Queries,
     current: &ContactRow,
     card: &ContactCard,
-) -> Result<core::result::Result<(), &'static str>> {
-    Ok(check_update(q, current, card)?.map(|_| ()))
-}
-
-fn check_update(
-    q: &impl Queries,
-    current: &ContactRow,
-    card: &ContactCard,
-) -> Result<core::result::Result<Checked, &'static str>> {
-    if card.fingerprint() != current.fp {
+) -> Result<core::result::Result<CardUpdate, &'static str>> {
+    let old = load_card(&current.card)?;
+    if card.fingerprint() != current.fp || card.devices.root != old.devices.root {
         return Ok(Err(R_CARD_REFUSED));
     }
-    let old = load_card(&current.card)?;
-    if card.devices.root != old.devices.root || card.devices.version <= old.devices.version {
-        return Ok(Err(R_CARD_REFUSED));
+    if card.devices.version <= old.devices.version {
+        return Ok(Ok(CardUpdate::Superseded));
     }
-    match check_card(q, card) {
-        Ok(c) => Ok(Ok(c)),
-        Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => Err(e),
-        Err(_) => Ok(Err(R_CARD_REFUSED)),
-    }
-}
-
-/// Applique une mise à jour de carte vérifiée par [`verify_card_update`] :
-/// la carte est remplacée (alias et statut vérifié gardés : même racine) et
-/// les sessions des appareils retirés sont supprimées, y compris celle de
-/// l'appareil qui l'a envoyée s'il en fait partie. Renvoie le nombre
-/// d'appareils ajoutés et retirés. À appeler dans la transaction de la
-/// réception, après l'écriture de la session.
-pub(super) fn apply_card_update(
-    q: &impl Queries,
-    current: &ContactRow,
-    card: &ContactCard,
-) -> Result<(u32, u32)> {
-    let c = check_update(q, current, card)?.map_err(CoreError::Malformed)?;
-    let old = load_card(&current.card)?;
+    let checked = match check_card(q, card) {
+        Ok(c) => c,
+        Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => return Err(e),
+        Err(_) => return Ok(Err(R_CARD_REFUSED)),
+    };
     let added = card
         .devices
         .certs
@@ -409,12 +401,30 @@ pub(super) fn apply_card_update(
                 .any(|o| o.device.id() == n.device.id())
         })
         .count();
+    Ok(Ok(CardUpdate::Newer(VerifiedCard {
+        checked,
+        added: u32::try_from(added).unwrap_or(u32::MAX),
+    })))
+}
+
+/// Applique une mise à jour de carte vérifiée par [`verify_card_update`] :
+/// la carte est remplacée (alias et statut vérifié gardés : même racine) et
+/// les sessions des appareils retirés sont supprimées, y compris celle de
+/// l'appareil qui l'a envoyée s'il en fait partie. Renvoie le nombre
+/// d'appareils ajoutés et retirés. À appeler dans la transaction de la
+/// réception, après l'écriture de la session. Aucune erreur due au contenu.
+pub(super) fn apply_card_update(
+    q: &impl Queries,
+    current: &ContactRow,
+    verified: VerifiedCard,
+) -> Result<(u32, u32)> {
+    let c = verified.checked;
     for id in &c.revoked {
         q.delete_sessions_for_device(c.fp, *id)?;
     }
     q.upsert_contact(c.fp, &c.bytes, &current.alias, current.verified)?;
-    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    Ok((count(added), count(c.revoked.len())))
+    let removed = u32::try_from(c.revoked.len()).unwrap_or(u32::MAX);
+    Ok((verified.added, removed))
 }
 
 /// Supprime un contact connu de `q` (voir `remove_contact`).

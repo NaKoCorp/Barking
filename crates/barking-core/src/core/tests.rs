@@ -1573,9 +1573,58 @@ fn card_update_wrong_root_or_older_ignored() {
     let bob = b.fingerprint();
     let current = stored_card(&b, alice);
     assert_eq!(current.devices.certs.len(), 2);
+    // Autre racine : quarantaine, carte inchangée.
     let (c, _) = Core::create(&dir.path().join("c"), &[5; 32], "c", NOW, &mut rng).unwrap();
-    let carol = c.contact_card("Carol").unwrap();
-    for (card, why) in [(carol, "autre racine"), (v1, "version inférieure")] {
+    let p = card_update(&mut a, bob, c.contact_card("Carol").unwrap(), &mut rng);
+    assert_eq!(
+        reason(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
+        "mise à jour de carte refusée"
+    );
+    assert_eq!(stored_card(&b, alice), current);
+    // Version inférieure, ou la même carte : dépassée, doublon accusé
+    // (l'expéditeur cesse de la renvoyer), carte inchangée.
+    for (card, why) in [(v1, "version inférieure"), (current.clone(), "même carte")] {
+        let acks = b.pending_outbox(NOW).unwrap().len();
+        let p = card_update(&mut a, bob, card, &mut rng);
+        assert!(
+            matches!(
+                b.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
+                ReceiveOutcome::Duplicate
+            ),
+            "{why}"
+        );
+        assert_eq!(b.pending_outbox(NOW).unwrap().len(), acks + 1, "{why}");
+        assert_eq!(stored_card(&b, alice), current, "{why}");
+    }
+}
+
+#[test]
+fn card_update_refusals() {
+    let (dir, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    // Carol, autre contact de Bob.
+    let (carol, _) = Core::create(&dir.path().join("c"), &[5; 32], "c", NOW, &mut rng).unwrap();
+    let carol_card = carol.contact_card("Carol").unwrap();
+    b.add_contact(&carol_card, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    let current = stored_card(&b, alice);
+    let root = RootIdentity::from_seed(&Zeroizing::new(
+        a.store.get_meta::<[u8; 32]>(META_ROOT).unwrap().unwrap(),
+    ));
+    // Liste d'Alice plus récente, avec en plus l'appareil `extra`.
+    let claiming = |extra: &DeviceKeys| {
+        let mut certs = current.devices.certs.clone();
+        certs.push(DeviceCertificate::issue(&root, extra, "vol", NOW).unwrap());
+        let list = DeviceList::sign(&root, current.devices.version + 1, certs).unwrap();
+        ContactCard::sign(&root, "Alice", list, current.bundles.clone()).unwrap()
+    };
+    let cases = [
+        (carol_card.clone(), "carte d'un autre contact"),
+        (claiming(&b.device), "un de mes appareils"),
+        (claiming(&carol.device), "un appareil d'un autre contact"),
+    ];
+    for (card, why) in cases {
         let p = card_update(&mut a, bob, card, &mut rng);
         assert_eq!(
             reason(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
@@ -1583,15 +1632,8 @@ fn card_update_wrong_root_or_older_ignored() {
             "{why}"
         );
         assert_eq!(stored_card(&b, alice), current, "{why}");
+        assert_eq!(stored_card(&b, carol.fingerprint()), carol_card, "{why}");
     }
-    // La même carte une seconde fois : doublon, accusé, rien ne change.
-    let p = card_update(&mut a, bob, current.clone(), &mut rng);
-    assert!(matches!(
-        b.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
-        ReceiveOutcome::Duplicate
-    ));
-    assert_eq!(stored_card(&b, alice), current);
-    let _ = c.fingerprint();
 }
 
 #[test]
@@ -1628,6 +1670,7 @@ fn card_update_removing_sender_device() {
         count_events(&b, |e| *e
             == TransparencyEvent::ContactCardUpdated {
                 contact: alice,
+                alias: "alice".into(),
                 added: 0,
                 removed: 1
             })

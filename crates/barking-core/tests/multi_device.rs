@@ -947,6 +947,7 @@ fn bob_reaches_new_tablet() {
     assert_eq!(c[0].display_name, "Alice");
     let updated = TransparencyEvent::ContactCardUpdated {
         contact: alice_fp,
+        alias: "alice".into(),
         added: 1,
         removed: 0,
     };
@@ -1011,4 +1012,66 @@ fn second_link_sends_devices_to_first_tablet() {
             .unwrap();
     });
     assert_eq!(produced.len(), 2);
+}
+
+#[test]
+fn card_updates_in_reverse_order_converge() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut alice = create(d.path(), "alice", 1, &mut rng);
+    let mut bob = create(d.path(), "bob", 3, &mut rng);
+    let alice_fp = bob
+        .core
+        .add_contact(
+            &alice.core.contact_card("Alice").unwrap(),
+            Some("alice"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    alice
+        .core
+        .add_contact(&bob.core.contact_card("Bob").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let mut updates = Vec::new();
+    for (i, file) in ["t1", "t2"].into_iter().enumerate() {
+        let offer = alice.core.link_offer(NOW, &mut rng).unwrap();
+        let (mut t, req) = begin(d.path(), file, 20 + i as u8, &offer, &mut rng);
+        let out = alice.core.link_device(&req, false, NOW, &mut rng).unwrap();
+        t.core.finish_link(&out.bundle, None, NOW).unwrap();
+        updates.push(out.packets);
+    }
+    // La plus récente (3 appareils) d'abord, puis l'ancienne (2 appareils).
+    let mut outcomes = Vec::new();
+    for packets in updates.iter().rev() {
+        for p in packets {
+            match bob.core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
+                ReceiveOutcome::NotForUs => {}
+                o => outcomes.push(o),
+            }
+        }
+    }
+    assert_eq!(outcomes.len(), 2);
+    assert!(matches!(outcomes[0], ReceiveOutcome::CardUpdated { .. }));
+    assert!(matches!(outcomes[1], ReceiveOutcome::Duplicate));
+    // Bob chiffre pour les 3 appareils d'Alice.
+    assert_eq!(
+        bob.core
+            .send_text(&alice_fp, "x", NOW, &mut rng)
+            .unwrap()
+            .len(),
+        3
+    );
+    // Les deux mises à jour sont accusées : elles quittent la file d'Alice.
+    for bytes in bob.core.pending_outbox(NOW).unwrap() {
+        alice.core.receive(&bytes, T, NOW, &mut rng).unwrap();
+    }
+    // Seul le `SyncDevices` pour T1 (non relayé ici) reste.
+    let left = alice.core.pending_outbox(NOW).unwrap();
+    let card_updates_left = updates
+        .iter()
+        .flatten()
+        .filter(|p| left.contains(&p.encode()))
+        .count();
+    assert_eq!(card_updates_left, 1, "seul le SyncDevices pour T1 reste");
 }
