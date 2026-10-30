@@ -2,6 +2,7 @@
 //! limites anti-abus et serveur QUIC.
 
 pub mod config;
+pub mod dht;
 pub mod limits;
 pub mod logging;
 pub mod rules;

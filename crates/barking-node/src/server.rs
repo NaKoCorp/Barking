@@ -48,6 +48,10 @@
 //!   Après `MAX_CONSECUTIVE_REFUSALS` (20) refus de débit d'affilée, la
 //!   connexion est fermée.
 //! - **Purge** des expirés au démarrage puis toutes les 60 s.
+//! - **Table de hachage** (`[dht]`, spec §3.3, §4) : l'identifiant d'un
+//!   appelant qui présente un certificat de nœud est lu une fois par
+//!   connexion et passé aux requêtes de la table (`dht`). Sans `[dht]`, elles
+//!   reçoivent `Unsupported` et aucune tâche de la table ne démarre.
 
 use std::fmt;
 use std::future::Future;
@@ -58,13 +62,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use barking_packet::Tier;
 use barking_proto::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
-use barking_proto::{ErrorReason, Limits, NodeId, PROTOCOL_VERSION, Request, Response, tls};
+use barking_proto::{
+    ErrorReason, Limits, MAX_HOLDINGS_PER_PAGE, NodeId, PROTOCOL_VERSION, Request, Response, tls,
+};
 use ed25519_dalek::SigningKey;
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
+use crate::config::DhtConfig;
+use crate::dht::{Dht, maintain};
 use crate::limits::{ConnectionSlot, GroupDbJob, LimitConfig, Limiter};
 use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
 use crate::store::NodeStore;
@@ -84,8 +92,13 @@ const SEND_WINDOW: u64 = 2 * MAX_RESPONSE_BYTES as u64;
 const PAGE_OVERHEAD: usize = 8 * 1024;
 /// Échéance d'écriture maximale d'une réponse.
 pub const MAX_WRITE_DEADLINE: Duration = Duration::from_secs(60);
-/// Réserve de réponse d'une requête autre que `Fetch`.
+/// Réserve de réponse d'une requête autre que `Fetch`, `FindNode` et
+/// `FindValue`.
 const SMALL_RESPONSE_BYTES: usize = 4 * 1024;
+/// Réserve d'une réponse `Nodes` (20 fiches de moins de 200 octets).
+const NODES_RESPONSE_BYTES: usize = 8 * 1024;
+/// Réserve d'une page `Holdings` : 1 024 empreintes et la marge d'encodage.
+const HOLDINGS_RESPONSE_BYTES: usize = MAX_HOLDINGS_PER_PAGE * 32 + 1024;
 /// Refus de débit consécutifs avant fermeture de la connexion.
 pub const MAX_CONSECUTIVE_REFUSALS: u32 = 20;
 
@@ -130,6 +143,11 @@ pub struct ServerConfig {
     pub min_version: u16,
     /// Jauges observables (tests, journaux agrégés).
     pub stats: Arc<ServerStats>,
+    /// Table de hachage entre nœuds ; `None` : désactivée.
+    pub dht: Option<DhtConfig>,
+    /// Tests : ramène toutes les cadences d'entretien de la table à cette
+    /// période. `None` : valeurs de la spec.
+    pub dht_tick: Option<Duration>,
 }
 
 /// Jauge : valeur courante et maximum atteint.
@@ -394,14 +412,16 @@ impl ServerConfig {
             version: PROTOCOL_VERSION,
             min_version: PROTOCOL_VERSION,
             stats: Arc::new(ServerStats::default()),
+            dht: None,
+            dht_tick: None,
         }
     }
 }
 
 /// État partagé par toutes les connexions.
-struct Shared {
+pub(crate) struct Shared {
     store: Mutex<NodeStore>,
-    policy: Policy,
+    pub(crate) policy: Policy,
     node_id: NodeId,
     version: u16,
     min_version: u16,
@@ -418,6 +438,8 @@ struct Shared {
     response_bytes_per_ip: usize,
     min_send_rate: u64,
     stats: Arc<ServerStats>,
+    /// Table de hachage, si `[dht]` est configurée.
+    dht: Option<Arc<Dht>>,
 }
 
 impl Shared {
@@ -447,7 +469,7 @@ fn fetch_reserve(max_bytes: u32) -> usize {
 }
 
 /// Issue d'une opération de base.
-enum Stored<T> {
+pub(crate) enum Stored<T> {
     Done(T),
     /// File de base pleine.
     Busy,
@@ -455,7 +477,7 @@ enum Stored<T> {
     Failed,
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -467,7 +489,7 @@ impl Shared {
     /// une place dans la file (tâches internes) au lieu de répondre `Busy`.
     /// `group` : la requête vient de ce groupe d'adresses, qui n'a droit
     /// qu'à `db_jobs_per_group` places à la fois (`Busy` au-delà).
-    async fn with_store<T: Send + 'static>(
+    pub(crate) async fn with_store<T: Send + 'static>(
         self: &Arc<Self>,
         wait: bool,
         group: Option<&ConnectionSlot>,
@@ -555,6 +577,29 @@ pub async fn run(
     qcfg.transport_config(Arc::new(transport));
     qcfg.migration(false);
 
+    let runtime =
+        quinn::default_runtime().ok_or_else(|| Error::Config("pas de runtime tokio".into()))?;
+    let mut endpoints = Vec::new();
+    for socket in config.sockets {
+        endpoints.push(Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(qcfg.clone()),
+            socket,
+            runtime.clone(),
+        )?);
+    }
+    // Les appels sortants vers les pairs partent des mêmes endpoints, donc
+    // du même port UDP (spec §3.3).
+    let dht = config.dht.map(|d| {
+        Arc::new(Dht::new(
+            config.key.clone(),
+            d,
+            endpoints.clone(),
+            db_jobs_per_group(config.max_db_jobs),
+            config.dht_tick,
+        ))
+    });
+
     let shared = Arc::new(Shared {
         store: Mutex::new(store),
         policy,
@@ -581,19 +626,8 @@ pub async fn run(
         response_bytes_per_ip: config.max_response_bytes_per_ip,
         min_send_rate: config.min_send_rate,
         stats: Arc::clone(&config.stats),
+        dht: dht.clone(),
     });
-
-    let runtime =
-        quinn::default_runtime().ok_or_else(|| Error::Config("pas de runtime tokio".into()))?;
-    let mut endpoints = Vec::new();
-    for socket in config.sockets {
-        endpoints.push(Endpoint::new(
-            quinn::EndpointConfig::default(),
-            Some(qcfg.clone()),
-            socket,
-            runtime.clone(),
-        )?);
-    }
 
     if let Stored::Done(n) = shared
         .with_store(true, None, |s, _| s.purge_expired(unix_now()))
@@ -612,9 +646,17 @@ pub async fn run(
         ));
     }
     tasks.spawn(purge_loop(Arc::clone(&shared), stop_rx.clone()));
+    // Entretien de la table, attendu à l'arrêt : il enregistre `peers`.
+    let maintenance =
+        dht.map(|d| tokio::spawn(maintain::run(d, Arc::clone(&shared), stop_rx.clone())));
 
     shutdown.await;
     let _ = stop_tx.send(true);
+    if let Some(mut m) = maintenance
+        && timeout(Duration::from_secs(10), &mut m).await.is_err()
+    {
+        m.abort();
+    }
     for ep in &endpoints {
         ep.close(CLOSE_NORMAL.into(), b"arret");
     }
@@ -716,7 +758,10 @@ async fn serve_connection(
         }
     }
 
+    // Identifiant de l'appelant s'il a présenté un certificat de nœud.
+    let peer = tls::peer_node_id(&conn);
     let conn_state = Arc::new(ConnState {
+        peer,
         refusals: AtomicU32::new(0),
         conn: conn.clone(),
         reserved: AtomicUsize::new(0),
@@ -760,6 +805,8 @@ async fn serve_connection(
 
 /// État d'une connexion partagé par ses flux.
 struct ConnState {
+    /// Nœud appelant authentifié par son certificat (spec §3.3).
+    peer: Option<NodeId>,
     /// Refus de débit consécutifs.
     refusals: AtomicU32,
     conn: Connection,
@@ -951,6 +998,8 @@ async fn serve_stream(
     // Réserve de réponse prise avant tout travail ; plafond atteint : refus.
     let reserve = match &req {
         Ok(Request::Fetch { max_bytes, .. }) => fetch_reserve(*max_bytes),
+        Ok(Request::FindNode { .. }) => NODES_RESPONSE_BYTES,
+        Ok(Request::FindValue { .. }) => HOLDINGS_RESPONSE_BYTES,
         _ => SMALL_RESPONSE_BYTES,
     };
     let (bytes, held) = match Reservation::try_new(&shared, &state, reserve) {
@@ -961,7 +1010,7 @@ async fn serve_stream(
         Some(mut held) => {
             let resp = match req {
                 Err(()) => Response::Error(ErrorReason::Malformed),
-                Ok(req) => match handle(req, &shared, &state.slot).await {
+                Ok(req) => match handle(req, &shared, &state.slot, state.peer).await {
                     Stored::Done(r) => r,
                     Stored::Busy => Response::Error(ErrorReason::RateLimited),
                     Stored::Failed => {
@@ -1009,8 +1058,13 @@ pub fn db_jobs_per_prefix(max_db_jobs: usize) -> u32 {
     u32::try_from((max_db_jobs / 8).max(1)).unwrap_or(u32::MAX)
 }
 
-/// Traite une requête après `Hello`.
-async fn handle(req: Request, shared: &Arc<Shared>, group: &ConnectionSlot) -> Stored<Response> {
+/// Traite une requête après `Hello` ; `peer` : nœud appelant authentifié.
+async fn handle(
+    req: Request,
+    shared: &Arc<Shared>,
+    group: &ConnectionSlot,
+    peer: Option<NodeId>,
+) -> Stored<Response> {
     let to_resp = |r: core::result::Result<Response, ErrorReason>| match r {
         Ok(resp) => resp,
         Err(e) => Response::Error(e),
@@ -1060,7 +1114,10 @@ async fn handle(req: Request, shared: &Arc<Shared>, group: &ConnectionSlot) -> S
         Request::Ping { .. }
         | Request::FindNode { .. }
         | Request::Store { .. }
-        | Request::FindValue { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
+        | Request::FindValue { .. } => match &shared.dht {
+            None => Stored::Done(Response::Error(ErrorReason::Unsupported)),
+            Some(dht) => dht.handle(req, peer, shared, group).await,
+        },
     }
 }
 

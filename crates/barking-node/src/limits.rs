@@ -11,6 +11,10 @@
 //!   d'un groupe survit à ses connexions tant que son seau n'est pas revenu à
 //!   son niveau de départ : se reconnecter ne le remplit pas.
 //!
+//! - Par identifiant de nœud authentifié (`PeerLimiter`, spec §5.2) : seau
+//!   de 50 requêtes/s et 1 Mio/s, rafale ×5, plein au départ, et part de la
+//!   file de base. S'ajoute à celui du groupe d'adresses.
+//!
 //! Les adresses ne vivent que dans ces tables, le temps des connexions (et du
 //! retour du seau à son niveau de départ, quelques secondes) ; elles ne sont
 //! ni écrites, ni journalisées, ni affichables (les clés n'implémentent pas
@@ -21,6 +25,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
+use barking_proto::NodeId;
 use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,6 +413,109 @@ impl Drop for GroupDbJob {
     }
 }
 
+/// Requêtes par seconde d'un identifiant de nœud.
+pub const PEER_REQUESTS_PER_SEC: f64 = 50.0;
+/// Octets par seconde d'un identifiant de nœud.
+pub const PEER_BYTES_PER_SEC: f64 = (1 << 20) as f64;
+/// Rafale des seaux par identifiant, en secondes de débit.
+pub const PEER_BURST: f64 = 5.0;
+/// Identifiants suivis au-delà desquels les seaux revenus pleins sont
+/// oubliés (coût amorti).
+const PEER_SWEEP_AT: usize = 4096;
+
+/// État d'un identifiant de nœud appelant.
+struct PeerState {
+    requests: TokenBucket,
+    bytes: TokenBucket,
+    db_jobs: u32,
+}
+
+impl PeerState {
+    fn new(now: Instant) -> PeerState {
+        let r = PEER_REQUESTS_PER_SEC * PEER_BURST;
+        let b = PEER_BYTES_PER_SEC * PEER_BURST;
+        PeerState {
+            requests: TokenBucket::new(PEER_REQUESTS_PER_SEC, r, r, now),
+            bytes: TokenBucket::new(PEER_BYTES_PER_SEC, b, b, now),
+            db_jobs: 0,
+        }
+    }
+
+    /// Sans travail en cours, seaux pleins : équivalent à un état neuf.
+    fn forgettable(&mut self, now: Instant) -> bool {
+        self.db_jobs == 0
+            && self.requests.level(now) >= self.requests.capacity
+            && self.bytes.level(now) >= self.bytes.capacity
+    }
+}
+
+/// Débit et file de base par identifiant de nœud authentifié (spec §5.2,
+/// points 2 et 7). En mémoire seulement ; les identifiants revenus à l'état
+/// neuf sont oubliés quand ils deviennent nombreux.
+#[derive(Clone, Default)]
+pub struct PeerLimiter {
+    peers: Arc<Mutex<HashMap<NodeId, PeerState>>>,
+}
+
+impl PeerLimiter {
+    pub fn new() -> PeerLimiter {
+        PeerLimiter::default()
+    }
+
+    fn peers(&self) -> std::sync::MutexGuard<'_, HashMap<NodeId, PeerState>> {
+        self.peers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Admet une requête de `bytes` octets de `id` si ses seaux le
+    /// permettent, et la débite. Sinon rien n'est débité.
+    pub fn admit(&self, id: &NodeId, bytes: usize, now: Instant) -> bool {
+        let mut peers = self.peers();
+        if peers.len() >= PEER_SWEEP_AT {
+            peers.retain(|_, p| !p.forgettable(now));
+        }
+        let p = peers.entry(*id).or_insert_with(|| PeerState::new(now));
+        let b = bytes as f64;
+        if p.requests.available(1.0, now) && p.bytes.available(b, now) {
+            p.requests.charge(1.0, now);
+            p.bytes.charge(b, now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Réserve une opération de base pour `id` : au plus `cap` en cours ;
+    /// rendue quand la garde est lâchée.
+    pub fn try_db_job(&self, id: &NodeId, cap: u32) -> Option<PeerDbJob> {
+        let mut peers = self.peers();
+        let p = peers
+            .entry(*id)
+            .or_insert_with(|| PeerState::new(Instant::now()));
+        if p.db_jobs >= cap {
+            return None;
+        }
+        p.db_jobs += 1;
+        Some(PeerDbJob {
+            limiter: self.clone(),
+            id: *id,
+        })
+    }
+}
+
+/// Opération de base comptée pour un identifiant de nœud.
+pub struct PeerDbJob {
+    limiter: PeerLimiter,
+    id: NodeId,
+}
+
+impl Drop for PeerDbJob {
+    fn drop(&mut self) {
+        if let Some(p) = self.limiter.peers().get_mut(&self.id) {
+            p.db_jobs = p.db_jobs.saturating_sub(1);
+        }
+    }
+}
+
 /// Seau de jetons : `rate` jetons par seconde, `capacity` au plus.
 #[derive(Debug, Clone)]
 pub struct TokenBucket {
@@ -524,6 +632,42 @@ mod tests {
             max_connections: 10_000,
             ..LimitConfig::default()
         })
+    }
+
+    #[test]
+    fn peer_limiter_caps_rate() {
+        let l = PeerLimiter::new();
+        let (a, b) = (NodeId([1; 32]), NodeId([2; 32]));
+        let now = Instant::now();
+        // Rafale ×5 de 50 req/s, pleine au départ : 250 requêtes.
+        for i in 0..250 {
+            assert!(l.admit(&a, 100, now), "requête {i}");
+        }
+        assert!(!l.admit(&a, 100, now), "251ᵉ requête de la même seconde");
+        // Un autre identifiant n'est pas touché.
+        assert!(l.admit(&b, 100, now));
+        // Une seconde plus tard : 50 requêtes de plus.
+        let later = now + Duration::from_secs(1);
+        for _ in 0..50 {
+            assert!(l.admit(&a, 100, later));
+        }
+        assert!(!l.admit(&a, 100, later));
+        // Octets : 1 Mio/s, rafale de 5 Mio.
+        let c = NodeId([3; 32]);
+        assert!(l.admit(&c, 5 << 20, now));
+        assert!(!l.admit(&c, 1, now));
+    }
+
+    #[test]
+    fn peer_db_jobs_are_capped_per_id() {
+        let l = PeerLimiter::new();
+        let (a, b) = (NodeId([1; 32]), NodeId([2; 32]));
+        let j1 = l.try_db_job(&a, 2).unwrap();
+        let _j2 = l.try_db_job(&a, 2).unwrap();
+        assert!(l.try_db_job(&a, 2).is_none());
+        assert!(l.try_db_job(&b, 2).is_some());
+        drop(j1);
+        assert!(l.try_db_job(&a, 2).is_some());
     }
 
     #[test]

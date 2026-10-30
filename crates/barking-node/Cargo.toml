@@ -8,6 +8,7 @@ name = "barking-node"
 path = "src/main.rs"
 
 [dependencies]
+barking-dht.workspace = true
 barking-packet.workspace = true
 barking-proto.workspace = true
 clap.workspace = true
@@ -18,6 +19,7 @@ toml.workspace = true
 tracing-subscriber.workspace = true
 zeroize.workspace = true
 ed25519-dalek.workspace = true
+postcard.workspace = true
 quinn.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros", "signal"] }

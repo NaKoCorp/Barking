@@ -1,10 +1,12 @@
 //! Configuration TOML du nœud (spec §8). Les valeurs par défaut sont celles de
 //! la spec ; une clé inconnue ou une valeur hors bornes est une erreur.
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
 use std::path::{Path, PathBuf};
 
+use barking_dht::{BootstrapEntry, parse_bootstrap};
 use barking_proto::pow::{DEFAULT_POW_BITS, MAX_POW_BITS};
+use barking_proto::routable;
 use ed25519_dalek::SigningKey;
 use serde::Deserialize;
 
@@ -22,6 +24,89 @@ pub const DEFAULT_DATA_DIR: &str = "/var/lib/barking-node";
 pub const DEFAULT_LISTEN: &str = "[::]:4433";
 /// Plancher du plafond de réponses par adresse : une page entière (1 Mio).
 pub const MIN_RESPONSE_BYTES_PER_IP: usize = 1 << 20;
+/// Plafond de recopie sortante par défaut (spec §5.3).
+pub const DEFAULT_REPLICATION_BYTES_PER_HOUR: u64 = 512 << 20;
+
+/// Section `[dht]` (spec §8). Sans elle, la table est désactivée : le nœud
+/// reste un simple relais et répond `Unsupported` aux requêtes de la table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "DhtToml")]
+pub struct DhtConfig {
+    /// Adresses publiées dans la fiche, une par famille au plus.
+    pub public_v4: Option<SocketAddrV4>,
+    pub public_v6: Option<SocketAddrV6>,
+    /// Nœuds essayés après la liste intégrée.
+    pub bootstrap: Vec<BootstrapEntry>,
+    /// Accepte les adresses non routables (tests, réseaux locaux).
+    pub allow_private_addrs: bool,
+    /// Octets recopiés au plus par heure.
+    pub replication_bytes_per_hour: u64,
+}
+
+/// Forme TOML de `[dht]`, avant validation.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DhtToml {
+    public_addr: Vec<String>,
+    bootstrap: Vec<String>,
+    allow_private_addrs: bool,
+    replication_bytes_per_hour: u64,
+}
+
+impl Default for DhtToml {
+    fn default() -> Self {
+        DhtToml {
+            public_addr: Vec::new(),
+            bootstrap: Vec::new(),
+            allow_private_addrs: false,
+            replication_bytes_per_hour: DEFAULT_REPLICATION_BYTES_PER_HOUR,
+        }
+    }
+}
+
+impl TryFrom<DhtToml> for DhtConfig {
+    type Error = String;
+
+    /// Les messages d'erreur ne reprennent ni les adresses ni les entrées.
+    fn try_from(t: DhtToml) -> core::result::Result<DhtConfig, String> {
+        let mut cfg = DhtConfig {
+            public_v4: None,
+            public_v6: None,
+            bootstrap: Vec::with_capacity(t.bootstrap.len()),
+            allow_private_addrs: t.allow_private_addrs,
+            replication_bytes_per_hour: t.replication_bytes_per_hour,
+        };
+        if t.public_addr.is_empty() {
+            return Err(
+                "dht.public_addr : une ou deux adresses (IPv4 et/ou IPv6) ; \
+                        sans table, retirer la section [dht]"
+                    .into(),
+            );
+        }
+        for a in &t.public_addr {
+            let addr: SocketAddr = a
+                .parse()
+                .map_err(|_| "dht.public_addr : adresse invalide (attendu ip:port)".to_string())?;
+            if !t.allow_private_addrs && !routable(&addr) {
+                return Err(
+                    "dht.public_addr : adresse non routable (allow_private_addrs = false)".into(),
+                );
+            }
+            let twice = match addr {
+                SocketAddr::V4(v4) => cfg.public_v4.replace(v4).is_some(),
+                SocketAddr::V6(v6) => cfg.public_v6.replace(v6).is_some(),
+            };
+            if twice {
+                return Err("dht.public_addr : une adresse par famille au plus".into());
+            }
+        }
+        for e in &t.bootstrap {
+            cfg.bootstrap
+                .push(parse_bootstrap(e).map_err(|e| format!("dht.bootstrap : {e}"))?);
+        }
+        Ok(cfg)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -54,6 +139,8 @@ pub struct Config {
     pub min_send_rate: u64,
     /// Période des journaux agrégés, en secondes.
     pub log_interval_secs: u64,
+    /// Table de hachage entre nœuds ; absente : désactivée.
+    pub dht: Option<DhtConfig>,
 }
 
 impl Default for Config {
@@ -76,6 +163,7 @@ impl Default for Config {
             max_db_jobs_per_prefix: None,
             min_send_rate: DEFAULT_MIN_SEND_RATE,
             log_interval_secs: 60,
+            dht: None,
         }
     }
 }
@@ -178,6 +266,7 @@ impl Config {
         cfg.max_db_jobs = self.max_db_jobs;
         cfg.max_db_jobs_per_prefix = self.max_db_jobs_per_prefix;
         cfg.min_send_rate = self.min_send_rate;
+        cfg.dht = self.dht.clone();
         cfg
     }
 }
@@ -207,6 +296,50 @@ mod tests {
     fn unknown_key_is_rejected() {
         let e = Config::parse("pow_bits = 18\nlisten_adress = []\n").unwrap_err();
         assert!(e.to_string().contains("listen_adress"), "{e}");
+    }
+
+    #[test]
+    fn config_parses_dht_section() {
+        assert!(Config::parse("").unwrap().dht.is_none());
+        let id = barking_proto::NodeId([7; 32]);
+        let c = Config::parse(&format!(
+            "[dht]\npublic_addr = [\"1.2.3.4:4433\", \"[2a01::1]:4433\"]\nbootstrap = [\"{id}@5.6.7.8:4433\"]\n"
+        ))
+        .unwrap();
+        let d = c.dht.clone().unwrap();
+        assert_eq!(d.public_v4, Some("1.2.3.4:4433".parse().unwrap()));
+        assert_eq!(d.public_v6, Some("[2a01::1]:4433".parse().unwrap()));
+        assert_eq!(d.bootstrap.len(), 1);
+        assert_eq!(d.bootstrap[0].id, id);
+        assert!(!d.allow_private_addrs);
+        assert_eq!(d.replication_bytes_per_hour, 512 << 20);
+        let sc = c.server_config(vec![], SigningKey::from_bytes(&[1; 32]));
+        assert_eq!(sc.dht, Some(d));
+        // Une seule famille suffit ; adresses privées permises sur demande.
+        let c = Config::parse(
+            "[dht]\npublic_addr = [\"127.0.0.1:4433\"]\nallow_private_addrs = true\nreplication_bytes_per_hour = 1024\n",
+        )
+        .unwrap();
+        let d = c.dht.unwrap();
+        assert_eq!((d.public_v4.is_some(), d.public_v6.is_none()), (true, true));
+        assert_eq!(d.replication_bytes_per_hour, 1024);
+        for bad in [
+            // Deux adresses de la même famille.
+            "[dht]\npublic_addr = [\"1.2.3.4:4433\", \"5.6.7.8:4433\"]",
+            "[dht]\npublic_addr = [\"[2a01::1]:4433\", \"[2a01::2]:4433\"]",
+            // Entrée d'amorçage mal formée.
+            "[dht]\npublic_addr = [\"1.2.3.4:4433\"]\nbootstrap = [\"1.2.3.4:4433\"]",
+            // Sans adresse publique, ou adresse illisible.
+            "[dht]\npublic_addr = []",
+            "[dht]\nbootstrap = []",
+            "[dht]\npublic_addr = [\"1.2.3.4\"]",
+            // Adresse non routable sans `allow_private_addrs`.
+            "[dht]\npublic_addr = [\"192.168.1.2:4433\"]",
+            "[dht]\npublic_addr = [\"1.2.3.4:0\"]",
+            "[dht]\npublic_addr = [\"1.2.3.4:4433\"]\ninconnue = 1",
+        ] {
+            assert!(Config::parse(bad).is_err(), "{bad} doit être refusé");
+        }
     }
 
     #[test]
