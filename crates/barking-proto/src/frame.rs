@@ -32,12 +32,13 @@ fn io_err(e: std::io::Error) -> FrameError {
     }
 }
 
-/// Écrit une trame ; refuse un corps plus grand que `max`.
+/// Écrit une trame ; refuse un corps plus grand que `max`. Renvoie le nombre
+/// d'octets écrits (en-tête compris).
 pub async fn write<T: Serialize>(
     w: &mut (impl AsyncWrite + Unpin),
     value: &T,
     max: usize,
-) -> Result<()> {
+) -> Result<usize> {
     let body = postcard::to_allocvec(value).map_err(|_| FrameError::Malformed)?;
     if body.len() > max {
         return Err(FrameError::TooLarge {
@@ -51,11 +52,19 @@ pub async fn write<T: Serialize>(
     })?;
     w.write_all(&len.to_be_bytes()).await.map_err(io_err)?;
     w.write_all(&body).await.map_err(io_err)?;
-    Ok(())
+    Ok(4 + body.len())
 }
 
 /// Lit une trame. La longueur annoncée est vérifiée avant toute allocation.
 pub async fn read<T: DeserializeOwned>(r: &mut (impl AsyncRead + Unpin), max: usize) -> Result<T> {
+    Ok(read_counted(r, max).await?.0)
+}
+
+/// Comme `read`, et renvoie aussi le nombre d'octets lus (en-tête compris).
+pub async fn read_counted<T: DeserializeOwned>(
+    r: &mut (impl AsyncRead + Unpin),
+    max: usize,
+) -> Result<(T, usize)> {
     let mut head = [0u8; 4];
     // EOF avant le premier octet : fermeture propre ; ensuite : tronquée.
     let mut got = 0;
@@ -89,7 +98,7 @@ pub async fn read<T: DeserializeOwned>(r: &mut (impl AsyncRead + Unpin), max: us
     if !rest.is_empty() {
         return Err(FrameError::Malformed);
     }
-    Ok(value)
+    Ok((value, 4 + len))
 }
 
 #[cfg(test)]

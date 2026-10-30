@@ -56,26 +56,18 @@ impl NodeStore {
     }
 
     fn init(conn: Connection) -> Result<NodeStore> {
+        // La version est lue AVANT toute écriture (pragmas persistants, schéma) :
+        // une base d'un autre schéma est refusée sans être modifiée.
+        check_version(&conn)?;
         // `journal_mode` renvoie une ligne : on la lit pour ne pas la laisser pendre.
         let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "secure_delete", "ON")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.execute_batch(SCHEMA)?;
-        let version: Option<i64> = conn
-            .query_row("SELECT v FROM meta WHERE k='schema_version'", [], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        match version {
-            None => {
-                conn.execute(
-                    "INSERT INTO meta(k,v) VALUES('schema_version', ?1), ('stored_bytes', 0)",
-                    params![SCHEMA_VERSION],
-                )?;
-            }
-            Some(SCHEMA_VERSION) => {}
-            Some(other) => return Err(Error::SchemaVersion(other)),
-        }
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA}
+             INSERT OR IGNORE INTO meta(k,v) VALUES('schema_version', {SCHEMA_VERSION}), ('stored_bytes', 0);
+             COMMIT;"
+        ))?;
         Ok(NodeStore { conn })
     }
 
@@ -124,6 +116,38 @@ impl NodeStore {
         tx.commit()?;
         Ok(removed)
     }
+}
+
+/// Base vide : acceptée. Base avec `meta` : `schema_version` doit valoir
+/// `SCHEMA_VERSION`. Base avec d'autres tables mais sans `meta` : refusée.
+fn check_version(conn: &Connection) -> Result<()> {
+    let table_exists = |name: &str| -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            params![name],
+            |r| r.get(0),
+        )?)
+    };
+    if table_exists("meta")? {
+        let version: Option<i64> = conn
+            .query_row("SELECT v FROM meta WHERE k='schema_version'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        return match version {
+            Some(SCHEMA_VERSION) => Ok(()),
+            other => Err(Error::SchemaVersion(other.unwrap_or(0))),
+        };
+    }
+    let any_table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%')",
+        [],
+        |r| r.get(0),
+    )?;
+    if any_table {
+        return Err(Error::SchemaVersion(0));
+    }
+    Ok(())
 }
 
 pub(crate) fn stored_bytes(conn: &Connection) -> Result<u64> {

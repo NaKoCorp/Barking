@@ -630,3 +630,90 @@ fn old_schema_is_refused() {
         other => panic!("attendu SchemaVersion(1), obtenu {:?}", other.map(|_| ())),
     }
 }
+
+/// Schéma v1 réel (avant la déduplication par contenu) : refusé, et la base
+/// n'est pas modifiée (ni index, ni mode WAL).
+#[test]
+fn v1_layout_refused_without_modification() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v1.db");
+    let snapshot = |c: &rusqlite::Connection| -> (Vec<String>, String) {
+        let mut st = c
+            .prepare("SELECT COALESCE(sql,'') FROM sqlite_master ORDER BY name")
+            .unwrap();
+        let sql = st
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<core::result::Result<Vec<String>, _>>()
+            .unwrap();
+        let mode: String = c
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        (sql, mode)
+    };
+    let before = {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE packets(
+                id BLOB PRIMARY KEY, mailbox BLOB NOT NULL, kind INTEGER NOT NULL,
+                tier INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+                received_at INTEGER NOT NULL, bytes BLOB NOT NULL);
+             CREATE INDEX packets_mailbox ON packets(mailbox);
+             CREATE INDEX packets_expires ON packets(expires_at);
+             CREATE TABLE acks(
+                packet_id BLOB PRIMARY KEY, mailbox BLOB NOT NULL,
+                expires_at INTEGER NOT NULL, bytes BLOB NOT NULL);
+             CREATE INDEX acks_mailbox ON acks(mailbox);
+             CREATE INDEX acks_expires ON acks(expires_at);
+             CREATE TABLE meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
+             INSERT INTO meta VALUES('schema_version', 1), ('stored_bytes', 0);",
+        )
+        .unwrap();
+        snapshot(&c)
+    };
+    match NodeStore::open(&path) {
+        Err(crate::Error::SchemaVersion(1)) => {}
+        other => panic!("attendu SchemaVersion(1), obtenu {:?}", other.map(|_| ())),
+    }
+    let c = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(snapshot(&c), before);
+    assert_ne!(before.1, "wal");
+}
+
+#[test]
+fn foreign_db_without_meta_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("CREATE TABLE autre(x INTEGER);")
+        .unwrap();
+    assert!(matches!(
+        NodeStore::open(&path),
+        Err(crate::Error::SchemaVersion(0))
+    ));
+}
+
+#[test]
+fn reopen_current_schema_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("n.db");
+    drop(NodeStore::open(&path).unwrap());
+    let s = NodeStore::open(&path).unwrap();
+    assert_eq!(s.stats().unwrap().bytes, 0);
+}
+
+#[test]
+fn policy_validation() {
+    assert!(Policy::default().validate().is_ok());
+    let p = Policy {
+        pow_bits: pow::MAX_POW_BITS + 1,
+        ..Policy::default()
+    };
+    assert!(p.validate().is_err());
+    let p = Policy {
+        pow_bits: pow::MAX_POW_BITS,
+        ..Policy::default()
+    };
+    assert!(p.validate().is_ok());
+}

@@ -9,12 +9,16 @@ blake3.workspace = true
 data-encoding.workspace = true
 ed25519-dalek.workspace = true
 postcard.workspace = true
+quinn.workspace = true
 rand_core.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-webpki.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "time", "rt"] }
 
 [dev-dependencies]
 rand.workspace = true
-tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
+tokio = { workspace = true, features = ["io-util", "rt", "rt-multi-thread", "macros", "time"] }

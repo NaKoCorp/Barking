@@ -51,6 +51,24 @@ impl Default for Policy {
     }
 }
 
+impl Policy {
+    /// Refuse une politique incohérente (difficulté au-delà de `MAX_POW_BITS`,
+    /// qu'aucun client ne pourrait satisfaire).
+    pub fn validate(&self) -> Result<()> {
+        if self.pow_bits > pow::MAX_POW_BITS {
+            return Err(crate::Error::Config(format!(
+                "pow_bits = {} dépasse le maximum {}",
+                self.pow_bits,
+                pow::MAX_POW_BITS
+            )));
+        }
+        if self.max_per_mailbox == 0 {
+            return Err(crate::Error::Config("max_per_mailbox = 0".into()));
+        }
+        Ok(())
+    }
+}
+
 fn i(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
