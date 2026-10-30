@@ -38,8 +38,16 @@ fn msg(n: u8, mailbox: u8, tier: Tier, expires_at: u64) -> Packet {
     }
 }
 
+/// Preuve à la difficulté de base plus le palier (boîte et nœud peu remplis).
 fn nonce(p: &Packet) -> u64 {
-    pow::solve(&pow::content_hash(&p.encode()), &p.mailbox, BITS).unwrap()
+    let bits = BITS + pow::tier_surcharge(p.tier);
+    pow::solve(&pow::content_hash(&p.encode()), &p.mailbox, bits).unwrap()
+}
+
+/// Preuve à la difficulté exigée maintenant par `s`.
+fn nonce_for(s: &NodeStore, pol: &Policy, p: &Packet) -> u64 {
+    let bits = required_pow_bits(s, pol, &p.mailbox, p.tier).unwrap();
+    pow::solve(&pow::content_hash(&p.encode()), &p.mailbox, bits).unwrap()
 }
 
 fn put(s: &mut NodeStore, p: &Packet) -> core::result::Result<(), ErrorReason> {
@@ -170,14 +178,22 @@ fn rejects_when_node_full() {
     for n in 1..=2 {
         let p = ok_msg(n, n);
         assert_eq!(
-            deposit(&mut s, &pol, &p.encode(), nonce(&p), NOW).unwrap(),
+            {
+                let n = nonce_for(&s, &pol, &p);
+                deposit(&mut s, &pol, &p.encode(), n, NOW)
+            }
+            .unwrap(),
             Ok(())
         );
     }
     assert_eq!(s.stats().unwrap().bytes, 490);
     let p = ok_msg(3, 3);
     assert_eq!(
-        deposit(&mut s, &pol, &p.encode(), nonce(&p), NOW).unwrap(),
+        {
+            let n = nonce_for(&s, &pol, &p);
+            deposit(&mut s, &pol, &p.encode(), n, NOW)
+        }
+        .unwrap(),
         Err(ErrorReason::NodeFull)
     );
 }
@@ -487,7 +503,7 @@ fn fill(s: &NodeStore, mailbox: u8, count: u32) {
 fn pow_is_progressive_per_mailbox() {
     let (_d, mut s) = store();
     let pol = policy();
-    let req = |s: &NodeStore| required_pow_bits(s, &pol, &mb(1)).unwrap();
+    let req = |s: &NodeStore| required_pow_bits(s, &pol, &mb(1), Tier::S).unwrap();
     assert_eq!(req(&s), BITS);
     fill(&s, 1, 64); // 64 : n / 64 = 1, log2 = 0
     assert_eq!(req(&s), BITS);
@@ -500,14 +516,14 @@ fn pow_is_progressive_per_mailbox() {
     fill(&s, 1, 744); // 1 000 : n / 64 = 15
     assert_eq!(req(&s), BITS + 3);
     // Une autre boîte n'est pas touchée.
-    assert_eq!(required_pow_bits(&s, &pol, &mb(2)).unwrap(), BITS);
+    assert_eq!(required_pow_bits(&s, &pol, &mb(2), Tier::S).unwrap(), BITS);
     // Plafonné à MAX_POW_BITS.
     let high = Policy {
         pow_bits: pow::MAX_POW_BITS,
         ..pol
     };
     assert_eq!(
-        required_pow_bits(&s, &high, &mb(1)).unwrap(),
+        required_pow_bits(&s, &high, &mb(1), Tier::S).unwrap(),
         pow::MAX_POW_BITS
     );
     // Dépôt : une preuve à BITS bits ne suffit plus à 128 paquets.
@@ -758,7 +774,7 @@ fn fetch_large_table_index_ordered_and_bounded() {
             .conn()
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                super::fetch_scan_sql(table)
+                super::fetch_scan_sql(table, 0)
             ))
             .unwrap()
             .query_map(rusqlite::params![&[1u8; 16][..], 0], |r| r.get(3))
@@ -793,5 +809,73 @@ fn fetch_large_table_index_ordered_and_bounded() {
     // Ordre d'insertion (seq) respecté.
     for (k, it) in all.iter().enumerate() {
         assert_eq!(it[0], (k % usize::from(BOXES)) as u8);
+    }
+}
+
+/// Nonce qui passe exactement `bits` bits, pas `bits + 1`.
+fn exact_nonce(p: &Packet, bits: u8) -> u64 {
+    let h = pow::content_hash(&p.encode());
+    (0..)
+        .find(|n| pow::check(&h, &p.mailbox, *n, bits) && !pow::check(&h, &p.mailbox, *n, bits + 1))
+        .unwrap()
+}
+
+#[test]
+fn pow_surcharge_by_tier() {
+    for (tier, extra) in [(Tier::S, 0u8), (Tier::M, 2), (Tier::L, 6)] {
+        let (_d, mut s) = store();
+        let p = msg(1, 1, tier, NOW + 86_400);
+        let bytes = p.encode();
+        if extra > 0 {
+            let weak = exact_nonce(&p, BITS + extra - 1);
+            assert_eq!(
+                deposit(&mut s, &policy(), &bytes, weak, NOW).unwrap(),
+                Err(ErrorReason::PowTooWeak),
+                "{tier:?}"
+            );
+        }
+        let ok = exact_nonce(&p, BITS + extra);
+        assert_eq!(
+            deposit(&mut s, &policy(), &bytes, ok, NOW).unwrap(),
+            Ok(()),
+            "{tier:?}"
+        );
+    }
+}
+
+#[test]
+fn pow_surcharge_by_global_fill() {
+    // Plafond 8 000 octets : 1/8 = 1 000. Au-delà, +1 bit par doublement.
+    let pol = Policy {
+        storage_max_bytes: 8_000,
+        ..policy()
+    };
+    for (stored, extra) in [
+        (0i64, 0u8),
+        (1_000, 0),
+        (1_001, 1),
+        (2_000, 1),
+        (2_001, 2),
+        (4_000, 2),
+        (4_001, 3),
+    ] {
+        let (_d, mut s) = store();
+        add_stored_bytes(s.conn(), stored).unwrap();
+        let p = ok_msg(1, 1);
+        let bytes = p.encode();
+        if extra > 0 {
+            let weak = exact_nonce(&p, BITS + extra - 1);
+            assert_eq!(
+                deposit(&mut s, &pol, &bytes, weak, NOW).unwrap(),
+                Err(ErrorReason::PowTooWeak),
+                "stored={stored}"
+            );
+        }
+        let ok = exact_nonce(&p, BITS + extra);
+        assert_eq!(
+            deposit(&mut s, &pol, &bytes, ok, NOW).unwrap(),
+            Ok(()),
+            "stored={stored}"
+        );
     }
 }

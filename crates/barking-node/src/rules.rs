@@ -14,7 +14,9 @@
 //!   ligne (une ligne d'accusé par (identifiant, boîte)) ; il reste gardé jusqu'à `max(expiration de l'accusé,
 //!   expiration des paquets supprimés)` : le message ne ressuscite pas, ni par
 //!   redépôt ni par accusé raccourci.
-//! - Preuve de travail progressive par boîte : voir `required_pow_bits`.
+//! - Preuve de travail progressive : par boîte, par palier et selon le
+//!   remplissage global, voir `pow_bits_for`. `precheck` vérifie forme,
+//!   expiration et preuve au minimum (base + palier) sans la base de données.
 //! - Curseur de `fetch` : `seq` (AUTOINCREMENT, jamais réutilisé) des paquets,
 //!   puis `ACK_BASE + seq` des accusés.
 
@@ -76,6 +78,53 @@ fn i(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
+/// Forme et expiration d'un dépôt.
+fn parse_checked(bytes: &[u8], now: u64) -> core::result::Result<Packet, ErrorReason> {
+    // Palier valide mais longueur différente : WrongTier.
+    if bytes.len() >= OVERHEAD
+        && let Some(tier) = tier_from_byte(bytes[3])
+        && bytes.len() != tier.size()
+    {
+        return Err(ErrorReason::WrongTier);
+    }
+    let Ok(packet) = Packet::decode(bytes) else {
+        return Err(ErrorReason::Malformed);
+    };
+    let expires = u64::from(packet.expires_at);
+    if expires <= now {
+        return Err(ErrorReason::Expired);
+    }
+    if expires > now.saturating_add(MAX_EXPIRY_SECS) {
+        return Err(ErrorReason::TooFarInFuture);
+    }
+    Ok(packet)
+}
+
+/// Contrôles sans base de données, faits avant de prendre une place dans la
+/// file : forme, expiration, et pour un message une preuve à la difficulté
+/// minimale (base + palier). `deposit` refait tout, avec la difficulté
+/// complète.
+pub fn precheck(
+    policy: &Policy,
+    bytes: &[u8],
+    pow_nonce: u64,
+    now: u64,
+) -> core::result::Result<(), ErrorReason> {
+    let p = parse_checked(bytes, now)?;
+    if p.kind == Kind::Message {
+        let hash = pow::content_hash(bytes);
+        if !pow::check(
+            &hash,
+            &p.mailbox,
+            pow_nonce,
+            pow_bits_for(policy, 0, p.tier, 0),
+        ) {
+            return Err(ErrorReason::PowTooWeak);
+        }
+    }
+    Ok(())
+}
+
 /// Valide et enregistre un dépôt. `Err` : stockage ; `Ok(Err(raison))` : refus.
 pub fn deposit(
     store: &mut NodeStore,
@@ -84,23 +133,10 @@ pub fn deposit(
     pow_nonce: u64,
     now: u64,
 ) -> Result<core::result::Result<(), ErrorReason>> {
-    // Palier valide mais longueur différente : WrongTier.
-    if bytes.len() >= OVERHEAD
-        && let Some(tier) = tier_from_byte(bytes[3])
-        && bytes.len() != tier.size()
-    {
-        return Ok(Err(ErrorReason::WrongTier));
-    }
-    let Ok(packet) = Packet::decode(bytes) else {
-        return Ok(Err(ErrorReason::Malformed));
+    let packet = match parse_checked(bytes, now) {
+        Ok(p) => p,
+        Err(r) => return Ok(Err(r)),
     };
-    let expires = u64::from(packet.expires_at);
-    if expires <= now {
-        return Ok(Err(ErrorReason::Expired));
-    }
-    if expires > now.saturating_add(MAX_EXPIRY_SECS) {
-        return Ok(Err(ErrorReason::TooFarInFuture));
-    }
     match packet.kind {
         Kind::Message => deposit_message(store, policy, &packet, bytes, pow_nonce, now),
         Kind::Ack => deposit_ack(store, policy, &packet, bytes),
@@ -116,23 +152,51 @@ fn tier_from_byte(b: u8) -> Option<Tier> {
     }
 }
 
-fn pow_bits_for_count(policy: &Policy, count: i64) -> u8 {
-    let steps = count / POW_STEP_PACKETS;
-    let extra = if steps >= 1 { steps.ilog2() } else { 0 };
-    let bits = u32::from(policy.pow_bits).saturating_add(extra);
+/// Bits ajoutés selon le remplissage global : +1 par doublement au-delà de
+/// 1/8 du plafond (`stored` ≤ 1/8 : 0 ; ≤ 1/4 : 1 ; ≤ 1/2 : 2 ; au-delà : 3).
+pub fn fill_surcharge(stored: u64, storage_max: u64) -> u32 {
+    let mut level = (storage_max / 8).max(1);
+    let mut extra = 0;
+    while stored > level && extra < 64 {
+        extra += 1;
+        level = level.saturating_mul(2);
+    }
+    extra
+}
+
+/// Difficulté exigée : `min(MAX_POW_BITS, pow_bits + floor(log2(max(1,
+/// in_box / 64))) + palier (S 0, M 2, L 6) + remplissage global)`, `in_box`
+/// étant le nombre de paquets déjà gardés dans la boîte visée et `stored`
+/// les octets gardés par le nœud.
+pub fn pow_bits_for(policy: &Policy, in_box: i64, tier: Tier, stored: u64) -> u8 {
+    let steps = in_box / POW_STEP_PACKETS;
+    let per_box = if steps >= 1 { steps.ilog2() } else { 0 };
+    let bits = u32::from(policy.pow_bits)
+        .saturating_add(per_box)
+        .saturating_add(u32::from(pow::tier_surcharge(tier)))
+        .saturating_add(fill_surcharge(stored, policy.storage_max_bytes));
     u8::try_from(bits.min(u32::from(pow::MAX_POW_BITS))).unwrap_or(pow::MAX_POW_BITS)
 }
 
-/// Difficulté exigée pour un dépôt dans `mailbox` :
-/// `min(MAX_POW_BITS, pow_bits + floor(log2(max(1, n / 64))))`, `n` étant le
-/// nombre de paquets déjà gardés dans cette boîte.
-pub fn required_pow_bits(store: &NodeStore, policy: &Policy, mailbox: &MailboxId) -> Result<u8> {
+/// Difficulté exigée maintenant pour un dépôt de palier `tier` dans
+/// `mailbox` (voir `pow_bits_for`).
+pub fn required_pow_bits(
+    store: &NodeStore,
+    policy: &Policy,
+    mailbox: &MailboxId,
+    tier: Tier,
+) -> Result<u8> {
     let count: i64 = store.conn().query_row(
         "SELECT COUNT(*) FROM packets WHERE mailbox=?1",
         params![&mailbox.0[..]],
         |r| r.get(0),
     )?;
-    Ok(pow_bits_for_count(policy, count))
+    Ok(pow_bits_for(
+        policy,
+        count,
+        tier,
+        stored_bytes(store.conn())?,
+    ))
 }
 
 fn deposit_message(
@@ -159,14 +223,20 @@ fn deposit_message(
         params![&p.mailbox.0[..]],
         |r| r.get(0),
     )?;
-    if !pow::check(&hash, &p.mailbox, nonce, pow_bits_for_count(policy, in_box)) {
+    let stored = stored_bytes(&tx)?;
+    if !pow::check(
+        &hash,
+        &p.mailbox,
+        nonce,
+        pow_bits_for(policy, in_box, p.tier, stored),
+    ) {
         return Ok(Err(ErrorReason::PowTooWeak));
     }
     if in_box >= i64::from(policy.max_per_mailbox) {
         return Ok(Err(ErrorReason::MailboxFull));
     }
     let len = bytes.len() as u64;
-    if stored_bytes(&tx)?.saturating_add(len) > policy.storage_max_bytes {
+    if stored.saturating_add(len) > policy.storage_max_bytes {
         return Ok(Err(ErrorReason::NodeFull));
     }
     tx.execute(
@@ -251,10 +321,18 @@ pub type Page = (Vec<Vec<u8>>, Option<u64>);
 pub const MAX_PAGE_ITEMS: usize = 1024;
 
 /// Lecture d'une boîte dans l'ordre de `seq`, via l'index `(mailbox, rowid)` :
-/// ni tri, ni lecture des charges utiles.
-pub(crate) fn fetch_scan_sql(table: &str) -> String {
-    format!("SELECT seq, length(bytes) FROM {table} WHERE mailbox=?1 AND seq>?2 ORDER BY seq")
+/// ni tri, ni lecture des charges utiles. `slot` (rang de la boîte dans la
+/// requête) rend le texte unique : le cache de requêtes préparées en garde
+/// une par texte, et une relève en tient jusqu'à 64 à la fois par table.
+pub(crate) fn fetch_scan_sql(table: &str, slot: usize) -> String {
+    format!(
+        "SELECT seq, length(bytes) FROM {table} WHERE mailbox=?1 AND seq>?2 ORDER BY seq /*{slot}*/"
+    )
 }
+
+/// Requêtes préparées gardées en cache : 64 lectures par table, plus la
+/// lecture des charges de chaque table.
+pub const STATEMENT_CACHE: usize = 2 * MAX_MAILBOXES_PER_FETCH + 2;
 
 /// Relève paginée : paquets puis accusés des `mailboxes`, dans l'ordre de
 /// `seq`. Fusion des lectures indexées de chaque boîte : le travail d'une
@@ -289,10 +367,8 @@ pub fn fetch(
             continue;
         }
         let start = i(after.saturating_sub(base));
-        let sql = fetch_scan_sql(table);
-        let mut stmts = boxes
-            .iter()
-            .map(|_| conn.prepare(&sql))
+        let mut stmts = (0..boxes.len())
+            .map(|k| conn.prepare_cached(&fetch_scan_sql(table, k)))
             .collect::<core::result::Result<Vec<_>, _>>()?;
         let mut rows = Vec::with_capacity(stmts.len());
         for (st, mb) in stmts.iter_mut().zip(&boxes) {

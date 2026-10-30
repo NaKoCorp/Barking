@@ -6,12 +6,15 @@
 //! sans balayer la table.
 
 use std::path::Path;
+use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{Error, Result};
 
 pub const SCHEMA_VERSION: i64 = 2;
+/// Attente d'un verrou tenu par un autre processus (`status` pendant `run`).
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Compteurs du nœud.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,19 +53,42 @@ impl NodeStore {
         Self::init(Connection::open(path)?)
     }
 
+    /// Ouverture en lecture seule (`status`) : aucune écriture, ni schéma ni
+    /// pragma persistant. La base doit exister et être au bon schéma.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<NodeStore> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        check_version(&conn)?;
+        let has_meta: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_meta {
+            return Err(Error::SchemaVersion(0));
+        }
+        Ok(NodeStore { conn })
+    }
+
     /// Base en mémoire (tests).
     pub fn open_in_memory() -> Result<NodeStore> {
         Self::init(Connection::open_in_memory()?)
     }
 
     fn init(conn: Connection) -> Result<NodeStore> {
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         // La version est lue AVANT toute écriture (pragmas persistants, schéma) :
         // une base d'un autre schéma est refusée sans être modifiée.
         check_version(&conn)?;
         // `journal_mode` renvoie une ligne : on la lit pour ne pas la laisser pendre.
         let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "secure_delete", "ON")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // Un dépôt confirmé au client survit à une coupure de courant.
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.set_prepared_statement_cache_capacity(crate::rules::STATEMENT_CACHE);
         conn.execute_batch(&format!(
             "BEGIN; {SCHEMA}
              INSERT OR IGNORE INTO meta(k,v) VALUES('schema_version', {SCHEMA_VERSION}), ('stored_bytes', 0);
@@ -163,4 +189,41 @@ pub(crate) fn add_stored_bytes(conn: &Connection, delta: i64) -> Result<()> {
         params![delta],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_open_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.db");
+        // Base absente : refus, rien n'est créé.
+        assert!(NodeStore::open_read_only(&path).is_err());
+        assert!(!path.exists());
+        drop(NodeStore::open(&path).unwrap());
+        let before = std::fs::read(&path).unwrap();
+        let ro = NodeStore::open_read_only(&path).unwrap();
+        assert_eq!(ro.stats().unwrap().packets, 0);
+        // Une écriture est refusée par SQLite.
+        assert!(ro.conn().execute("DELETE FROM packets", []).is_err());
+        drop(ro);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn pragmas_and_cache() {
+        let s = NodeStore::open_in_memory().unwrap();
+        let sync: i64 = s
+            .conn()
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sync, 2, "synchronous=FULL");
+        let busy: i64 = s
+            .conn()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy, 5_000);
+    }
 }

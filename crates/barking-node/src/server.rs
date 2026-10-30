@@ -6,7 +6,10 @@
 //!   opération dans `spawn_blocking`. Écritures (et lectures) sérialisées sur
 //!   une seule connexion SQLite : pas de course entre la vérification des
 //!   quotas et l'insertion. La file est bornée : au plus `max_db_jobs` (64)
-//!   opérations en cours ou en attente, au-delà `RateLimited`. Le jeton est
+//!   opérations en cours ou en attente, et `max(1, max_db_jobs / 16)` par
+//!   groupe d'adresses ; au-delà `RateLimited`. Un dépôt passe d'abord
+//!   `rules::precheck` (forme, expiration, preuve minimale) sans prendre de
+//!   place. Le jeton est
 //!   tenu par la tâche bloquante elle-même : abandonner la requête ne libère
 //!   la place qu'une fois le travail fini.
 //! - **Mémoire des réponses** : chaque requête réserve d'avance la taille
@@ -25,8 +28,10 @@
 //!   (abandonnées à la fermeture).
 //! - **Adresses** : une connexion n'est acceptée qu'après validation de
 //!   l'adresse (jeton QUIC `Retry`), pour qu'une adresse usurpée ne réserve
-//!   pas de place dans le limiteur. Le limiteur regroupe par IP (/64 en IPv6),
-//!   en mémoire seulement ; aucune adresse n'est journalisée.
+//!   pas de place dans le limiteur. Le limiteur regroupe par IP (/64 en IPv6)
+//!   avec des plafonds par /56, /48 et /24, en mémoire seulement ; aucune
+//!   adresse n'est journalisée. Une connexion évincée (table pleine) est
+//!   fermée avec le code `CLOSE_EVICTED`.
 //! - **Délais** : poignée de main et `Hello` sous `hello_timeout` (5 s) ;
 //!   connexion fermée sans nouvelle requête pendant `idle_timeout` (60 s, aussi
 //!   le délai d'inactivité QUIC) ; lecture d'une requête sous
@@ -36,8 +41,9 @@
 //!   et d'envoi (2 Mio) réduites : mémoire bornée par connexion.
 //! - **Trames** : une trame trop grande, tronquée ou trop lente ferme le flux
 //!   sans réponse ; un corps illisible reçoit `Error(Malformed)`.
-//! - **Débit** : chaque requête après `Hello` passe par le seau de jetons de sa
-//!   connexion (`RateLimited` sinon) ; les octets de chaque réponse y sont
+//! - **Débit** : chaque requête après `Hello` passe par le seau de jetons de son
+//!   groupe d'adresses (`RateLimited` sinon ; une relève coûte `fetch_cost`) ;
+//!   les octets de chaque réponse y sont
 //!   débités qu'elle soit acquittée, coupée, arrêtée par le pair ou expirée.
 //!   Après `MAX_CONSECUTIVE_REFUSALS` (20) refus de débit d'affilée, la
 //!   connexion est fermée.
@@ -59,7 +65,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-use crate::limits::{ConnBudget, ConnectionSlot, LimitConfig, Limiter};
+use crate::limits::{ConnectionSlot, GroupDbJob, LimitConfig, Limiter};
 use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
 use crate::store::NodeStore;
 use crate::{Error, Result};
@@ -94,6 +100,7 @@ const CLOSE_NORMAL: u32 = 0;
 const CLOSE_PROTOCOL: u32 = 1;
 const CLOSE_IDLE: u32 = 2;
 const CLOSE_ABUSE: u32 = 3;
+const CLOSE_EVICTED: u32 = 4;
 const STREAM_REFUSED: u32 = 1;
 
 pub struct ServerConfig {
@@ -397,6 +404,8 @@ struct Shared {
     request_timeout: Duration,
     limiter: Arc<Limiter>,
     db: Arc<Budget>,
+    /// Opérations de base en cours ou en attente par groupe d'adresses.
+    db_jobs_per_group: u32,
     responses: Arc<Budget>,
     response_bytes_per_ip: usize,
     min_send_rate: u64,
@@ -448,11 +457,21 @@ fn unix_now() -> u64 {
 impl Shared {
     /// Exécute `f` sur la base, hors de la boucle asynchrone. `wait` : attend
     /// une place dans la file (tâches internes) au lieu de répondre `Busy`.
+    /// `group` : la requête vient de ce groupe d'adresses, qui n'a droit
+    /// qu'à `db_jobs_per_group` places à la fois (`Busy` au-delà).
     async fn with_store<T: Send + 'static>(
         self: &Arc<Self>,
         wait: bool,
+        group: Option<&ConnectionSlot>,
         f: impl FnOnce(&mut NodeStore, &Policy) -> Result<T> + Send + 'static,
     ) -> Stored<T> {
+        let group_job: Option<GroupDbJob> = match group {
+            Some(g) => match g.try_db_job(self.db_jobs_per_group) {
+                Some(j) => Some(j),
+                None => return Stored::Busy,
+            },
+            None => None,
+        };
         let slot = if wait {
             self.db.take(1).await
         } else {
@@ -463,9 +482,10 @@ impl Shared {
         };
         let me = Arc::clone(self);
         let r = tokio::task::spawn_blocking(move || {
-            // La place est rendue à la fin du travail, même si la requête a
-            // été abandonnée entre-temps.
+            // Les places sont rendues à la fin du travail, même si la requête
+            // a été abandonnée entre-temps.
             let _slot = slot;
+            let _group_job = group_job;
             let mut store = me.store.lock().unwrap_or_else(PoisonError::into_inner);
             f(&mut store, &me.policy)
         })
@@ -540,6 +560,7 @@ pub async fn run(
         db: Budget::new(config.max_db_jobs, Arc::clone(&config.stats), |s| {
             &s.db_jobs
         }),
+        db_jobs_per_group: db_jobs_per_group(config.max_db_jobs),
         responses: Budget::new(
             config.max_response_bytes_in_flight,
             Arc::clone(&config.stats),
@@ -563,7 +584,7 @@ pub async fn run(
     }
 
     if let Stored::Done(n) = shared
-        .with_store(true, |s, _| s.purge_expired(unix_now()))
+        .with_store(true, None, |s, _| s.purge_expired(unix_now()))
         .await
     {
         shared.stats.purged(n);
@@ -599,7 +620,7 @@ async fn purge_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
         tokio::select! {
             _ = tick.tick() => {
                 if let Stored::Done(n) =
-                    shared.with_store(true, |s, _| s.purge_expired(unix_now())).await
+                    shared.with_store(true, None, |s, _| s.purge_expired(unix_now())).await
                 {
                     shared.stats.purged(n);
                 }
@@ -639,7 +660,10 @@ fn admit(
         }
         return;
     }
-    let Some(slot) = shared.limiter.try_acquire(incoming.remote_address().ip()) else {
+    let Some(slot) = shared
+        .limiter
+        .try_acquire(incoming.remote_address().ip(), Instant::now())
+    else {
         incoming.refuse();
         return;
     };
@@ -681,7 +705,6 @@ async fn serve_connection(
     }
 
     let conn_state = Arc::new(ConnState {
-        budget: Mutex::new(shared.limiter.budget(Instant::now())),
         refusals: AtomicU32::new(0),
         conn: conn.clone(),
         reserved: AtomicUsize::new(0),
@@ -696,6 +719,11 @@ async fn serve_connection(
             r = timeout(shared.idle_timeout, conn.accept_bi()) => r,
             _ = stop.changed() => {
                 conn.close(CLOSE_NORMAL.into(), b"arret");
+                break;
+            }
+            // Table des connexions pleine : place cédée à un autre groupe.
+            _ = conn_state.slot.evicted().notified() => {
+                conn.close(CLOSE_EVICTED.into(), b"evince");
                 break;
             }
         };
@@ -720,13 +748,13 @@ async fn serve_connection(
 
 /// État d'une connexion partagé par ses flux.
 struct ConnState {
-    budget: Mutex<ConnBudget>,
     /// Refus de débit consécutifs.
     refusals: AtomicU32,
     conn: Connection,
     /// Octets de réponses réservés par cette connexion (au plus une page).
     reserved: AtomicUsize,
-    /// Place du limiteur : rendue quand la connexion et ses flux sont finis.
+    /// Place du limiteur (et état du groupe d'adresses : seau de débit,
+    /// réserves) : rendue quand la connexion et ses flux sont finis.
     slot: ConnectionSlot,
 }
 
@@ -887,11 +915,13 @@ async fn serve_stream(
     let Some((req, size)) = read_request(&mut send, &mut recv, shared.request_timeout).await else {
         return;
     };
-    let admitted = state
-        .budget
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .admit(size, Instant::now());
+    let now = Instant::now();
+    state.slot.touch(now);
+    let cost = match &req {
+        Ok(Request::Fetch { mailboxes, .. }) => fetch_cost(mailboxes.len()),
+        _ => 1,
+    };
+    let admitted = state.slot.admit(cost, size, now);
     if !admitted {
         shared.stats.refuse(ErrorReason::RateLimited);
         let n = state.refusals.fetch_add(1, Ordering::Relaxed) + 1;
@@ -919,7 +949,7 @@ async fn serve_stream(
         Some(mut held) => {
             let resp = match req {
                 Err(()) => Response::Error(ErrorReason::Malformed),
-                Ok(req) => match handle(req, &shared).await {
+                Ok(req) => match handle(req, &shared, &state.slot).await {
                     Stored::Done(r) => r,
                     Stored::Busy => Response::Error(ErrorReason::RateLimited),
                     Stored::Failed => {
@@ -947,15 +977,23 @@ async fn serve_stream(
 
 impl ConnState {
     fn charge(&self, bytes: usize) {
-        self.budget
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .charge_bytes(bytes, Instant::now());
+        self.slot.charge_bytes(bytes, Instant::now());
     }
 }
 
+/// Coût d'une relève en jetons de requêtes : 1, plus 1 par tranche de 8
+/// boîtes (chaque boîte est une lecture d'index).
+pub fn fetch_cost(mailboxes: usize) -> u32 {
+    u32::try_from(1 + mailboxes.div_ceil(8)).unwrap_or(u32::MAX)
+}
+
+/// Part de la file de base d'un groupe d'adresses : 1/16, au moins 1.
+pub fn db_jobs_per_group(max_db_jobs: usize) -> u32 {
+    u32::try_from((max_db_jobs / 16).max(1)).unwrap_or(u32::MAX)
+}
+
 /// Traite une requête après `Hello`.
-async fn handle(req: Request, shared: &Arc<Shared>) -> Stored<Response> {
+async fn handle(req: Request, shared: &Arc<Shared>, group: &ConnectionSlot) -> Stored<Response> {
     let to_resp = |r: core::result::Result<Response, ErrorReason>| match r {
         Ok(resp) => resp,
         Err(e) => Response::Error(e),
@@ -963,8 +1001,13 @@ async fn handle(req: Request, shared: &Arc<Shared>) -> Stored<Response> {
     match req {
         Request::Hello { .. } => Stored::Done(Response::Error(ErrorReason::Malformed)),
         Request::Deposit { packet, pow } => {
+            // Forme, expiration et preuve à la difficulté de base vérifiées
+            // avant de prendre une place dans la file de la base.
+            if let Err(r) = rules::precheck(&shared.policy, &packet, pow, unix_now()) {
+                return Stored::Done(Response::Error(r));
+            }
             match shared
-                .with_store(false, move |s, p| {
+                .with_store(false, Some(group), move |s, p| {
                     rules::deposit(s, p, &packet, pow, unix_now())
                 })
                 .await
@@ -984,7 +1027,9 @@ async fn handle(req: Request, shared: &Arc<Shared>) -> Stored<Response> {
         } => {
             let page = fetch_page_bytes(max_bytes);
             match shared
-                .with_store(false, move |s, _| rules::fetch(s, &mailboxes, cursor, page))
+                .with_store(false, Some(group), move |s, _| {
+                    rules::fetch(s, &mailboxes, cursor, page)
+                })
                 .await
             {
                 Stored::Done(r) => Stored::Done(to_resp(r.map(|(items, next)| {

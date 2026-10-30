@@ -22,6 +22,12 @@ pow_bits = 18
 # préfixe /64 en IPv6 (défaut 8).
 # max_connections = 1000
 # max_connections_per_ip = 8
+# Plafonds par préfixe plus large : IPv6 /56 (32) et /48 (64), IPv4 /24 (32).
+# Table pleine : la connexion la plus longtemps inactive du /48 ou /24 le plus
+# représenté cède sa place.
+# max_connections_per_ipv6_56 = 32
+# max_connections_per_ipv6_48 = 64
+# max_connections_per_ipv4_24 = 32
 # Petit appareil : max_connections = 200
 
 # Mémoire des réponses : octets de réponses en vol, tous pairs confondus

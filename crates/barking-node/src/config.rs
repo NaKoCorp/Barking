@@ -35,7 +35,11 @@ pub struct Config {
     /// Difficulté de base de la preuve de travail, 1 à 24 bits.
     pub pow_bits: u8,
     pub max_connections: u32,
+    /// Par adresse IPv4 (/32) ou préfixe IPv6 /64.
     pub max_connections_per_ip: u32,
+    pub max_connections_per_ipv6_56: u32,
+    pub max_connections_per_ipv6_48: u32,
+    pub max_connections_per_ipv4_24: u32,
     /// Octets de réponses en vol, tous pairs confondus (mémoire réelle :
     /// environ le double).
     pub max_response_bytes_in_flight: usize,
@@ -61,6 +65,9 @@ impl Default for Config {
             pow_bits: DEFAULT_POW_BITS,
             max_connections: limits.max_connections,
             max_connections_per_ip: limits.max_connections_per_ip,
+            max_connections_per_ipv6_56: limits.max_connections_per_ipv6_56,
+            max_connections_per_ipv6_48: limits.max_connections_per_ipv6_48,
+            max_connections_per_ipv4_24: limits.max_connections_per_ipv4_24,
             max_response_bytes_in_flight: DEFAULT_MAX_RESPONSE_BYTES_IN_FLIGHT,
             max_response_bytes_per_ip: DEFAULT_MAX_RESPONSE_BYTES_PER_IP,
             max_db_jobs: DEFAULT_MAX_DB_JOBS,
@@ -102,10 +109,16 @@ impl Config {
                 self.pow_bits
             )));
         }
-        if self.max_connections == 0 || self.max_connections_per_ip == 0 {
-            return Err(bad(
-                "max_connections et max_connections_per_ip : au moins 1",
-            ));
+        if [
+            self.max_connections,
+            self.max_connections_per_ip,
+            self.max_connections_per_ipv6_56,
+            self.max_connections_per_ipv6_48,
+            self.max_connections_per_ipv4_24,
+        ]
+        .contains(&0)
+        {
+            return Err(bad("max_connections et max_connections_per_* : au moins 1"));
         }
         if self.storage_max_bytes == 0 {
             return Err(bad("storage_max_bytes : au moins 1"));
@@ -149,6 +162,9 @@ impl Config {
         cfg.limits = LimitConfig {
             max_connections: self.max_connections,
             max_connections_per_ip: self.max_connections_per_ip,
+            max_connections_per_ipv6_56: self.max_connections_per_ipv6_56,
+            max_connections_per_ipv6_48: self.max_connections_per_ipv6_48,
+            max_connections_per_ipv4_24: self.max_connections_per_ipv4_24,
             ..LimitConfig::default()
         };
         cfg.max_response_bytes_in_flight = self.max_response_bytes_in_flight;
@@ -170,6 +186,9 @@ mod tests {
         assert_eq!(c.pow_bits, 18);
         assert_eq!(c.max_connections, 1_000);
         assert_eq!(c.max_connections_per_ip, 8);
+        assert_eq!(c.max_connections_per_ipv6_56, 32);
+        assert_eq!(c.max_connections_per_ipv6_48, 64);
+        assert_eq!(c.max_connections_per_ipv4_24, 32);
         assert_eq!(c.storage_max_bytes, 1 << 30);
         assert_eq!(c.max_response_bytes_in_flight, 64 << 20);
         assert_eq!(c.max_response_bytes_per_ip, 4 << 20);
@@ -192,6 +211,9 @@ mod tests {
             "max_response_bytes_in_flight = 1000",
             "max_connections = 0",
             "max_connections_per_ip = 0",
+            "max_connections_per_ipv6_56 = 0",
+            "max_connections_per_ipv6_48 = 0",
+            "max_connections_per_ipv4_24 = 0",
             "max_db_jobs = 0",
             "min_send_rate = 0",
             "log_interval_secs = 0",
@@ -204,6 +226,7 @@ mod tests {
         for ok in [
             "pow_bits = 1",
             "pow_bits = 24",
+            "max_connections_per_ipv6_48 = 128",
             "max_response_bytes_per_ip = 1048576",
             "listen = [\"127.0.0.1:1\", \"[::1]:1\"]",
         ] {

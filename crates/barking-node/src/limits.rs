@@ -1,22 +1,36 @@
 //! Limites anti-abus (spec §5), tenues en mémoire seulement.
 //!
-//! - Connexions simultanées par adresse IP (IPv6 regroupée par préfixe /64,
-//!   IPv4 encapsulée dans IPv6 ramenée à IPv4) et au total.
-//! - Seau de jetons par connexion : requêtes et octets, rafale ×`burst`.
+//! - Connexions simultanées, par niveaux : par adresse (IPv4 /32, IPv6 /64),
+//!   par IPv6 /56 et /48, par IPv4 /24, et au total. IPv4 encapsulée dans
+//!   IPv6 ramenée à IPv4. Table pleine : la connexion la plus longtemps
+//!   inactive du /48 (ou /24) le plus représenté est évincée, si ce groupe
+//!   pèse plus que celui du nouveau venu ; sinon refus.
+//! - Par groupe d'adresses (/32 ou /64), partagés par ses connexions : seau
+//!   de jetons (requêtes et octets, rafale ×`burst`, à moitié plein au
+//!   départ), octets de réponses réservés, opérations de base en cours. L'état
+//!   d'un groupe survit à ses connexions tant que son seau n'est pas revenu à
+//!   son niveau de départ : se reconnecter ne le remplit pas.
 //!
-//! Les adresses ne vivent que dans la table des connexions ouvertes, le temps
-//! de la connexion ; elles ne sont ni écrites, ni journalisées, ni affichables
-//! (`IpKey` n'implémente pas `Debug`).
+//! Les adresses ne vivent que dans ces tables, le temps des connexions (et du
+//! retour du seau à son niveau de départ, quelques secondes) ; elles ne sont
+//! ni écrites, ni journalisées, ni affichables (les clés n'implémentent pas
+//! `Debug`).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
+use tokio::sync::Notify;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LimitConfig {
     pub max_connections: u32,
+    /// Par adresse IPv4 (/32) ou préfixe IPv6 /64.
     pub max_connections_per_ip: u32,
+    pub max_connections_per_ipv6_56: u32,
+    pub max_connections_per_ipv6_48: u32,
+    pub max_connections_per_ipv4_24: u32,
     pub requests_per_sec: u32,
     pub bytes_per_sec: u64,
     /// Capacité des seaux, en secondes de débit.
@@ -28,6 +42,9 @@ impl Default for LimitConfig {
         LimitConfig {
             max_connections: 1_000,
             max_connections_per_ip: 8,
+            max_connections_per_ipv6_56: 32,
+            max_connections_per_ipv6_48: 64,
+            max_connections_per_ipv4_24: 32,
             requests_per_sec: 20,
             bytes_per_sec: 1 << 20,
             burst: 5,
@@ -35,41 +52,124 @@ impl Default for LimitConfig {
     }
 }
 
-/// Clé de regroupement d'une adresse : IPv4 entière, ou préfixe /64 IPv6.
+/// Groupe d'une adresse : IPv4 entière, ou préfixe /64 IPv6.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum IpKey {
     V4([u8; 4]),
     V6([u8; 8]),
 }
 
-fn ip_key(ip: IpAddr) -> IpKey {
+/// Préfixes englobants, comptés pour les plafonds par niveau.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PrefixKey {
+    V6_56([u8; 7]),
+    V6_48([u8; 6]),
+    V4_24([u8; 3]),
+}
+
+/// Groupe et préfixes (du plus étroit au plus large ; le dernier est le
+/// groupe d'éviction : /48 ou /24).
+fn keys(ip: IpAddr) -> (IpKey, Vec<PrefixKey>) {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    };
     match ip {
-        IpAddr::V4(v4) => IpKey::V4(v4.octets()),
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpKey::V4(v4.octets()),
-            None => {
-                let mut p = [0u8; 8];
-                p.copy_from_slice(&v6.octets()[..8]);
-                IpKey::V6(p)
-            }
-        },
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            (IpKey::V4(o), vec![PrefixKey::V4_24([o[0], o[1], o[2]])])
+        }
+        IpAddr::V6(v6) => {
+            let o = v6.octets();
+            let mut p64 = [0u8; 8];
+            p64.copy_from_slice(&o[..8]);
+            let mut p56 = [0u8; 7];
+            p56.copy_from_slice(&o[..7]);
+            let mut p48 = [0u8; 6];
+            p48.copy_from_slice(&o[..6]);
+            (
+                IpKey::V6(p64),
+                vec![PrefixKey::V6_56(p56), PrefixKey::V6_48(p48)],
+            )
+        }
     }
 }
 
-/// Un groupe d'adresses : connexions ouvertes et octets de réponses réservés.
-#[derive(Default)]
+/// Un groupe d'adresses : connexions ouvertes, débit, octets de réponses
+/// réservés, opérations de base en cours.
 struct Group {
     conns: u32,
     bytes: usize,
+    db_jobs: u32,
+    budget: ConnBudget,
+}
+
+impl Group {
+    /// Sans connexion ni travail en cours, et seau revenu à son niveau de
+    /// départ : équivalent à un groupe neuf, peut être oublié.
+    fn forgettable(&mut self, now: Instant) -> bool {
+        self.conns == 0 && self.bytes == 0 && self.db_jobs == 0 && self.budget.settled(now)
+    }
+}
+
+/// Une connexion ouverte (pour l'éviction).
+struct ConnEntry {
+    group: IpKey,
+    prefixes: Vec<PrefixKey>,
+    last_active: Instant,
+    evict: Arc<Notify>,
 }
 
 #[derive(Default)]
 struct Table {
-    per_ip: HashMap<IpKey, Group>,
+    groups: HashMap<IpKey, Group>,
+    prefixes: HashMap<PrefixKey, u32>,
+    conns: HashMap<u64, ConnEntry>,
+    next_id: u64,
     total: u32,
 }
 
-/// Compteur de connexions ouvertes.
+impl Table {
+    /// Retire une connexion des compteurs (fermeture ou éviction).
+    fn remove_conn(&mut self, id: u64, now: Instant) -> Option<ConnEntry> {
+        let e = self.conns.remove(&id)?;
+        self.total = self.total.saturating_sub(1);
+        for p in &e.prefixes {
+            if let Some(n) = self.prefixes.get_mut(p) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    self.prefixes.remove(p);
+                }
+            }
+        }
+        if let Some(g) = self.groups.get_mut(&e.group) {
+            g.conns = g.conns.saturating_sub(1);
+        }
+        self.forget_if_idle(e.group, now);
+        Some(e)
+    }
+
+    fn forget_if_idle(&mut self, key: IpKey, now: Instant) {
+        if self
+            .groups
+            .get_mut(&key)
+            .is_some_and(|g| g.forgettable(now))
+        {
+            self.groups.remove(&key);
+        }
+    }
+
+    /// Oublie les groupes inactifs revenus à leur niveau de départ, quand
+    /// ils sont nombreux (coût amorti).
+    fn sweep(&mut self, now: Instant) {
+        let live = self.total as usize;
+        if self.groups.len() > 2 * live + 256 {
+            self.groups.retain(|_, g| !g.forgettable(now));
+        }
+    }
+}
+
+/// Compteur de connexions ouvertes et état par groupe d'adresses.
 pub struct Limiter {
     cfg: LimitConfig,
     table: Mutex<Table>,
@@ -91,26 +191,83 @@ impl Limiter {
         self.table.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn prefix_cap(&self, p: &PrefixKey) -> u32 {
+        match p {
+            PrefixKey::V6_56(_) => self.cfg.max_connections_per_ipv6_56,
+            PrefixKey::V6_48(_) => self.cfg.max_connections_per_ipv6_48,
+            PrefixKey::V4_24(_) => self.cfg.max_connections_per_ipv4_24,
+        }
+    }
+
     /// Réserve une place pour une connexion depuis `ip`, ou `None` si une
-    /// limite est atteinte. La place est rendue quand la garde est lâchée.
-    pub fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ConnectionSlot> {
-        let key = ip_key(ip);
+    /// limite est atteinte. Table pleine : évince la connexion la plus
+    /// longtemps inactive du groupe d'éviction (/48 ou /24) le plus
+    /// représenté, s'il compte au moins deux connexions de plus que celui du
+    /// nouveau venu. La place est rendue quand la garde est lâchée.
+    pub fn try_acquire(self: &Arc<Self>, ip: IpAddr, now: Instant) -> Option<ConnectionSlot> {
+        let (key, prefixes) = keys(ip);
         let mut t = self.table();
-        if t.total >= self.cfg.max_connections {
+        t.sweep(now);
+        if t.groups.get(&key).map_or(0, |g| g.conns) >= self.cfg.max_connections_per_ip {
             return None;
         }
-        let g = t.per_ip.entry(key).or_default();
-        if g.conns >= self.cfg.max_connections_per_ip {
-            if g.conns == 0 {
-                t.per_ip.remove(&key);
+        for p in &prefixes {
+            if t.prefixes.get(p).copied().unwrap_or(0) >= self.prefix_cap(p) {
+                return None;
             }
-            return None;
         }
+        if t.total >= self.cfg.max_connections {
+            let top = *prefixes.last()?;
+            let mine = t.prefixes.get(&top).copied().unwrap_or(0);
+            // Groupe d'éviction le plus représenté (même niveau : /48 ou /24).
+            let (victim_group, count) = t
+                .prefixes
+                .iter()
+                .filter(|(p, _)| matches!(p, PrefixKey::V6_48(_) | PrefixKey::V4_24(_)))
+                .max_by_key(|(_, n)| **n)
+                .map(|(p, n)| (*p, *n))?;
+            if count < mine.saturating_add(2) {
+                return None;
+            }
+            let victim = t
+                .conns
+                .iter()
+                .filter(|(_, e)| e.prefixes.last() == Some(&victim_group))
+                .min_by_key(|(_, e)| e.last_active)
+                .map(|(id, _)| *id)?;
+            if let Some(e) = t.remove_conn(victim, now) {
+                e.evict.notify_one();
+            }
+        }
+        let cfg = self.cfg;
+        let g = t.groups.entry(key).or_insert_with(|| Group {
+            conns: 0,
+            bytes: 0,
+            db_jobs: 0,
+            budget: ConnBudget::new(&cfg, now),
+        });
         g.conns += 1;
+        for p in &prefixes {
+            *t.prefixes.entry(*p).or_insert(0) += 1;
+        }
         t.total += 1;
+        let id = t.next_id;
+        t.next_id += 1;
+        let evict = Arc::new(Notify::new());
+        t.conns.insert(
+            id,
+            ConnEntry {
+                group: key,
+                prefixes,
+                last_active: now,
+                evict: Arc::clone(&evict),
+            },
+        );
         Some(ConnectionSlot {
             limiter: Arc::clone(self),
+            id,
             key,
+            evict,
         })
     }
 
@@ -118,25 +275,52 @@ impl Limiter {
     pub fn connections(&self) -> u32 {
         self.table().total
     }
-
-    /// Budget de débit d'une nouvelle connexion.
-    pub fn budget(&self, now: Instant) -> ConnBudget {
-        ConnBudget::new(&self.cfg, now)
-    }
 }
 
 /// Place réservée pour une connexion.
 pub struct ConnectionSlot {
     limiter: Arc<Limiter>,
+    id: u64,
     key: IpKey,
+    evict: Arc<Notify>,
 }
 
 impl ConnectionSlot {
+    /// Notifié quand la connexion est évincée (table pleine) : elle doit
+    /// être fermée. Sa place est déjà rendue.
+    pub fn evicted(&self) -> &Notify {
+        &self.evict
+    }
+
+    /// Note une activité de la connexion (requête reçue).
+    pub fn touch(&self, now: Instant) {
+        if let Some(e) = self.limiter.table().conns.get_mut(&self.id) {
+            e.last_active = now;
+        }
+    }
+
+    /// Admet une requête de coût `cost` (en requêtes) et de `bytes` octets
+    /// si le seau du groupe le permet, et la débite. Faux si le groupe n'est
+    /// plus suivi (connexion évincée).
+    pub fn admit(&self, cost: u32, bytes: usize, now: Instant) -> bool {
+        let mut t = self.limiter.table();
+        t.groups
+            .get_mut(&self.key)
+            .is_some_and(|g| g.budget.admit(cost, bytes, now))
+    }
+
+    /// Débite les octets d'une réponse au seau du groupe.
+    pub fn charge_bytes(&self, bytes: usize, now: Instant) {
+        if let Some(g) = self.limiter.table().groups.get_mut(&self.key) {
+            g.budget.charge_bytes(bytes, now);
+        }
+    }
+
     /// Réserve `n` octets de réponse pour le groupe d'adresses de cette
     /// connexion, sans dépasser `cap`.
     pub fn try_reserve_bytes(&self, n: usize, cap: usize) -> bool {
         let mut t = self.limiter.table();
-        let Some(g) = t.per_ip.get_mut(&self.key) else {
+        let Some(g) = t.groups.get_mut(&self.key) else {
             return false;
         };
         match g.bytes.checked_add(n) {
@@ -151,31 +335,57 @@ impl ConnectionSlot {
     /// Rend `n` octets réservés par `try_reserve_bytes`.
     pub fn release_bytes(&self, n: usize) {
         let mut t = self.limiter.table();
-        if let Some(g) = t.per_ip.get_mut(&self.key) {
+        if let Some(g) = t.groups.get_mut(&self.key) {
             g.bytes = g.bytes.saturating_sub(n);
         }
+        t.forget_if_idle(self.key, Instant::now());
     }
 
     /// Octets réservés par le groupe d'adresses de cette connexion.
     pub fn group_bytes(&self) -> usize {
         self.limiter
             .table()
-            .per_ip
+            .groups
             .get(&self.key)
             .map_or(0, |g| g.bytes)
+    }
+
+    /// Réserve une opération de base pour le groupe, au plus `cap` en cours
+    /// par groupe ; rendue quand la garde est lâchée.
+    pub fn try_db_job(&self, cap: u32) -> Option<GroupDbJob> {
+        let mut t = self.limiter.table();
+        let g = t.groups.get_mut(&self.key)?;
+        if g.db_jobs >= cap {
+            return None;
+        }
+        g.db_jobs += 1;
+        Some(GroupDbJob {
+            limiter: Arc::clone(&self.limiter),
+            key: self.key,
+        })
     }
 }
 
 impl Drop for ConnectionSlot {
     fn drop(&mut self) {
+        // Déjà retirée si elle a été évincée.
+        self.limiter.table().remove_conn(self.id, Instant::now());
+    }
+}
+
+/// Opération de base comptée pour un groupe d'adresses.
+pub struct GroupDbJob {
+    limiter: Arc<Limiter>,
+    key: IpKey,
+}
+
+impl Drop for GroupDbJob {
+    fn drop(&mut self) {
         let mut t = self.limiter.table();
-        t.total = t.total.saturating_sub(1);
-        if let Some(g) = t.per_ip.get_mut(&self.key) {
-            g.conns = g.conns.saturating_sub(1);
-            if g.conns == 0 {
-                t.per_ip.remove(&self.key);
-            }
+        if let Some(g) = t.groups.get_mut(&self.key) {
+            g.db_jobs = g.db_jobs.saturating_sub(1);
         }
+        t.forget_if_idle(self.key, Instant::now());
     }
 }
 
@@ -189,12 +399,12 @@ pub struct TokenBucket {
 }
 
 impl TokenBucket {
-    /// Seau plein au départ.
-    pub fn new(rate: f64, capacity: f64, now: Instant) -> TokenBucket {
+    /// Seau contenant `tokens` jetons au départ.
+    pub fn new(rate: f64, capacity: f64, tokens: f64, now: Instant) -> TokenBucket {
         TokenBucket {
             rate,
             capacity,
-            tokens: capacity,
+            tokens: tokens.min(capacity),
             last: now,
         }
     }
@@ -216,9 +426,15 @@ impl TokenBucket {
         self.refill(now);
         self.tokens = (self.tokens - n).max(-self.capacity);
     }
+
+    fn level(&mut self, now: Instant) -> f64 {
+        self.refill(now);
+        self.tokens
+    }
 }
 
-/// Budget de débit d'une connexion : requêtes et octets.
+/// Budget de débit d'un groupe d'adresses : requêtes et octets. Les seaux
+/// sont à moitié pleins au départ.
 #[derive(Debug, Clone)]
 pub struct ConnBudget {
     requests: TokenBucket,
@@ -231,17 +447,18 @@ impl ConnBudget {
         let rps = f64::from(cfg.requests_per_sec);
         let bps = cfg.bytes_per_sec as f64;
         ConnBudget {
-            requests: TokenBucket::new(rps, rps * burst, now),
-            bytes: TokenBucket::new(bps, bps * burst, now),
+            requests: TokenBucket::new(rps, rps * burst, rps * burst / 2.0, now),
+            bytes: TokenBucket::new(bps, bps * burst, bps * burst / 2.0, now),
         }
     }
 
-    /// Admet une requête de `bytes` octets si les deux seaux le permettent,
-    /// et la débite. Sinon rien n'est débité.
-    pub fn admit(&mut self, bytes: usize, now: Instant) -> bool {
+    /// Admet une requête de coût `cost` et de `bytes` octets si les deux
+    /// seaux le permettent, et la débite. Sinon rien n'est débité.
+    pub fn admit(&mut self, cost: u32, bytes: usize, now: Instant) -> bool {
+        let c = f64::from(cost.max(1));
         let b = bytes as f64;
-        if self.requests.available(1.0, now) && self.bytes.available(b, now) {
-            self.requests.charge(1.0, now);
+        if self.requests.available(c, now) && self.bytes.available(b, now) {
+            self.requests.charge(c, now);
             self.bytes.charge(b, now);
             true
         } else {
@@ -252,6 +469,13 @@ impl ConnBudget {
     /// Débite les octets d'une réponse.
     pub fn charge_bytes(&mut self, bytes: usize, now: Instant) {
         self.bytes.charge(bytes as f64, now);
+    }
+
+    /// Seaux revenus (au moins) à leur niveau de départ.
+    fn settled(&mut self, now: Instant) -> bool {
+        let r = self.requests.capacity / 2.0;
+        let b = self.bytes.capacity / 2.0;
+        self.requests.level(now) >= r && self.bytes.level(now) >= b
     }
 }
 
@@ -268,44 +492,165 @@ mod tests {
         }
     }
 
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn acq(l: &Arc<Limiter>, s: &str) -> Option<ConnectionSlot> {
+        l.try_acquire(ip(s), Instant::now())
+    }
+
+    fn wide() -> Arc<Limiter> {
+        Limiter::new(LimitConfig {
+            max_connections: 10_000,
+            ..LimitConfig::default()
+        })
+    }
+
     #[test]
     fn per_ip_limit_and_release() {
         let l = Limiter::new(cfg());
-        let ip: IpAddr = "192.0.2.1".parse().unwrap();
-        let a = l.try_acquire(ip).unwrap();
-        let _b = l.try_acquire(ip).unwrap();
-        assert!(l.try_acquire(ip).is_none());
+        let a = acq(&l, "192.0.2.1").unwrap();
+        let _b = acq(&l, "192.0.2.1").unwrap();
+        assert!(acq(&l, "192.0.2.1").is_none());
         // Autre adresse : acceptée.
-        let _c = l.try_acquire("192.0.2.2".parse().unwrap()).unwrap();
+        let _c = acq(&l, "192.0.2.2").unwrap();
         drop(a);
-        assert!(l.try_acquire(ip).is_some());
+        assert!(acq(&l, "192.0.2.1").is_some());
     }
 
     #[test]
     fn ipv6_grouped_by_64_and_mapped_v4() {
         let l = Limiter::new(cfg());
-        let _a = l.try_acquire("2001:db8:1:2::1".parse().unwrap()).unwrap();
-        let _b = l
-            .try_acquire("2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap())
-            .unwrap();
+        let _a = acq(&l, "2001:db8:1:2::1").unwrap();
+        let _b = acq(&l, "2001:db8:1:2:ffff:ffff:ffff:ffff").unwrap();
         // Même /64 : refusée.
-        assert!(l.try_acquire("2001:db8:1:2::99".parse().unwrap()).is_none());
+        assert!(acq(&l, "2001:db8:1:2::99").is_none());
         // Autre /64 : acceptée.
-        let _c = l.try_acquire("2001:db8:1:3::1".parse().unwrap()).unwrap();
+        let _c = acq(&l, "2001:db8:1:3::1").unwrap();
         // IPv4 encapsulée = même clé que l'IPv4.
-        let _d = l.try_acquire("198.51.100.7".parse().unwrap()).unwrap();
-        let _e = l
-            .try_acquire("::ffff:198.51.100.7".parse().unwrap())
-            .unwrap();
-        assert!(l.try_acquire("198.51.100.7".parse().unwrap()).is_none());
+        let _d = acq(&l, "198.51.100.7").unwrap();
+        let _e = acq(&l, "::ffff:198.51.100.7").unwrap();
+        assert!(acq(&l, "198.51.100.7").is_none());
+    }
+
+    #[test]
+    fn ipv6_hierarchical_caps() {
+        let l = wide();
+        let mut held = Vec::new();
+        // Un /56 : 32 connexions au plus, réparties sur 32 /64.
+        for i in 0..32u32 {
+            held.push(acq(&l, &format!("2001:db8:1:{i:x}::1")).unwrap());
+        }
+        assert!(acq(&l, "2001:db8:1:ff::1").is_none());
+        // Un autre /56 du même /48 : 32 de plus, puis le /48 est plein (64).
+        for i in 0..32u32 {
+            held.push(acq(&l, &format!("2001:db8:1:1{i:02x}::1")).unwrap());
+        }
+        assert!(acq(&l, "2001:db8:1:200::1").is_none());
+        // Un autre /48 : accepté.
+        held.push(acq(&l, "2001:db8:2::1").unwrap());
+        // Une place rendue dans le premier /56 : de nouveau acceptée là.
+        held.remove(0);
+        assert!(acq(&l, "2001:db8:1:ff::1").is_some());
+    }
+
+    #[test]
+    fn ipv4_hierarchical_caps() {
+        let l = wide();
+        let mut held = Vec::new();
+        for i in 1..=32u8 {
+            held.push(
+                l.try_acquire(IpAddr::from([10, 0, 0, i]), Instant::now())
+                    .unwrap(),
+            );
+        }
+        // Le /24 est plein (32).
+        assert!(acq(&l, "10.0.0.200").is_none());
+        held.push(acq(&l, "10.0.1.1").unwrap());
+    }
+
+    #[test]
+    fn caps_are_configurable() {
+        let l = Limiter::new(LimitConfig {
+            max_connections: 10_000,
+            max_connections_per_ipv6_56: 2,
+            max_connections_per_ipv6_48: 3,
+            max_connections_per_ipv4_24: 1,
+            ..LimitConfig::default()
+        });
+        let _a = acq(&l, "2001:db8:0:1::1").unwrap();
+        let _b = acq(&l, "2001:db8:0:2::1").unwrap();
+        assert!(acq(&l, "2001:db8:0:3::1").is_none());
+        let _c = acq(&l, "2001:db8:0:100::1").unwrap();
+        assert!(acq(&l, "2001:db8:0:200::1").is_none());
+        let _d = acq(&l, "10.0.0.1").unwrap();
+        assert!(acq(&l, "10.0.0.2").is_none());
+    }
+
+    #[test]
+    fn full_table_evicts_longest_idle_of_largest_group() {
+        let l = Limiter::new(LimitConfig {
+            max_connections: 6,
+            ..LimitConfig::default()
+        });
+        let t0 = Instant::now();
+        let at = |s| t0 + Duration::from_secs(s);
+        // Groupe A (10.0.0.0/24) : 4 connexions ; B et C : une chacune.
+        let a: Vec<_> = (1..=4u8)
+            .map(|i| l.try_acquire(IpAddr::from([10, 0, 0, i]), at(0)).unwrap())
+            .collect();
+        let _b = l.try_acquire(ip("10.1.0.1"), at(0)).unwrap();
+        let _c = l.try_acquire(ip("2001:db8::1"), at(0)).unwrap();
+        // A[2] est la plus longtemps inactive de A.
+        for (i, s) in a.iter().enumerate() {
+            if i != 2 {
+                s.touch(at(10));
+            }
+        }
+        assert_eq!(l.connections(), 6);
+        let d = l.try_acquire(ip("10.2.0.1"), at(20)).unwrap();
+        assert_eq!(l.connections(), 6);
+        // A[2] est évincée : notifiée, sa place déjà rendue.
+        let evicted: Vec<bool> = a
+            .iter()
+            .map(|s| {
+                let n = s.evicted().notified();
+                tokio::pin!(n);
+                n.as_mut().enable()
+            })
+            .collect();
+        assert_eq!(evicted, [false, false, true, false]);
+        // La garde évincée lâchée ne rend pas une seconde fois sa place.
+        drop(a);
+        assert_eq!(l.connections(), 3);
+        drop(d);
+        assert_eq!(l.connections(), 2);
+    }
+
+    #[test]
+    fn full_table_refuses_when_no_group_dominates() {
+        let l = Limiter::new(LimitConfig {
+            max_connections: 3,
+            ..LimitConfig::default()
+        });
+        let _a = acq(&l, "10.0.0.1").unwrap();
+        let _b = acq(&l, "10.0.0.2").unwrap();
+        let _c = acq(&l, "10.1.0.1").unwrap();
+        // Nouveau venu du groupe le plus représenté : refus, pas d'éviction.
+        assert!(acq(&l, "10.0.0.3").is_none());
+        // Groupe A (2) contre nouveau groupe (0) : éviction.
+        let _d = acq(&l, "10.2.0.1").unwrap();
+        // Puis A (1), B (1), D (1) : personne ne domine, refus.
+        assert!(acq(&l, "10.3.0.1").is_none());
     }
 
     #[test]
     fn group_byte_reservation() {
         let l = Limiter::new(cfg());
-        let a = l.try_acquire("2001:db8::1".parse().unwrap()).unwrap();
-        let b = l.try_acquire("2001:db8::2".parse().unwrap()).unwrap();
-        let c = l.try_acquire("2001:db9::1".parse().unwrap()).unwrap();
+        let a = acq(&l, "2001:db8::1").unwrap();
+        let b = acq(&l, "2001:db8::2").unwrap();
+        let c = acq(&l, "2001:db9::1").unwrap();
         assert!(a.try_reserve_bytes(600, 1000));
         // Même /64 : part commune.
         assert!(!b.try_reserve_bytes(500, 1000));
@@ -322,31 +667,95 @@ mod tests {
     fn global_limit() {
         let l = Limiter::new(cfg());
         let slots: Vec<_> = (1..=5u8)
-            .map(|i| l.try_acquire(IpAddr::from([10, 0, 0, i])).unwrap())
+            .map(|i| {
+                l.try_acquire(IpAddr::from([10, i, 0, 1]), Instant::now())
+                    .unwrap()
+            })
             .collect();
         assert_eq!(l.connections(), 5);
-        assert!(l.try_acquire(IpAddr::from([10, 0, 0, 9])).is_none());
+        // Aucun groupe ne domine : refus.
+        assert!(
+            l.try_acquire(IpAddr::from([10, 9, 0, 1]), Instant::now())
+                .is_none()
+        );
         drop(slots);
         assert_eq!(l.connections(), 0);
-        assert!(l.table().per_ip.is_empty());
+        let t = l.table();
+        assert!(t.conns.is_empty() && t.prefixes.is_empty());
     }
 
     #[test]
-    fn request_bucket_burst_then_refill() {
+    fn reconnect_does_not_refill_group_bucket() {
+        let l = Limiter::new(LimitConfig::default());
+        let t0 = Instant::now();
+        let a = l.try_acquire(ip("192.0.2.1"), t0).unwrap();
+        // Départ à moitié plein : 50 requêtes.
+        let mut n = 0;
+        while a.admit(1, 10, t0) {
+            n += 1;
+        }
+        assert_eq!(n, 50);
+        drop(a);
+        // Reconnexion immédiate, ou par une autre connexion du groupe : vide.
+        let b = l.try_acquire(ip("192.0.2.1"), t0).unwrap();
+        let c = l.try_acquire(ip("192.0.2.1"), t0).unwrap();
+        assert!(!b.admit(1, 10, t0));
+        assert!(!c.admit(1, 10, t0));
+        drop((b, c));
+        // Une autre adresse a son propre seau.
+        let d = l.try_acquire(ip("192.0.2.2"), t0).unwrap();
+        assert!(d.admit(1, 10, t0));
+        drop(d);
+        // Une fois le seau revenu à son niveau de départ, le groupe est oublié.
+        let later = t0 + Duration::from_secs(10);
+        let e = l.try_acquire(ip("192.0.2.9"), later).unwrap();
+        drop(e);
+        let mut t = l.table();
+        t.groups.retain(|_, g| !g.forgettable(later));
+        assert!(t.groups.is_empty());
+    }
+
+    #[test]
+    fn group_db_jobs_capped() {
+        let l = Limiter::new(LimitConfig::default());
+        let a = acq(&l, "192.0.2.1").unwrap();
+        let b = acq(&l, "192.0.2.1").unwrap();
+        let other = acq(&l, "192.0.2.2").unwrap();
+        let j1 = a.try_db_job(2).unwrap();
+        let _j2 = b.try_db_job(2).unwrap();
+        // Le groupe a ses deux places, quelle que soit la connexion.
+        assert!(a.try_db_job(2).is_none());
+        assert!(b.try_db_job(2).is_none());
+        // Un autre groupe n'est pas touché.
+        assert!(other.try_db_job(2).is_some());
+        drop(j1);
+        assert!(a.try_db_job(2).is_some());
+    }
+
+    #[test]
+    fn request_cost_and_refill() {
         let t0 = Instant::now();
         let c = LimitConfig::default();
         let mut b = ConnBudget::new(&c, t0);
-        // Rafale ×5 : 100 requêtes, puis refus.
-        for _ in 0..100 {
-            assert!(b.admit(10, t0));
+        // Départ à moitié plein (rafale ×5) : 50 requêtes, puis refus.
+        for _ in 0..50 {
+            assert!(b.admit(1, 10, t0));
         }
-        assert!(!b.admit(10, t0));
-        // 1 s plus tard : 20 de plus.
+        assert!(!b.admit(1, 10, t0));
+        // 1 s plus tard : 20 de plus, ou deux requêtes de coût 9.
         let t1 = t0 + Duration::from_secs(1);
-        for _ in 0..20 {
-            assert!(b.admit(10, t1));
+        assert!(b.admit(9, 10, t1));
+        assert!(b.admit(9, 10, t1));
+        assert!(!b.admit(9, 10, t1));
+        assert!(b.admit(1, 10, t1));
+        assert!(b.admit(1, 10, t1));
+        assert!(!b.admit(1, 10, t1));
+        // Plein après 10 s : 100 requêtes.
+        let t2 = t1 + Duration::from_secs(10);
+        for _ in 0..100 {
+            assert!(b.admit(1, 10, t2));
         }
-        assert!(!b.admit(10, t1));
+        assert!(!b.admit(1, 10, t2));
     }
 
     #[test]
@@ -354,11 +763,12 @@ mod tests {
         let t0 = Instant::now();
         let c = LimitConfig::default();
         let mut b = ConnBudget::new(&c, t0);
-        assert!(b.admit(5 << 20, t0));
-        assert!(!b.admit(1, t0));
+        assert!(!b.admit(1, 5 << 19 | 1, t0));
+        assert!(b.admit(1, 5 << 19, t0));
+        assert!(!b.admit(1, 1, t0));
         // Une réponse endette le seau : il faut attendre plus longtemps.
         b.charge_bytes(1 << 20, t0);
-        assert!(!b.admit(1, t0 + Duration::from_millis(900)));
-        assert!(b.admit(1, t0 + Duration::from_millis(1100)));
+        assert!(!b.admit(1, 1, t0 + Duration::from_millis(900)));
+        assert!(b.admit(1, 1, t0 + Duration::from_millis(1100)));
     }
 }

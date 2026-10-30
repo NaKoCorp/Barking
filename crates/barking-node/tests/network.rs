@@ -1079,3 +1079,153 @@ fn limit_defaults_match_spec() {
     assert_eq!(c.max_streams, 4);
     assert_eq!(c.max_response_bytes_in_flight, 64 << 20);
 }
+
+/// Le seau de débit est celui du groupe d'adresses : se reconnecter ne le
+/// remplit pas.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconnect_does_not_refill_rate_bucket() {
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 1;
+        c.limits.burst = 10;
+    });
+    let s = Client::connect(node.addr, node.id).await.unwrap();
+    // Seau vidé (sans atteindre la fermeture pour abus).
+    let mut drained = false;
+    for _ in 0..15 {
+        if s.request(&Request::Ping).await.unwrap() == Response::Error(ErrorReason::RateLimited) {
+            drained = true;
+            break;
+        }
+    }
+    assert!(drained);
+    s.close().await;
+    // Nouvelle connexion depuis la même adresse : toujours limitée.
+    let s = Client::connect(node.addr, node.id).await.unwrap();
+    assert_eq!(
+        s.request(&Request::Ping).await.unwrap(),
+        Response::Error(ErrorReason::RateLimited)
+    );
+    node.stop().await;
+}
+
+/// Une preuve de travail fausse à la difficulté de base est refusée sans
+/// prendre de place dans la file de la base.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_pow_never_takes_db_job() {
+    let (_d, path) = db();
+    let stats = Arc::new(ServerStats::default());
+    let st = stats.clone();
+    let node = start_with(
+        &path,
+        key(0),
+        Policy {
+            pow_bits: 20,
+            ..Policy::default()
+        },
+        move |c| {
+            c.stats = st;
+            c.limits.requests_per_sec = 10_000;
+        },
+    );
+    let s = Client::connect(node.addr, node.id).await.unwrap();
+    // La purge de démarrage (faite avant d'accepter) a pris sa place : oubliée.
+    assert_eq!(stats.db_jobs.now(), 0);
+    stats.db_jobs.take_peak();
+    let mut refused = 0;
+    for n in 0..20u32 {
+        let p = message(n, 7);
+        let h = barking_proto::pow::content_hash(&p);
+        // Un nonce qui ne passe pas la difficulté de base.
+        let bad = (0u64..)
+            .find(|x| !barking_proto::pow::check(&h, &MailboxId([7; 16]), *x, 20))
+            .unwrap();
+        let r = s
+            .request(&Request::Deposit {
+                packet: p,
+                pow: bad,
+            })
+            .await
+            .unwrap();
+        if r == Response::Error(ErrorReason::PowTooWeak) {
+            refused += 1;
+        }
+    }
+    assert_eq!(refused, 20);
+    assert_eq!(stats.db_jobs.peak(), 0);
+    node.stop().await;
+}
+
+/// Relève reprise : un budget d'octets coupe la relève, la suivante reprend
+/// au curseur sans relire le début ; une tranche finie repart du début.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumable_fetch_continues_where_it_stopped() {
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 10_000;
+        c.limits.bytes_per_sec = 1 << 30;
+    });
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    for n in 0..100 {
+        assert_eq!(
+            s.deposit(&message_tier(n, 9, Tier::L)).await.unwrap(),
+            Ok(())
+        );
+    }
+    let boxes = [MailboxId([9; 16])];
+    let mut resume = client::FetchResume::default();
+    // Budget sous une page : une page entière quand même.
+    let first = s.fetch_resumable(&boxes, &mut resume, 1).await.unwrap();
+    assert!(s.last_fetch_truncated());
+    assert!(!first.is_empty() && first.len() < 100);
+    assert!(resume.cursors[0].is_some());
+    let mut all = first.clone();
+    while s.last_fetch_truncated() || all.len() < 100 {
+        let more = s.fetch_resumable(&boxes, &mut resume, 1).await.unwrap();
+        assert!(!more.is_empty());
+        all.extend(more);
+        if !s.last_fetch_truncated() {
+            break;
+        }
+    }
+    let want: Vec<Vec<u8>> = (0..100).map(|n| message_tier(n, 9, Tier::L)).collect();
+    assert_eq!(all, want);
+    // Tranche finie : curseur effacé.
+    assert_eq!(resume.cursors, vec![None]);
+    // Autre liste de boîtes (nombre de tranches différent) : depuis le début.
+    let many: Vec<MailboxId> = (0..65u8).map(|n| MailboxId([n; 16])).collect();
+    let mut stale = client::FetchResume {
+        cursors: vec![Some(u64::MAX - 1)],
+    };
+    let got = s
+        .fetch_resumable(&many, &mut stale, 64 << 20)
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 100);
+    assert_eq!(stale.cursors, vec![None, None]);
+    node.stop().await;
+}
+
+/// Le client part de la difficulté de base plus le supplément du palier, et
+/// un budget de preuve l'arrête avant de calculer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deposit_pow_budget_and_tier_surcharge() {
+    let (_d, path) = db();
+    let node = start(&path);
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    assert_eq!(
+        s.deposit(&message_tier(1, 5, Tier::L)).await.unwrap(),
+        Ok(())
+    );
+    // Une seule preuve, à base + 6 bits : pas de nouvel essai.
+    assert_eq!(
+        s.pow_spent(),
+        barking_proto::pow::expected_work(TEST_BITS + 6)
+    );
+    s.set_pow_budget(Some(s.pow_spent()));
+    assert!(matches!(
+        s.deposit(&message(2, 5)).await,
+        Err(ClientError::PowBudget)
+    ));
+    node.stop().await;
+}

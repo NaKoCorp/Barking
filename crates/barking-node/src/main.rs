@@ -200,7 +200,8 @@ fn status(data_dir: Option<PathBuf>) -> Result<()> {
     if !db.exists() {
         return Err(fail(format!("base absente de {}", dir.display())));
     }
-    let stats = NodeStore::open(&db)?.stats()?;
+    // Lecture seule : `status` ne modifie rien, même pendant `run`.
+    let stats = NodeStore::open_read_only(&db)?.stats()?;
     println!("identifiant : {id}");
     println!(
         "version     : {} (protocole {PROTOCOL_VERSION})",
@@ -253,8 +254,9 @@ async fn shutdown_signal() {
 
 fn main() -> ExitCode {
     // Message fixe : la charge d'une panique pourrait contenir une adresse.
+    // Une panique dans une tâche de connexion ne termine que cette tâche.
     std::panic::set_hook(Box::new(|_| {
-        eprintln!("erreur interne : le nœud s'arrête (panique, détails omis)");
+        eprintln!("erreur interne : panique (détails omis)");
     }));
     let cli = Cli::parse();
     let r = match cli.cmd {
