@@ -113,19 +113,23 @@ cible_compilable_ici() {
 
 # Cible d'un binaire de la version $2 : « barking-cli-<version>-<cible> » ou « barking-node-<version>-<cible> ».
 # Affiche la cible ; code 1 pour tout autre nom (autre binaire, autre version).
+# Les cibles publiées sont exactement CIBLES_PUBLIEES : toute autre cible est refusée.
+CIBLES_PUBLIEES="x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
 cible_du_nom() { # $1 = nom, $2 = version
+  local c
   case "$1" in
-    "barking-cli-$2-"?*)  printf '%s\n' "${1#"barking-cli-$2-"}" ;;
-    "barking-node-$2-"?*) printf '%s\n' "${1#"barking-node-$2-"}" ;;
+    "barking-cli-$2-"?*)  c="${1#"barking-cli-$2-"}" ;;
+    "barking-node-$2-"?*) c="${1#"barking-node-$2-"}" ;;
     *) return 1 ;;
   esac
+  case " $CIBLES_PUBLIEES " in *" $c "*) printf '%s\n' "$c" ;; *) return 1 ;; esac
 }
 
 # Contrôle SHA256SUMS et les binaires barking-cli-<version>-* et barking-node-<version>-* d'un répertoire.
 # Calcule et compare soi-même les empreintes. Sort en erreur (exit 1) au premier problème.
 # Positionne NOMS_LISTES (noms séparés par des espaces).
 controler_somme_dir() { # $1 = répertoire, $2 = version
-  local dir="$1" version="$2" sums ligne somme nom reel f n
+  local dir="$1" version="$2" sums ligne somme nom reel f n c p
   local motif='^([0-9a-f]{64})  ([A-Za-z0-9._+-]+)$'
   local vus="|"
   NOMS_LISTES=""
@@ -134,7 +138,7 @@ controler_somme_dir() { # $1 = répertoire, $2 = version
   while IFS= read -r ligne || [ -n "$ligne" ]; do
     [[ $ligne =~ $motif ]] || erreur "ligne illisible dans SHA256SUMS : $ligne"
     somme="${BASH_REMATCH[1]}"; nom="${BASH_REMATCH[2]}"
-    cible_du_nom "$nom" "$version" >/dev/null || erreur "entrée inattendue dans SHA256SUMS (pas un binaire barking-cli ou barking-node de la version $version) : $nom"
+    cible_du_nom "$nom" "$version" >/dev/null || erreur "entrée inattendue dans SHA256SUMS (pas un binaire barking-cli ou barking-node de la version $version pour une cible publiée : $CIBLES_PUBLIEES) : $nom"
     case "$vus" in *"|$nom|"*) erreur "entrée en double dans SHA256SUMS : $nom" ;; esac
     vus="$vus$nom|"
     [ -f "$dir/$nom" ] || erreur "fichier manquant : $nom est listé dans SHA256SUMS mais absent de $dir"
@@ -147,6 +151,12 @@ controler_somme_dir() { # $1 = répertoire, $2 = version
     [ -e "$f" ] || continue
     n="$(basename "$f")"
     case "$vus" in *"|$n|"*) ;; *) erreur "fichier en trop : $n est présent dans $dir mais absent de SHA256SUMS" ;; esac
+  done
+  # Jeu complet exigé : barking-cli et barking-node pour chacune des cibles publiées, ni plus ni moins.
+  for c in $CIBLES_PUBLIEES; do
+    for p in barking-cli barking-node; do
+      case "$vus" in *"|$p-$version-$c|"*) ;; *) erreur "jeu incomplet : $p-$version-$c est absent de SHA256SUMS (barking-cli et barking-node sont exigés pour chaque cible publiée)" ;; esac
+    done
   done
   NOMS_LISTES="${NOMS_LISTES# }"
 }
@@ -174,7 +184,7 @@ comparer_reconstruction() { # $1 = répertoire de la version, $2 = répertoire r
 # L'environnement de build (scripts/, docker/, .xcode-version, rust-toolchain.toml) est celui enregistré
 # dans le tag v<version>, extrait dans $4 : jamais celui de l'arbre de travail.
 recompiler_localement() { # $1 = racine du dépôt, $2 = version, $3 = répertoire de sortie, $4 = répertoire de travail
-  local racine="$1" version="$2" out="$3" env="$4/env-du-tag" nom cible chemin
+  local racine="$1" version="$2" out="$3" env="$4/env-du-tag" nom cible chemin faites=" "
   git -C "$racine" rev-parse --verify --quiet "v$version^{commit}" >/dev/null \
     || erreur "le tag v$version est introuvable dans ce clone (git fetch --tags)"
   for chemin in scripts/repro-build.sh scripts/release-lib.sh docker/repro.Dockerfile .xcode-version rust-toolchain.toml; do
@@ -187,7 +197,10 @@ recompiler_localement() { # $1 = racine du dépôt, $2 = version, $3 = répertoi
   XCODE_VERSION_FICHIER="$env/.xcode-version"
   for nom in $NOMS_LISTES; do
     cible="$(cible_du_nom "$nom" "$version")" || erreur "nom de binaire inattendu : $nom"
+    # Une seule reconstruction par cible : repro-build.sh produit déjà les deux binaires.
+    case "$faites" in *" $cible "*) continue ;; esac
     cible_compilable_ici "$cible" || continue
+    faites="$faites$cible "
     echo "recompilation de $cible (environnement de build du tag v$version)…" >&2
     "$env/scripts/repro-build.sh" --git-dir "$racine" --target "$cible" --ref "v$version" --out "$out" >/dev/null \
       || erreur "la recompilation de $cible a échoué"

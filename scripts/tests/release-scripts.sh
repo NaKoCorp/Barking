@@ -172,10 +172,34 @@ cas_mixed_version_or_unknown_name_refused() {
     signer "$tmp/cles/bonne.key"
     attendre_code 1 && attendre_texte "entrée inattendue" && sans_minisig || { echo "    cas : $autre" >&2; return 1; }
   done
-  nouveau; signer_ok || return 1
+  # Vérification : sommes modifiées puis re-signées, la signature est donc valable et le refus vient du contenu.
+  nouveau
   printf 'intrus\n' > "$D/barking-node-9.9.9-$t_x86"
   regenerer_sommes "$D"
-  verifier "$tmp/cles/bonne.pub"; attendre_code 1 || return 1
+  signer_avec_commentaire "barking v$version commit $commit_tag"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "entrée inattendue"
+}
+cas_incomplete_or_unknown_target_set_refused() {
+  # Jeu complet exigé : un binaire du nœud retiré (fichier et ligne) est refusé, signature valable ou non.
+  nouveau
+  rm "$D/barking-node-$version-$t_mac"
+  regenerer_sommes "$D"
+  signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "jeu incomplet" && sans_minisig || return 1
+  nouveau
+  rm "$D/barking-node-$version-$t_arm"
+  regenerer_sommes "$D"
+  signer_avec_commentaire "barking v$version commit $commit_tag"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "jeu incomplet" || return 1
+  # Cible inconnue (y compris le faux découpage d'un nom de pré-version) : refusée.
+  nouveau
+  printf 'x\n' > "$D/barking-node-$version-riscv64-unknown-linux-musl"
+  regenerer_sommes "$D"
+  signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "entrée inattendue" && sans_minisig || return 1
+  nouveau
+  printf 'x\n' > "$D/barking-cli-$version-rc.1-$t_x86"
+  regenerer_sommes "$D"
+  signer_avec_commentaire "barking v$version commit $commit_tag"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "entrée inattendue"
 }
 cas_sign_refuses_on_mismatch() {
   nouveau
@@ -279,7 +303,7 @@ cas_empty_pubkey_rejected() {
 echecs=0
 for cas in sign_then_verify_ok sign_then_verify_rebuild_ok forged_signature_rejected other_key_rejected \
            tampered_binary_rejected tampered_sums_rejected extra_or_missing_binary_rejected \
-           node_binary_checked_like_cli mixed_version_or_unknown_name_refused \
+           node_binary_checked_like_cli mixed_version_or_unknown_name_refused incomplete_or_unknown_target_set_refused \
            sign_refuses_on_mismatch sign_refuses_missing_or_unlisted sign_refuses_without_rebuilt_counterpart \
            verify_rebuilt_mismatch_rejected trusted_comment_other_version_rejected \
            trusted_comment_without_commit_rejected signed_commit_differs_from_local_tag_rejected \

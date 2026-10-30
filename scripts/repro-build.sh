@@ -74,7 +74,7 @@ nom_node="barking-node-${version}-${cible}"
 controle_node='
   arbre="$(cargo tree --locked -p barking-node -e normal,features --target "$TARGET")" || exit 1
   if printf "%s\n" "$arbre" | grep -qiE "openssl|sqlcipher"; then
-    echo "erreur : barking-node dépend d OpenSSL ou de SQLCipher :" >&2
+    echo "erreur : barking-node dépend d'\''OpenSSL ou de SQLCipher :" >&2
     printf "%s\n" "$arbre" | grep -iE "openssl|sqlcipher" >&2
     exit 1
   fi'
@@ -118,9 +118,9 @@ if [ "$cible" = "aarch64-apple-darwin" ]; then
   (
     cd "$src"
     echo "rustc : $(rustc --version)" >&2
-    cargo build --release --locked -p barking-cli --target "$cible"
+    cargo build --release --locked -p barking-cli --target "$cible" || exit 1
     TARGET="$cible" bash -ec "$controle_node" || exit 1
-    cargo build --release --locked -p barking-node --target "$cible"
+    cargo build --release --locked -p barking-node --target "$cible" || exit 1
   ) || erreur "compilation échouée"
   cp "$CARGO_TARGET_DIR/$cible/release/barking" "$sortie/$nom"
   cp "$CARGO_TARGET_DIR/$cible/release/barking-node" "$sortie/$nom_node"
