@@ -21,6 +21,8 @@ ExecStart=/usr/local/bin/barking-node run --config /etc/barking-node.toml
 Restart=on-failure
 RestartSec=5
 # Le dossier de données (clé, base) est le seul endroit inscriptible.
+StateDirectory=barking-node
+StateDirectoryMode=0700
 ReadWritePaths=/var/lib/barking-node
 ProtectSystem=strict
 ProtectHome=yes
@@ -31,9 +33,25 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX : le pilote de signaux de tokio crée une paire de sockets Unix au
+# démarrage (tokio signal/unix.rs, `UnixStream::pair().expect(..)`).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
 LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+# À tester sur une vraie machine avant de l'activer (un appel système manquant
+# tue le processus) :
+# SystemCallFilter=@system-service
+# Petit appareil (Raspberry Pi) : plafond de mémoire du service.
+# MemoryMax=512M
 UMask=0077
 # Port UDP > 1024 : aucune capacité n'est nécessaire.
 LimitNOFILE=4096

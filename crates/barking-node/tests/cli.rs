@@ -58,6 +58,15 @@ fn init_creates_private_key_and_prints_id() {
         0o700
     );
     assert!(dir.join("node.db").exists());
+    assert_eq!(
+        fs::metadata(dir.join("node.db"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(!dir.join("node.key.tmp").exists());
     // La clé écrite redonne bien cet identifiant (status le relit).
     let st = node(&["status", "--data-dir", dir.to_str().unwrap()]);
     assert!(st.status.success(), "{}", text(&st.stderr));
@@ -287,6 +296,7 @@ async fn logs_and_db_contain_no_ip() {
         logs.contains("dépôts"),
         "le rapport agrégé doit apparaître dans les journaux : {logs:?}"
     );
+    assert!(!logs.contains("quinn_udp"), "journaux : {logs:?}");
     let b32 = data_encoding::BASE32_NOPAD.encode(&mailbox);
     let b32_lower = b32.to_lowercase();
     for needle in [
@@ -306,4 +316,33 @@ async fn logs_and_db_contain_no_ip() {
     for needle in ["127.0.0.1", "::1", &"a7".repeat(16), &b32, &b32_lower] {
         assert!(!files_contain(&data, needle.as_bytes()), "base : {needle}");
     }
+}
+
+#[test]
+fn key_symlink_is_refused_and_init_recovers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    assert!(init(&dir).status.success());
+    let real = tmp.path().join("real.key");
+    fs::rename(dir.join("node.key"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.join("node.key")).unwrap();
+    let st = node(&["status", "--data-dir", dir.to_str().unwrap()]);
+    assert!(!st.status.success());
+    assert!(
+        text(&st.stderr).contains("fichier ordinaire"),
+        "{}",
+        text(&st.stderr)
+    );
+
+    // Dossier ouvert au groupe : avertissement en français.
+    let open = tmp.path().join("open");
+    fs::create_dir(&open).unwrap();
+    fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = init(&open);
+    assert!(out.status.success());
+    assert!(
+        text(&out.stderr).contains("avertissement"),
+        "{}",
+        text(&out.stderr)
+    );
 }

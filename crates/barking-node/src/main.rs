@@ -63,15 +63,37 @@ fn load_config(path: Option<&Path>) -> Result<Config> {
     }
 }
 
-/// Lit la clé du nœud ; refuse un fichier lisible par d'autres utilisateurs.
+/// Avertit (stderr) si le dossier de données est accessible à d'autres
+/// utilisateurs que le propriétaire.
+fn warn_dir_perms(dir: &Path) {
+    if let Ok(m) = fs::metadata(dir)
+        && m.permissions().mode() & 0o077 != 0
+    {
+        eprintln!(
+            "avertissement : le dossier {} est accessible au groupe ou aux autres \
+             (mode {:04o}) ; `chmod 700` est recommandé.",
+            dir.display(),
+            m.permissions().mode() & 0o7777
+        );
+    }
+}
+
+/// Lit la clé du nœud ; refuse un lien symbolique, un fichier irrégulier ou
+/// un fichier lisible par d'autres utilisateurs.
 fn load_key(dir: &Path) -> Result<SigningKey> {
     let path = dir.join(KEY_FILE);
-    let meta = fs::metadata(&path).map_err(|_| {
+    let meta = fs::symlink_metadata(&path).map_err(|_| {
         fail(format!(
             "{} n'est pas initialisé (`barking-node init`)",
             dir.display()
         ))
     })?;
+    if !meta.file_type().is_file() {
+        return Err(fail(format!(
+            "{} doit être un fichier ordinaire (ni lien symbolique ni autre type)",
+            path.display()
+        )));
+    }
     if meta.permissions().mode() & 0o077 != 0 {
         return Err(fail(format!(
             "{} doit être en mode 0600 (lisible par d'autres utilisateurs)",
@@ -93,6 +115,31 @@ fn load_key(dir: &Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&seed))
 }
 
+/// Écrit la clé dans `node.key.tmp` (0600) puis la range d'un `rename`.
+fn write_key(dir: &Path, key: &SigningKey) -> Result<()> {
+    let tmp = dir.join(format!("{KEY_FILE}.tmp"));
+    let _ = fs::remove_file(&tmp);
+    let res = (|| -> Result<()> {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        let enc = Zeroizing::new(format!(
+            "{}\n",
+            data_encoding::BASE32_NOPAD.encode(&key.to_bytes())
+        ));
+        f.write_all(enc.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, dir.join(KEY_FILE))?;
+        Ok(())
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
 fn init(data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Result<()> {
     let cfg = load_config(config.as_deref())?;
     let dir = data_dir.unwrap_or_else(|| cfg.data_dir.clone());
@@ -106,20 +153,33 @@ fn init(data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Result<()> {
 
     // Dossier créé en 0700 ; les droits d'un dossier déjà là (par exemple
     // créé par systemd) ne sont pas modifiés.
+    let created = !dir.exists();
     DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&key_path)?;
-    let enc = Zeroizing::new(format!(
-        "{}\n",
-        data_encoding::BASE32_NOPAD.encode(&key.to_bytes())
-    ));
-    f.write_all(enc.as_bytes())?;
-    f.sync_all()?;
-    NodeStore::open(&db_path)?;
-    fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
+    warn_dir_perms(&dir);
+    // Clé rangée d'abord (dernier geste atomique de l'identité), puis la base
+    // en 0600 dès sa création. En cas d'échec, tout ce qui a été créé est
+    // retiré : `init` peut être relancé.
+    let res = write_key(&dir, &key).and_then(|()| {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&db_path)?;
+        NodeStore::open(&db_path)?;
+        Ok(())
+    });
+    if let Err(e) = res {
+        for f in [&key_path, &db_path] {
+            let _ = fs::remove_file(f);
+        }
+        for ext in ["-wal", "-shm"] {
+            let _ = fs::remove_file(dir.join(format!("{DB_FILE}{ext}")));
+        }
+        if created {
+            let _ = fs::remove_dir(&dir);
+        }
+        return Err(e);
+    }
 
     let listen = cfg.listen.first().cloned().unwrap_or_default();
     println!("identifiant : {id}");
@@ -154,6 +214,7 @@ fn status(data_dir: Option<PathBuf>) -> Result<()> {
 
 fn run(config: Option<PathBuf>) -> Result<()> {
     let cfg = load_config(config.as_deref())?;
+    warn_dir_perms(&cfg.data_dir);
     let key = load_key(&cfg.data_dir)?;
     let id = NodeId::from_public_key(&key.verifying_key());
     let store = NodeStore::open(cfg.data_dir.join(DB_FILE))?;
@@ -191,6 +252,10 @@ async fn shutdown_signal() {
 }
 
 fn main() -> ExitCode {
+    // Message fixe : la charge d'une panique pourrait contenir une adresse.
+    std::panic::set_hook(Box::new(|_| {
+        eprintln!("erreur interne : le nœud s'arrête (panique, détails omis)");
+    }));
     let cli = Cli::parse();
     let r = match cli.cmd {
         Cmd::Init { data_dir, config } => init(data_dir, config),
