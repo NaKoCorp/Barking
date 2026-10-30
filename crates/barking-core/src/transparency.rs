@@ -321,7 +321,8 @@ impl TransparencyEvent {
                 refused,
             } => format!(
                 "{count} paquets déposés sur le nœud {node} ({refused} refusés). \
-                 Le nœud voit la boîte aux lettres, la taille et l'heure ; pas le contenu."
+                 Le nœud voit la boîte aux lettres, la taille, l'heure et ton adresse IP ; \
+                 pas le contenu."
             ),
             Self::NodeFetch {
                 node,
@@ -330,7 +331,9 @@ impl TransparencyEvent {
             } => format!(
                 "Boîtes relevées sur le nœud {node} : {mailboxes} boîtes, {received} éléments \
                  reçus. Le nœud voit quelles boîtes tu relèves et ton adresse IP pendant la \
-                 connexion."
+                 connexion, et peut lier entre eux les dépôts et la relève d'une même \
+                 connexion. Ta boîte d'introduction se calcule à partir de ta clé publique : \
+                 la relever lie ton identité à cette adresse IP."
             ),
         }
     }
@@ -698,7 +701,8 @@ mod tests {
         assert_eq!(
             dep.describe(),
             "2 paquets déposés sur le nœud ABCDEFGH (1 refusés). \
-             Le nœud voit la boîte aux lettres, la taille et l'heure ; pas le contenu."
+             Le nœud voit la boîte aux lettres, la taille, l'heure et ton adresse IP ; \
+             pas le contenu."
         );
         let fetch = TransparencyEvent::NodeFetch {
             node: "ABCDEFGH".into(),
@@ -709,7 +713,10 @@ mod tests {
         assert_eq!(
             fetch.describe(),
             "Boîtes relevées sur le nœud ABCDEFGH : 5 boîtes, 3 éléments reçus. \
-             Le nœud voit quelles boîtes tu relèves et ton adresse IP pendant la connexion."
+             Le nœud voit quelles boîtes tu relèves et ton adresse IP pendant la connexion, \
+             et peut lier entre eux les dépôts et la relève d'une même connexion. \
+             Ta boîte d'introduction se calcule à partir de ta clé publique : \
+             la relever lie ton identité à cette adresse IP."
         );
     }
 

@@ -1923,3 +1923,41 @@ fn log_transport_event_accepts_only_node_events() {
         Err(CoreError::Malformed("événement de transport"))
     );
 }
+
+#[test]
+fn watched_mailboxes_split_by_class() {
+    let (_da, mut a) = party("a", 1);
+    let (_db, mut b) = party("b", 2);
+    let mut rng = StdRng::seed_from_u64(9);
+    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"), NOW, &mut rng)
+        .unwrap();
+    b.add_contact(
+        &a.contact_card("Alice").unwrap(),
+        Some("alice"),
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    // Premier contact : vers la boîte d'introduction de Bob, accusé attendu là.
+    let p = a.send_text(&b.fingerprint(), "x", NOW, &mut rng).unwrap();
+    let g = a.watched_mailbox_groups(NOW);
+    let my_intro = intro_mailbox(&a.device.public(), day_of(NOW));
+    assert!(g.intro.contains(&my_intro));
+    assert!(g.intro.contains(&p[0].mailbox));
+    assert!(!g.sessions.contains(&p[0].mailbox));
+    assert!(!g.sessions.contains(&my_intro));
+    // Session établie : la boîte de session et celle de l'accusé attendu
+    // sont dans le groupe des sessions.
+    b.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap();
+    let q = b.send_text(&a.fingerprint(), "y", NOW, &mut rng).unwrap();
+    a.receive(&q[0].encode(), "t", NOW, &mut rng).unwrap();
+    let r = a.send_text(&b.fingerprint(), "z", NOW, &mut rng).unwrap();
+    let g = a.watched_mailbox_groups(NOW);
+    assert!(g.sessions.contains(&q[0].mailbox));
+    assert!(g.sessions.contains(&r[0].mailbox));
+    assert!(!g.intro.contains(&r[0].mailbox));
+    // Union, sans doublon.
+    let all = a.watched_mailboxes(NOW);
+    assert_eq!(all.len(), g.intro.len() + g.sessions.len());
+    assert!(g.intro.iter().chain(&g.sessions).all(|m| all.contains(m)));
+}

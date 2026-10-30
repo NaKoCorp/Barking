@@ -770,7 +770,9 @@ fn emit_ack(
             for_packet: packet.id,
         },
     )?;
-    let ack = Packet::ack(packet, ack_secret, now, rng);
+    let mut ack = Packet::ack(packet, ack_secret, now, rng);
+    // Même granularité que les messages scellés.
+    ack.expires_at = crate::envelope::sealed_expiry(now);
     q.outbox_put(
         ack.id,
         &ack.encode(),

@@ -74,6 +74,19 @@ const META_LAST_POLLED: &str = "last_polled_day";
 /// encore contenir un paquet non expiré (durée de vie de 7 jours).
 const MAX_POLL_BACK_DAYS: u32 = 7;
 
+/// Boîtes à relever, par classe. Une relève lit les sessions d'abord : la
+/// boîte d'introduction est dérivable de ma clé publique, donc quiconque a ma
+/// carte peut la remplir, et sa lecture ne doit pas retarder les sessions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WatchedMailboxes {
+    /// Mes boîtes de session, et les boîtes de session où j'attends un
+    /// accusé : connues de mes seuls correspondants.
+    pub sessions: Vec<MailboxId>,
+    /// Mes boîtes d'introduction, et celles de mes contacts où j'attends
+    /// l'accusé d'un premier contact.
+    pub intro: Vec<MailboxId>,
+}
+
 /// Âge maximal accepté d'un message (horodatage authentifié de l'enveloppe) :
 /// durée de vie d'un paquet plus un jour de décalage d'horloge.
 const MAX_AGE_SECS: u64 = DEFAULT_TTL_SECS + 86_400;
@@ -380,43 +393,84 @@ impl Core {
     /// et celles de chaque session (de la dernière relève au lendemain, 9 jours
     /// au plus ; veille, jour et lendemain sans relève enregistrée), plus la boîte de
     /// chacun de mes messages en attente d'accusé, où l'accusé arrivera.
+    /// Union des deux groupes de `watched_mailbox_groups`, introduction
+    /// d'abord.
     ///
     /// En cas d'erreur de lecture du stockage, seules les boîtes
     /// d'introduction sont renvoyées (`receive` refait le calcul lui-même).
     pub fn watched_mailboxes(&self, now: u64) -> Vec<MailboxId> {
+        let g = self.watched_mailbox_groups(now);
+        let mut out = g.intro;
+        for m in g.sessions {
+            if !out.contains(&m) {
+                out.push(m);
+            }
+        }
+        out
+    }
+
+    /// Boîtes à relever, par classe (voir `WatchedMailboxes`). Une boîte
+    /// d'accusé attendu est de session si elle est la boîte d'envoi d'une de
+    /// mes sessions (sur la fenêtre de réception), sinon d'introduction
+    /// (premier contact).
+    pub fn watched_mailbox_groups(&self, now: u64) -> WatchedMailboxes {
+        let mut g = WatchedMailboxes::default();
         // En attente de liaison : rien à relever (`receive` refuserait).
         if self.pending {
-            return Vec::new();
+            return g;
         }
         let me = self.device.public();
         let my_id = me.id();
         let days = self.watched_days(now);
-        let mut out: Vec<MailboxId> = Vec::new();
-        let mut push = |m: MailboxId| {
-            if !out.contains(&m) {
-                out.push(m);
+        let push = |v: &mut Vec<MailboxId>, m: MailboxId| {
+            if !v.contains(&m) {
+                v.push(m);
             }
         };
         for &d in &days {
-            push(intro_mailbox(&me, d));
+            push(&mut g.intro, intro_mailbox(&me, d));
         }
-        if let Ok(sessions) = self.store.all_sessions() {
-            for s in &sessions {
-                for &d in &days {
-                    push(session_mailbox(&s.mailbox_secret, &my_id, d));
-                }
+        let sessions = self.store.all_sessions().unwrap_or_default();
+        for s in &sessions {
+            for &d in &days {
+                push(
+                    &mut g.sessions,
+                    session_mailbox(&s.mailbox_secret, &my_id, d),
+                );
             }
         }
         if let Ok(pending) = self.store.outbox_pending(now) {
+            // Boîtes d'envoi de mes sessions, sur toute la fenêtre où un
+            // paquet en file peut avoir été scellé.
+            let first = day_of(now.saturating_sub(MAX_AGE_SECS));
+            let last = day_of(now).saturating_add(1);
+            let mut sent: Vec<MailboxId> = Vec::new();
+            let mut sent_ready = false;
             for (_, bytes) in pending {
-                if let Ok(p) = Packet::decode(&bytes)
-                    && p.kind == Kind::Message
-                {
-                    push(p.mailbox);
+                let Ok(p) = Packet::decode(&bytes) else {
+                    continue;
+                };
+                if p.kind != Kind::Message {
+                    continue;
+                }
+                if !sent_ready {
+                    for s in &sessions {
+                        for d in first..=last {
+                            sent.push(session_mailbox(&s.mailbox_secret, &s.contact_device, d));
+                        }
+                    }
+                    sent_ready = true;
+                }
+                if sent.contains(&p.mailbox) {
+                    push(&mut g.sessions, p.mailbox);
+                } else {
+                    push(&mut g.intro, p.mailbox);
                 }
             }
         }
-        out
+        // Une boîte n'est que dans un groupe : celui des sessions prime.
+        g.intro.retain(|m| !g.sessions.contains(m));
+        g
     }
 
     /// Enregistre que les boîtes ont été relevées à `now`. À appeler après

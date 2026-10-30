@@ -21,7 +21,7 @@ use crate::crypto::labels;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::identity::{DeviceKeys, Fingerprint};
 use crate::mailbox::MailboxId;
-use crate::packet::{DEFAULT_HOPS, Kind, Packet, Tier, ack, default_expiry};
+use crate::packet::{DEFAULT_HOPS, DEFAULT_TTL_SECS, Kind, Packet, Tier, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
 use crate::{CoreError, Result};
 
@@ -248,10 +248,26 @@ pub fn seal(
         hops: DEFAULT_HOPS,
         tier,
         id: ack::packet_id_for(&env.ack_secret),
-        expires_at: default_expiry(now),
+        expires_at: sealed_expiry(now),
         mailbox,
         payload,
     })
+}
+
+/// Granularité de l'expiration d'un paquet scellé par le cœur.
+pub const EXPIRY_GRANULARITY_SECS: u64 = 600;
+
+/// Expiration d'un paquet scellé à `now` : `now` + 7 jours, arrondie vers le
+/// bas à 10 minutes (les nœuds ne voient pas la seconde du scellement).
+/// Saturée à `u32::MAX`.
+pub fn sealed_expiry(now: u64) -> u32 {
+    match u32::try_from(now.saturating_add(DEFAULT_TTL_SECS)) {
+        Ok(e) => {
+            let g = EXPIRY_GRANULARITY_SECS as u32;
+            e / g * g
+        }
+        Err(_) => u32::MAX,
+    }
 }
 
 /// Décode la charge d'un paquet de message. Refuse les octets en trop.
@@ -412,7 +428,10 @@ mod tests {
             assert_eq!(p.kind, Kind::Message);
             assert_eq!(p.hops, DEFAULT_HOPS);
             assert_eq!(p.mailbox, MB);
-            assert_eq!(p.expires_at as u64, NOW + i as u64 + DEFAULT_TTL_SECS);
+            assert_eq!(
+                p.expires_at as u64,
+                (NOW + i as u64 + DEFAULT_TTL_SECS) / 600 * 600
+            );
             let decoded = Packet::decode(&p.encode()).unwrap();
             let Wire::Normal { msg } = parse_wire(&decoded.payload).unwrap() else {
                 panic!("Normal attendu");
@@ -575,6 +594,21 @@ mod tests {
         let e = env(&mut s.rng, &"a".repeat(MAX_TEXT_LEN));
         let p = seal(&e, &mut s.a, &ad, None, MB, NOW, &mut s.rng).unwrap();
         assert_eq!(p.tier, Tier::L);
+    }
+
+    #[test]
+    fn expiry_rounded_down_to_ten_minutes() {
+        let base = 1_800_000_000u64 / 600 * 600;
+        for (now, want) in [
+            (base, base + DEFAULT_TTL_SECS),
+            (base + 1, base + DEFAULT_TTL_SECS),
+            (base + 599, base + DEFAULT_TTL_SECS),
+            (base + 600, base + 600 + DEFAULT_TTL_SECS),
+        ] {
+            assert_eq!(u64::from(sealed_expiry(now)), want);
+            // Toujours accepté par un nœud : dans le futur, à 7 j + 1 h au plus.
+            assert!(want > now && want <= now + 7 * 86_400 + 3_600);
+        }
     }
 
     #[test]

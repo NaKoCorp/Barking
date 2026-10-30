@@ -1227,9 +1227,10 @@ fn skipped_keys_expire_after_seven_days() {
     assert_eq!(expect_msg(b.recv(&q1, stored + 3 * DAY, &mut rng)).2, "q1");
     // Clé sautée de plus de 7 jours : purgée, alors que le paquet n'est pas
     // encore expiré et que son horodatage reste frais.
-    let late = s + DEFAULT_TTL_SECS;
+    // (Expiration arrondie à 10 min vers le bas : juste avant.)
+    let late = u64::from(q0.expires_at) - 1;
+    assert!(late >= s + DEFAULT_TTL_SECS - 600);
     assert!(late - stored > 7 * DAY);
-    assert!(u64::from(q0.expires_at) >= late);
     match b.recv(&q0, late, &mut rng) {
         ReceiveOutcome::Quarantined { .. } | ReceiveOutcome::NotForUs => {}
         other => panic!("clé sautée expirée, obtenu {other:?}"),
