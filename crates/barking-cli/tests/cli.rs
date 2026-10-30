@@ -875,6 +875,12 @@ mod node {
         assert!(log.contains("Boîtes relevées sur le nœud"), "{log}");
         // Ni boîte ni adresse dans le journal.
         assert!(!log.contains("127.0.0.1"), "{log}");
+        // Aucun identifiant de boîte (hex ou base32) : aucune longue suite alphanumérique.
+        assert!(
+            log.split(|c: char| !c.is_ascii_alphanumeric())
+                .all(|w| w.len() < 20),
+            "{log}"
+        );
     }
 
     #[test]
@@ -887,10 +893,10 @@ mod node {
             .unwrap();
         let dead_id = NodeId::from_public_key(&key(1).verifying_key()).to_string();
         let ((da, a), (_db, b)) = pair();
-        for home in [&a, &b] {
-            node_add(home, dead_addr, &dead_id);
-            node_add(home, live.addr, &live.id);
-        }
+        // Alice n'a que le nœud vivant ; seul Bob a aussi le nœud mort.
+        node_add(&a, live.addr, &live.id);
+        node_add(&b, dead_addr, &dead_id);
+        node_add(&b, live.addr, &live.id);
         let out = da.path().join("out");
         ok(
             &a,
@@ -898,18 +904,17 @@ mod node {
         );
         ok(&a, &["sync"]);
         assert_eq!(live.stats().packets, 1);
-        let got = ok(&b, &["sync"]);
-        assert!(got.contains("[alice] par le vivant"), "{got}");
 
-        // `mark_polled` n'a pas eu lieu : le nœud mort n'a pas répondu à la relève.
-        let again = barking(&b)
+        // Le nœud mort n'empêche pas de recevoir, mais `mark_polled` n'a pas lieu.
+        let got = barking(&b)
             .arg("sync")
             .assert()
             .success()
             .get_output()
             .clone();
-        let stdout = String::from_utf8(again.stdout).unwrap();
-        let stderr = String::from_utf8(again.stderr).unwrap();
+        let stdout = String::from_utf8(got.stdout).unwrap();
+        let stderr = String::from_utf8(got.stderr).unwrap();
+        assert!(stdout.contains("[alice] par le vivant"), "{stdout}");
         assert!(stderr.contains(&dead_id[..8]), "{stderr}");
         assert!(stdout.contains("Relève non enregistrée"), "{stdout}");
 

@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use barking_core::Core;
+use barking_core::packet::{Kind, Packet};
 use barking_core::transparency::TransparencyEvent;
+use barking_proto::ErrorReason;
 use barking_proto::client::{Client, Session};
 
 use super::nodes::{self, NodeEntry};
@@ -20,6 +22,35 @@ struct Report {
     fetched: Option<(u32, u32)>,
     /// La relève s'est arrêtée sur un plafond du client : le reste attend.
     truncated: bool,
+    /// Un élément relevé n'a pas pu être traité (erreur locale, par exemple
+    /// base occupée) : il ne doit pas sortir de la fenêtre de relève.
+    receive_failed: bool,
+}
+
+impl Report {
+    /// Les boîtes ont été relevées en entier et tout a été traité : seul cas
+    /// où `mark_polled` peut avancer la fenêtre de relève.
+    fn fully_polled(&self) -> bool {
+        self.fetched.is_some() && !self.truncated && !self.receive_failed
+    }
+}
+
+/// Sort d'un dépôt, vu du résumé.
+#[derive(Debug, PartialEq, Eq)]
+enum DepositTally {
+    Deposited,
+    Refused,
+    /// Accusé arrivé avant son paquet sur ce nœud (ordre réseau entre deux
+    /// nœuds) : ni dépôt ni refus, il sera redéposé à la prochaine synchronisation.
+    Deferred,
+}
+
+fn tally(is_ack: bool, result: &Result<(), ErrorReason>) -> DepositTally {
+    match result {
+        Ok(()) => DepositTally::Deposited,
+        Err(ErrorReason::UnknownAckTarget) if is_ack => DepositTally::Deferred,
+        Err(_) => DepositTally::Refused,
+    }
 }
 
 pub fn sync(home: &Path) -> CliResult<()> {
@@ -45,7 +76,7 @@ pub fn sync(home: &Path) -> CliResult<()> {
         match result {
             Ok(()) => {
                 ok_nodes += 1;
-                if report.truncated {
+                if !report.fully_polled() {
                     all_polled = false;
                 }
                 println!(
@@ -54,7 +85,9 @@ pub fn sync(home: &Path) -> CliResult<()> {
                     report.refused,
                     report.fetched.map_or(0, |f| f.0),
                     report.fetched.map_or(0, |f| f.1),
-                    if report.truncated {
+                    if report.receive_failed {
+                        " (élément non traité : il sera relevé à la prochaine synchronisation)"
+                    } else if report.truncated {
                         " (relève partielle : la suite à la prochaine synchronisation)"
                     } else {
                         ""
@@ -63,7 +96,7 @@ pub fn sync(home: &Path) -> CliResult<()> {
             }
             Err(msg) => {
                 all_polled = false;
-                eprintln!("Nœud {short} : {msg}");
+                eprintln!("Nœud {short} : {}", printable(&msg));
             }
         }
     }
@@ -112,8 +145,14 @@ async fn deposit_all(
 ) -> Result<(), String> {
     for bytes in packets {
         match session.deposit(bytes).await {
-            Ok(Ok(())) => report.deposited += 1,
-            Ok(Err(_)) => report.refused += 1,
+            Ok(result) => {
+                let is_ack = Packet::decode(bytes).is_ok_and(|p| p.kind == Kind::Ack);
+                match tally(is_ack, &result) {
+                    DepositTally::Deposited => report.deposited += 1,
+                    DepositTally::Refused => report.refused += 1,
+                    DepositTally::Deferred => {}
+                }
+            }
             Err(e) => return Err(e.to_string()),
         }
     }
@@ -140,7 +179,10 @@ async fn sync_node(core: &mut Core, node: &NodeEntry, report: &mut Report) -> Re
             Ok(outcome) => {
                 show_outcome(&label, outcome, AckSink::Queued).map_err(|e| e.0)?;
             }
-            Err(e) => eprintln!("{label} : élément ignoré ({})", printable(&e.to_string())),
+            Err(e) => {
+                report.receive_failed = true;
+                eprintln!("{label} : élément ignoré ({})", printable(&e.to_string()));
+            }
         }
     }
     report.fetched = Some((
@@ -160,4 +202,52 @@ async fn sync_node(core: &mut Core, node: &NodeEntry, report: &mut Report) -> Re
     deposit_all(&mut session, &more, report).await?;
     session.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receive_failure_or_truncation_blocks_mark_polled() {
+        let ok = Report {
+            fetched: Some((3, 1)),
+            ..Report::default()
+        };
+        assert!(ok.fully_polled());
+        assert!(
+            !Report {
+                receive_failed: true,
+                ..ok_clone(&ok)
+            }
+            .fully_polled()
+        );
+        assert!(
+            !Report {
+                truncated: true,
+                ..ok_clone(&ok)
+            }
+            .fully_polled()
+        );
+        assert!(!Report::default().fully_polled());
+    }
+
+    fn ok_clone(r: &Report) -> Report {
+        Report {
+            fetched: r.fetched,
+            ..Report::default()
+        }
+    }
+
+    #[test]
+    fn early_ack_is_deferred_not_refused() {
+        let early = Err(ErrorReason::UnknownAckTarget);
+        assert_eq!(tally(true, &early), DepositTally::Deferred);
+        assert_eq!(tally(false, &early), DepositTally::Refused);
+        assert_eq!(tally(true, &Ok(())), DepositTally::Deposited);
+        assert_eq!(
+            tally(true, &Err(ErrorReason::PowTooWeak)),
+            DepositTally::Refused
+        );
+    }
 }

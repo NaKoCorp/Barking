@@ -268,6 +268,10 @@ impl Store {
     /// Ouvre (ou crée) la base chiffrée avec une clé de 32 octets.
     pub fn open(path: &Path, key: &[u8; 32]) -> Result<Store> {
         let conn = Connection::open(path).map_err(map_err)?;
+        // Un autre processus (`barking send` pendant `barking sync`) peut tenir
+        // l'écriture : attendre un peu plutôt qu'échouer aussitôt.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(map_err)?;
         let mut hex = data_encoding::HEXLOWER.encode(key);
         let mut pragma = format!("PRAGMA key = \"x'{hex}'\";");
         let r = conn.execute_batch(&pragma);

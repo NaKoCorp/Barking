@@ -71,7 +71,16 @@ pub fn load(home: &Path) -> CliResult<Vec<NodeEntry>> {
             "{NODES_FILE} illisible : corrige-le ou supprime-le"
         ))
     })?;
-    Ok(file.nodes)
+    // Fichier éventuellement édité à la main : forme canonique, ou refus.
+    file.nodes
+        .into_iter()
+        .map(|n| {
+            Ok(NodeEntry {
+                addr: n.addr,
+                id: parse_id(&n.id)?.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn save(home: &Path, nodes: Vec<NodeEntry>) -> CliResult<()> {
