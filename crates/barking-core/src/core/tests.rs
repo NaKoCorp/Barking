@@ -1961,3 +1961,35 @@ fn watched_mailboxes_split_by_class() {
     assert_eq!(all.len(), g.intro.len() + g.sessions.len());
     assert!(g.intro.iter().chain(&g.sessions).all(|m| all.contains(m)));
 }
+
+#[test]
+fn transport_state_roundtrip_and_key_rules() {
+    let (d, mut a) = party("a", 1);
+    assert_eq!(a.transport_state("netsync").unwrap(), None);
+    a.set_transport_state("netsync", b"etat").unwrap();
+    assert_eq!(
+        a.transport_state("netsync").unwrap().as_deref(),
+        Some(&b"etat"[..])
+    );
+    a.set_transport_state("netsync", b"").unwrap();
+    assert_eq!(
+        a.transport_state("netsync").unwrap().as_deref(),
+        Some(&b""[..])
+    );
+    for bad in ["", "a/b", "é", &"x".repeat(65)] {
+        assert!(a.transport_state(bad).is_err());
+        assert!(a.set_transport_state(bad, b"x").is_err());
+    }
+    assert!(matches!(
+        a.set_transport_state("big", &vec![0; MAX_TRANSPORT_STATE + 1]),
+        Err(CoreError::TooLarge)
+    ));
+    // Gardé dans la base (chiffrée) : relu après réouverture.
+    a.set_transport_state("netsync", b"persiste").unwrap();
+    drop(a);
+    let a = Core::open(&d.path().join("db"), &[1; 32], NOW).unwrap();
+    assert_eq!(
+        a.transport_state("netsync").unwrap().as_deref(),
+        Some(&b"persiste"[..])
+    );
+}

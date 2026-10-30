@@ -87,6 +87,21 @@ pub struct WatchedMailboxes {
     pub intro: Vec<MailboxId>,
 }
 
+/// Taille maximale de l'état d'un transport.
+pub const MAX_TRANSPORT_STATE: usize = 4 << 20;
+
+fn transport_key(key: &str) -> Result<String> {
+    if key.is_empty()
+        || key.len() > 64
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(CoreError::Malformed("clé d'état de transport"));
+    }
+    Ok(format!("transport/{key}"))
+}
+
 /// Âge maximal accepté d'un message (horodatage authentifié de l'enveloppe) :
 /// durée de vie d'un paquet plus un jour de décalage d'horloge.
 const MAX_AGE_SECS: u64 = DEFAULT_TTL_SECS + 86_400;
@@ -529,6 +544,21 @@ impl Core {
                 .map(|(_, bytes)| bytes)
                 .collect())
         })
+    }
+
+    /// État opaque d'un transport (par exemple positions de relève et dépôts
+    /// par nœud du CLI), gardé dans la base chiffrée sous `transport/<key>`.
+    /// `key` : 1 à 64 caractères ASCII alphanumériques, `_` ou `-`.
+    pub fn transport_state(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.store.get_meta(&transport_key(key)?)
+    }
+
+    /// Remplace l'état d'un transport (au plus `MAX_TRANSPORT_STATE` octets).
+    pub fn set_transport_state(&mut self, key: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > MAX_TRANSPORT_STATE {
+            return Err(CoreError::TooLarge);
+        }
+        self.store.put_meta(&transport_key(key)?, &bytes)
     }
 
     /// Journalise un événement de transport (dépôt ou relève sur un nœud) :
