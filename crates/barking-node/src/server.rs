@@ -55,6 +55,7 @@
 //!   elle, deux tâches de fond : entretien de la table (`dht::maintain`) et
 //!   recopie entre responsables (`dht::replicate`).
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::net::{SocketAddr, UdpSocket};
@@ -213,12 +214,18 @@ pub struct ServerStats {
     replication_period: Mutex<ReplicationStats>,
 }
 
+/// Numéros des dernières passes qui ont recopié quelque chose, gardés.
+const SENDING_PASSES_KEPT: usize = 64;
+
 /// Passes de recopie : nombre, somme des bilans et dernier bilan.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReplicationStats {
     pub passes: u64,
     pub total: PassReport,
     pub last: Option<PassReport>,
+    /// Numéros (1, 2…) des `SENDING_PASSES_KEPT` dernières passes dont au
+    /// moins un envoi a été accepté.
+    pub sending_passes: VecDeque<u64>,
 }
 
 impl ReplicationStats {
@@ -226,6 +233,12 @@ impl ReplicationStats {
         self.passes += 1;
         self.total.add(r);
         self.last = Some(r.clone());
+        if r.sent > 0 {
+            if self.sending_passes.len() >= SENDING_PASSES_KEPT {
+                self.sending_passes.pop_front();
+            }
+            self.sending_passes.push_back(self.passes);
+        }
     }
 }
 

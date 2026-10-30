@@ -913,17 +913,26 @@ async fn stopping_two_responsibles_recopies_to_next() {
     )
     .await;
     // Recopie dans les 3 passes qui suivent l'arrêt, chez au moins un des
-    // gardiens restants : 3 échecs retirent un nœud de la table, et la
-    // boîte est recopiée au suivant dans la passe du 3ᵉ échec. La passe en
-    // cours au moment de l'arrêt, qui a pu joindre les nœuds arrêtés, est
-    // comptée en plus.
+    // gardiens restants : chaque passe sans réponse demande un contrôle de
+    // vie (un par pair et par `TICK` ici), 3 contrôles sans réponse
+    // retirent le nœud, et la boîte va au suivant dans la même passe. La
+    // passe en cours au moment de l'arrêt, qui a pu joindre les nœuds
+    // arrêtés, est comptée en plus. Le numéro est celui de la première
+    // passe d'envoi après l'arrêt, noté par la passe elle-même.
     let fastest = holders
         .iter()
         .zip(&passes_at_stop)
-        .map(|(&i, before)| slots[i].as_ref().unwrap().stats.replication().passes - before)
+        .filter_map(|(&i, before)| {
+            let r = slots[i].as_ref().unwrap().stats.replication();
+            let first = r.sending_passes.iter().find(|p| *p > before)?;
+            Some(first - before)
+        })
         .min()
-        .unwrap();
-    assert!(fastest <= 3 + 1, "recopie après {fastest} passes");
+        .expect("aucun gardien n'a recopié");
+    assert!(
+        fastest <= 3 + 1,
+        "recopie à la passe {fastest} après l'arrêt"
+    );
     stop_all(slots.into_iter().flatten().collect()).await;
 }
 

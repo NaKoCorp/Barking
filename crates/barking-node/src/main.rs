@@ -213,13 +213,8 @@ fn open_for_reading(data_dir: Option<PathBuf>) -> Result<(NodeId, NodeStore)> {
     if !db.exists() {
         return Err(fail(format!("base absente de {}", dir.display())));
     }
-    match NodeStore::open_read_only(&db) {
-        Ok(store) => Ok((id, store)),
-        Err(Error::SchemaVersion(2)) => Err(fail(
-            "base en version 2 : lancez le nœud une fois pour migrer la base",
-        )),
-        Err(e) => Err(e),
-    }
+    // Une base v2 donne `SchemaVersion(2)`, affiché par `main`.
+    Ok((id, NodeStore::open_read_only(&db)?))
 }
 
 fn unix_now() -> u64 {
@@ -345,6 +340,11 @@ fn main() -> ExitCode {
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
+        // Base du schéma précédent (`status`, `peers` en lecture seule).
+        Err(Error::SchemaVersion(2)) => {
+            eprintln!("erreur : base en version 2, lancez le nœud une fois pour migrer la base");
+            ExitCode::FAILURE
+        }
         Err(e) => {
             eprintln!("erreur : {e}");
             ExitCode::FAILURE

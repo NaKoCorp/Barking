@@ -205,6 +205,27 @@ impl RoutingTable {
         }
     }
 
+    /// Réponse lisible d'un nœud connu, hors contact vérifié : ses échecs
+    /// sont remis à zéro et il est vu à `now` (fin de l'ordre de son
+    /// compartiment, comme après un contact), sa fiche est inchangée. Vrai
+    /// s'il est connu.
+    pub fn mark_alive(&mut self, id: &NodeId, now: u64) -> bool {
+        let Some(b) = bucket_index(&self.own, id) else {
+            return false;
+        };
+        let bucket = &mut self.buckets[b];
+        for peers in [&mut bucket.active, &mut bucket.reserve] {
+            if let Some(i) = position(peers, id) {
+                let mut peer = peers.remove(i);
+                peer.fails = 0;
+                peer.last_seen = peer.last_seen.max(now);
+                peers.push(peer);
+                return true;
+            }
+        }
+        false
+    }
+
     fn insert_new(&mut self, b: usize, id: NodeId, record: NodeRecord, now: u64) -> Insert {
         let full = self.buckets[b].active.len() >= K;
         if !self.diversity_ok(b, &id, &prefixes(&record), !full) {
@@ -665,6 +686,30 @@ mod tests {
             .count();
         assert_eq!(kept, MAX_PER_PREFIX);
         assert_eq!(table.closest_diverse(&[0; 32], 5).len(), 5);
+    }
+
+    #[test]
+    fn mark_alive_resets_failures_and_refreshes() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let mut table = RoutingTable::new(OWN);
+        let (a, ra) = node_in(&mut rng, 0, &distinct(0));
+        let (b, rb) = node_in(&mut rng, 0, &distinct(1));
+        table.on_contact(a, ra.clone(), NOW);
+        table.on_contact(b, rb, NOW);
+        table.on_failure(&a);
+        table.on_failure(&a);
+        assert_eq!(table.get(&a).unwrap().fails, 2);
+        assert!(table.mark_alive(&a, NOW + 50));
+        let p = table.get(&a).unwrap();
+        assert_eq!((p.fails, p.last_seen, &p.record), (0, NOW + 50, &ra));
+        // Vu le plus récemment : `b` devient la tête du compartiment.
+        assert_eq!(table.stale_heads(NOW + STALE_AFTER_SECS), vec![b]);
+        // Deux nouveaux échecs ne le retirent pas : la série a recommencé.
+        table.on_failure(&a);
+        table.on_failure(&a);
+        assert!(table.get(&a).is_some());
+        assert!(!table.mark_alive(&NodeId([9; 32]), NOW));
+        assert!(!table.mark_alive(&OWN, NOW));
     }
 
     #[test]

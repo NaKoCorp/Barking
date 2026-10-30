@@ -473,7 +473,8 @@ fn status_on_v2_base_asks_to_run() {
         let out = node(&[cmd, "--data-dir", dir.to_str().unwrap()]);
         assert!(!out.status.success(), "{cmd}");
         assert!(
-            text(&out.stderr).contains("lancez le nœud une fois pour migrer la base"),
+            text(&out.stderr).contains("lancez le nœud une fois pour migrer la base")
+                && !text(&out.stderr).contains("configuration"),
             "{cmd} : {}",
             text(&out.stderr)
         );

@@ -3,23 +3,29 @@
 //! propre table.
 //!
 //! - **Ordre** : les boîtes mises en file (un nœud est entré parmi leurs 5
-//!   plus proches) d'abord, puis celles traitées le moins récemment. Le
-//!   moment du dernier traitement n'est gardé qu'en mémoire.
+//!   plus proches) d'abord, puis celles jamais tentées, puis les moins
+//!   récemment tentées. Une boîte tentée passe en fin d'ordre, même si un
+//!   responsable l'a refusée : un pair qui refuse toujours ne la garde pas
+//!   en tête. Tout cela n'est gardé qu'en mémoire.
 //! - **Par responsable** : `FindValue` sur toutes les pages, puis `Store`
 //!   de ce qui manque, accusés d'abord. Un message sans preuve gardée (ligne
 //!   d'une base migrée, `pow = 0`) n'est pas envoyé : il serait refusé.
-//! - **Bornes** : `MAX_MAILBOXES_PER_PEER` boîtes par responsable et par
-//!   passe ; `replication_bytes_per_hour` octets envoyés par heure, au-delà
-//!   la passe s'arrête et reprend à la suivante.
-//! - **Refus** : un pair qui ne répond pas, renvoie `RateLimited` ou une
-//!   page `Holdings` hors bornes est sauté jusqu'à la passe suivante ; sans
-//!   réponse, son échec est compté dans la table (3 échecs le retirent, et
-//!   la boîte est alors recopiée vers le suivant dans la même passe).
-//!   `NotResponsible`, `PowTooWeak` et `UnknownAckTarget` sont comptés sans
-//!   rien réessayer.
+//! - **Bornes** : `MAX_MAILBOXES_PER_PEER` boîtes et `PEER_TIME_PER_PASS`
+//!   par responsable et par passe ; `replication_bytes_per_hour` octets
+//!   envoyés par heure, au-delà la passe s'arrête et reprend à la suivante.
+//! - **Refus et pannes** : la recopie ne compte jamais d'échec dans la
+//!   table. Une réponse lisible marque le pair vivant (`mark_alive`).
+//!   - Pas de réponse : pair sauté pour la passe, et contrôle de vie
+//!     (`Dht::liveness_check`, au plus un par pair et par 10 min) ; c'est ce
+//!     contrôle qui compte l'échec. S'il retire le pair, la boîte est
+//!     recopiée au suivant dans la même passe.
+//!   - `RateLimited`, ou temps de la passe épuisé : pair sauté.
+//!   - Réponse hors bornes ou inattendue, flux coupé, `MailboxFull`,
+//!     `NodeFull`, `NotResponsible` : la boîte est sautée pour ce pair.
+//!   - `PowTooWeak`, `UnknownAckTarget` : comptés, l'élément suivant part.
 //! - **Cadence** : toutes les heures ; une boîte mise en file déclenche une
-//!   passe 1 min plus tard au plus tôt. Avec `ServerConfig::dht_tick`, ces
-//!   deux délais valent `dht_tick`.
+//!   passe 1 min plus tard au plus tôt, limitée aux boîtes en file. Avec
+//!   `ServerConfig::dht_tick`, ces délais valent `dht_tick`.
 //!
 //! Les journaux ne donnent que des compteurs : ni adresse, ni boîte.
 
@@ -28,8 +34,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use barking_dht::mailbox_key;
+use barking_dht::{REPLICAS, distance, mailbox_key};
 use barking_packet::MailboxId;
+use barking_proto::client::ClientError;
 use barking_proto::{ErrorReason, MAX_HOLDINGS_PER_PAGE, NodeId, Request, Response};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
@@ -44,9 +51,12 @@ pub const PASS_EVERY: Duration = Duration::from_secs(3600);
 pub const QUEUE_DELAY: Duration = Duration::from_secs(60);
 /// Boîtes recopiées au plus par responsable et par passe (spec §5.3).
 pub const MAX_MAILBOXES_PER_PEER: usize = 64;
-/// Pages `Holdings` lues au plus par boîte et par responsable : au-delà, le
-/// pair est jugé défaillant pour la passe.
+/// Pages `Holdings` lues au plus par boîte et par responsable : au-delà, la
+/// boîte est sautée pour ce pair.
 pub const MAX_HOLDINGS_PAGES: usize = 16;
+/// Temps passé au plus avec un même responsable dans une passe : au-delà,
+/// il est sauté jusqu'à la passe suivante.
+pub const PEER_TIME_PER_PASS: Duration = Duration::from_secs(60);
 /// Fenêtre du plafond de recopie.
 const BUDGET_WINDOW_SECS: u64 = 3600;
 
@@ -159,56 +169,122 @@ impl ByteBudget {
     }
 }
 
+/// Distance « infinie » : moins de `REPLICAS` responsables connus, tout
+/// nouveau venu en devient un.
+const FAR: [u8; 32] = [0xff; 32];
+
+/// Une boîte gardée, en mémoire.
+struct Entry {
+    key: [u8; 32],
+    /// Numéro de la dernière tentative, 0 si jamais tentée.
+    seq: u64,
+    /// Distance à la clé du plus loin de ses responsables (nous compris) à
+    /// la dernière passe ; `None` si nous n'en sommes pas responsables. Un
+    /// nouveau venu plus proche entre parmi eux.
+    bound: Option<[u8; 32]>,
+}
+
 /// Ordre et file des boîtes, en mémoire seulement.
 #[derive(Default)]
 pub(crate) struct Queue {
-    /// Numéro croissant de traitement.
+    /// Numéro croissant de tentative.
     seq: u64,
-    /// Dernier traitement complet de chaque boîte gardée.
-    done: HashMap<MailboxId, u64>,
+    boxes: HashMap<MailboxId, Entry>,
     /// Boîtes à traiter en premier.
     queued: HashSet<MailboxId>,
 }
 
 impl Queue {
-    /// Boîtes gardées dans l'ordre de traitement ; oublie celles qui ne le
-    /// sont plus et vide la file.
-    fn order(&mut self, held: Vec<MailboxId>) -> Vec<MailboxId> {
+    /// Boîtes à traiter, avec leur clé, dans l'ordre : en file, puis jamais
+    /// tentées, puis les moins récemment tentées. `queued_only` : seulement
+    /// celles en file. Oublie les boîtes qui ne sont plus gardées et vide la
+    /// file.
+    fn order(&mut self, held: Vec<MailboxId>, queued_only: bool) -> Vec<(MailboxId, [u8; 32])> {
         let keep: HashSet<MailboxId> = held.iter().copied().collect();
-        self.done.retain(|m, _| keep.contains(m));
+        self.boxes.retain(|m, _| keep.contains(m));
         let queued = std::mem::take(&mut self.queued);
-        let mut order = held;
-        order.sort_by_key(|m| (!queued.contains(m), self.done.get(m).copied().unwrap_or(0)));
-        order
+        let mut order: Vec<(bool, u64, MailboxId, [u8; 32])> = held
+            .into_iter()
+            .filter(|m| !queued_only || queued.contains(m))
+            .map(|m| {
+                let e = self.boxes.entry(m).or_insert_with(|| Entry {
+                    key: mailbox_key(&m),
+                    seq: 0,
+                    bound: None,
+                });
+                (!queued.contains(&m), e.seq, m, e.key)
+            })
+            .collect();
+        order.sort_by_key(|(q, seq, _, _)| (*q, *seq));
+        order.into_iter().map(|(_, _, m, k)| (m, k)).collect()
     }
 
-    fn mark_done(&mut self, m: MailboxId) {
+    /// La boîte a été tentée : elle passe en fin d'ordre.
+    fn attempted(&mut self, m: &MailboxId) {
         self.seq += 1;
-        self.done.insert(m, self.seq);
+        if let Some(e) = self.boxes.get_mut(m) {
+            e.seq = self.seq;
+        }
     }
 
-    /// Boîtes connues de la dernière passe.
-    pub(crate) fn known(&self) -> Vec<MailboxId> {
-        self.done.keys().copied().collect()
+    fn set_bound(&mut self, m: &MailboxId, bound: Option<[u8; 32]>) {
+        if let Some(e) = self.boxes.get_mut(m) {
+            e.bound = bound;
+        }
     }
 
-    /// Met des boîtes en file ; vrai si la file en a gagné.
-    pub(crate) fn enqueue(&mut self, boxes: impl IntoIterator<Item = MailboxId>) -> bool {
+    /// Met en file les boîtes dont `id` entre parmi les responsables, sans
+    /// consulter la table ; vrai si la file en a gagné.
+    pub(crate) fn enqueue_near(&mut self, id: &NodeId) -> bool {
         let before = self.queued.len();
-        self.queued.extend(boxes);
+        for (m, e) in &self.boxes {
+            if e.bound.is_some_and(|b| distance(&id.0, &e.key) < b) {
+                self.queued.insert(*m);
+            }
+        }
         self.queued.len() > before
+    }
+}
+
+/// Distance à `key` du plus loin des responsables `targets` (nous compris
+/// si nous en sommes) ; `FAR` s'il y en a moins de `REPLICAS`.
+fn replica_bound(own: &NodeId, key: &[u8; 32], targets: &[NodeId]) -> [u8; 32] {
+    let far = targets.iter().map(|t| distance(&t.0, key)).max();
+    match targets.len() {
+        n if n >= REPLICAS => far.unwrap_or(FAR),
+        n if n + 1 == REPLICAS => far.unwrap_or(FAR).max(distance(&own.0, key)),
+        _ => FAR,
     }
 }
 
 /// Issue de la recopie d'une boîte vers un responsable.
 enum Outcome {
     Done,
-    /// Pas de réponse, ou réponse hors bornes : pair sauté, échec compté.
-    Failed,
-    /// `RateLimited` : pair sauté.
-    RateLimited,
+    /// Pas de réponse (délai, connexion impossible ou perdue) : pair sauté
+    /// pour la passe, contrôle de vie demandé.
+    NoAnswer,
+    /// `RateLimited`, ou temps de la passe épuisé pour ce pair : sauté.
+    Skip,
     /// Plafond horaire atteint : fin de la passe.
     Budget,
+}
+
+/// Réponse d'un appel.
+enum Call {
+    Answer(Response),
+    /// Délai dépassé, connexion impossible ou perdue.
+    NoAnswer,
+    /// Réponse illisible ou flux coupé par le pair : il répond, mais pas à
+    /// cette requête.
+    Broken,
+}
+
+/// Bilan par pair dans une passe.
+#[derive(Default)]
+struct PeerPass {
+    mailboxes: usize,
+    spent: Duration,
+    skipped: bool,
 }
 
 /// Fait tourner les passes jusqu'à `stop`.
@@ -223,18 +299,25 @@ pub(crate) async fn run(dht: Arc<Dht>, shared: Arc<Shared>, mut stop: watch::Rec
     let work = async {
         let mut next = Instant::now() + every;
         loop {
-            tokio::select! {
-                () = sleep_until(next) => {}
-                () = dht.replication_wake().notified() => sleep(delay).await,
-            }
-            let report = pass(&dht, &shared, &mut budget, unix_now()).await;
+            // Passe complète à l'échéance ; une mise en file ne fait traiter
+            // que les boîtes en file.
+            let queued_only = tokio::select! {
+                () = sleep_until(next) => false,
+                () = dht.replication_wake().notified() => {
+                    sleep(delay).await;
+                    true
+                }
+            };
+            let report = pass(&dht, &shared, &mut budget, unix_now(), queued_only).await;
             let (start, used) = budget.window();
             shared
                 .with_store(true, None, move |s, _| s.set_replicated(start, used))
                 .await;
             shared.stats().replicated(&report);
             tracing::debug!("recopie : {report}");
-            next = Instant::now() + every;
+            if !queued_only {
+                next = Instant::now() + every;
+            }
         }
     };
     tokio::select! {
@@ -243,12 +326,14 @@ pub(crate) async fn run(dht: Arc<Dht>, shared: Arc<Shared>, mut stop: watch::Rec
     }
 }
 
-/// Une passe de recopie sur toutes les boîtes gardées.
+/// Une passe de recopie sur les boîtes gardées (`queued_only` : celles en
+/// file seulement).
 pub(crate) async fn pass(
-    dht: &Dht,
+    dht: &Arc<Dht>,
     shared: &Arc<Shared>,
     budget: &mut ByteBudget,
     now: u64,
+    queued_only: bool,
 ) -> PassReport {
     let mut report = PassReport::default();
     let held = match shared
@@ -258,17 +343,20 @@ pub(crate) async fn pass(
         Stored::Done(h) => h,
         Stored::Busy | Stored::Failed => return report,
     };
-    let order = dht.replication_queue().order(held);
-    let mut skipped: HashSet<NodeId> = HashSet::new();
-    let mut served: HashMap<NodeId, usize> = HashMap::new();
-    for mailbox in order {
-        let key = mailbox_key(&mailbox);
+    let order = dht.replication_queue().order(held, queued_only);
+    let own = dht.id();
+    let mut peers: HashMap<NodeId, PeerPass> = HashMap::new();
+    for (mailbox, key) in order {
         // Hors de la fenêtre de responsabilité : plus de recopie, rien
         // n'est effacé (spec §5.3, point 2).
         let Some(mut targets) = dht.table().replica_targets(&key) else {
-            dht.replication_queue().mark_done(mailbox);
+            let mut q = dht.replication_queue();
+            q.set_bound(&mailbox, None);
+            q.attempted(&mailbox);
             continue;
         };
+        dht.replication_queue()
+            .set_bound(&mailbox, Some(replica_bound(&own, &key, &targets)));
         let items = match shared
             .with_store(true, None, move |s, _| rules::copy_items(s, &mailbox, now))
             .await
@@ -282,44 +370,58 @@ pub(crate) async fn pass(
             .filter(|i| i.is_ack || i.pow != 0)
             .collect();
         if items.is_empty() {
-            dht.replication_queue().mark_done(mailbox);
+            dht.replication_queue().attempted(&mailbox);
             continue;
         }
         report.mailboxes += 1;
         let mut tried: HashSet<NodeId> = HashSet::new();
-        let mut complete = true;
-        // Un responsable retiré de la table pendant la boîte laisse sa
-        // place au suivant, servi dans la même passe.
+        let mut attempted = false;
+        // Un responsable retiré de la table par son contrôle de vie laisse
+        // sa place au suivant, servi dans la même passe.
         for _ in 0..2 {
             let mut evicted = false;
             for peer in targets {
                 if !tried.insert(peer) {
                     continue;
                 }
-                let count = served.entry(peer).or_default();
-                if skipped.contains(&peer) || *count >= MAX_MAILBOXES_PER_PEER {
-                    complete = false;
+                let st = peers.entry(peer).or_default();
+                if st.skipped || st.mailboxes >= MAX_MAILBOXES_PER_PEER {
                     continue;
                 }
-                *count += 1;
-                match copy_to(dht, peer, mailbox, &items, budget, now, &mut report).await {
-                    Outcome::Done => {}
-                    Outcome::RateLimited => {
-                        skipped.insert(peer);
+                let Some(left) = PEER_TIME_PER_PASS.checked_sub(st.spent) else {
+                    st.skipped = true;
+                    report.skipped_peers += 1;
+                    continue;
+                };
+                st.mailboxes += 1;
+                attempted = true;
+                let started = Instant::now();
+                let outcome = timeout(
+                    left,
+                    copy_to(dht, peer, mailbox, &items, budget, now, &mut report),
+                )
+                .await
+                .unwrap_or(Outcome::Skip);
+                let gone = match outcome {
+                    Outcome::Done => false,
+                    Outcome::Skip => {
+                        st.skipped = true;
                         report.skipped_peers += 1;
-                        complete = false;
+                        false
                     }
-                    Outcome::Failed => {
-                        skipped.insert(peer);
+                    Outcome::NoAnswer => {
+                        st.skipped = true;
                         report.skipped_peers += 1;
-                        complete = false;
-                        evicted |= dht.peer_failed(peer).await;
+                        !dht.liveness_check(peer).await
                     }
                     Outcome::Budget => {
                         report.budget_exhausted = true;
+                        dht.replication_queue().attempted(&mailbox);
                         return report;
                     }
-                }
+                };
+                st.spent += started.elapsed();
+                evicted |= gone;
             }
             if !evicted {
                 break;
@@ -328,51 +430,67 @@ pub(crate) async fn pass(
                 Some(t) => targets = t,
                 None => break,
             }
+            dht.replication_queue()
+                .set_bound(&mailbox, Some(replica_bound(&own, &key, &targets)));
         }
-        if complete {
-            dht.replication_queue().mark_done(mailbox);
+        if attempted {
+            dht.replication_queue().attempted(&mailbox);
         }
     }
     report
 }
 
-/// Envoie `req` au pair `peer` (adresses de sa fiche dans la table).
-async fn call(dht: &Dht, peer: NodeId, req: &Request) -> Option<Response> {
-    let addrs = dht.table().get(&peer).map(|p| p.record.addrs())?;
-    timeout(CALL_TIMEOUT, dht.pool().request(peer, &addrs, req))
-        .await
-        .ok()?
-        .ok()
+/// Envoie `req` au pair `peer` (adresses de sa fiche dans la table). Une
+/// réponse lisible le marque vivant dans la table.
+async fn call(dht: &Dht, peer: NodeId, req: &Request) -> Call {
+    let Some(addrs) = dht.table().get(&peer).map(|p| p.record.addrs()) else {
+        return Call::NoAnswer;
+    };
+    match timeout(CALL_TIMEOUT, dht.pool().request(peer, &addrs, req)).await {
+        Ok(Ok(resp)) => {
+            dht.table().mark_alive(&peer, unix_now());
+            Call::Answer(resp)
+        }
+        Ok(Err(ClientError::Connect(_) | ClientError::Connection(_) | ClientError::Timeout))
+        | Err(_) => Call::NoAnswer,
+        Ok(Err(_)) => Call::Broken,
+    }
 }
 
-/// Empreintes que `peer` tient pour `mailbox`, toutes pages lues.
+/// Empreintes que `peer` tient pour `mailbox`, toutes pages lues. Une
+/// réponse hors bornes (page trop longue, curseur qui n'avance pas, plus
+/// de `MAX_HOLDINGS_PAGES` pages) ou inattendue fait sauter la boîte pour
+/// ce pair (`Err(Outcome::Done)`), sans rien compter contre lui.
 async fn holdings_of(
     dht: &Dht,
     peer: NodeId,
     mailbox: MailboxId,
+    report: &mut PassReport,
 ) -> Result<HashSet<[u8; 32]>, Outcome> {
     let mut have = HashSet::new();
     let mut cursor = None;
     for _ in 0..MAX_HOLDINGS_PAGES {
         let req = Request::FindValue { mailbox, cursor };
         match call(dht, peer, &req).await {
-            Some(Response::Holdings { hashes, next }) => {
-                if hashes.len() > MAX_HOLDINGS_PER_PAGE {
-                    return Err(Outcome::Failed);
-                }
+            Call::Answer(Response::Holdings { hashes, next })
+                if hashes.len() <= MAX_HOLDINGS_PER_PAGE =>
+            {
                 have.extend(hashes);
                 match next {
                     None => return Ok(have),
-                    // Un curseur qui n'avance pas ne finirait jamais.
-                    Some(c) if cursor.is_some_and(|p| c <= p) => return Err(Outcome::Failed),
+                    Some(c) if cursor.is_some_and(|p| c <= p) => break,
                     Some(c) => cursor = Some(c),
                 }
             }
-            Some(Response::Error(ErrorReason::RateLimited)) => return Err(Outcome::RateLimited),
-            _ => return Err(Outcome::Failed),
+            Call::Answer(Response::Error(ErrorReason::RateLimited)) => {
+                return Err(Outcome::Skip);
+            }
+            Call::NoAnswer => return Err(Outcome::NoAnswer),
+            Call::Answer(_) | Call::Broken => break,
         }
     }
-    Err(Outcome::Failed)
+    report.refused += 1;
+    Err(Outcome::Done)
 }
 
 /// Recopie vers `peer` ce qui lui manque de `items` (accusés d'abord).
@@ -385,7 +503,7 @@ async fn copy_to(
     now: u64,
     report: &mut PassReport,
 ) -> Outcome {
-    let have = match holdings_of(dht, peer, mailbox).await {
+    let have = match holdings_of(dht, peer, mailbox, report).await {
         Ok(h) => h,
         Err(o) => return o,
     };
@@ -401,9 +519,9 @@ async fn copy_to(
             pow: item.pow,
         };
         match call(dht, peer, &req).await {
-            Some(Response::Ok) => report.sent += 1,
-            Some(Response::Error(r)) => match r {
-                ErrorReason::RateLimited => return Outcome::RateLimited,
+            Call::Answer(Response::Ok) => report.sent += 1,
+            Call::Answer(Response::Error(r)) => match r {
+                ErrorReason::RateLimited => return Outcome::Skip,
                 // Tables divergentes : rien d'autre pour ce pair avant la
                 // passe suivante.
                 ErrorReason::NotResponsible => {
@@ -412,13 +530,17 @@ async fn copy_to(
                 }
                 ErrorReason::PowTooWeak => report.pow_too_weak += 1,
                 ErrorReason::UnknownAckTarget => report.unknown_ack += 1,
-                ErrorReason::MailboxFull | ErrorReason::NodeFull => {
+                _ => {
                     report.refused += 1;
                     return Outcome::Done;
                 }
-                _ => report.refused += 1,
             },
-            _ => return Outcome::Failed,
+            Call::NoAnswer => return Outcome::NoAnswer,
+            // Réponse inattendue ou flux coupé : la boîte est sautée.
+            Call::Answer(_) | Call::Broken => {
+                report.refused += 1;
+                return Outcome::Done;
+            }
         }
     }
     Outcome::Done
@@ -450,23 +572,66 @@ mod tests {
     #[test]
     fn queue_orders_queued_then_least_recent() {
         let m = |b: u8| MailboxId([b; 16]);
+        let ids = |v: Vec<(MailboxId, [u8; 32])>| v.into_iter().map(|(m, _)| m).collect::<Vec<_>>();
         let mut q = Queue::default();
-        q.mark_done(m(1));
-        q.mark_done(m(2));
-        q.mark_done(m(3));
-        // Jamais traitée d'abord, puis les plus anciennes.
+        q.order(vec![m(1), m(2), m(3)], false);
+        q.attempted(&m(1));
+        q.attempted(&m(2));
+        q.attempted(&m(3));
+        // Jamais tentée d'abord, puis les moins récemment tentées ; la clé
+        // de chaque boîte est jointe.
+        let order = q.order(vec![m(3), m(2), m(4), m(1)], false);
+        assert_eq!(order[0].1, mailbox_key(&m(4)));
+        assert_eq!(ids(order), [m(4), m(1), m(2), m(3)]);
+        // Une boîte tentée, même refusée, passe en fin d'ordre.
+        q.attempted(&m(4));
+        q.attempted(&m(1));
         assert_eq!(
-            q.order(vec![m(3), m(2), m(4), m(1)]),
-            [m(4), m(1), m(2), m(3)]
+            ids(q.order(vec![m(1), m(2), m(3), m(4)], false)),
+            [m(2), m(3), m(4), m(1)]
         );
-        // Une boîte en file passe devant ; la file est vidée.
-        assert!(q.enqueue([m(3)]));
-        assert!(!q.enqueue([m(3)]));
-        assert_eq!(q.order(vec![m(1), m(2), m(3)]), [m(3), m(1), m(2)]);
-        assert_eq!(q.order(vec![m(1), m(2), m(3)]), [m(1), m(2), m(3)]);
+        // Mise en file d'après la borne : seul un nœud plus proche de la clé
+        // que le plus loin des responsables la fait entrer.
+        let key = mailbox_key(&m(2));
+        let mut bound = key;
+        bound[0] ^= 0x10;
+        let bound = distance(&key, &bound);
+        q.set_bound(&m(2), Some(bound));
+        let mut far = key;
+        far[0] ^= 0x80;
+        assert!(!q.enqueue_near(&NodeId(far)));
+        let mut near = key;
+        near[31] ^= 1;
+        assert!(q.enqueue_near(&NodeId(near)));
+        assert!(!q.enqueue_near(&NodeId(near)));
+        // Sans borne (pas responsable) : jamais en file.
+        q.set_bound(&m(3), None);
+        assert!(!q.enqueue_near(&NodeId(mailbox_key(&m(3)))));
+        // Passe limitée à la file, qui est ensuite vidée.
+        assert_eq!(ids(q.order(vec![m(1), m(2), m(3)], true)), [m(2)]);
+        assert!(q.order(vec![m(1), m(2), m(3)], true).is_empty());
         // Une boîte qui n'est plus gardée est oubliée.
-        assert_eq!(q.order(vec![m(2)]), [m(2)]);
-        assert_eq!(q.known(), vec![m(2)]);
+        assert_eq!(ids(q.order(vec![m(2)], false)), [m(2)]);
+        assert_eq!(q.boxes.len(), 1);
+    }
+
+    #[test]
+    fn replica_bound_is_farthest_responsible() {
+        let key = [0u8; 32];
+        let id = |b: u8| {
+            let mut x = [0u8; 32];
+            x[0] = b;
+            NodeId(x)
+        };
+        let d = |n: &NodeId| distance(&n.0, &key);
+        let targets: Vec<NodeId> = (1..=5).map(id).collect();
+        // Cinq responsables autres que nous : le plus loin d'entre eux.
+        assert_eq!(replica_bound(&id(9), &key, &targets), d(&id(5)));
+        // Quatre : nous en sommes, le plus loin des cinq.
+        assert_eq!(replica_bound(&id(9), &key, &targets[..4]), d(&id(9)));
+        assert_eq!(replica_bound(&id(0), &key, &targets[..4]), d(&id(4)));
+        // Moins : tout nouveau venu entre.
+        assert_eq!(replica_bound(&id(9), &key, &targets[..2]), FAR);
     }
 
     #[test]

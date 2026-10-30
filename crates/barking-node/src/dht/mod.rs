@@ -34,7 +34,6 @@ use barking_dht::lookup::REQUEST_TIMEOUT_MS;
 use barking_dht::{
     DiversityLimits, Insert, K, Lookup, RoutingTable, STALE_AFTER_SECS, mailbox_key,
 };
-use barking_packet::MailboxId;
 use barking_proto::{
     ErrorReason, MAX_NODES_PER_RESPONSE, NodeId, NodeRecord, RecordPolicy, Request, Response,
 };
@@ -56,6 +55,9 @@ use replicate::Queue;
 pub const CALL_TIMEOUT: Duration = Duration::from_millis(REQUEST_TIMEOUT_MS);
 /// Un `Ping` de rappel au plus par identifiant sur cette durée (spec §6.2).
 pub const RECALL_INTERVAL: Duration = Duration::from_secs(600);
+/// Un contrôle de vie demandé par la recopie au plus par identifiant sur
+/// cette durée.
+pub const LIVENESS_INTERVAL: Duration = Duration::from_secs(600);
 /// Rappels en cours au plus, tous identifiants confondus : un afflux de
 /// fiches jointes ne fait pas du nœud un amplificateur.
 const MAX_RECALLS_IN_FLIGHT: usize = 16;
@@ -91,6 +93,8 @@ pub struct Dht {
     queue: Mutex<Queue>,
     /// Réveille la recopie quand la file gagne une boîte.
     wake: Notify,
+    /// Dernier contrôle de vie demandé par la recopie, par identifiant.
+    liveness: Mutex<HashMap<NodeId, Instant>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -134,6 +138,7 @@ impl Dht {
             tick,
             queue: Mutex::new(Queue::default()),
             wake: Notify::new(),
+            liveness: Mutex::new(HashMap::new()),
         }
     }
 
@@ -178,23 +183,39 @@ impl Dht {
     }
 
     /// Un nœud vient d'entrer dans la table : les boîtes gardées dont il
-    /// est désormais l'un des responsables sont mises en file (spec §5.3).
+    /// devient l'un des responsables sont mises en file (spec §5.3), d'après
+    /// les distances notées à la dernière passe, sans parcourir la table.
     fn enqueue_for(&self, id: NodeId) {
-        let known = self.replication_queue().known();
-        let touched: Vec<MailboxId> = {
-            let table = self.table();
-            known
-                .into_iter()
-                .filter(|m| {
-                    table
-                        .replica_targets(&mailbox_key(m))
-                        .is_some_and(|t| t.contains(&id))
-                })
-                .collect()
-        };
-        if self.replication_queue().enqueue(touched) {
+        if self.replication_queue().enqueue_near(&id) {
             self.wake.notify_one();
         }
+    }
+
+    /// Contrôle de vie d'un responsable resté sans réponse pendant la
+    /// recopie : au plus un par identifiant et par `LIVENESS_INTERVAL`
+    /// (`dht_tick` en test), par `check_alive` (qui seul compte l'échec, et
+    /// saute un contrôle déjà en cours). Vrai si le nœud est encore dans la
+    /// table.
+    pub async fn liveness_check(&self, id: NodeId) -> bool {
+        let every = self.tick.unwrap_or(LIVENESS_INTERVAL);
+        let now = Instant::now();
+        let due = {
+            let mut last = lock(&self.liveness);
+            if last.len() >= RECALLS_SWEEP_AT {
+                last.retain(|_, t| now.saturating_duration_since(*t) < every);
+            }
+            let due = last
+                .get(&id)
+                .is_none_or(|t| now.saturating_duration_since(*t) >= every);
+            if due {
+                last.insert(id, now);
+            }
+            due
+        };
+        if due {
+            self.refresh_peer(id).await;
+        }
+        self.table().get(&id).is_some()
     }
 
     /// Lignes de `peers` : les actifs d'abord, `MAX_PEER_ROWS` au plus,
@@ -526,30 +547,6 @@ impl Dht {
         }
     }
 
-    /// Compte un appel sans réponse de `id` (recopie). Au 3ᵉ échec
-    /// consécutif il est retiré, et sa remplaçante de la réserve est
-    /// contactée puis promue. Vrai s'il a été retiré.
-    pub async fn peer_failed(&self, id: NodeId) -> bool {
-        let candidate = {
-            let mut table = self.table();
-            if table.get(&id).is_none() {
-                return false;
-            }
-            let c = table.on_failure(&id);
-            if table.get(&id).is_some() {
-                return false;
-            }
-            c
-        };
-        tracing::debug!("pair retiré de la table : {id}");
-        if let Some(c) = candidate
-            && let Some((c, r)) = self.try_candidate(c).await
-        {
-            self.admit_contact(c, r).await;
-        }
-        true
-    }
-
     /// Marque `id` en cours de contrôle ; `None` s'il l'est déjà.
     fn begin_check(&self, id: NodeId) -> Option<CheckGuard<'_>> {
         // `then` et non `then_some` : une garde construite pour rien serait
@@ -866,6 +863,33 @@ mod tests {
         // Seul : l'échec est compté.
         assert_eq!(d.check_alive(id).await, None);
         assert_eq!(fails(&d), Some(1));
+    }
+
+    #[tokio::test]
+    async fn liveness_check_counts_once_per_interval() {
+        let ep = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        let cfg = dht().cfg.clone();
+        let d = Dht::new(
+            SigningKey::from_bytes(&[1; 32]),
+            cfg,
+            vec![ep],
+            4,
+            None,
+            DiversityLimits::SPEC,
+        );
+        let id = NodeId([9; 32]);
+        let dead = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let SocketAddr::V4(addr) = dead.local_addr().unwrap() else {
+            unreachable!()
+        };
+        let rec = NodeRecord::sign(&SigningKey::from_bytes(&[9; 32]), Some(addr), None, 0);
+        assert_eq!(d.table().on_contact(id, rec, 0), Insert::Added);
+        // Premier contrôle : sans réponse, un échec.
+        assert!(d.liveness_check(id).await);
+        assert_eq!(d.table().get(&id).map(|p| p.fails), Some(1));
+        // Dans les 10 min : aucun nouveau contrôle, rien de compté.
+        assert!(d.liveness_check(id).await);
+        assert_eq!(d.table().get(&id).map(|p| p.fails), Some(1));
     }
 
     #[tokio::test]
