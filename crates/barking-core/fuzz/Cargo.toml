@@ -19,6 +19,14 @@ path = "src/lib.rs"
 [dependencies.barking-core]
 path = ".."
 
+[dependencies.barking-proto]
+path = "../../barking-proto"
+
+[dependencies.tokio]
+version = "1.54.1"
+default-features = false
+features = ["rt"]
+
 [[bin]]
 name = "packet_decode"
 path = "fuzz_targets/packet_decode.rs"
@@ -43,6 +51,15 @@ bench = false
 [[bin]]
 name = "receive_frame"
 path = "fuzz_targets/receive_frame.rs"
+test = false
+doc = false
+bench = false
+
+# Décoder des octets arbitraires comme trame de requête ne doit jamais paniquer.
+# Lancer : cd crates/barking-core/fuzz && cargo fuzz run proto_frame
+[[bin]]
+name = "proto_frame"
+path = "fuzz_targets/proto_frame.rs"
 test = false
 doc = false
 bench = false

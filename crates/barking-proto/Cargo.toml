@@ -1,0 +1,19 @@
+[package]
+name = "barking-proto"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+barking-packet.workspace = true
+blake3.workspace = true
+data-encoding.workspace = true
+ed25519-dalek.workspace = true
+postcard.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+rand.workspace = true
+tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
