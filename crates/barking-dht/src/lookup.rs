@@ -67,8 +67,9 @@ pub struct Lookup {
     started_ms: u64,
     /// Liste de chaque chemin, triée par distance.
     paths: Vec<Vec<Entry>>,
-    /// Chemin propriétaire de chaque nœud déjà vu : un nœud n'appartient
-    /// qu'à un chemin.
+    /// Chemin propriétaire de chaque nœud pris : présent dans la liste de ce
+    /// chemin, ou déjà interrogé par lui. Un nœud n'appartient qu'à un chemin ;
+    /// un nœud écarté de sa liste sans avoir été interrogé est libéré.
     owner: HashMap<NodeId, usize>,
     /// Nœuds jamais repris (le nœud qui cherche).
     excluded: HashSet<NodeId>,
@@ -137,11 +138,18 @@ impl Lookup {
     /// au-delà restent, pour que leur réponse soit encore attendue.
     fn trim(&mut self, path: usize) {
         let list = &mut self.paths[path];
+        let owner = &mut self.owner;
         list.sort_by_key(|e| e.dist);
         let mut rank = 0;
         list.retain(|e| {
             rank += 1;
-            rank <= K || matches!(e.state, State::InFlight { .. })
+            let keep = rank <= K || matches!(e.state, State::InFlight { .. });
+            // Un nœud écarté sans avoir été interrogé est libéré : un autre
+            // chemin pourra le reprendre. Un nœud interrogé reste pris.
+            if !keep && e.state == State::Waiting {
+                owner.remove(&e.id);
+            }
+            keep
         });
     }
 
@@ -527,5 +535,31 @@ mod tests {
         assert!(lookup.is_done(0));
         assert_eq!(ids(&lookup.result()), vec![sent[0]]);
         assert_eq!(ids(&lookup.responders()), vec![sent[0]]);
+    }
+
+    #[test]
+    fn trimmed_unqueried_node_is_released() {
+        let mut rng = StdRng::seed_from_u64(9);
+        let target = [0; 32];
+        let mut all = nodes(&mut rng, 30);
+        all.sort_by_key(|(id, _)| distance(&id.0, &target));
+        // Les deux plus proches : une graine par chemin (0 puis 1).
+        let mut lookup = Lookup::new(target, all[..2].to_vec(), POLICY, 0);
+        let sent = ids(&lookup.next_requests(0));
+        assert_eq!(sent, ids(&all[..2]));
+        let (x, x_rec) = all[29].clone();
+        // Le chemin 0 apprend X avec 19 nœuds plus proches : sa liste
+        // (graine comprise) dépasse K, X en est écarté sans être interrogé.
+        let mut records: Vec<NodeRecord> = all[2..21].iter().map(|(_, r)| r.clone()).collect();
+        records.push(x_rec.clone());
+        lookup.on_response(&sent[0], records, NOW_SECS);
+        assert!(lookup.paths[0].iter().all(|e| e.id != x));
+        // Le chemin 1 reçoit X d'un nœud honnête et doit le reprendre.
+        lookup.on_response(&sent[1], vec![x_rec], NOW_SECS);
+        assert!(lookup.paths[1].iter().any(|e| e.id == x));
+        let log = ids(&lookup.next_requests(0));
+        assert!(log.contains(&x));
+        let unique: HashSet<NodeId> = log.iter().copied().collect();
+        assert_eq!(unique.len(), log.len());
     }
 }
