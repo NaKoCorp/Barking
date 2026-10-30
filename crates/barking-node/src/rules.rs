@@ -17,6 +17,10 @@
 //! - Preuve de travail progressive : par boîte, par palier et selon le
 //!   remplissage global, voir `pow_bits_for`. `precheck` vérifie forme,
 //!   expiration et preuve au minimum (base + palier) sans la base de données.
+//! - Recopie entre nœuds (spec §5.2) : mêmes règles de forme, d'accusé, de
+//!   quotas et de déduplication que `deposit`, mais la preuve exigée est la
+//!   base du nœud (`pow_bits` + palier), sans le supplément progressif ; le
+//!   nonce reçu est gardé pour pouvoir recopier à son tour.
 //! - Curseur de `fetch` : `seq` (AUTOINCREMENT, jamais réutilisé) des paquets,
 //!   puis `ACK_BASE + seq` des accusés.
 
@@ -38,6 +42,7 @@ pub const MAX_EXPIRY_SECS: u64 = 7 * 86_400 + 3_600;
 /// Nombre maximal de boîtes par relève.
 pub const MAX_MAILBOXES_PER_FETCH: usize = 64;
 const ACK_BASE: u64 = barking_proto::ACK_CURSOR_BASE;
+const MAX_HOLDINGS: usize = barking_proto::MAX_HOLDINGS_PER_PAGE;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
@@ -138,7 +143,15 @@ pub fn deposit(
         Err(r) => return Ok(Err(r)),
     };
     match packet.kind {
-        Kind::Message => deposit_message(store, policy, &packet, bytes, pow_nonce, now),
+        Kind::Message => deposit_message(
+            store,
+            policy,
+            &packet,
+            bytes,
+            pow_nonce,
+            now,
+            Difficulty::Progressive,
+        ),
         Kind::Ack => deposit_ack(store, policy, &packet, bytes),
     }
 }
@@ -199,6 +212,16 @@ pub fn required_pow_bits(
     ))
 }
 
+/// Difficulté exigée d'un message déposé.
+#[derive(Clone, Copy)]
+enum Difficulty {
+    /// Dépôt d'un client : base, palier, boîte et remplissage (`pow_bits_for`).
+    Progressive,
+    /// Recopie d'un pair : base et palier seulement (le client a déjà payé le
+    /// progressif au premier nœud).
+    Base,
+}
+
 fn deposit_message(
     store: &mut NodeStore,
     policy: &Policy,
@@ -206,6 +229,7 @@ fn deposit_message(
     bytes: &[u8],
     nonce: u64,
     now: u64,
+    difficulty: Difficulty,
 ) -> Result<core::result::Result<(), ErrorReason>> {
     let hash = pow::content_hash(bytes);
     let tx = store.conn_mut().transaction()?;
@@ -224,12 +248,11 @@ fn deposit_message(
         |r| r.get(0),
     )?;
     let stored = stored_bytes(&tx)?;
-    if !pow::check(
-        &hash,
-        &p.mailbox,
-        nonce,
-        pow_bits_for(policy, in_box, p.tier, stored),
-    ) {
+    let bits = match difficulty {
+        Difficulty::Progressive => pow_bits_for(policy, in_box, p.tier, stored),
+        Difficulty::Base => pow_bits_for(policy, 0, p.tier, 0),
+    };
+    if !pow::check(&hash, &p.mailbox, nonce, bits) {
         return Ok(Err(ErrorReason::PowTooWeak));
     }
     if in_box >= i64::from(policy.max_per_mailbox) {
@@ -240,7 +263,7 @@ fn deposit_message(
         return Ok(Err(ErrorReason::NodeFull));
     }
     tx.execute(
-        "INSERT INTO packets(id,mailbox,kind,tier,expires_at,received_at,hash,bytes) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        "INSERT INTO packets(id,mailbox,kind,tier,expires_at,received_at,hash,bytes,pow) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         params![
             &p.id.0[..],
             &p.mailbox.0[..],
@@ -249,7 +272,9 @@ fn deposit_message(
             i64::from(p.expires_at),
             i(now / 60 * 60),
             &hash[..],
-            bytes
+            bytes,
+            // Le nonce est gardé tel quel (réinterprété en i64, sans perte).
+            nonce as i64
         ],
     )?;
     add_stored_bytes(&tx, i(len))?;
@@ -332,7 +357,8 @@ pub(crate) fn fetch_scan_sql(table: &str, slot: usize) -> String {
 
 /// Requêtes préparées gardées en cache : 64 lectures par table, plus la
 /// lecture des charges de chaque table.
-pub const STATEMENT_CACHE: usize = 2 * MAX_MAILBOXES_PER_FETCH + 2;
+/// Plus les deux lectures de `holdings` et les deux de `copy_items`.
+pub const STATEMENT_CACHE: usize = 2 * MAX_MAILBOXES_PER_FETCH + 2 + 4;
 
 /// Relève paginée : paquets puis accusés des `mailboxes`, dans l'ordre de
 /// `seq`. Fusion des lectures indexées de chaque boîte : le travail d'une
@@ -403,6 +429,175 @@ pub fn fetch(
         page.push(st.query_row(params![seq], |r| r.get::<_, Vec<u8>>(0))?);
     }
     Ok(Ok((page, if more { last } else { None })))
+}
+
+/// Boîte visée par un paquet à recopier, et `true` si c'est un accusé :
+/// forme, expiration et palier vérifiés comme pour un dépôt (spec §5.2,
+/// point 3).
+pub fn copy_target(
+    packet: &[u8],
+    now: u64,
+) -> core::result::Result<(MailboxId, bool), ErrorReason> {
+    let p = parse_checked(packet, now)?;
+    Ok((p.mailbox, p.kind == Kind::Ack))
+}
+
+/// Preuve d'un message recopié (spec §5.2, point 5) : `pow_bits` + palier,
+/// sans le supplément progressif. Un accusé n'en exige aucune.
+pub fn copy_pow_ok(
+    policy: &Policy,
+    packet: &[u8],
+    pow_nonce: u64,
+) -> core::result::Result<(), ErrorReason> {
+    let Ok(p) = Packet::decode(packet) else {
+        return Err(ErrorReason::Malformed);
+    };
+    if p.kind == Kind::Ack {
+        return Ok(());
+    }
+    let hash = pow::content_hash(packet);
+    if pow::check(
+        &hash,
+        &p.mailbox,
+        pow_nonce,
+        pow_bits_for(policy, 0, p.tier, 0),
+    ) {
+        Ok(())
+    } else {
+        Err(ErrorReason::PowTooWeak)
+    }
+}
+
+/// Enregistre une copie reçue d'un pair (spec §5.2, points 6 et 7) : comme
+/// `deposit`, sans la surcharge progressive. Quotas et déduplication sont
+/// ceux du dépôt. La proximité (point 4) est vérifiée par l'appelant.
+pub fn store_copy(
+    store: &mut NodeStore,
+    policy: &Policy,
+    packet: &[u8],
+    pow_nonce: u64,
+    now: u64,
+) -> Result<core::result::Result<(), ErrorReason>> {
+    let p = match parse_checked(packet, now) {
+        Ok(p) => p,
+        Err(r) => return Ok(Err(r)),
+    };
+    match p.kind {
+        Kind::Message => {
+            deposit_message(store, policy, &p, packet, pow_nonce, now, Difficulty::Base)
+        }
+        Kind::Ack => deposit_ack(store, policy, &p, packet),
+    }
+}
+
+/// Une page d'empreintes : (empreintes, curseur suivant).
+pub type HoldingsPage = (Vec<[u8; 32]>, Option<u64>);
+
+/// Page des empreintes tenues pour une boîte : paquets (par `seq`) puis
+/// accusés (`ACK_BASE + seq`), même ordre de curseur que `fetch`. L'empreinte
+/// d'un paquet est la colonne `hash`, celle d'un accusé `content_hash` de ses
+/// octets.
+pub fn holdings(
+    store: &NodeStore,
+    mailbox: &MailboxId,
+    cursor: Option<u64>,
+) -> Result<core::result::Result<HoldingsPage, ErrorReason>> {
+    let after = cursor.unwrap_or(0);
+    let conn = store.conn();
+    // (curseur, empreinte), une ligne de plus que la page pour savoir s'il reste
+    // quelque chose.
+    let want = MAX_HOLDINGS + 1;
+    let mut items: Vec<(u64, [u8; 32])> = Vec::with_capacity(want);
+    for (table, base) in [("packets", 0u64), ("acks", ACK_BASE)] {
+        if table == "packets" && after >= ACK_BASE {
+            continue;
+        }
+        let left = want - items.len();
+        if left == 0 {
+            break;
+        }
+        let column = if table == "packets" { "hash" } else { "bytes" };
+        let mut st = conn.prepare_cached(&format!(
+            "SELECT seq, {column} FROM {table} WHERE mailbox=?1 AND seq>?2 ORDER BY seq LIMIT ?3"
+        ))?;
+        let mut rows = st.query(params![
+            &mailbox.0[..],
+            i(after.saturating_sub(base)),
+            i(left as u64)
+        ])?;
+        while let Some(row) = rows.next()? {
+            let seq = u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0);
+            let blob: Vec<u8> = row.get(1)?;
+            let hash = if table == "packets" {
+                // Une empreinte de longueur inattendue (base abîmée) est recalculée
+                // à défaut : on ne ment pas au pair sur ce qu'on tient.
+                <[u8; 32]>::try_from(blob.as_slice()).unwrap_or_else(|_| pow::content_hash(&blob))
+            } else {
+                pow::content_hash(&blob)
+            };
+            items.push((base + seq, hash));
+        }
+    }
+    let more = items.len() > MAX_HOLDINGS;
+    items.truncate(MAX_HOLDINGS);
+    let next = if more {
+        items.last().map(|(c, _)| *c)
+    } else {
+        None
+    };
+    Ok(Ok((items.into_iter().map(|(_, h)| h).collect(), next)))
+}
+
+/// Un élément à recopier chez un responsable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyItem {
+    pub bytes: Vec<u8>,
+    /// Nonce de preuve gardé au dépôt (0 pour un accusé ou une ligne migrée).
+    pub pow: u64,
+    pub hash: [u8; 32],
+    pub is_ack: bool,
+}
+
+/// Tout ce que le nœud tient pour `mailbox` et qui n'a pas expiré : les
+/// accusés d'abord, puis les paquets (spec §5.2, point 6).
+pub fn copy_items(
+    store: &NodeStore,
+    mailbox: &MailboxId,
+    now: u64,
+) -> Result<core::result::Result<Vec<CopyItem>, ErrorReason>> {
+    let conn = store.conn();
+    let now = i(now);
+    let mut out = Vec::new();
+    let mut st = conn
+        .prepare_cached("SELECT bytes FROM acks WHERE mailbox=?1 AND expires_at>?2 ORDER BY seq")?;
+    let mut rows = st.query(params![&mailbox.0[..], now])?;
+    while let Some(row) = rows.next()? {
+        let bytes: Vec<u8> = row.get(0)?;
+        let hash = pow::content_hash(&bytes);
+        out.push(CopyItem {
+            bytes,
+            pow: 0,
+            hash,
+            is_ack: true,
+        });
+    }
+    let mut st = conn.prepare_cached(
+        "SELECT bytes, pow, hash FROM packets WHERE mailbox=?1 AND expires_at>?2 ORDER BY seq",
+    )?;
+    let mut rows = st.query(params![&mailbox.0[..], now])?;
+    while let Some(row) = rows.next()? {
+        let bytes: Vec<u8> = row.get(0)?;
+        let nonce: i64 = row.get(1)?;
+        let hash = <[u8; 32]>::try_from(row.get::<_, Vec<u8>>(2)?.as_slice())
+            .unwrap_or_else(|_| pow::content_hash(&bytes));
+        out.push(CopyItem {
+            bytes,
+            pow: nonce as u64,
+            hash,
+            is_ack: false,
+        });
+    }
+    Ok(Ok(out))
 }
 
 #[cfg(test)]

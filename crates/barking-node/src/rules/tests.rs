@@ -879,3 +879,241 @@ fn pow_surcharge_by_global_fill() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// Recopie entre nœuds (spec §5.2, points 3, 5, 6, 7) et stockage v3.
+// ---------------------------------------------------------------------
+
+/// Nonce qui satisfait `BITS + palier` mais pas un bit de plus : une preuve
+/// « de base », trop faible pour un dépôt progressif.
+fn base_only_nonce(p: &Packet) -> u64 {
+    let hash = pow::content_hash(&p.encode());
+    let bits = BITS + pow::tier_surcharge(p.tier);
+    (0u64..)
+        .find(|&n| {
+            pow::check(&hash, &p.mailbox, n, bits) && !pow::check(&hash, &p.mailbox, n, bits + 1)
+        })
+        .unwrap()
+}
+
+fn copy(s: &mut NodeStore, p: &Packet, pow_nonce: u64) -> core::result::Result<(), ErrorReason> {
+    store_copy(s, &policy(), &p.encode(), pow_nonce, NOW).unwrap()
+}
+
+#[test]
+fn deposit_records_pow() {
+    let (_d, mut s) = store();
+    let p = ok_msg(1, 1);
+    let n = nonce(&p);
+    assert_eq!(put(&mut s, &p), Ok(()));
+    let items = copy_items(&s, &p.mailbox, NOW).unwrap().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].pow, n);
+    assert_eq!(items[0].bytes, p.encode());
+    assert!(!items[0].is_ack);
+}
+
+#[test]
+fn store_copy_requires_only_base_pow() {
+    let (_d, mut s) = store();
+    // 128 paquets : un bit progressif de plus (steps = 2, ilog2 = 1).
+    for n in 0..128u8 {
+        assert_eq!(put(&mut s, &ok_msg(n, 1)), Ok(()), "dépôt {n}");
+    }
+    let p = ok_msg(200, 1);
+    let weak = base_only_nonce(&p);
+    assert!(required_pow_bits(&s, &policy(), &p.mailbox, p.tier).unwrap() > BITS);
+    // Le dépôt exige le progressif, la recopie seulement la base.
+    assert_eq!(
+        deposit(&mut s, &policy(), &p.encode(), weak, NOW).unwrap(),
+        Err(ErrorReason::PowTooWeak)
+    );
+    assert_eq!(copy_pow_ok(&policy(), &p.encode(), weak), Ok(()));
+    assert_eq!(copy(&mut s, &p, weak), Ok(()));
+    assert_eq!(s.stats().unwrap().packets, 129);
+}
+
+#[test]
+fn copy_pow_too_weak() {
+    let strict = Policy {
+        pow_bits: 20,
+        ..policy()
+    };
+    let p = ok_msg(1, 1);
+    assert_eq!(
+        copy_pow_ok(&strict, &p.encode(), nonce(&p)),
+        Err(ErrorReason::PowTooWeak)
+    );
+    let (_d, mut s) = store();
+    assert_eq!(
+        store_copy(&mut s, &strict, &p.encode(), nonce(&p), NOW).unwrap(),
+        Err(ErrorReason::PowTooWeak)
+    );
+    // Un accusé n'exige aucune preuve ; des octets illisibles sont refusés.
+    let (_m, _sec, a) = msg_and_ack(1, 1);
+    assert_eq!(copy_pow_ok(&strict, &a.encode(), 0), Ok(()));
+    assert_eq!(
+        copy_pow_ok(&strict, &[1, 2, 3], 0),
+        Err(ErrorReason::Malformed)
+    );
+}
+
+#[test]
+fn copy_target_checks_shape_and_expiry() {
+    let m = ok_msg(1, 3);
+    assert_eq!(copy_target(&m.encode(), NOW), Ok((mb(3), false)));
+    let (_m, _sec, a) = msg_and_ack(2, 4);
+    assert_eq!(copy_target(&a.encode(), NOW), Ok((mb(4), true)));
+    assert_eq!(copy_target(&[0; 5], NOW), Err(ErrorReason::Malformed));
+    assert_eq!(
+        copy_target(&msg(1, 1, Tier::S, NOW).encode(), NOW),
+        Err(ErrorReason::Expired)
+    );
+    let mut long = m.encode();
+    long.push(0);
+    assert_eq!(copy_target(&long, NOW), Err(ErrorReason::WrongTier));
+}
+
+#[test]
+fn store_copy_ack_unknown_target() {
+    let (_d, mut s) = store();
+    let (_m, _sec, a) = msg_and_ack(1, 1);
+    assert_eq!(copy(&mut s, &a, 0), Err(ErrorReason::UnknownAckTarget));
+    // Avec le paquet visé, l'accusé est accepté et supprime le paquet.
+    let (m, _sec, a) = msg_and_ack(2, 1);
+    assert_eq!(copy(&mut s, &m, nonce(&m)), Ok(()));
+    assert_eq!(copy(&mut s, &a, 0), Ok(()));
+    assert_eq!(s.stats().unwrap().packets, 0);
+    assert_eq!(s.stats().unwrap().acks, 1);
+}
+
+#[test]
+fn store_copy_dedups() {
+    let (_d, mut s) = store();
+    let p = ok_msg(1, 1);
+    assert_eq!(copy(&mut s, &p, nonce(&p)), Ok(()));
+    let before = s.stats().unwrap();
+    assert_eq!(copy(&mut s, &p, nonce(&p)), Ok(()));
+    assert_eq!(s.stats().unwrap(), before);
+}
+
+#[test]
+fn store_copy_respects_quotas() {
+    let (_d, mut s) = store();
+    let small = Policy {
+        max_per_mailbox: 1,
+        ..policy()
+    };
+    let a = ok_msg(1, 1);
+    let b = ok_msg(2, 1);
+    assert_eq!(
+        store_copy(&mut s, &small, &a.encode(), nonce(&a), NOW).unwrap(),
+        Ok(())
+    );
+    assert_eq!(
+        store_copy(&mut s, &small, &b.encode(), nonce(&b), NOW).unwrap(),
+        Err(ErrorReason::MailboxFull)
+    );
+    let tiny = Policy {
+        storage_max_bytes: 100,
+        ..policy()
+    };
+    let c = ok_msg(3, 2);
+    assert_eq!(
+        store_copy(&mut s, &tiny, &c.encode(), nonce(&c), NOW).unwrap(),
+        Err(ErrorReason::NodeFull)
+    );
+}
+
+#[test]
+fn holdings_pages_and_hashes() {
+    let (_d, mut s) = store();
+    let pol = Policy {
+        max_per_mailbox: 2_000,
+        ..policy()
+    };
+    // 1 500 messages, dont 500 accusés : 1 000 paquets et 500 accusés, soit
+    // 1 500 éléments. La première page passe des paquets aux accusés.
+    let mut all = Vec::new();
+    for n in 0..1_500u16 {
+        let mut secret = [0u8; 16];
+        secret[..2].copy_from_slice(&n.to_be_bytes());
+        let mut m = ok_msg(1, 1);
+        m.id = ack::packet_id_for(&secret);
+        m.payload = secret.to_vec();
+        assert_eq!(
+            store_copy(&mut s, &pol, &m.encode(), nonce(&m), NOW).unwrap(),
+            Ok(())
+        );
+        all.push((m, secret));
+    }
+    for (m, secret) in all.iter().take(500) {
+        let mut payload = m.id.0.to_vec();
+        payload.extend_from_slice(secret);
+        let a = Packet {
+            kind: Kind::Ack,
+            hops: DEFAULT_HOPS,
+            tier: Tier::S,
+            id: PacketId([0xA0; 16]),
+            expires_at: u32::try_from(NOW + 86_400).unwrap(),
+            mailbox: m.mailbox,
+            payload,
+        };
+        assert_eq!(
+            store_copy(&mut s, &pol, &a.encode(), 0, NOW).unwrap(),
+            Ok(())
+        );
+    }
+    let stats = s.stats().unwrap();
+    assert_eq!((stats.packets, stats.acks), (1_000, 500));
+
+    let (page1, c1) = holdings(&s, &mb(1), None).unwrap().unwrap();
+    assert_eq!(page1.len(), 1024);
+    let c1 = c1.expect("une seconde page");
+    assert!(
+        c1 >= barking_proto::ACK_CURSOR_BASE,
+        "curseur dans les accusés"
+    );
+    let (page2, c2) = holdings(&s, &mb(1), Some(c1)).unwrap().unwrap();
+    assert_eq!(page2.len(), 1_500 - 1024);
+    assert_eq!(c2, None);
+    // Les empreintes sont celles des octets : mêmes que `copy_items`.
+    let mut want: Vec<[u8; 32]> = copy_items(&s, &mb(1), NOW)
+        .unwrap()
+        .unwrap()
+        .iter()
+        .map(|i| pow::content_hash(&i.bytes))
+        .collect();
+    let mut got: Vec<[u8; 32]> = page1.into_iter().chain(page2).collect();
+    want.sort_unstable();
+    got.sort_unstable();
+    assert_eq!(got, want);
+    assert_eq!(got.len(), 1_500);
+    // Une boîte vide n'a rien.
+    assert_eq!(holdings(&s, &mb(2), None).unwrap().unwrap(), (vec![], None));
+}
+
+#[test]
+fn copy_items_acks_first() {
+    let (_d, mut s) = store();
+    let (m, _sec, a) = msg_and_ack(1, 1);
+    let other = ok_msg(9, 1);
+    assert_eq!(put(&mut s, &m), Ok(()));
+    assert_eq!(put(&mut s, &other), Ok(()));
+    assert_eq!(put_ack(&mut s, &a), Ok(()));
+    let items = copy_items(&s, &mb(1), NOW).unwrap().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items[0].is_ack);
+    assert_eq!(items[0].bytes, a.encode());
+    assert_eq!(items[0].hash, pow::content_hash(&a.encode()));
+    assert!(!items[1].is_ack);
+    assert_eq!(items[1].hash, pow::content_hash(&other.encode()));
+    // Rien d'expiré, et rien dans une autre boîte.
+    assert!(
+        copy_items(&s, &mb(1), NOW + 2 * 86_400)
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(copy_items(&s, &mb(2), NOW).unwrap().unwrap().is_empty());
+}
