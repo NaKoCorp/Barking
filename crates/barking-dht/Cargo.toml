@@ -1,0 +1,16 @@
+[package]
+name = "barking-dht"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+barking-packet.workspace = true
+barking-proto.workspace = true
+blake3.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
