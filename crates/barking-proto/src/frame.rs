@@ -12,6 +12,8 @@ pub const MAX_RESPONSE_BYTES: usize = 1 << 20;
 pub enum FrameError {
     #[error("trame trop grande ({len} octets, maximum {max})")]
     TooLarge { len: usize, max: usize },
+    #[error("flux fermé proprement avant toute trame")]
+    Closed,
     #[error("trame tronquée")]
     Truncated,
     #[error("corps de trame invalide")]
@@ -55,14 +57,39 @@ pub async fn write<T: Serialize>(
 /// Lit une trame. La longueur annoncée est vérifiée avant toute allocation.
 pub async fn read<T: DeserializeOwned>(r: &mut (impl AsyncRead + Unpin), max: usize) -> Result<T> {
     let mut head = [0u8; 4];
-    r.read_exact(&mut head).await.map_err(io_err)?;
+    // EOF avant le premier octet : fermeture propre ; ensuite : tronquée.
+    let mut got = 0;
+    while got < head.len() {
+        let n = r.read(&mut head[got..]).await.map_err(io_err)?;
+        if n == 0 {
+            return Err(if got == 0 {
+                FrameError::Closed
+            } else {
+                FrameError::Truncated
+            });
+        }
+        got += n;
+    }
     let len = u32::from_be_bytes(head) as usize;
     if len > max {
         return Err(FrameError::TooLarge { len, max });
     }
-    let mut body = vec![0u8; len];
-    r.read_exact(&mut body).await.map_err(io_err)?;
-    postcard::from_bytes(&body).map_err(|_| FrameError::Malformed)
+    // Le tampon grandit au fil des octets reçus : un en-tête seul ne réserve
+    // pas `len` octets (pas d'amplification par un pair qui n'envoie rien).
+    let mut body = Vec::new();
+    let n = r
+        .take(len as u64)
+        .read_to_end(&mut body)
+        .await
+        .map_err(io_err)?;
+    if n < len {
+        return Err(FrameError::Truncated);
+    }
+    let (value, rest) = postcard::take_from_bytes(&body).map_err(|_| FrameError::Malformed)?;
+    if !rest.is_empty() {
+        return Err(FrameError::Malformed);
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -81,12 +108,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frame_header_then_eof_is_truncated() {
+        let bytes = (MAX_REQUEST_BYTES as u32).to_be_bytes();
+        let mut r = &bytes[..];
+        assert!(matches!(
+            read::<Request>(&mut r, MAX_REQUEST_BYTES).await,
+            Err(FrameError::Truncated)
+        ));
+    }
+
+    #[tokio::test]
+    async fn frame_clean_eof_is_closed() {
+        let mut r = &[][..];
+        assert!(matches!(
+            read::<Request>(&mut r, MAX_REQUEST_BYTES).await,
+            Err(FrameError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn frame_trailing_bytes_is_malformed() {
+        let mut buf = Vec::new();
+        write(&mut buf, &Request::Ping, MAX_REQUEST_BYTES)
+            .await
+            .unwrap();
+        buf.push(0);
+        let len = (buf.len() - 4) as u32;
+        buf[..4].copy_from_slice(&len.to_be_bytes());
+        let mut r = &buf[..];
+        assert!(matches!(
+            read::<Request>(&mut r, MAX_REQUEST_BYTES).await,
+            Err(FrameError::Malformed)
+        ));
+    }
+
+    #[tokio::test]
     async fn frame_truncated_is_error() {
         let mut buf = Vec::new();
         write(&mut buf, &Request::Ping, MAX_REQUEST_BYTES)
             .await
             .unwrap();
-        for cut in 0..buf.len() {
+        for cut in 1..buf.len() {
             let mut r = &buf[..cut];
             let err = read::<Request>(&mut r, MAX_REQUEST_BYTES)
                 .await

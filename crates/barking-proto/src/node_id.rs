@@ -6,6 +6,7 @@ use std::{fmt, str::FromStr};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::pow::leading_zero_bits;
 
@@ -61,8 +62,8 @@ impl FromStr for NodeId {
 
 fn generate_with_bits(rng: &mut impl CryptoRng, bits: u32) -> SigningKey {
     loop {
-        let mut seed = [0u8; 32];
-        rng.fill_bytes(&mut seed);
+        let mut seed = Zeroizing::new([0u8; 32]);
+        rng.fill_bytes(&mut *seed);
         let key = SigningKey::from_bytes(&seed);
         let id = NodeId::from_public_key(&key.verifying_key());
         if id.puzzle_bits() >= bits {

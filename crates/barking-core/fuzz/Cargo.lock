@@ -97,6 +97,7 @@ dependencies = [
  "serde",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

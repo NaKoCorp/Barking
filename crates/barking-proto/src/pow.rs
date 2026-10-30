@@ -29,15 +29,18 @@ fn digest(id: &PacketId, mailbox: &MailboxId, nonce: u64) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
+/// Faux si `bits` dépasse `MAX_POW_BITS` : aucune preuve n'est valide au-delà.
 pub fn check(id: &PacketId, mailbox: &MailboxId, nonce: u64, bits: u8) -> bool {
-    leading_zero_bits(&digest(id, mailbox, nonce)) >= u32::from(bits)
+    bits <= MAX_POW_BITS && leading_zero_bits(&digest(id, mailbox, nonce)) >= u32::from(bits)
 }
 
-/// Cherche un nonce valide pour `bits` (au plus `MAX_POW_BITS` en pratique).
-pub fn solve(id: &PacketId, mailbox: &MailboxId, bits: u8) -> u64 {
-    (0u64..)
-        .find(|n| check(id, mailbox, *n, bits))
-        .expect("un nonce existe toujours dans l'espace u64")
+/// Cherche un nonce valide. Refuse (`None`) `bits > MAX_POW_BITS` : un nœud
+/// hostile ne peut pas faire tourner le client indéfiniment.
+pub fn solve(id: &PacketId, mailbox: &MailboxId, bits: u8) -> Option<u64> {
+    if bits > MAX_POW_BITS {
+        return None;
+    }
+    (0u64..).find(|n| check(id, mailbox, *n, bits))
 }
 
 #[cfg(test)]
@@ -58,13 +61,13 @@ mod tests {
 
     #[test]
     fn pow_solve_then_check() {
-        let n = solve(&ID, &MB, DEFAULT_POW_BITS);
+        let n = solve(&ID, &MB, DEFAULT_POW_BITS).unwrap();
         assert!(check(&ID, &MB, n, DEFAULT_POW_BITS));
     }
 
     #[test]
     fn pow_bound_to_packet_and_mailbox() {
-        let n = solve(&ID, &MB, 16);
+        let n = solve(&ID, &MB, 16).unwrap();
         assert!(check(&ID, &MB, n, 16));
         // Une autre entrée passe par hasard avec probabilité 2^-16 : on en
         // essaie plusieurs, la quasi-totalité doit échouer.
@@ -79,9 +82,17 @@ mod tests {
 
     #[test]
     fn pow_bits_monotonic() {
-        let n = solve(&ID, &MB, 20);
+        let n = solve(&ID, &MB, 20).unwrap();
         assert!(check(&ID, &MB, n, 20));
         assert!(check(&ID, &MB, n, DEFAULT_POW_BITS));
         assert!(check(&ID, &MB, n, 0));
+    }
+
+    #[test]
+    fn solve_refuses_bits_above_max() {
+        assert_eq!(solve(&ID, &MB, MAX_POW_BITS + 1), None);
+        assert_eq!(solve(&ID, &MB, 255), None);
+        assert!(!check(&ID, &MB, 0, 255));
+        assert!(!check(&ID, &MB, 0, MAX_POW_BITS + 1));
     }
 }

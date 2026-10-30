@@ -12,6 +12,7 @@ postcard.workspace = true
 rand_core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 
 [dev-dependencies]
