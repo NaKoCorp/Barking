@@ -236,10 +236,16 @@ pub async fn connect_peer(
     // connexion.
     match hello(&conn, expected).await {
         Ok(_) => Ok(conn),
-        Err(e) => match conn.close_reason() {
-            Some(reason) => Err(ClientError::Connect(reason.to_string())),
-            None => Err(e),
-        },
+        // Seules les erreurs de transport sont remappées : `Version`,
+        // `Refused` et `Protocol` sont des réponses du nœud, rendues telles
+        // quelles même si la connexion se ferme juste après.
+        Err(e @ (ClientError::Frame(_) | ClientError::Connection(_))) => {
+            match conn.close_reason() {
+                Some(reason) => Err(ClientError::Connect(reason.to_string())),
+                None => Err(e),
+            }
+        }
+        Err(e) => Err(e),
     }
 }
 

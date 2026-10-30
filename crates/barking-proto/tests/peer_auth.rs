@@ -36,6 +36,19 @@ fn spawn_server(
     mpsc::UnboundedReceiver<Option<NodeId>>,
     Endpoint,
 ) {
+    spawn_server_with(key, None)
+}
+
+/// Comme `spawn_server`, mais `refuse` remplace la réponse à `Hello` : le
+/// serveur l'envoie, attend l'accusé du client, puis ferme la connexion.
+fn spawn_server_with(
+    key: &SigningKey,
+    refuse: Option<Response>,
+) -> (
+    SocketAddr,
+    mpsc::UnboundedReceiver<Option<NodeId>>,
+    Endpoint,
+) {
     let cfg = tls::quinn_server_config(key);
     let ep = Endpoint::server(cfg, (Ipv4Addr::LOCALHOST, 0).into()).unwrap();
     let addr = ep.local_addr().unwrap();
@@ -45,6 +58,7 @@ fn spawn_server(
     tokio::spawn(async move {
         while let Some(incoming) = ep2.accept().await {
             let tx = tx.clone();
+            let refuse = refuse.clone();
             tokio::spawn(async move {
                 let Ok(conn) = incoming.await else { return };
                 let _ = tx.send(tls::peer_node_id(&conn));
@@ -54,6 +68,13 @@ fn spawn_server(
                     else {
                         return;
                     };
+                    if let Some(r) = refuse {
+                        let _ = frame::write(&mut send, &r, MAX_RESPONSE_BYTES).await;
+                        let _ = send.finish();
+                        let _ = send.stopped().await;
+                        conn.close(0u32.into(), b"fin");
+                        return;
+                    }
                     let resp = Response::Hello {
                         version: PROTOCOL_VERSION,
                         min_version: 0,
@@ -125,4 +146,18 @@ async fn connect_peer_checks_server_identity() {
     let ep = client_endpoint();
     let r = client::connect_peer(&ep, addr, NodeId([3; 32]), &caller).await;
     assert!(matches!(r, Err(ClientError::Connect(_))), "{:?}", r.err());
+}
+
+#[tokio::test]
+async fn connect_peer_reports_version_refusal_not_connect() {
+    let (server, caller) = (key(0), key(1));
+    let refuse = Response::Error(barking_proto::ErrorReason::VersionTooOld);
+    let (addr, _seen, _ep) = spawn_server_with(&server, Some(refuse));
+    let ep = client_endpoint();
+    // Plusieurs essais : le résultat ne doit pas dépendre de la course entre
+    // la réponse et la fermeture de la connexion.
+    for _ in 0..5 {
+        let r = client::connect_peer(&ep, addr, id_of(&server), &caller).await;
+        assert!(matches!(r, Err(ClientError::Version)), "{:?}", r.err());
+    }
 }
