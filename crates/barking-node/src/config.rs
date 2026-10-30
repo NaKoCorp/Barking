@@ -27,8 +27,9 @@ pub const MIN_RESPONSE_BYTES_PER_IP: usize = 1 << 20;
 /// Plafond de recopie sortante par défaut (spec §5.3).
 pub const DEFAULT_REPLICATION_BYTES_PER_HOUR: u64 = 512 << 20;
 
-/// Section `[dht]` (spec §8). Sans elle, la table est désactivée : le nœud
-/// reste un simple relais et répond `Unsupported` aux requêtes de la table.
+/// Section `[dht]` (spec §8). Sans elle, ou sans `public_addr`, la table est
+/// désactivée : le nœud reste un simple relais et répond `Unsupported` aux
+/// requêtes de la table.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "DhtToml")]
 pub struct DhtConfig {
@@ -76,13 +77,6 @@ impl TryFrom<DhtToml> for DhtConfig {
             allow_private_addrs: t.allow_private_addrs,
             replication_bytes_per_hour: t.replication_bytes_per_hour,
         };
-        if t.public_addr.is_empty() {
-            return Err(
-                "dht.public_addr : une ou deux adresses (IPv4 et/ou IPv6) ; \
-                        sans table, retirer la section [dht]"
-                    .into(),
-            );
-        }
         for a in &t.public_addr {
             let addr: SocketAddr = a
                 .parse()
@@ -141,6 +135,10 @@ pub struct Config {
     pub log_interval_secs: u64,
     /// Table de hachage entre nœuds ; absente : désactivée.
     pub dht: Option<DhtConfig>,
+    /// `[dht]` présente sans `public_addr` : table désactivée, à signaler
+    /// dans les journaux au démarrage.
+    #[serde(skip)]
+    pub dht_without_public_addr: bool,
 }
 
 impl Default for Config {
@@ -164,6 +162,7 @@ impl Default for Config {
             min_send_rate: DEFAULT_MIN_SEND_RATE,
             log_interval_secs: 60,
             dht: None,
+            dht_without_public_addr: false,
         }
     }
 }
@@ -175,8 +174,17 @@ fn bad(msg: impl Into<String>) -> Error {
 impl Config {
     /// Lit et valide un texte TOML.
     pub fn parse(text: &str) -> Result<Config> {
-        let cfg: Config = toml::from_str(text).map_err(|e| bad(e.to_string()))?;
+        let mut cfg: Config = toml::from_str(text).map_err(|e| bad(e.to_string()))?;
         cfg.validate()?;
+        // `[dht]` sans adresse publique : table désactivée (spec §8).
+        if cfg
+            .dht
+            .as_ref()
+            .is_some_and(|d| d.public_v4.is_none() && d.public_v6.is_none())
+        {
+            cfg.dht = None;
+            cfg.dht_without_public_addr = true;
+        }
         Ok(cfg)
     }
 
@@ -323,15 +331,19 @@ mod tests {
         let d = c.dht.unwrap();
         assert_eq!((d.public_v4.is_some(), d.public_v6.is_none()), (true, true));
         assert_eq!(d.replication_bytes_per_hour, 1024);
+        // Sans adresse publique : table désactivée, pas d'erreur.
+        for off in ["[dht]\npublic_addr = []", "[dht]\nbootstrap = []"] {
+            let c = Config::parse(off).unwrap_or_else(|e| panic!("{off} : {e}"));
+            assert!(c.dht.is_none() && c.dht_without_public_addr, "{off}");
+        }
+        assert!(!Config::parse("").unwrap().dht_without_public_addr);
         for bad in [
             // Deux adresses de la même famille.
             "[dht]\npublic_addr = [\"1.2.3.4:4433\", \"5.6.7.8:4433\"]",
             "[dht]\npublic_addr = [\"[2a01::1]:4433\", \"[2a01::2]:4433\"]",
             // Entrée d'amorçage mal formée.
             "[dht]\npublic_addr = [\"1.2.3.4:4433\"]\nbootstrap = [\"1.2.3.4:4433\"]",
-            // Sans adresse publique, ou adresse illisible.
-            "[dht]\npublic_addr = []",
-            "[dht]\nbootstrap = []",
+            // Adresse illisible.
             "[dht]\npublic_addr = [\"1.2.3.4\"]",
             // Adresse non routable sans `allow_private_addrs`.
             "[dht]\npublic_addr = [\"192.168.1.2:4433\"]",

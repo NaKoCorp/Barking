@@ -7,7 +7,9 @@
 //! - est valide (`NodeRecord::verify`) ;
 //! - donne l'identifiant épinglé par TLS sur la connexion qui l'a apportée ;
 //! - a été renvoyée à l'identique par un `Pong` à **chacune** de ses
-//!   adresses, chaque `Ping` partant vers cette adresse précise.
+//!   adresses que ce nœud peut joindre (au moins une), chaque `Ping` partant
+//!   vers cette adresse précise. Une adresse d'une famille sans endpoint ici
+//!   n'est ni vérifiée ni comptée comme un échec (spec §10).
 //!
 //! Sans la dernière condition, une fiche à double pile pourrait revendiquer
 //! une adresse dans le /24 ou le /48 d'une victime et en prendre les places.
@@ -20,7 +22,7 @@
 pub mod maintain;
 pub mod pool;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -71,6 +73,9 @@ pub struct Dht {
     /// Dernier rappel par identifiant (spec §6.2).
     recalls: Mutex<HashMap<NodeId, Instant>>,
     recall_slots: Arc<Semaphore>,
+    /// Nœuds de la table en cours de contrôle (`check_alive`) : un second
+    /// contrôle simultané n'ajoute pas d'échec.
+    checking: Mutex<HashSet<NodeId>>,
     /// Part de la file de base d'un identifiant appelant.
     db_jobs_per_peer: u32,
     /// Tests : période qui remplace toutes les cadences d'entretien.
@@ -107,6 +112,7 @@ impl Dht {
             limiter: PeerLimiter::new(),
             recalls: Mutex::new(HashMap::new()),
             recall_slots: Arc::new(Semaphore::new(MAX_RECALLS_IN_FLIGHT)),
+            checking: Mutex::new(HashSet::new()),
             db_jobs_per_peer: db_jobs_per_peer.max(1),
             tick,
         }
@@ -158,12 +164,14 @@ impl Dht {
     }
 
     /// Traite une requête de la table. `peer` : nœud appelant authentifié
-    /// par son certificat ; `group` : sa place dans le limiteur d'adresses,
-    /// dont le seau a déjà admis la requête.
+    /// par son certificat ; `remote` : adresse source de la connexion ;
+    /// `group` : sa place dans le limiteur d'adresses, dont le seau a déjà
+    /// admis la requête.
     pub(crate) async fn handle(
         self: &Arc<Self>,
         req: Request,
         peer: Option<NodeId>,
+        remote: SocketAddr,
         shared: &Arc<Shared>,
         group: &ConnectionSlot,
     ) -> Stored<Response> {
@@ -173,7 +181,7 @@ impl Dht {
                 if let Err(r) = self.admit(peer, SMALL_REQUEST_BYTES) {
                     return err(r);
                 }
-                if let Err(r) = self.check_from(from, peer) {
+                if let Err(r) = self.check_from(from, peer, remote) {
                     return err(r);
                 }
                 Stored::Done(Response::Pong {
@@ -184,7 +192,7 @@ impl Dht {
                 if let Err(r) = self.admit(peer, SMALL_REQUEST_BYTES) {
                     return err(r);
                 }
-                if let Err(r) = self.check_from(from, peer) {
+                if let Err(r) = self.check_from(from, peer, remote) {
                     return err(r);
                 }
                 Stored::Done(Response::Nodes {
@@ -268,11 +276,13 @@ impl Dht {
     /// Fiche jointe `from` (spec §4, §6.2) : réservée à un appelant
     /// authentifié, valide et à son identifiant, sinon `Malformed`. Elle est
     /// ensuite rappelée, au plus une fois par identifiant et par
-    /// `RECALL_INTERVAL`.
+    /// `RECALL_INTERVAL`, et seulement si elle annonce l'IP source de la
+    /// connexion (`remote`).
     fn check_from(
         self: &Arc<Self>,
         from: Option<NodeRecord>,
         peer: Option<NodeId>,
+        remote: SocketAddr,
     ) -> Result<(), ErrorReason> {
         let Some(record) = from else {
             return Ok(());
@@ -282,20 +292,26 @@ impl Dht {
         };
         match record.verify(unix_now(), &self.policy) {
             Ok(id) if id == peer => {
-                self.recall(peer, record);
+                self.recall(peer, record, remote);
                 Ok(())
             }
             _ => Err(ErrorReason::Malformed),
         }
     }
 
-    /// Rappelle une candidate jointe en `from` : `Ping` vers chacune de ses
-    /// adresses, puis contact si tout concorde. Rien si elle est déjà dans
-    /// la table avec cette fiche et vue récemment.
-    fn recall(self: &Arc<Self>, id: NodeId, record: NodeRecord) {
+    /// Rappelle une candidate jointe en `from` : `Ping` d'abord vers son
+    /// adresse qui porte l'IP source `remote`, puis vers les autres, et
+    /// contact si tout concorde. Rien si aucune de ses adresses n'a cette IP :
+    /// sinon n'importe quel identifiant ferait pinger par chaque nœud des
+    /// adresses de son choix (réflexion vers une victime). Rien non plus si
+    /// elle est déjà dans la table avec cette fiche et vue récemment.
+    fn recall(self: &Arc<Self>, id: NodeId, record: NodeRecord, remote: SocketAddr) {
         if id == self.id {
             return;
         }
+        let Some(start) = recall_start(&record, remote) else {
+            return;
+        };
         let fresh = self.table().get(&id).is_some_and(|p| {
             p.record == record && unix_now().saturating_sub(p.last_seen) < STALE_AFTER_SECS
         });
@@ -321,7 +337,7 @@ impl Dht {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             let _permit = permit;
-            if let Some(r) = me.verify(id, &record.addrs()).await {
+            if let Some(r) = me.verify(id, &[start]).await {
                 me.admit_contact(id, r).await;
             }
         });
@@ -367,28 +383,35 @@ impl Dht {
 
     /// Contact direct avec `id`, joint d'abord à l'une de `start` : sa fiche
     /// si elle est valide, donne `id`, et revient à l'identique d'un `Ping`
-    /// à chacune de ses adresses.
+    /// à chacune de ses adresses joignables d'ici, dont au moins une. Une
+    /// adresse d'une famille sans endpoint ici est sautée.
     pub async fn verify(&self, id: NodeId, start: &[SocketAddr]) -> Option<NodeRecord> {
         if id == self.id {
             return None;
         }
         let mut first = None;
-        for a in start {
+        for a in start.iter().filter(|a| self.pool.can_reach(a)) {
             if let Some(r) = self.ping_at(id, *a).await {
                 first = Some((*a, r));
                 break;
             }
         }
         let (at, record) = first?;
+        let mut verified = false;
         for a in record.addrs() {
             if a == at {
+                verified = true;
+                continue;
+            }
+            if !self.pool.can_reach(&a) {
                 continue;
             }
             if self.ping_at(id, a).await.as_ref() != Some(&record) {
                 return None;
             }
+            verified = true;
         }
-        Some(record)
+        verified.then_some(record)
     }
 
     /// Fait entrer dans la table un nœud dont la fiche vient d'être vérifiée
@@ -415,9 +438,15 @@ impl Dht {
 
     /// Pinge un nœud de la table. S'il répond, le contact est noté ; sinon
     /// l'échec est compté, et la candidate de réserve qui le remplace, s'il
-    /// est retiré, est renvoyée une fois vérifiée.
+    /// est retiré, est renvoyée une fois vérifiée. Un contrôle déjà en cours
+    /// pour `id` fait sauter celui-ci : un même délai dépassé n'est compté
+    /// qu'une fois. Une fiche sans adresse joignable d'ici n'est pas jugée.
     async fn check_alive(&self, id: NodeId) -> Option<(NodeId, NodeRecord)> {
+        let _check = self.begin_check(id)?;
         let known = self.table().get(&id).map(|p| p.record.clone())?;
+        if !known.addrs().iter().any(|a| self.pool.can_reach(a)) {
+            return None;
+        }
         if let Some(r) = self.verify(id, &known.addrs()).await {
             // Toujours actif : il reste (rafraîchi), rien à promouvoir.
             self.table().on_contact(id, r, unix_now());
@@ -433,6 +462,14 @@ impl Dht {
                 None
             }
         }
+    }
+
+    /// Marque `id` en cours de contrôle ; `None` s'il l'est déjà.
+    fn begin_check(&self, id: NodeId) -> Option<CheckGuard<'_>> {
+        // `then` et non `then_some` : une garde construite pour rien serait
+        // détruite sous le verrou, et retirerait le contrôle en cours.
+        let fresh = lock(&self.checking).insert(id);
+        fresh.then(|| CheckGuard { dht: self, id })
     }
 
     /// Entretien d'un nœud de la table : contrôle, puis promotion éventuelle
@@ -529,6 +566,28 @@ impl Dht {
         self.contact_all(candidates, MAX_RECALLS_IN_FLIGHT).await;
         lookup.result()
     }
+}
+
+/// Contrôle en cours d'un nœud de la table, levé à la destruction.
+struct CheckGuard<'a> {
+    dht: &'a Dht,
+    id: NodeId,
+}
+
+impl Drop for CheckGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.dht.checking).remove(&self.id);
+    }
+}
+
+/// Adresse de `record` qui porte l'IP source `remote` (le port peut
+/// différer), par où commence le rappel ; `None` si aucune.
+fn recall_start(record: &NodeRecord, remote: SocketAddr) -> Option<SocketAddr> {
+    let ip = remote.ip().to_canonical();
+    record
+        .addrs()
+        .into_iter()
+        .find(|a| a.ip().to_canonical() == ip)
 }
 
 #[cfg(test)]
@@ -628,6 +687,74 @@ mod tests {
         assert_eq!(
             d.check_store(&policy, &near, &packet, weak, now),
             Err(ErrorReason::PowTooWeak)
+        );
+    }
+
+    #[test]
+    fn recall_starts_at_the_source_ip() {
+        let key = SigningKey::from_bytes(&[3; 32]);
+        let rec = NodeRecord::sign(
+            &key,
+            Some("1.2.3.4:4433".parse().unwrap()),
+            Some("[2a01::1]:4433".parse().unwrap()),
+            0,
+        );
+        // Même IP, autre port : le rappel part de l'adresse annoncée.
+        assert_eq!(
+            recall_start(&rec, "1.2.3.4:9999".parse().unwrap()),
+            Some("1.2.3.4:4433".parse().unwrap())
+        );
+        assert_eq!(
+            recall_start(&rec, "[2a01::1]:1".parse().unwrap()),
+            Some("[2a01::1]:4433".parse().unwrap())
+        );
+        // IPv4 vue en IPv6 encapsulée (socket double pile).
+        assert_eq!(
+            recall_start(&rec, "[::ffff:1.2.3.4]:1".parse().unwrap()),
+            Some("1.2.3.4:4433".parse().unwrap())
+        );
+        // IP absente de la fiche : aucun rappel.
+        assert_eq!(recall_start(&rec, "1.2.3.5:4433".parse().unwrap()), None);
+        assert_eq!(recall_start(&rec, "[2a01::2]:4433".parse().unwrap()), None);
+    }
+
+    #[tokio::test]
+    async fn concurrent_head_checks_count_one_failure() {
+        // Endpoint IPv4 : l'adresse du nœud est joignable, mais personne
+        // n'écoute (délai dépassé).
+        let ep = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        let cfg = dht().cfg.clone();
+        let d = Dht::new(SigningKey::from_bytes(&[1; 32]), cfg, vec![ep], 4, None);
+        let id = NodeId([9; 32]);
+        let dead = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let SocketAddr::V4(addr) = dead.local_addr().unwrap() else {
+            unreachable!()
+        };
+        let rec = NodeRecord::sign(&SigningKey::from_bytes(&[9; 32]), Some(addr), None, 0);
+        assert_eq!(d.table().on_contact(id, rec, 0), Insert::Added);
+        let fails = |d: &Dht| d.table().get(&id).map(|p| p.fails);
+        // Contrôle déjà en cours : le second ne compte rien.
+        let guard = d.begin_check(id).unwrap();
+        assert!(d.begin_check(id).is_none());
+        assert_eq!(d.check_alive(id).await, None);
+        assert_eq!(fails(&d), Some(0));
+        drop(guard);
+        // Seul : l'échec est compté.
+        assert_eq!(d.check_alive(id).await, None);
+        assert_eq!(fails(&d), Some(1));
+    }
+
+    #[tokio::test]
+    async fn unreachable_family_is_never_a_failure() {
+        // Aucun endpoint : aucune adresse joignable, rien n'est jugé.
+        let d = dht();
+        let id = NodeId([9; 32]);
+        add(&d, id, 1);
+        assert_eq!(d.check_alive(id).await, None);
+        assert_eq!(d.table().get(&id).map(|p| p.fails), Some(0));
+        assert_eq!(
+            d.verify(id, &["10.0.1.1:4433".parse().unwrap()]).await,
+            None
         );
     }
 

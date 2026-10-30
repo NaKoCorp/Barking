@@ -224,6 +224,7 @@ fn run(config: Option<PathBuf>) -> Result<()> {
     let stats: std::sync::Arc<ServerStats> = std::sync::Arc::clone(&server_cfg.stats);
     let every = std::time::Duration::from_secs(cfg.log_interval_secs);
     let policy = cfg.policy();
+    let dht_off = cfg.dht_without_public_addr;
 
     logging::init_stderr();
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -231,6 +232,9 @@ fn run(config: Option<PathBuf>) -> Result<()> {
         .build()?;
     rt.block_on(async move {
         tracing::info!("nœud {id} démarré");
+        if dht_off {
+            tracing::warn!("[dht] sans public_addr : table désactivée, simple relais");
+        }
         let reporter = tokio::spawn(server::report_loop(stats, every));
         let r = server::run(server_cfg, store, policy, shutdown_signal()).await;
         reporter.abort();

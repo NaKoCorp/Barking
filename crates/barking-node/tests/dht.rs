@@ -75,6 +75,8 @@ fn policy() -> Policy {
 
 struct Node {
     addr: SocketAddr,
+    /// Adresse IPv6 d'écoute, si le nœud a aussi un socket `[::1]`.
+    v6: Option<SocketAddr>,
     id: NodeId,
     stop: Option<oneshot::Sender<()>>,
     task: JoinHandle<barking_node::Result<()>>,
@@ -98,17 +100,32 @@ impl Node {
 /// Démarre le nœud de clé `key(n)` ; table active si `bootstrap` est
 /// `Some`, amorcée sur ces nœuds.
 fn start(n: usize, bootstrap: Option<Vec<BootstrapEntry>>) -> Node {
+    start_with(n, bootstrap, None, false)
+}
+
+/// Comme `start`, avec en plus le socket IPv6 `v6`, publié dans la fiche si
+/// `publish_v6`.
+fn start_with(
+    n: usize,
+    bootstrap: Option<Vec<BootstrapEntry>>,
+    v6: Option<UdpSocket>,
+    publish_v6: bool,
+) -> Node {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let addr = socket.local_addr().unwrap();
+    let v6_addr = v6.as_ref().map(|s| s.local_addr().unwrap());
     let k = key(n);
     let id = id_of(&k);
-    let mut cfg = ServerConfig::new(vec![socket], k);
+    let mut cfg = ServerConfig::new(vec![socket].into_iter().chain(v6).collect(), k);
     cfg.dht = bootstrap.map(|bootstrap| DhtConfig {
         public_v4: match addr {
             SocketAddr::V4(a) => Some(a),
             SocketAddr::V6(_) => None,
         },
-        public_v6: None,
+        public_v6: match v6_addr {
+            Some(SocketAddr::V6(a)) if publish_v6 => Some(a),
+            _ => None,
+        },
         bootstrap,
         allow_private_addrs: true,
         replication_bytes_per_hour: 512 << 20,
@@ -123,6 +140,7 @@ fn start(n: usize, bootstrap: Option<Vec<BootstrapEntry>>) -> Node {
     }));
     Node {
         addr,
+        v6: v6_addr,
         id,
         stop: Some(tx),
         task,
@@ -140,14 +158,25 @@ async fn anon(node: &Node) -> Session {
 /// Connexion d'un nœud appelant, authentifié par le certificat de
 /// `key(caller)`.
 async fn as_peer(node: &Node, caller: usize) -> (quinn::Endpoint, quinn::Connection) {
-    let ep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-    let conn = timeout(
-        LONG,
-        client::connect_peer(&ep, node.addr, node.id, &key(caller)),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    as_peer_at(node, node.addr, caller).await
+}
+
+/// Comme `as_peer`, vers l'adresse `addr` du nœud.
+async fn as_peer_at(
+    node: &Node,
+    addr: SocketAddr,
+    caller: usize,
+) -> (quinn::Endpoint, quinn::Connection) {
+    let bind = if addr.is_ipv6() {
+        "[::1]:0"
+    } else {
+        "127.0.0.1:0"
+    };
+    let ep = quinn::Endpoint::client(bind.parse().unwrap()).unwrap();
+    let conn = timeout(LONG, client::connect_peer(&ep, addr, node.id, &key(caller)))
+        .await
+        .unwrap()
+        .unwrap();
     (ep, conn)
 }
 
@@ -397,6 +426,70 @@ async fn three_nodes_learn_each_other() {
         tokio::time::sleep(TICK).await;
     }
     for n in [a, b, c] {
+        n.stop().await;
+    }
+}
+
+/// Socket `[::1]`, ou `None` si l'IPv6 locale manque (test ignoré).
+fn local_v6() -> Option<UdpSocket> {
+    let s = UdpSocket::bind("[::1]:0").ok();
+    if s.is_none() {
+        eprintln!("IPv6 local indisponible : test ignoré");
+    }
+    s
+}
+
+#[tokio::test]
+async fn recall_requires_source_ip() {
+    let Some(v6) = local_v6() else { return };
+    let node = start_with(0, Some(vec![]), Some(v6), false);
+    // Observateur : l'adresse annoncée par la fiche jointe ; il ne fait que
+    // compter les datagrammes reçus (un rappel y enverrait un `Initial`).
+    let watch = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let SocketAddr::V4(at) = watch.local_addr().unwrap() else {
+        unreachable!()
+    };
+    let record = NodeRecord::sign(&key(1), Some(at), None, now());
+    let ping = Request::Ping { from: Some(record) };
+    let mut buf = [0u8; 2048];
+    // Appel depuis ::1 : la fiche n'annonce pas cette IP, aucun rappel.
+    let (_ep6, from_v6) = as_peer_at(&node, node.v6.unwrap(), 1).await;
+    assert!(matches!(ask(&from_v6, &ping).await, Response::Pong { .. }));
+    assert!(
+        timeout(Duration::from_millis(1500), watch.recv_from(&mut buf))
+            .await
+            .is_err(),
+        "rappel vers une adresse que l'appelant n'utilise pas"
+    );
+    // Appel depuis 127.0.0.1 (autre port que l'adresse annoncée) : rappel.
+    let (_ep4, from_v4) = as_peer(&node, 1).await;
+    assert!(matches!(ask(&from_v4, &ping).await, Response::Pong { .. }));
+    timeout(LONG, watch.recv_from(&mut buf))
+        .await
+        .expect("rappel attendu")
+        .unwrap();
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn dual_stack_peer_is_admitted_by_v4_only_node() {
+    let Some(v6) = local_v6() else { return };
+    // B publie une IPv4 et une IPv6 ; A n'a qu'un endpoint IPv4 et ne peut
+    // pas vérifier l'IPv6 de B : elle est sautée, pas comptée en échec.
+    let b = start_with(1, Some(vec![]), Some(v6), true);
+    let a = start(0, Some(vec![b.entry()]));
+    let deadline = tokio::time::Instant::now() + LONG;
+    while !known_by(&a).await.contains(&b.id) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "le pair à double pile n'est pas entré"
+        );
+        tokio::time::sleep(TICK).await;
+    }
+    // Et il y reste au fil des cycles d'entretien.
+    tokio::time::sleep(5 * TICK).await;
+    assert!(known_by(&a).await.contains(&b.id));
+    for n in [a, b] {
         n.stop().await;
     }
 }

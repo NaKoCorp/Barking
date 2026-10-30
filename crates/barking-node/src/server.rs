@@ -55,7 +55,7 @@
 
 use std::fmt;
 use std::future::Future;
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -590,7 +590,15 @@ pub async fn run(
     }
     // Les appels sortants vers les pairs partent des mêmes endpoints, donc
     // du même port UDP (spec §3.3).
-    let dht = config.dht.map(|d| {
+    // Sans adresse publique, la table est désactivée (spec §8).
+    let dht_cfg = config.dht.filter(|d| {
+        let has_addr = d.public_v4.is_some() || d.public_v6.is_some();
+        if !has_addr {
+            tracing::warn!("[dht] sans public_addr : table désactivée, simple relais");
+        }
+        has_addr
+    });
+    let dht = dht_cfg.map(|d| {
         Arc::new(Dht::new(
             config.key.clone(),
             d,
@@ -762,6 +770,7 @@ async fn serve_connection(
     let peer = tls::peer_node_id(&conn);
     let conn_state = Arc::new(ConnState {
         peer,
+        remote: conn.remote_address(),
         refusals: AtomicU32::new(0),
         conn: conn.clone(),
         reserved: AtomicUsize::new(0),
@@ -807,6 +816,9 @@ async fn serve_connection(
 struct ConnState {
     /// Nœud appelant authentifié par son certificat (spec §3.3).
     peer: Option<NodeId>,
+    /// Adresse source (en mémoire seulement, jamais journalisée) : le rappel
+    /// d'une fiche `from` n'est fait que si elle l'annonce (spec §6.2).
+    remote: SocketAddr,
     /// Refus de débit consécutifs.
     refusals: AtomicU32,
     conn: Connection,
@@ -998,8 +1010,9 @@ async fn serve_stream(
     // Réserve de réponse prise avant tout travail ; plafond atteint : refus.
     let reserve = match &req {
         Ok(Request::Fetch { max_bytes, .. }) => fetch_reserve(*max_bytes),
-        Ok(Request::FindNode { .. }) => NODES_RESPONSE_BYTES,
-        Ok(Request::FindValue { .. }) => HOLDINGS_RESPONSE_BYTES,
+        // Sans table, ces requêtes reçoivent `Unsupported` : petite réserve.
+        Ok(Request::FindNode { .. }) if shared.dht.is_some() => NODES_RESPONSE_BYTES,
+        Ok(Request::FindValue { .. }) if shared.dht.is_some() => HOLDINGS_RESPONSE_BYTES,
         _ => SMALL_RESPONSE_BYTES,
     };
     let (bytes, held) = match Reservation::try_new(&shared, &state, reserve) {
@@ -1010,7 +1023,7 @@ async fn serve_stream(
         Some(mut held) => {
             let resp = match req {
                 Err(()) => Response::Error(ErrorReason::Malformed),
-                Ok(req) => match handle(req, &shared, &state.slot, state.peer).await {
+                Ok(req) => match handle(req, &shared, &state).await {
                     Stored::Done(r) => r,
                     Stored::Busy => Response::Error(ErrorReason::RateLimited),
                     Stored::Failed => {
@@ -1059,12 +1072,8 @@ pub fn db_jobs_per_prefix(max_db_jobs: usize) -> u32 {
 }
 
 /// Traite une requête après `Hello` ; `peer` : nœud appelant authentifié.
-async fn handle(
-    req: Request,
-    shared: &Arc<Shared>,
-    group: &ConnectionSlot,
-    peer: Option<NodeId>,
-) -> Stored<Response> {
+async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored<Response> {
+    let group = &state.slot;
     let to_resp = |r: core::result::Result<Response, ErrorReason>| match r {
         Ok(resp) => resp,
         Err(e) => Response::Error(e),
@@ -1116,7 +1125,10 @@ async fn handle(
         | Request::Store { .. }
         | Request::FindValue { .. } => match &shared.dht {
             None => Stored::Done(Response::Error(ErrorReason::Unsupported)),
-            Some(dht) => dht.handle(req, peer, shared, group).await,
+            Some(dht) => {
+                dht.handle(req, state.peer, state.remote, shared, group)
+                    .await
+            }
         },
     }
 }

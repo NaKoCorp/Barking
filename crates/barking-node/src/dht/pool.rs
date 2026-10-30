@@ -119,6 +119,12 @@ impl PeerPool {
             })
     }
 
+    /// Vrai si ce nœud a un endpoint d'où appeler `addr` (famille
+    /// joignable).
+    pub fn can_reach(&self, addr: &SocketAddr) -> bool {
+        self.endpoint_for(addr).is_some()
+    }
+
     /// Connexion vers le nœud `id` : une connexion gardée vers l'une de
     /// `addrs`, sinon une nouvelle, essayée sur `addrs` dans l'ordre
     /// (identité épinglée sur `id`, certificat du nœud, `Hello`).
