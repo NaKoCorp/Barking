@@ -217,9 +217,23 @@ pub async fn connect_peer(
     expected: NodeId,
     key: &SigningKey,
 ) -> Result<Connection> {
-    let crypto =
-        quinn::crypto::rustls::QuicClientConfig::try_from(tls::node_client_config(expected, key))
-            .map_err(|e| ClientError::Connect(e.to_string()))?;
+    let identity = tls::NodeIdentity::new(key);
+    Ok(connect_node(endpoint, addr, expected, &identity).await?.0)
+}
+
+/// Comme `connect_peer`, avec l'identité du nœud déjà construite (une fois
+/// pour toutes ses connexions) ; rend aussi la difficulté de base annoncée
+/// par le nœud appelé dans `Hello`.
+pub async fn connect_node(
+    endpoint: &Endpoint,
+    addr: SocketAddr,
+    expected: NodeId,
+    identity: &tls::NodeIdentity,
+) -> Result<(Connection, u8)> {
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls::node_client_config_for(
+        expected, identity,
+    ))
+    .map_err(|e| ClientError::Connect(e.to_string()))?;
     let mut cfg = quinn::ClientConfig::new(Arc::new(crypto));
     cfg.transport_config(Arc::new(no_incoming_streams()));
     let connecting = endpoint
@@ -235,7 +249,7 @@ pub async fn connect_peer(
     // le moment). Une connexion fermée pendant `Hello` est donc un échec de
     // connexion.
     match hello(&conn, expected).await {
-        Ok(_) => Ok(conn),
+        Ok((pow_bits, _)) => Ok((conn, pow_bits)),
         // Seules les erreurs de transport sont remappées : `Version`,
         // `Refused` et `Protocol` sont des réponses du nœud, rendues telles
         // quelles même si la connexion se ferme juste après.

@@ -134,8 +134,21 @@ impl NodeRecord {
         if !policy.allow_private && !addrs.iter().all(routable) {
             return Err(RecordError::Unroutable);
         }
+        // Une IPv4 déguisée en IPv6 compterait dans le bloc `::/48` au lieu
+        // de son /24 : refusée même sous `allow_private`.
+        if self.v6.is_some_and(|a| embeds_ipv4(a.ip())) {
+            return Err(RecordError::Unroutable);
+        }
         Ok(id)
     }
+}
+
+/// Vrai si `ip` porte une IPv4 : `::ffff:0:0/96` (IPv4 encapsulée) ou
+/// `::/96` (IPv4 compatible, obsolète, adresse non spécifiée comprise).
+/// `::1` (boucle locale) n'en est pas.
+pub fn embeds_ipv4(ip: &Ipv6Addr) -> bool {
+    let s = ip.segments();
+    s[..5] == [0; 5] && (s[5] == 0xffff || (s[5] == 0 && !ip.is_loopback()))
 }
 
 fn routable_v4(ip: &Ipv4Addr) -> bool {
@@ -300,6 +313,44 @@ mod tests {
             puzzle_bits: 0,
         };
         assert!(rec.verify(NOW, &private_ok).is_ok());
+    }
+
+    #[test]
+    fn ipv4_in_ipv6_is_refused_even_when_private_allowed() {
+        let private_ok = RecordPolicy {
+            allow_private: true,
+            puzzle_bits: 0,
+        };
+        for bad in ["[::ffff:1.2.3.4]:4433", "[::1.2.3.4]:4433", "[::]:4433"] {
+            let rec = NodeRecord::sign(&any_key(), None, Some(bad.parse().unwrap()), NOW);
+            for p in [lax(), private_ok] {
+                assert_eq!(rec.verify(NOW, &p), Err(RecordError::Unroutable), "{bad}");
+            }
+            // Aussi en second d'une fiche à double pile.
+            let rec = NodeRecord::sign(
+                &any_key(),
+                v4("1.2.3.4:4433"),
+                Some(bad.parse().unwrap()),
+                NOW,
+            );
+            assert_eq!(
+                rec.verify(NOW, &lax()),
+                Err(RecordError::Unroutable),
+                "{bad}"
+            );
+        }
+        // Boucle locale permise sous `allow_private`, IPv6 publique partout.
+        let rec = NodeRecord::sign(&any_key(), None, Some("[::1]:4433".parse().unwrap()), NOW);
+        assert!(rec.verify(NOW, &private_ok).is_ok());
+        let rec = NodeRecord::sign(
+            &any_key(),
+            None,
+            Some("[2a01:4f8::1]:4433".parse().unwrap()),
+            NOW,
+        );
+        assert!(rec.verify(NOW, &lax()).is_ok());
+        assert!(!embeds_ipv4(&"::1".parse().unwrap()));
+        assert!(!embeds_ipv4(&"2a01::ffff:1.2.3.4".parse().unwrap()));
     }
 
     #[test]

@@ -14,7 +14,7 @@ pub use msg::{
     MIN_PAGE_BYTES, Request, Response,
 };
 pub use node_id::{NodeId, generate_node_key};
-pub use record::{NodeRecord, RecordError, RecordPolicy, routable};
+pub use record::{NodeRecord, RecordError, RecordPolicy, embeds_ipv4, routable};
 
 /// Version du protocole.
 pub const PROTOCOL_VERSION: u16 = 0;

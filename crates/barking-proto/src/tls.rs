@@ -18,10 +18,12 @@ use std::sync::Arc;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rustls::DistinguishedName;
+use rustls::client::ResolvesClientCert;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::sign::CertifiedKey;
 use rustls::{CertificateError, DigitallySignedStruct, SignatureScheme};
 use zeroize::Zeroizing;
 
@@ -112,20 +114,57 @@ pub fn client_config(expected: NodeId) -> rustls::ClientConfig {
     cfg
 }
 
+/// Identité TLS d'un nœud appelant : certificat autosigné et clé de
+/// signature, construits une fois et partagés par toutes ses connexions
+/// sortantes. La copie DER de la graine qui sert à la construire est effacée
+/// aussitôt.
+#[derive(Clone, Debug)]
+pub struct NodeIdentity {
+    certified: Arc<CertifiedKey>,
+}
+
+impl NodeIdentity {
+    pub fn new(key: &SigningKey) -> NodeIdentity {
+        let der = pkcs8_der(key);
+        // Entrée construite ici (clé Ed25519 valide) : aucun octet du réseau.
+        let signer =
+            rustls::crypto::ring::sign::any_eddsa_type(&PrivatePkcs8KeyDer::from(&der[..]))
+                .expect("clé Ed25519 PKCS#8 valide");
+        NodeIdentity {
+            certified: Arc::new(CertifiedKey::new(vec![self_signed_cert(key)], signer)),
+        }
+    }
+}
+
+impl ResolvesClientCert for NodeIdentity {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        Some(Arc::clone(&self.certified))
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
 /// Configuration TLS d'un nœud appelant : même épinglage que `client_config`,
 /// plus le certificat autosigné de `key` pour s'identifier auprès du serveur.
 pub fn node_client_config(expected: NodeId, key: &SigningKey) -> rustls::ClientConfig {
-    let der = pkcs8_der(key);
+    node_client_config_for(expected, &NodeIdentity::new(key))
+}
+
+/// Comme `node_client_config`, avec une identité déjà construite : seul
+/// l'identifiant épinglé change d'une connexion à l'autre.
+pub fn node_client_config_for(expected: NodeId, identity: &NodeIdentity) -> rustls::ClientConfig {
     let mut cfg = rustls::ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("TLS 1.3 pris en charge par ring")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedNode { expected }))
-        .with_client_auth_cert(
-            vec![self_signed_cert(key)],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der.to_vec())),
-        )
-        .expect("certificat et clé cohérents");
+        .with_client_cert_resolver(Arc::new(identity.clone()));
     cfg.alpn_protocols = vec![ALPN.to_vec()];
     cfg.enable_sni = false;
     cfg

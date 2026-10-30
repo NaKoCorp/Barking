@@ -128,6 +128,27 @@ async fn node_client_is_identified() {
 }
 
 #[tokio::test]
+async fn one_identity_serves_many_connections_and_reports_pow_bits() {
+    let (server, caller) = (key(0), key(1));
+    let (addr, mut seen, _ep) = spawn_server(&server);
+    let ep = client_endpoint();
+    let identity = tls::NodeIdentity::new(&caller);
+    for _ in 0..2 {
+        let (_conn, pow_bits) = client::connect_node(&ep, addr, id_of(&server), &identity)
+            .await
+            .unwrap();
+        assert_eq!(pow_bits, 8);
+        assert_eq!(seen.recv().await, Some(Some(id_of(&caller))));
+    }
+    // Identifiant épinglé différent : refusé avec la même identité.
+    assert!(
+        client::connect_node(&ep, addr, NodeId([3; 32]), &identity)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn node_client_with_bad_puzzle_is_refused() {
     let server = key(0);
     // Clé valide mais qui ne résout pas le puzzle de 20 bits.
