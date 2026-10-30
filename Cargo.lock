@@ -164,6 +164,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "barking-node"
+version = "0.1.0"
+dependencies = [
+ "barking-packet",
+ "barking-proto",
+ "rusqlite",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "barking-packet"
 version = "0.1.0"
 dependencies = [

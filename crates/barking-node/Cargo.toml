@@ -1,0 +1,15 @@
+[package]
+name = "barking-node"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+barking-packet.workspace = true
+barking-proto.workspace = true
+thiserror.workspace = true
+# SQLite en clair : les paquets sont chiffrés de bout en bout, la base ne
+# contient aucun secret. Spécification distincte de celle du cœur (SQLCipher).
+rusqlite = { version = "0.41.0", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile.workspace = true
