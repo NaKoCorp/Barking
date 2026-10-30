@@ -1,12 +1,16 @@
-//! `barking-node` : `init`, `run`, `status`.
+//! `barking-node` : `init`, `run`, `status`, `peers`.
 
+use std::collections::HashSet;
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use barking_dht::mailbox_key;
 use barking_node::config::{Config, DEFAULT_DATA_DIR};
+use barking_node::dht::table_from_rows;
 use barking_node::server::{self, ServerStats};
 use barking_node::{Error, NodeStore, Result, logging};
 use barking_proto::{NodeId, PROTOCOL_VERSION, generate_node_key};
@@ -45,8 +49,15 @@ enum Cmd {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Identifiant, version, paquets, accusés et octets gardés.
+    /// Identifiant, version, paquets, accusés et octets gardés ; table de
+    /// hachage et recopie.
     Status {
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Pairs actifs de la table (identifiant, ancienneté, dernier contact),
+    /// d'après la dernière sauvegarde de `peers`, sans adresse.
+    Peers {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
@@ -192,7 +203,9 @@ fn init(data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn status(data_dir: Option<PathBuf>) -> Result<()> {
+/// Identifiant du nœud et base ouverte en lecture seule : `status` et
+/// `peers` ne modifient rien, même pendant `run`.
+fn open_for_reading(data_dir: Option<PathBuf>) -> Result<(NodeId, NodeStore)> {
     let dir = data_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
     let key = load_key(&dir)?;
     let id = NodeId::from_public_key(&key.verifying_key());
@@ -200,8 +213,43 @@ fn status(data_dir: Option<PathBuf>) -> Result<()> {
     if !db.exists() {
         return Err(fail(format!("base absente de {}", dir.display())));
     }
-    // Lecture seule : `status` ne modifie rien, même pendant `run`.
-    let stats = NodeStore::open_read_only(&db)?.stats()?;
+    match NodeStore::open_read_only(&db) {
+        Ok(store) => Ok((id, store)),
+        Err(Error::SchemaVersion(2)) => Err(fail(
+            "base en version 2 : lancez le nœud une fois pour migrer la base",
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Heures entières écoulées entre `t` et `now`.
+fn hours_since(now: u64, t: u64) -> u64 {
+    now.saturating_sub(t) / 3600
+}
+
+fn status(data_dir: Option<PathBuf>) -> Result<()> {
+    let (id, store) = open_for_reading(data_dir)?;
+    let stats = store.stats()?;
+    let now = unix_now();
+    let table = table_from_rows(id, &store.load_peers()?);
+    let responsible = store
+        .held_mailboxes()?
+        .iter()
+        .filter(|m| table.may_hold(&mailbox_key(m), &id))
+        .count();
+    let (window, bytes) = store.replicated()?;
+    let recent = if now.saturating_sub(window) < 3600 {
+        bytes
+    } else {
+        0
+    };
     println!("identifiant : {id}");
     println!(
         "version     : {} (protocole {PROTOCOL_VERSION})",
@@ -210,6 +258,32 @@ fn status(data_dir: Option<PathBuf>) -> Result<()> {
     println!("paquets     : {}", stats.packets);
     println!("accusés     : {}", stats.acks);
     println!("octets      : {}", stats.bytes);
+    println!("pairs       : {}", table.len());
+    println!("compartiments : {} non vides", table.non_empty_buckets());
+    println!("responsable : {responsible} boîtes");
+    println!("recopié     : {recent} octets dans l'heure");
+    Ok(())
+}
+
+fn peers(data_dir: Option<PathBuf>) -> Result<()> {
+    let (id, store) = open_for_reading(data_dir)?;
+    let rows = store.load_peers()?;
+    // Nœuds actifs de la table (la réserve est écartée).
+    let active: HashSet<NodeId> = table_from_rows(id, &rows)
+        .closest(&id.0, usize::MAX)
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let now = unix_now();
+    // Dans l'ordre de `load_peers` : les plus récemment vus d'abord.
+    for row in rows.iter().filter(|r| active.contains(&NodeId(r.node_id))) {
+        println!(
+            "{}  ancienneté {} h  vu il y a {} h",
+            NodeId(row.node_id),
+            hours_since(now, row.first_seen),
+            hours_since(now, row.last_seen)
+        );
+    }
     Ok(())
 }
 
@@ -267,6 +341,7 @@ fn main() -> ExitCode {
         Cmd::Init { data_dir, config } => init(data_dir, config),
         Cmd::Run { config } => run(config),
         Cmd::Status { data_dir } => status(data_dir),
+        Cmd::Peers { data_dir } => peers(data_dir),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,

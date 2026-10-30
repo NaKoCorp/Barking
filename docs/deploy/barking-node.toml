@@ -52,3 +52,19 @@ pow_bits = 18
 
 # Période des journaux agrégés, en secondes (défaut 60).
 # log_interval_secs = 60
+
+# Table de hachage entre nœuds (S/Kademlia). Sans `public_addr`, la table est
+# désactivée : le nœud reste un simple relais et répond `Unsupported` aux
+# requêtes de la table.
+# [dht]
+# Une ou deux adresses publiques (IPv4 et/ou IPv6, avec le port d'écoute),
+# publiées dans la fiche signée du nœud.
+# public_addr = ["203.0.113.7:4433", "[2001:db8::7]:4433"]
+# Nœuds d'amorçage supplémentaires `identifiant@adresse:port`, essayés après
+# la liste intégrée au binaire.
+# bootstrap = []
+# Accepte les adresses non routables : tests et réseaux locaux seulement.
+# allow_private_addrs = false
+# Plafond de recopie sortante vers les autres responsables, en octets par
+# heure. Défaut : 512 Mio. Petit appareil (Raspberry Pi) : 128 Mio.
+# replication_bytes_per_hour = 134217728

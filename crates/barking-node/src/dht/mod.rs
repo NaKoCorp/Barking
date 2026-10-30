@@ -23,6 +23,7 @@
 
 pub mod maintain;
 pub mod pool;
+pub mod replicate;
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -30,13 +31,16 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use barking_dht::lookup::REQUEST_TIMEOUT_MS;
-use barking_dht::{Insert, K, Lookup, RoutingTable, STALE_AFTER_SECS, mailbox_key};
+use barking_dht::{
+    DiversityLimits, Insert, K, Lookup, RoutingTable, STALE_AFTER_SECS, mailbox_key,
+};
+use barking_packet::MailboxId;
 use barking_proto::{
     ErrorReason, MAX_NODES_PER_RESPONSE, NodeId, NodeRecord, RecordPolicy, Request, Response,
 };
 use ed25519_dalek::SigningKey;
 use quinn::Endpoint;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
@@ -46,6 +50,7 @@ use crate::rules::{self, Policy};
 use crate::server::{Shared, Stored, unix_now};
 use crate::store::{MAX_PEER_ROWS, PeerRow};
 use pool::PeerPool;
+use replicate::Queue;
 
 /// Délai d'un appel à un pair, connexion comprise (spec §6.3 : 3 s).
 pub const CALL_TIMEOUT: Duration = Duration::from_millis(REQUEST_TIMEOUT_MS);
@@ -82,6 +87,10 @@ pub struct Dht {
     db_jobs_per_peer: u32,
     /// Tests : période qui remplace toutes les cadences d'entretien.
     tick: Option<Duration>,
+    /// Ordre et file des boîtes à recopier (spec §5.3).
+    queue: Mutex<Queue>,
+    /// Réveille la recopie quand la file gagne une boîte.
+    wake: Notify,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -100,6 +109,7 @@ impl Dht {
         endpoints: Vec<Endpoint>,
         db_jobs_per_peer: u32,
         tick: Option<Duration>,
+        limits: DiversityLimits,
     ) -> Dht {
         let id = NodeId::from_public_key(&key.verifying_key());
         let record = NodeRecord::sign(&key, cfg.public_v4, cfg.public_v6, unix_now());
@@ -115,13 +125,15 @@ impl Dht {
             id,
             cfg,
             record: Mutex::new(record),
-            table: Mutex::new(RoutingTable::new(id)),
+            table: Mutex::new(RoutingTable::with_limits(id, limits)),
             limiter: PeerLimiter::new(),
             recalls: Mutex::new(HashMap::new()),
             recall_slots: Arc::new(Semaphore::new(MAX_RECALLS_IN_FLIGHT)),
             checking: Mutex::new(HashSet::new()),
             db_jobs_per_peer: db_jobs_per_peer.max(1),
             tick,
+            queue: Mutex::new(Queue::default()),
+            wake: Notify::new(),
         }
     }
 
@@ -151,6 +163,38 @@ impl Dht {
     /// Accès à la table (jamais tenu pendant une attente).
     pub fn table(&self) -> MutexGuard<'_, RoutingTable> {
         lock(&self.table)
+    }
+
+    pub(crate) fn pool(&self) -> &PeerPool {
+        &self.pool
+    }
+
+    pub(crate) fn replication_queue(&self) -> MutexGuard<'_, Queue> {
+        lock(&self.queue)
+    }
+
+    pub(crate) fn replication_wake(&self) -> &Notify {
+        &self.wake
+    }
+
+    /// Un nœud vient d'entrer dans la table : les boîtes gardées dont il
+    /// est désormais l'un des responsables sont mises en file (spec §5.3).
+    fn enqueue_for(&self, id: NodeId) {
+        let known = self.replication_queue().known();
+        let touched: Vec<MailboxId> = {
+            let table = self.table();
+            known
+                .into_iter()
+                .filter(|m| {
+                    table
+                        .replica_targets(&mailbox_key(m))
+                        .is_some_and(|t| t.contains(&id))
+                })
+                .collect()
+        };
+        if self.replication_queue().enqueue(touched) {
+            self.wake.notify_one();
+        }
     }
 
     /// Lignes de `peers` : les actifs d'abord, `MAX_PEER_ROWS` au plus,
@@ -432,9 +476,13 @@ impl Dht {
             let Some((id, record)) = next.take() else {
                 return;
             };
-            let head = match self.table().on_contact(id, record, unix_now()) {
+            // Résultat lié d'abord : la garde de la table est rendue avant
+            // `enqueue_for`, qui la reprend.
+            let inserted = self.table().on_contact(id, record, unix_now());
+            let head = match inserted {
                 Insert::Added => {
                     tracing::debug!("pair ajouté à la table : {id}");
+                    self.enqueue_for(id);
                     return;
                 }
                 Insert::Pending { ping } => ping,
@@ -462,6 +510,12 @@ impl Dht {
         }
         let candidate = self.table().on_failure(&id)?;
         tracing::debug!("pair retiré de la table : {id}");
+        self.try_candidate(candidate).await
+    }
+
+    /// Contacte la candidate de réserve qui remplace un nœud retiré : sa
+    /// fiche si elle répond, sinon son échec est compté.
+    async fn try_candidate(&self, candidate: NodeId) -> Option<(NodeId, NodeRecord)> {
         let rec = self.table().get(&candidate).map(|p| p.record.clone())?;
         match self.verify(candidate, &rec.addrs()).await {
             Some(r) => Some((candidate, r)),
@@ -470,6 +524,30 @@ impl Dht {
                 None
             }
         }
+    }
+
+    /// Compte un appel sans réponse de `id` (recopie). Au 3ᵉ échec
+    /// consécutif il est retiré, et sa remplaçante de la réserve est
+    /// contactée puis promue. Vrai s'il a été retiré.
+    pub async fn peer_failed(&self, id: NodeId) -> bool {
+        let candidate = {
+            let mut table = self.table();
+            if table.get(&id).is_none() {
+                return false;
+            }
+            let c = table.on_failure(&id);
+            if table.get(&id).is_some() {
+                return false;
+            }
+            c
+        };
+        tracing::debug!("pair retiré de la table : {id}");
+        if let Some(c) = candidate
+            && let Some((c, r)) = self.try_candidate(c).await
+        {
+            self.admit_contact(c, r).await;
+        }
+        true
     }
 
     /// Marque `id` en cours de contrôle ; `None` s'il l'est déjà.
@@ -576,6 +654,30 @@ impl Dht {
     }
 }
 
+/// Table reconstruite hors ligne depuis les lignes de `peers` (commandes
+/// `status` et `peers`), aux limites de la spec : les plus anciens d'abord,
+/// comme la table vivante les garde. Une ligne illisible ou dont la fiche ne
+/// donne pas l'identifiant est écartée ; les fiches ne sont pas revérifiées
+/// (date, puzzle), le nœud l'a fait avant de les enregistrer.
+pub fn table_from_rows(own: NodeId, rows: &[PeerRow]) -> RoutingTable {
+    let mut table = RoutingTable::new(own);
+    let mut sorted: Vec<&PeerRow> = rows.iter().collect();
+    sorted.sort_by_key(|r| (r.first_seen, r.node_id));
+    for row in sorted {
+        let Ok(record) = postcard::from_bytes::<NodeRecord>(&row.record) else {
+            continue;
+        };
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&record.public_key) else {
+            continue;
+        };
+        let id = NodeId::from_public_key(&key);
+        if id.0 == row.node_id {
+            table.on_contact(id, record, row.last_seen);
+        }
+    }
+    table
+}
+
 /// Contrôle en cours d'un nœud de la table, levé à la destruction.
 struct CheckGuard<'a> {
     dht: &'a Dht,
@@ -616,7 +718,14 @@ mod tests {
             allow_private_addrs: true,
             replication_bytes_per_hour: 512 << 20,
         };
-        Dht::new(SigningKey::from_bytes(&[1; 32]), cfg, vec![], 4, None)
+        Dht::new(
+            SigningKey::from_bytes(&[1; 32]),
+            cfg,
+            vec![],
+            4,
+            None,
+            DiversityLimits::SPEC,
+        )
     }
 
     fn message(now: u64) -> Vec<u8> {
@@ -732,7 +841,14 @@ mod tests {
         // n'écoute (délai dépassé).
         let ep = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
         let cfg = dht().cfg.clone();
-        let d = Dht::new(SigningKey::from_bytes(&[1; 32]), cfg, vec![ep], 4, None);
+        let d = Dht::new(
+            SigningKey::from_bytes(&[1; 32]),
+            cfg,
+            vec![ep],
+            4,
+            None,
+            DiversityLimits::SPEC,
+        );
         let id = NodeId([9; 32]);
         let dead = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let SocketAddr::V4(addr) = dead.local_addr().unwrap() else {

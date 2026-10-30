@@ -346,3 +346,136 @@ fn key_symlink_is_refused_and_init_recovers() {
         text(&out.stderr)
     );
 }
+
+// --- `status` et `peers` avec la table de hachage (spec §8) ---
+
+/// Dossier de données sans `init` (pas de puzzle à résoudre) : clé de
+/// graine fixe, base neuve.
+fn data_dir_with_key(tmp: &Path) -> (std::path::PathBuf, NodeId) {
+    let dir = tmp.join("data");
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let path = dir.join("node.key");
+    fs::write(
+        &path,
+        format!("{}\n", data_encoding::BASE32_NOPAD.encode(&key.to_bytes())),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    (dir, NodeId::from_public_key(&key.verifying_key()))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Trois pairs aux /24 distincts, vus il y a 1 h, connus depuis 5 h ; un
+/// message gardé ; 12 345 octets recopiés dans l'heure.
+fn fill_dht_base(dir: &Path) -> Vec<NodeId> {
+    use barking_node::rules;
+    use barking_node::store::PeerRow;
+    use barking_proto::{NodeRecord, pow};
+    let now = unix_now();
+    let hour = now - now % 3600;
+    let mut store = barking_node::NodeStore::open(dir.join("node.db")).unwrap();
+    let mut ids = Vec::new();
+    let rows: Vec<PeerRow> = (1..=3u8)
+        .map(|n| {
+            let key = ed25519_dalek::SigningKey::from_bytes(&[n; 32]);
+            let addr = format!("11.0.{n}.1:4433").parse().unwrap();
+            let record = NodeRecord::sign(&key, Some(addr), None, hour);
+            let id = NodeId::from_public_key(&key.verifying_key());
+            ids.push(id);
+            PeerRow {
+                node_id: id.0,
+                record: postcard::to_allocvec(&record).unwrap(),
+                first_seen: hour - 5 * 3600,
+                last_seen: hour - 3600,
+            }
+        })
+        .collect();
+    store.save_peers(&rows).unwrap();
+    let policy = barking_node::Policy {
+        pow_bits: 4,
+        ..barking_node::Policy::default()
+    };
+    let mailbox = [0x33; 16];
+    let packet = message(3, mailbox);
+    let bits = rules::pow_bits_for(&policy, 0, Tier::S, 0);
+    let nonce = pow::solve(&pow::content_hash(&packet), &MailboxId(mailbox), bits).unwrap();
+    rules::store_copy(&mut store, &policy, &packet, nonce, now)
+        .unwrap()
+        .unwrap();
+    store.set_replicated(now, 12_345).unwrap();
+    ids
+}
+
+/// Aucun mot de la sortie ne se lit comme une adresse IP ou de socket.
+fn assert_no_address(out: &str) {
+    for word in out.split_whitespace() {
+        let w = word.trim_matches(|c: char| ",;()[]".contains(c));
+        assert!(
+            w.parse::<std::net::IpAddr>().is_err() && w.parse::<SocketAddr>().is_err(),
+            "adresse dans la sortie : {w} ({out})"
+        );
+    }
+    assert!(!out.contains("11.0."), "{out}");
+}
+
+#[test]
+fn status_shows_dht_lines_without_addresses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, id) = data_dir_with_key(tmp.path());
+    fill_dht_base(&dir);
+    let s = status_of(&dir);
+    assert_eq!(field(&s, "identifiant"), id.to_string());
+    assert_eq!(field(&s, "paquets"), "1");
+    assert_eq!(field(&s, "pairs"), "3");
+    assert_eq!(field(&s, "compartiments"), "3 non vides");
+    // Moins de 10 nœuds connus : responsable de toutes ses boîtes.
+    assert_eq!(field(&s, "responsable"), "1 boîtes");
+    assert_eq!(field(&s, "recopié"), "12345 octets dans l'heure");
+    assert_no_address(&s);
+}
+
+#[test]
+fn peers_lists_ids_without_addresses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, _) = data_dir_with_key(tmp.path());
+    let ids = fill_dht_base(&dir);
+    let out = node(&["peers", "--data-dir", dir.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let out = text(&out.stdout);
+    assert_eq!(out.lines().count(), 3, "{out}");
+    for id in ids {
+        let line = format!("{id}  ancienneté 5 h  vu il y a 1 h");
+        assert!(out.lines().any(|l| l == line), "{line} absent de {out}");
+    }
+    assert_no_address(&out);
+}
+
+#[test]
+fn status_on_v2_base_asks_to_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, _) = data_dir_with_key(tmp.path());
+    let conn = rusqlite::Connection::open(dir.join("node.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
+         INSERT INTO meta VALUES('schema_version', 2), ('stored_bytes', 0);",
+    )
+    .unwrap();
+    drop(conn);
+    for cmd in ["status", "peers"] {
+        let out = node(&[cmd, "--data-dir", dir.to_str().unwrap()]);
+        assert!(!out.status.success(), "{cmd}");
+        assert!(
+            text(&out.stderr).contains("lancez le nœud une fois pour migrer la base"),
+            "{cmd} : {}",
+            text(&out.stderr)
+        );
+    }
+}

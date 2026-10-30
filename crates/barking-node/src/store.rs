@@ -169,6 +169,35 @@ impl NodeStore {
         Ok(out)
     }
 
+    /// Enregistre le volume recopié dans la fenêtre horaire commencée à
+    /// `window_start` (lu par `status`).
+    pub fn set_replicated(&mut self, window_start: u64, bytes: u64) -> Result<()> {
+        let mut st = self
+            .conn
+            .prepare_cached("INSERT OR REPLACE INTO meta(k,v) VALUES(?1,?2)")?;
+        st.execute(params![
+            "replicated_window",
+            i64::try_from(window_start).unwrap_or(i64::MAX)
+        ])?;
+        st.execute(params![
+            "replicated_bytes",
+            i64::try_from(bytes).unwrap_or(i64::MAX)
+        ])?;
+        Ok(())
+    }
+
+    /// Fenêtre horaire et volume recopié enregistrés, `(0, 0)` si aucun.
+    pub fn replicated(&self) -> Result<(u64, u64)> {
+        let get = |k: &str| -> Result<u64> {
+            let v: Option<i64> = self
+                .conn
+                .query_row("SELECT v FROM meta WHERE k=?1", params![k], |r| r.get(0))
+                .optional()?;
+            Ok(v.map_or(0, |v| u64::try_from(v).unwrap_or(0)))
+        };
+        Ok((get("replicated_window")?, get("replicated_bytes")?))
+    }
+
     /// Remplace tout le contenu de `peers` par `rows` (au plus `MAX_PEER_ROWS`
     /// lignes, les premières : l'appelant met les nœuds actifs d'abord).
     pub fn save_peers(&mut self, rows: &[PeerRow]) -> Result<()> {
@@ -385,6 +414,15 @@ mod tests {
             .collect::<core::result::Result<_, _>>()
             .unwrap();
         (cols, idx)
+    }
+
+    #[test]
+    fn replicated_window_round_trips() {
+        let mut s = NodeStore::open_in_memory().unwrap();
+        assert_eq!(s.replicated().unwrap(), (0, 0));
+        s.set_replicated(7200, 1234).unwrap();
+        s.set_replicated(10_800, 99).unwrap();
+        assert_eq!(s.replicated().unwrap(), (10_800, 99));
     }
 
     #[test]

@@ -355,6 +355,28 @@ mod tests {
     }
 
     #[test]
+    fn deploy_example_parses_with_dht_section() {
+        let text = include_str!("../../../docs/deploy/barking-node.toml");
+        assert!(Config::parse(text).unwrap().dht.is_none());
+        // Section `[dht]` décommentée (sans l'exemple d'amorçage vide).
+        let on: String = text
+            .lines()
+            .map(|l| match l.strip_prefix("# ") {
+                Some(r) if r == "[dht]" || r.starts_with("public_addr") => r,
+                Some(r) if r.starts_with("replication_bytes_per_hour") => r,
+                _ => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            // Adresses de documentation, non routables : remplacées.
+            .replace("203.0.113.7", "1.2.3.4")
+            .replace("2001:db8::7", "2a01::7");
+        let d = Config::parse(&on).unwrap().dht.unwrap();
+        assert_eq!(d.replication_bytes_per_hour, 128 << 20);
+        assert!(d.public_v4.is_some() && d.public_v6.is_some());
+    }
+
+    #[test]
     fn bounds_are_enforced() {
         for bad in [
             "pow_bits = 0",

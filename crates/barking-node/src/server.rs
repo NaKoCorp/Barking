@@ -51,7 +51,9 @@
 //! - **Table de hachage** (`[dht]`, spec §3.3, §4) : l'identifiant d'un
 //!   appelant qui présente un certificat de nœud est lu une fois par
 //!   connexion et passé aux requêtes de la table (`dht`). Sans `[dht]`, elles
-//!   reçoivent `Unsupported` et aucune tâche de la table ne démarre.
+//!   reçoivent `Unsupported` et aucune tâche de la table ne démarre. Avec
+//!   elle, deux tâches de fond : entretien de la table (`dht::maintain`) et
+//!   recopie entre responsables (`dht::replicate`).
 
 use std::fmt;
 use std::future::Future;
@@ -60,6 +62,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use barking_dht::DiversityLimits;
 use barking_packet::Tier;
 use barking_proto::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use barking_proto::{
@@ -72,6 +75,7 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::config::DhtConfig;
+use crate::dht::replicate::{self, PassReport};
 use crate::dht::{Dht, maintain};
 use crate::limits::{ConnectionSlot, GroupDbJob, LimitConfig, Limiter};
 use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
@@ -145,9 +149,13 @@ pub struct ServerConfig {
     pub stats: Arc<ServerStats>,
     /// Table de hachage entre nœuds ; `None` : désactivée.
     pub dht: Option<DhtConfig>,
-    /// Tests : ramène toutes les cadences d'entretien de la table à cette
-    /// période. `None` : valeurs de la spec.
+    /// Tests : ramène toutes les cadences d'entretien de la table et de la
+    /// recopie à cette période. `None` : valeurs de la spec.
     pub dht_tick: Option<Duration>,
+    /// Tests seulement, jamais lu de la configuration : limites de diversité
+    /// des adresses de la table. Défaut : celles de la spec. Les tests réseau
+    /// les lèvent, tous leurs nœuds partageant le /24 de 127.0.0.1.
+    pub dht_diversity: DiversityLimits,
 }
 
 /// Jauge : valeur courante et maximum atteint.
@@ -200,6 +208,25 @@ pub struct ServerStats {
     purged: AtomicU64,
     /// Refus par raison (indice : `reason_index`).
     refusals: [AtomicU64; REASONS.len()],
+    /// Recopie : depuis le démarrage, et depuis le dernier `drain`.
+    replication: Mutex<ReplicationStats>,
+    replication_period: Mutex<ReplicationStats>,
+}
+
+/// Passes de recopie : nombre, somme des bilans et dernier bilan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplicationStats {
+    pub passes: u64,
+    pub total: PassReport,
+    pub last: Option<PassReport>,
+}
+
+impl ReplicationStats {
+    fn record(&mut self, r: &PassReport) {
+        self.passes += 1;
+        self.total.add(r);
+        self.last = Some(r.clone());
+    }
 }
 
 /// Raisons d'erreur, dans l'ordre de `reason_index`.
@@ -256,6 +283,21 @@ impl ServerStats {
         self.purged.fetch_add(n as u64, Ordering::Relaxed);
     }
 
+    /// Compte une passe de recopie.
+    pub fn replicated(&self, r: &PassReport) {
+        for m in [&self.replication, &self.replication_period] {
+            m.lock().unwrap_or_else(PoisonError::into_inner).record(r);
+        }
+    }
+
+    /// Passes de recopie depuis le démarrage.
+    pub fn replication(&self) -> ReplicationStats {
+        self.replication
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Relève les compteurs depuis le dernier appel (remis à zéro, pics
     /// ramenés à la valeur courante) : un rapport par période.
     pub fn drain(&self) -> Report {
@@ -273,6 +315,12 @@ impl ServerStats {
             connections_peak: self.connections.take_peak(),
             db_jobs_peak: self.db_jobs.take_peak(),
             response_bytes_peak: self.response_bytes.take_peak(),
+            replication: std::mem::take(
+                &mut *self
+                    .replication_period
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            ),
         }
     }
 }
@@ -289,6 +337,8 @@ pub struct Report {
     pub connections_peak: usize,
     pub db_jobs_peak: usize,
     pub response_bytes_peak: usize,
+    /// Passes de recopie de la période (`last` : la dernière).
+    pub replication: ReplicationStats,
 }
 
 impl fmt::Display for Report {
@@ -308,7 +358,15 @@ impl fmt::Display for Report {
             f,
             ", connexions ouvertes : {} (pic {}), pic d'opérations de base : {}, pic d'octets de réponse : {}",
             self.connections, self.connections_peak, self.db_jobs_peak, self.response_bytes_peak
-        )
+        )?;
+        if self.replication.passes > 0 {
+            write!(
+                f,
+                ", recopie : {} passes, {}",
+                self.replication.passes, self.replication.total
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -414,6 +472,7 @@ impl ServerConfig {
             stats: Arc::new(ServerStats::default()),
             dht: None,
             dht_tick: None,
+            dht_diversity: DiversityLimits::SPEC,
         }
     }
 }
@@ -443,6 +502,10 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    pub(crate) fn stats(&self) -> &ServerStats {
+        &self.stats
+    }
+
     /// Échéance d'écriture d'une réponse de `len` octets.
     fn write_deadline(&self, len: usize) -> Duration {
         write_deadline(self.request_timeout, len, self.min_send_rate)
@@ -605,6 +668,7 @@ pub async fn run(
             endpoints.clone(),
             db_jobs_per_group(config.max_db_jobs),
             config.dht_tick,
+            config.dht_diversity,
         ))
     });
 
@@ -654,6 +718,13 @@ pub async fn run(
         ));
     }
     tasks.spawn(purge_loop(Arc::clone(&shared), stop_rx.clone()));
+    if let Some(d) = &dht {
+        tasks.spawn(replicate::run(
+            Arc::clone(d),
+            Arc::clone(&shared),
+            stop_rx.clone(),
+        ));
+    }
     // Entretien de la table, attendu à l'arrêt : il enregistre `peers`.
     let maintenance =
         dht.map(|d| tokio::spawn(maintain::run(d, Arc::clone(&shared), stop_rx.clone())));
