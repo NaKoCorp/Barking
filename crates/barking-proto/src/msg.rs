@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::node_id::NodeId;
 
+/// Curseurs de relève : les paquets d'abord (curseur = leur numéro d'ordre,
+/// sous cette base), puis les accusés (`ACK_CURSOR_BASE + numéro`).
+pub const ACK_CURSOR_BASE: u64 = 1 << 62;
+
 /// Plus petite page de relève servie par un nœud (octets de paquets).
 pub const MIN_PAGE_BYTES: u32 = 16 * 1024;
 

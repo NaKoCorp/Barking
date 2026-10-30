@@ -23,17 +23,17 @@
 //! diffère de la boîte relevée n'est pas écarté (l'accusé est rangé dans
 //! chaque boîte qui tenait le paquet).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use barking_packet::{Kind, MailboxId, Packet};
 use quinn::{Connection, Endpoint};
-use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
 use crate::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
-use crate::msg::{ErrorReason, Limits, Request, Response};
+use crate::msg::{ACK_CURSOR_BASE, ErrorReason, Limits, Request, Response};
 use crate::{NodeId, PROTOCOL_VERSION, pow, tls};
 
 /// Plus ancienne version du protocole que ce client sait parler.
@@ -82,15 +82,62 @@ pub enum ClientError {
     PowBudget,
 }
 
-/// Position de reprise d'une relève : pour chaque tranche de boîtes (dans
-/// l'ordre de la liste, par `max_mailboxes_per_fetch`), le curseur de la
-/// dernière page prise d'une tranche inachevée, `None` pour une tranche
-/// relevée jusqu'au bout (relue depuis le début la fois suivante : le
-/// curseur final n'est pas connu). Ne vaut que pour la même liste de boîtes
-/// et le même nœud.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Position de reprise d'une relève, par boîte : `seen[boîte] = n` dit que
+/// tous les paquets de cette boîte de curseur `<= n` ont été reçus (`n` est
+/// toujours un curseur de paquets, sous `ACK_CURSOR_BASE` : un curseur
+/// d'accusés sauterait les paquets arrivés depuis). Une tranche reprend au
+/// minimum des boîtes qu'elle contient (0 pour une boîte inconnue) : la
+/// liste des boîtes peut changer d'une relève à l'autre sans tout relire.
+/// Les boîtes sont regroupées en tranches selon leur position : les boîtes
+/// sans position ensemble, les autres par position décroissante, pour qu'une
+/// boîte nouvelle ne ramène pas une boîte avancée au début.
+/// Ne vaut que pour un même nœud.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FetchResume {
-    pub cursors: Vec<Option<u64>>,
+    pub seen: HashMap<[u8; 16], u64>,
+}
+
+impl FetchResume {
+    /// Curseur de départ d'une tranche.
+    fn start(&self, chunk: &[MailboxId]) -> Option<u64> {
+        let min = chunk
+            .iter()
+            .map(|m| self.seen.get(&m.0).copied().unwrap_or(0))
+            .min()
+            .unwrap_or(0);
+        (min > 0).then_some(min)
+    }
+
+    /// Une page de suite `n` a été prise pour `chunk`.
+    fn advance(&mut self, chunk: &[MailboxId], n: u64) {
+        if n >= ACK_CURSOR_BASE {
+            return;
+        }
+        for m in chunk {
+            let e = self.seen.entry(m.0).or_insert(0);
+            *e = (*e).max(n);
+        }
+    }
+
+    /// Tranches de `per` boîtes au plus : boîtes sans position d'abord, puis
+    /// les autres par position décroissante.
+    fn chunks(&self, mailboxes: &[MailboxId], per: usize) -> Vec<Vec<MailboxId>> {
+        let at = |m: &MailboxId| self.seen.get(&m.0).copied().unwrap_or(0);
+        let mut zero: Vec<MailboxId> = mailboxes.iter().filter(|m| at(m) == 0).copied().collect();
+        zero.dedup();
+        let mut known: Vec<MailboxId> = mailboxes.iter().filter(|m| at(m) > 0).copied().collect();
+        known.sort_by_key(|m| core::cmp::Reverse(at(m)));
+        known.dedup();
+        zero.chunks(per)
+            .chain(known.chunks(per))
+            .map(<[MailboxId]>::to_vec)
+            .collect()
+    }
+
+    /// Ne garde que ces boîtes.
+    pub fn retain(&mut self, mailboxes: &[MailboxId]) {
+        self.seen.retain(|k, _| mailboxes.iter().any(|m| m.0 == *k));
+    }
 }
 
 pub type Result<T> = core::result::Result<T, ClientError>;
@@ -314,11 +361,10 @@ impl Session {
             .await
     }
 
-    /// Comme `fetch`, mais reprend chaque tranche de boîtes au curseur de
-    /// `resume` (remis à zéro si le nombre de tranches ne correspond pas),
-    /// et s'arrête à `max_bytes` octets (au moins une page est prise). En
-    /// sortie, `resume` donne où reprendre ; une erreur le laisse à la
-    /// dernière page prise.
+    /// Comme `fetch`, mais reprend chaque tranche de boîtes d'après `resume`
+    /// (voir `FetchResume`) et s'arrête à `max_bytes` octets (au moins une
+    /// page est prise). En sortie, `resume` donne où reprendre ; une erreur
+    /// le laisse à la dernière page prise.
     pub async fn fetch_resumable(
         &mut self,
         mailboxes: &[MailboxId],
@@ -327,18 +373,15 @@ impl Session {
     ) -> Result<Vec<Vec<u8>>> {
         self.truncated = false;
         let per = usize::from(self.limits.max_mailboxes_per_fetch).min(MAX_MAILBOXES);
-        let chunks: Vec<&[MailboxId]> = mailboxes.chunks(per).collect();
-        if resume.cursors.len() != chunks.len() {
-            resume.cursors = vec![None; chunks.len()];
-        }
+        let chunks = resume.chunks(mailboxes, per.max(1));
         let mut out = Vec::new();
         let mut bytes = 0usize;
         let mut pages = 0usize;
         // Indice dans `FETCH_PAGE_SIZES` : ne remonte pas au cours d'un appel.
         let mut size = 0usize;
         let deadline = tokio::time::Instant::now() + FETCH_DEADLINE;
-        for (k, chunk) in chunks.iter().enumerate() {
-            let mut cursor: Option<u64> = resume.cursors[k];
+        for chunk in &chunks {
+            let mut cursor: Option<u64> = resume.start(chunk);
             loop {
                 if pages >= MAX_FETCH_PAGES || tokio::time::Instant::now() >= deadline {
                     self.truncated = true;
@@ -404,7 +447,9 @@ impl Session {
                 }
                 bytes += page_bytes;
                 out.append(&mut items);
-                resume.cursors[k] = next;
+                if let Some(n) = next {
+                    resume.advance(chunk, n);
+                }
                 match next {
                     Some(n) => cursor = Some(n),
                     None => break,
