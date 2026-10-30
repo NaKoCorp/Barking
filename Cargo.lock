@@ -219,6 +219,7 @@ dependencies = [
  "rand",
  "rand_core",
  "serde",
+ "thiserror",
  "toml",
 ]
 

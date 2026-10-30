@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Fuzzing de barking-core et des trames de barking-proto, entièrement dans Docker (rien n'est installé sur l'hôte).
 # Usage : scripts/fuzz.sh [cible|all] [secondes]      (défaut : all 300)
-# Cibles : packet_decode, reassemble, receive, receive_frame, proto_frame (trames du protocole du nœud).
+# Cibles : packet_decode, reassemble, receive, receive_frame, proto_frame (trames du protocole du nœud),
+# dht_response (filtrage des réponses `Nodes` de la table de hachage).
 # Le corpus versionné (crates/barking-core/fuzz/corpus/<cible>/) ne contient que les graines ; les
 # entrées découvertes vivent dans un volume Docker, sans salir le dépôt. Un plantage laisse son
 # artefact dans crates/barking-core/fuzz/artifacts/<cible>/ et fait sortir le script en erreur.
 set -euo pipefail
 
 racine="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cibles_connues=(packet_decode reassemble receive receive_frame proto_frame)
+cibles_connues=(packet_decode reassemble receive receive_frame proto_frame dht_response)
 
 erreur() { echo "erreur : $*" >&2; exit 1; }
 usage() { echo "Usage : $0 [cible|all] [secondes]   (cibles : ${cibles_connues[*]})"; }

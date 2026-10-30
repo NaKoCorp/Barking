@@ -1,11 +1,15 @@
 //! Table de hachage distribuée S/Kademlia entre nœuds : distance, clés de
 //! boîte, blocs d'adresses et table de routage.
 
+pub mod bootstrap;
+pub mod lookup;
 pub mod table;
 
 use barking_packet::MailboxId;
 use barking_proto::{NodeId, NodeRecord};
 
+pub use bootstrap::{BootstrapEntry, BootstrapError, builtin_bootstrap, parse_bootstrap};
+pub use lookup::{Lookup, Suspect, filter_nodes};
 pub use table::{Insert, Peer, Reject, RoutingTable};
 
 /// Nœuds actifs par compartiment.

@@ -1,0 +1,10 @@
+# Liste d'amorçage intégrée au binaire : nœuds publics essayés au démarrage
+# quand moins de 3 nœuds de `peers` répondent, avant `bootstrap` de la config.
+# Format : une entrée "<identifiant base32>@<ip:port>" par nœud, par exemple
+#   nodes = [
+#     "<identifiant>@203.0.113.7:4433",
+#     "<identifiant>@[2001:db8::7]:4433",
+#   ]
+# Vide tant qu'aucun nœud public n'existe ; le mainteneur la remplit à la
+# première mise en ligne.
+nodes = []
