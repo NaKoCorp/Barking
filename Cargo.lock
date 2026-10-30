@@ -167,6 +167,7 @@ dependencies = [
  "barking-core",
  "barking-node",
  "barking-proto",
+ "blake3",
  "clap",
  "data-encoding",
  "ed25519-dalek",

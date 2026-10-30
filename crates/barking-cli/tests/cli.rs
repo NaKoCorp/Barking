@@ -794,13 +794,18 @@ mod node {
 
     impl TestNode {
         fn start(n: usize) -> TestNode {
+            Self::start_with(n, |_| {})
+        }
+
+        fn start_with(n: usize, tweak: impl FnOnce(&mut ServerConfig)) -> TestNode {
             let dir = tempfile::tempdir().unwrap();
             let db = dir.path().join("node.db");
             let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
             let addr = socket.local_addr().unwrap();
             let key = key(n);
             let id = NodeId::from_public_key(&key.verifying_key()).to_string();
-            let cfg = ServerConfig::new(vec![socket], key);
+            let mut cfg = ServerConfig::new(vec![socket], key);
+            tweak(&mut cfg);
             let store = NodeStore::open(&db).unwrap();
             let policy = Policy {
                 pow_bits: 4,
@@ -881,6 +886,104 @@ mod node {
                 .all(|w| w.len() < 20),
             "{log}"
         );
+    }
+
+    /// Nombre d'éléments reçus annoncé pour le nœud dans la sortie de `sync`.
+    fn received(out: &str) -> usize {
+        let line = out.lines().find(|l| l.contains("éléments reçus")).unwrap();
+        let before = &line[..line.find(" éléments reçus").unwrap()];
+        before.rsplit(' ').next().unwrap().parse().unwrap()
+    }
+
+    /// Une boîte d'introduction inondée (n'importe qui peut la calculer) ne
+    /// retarde pas les sessions : le message de session arrive dans la même
+    /// synchronisation, la relève est enregistrée, et la relève des
+    /// introductions reprend là où elle s'était arrêtée.
+    #[test]
+    fn flooded_intro_mailbox_does_not_block_sessions() {
+        use barking_core::packet::{DEFAULT_HOPS, Kind, Packet, PacketId, Tier};
+        use barking_proto::client::Client;
+
+        let node = TestNode::start_with(0, |c| {
+            c.limits.requests_per_sec = 100_000;
+            c.limits.bytes_per_sec = 1 << 30;
+        });
+        let ((da, a), (db, b)) = pair();
+        node_add(&a, node.addr, &node.id);
+        node_add(&b, node.addr, &node.id);
+
+        // Session établie par fichiers ; le premier contact donne la boîte
+        // d'introduction de Bob pour aujourd'hui.
+        let out_a = da.path().join("out");
+        ok(&a, &["send", "bob", "ouverture", "--out", path_arg(&out_a)]);
+        let first = packets(&out_a).remove(0);
+        let intro = Packet::decode(&fs::read(&first).unwrap()).unwrap().mailbox;
+        let out_b = db.path().join("out");
+        ok(
+            &b,
+            &["receive", path_arg(&first), "--out", path_arg(&out_b)],
+        );
+        ok(&b, &["send", "alice", "retour", "--out", path_arg(&out_b)]);
+        for p in packets(&out_b) {
+            ok(&a, &["receive", path_arg(&p), "--out", path_arg(&out_a)]);
+        }
+
+        // Inondation : 600 paquets L (~9,4 Mio) dans la boîte d'introduction.
+        const JUNK: u32 = 600;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let id: NodeId = node.id.parse().unwrap();
+            let mut s = Client::connect(node.addr, id).await.unwrap();
+            let expires = u32::try_from(super::now_secs() + 86_400).unwrap();
+            for n in 0..JUNK {
+                let mut pid = [0xEE; 16];
+                pid[..4].copy_from_slice(&n.to_le_bytes());
+                let p = Packet {
+                    kind: Kind::Message,
+                    hops: DEFAULT_HOPS,
+                    tier: Tier::L,
+                    id: PacketId(pid),
+                    expires_at: expires,
+                    mailbox: intro,
+                    payload: vec![n as u8; 16],
+                };
+                assert_eq!(s.deposit(&p.encode()).await.unwrap(), Ok(()));
+            }
+            s.close().await;
+        });
+
+        // Alice écrit sur la session, par le nœud.
+        let out2 = da.path().join("out2");
+        ok(
+            &a,
+            &["send", "bob", "par la session", "--out", path_arg(&out2)],
+        );
+        ok(&a, &["sync"]);
+
+        let s1 = ok(&b, &["sync"]);
+        assert!(s1.contains("[alice] par la session"), "{s1}");
+        assert!(s1.contains("introductions : relève partielle"), "{s1}");
+        assert!(s1.contains("Relève enregistrée"), "{s1}");
+        let r1 = received(&s1);
+        assert!(r1 < JUNK as usize, "{r1}");
+        let cursors = fs::read_to_string(b.join("fetch_cursors.toml")).unwrap();
+        assert!(cursors.contains(&node.id), "{cursors}");
+        assert_eq!(
+            fs::metadata(b.join("fetch_cursors.toml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        // La synchronisation suivante reprend au curseur : le reste seulement.
+        let s2 = ok(&b, &["sync"]);
+        assert!(!s2.contains("introductions : relève partielle"), "{s2}");
+        assert!(s2.contains("Relève enregistrée"), "{s2}");
+        let r2 = received(&s2);
+        assert!(r1 + r2 >= JUNK as usize, "{r1} + {r2}");
+        assert!(r2 < JUNK as usize - r1 + 50, "{r1} + {r2}");
     }
 
     #[test]
@@ -966,4 +1069,11 @@ mod node {
             .assert()
             .failure();
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
