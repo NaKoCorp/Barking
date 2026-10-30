@@ -2,13 +2,17 @@
 //!
 //! Aucun réseau : chaque nœud n'est qu'une `RoutingTable`, et le harnais
 //! répond de manière synchrone aux `FindNode` d'une recherche depuis la table
-//! du nœud interrogé. Un nœud mort ou muet compte comme un échec immédiat,
-//! équivalent à l'expiration du délai. Une graine fixe et une horloge simulée
-//! rendent chaque exécution identique.
+//! du nœud interrogé. Un nœud mort ou muet ne répond jamais : sa requête
+//! reste en vol et occupe sa place jusqu'à l'expiration du délai de 3 s, et
+//! la recherche entière reste bornée à 10 s. Une graine fixe et une horloge
+//! simulée rendent chaque exécution identique.
 
 use std::collections::{BTreeSet, HashMap};
 
-use barking_dht::{Insert, K, Lookup, Prefix, REPLICAS, RoutingTable, distance, prefixes};
+use barking_dht::{
+    Insert, K, Lookup, Prefix, REPLICAS, RoutingTable, distance, lookup::LOOKUP_TIMEOUT_MS,
+    prefixes,
+};
 use barking_proto::{NodeId, NodeRecord, RecordPolicy};
 use ed25519_dalek::SigningKey;
 use rand::{Rng, RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
@@ -58,6 +62,8 @@ struct Search {
     answered: Vec<usize>,
     /// Nœuds interrogés qui n'ont pas répondu.
     failed: Vec<usize>,
+    /// Durée simulée de la recherche.
+    elapsed_ms: u64,
 }
 
 struct Net {
@@ -232,21 +238,18 @@ impl Net {
         let mut lookup = Lookup::new(*target, seeds, POLICY, now_ms).excluding(me.id);
         let (mut answered, mut failed) = (Vec::new(), Vec::new());
         while !lookup.is_done(now_ms) {
-            let requests = lookup.next_requests(now_ms);
-            // Chaque requête reçoit sa réponse dans le même tour : rien ne
-            // reste en vol.
-            assert!(!requests.is_empty(), "recherche bloquée");
-            for (id, _) in requests {
+            // Une réponse arrive dans le tour de sa requête. Sans réponse, la
+            // requête reste en vol : `next_requests` la déclare échouée après
+            // `REQUEST_TIMEOUT_MS`, et `is_done` arrête la recherche après
+            // `LOOKUP_TIMEOUT_MS`.
+            for (id, _) in lookup.next_requests(now_ms) {
                 let to = self.index[&id];
                 match self.answer(to, target) {
                     Some(records) => {
                         lookup.on_response(&id, records, now_secs);
                         answered.push(to);
                     }
-                    None => {
-                        lookup.on_failure(&id);
-                        failed.push(to);
-                    }
+                    None => failed.push(to),
                 }
             }
             now_ms += ROUND_MS;
@@ -255,6 +258,7 @@ impl Net {
             lookup,
             answered,
             failed,
+            elapsed_ms: now_ms - self.now_ms,
         }
     }
 
@@ -278,15 +282,17 @@ impl Net {
         }
     }
 
-    /// Recherche de mesure : identifiants trouvés, sans effet sur les tables.
-    fn probe(&self, from: usize, target: &[u8; 32]) -> Vec<NodeId> {
+    /// Recherche de mesure : identifiants trouvés et durée simulée, sans
+    /// effet sur les tables.
+    fn probe(&self, from: usize, target: &[u8; 32]) -> (Vec<NodeId>, u64) {
         let search = self.search(from, target);
-        search
+        let found = search
             .lookup
             .result()
             .into_iter()
             .map(|(id, _)| id)
-            .collect()
+            .collect();
+        (found, search.elapsed_ms)
     }
 
     /// Amorçage depuis `BOOT` puis recherche de son propre identifiant.
@@ -437,26 +443,37 @@ impl Mailbox {
 }
 
 /// Part des recherches qui trouvent au moins `need` des 5 vrais
-/// responsables honnêtes, lancées depuis des nœuds honnêtes au hasard.
+/// responsables honnêtes, lancées depuis des nœuds honnêtes au hasard ;
+/// affiche aussi leur durée simulée.
 fn success_rate(net: &mut Net, need: usize) -> f64 {
     let jobs: Vec<([u8; 32], usize)> = (0..LOOKUPS)
         .map(|_| (net.key(), net.random_honest()))
         .collect();
     let net = &*net;
-    let hits = par_map(&jobs, |(key, from)| {
+    let outcomes = par_map(&jobs, |(key, from)| {
         let truth = net.truth(key, REPLICAS);
-        let mut found = net.probe(*from, key);
+        let (mut found, elapsed_ms) = net.probe(*from, key);
         // Le nœud qui cherche se connaît lui-même.
         found.push(net.nodes[*from].id);
-        truth
+        let hit = truth
             .iter()
             .filter(|&&t| found.contains(&net.nodes[t].id))
             .count()
-            >= need
-    })
-    .into_iter()
-    .filter(|&hit| hit)
-    .count();
+            >= need;
+        (hit, elapsed_ms)
+    });
+    let hits = outcomes.iter().filter(|(hit, _)| *hit).count();
+    let mut durations: Vec<u64> = outcomes.iter().map(|&(_, ms)| ms).collect();
+    durations.sort_unstable();
+    let timed_out = durations
+        .iter()
+        .filter(|&&ms| ms >= LOOKUP_TIMEOUT_MS)
+        .count();
+    eprintln!(
+        "durée simulée : médiane {} ms, max {} ms, {timed_out} recherches arrêtées à {LOOKUP_TIMEOUT_MS} ms",
+        durations[durations.len() / 2],
+        durations[durations.len() - 1],
+    );
     hits as f64 / LOOKUPS as f64
 }
 
@@ -573,19 +590,29 @@ fn churn_restores_five_copies_in_two_passes() {
             "boîte perdue avec toutes ses copies"
         );
     }
+    // Les départs ont bien privé des boîtes de copies : c'est la réparation
+    // qui fait passer le test.
+    let damaged = short_of_five(&net, &boxes);
+    assert!(damaged > 0, "aucune boîte touchée par les départs");
     // 4. Un cycle d'entretien des tables.
     net.maintenance_cycle();
     // 5. Deux passes de recopie.
     net.replication_pass(&mut boxes);
     net.replication_pass(&mut boxes);
-    let mut short = 0;
-    for mailbox in &boxes {
-        let live = mailbox.live_holders(&net);
-        let truth: BTreeSet<usize> = net.truth(&mailbox.key, REPLICAS).into_iter().collect();
-        if live.len() < REPLICAS || !live.is_superset(&truth) {
-            short += 1;
-        }
-    }
-    eprintln!("départs : {short} boîtes sur 100 sans leurs 5 copies");
+    let short = short_of_five(&net, &boxes);
+    eprintln!("départs : {damaged} boîtes sur 100 touchées, {short} encore sans leurs 5 copies");
     assert_eq!(short, 0);
+}
+
+/// Boîtes qui n'ont pas une copie vivante sur chacun de leurs 5 vrais
+/// responsables vivants.
+fn short_of_five(net: &Net, boxes: &[Mailbox]) -> usize {
+    boxes
+        .iter()
+        .filter(|mailbox| {
+            let live = mailbox.live_holders(net);
+            let truth: BTreeSet<usize> = net.truth(&mailbox.key, REPLICAS).into_iter().collect();
+            live.len() < REPLICAS || !live.is_superset(&truth)
+        })
+        .count()
 }
