@@ -6,7 +6,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use barking_proto::{MAX_NODES_PER_RESPONSE, NodeId, NodeRecord, RecordPolicy};
+use barking_proto::{
+    MAX_NODES_PER_RESPONSE, NodeId, NodeRecord, RecordPolicy, record::MAX_RECORD_SKEW_SECS,
+};
+use ed25519_dalek::Signature;
 
 use crate::{ALPHA, K, MAX_PER_PREFIX, PATHS, Prefix, distance, prefixes};
 
@@ -28,13 +31,40 @@ pub fn filter_nodes(
     now_secs: u64,
     policy: &RecordPolicy,
 ) -> Result<Vec<(NodeId, NodeRecord)>, Suspect> {
+    filter_known(records, now_secs, policy, &mut HashMap::new())
+}
+
+/// Fiches valides déjà vérifiées, par signature.
+type Verified = HashMap<Signature, (NodeRecord, NodeId)>;
+
+/// Comme `filter_nodes`, sans revérifier la signature d'une fiche identique
+/// à une fiche de `verified`, qui reçoit les fiches valides. Une fiche valide
+/// le reste quand l'horloge avance ; seule sa date est revue, au cas où
+/// l'horloge aurait reculé.
+fn filter_known(
+    records: Vec<NodeRecord>,
+    now_secs: u64,
+    policy: &RecordPolicy,
+    verified: &mut Verified,
+) -> Result<Vec<(NodeId, NodeRecord)>, Suspect> {
     if records.len() > MAX_NODES_PER_RESPONSE {
         return Err(Suspect);
     }
     let mut seen = HashSet::with_capacity(records.len());
     let mut out = Vec::with_capacity(records.len());
     for record in records {
-        let id = record.verify(now_secs, policy).map_err(|_| Suspect)?;
+        let known = verified.get(&record.signature).and_then(|(r, id)| {
+            (*r == record && record.issued_at <= now_secs.saturating_add(MAX_RECORD_SKEW_SECS))
+                .then_some(*id)
+        });
+        let id = match known {
+            Some(id) => id,
+            None => {
+                let id = record.verify(now_secs, policy).map_err(|_| Suspect)?;
+                verified.insert(record.signature, (record.clone(), id));
+                id
+            }
+        };
         if seen.insert(id) {
             out.push((id, record));
         }
@@ -76,6 +106,10 @@ pub struct Lookup {
     suspects: HashSet<NodeId>,
     /// Nœuds qui ont répondu correctement, dans l'ordre des réponses.
     responded: Vec<(NodeId, NodeRecord)>,
+    /// Fiches déjà vérifiées pendant la recherche : les réponses se
+    /// recoupent largement (douze fois en moyenne dans la simulation de
+    /// 500 nœuds), et la vérification des signatures dominait le coût.
+    verified: Verified,
 }
 
 impl Lookup {
@@ -97,6 +131,7 @@ impl Lookup {
             excluded: HashSet::new(),
             suspects: HashSet::new(),
             responded: Vec::new(),
+            verified: HashMap::new(),
         };
         let mut next = 0;
         for (id, record) in seeds {
@@ -199,13 +234,16 @@ impl Lookup {
     /// vers lui.
     pub fn on_response(&mut self, from: &NodeId, records: Vec<NodeRecord>, now_secs: u64) {
         let policy = self.policy;
-        let Some((path, entry)) = self.entry_mut(from) else {
+        let Some(path) = self.owner.get(from).copied() else {
+            return;
+        };
+        let Some(entry) = self.paths[path].iter_mut().find(|e| e.id == *from) else {
             return;
         };
         if !matches!(entry.state, State::InFlight { .. }) {
             return;
         }
-        let Ok(nodes) = filter_nodes(records, now_secs, &policy) else {
+        let Ok(nodes) = filter_known(records, now_secs, &policy, &mut self.verified) else {
             entry.state = State::Failed;
             self.suspects.insert(*from);
             return;
@@ -534,6 +572,34 @@ mod tests {
         lookup.on_failure(&heard);
         assert!(lookup.is_done(0));
         assert_eq!(ids(&lookup.result()), vec![sent[0]]);
+        assert_eq!(ids(&lookup.responders()), vec![sent[0]]);
+    }
+
+    #[test]
+    fn known_signature_with_other_content_is_suspect() {
+        let mut rng = StdRng::seed_from_u64(10);
+        let seeds = nodes(&mut rng, 2);
+        let (_, rec) = node(&mut rng, 2);
+        let (mut lookup, sent) = lookup_with(&seeds);
+        lookup.on_response(&sent[0], vec![rec.clone()], NOW_SECS);
+        // Même signature, autre adresse : la fiche déjà vérifiée ne la
+        // couvre pas.
+        let mut forged = rec;
+        forged.v4 = Some("11.200.0.1:4433".parse().unwrap());
+        lookup.on_response(&sent[1], vec![forged], NOW_SECS);
+        assert_eq!(ids(&lookup.responders()), vec![sent[0]]);
+    }
+
+    #[test]
+    fn known_record_still_checks_date() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let seeds = nodes(&mut rng, 2);
+        let (_, rec) = node(&mut rng, 2);
+        let (mut lookup, sent) = lookup_with(&seeds);
+        lookup.on_response(&sent[0], vec![rec.clone()], NOW_SECS);
+        // L'horloge a reculé : la même fiche vient désormais du futur.
+        let past = rec.issued_at - MAX_RECORD_SKEW_SECS - 1;
+        lookup.on_response(&sent[1], vec![rec], past);
         assert_eq!(ids(&lookup.responders()), vec![sent[0]]);
     }
 
