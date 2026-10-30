@@ -125,6 +125,8 @@ struct Table {
     groups: HashMap<IpKey, Group>,
     prefixes: HashMap<PrefixKey, u32>,
     conns: HashMap<u64, ConnEntry>,
+    /// Opérations de base en cours par /48 ou /24.
+    prefix_db: HashMap<PrefixKey, u32>,
     next_id: u64,
     total: u32,
 }
@@ -253,6 +255,7 @@ impl Limiter {
         t.total += 1;
         let id = t.next_id;
         t.next_id += 1;
+        let top = *prefixes.last()?;
         let evict = Arc::new(Notify::new());
         t.conns.insert(
             id,
@@ -267,6 +270,7 @@ impl Limiter {
             limiter: Arc::clone(self),
             id,
             key,
+            top,
             evict,
         })
     }
@@ -282,6 +286,8 @@ pub struct ConnectionSlot {
     limiter: Arc<Limiter>,
     id: u64,
     key: IpKey,
+    /// /48 ou /24 englobant.
+    top: PrefixKey,
     evict: Arc<Notify>,
 }
 
@@ -350,18 +356,24 @@ impl ConnectionSlot {
             .map_or(0, |g| g.bytes)
     }
 
-    /// Réserve une opération de base pour le groupe, au plus `cap` en cours
-    /// par groupe ; rendue quand la garde est lâchée.
-    pub fn try_db_job(&self, cap: u32) -> Option<GroupDbJob> {
+    /// Réserve une opération de base : au plus `group_cap` en cours pour le
+    /// groupe (/64 ou /32) et `prefix_cap` pour le /48 ou /24 englobant ;
+    /// rendue quand la garde est lâchée.
+    pub fn try_db_job(&self, group_cap: u32, prefix_cap: u32) -> Option<GroupDbJob> {
         let mut t = self.limiter.table();
+        if t.prefix_db.get(&self.top).copied().unwrap_or(0) >= prefix_cap {
+            return None;
+        }
         let g = t.groups.get_mut(&self.key)?;
-        if g.db_jobs >= cap {
+        if g.db_jobs >= group_cap {
             return None;
         }
         g.db_jobs += 1;
+        *t.prefix_db.entry(self.top).or_insert(0) += 1;
         Some(GroupDbJob {
             limiter: Arc::clone(&self.limiter),
             key: self.key,
+            top: self.top,
         })
     }
 }
@@ -377,6 +389,7 @@ impl Drop for ConnectionSlot {
 pub struct GroupDbJob {
     limiter: Arc<Limiter>,
     key: IpKey,
+    top: PrefixKey,
 }
 
 impl Drop for GroupDbJob {
@@ -384,6 +397,12 @@ impl Drop for GroupDbJob {
         let mut t = self.limiter.table();
         if let Some(g) = t.groups.get_mut(&self.key) {
             g.db_jobs = g.db_jobs.saturating_sub(1);
+        }
+        if let Some(n) = t.prefix_db.get_mut(&self.top) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                t.prefix_db.remove(&self.top);
+            }
         }
         t.forget_if_idle(self.key, Instant::now());
     }
@@ -721,15 +740,54 @@ mod tests {
         let a = acq(&l, "192.0.2.1").unwrap();
         let b = acq(&l, "192.0.2.1").unwrap();
         let other = acq(&l, "192.0.2.2").unwrap();
-        let j1 = a.try_db_job(2).unwrap();
-        let _j2 = b.try_db_job(2).unwrap();
+        let j1 = a.try_db_job(2, 100).unwrap();
+        let _j2 = b.try_db_job(2, 100).unwrap();
         // Le groupe a ses deux places, quelle que soit la connexion.
-        assert!(a.try_db_job(2).is_none());
-        assert!(b.try_db_job(2).is_none());
+        assert!(a.try_db_job(2, 100).is_none());
+        assert!(b.try_db_job(2, 100).is_none());
         // Un autre groupe n'est pas touché.
-        assert!(other.try_db_job(2).is_some());
+        assert!(other.try_db_job(2, 100).is_some());
         drop(j1);
-        assert!(a.try_db_job(2).is_some());
+        assert!(a.try_db_job(2, 100).is_some());
+    }
+
+    #[test]
+    fn prefix_db_jobs_capped_across_its_groups() {
+        let l = wide();
+        // Quatre /64 d'un même /56 (donc d'un même /48), part de 4 chacun,
+        // part de 8 pour le /48.
+        let slots: Vec<_> = (0..4u32)
+            .map(|i| acq(&l, &format!("2001:db8:1:{i:x}::1")).unwrap())
+            .collect();
+        let mut jobs = Vec::new();
+        for s in &slots {
+            while let Some(j) = s.try_db_job(4, 8) {
+                jobs.push(j);
+            }
+        }
+        assert_eq!(jobs.len(), 8);
+        // Un autre /48 n'est pas touché ; IPv4 : part par /24.
+        let other = acq(&l, "2001:db8:2::1").unwrap();
+        assert!(other.try_db_job(4, 8).is_some());
+        let v4: Vec<_> = (1..=3u8)
+            .map(|i| {
+                l.try_acquire(IpAddr::from([10, 0, 0, i]), Instant::now())
+                    .unwrap()
+            })
+            .collect();
+        let mut v4jobs = Vec::new();
+        for s in &v4 {
+            while let Some(j) = s.try_db_job(4, 5) {
+                v4jobs.push(j);
+            }
+        }
+        assert_eq!(v4jobs.len(), 5);
+        // Une place rendue dans le /48 : reprise possible.
+        jobs.pop();
+        assert!(slots[0].try_db_job(4, 8).is_none());
+        assert!(slots[1].try_db_job(4, 8).is_some());
+        drop(jobs);
+        assert!(l.table().prefix_db.len() <= 3);
     }
 
     #[test]

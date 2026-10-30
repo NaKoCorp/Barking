@@ -47,6 +47,8 @@ pub struct Config {
     pub max_response_bytes_per_ip: usize,
     /// Opérations de base simultanées ou en attente.
     pub max_db_jobs: usize,
+    /// Part d'un /48 (IPv6) ou /24 (IPv4) ; absent : `max_db_jobs / 8`.
+    pub max_db_jobs_per_prefix: Option<usize>,
     /// Débit minimal attendu d'un lecteur, en octets/s (allonge l'échéance
     /// d'écriture d'une réponse, au plus 60 s).
     pub min_send_rate: u64,
@@ -71,6 +73,7 @@ impl Default for Config {
             max_response_bytes_in_flight: DEFAULT_MAX_RESPONSE_BYTES_IN_FLIGHT,
             max_response_bytes_per_ip: DEFAULT_MAX_RESPONSE_BYTES_PER_IP,
             max_db_jobs: DEFAULT_MAX_DB_JOBS,
+            max_db_jobs_per_prefix: None,
             min_send_rate: DEFAULT_MIN_SEND_RATE,
             log_interval_secs: 60,
         }
@@ -129,6 +132,9 @@ impl Config {
         if self.max_response_bytes_in_flight < server::FETCH_PAGE_BYTES + (64 << 10) {
             return Err(bad("max_response_bytes_in_flight : au moins 1 Mio"));
         }
+        if self.max_db_jobs_per_prefix == Some(0) {
+            return Err(bad("max_db_jobs_per_prefix : au moins 1"));
+        }
         if self.max_db_jobs == 0 || self.min_send_rate == 0 || self.log_interval_secs == 0 {
             return Err(bad(
                 "max_db_jobs, min_send_rate et log_interval_secs : au moins 1",
@@ -170,6 +176,7 @@ impl Config {
         cfg.max_response_bytes_in_flight = self.max_response_bytes_in_flight;
         cfg.max_response_bytes_per_ip = self.max_response_bytes_per_ip;
         cfg.max_db_jobs = self.max_db_jobs;
+        cfg.max_db_jobs_per_prefix = self.max_db_jobs_per_prefix;
         cfg.min_send_rate = self.min_send_rate;
         cfg
     }
@@ -215,6 +222,7 @@ mod tests {
             "max_connections_per_ipv6_48 = 0",
             "max_connections_per_ipv4_24 = 0",
             "max_db_jobs = 0",
+            "max_db_jobs_per_prefix = 0",
             "min_send_rate = 0",
             "log_interval_secs = 0",
             "storage_max_bytes = 0",
@@ -227,6 +235,7 @@ mod tests {
             "pow_bits = 1",
             "pow_bits = 24",
             "max_connections_per_ipv6_48 = 128",
+            "max_db_jobs_per_prefix = 4",
             "max_response_bytes_per_ip = 1048576",
             "listen = [\"127.0.0.1:1\", \"[::1]:1\"]",
         ] {

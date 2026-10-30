@@ -1157,7 +1157,8 @@ async fn invalid_pow_never_takes_db_job() {
 }
 
 /// Relève reprise : un budget d'octets coupe la relève, la suivante reprend
-/// au curseur sans relire le début ; une tranche finie repart du début.
+/// à la position de chaque boîte ; la position survit à un changement de la
+/// liste des boîtes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resumable_fetch_continues_where_it_stopped() {
     let (_d, path) = db();
@@ -1172,37 +1173,40 @@ async fn resumable_fetch_continues_where_it_stopped() {
             Ok(())
         );
     }
-    let boxes = [MailboxId([9; 16])];
+    for n in 0..5 {
+        assert_eq!(s.deposit(&message(1000 + n, 8)).await.unwrap(), Ok(()));
+    }
+    let nine = [MailboxId([9; 16])];
     let mut resume = client::FetchResume::default();
     // Budget sous une page : une page entière quand même.
-    let first = s.fetch_resumable(&boxes, &mut resume, 1).await.unwrap();
+    let first = s.fetch_resumable(&nine, &mut resume, 1).await.unwrap();
     assert!(s.last_fetch_truncated());
     assert!(!first.is_empty() && first.len() < 100);
-    assert!(resume.cursors[0].is_some());
+    assert!(resume.seen[&[9; 16]] > 0);
+    // Liste changée (boîte 8 ajoutée) : la boîte 9 reprend à sa position,
+    // la boîte 8 est lue depuis le début.
+    let both = [MailboxId([8; 16]), MailboxId([9; 16])];
     let mut all = first.clone();
-    while s.last_fetch_truncated() || all.len() < 100 {
-        let more = s.fetch_resumable(&boxes, &mut resume, 1).await.unwrap();
-        assert!(!more.is_empty());
+    loop {
+        let more = s
+            .fetch_resumable(&both, &mut resume, 1 << 20)
+            .await
+            .unwrap();
         all.extend(more);
         if !s.last_fetch_truncated() {
             break;
         }
     }
-    let want: Vec<Vec<u8>> = (0..100).map(|n| message_tier(n, 9, Tier::L)).collect();
-    assert_eq!(all, want);
-    // Tranche finie : curseur effacé.
-    assert_eq!(resume.cursors, vec![None]);
-    // Autre liste de boîtes (nombre de tranches différent) : depuis le début.
-    let many: Vec<MailboxId> = (0..65u8).map(|n| MailboxId([n; 16])).collect();
-    let mut stale = client::FetchResume {
-        cursors: vec![Some(u64::MAX - 1)],
-    };
-    let got = s
-        .fetch_resumable(&many, &mut stale, 64 << 20)
-        .await
-        .unwrap();
-    assert_eq!(got.len(), 100);
-    assert_eq!(stale.cursors, vec![None, None]);
+    let mut want: Vec<Vec<u8>> = (0..100).map(|n| message_tier(n, 9, Tier::L)).collect();
+    want.extend((0..5).map(|n| message(1000 + n, 8)));
+    for w in &want {
+        assert!(all.contains(w));
+    }
+    // Pas de relecture depuis le début : au plus une page relue par boîte.
+    assert!(all.len() < want.len() + 70, "{}", all.len());
+    // Boîte retirée : oubliée.
+    resume.retain(&nine);
+    assert!(!resume.seen.contains_key(&[8; 16]));
     node.stop().await;
 }
 

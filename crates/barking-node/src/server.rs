@@ -6,8 +6,8 @@
 //!   opération dans `spawn_blocking`. Écritures (et lectures) sérialisées sur
 //!   une seule connexion SQLite : pas de course entre la vérification des
 //!   quotas et l'insertion. La file est bornée : au plus `max_db_jobs` (64)
-//!   opérations en cours ou en attente, et `max(1, max_db_jobs / 16)` par
-//!   groupe d'adresses ; au-delà `RateLimited`. Un dépôt passe d'abord
+//!   opérations en cours ou en attente, `max(1, max_db_jobs / 16)` par
+//!   groupe d'adresses (/64, /32) et `max(1, max_db_jobs / 8)` par /48 ou /24 ; au-delà `RateLimited`. Un dépôt passe d'abord
 //!   `rules::precheck` (forme, expiration, preuve minimale) sans prendre de
 //!   place. Le jeton est
 //!   tenu par la tâche bloquante elle-même : abandonner la requête ne libère
@@ -122,6 +122,9 @@ pub struct ServerConfig {
     pub min_send_rate: u64,
     /// Opérations de base en cours ou en attente, tous pairs confondus.
     pub max_db_jobs: usize,
+    /// Part d'un /48 ou /24 ; `None` : `max_db_jobs / 8` (au moins 1). Celle
+    /// d'un /64 ou /32 vaut `max_db_jobs / 16` (au moins 1).
+    pub max_db_jobs_per_prefix: Option<usize>,
     /// Versions du protocole servies : `min_version..=version`.
     pub version: u16,
     pub min_version: u16,
@@ -385,6 +388,7 @@ impl ServerConfig {
             max_response_bytes_per_ip: DEFAULT_MAX_RESPONSE_BYTES_PER_IP,
             min_send_rate: DEFAULT_MIN_SEND_RATE,
             max_db_jobs: DEFAULT_MAX_DB_JOBS,
+            max_db_jobs_per_prefix: None,
             version: PROTOCOL_VERSION,
             min_version: PROTOCOL_VERSION,
             stats: Arc::new(ServerStats::default()),
@@ -406,6 +410,8 @@ struct Shared {
     db: Arc<Budget>,
     /// Opérations de base en cours ou en attente par groupe d'adresses.
     db_jobs_per_group: u32,
+    /// Même chose par /48 (IPv6) ou /24 (IPv4).
+    db_jobs_per_prefix: u32,
     responses: Arc<Budget>,
     response_bytes_per_ip: usize,
     min_send_rate: u64,
@@ -466,7 +472,7 @@ impl Shared {
         f: impl FnOnce(&mut NodeStore, &Policy) -> Result<T> + Send + 'static,
     ) -> Stored<T> {
         let group_job: Option<GroupDbJob> = match group {
-            Some(g) => match g.try_db_job(self.db_jobs_per_group) {
+            Some(g) => match g.try_db_job(self.db_jobs_per_group, self.db_jobs_per_prefix) {
                 Some(j) => Some(j),
                 None => return Stored::Busy,
             },
@@ -561,6 +567,10 @@ pub async fn run(
             &s.db_jobs
         }),
         db_jobs_per_group: db_jobs_per_group(config.max_db_jobs),
+        db_jobs_per_prefix: config.max_db_jobs_per_prefix.map_or_else(
+            || db_jobs_per_prefix(config.max_db_jobs),
+            |n| u32::try_from(n.max(1)).unwrap_or(u32::MAX),
+        ),
         responses: Budget::new(
             config.max_response_bytes_in_flight,
             Arc::clone(&config.stats),
@@ -990,6 +1000,11 @@ pub fn fetch_cost(mailboxes: usize) -> u32 {
 /// Part de la file de base d'un groupe d'adresses : 1/16, au moins 1.
 pub fn db_jobs_per_group(max_db_jobs: usize) -> u32 {
     u32::try_from((max_db_jobs / 16).max(1)).unwrap_or(u32::MAX)
+}
+
+/// Part de la file de base d'un /48 ou /24 : 1/8, au moins 1.
+pub fn db_jobs_per_prefix(max_db_jobs: usize) -> u32 {
+    u32::try_from((max_db_jobs / 8).max(1)).unwrap_or(u32::MAX)
 }
 
 /// Traite une requête après `Hello`.

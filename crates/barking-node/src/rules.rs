@@ -37,7 +37,7 @@ const POW_STEP_PACKETS: i64 = 64;
 pub const MAX_EXPIRY_SECS: u64 = 7 * 86_400 + 3_600;
 /// Nombre maximal de boîtes par relève.
 pub const MAX_MAILBOXES_PER_FETCH: usize = 64;
-const ACK_BASE: u64 = 1 << 62;
+const ACK_BASE: u64 = barking_proto::ACK_CURSOR_BASE;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {

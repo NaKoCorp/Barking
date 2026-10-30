@@ -41,6 +41,9 @@ pow_bits = 18
 
 # Opérations de base simultanées ou en attente (défaut 64). Au-delà : RateLimited.
 # max_db_jobs = 64
+# Part de cette file par /64 ou /32 : max_db_jobs / 16 ; par /48 ou /24 :
+# max_db_jobs / 8 par défaut, réglable :
+# max_db_jobs_per_prefix = 8
 # Petit appareil : max_db_jobs = 16
 
 # Débit minimal attendu d'un lecteur, en octets/s (défaut 32 Kio/s). Il allonge
