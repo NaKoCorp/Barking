@@ -1612,6 +1612,60 @@ fn card_update(from: &mut Core, to: Fingerprint, card: ContactCard, rng: &mut St
 }
 
 #[test]
+fn trapped_card_does_not_block_receive() {
+    // Bob signe une carte qui ajoute un appareil dont la préclé signée est
+    // d'ordre faible ([0; 32]). Alice, liée (carte stockée), lui enverrait sa
+    // carte : le scellement échoue pour cet appareil, qui est ignoré.
+    let (_dir, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    let bob_root = b.root.take().unwrap();
+    let trap = DeviceKeys::generate(&mut rng);
+    let mut bundle = PrekeySecrets::generate(&mut rng, 0).bundle(&trap, false);
+    bundle.spk = [0; 32];
+    bundle.sig = trap.sign(crate::crypto::labels::PREKEYS, &bundle.signed_bytes());
+    let mut certs = b.devices.certs.clone();
+    certs.push(DeviceCertificate::issue(&bob_root, &trap, "piège", NOW).unwrap());
+    let list = DeviceList::sign(&bob_root, b.devices.version + 1, certs).unwrap();
+    let bundles = vec![b.prekeys.bundle(&b.device, false), bundle];
+    let card = ContactCard::sign(&bob_root, "Bob", list, bundles).unwrap();
+    b.root = Some(bob_root);
+    let a_id = a.device.public().id();
+    let body = Body::CardUpdate(Box::new(card));
+    let p = seal_body(
+        &mut b,
+        &send::Target::Contact(alice),
+        &body,
+        MessageId([90; 16]),
+        &mut rng,
+    )
+    .into_iter()
+    .find(|(_, d)| *d == a_id)
+    .unwrap()
+    .0;
+    let r = a.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::CardUpdated { .. }), "{r:?}");
+    assert_eq!(stored_card(&a, bob).devices.certs.len(), 2);
+    assert!(a.store.is_seen(p.id).unwrap());
+    let again = a.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(again, ReceiveOutcome::Duplicate), "{again:?}");
+    // Alice écrit encore à Bob : son appareil valide reçoit (l'appareil
+    // piégé est ignoré), plus la copie pour T.
+    let pkts = a.send_text(&bob, "toujours là", NOW, &mut rng).unwrap();
+    assert_eq!(pkts.len(), 2);
+    let opened = pkts
+        .iter()
+        .filter(|p| {
+            matches!(
+                b.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
+                ReceiveOutcome::Message { ref text, .. } if text == "toujours là"
+            )
+        })
+        .count();
+    assert_eq!(opened, 1);
+}
+
+#[test]
 fn card_update_wrong_root_or_older_ignored() {
     let (dir, mut a, _t, mut b, v1, mut rng) = alice_tablet_bob();
     let alice = a.fingerprint();

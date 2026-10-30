@@ -58,7 +58,12 @@ fn new_message_id(rng: &mut impl CryptoRng) -> MessageId {
 /// appareil, tous porteurs de `message_id`. Sessions (nouvelles ou avancées),
 /// file d'envoi et journal sont écrits dans `q` ; c'est à l'appelant
 /// d'enregistrer le message lui-même. Un appareil sans session ni paquet de
-/// clés est ignoré (injoignable pour l'instant).
+/// clés est ignoré (injoignable pour l'instant), de même qu'un appareil dont
+/// les clés publiques font échouer la poignée de main ou le scellement
+/// (préclé d'ordre faible, clé ML-KEM invalide, signées par le contact
+/// lui-même) : une carte piégée ne doit faire échouer ni l'envoi à ses
+/// autres appareils, ni la réception qui la fait connaître. Seules les
+/// erreurs du stockage sont propagées.
 pub(super) fn seal_for(
     q: &impl Queries,
     device: &DeviceKeys,
@@ -105,18 +110,25 @@ pub(super) fn seal_for(
         let chosen = sessions
             .into_iter()
             .max_by_key(|s| (s.last_rx, s.created_at));
-        let (mut row, mut ratchet, init) = match chosen {
+        let (mut row, mut ratchet, init, opened_here) = match chosen {
             Some(row) => {
                 let ratchet = de_state(&row.state)?;
                 let init = row.pending_initial.as_deref().map(de_init).transpose()?;
-                (row, ratchet, init)
+                (row, ratchet, init, false)
             }
             None => {
                 let Some(bundle) = bundle else {
                     continue;
                 };
-                let (secrets, init) = pqxdh::initiate(device, &bundle, rng)?;
-                let ratchet = RatchetState::init_initiator(&secrets.sk, bundle.spk, rng)?;
+                let opened = pqxdh::initiate(device, &bundle, rng).and_then(|(secrets, init)| {
+                    let ratchet = RatchetState::init_initiator(&secrets.sk, bundle.spk, rng)?;
+                    Ok((secrets, init, ratchet))
+                });
+                let (secrets, init, ratchet) = match opened {
+                    Ok(v) => v,
+                    Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => return Err(e),
+                    Err(_) => continue,
+                };
                 let row = SessionRow {
                     contact_device: peer_id,
                     contact_fp: fp,
@@ -128,18 +140,7 @@ pub(super) fn seal_for(
                     last_rx: 0,
                     created_at: now,
                 };
-                log(
-                    q,
-                    now,
-                    None,
-                    &TransparencyEvent::SessionEstablished {
-                        contact: fp,
-                        device: peer_id,
-                        initiator: true,
-                        post_quantum: true,
-                    },
-                )?;
-                (row, ratchet, Some(init))
+                (row, ratchet, Some(init), true)
             }
         };
         let first_contact = init.is_some();
@@ -154,7 +155,7 @@ pub(super) fn seal_for(
             message_id: message_id.0,
             body: body.clone(),
         };
-        let packet = envelope::seal(
+        let packet = match envelope::seal(
             &env,
             &mut ratchet,
             &row.ad,
@@ -162,7 +163,26 @@ pub(super) fn seal_for(
             mailbox,
             now,
             rng,
-        )?;
+        ) {
+            Ok(p) => p,
+            Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => return Err(e),
+            // Rien n'a été écrit pour cet appareil.
+            Err(_) => continue,
+        };
+        // Session ouverte par ce scellement : journalisée une fois scellée.
+        if opened_here {
+            log(
+                q,
+                now,
+                None,
+                &TransparencyEvent::SessionEstablished {
+                    contact: fp,
+                    device: peer_id,
+                    initiator: true,
+                    post_quantum: true,
+                },
+            )?;
+        }
         row.state = ser_state(&ratchet)?;
         q.put_session(&row)?;
         q.outbox_put(
