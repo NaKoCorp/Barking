@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use barking_packet::{Kind, MailboxId, Packet};
+use ed25519_dalek::SigningKey;
 use quinn::{Connection, Endpoint};
 use tokio::time::timeout;
 
@@ -154,11 +155,7 @@ pub async fn open_connection(addr: SocketAddr, expected: NodeId) -> Result<(Endp
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls::client_config(expected))
         .map_err(|e| ClientError::Connect(e.to_string()))?;
     let mut cfg = quinn::ClientConfig::new(Arc::new(crypto));
-    let mut transport = quinn::TransportConfig::default();
-    transport
-        .max_concurrent_bidi_streams(0u32.into())
-        .max_concurrent_uni_streams(0u32.into());
-    cfg.transport_config(Arc::new(transport));
+    cfg.transport_config(Arc::new(no_incoming_streams()));
     endpoint.set_default_client_config(cfg);
     let connecting = endpoint
         .connect(addr, tls::CERT_NAME)
@@ -195,54 +192,106 @@ impl Client {
     /// `Hello` et vérifie la version et les paramètres annoncés.
     pub async fn connect(addr: SocketAddr, expected: NodeId) -> Result<Session> {
         let (endpoint, conn) = open_connection(addr, expected).await?;
-        let hello = Request::Hello {
-            version: PROTOCOL_VERSION,
-            min_version: MIN_PROTOCOL_VERSION,
-        };
-        match request(&conn, &hello).await? {
-            Response::Hello {
-                version,
-                min_version,
-                node_id,
-                pow_bits,
-                limits,
-            } => {
-                if node_id != expected {
-                    return Err(ClientError::Protocol("identifiant annoncé différent"));
-                }
-                if min_version > version {
-                    return Err(ClientError::Protocol("versions annoncées incohérentes"));
-                }
-                if !crate::versions_overlap(
-                    min_version,
-                    version,
-                    MIN_PROTOCOL_VERSION,
-                    PROTOCOL_VERSION,
-                ) {
-                    return Err(ClientError::Version);
-                }
-                if pow_bits > pow::MAX_POW_BITS {
-                    return Err(ClientError::Protocol("preuve de travail exigée trop forte"));
-                }
-                if limits.max_mailboxes_per_fetch == 0 {
-                    return Err(ClientError::Protocol("limite de relève nulle"));
-                }
-                Ok(Session {
-                    endpoint,
-                    conn,
-                    node_id,
-                    pow_bits,
-                    limits,
-                    truncated: false,
-                    pow_budget: None,
-                    pow_spent: 0,
-                    fetch_deadline: FETCH_DEADLINE,
-                })
+        let (pow_bits, limits) = hello(&conn, expected).await?;
+        Ok(Session {
+            endpoint,
+            conn,
+            node_id: expected,
+            pow_bits,
+            limits,
+            truncated: false,
+            pow_budget: None,
+            pow_spent: 0,
+            fetch_deadline: FETCH_DEADLINE,
+        })
+    }
+}
+
+/// Se connecte depuis l'endpoint d'un nœud : identité du serveur épinglée sur
+/// `expected`, certificat client de `key`, puis `Hello` et vérification de la
+/// version comme `Client::connect`. Les requêtes passent ensuite par
+/// `request(&conn, &req)`.
+pub async fn connect_peer(
+    endpoint: &Endpoint,
+    addr: SocketAddr,
+    expected: NodeId,
+    key: &SigningKey,
+) -> Result<Connection> {
+    let crypto =
+        quinn::crypto::rustls::QuicClientConfig::try_from(tls::node_client_config(expected, key))
+            .map_err(|e| ClientError::Connect(e.to_string()))?;
+    let mut cfg = quinn::ClientConfig::new(Arc::new(crypto));
+    cfg.transport_config(Arc::new(no_incoming_streams()));
+    let connecting = endpoint
+        .connect_with(cfg, addr, tls::CERT_NAME)
+        .map_err(|e| ClientError::Connect(e.to_string()))?;
+    let conn = timeout(CONNECT_TIMEOUT, connecting)
+        .await
+        .map_err(|_| ClientError::Timeout)?
+        .map_err(|e| ClientError::Connect(e.to_string()))?;
+    // TLS 1.3 : le serveur juge le certificat client après la fin de la
+    // poignée de main du client ; son refus n'apparaît qu'au premier flux,
+    // sous forme d'une connexion fermée (erreur de flux ou de connexion selon
+    // le moment). Une connexion fermée pendant `Hello` est donc un échec de
+    // connexion.
+    match hello(&conn, expected).await {
+        Ok(_) => Ok(conn),
+        Err(e) => match conn.close_reason() {
+            Some(reason) => Err(ClientError::Connect(reason.to_string())),
+            None => Err(e),
+        },
+    }
+}
+
+/// Transport d'un appelant : le serveur n'ouvre aucun flux vers lui.
+fn no_incoming_streams() -> quinn::TransportConfig {
+    let mut transport = quinn::TransportConfig::default();
+    transport
+        .max_concurrent_bidi_streams(0u32.into())
+        .max_concurrent_uni_streams(0u32.into());
+    transport
+}
+
+/// Envoie `Hello` et vérifie la version et les paramètres annoncés ; rend la
+/// difficulté de base et les limites du nœud.
+async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits)> {
+    let hello = Request::Hello {
+        version: PROTOCOL_VERSION,
+        min_version: MIN_PROTOCOL_VERSION,
+    };
+    match request(conn, &hello).await? {
+        Response::Hello {
+            version,
+            min_version,
+            node_id,
+            pow_bits,
+            limits,
+        } => {
+            if node_id != expected {
+                return Err(ClientError::Protocol("identifiant annoncé différent"));
             }
-            Response::Error(ErrorReason::VersionTooOld) => Err(ClientError::Version),
-            Response::Error(r) => Err(ClientError::Refused(r)),
-            _ => Err(ClientError::Protocol("réponse inattendue à Hello")),
+            if min_version > version {
+                return Err(ClientError::Protocol("versions annoncées incohérentes"));
+            }
+            if !crate::versions_overlap(
+                min_version,
+                version,
+                MIN_PROTOCOL_VERSION,
+                PROTOCOL_VERSION,
+            ) {
+                return Err(ClientError::Version);
+            }
+            if pow_bits > pow::MAX_POW_BITS {
+                return Err(ClientError::Protocol("preuve de travail exigée trop forte"));
+            }
+            if limits.max_mailboxes_per_fetch == 0 {
+                return Err(ClientError::Protocol("limite de relève nulle"));
+            }
+            Ok((pow_bits, limits))
         }
+        Response::Error(ErrorReason::VersionTooOld) => Err(ClientError::Version),
+        Response::Error(r) => Err(ClientError::Refused(r)),
+        _ => Err(ClientError::Protocol("réponse inattendue à Hello")),
     }
 }
 

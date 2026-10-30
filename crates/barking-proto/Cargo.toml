@@ -21,4 +21,4 @@ tokio = { workspace = true, features = ["io-util", "time", "rt"] }
 
 [dev-dependencies]
 rand.workspace = true
-tokio = { workspace = true, features = ["io-util", "rt", "rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }

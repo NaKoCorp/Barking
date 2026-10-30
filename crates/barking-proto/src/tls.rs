@@ -6,7 +6,9 @@
 //!   identifiant résout le puzzle. La signature de la poignée de main TLS est
 //!   vérifiée avec cette même clé : un certificat copié sans la clé privée est
 //!   refusé.
-//! - Le client ne présente aucun certificat et n'envoie pas de SNI.
+//! - Le client n'envoie pas de SNI. Un client anonyme ne présente aucun
+//!   certificat ; un nœud appelant présente le sien (autosigné, Ed25519, clé
+//!   qui résout le puzzle), que le serveur accepte sans l'exiger.
 //!
 //! Fournisseur cryptographique : `ring` (pas d'aws-lc : ni cmake ni NASM, build
 //! musl et reproductible plus simple). Le même fournisseur sert au client et
@@ -15,9 +17,11 @@
 use std::sync::Arc;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use rustls::DistinguishedName;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{CertificateError, DigitallySignedStruct, SignatureScheme};
 use zeroize::Zeroizing;
 
@@ -70,15 +74,15 @@ pub fn self_signed_cert(key: &SigningKey) -> CertificateDer<'static> {
         .clone()
 }
 
-/// Configuration TLS du nœud : TLS 1.3 seul, ALPN `barking/0`, pas de
-/// certificat client.
+/// Configuration TLS du nœud : TLS 1.3 seul, ALPN `barking/0`, certificat
+/// client optionnel (un nœud appelant peut s'identifier, un client non).
 pub fn server_config(key: &SigningKey) -> rustls::ServerConfig {
     let cert = self_signed_cert(key);
     let der = pkcs8_der(key);
     let mut cfg = rustls::ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("TLS 1.3 pris en charge par ring")
-        .with_no_client_auth()
+        .with_client_cert_verifier(Arc::new(PeerNode))
         .with_single_cert(
             vec![cert],
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der.to_vec())),
@@ -106,6 +110,37 @@ pub fn client_config(expected: NodeId) -> rustls::ClientConfig {
     cfg.alpn_protocols = vec![ALPN.to_vec()];
     cfg.enable_sni = false;
     cfg
+}
+
+/// Configuration TLS d'un nœud appelant : même épinglage que `client_config`,
+/// plus le certificat autosigné de `key` pour s'identifier auprès du serveur.
+pub fn node_client_config(expected: NodeId, key: &SigningKey) -> rustls::ClientConfig {
+    let der = pkcs8_der(key);
+    let mut cfg = rustls::ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 pris en charge par ring")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedNode { expected }))
+        .with_client_auth_cert(
+            vec![self_signed_cert(key)],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der.to_vec())),
+        )
+        .expect("certificat et clé cohérents");
+    cfg.alpn_protocols = vec![ALPN.to_vec()];
+    cfg.enable_sni = false;
+    cfg
+}
+
+/// Identifiant du nœud appelant, si la connexion porte un certificat client
+/// (déjà validé par la poignée de main) dont la clé résout le puzzle.
+pub fn peer_node_id(conn: &quinn::Connection) -> Option<NodeId> {
+    let identity = conn.peer_identity()?;
+    let certs = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
+    let [cert] = certs.as_slice() else {
+        return None;
+    };
+    let id = NodeId::from_public_key(&node_key_from_cert(cert)?);
+    id.puzzle_ok().then_some(id)
 }
 
 /// Clé Ed25519 portée par un certificat, si c'en est une.
@@ -163,6 +198,66 @@ impl ServerCertVerifier for PinnedNode {
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
         // `cert` est le certificat déjà accepté par `verify_server_cert` :
         // la signature est vérifiée avec la clé épinglée.
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &ED25519_ONLY)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+}
+
+/// Vérificateur de certificat client : optionnel, mais s'il est présenté,
+/// Ed25519 seul, clé qui résout le puzzle, signature TLS vérifiée.
+#[derive(Debug)]
+struct PeerNode;
+
+impl ClientCertVerifier for PeerNode {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        // Aucune autorité : pas d'indice à envoyer.
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        if !intermediates.is_empty() {
+            return Err(CertificateError::ApplicationVerificationFailure.into());
+        }
+        let key = node_key_from_cert(end_entity).ok_or(CertificateError::BadEncoding)?;
+        if !NodeId::from_public_key(&key).puzzle_ok() {
+            return Err(CertificateError::ApplicationVerificationFailure.into());
+        }
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOffered,
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls13_signature(message, cert, dss, &ED25519_ONLY)
     }
 
