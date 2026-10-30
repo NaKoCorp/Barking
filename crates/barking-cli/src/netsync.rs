@@ -12,20 +12,24 @@
 //! `RateLimited` sur une relève la rend partielle, sans faire échouer le nœud.
 //!
 //! **Dépôts**, après la relève : accusés d'abord (sans preuve de travail),
-//! puis les paquets jamais déposés sur ce nœud, puis les anciens. Un paquet
-//! déjà accepté (ou refusé) par ce nœud n'y est redéposé qu'au bout de
-//! `REDEPOSIT_AFTER_SECS`. Budget de preuve épuisé : les paquets à preuve
+//! puis les paquets jamais déposés sur ce nœud, puis les anciens. Après une
+//! issue sur un nœud, un paquet n'y est redéposé qu'au bout d'un délai
+//! (`retry_after`) : 24 h s'il a été accepté (ou refusé pour de bon), 10 min
+//! si le nœud ou la boîte était plein, 1 h pour un accusé arrivé avant son
+//! paquet. Budget de preuve épuisé : les paquets à preuve
 //! restants attendent, les autres partent. `RateLimited` : arrêt des dépôts
 //! sur ce nœud pour cette synchronisation, sans échec.
 //!
-//! Positions et dépôts sont gardés dans `<home>/sync_state.toml` (0600).
+//! Positions et dépôts sont gardés dans la base chiffrée du cœur
+//! (`Core::transport_state`), jamais en clair : ils contiennent des
+//! identifiants de boîtes et de paquets. Un ancien fichier en clair
+//! (`sync_state.toml`, `fetch_cursors.toml`) est migré puis effacé.
 //! Chaque nœud a `SYNC_NODE_DEADLINE` ; toute la synchronisation dispose de
 //! `SYNC_POW_BUDGET` essais de preuve de travail.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -48,10 +52,22 @@ pub const SYNC_NODE_DEADLINE: Duration = Duration::from_secs(180);
 /// 1 000 dépôts à 18 bits, 16 à 24 bits.
 pub const SYNC_POW_BUDGET: u64 = 1 << 28;
 /// Délai avant de redéposer sur un nœud un paquet qu'il a déjà accepté ou
-/// refusé (au cas où il l'aurait perdu).
+/// refusé pour de bon (au cas où il l'aurait perdu).
 pub const REDEPOSIT_AFTER_SECS: u64 = 86_400;
+/// Délai après un refus `NodeFull` ou `MailboxFull` (la place peut revenir).
+pub const FULL_RETRY_SECS: u64 = 600;
+/// Délai après un accusé arrivé avant son paquet (`UnknownAckTarget`).
+pub const DEFERRED_ACK_RETRY_SECS: u64 = 3_600;
+/// Part de `SYNC_NODE_DEADLINE` pour la relève des sessions.
+pub const SESSION_FETCH_SLICE: Duration = Duration::from_secs(90);
+/// Part de `SYNC_NODE_DEADLINE` pour la relève des introductions : au-delà,
+/// relève partielle, sans échec du nœud.
+pub const INTRO_FETCH_SLICE: Duration = Duration::from_secs(45);
 
-const STATE_FILE: &str = "sync_state.toml";
+/// Clé de l'état dans la base du cœur.
+const STATE_KEY: &str = "netsync";
+/// Anciens fichiers d'état en clair (migrés puis effacés).
+const LEGACY_FILES: [&str; 2] = ["sync_state.toml", "fetch_cursors.toml"];
 
 /// Ce qui s'est passé avec un nœud, même s'il a échoué en route.
 #[derive(Default)]
@@ -111,11 +127,13 @@ struct Seen {
     seq: u64,
 }
 
-/// Paquet déposé (accepté ou refusé) sur un nœud, à l'instant `at`.
+/// Paquet déposé (accepté, refusé ou différé) sur un nœud : pas de nouveau
+/// dépôt avant `until`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Deposited {
     id: String,
-    at: u64,
+    #[serde(alias = "at")]
+    until: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,33 +181,63 @@ struct StateFile {
     nodes: Vec<NodeState>,
 }
 
-/// État gardé ; fichier absent ou illisible : depuis le début.
-fn load_state(home: &Path) -> Vec<NodeState> {
-    fs::read_to_string(home.join(STATE_FILE))
-        .ok()
-        .and_then(|t| toml::from_str::<StateFile>(&t).ok())
-        .map(|f| f.nodes)
-        .unwrap_or_default()
+/// État gardé dans la base ; absent ou illisible : depuis le début. Un
+/// ancien fichier en clair est d'abord migré (si la base n'a pas d'état),
+/// puis écrasé de zéros et effacé.
+fn load_state(home: &Path, core: &mut Core) -> CliResult<Vec<NodeState>> {
+    let parse = |t: &str| toml::from_str::<StateFile>(t).ok().map(|f| f.nodes);
+    let mut nodes = core
+        .transport_state(STATE_KEY)?
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|t| parse(&t));
+    for name in LEGACY_FILES {
+        let path = home.join(name);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if nodes.is_none() {
+            nodes = parse(&text);
+            if let Some(n) = &nodes {
+                save_state(core, n)?;
+            }
+        }
+        wipe(&path);
+    }
+    Ok(nodes.unwrap_or_default())
 }
 
-/// Écrit l'état (0600, remplacement atomique).
-fn save_state(home: &Path, nodes: &[NodeState]) -> CliResult<()> {
+/// Écrase un fichier de zéros puis l'efface (au mieux).
+fn wipe(path: &Path) {
+    if let Ok(meta) = fs::metadata(path)
+        && let Ok(mut f) = fs::OpenOptions::new().write(true).open(path)
+    {
+        let len = usize::try_from(meta.len()).unwrap_or(0);
+        let _ = f.write_all(&vec![0u8; len]);
+        let _ = f.sync_all();
+    }
+    let _ = fs::remove_file(path);
+}
+
+/// Écrit l'état dans la base chiffrée du cœur.
+fn save_state(core: &mut Core, nodes: &[NodeState]) -> CliResult<()> {
     let text = toml::to_string(&StateFile {
         nodes: nodes.to_vec(),
     })
     .map_err(|_| CliError("Erreur : écriture de l'état de synchronisation impossible".into()))?;
-    let tmp = home.join(format!("{STATE_FILE}.tmp"));
-    let _ = fs::remove_file(&tmp);
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.write_all(text.as_bytes())?;
-    f.sync_all()?;
-    drop(f);
-    fs::rename(&tmp, home.join(STATE_FILE))?;
+    core.set_transport_state(STATE_KEY, text.as_bytes())?;
     Ok(())
+}
+
+fn intro_slice() -> Duration {
+    // Réglable dans les builds de test seulement.
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("BARKING_TEST_INTRO_SLICE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    INTRO_FETCH_SLICE
 }
 
 fn pow_budget() -> u64 {
@@ -213,7 +261,7 @@ pub fn sync(home: &Path) -> CliResult<()> {
     }
     let mut core = open_core(home)?;
     // État des seuls nœuds configurés.
-    let mut state: Vec<NodeState> = load_state(home)
+    let mut state: Vec<NodeState> = load_state(home, &mut core)?
         .into_iter()
         .filter(|c| nodes.iter().any(|n| n.id == c.id))
         .collect();
@@ -247,7 +295,7 @@ pub fn sync(home: &Path) -> CliResult<()> {
         ));
         pow_left = pow_left.saturating_sub(report.pow_spent);
         log_report(&mut core, &short, &report)?;
-        save_state(home, &state)?;
+        save_state(&mut core, &state)?;
         match result {
             Ok(()) => {
                 ok_nodes += 1;
@@ -336,19 +384,28 @@ struct Planned {
     ack: bool,
 }
 
+/// Délai avant un nouveau dépôt sur ce nœud, selon l'issue du dernier.
+fn retry_after(tally: &DepositTally, result: &Result<(), ErrorReason>) -> u64 {
+    match (tally, result) {
+        (DepositTally::Deferred, _) => DEFERRED_ACK_RETRY_SECS,
+        (_, Err(ErrorReason::NodeFull | ErrorReason::MailboxFull)) => FULL_RETRY_SECS,
+        _ => REDEPOSIT_AFTER_SECS,
+    }
+}
+
 /// Ordre des dépôts sur un nœud : accusés, paquets jamais déposés ici, puis
-/// anciens dépôts à refaire ; ce qui a été déposé il y a moins de
-/// `REDEPOSIT_AFTER_SECS` est écarté (compté dans le second terme).
+/// anciens dépôts à refaire ; ce dont le délai (`retry_after`) court encore
+/// est écarté (compté dans le second terme).
 fn plan_deposits(outbox: Vec<Vec<u8>>, deposited: &[Deposited], now: u64) -> (Vec<Planned>, u32) {
-    let at: HashMap<&str, u64> = deposited.iter().map(|d| (d.id.as_str(), d.at)).collect();
+    let until: HashMap<&str, u64> = deposited.iter().map(|d| (d.id.as_str(), d.until)).collect();
     let (mut acks, mut new, mut old) = (Vec::new(), Vec::new(), Vec::new());
     let mut skipped = 0;
     for bytes in outbox {
         let p = Packet::decode(&bytes).ok();
         let id = p.as_ref().map(|p| data_encoding::HEXLOWER.encode(&p.id.0));
         let ack = p.as_ref().is_some_and(|p| p.kind == Kind::Ack);
-        let last = id.as_deref().and_then(|i| at.get(i).copied());
-        if last.is_some_and(|t| now.saturating_sub(t) < REDEPOSIT_AFTER_SECS) {
+        let last = id.as_deref().and_then(|i| until.get(i).copied());
+        if last.is_some_and(|t| now < t) {
             skipped += 1;
             continue;
         }
@@ -396,16 +453,17 @@ async fn deposit_all(
                 return;
             }
         };
-        match tally(item.ack, &result) {
+        let t = tally(item.ack, &result);
+        match t {
             DepositTally::Deposited => report.deposited += 1,
             DepositTally::Refused => report.refused += 1,
-            DepositTally::Deferred => continue,
+            DepositTally::Deferred => {}
         }
         if let Some(id) = &item.id {
             deposited.retain(|d| &d.id != id);
             deposited.push(Deposited {
                 id: id.clone(),
-                at: now(),
+                until: now().saturating_add(retry_after(&t, &result)),
             });
         }
     }
@@ -444,10 +502,13 @@ async fn fetch_group(
     mailboxes: &[MailboxId],
     resume: &mut FetchResume,
     max_bytes: usize,
+    slice: Duration,
 ) -> Result<Fetched, ClientError> {
     if mailboxes.is_empty() {
         return Ok(Fetched::Items(Vec::new(), true));
     }
+    // Le temps écoulé rend la relève partielle, avec ce qui a été pris.
+    session.set_fetch_deadline(slice);
     match session.fetch_resumable(mailboxes, resume, max_bytes).await {
         Ok(items) => Ok(Fetched::Items(items, !session.last_fetch_truncated())),
         Err(ClientError::Refused(ErrorReason::RateLimited)) => Ok(Fetched::RateLimited),
@@ -481,9 +542,15 @@ async fn sync_node(
         let mut limited = false;
 
         let mut resume = to_resume(&state.sessions);
-        match fetch_group(&mut session, &groups.sessions, &mut resume, MAX_FETCH_BYTES)
-            .await
-            .map_err(|e| e.to_string())?
+        match fetch_group(
+            &mut session,
+            &groups.sessions,
+            &mut resume,
+            MAX_FETCH_BYTES,
+            SESSION_FETCH_SLICE,
+        )
+        .await
+        .map_err(|e| e.to_string())?
         {
             Fetched::Items(items, complete) => {
                 report.truncated = !complete;
@@ -505,7 +572,14 @@ async fn sync_node(
         let intro = if limited {
             Ok(Fetched::RateLimited)
         } else {
-            fetch_group(&mut session, &groups.intro, &mut resume, INTRO_FETCH_BYTES).await
+            fetch_group(
+                &mut session,
+                &groups.intro,
+                &mut resume,
+                INTRO_FETCH_BYTES,
+                intro_slice(),
+            )
+            .await
         };
         match intro {
             Ok(Fetched::Items(items, complete)) => {
@@ -656,15 +730,15 @@ mod tests {
         let done = vec![
             Deposited {
                 id: hex(1),
-                at: now - REDEPOSIT_AFTER_SECS,
+                until: now,
             },
             Deposited {
                 id: hex(2),
-                at: now - 10,
+                until: now + 10,
             },
             Deposited {
                 id: hex(5),
-                at: now - 10,
+                until: now + 10,
             },
         ];
         let (plan, skipped) = plan_deposits(outbox, &done, now);
@@ -672,6 +746,26 @@ mod tests {
         let ids: Vec<String> = plan.iter().map(|p| p.id.clone().unwrap()).collect();
         assert_eq!(ids, vec![hex(3), hex(4), hex(1)]);
         assert!(plan[0].ack && !plan[1].ack);
+    }
+
+    #[test]
+    fn backoff_by_outcome() {
+        let ok = Ok(());
+        let full = Err(ErrorReason::NodeFull);
+        let mfull = Err(ErrorReason::MailboxFull);
+        let bad = Err(ErrorReason::Malformed);
+        let early = Err(ErrorReason::UnknownAckTarget);
+        let r = |ack, res: &Result<(), ErrorReason>| retry_after(&tally(ack, res), res);
+        assert_eq!(r(false, &ok), REDEPOSIT_AFTER_SECS);
+        assert_eq!(r(true, &ok), REDEPOSIT_AFTER_SECS);
+        assert_eq!(r(false, &full), FULL_RETRY_SECS);
+        assert_eq!(r(false, &mfull), FULL_RETRY_SECS);
+        assert_eq!(r(false, &bad), REDEPOSIT_AFTER_SECS);
+        assert_eq!(r(true, &early), DEFERRED_ACK_RETRY_SECS);
+        assert_eq!((FULL_RETRY_SECS, DEFERRED_ACK_RETRY_SECS), (600, 3_600));
+        // Ancien format (`at`) relu comme échéance.
+        let d: Deposited = toml::from_str("id = \"x\"\nat = 5").unwrap();
+        assert_eq!(d.until, 5);
     }
 
     #[test]

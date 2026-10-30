@@ -888,6 +888,37 @@ mod node {
         );
     }
 
+    /// Aucun fichier sous `home` ne contient ces identifiants (octets bruts,
+    /// hex ou base32).
+    fn assert_no_ids_in(home: &Path, ids: &[[u8; 16]]) {
+        let mut stack = vec![home.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let bytes = fs::read(&p).unwrap();
+                let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+                for id in ids {
+                    let forms = [
+                        data_encoding::HEXLOWER.encode(id),
+                        data_encoding::BASE32_NOPAD.encode(id).to_ascii_lowercase(),
+                    ];
+                    for f in &forms {
+                        assert!(!text.contains(f.as_str()), "{} contient {f}", p.display());
+                    }
+                    assert!(
+                        !bytes.windows(16).any(|w| w == id),
+                        "{} contient un identifiant brut",
+                        p.display()
+                    );
+                }
+            }
+        }
+    }
+
     /// Nombre d'éléments reçus annoncé pour le nœud dans la sortie de `sync`.
     fn received(out: &str) -> usize {
         let line = out.lines().find(|l| l.contains("éléments reçus")).unwrap();
@@ -966,16 +997,13 @@ mod node {
         assert!(s1.contains("Relève enregistrée"), "{s1}");
         let r1 = received(&s1);
         assert!(r1 < JUNK as usize, "{r1}");
-        let cursors = fs::read_to_string(b.join("sync_state.toml")).unwrap();
-        assert!(cursors.contains(&node.id), "{cursors}");
-        assert_eq!(
-            fs::metadata(b.join("sync_state.toml"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+        // L'état de synchronisation (positions, dépôts) est dans la base
+        // chiffrée : aucun identifiant de boîte ou de paquet en clair.
+        let sent = Packet::decode(&fs::read(packets(&out2).remove(0)).unwrap()).unwrap();
+        let first_id = Packet::decode(&fs::read(&first).unwrap()).unwrap().id;
+        let ids = [intro.0, sent.mailbox.0, sent.id.0, first_id.0];
+        assert_no_ids_in(&a, &ids);
+        assert_no_ids_in(&b, &ids);
 
         // La synchronisation suivante reprend au curseur : le reste seulement.
         let s2 = ok(&b, &["sync"]);
@@ -1075,6 +1103,68 @@ mod node {
         let st = node.stats();
         assert_eq!((st.packets, st.acks), (0, 1));
         assert!(ok(&a, &["sync"]).contains("livré"));
+    }
+
+    /// Un ancien fichier d'état en clair est migré dans la base puis effacé.
+    #[test]
+    fn legacy_plaintext_state_is_migrated_and_removed() {
+        let node = TestNode::start(0);
+        let (_d, home) = party("tel");
+        node_add(&home, node.addr, &node.id);
+        let legacy = format!(
+            "[[node]]\nid = \"{}\"\n[[node.deposited]]\nid = \"{}\"\nat = 1\n",
+            node.id,
+            "ab".repeat(16)
+        );
+        fs::write(home.join("sync_state.toml"), &legacy).unwrap();
+        fs::write(home.join("fetch_cursors.toml"), "[[node]]\nid = \"x\"\n").unwrap();
+        assert!(ok(&home, &["sync"]).contains("Relève enregistrée"));
+        assert!(!home.join("sync_state.toml").exists());
+        assert!(!home.join("fetch_cursors.toml").exists());
+        assert_no_ids_in(&home, &[[0xab; 16]]);
+    }
+
+    /// La relève des introductions a sa propre part du délai : dépassée, elle
+    /// est partielle, sans empêcher sessions, dépôts ni `mark_polled`.
+    #[test]
+    fn intro_fetch_overrun_is_partial_not_failure() {
+        let node = TestNode::start(0);
+        let ((da, a), (db, b)) = pair();
+        node_add(&a, node.addr, &node.id);
+        node_add(&b, node.addr, &node.id);
+        // Session établie par fichiers.
+        let out_a = da.path().join("out");
+        ok(&a, &["send", "bob", "ouverture", "--out", path_arg(&out_a)]);
+        let first = packets(&out_a).remove(0);
+        let out_b = db.path().join("out");
+        ok(
+            &b,
+            &["receive", path_arg(&first), "--out", path_arg(&out_b)],
+        );
+        ok(&b, &["send", "alice", "retour", "--out", path_arg(&out_b)]);
+        for p in packets(&out_b) {
+            ok(&a, &["receive", path_arg(&p), "--out", path_arg(&out_a)]);
+        }
+        let out2 = da.path().join("out2");
+        ok(
+            &a,
+            &["send", "bob", "par la session", "--out", path_arg(&out2)],
+        );
+        ok(&a, &["sync"]);
+        let got = barking(&b)
+            .env("BARKING_TEST_INTRO_SLICE_MS", "0")
+            .arg("sync")
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let s = String::from_utf8(got.stdout).unwrap();
+        assert!(s.contains("[alice] par la session"), "{s}");
+        assert!(s.contains("introductions : relève partielle"), "{s}");
+        assert!(s.contains("Relève enregistrée"), "{s}");
+        // L'accusé de Bob est déposé (celui d'Alice pour « retour » attend
+        // son paquet : différé, non gardé par le nœud).
+        assert_eq!(node.stats().acks, 1);
     }
 
     #[test]
