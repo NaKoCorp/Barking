@@ -39,14 +39,20 @@ jobs:
           fi
           echo "tag $TAG : commit $commit, ancêtre de origin/main"
 
-      - name: Le tag correspond à la version de barking-cli
+      - name: Le tag correspond à la version de barking-cli et de barking-node
         env:
           TAG: ${{ github.ref_name }}
         run: |
           version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-cli/Cargo.toml | head -n1)"
           [ -n "$version" ] || { echo "version introuvable dans crates/barking-cli/Cargo.toml" >&2; exit 1; }
+          version_node="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-node/Cargo.toml | head -n1)"
+          [ -n "$version_node" ] || { echo "version introuvable dans crates/barking-node/Cargo.toml" >&2; exit 1; }
+          if [ "$version" != "$version_node" ]; then
+            echo "barking-cli ($version) et barking-node ($version_node) doivent avoir la même version" >&2
+            exit 1
+          fi
           if [ "$TAG" != "v$version" ]; then
-            echo "le tag $TAG ne correspond pas à la version v$version de crates/barking-cli/Cargo.toml" >&2
+            echo "le tag $TAG ne correspond pas à la version v$version de crates/barking-cli/Cargo.toml et crates/barking-node/Cargo.toml" >&2
             exit 1
           fi
 
@@ -137,23 +143,26 @@ jobs:
           for t in $targets; do
             a="copies/build-$t-a"; b="copies/build-$t-b"
             [ -d "$a" ] && [ -d "$b" ] || { echo "copies manquantes pour $t" >&2; exit 1; }
-            bins_a="$(cd "$a" && ls barking-cli-* 2>/dev/null || true)"
-            bins_b="$(cd "$b" && ls barking-cli-* 2>/dev/null || true)"
-            [ -n "$bins_a" ] && [ "$(printf '%s\n' "$bins_a" | wc -l)" -eq 1 ] \
-              || { echo "il faut exactement un binaire pour $t (copie a) : $bins_a" >&2; exit 1; }
-            [ "$bins_a" = "$bins_b" ] \
-              || { echo "noms de binaires différents pour $t : $bins_a / $bins_b" >&2; exit 1; }
-            case "$bins_a" in *"-$t") ;; *) echo "nom inattendu pour $t : $bins_a" >&2; exit 1 ;; esac
-            cmp "$a/$bins_a" "$b/$bins_a" \
-              || { echo "les deux copies de $t diffèrent : build non reproductible" >&2; exit 1; }
+            for prog in barking-cli barking-node; do
+              bins_a="$(cd "$a" && ls "$prog"-* 2>/dev/null || true)"
+              bins_b="$(cd "$b" && ls "$prog"-* 2>/dev/null || true)"
+              [ -n "$bins_a" ] && [ "$(printf '%s\n' "$bins_a" | wc -l)" -eq 1 ] \
+                || { echo "il faut exactement un binaire $prog pour $t (copie a) : $bins_a" >&2; exit 1; }
+              [ "$bins_a" = "$bins_b" ] \
+                || { echo "noms de binaires différents pour $t : $bins_a / $bins_b" >&2; exit 1; }
+              case "$bins_a" in *"-$t") ;; *) echo "nom inattendu pour $t : $bins_a" >&2; exit 1 ;; esac
+              cmp "$a/$bins_a" "$b/$bins_a" \
+                || { echo "les deux copies de $t diffèrent ($prog) : build non reproductible" >&2; exit 1; }
+              cp "$a/$bins_a" release/
+            done
             cmp "$a/SHA256SUMS" "$b/SHA256SUMS" \
               || { echo "les SHA256SUMS des copies de $t diffèrent" >&2; exit 1; }
             (cd "$a" && sha256sum -c SHA256SUMS)
-            cp "$a/$bins_a" release/
           done
-          chmod 755 release/barking-cli-*
-          [ "$(find release -maxdepth 1 -type f -name 'barking-cli-*' | wc -l)" -eq 3 ] || { echo "3 binaires attendus" >&2; exit 1; }
-          (cd release && sha256sum barking-cli-* | LC_ALL=C sort -k2 > SHA256SUMS && sha256sum -c SHA256SUMS)
+          chmod 755 release/barking-cli-* release/barking-node-*
+          [ "$(find release -maxdepth 1 -type f -name 'barking-cli-*' | wc -l)" -eq 3 ] || { echo "3 binaires barking-cli attendus" >&2; exit 1; }
+          [ "$(find release -maxdepth 1 -type f -name 'barking-node-*' | wc -l)" -eq 3 ] || { echo "3 binaires barking-node attendus" >&2; exit 1; }
+          (cd release && sha256sum barking-cli-* barking-node-* | LC_ALL=C sort -k2 > SHA256SUMS && sha256sum -c SHA256SUMS)
           cat release/SHA256SUMS
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -188,14 +197,16 @@ jobs:
 
       - name: Les binaires portent la version du tag
         run: |
-          for f in release/barking-cli-*; do
-            case "$f" in "release/barking-cli-${VERSION}-"*) ;; *) echo "binaire inattendu : $f" >&2; exit 1 ;; esac
+          for f in release/barking-cli-* release/barking-node-*; do
+            case "$f" in "release/barking-cli-${VERSION}-"*|"release/barking-node-${VERSION}-"*) ;; *) echo "binaire inattendu : $f" >&2; exit 1 ;; esac
           done
           (cd release && sha256sum -c SHA256SUMS)
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: release/barking-cli-*
+          subject-path: |
+            release/barking-cli-*
+            release/barking-node-*
 
       - name: Créer la version en brouillon
         env:
@@ -214,4 +225,4 @@ jobs:
           notes="Brouillon : en attente de la signature du mainteneur (\`scripts/sign-release.sh\`)."
           gh release create "$TAG" --draft --verify-tag -R "$GITHUB_REPOSITORY" \
             --title "$TAG" --notes "$notes" \
-            release/barking-cli-* release/SHA256SUMS
+            release/barking-cli-* release/barking-node-* release/SHA256SUMS

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build reproductible de barking-cli (spec §15).
+# Build reproductible de barking-cli et de barking-node (spec §15).
 # Usage : scripts/repro-build.sh [--target <triple>] [--ref <git-ref>] [--out <dir>] [--git-dir <dépôt>]
 #
 # L'environnement de build (ce script, docker/repro.Dockerfile, .xcode-version) est toujours celui du
@@ -57,10 +57,27 @@ git -C "$depot" archive --format=tar "$ref" | tar -x -C "$src"
 
 version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-cli/Cargo.toml" | head -n1)"
 [ -n "$version" ] || erreur "version introuvable dans crates/barking-cli/Cargo.toml"
+version_node="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-node/Cargo.toml" | head -n1)"
+[ -n "$version_node" ] || erreur "version introuvable dans crates/barking-node/Cargo.toml"
+[ "$version" = "$version_node" ] \
+  || erreur "barking-cli ($version) et barking-node ($version_node) doivent avoir la même version : une version publiée porte les deux binaires"
 SOURCE_DATE_EPOCH="$(git -C "$depot" log -1 --format=%ct "$ref")"
 export SOURCE_DATE_EPOCH
 
 nom="barking-cli-${version}-${cible}"
+nom_node="barking-node-${version}-${cible}"
+# Le nœud est compilé seul (cargo build -p barking-node, invocation distincte de celle de barking-cli) :
+# les features de libsqlite3-sys s'unifient dans un même build, et celles de barking-cli (SQLCipher,
+# OpenSSL) ne doivent pas entrer dans le nœud. Ce contrôle échoue si une feature SQLCipher ou OpenSSL
+# apparaît dans l'arbre de dépendances du nœud.
+# shellcheck disable=SC2016  # le script est interprété par le bash du conteneur ou de l hôte, pas ici
+controle_node='
+  arbre="$(cargo tree --locked -p barking-node -e normal,features --target "$TARGET")" || exit 1
+  if printf "%s\n" "$arbre" | grep -qiE "openssl|sqlcipher"; then
+    echo "erreur : barking-node dépend d OpenSSL ou de SQLCipher :" >&2
+    printf "%s\n" "$arbre" | grep -iE "openssl|sqlcipher" >&2
+    exit 1
+  fi'
 mkdir -p "$sortie"
 sortie="$(cd "$sortie" && pwd)"
 
@@ -98,8 +115,15 @@ if [ "$cible" = "aarch64-apple-darwin" ]; then
   # Cible de déploiement fixe : sinon cc/rustc prennent la version du macOS ou du SDK de la machine.
   export MACOSX_DEPLOYMENT_TARGET="11.0"
   # rust-toolchain.toml (dans les sources extraites) fait foi pour rustup.
-  (cd "$src" && echo "rustc : $(rustc --version)" >&2 && cargo build --release --locked -p barking-cli --target "$cible")
+  (
+    cd "$src"
+    echo "rustc : $(rustc --version)" >&2
+    cargo build --release --locked -p barking-cli --target "$cible"
+    TARGET="$cible" bash -ec "$controle_node" || exit 1
+    cargo build --release --locked -p barking-node --target "$cible"
+  ) || erreur "compilation échouée"
   cp "$CARGO_TARGET_DIR/$cible/release/barking" "$sortie/$nom"
+  cp "$CARGO_TARGET_DIR/$cible/release/barking-node" "$sortie/$nom_node"
 else
   command -v docker >/dev/null 2>&1 || erreur "docker est requis pour la cible $cible"
   empreinte_df="$(sha256_de "$racine/docker/repro.Dockerfile")"
@@ -112,27 +136,35 @@ else
   mkdir -p "$tmp/out"
   docker run --rm --platform "$plateforme" \
     -v "$src:/build" -v "$volume:/cargo" -v "$tmp/out:/out" \
-    -e SOURCE_DATE_EPOCH -e "TARGET=$cible" -e "NOM=$nom" \
+    -e SOURCE_DATE_EPOCH -e "TARGET=$cible" -e "NOM=$nom" -e "NOM_NODE=$nom_node" \
+    -e "CONTROLE_NODE=$controle_node" \
     -e CARGO_HOME=/cargo \
     -w /build "$image" bash -ec '
       export RUSTFLAGS="--remap-path-prefix=/build=/build --remap-path-prefix=$CARGO_HOME=/cargo"
       export CFLAGS="-ffile-prefix-map=/build=/build -ffile-prefix-map=$CARGO_HOME=/cargo"
       export CARGO_TARGET_DIR=/tmp/target
       cargo build --release --locked -p barking-cli --target "$TARGET"
+      bash -ec "$CONTROLE_NODE"
+      cargo build --release --locked -p barking-node --target "$TARGET"
       cp "/tmp/target/$TARGET/release/barking" "/out/$NOM"
+      cp "/tmp/target/$TARGET/release/barking-node" "/out/$NOM_NODE"
     ' || erreur "compilation échouée dans le conteneur"
   cp "$tmp/out/$nom" "$sortie/$nom"
+  cp "$tmp/out/$nom_node" "$sortie/$nom_node"
 fi
 
-chmod 755 "$sortie/$nom"
+chmod 755 "$sortie/$nom" "$sortie/$nom_node"
 somme="$(sha256_de "$sortie/$nom")"
+somme_node="$(sha256_de "$sortie/$nom_node")"
 
-# SHA256SUMS : une ligne par fichier, format sha256sum, trié par nom ; la ligne de ce fichier est remplacée.
+# SHA256SUMS : une ligne par fichier, format sha256sum, trié par nom ; les lignes de ces fichiers sont remplacées.
 sums="$sortie/SHA256SUMS"
 {
-  if [ -f "$sums" ]; then grep -v -F "  $nom" "$sums" || true; fi
+  if [ -f "$sums" ]; then grep -v -F -e "  $nom" -e "  $nom_node" "$sums" || true; fi
   printf '%s  %s\n' "$somme" "$nom"
+  printf '%s  %s\n' "$somme_node" "$nom_node"
 } | LC_ALL=C sort -k2 > "$tmp/SHA256SUMS"
 cp "$tmp/SHA256SUMS" "$sums"
 
 echo "$somme  $nom"
+echo "$somme_node  $nom_node"

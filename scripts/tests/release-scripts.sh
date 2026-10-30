@@ -55,13 +55,15 @@ compteur=0
 faire_dist() {
   mkdir -p "$1"
   for t in "$t_x86" "$t_arm" "$t_mac"; do
-    printf 'binaire factice %s\n%s\n' "$t" "$$-$compteur" > "$1/barking-cli-$version-$t"
-    chmod 755 "$1/barking-cli-$version-$t"
+    for b in barking-cli barking-node; do
+      printf 'binaire factice %s %s\n%s\n' "$b" "$t" "$$-$compteur" > "$1/$b-$version-$t"
+      chmod 755 "$1/$b-$version-$t"
+    done
   done
   regenerer_sommes "$1"
 }
 regenerer_sommes() {
-  (cd "$1" && for f in barking-cli-*; do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done \
+  (cd "$1" && for f in barking-cli-* barking-node-*; do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done \
     | LC_ALL=C sort -k2 > SHA256SUMS)
 }
 # Nouvel espace de travail : $D (version à publier), $R (sortie de reconstruction identique).
@@ -141,6 +143,40 @@ cas_extra_or_missing_binary_rejected() {
   rm "$D/barking-cli-$version-extra" "$D/barking-cli-$version-$t_arm"
   verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "manquant"
 }
+cas_node_binary_checked_like_cli() {
+  nouveau; signer_ok || return 1
+  verifier "$tmp/cles/bonne.pub" --rebuilt-dir "$R"; attendre_code 0 || return 1
+  # Le binaire du nœud est contrôlé comme celui de la CLI : empreinte, reconstruction, fichier en trop.
+  printf 'X' >> "$D/barking-node-$version-$t_x86"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "empreinte incorrecte pour barking-node-" || return 1
+  nouveau; signer_ok || return 1
+  printf 'autre\n' > "$R/barking-node-$version-$t_x86"
+  verifier "$tmp/cles/bonne.pub" --rebuilt-dir "$R"; attendre_code 1 && attendre_texte "diffère du binaire publié pour barking-node-" || return 1
+  nouveau; signer_ok || return 1
+  cp "$D/barking-node-$version-$t_x86" "$D/barking-node-$version-extra"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "en trop" || return 1
+  rm "$D/barking-node-$version-extra" "$D/barking-node-$version-$t_arm"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "manquant"
+}
+cas_mixed_version_or_unknown_name_refused() {
+  # Un binaire du nœud d'une autre version, ou un nom inconnu, listé dans SHA256SUMS : refusé à la
+  # signature comme à la vérification, même si les empreintes et le fichier sont cohérents.
+  local autre
+  for autre in "barking-node-9.9.9-$t_x86" "barking-cli-9.9.9-$t_x86" "barking-relay-$version-$t_x86" "barking-node-$version-"; do
+    nouveau
+    printf 'intrus\n' > "$D/$autre"
+    regenerer_sommes "$D"
+    # Listé à la main : regenerer_sommes ne connaît que les noms de binaires valides.
+    grep -qF "  $autre" "$D/SHA256SUMS" \
+      || { printf '%s  %s\n' "$(sha256sum "$D/$autre" | cut -d' ' -f1)" "$autre" >> "$D/SHA256SUMS"; }
+    signer "$tmp/cles/bonne.key"
+    attendre_code 1 && attendre_texte "entrée inattendue" && sans_minisig || { echo "    cas : $autre" >&2; return 1; }
+  done
+  nouveau; signer_ok || return 1
+  printf 'intrus\n' > "$D/barking-node-9.9.9-$t_x86"
+  regenerer_sommes "$D"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 || return 1
+}
 cas_sign_refuses_on_mismatch() {
   nouveau
   # Binaire remplacé dans --from-dir ; SHA256SUMS régénéré (cohérent), la reconstruction diffère.
@@ -163,6 +199,9 @@ cas_sign_refuses_without_rebuilt_counterpart() {
   # La cible compilable sur cette machine doit avoir une contrepartie reconstruite.
   case "$(uname -m)" in x86_64|amd64) hote="$t_x86" ;; *) hote="$t_arm" ;; esac
   rm "$R/barking-cli-$version-$hote"
+  signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "sans recompilation" && sans_minisig || return 1
+  nouveau
+  rm "$R/barking-node-$version-$hote"
   signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "sans recompilation" && sans_minisig
 }
 cas_verify_rebuilt_mismatch_rejected() {
@@ -240,6 +279,7 @@ cas_empty_pubkey_rejected() {
 echecs=0
 for cas in sign_then_verify_ok sign_then_verify_rebuild_ok forged_signature_rejected other_key_rejected \
            tampered_binary_rejected tampered_sums_rejected extra_or_missing_binary_rejected \
+           node_binary_checked_like_cli mixed_version_or_unknown_name_refused \
            sign_refuses_on_mismatch sign_refuses_missing_or_unlisted sign_refuses_without_rebuilt_counterpart \
            verify_rebuilt_mismatch_rejected trusted_comment_other_version_rejected \
            trusted_comment_without_commit_rejected signed_commit_differs_from_local_tag_rejected \

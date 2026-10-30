@@ -111,7 +111,17 @@ cible_compilable_ici() {
   return 1
 }
 
-# Contrôle SHA256SUMS et les binaires barking-cli-<version>-* d'un répertoire.
+# Cible d'un binaire de la version $2 : « barking-cli-<version>-<cible> » ou « barking-node-<version>-<cible> ».
+# Affiche la cible ; code 1 pour tout autre nom (autre binaire, autre version).
+cible_du_nom() { # $1 = nom, $2 = version
+  case "$1" in
+    "barking-cli-$2-"?*)  printf '%s\n' "${1#"barking-cli-$2-"}" ;;
+    "barking-node-$2-"?*) printf '%s\n' "${1#"barking-node-$2-"}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Contrôle SHA256SUMS et les binaires barking-cli-<version>-* et barking-node-<version>-* d'un répertoire.
 # Calcule et compare soi-même les empreintes. Sort en erreur (exit 1) au premier problème.
 # Positionne NOMS_LISTES (noms séparés par des espaces).
 controler_somme_dir() { # $1 = répertoire, $2 = version
@@ -124,7 +134,7 @@ controler_somme_dir() { # $1 = répertoire, $2 = version
   while IFS= read -r ligne || [ -n "$ligne" ]; do
     [[ $ligne =~ $motif ]] || erreur "ligne illisible dans SHA256SUMS : $ligne"
     somme="${BASH_REMATCH[1]}"; nom="${BASH_REMATCH[2]}"
-    case "$nom" in "barking-cli-${version}-"?*) ;; *) erreur "entrée inattendue dans SHA256SUMS (pas un binaire de la version $version) : $nom" ;; esac
+    cible_du_nom "$nom" "$version" >/dev/null || erreur "entrée inattendue dans SHA256SUMS (pas un binaire barking-cli ou barking-node de la version $version) : $nom"
     case "$vus" in *"|$nom|"*) erreur "entrée en double dans SHA256SUMS : $nom" ;; esac
     vus="$vus$nom|"
     [ -f "$dir/$nom" ] || erreur "fichier manquant : $nom est listé dans SHA256SUMS mais absent de $dir"
@@ -133,7 +143,7 @@ controler_somme_dir() { # $1 = répertoire, $2 = version
     [ "$reel" = "$somme" ] || erreur "empreinte incorrecte pour $nom (SHA256SUMS : $somme, fichier : $reel)"
     NOMS_LISTES="$NOMS_LISTES $nom"
   done < "$sums"
-  for f in "$dir"/barking-cli-*; do
+  for f in "$dir"/barking-cli-* "$dir"/barking-node-*; do
     [ -e "$f" ] || continue
     n="$(basename "$f")"
     case "$vus" in *"|$n|"*) ;; *) erreur "fichier en trop : $n est présent dans $dir mais absent de SHA256SUMS" ;; esac
@@ -145,7 +155,7 @@ controler_somme_dir() { # $1 = répertoire, $2 = version
 comparer_reconstruction() { # $1 = répertoire de la version, $2 = répertoire reconstruit, $3 = version
   local dir="$1" rebuilt="$2" version="$3" nom cible compares=0 h_rec h_pub
   for nom in $NOMS_LISTES; do
-    cible="${nom#"barking-cli-${version}-"}"
+    cible="$(cible_du_nom "$nom" "$version")" || erreur "nom de binaire inattendu : $nom"
     if [ -f "$rebuilt/$nom" ]; then
       h_rec="$(sha256_de "$rebuilt/$nom")" || h_rec=""
       h_pub="$(sha256_de "$dir/$nom")" || h_pub=""
@@ -176,7 +186,7 @@ recompiler_localement() { # $1 = racine du dépôt, $2 = version, $3 = répertoi
     | tar -x -C "$env" || erreur "extraction de l'environnement de build du tag v$version échouée"
   XCODE_VERSION_FICHIER="$env/.xcode-version"
   for nom in $NOMS_LISTES; do
-    cible="${nom#"barking-cli-${version}-"}"
+    cible="$(cible_du_nom "$nom" "$version")" || erreur "nom de binaire inattendu : $nom"
     cible_compilable_ici "$cible" || continue
     echo "recompilation de $cible (environnement de build du tag v$version)…" >&2
     "$env/scripts/repro-build.sh" --git-dir "$racine" --target "$cible" --ref "v$version" --out "$out" >/dev/null \

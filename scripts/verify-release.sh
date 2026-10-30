@@ -50,7 +50,7 @@ dir="$tmp/assets"; mkdir -p "$dir"
 resoudre_repo "$repo_arg" "$racine"
 if [ -n "$from_dir" ]; then
   [ -d "$from_dir" ] || erreur "répertoire introuvable : $from_dir"
-  for f in "$from_dir"/SHA256SUMS "$from_dir"/SHA256SUMS.minisig "$from_dir"/barking-cli-*; do
+  for f in "$from_dir"/SHA256SUMS "$from_dir"/SHA256SUMS.minisig "$from_dir"/barking-cli-* "$from_dir"/barking-node-*; do
     [ -e "$f" ] || continue
     cp "$f" "$dir/"
   done
@@ -58,7 +58,7 @@ else
   command -v gh >/dev/null 2>&1 || erreur "gh est requis pour télécharger la version v$version"
   exiger_repo
   gh release download "v$version" -R "$REPO" --dir "$dir" \
-    --pattern 'SHA256SUMS' --pattern 'SHA256SUMS.minisig' --pattern 'barking-cli-*' \
+    --pattern 'SHA256SUMS' --pattern 'SHA256SUMS.minisig' --pattern 'barking-cli-*' --pattern 'barking-node-*' \
     || erreur "téléchargement des assets de v$version échoué"
 fi
 

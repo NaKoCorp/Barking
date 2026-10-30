@@ -48,14 +48,14 @@ if [ -n "$from_dir" ]; then
   [ -d "$from_dir" ] || erreur "répertoire introuvable : $from_dir"
   [ -f "$from_dir/SHA256SUMS" ] || erreur "SHA256SUMS absent de $from_dir"
   cp "$from_dir/SHA256SUMS" "$dir/"
-  for f in "$from_dir"/barking-cli-*; do
+  for f in "$from_dir"/barking-cli-* "$from_dir"/barking-node-*; do
     [ -e "$f" ] || continue
     cp "$f" "$dir/"
   done
 else
   command -v gh >/dev/null 2>&1 || erreur "gh est requis pour récupérer les assets du brouillon"
   resoudre_repo "$repo_arg" "$racine"; exiger_repo
-  gh release download "v$version" -R "$REPO" --dir "$dir" --pattern 'SHA256SUMS' --pattern 'barking-cli-*' \
+  gh release download "v$version" -R "$REPO" --dir "$dir" --pattern 'SHA256SUMS' --pattern 'barking-cli-*' --pattern 'barking-node-*' \
     || erreur "téléchargement des assets de v$version échoué"
 fi
 
