@@ -236,6 +236,7 @@ impl Client {
                     truncated: false,
                     pow_budget: None,
                     pow_spent: 0,
+                    fetch_deadline: FETCH_DEADLINE,
                 })
             }
             Response::Error(ErrorReason::VersionTooOld) => Err(ClientError::Version),
@@ -257,6 +258,8 @@ pub struct Session {
     pow_budget: Option<u64>,
     /// Travail de preuve dépensé (essais attendus, `2^bits` par preuve).
     pow_spent: u64,
+    /// Durée maximale d'un appel à `fetch` / `fetch_resumable`.
+    fetch_deadline: Duration,
 }
 
 impl Session {
@@ -265,6 +268,12 @@ impl Session {
     /// renvoie `ClientError::PowBudget` sans calculer.
     pub fn set_pow_budget(&mut self, budget: Option<u64>) {
         self.pow_budget = budget;
+    }
+
+    /// Durée maximale des appels de relève suivants (défaut `FETCH_DEADLINE`) :
+    /// au-delà, relève partielle avec ce qui a été pris.
+    pub fn set_fetch_deadline(&mut self, d: Duration) {
+        self.fetch_deadline = d;
     }
 
     /// Travail de preuve dépensé par cette session.
@@ -379,7 +388,7 @@ impl Session {
         let mut pages = 0usize;
         // Indice dans `FETCH_PAGE_SIZES` : ne remonte pas au cours d'un appel.
         let mut size = 0usize;
-        let deadline = tokio::time::Instant::now() + FETCH_DEADLINE;
+        let deadline = tokio::time::Instant::now() + self.fetch_deadline;
         for chunk in &chunks {
             let mut cursor: Option<u64> = resume.start(chunk);
             loop {
