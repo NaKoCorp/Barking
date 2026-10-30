@@ -1,0 +1,42 @@
+# Unité systemd de barking-node.
+#
+# Installation (exemple) :
+#   useradd --system --home-dir /var/lib/barking-node --shell /usr/sbin/nologin barking-node
+#   install -m 0755 barking-node /usr/local/bin/barking-node
+#   install -d -m 0700 -o barking-node -g barking-node /var/lib/barking-node
+#   install -m 0644 barking-node.toml /etc/barking-node.toml
+#   sudo -u barking-node barking-node init --data-dir /var/lib/barking-node
+#   install -m 0644 barking-node.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now barking-node
+[Unit]
+Description=Nœud Barking (paquets chiffrés en attente, QUIC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=barking-node
+Group=barking-node
+ExecStart=/usr/local/bin/barking-node run --config /etc/barking-node.toml
+Restart=on-failure
+RestartSec=5
+# Le dossier de données (clé, base) est le seul endroit inscriptible.
+ReadWritePaths=/var/lib/barking-node
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=yes
+UMask=0077
+# Port UDP > 1024 : aucune capacité n'est nécessaire.
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

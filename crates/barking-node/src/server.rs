@@ -43,9 +43,10 @@
 //!   connexion est fermée.
 //! - **Purge** des expirés au démarrage puis toutes les 60 s.
 
+use std::fmt;
 use std::future::Future;
 use std::net::UdpSocket;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -81,6 +82,12 @@ pub const MAX_WRITE_DEADLINE: Duration = Duration::from_secs(60);
 const SMALL_RESPONSE_BYTES: usize = 4 * 1024;
 /// Refus de débit consécutifs avant fermeture de la connexion.
 pub const MAX_CONSECUTIVE_REFUSALS: u32 = 20;
+
+/// Valeurs par défaut de la spec (reprises par la configuration).
+pub const DEFAULT_MAX_RESPONSE_BYTES_IN_FLIGHT: usize = 64 << 20;
+pub const DEFAULT_MAX_RESPONSE_BYTES_PER_IP: usize = 4 << 20;
+pub const DEFAULT_MIN_SEND_RATE: u64 = 32 * 1024;
+pub const DEFAULT_MAX_DB_JOBS: usize = 64;
 
 /// Codes de fermeture (application).
 const CLOSE_NORMAL: u32 = 0;
@@ -131,6 +138,13 @@ impl Gauge {
         self.peak.load(Ordering::Relaxed)
     }
 
+    /// Maximum atteint depuis le dernier appel, puis remise du pic à la valeur
+    /// courante (rapports périodiques).
+    pub fn take_peak(&self) -> usize {
+        self.peak
+            .swap(self.now.load(Ordering::Relaxed), Ordering::Relaxed)
+    }
+
     fn add(&self, n: usize) {
         let v = self.now.fetch_add(n, Ordering::Relaxed) + n;
         self.peak.fetch_max(v, Ordering::Relaxed);
@@ -150,6 +164,132 @@ pub struct ServerStats {
     pub response_bytes: Gauge,
     /// Connexions ouvertes.
     pub connections: Gauge,
+    /// Dépôts acceptés (cumul depuis le dernier `drain`).
+    deposits_ok: AtomicU64,
+    /// Relèves servies.
+    fetches: AtomicU64,
+    /// Lignes expirées purgées.
+    purged: AtomicU64,
+    /// Refus par raison (indice : `reason_index`).
+    refusals: [AtomicU64; REASONS.len()],
+}
+
+/// Raisons d'erreur, dans l'ordre de `reason_index`.
+const REASONS: [ErrorReason; 12] = [
+    ErrorReason::VersionTooOld,
+    ErrorReason::Malformed,
+    ErrorReason::Expired,
+    ErrorReason::TooFarInFuture,
+    ErrorReason::WrongTier,
+    ErrorReason::PowTooWeak,
+    ErrorReason::UnknownAckTarget,
+    ErrorReason::MailboxFull,
+    ErrorReason::NodeFull,
+    ErrorReason::RateLimited,
+    ErrorReason::TooManyMailboxes,
+    ErrorReason::Unsupported,
+];
+
+fn reason_index(r: ErrorReason) -> usize {
+    // Sans joker : une nouvelle raison fait échouer la compilation ici.
+    match r {
+        ErrorReason::VersionTooOld => 0,
+        ErrorReason::Malformed => 1,
+        ErrorReason::Expired => 2,
+        ErrorReason::TooFarInFuture => 3,
+        ErrorReason::WrongTier => 4,
+        ErrorReason::PowTooWeak => 5,
+        ErrorReason::UnknownAckTarget => 6,
+        ErrorReason::MailboxFull => 7,
+        ErrorReason::NodeFull => 8,
+        ErrorReason::RateLimited => 9,
+        ErrorReason::TooManyMailboxes => 10,
+        ErrorReason::Unsupported => 11,
+    }
+}
+
+impl ServerStats {
+    /// Compte un refus (jamais d'adresse, de boîte ni d'identifiant de paquet).
+    pub fn refuse(&self, reason: ErrorReason) {
+        self.refusals[reason_index(reason)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn deposit_ok(&self) {
+        self.deposits_ok.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn fetch_served(&self) {
+        self.fetches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn purged(&self, n: usize) {
+        self.purged.fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    /// Relève les compteurs depuis le dernier appel (remis à zéro, pics
+    /// ramenés à la valeur courante) : un rapport par période.
+    pub fn drain(&self) -> Report {
+        let take = |c: &AtomicU64| c.swap(0, Ordering::Relaxed);
+        Report {
+            deposits_ok: take(&self.deposits_ok),
+            fetches: take(&self.fetches),
+            purged: take(&self.purged),
+            refusals: REASONS
+                .iter()
+                .map(|r| (*r, take(&self.refusals[reason_index(*r)])))
+                .filter(|(_, n)| *n > 0)
+                .collect(),
+            connections: self.connections.now(),
+            connections_peak: self.connections.take_peak(),
+            db_jobs_peak: self.db_jobs.take_peak(),
+            response_bytes_peak: self.response_bytes.take_peak(),
+        }
+    }
+}
+
+/// Compteurs agrégés d'une période (aucune donnée par pair).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    pub deposits_ok: u64,
+    pub fetches: u64,
+    pub purged: u64,
+    /// Refus par raison (raisons nulles omises).
+    pub refusals: Vec<(ErrorReason, u64)>,
+    pub connections: usize,
+    pub connections_peak: usize,
+    pub db_jobs_peak: usize,
+    pub response_bytes_peak: usize,
+}
+
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "dépôts acceptés : {}, relèves : {}, expirés purgés : {}, refus : ",
+            self.deposits_ok, self.fetches, self.purged
+        )?;
+        if self.refusals.is_empty() {
+            f.write_str("aucun")?;
+        }
+        for (i, (r, n)) in self.refusals.iter().enumerate() {
+            write!(f, "{}{r:?}={n}", if i == 0 { "" } else { ", " })?;
+        }
+        write!(
+            f,
+            ", connexions ouvertes : {} (pic {}), pic d'opérations de base : {}, pic d'octets de réponse : {}",
+            self.connections, self.connections_peak, self.db_jobs_peak, self.response_bytes_peak
+        )
+    }
+}
+
+/// Journalise un rapport agrégé à chaque période (aucune adresse).
+pub async fn report_loop(stats: Arc<ServerStats>, every: Duration) {
+    let mut tick = tokio::time::interval(every);
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        tracing::info!("{}", stats.drain());
+    }
 }
 
 /// Budget global à jetons, reflété dans une jauge.
@@ -234,10 +374,10 @@ impl ServerConfig {
             idle_timeout: Duration::from_secs(60),
             request_timeout: Duration::from_secs(10),
             max_streams: 4,
-            max_response_bytes_in_flight: 64 << 20,
-            max_response_bytes_per_ip: 4 << 20,
-            min_send_rate: 32 * 1024,
-            max_db_jobs: 64,
+            max_response_bytes_in_flight: DEFAULT_MAX_RESPONSE_BYTES_IN_FLIGHT,
+            max_response_bytes_per_ip: DEFAULT_MAX_RESPONSE_BYTES_PER_IP,
+            min_send_rate: DEFAULT_MIN_SEND_RATE,
+            max_db_jobs: DEFAULT_MAX_DB_JOBS,
             version: PROTOCOL_VERSION,
             min_version: PROTOCOL_VERSION,
             stats: Arc::new(ServerStats::default()),
@@ -422,9 +562,12 @@ pub async fn run(
         )?);
     }
 
-    let _ = shared
+    if let Stored::Done(n) = shared
         .with_store(true, |s, _| s.purge_expired(unix_now()))
-        .await;
+        .await
+    {
+        shared.stats.purged(n);
+    }
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut tasks = JoinSet::new();
@@ -457,9 +600,8 @@ async fn purge_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
             _ = tick.tick() => {
                 if let Stored::Done(n) =
                     shared.with_store(true, |s, _| s.purge_expired(unix_now())).await
-                    && n > 0
                 {
-                    tracing::info!(purges = n, "expirés purgés");
+                    shared.stats.purged(n);
                 }
             }
             _ = stop.changed() => return,
@@ -728,6 +870,9 @@ async fn hello(conn: &Connection, shared: &Arc<Shared>) -> bool {
         }
         _ => (Response::Error(ErrorReason::Malformed), false),
     };
+    if let Response::Error(r) = &resp {
+        shared.stats.refuse(*r);
+    }
     // Attend l'acquittement : la réponse arrive avant toute fermeture.
     respond(&mut send, &encode(&resp), shared.hello_timeout).await;
     ok
@@ -748,6 +893,7 @@ async fn serve_stream(
         .unwrap_or_else(PoisonError::into_inner)
         .admit(size, Instant::now());
     if !admitted {
+        shared.stats.refuse(ErrorReason::RateLimited);
         let n = state.refusals.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= MAX_CONSECUTIVE_REFUSALS {
             state.conn.close(CLOSE_ABUSE.into(), b"debit");
@@ -766,7 +912,10 @@ async fn serve_stream(
         _ => SMALL_RESPONSE_BYTES,
     };
     let (bytes, held) = match Reservation::try_new(&shared, &state, reserve) {
-        None => (encode(&Response::Error(ErrorReason::RateLimited)), None),
+        None => {
+            shared.stats.refuse(ErrorReason::RateLimited);
+            (encode(&Response::Error(ErrorReason::RateLimited)), None)
+        }
         Some(mut held) => {
             let resp = match req {
                 Err(()) => Response::Error(ErrorReason::Malformed),
@@ -780,6 +929,9 @@ async fn serve_stream(
                     }
                 },
             };
+            if let Response::Error(r) = &resp {
+                shared.stats.refuse(*r);
+            }
             // La réserve couvre la réponse : page bornée par `fetch_reserve`.
             let bytes = encode(&resp);
             held.shrink(bytes.len());
@@ -817,7 +969,10 @@ async fn handle(req: Request, shared: &Arc<Shared>) -> Stored<Response> {
                 })
                 .await
             {
-                Stored::Done(r) => Stored::Done(to_resp(r.map(|()| Response::Ok))),
+                Stored::Done(r) => Stored::Done(to_resp(r.map(|()| {
+                    shared.stats.deposit_ok();
+                    Response::Ok
+                }))),
                 Stored::Busy => Stored::Busy,
                 Stored::Failed => Stored::Failed,
             }
@@ -832,9 +987,10 @@ async fn handle(req: Request, shared: &Arc<Shared>) -> Stored<Response> {
                 .with_store(false, move |s, _| rules::fetch(s, &mailboxes, cursor, page))
                 .await
             {
-                Stored::Done(r) => Stored::Done(to_resp(
-                    r.map(|(items, next)| Response::Items { items, next }),
-                )),
+                Stored::Done(r) => Stored::Done(to_resp(r.map(|(items, next)| {
+                    shared.stats.fetch_served();
+                    Response::Items { items, next }
+                }))),
                 Stored::Busy => Stored::Busy,
                 Stored::Failed => Stored::Failed,
             }
@@ -849,6 +1005,37 @@ async fn handle(req: Request, shared: &Arc<Shared>) -> Stored<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_drains_counters_and_peaks() {
+        let st = ServerStats::default();
+        st.deposit_ok();
+        st.deposit_ok();
+        st.fetch_served();
+        st.purged(3);
+        st.refuse(ErrorReason::PowTooWeak);
+        st.refuse(ErrorReason::PowTooWeak);
+        st.refuse(ErrorReason::RateLimited);
+        st.connections.add(5);
+        st.connections.sub(3);
+        let r = st.drain();
+        assert_eq!((r.deposits_ok, r.fetches, r.purged), (2, 1, 3));
+        assert_eq!(
+            r.refusals,
+            vec![(ErrorReason::PowTooWeak, 2), (ErrorReason::RateLimited, 1)]
+        );
+        assert_eq!((r.connections, r.connections_peak), (2, 5));
+        let line = r.to_string();
+        assert!(
+            line.contains("PowTooWeak=2") && line.contains("pic 5"),
+            "{line}"
+        );
+        // Période suivante : compteurs à zéro, pic ramené à la valeur courante.
+        let r = st.drain();
+        assert_eq!((r.deposits_ok, r.fetches, r.purged), (0, 0, 0));
+        assert!(r.refusals.is_empty());
+        assert_eq!((r.connections, r.connections_peak), (2, 2));
+    }
 
     #[test]
     fn write_deadline_scales_with_size() {

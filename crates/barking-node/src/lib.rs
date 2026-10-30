@@ -1,7 +1,9 @@
 //! Nœud Barking : stockage SQLite, règles de dépôt et de relève (sans réseau),
 //! limites anti-abus et serveur QUIC.
 
+pub mod config;
 pub mod limits;
+pub mod logging;
 pub mod rules;
 pub mod server;
 pub mod store;

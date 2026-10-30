@@ -38,6 +38,10 @@ tempfile = "3.20.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false }
 tracing = "0.1.44"
+# Journaux du nœud : sortie texte seule, filtre par cible (pas d'env-filter ni
+# d'ANSI, pas de pont `log`).
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "registry"] }
+toml = "1.1.8"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
 

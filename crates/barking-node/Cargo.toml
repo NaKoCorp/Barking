@@ -3,13 +3,24 @@ name = "barking-node"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "barking-node"
+path = "src/main.rs"
+
 [dependencies]
 barking-packet.workspace = true
 barking-proto.workspace = true
+clap.workspace = true
+data-encoding.workspace = true
+rand.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
 ed25519-dalek.workspace = true
 quinn.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros", "signal"] }
 tracing.workspace = true
 # SQLite en clair : les paquets sont chiffrés de bout en bout, la base ne
 # contient aucun secret. Spécification distincte de celle du cœur (SQLCipher).
@@ -19,7 +30,6 @@ rusqlite = { version = "0.41.0", features = ["bundled"] }
 # Le cœur (et donc SQLCipher) n'entre que dans les tests : le binaire du nœud
 # n'en dépend pas (résolveur 3, pas d'unification des dépendances de dev).
 barking-core.workspace = true
-rand.workspace = true
 rustls.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
