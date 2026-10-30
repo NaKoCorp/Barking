@@ -468,6 +468,16 @@ pub fn copy_pow_ok(
     }
 }
 
+/// Difficulté qu'un pair de difficulté de base `pow_bits` exige d'un
+/// message recopié de palier `tier` (spec §5.2, point 5).
+pub fn copy_pow_bits(pow_bits: u8, tier: Tier) -> u8 {
+    let policy = Policy {
+        pow_bits,
+        ..Policy::default()
+    };
+    pow_bits_for(&policy, 0, tier, 0)
+}
+
 /// Enregistre une copie reçue d'un pair (spec §5.2, points 6 et 7) : comme
 /// `deposit`, sans la surcharge progressive. Quotas et déduplication sont
 /// ceux du dépôt. La proximité (point 4) est vérifiée par l'appelant.
@@ -556,6 +566,9 @@ pub struct CopyItem {
     pub pow: u64,
     pub hash: [u8; 32],
     pub is_ack: bool,
+    /// Palier (accusé : S ; colonne illisible : L, le supplément le plus
+    /// fort).
+    pub tier: Tier,
 }
 
 /// Tout ce que le nœud tient pour `mailbox` et qui n'a pas expiré : les
@@ -579,10 +592,11 @@ pub fn copy_items(
             pow: 0,
             hash,
             is_ack: true,
+            tier: Tier::S,
         });
     }
     let mut st = conn.prepare_cached(
-        "SELECT bytes, pow, hash FROM packets WHERE mailbox=?1 AND expires_at>?2 ORDER BY seq",
+        "SELECT bytes, pow, hash, tier FROM packets WHERE mailbox=?1 AND expires_at>?2 ORDER BY seq",
     )?;
     let mut rows = st.query(params![&mailbox.0[..], now])?;
     while let Some(row) = rows.next()? {
@@ -590,11 +604,16 @@ pub fn copy_items(
         let nonce: i64 = row.get(1)?;
         let hash = <[u8; 32]>::try_from(row.get::<_, Vec<u8>>(2)?.as_slice())
             .unwrap_or_else(|_| pow::content_hash(&bytes));
+        let tier = u8::try_from(row.get::<_, i64>(3)?)
+            .ok()
+            .and_then(tier_from_byte)
+            .unwrap_or(Tier::L);
         out.push(CopyItem {
             bytes,
             pow: nonce as u64,
             hash,
             is_ack: false,
+            tier,
         });
     }
     Ok(Ok(out))

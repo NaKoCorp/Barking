@@ -1,6 +1,6 @@
 //! Connexions sortantes vers les pairs (spec §3.3) : parties des endpoints
-//! du serveur (même port UDP), avec le certificat du nœud, réutilisées, au
-//! plus `MAX_OUTBOUND`. Au-delà, la moins récemment utilisée est lâchée ;
+//! du serveur (même port UDP), avec le certificat du nœud (construit une
+//! fois, `tls::NodeIdentity`), réutilisées, au plus `MAX_OUTBOUND`. Au-delà, la moins récemment utilisée est lâchée ;
 //! QUIC la ferme quand ses derniers utilisateurs ont fini.
 //!
 //! Une connexion est rangée sous (identifiant, adresse) : l'adresse
@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use barking_proto::client::{self, ClientError, Result};
-use barking_proto::{NodeId, Request, Response};
+use barking_proto::{NodeId, Request, Response, tls};
 use ed25519_dalek::SigningKey;
 use quinn::{Connection, Endpoint};
 
@@ -26,6 +26,8 @@ pub const MAX_OUTBOUND: usize = 64;
 
 struct Entry {
     conn: Connection,
+    /// Difficulté de base annoncée par le pair dans `Hello`.
+    pow_bits: u8,
     /// Date d'usage (compteur croissant) pour l'éviction.
     used: u64,
 }
@@ -37,7 +39,7 @@ struct Conns {
 }
 
 struct Inner {
-    key: SigningKey,
+    identity: tls::NodeIdentity,
     endpoints: Vec<Endpoint>,
     /// Familles publiées dans notre fiche : IPv4, IPv6.
     v4: bool,
@@ -56,7 +58,7 @@ impl PeerPool {
     pub fn new(key: SigningKey, endpoints: Vec<Endpoint>, v4: bool, v6: bool) -> PeerPool {
         PeerPool {
             inner: Arc::new(Inner {
-                key,
+                identity: tls::NodeIdentity::new(&key),
                 endpoints,
                 v4,
                 v6,
@@ -93,7 +95,7 @@ impl PeerPool {
         None
     }
 
-    fn insert(&self, id: NodeId, addr: SocketAddr, conn: Connection) {
+    fn insert(&self, id: NodeId, addr: SocketAddr, conn: Connection, pow_bits: u8) {
         let mut c = self.conns();
         c.clock += 1;
         let used = c.clock;
@@ -107,7 +109,14 @@ impl PeerPool {
                 c.map.remove(&old);
             }
         }
-        c.map.insert(key, Entry { conn, used });
+        c.map.insert(
+            key,
+            Entry {
+                conn,
+                pow_bits,
+                used,
+            },
+        );
     }
 
     fn forget(&self, id: NodeId, conn: &Connection) {
@@ -139,6 +148,16 @@ impl PeerPool {
             })
     }
 
+    /// Difficulté de base annoncée par `id` sur une connexion gardée vers
+    /// l'une de `addrs`.
+    pub fn pow_bits(&self, id: NodeId, addrs: &[SocketAddr]) -> Option<u8> {
+        let c = self.conns();
+        addrs
+            .iter()
+            .find_map(|a| c.map.get(&(id, *a)))
+            .map(|e| e.pow_bits)
+    }
+
     /// Vrai si la famille de `addr` est joignable d'ici : publiée dans
     /// notre fiche, avec un endpoint qui peut y envoyer.
     pub fn can_reach(&self, addr: &SocketAddr) -> bool {
@@ -157,9 +176,9 @@ impl PeerPool {
             let Some(ep) = self.endpoint_for(a) else {
                 continue;
             };
-            match client::connect_peer(ep, *a, id, &self.inner.key).await {
-                Ok(c) => {
-                    self.insert(id, *a, c.clone());
+            match client::connect_node(ep, *a, id, &self.inner.identity).await {
+                Ok((c, pow_bits)) => {
+                    self.insert(id, *a, c.clone(), pow_bits);
                     return Ok(c);
                 }
                 Err(e) => last = e,

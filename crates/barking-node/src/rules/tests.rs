@@ -911,6 +911,7 @@ fn deposit_records_pow() {
     assert_eq!(items[0].pow, n);
     assert_eq!(items[0].bytes, p.encode());
     assert!(!items[0].is_ack);
+    assert_eq!(items[0].tier, p.tier);
 }
 
 #[test]

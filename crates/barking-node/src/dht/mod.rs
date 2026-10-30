@@ -95,6 +95,8 @@ pub struct Dht {
     wake: Notify,
     /// Dernier contrôle de vie demandé par la recopie, par identifiant.
     liveness: Mutex<HashMap<NodeId, Instant>>,
+    /// Prochain instant où la recopie peut appeler chaque identifiant.
+    pace: Mutex<HashMap<NodeId, tokio::time::Instant>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -139,6 +141,7 @@ impl Dht {
             queue: Mutex::new(Queue::default()),
             wake: Notify::new(),
             liveness: Mutex::new(HashMap::new()),
+            pace: Mutex::new(HashMap::new()),
         }
     }
 
@@ -189,6 +192,19 @@ impl Dht {
         if self.replication_queue().enqueue_near(&id) {
             self.wake.notify_one();
         }
+    }
+
+    /// Instant où la recopie peut appeler `id` : le premier libre, puis
+    /// réservé ; l'appel suivant attendra `spacing` de plus.
+    pub(crate) fn replication_slot(&self, id: NodeId, spacing: Duration) -> tokio::time::Instant {
+        let now = tokio::time::Instant::now();
+        let mut pace = lock(&self.pace);
+        if pace.len() >= RECALLS_SWEEP_AT {
+            pace.retain(|_, t| *t > now);
+        }
+        let at = pace.get(&id).copied().unwrap_or(now).max(now);
+        pace.insert(id, at + spacing);
+        at
     }
 
     /// Contrôle de vie d'un responsable resté sans réponse pendant la
@@ -863,6 +879,19 @@ mod tests {
         // Seul : l'échec est compté.
         assert_eq!(d.check_alive(id).await, None);
         assert_eq!(fails(&d), Some(1));
+    }
+
+    #[tokio::test]
+    async fn replication_slots_are_spaced_per_peer() {
+        let d = dht();
+        let gap = Duration::from_millis(100);
+        let (a, b) = (NodeId([1; 32]), NodeId([2; 32]));
+        let first = d.replication_slot(a, gap);
+        let second = d.replication_slot(a, gap);
+        assert!(second >= first + gap);
+        assert!(d.replication_slot(a, gap) >= second + gap);
+        // Un autre responsable n'attend pas.
+        assert!(d.replication_slot(b, gap) < second);
     }
 
     #[tokio::test]

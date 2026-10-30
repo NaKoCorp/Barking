@@ -480,3 +480,18 @@ fn status_on_v2_base_asks_to_run() {
         );
     }
 }
+
+#[test]
+fn status_with_empty_table_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, _) = data_dir_with_key(tmp.path());
+    fill_dht_base(&dir);
+    barking_node::NodeStore::open(dir.join("node.db"))
+        .unwrap()
+        .save_peers(&[])
+        .unwrap();
+    let s = status_of(&dir);
+    assert_eq!(field(&s, "pairs"), "0");
+    // Sans pair connu, les boîtes gardées ne sont pas dites « responsables ».
+    assert_eq!(field(&s, "responsable"), "table vide ou désactivée");
+}

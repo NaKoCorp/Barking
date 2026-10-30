@@ -176,24 +176,44 @@ fn start_raw(
     dht: Option<DhtConfig>,
     limits: DiversityLimits,
 ) -> Node {
+    start_limited(n, sockets, addr, dht, limits, true, TEST_BITS)
+}
+
+/// Comme `start_raw` ; `shared_ip` : tous les nœuds et le client de test
+/// partagent 127.0.0.1, les plafonds par adresse et le débit de ce groupe
+/// sont levés. Sinon seul le plafond de connexions par /24 l'est, et les
+/// seaux de débit gardent leurs valeurs de la spec.
+fn start_limited(
+    n: usize,
+    sockets: Vec<UdpSocket>,
+    addr: SocketAddr,
+    dht: Option<DhtConfig>,
+    limits: DiversityLimits,
+    shared_ip: bool,
+    pow_bits: u8,
+) -> Node {
     let k = key(n);
     let id = id_of(&k);
     let mut cfg = ServerConfig::new(sockets, k);
     cfg.dht = dht;
     cfg.dht_tick = Some(TICK);
     cfg.dht_diversity = limits;
-    // Tous les nœuds et le client de test partagent 127.0.0.1 : les plafonds
-    // par adresse et le débit de ce groupe sont levés.
-    cfg.limits.max_connections_per_ip = 1_000;
     cfg.limits.max_connections_per_ipv4_24 = 1_000;
-    cfg.limits.requests_per_sec = 10_000;
-    cfg.limits.bytes_per_sec = 1 << 30;
+    if shared_ip {
+        cfg.limits.max_connections_per_ip = 1_000;
+        cfg.limits.requests_per_sec = 10_000;
+        cfg.limits.bytes_per_sec = 1 << 30;
+    }
     let stats = Arc::clone(&cfg.stats);
     let dir = tempfile::tempdir().unwrap();
     let db: PathBuf = dir.path().join("node.db");
     let store = NodeStore::open(&db).unwrap();
     let (tx, rx) = oneshot::channel::<()>();
-    let task = tokio::spawn(server::run(cfg, store, policy(), async move {
+    let policy = Policy {
+        pow_bits,
+        ..Policy::default()
+    };
+    let task = tokio::spawn(server::run(cfg, store, policy, async move {
         let _ = rx.await;
     }));
     Node {
@@ -1069,4 +1089,162 @@ async fn replication_budget_stops_pass() {
         }
     }
     stop_all(nodes).await;
+}
+
+/// Nœud `n` sur sa propre adresse 127.0.0.(10 + n) (son propre groupe chez
+/// les autres), aux seaux de débit de la spec ; `None` si l'adresse ne se
+/// lie pas (macOS sans alias de 127.0.0.x).
+fn start_own_ip(n: usize, bootstrap: Vec<BootstrapEntry>) -> Option<Node> {
+    let ip = std::net::Ipv4Addr::new(127, 0, 0, 10 + u8::try_from(n).unwrap());
+    let socket = UdpSocket::bind((ip, 0)).ok()?;
+    let SocketAddr::V4(v4) = socket.local_addr().unwrap() else {
+        unreachable!()
+    };
+    let dht = DhtConfig {
+        public_v4: Some(v4),
+        public_v6: None,
+        bootstrap,
+        allow_private_addrs: true,
+        replication_bytes_per_hour: DEFAULT_REPLICATION_BYTES_PER_HOUR,
+    };
+    Some(start_limited(
+        n,
+        vec![socket],
+        v4.into(),
+        Some(dht),
+        LOCAL,
+        false,
+        TEST_BITS,
+    ))
+}
+
+/// Dépose en réessayant après un `RateLimited` (le client de test a aussi
+/// son seau chez le nœud).
+async fn deposit_paced(node: &Node, packet: &[u8]) {
+    let deadline = tokio::time::Instant::now() + LONG;
+    loop {
+        let mut s = anon(node).await;
+        let r = timeout(LONG, s.deposit(packet)).await.unwrap().unwrap();
+        s.close().await;
+        match r {
+            Ok(()) => return,
+            Err(ErrorReason::RateLimited) => {
+                assert!(tokio::time::Instant::now() < deadline, "dépôt refusé");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(e) => panic!("dépôt refusé : {e:?}"),
+        }
+    }
+}
+
+/// Nombre de `msgs` que `node` sert, ou `None` si la relève est refusée.
+async fn count_held(node: &Node, mailbox: MailboxId, msgs: &[Vec<u8>]) -> Option<usize> {
+    let mut s = timeout(LONG, Client::connect(node.addr, node.id))
+        .await
+        .ok()?
+        .ok()?;
+    let items = timeout(LONG, s.fetch(&[mailbox])).await.ok()?.ok()?;
+    s.close().await;
+    Some(msgs.iter().filter(|m| items.contains(m)).count())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replication_paces_under_default_rate_limits() {
+    // Chaque nœud a sa propre IP : ses appels passent par le seau de son
+    // groupe chez l'appelé (20 requêtes/s, rafale ×5), non levé ici.
+    let Some(first) = start_own_ip(0, vec![]) else {
+        eprintln!("127.0.0.x indisponible (pas d'alias) : test ignoré");
+        return;
+    };
+    let entry = first.entry();
+    let mut nodes = vec![first];
+    for n in 1..8 {
+        let Some(node) = start_own_ip(n, vec![entry]) else {
+            eprintln!("127.0.0.x indisponible (pas d'alias) : test ignoré");
+            stop_all(nodes).await;
+            return;
+        };
+        nodes.push(node);
+    }
+    wait_full_tables(&nodes.iter().collect::<Vec<_>>()).await;
+    let mailbox = MailboxId([0x58; 16]);
+    let order = by_distance(&ids(&nodes), &mailbox);
+    // Plus d'éléments que la rafale du seau d'un groupe : sans rythme, la
+    // recopie serait refusée (`RateLimited`) en cours de route.
+    let msgs: Vec<Vec<u8>> = (0..60u8)
+        .map(|i| {
+            let mut id = [0x58; 16];
+            id[0] = i;
+            message_in(mailbox, PacketId(id))
+        })
+        .collect();
+    let r = order[0];
+    for m in &msgs {
+        deposit_paced(&nodes[r], m).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+    let deadline = tokio::time::Instant::now() + 2 * REPLICATION_WAIT;
+    for &i in &order[..5] {
+        while count_held(&nodes[i], mailbox, &msgs).await != Some(msgs.len()) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "copies incomplètes chez le nœud {i}"
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    // La recopie s'est tenue sous le seau : aucun refus de débit, aucun
+    // responsable sauté.
+    let rep = nodes[r].stats.replication();
+    assert_eq!(
+        (rep.total.rate_limited, rep.total.skipped_peers),
+        (0, 0),
+        "{rep:?}"
+    );
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn message_too_weak_for_peer_is_not_sent() {
+    // P annonce 12 bits de plus que R dans `Hello`. La preuve d'un message
+    // déposé chez R vise la difficulté de R : elle n'atteint celle de P
+    // qu'avec une chance de 2^-12. R ne lui envoie donc rien.
+    let r = start_dht(0, vec![], LOCAL, DEFAULT_REPLICATION_BYTES_PER_HOUR);
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let SocketAddr::V4(v4) = socket.local_addr().unwrap() else {
+        unreachable!()
+    };
+    let dht = DhtConfig {
+        public_v4: Some(v4),
+        public_v6: None,
+        bootstrap: vec![r.entry()],
+        allow_private_addrs: true,
+        replication_bytes_per_hour: DEFAULT_REPLICATION_BYTES_PER_HOUR,
+    };
+    let p = start_limited(
+        1,
+        vec![socket],
+        v4.into(),
+        Some(dht),
+        LOCAL,
+        true,
+        TEST_BITS + 12,
+    );
+    wait_full_tables(&[&r, &p]).await;
+    let mailbox = MailboxId([0x59; 16]);
+    let msg = message_in(mailbox, PacketId([0x59; 16]));
+    deposit(&r, &msg).await;
+    let deadline = tokio::time::Instant::now() + REPLICATION_WAIT;
+    let rep = loop {
+        let rep = r.stats.replication();
+        if rep.total.pow_too_weak > 0 {
+            break rep;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{rep:?}");
+        tokio::time::sleep(TICK).await;
+    };
+    // Rien n'est parti vers P (aucun octet envoyé), qui ne garde rien.
+    assert_eq!((rep.total.bytes, rep.total.sent), (0, 0), "{rep:?}");
+    assert!(held(&p, mailbox).await.is_empty());
+    stop_all(vec![r, p]).await;
 }

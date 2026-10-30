@@ -70,6 +70,9 @@ impl TryFrom<DhtToml> for DhtConfig {
 
     /// Les messages d'erreur ne reprennent ni les adresses ni les entrées.
     fn try_from(t: DhtToml) -> core::result::Result<DhtConfig, String> {
+        if t.replication_bytes_per_hour == 0 {
+            return Err("dht.replication_bytes_per_hour : au moins 1".into());
+        }
         let mut cfg = DhtConfig {
             public_v4: None,
             public_v6: None,
@@ -85,6 +88,11 @@ impl TryFrom<DhtToml> for DhtConfig {
                 return Err(
                     "dht.public_addr : adresse non routable (allow_private_addrs = false)".into(),
                 );
+            }
+            if let SocketAddr::V6(v6) = addr
+                && barking_proto::embeds_ipv4(v6.ip())
+            {
+                return Err("dht.public_addr : IPv4 écrite en IPv6, à publier en IPv4".into());
             }
             let twice = match addr {
                 SocketAddr::V4(v4) => cfg.public_v4.replace(v4).is_some(),
@@ -171,6 +179,28 @@ fn bad(msg: impl Into<String>) -> Error {
     Error::Config(msg.into())
 }
 
+/// Chaque famille publiée dans `[dht]` doit avoir une adresse d'écoute qui
+/// la sert : une IPv4, ou `[::]` (double pile) pour l'IPv4 ; une IPv6 pour
+/// l'IPv6. Sinon les pairs ne pourraient pas vérifier la fiche, et les
+/// appels sortants n'auraient pas d'endpoint de cette famille.
+fn check_dht_listen(d: &DhtConfig, listen: &[String]) -> Result<()> {
+    let addrs: Vec<SocketAddr> = listen.iter().filter_map(|a| a.parse().ok()).collect();
+    let serves_v4 = addrs
+        .iter()
+        .any(|a| a.is_ipv4() || (a.is_ipv6() && a.ip().is_unspecified()));
+    if d.public_v4.is_some() && !serves_v4 {
+        return Err(bad(
+            "dht.public_addr : IPv4 publiée sans adresse d'écoute IPv4 ni [::]",
+        ));
+    }
+    if d.public_v6.is_some() && !addrs.iter().any(SocketAddr::is_ipv6) {
+        return Err(bad(
+            "dht.public_addr : IPv6 publiée sans adresse d'écoute IPv6",
+        ));
+    }
+    Ok(())
+}
+
 impl Config {
     /// Lit et valide un texte TOML.
     pub fn parse(text: &str) -> Result<Config> {
@@ -230,6 +260,9 @@ impl Config {
         }
         if self.max_db_jobs_per_prefix == Some(0) {
             return Err(bad("max_db_jobs_per_prefix : au moins 1"));
+        }
+        if let Some(d) = &self.dht {
+            check_dht_listen(d, &self.listen)?;
         }
         if self.max_db_jobs == 0 || self.min_send_rate == 0 || self.log_interval_secs == 0 {
             return Err(bad(
@@ -337,6 +370,14 @@ mod tests {
             assert!(c.dht.is_none() && c.dht_without_public_addr, "{off}");
         }
         assert!(!Config::parse("").unwrap().dht_without_public_addr);
+        // Écoute qui sert la famille publiée : IPv4 directe, ou `[::]`.
+        for ok in [
+            "listen = [\"0.0.0.0:4433\"]\n[dht]\npublic_addr = [\"1.2.3.4:4433\"]",
+            "listen = [\"[::]:4433\"]\n[dht]\npublic_addr = [\"1.2.3.4:4433\", \"[2a01::1]:4433\"]",
+            "listen = [\"0.0.0.0:4433\", \"[2a01::1]:4433\"]\n[dht]\npublic_addr = [\"[2a01::1]:4433\"]",
+        ] {
+            Config::parse(ok).unwrap_or_else(|e| panic!("{ok} : {e}"));
+        }
         for bad in [
             // Deux adresses de la même famille.
             "[dht]\npublic_addr = [\"1.2.3.4:4433\", \"5.6.7.8:4433\"]",
@@ -349,6 +390,13 @@ mod tests {
             "[dht]\npublic_addr = [\"192.168.1.2:4433\"]",
             "[dht]\npublic_addr = [\"1.2.3.4:0\"]",
             "[dht]\npublic_addr = [\"1.2.3.4:4433\"]\ninconnue = 1",
+            // Plafond de recopie nul.
+            "[dht]\npublic_addr = [\"1.2.3.4:4433\"]\nreplication_bytes_per_hour = 0",
+            // IPv4 écrite en IPv6.
+            "[dht]\npublic_addr = [\"[::ffff:1.2.3.4]:4433\"]\nallow_private_addrs = true",
+            // Famille publiée sans adresse d'écoute qui la sert.
+            "listen = [\"[::1]:4433\"]\n[dht]\npublic_addr = [\"1.2.3.4:4433\"]",
+            "listen = [\"0.0.0.0:4433\"]\n[dht]\npublic_addr = [\"[2a01::1]:4433\"]",
         ] {
             assert!(Config::parse(bad).is_err(), "{bad} doit être refusé");
         }

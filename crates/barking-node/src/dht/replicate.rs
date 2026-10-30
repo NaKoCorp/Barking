@@ -12,14 +12,22 @@
 //!   d'une base migrée, `pow = 0`) n'est pas envoyé : il serait refusé.
 //! - **Bornes** : `MAX_MAILBOXES_PER_PEER` boîtes et `PEER_TIME_PER_PASS`
 //!   par responsable et par passe ; `replication_bytes_per_hour` octets
-//!   envoyés par heure, au-delà la passe s'arrête et reprend à la suivante.
+//!   envoyés par heure (au-delà la passe s'arrête et reprend à la suivante),
+//!   dont au plus un cinquième vers un même responsable.
+//! - **Rythme** : au plus 10 requêtes par seconde vers un même responsable
+//!   (`PEER_CALL_SPACING`), sous le seau de son groupe d'adresses (spec §5.2
+//!   point 2) ; après un `RateLimited`, pause de `RATE_LIMIT_BACKOFF` puis
+//!   reprise, dans le temps de la passe.
+//! - **Preuve** : un message dont la preuve n'atteint pas la difficulté
+//!   annoncée par le responsable (`Hello`) plus le palier ne lui est pas
+//!   envoyé (compté `PowTooWeak`).
 //! - **Refus et pannes** : la recopie ne compte jamais d'échec dans la
 //!   table. Une réponse lisible marque le pair vivant (`mark_alive`).
 //!   - Pas de réponse : pair sauté pour la passe, et contrôle de vie
 //!     (`Dht::liveness_check`, au plus un par pair et par 10 min) ; c'est ce
 //!     contrôle qui compte l'échec. S'il retire le pair, la boîte est
 //!     recopiée au suivant dans la même passe.
-//!   - `RateLimited`, ou temps de la passe épuisé : pair sauté.
+//!   - Temps de la passe ou part horaire épuisés : pair sauté.
 //!   - Réponse hors bornes ou inattendue, flux coupé, `MailboxFull`,
 //!     `NodeFull`, `NotResponsible` : la boîte est sautée pour ce pair.
 //!   - `PowTooWeak`, `UnknownAckTarget` : comptés, l'élément suivant part.
@@ -37,7 +45,7 @@ use std::time::Duration;
 use barking_dht::{REPLICAS, distance, mailbox_key};
 use barking_packet::MailboxId;
 use barking_proto::client::ClientError;
-use barking_proto::{ErrorReason, MAX_HOLDINGS_PER_PAGE, NodeId, Request, Response};
+use barking_proto::{ErrorReason, MAX_HOLDINGS_PER_PAGE, NodeId, Request, Response, pow};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
 
@@ -57,6 +65,13 @@ pub const MAX_HOLDINGS_PAGES: usize = 16;
 /// Temps passé au plus avec un même responsable dans une passe : au-delà,
 /// il est sauté jusqu'à la passe suivante.
 pub const PEER_TIME_PER_PASS: Duration = Duration::from_secs(60);
+/// Écart minimal entre deux requêtes de recopie vers un même responsable
+/// (10 par seconde) : sous le seau du groupe d'adresses de l'appelé (20
+/// requêtes/s, spec §5.2 point 2), que partagent aussi l'entretien de la
+/// table et un éventuel client sur la même IP.
+pub const PEER_CALL_SPACING: Duration = Duration::from_millis(100);
+/// Attente après un `RateLimited` avant de reprendre le même responsable.
+pub const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(2);
 /// Fenêtre du plafond de recopie.
 const BUDGET_WINDOW_SECS: u64 = 3600;
 
@@ -76,6 +91,8 @@ pub struct PassReport {
     pub unknown_ack: usize,
     /// Autres refus d'un `Store`.
     pub refused: usize,
+    /// `RateLimited` reçus (chacun suivi d'une pause).
+    pub rate_limited: usize,
     /// La passe s'est arrêtée au plafond horaire.
     pub budget_exhausted: bool,
 }
@@ -91,6 +108,7 @@ impl PassReport {
         self.pow_too_weak += other.pow_too_weak;
         self.unknown_ack += other.unknown_ack;
         self.refused += other.refused;
+        self.rate_limited += other.rate_limited;
         self.budget_exhausted |= other.budget_exhausted;
     }
 }
@@ -100,7 +118,7 @@ impl fmt::Display for PassReport {
         write!(
             f,
             "{} boîtes, {} envois acceptés, {} octets, {} pairs sautés, refus : \
-             NotResponsible={} PowTooWeak={} UnknownAckTarget={} autres={}{}",
+             NotResponsible={} PowTooWeak={} UnknownAckTarget={} autres={} RateLimited={}{}",
             self.mailboxes,
             self.sent,
             self.bytes,
@@ -109,6 +127,7 @@ impl fmt::Display for PassReport {
             self.pow_too_weak,
             self.unknown_ack,
             self.refused,
+            self.rate_limited,
             if self.budget_exhausted {
                 ", plafond horaire atteint"
             } else {
@@ -118,21 +137,22 @@ impl fmt::Display for PassReport {
     }
 }
 
-/// Plafond d'octets recopiés par fenêtre d'une heure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Plafond d'octets recopiés par fenêtre d'une heure, et part de chaque
+/// responsable : `limit / REPLICAS` (au moins 1 octet). Un responsable qui
+/// prend tout (`Holdings` vides, `Ok` à chaque `Store`) n'épuise pas le
+/// plafond des autres.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ByteBudget {
     limit: u64,
     window_start: u64,
     used: u64,
+    /// Octets envoyés à chaque responsable dans la fenêtre (mémoire seule).
+    per_peer: HashMap<NodeId, u64>,
 }
 
 impl ByteBudget {
     pub fn new(limit: u64) -> ByteBudget {
-        ByteBudget {
-            limit,
-            window_start: 0,
-            used: 0,
-        }
+        ByteBudget::resume(limit, 0, 0)
     }
 
     /// Reprend une fenêtre enregistrée (redémarrage dans l'heure).
@@ -141,6 +161,7 @@ impl ByteBudget {
             limit,
             window_start,
             used,
+            per_peer: HashMap::new(),
         }
     }
 
@@ -148,7 +169,13 @@ impl ByteBudget {
         if now.saturating_sub(self.window_start) >= BUDGET_WINDOW_SECS {
             self.window_start = now;
             self.used = 0;
+            self.per_peer.clear();
         }
+    }
+
+    /// Part horaire d'un responsable.
+    pub fn peer_share(&self) -> u64 {
+        (self.limit / REPLICAS as u64).max(1)
     }
 
     /// Vrai si le plafond de la fenêtre courante est atteint.
@@ -157,10 +184,18 @@ impl ByteBudget {
         self.used >= self.limit
     }
 
-    /// Compte `n` octets envoyés.
-    pub fn spend(&mut self, now: u64, n: u64) {
+    /// Vrai si la part de `peer` dans la fenêtre courante est atteinte.
+    pub fn peer_exhausted(&mut self, now: u64, peer: &NodeId) -> bool {
+        self.roll(now);
+        self.per_peer.get(peer).copied().unwrap_or(0) >= self.peer_share()
+    }
+
+    /// Compte `n` octets envoyés à `peer`.
+    pub fn spend(&mut self, now: u64, peer: NodeId, n: u64) {
         self.roll(now);
         self.used = self.used.saturating_add(n);
+        let p = self.per_peer.entry(peer).or_default();
+        *p = p.saturating_add(n);
     }
 
     /// (début de la fenêtre, octets envoyés dans la fenêtre).
@@ -263,7 +298,8 @@ enum Outcome {
     /// Pas de réponse (délai, connexion impossible ou perdue) : pair sauté
     /// pour la passe, contrôle de vie demandé.
     NoAnswer,
-    /// `RateLimited`, ou temps de la passe épuisé pour ce pair : sauté.
+    /// Temps de la passe ou part horaire d'octets épuisés pour ce pair :
+    /// sauté.
     Skip,
     /// Plafond horaire atteint : fin de la passe.
     Budget,
@@ -440,9 +476,24 @@ pub(crate) async fn pass(
     report
 }
 
-/// Envoie `req` au pair `peer` (adresses de sa fiche dans la table). Une
-/// réponse lisible le marque vivant dans la table.
-async fn call(dht: &Dht, peer: NodeId, req: &Request) -> Call {
+/// Envoie `req` au pair `peer` (adresses de sa fiche dans la table), au
+/// rythme de `PEER_CALL_SPACING`. Après un `RateLimited`, attend
+/// `RATE_LIMIT_BACKOFF` et réessaie : seul le temps de la passe pour ce
+/// pair borne l'attente. Une réponse lisible le marque vivant dans la table.
+async fn call(dht: &Dht, peer: NodeId, req: &Request, report: &mut PassReport) -> Call {
+    loop {
+        sleep_until(dht.replication_slot(peer, PEER_CALL_SPACING)).await;
+        match call_once(dht, peer, req).await {
+            Call::Answer(Response::Error(ErrorReason::RateLimited)) => {
+                report.rate_limited += 1;
+                sleep(RATE_LIMIT_BACKOFF).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn call_once(dht: &Dht, peer: NodeId, req: &Request) -> Call {
     let Some(addrs) = dht.table().get(&peer).map(|p| p.record.addrs()) else {
         return Call::NoAnswer;
     };
@@ -455,6 +506,13 @@ async fn call(dht: &Dht, peer: NodeId, req: &Request) -> Call {
         | Err(_) => Call::NoAnswer,
         Ok(Err(_)) => Call::Broken,
     }
+}
+
+/// Difficulté de base annoncée par `peer` dans `Hello`, si une connexion
+/// vers lui est gardée.
+fn peer_pow_bits(dht: &Dht, peer: NodeId) -> Option<u8> {
+    let addrs = dht.table().get(&peer).map(|p| p.record.addrs())?;
+    dht.pool().pow_bits(peer, &addrs)
 }
 
 /// Empreintes que `peer` tient pour `mailbox`, toutes pages lues. Une
@@ -471,7 +529,7 @@ async fn holdings_of(
     let mut cursor = None;
     for _ in 0..MAX_HOLDINGS_PAGES {
         let req = Request::FindValue { mailbox, cursor };
-        match call(dht, peer, &req).await {
+        match call(dht, peer, &req, report).await {
             Call::Answer(Response::Holdings { hashes, next })
                 if hashes.len() <= MAX_HOLDINGS_PER_PAGE =>
             {
@@ -481,9 +539,6 @@ async fn holdings_of(
                     Some(c) if cursor.is_some_and(|p| c <= p) => break,
                     Some(c) => cursor = Some(c),
                 }
-            }
-            Call::Answer(Response::Error(ErrorReason::RateLimited)) => {
-                return Err(Outcome::Skip);
             }
             Call::NoAnswer => return Err(Outcome::NoAnswer),
             Call::Answer(_) | Call::Broken => break,
@@ -507,21 +562,38 @@ async fn copy_to(
         Ok(h) => h,
         Err(o) => return o,
     };
+    // Difficulté du pair (`Hello`) : un message dont la preuve ne l'atteint
+    // pas serait refusé (`PowTooWeak`) à chaque passe, il n'est pas envoyé.
+    let peer_bits = peer_pow_bits(dht, peer);
     for item in items.iter().filter(|i| !have.contains(&i.hash)) {
+        if let Some(bits) = peer_bits
+            && !item.is_ack
+            && !pow::check(
+                &item.hash,
+                &mailbox,
+                item.pow,
+                rules::copy_pow_bits(bits, item.tier),
+            )
+        {
+            report.pow_too_weak += 1;
+            continue;
+        }
         if budget.exhausted(now) {
             return Outcome::Budget;
         }
+        if budget.peer_exhausted(now, &peer) {
+            return Outcome::Skip;
+        }
         let len = item.bytes.len() as u64;
-        budget.spend(now, len);
+        budget.spend(now, peer, len);
         report.bytes += len;
         let req = Request::Store {
             packet: item.bytes.clone(),
             pow: item.pow,
         };
-        match call(dht, peer, &req).await {
+        match call(dht, peer, &req, report).await {
             Call::Answer(Response::Ok) => report.sent += 1,
             Call::Answer(Response::Error(r)) => match r {
-                ErrorReason::RateLimited => return Outcome::Skip,
                 // Tables divergentes : rien d'autre pour ce pair avant la
                 // passe suivante.
                 ErrorReason::NotResponsible => {
@@ -553,20 +625,39 @@ mod tests {
     #[test]
     fn budget_stops_after_limit_and_rolls_each_hour() {
         const T: u64 = 1_800_000_000;
-        let mut b = ByteBudget::new(10);
-        assert!(!b.exhausted(T));
-        b.spend(T, 7);
-        assert!(!b.exhausted(T + 1));
-        b.spend(T + 1, 7);
-        assert!(b.exhausted(T + 2));
-        assert_eq!(b.window(), (T, 14));
+        let (a, b) = (NodeId([1; 32]), NodeId([2; 32]));
+        let mut bud = ByteBudget::new(10);
+        assert!(!bud.exhausted(T));
+        bud.spend(T, a, 7);
+        assert!(!bud.exhausted(T + 1));
+        bud.spend(T + 1, b, 7);
+        assert!(bud.exhausted(T + 2));
+        assert_eq!(bud.window(), (T, 14));
         // Une heure après le début de la fenêtre : nouvelle fenêtre.
-        assert!(!b.exhausted(T + 3600));
-        assert_eq!(b.window(), (T + 3600, 0));
+        assert!(!bud.exhausted(T + 3600));
+        assert_eq!(bud.window(), (T + 3600, 0));
+        assert!(!bud.peer_exhausted(T + 3600, &a));
         // Reprise d'une fenêtre enregistrée.
         let mut r = ByteBudget::resume(10, T, 10);
         assert!(r.exhausted(T + 100));
         assert!(!r.exhausted(T + 3600));
+    }
+
+    #[test]
+    fn one_peer_cannot_take_the_whole_budget() {
+        const T: u64 = 1_800_000_000;
+        let (a, b) = (NodeId([1; 32]), NodeId([2; 32]));
+        let mut bud = ByteBudget::new(1000);
+        assert_eq!(bud.peer_share(), 200);
+        bud.spend(T, a, 150);
+        assert!(!bud.peer_exhausted(T, &a));
+        bud.spend(T, a, 50);
+        // `a` a pris sa part ; `b` et le plafond global restent ouverts.
+        assert!(bud.peer_exhausted(T, &a));
+        assert!(!bud.peer_exhausted(T, &b));
+        assert!(!bud.exhausted(T));
+        // Plafond minuscule : au moins un octet par responsable.
+        assert_eq!(ByteBudget::new(1).peer_share(), 1);
     }
 
     #[test]

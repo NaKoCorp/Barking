@@ -255,7 +255,12 @@ fn status(data_dir: Option<PathBuf>) -> Result<()> {
     println!("octets      : {}", stats.bytes);
     println!("pairs       : {}", table.len());
     println!("compartiments : {} non vides", table.non_empty_buckets());
-    println!("responsable : {responsible} boîtes");
+    if table.is_empty() {
+        // Sans pair connu, toute boîte gardée paraîtrait « responsable ».
+        println!("responsable : table vide ou désactivée");
+    } else {
+        println!("responsable : {responsible} boîtes");
+    }
     println!("recopié     : {recent} octets dans l'heure");
     Ok(())
 }
