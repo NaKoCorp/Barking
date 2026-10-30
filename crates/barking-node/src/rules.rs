@@ -10,7 +10,8 @@
 //!   côté (compte dans les quotas), pour qu'un identifiant ne puisse être squatté.
 //! - Un accusé est un paquet de palier S à charge de 32 octets, dans la boîte du
 //!   paquet accusé (sinon `UnknownAckTarget`). Il supprime toutes les lignes de
-//!   cet identifiant et reste gardé jusqu'à `max(expiration de l'accusé,
+//!   cet identifiant et est rangé dans chaque boîte distincte qui en tenait une
+//!   ligne (une ligne d'accusé par (identifiant, boîte)) ; il reste gardé jusqu'à `max(expiration de l'accusé,
 //!   expiration des paquets supprimés)` : le message ne ressuscite pas, ni par
 //!   redépôt ni par accusé raccourci.
 //! - Preuve de travail progressive par boîte : voir `required_pow_bits`.
@@ -94,16 +95,6 @@ fn tier_from_byte(b: u8) -> Option<Tier> {
     }
 }
 
-/// Empreinte de déduplication : BLAKE3 des octets, `hops` mis à zéro (relayé,
-/// il change d'un nœud à l'autre).
-fn content_hash(bytes: &[u8]) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    h.update(&bytes[..2]);
-    h.update(&[0]);
-    h.update(&bytes[3..]);
-    *h.finalize().as_bytes()
-}
-
 fn pow_bits_for_count(policy: &Policy, count: i64) -> u8 {
     let steps = count / POW_STEP_PACKETS;
     let extra = if steps >= 1 { steps.ilog2() } else { 0 };
@@ -131,7 +122,7 @@ fn deposit_message(
     nonce: u64,
     now: u64,
 ) -> Result<core::result::Result<(), ErrorReason>> {
-    let hash = content_hash(bytes);
+    let hash = pow::content_hash(bytes);
     let tx = store.conn_mut().transaction()?;
     // Déjà accusé, ou même contenu déjà gardé : sans effet.
     let known: bool = tx.query_row(
@@ -147,7 +138,7 @@ fn deposit_message(
         params![&p.mailbox.0[..]],
         |r| r.get(0),
     )?;
-    if !pow::check(&p.id, &p.mailbox, nonce, pow_bits_for_count(policy, in_box)) {
+    if !pow::check(&hash, &p.mailbox, nonce, pow_bits_for_count(policy, in_box)) {
         return Ok(Err(ErrorReason::PowTooWeak));
     }
     if in_box >= i64::from(policy.max_per_mailbox) {
@@ -199,32 +190,34 @@ fn deposit_ack(
     if known {
         return Ok(Ok(()));
     }
-    // Lignes de cet identifiant : octets, expiration maximale, et présence
-    // d'une ligne dans la boîte de l'accusé.
-    let (n, old_len, max_exp, in_mailbox): (i64, i64, i64, i64) = tx.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(length(bytes)),0), COALESCE(MAX(expires_at),0),
-                COALESCE(SUM(mailbox=?2),0)
+    // Lignes de cet identifiant : octets, expiration maximale, et boîtes
+    // distinctes (l'accusé est rangé dans chacune).
+    let (n, old_len, max_exp): (i64, i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(bytes)),0), COALESCE(MAX(expires_at),0)
          FROM packets WHERE id=?1",
-        params![&target.0[..], &p.mailbox.0[..]],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        params![&target.0[..]],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    if n == 0 || in_mailbox == 0 || !ack::verify(&target, &sec) {
+    let boxes: Vec<Vec<u8>> = {
+        let mut st = tx.prepare("SELECT DISTINCT mailbox FROM packets WHERE id=?1")?;
+        st.query_map(params![&target.0[..]], |r| r.get(0))?
+            .collect::<core::result::Result<_, _>>()?
+    };
+    if n == 0 || !boxes.iter().any(|m| m[..] == p.mailbox.0) || !ack::verify(&target, &sec) {
         return Ok(Err(ErrorReason::UnknownAckTarget));
     }
-    let delta = i(bytes.len() as u64) - old_len;
+    let delta = i(bytes.len() as u64) * i(boxes.len() as u64) - old_len;
     if delta > 0 && stored_bytes(&tx)?.saturating_add(delta as u64) > policy.storage_max_bytes {
         return Ok(Err(ErrorReason::NodeFull));
     }
     tx.execute("DELETE FROM packets WHERE id=?1", params![&target.0[..]])?;
-    tx.execute(
-        "INSERT INTO acks(packet_id,mailbox,expires_at,bytes) VALUES(?1,?2,?3,?4)",
-        params![
-            &target.0[..],
-            &p.mailbox.0[..],
-            i64::from(p.expires_at).max(max_exp),
-            bytes
-        ],
-    )?;
+    let keep = i64::from(p.expires_at).max(max_exp);
+    for m in &boxes {
+        tx.execute(
+            "INSERT INTO acks(packet_id,mailbox,expires_at,bytes) VALUES(?1,?2,?3,?4)",
+            params![&target.0[..], m, keep, bytes],
+        )?;
+    }
     add_stored_bytes(&tx, delta)?;
     tx.commit()?;
     Ok(Ok(()))

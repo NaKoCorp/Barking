@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Compteurs du nœud.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,8 +36,10 @@ CREATE INDEX IF NOT EXISTS packets_mailbox ON packets(mailbox);
 CREATE INDEX IF NOT EXISTS packets_expires ON packets(expires_at);
 CREATE TABLE IF NOT EXISTS acks(
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    packet_id BLOB NOT NULL UNIQUE, mailbox BLOB NOT NULL,
-    expires_at INTEGER NOT NULL, bytes BLOB NOT NULL);
+    packet_id BLOB NOT NULL, mailbox BLOB NOT NULL,
+    expires_at INTEGER NOT NULL, bytes BLOB NOT NULL,
+    UNIQUE(packet_id, mailbox));
+CREATE INDEX IF NOT EXISTS acks_packet ON acks(packet_id);
 CREATE INDEX IF NOT EXISTS acks_mailbox ON acks(mailbox);
 CREATE INDEX IF NOT EXISTS acks_expires ON acks(expires_at);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);

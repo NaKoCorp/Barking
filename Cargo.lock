@@ -169,7 +169,6 @@ version = "0.1.0"
 dependencies = [
  "barking-packet",
  "barking-proto",
- "blake3",
  "rusqlite",
  "tempfile",
  "thiserror",

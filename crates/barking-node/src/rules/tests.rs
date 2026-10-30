@@ -39,7 +39,7 @@ fn msg(n: u8, mailbox: u8, tier: Tier, expires_at: u64) -> Packet {
 }
 
 fn nonce(p: &Packet) -> u64 {
-    pow::solve(&p.id, &p.mailbox, BITS).unwrap()
+    pow::solve(&pow::content_hash(&p.encode()), &p.mailbox, BITS).unwrap()
 }
 
 fn put(s: &mut NodeStore, p: &Packet) -> core::result::Result<(), ErrorReason> {
@@ -514,16 +514,15 @@ fn pow_is_progressive_per_mailbox() {
     let (_d2, mut s2) = store();
     fill(&s2, 1, 128);
     let p = ok_msg(1, 1);
+    let h = pow::content_hash(&p.encode());
     let weak = (0..)
-        .find(|n| {
-            pow::check(&p.id, &p.mailbox, *n, BITS) && !pow::check(&p.id, &p.mailbox, *n, BITS + 1)
-        })
+        .find(|n| pow::check(&h, &p.mailbox, *n, BITS) && !pow::check(&h, &p.mailbox, *n, BITS + 1))
         .unwrap();
     assert_eq!(
         deposit(&mut s2, &pol, &p.encode(), weak, NOW).unwrap(),
         Err(ErrorReason::PowTooWeak)
     );
-    let strong = pow::solve(&p.id, &p.mailbox, BITS + 1).unwrap();
+    let strong = pow::solve(&h, &p.mailbox, BITS + 1).unwrap();
     assert_eq!(
         deposit(&mut s2, &pol, &p.encode(), strong, NOW).unwrap(),
         Ok(())
@@ -566,4 +565,68 @@ fn reopen_keeps_data_and_pragmas() {
     }
     let s = NodeStore::open(&path).unwrap();
     assert_eq!(s.stats().unwrap().packets, 1);
+}
+
+#[test]
+fn pow_is_bound_to_content() {
+    let (_d, mut s) = store();
+    let real = ok_msg(1, 1);
+    let mut other = real.clone();
+    other.payload = vec![0xEE; 8];
+    // La preuve de `real` ne vaut pas pour un autre contenu du même identifiant,
+    // sauf rencontre fortuite (2^-4) : on cherche un nonce qui ne passe pas.
+    let h1 = pow::content_hash(&real.encode());
+    let h2 = pow::content_hash(&other.encode());
+    let n = (0..)
+        .find(|k| {
+            pow::check(&h1, &real.mailbox, *k, BITS) && !pow::check(&h2, &other.mailbox, *k, BITS)
+        })
+        .unwrap();
+    assert_eq!(
+        deposit(&mut s, &policy(), &other.encode(), n, NOW).unwrap(),
+        Err(ErrorReason::PowTooWeak)
+    );
+    assert_eq!(
+        deposit(&mut s, &policy(), &real.encode(), n, NOW).unwrap(),
+        Ok(())
+    );
+    assert_eq!(s.stats().unwrap().packets, 1);
+}
+
+#[test]
+fn ack_is_filed_in_every_mailbox_of_the_id() {
+    let (_d, mut s) = store();
+    let (real, _secret, mut a) = msg_and_ack(1, 1);
+    let mut squat = real.clone();
+    squat.mailbox = mb(2);
+    assert_eq!(put(&mut s, &squat), Ok(()));
+    assert_eq!(put(&mut s, &real), Ok(()));
+    // Ack ré-adressé vers B (où se trouve la ligne squat).
+    a.mailbox = mb(2);
+    assert_eq!(put_ack(&mut s, &a), Ok(()));
+    let st = s.stats().unwrap();
+    assert_eq!((st.packets, st.acks, st.bytes), (0, 2, 490));
+    for m in [1, 2] {
+        let (items, _) = fetch(&s, &[mb(m)], None, 1 << 20).unwrap().unwrap();
+        assert_eq!(items, vec![a.encode()], "boîte {m}");
+    }
+    // Le message ne ressuscite pas.
+    assert_eq!(put(&mut s, &real), Ok(()));
+    assert_eq!(s.stats().unwrap().packets, 0);
+}
+
+#[test]
+fn old_schema_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("n.db");
+    {
+        let s = NodeStore::open(&path).unwrap();
+        s.conn()
+            .execute("UPDATE meta SET v=1 WHERE k='schema_version'", [])
+            .unwrap();
+    }
+    match NodeStore::open(&path) {
+        Err(crate::Error::SchemaVersion(1)) => {}
+        other => panic!("attendu SchemaVersion(1), obtenu {:?}", other.map(|_| ())),
+    }
 }
