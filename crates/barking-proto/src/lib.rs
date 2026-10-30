@@ -6,10 +6,15 @@ pub mod frame;
 pub mod msg;
 pub mod node_id;
 pub mod pow;
+pub mod record;
 pub mod tls;
 
-pub use msg::{ACK_CURSOR_BASE, ErrorReason, Limits, MIN_PAGE_BYTES, Request, Response};
+pub use msg::{
+    ACK_CURSOR_BASE, ErrorReason, Limits, MAX_HOLDINGS_PER_PAGE, MAX_NODES_PER_RESPONSE,
+    MIN_PAGE_BYTES, Request, Response,
+};
 pub use node_id::{NodeId, generate_node_key};
+pub use record::{NodeRecord, RecordError, RecordPolicy, routable};
 
 /// Version du protocole.
 pub const PROTOCOL_VERSION: u16 = 0;

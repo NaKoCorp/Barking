@@ -370,7 +370,7 @@ async fn oversized_or_truncated_frame_closes_stream() {
 
     // La même connexion et une seconde connexion sont toujours servies.
     assert_eq!(
-        s.request(&Request::Ping).await.unwrap(),
+        s.request(&Request::Ping { from: None }).await.unwrap(),
         Response::Error(ErrorReason::Unsupported)
     );
     let mut s2 = Client::connect(node.addr, node.id).await.unwrap();
@@ -392,7 +392,7 @@ async fn rate_limited() {
     let s = Client::connect(node.addr, node.id).await.unwrap();
     let mut seen = Vec::new();
     for _ in 0..20 {
-        seen.push(s.request(&Request::Ping).await.unwrap());
+        seen.push(s.request(&Request::Ping { from: None }).await.unwrap());
     }
     assert_eq!(seen[0], Response::Error(ErrorReason::Unsupported));
     assert!(seen.contains(&Response::Error(ErrorReason::RateLimited)));
@@ -447,13 +447,18 @@ async fn dht_requests_unsupported() {
     let node = start(&path);
     let s = Client::connect(node.addr, node.id).await.unwrap();
     for req in [
-        Request::Ping,
-        Request::FindNode { target: [1; 32] },
+        Request::Ping { from: None },
+        Request::FindNode {
+            target: [1; 32],
+            from: None,
+        },
         Request::Store {
             packet: message(1, 1),
+            pow: 0,
         },
         Request::FindValue {
             mailbox: MailboxId([1; 16]),
+            cursor: None,
         },
     ] {
         assert_eq!(
@@ -842,7 +847,9 @@ async fn stopped_reader_is_charged() {
     // les requêtes suivantes sont limitées tant qu'il n'est pas rechargé.
     let deadline = tokio::time::Instant::now() + LONG;
     loop {
-        if s.request(&Request::Ping).await.unwrap() == Response::Error(ErrorReason::RateLimited) {
+        if s.request(&Request::Ping { from: None }).await.unwrap()
+            == Response::Error(ErrorReason::RateLimited)
+        {
             break;
         }
         assert!(
@@ -1050,7 +1057,7 @@ async fn repeated_rate_limit_closes_connection() {
     let s = Client::connect(node.addr, node.id).await.unwrap();
     let mut closed = false;
     for _ in 0..100 {
-        if s.request(&Request::Ping).await.is_err() {
+        if s.request(&Request::Ping { from: None }).await.is_err() {
             closed = true;
             break;
         }
@@ -1093,7 +1100,9 @@ async fn reconnect_does_not_refill_rate_bucket() {
     // Seau vidé (sans atteindre la fermeture pour abus).
     let mut drained = false;
     for _ in 0..15 {
-        if s.request(&Request::Ping).await.unwrap() == Response::Error(ErrorReason::RateLimited) {
+        if s.request(&Request::Ping { from: None }).await.unwrap()
+            == Response::Error(ErrorReason::RateLimited)
+        {
             drained = true;
             break;
         }
@@ -1103,7 +1112,7 @@ async fn reconnect_does_not_refill_rate_bucket() {
     // Nouvelle connexion depuis la même adresse : toujours limitée.
     let s = Client::connect(node.addr, node.id).await.unwrap();
     assert_eq!(
-        s.request(&Request::Ping).await.unwrap(),
+        s.request(&Request::Ping { from: None }).await.unwrap(),
         Response::Error(ErrorReason::RateLimited)
     );
     node.stop().await;

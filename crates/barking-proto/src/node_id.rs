@@ -24,7 +24,13 @@ impl NodeId {
 
     /// Vrai si le puzzle statique est résolu (20 bits à zéro).
     pub fn puzzle_ok(&self) -> bool {
-        self.puzzle_bits() >= NODE_PUZZLE_BITS
+        self.puzzle_ok_bits(NODE_PUZZLE_BITS)
+    }
+
+    /// Vrai si au moins `bits` bits sont à zéro (0 : toujours vrai, pour les
+    /// simulations).
+    pub fn puzzle_ok_bits(&self, bits: u32) -> bool {
+        self.puzzle_bits() >= bits
     }
 
     fn puzzle_bits(&self) -> u32 {

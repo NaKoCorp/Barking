@@ -147,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn frame_trailing_bytes_is_malformed() {
         let mut buf = Vec::new();
-        write(&mut buf, &Request::Ping, MAX_REQUEST_BYTES)
+        write(&mut buf, &Request::Ping { from: None }, MAX_REQUEST_BYTES)
             .await
             .unwrap();
         buf.push(0);
@@ -163,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn frame_truncated_is_error() {
         let mut buf = Vec::new();
-        write(&mut buf, &Request::Ping, MAX_REQUEST_BYTES)
+        write(&mut buf, &Request::Ping { from: None }, MAX_REQUEST_BYTES)
             .await
             .unwrap();
         for cut in 1..buf.len() {

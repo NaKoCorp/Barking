@@ -185,7 +185,7 @@ pub struct ServerStats {
 }
 
 /// Raisons d'erreur, dans l'ordre de `reason_index`.
-const REASONS: [ErrorReason; 12] = [
+const REASONS: [ErrorReason; 13] = [
     ErrorReason::VersionTooOld,
     ErrorReason::Malformed,
     ErrorReason::Expired,
@@ -198,6 +198,7 @@ const REASONS: [ErrorReason; 12] = [
     ErrorReason::RateLimited,
     ErrorReason::TooManyMailboxes,
     ErrorReason::Unsupported,
+    ErrorReason::NotResponsible,
 ];
 
 fn reason_index(r: ErrorReason) -> usize {
@@ -215,6 +216,7 @@ fn reason_index(r: ErrorReason) -> usize {
         ErrorReason::RateLimited => 9,
         ErrorReason::TooManyMailboxes => 10,
         ErrorReason::Unsupported => 11,
+        ErrorReason::NotResponsible => 12,
     }
 }
 
@@ -1055,7 +1057,7 @@ async fn handle(req: Request, shared: &Arc<Shared>, group: &ConnectionSlot) -> S
                 Stored::Failed => Stored::Failed,
             }
         }
-        Request::Ping
+        Request::Ping { .. }
         | Request::FindNode { .. }
         | Request::Store { .. }
         | Request::FindValue { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),

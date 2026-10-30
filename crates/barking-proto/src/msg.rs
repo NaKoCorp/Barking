@@ -4,7 +4,7 @@
 use barking_packet::MailboxId;
 use serde::{Deserialize, Serialize};
 
-use crate::node_id::NodeId;
+use crate::{node_id::NodeId, record::NodeRecord};
 
 /// Curseurs de relève : les paquets d'abord (curseur = leur numéro d'ordre,
 /// sous cette base), puis les accusés (`ACK_CURSOR_BASE + numéro`).
@@ -12,6 +12,12 @@ pub const ACK_CURSOR_BASE: u64 = 1 << 62;
 
 /// Plus petite page de relève servie par un nœud (octets de paquets).
 pub const MIN_PAGE_BYTES: u32 = 16 * 1024;
+
+/// Fiches au plus dans une réponse `Nodes`.
+pub const MAX_NODES_PER_RESPONSE: usize = 20;
+
+/// Empreintes au plus dans une page `Holdings`.
+pub const MAX_HOLDINGS_PER_PAGE: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
@@ -31,16 +37,24 @@ pub enum Request {
         /// que la page est envoyé seul).
         max_bytes: u32,
     },
-    /// Réservées au sous-projet 2.
-    Ping,
+    /// Table de hachage entre nœuds. `from` est la fiche de l'appelant s'il
+    /// est un nœud.
+    Ping {
+        from: Option<NodeRecord>,
+    },
     FindNode {
         target: [u8; 32],
+        from: Option<NodeRecord>,
     },
+    /// Dépôt d'un paquet recopié entre responsables.
     Store {
         packet: Vec<u8>,
+        pow: u64,
     },
+    /// Empreintes des paquets détenus pour une boîte, par pages.
     FindValue {
         mailbox: MailboxId,
+        cursor: Option<u64>,
     },
 }
 
@@ -66,6 +80,16 @@ pub enum Response {
         next: Option<u64>,
     },
     Error(ErrorReason),
+    Pong {
+        record: NodeRecord,
+    },
+    Nodes {
+        records: Vec<NodeRecord>,
+    },
+    Holdings {
+        hashes: Vec<[u8; 32]>,
+        next: Option<u64>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +106,7 @@ pub enum ErrorReason {
     RateLimited,
     TooManyMailboxes,
     Unsupported,
+    NotResponsible,
 }
 
 impl ErrorReason {
@@ -100,6 +125,7 @@ impl ErrorReason {
             ErrorReason::RateLimited => "trop de requêtes, réessayez plus tard",
             ErrorReason::TooManyMailboxes => "trop de boîtes demandées en une seule requête",
             ErrorReason::Unsupported => "requête non prise en charge par ce nœud",
+            ErrorReason::NotResponsible => "ce nœud n'est pas responsable de cette boîte",
         }
     }
 }
@@ -107,6 +133,15 @@ impl ErrorReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record() -> NodeRecord {
+        NodeRecord::sign(
+            &ed25519_dalek::SigningKey::from_bytes(&[5; 32]),
+            Some("1.2.3.4:4433".parse().unwrap()),
+            None,
+            7_200,
+        )
+    }
 
     fn rt<T: Serialize + for<'a> Deserialize<'a> + PartialEq + std::fmt::Debug>(v: T) {
         let bytes = postcard::to_allocvec(&v).unwrap();
@@ -133,13 +168,29 @@ mod tests {
             cursor: None,
             max_bytes: 0,
         });
-        rt(Request::Ping);
-        rt(Request::FindNode { target: [9; 32] });
+        rt(Request::Ping { from: None });
+        rt(Request::Ping {
+            from: Some(record()),
+        });
+        rt(Request::FindNode {
+            target: [9; 32],
+            from: None,
+        });
+        rt(Request::FindNode {
+            target: [9; 32],
+            from: Some(record()),
+        });
         rt(Request::Store {
             packet: vec![5; 10],
+            pow: 77,
         });
         rt(Request::FindValue {
             mailbox: MailboxId([4; 16]),
+            cursor: None,
+        });
+        rt(Request::FindValue {
+            mailbox: MailboxId([4; 16]),
+            cursor: Some(9),
         });
     }
 
@@ -174,19 +225,58 @@ mod tests {
             ErrorReason::RateLimited,
             ErrorReason::TooManyMailboxes,
             ErrorReason::Unsupported,
+            ErrorReason::NotResponsible,
         ] {
             rt(Response::Error(r));
             assert!(!r.describe().is_empty());
         }
+        rt(Response::Pong { record: record() });
+        rt(Response::Nodes { records: vec![] });
+        rt(Response::Nodes {
+            records: vec![record(), record()],
+        });
+        rt(Response::Holdings {
+            hashes: vec![[1; 32], [2; 32]],
+            next: Some(3),
+        });
+        rt(Response::Holdings {
+            hashes: vec![],
+            next: None,
+        });
     }
 
     #[test]
     fn variant_order_is_stable() {
         // Les variantes réservées suivent les variantes actives : ordre figé.
-        assert_eq!(postcard::to_allocvec(&Request::Ping).unwrap(), [3]);
+        assert_eq!(
+            postcard::to_allocvec(&Request::Ping { from: None }).unwrap(),
+            [3, 0]
+        );
         assert_eq!(
             postcard::to_allocvec(&Response::Error(ErrorReason::Unsupported)).unwrap(),
             [3, 11]
+        );
+    }
+
+    #[test]
+    fn new_variants_are_appended() {
+        let first = |r: &Response| postcard::to_allocvec(r).unwrap()[0];
+        let error = first(&Response::Error(ErrorReason::Unsupported));
+        assert_eq!(error, 3);
+        assert_eq!(first(&Response::Pong { record: record() }), error + 1);
+        assert_eq!(first(&Response::Nodes { records: vec![] }), error + 2);
+        assert_eq!(
+            first(&Response::Holdings {
+                hashes: vec![],
+                next: None
+            }),
+            error + 3
+        );
+        let reason = |r| postcard::to_allocvec(&Response::Error(r)).unwrap()[1];
+        assert_eq!(reason(ErrorReason::Unsupported), 11);
+        assert_eq!(
+            reason(ErrorReason::NotResponsible),
+            reason(ErrorReason::Unsupported) + 1
         );
     }
 }
