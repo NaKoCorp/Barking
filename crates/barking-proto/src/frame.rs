@@ -32,13 +32,9 @@ fn io_err(e: std::io::Error) -> FrameError {
     }
 }
 
-/// Écrit une trame ; refuse un corps plus grand que `max`. Renvoie le nombre
-/// d'octets écrits (en-tête compris).
-pub async fn write<T: Serialize>(
-    w: &mut (impl AsyncWrite + Unpin),
-    value: &T,
-    max: usize,
-) -> Result<usize> {
+/// Encode une trame complète (en-tête compris) ; refuse un corps plus grand
+/// que `max`.
+pub fn encode<T: Serialize>(value: &T, max: usize) -> Result<Vec<u8>> {
     let body = postcard::to_allocvec(value).map_err(|_| FrameError::Malformed)?;
     if body.len() > max {
         return Err(FrameError::TooLarge {
@@ -50,9 +46,22 @@ pub async fn write<T: Serialize>(
         len: body.len(),
         max,
     })?;
-    w.write_all(&len.to_be_bytes()).await.map_err(io_err)?;
-    w.write_all(&body).await.map_err(io_err)?;
-    Ok(4 + body.len())
+    let mut out = Vec::with_capacity(4 + body.len());
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Écrit une trame ; refuse un corps plus grand que `max`. Renvoie le nombre
+/// d'octets écrits (en-tête compris).
+pub async fn write<T: Serialize>(
+    w: &mut (impl AsyncWrite + Unpin),
+    value: &T,
+    max: usize,
+) -> Result<usize> {
+    let bytes = encode(value, max)?;
+    w.write_all(&bytes).await.map_err(io_err)?;
+    Ok(bytes.len())
 }
 
 /// Lit une trame. La longueur annoncée est vérifiée avant toute allocation.

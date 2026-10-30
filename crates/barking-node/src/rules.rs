@@ -20,6 +20,9 @@
 
 use barking_packet::{Kind, MailboxId, OVERHEAD, Packet, PacketId, Tier, ack};
 use barking_proto::{ErrorReason, pow};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use rusqlite::params;
 
 use crate::Result;
@@ -244,7 +247,19 @@ fn deposit_ack(
 /// Une page de relève : (éléments, curseur suivant). Ne supprime rien.
 pub type Page = (Vec<Vec<u8>>, Option<u64>);
 
-/// Relève paginée : paquets puis accusés des `mailboxes`, dans un ordre stable.
+/// Nombre maximal d'éléments par page (borne le travail d'une relève).
+pub const MAX_PAGE_ITEMS: usize = 1024;
+
+/// Lecture d'une boîte dans l'ordre de `seq`, via l'index `(mailbox, rowid)` :
+/// ni tri, ni lecture des charges utiles.
+pub(crate) fn fetch_scan_sql(table: &str) -> String {
+    format!("SELECT seq, length(bytes) FROM {table} WHERE mailbox=?1 AND seq>?2 ORDER BY seq")
+}
+
+/// Relève paginée : paquets puis accusés des `mailboxes`, dans l'ordre de
+/// `seq`. Fusion des lectures indexées de chaque boîte : le travail d'une
+/// page est proportionnel à sa taille (au plus `MAX_PAGE_ITEMS` éléments),
+/// pas au contenu des boîtes. Seules les charges retenues sont lues.
 /// La page ne dépasse `max_bytes` que si un seul élément est plus gros.
 pub fn fetch(
     store: &NodeStore,
@@ -255,43 +270,61 @@ pub fn fetch(
     if mailboxes.len() > MAX_MAILBOXES_PER_FETCH {
         return Ok(Err(ErrorReason::TooManyMailboxes));
     }
-    if mailboxes.is_empty() {
+    let mut boxes: Vec<[u8; 16]> = mailboxes.iter().map(|m| m.0).collect();
+    boxes.sort_unstable();
+    boxes.dedup();
+    if boxes.is_empty() {
         return Ok(Ok((Vec::new(), None)));
     }
     let after = cursor.unwrap_or(0);
-    let marks = vec!["?"; mailboxes.len()].join(",");
-    let mut page: Vec<Vec<u8>> = Vec::new();
+    let conn = store.conn();
+    // (table, seq) retenus, dans l'ordre.
+    let mut chosen: Vec<(&str, i64)> = Vec::new();
     let mut used = 0usize;
     let mut last: Option<u64> = None;
     let mut more = false;
 
-    'outer: for (table, key, base) in [("packets", "seq", 0u64), ("acks", "seq", ACK_BASE)] {
-        // Position de reprise dans cette table (0 = depuis le début).
-        let start = after.saturating_sub(base);
+    'outer: for (table, base) in [("packets", 0u64), ("acks", ACK_BASE)] {
         if table == "packets" && after >= ACK_BASE {
             continue;
         }
-        let sql = format!(
-            "SELECT {key}, bytes FROM {table} WHERE mailbox IN ({marks}) AND {key} > ? ORDER BY {key}"
-        );
-        let mut stmt = store.conn().prepare(&sql)?;
-        let mut args: Vec<rusqlite::types::Value> = mailboxes
+        let start = i(after.saturating_sub(base));
+        let sql = fetch_scan_sql(table);
+        let mut stmts = boxes
             .iter()
-            .map(|m| rusqlite::types::Value::Blob(m.0.to_vec()))
-            .collect();
-        args.push(rusqlite::types::Value::Integer(i(start)));
-        let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
-        while let Some(row) = rows.next()? {
-            let rowid: i64 = row.get(0)?;
-            let data: Vec<u8> = row.get(1)?;
-            if !page.is_empty() && used + data.len() > max_bytes {
+            .map(|_| conn.prepare(&sql))
+            .collect::<core::result::Result<Vec<_>, _>>()?;
+        let mut rows = Vec::with_capacity(stmts.len());
+        for (st, mb) in stmts.iter_mut().zip(&boxes) {
+            rows.push(st.query(params![&mb[..], start])?);
+        }
+        let mut heap = BinaryHeap::new();
+        for (k, r) in rows.iter_mut().enumerate() {
+            if let Some(row) = r.next()? {
+                heap.push(Reverse((row.get::<_, i64>(0)?, k, row.get::<_, i64>(1)?)));
+            }
+        }
+        while let Some(Reverse((seq, k, len))) = heap.pop() {
+            let len = usize::try_from(len).unwrap_or(usize::MAX);
+            if !chosen.is_empty()
+                && (chosen.len() >= MAX_PAGE_ITEMS || used.saturating_add(len) > max_bytes)
+            {
                 more = true;
                 break 'outer;
             }
-            used += data.len();
-            last = Some(base + u64::try_from(rowid).unwrap_or(0));
-            page.push(data);
+            used = used.saturating_add(len);
+            last = Some(base + u64::try_from(seq).unwrap_or(0));
+            chosen.push((table, seq));
+            if let Some(row) = rows[k].next()? {
+                heap.push(Reverse((row.get::<_, i64>(0)?, k, row.get::<_, i64>(1)?)));
+            }
         }
+    }
+
+    let mut page = Vec::with_capacity(chosen.len());
+    for (table, seq) in chosen {
+        let mut st = conn.prepare_cached(&format!("SELECT bytes FROM {table} WHERE seq=?1"))?;
+        page.push(st.query_row(params![seq], |r| r.get::<_, Vec<u8>>(0))?);
     }
     Ok(Ok((page, if more { last } else { None })))
 }

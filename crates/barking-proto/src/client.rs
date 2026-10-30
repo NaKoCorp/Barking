@@ -3,8 +3,8 @@
 //! Le client se méfie du nœud autant que le nœud se méfie de lui :
 //! - une difficulté annoncée au-delà de `MAX_POW_BITS` est une erreur de
 //!   protocole (un nœud hostile ne fait pas tourner le client sans fin) ;
-//! - une relève s'arrête à `MAX_FETCH_ITEMS` éléments ou `MAX_FETCH_BYTES`
-//!   octets par appel ; le reste attend la relève suivante (rien n'est supprimé
+//! - une relève s'arrête à `MAX_FETCH_ITEMS` éléments, `MAX_FETCH_BYTES`
+//!   octets, `MAX_FETCH_PAGES` pages ou `FETCH_DEADLINE` par appel ; le reste attend la relève suivante (rien n'est supprimé
 //!   à la lecture) et `Session::last_fetch_truncated` le signale ;
 //! - le curseur de pagination doit croître strictement, et une page vide ne
 //!   peut pas annoncer de suite ;
@@ -32,6 +32,10 @@ pub const MIN_PROTOCOL_VERSION: u16 = 0;
 pub const MAX_FETCH_ITEMS: usize = 10_000;
 /// Nombre maximal d'octets acceptés par appel à `fetch`.
 pub const MAX_FETCH_BYTES: usize = 64 << 20;
+/// Nombre maximal de pages suivies par appel à `fetch`.
+pub const MAX_FETCH_PAGES: usize = 1_000;
+/// Durée maximale d'un appel à `fetch`.
+pub const FETCH_DEADLINE: Duration = Duration::from_secs(120);
 /// Délai d'établissement de la connexion (poignée de main comprise).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Délai d'une requête (envoi et réponse).
@@ -237,21 +241,36 @@ impl Session {
     }
 
     /// Relève paquets et accusés en attente pour `mailboxes` (découpage par
-    /// 64 boîtes, pages suivies). S'arrête à `MAX_FETCH_ITEMS` éléments ou
-    /// `MAX_FETCH_BYTES` octets : voir `last_fetch_truncated`.
+    /// 64 boîtes, pages suivies). S'arrête à `MAX_FETCH_ITEMS` éléments,
+    /// `MAX_FETCH_BYTES` octets, `MAX_FETCH_PAGES` pages ou après
+    /// `FETCH_DEADLINE` : voir `last_fetch_truncated`.
     pub async fn fetch(&mut self, mailboxes: &[MailboxId]) -> Result<Vec<Vec<u8>>> {
         self.truncated = false;
         let per = usize::from(self.limits.max_mailboxes_per_fetch).min(MAX_MAILBOXES);
         let mut out = Vec::new();
         let mut bytes = 0usize;
+        let mut pages = 0usize;
+        let deadline = tokio::time::Instant::now() + FETCH_DEADLINE;
         for chunk in mailboxes.chunks(per) {
             let mut cursor: Option<u64> = None;
             loop {
+                if pages >= MAX_FETCH_PAGES || tokio::time::Instant::now() >= deadline {
+                    self.truncated = true;
+                    return Ok(out);
+                }
+                pages += 1;
                 let req = Request::Fetch {
                     mailboxes: chunk.to_vec(),
                     cursor,
                 };
-                let (items, next) = match self.request(&req).await? {
+                let resp = match tokio::time::timeout_at(deadline, self.request(&req)).await {
+                    Ok(r) => r?,
+                    Err(_) => {
+                        self.truncated = true;
+                        return Ok(out);
+                    }
+                };
+                let (items, next) = match resp {
                     Response::Items { items, next } => (items, next),
                     Response::Error(r) => return Err(ClientError::Refused(r)),
                     _ => return Err(ClientError::Protocol("réponse inattendue à Fetch")),

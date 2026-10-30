@@ -717,3 +717,81 @@ fn policy_validation() {
     };
     assert!(p.validate().is_ok());
 }
+
+/// Grande table : la lecture de chaque boîte suit l'index (pas de tri
+/// temporaire sur les charges), une page reste bornée en éléments, et la
+/// pagination complète ne perd ni ne duplique rien.
+#[test]
+fn fetch_large_table_index_ordered_and_bounded() {
+    let (_d, mut s) = store();
+    const BOXES: u8 = 64;
+    const PER_BOX: u32 = 300;
+    {
+        let tx = s.conn_mut().transaction().unwrap();
+        {
+            let mut st = tx
+                .prepare(
+                    "INSERT INTO packets(id,mailbox,kind,tier,expires_at,received_at,hash,bytes)
+                     VALUES(?1,?2,0,0,?3,0,?4,?5)",
+                )
+                .unwrap();
+            for n in 0..PER_BOX {
+                for b in 0..BOXES {
+                    let mut id = [0u8; 16];
+                    id[..4].copy_from_slice(&n.to_le_bytes());
+                    id[4] = b;
+                    st.execute(rusqlite::params![
+                        &id[..],
+                        &[b; 16][..],
+                        i64::try_from(NOW + 86_400).unwrap(),
+                        &id[..],
+                        vec![b; 245]
+                    ])
+                    .unwrap();
+                }
+            }
+        }
+        tx.commit().unwrap();
+    }
+    for table in ["packets", "acks"] {
+        let plan: Vec<String> = s
+            .conn()
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                super::fetch_scan_sql(table)
+            ))
+            .unwrap()
+            .query_map(rusqlite::params![&[1u8; 16][..], 0], |r| r.get(3))
+            .unwrap()
+            .collect::<core::result::Result<_, _>>()
+            .unwrap();
+        let plan = plan.join(" | ");
+        assert!(!plan.contains("TEMP B-TREE"), "{table}: {plan}");
+        assert!(plan.contains("INDEX"), "{table}: {plan}");
+    }
+    // Boîtes en double dans la requête : pas de doublon.
+    let (dup, next) = fetch(&s, &[mb(3), mb(3)], None, 1 << 20).unwrap().unwrap();
+    assert_eq!((dup.len(), next), (PER_BOX as usize, None));
+    let boxes: Vec<MailboxId> = (0..BOXES).map(mb).collect();
+    let mut cursor = None;
+    let mut all = Vec::new();
+    let mut pages = 0;
+    loop {
+        let (items, next) = fetch(&s, &boxes, cursor, 1 << 20).unwrap().unwrap();
+        assert!(items.len() <= super::MAX_PAGE_ITEMS);
+        assert!(!items.is_empty());
+        pages += 1;
+        all.extend(items);
+        match next {
+            Some(n) => cursor = Some(n),
+            None => break,
+        }
+    }
+    let total = usize::from(BOXES) * PER_BOX as usize;
+    assert_eq!(all.len(), total);
+    assert_eq!(pages, total.div_ceil(super::MAX_PAGE_ITEMS));
+    // Ordre d'insertion (seq) respecté.
+    for (k, it) in all.iter().enumerate() {
+        assert_eq!(it[0], (k % usize::from(BOXES)) as u8);
+    }
+}

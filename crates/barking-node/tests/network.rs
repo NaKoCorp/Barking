@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::{Core, ReceiveOutcome};
 use barking_node::limits::LimitConfig;
-use barking_node::server::{self, ServerConfig};
+use barking_node::server::{self, ServerConfig, ServerStats};
 use barking_node::{NodeStore, Policy};
 use barking_packet::{DEFAULT_HOPS, Kind, MailboxId, Packet, PacketId, Tier};
 use barking_proto::client::{self, Client, ClientError};
@@ -103,15 +103,26 @@ fn db() -> (tempfile::TempDir, PathBuf) {
 
 /// Paquet de message synthétique valide (palier S) dans la boîte `mb`.
 fn message(n: u32, mb: u8) -> Vec<u8> {
+    message_tier(n, mb, Tier::S)
+}
+
+/// Expiration fixée une fois pour toutes : un même paquet a les mêmes octets
+/// d'un appel à l'autre.
+fn expiry() -> u32 {
+    static E: OnceLock<u32> = OnceLock::new();
+    *E.get_or_init(|| u32::try_from(now() + 86_400).unwrap())
+}
+
+fn message_tier(n: u32, mb: u8, tier: Tier) -> Vec<u8> {
     let mut id = [0u8; 16];
     id[..4].copy_from_slice(&n.to_le_bytes());
     id[4] = mb;
     Packet {
         kind: Kind::Message,
         hops: DEFAULT_HOPS,
-        tier: Tier::S,
+        tier,
         id: PacketId(id),
-        expires_at: u32::try_from(now() + 86_400).unwrap(),
+        expires_at: expiry(),
         mailbox: MailboxId([mb; 16]),
         payload: vec![n as u8; 16],
     }
@@ -597,6 +608,196 @@ async fn client_caps_hostile_pagination() {
     srv.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_caps_page_count() {
+    let k = key(0);
+    let h = hello(&k, TEST_BITS);
+    let (addr, srv) = fake_node(k.clone(), move |req| match req {
+        Request::Hello { .. } => h.clone(),
+        Request::Fetch { cursor, .. } => Response::Items {
+            items: vec![vec![1]],
+            next: Some(cursor.unwrap_or(0) + 1),
+        },
+        _ => Response::Error(ErrorReason::Unsupported),
+    });
+    let mut s = Client::connect(addr, id_of(&k)).await.unwrap();
+    let items = timeout(Duration::from_secs(60), s.fetch(&[MailboxId([1; 16])]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(items.len(), client::MAX_FETCH_PAGES);
+    assert!(s.last_fetch_truncated());
+    srv.abort();
+}
+
+/// Connexion dont le lecteur n'ouvre presque pas sa fenêtre de réception :
+/// les réponses restent bloquées côté nœud.
+async fn stuck_connection(addr: SocketAddr, id: NodeId) -> (quinn::Endpoint, quinn::Connection) {
+    let mut ep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls::client_config(id)).unwrap();
+    let mut cfg = quinn::ClientConfig::new(Arc::new(crypto));
+    let mut t = quinn::TransportConfig::default();
+    t.stream_receive_window(2048u32.into())
+        .receive_window(8192u32.into());
+    cfg.transport_config(Arc::new(t));
+    ep.set_default_client_config(cfg);
+    let conn = ep.connect(addr, tls::CERT_NAME).unwrap().await.unwrap();
+    let r = client::request(
+        &conn,
+        &Request::Hello {
+            version: 0,
+            min_version: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(r, Response::Hello { .. }));
+    (ep, conn)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stuck_readers_bounded_by_global_cap() {
+    let (_d, path) = db();
+    let stats = Arc::new(ServerStats::default());
+    const CAP: usize = 2 << 20;
+    let st = stats.clone();
+    let node = start_with(&path, key(0), policy(), move |c| {
+        c.stats = st;
+        c.max_response_bytes_in_flight = CAP;
+        c.request_timeout = Duration::from_secs(3);
+        c.limits.requests_per_sec = 10_000;
+        c.limits.bytes_per_sec = 1 << 30;
+    });
+    // Plus d'une page de paquets L dans la boîte 9.
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    for n in 0..70 {
+        assert_eq!(
+            s.deposit(&message_tier(n, 9, Tier::L)).await.unwrap(),
+            Ok(())
+        );
+    }
+    // 3 connexions × 4 flux de relève jamais lus.
+    let fetch = frame::encode(
+        &Request::Fetch {
+            mailboxes: vec![MailboxId([9; 16])],
+            cursor: None,
+        },
+        MAX_REQUEST_BYTES,
+    )
+    .unwrap();
+    let mut held = Vec::new();
+    let mut endpoints = Vec::new();
+    for _ in 0..3 {
+        let (ep, conn) = stuck_connection(node.addr, node.id).await;
+        for _ in 0..4 {
+            let (mut send, recv) = conn.open_bi().await.unwrap();
+            send.write_all(&fetch).await.unwrap();
+            send.finish().unwrap();
+            held.push((send, recv));
+        }
+        endpoints.push((ep, conn));
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert!(
+        stats.response_bytes.now() > 1 << 20,
+        "{}",
+        stats.response_bytes.now()
+    );
+    assert!(stats.response_bytes.peak() <= CAP);
+    // Un autre client est toujours servi.
+    let mut other = Client::connect(node.addr, node.id).await.unwrap();
+    assert_eq!(other.deposit(&message(1, 1)).await.unwrap(), Ok(()));
+    // Passé `request_timeout`, les flux bloqués sont coupés et la mémoire rendue.
+    let deadline = tokio::time::Instant::now() + LONG;
+    while stats.response_bytes.now() != 0 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        other.fetch(&[MailboxId([1; 16])]).await.unwrap(),
+        vec![message(1, 1)]
+    );
+    assert!(stats.response_bytes.peak() <= CAP);
+    drop(held);
+    drop(endpoints);
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn db_queue_bounded_across_connection_churn() {
+    let (_d, path) = db();
+    let stats = Arc::new(ServerStats::default());
+    let st = stats.clone();
+    let node = start_with(&path, key(0), policy(), move |c| {
+        c.stats = st;
+        c.max_db_jobs = 2;
+        c.limits.requests_per_sec = 10_000;
+    });
+    let boxes: Vec<MailboxId> = (0..64u8).map(|n| MailboxId([n; 16])).collect();
+    let mut limited = 0;
+    for round in 0..10u32 {
+        let s = Client::connect(node.addr, node.id).await.unwrap();
+        let mut reqs = Vec::new();
+        for k in 0..4u32 {
+            let conn = s.connection().clone();
+            let req = if k % 2 == 0 {
+                Request::Fetch {
+                    mailboxes: boxes.clone(),
+                    cursor: None,
+                }
+            } else {
+                Request::Deposit {
+                    packet: message(round * 4 + k, 5),
+                    pow: 0,
+                }
+            };
+            reqs.push(tokio::spawn(
+                async move { client::request(&conn, &req).await },
+            ));
+        }
+        // Moitié des tours : fermeture sans attendre les réponses.
+        if round % 2 == 0 {
+            for r in reqs {
+                if let Ok(Ok(Response::Error(ErrorReason::RateLimited))) = r.await {
+                    limited += 1;
+                }
+            }
+        }
+        drop(s);
+        assert!(stats.db_jobs.peak() <= 2);
+    }
+    let _ = limited;
+    let deadline = tokio::time::Instant::now() + LONG;
+    while stats.db_jobs.now() != 0 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(stats.db_jobs.peak() <= 2);
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    assert_eq!(s.deposit(&message(999, 6)).await.unwrap(), Ok(()));
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_rate_limit_closes_connection() {
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 1;
+        c.limits.burst = 1;
+    });
+    let s = Client::connect(node.addr, node.id).await.unwrap();
+    let mut closed = false;
+    for _ in 0..100 {
+        if s.request(&Request::Ping).await.is_err() {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed);
+    timeout(LONG, s.connection().closed()).await.unwrap();
+    node.stop().await;
+}
+
 #[test]
 fn limit_defaults_match_spec() {
     let l = LimitConfig::default();
@@ -613,4 +814,6 @@ fn limit_defaults_match_spec() {
     let c = ServerConfig::new(vec![], key(0));
     assert_eq!(c.hello_timeout, Duration::from_secs(5));
     assert_eq!(c.idle_timeout, Duration::from_secs(60));
+    assert_eq!(c.max_streams, 4);
+    assert_eq!(c.max_response_bytes_in_flight, 64 << 20);
 }
