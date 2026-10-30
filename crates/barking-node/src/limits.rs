@@ -56,9 +56,16 @@ fn ip_key(ip: IpAddr) -> IpKey {
     }
 }
 
+/// Un groupe d'adresses : connexions ouvertes et octets de réponses réservés.
+#[derive(Default)]
+struct Group {
+    conns: u32,
+    bytes: usize,
+}
+
 #[derive(Default)]
 struct Table {
-    per_ip: HashMap<IpKey, u32>,
+    per_ip: HashMap<IpKey, Group>,
     total: u32,
 }
 
@@ -92,14 +99,14 @@ impl Limiter {
         if t.total >= self.cfg.max_connections {
             return None;
         }
-        let n = t.per_ip.entry(key).or_insert(0);
-        if *n >= self.cfg.max_connections_per_ip {
-            if *n == 0 {
+        let g = t.per_ip.entry(key).or_default();
+        if g.conns >= self.cfg.max_connections_per_ip {
+            if g.conns == 0 {
                 t.per_ip.remove(&key);
             }
             return None;
         }
-        *n += 1;
+        g.conns += 1;
         t.total += 1;
         Some(ConnectionSlot {
             limiter: Arc::clone(self),
@@ -124,13 +131,48 @@ pub struct ConnectionSlot {
     key: IpKey,
 }
 
+impl ConnectionSlot {
+    /// Réserve `n` octets de réponse pour le groupe d'adresses de cette
+    /// connexion, sans dépasser `cap`.
+    pub fn try_reserve_bytes(&self, n: usize, cap: usize) -> bool {
+        let mut t = self.limiter.table();
+        let Some(g) = t.per_ip.get_mut(&self.key) else {
+            return false;
+        };
+        match g.bytes.checked_add(n) {
+            Some(v) if v <= cap => {
+                g.bytes = v;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Rend `n` octets réservés par `try_reserve_bytes`.
+    pub fn release_bytes(&self, n: usize) {
+        let mut t = self.limiter.table();
+        if let Some(g) = t.per_ip.get_mut(&self.key) {
+            g.bytes = g.bytes.saturating_sub(n);
+        }
+    }
+
+    /// Octets réservés par le groupe d'adresses de cette connexion.
+    pub fn group_bytes(&self) -> usize {
+        self.limiter
+            .table()
+            .per_ip
+            .get(&self.key)
+            .map_or(0, |g| g.bytes)
+    }
+}
+
 impl Drop for ConnectionSlot {
     fn drop(&mut self) {
         let mut t = self.limiter.table();
         t.total = t.total.saturating_sub(1);
-        if let Some(n) = t.per_ip.get_mut(&self.key) {
-            *n = n.saturating_sub(1);
-            if *n == 0 {
+        if let Some(g) = t.per_ip.get_mut(&self.key) {
+            g.conns = g.conns.saturating_sub(1);
+            if g.conns == 0 {
                 t.per_ip.remove(&self.key);
             }
         }
@@ -256,6 +298,24 @@ mod tests {
             .try_acquire("::ffff:198.51.100.7".parse().unwrap())
             .unwrap();
         assert!(l.try_acquire("198.51.100.7".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn group_byte_reservation() {
+        let l = Limiter::new(cfg());
+        let a = l.try_acquire("2001:db8::1".parse().unwrap()).unwrap();
+        let b = l.try_acquire("2001:db8::2".parse().unwrap()).unwrap();
+        let c = l.try_acquire("2001:db9::1".parse().unwrap()).unwrap();
+        assert!(a.try_reserve_bytes(600, 1000));
+        // Même /64 : part commune.
+        assert!(!b.try_reserve_bytes(500, 1000));
+        assert!(b.try_reserve_bytes(400, 1000));
+        assert_eq!(a.group_bytes(), 1000);
+        // Autre groupe : indépendant.
+        assert!(c.try_reserve_bytes(1000, 1000));
+        a.release_bytes(600);
+        assert!(b.try_reserve_bytes(600, 1000));
+        assert!(!a.try_reserve_bytes(usize::MAX, usize::MAX));
     }
 
     #[test]

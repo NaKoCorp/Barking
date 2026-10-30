@@ -10,12 +10,16 @@
 //!   tenu par la tâche bloquante elle-même : abandonner la requête ne libère
 //!   la place qu'une fois le travail fini.
 //! - **Mémoire des réponses** : chaque requête réserve d'avance la taille
-//!   maximale de sa réponse (1 Mio pour `Fetch`) dans un budget global
-//!   (`max_response_bytes_in_flight`, 64 Mio), ramenée ensuite à la taille
-//!   encodée. La réserve est rendue quand le pair a acquitté toute la réponse,
-//!   ou au bout de `request_timeout` (flux alors réinitialisé). Budget épuisé :
-//!   `RateLimited`. Un lecteur lent ne retient donc ni mémoire ni flux au-delà
-//!   de ce délai.
+//!   maximale de sa réponse (pour `Fetch` : la page demandée par le client,
+//!   entre 16 Kio et ~1 Mio, plus la marge d'encodage), ramenée ensuite à la
+//!   taille encodée. Trois plafonds : une page par connexion (1 Mio), 1/16 du
+//!   budget global par groupe d'adresses (`max_response_bytes_per_ip`, 4 Mio)
+//!   et le budget global (`max_response_bytes_in_flight`, 64 Mio). Plafond
+//!   atteint : `RateLimited`. La réserve est rendue quand le pair a acquitté
+//!   toute la réponse, ou à l'échéance d'écriture (flux alors réinitialisé) :
+//!   `request_timeout + taille / min_send_rate` (32 Kio/s), au plus 60 s.
+//!   Mémoire réelle : environ deux fois le budget (éléments lus de la base,
+//!   corps encodé, puis copie tenue par quinn jusqu'à l'acquittement).
 //! - **Tâches** : les flux d'une connexion vivent dans un `JoinSet` de la
 //!   connexion ; la place du limiteur n'est rendue qu'après leur fin
 //!   (abandonnées à la fermeture).
@@ -33,7 +37,8 @@
 //! - **Trames** : une trame trop grande, tronquée ou trop lente ferme le flux
 //!   sans réponse ; un corps illisible reçoit `Error(Malformed)`.
 //! - **Débit** : chaque requête après `Hello` passe par le seau de jetons de sa
-//!   connexion (`RateLimited` sinon) ; les octets des réponses y sont débités.
+//!   connexion (`RateLimited` sinon) ; les octets de chaque réponse y sont
+//!   débités qu'elle soit acquittée, coupée, arrêtée par le pair ou expirée.
 //!   Après `MAX_CONSECUTIVE_REFUSALS` (20) refus de débit d'affilée, la
 //!   connexion est fermée.
 //! - **Purge** des expirés au démarrage puis toutes les 60 s.
@@ -44,6 +49,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use barking_packet::Tier;
 use barking_proto::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use barking_proto::{ErrorReason, Limits, NodeId, PROTOCOL_VERSION, Request, Response, tls};
 use ed25519_dalek::SigningKey;
@@ -52,7 +58,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-use crate::limits::{ConnBudget, LimitConfig, Limiter};
+use crate::limits::{ConnBudget, ConnectionSlot, LimitConfig, Limiter};
 use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
 use crate::store::NodeStore;
 use crate::{Error, Result};
@@ -67,6 +73,10 @@ const STREAM_WINDOW: u32 = 2 * MAX_REQUEST_BYTES as u32;
 /// Octets de réponses non acquittés par connexion.
 const SEND_WINDOW: u64 = 2 * MAX_RESPONSE_BYTES as u64;
 
+/// Marge d'encodage d'une page (longueurs des éléments, curseur, en-tête).
+const PAGE_OVERHEAD: usize = 8 * 1024;
+/// Échéance d'écriture maximale d'une réponse.
+pub const MAX_WRITE_DEADLINE: Duration = Duration::from_secs(60);
 /// Réserve de réponse d'une requête autre que `Fetch`.
 const SMALL_RESPONSE_BYTES: usize = 4 * 1024;
 /// Refus de débit consécutifs avant fermeture de la connexion.
@@ -91,6 +101,11 @@ pub struct ServerConfig {
     pub max_streams: u32,
     /// Octets de réponses en vol (réservés, non acquittés), tous pairs confondus.
     pub max_response_bytes_in_flight: usize,
+    /// Octets de réponses en vol par groupe d'adresses (/64 en IPv6).
+    pub max_response_bytes_per_ip: usize,
+    /// Débit minimal attendu d'un lecteur : allonge l'échéance d'écriture
+    /// d'une réponse de `taille / min_send_rate`.
+    pub min_send_rate: u64,
     /// Opérations de base en cours ou en attente, tous pairs confondus.
     pub max_db_jobs: usize,
     /// Versions du protocole servies : `min_version..=version`.
@@ -133,6 +148,8 @@ pub struct ServerStats {
     pub db_jobs: Gauge,
     /// Octets de réponses réservés.
     pub response_bytes: Gauge,
+    /// Connexions ouvertes.
+    pub connections: Gauge,
 }
 
 /// Budget global à jetons, reflété dans une jauge.
@@ -218,6 +235,8 @@ impl ServerConfig {
             request_timeout: Duration::from_secs(10),
             max_streams: 4,
             max_response_bytes_in_flight: 64 << 20,
+            max_response_bytes_per_ip: 4 << 20,
+            min_send_rate: 32 * 1024,
             max_db_jobs: 64,
             version: PROTOCOL_VERSION,
             min_version: PROTOCOL_VERSION,
@@ -239,6 +258,35 @@ struct Shared {
     limiter: Arc<Limiter>,
     db: Arc<Budget>,
     responses: Arc<Budget>,
+    response_bytes_per_ip: usize,
+    min_send_rate: u64,
+    stats: Arc<ServerStats>,
+}
+
+impl Shared {
+    /// Échéance d'écriture d'une réponse de `len` octets.
+    fn write_deadline(&self, len: usize) -> Duration {
+        write_deadline(self.request_timeout, len, self.min_send_rate)
+    }
+}
+
+/// `request_timeout + len / rate`, au plus `MAX_WRITE_DEADLINE`.
+pub fn write_deadline(request_timeout: Duration, len: usize, rate: u64) -> Duration {
+    let extra = Duration::from_secs_f64(len as f64 / rate.max(1) as f64);
+    request_timeout
+        .saturating_add(extra)
+        .min(MAX_WRITE_DEADLINE)
+}
+
+/// Taille de page servie pour une demande de `max_bytes`.
+pub fn fetch_page_bytes(max_bytes: u32) -> usize {
+    (max_bytes as usize).clamp(barking_proto::MIN_PAGE_BYTES as usize, FETCH_PAGE_BYTES)
+}
+
+/// Réserve de réponse d'une page : la page, ou un élément seul plus gros
+/// (palier L), plus la marge d'encodage.
+fn fetch_reserve(max_bytes: u32) -> usize {
+    (fetch_page_bytes(max_bytes).max(Tier::L.size()) + PAGE_OVERHEAD).min(MAX_RESPONSE_BYTES)
 }
 
 /// Issue d'une opération de base.
@@ -310,9 +358,13 @@ pub async fn run(
     if config.sockets.is_empty() {
         return Err(Error::Config("aucune adresse d'écoute".into()));
     }
-    if config.max_db_jobs == 0 || config.max_response_bytes_in_flight < MAX_RESPONSE_BYTES {
+    if config.max_db_jobs == 0
+        || config.max_response_bytes_in_flight < MAX_RESPONSE_BYTES
+        || config.max_response_bytes_per_ip < MAX_RESPONSE_BYTES
+        || config.min_send_rate == 0
+    {
         return Err(Error::Config(
-            "max_db_jobs nul ou max_response_bytes_in_flight sous 1 Mio".into(),
+            "max_db_jobs ou min_send_rate nul, ou budget de réponse sous 1 Mio".into(),
         ));
     }
 
@@ -353,6 +405,9 @@ pub async fn run(
             Arc::clone(&config.stats),
             |s| &s.response_bytes,
         ),
+        response_bytes_per_ip: config.max_response_bytes_per_ip,
+        min_send_rate: config.min_send_rate,
+        stats: Arc::clone(&config.stats),
     });
 
     let runtime =
@@ -449,13 +504,24 @@ fn admit(
     let shared = Arc::clone(shared);
     let stop = stop.clone();
     conns.spawn(async move {
-        let _slot = slot;
-        serve_connection(incoming, shared, stop).await;
+        shared.stats.connections.add(1);
+        let _open = OpenConnection(Arc::clone(&shared.stats));
+        serve_connection(incoming, slot, shared, stop).await;
     });
+}
+
+/// Décompte d'une connexion ouverte (même si sa tâche est abandonnée).
+struct OpenConnection(Arc<ServerStats>);
+
+impl Drop for OpenConnection {
+    fn drop(&mut self) {
+        self.0.connections.sub(1);
+    }
 }
 
 async fn serve_connection(
     incoming: Incoming,
+    slot: ConnectionSlot,
     shared: Arc<Shared>,
     mut stop: watch::Receiver<bool>,
 ) {
@@ -476,6 +542,8 @@ async fn serve_connection(
         budget: Mutex::new(shared.limiter.budget(Instant::now())),
         refusals: AtomicU32::new(0),
         conn: conn.clone(),
+        reserved: AtomicUsize::new(0),
+        slot,
     });
     // Flux de cette connexion : bornés par QUIC (`max_streams`), attendus ou
     // abandonnés avant de rendre la place du limiteur.
@@ -514,6 +582,62 @@ struct ConnState {
     /// Refus de débit consécutifs.
     refusals: AtomicU32,
     conn: Connection,
+    /// Octets de réponses réservés par cette connexion (au plus une page).
+    reserved: AtomicUsize,
+    /// Place du limiteur : rendue quand la connexion et ses flux sont finis.
+    slot: ConnectionSlot,
+}
+
+/// Réserve de réponse comptée à trois niveaux : connexion, groupe
+/// d'adresses, budget global.
+struct Reservation {
+    held: Held,
+    state: Arc<ConnState>,
+    n: usize,
+}
+
+impl Reservation {
+    fn try_new(shared: &Shared, state: &Arc<ConnState>, n: usize) -> Option<Reservation> {
+        state
+            .reserved
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                v.checked_add(n).filter(|t| *t <= MAX_RESPONSE_BYTES)
+            })
+            .ok()?;
+        if !state
+            .slot
+            .try_reserve_bytes(n, shared.response_bytes_per_ip)
+        {
+            state.reserved.fetch_sub(n, Ordering::Relaxed);
+            return None;
+        }
+        let Some(held) = shared.responses.try_take(n) else {
+            state.slot.release_bytes(n);
+            state.reserved.fetch_sub(n, Ordering::Relaxed);
+            return None;
+        };
+        Some(Reservation {
+            held,
+            state: Arc::clone(state),
+            n,
+        })
+    }
+
+    /// Ramène la réserve à `keep` octets (jamais au-dessus de la réserve).
+    fn shrink(&mut self, keep: usize) {
+        let extra = self.n.saturating_sub(keep);
+        self.held.shrink(keep);
+        self.state.slot.release_bytes(extra);
+        self.state.reserved.fetch_sub(extra, Ordering::Relaxed);
+        self.n -= extra;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.state.slot.release_bytes(self.n);
+        self.state.reserved.fetch_sub(self.n, Ordering::Relaxed);
+    }
 }
 
 /// Lit une requête ; `None` si le flux a été fermé (trame trop grande,
@@ -540,8 +664,8 @@ async fn read_request(
 }
 
 /// Écrit la réponse et attend son acquittement complet, sous `limit` ; sinon
-/// le flux est réinitialisé. Renvoie les octets écrits.
-async fn respond(send: &mut SendStream, bytes: &[u8], limit: Duration) -> usize {
+/// (délai, arrêt par le pair) le flux est réinitialisé. Vrai si acquittée.
+async fn respond(send: &mut SendStream, bytes: &[u8], limit: Duration) -> bool {
     let sent = timeout(limit, async {
         send.write_all(bytes).await.ok()?;
         send.finish().ok()?;
@@ -549,10 +673,10 @@ async fn respond(send: &mut SendStream, bytes: &[u8], limit: Duration) -> usize 
     })
     .await;
     match sent {
-        Ok(Some(None)) => bytes.len(),
+        Ok(Some(None)) => true,
         _ => {
             let _ = send.reset(STREAM_REFUSED.into());
-            0
+            false
         }
     }
 }
@@ -630,17 +754,18 @@ async fn serve_stream(
             return;
         }
         let bytes = encode(&Response::Error(ErrorReason::RateLimited));
-        respond(&mut send, &bytes, shared.request_timeout).await;
+        respond(&mut send, &bytes, shared.write_deadline(bytes.len())).await;
+        state.charge(bytes.len());
         return;
     }
     state.refusals.store(0, Ordering::Relaxed);
 
-    // Réserve de réponse prise avant tout travail ; budget épuisé : refus.
+    // Réserve de réponse prise avant tout travail ; plafond atteint : refus.
     let reserve = match &req {
-        Ok(Request::Fetch { .. }) => MAX_RESPONSE_BYTES,
+        Ok(Request::Fetch { max_bytes, .. }) => fetch_reserve(*max_bytes),
         _ => SMALL_RESPONSE_BYTES,
     };
-    let (bytes, held) = match shared.responses.try_take(reserve) {
+    let (bytes, held) = match Reservation::try_new(&shared, &state, reserve) {
         None => (encode(&Response::Error(ErrorReason::RateLimited)), None),
         Some(mut held) => {
             let resp = match req {
@@ -655,18 +780,26 @@ async fn serve_stream(
                     }
                 },
             };
+            // La réserve couvre la réponse : page bornée par `fetch_reserve`.
             let bytes = encode(&resp);
             held.shrink(bytes.len());
             (bytes, Some(held))
         }
     };
-    let sent = respond(&mut send, &bytes, shared.request_timeout).await;
+    // Débit compté sur la taille envoyée, que la réponse soit acquittée,
+    // coupée, arrêtée par le pair ou expirée.
+    respond(&mut send, &bytes, shared.write_deadline(bytes.len())).await;
     drop(held);
-    state
-        .budget
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .charge_bytes(sent, Instant::now());
+    state.charge(bytes.len());
+}
+
+impl ConnState {
+    fn charge(&self, bytes: usize) {
+        self.budget
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .charge_bytes(bytes, Instant::now());
+    }
 }
 
 /// Traite une requête après `Hello`.
@@ -689,11 +822,14 @@ async fn handle(req: Request, shared: &Arc<Shared>) -> Stored<Response> {
                 Stored::Failed => Stored::Failed,
             }
         }
-        Request::Fetch { mailboxes, cursor } => {
+        Request::Fetch {
+            mailboxes,
+            cursor,
+            max_bytes,
+        } => {
+            let page = fetch_page_bytes(max_bytes);
             match shared
-                .with_store(false, move |s, _| {
-                    rules::fetch(s, &mailboxes, cursor, FETCH_PAGE_BYTES)
-                })
+                .with_store(false, move |s, _| rules::fetch(s, &mailboxes, cursor, page))
                 .await
             {
                 Stored::Done(r) => Stored::Done(to_resp(
@@ -707,5 +843,31 @@ async fn handle(req: Request, shared: &Arc<Shared>) -> Stored<Response> {
         | Request::FindNode { .. }
         | Request::Store { .. }
         | Request::FindValue { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_deadline_scales_with_size() {
+        let t = Duration::from_secs(10);
+        let r = 32 * 1024;
+        assert_eq!(write_deadline(t, 0, r), t);
+        assert_eq!(write_deadline(t, 32 * 1024, r), Duration::from_secs(11));
+        assert_eq!(write_deadline(t, 1 << 20, r), Duration::from_secs(42));
+        assert_eq!(write_deadline(t, 100 << 20, r), MAX_WRITE_DEADLINE);
+    }
+
+    #[test]
+    fn fetch_page_and_reserve_bounds() {
+        assert_eq!(fetch_page_bytes(0), 16 * 1024);
+        assert_eq!(fetch_page_bytes(64 * 1024), 64 * 1024);
+        assert_eq!(fetch_page_bytes(u32::MAX), FETCH_PAGE_BYTES);
+        // Un élément L seul tient toujours dans la réserve.
+        assert!(fetch_reserve(0) >= Tier::L.size() + PAGE_OVERHEAD);
+        assert!(fetch_reserve(u32::MAX) <= MAX_RESPONSE_BYTES);
+        assert!(fetch_reserve(u32::MAX) >= FETCH_PAGE_BYTES + PAGE_OVERHEAD);
     }
 }

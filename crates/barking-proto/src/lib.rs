@@ -8,7 +8,7 @@ pub mod node_id;
 pub mod pow;
 pub mod tls;
 
-pub use msg::{ErrorReason, Limits, Request, Response};
+pub use msg::{ErrorReason, Limits, MIN_PAGE_BYTES, Request, Response};
 pub use node_id::{NodeId, generate_node_key};
 
 /// Version du protocole.

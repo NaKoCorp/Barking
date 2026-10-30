@@ -305,6 +305,7 @@ async fn request_before_hello_refused() {
         &Request::Fetch {
             mailboxes: vec![MailboxId([1; 16])],
             cursor: None,
+            max_bytes: 1 << 20,
         },
     )
     .await
@@ -538,7 +539,7 @@ async fn policy_with_excessive_pow_refused() {
 /// Faux nœud : TLS authentique (clé `k`), réponses fournies par `answer`.
 fn fake_node(
     k: SigningKey,
-    answer: impl Fn(Request) -> Response + Send + Sync + 'static,
+    answer: impl Fn(Request) -> Option<Response> + Send + Sync + 'static,
 ) -> (SocketAddr, JoinHandle<()>) {
     let ep = quinn::Endpoint::server(tls::quinn_server_config(&k), "127.0.0.1:0".parse().unwrap())
         .unwrap();
@@ -553,8 +554,16 @@ fn fake_node(
                     let Ok(req) = frame::read::<Request>(&mut recv, MAX_REQUEST_BYTES).await else {
                         return;
                     };
-                    let _ = frame::write(&mut send, &answer(req), frame::MAX_RESPONSE_BYTES).await;
-                    let _ = send.finish();
+                    match answer(req) {
+                        Some(resp) => {
+                            let _ = frame::write(&mut send, &resp, frame::MAX_RESPONSE_BYTES).await;
+                            let _ = send.finish();
+                        }
+                        // Flux coupé, comme un nœud dont l'échéance d'écriture expire.
+                        None => {
+                            let _ = send.reset(1u32.into());
+                        }
+                    }
                 }
             });
         }
@@ -580,7 +589,7 @@ fn hello(k: &SigningKey, pow_bits: u8) -> Response {
 async fn client_rejects_excessive_pow_bits() {
     let k = key(0);
     let h = hello(&k, 30);
-    let (addr, srv) = fake_node(k.clone(), move |_| h.clone());
+    let (addr, srv) = fake_node(k.clone(), move |_| Some(h.clone()));
     let r = Client::connect(addr, id_of(&k)).await;
     assert!(matches!(r, Err(ClientError::Protocol(_))), "{:?}", r.err());
     srv.abort();
@@ -590,13 +599,15 @@ async fn client_rejects_excessive_pow_bits() {
 async fn client_caps_hostile_pagination() {
     let k = key(0);
     let h = hello(&k, TEST_BITS);
-    let (addr, srv) = fake_node(k.clone(), move |req| match req {
-        Request::Hello { .. } => h.clone(),
-        Request::Fetch { cursor, .. } => Response::Items {
-            items: vec![vec![0; 8]; 100],
-            next: Some(cursor.unwrap_or(0) + 1),
-        },
-        _ => Response::Error(ErrorReason::Unsupported),
+    let (addr, srv) = fake_node(k.clone(), move |req| {
+        Some(match req {
+            Request::Hello { .. } => h.clone(),
+            Request::Fetch { cursor, .. } => Response::Items {
+                items: vec![vec![0; 8]; 100],
+                next: Some(cursor.unwrap_or(0) + 1),
+            },
+            _ => Response::Error(ErrorReason::Unsupported),
+        })
     });
     let mut s = Client::connect(addr, id_of(&k)).await.unwrap();
     let items = timeout(LONG, s.fetch(&[MailboxId([1; 16])]))
@@ -612,13 +623,15 @@ async fn client_caps_hostile_pagination() {
 async fn client_caps_page_count() {
     let k = key(0);
     let h = hello(&k, TEST_BITS);
-    let (addr, srv) = fake_node(k.clone(), move |req| match req {
-        Request::Hello { .. } => h.clone(),
-        Request::Fetch { cursor, .. } => Response::Items {
-            items: vec![vec![1]],
-            next: Some(cursor.unwrap_or(0) + 1),
-        },
-        _ => Response::Error(ErrorReason::Unsupported),
+    let (addr, srv) = fake_node(k.clone(), move |req| {
+        Some(match req {
+            Request::Hello { .. } => h.clone(),
+            Request::Fetch { cursor, .. } => Response::Items {
+                items: vec![vec![1]],
+                next: Some(cursor.unwrap_or(0) + 1),
+            },
+            _ => Response::Error(ErrorReason::Unsupported),
+        })
     });
     let mut s = Client::connect(addr, id_of(&k)).await.unwrap();
     let items = timeout(Duration::from_secs(60), s.fetch(&[MailboxId([1; 16])]))
@@ -664,7 +677,9 @@ async fn stuck_readers_bounded_by_global_cap() {
     let node = start_with(&path, key(0), policy(), move |c| {
         c.stats = st;
         c.max_response_bytes_in_flight = CAP;
-        c.request_timeout = Duration::from_secs(3);
+        c.request_timeout = Duration::from_secs(5);
+        // Échéance d'écriture ≈ request_timeout : test court.
+        c.min_send_rate = 1 << 30;
         c.limits.requests_per_sec = 10_000;
         c.limits.bytes_per_sec = 1 << 30;
     });
@@ -681,6 +696,7 @@ async fn stuck_readers_bounded_by_global_cap() {
         &Request::Fetch {
             mailboxes: vec![MailboxId([9; 16])],
             cursor: None,
+            max_bytes: 1 << 20,
         },
         MAX_REQUEST_BYTES,
     )
@@ -697,12 +713,15 @@ async fn stuck_readers_bounded_by_global_cap() {
         }
         endpoints.push((ep, conn));
     }
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    assert!(
-        stats.response_bytes.now() > 1 << 20,
-        "{}",
-        stats.response_bytes.now()
-    );
+    // Synchronisation sur la jauge du nœud plutôt qu'un délai fixe.
+    let deadline = tokio::time::Instant::now() + LONG;
+    while stats.response_bytes.now() <= 1 << 20 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "flux bloqués non réservés"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(stats.response_bytes.peak() <= CAP);
     // Un autre client est toujours servi.
     let mut other = Client::connect(node.addr, node.id).await.unwrap();
@@ -730,32 +749,31 @@ async fn db_queue_bounded_across_connection_churn() {
     let st = stats.clone();
     let node = start_with(&path, key(0), policy(), move |c| {
         c.stats = st;
-        c.max_db_jobs = 2;
+        c.max_db_jobs = 1;
         c.limits.requests_per_sec = 10_000;
     });
+    // De quoi rendre une relève de 64 boîtes non instantanée.
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    for n in 0..64u32 {
+        assert_eq!(s.deposit(&message(n, n as u8)).await.unwrap(), Ok(()));
+    }
+    s.close().await;
     let boxes: Vec<MailboxId> = (0..64u8).map(|n| MailboxId([n; 16])).collect();
     let mut limited = 0;
     for round in 0..10u32 {
         let s = Client::connect(node.addr, node.id).await.unwrap();
         let mut reqs = Vec::new();
-        for k in 0..4u32 {
+        for _ in 0..4 {
             let conn = s.connection().clone();
-            let req = if k % 2 == 0 {
-                Request::Fetch {
-                    mailboxes: boxes.clone(),
-                    cursor: None,
-                }
-            } else {
-                Request::Deposit {
-                    packet: message(round * 4 + k, 5),
-                    pow: 0,
-                }
+            let req = Request::Fetch {
+                mailboxes: boxes.clone(),
+                cursor: None,
+                max_bytes: 16 * 1024,
             };
             reqs.push(tokio::spawn(
                 async move { client::request(&conn, &req).await },
             ));
         }
-        // Moitié des tours : fermeture sans attendre les réponses.
         if round % 2 == 0 {
             for r in reqs {
                 if let Ok(Ok(Response::Error(ErrorReason::RateLimited))) = r.await {
@@ -763,18 +781,262 @@ async fn db_queue_bounded_across_connection_churn() {
                 }
             }
         }
-        drop(s);
-        assert!(stats.db_jobs.peak() <= 2);
+        // Tours impairs : fermeture pendant que les requêtes sont en cours.
+        s.close().await;
+        assert!(stats.db_jobs.peak() <= 1);
     }
-    let _ = limited;
+    // Quatre relèves simultanées pour une seule place : des refus.
+    assert!(limited > 0);
+    // Toutes les connexions et leurs travaux de base se terminent.
     let deadline = tokio::time::Instant::now() + LONG;
-    while stats.db_jobs.now() != 0 {
+    while stats.db_jobs.now() != 0 || stats.connections.now() != 0 {
         assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(stats.db_jobs.peak() <= 2);
+    assert!(stats.db_jobs.peak() <= 1);
     let mut s = Client::connect(node.addr, node.id).await.unwrap();
     assert_eq!(s.deposit(&message(999, 6)).await.unwrap(), Ok(()));
+    node.stop().await;
+}
+
+/// Lecteur qui arrête le flux (STOP_SENDING) : la réponse est quand même
+/// débitée de son seau d'octets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopped_reader_is_charged() {
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 10_000;
+        c.limits.bytes_per_sec = 100 * 1024;
+        c.limits.burst = 2;
+    });
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    // 20 paquets L (320 Kio) déposés depuis une autre connexion (son propre
+    // seau, attendu quand il est vide).
+    let mut filler = Client::connect(node.addr, node.id).await.unwrap();
+    for n in 0..20 {
+        loop {
+            match filler.deposit(&message_tier(n, 11, Tier::L)).await.unwrap() {
+                Ok(()) => break,
+                Err(ErrorReason::RateLimited) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await
+                }
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+    }
+    let page = frame::encode(
+        &Request::Fetch {
+            mailboxes: vec![MailboxId([11; 16])],
+            cursor: None,
+            max_bytes: 1 << 20,
+        },
+        MAX_REQUEST_BYTES,
+    )
+    .unwrap();
+    let conn = s.connection().clone();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    send.write_all(&page).await.unwrap();
+    send.finish().unwrap();
+    recv.stop(7u32.into()).unwrap();
+    // La réponse arrêtée (~320 Kio) dépasse la capacité du seau (200 Kio) :
+    // les requêtes suivantes sont limitées tant qu'il n'est pas rechargé.
+    let deadline = tokio::time::Instant::now() + LONG;
+    loop {
+        if s.request(&Request::Ping).await.unwrap() == Response::Error(ErrorReason::RateLimited) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "réponse arrêtée non débitée"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let _ = s.fetch(&[]).await;
+    node.stop().await;
+}
+
+/// Une page trop lente (flux coupé par le nœud) est redemandée plus petite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_shrinks_page_after_reset() {
+    let k = key(0);
+    let h = hello(&k, TEST_BITS);
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let (addr, srv) = fake_node(k.clone(), move |req| match req {
+        Request::Hello { .. } => Some(h.clone()),
+        Request::Fetch {
+            cursor, max_bytes, ..
+        } => {
+            log.lock().unwrap().push((cursor, max_bytes));
+            // Lien « lent » : toute page au-delà de 64 Kio est coupée.
+            if max_bytes > 64 * 1024 {
+                return None;
+            }
+            let c = cursor.unwrap_or(0);
+            Some(Response::Items {
+                items: vec![vec![c as u8]],
+                next: (c < 2).then_some(c + 1),
+            })
+        }
+        _ => Some(Response::Error(ErrorReason::Unsupported)),
+    });
+    let mut s = Client::connect(addr, id_of(&k)).await.unwrap();
+    let items = s.fetch(&[MailboxId([1; 16])]).await.unwrap();
+    assert_eq!(items, vec![vec![0], vec![1], vec![2]]);
+    assert!(!s.last_fetch_truncated());
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![
+            (None, 1 << 20),
+            (None, 256 << 10),
+            (None, 64 << 10),
+            (Some(1), 64 << 10),
+            (Some(2), 64 << 10)
+        ]
+    );
+    srv.abort();
+}
+
+/// Toutes les tailles coupées : abandon après 16 Kio.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_gives_up_below_smallest_page() {
+    let k = key(0);
+    let h = hello(&k, TEST_BITS);
+    let (addr, srv) = fake_node(k.clone(), move |req| match req {
+        Request::Hello { .. } => Some(h.clone()),
+        _ => None,
+    });
+    let mut s = Client::connect(addr, id_of(&k)).await.unwrap();
+    assert!(s.fetch(&[MailboxId([1; 16])]).await.is_err());
+    srv.abort();
+}
+
+/// Le nœud sert la taille de page demandée (plancher 16 Kio).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn node_honors_requested_page_size() {
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 10_000;
+    });
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    for n in 0..40 {
+        assert_eq!(
+            s.deposit(&message_tier(n, 12, Tier::M)).await.unwrap(),
+            Ok(())
+        );
+    }
+    for (asked, per_page) in [(0u32, 16usize), (16 * 1024, 16), (32 * 1024, 32)] {
+        let r = s
+            .request(&Request::Fetch {
+                mailboxes: vec![MailboxId([12; 16])],
+                cursor: None,
+                max_bytes: asked,
+            })
+            .await
+            .unwrap();
+        let Response::Items { items, next } = r else {
+            panic!("{r:?}")
+        };
+        assert_eq!(items.len(), per_page, "demande {asked}");
+        assert!(next.is_some());
+    }
+    node.stop().await;
+}
+
+/// Un groupe d'adresses ne prend que sa part du budget de réponses ; un
+/// client d'un autre groupe relève toujours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ip_group_capped_share_of_response_budget() {
+    let Ok(v6) = UdpSocket::bind("[::1]:0") else {
+        eprintln!("IPv6 local indisponible : test ignoré");
+        return;
+    };
+    let v6_addr = v6.local_addr().unwrap();
+    let v4 = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = v4.local_addr().unwrap();
+    let (_d, path) = db();
+    let k = key(0);
+    let id = id_of(&k);
+    let stats = Arc::new(ServerStats::default());
+    let mut cfg = ServerConfig::new(vec![v4, v6], k);
+    cfg.stats = stats.clone();
+    cfg.request_timeout = Duration::from_secs(10);
+    cfg.limits.requests_per_sec = 10_000;
+    cfg.limits.bytes_per_sec = 1 << 30;
+    const PER_IP: usize = 4 << 20;
+    assert_eq!(cfg.max_response_bytes_per_ip, PER_IP);
+    let (tx, rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(server::run(
+        cfg,
+        NodeStore::open(&path).unwrap(),
+        policy(),
+        async move {
+            let _ = rx.await;
+        },
+    ));
+    let node = Node {
+        addr,
+        id,
+        stop: Some(tx),
+        task,
+    };
+    let mut s = Client::connect(addr, id).await.unwrap();
+    for n in 0..70 {
+        assert_eq!(
+            s.deposit(&message_tier(n, 9, Tier::L)).await.unwrap(),
+            Ok(())
+        );
+    }
+    // 7 connexions IPv4 bloquées (une page chacune au plus).
+    let fetch = frame::encode(
+        &Request::Fetch {
+            mailboxes: vec![MailboxId([9; 16])],
+            cursor: None,
+            max_bytes: 1 << 20,
+        },
+        MAX_REQUEST_BYTES,
+    )
+    .unwrap();
+    s.close().await;
+    let mut held = Vec::new();
+    let mut endpoints = Vec::new();
+    for _ in 0..7 {
+        let (ep, conn) = stuck_connection(addr, id).await;
+        for _ in 0..2 {
+            let (mut send, recv) = conn.open_bi().await.unwrap();
+            send.write_all(&fetch).await.unwrap();
+            send.finish().unwrap();
+            held.push((send, recv));
+        }
+        endpoints.push((ep, conn));
+    }
+    // Quatre pages (~1 Mio chacune) tiennent dans la part du groupe.
+    let deadline = tokio::time::Instant::now() + LONG;
+    while stats.response_bytes.now() < 4_000_000 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "flux bloqués non réservés"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        stats.response_bytes.peak() <= PER_IP,
+        "{}",
+        stats.response_bytes.peak()
+    );
+    // Le groupe IPv4 est plein : sa relève est refusée.
+    let mut v4c = Client::connect(addr, id).await.unwrap();
+    assert!(matches!(
+        v4c.fetch(&[MailboxId([9; 16])]).await,
+        Err(ClientError::Refused(ErrorReason::RateLimited))
+    ));
+    // Un client IPv6 relève normalement.
+    let mut v6c = Client::connect(v6_addr, id).await.unwrap();
+    let items = v6c.fetch(&[MailboxId([9; 16])]).await.unwrap();
+    assert_eq!(items.len(), 70);
+    drop(held);
+    drop(endpoints);
     node.stop().await;
 }
 

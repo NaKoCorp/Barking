@@ -8,7 +8,9 @@
 //!   à la lecture) et `Session::last_fetch_truncated` le signale ;
 //! - le curseur de pagination doit croître strictement, et une page vide ne
 //!   peut pas annoncer de suite ;
-//! - chaque requête a un délai.
+//! - chaque requête a un délai ;
+//! - une page coupée en route (lien lent) est redemandée plus petite :
+//!   1 Mio, 256 Kio, 64 Kio puis 16 Kio, avant d'abandonner.
 //!
 //! Les éléments relevés sont rendus tels quels : un accusé dont le champ boîte
 //! diffère de la boîte relevée n'est pas écarté (l'accusé est rangé dans
@@ -32,6 +34,13 @@ pub const MIN_PROTOCOL_VERSION: u16 = 0;
 pub const MAX_FETCH_ITEMS: usize = 10_000;
 /// Nombre maximal d'octets acceptés par appel à `fetch`.
 pub const MAX_FETCH_BYTES: usize = 64 << 20;
+/// Tailles de page demandées, de la plus grande à la plus petite : après un
+/// flux coupé ou un délai dépassé sur une page (lien trop lent pour la page
+/// dans le délai d'écriture du nœud), la même page est redemandée plus petite.
+pub const FETCH_PAGE_SIZES: [u32; 4] = [1 << 20, 256 << 10, 64 << 10, crate::MIN_PAGE_BYTES];
+/// Délai d'une page de relève : au-delà du délai d'écriture maximal du nœud
+/// (60 s), pour que ce soit le nœud qui coupe un lien trop lent.
+pub const FETCH_PAGE_TIMEOUT: Duration = Duration::from_secs(70);
 /// Nombre maximal de pages suivies par appel à `fetch`.
 pub const MAX_FETCH_PAGES: usize = 1_000;
 /// Durée maximale d'un appel à `fetch`.
@@ -95,7 +104,11 @@ pub async fn open_connection(addr: SocketAddr, expected: NodeId) -> Result<(Endp
 
 /// Envoie une requête sur un nouveau flux et lit l'unique réponse.
 pub async fn request(conn: &Connection, req: &Request) -> Result<Response> {
-    timeout(REQUEST_TIMEOUT, async {
+    request_within(conn, req, REQUEST_TIMEOUT).await
+}
+
+async fn request_within(conn: &Connection, req: &Request, limit: Duration) -> Result<Response> {
+    timeout(limit, async {
         let (mut send, mut recv) = conn.open_bi().await?;
         frame::write(&mut send, req, MAX_REQUEST_BYTES).await?;
         // Le flux peut déjà être fermé par le nœud : la lecture le dira.
@@ -250,6 +263,8 @@ impl Session {
         let mut out = Vec::new();
         let mut bytes = 0usize;
         let mut pages = 0usize;
+        // Indice dans `FETCH_PAGE_SIZES` : ne remonte pas au cours d'un appel.
+        let mut size = 0usize;
         let deadline = tokio::time::Instant::now() + FETCH_DEADLINE;
         for chunk in mailboxes.chunks(per) {
             let mut cursor: Option<u64> = None;
@@ -262,13 +277,22 @@ impl Session {
                 let req = Request::Fetch {
                     mailboxes: chunk.to_vec(),
                     cursor,
+                    max_bytes: FETCH_PAGE_SIZES[size],
                 };
-                let resp = match tokio::time::timeout_at(deadline, self.request(&req)).await {
-                    Ok(r) => r?,
+                let page = request_within(&self.conn, &req, FETCH_PAGE_TIMEOUT);
+                let resp = match tokio::time::timeout_at(deadline, page).await {
                     Err(_) => {
                         self.truncated = true;
                         return Ok(out);
                     }
+                    // Flux coupé ou trop lent : même curseur, page plus petite.
+                    Ok(Err(ClientError::Frame(_) | ClientError::Timeout))
+                        if size + 1 < FETCH_PAGE_SIZES.len() =>
+                    {
+                        size += 1;
+                        continue;
+                    }
+                    Ok(r) => r?,
                 };
                 let (items, next) = match resp {
                     Response::Items { items, next } => (items, next),

@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::node_id::NodeId;
 
+/// Plus petite page de relève servie par un nœud (octets de paquets).
+pub const MIN_PAGE_BYTES: u32 = 16 * 1024;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
     Hello {
@@ -19,6 +22,10 @@ pub enum Request {
     Fetch {
         mailboxes: Vec<MailboxId>,
         cursor: Option<u64>,
+        /// Taille de page souhaitée en octets de paquets ; le nœud la borne
+        /// entre `MIN_PAGE_BYTES` et sa propre limite (un élément plus gros
+        /// que la page est envoyé seul).
+        max_bytes: u32,
     },
     /// Réservées au sous-projet 2.
     Ping,
@@ -115,10 +122,12 @@ mod tests {
         rt(Request::Fetch {
             mailboxes: vec![MailboxId([3; 16])],
             cursor: Some(7),
+            max_bytes: 1 << 20,
         });
         rt(Request::Fetch {
             mailboxes: vec![],
             cursor: None,
+            max_bytes: 0,
         });
         rt(Request::Ping);
         rt(Request::FindNode { target: [9; 32] });
