@@ -114,10 +114,7 @@ fn start_with(
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let addr = socket.local_addr().unwrap();
     let v6_addr = v6.as_ref().map(|s| s.local_addr().unwrap());
-    let k = key(n);
-    let id = id_of(&k);
-    let mut cfg = ServerConfig::new(vec![socket].into_iter().chain(v6).collect(), k);
-    cfg.dht = bootstrap.map(|bootstrap| DhtConfig {
+    let dht = bootstrap.map(|bootstrap| DhtConfig {
         public_v4: match addr {
             SocketAddr::V4(a) => Some(a),
             SocketAddr::V6(_) => None,
@@ -130,6 +127,18 @@ fn start_with(
         allow_private_addrs: true,
         replication_bytes_per_hour: 512 << 20,
     });
+    let mut node = start_raw(n, vec![socket].into_iter().chain(v6).collect(), addr, dht);
+    node.v6 = v6_addr;
+    node
+}
+
+/// Démarre le nœud de clé `key(n)` sur `sockets`, joint par les tests à
+/// `addr`, avec la table `dht`.
+fn start_raw(n: usize, sockets: Vec<UdpSocket>, addr: SocketAddr, dht: Option<DhtConfig>) -> Node {
+    let k = key(n);
+    let id = id_of(&k);
+    let mut cfg = ServerConfig::new(sockets, k);
+    cfg.dht = dht;
     cfg.dht_tick = Some(TICK);
     let dir = tempfile::tempdir().unwrap();
     let db: PathBuf = dir.path().join("node.db");
@@ -140,7 +149,7 @@ fn start_with(
     }));
     Node {
         addr,
-        v6: v6_addr,
+        v6: None,
         id,
         stop: Some(tx),
         task,
@@ -489,6 +498,64 @@ async fn dual_stack_peer_is_admitted_by_v4_only_node() {
     // Et il y reste au fil des cycles d'entretien.
     tokio::time::sleep(5 * TICK).await;
     assert!(known_by(&a).await.contains(&b.id));
+    for n in [a, b] {
+        n.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn dual_stack_listener_publishing_v4_skips_peer_v6() {
+    if local_v6().is_none() {
+        return;
+    }
+    // A écoute sur `[::]` (double pile, comme `listen` par défaut) mais ne
+    // publie qu'une IPv4 : l'IPv6 d'un pair n'est pas vérifiée chez lui.
+    let Ok(any) = UdpSocket::bind("[::]:0") else {
+        eprintln!("[::] indisponible : test ignoré");
+        return;
+    };
+    let port = any.local_addr().unwrap().port();
+    let a_addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    // B publie une IPv4 qui répond et une IPv6 où personne n'écoute.
+    let dead = UdpSocket::bind("[::1]:0").unwrap();
+    let SocketAddr::V6(dead_v6) = dead.local_addr().unwrap() else {
+        unreachable!()
+    };
+    let b_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let b_addr = b_sock.local_addr().unwrap();
+    let dht = |v4: SocketAddr, v6, bootstrap| DhtConfig {
+        public_v4: match v4 {
+            SocketAddr::V4(a) => Some(a),
+            SocketAddr::V6(_) => None,
+        },
+        public_v6: v6,
+        bootstrap,
+        allow_private_addrs: true,
+        replication_bytes_per_hour: 512 << 20,
+    };
+    let b = start_raw(
+        1,
+        vec![b_sock],
+        b_addr,
+        Some(dht(b_addr, Some(dead_v6), vec![])),
+    );
+    let a = start_raw(
+        0,
+        vec![any],
+        a_addr,
+        Some(dht(a_addr, None, vec![b.entry()])),
+    );
+    let deadline = tokio::time::Instant::now() + LONG;
+    while !known_by(&a).await.contains(&b.id) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "le pair à double pile n'est pas entré"
+        );
+        tokio::time::sleep(TICK).await;
+    }
+    tokio::time::sleep(5 * TICK).await;
+    assert!(known_by(&a).await.contains(&b.id));
+    drop(dead);
     for n in [a, b] {
         n.stop().await;
     }

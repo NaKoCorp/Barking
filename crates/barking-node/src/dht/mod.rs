@@ -8,8 +8,10 @@
 //! - donne l'identifiant épinglé par TLS sur la connexion qui l'a apportée ;
 //! - a été renvoyée à l'identique par un `Pong` à **chacune** de ses
 //!   adresses que ce nœud peut joindre (au moins une), chaque `Ping` partant
-//!   vers cette adresse précise. Une adresse d'une famille sans endpoint ici
-//!   n'est ni vérifiée ni comptée comme un échec (spec §10).
+//!   vers cette adresse précise. Une famille est joignable si nous publions
+//!   une adresse de cette famille et avons un endpoint pour elle ; une
+//!   adresse d'une autre famille n'est ni appelée, ni vérifiée, ni comptée
+//!   comme un échec (spec §10).
 //!
 //! Sans la dernière condition, une fiche à double pile pourrait revendiquer
 //! une adresse dans le /24 ou le /48 d'une victime et en prendre les places.
@@ -103,7 +105,12 @@ impl Dht {
         let record = NodeRecord::sign(&key, cfg.public_v4, cfg.public_v6, unix_now());
         Dht {
             policy: RecordPolicy::network(cfg.allow_private_addrs),
-            pool: PeerPool::new(key.clone(), endpoints),
+            pool: PeerPool::new(
+                key.clone(),
+                endpoints,
+                cfg.public_v4.is_some(),
+                cfg.public_v6.is_some(),
+            ),
             key,
             id,
             cfg,
@@ -384,7 +391,8 @@ impl Dht {
     /// Contact direct avec `id`, joint d'abord à l'une de `start` : sa fiche
     /// si elle est valide, donne `id`, et revient à l'identique d'un `Ping`
     /// à chacune de ses adresses joignables d'ici, dont au moins une. Une
-    /// adresse d'une famille sans endpoint ici est sautée.
+    /// adresse d'une famille injoignable d'ici (non publiée, ou sans endpoint)
+    /// est sautée.
     pub async fn verify(&self, id: NodeId, start: &[SocketAddr]) -> Option<NodeRecord> {
         if id == self.id {
             return None;

@@ -6,6 +6,11 @@
 //! Une connexion est rangée sous (identifiant, adresse) : l'adresse
 //! appelée est celle de la connexion, ce que la vérification des adresses
 //! d'une fiche exige (chaque adresse doit répondre elle-même).
+//!
+//! Une famille d'adresses n'est joignable que si le nœud **publie** une
+//! adresse de cette famille et a un endpoint qui peut y envoyer : un socket
+//! `[::]` ne prouve pas une route IPv6 (règle R17). Les adresses d'une
+//! famille injoignable ne sont jamais appelées.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -34,6 +39,9 @@ struct Conns {
 struct Inner {
     key: SigningKey,
     endpoints: Vec<Endpoint>,
+    /// Familles publiées dans notre fiche : IPv4, IPv6.
+    v4: bool,
+    v6: bool,
     conns: Mutex<Conns>,
 }
 
@@ -44,11 +52,14 @@ pub struct PeerPool {
 }
 
 impl PeerPool {
-    pub fn new(key: SigningKey, endpoints: Vec<Endpoint>) -> PeerPool {
+    /// `v4`, `v6` : familles dont le nœud publie une adresse.
+    pub fn new(key: SigningKey, endpoints: Vec<Endpoint>, v4: bool, v6: bool) -> PeerPool {
         PeerPool {
             inner: Arc::new(Inner {
                 key,
                 endpoints,
+                v4,
+                v6,
                 conns: Mutex::new(Conns::default()),
             }),
         }
@@ -106,8 +117,17 @@ impl PeerPool {
     }
 
     /// Endpoint d'où appeler `addr` : de la même famille, ou un endpoint
-    /// IPv6 (double pile) pour une adresse IPv4.
+    /// IPv6 (double pile) pour une adresse IPv4. `None` si nous ne publions
+    /// pas d'adresse de cette famille.
     fn endpoint_for(&self, addr: &SocketAddr) -> Option<&Endpoint> {
+        let published = if addr.is_ipv6() {
+            self.inner.v6
+        } else {
+            self.inner.v4
+        };
+        if !published {
+            return None;
+        }
         let family = |ep: &&Endpoint, v6: bool| ep.local_addr().is_ok_and(|l| l.is_ipv6() == v6);
         let eps = &self.inner.endpoints;
         eps.iter()
@@ -119,8 +139,8 @@ impl PeerPool {
             })
     }
 
-    /// Vrai si ce nœud a un endpoint d'où appeler `addr` (famille
-    /// joignable).
+    /// Vrai si la famille de `addr` est joignable d'ici : publiée dans
+    /// notre fiche, avec un endpoint qui peut y envoyer.
     pub fn can_reach(&self, addr: &SocketAddr) -> bool {
         self.endpoint_for(addr).is_some()
     }
@@ -168,5 +188,35 @@ impl PeerPool {
         }
         let c = self.get(id, addrs).await?;
         client::request(&c, req).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn only_published_families_are_reachable() {
+        let Ok(ep) = Endpoint::client("[::]:0".parse().unwrap()) else {
+            eprintln!("[::] indisponible : test ignoré");
+            return;
+        };
+        let key = SigningKey::from_bytes(&[1; 32]);
+        let v4: SocketAddr = "192.0.2.1:4433".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::1]:4433".parse().unwrap();
+        // Socket `[::]` double pile, IPv4 seule publiée : l'IPv6 n'est pas
+        // joignable, l'IPv4 passe par l'endpoint IPv6.
+        let p = PeerPool::new(key.clone(), vec![ep.clone()], true, false);
+        assert!(p.can_reach(&v4));
+        assert!(!p.can_reach(&v6));
+        // Et l'inverse.
+        let p = PeerPool::new(key.clone(), vec![ep.clone()], false, true);
+        assert!(!p.can_reach(&v4));
+        assert!(p.can_reach(&v6));
+        // Famille publiée sans endpoint pour elle.
+        let ep4 = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        let p = PeerPool::new(key, vec![ep4], true, true);
+        assert!(p.can_reach(&v4));
+        assert!(!p.can_reach(&v6));
     }
 }
