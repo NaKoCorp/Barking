@@ -1,21 +1,28 @@
-//! `barking sync` : dépose la file d'envoi sur chaque nœud configuré, relève
-//! les boîtes surveillées, traite le reçu, puis dépose les accusés produits.
+//! `barking sync` : pour chaque nœud configuré, relève les boîtes surveillées
+//! et traite le reçu, puis dépose la file d'envoi (accusés produits compris).
 //!
-//! La relève se fait en deux groupes : d'abord les boîtes de session (et
-//! d'accusés attendus sur une session), avec le budget complet du client,
-//! puis les boîtes d'introduction, avec `INTRO_FETCH_BYTES`. Une boîte
-//! d'introduction se calcule à partir d'une clé publique : n'importe qui peut
-//! la remplir de déchets. Pour chaque nœud et chaque groupe, la position
-//! atteinte est gardée dans `<home>/fetch_cursors.toml` (0600) et reprise à
-//! la synchronisation suivante, tant que la liste des boîtes du groupe ne
-//! change pas. Seule une relève de sessions incomplète empêche `mark_polled` :
-//! une boîte d'introduction inondée ne retarde que les premiers contacts.
+//! **Relève.** D'abord les boîtes de session (et d'accusés attendus sur une
+//! session), avec le budget complet du client, puis les boîtes
+//! d'introduction, avec `INTRO_FETCH_BYTES` : une boîte d'introduction se
+//! calcule à partir d'une clé publique, n'importe qui peut la remplir de
+//! déchets. Pour chaque nœud et chaque boîte, la position atteinte (`seen`)
+//! est gardée et reprise la fois suivante, même si la liste des boîtes a
+//! changé. Seule une relève de sessions incomplète empêche `mark_polled` :
+//! une boîte d'introduction inondée ne retarde que les premiers contacts. Un
+//! `RateLimited` sur une relève la rend partielle, sans faire échouer le nœud.
 //!
+//! **Dépôts**, après la relève : accusés d'abord (sans preuve de travail),
+//! puis les paquets jamais déposés sur ce nœud, puis les anciens. Un paquet
+//! déjà accepté (ou refusé) par ce nœud n'y est redéposé qu'au bout de
+//! `REDEPOSIT_AFTER_SECS`. Budget de preuve épuisé : les paquets à preuve
+//! restants attendent, les autres partent. `RateLimited` : arrêt des dépôts
+//! sur ce nœud pour cette synchronisation, sans échec.
+//!
+//! Positions et dépôts sont gardés dans `<home>/sync_state.toml` (0600).
 //! Chaque nœud a `SYNC_NODE_DEADLINE` ; toute la synchronisation dispose de
-//! `SYNC_POW_BUDGET` essais de preuve de travail (au-delà, les dépôts
-//! restants attendent la synchronisation suivante).
+//! `SYNC_POW_BUDGET` essais de preuve de travail.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -40,17 +47,23 @@ pub const SYNC_NODE_DEADLINE: Duration = Duration::from_secs(180);
 /// Travail de preuve permis par synchronisation (essais attendus) : environ
 /// 1 000 dépôts à 18 bits, 16 à 24 bits.
 pub const SYNC_POW_BUDGET: u64 = 1 << 28;
+/// Délai avant de redéposer sur un nœud un paquet qu'il a déjà accepté ou
+/// refusé (au cas où il l'aurait perdu).
+pub const REDEPOSIT_AFTER_SECS: u64 = 86_400;
 
-const CURSORS_FILE: &str = "fetch_cursors.toml";
+const STATE_FILE: &str = "sync_state.toml";
 
 /// Ce qui s'est passé avec un nœud, même s'il a échoué en route.
 #[derive(Default)]
 struct Report {
     deposited: u32,
     refused: u32,
-    /// `Some((boîtes, éléments reçus))` une fois la relève des sessions terminée.
+    /// Paquets déjà déposés récemment sur ce nœud : pas redéposés.
+    already: u32,
+    /// `Some((boîtes, éléments reçus))` une fois la relève terminée.
     fetched: Option<(u32, u32)>,
-    /// La relève des sessions s'est arrêtée sur un plafond : le reste attend.
+    /// La relève des sessions n'est pas allée au bout (plafond, débit) : le
+    /// reste attend.
     truncated: bool,
     /// Un élément de session relevé n'a pas pu être traité (erreur locale,
     /// par exemple base occupée) : il ne doit pas sortir de la fenêtre de relève.
@@ -58,8 +71,10 @@ struct Report {
     /// Les introductions n'ont pas été relevées en entier (plafond, erreur,
     /// élément non traité) : sans effet sur `mark_polled`.
     intro_partial: bool,
-    /// Budget de preuve de travail épuisé : dépôts restants remis à plus tard.
+    /// Budget de preuve de travail épuisé : paquets à preuve remis à plus tard.
     pow_exhausted: bool,
+    /// Dépôts arrêtés par le nœud (débit) ou par une erreur ou le délai.
+    deposits_stopped: Option<String>,
     pow_spent: u64,
 }
 
@@ -89,68 +104,81 @@ fn tally(is_ack: bool, result: &Result<(), ErrorReason>) -> DepositTally {
     }
 }
 
-/// Position de reprise d'un groupe de boîtes sur un nœud. `set` : empreinte
-/// de la liste des boîtes ; `cursors` : un par tranche, 0 = depuis le début.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct GroupCursor {
-    #[serde(default)]
-    set: String,
-    #[serde(default)]
-    cursors: Vec<u64>,
+/// Position d'une boîte sur un nœud (voir `FetchResume`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Seen {
+    mailbox: String,
+    seq: u64,
 }
 
-impl GroupCursor {
-    /// Reprise pour cette liste de boîtes : depuis le début si elle a changé.
-    fn resume_for(&self, set: &str) -> FetchResume {
-        if self.set != set {
-            return FetchResume::default();
-        }
-        FetchResume {
-            cursors: self
-                .cursors
-                .iter()
-                .map(|c| (*c != 0).then_some(*c))
-                .collect(),
-        }
-    }
-
-    fn store(&mut self, set: String, r: &FetchResume) {
-        self.set = set;
-        self.cursors = r.cursors.iter().map(|c| c.unwrap_or(0)).collect();
-    }
+/// Paquet déposé (accepté ou refusé) sur un nœud, à l'instant `at`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Deposited {
+    id: String,
+    at: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct NodeCursors {
+struct NodeState {
     id: String,
     #[serde(default)]
-    sessions: GroupCursor,
+    sessions: Vec<Seen>,
     #[serde(default)]
-    intro: GroupCursor,
+    intro: Vec<Seen>,
+    #[serde(default)]
+    deposited: Vec<Deposited>,
+}
+
+fn to_resume(seen: &[Seen]) -> FetchResume {
+    let mut r = FetchResume::default();
+    for s in seen {
+        if let Ok(b) = data_encoding::HEXLOWER.decode(s.mailbox.as_bytes())
+            && let Ok(k) = <[u8; 16]>::try_from(b.as_slice())
+        {
+            r.seen.insert(k, s.seq);
+        }
+    }
+    r
+}
+
+/// Positions des seules boîtes de `current`, dans un ordre stable.
+fn from_resume(r: &FetchResume, current: &[MailboxId]) -> Vec<Seen> {
+    let mut v: Vec<Seen> = current
+        .iter()
+        .filter_map(|m| {
+            r.seen.get(&m.0).filter(|s| **s > 0).map(|s| Seen {
+                mailbox: data_encoding::HEXLOWER.encode(&m.0),
+                seq: *s,
+            })
+        })
+        .collect();
+    v.sort_by(|a, b| a.mailbox.cmp(&b.mailbox));
+    v.dedup();
+    v
 }
 
 #[derive(Default, Serialize, Deserialize)]
-struct CursorsFile {
+struct StateFile {
     #[serde(default, rename = "node")]
-    nodes: Vec<NodeCursors>,
+    nodes: Vec<NodeState>,
 }
 
-/// Curseurs gardés ; fichier absent ou illisible : depuis le début.
-fn load_cursors(home: &Path) -> Vec<NodeCursors> {
-    fs::read_to_string(home.join(CURSORS_FILE))
+/// État gardé ; fichier absent ou illisible : depuis le début.
+fn load_state(home: &Path) -> Vec<NodeState> {
+    fs::read_to_string(home.join(STATE_FILE))
         .ok()
-        .and_then(|t| toml::from_str::<CursorsFile>(&t).ok())
+        .and_then(|t| toml::from_str::<StateFile>(&t).ok())
         .map(|f| f.nodes)
         .unwrap_or_default()
 }
 
-/// Écrit les curseurs (0600, remplacement atomique).
-fn save_cursors(home: &Path, nodes: &[NodeCursors]) -> CliResult<()> {
-    let text = toml::to_string(&CursorsFile {
+/// Écrit l'état (0600, remplacement atomique).
+fn save_state(home: &Path, nodes: &[NodeState]) -> CliResult<()> {
+    let text = toml::to_string(&StateFile {
         nodes: nodes.to_vec(),
     })
-    .map_err(|_| CliError("Erreur : écriture des curseurs de relève impossible".into()))?;
-    let tmp = home.join(format!("{CURSORS_FILE}.tmp"));
+    .map_err(|_| CliError("Erreur : écriture de l'état de synchronisation impossible".into()))?;
+    let tmp = home.join(format!("{STATE_FILE}.tmp"));
     let _ = fs::remove_file(&tmp);
     let mut f = fs::OpenOptions::new()
         .write(true)
@@ -160,17 +188,20 @@ fn save_cursors(home: &Path, nodes: &[NodeCursors]) -> CliResult<()> {
     f.write_all(text.as_bytes())?;
     f.sync_all()?;
     drop(f);
-    fs::rename(&tmp, home.join(CURSORS_FILE))?;
+    fs::rename(&tmp, home.join(STATE_FILE))?;
     Ok(())
 }
 
-/// Empreinte d'une liste de boîtes (triée).
-fn set_id(mailboxes: &[MailboxId]) -> String {
-    let mut h = blake3::Hasher::new();
-    for m in mailboxes {
-        h.update(&m.0);
+fn pow_budget() -> u64 {
+    // Réglable dans les builds de test seulement.
+    #[cfg(debug_assertions)]
+    if let Some(b) = std::env::var("BARKING_TEST_POW_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return b;
     }
-    data_encoding::HEXLOWER.encode(&h.finalize().as_bytes()[..16])
+    SYNC_POW_BUDGET
 }
 
 pub fn sync(home: &Path) -> CliResult<()> {
@@ -181,8 +212,8 @@ pub fn sync(home: &Path) -> CliResult<()> {
         );
     }
     let mut core = open_core(home)?;
-    // Curseurs des seuls nœuds configurés.
-    let mut cursors: Vec<NodeCursors> = load_cursors(home)
+    // État des seuls nœuds configurés.
+    let mut state: Vec<NodeState> = load_state(home)
         .into_iter()
         .filter(|c| nodes.iter().any(|n| n.id == c.id))
         .collect();
@@ -193,32 +224,30 @@ pub fn sync(home: &Path) -> CliResult<()> {
         .map_err(|e| CliError(format!("Erreur d'entrée/sortie : {e}")))?;
     let mut ok_nodes = 0usize;
     let mut all_polled = true;
-    let mut pow_left = SYNC_POW_BUDGET;
+    let mut pow_left = pow_budget();
     for node in &nodes {
         let short = node.short_id();
         let mut report = Report::default();
-        let k = match cursors.iter().position(|c| c.id == node.id) {
+        let k = match state.iter().position(|c| c.id == node.id) {
             Some(k) => k,
             None => {
-                cursors.push(NodeCursors {
+                state.push(NodeState {
                     id: node.id.clone(),
-                    ..NodeCursors::default()
+                    ..NodeState::default()
                 });
-                cursors.len() - 1
+                state.len() - 1
             }
         };
-        let result = rt
-            .block_on(async {
-                tokio::time::timeout(
-                    SYNC_NODE_DEADLINE,
-                    sync_node(&mut core, node, &mut report, &mut cursors[k], pow_left),
-                )
-                .await
-            })
-            .unwrap_or_else(|_| Err("délai de synchronisation dépassé (3 min)".into()));
+        let result = rt.block_on(sync_node(
+            &mut core,
+            node,
+            &mut report,
+            &mut state[k],
+            pow_left,
+        ));
         pow_left = pow_left.saturating_sub(report.pow_spent);
         log_report(&mut core, &short, &report)?;
-        save_cursors(home, &cursors)?;
+        save_state(home, &state)?;
         match result {
             Ok(()) => {
                 ok_nodes += 1;
@@ -238,10 +267,17 @@ pub fn sync(home: &Path) -> CliResult<()> {
                 if report.pow_exhausted {
                     notes += " (budget de preuve de travail épuisé : dépôts restants à la prochaine synchronisation)";
                 }
+                if let Some(why) = &report.deposits_stopped {
+                    notes += &format!(
+                        " (dépôts interrompus : {} ; la suite à la prochaine synchronisation)",
+                        printable(why)
+                    );
+                }
                 println!(
-                    "Nœud {short} : {} déposés ({} refusés), {} boîtes relevées, {} éléments reçus{notes}",
+                    "Nœud {short} : {} déposés ({} refusés, {} déjà présents), {} boîtes relevées, {} éléments reçus{notes}",
                     report.deposited,
                     report.refused,
+                    report.already,
                     report.fetched.map_or(0, |f| f.0),
                     report.fetched.map_or(0, |f| f.1),
                 );
@@ -290,34 +326,89 @@ fn log_report(core: &mut Core, short: &str, r: &Report) -> CliResult<()> {
     Ok(())
 }
 
-/// Dépose ces paquets ; un refus du nœud est compté, une erreur de
-/// connexion interrompt (le reste sera redéposé à la prochaine synchronisation).
-/// Budget de preuve épuisé : arrêt des dépôts, sans erreur.
-async fn deposit_all(
-    session: &mut Session,
-    packets: &[Vec<u8>],
-    report: &mut Report,
-) -> Result<(), String> {
-    for bytes in packets {
-        let r = session.deposit(bytes).await;
-        report.pow_spent = session.pow_spent();
-        match r {
-            Ok(result) => {
-                let is_ack = Packet::decode(bytes).is_ok_and(|p| p.kind == Kind::Ack);
-                match tally(is_ack, &result) {
-                    DepositTally::Deposited => report.deposited += 1,
-                    DepositTally::Refused => report.refused += 1,
-                    DepositTally::Deferred => {}
-                }
-            }
-            Err(ClientError::PowBudget) => {
-                report.pow_exhausted = true;
-                return Ok(());
-            }
-            Err(e) => return Err(e.to_string()),
+/// Un paquet de la file d'envoi, prêt à déposer.
+#[derive(Debug, PartialEq, Eq)]
+struct Planned {
+    bytes: Vec<u8>,
+    /// Identifiant (hex) ; `None` si le paquet est illisible.
+    id: Option<String>,
+    /// Accusé (sans preuve de travail).
+    ack: bool,
+}
+
+/// Ordre des dépôts sur un nœud : accusés, paquets jamais déposés ici, puis
+/// anciens dépôts à refaire ; ce qui a été déposé il y a moins de
+/// `REDEPOSIT_AFTER_SECS` est écarté (compté dans le second terme).
+fn plan_deposits(outbox: Vec<Vec<u8>>, deposited: &[Deposited], now: u64) -> (Vec<Planned>, u32) {
+    let at: HashMap<&str, u64> = deposited.iter().map(|d| (d.id.as_str(), d.at)).collect();
+    let (mut acks, mut new, mut old) = (Vec::new(), Vec::new(), Vec::new());
+    let mut skipped = 0;
+    for bytes in outbox {
+        let p = Packet::decode(&bytes).ok();
+        let id = p.as_ref().map(|p| data_encoding::HEXLOWER.encode(&p.id.0));
+        let ack = p.as_ref().is_some_and(|p| p.kind == Kind::Ack);
+        let last = id.as_deref().and_then(|i| at.get(i).copied());
+        if last.is_some_and(|t| now.saturating_sub(t) < REDEPOSIT_AFTER_SECS) {
+            skipped += 1;
+            continue;
+        }
+        let item = Planned { bytes, id, ack };
+        if ack {
+            acks.push(item);
+        } else if last.is_none() {
+            new.push(item);
+        } else {
+            old.push(item);
         }
     }
-    Ok(())
+    acks.append(&mut new);
+    acks.append(&mut old);
+    (acks, skipped)
+}
+
+/// Dépose `plan` dans l'ordre et note chaque issue définitive dans
+/// `deposited`. Budget de preuve épuisé : les paquets à preuve suivants sont
+/// sautés, les autres partent. `RateLimited` ou erreur : arrêt des dépôts.
+async fn deposit_all(
+    session: &mut Session,
+    plan: &[Planned],
+    deposited: &mut Vec<Deposited>,
+    report: &mut Report,
+) {
+    for item in plan {
+        if !item.ack && report.pow_exhausted {
+            continue;
+        }
+        let r = session.deposit(&item.bytes).await;
+        report.pow_spent = session.pow_spent();
+        let result = match r {
+            Ok(Err(ErrorReason::RateLimited)) => {
+                report.deposits_stopped = Some("trop de requêtes".into());
+                return;
+            }
+            Ok(result) => result,
+            Err(ClientError::PowBudget) => {
+                report.pow_exhausted = true;
+                continue;
+            }
+            Err(e) => {
+                report.deposits_stopped = Some(e.to_string());
+                return;
+            }
+        };
+        match tally(item.ack, &result) {
+            DepositTally::Deposited => report.deposited += 1,
+            DepositTally::Refused => report.refused += 1,
+            DepositTally::Deferred => continue,
+        }
+        if let Some(id) = &item.id {
+            deposited.retain(|d| &d.id != id);
+            deposited.push(Deposited {
+                id: id.clone(),
+                at: now(),
+            });
+        }
+    }
 }
 
 /// Passe chaque élément relevé à `receive`. Faux si un élément n'a pas pu
@@ -340,82 +431,136 @@ fn receive_all(core: &mut Core, items: &[Vec<u8>], label: &str) -> Result<bool, 
     Ok(all)
 }
 
+/// Relève d'un groupe de boîtes.
+enum Fetched {
+    /// Éléments, et relève allée au bout.
+    Items(Vec<Vec<u8>>, bool),
+    /// Débit épuisé avant la première page.
+    RateLimited,
+}
+
+async fn fetch_group(
+    session: &mut Session,
+    mailboxes: &[MailboxId],
+    resume: &mut FetchResume,
+    max_bytes: usize,
+) -> Result<Fetched, ClientError> {
+    if mailboxes.is_empty() {
+        return Ok(Fetched::Items(Vec::new(), true));
+    }
+    match session.fetch_resumable(mailboxes, resume, max_bytes).await {
+        Ok(items) => Ok(Fetched::Items(items, !session.last_fetch_truncated())),
+        Err(ClientError::Refused(ErrorReason::RateLimited)) => Ok(Fetched::RateLimited),
+        Err(e) => Err(e),
+    }
+}
+
 async fn sync_node(
     core: &mut Core,
     node: &NodeEntry,
     report: &mut Report,
-    cursors: &mut NodeCursors,
+    state: &mut NodeState,
     pow_budget: u64,
 ) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + SYNC_NODE_DEADLINE;
+    let timed_out = || "délai de synchronisation dépassé (3 min)".to_string();
     let id = node.node_id().map_err(|e| e.0)?;
-    let mut session = Client::connect(node.addr, id)
+    let mut session = tokio::time::timeout_at(deadline, Client::connect(node.addr, id))
         .await
+        .map_err(|_| timed_out())?
         .map_err(|e| e.to_string())?;
     session.set_pow_budget(Some(pow_budget));
-
-    let first = core.pending_outbox(now()).map_err(|e| e.to_string())?;
-    deposit_all(&mut session, &first, report).await?;
-
-    let mut groups = core.watched_mailbox_groups(now());
-    groups.sessions.sort_unstable_by_key(|m| m.0);
-    groups.intro.sort_unstable_by_key(|m| m.0);
     let label = format!("nœud {}", node.short_id());
 
-    // Sessions d'abord, budget complet.
-    let set = set_id(&groups.sessions);
-    let mut resume = cursors.sessions.resume_for(&set);
-    let items = session
-        .fetch_resumable(&groups.sessions, &mut resume, MAX_FETCH_BYTES)
-        .await
-        .map_err(|e| e.to_string())?;
-    report.truncated = session.last_fetch_truncated();
-    if receive_all(core, &items, &label)? {
-        cursors.sessions.store(set, &resume);
-    } else {
-        report.receive_failed = true;
-    }
-    let mut received = items.len();
+    // Relève : sessions d'abord, introductions ensuite.
+    let fetch = async {
+        let mut groups = core.watched_mailbox_groups(now());
+        groups.sessions.sort_unstable_by_key(|m| m.0);
+        groups.intro.sort_unstable_by_key(|m| m.0);
+        let mut received = 0usize;
+        let mut limited = false;
 
-    // Introductions ensuite, budget réduit ; une erreur n'arrête pas le nœud.
-    let set = set_id(&groups.intro);
-    let mut resume = cursors.intro.resume_for(&set);
-    match session
-        .fetch_resumable(&groups.intro, &mut resume, INTRO_FETCH_BYTES)
-        .await
-    {
-        Ok(items) => {
-            report.intro_partial = session.last_fetch_truncated();
-            if receive_all(core, &items, &label)? {
-                cursors.intro.store(set, &resume);
-            } else {
-                report.intro_partial = true;
+        let mut resume = to_resume(&state.sessions);
+        match fetch_group(&mut session, &groups.sessions, &mut resume, MAX_FETCH_BYTES)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Fetched::Items(items, complete) => {
+                report.truncated = !complete;
+                if receive_all(core, &items, &label)? {
+                    state.sessions = from_resume(&resume, &groups.sessions);
+                } else {
+                    report.receive_failed = true;
+                }
+                received += items.len();
             }
-            received += items.len();
+            Fetched::RateLimited => {
+                report.truncated = true;
+                limited = true;
+            }
         }
-        Err(e) => {
-            report.intro_partial = true;
-            eprintln!(
-                "{label} : relève des introductions interrompue ({})",
-                printable(&e.to_string())
-            );
-        }
-    }
-    report.fetched = Some((
-        u32::try_from(groups.sessions.len() + groups.intro.len()).unwrap_or(u32::MAX),
-        u32::try_from(received).unwrap_or(u32::MAX),
-    ));
 
-    // Accusés (et tout nouveau paquet) produits par la relève : seulement ce
-    // qui n'a pas déjà été déposé, pour ne pas refaire la preuve de travail.
-    let sent: HashSet<&Vec<u8>> = first.iter().collect();
-    let more: Vec<Vec<u8>> = core
-        .pending_outbox(now())
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|b| !sent.contains(b))
+        // Débit épuisé : pas de seconde requête refusée d'affilée.
+        let mut resume = to_resume(&state.intro);
+        let intro = if limited {
+            Ok(Fetched::RateLimited)
+        } else {
+            fetch_group(&mut session, &groups.intro, &mut resume, INTRO_FETCH_BYTES).await
+        };
+        match intro {
+            Ok(Fetched::Items(items, complete)) => {
+                report.intro_partial = !complete;
+                if receive_all(core, &items, &label)? {
+                    state.intro = from_resume(&resume, &groups.intro);
+                } else {
+                    report.intro_partial = true;
+                }
+                received += items.len();
+            }
+            Ok(Fetched::RateLimited) => {
+                report.intro_partial = true;
+                limited = true;
+            }
+            Err(e) => {
+                report.intro_partial = true;
+                eprintln!(
+                    "{label} : relève des introductions interrompue ({})",
+                    printable(&e.to_string())
+                );
+            }
+        }
+        report.fetched = Some((
+            u32::try_from(groups.sessions.len() + groups.intro.len()).unwrap_or(u32::MAX),
+            u32::try_from(received).unwrap_or(u32::MAX),
+        ));
+        Ok::<bool, String>(limited)
+    };
+    let limited = tokio::time::timeout_at(deadline, fetch)
+        .await
+        .map_err(|_| timed_out())??;
+
+    // Dépôts : la file entière (accusés produits par la relève compris),
+    // sauf ce que ce nœud a déjà eu récemment.
+    let outbox = core.pending_outbox(now()).map_err(|e| e.to_string())?;
+    let live: HashSet<String> = outbox
+        .iter()
+        .filter_map(|b| Packet::decode(b).ok())
+        .map(|p| data_encoding::HEXLOWER.encode(&p.id.0))
         .collect();
-    if !report.pow_exhausted {
-        deposit_all(&mut session, &more, report).await?;
+    // Paquets accusés ou expirés (sortis de la file) : oubliés.
+    state.deposited.retain(|d| live.contains(&d.id));
+    let (plan, skipped) = plan_deposits(outbox, &state.deposited, now());
+    report.already = skipped;
+    if limited && !plan.is_empty() {
+        report.deposits_stopped = Some("trop de requêtes".into());
+    } else if tokio::time::timeout_at(
+        deadline,
+        deposit_all(&mut session, &plan, &mut state.deposited, report),
+    )
+    .await
+    .is_err()
+    {
+        report.deposits_stopped = Some(timed_out());
     }
     session.close().await;
     Ok(())
@@ -424,6 +569,7 @@ async fn sync_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use barking_core::packet::{DEFAULT_HOPS, PacketId, Tier};
 
     #[test]
     fn receive_failure_or_truncation_blocks_mark_polled() {
@@ -457,29 +603,75 @@ mod tests {
     }
 
     #[test]
-    fn intro_partial_does_not_block_mark_polled() {
+    fn intro_partial_or_stopped_deposits_do_not_block_mark_polled() {
         let r = Report {
             fetched: Some((3, 1)),
             intro_partial: true,
             pow_exhausted: true,
+            deposits_stopped: Some("x".into()),
             ..Report::default()
         };
         assert!(r.fully_polled());
     }
 
     #[test]
-    fn group_cursor_resets_when_set_changes() {
-        let mut g = GroupCursor::default();
-        let r = FetchResume {
-            cursors: vec![Some(7), None],
-        };
-        g.store("a".into(), &r);
-        assert_eq!(g.cursors, vec![7, 0]);
-        assert_eq!(g.resume_for("a"), r);
-        assert_eq!(g.resume_for("b"), FetchResume::default());
+    fn seen_positions_roundtrip_and_prune() {
         let m = |b: u8| MailboxId([b; 16]);
-        assert_ne!(set_id(&[m(1), m(2)]), set_id(&[m(1)]));
-        assert_eq!(set_id(&[m(1), m(2)]), set_id(&[m(1), m(2)]));
+        let mut r = FetchResume::default();
+        r.seen.insert([1; 16], 7);
+        r.seen.insert([2; 16], 0);
+        r.seen.insert([3; 16], 9);
+        // Seules les boîtes encore surveillées, positions nulles omises.
+        let s = from_resume(&r, &[m(1), m(2)]);
+        assert_eq!(s.len(), 1);
+        let back = to_resume(&s);
+        assert_eq!(back.seen.get(&[1; 16]), Some(&7));
+        assert!(!back.seen.contains_key(&[3; 16]));
+    }
+
+    fn pkt(n: u8, kind: Kind) -> Vec<u8> {
+        Packet {
+            kind,
+            hops: DEFAULT_HOPS,
+            tier: Tier::S,
+            id: PacketId([n; 16]),
+            expires_at: 2_000_000_000,
+            mailbox: MailboxId([n; 16]),
+            payload: vec![n; 8],
+        }
+        .encode()
+    }
+
+    #[test]
+    fn deposit_plan_order_and_backoff() {
+        let now = 1_800_000_000;
+        let hex = |n: u8| data_encoding::HEXLOWER.encode(&[n; 16]);
+        let outbox = vec![
+            pkt(1, Kind::Message), // ancien, à refaire
+            pkt(2, Kind::Message), // déposé récemment : écarté
+            pkt(3, Kind::Ack),     // accusé jamais déposé
+            pkt(4, Kind::Message), // nouveau
+            pkt(5, Kind::Ack),     // accusé déposé récemment : écarté
+        ];
+        let done = vec![
+            Deposited {
+                id: hex(1),
+                at: now - REDEPOSIT_AFTER_SECS,
+            },
+            Deposited {
+                id: hex(2),
+                at: now - 10,
+            },
+            Deposited {
+                id: hex(5),
+                at: now - 10,
+            },
+        ];
+        let (plan, skipped) = plan_deposits(outbox, &done, now);
+        assert_eq!(skipped, 2);
+        let ids: Vec<String> = plan.iter().map(|p| p.id.clone().unwrap()).collect();
+        assert_eq!(ids, vec![hex(3), hex(4), hex(1)]);
+        assert!(plan[0].ack && !plan[1].ack);
     }
 
     #[test]

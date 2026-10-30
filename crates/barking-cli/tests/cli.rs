@@ -966,10 +966,10 @@ mod node {
         assert!(s1.contains("Relève enregistrée"), "{s1}");
         let r1 = received(&s1);
         assert!(r1 < JUNK as usize, "{r1}");
-        let cursors = fs::read_to_string(b.join("fetch_cursors.toml")).unwrap();
+        let cursors = fs::read_to_string(b.join("sync_state.toml")).unwrap();
         assert!(cursors.contains(&node.id), "{cursors}");
         assert_eq!(
-            fs::metadata(b.join("fetch_cursors.toml"))
+            fs::metadata(b.join("sync_state.toml"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -984,6 +984,97 @@ mod node {
         let r2 = received(&s2);
         assert!(r1 + r2 >= JUNK as usize, "{r1} + {r2}");
         assert!(r2 < JUNK as usize - r1 + 50, "{r1} + {r2}");
+    }
+
+    /// Une longue file d'envoi (accusés et messages) ne bloque pas la
+    /// relève : elle a lieu d'abord, les accusés partent en premier, et un
+    /// `RateLimited` sur les dépôts arrête les dépôts sans faire échouer le
+    /// nœud ; les synchronisations suivantes finissent sans redéposer.
+    #[test]
+    fn outbox_backlog_does_not_block_fetch() {
+        let node = TestNode::start(0);
+        let ((da, a), (db, b)) = pair();
+        node_add(&a, node.addr, &node.id);
+        node_add(&b, node.addr, &node.id);
+        let out_b = db.path().join("out");
+        for i in 0..3 {
+            ok(
+                &b,
+                &[
+                    "send",
+                    "alice",
+                    &format!("de Bob {i}"),
+                    "--out",
+                    path_arg(&out_b),
+                ],
+            );
+        }
+        ok(&b, &["sync"]);
+        const N: usize = 100;
+        let out_a = da.path().join("out");
+        for i in 0..N {
+            ok(
+                &a,
+                &["send", "bob", &format!("m{i}"), "--out", path_arg(&out_a)],
+            );
+        }
+        // Seau du groupe 127.0.0.1 rechargé.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let s1 = ok(&a, &["sync"]);
+        for i in 0..3 {
+            assert!(s1.contains(&format!("[bob] de Bob {i}")), "{s1}");
+        }
+        assert!(s1.contains("Relève enregistrée"), "{s1}");
+        assert!(s1.contains("dépôts interrompus"), "{s1}");
+        // Les trois accusés sont partis avant les messages.
+        assert!(node.stats().acks >= 3);
+        let mut done = false;
+        for _ in 0..8 {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let s = ok(&a, &["sync"]);
+            assert!(s.contains("Relève enregistrée"), "{s}");
+            assert!(!s.contains(" 0 déjà présents"), "{s}");
+            if !s.contains("dépôts interrompus") {
+                done = true;
+                break;
+            }
+        }
+        assert!(done);
+        assert_eq!(node.stats().packets, N as u64);
+        // Tout est déjà déposé : rien n'est redéposé.
+        let s = ok(&a, &["sync"]);
+        assert!(s.contains(" 0 déposés"), "{s}");
+    }
+
+    /// Budget de preuve épuisé : les accusés (sans preuve) partent quand même.
+    #[test]
+    fn pow_budget_exhausted_still_sends_acks() {
+        let node = TestNode::start(0);
+        let ((da, a), (db, b)) = pair();
+        node_add(&a, node.addr, &node.id);
+        node_add(&b, node.addr, &node.id);
+        let out_a = da.path().join("out");
+        ok(&a, &["send", "bob", "bonjour", "--out", path_arg(&out_a)]);
+        ok(&a, &["sync"]);
+        let out_b = db.path().join("out");
+        ok(
+            &b,
+            &["send", "alice", "en attente", "--out", path_arg(&out_b)],
+        );
+        let got = barking(&b)
+            .env("BARKING_TEST_POW_BUDGET", "0")
+            .arg("sync")
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let s = String::from_utf8(got.stdout).unwrap();
+        assert!(s.contains("[alice] bonjour"), "{s}");
+        assert!(s.contains("budget de preuve de travail épuisé"), "{s}");
+        // L'accusé est déposé (il a effacé le message), pas le message de Bob.
+        let st = node.stats();
+        assert_eq!((st.packets, st.acks), (0, 1));
+        assert!(ok(&a, &["sync"]).contains("livré"));
     }
 
     #[test]
