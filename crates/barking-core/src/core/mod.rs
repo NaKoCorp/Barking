@@ -477,6 +477,18 @@ impl Core {
         })
     }
 
+    /// Journalise un événement de transport (dépôt ou relève sur un nœud) :
+    /// seules `NodeDeposit` et `NodeFetch` sont acceptées.
+    pub fn log_transport_event(&mut self, event: TransparencyEvent, now: u64) -> Result<()> {
+        if !matches!(
+            event,
+            TransparencyEvent::NodeDeposit { .. } | TransparencyEvent::NodeFetch { .. }
+        ) {
+            return Err(CoreError::Malformed("événement de transport"));
+        }
+        log(&self.store, now, None, &event)
+    }
+
     /// Historique avec un contact, du plus ancien au plus récent.
     pub fn messages_with(&self, contact: &Fingerprint) -> Result<Vec<MessageRow>> {
         self.store.messages_with(*contact)

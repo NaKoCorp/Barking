@@ -1,6 +1,8 @@
 //! `barking` : CLI au-dessus de `barking-core`. Le transport de la v0 est le
 //! fichier : un paquet = un fichier `.pkt`.
 
+mod netsync;
+mod nodes;
 mod passphrase;
 
 use std::fs;
@@ -105,6 +107,21 @@ enum Command {
     /// Lie un nouvel appareil à cette identité.
     #[command(subcommand)]
     Link(LinkCommand),
+    /// Gère les nœuds de relais.
+    #[command(subcommand)]
+    Node(NodeCommand),
+    /// Dépose les paquets en attente sur les nœuds, relève mes boîtes et traite le reçu.
+    Sync,
+}
+
+#[derive(Subcommand)]
+enum NodeCommand {
+    /// Ajoute un nœud : adresse (IP:port) et identifiant publié par son opérateur.
+    Add { address: String, id: String },
+    /// Liste les nœuds configurés.
+    List,
+    /// Retire un nœud.
+    Remove { id: String },
 }
 
 #[derive(Subcommand)]
@@ -406,6 +423,8 @@ fn run(cli: Cli) -> CliResult<()> {
             println!("Alias de {fp} : {}", printable(&alias));
         }
         Command::Link(cmd) => link(&home, cmd)?,
+        Command::Node(cmd) => nodes::run(&home, cmd)?,
+        Command::Sync => return netsync::sync(&home),
     }
     Ok(())
 }
@@ -714,6 +733,67 @@ fn write_packet(dir: &Path, packet: &Packet) -> CliResult<PathBuf> {
     Ok(path)
 }
 
+/// Où va l'accusé d'un message reçu.
+#[derive(Clone, Copy)]
+enum AckSink<'a> {
+    /// Aucun dossier de sortie : l'accusé n'est pas écrit.
+    Unwritten,
+    /// Écrit en `.pkt` dans ce dossier.
+    Dir(&'a Path),
+    /// Rangé dans la file d'envoi du cœur (déposé par la synchronisation).
+    Queued,
+}
+
+impl<'a> From<Option<&'a Path>> for AckSink<'a> {
+    fn from(out: Option<&'a Path>) -> Self {
+        out.map_or(AckSink::Unwritten, AckSink::Dir)
+    }
+}
+
+/// Affiche le résultat du traitement d'un paquet reçu (fichier ou nœud).
+fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> CliResult<()> {
+    match outcome {
+        ReceiveOutcome::Message {
+            from,
+            alias,
+            text,
+            ack,
+        } => {
+            let who = alias.unwrap_or_else(|| from.to_string());
+            print!("{}", render_message(&who, &text));
+            match ack_sink {
+                AckSink::Dir(dir) => {
+                    fs::create_dir_all(dir)?;
+                    let path = write_packet(dir, &ack)?;
+                    println!("  accusé : {}", path.display());
+                }
+                AckSink::Unwritten => println!("  accusé non écrit (aucun --out)"),
+                AckSink::Queued => println!("  accusé en file d'envoi"),
+            }
+        }
+        ReceiveOutcome::AckReceived { .. } => println!("{label} : livré ✓"),
+        ReceiveOutcome::Partial => println!("{label} : trame partielle"),
+        ReceiveOutcome::Duplicate => println!("{label} : doublon"),
+        ReceiveOutcome::NotForUs => println!("{label} : pas pour toi"),
+        ReceiveOutcome::Expired => println!("{label} : expiré"),
+        ReceiveOutcome::Quarantined { reason } => {
+            println!("{label} : mis en quarantaine : {reason}");
+        }
+        ReceiveOutcome::Synced { kind } => println!(
+            "{label} : synchronisé depuis un de tes appareils ({})",
+            kind.label()
+        ),
+        ReceiveOutcome::CardUpdated { from, alias } => {
+            let who = alias.unwrap_or_else(|| from.to_string());
+            println!(
+                "{label} : {} a mis à jour sa liste d'appareils",
+                printable(&who)
+            );
+        }
+    }
+    Ok(())
+}
+
 fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> {
     let mut core = open_core(home)?;
     let mut failed = false;
@@ -727,44 +807,8 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
                 continue;
             }
         };
-        match core.receive(&bytes, "fichier", now(), &mut rand::rng())? {
-            ReceiveOutcome::Message {
-                from,
-                alias,
-                text,
-                ack,
-            } => {
-                let who = alias.unwrap_or_else(|| from.to_string());
-                print!("{}", render_message(&who, &text));
-                match out {
-                    Some(dir) => {
-                        fs::create_dir_all(dir)?;
-                        let path = write_packet(dir, &ack)?;
-                        println!("  accusé : {}", path.display());
-                    }
-                    None => println!("  accusé non écrit (aucun --out)"),
-                }
-            }
-            ReceiveOutcome::AckReceived { .. } => println!("{label} : livré ✓"),
-            ReceiveOutcome::Partial => println!("{label} : trame partielle"),
-            ReceiveOutcome::Duplicate => println!("{label} : doublon"),
-            ReceiveOutcome::NotForUs => println!("{label} : pas pour toi"),
-            ReceiveOutcome::Expired => println!("{label} : expiré"),
-            ReceiveOutcome::Quarantined { reason } => {
-                println!("{label} : mis en quarantaine : {reason}");
-            }
-            ReceiveOutcome::Synced { kind } => println!(
-                "{label} : synchronisé depuis un de tes appareils ({})",
-                kind.label()
-            ),
-            ReceiveOutcome::CardUpdated { from, alias } => {
-                let who = alias.unwrap_or_else(|| from.to_string());
-                println!(
-                    "{label} : {} a mis à jour sa liste d'appareils",
-                    printable(&who)
-                );
-            }
-        }
+        let outcome = core.receive(&bytes, "fichier", now(), &mut rand::rng())?;
+        show_outcome(&label.to_string(), outcome, AckSink::from(out))?;
     }
     if failed {
         return fail("Certains fichiers n'ont pas pu être lus");

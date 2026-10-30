@@ -755,3 +755,210 @@ fn log_neutralises_control_characters_in_names() {
     assert!(!log.contains('\u{1b}'), "{log:?}");
     assert!(log.contains("tab\u{FFFD}[2Jlette"), "{log}");
 }
+
+// --- Synchronisation par les nœuds (transport réseau) ---
+
+mod node {
+    use std::net::{SocketAddr, UdpSocket};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::OnceLock;
+
+    use barking_node::server::{self, ServerConfig};
+    use barking_node::{NodeStore, Policy};
+    use barking_proto::{NodeId, generate_node_key};
+    use ed25519_dalek::SigningKey;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    fn key(n: usize) -> SigningKey {
+        static KEYS: OnceLock<Vec<SigningKey>> = OnceLock::new();
+        KEYS.get_or_init(|| {
+            let mut rng = StdRng::seed_from_u64(4242);
+            (0..2).map(|_| generate_node_key(&mut rng)).collect()
+        })[n]
+            .clone()
+    }
+
+    /// Un nœud réel dans ce processus, sur 127.0.0.1 (port libre).
+    struct TestNode {
+        addr: SocketAddr,
+        id: String,
+        db: PathBuf,
+        _dir: TempDir,
+        stop: Option<oneshot::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestNode {
+        fn start(n: usize) -> TestNode {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("node.db");
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = socket.local_addr().unwrap();
+            let key = key(n);
+            let id = NodeId::from_public_key(&key.verifying_key()).to_string();
+            let cfg = ServerConfig::new(vec![socket], key);
+            let store = NodeStore::open(&db).unwrap();
+            let policy = Policy {
+                pow_bits: 4,
+                ..Policy::default()
+            };
+            let (tx, rx) = oneshot::channel::<()>();
+            let thread = std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let _ = rt.block_on(server::run(cfg, store, policy, async move {
+                    let _ = rx.await;
+                }));
+            });
+            TestNode {
+                addr,
+                id,
+                db,
+                _dir: dir,
+                stop: Some(tx),
+                thread: Some(thread),
+            }
+        }
+
+        fn stats(&self) -> barking_node::Stats {
+            NodeStore::open(&self.db).unwrap().stats().unwrap()
+        }
+    }
+
+    impl Drop for TestNode {
+        fn drop(&mut self) {
+            if let Some(tx) = self.stop.take() {
+                let _ = tx.send(());
+            }
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    fn node_add(home: &Path, addr: SocketAddr, id: &str) {
+        ok(home, &["node", "add", &addr.to_string(), id]);
+    }
+
+    #[test]
+    fn two_clis_talk_via_node() {
+        let node = TestNode::start(0);
+        let ((da, a), (_db, b)) = pair();
+        node_add(&a, node.addr, &node.id);
+        node_add(&b, node.addr, &node.id);
+
+        let out = da.path().join("out");
+        ok(
+            &a,
+            &["send", "bob", "salut via nœud", "--out", path_arg(&out)],
+        );
+        let sync_a = ok(&a, &["sync"]);
+        assert!(sync_a.contains(&node.id[..8]), "{sync_a}");
+        assert_eq!(node.stats().packets, 1);
+
+        let sync_b = ok(&b, &["sync"]);
+        assert!(sync_b.contains("[alice] salut via nœud"), "{sync_b}");
+        // L'accusé de Bob a effacé le paquet du nœud.
+        let st = node.stats();
+        assert_eq!((st.packets, st.acks), (0, 1));
+
+        let sync_a2 = ok(&a, &["sync"]);
+        assert!(sync_a2.contains("livré"), "{sync_a2}");
+        assert_eq!(node.stats().packets, 0);
+        assert!(ok(&a, &["messages", "bob"]).contains("livré"));
+
+        let log = ok(&a, &["log"]);
+        assert!(log.contains("paquets déposés sur le nœud"), "{log}");
+        assert!(log.contains("Boîtes relevées sur le nœud"), "{log}");
+        // Ni boîte ni adresse dans le journal.
+        assert!(!log.contains("127.0.0.1"), "{log}");
+    }
+
+    #[test]
+    fn sync_with_one_dead_node() {
+        let live = TestNode::start(0);
+        // Nœud injoignable : un port UDP libéré aussitôt.
+        let dead_addr = UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let dead_id = NodeId::from_public_key(&key(1).verifying_key()).to_string();
+        let ((da, a), (_db, b)) = pair();
+        for home in [&a, &b] {
+            node_add(home, dead_addr, &dead_id);
+            node_add(home, live.addr, &live.id);
+        }
+        let out = da.path().join("out");
+        ok(
+            &a,
+            &["send", "bob", "par le vivant", "--out", path_arg(&out)],
+        );
+        ok(&a, &["sync"]);
+        assert_eq!(live.stats().packets, 1);
+        let got = ok(&b, &["sync"]);
+        assert!(got.contains("[alice] par le vivant"), "{got}");
+
+        // `mark_polled` n'a pas eu lieu : le nœud mort n'a pas répondu à la relève.
+        let again = barking(&b)
+            .arg("sync")
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let stdout = String::from_utf8(again.stdout).unwrap();
+        let stderr = String::from_utf8(again.stderr).unwrap();
+        assert!(stderr.contains(&dead_id[..8]), "{stderr}");
+        assert!(stdout.contains("Relève non enregistrée"), "{stdout}");
+
+        // Avec le seul nœud vivant, la relève est enregistrée.
+        ok(&b, &["node", "remove", &dead_id]);
+        assert!(ok(&b, &["sync"]).contains("Relève enregistrée"));
+    }
+
+    #[test]
+    fn node_add_list_remove() {
+        let (_d, home) = party("tel");
+        let addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let id = NodeId::from_public_key(&key(0).verifying_key()).to_string();
+        // Espaces et minuscules tolérés.
+        ok(
+            &home,
+            &[
+                "node",
+                "add",
+                &addr.to_string(),
+                &format!(" {} ", id.to_lowercase()),
+            ],
+        );
+        let list = ok(&home, &["node", "list"]);
+        assert!(
+            list.contains(&id) && list.contains("127.0.0.1:4433"),
+            "{list}"
+        );
+        let mode = fs::metadata(home.join("nodes.toml"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // Identifiant qui échoue au puzzle.
+        let bad = data_encoding::BASE32_NOPAD.encode(&[7u8; 32]);
+        barking(&home)
+            .args(["node", "add", "127.0.0.1:1", &bad])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("puzzle"));
+        barking(&home)
+            .args(["node", "add", "127.0.0.1:1", "pas-base32"])
+            .assert()
+            .failure();
+        ok(&home, &["node", "remove", &id]);
+        assert!(!ok(&home, &["node", "list"]).contains(&id));
+        barking(&home)
+            .args(["node", "remove", &id])
+            .assert()
+            .failure();
+    }
+}

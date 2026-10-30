@@ -6,6 +6,7 @@ members = ["crates/*"]
 argon2 = "0.6.0"
 assert_cmd = "2.2.2"
 barking-core = { path = "crates/barking-core" }
+barking-node = { path = "crates/barking-node" }
 barking-packet = { path = "crates/barking-packet" }
 barking-proto = { path = "crates/barking-proto" }
 bip39 = "3.0.0"

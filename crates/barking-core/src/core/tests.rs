@@ -1894,3 +1894,32 @@ fn sync_sent_matching_imported_history_message_not_duplicated() {
     assert_eq!(synced, 1);
     assert_eq!(t.messages_with(&bob_fp).unwrap().len(), 1);
 }
+
+#[test]
+fn log_transport_event_accepts_only_node_events() {
+    let mut p = pair();
+    let dep = TransparencyEvent::NodeDeposit {
+        node: "ABCDEFGH".into(),
+        count: 1,
+        refused: 0,
+    };
+    let fetch = TransparencyEvent::NodeFetch {
+        node: "ABCDEFGH".into(),
+        mailboxes: 2,
+        received: 1,
+    };
+    p.a.log_transport_event(dep.clone(), NOW).unwrap();
+    p.a.log_transport_event(fetch.clone(), NOW).unwrap();
+    let log = p.a.transparency_log(10).unwrap();
+    assert!(log.iter().any(|(_, e)| *e == dep));
+    assert!(log.iter().any(|(_, e)| *e == fetch));
+    assert_eq!(
+        p.a.log_transport_event(
+            TransparencyEvent::AckEmitted {
+                for_packet: PacketId([0; 16])
+            },
+            NOW
+        ),
+        Err(CoreError::Malformed("événement de transport"))
+    );
+}

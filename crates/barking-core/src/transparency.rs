@@ -93,6 +93,20 @@ pub enum TransparencyEvent {
         added: u32,
         removed: u32,
     },
+    /// Dépôts sur un nœud : `node` est l'identifiant court (8 caractères
+    /// base32), jamais de boîte ni d'adresse. Ajouté en dernier.
+    NodeDeposit {
+        node: String,
+        count: u32,
+        refused: u32,
+    },
+    /// Relève sur un nœud : `mailboxes` boîtes relevées, `received` éléments
+    /// reçus. Ajouté en dernier.
+    NodeFetch {
+        node: String,
+        mailboxes: u32,
+        received: u32,
+    },
 }
 
 /// Type de synchronisation entre mes appareils.
@@ -301,6 +315,23 @@ impl TransparencyEvent {
             Self::OwnDevicesUpdated { added, removed } => {
                 format!("Ta liste d'appareils a changé (+{added}, \u{2212}{removed}).")
             }
+            Self::NodeDeposit {
+                node,
+                count,
+                refused,
+            } => format!(
+                "{count} paquets déposés sur le nœud {node} ({refused} refusés). \
+                 Le nœud voit la boîte aux lettres, la taille et l'heure ; pas le contenu."
+            ),
+            Self::NodeFetch {
+                node,
+                mailboxes,
+                received,
+            } => format!(
+                "Boîtes relevées sur le nœud {node} : {mailboxes} boîtes, {received} éléments \
+                 reçus. Le nœud voit quelles boîtes tu relèves et ton adresse IP pendant la \
+                 connexion."
+            ),
         }
     }
 }
@@ -441,6 +472,16 @@ mod tests {
             TransparencyEvent::OwnDevicesUpdated {
                 added: 1,
                 removed: 0,
+            },
+            TransparencyEvent::NodeDeposit {
+                node: "ABCDEFGH".into(),
+                count: 2,
+                refused: 1,
+            },
+            TransparencyEvent::NodeFetch {
+                node: "ABCDEFGH".into(),
+                mailboxes: 5,
+                received: 3,
             },
         ]
     }
@@ -643,6 +684,32 @@ mod tests {
         assert_eq!(
             e.describe(),
             "Ta liste d'appareils a changé (+2, \u{2212}1)."
+        );
+    }
+
+    #[test]
+    fn describe_node_events_exact() {
+        let dep = TransparencyEvent::NodeDeposit {
+            node: "ABCDEFGH".into(),
+            count: 2,
+            refused: 1,
+        };
+        assert!(!dep.is_security());
+        assert_eq!(
+            dep.describe(),
+            "2 paquets déposés sur le nœud ABCDEFGH (1 refusés). \
+             Le nœud voit la boîte aux lettres, la taille et l'heure ; pas le contenu."
+        );
+        let fetch = TransparencyEvent::NodeFetch {
+            node: "ABCDEFGH".into(),
+            mailboxes: 5,
+            received: 3,
+        };
+        assert!(!fetch.is_security());
+        assert_eq!(
+            fetch.describe(),
+            "Boîtes relevées sur le nœud ABCDEFGH : 5 boîtes, 3 éléments reçus. \
+             Le nœud voit quelles boîtes tu relèves et ton adresse IP pendant la connexion."
         );
     }
 

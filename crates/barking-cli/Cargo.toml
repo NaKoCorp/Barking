@@ -10,13 +10,20 @@ path = "src/main.rs"
 [dependencies]
 argon2.workspace = true
 barking-core.workspace = true
+barking-proto.workspace = true
 clap.workspace = true
 data-encoding.workspace = true
 rand.workspace = true
 rpassword.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+toml.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+barking-node.workspace = true
+ed25519-dalek.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time"] }
 assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
