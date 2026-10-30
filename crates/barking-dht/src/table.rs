@@ -15,6 +15,42 @@ use crate::{
     distance, prefixes,
 };
 
+/// Limites de diversité des adresses d'une table. `SPEC` (valeurs de la
+/// spec) partout ; d'autres valeurs ne servent qu'aux tests réseau du nœud,
+/// où tous les nœuds partagent le /24 de 127.0.0.1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiversityLimits {
+    /// Nœuds d'un même bloc par compartiment (réserve comprise) et par
+    /// résultat.
+    pub per_prefix: usize,
+    /// Part maximale des nœuds actifs de la table pour un même bloc.
+    pub share_percent: usize,
+    /// Nœuds toujours autorisés par bloc.
+    pub min_allowed: usize,
+}
+
+impl DiversityLimits {
+    /// Valeurs de la spec.
+    pub const SPEC: DiversityLimits = DiversityLimits {
+        per_prefix: MAX_PER_PREFIX,
+        share_percent: MAX_PREFIX_SHARE_PERCENT,
+        min_allowed: MIN_PREFIX_ALLOWED,
+    };
+
+    /// Aucune limite (tests réseau en local seulement).
+    pub const NONE: DiversityLimits = DiversityLimits {
+        per_prefix: usize::MAX,
+        share_percent: 100,
+        min_allowed: usize::MAX,
+    };
+}
+
+impl Default for DiversityLimits {
+    fn default() -> Self {
+        DiversityLimits::SPEC
+    }
+}
+
 /// Nombre de compartiments (un par longueur de préfixe commun).
 const BUCKETS: usize = 256;
 
@@ -67,6 +103,7 @@ struct Bucket {
 pub struct RoutingTable {
     own: NodeId,
     buckets: Vec<Bucket>,
+    limits: DiversityLimits,
 }
 
 fn position(peers: &[Peer], id: &NodeId) -> Option<usize> {
@@ -89,10 +126,17 @@ fn in_block(peer: &Peer, block: &Prefix) -> bool {
 }
 
 impl RoutingTable {
+    /// Table aux limites de diversité de la spec.
     pub fn new(own: NodeId) -> RoutingTable {
+        RoutingTable::with_limits(own, DiversityLimits::SPEC)
+    }
+
+    /// Table aux limites de diversité `limits` (tests réseau du nœud).
+    pub fn with_limits(own: NodeId, limits: DiversityLimits) -> RoutingTable {
         RoutingTable {
             own,
             buckets: vec![Bucket::default(); BUCKETS],
+            limits,
         }
     }
 
@@ -199,10 +243,9 @@ impl RoutingTable {
                 .chain(&bucket.reserve)
                 .filter(|p| p.id != *id)
         };
-        if blocks
-            .iter()
-            .any(|block| neighbours().filter(|p| in_block(p, block)).count() >= MAX_PER_PREFIX)
-        {
+        if blocks.iter().any(|block| {
+            neighbours().filter(|p| in_block(p, block)).count() >= self.limits.per_prefix
+        }) {
             return false;
         }
         if !to_active {
@@ -210,7 +253,7 @@ impl RoutingTable {
         }
         let others = || self.active().filter(|p| p.id != *id);
         let total = others().count() + 1;
-        let limit = MIN_PREFIX_ALLOWED.max(total * MAX_PREFIX_SHARE_PERCENT / 100);
+        let limit = (self.limits.min_allowed).max(total * self.limits.share_percent / 100);
         blocks
             .iter()
             .all(|block| others().filter(|p| in_block(p, block)).count() < limit)
@@ -244,7 +287,7 @@ impl RoutingTable {
         peers.into_iter().take(n).cloned().collect()
     }
 
-    /// Comme `closest`, avec au plus `MAX_PER_PREFIX` nœuds par bloc.
+    /// Comme `closest`, avec au plus `per_prefix` nœuds par bloc.
     pub fn closest_diverse(&self, target: &[u8; 32], n: usize) -> Vec<NodeRecord> {
         let mut peers: Vec<&Peer> = self.active().collect();
         peers.sort_by_cached_key(|p| distance(&p.id.0, target));
@@ -257,7 +300,7 @@ impl RoutingTable {
             let blocks = prefixes(&peer.record);
             if blocks
                 .iter()
-                .any(|b| counts.get(b).copied().unwrap_or(0) >= MAX_PER_PREFIX)
+                .any(|b| counts.get(b).copied().unwrap_or(0) >= self.limits.per_prefix)
             {
                 continue;
             }
@@ -622,6 +665,23 @@ mod tests {
             .count();
         assert_eq!(kept, MAX_PER_PREFIX);
         assert_eq!(table.closest_diverse(&[0; 32], 5).len(), 5);
+    }
+
+    #[test]
+    fn relaxed_limits_admit_a_shared_block() {
+        let mut rng = StdRng::seed_from_u64(12);
+        let nodes: Vec<_> = (0..8).map(|i| node(&mut rng, &shared(i))).collect();
+        // Limites de la spec : 2 nœuds du /24 au plus dans toute la table.
+        let mut spec = RoutingTable::new(OWN);
+        let mut relaxed = RoutingTable::with_limits(OWN, DiversityLimits::NONE);
+        for (id, rec) in &nodes {
+            spec.on_contact(*id, rec.clone(), NOW);
+            assert_eq!(relaxed.on_contact(*id, rec.clone(), NOW), Insert::Added);
+        }
+        assert_eq!(spec.len(), MIN_PREFIX_ALLOWED);
+        assert_eq!(relaxed.len(), nodes.len());
+        assert_eq!(relaxed.closest_diverse(&[0; 32], K).len(), nodes.len());
+        assert_eq!(DiversityLimits::default(), DiversityLimits::SPEC);
     }
 
     #[test]

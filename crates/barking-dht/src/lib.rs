@@ -10,7 +10,7 @@ use barking_proto::{NodeId, NodeRecord};
 
 pub use bootstrap::{BootstrapEntry, BootstrapError, builtin_bootstrap, parse_bootstrap};
 pub use lookup::{Lookup, Suspect, filter_nodes};
-pub use table::{Insert, Peer, Reject, RoutingTable};
+pub use table::{DiversityLimits, Insert, Peer, Reject, RoutingTable};
 
 /// Nœuds actifs par compartiment.
 pub const K: usize = 20;
