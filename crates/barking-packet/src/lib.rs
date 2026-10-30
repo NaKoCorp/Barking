@@ -1,12 +1,18 @@
 //! Paquet universel : en-tête en clair de 40 octets, trois paliers de taille.
 
 pub mod ack;
+pub mod error;
+pub mod fragment;
 mod header;
+pub mod labels;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{CoreError, Result};
-use crate::mailbox::MailboxId;
+pub use error::{PacketError, Result};
+
+/// Identifiant de boîte aux lettres (16 octets).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct MailboxId(pub [u8; 16]);
 
 /// Taille de l'en-tête en clair (sans les 2 octets de longueur).
 pub const HEADER_LEN: usize = 40;
@@ -16,7 +22,7 @@ pub const DEFAULT_HOPS: u8 = 8;
 pub const DEFAULT_TTL_SECS: u64 = 7 * 86400;
 
 /// Octets d'en-tête + champ de longueur.
-pub(crate) const OVERHEAD: usize = HEADER_LEN + 2;
+pub const OVERHEAD: usize = HEADER_LEN + 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -45,11 +51,11 @@ impl Tier {
     pub fn fit(payload_len: usize) -> Result<Tier> {
         let total = payload_len
             .checked_add(OVERHEAD)
-            .ok_or(CoreError::TooLarge)?;
+            .ok_or(PacketError::TooLarge)?;
         [Tier::S, Tier::M, Tier::L]
             .into_iter()
             .find(|t| total <= t.size())
-            .ok_or(CoreError::TooLarge)
+            .ok_or(PacketError::TooLarge)
     }
 }
 
@@ -68,7 +74,7 @@ pub struct Packet {
 }
 
 /// Expiration par défaut à partir de `now`, saturée dans un `u32`.
-pub(crate) fn default_expiry(now: u64) -> u32 {
+pub fn default_expiry(now: u64) -> u32 {
     u32::try_from(now.saturating_add(DEFAULT_TTL_SECS)).unwrap_or(u32::MAX)
 }
 

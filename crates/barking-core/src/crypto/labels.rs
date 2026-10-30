@@ -51,7 +51,7 @@ pub const MAILBOX: &[u8] = b"barking/v0/mailbox";
 pub const INTRO_MAILBOX_CONTEXT: &str = "barking/v0/intro-mailbox";
 
 /// Contexte BLAKE3 de l'identifiant de paquet dérivé du secret d'accusé.
-pub const ACK_CONTEXT: &str = "barking/v0/ack";
+pub use barking_packet::labels::ACK_CONTEXT;
 
 /// Scellement du message initial : `key(32) || nonce(12)` dérivés de
 /// `DH(e_seal, IK_B)`, avec une éphémère propre à chaque paquet Initial.
@@ -61,7 +61,7 @@ pub const INITIAL_SEAL: &[u8] = b"barking/v0/initial-seal";
 pub const CONTACT_CARD: &[u8] = b"barking/v0/contact-card";
 
 /// Contexte BLAKE3 de la clé de trame : 8 octets du hash du paquet entier.
-pub const FRAME_CONTEXT: &str = "barking/v0/frame";
+pub use barking_packet::labels::FRAME_CONTEXT;
 
 /// Contexte BLAKE3 de la clé du MAC de la demande de liaison (dérivée du
 /// secret de liaison).

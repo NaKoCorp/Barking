@@ -3,8 +3,8 @@
 //! Disposition : `version(=0) | kind | hops | tier | id(16) | expires_at u32 BE
 //! | mailbox(16) | payload_len u16 BE | payload | zéros`.
 
-use super::{HEADER_LEN, Kind, MailboxId, OVERHEAD, Packet, PacketId, Tier};
-use crate::error::{CoreError, Result};
+use super::{HEADER_LEN, Kind, MailboxId, OVERHEAD, Packet, PacketId, Result, Tier};
+use crate::error::PacketError;
 
 const VERSION: u8 = 0;
 
@@ -37,24 +37,24 @@ impl Packet {
     /// octets, déjà borné par la longueur de l'entrée.
     pub fn decode(bytes: &[u8]) -> Result<Packet> {
         if bytes.len() < OVERHEAD {
-            return Err(CoreError::Malformed("paquet trop court"));
+            return Err(PacketError::Malformed("paquet trop court"));
         }
         if bytes[0] != VERSION {
-            return Err(CoreError::Malformed("version de paquet inconnue"));
+            return Err(PacketError::Malformed("version de paquet inconnue"));
         }
         let kind = match bytes[1] {
             0 => Kind::Message,
             1 => Kind::Ack,
-            _ => return Err(CoreError::Malformed("type de paquet inconnu")),
+            _ => return Err(PacketError::Malformed("type de paquet inconnu")),
         };
         let tier = match bytes[3] {
             0 => Tier::S,
             1 => Tier::M,
             2 => Tier::L,
-            _ => return Err(CoreError::Malformed("palier inconnu")),
+            _ => return Err(PacketError::Malformed("palier inconnu")),
         };
         if bytes.len() != tier.size() {
-            return Err(CoreError::Malformed("longueur différente du palier"));
+            return Err(PacketError::Malformed("longueur différente du palier"));
         }
         let mut id = [0u8; 16];
         id.copy_from_slice(&bytes[4..20]);
@@ -67,11 +67,11 @@ impl Packet {
             bytes[HEADER_LEN + 1],
         ]));
         if len > tier.size() - OVERHEAD {
-            return Err(CoreError::Malformed("longueur de charge trop grande"));
+            return Err(PacketError::Malformed("longueur de charge trop grande"));
         }
         let payload = &bytes[OVERHEAD..OVERHEAD + len];
         if bytes[OVERHEAD + len..].iter().any(|&b| b != 0) {
-            return Err(CoreError::Malformed("remplissage non nul"));
+            return Err(PacketError::Malformed("remplissage non nul"));
         }
         Ok(Packet {
             kind,

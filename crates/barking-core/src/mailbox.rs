@@ -1,14 +1,10 @@
 //! Boîtes aux lettres tournantes : un identifiant de 16 octets qui change
 //! chaque jour et que seuls les deux interlocuteurs savent calculer.
 
-use serde::{Deserialize, Serialize};
-
 use crate::crypto::labels;
 use crate::identity::{DeviceId, DevicePublic};
 
-/// Identifiant de boîte aux lettres (16 octets).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub struct MailboxId(pub [u8; 16]);
+pub use barking_packet::MailboxId;
 
 fn truncate(full: &[u8; 32]) -> MailboxId {
     let mut out = [0u8; 16];

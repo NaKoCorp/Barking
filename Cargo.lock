@@ -139,6 +139,7 @@ dependencies = [
 name = "barking-core"
 version = "0.1.0"
 dependencies = [
+ "barking-packet",
  "bip39",
  "blake3",
  "chacha20",
@@ -160,6 +161,18 @@ dependencies = [
  "thiserror",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "barking-packet"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "proptest",
+ "rand",
+ "rand_core",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]

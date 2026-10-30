@@ -1,5 +1,4 @@
 use super::*;
-use crate::mailbox::MailboxId;
 use proptest::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -47,8 +46,8 @@ fn max_payload_s_is_203() {
 #[test]
 fn too_large_rejected() {
     assert_eq!(Tier::fit(16342).unwrap(), Tier::L);
-    assert_eq!(Tier::fit(16343), Err(CoreError::TooLarge));
-    assert_eq!(Tier::fit(usize::MAX), Err(CoreError::TooLarge));
+    assert_eq!(Tier::fit(16343), Err(PacketError::TooLarge));
+    assert_eq!(Tier::fit(usize::MAX), Err(PacketError::TooLarge));
 }
 
 #[test]

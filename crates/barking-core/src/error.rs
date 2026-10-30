@@ -35,4 +35,13 @@ pub enum CoreError {
     Link(&'static str),
 }
 
+impl From<barking_packet::PacketError> for CoreError {
+    fn from(e: barking_packet::PacketError) -> Self {
+        match e {
+            barking_packet::PacketError::Malformed(m) => CoreError::Malformed(m),
+            barking_packet::PacketError::TooLarge => CoreError::TooLarge,
+        }
+    }
+}
+
 pub type Result<T> = core::result::Result<T, CoreError>;

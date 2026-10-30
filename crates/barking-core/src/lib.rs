@@ -5,11 +5,17 @@ pub mod core;
 pub mod crypto;
 pub mod envelope;
 pub mod error;
-pub mod fragment;
+pub mod fragment {
+    //! Fragmentation : réexportée depuis `barking-packet`.
+    pub use barking_packet::fragment::*;
+}
 pub mod handshake;
 pub mod identity;
 pub mod mailbox;
-pub mod packet;
+pub mod packet {
+    //! Paquet universel : réexporté depuis `barking-packet`.
+    pub use barking_packet::*;
+}
 pub mod ratchet;
 pub mod store;
 pub mod transparency;

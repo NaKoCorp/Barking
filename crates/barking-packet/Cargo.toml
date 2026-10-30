@@ -1,0 +1,14 @@
+[package]
+name = "barking-packet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blake3.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true

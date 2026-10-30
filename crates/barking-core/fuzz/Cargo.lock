@@ -43,6 +43,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "barking-core"
 version = "0.1.0"
 dependencies = [
+ "barking-packet",
  "bip39",
  "blake3",
  "chacha20poly1305",
@@ -69,6 +70,16 @@ dependencies = [
  "libfuzzer-sys",
  "rand",
  "tempfile",
+]
+
+[[package]]
+name = "barking-packet"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rand_core",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]

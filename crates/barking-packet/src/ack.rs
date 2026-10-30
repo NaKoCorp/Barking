@@ -7,7 +7,7 @@
 use rand_core::CryptoRng;
 
 use super::{DEFAULT_HOPS, Kind, Packet, PacketId, Tier, default_expiry};
-use crate::crypto::labels;
+use crate::labels;
 
 /// Tire un secret d'accusé aléatoire.
 pub fn new_secret(rng: &mut impl CryptoRng) -> [u8; 16] {

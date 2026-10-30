@@ -4,8 +4,8 @@
 //! puis un morceau du paquet. Le réassemblage recalcule la clé : une trame
 //! falsifiée ou contradictoire est détectée et l'entrée abandonnée.
 
-use crate::crypto::labels::FRAME_CONTEXT;
-use crate::error::{CoreError, Result};
+use crate::error::{PacketError, Result};
+use crate::labels::FRAME_CONTEXT;
 
 /// Longueur de l'en-tête de trame.
 pub const FRAG_HEADER_LEN: usize = 10;
@@ -42,12 +42,12 @@ pub fn frame_key(packet: &[u8]) -> [u8; 8] {
 /// ramenée à `MAX_FRAME_LEN`. Un paquet vide donne tout de même une trame.
 pub fn fragment(packet: &[u8], mtu: usize) -> Result<Vec<Vec<u8>>> {
     if mtu < MIN_MTU || packet.len() > MAX_PACKET_LEN {
-        return Err(CoreError::TooLarge);
+        return Err(PacketError::TooLarge);
     }
     let mtu = mtu.min(MAX_FRAME_LEN);
     let chunk = mtu - FRAG_HEADER_LEN;
     let count = packet.len().div_ceil(chunk).max(1);
-    let count_u8 = u8::try_from(count).map_err(|_| CoreError::TooLarge)?;
+    let count_u8 = u8::try_from(count).map_err(|_| PacketError::TooLarge)?;
     let key = frame_key(packet);
     let mut frames = Vec::with_capacity(count);
     for index in 0..count {
@@ -108,10 +108,10 @@ impl Reassembler {
             .retain(|e| now.saturating_sub(e.first_seen) <= ttl);
 
         if frame.len() < FRAG_HEADER_LEN {
-            return Err(CoreError::Malformed("trame trop courte"));
+            return Err(PacketError::Malformed("trame trop courte"));
         }
         if frame.len() > MAX_FRAME_LEN {
-            return Err(CoreError::Malformed("trame trop longue"));
+            return Err(PacketError::Malformed("trame trop longue"));
         }
         let mut key = [0u8; 8];
         key.copy_from_slice(&frame[..8]);
@@ -119,24 +119,24 @@ impl Reassembler {
         let count = usize::from(frame[9]);
         let chunk = &frame[FRAG_HEADER_LEN..];
         if count == 0 {
-            return Err(CoreError::Malformed("nombre de fragments nul"));
+            return Err(PacketError::Malformed("nombre de fragments nul"));
         }
         if index >= count {
-            return Err(CoreError::Malformed("index de fragment hors limites"));
+            return Err(PacketError::Malformed("index de fragment hors limites"));
         }
         if chunk.is_empty() && count > 1 {
-            return Err(CoreError::Malformed("fragment vide"));
+            return Err(PacketError::Malformed("fragment vide"));
         }
         // Budget d'une entrée : les `count - 1` premiers morceaux ont tous la
         // longueur du plus long, donc `(count - 1) * len` ne dépasse jamais un
         // paquet décodable si la trame est légitime. Vaut pour le dernier
         // morceau aussi (il n'est pas plus long que les autres).
         if (count - 1).saturating_mul(chunk.len()) > MAX_PACKET_LEN {
-            return Err(CoreError::Malformed("fragments trop volumineux"));
+            return Err(PacketError::Malformed("fragments trop volumineux"));
         }
         if count == 1 {
             if frame_key(chunk) != key {
-                return Err(CoreError::Malformed(REASON_BAD_HASH));
+                return Err(PacketError::Malformed(REASON_BAD_HASH));
             }
             return Ok(Some(chunk.to_vec()));
         }
@@ -164,7 +164,7 @@ impl Reassembler {
         };
         let entry = &mut self.entries[pos];
         if entry.count != count {
-            return Err(CoreError::Malformed("nombre de fragments incohérent"));
+            return Err(PacketError::Malformed("nombre de fragments incohérent"));
         }
         if let Some(prev) = &entry.parts[index] {
             if prev.as_slice() == chunk {
@@ -173,7 +173,7 @@ impl Reassembler {
             // Deux contenus pour le même index : l'une des deux trames est
             // fausse, on abandonne tout le paquet.
             self.entries.remove(pos);
-            return Err(CoreError::Malformed(REASON_CONTRADICTORY));
+            return Err(PacketError::Malformed(REASON_CONTRADICTORY));
         }
         // Cohérence des longueurs : tous les morceaux sauf le dernier ont la
         // même longueur, et le dernier n'est pas plus long.
@@ -182,14 +182,14 @@ impl Reassembler {
             (entry.full_len, Some(chunk.len()))
         } else {
             if entry.full_len.is_some_and(|f| f != chunk.len()) {
-                return Err(CoreError::Malformed("longueur de fragment incohérente"));
+                return Err(PacketError::Malformed("longueur de fragment incohérente"));
             }
             (Some(chunk.len()), entry.last_len)
         };
         if let (Some(f), Some(l)) = (full, last)
             && l > f
         {
-            return Err(CoreError::Malformed("longueur de fragment incohérente"));
+            return Err(PacketError::Malformed("longueur de fragment incohérente"));
         }
         entry.full_len = full;
         entry.last_len = last;
@@ -205,7 +205,7 @@ impl Reassembler {
             out.extend_from_slice(&p);
         }
         if frame_key(&out) != done.key {
-            return Err(CoreError::Malformed(REASON_BAD_HASH));
+            return Err(PacketError::Malformed(REASON_BAD_HASH));
         }
         Ok(Some(out))
     }
@@ -214,7 +214,7 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{Kind, Packet, PacketId, Tier};
+    use crate::{Kind, Packet, PacketId, Tier};
     use proptest::prelude::*;
 
     fn pid(n: u8) -> PacketId {
@@ -254,7 +254,7 @@ mod tests {
             tier: Tier::S,
             id: pid(2),
             expires_at: 0,
-            mailbox: crate::mailbox::MailboxId([0; 16]),
+            mailbox: crate::MailboxId([0; 16]),
             payload: vec![1; 10],
         };
         let enc = p.encode();
@@ -321,17 +321,20 @@ mod tests {
 
     #[test]
     fn mtu_too_small_rejected() {
-        assert_eq!(fragment(&bytes(100, 0), 73), Err(CoreError::TooLarge));
+        assert_eq!(fragment(&bytes(100, 0), 73), Err(PacketError::TooLarge));
         assert!(fragment(&bytes(100, 0), 74).is_ok());
     }
 
     #[test]
     fn too_many_fragments_rejected() {
-        assert_eq!(fragment(&bytes(64 * 256, 0), 74), Err(CoreError::TooLarge));
+        assert_eq!(
+            fragment(&bytes(64 * 256, 0), 74),
+            Err(PacketError::TooLarge)
+        );
         assert_eq!(fragment(&bytes(64 * 255, 0), 74).unwrap().len(), 255);
         assert_eq!(
             fragment(&bytes(MAX_PACKET_LEN + 1, 0), MAX_FRAME_LEN),
-            Err(CoreError::TooLarge)
+            Err(PacketError::TooLarge)
         );
     }
 
@@ -342,7 +345,7 @@ mod tests {
         r.push(&frames[0], 0).unwrap();
         let mut bad = frames[1].clone();
         bad[9] = 9;
-        assert!(matches!(r.push(&bad, 0), Err(CoreError::Malformed(_))));
+        assert!(matches!(r.push(&bad, 0), Err(PacketError::Malformed(_))));
     }
 
     #[test]
@@ -407,7 +410,7 @@ mod tests {
         assert_eq!(r.pending(), 1);
         let mut forged = frames[0].clone();
         forged[FRAG_HEADER_LEN] ^= 1;
-        assert!(matches!(r.push(&forged, 0), Err(CoreError::Malformed(_))));
+        assert!(matches!(r.push(&forged, 0), Err(PacketError::Malformed(_))));
         assert_eq!(r.pending(), 0);
         // Les trames légitimes reconstituent le paquet.
         assert!(r.push(&frames[0], 0).unwrap().is_none());
@@ -434,13 +437,13 @@ mod tests {
         let mut f = vec![7u8; 8];
         f.extend_from_slice(&[0, 2]);
         f.extend(std::iter::repeat_n(0xaa, 64 * 1024));
-        assert!(matches!(r.push(&f, 0), Err(CoreError::Malformed(_))));
+        assert!(matches!(r.push(&f, 0), Err(PacketError::Malformed(_))));
         assert_eq!(r.pending(), 0);
         // Même chose en une seule trame : refusée avant tout calcul de hash.
         let mut f = vec![7u8; 8];
         f.extend_from_slice(&[0, 1]);
         f.extend(std::iter::repeat_n(0xaa, 64 * 1024));
-        assert!(matches!(r.push(&f, 0), Err(CoreError::Malformed(_))));
+        assert!(matches!(r.push(&f, 0), Err(PacketError::Malformed(_))));
         assert_eq!(r.pending(), 0);
     }
 
@@ -451,13 +454,13 @@ mod tests {
         let mut f = vec![9u8; 8];
         f.extend_from_slice(&[0, 255]);
         f.extend(std::iter::repeat_n(0x55, 1000));
-        assert!(matches!(r.push(&f, 0), Err(CoreError::Malformed(_))));
+        assert!(matches!(r.push(&f, 0), Err(PacketError::Malformed(_))));
         assert_eq!(r.pending(), 0);
         // Le dernier morceau seul est soumis au même budget.
         let mut f = vec![9u8; 8];
         f.extend_from_slice(&[254, 255]);
         f.extend(std::iter::repeat_n(0x55, 1000));
-        assert!(matches!(r.push(&f, 0), Err(CoreError::Malformed(_))));
+        assert!(matches!(r.push(&f, 0), Err(PacketError::Malformed(_))));
         assert_eq!(r.pending(), 0);
     }
 
