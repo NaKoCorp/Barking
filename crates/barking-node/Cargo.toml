@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 barking-packet.workspace = true
 barking-proto.workspace = true
+blake3.workspace = true
 thiserror.workspace = true
 # SQLite en clair : les paquets sont chiffrés de bout en bout, la base ne
 # contient aucun secret. Spécification distincte de celle du cœur (SQLCipher).

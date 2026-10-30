@@ -340,14 +340,195 @@ fn purge_removes_expired_only() {
     let (_d, mut s) = store();
     put(&mut s, &msg(1, 1, Tier::S, NOW + 100)).unwrap();
     put(&mut s, &msg(2, 1, Tier::S, NOW + 10_000)).unwrap();
-    let (m, _sec, mut a) = msg_and_ack(3, 1);
-    a.expires_at = u32::try_from(NOW + 100).unwrap();
+    // Message expirant à NOW + 200 accusé : l'accusé vit jusqu'à NOW + 86 400.
+    let (mut m, _sec, a) = msg_and_ack(3, 1);
+    m.expires_at = u32::try_from(NOW + 200).unwrap();
     put(&mut s, &m).unwrap();
     put_ack(&mut s, &a).unwrap();
     assert_eq!(s.purge_expired(NOW + 50).unwrap(), 0);
-    assert_eq!(s.purge_expired(NOW + 100).unwrap(), 2); // paquet 1 et l'accusé
+    assert_eq!(s.purge_expired(NOW + 100).unwrap(), 1); // paquet 1
     let st = s.stats().unwrap();
-    assert_eq!((st.packets, st.acks, st.bytes), (1, 0, 245));
+    assert_eq!((st.packets, st.acks, st.bytes), (1, 1, 490));
+    assert_eq!(s.purge_expired(NOW + 86_400).unwrap(), 2); // paquet 2 et accusé
+    let st = s.stats().unwrap();
+    assert_eq!((st.packets, st.acks, st.bytes), (0, 0, 0));
+}
+
+#[test]
+fn readdressed_ack_is_refused() {
+    let (_d, mut s) = store();
+    let (m, _secret, mut a) = msg_and_ack(1, 1);
+    put(&mut s, &m).unwrap();
+    a.mailbox = mb(2);
+    assert_eq!(put_ack(&mut s, &a), Err(ErrorReason::UnknownAckTarget));
+    let st = s.stats().unwrap();
+    assert_eq!((st.packets, st.acks), (1, 0));
+}
+
+#[test]
+fn short_expiry_ack_cannot_resurrect_message() {
+    let (_d, mut s) = store();
+    let (m, _secret, mut a) = msg_and_ack(1, 1);
+    put(&mut s, &m).unwrap();
+    a.expires_at = u32::try_from(NOW + 10).unwrap();
+    assert_eq!(put_ack(&mut s, &a), Ok(()));
+    // L'accusé survit à sa propre expiration, jusqu'à celle du message.
+    s.purge_expired(NOW + 20).unwrap();
+    assert_eq!(s.stats().unwrap().acks, 1);
+    assert_eq!(put(&mut s, &m), Ok(()));
+    assert_eq!(s.stats().unwrap().packets, 0);
+    // Après l'expiration du message : purge, puis redépôt refusé (Expired).
+    let later = u64::from(m.expires_at);
+    s.purge_expired(later).unwrap();
+    assert_eq!(s.stats().unwrap().acks, 0);
+    let r = deposit(&mut s, &policy(), &m.encode(), nonce(&m), later).unwrap();
+    assert_eq!(r, Err(ErrorReason::Expired));
+}
+
+#[test]
+fn ack_must_be_tier_s_with_32_byte_payload() {
+    let (_d, mut s) = store();
+    let (m, _secret, a) = msg_and_ack(1, 1);
+    put(&mut s, &m).unwrap();
+    let mut big = a.clone();
+    big.tier = Tier::L;
+    assert_eq!(put_ack(&mut s, &big), Err(ErrorReason::Malformed));
+    let mut long = a.clone();
+    long.payload.push(0);
+    assert_eq!(put_ack(&mut s, &long), Err(ErrorReason::Malformed));
+    assert_eq!(s.stats().unwrap().packets, 1);
+    assert_eq!(put_ack(&mut s, &a), Ok(()));
+}
+
+#[test]
+fn ack_respects_node_full() {
+    let (_d, mut s) = store();
+    // Message M (1 Kio) accusé par un ack S (245) : delta négatif, accepté
+    // même au plafond. Message S accusé alors que le nœud est plein de
+    // lui-même : delta nul, accepté.
+    let pol = Policy {
+        storage_max_bytes: 245,
+        ..policy()
+    };
+    let (m, _sec, a) = msg_and_ack(1, 1);
+    let r = deposit(&mut s, &pol, &m.encode(), nonce(&m), NOW).unwrap();
+    assert_eq!(r, Ok(()));
+    assert_eq!(deposit(&mut s, &pol, &a.encode(), 0, NOW).unwrap(), Ok(()));
+    // Delta positif : plafond abaissé sous la taille d'un accusé, mais le
+    // paquet accusé est plus petit que l'accusé (charge vide en palier S
+    // = 245 octets aussi, donc on simule via un plafond réduit après dépôt).
+    let (_d2, mut s2) = store();
+    let (m2, _s2, a2) = msg_and_ack(2, 1);
+    put(&mut s2, &m2).unwrap();
+    s2.conn()
+        .execute("UPDATE meta SET v = 10 WHERE k='stored_bytes'", [])
+        .unwrap();
+    s2.conn()
+        .execute("UPDATE packets SET bytes = x'00'", [])
+        .unwrap();
+    let tiny = Policy {
+        storage_max_bytes: 100,
+        ..policy()
+    };
+    assert_eq!(
+        deposit(&mut s2, &tiny, &a2.encode(), 0, NOW).unwrap(),
+        Err(ErrorReason::NodeFull)
+    );
+    assert_eq!(s2.stats().unwrap().packets, 1);
+}
+
+#[test]
+fn squatted_id_does_not_block_real_message() {
+    let (_d, mut s) = store();
+    let (real, _secret, a) = msg_and_ack(1, 1);
+    let mut junk = real.clone();
+    junk.payload = vec![0xEE; 8];
+    assert_eq!(put(&mut s, &junk), Ok(()));
+    assert_eq!(put(&mut s, &real), Ok(()));
+    assert_eq!(put(&mut s, &real), Ok(())); // même contenu : sans effet
+    assert_eq!(s.stats().unwrap().packets, 2);
+    let (items, _) = fetch(&s, &[mb(1)], None, 1 << 20).unwrap().unwrap();
+    assert!(items.contains(&junk.encode()) && items.contains(&real.encode()));
+    // `hops` ne compte pas dans la déduplication.
+    let mut relayed = real.clone();
+    relayed.hops = 3;
+    assert_eq!(put(&mut s, &relayed), Ok(()));
+    assert_eq!(s.stats().unwrap().packets, 2);
+    // L'accusé supprime les deux.
+    assert_eq!(put_ack(&mut s, &a), Ok(()));
+    let st = s.stats().unwrap();
+    assert_eq!((st.packets, st.acks, st.bytes), (0, 1, 245));
+}
+
+fn fill(s: &NodeStore, mailbox: u8, count: u32) {
+    let start: u32 = s
+        .conn()
+        .query_row("SELECT COUNT(*) FROM packets", [], |r| r.get(0))
+        .unwrap();
+    for n in start..start + count {
+        let mut id = [0u8; 16];
+        id[..4].copy_from_slice(&n.to_be_bytes());
+        id[15] = 0xFF;
+        s.conn()
+            .execute(
+                "INSERT INTO packets(id,mailbox,kind,tier,expires_at,received_at,hash,bytes)
+                 VALUES(?1,?2,0,0,?3,0,?1,x'00')",
+                rusqlite::params![
+                    &id[..],
+                    &[mailbox; 16][..],
+                    i64::try_from(NOW + 86_400).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn pow_is_progressive_per_mailbox() {
+    let (_d, mut s) = store();
+    let pol = policy();
+    let req = |s: &NodeStore| required_pow_bits(s, &pol, &mb(1)).unwrap();
+    assert_eq!(req(&s), BITS);
+    fill(&s, 1, 64); // 64 : n / 64 = 1, log2 = 0
+    assert_eq!(req(&s), BITS);
+    fill(&s, 1, 63); // 127
+    assert_eq!(req(&s), BITS);
+    fill(&s, 1, 1); // 128 : n / 64 = 2
+    assert_eq!(req(&s), BITS + 1);
+    fill(&s, 1, 128); // 256 : n / 64 = 4
+    assert_eq!(req(&s), BITS + 2);
+    fill(&s, 1, 744); // 1 000 : n / 64 = 15
+    assert_eq!(req(&s), BITS + 3);
+    // Une autre boîte n'est pas touchée.
+    assert_eq!(required_pow_bits(&s, &pol, &mb(2)).unwrap(), BITS);
+    // Plafonné à MAX_POW_BITS.
+    let high = Policy {
+        pow_bits: pow::MAX_POW_BITS,
+        ..pol
+    };
+    assert_eq!(
+        required_pow_bits(&s, &high, &mb(1)).unwrap(),
+        pow::MAX_POW_BITS
+    );
+    // Dépôt : une preuve à BITS bits ne suffit plus à 128 paquets.
+    let (_d2, mut s2) = store();
+    fill(&s2, 1, 128);
+    let p = ok_msg(1, 1);
+    let weak = (0..)
+        .find(|n| {
+            pow::check(&p.id, &p.mailbox, *n, BITS) && !pow::check(&p.id, &p.mailbox, *n, BITS + 1)
+        })
+        .unwrap();
+    assert_eq!(
+        deposit(&mut s2, &pol, &p.encode(), weak, NOW).unwrap(),
+        Err(ErrorReason::PowTooWeak)
+    );
+    let strong = pow::solve(&p.id, &p.mailbox, BITS + 1).unwrap();
+    assert_eq!(
+        deposit(&mut s2, &pol, &p.encode(), strong, NOW).unwrap(),
+        Ok(())
+    );
+    let _ = &mut s;
 }
 
 #[test]

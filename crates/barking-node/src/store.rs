@@ -27,13 +27,16 @@ pub struct NodeStore {
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS packets(
-    id BLOB PRIMARY KEY, mailbox BLOB NOT NULL, kind INTEGER NOT NULL,
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BLOB NOT NULL, mailbox BLOB NOT NULL, kind INTEGER NOT NULL,
     tier INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-    received_at INTEGER NOT NULL, bytes BLOB NOT NULL);
+    received_at INTEGER NOT NULL, hash BLOB NOT NULL, bytes BLOB NOT NULL,
+    UNIQUE(id, hash));
 CREATE INDEX IF NOT EXISTS packets_mailbox ON packets(mailbox);
 CREATE INDEX IF NOT EXISTS packets_expires ON packets(expires_at);
 CREATE TABLE IF NOT EXISTS acks(
-    packet_id BLOB PRIMARY KEY, mailbox BLOB NOT NULL,
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    packet_id BLOB NOT NULL UNIQUE, mailbox BLOB NOT NULL,
     expires_at INTEGER NOT NULL, bytes BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS acks_mailbox ON acks(mailbox);
 CREATE INDEX IF NOT EXISTS acks_expires ON acks(expires_at);

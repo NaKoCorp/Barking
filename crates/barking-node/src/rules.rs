@@ -5,21 +5,27 @@
 //!   (c'est aussi ce que vérifie `Packet::decode`). Si l'octet de palier est
 //!   valide mais la longueur reçue ne correspond pas, la raison est `WrongTier` ;
 //!   tout autre défaut de forme donne `Malformed`.
-//! - Un message dont un accusé a déjà été reçu est accepté sans effet (il ne
-//!   ressuscite pas), comme un doublon.
-//! - L'accusé est rangé dans la boîte portée par le paquet accusé (champ
-//!   `mailbox` de l'accusé, fixé par le cœur à celle du message d'origine).
-//! - Curseur de `fetch` : clé stable `rowid` des paquets, puis `ACK_BASE + rowid`
-//!   des accusés. Un rowid libéré par la purge peut être réutilisé : un paquet
-//!   très récent peut alors manquer à une pagination en cours, il est rendu à la
-//!   relève suivante.
+//! - Déduplication par (identifiant, BLAKE3 des octets sans `hops`) : même
+//!   contenu = sans effet ; contenu différent sous le même identifiant = gardé à
+//!   côté (compte dans les quotas), pour qu'un identifiant ne puisse être squatté.
+//! - Un accusé est un paquet de palier S à charge de 32 octets, dans la boîte du
+//!   paquet accusé (sinon `UnknownAckTarget`). Il supprime toutes les lignes de
+//!   cet identifiant et reste gardé jusqu'à `max(expiration de l'accusé,
+//!   expiration des paquets supprimés)` : le message ne ressuscite pas, ni par
+//!   redépôt ni par accusé raccourci.
+//! - Preuve de travail progressive par boîte : voir `required_pow_bits`.
+//! - Curseur de `fetch` : `seq` (AUTOINCREMENT, jamais réutilisé) des paquets,
+//!   puis `ACK_BASE + seq` des accusés.
 
 use barking_packet::{Kind, MailboxId, OVERHEAD, Packet, PacketId, Tier, ack};
 use barking_proto::{ErrorReason, pow};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 use crate::Result;
 use crate::store::{NodeStore, add_stored_bytes, stored_bytes};
+
+/// Nombre de paquets par palier de difficulté supplémentaire.
+const POW_STEP_PACKETS: i64 = 64;
 
 /// Marge d'expiration : 7 jours + 1 h (tolérance d'horloge d'une heure).
 pub const MAX_EXPIRY_SECS: u64 = 7 * 86_400 + 3_600;
@@ -75,7 +81,7 @@ pub fn deposit(
     }
     match packet.kind {
         Kind::Message => deposit_message(store, policy, &packet, bytes, pow_nonce, now),
-        Kind::Ack => deposit_ack(store, &packet, bytes),
+        Kind::Ack => deposit_ack(store, policy, &packet, bytes),
     }
 }
 
@@ -88,6 +94,35 @@ fn tier_from_byte(b: u8) -> Option<Tier> {
     }
 }
 
+/// Empreinte de déduplication : BLAKE3 des octets, `hops` mis à zéro (relayé,
+/// il change d'un nœud à l'autre).
+fn content_hash(bytes: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(&bytes[..2]);
+    h.update(&[0]);
+    h.update(&bytes[3..]);
+    *h.finalize().as_bytes()
+}
+
+fn pow_bits_for_count(policy: &Policy, count: i64) -> u8 {
+    let steps = count / POW_STEP_PACKETS;
+    let extra = if steps >= 1 { steps.ilog2() } else { 0 };
+    let bits = u32::from(policy.pow_bits).saturating_add(extra);
+    u8::try_from(bits.min(u32::from(pow::MAX_POW_BITS))).unwrap_or(pow::MAX_POW_BITS)
+}
+
+/// Difficulté exigée pour un dépôt dans `mailbox` :
+/// `min(MAX_POW_BITS, pow_bits + floor(log2(max(1, n / 64))))`, `n` étant le
+/// nombre de paquets déjà gardés dans cette boîte.
+pub fn required_pow_bits(store: &NodeStore, policy: &Policy, mailbox: &MailboxId) -> Result<u8> {
+    let count: i64 = store.conn().query_row(
+        "SELECT COUNT(*) FROM packets WHERE mailbox=?1",
+        params![&mailbox.0[..]],
+        |r| r.get(0),
+    )?;
+    Ok(pow_bits_for_count(policy, count))
+}
+
 fn deposit_message(
     store: &mut NodeStore,
     policy: &Policy,
@@ -96,13 +131,12 @@ fn deposit_message(
     nonce: u64,
     now: u64,
 ) -> Result<core::result::Result<(), ErrorReason>> {
-    if !pow::check(&p.id, &p.mailbox, nonce, policy.pow_bits) {
-        return Ok(Err(ErrorReason::PowTooWeak));
-    }
+    let hash = content_hash(bytes);
     let tx = store.conn_mut().transaction()?;
+    // Déjà accusé, ou même contenu déjà gardé : sans effet.
     let known: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM packets WHERE id=?1) OR EXISTS(SELECT 1 FROM acks WHERE packet_id=?1)",
-        params![&p.id.0[..]],
+        "SELECT EXISTS(SELECT 1 FROM packets WHERE id=?1 AND hash=?2) OR EXISTS(SELECT 1 FROM acks WHERE packet_id=?1)",
+        params![&p.id.0[..], &hash[..]],
         |r| r.get(0),
     )?;
     if known {
@@ -113,6 +147,9 @@ fn deposit_message(
         params![&p.mailbox.0[..]],
         |r| r.get(0),
     )?;
+    if !pow::check(&p.id, &p.mailbox, nonce, pow_bits_for_count(policy, in_box)) {
+        return Ok(Err(ErrorReason::PowTooWeak));
+    }
     if in_box >= i64::from(policy.max_per_mailbox) {
         return Ok(Err(ErrorReason::MailboxFull));
     }
@@ -121,7 +158,7 @@ fn deposit_message(
         return Ok(Err(ErrorReason::NodeFull));
     }
     tx.execute(
-        "INSERT INTO packets(id,mailbox,kind,tier,expires_at,received_at,bytes) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        "INSERT INTO packets(id,mailbox,kind,tier,expires_at,received_at,hash,bytes) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             &p.id.0[..],
             &p.mailbox.0[..],
@@ -129,6 +166,7 @@ fn deposit_message(
             p.tier as u8,
             i64::from(p.expires_at),
             i(now / 60 * 60),
+            &hash[..],
             bytes
         ],
     )?;
@@ -139,19 +177,19 @@ fn deposit_message(
 
 fn deposit_ack(
     store: &mut NodeStore,
+    policy: &Policy,
     p: &Packet,
     bytes: &[u8],
 ) -> Result<core::result::Result<(), ErrorReason>> {
-    // Charge : id du paquet accusé (16) || secret (16).
-    let Some((target, secret)) = (p.payload.len() == 32).then(|| {
-        let mut t = [0u8; 16];
-        let mut s = [0u8; 16];
-        t.copy_from_slice(&p.payload[..16]);
-        s.copy_from_slice(&p.payload[16..]);
-        (PacketId(t), s)
-    }) else {
+    // Palier S, charge : id du paquet accusé (16) || secret (16).
+    if p.tier != Tier::S || p.payload.len() != 32 {
         return Ok(Err(ErrorReason::Malformed));
-    };
+    }
+    let mut t = [0u8; 16];
+    let mut sec = [0u8; 16];
+    t.copy_from_slice(&p.payload[..16]);
+    sec.copy_from_slice(&p.payload[16..]);
+    let target = PacketId(t);
     let tx = store.conn_mut().transaction()?;
     let known: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM acks WHERE packet_id=?1)",
@@ -161,18 +199,21 @@ fn deposit_ack(
     if known {
         return Ok(Ok(()));
     }
-    let stored: Option<i64> = tx
-        .query_row(
-            "SELECT length(bytes) FROM packets WHERE id=?1",
-            params![&target.0[..]],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(old_len) = stored else {
+    // Lignes de cet identifiant : octets, expiration maximale, et présence
+    // d'une ligne dans la boîte de l'accusé.
+    let (n, old_len, max_exp, in_mailbox): (i64, i64, i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(bytes)),0), COALESCE(MAX(expires_at),0),
+                COALESCE(SUM(mailbox=?2),0)
+         FROM packets WHERE id=?1",
+        params![&target.0[..], &p.mailbox.0[..]],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    if n == 0 || in_mailbox == 0 || !ack::verify(&target, &sec) {
         return Ok(Err(ErrorReason::UnknownAckTarget));
-    };
-    if !ack::verify(&target, &secret) {
-        return Ok(Err(ErrorReason::UnknownAckTarget));
+    }
+    let delta = i(bytes.len() as u64) - old_len;
+    if delta > 0 && stored_bytes(&tx)?.saturating_add(delta as u64) > policy.storage_max_bytes {
+        return Ok(Err(ErrorReason::NodeFull));
     }
     tx.execute("DELETE FROM packets WHERE id=?1", params![&target.0[..]])?;
     tx.execute(
@@ -180,11 +221,11 @@ fn deposit_ack(
         params![
             &target.0[..],
             &p.mailbox.0[..],
-            i64::from(p.expires_at),
+            i64::from(p.expires_at).max(max_exp),
             bytes
         ],
     )?;
-    add_stored_bytes(&tx, i(bytes.len() as u64) - old_len)?;
+    add_stored_bytes(&tx, delta)?;
     tx.commit()?;
     Ok(Ok(()))
 }
@@ -213,7 +254,7 @@ pub fn fetch(
     let mut last: Option<u64> = None;
     let mut more = false;
 
-    'outer: for (table, key, base) in [("packets", "rowid", 0u64), ("acks", "rowid", ACK_BASE)] {
+    'outer: for (table, key, base) in [("packets", "seq", 0u64), ("acks", "seq", ACK_BASE)] {
         // Position de reprise dans cette table (0 = depuis le début).
         let start = after.saturating_sub(base);
         if table == "packets" && after >= ACK_BASE {
