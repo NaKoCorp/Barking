@@ -3,9 +3,16 @@
 //! Le client se méfie du nœud autant que le nœud se méfie de lui :
 //! - une difficulté annoncée au-delà de `MAX_POW_BITS` est une erreur de
 //!   protocole (un nœud hostile ne fait pas tourner le client sans fin) ;
-//! - une relève s'arrête à `MAX_FETCH_ITEMS` éléments, `MAX_FETCH_BYTES`
-//!   octets, `MAX_FETCH_PAGES` pages ou `FETCH_DEADLINE` par appel ; le reste attend la relève suivante (rien n'est supprimé
-//!   à la lecture) et `Session::last_fetch_truncated` le signale ;
+//! - une relève s'arrête à `MAX_FETCH_ITEMS` éléments, au budget d'octets
+//!   de l'appel (`MAX_FETCH_BYTES` par défaut), `MAX_FETCH_PAGES` pages ou
+//!   `FETCH_DEADLINE` par appel ; le reste attend la relève suivante (rien
+//!   n'est supprimé à la lecture) et `Session::last_fetch_truncated` le
+//!   signale. Une page est prise entière ou pas du tout ; `FetchResume`
+//!   garde la position atteinte pour que la relève suivante reprenne là au
+//!   lieu de relire le début (une boîte inondée ne bloque pas la suite) ;
+//! - la preuve de travail d'un dépôt part de la difficulté de base plus le
+//!   supplément du palier, monte de 2 bits sur `PowTooWeak`, et peut être
+//!   bornée par un budget de travail (`Session::set_pow_budget`) ;
 //! - le curseur de pagination doit croître strictement, et une page vide ne
 //!   peut pas annoncer de suite ;
 //! - chaque requête a un délai ;
@@ -22,6 +29,7 @@ use std::time::Duration;
 
 use barking_packet::{Kind, MailboxId, Packet};
 use quinn::{Connection, Endpoint};
+use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
 use crate::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
@@ -70,6 +78,19 @@ pub enum ClientError {
     Frame(#[from] FrameError),
     #[error("le nœud ne répond pas à temps")]
     Timeout,
+    #[error("budget de preuve de travail épuisé pour cette synchronisation")]
+    PowBudget,
+}
+
+/// Position de reprise d'une relève : pour chaque tranche de boîtes (dans
+/// l'ordre de la liste, par `max_mailboxes_per_fetch`), le curseur de la
+/// dernière page prise d'une tranche inachevée, `None` pour une tranche
+/// relevée jusqu'au bout (relue depuis le début la fois suivante : le
+/// curseur final n'est pas connu). Ne vaut que pour la même liste de boîtes
+/// et le même nœud.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchResume {
+    pub cursors: Vec<Option<u64>>,
 }
 
 pub type Result<T> = core::result::Result<T, ClientError>;
@@ -166,6 +187,8 @@ impl Client {
                     pow_bits,
                     limits,
                     truncated: false,
+                    pow_budget: None,
+                    pow_spent: 0,
                 })
             }
             Response::Error(ErrorReason::VersionTooOld) => Err(ClientError::Version),
@@ -183,9 +206,25 @@ pub struct Session {
     pow_bits: u8,
     limits: Limits,
     truncated: bool,
+    /// Travail de preuve permis (essais attendus), `None` : sans borne.
+    pow_budget: Option<u64>,
+    /// Travail de preuve dépensé (essais attendus, `2^bits` par preuve).
+    pow_spent: u64,
 }
 
 impl Session {
+    /// Borne le travail de preuve des dépôts suivants (en essais attendus,
+    /// `2^bits` par preuve, compté avant de chercher) : au-delà, `deposit`
+    /// renvoie `ClientError::PowBudget` sans calculer.
+    pub fn set_pow_budget(&mut self, budget: Option<u64>) {
+        self.pow_budget = budget;
+    }
+
+    /// Travail de preuve dépensé par cette session.
+    pub fn pow_spent(&self) -> u64 {
+        self.pow_spent
+    }
+
     pub fn node_id(&self) -> NodeId {
         self.node_id
     }
@@ -210,23 +249,35 @@ impl Session {
     }
 
     /// Dépose un paquet encodé. Calcule la preuve de travail d'un message
-    /// (pas d'un accusé) ; sur `PowTooWeak`, réessaie avec 2 bits de plus
-    /// jusqu'à `MAX_POW_BITS`. `Ok(Err(raison))` : refus du nœud.
+    /// (pas d'un accusé), d'abord à la difficulté de base plus le supplément
+    /// du palier ; sur `PowTooWeak`, réessaie avec 2 bits de plus jusqu'à
+    /// `MAX_POW_BITS`. `Ok(Err(raison))` : refus du nœud.
     pub async fn deposit(
         &mut self,
         packet: &[u8],
     ) -> Result<core::result::Result<(), ErrorReason>> {
         // Un paquet illisible part sans preuve : le nœud répondra `Malformed`.
         let target = match Packet::decode(packet) {
-            Ok(p) if p.kind == Kind::Message => Some(p.mailbox),
+            Ok(p) if p.kind == Kind::Message => Some((p.mailbox, p.tier)),
             _ => None,
         };
-        let Some(mailbox) = target else {
+        let Some((mailbox, tier)) = target else {
             return self.deposit_once(packet, 0).await;
         };
         let content = pow::content_hash(packet);
-        let mut bits = self.pow_bits;
+        let mut bits = self
+            .pow_bits
+            .saturating_add(pow::tier_surcharge(tier))
+            .min(pow::MAX_POW_BITS);
         loop {
+            let work = pow::expected_work(bits);
+            if self
+                .pow_budget
+                .is_some_and(|b| self.pow_spent.saturating_add(work) > b)
+            {
+                return Err(ClientError::PowBudget);
+            }
+            self.pow_spent = self.pow_spent.saturating_add(work);
             let nonce = solve(content, mailbox, bits).await?;
             match self.deposit_once(packet, nonce).await? {
                 Err(ErrorReason::PowTooWeak) if bits < pow::MAX_POW_BITS => {
@@ -254,20 +305,40 @@ impl Session {
     }
 
     /// Relève paquets et accusés en attente pour `mailboxes` (découpage par
-    /// 64 boîtes, pages suivies). S'arrête à `MAX_FETCH_ITEMS` éléments,
-    /// `MAX_FETCH_BYTES` octets, `MAX_FETCH_PAGES` pages ou après
-    /// `FETCH_DEADLINE` : voir `last_fetch_truncated`.
+    /// 64 boîtes, pages suivies), depuis le début. S'arrête à
+    /// `MAX_FETCH_ITEMS` éléments, `MAX_FETCH_BYTES` octets, `MAX_FETCH_PAGES`
+    /// pages ou après `FETCH_DEADLINE` : voir `last_fetch_truncated`.
     pub async fn fetch(&mut self, mailboxes: &[MailboxId]) -> Result<Vec<Vec<u8>>> {
+        let mut resume = FetchResume::default();
+        self.fetch_resumable(mailboxes, &mut resume, MAX_FETCH_BYTES)
+            .await
+    }
+
+    /// Comme `fetch`, mais reprend chaque tranche de boîtes au curseur de
+    /// `resume` (remis à zéro si le nombre de tranches ne correspond pas),
+    /// et s'arrête à `max_bytes` octets (au moins une page est prise). En
+    /// sortie, `resume` donne où reprendre ; une erreur le laisse à la
+    /// dernière page prise.
+    pub async fn fetch_resumable(
+        &mut self,
+        mailboxes: &[MailboxId],
+        resume: &mut FetchResume,
+        max_bytes: usize,
+    ) -> Result<Vec<Vec<u8>>> {
         self.truncated = false;
         let per = usize::from(self.limits.max_mailboxes_per_fetch).min(MAX_MAILBOXES);
+        let chunks: Vec<&[MailboxId]> = mailboxes.chunks(per).collect();
+        if resume.cursors.len() != chunks.len() {
+            resume.cursors = vec![None; chunks.len()];
+        }
         let mut out = Vec::new();
         let mut bytes = 0usize;
         let mut pages = 0usize;
         // Indice dans `FETCH_PAGE_SIZES` : ne remonte pas au cours d'un appel.
         let mut size = 0usize;
         let deadline = tokio::time::Instant::now() + FETCH_DEADLINE;
-        for chunk in mailboxes.chunks(per) {
-            let mut cursor: Option<u64> = None;
+        for (k, chunk) in chunks.iter().enumerate() {
+            let mut cursor: Option<u64> = resume.cursors[k];
             loop {
                 if pages >= MAX_FETCH_PAGES || tokio::time::Instant::now() >= deadline {
                     self.truncated = true;
@@ -294,8 +365,14 @@ impl Session {
                     }
                     Ok(r) => r?,
                 };
-                let (items, next) = match resp {
+                let (mut items, next) = match resp {
                     Response::Items { items, next } => (items, next),
+                    // Débit épuisé après des pages déjà prises : relève
+                    // partielle, la suite au prochain appel.
+                    Response::Error(ErrorReason::RateLimited) if !out.is_empty() => {
+                        self.truncated = true;
+                        return Ok(out);
+                    }
                     Response::Error(r) => return Err(ClientError::Refused(r)),
                     _ => return Err(ClientError::Protocol("réponse inattendue à Fetch")),
                 };
@@ -307,14 +384,27 @@ impl Session {
                 {
                     return Err(ClientError::Protocol("curseur de relève non croissant"));
                 }
-                for it in items {
-                    if out.len() >= MAX_FETCH_ITEMS || bytes + it.len() > MAX_FETCH_BYTES {
-                        self.truncated = true;
-                        return Ok(out);
-                    }
-                    bytes += it.len();
-                    out.push(it);
+                let page_bytes = items
+                    .iter()
+                    .map(Vec::len)
+                    .fold(0usize, usize::saturating_add);
+                let over_items = out.len().saturating_add(items.len()) > MAX_FETCH_ITEMS;
+                let over_bytes = bytes.saturating_add(page_bytes) > max_bytes;
+                if !out.is_empty() && (over_items || over_bytes) {
+                    // Page laissée : reprise à `cursor` la prochaine fois.
+                    self.truncated = true;
+                    return Ok(out);
                 }
+                if over_items {
+                    // Première page déjà au-delà du plafond d'éléments (nœud
+                    // hostile) : tronquée, sans avancer le curseur.
+                    self.truncated = true;
+                    items.truncate(MAX_FETCH_ITEMS);
+                    return Ok(items);
+                }
+                bytes += page_bytes;
+                out.append(&mut items);
+                resume.cursors[k] = next;
                 match next {
                     Some(n) => cursor = Some(n),
                     None => break,

@@ -3,7 +3,7 @@
 //! (`content_hash`) couvre tout le paquet encodé sauf `hops` : la preuve est
 //! liée au contenu, un autre contenu sous le même identifiant en exige une autre.
 
-use barking_packet::MailboxId;
+use barking_packet::{MailboxId, Tier};
 
 /// Position de l'octet `hops` dans le paquet encodé.
 const HOPS_OFFSET: usize = 2;
@@ -41,17 +41,34 @@ pub fn leading_zero_bits(bytes: &[u8]) -> u32 {
     n
 }
 
-fn digest(content: &[u8; 32], mailbox: &MailboxId, nonce: u64) -> [u8; 32] {
+/// Bits de difficulté ajoutés selon le palier : un gros paquet coûte plus
+/// de stockage, donc plus de travail (S +0, M +2, L +6).
+pub fn tier_surcharge(tier: Tier) -> u8 {
+    match tier {
+        Tier::S => 0,
+        Tier::M => 2,
+        Tier::L => 6,
+    }
+}
+
+/// État BLAKE3 après le contexte, l'empreinte et la boîte : calculé une
+/// fois, cloné pour chaque nonce.
+fn prefix(content: &[u8; 32], mailbox: &MailboxId) -> blake3::Hasher {
     let mut h = blake3::Hasher::new_derive_key(POW_CONTEXT);
     h.update(content);
     h.update(&mailbox.0);
+    h
+}
+
+fn passes(prefix: &blake3::Hasher, nonce: u64, bits: u8) -> bool {
+    let mut h = prefix.clone();
     h.update(&nonce.to_le_bytes());
-    *h.finalize().as_bytes()
+    leading_zero_bits(h.finalize().as_bytes()) >= u32::from(bits)
 }
 
 /// Faux si `bits` dépasse `MAX_POW_BITS` : aucune preuve n'est valide au-delà.
 pub fn check(content: &[u8; 32], mailbox: &MailboxId, nonce: u64, bits: u8) -> bool {
-    bits <= MAX_POW_BITS && leading_zero_bits(&digest(content, mailbox, nonce)) >= u32::from(bits)
+    bits <= MAX_POW_BITS && passes(&prefix(content, mailbox), nonce, bits)
 }
 
 /// Cherche un nonce valide. Refuse (`None`) `bits > MAX_POW_BITS` : un nœud
@@ -60,7 +77,13 @@ pub fn solve(content: &[u8; 32], mailbox: &MailboxId, bits: u8) -> Option<u64> {
     if bits > MAX_POW_BITS {
         return None;
     }
-    (0u64..).find(|n| check(content, mailbox, *n, bits))
+    let p = prefix(content, mailbox);
+    (0u64..).find(|n| passes(&p, *n, bits))
+}
+
+/// Travail attendu (nombre moyen d'essais) pour `bits` bits : `2^bits`.
+pub fn expected_work(bits: u8) -> u64 {
+    1u64 << bits.min(63)
 }
 
 #[cfg(test)]
@@ -123,6 +146,29 @@ mod tests {
         assert!(check(&C, &MB, n, 20));
         assert!(check(&C, &MB, n, DEFAULT_POW_BITS));
         assert!(check(&C, &MB, n, 0));
+    }
+
+    #[test]
+    fn precomputed_prefix_matches_one_shot_digest() {
+        // Même résultat que le calcul d'un seul tenant.
+        for nonce in [0u64, 1, 0xdead_beef, u64::MAX] {
+            let mut h = blake3::Hasher::new_derive_key(POW_CONTEXT);
+            h.update(&C);
+            h.update(&MB.0);
+            h.update(&nonce.to_le_bytes());
+            let want = leading_zero_bits(h.finalize().as_bytes());
+            for bits in 0..=MAX_POW_BITS {
+                assert_eq!(check(&C, &MB, nonce, bits), want >= u32::from(bits));
+            }
+        }
+    }
+
+    #[test]
+    fn tier_surcharges() {
+        assert_eq!(tier_surcharge(Tier::S), 0);
+        assert_eq!(tier_surcharge(Tier::M), 2);
+        assert_eq!(tier_surcharge(Tier::L), 6);
+        assert_eq!(expected_work(18), 1 << 18);
     }
 
     #[test]
