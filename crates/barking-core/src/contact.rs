@@ -16,7 +16,7 @@ pub const CARD_PREFIX: &str = "barking1:";
 /// update or a synchronisation. The heaviest possible one
 /// (`MAX_DEVICES` devices, names at their maximum size, plus
 /// `MAX_CARD_NODES` hints of `MAX_NODE_HINT_BYTES` bytes) is about
-/// 15 KiB (test `max_card_text_roundtrip`).
+/// 14 KiB (test `max_card_text_roundtrip`).
 pub const MAX_CARD_BYTES: usize = 16 * 1024;
 /// Maximum size of the text (unpadded base64url of `MAX_CARD_BYTES`,
 /// about 22,000 characters), specific to the card: unrelated to the
@@ -26,7 +26,7 @@ pub const MAX_TEXT_LEN: usize = CARD_PREFIX.len() + MAX_CARD_BYTES.div_ceil(3) *
 /// Maximum number of node hints in a card.
 pub const MAX_CARD_NODES: usize = 3;
 /// Maximum size of one node hint (bytes). Hints are opaque to the core.
-pub const MAX_NODE_HINT_BYTES: usize = 512;
+pub const MAX_NODE_HINT_BYTES: usize = 192;
 
 /// A contact card. Serialized with serde (inside a message body or the
 /// encrypted store) as the length-prefixed bytes of [`ContactCard::encode`],
@@ -65,7 +65,7 @@ struct CardV2 {
     nodes: Vec<Vec<u8>>,
 }
 
-fn check_nodes(nodes: &[Vec<u8>]) -> Result<()> {
+pub(crate) fn check_nodes(nodes: &[Vec<u8>]) -> Result<()> {
     if nodes.len() > MAX_CARD_NODES || nodes.iter().any(|n| n.len() > MAX_NODE_HINT_BYTES) {
         return Err(CoreError::TooLarge);
     }
@@ -143,6 +143,7 @@ impl ContactCard {
             if c.nodes.is_empty() {
                 return Err(CoreError::Malformed("non canonical card"));
             }
+            check_nodes(&c.nodes)?;
             return Ok(ContactCard {
                 display_name: c.display_name,
                 devices: c.devices,
@@ -379,7 +380,7 @@ mod tests {
     fn max_card_text_roundtrip() {
         let c = max_card();
         let t = c.to_text();
-        assert!(postcard::to_allocvec(&c).unwrap().len() <= MAX_CARD_BYTES);
+        assert!(c.encode().len() <= MAX_CARD_BYTES);
         assert!(t.len() <= MAX_TEXT_LEN, "{} > {MAX_TEXT_LEN}", t.len());
         // Well beyond the size of a text message (4,000 bytes).
         assert!(t.len() > crate::envelope::MAX_TEXT_LEN);
@@ -397,6 +398,7 @@ mod tests {
         let c = max_card();
         assert_eq!(c.nodes.len(), MAX_CARD_NODES);
         assert!(c.encode().len() <= MAX_CARD_BYTES);
+        assert_eq!(MAX_NODE_HINT_BYTES, 192);
         assert_eq!(ContactCard::decode(&c.encode()).unwrap(), c);
         // Also inside a message body (serde form, length-prefixed).
         let bytes = postcard::to_allocvec(&c).unwrap();
@@ -424,7 +426,7 @@ mod tests {
     fn card_nodes_roundtrip() {
         let f = fixture();
         let b = f.secrets.bundle(&f.dev, false);
-        let nodes = vec![vec![1, 2, 3], vec![9; 512]];
+        let nodes = vec![vec![1, 2, 3], vec![9; 192]];
         let c =
             ContactCard::sign(&f.root, "Alice", f.list.clone(), vec![b], nodes.clone()).unwrap();
         c.verify().unwrap();
@@ -464,12 +466,12 @@ mod tests {
         };
         assert_eq!(sign(vec![vec![0]; 4]).map(|_| ()), Err(CoreError::TooLarge));
         assert_eq!(
-            sign(vec![vec![0; 513]]).map(|_| ()),
+            sign(vec![vec![0; 193]]).map(|_| ()),
             Err(CoreError::TooLarge)
         );
-        sign(vec![vec![0; 512]; 3]).unwrap();
+        sign(vec![vec![0; 192]; 3]).unwrap();
         // The same limits apply when decoding a card signed elsewhere.
-        for nodes in [vec![vec![0u8]; 4], vec![vec![0u8; 513]]] {
+        for nodes in [vec![vec![0u8]; 4], vec![vec![0u8; 193]]] {
             let mut c = sign(vec![vec![0]]).unwrap();
             c.nodes = nodes;
             assert_eq!(c.verify(), Err(CoreError::TooLarge));
@@ -486,7 +488,10 @@ mod tests {
         let c = card(&f);
         let mut bytes = c.encode();
         bytes.push(0);
-        assert!(ContactCard::decode(&bytes).is_err());
+        assert_eq!(
+            ContactCard::decode(&bytes),
+            Err(CoreError::Malformed("non canonical card"))
+        );
     }
 
     #[test]

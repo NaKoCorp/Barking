@@ -1430,7 +1430,7 @@ fn sync_from_removed_device_with_session_refused() {
     );
 }
 
-/// Card of `n` devices with maximum-size names.
+/// Card of `n` devices with maximum-size names and maximum node hints.
 fn max_card(n: usize, rng: &mut StdRng) -> ContactCard {
     let (root, _) = RootIdentity::generate(rng);
     let mut certs = Vec::new();
@@ -1442,7 +1442,9 @@ fn max_card(n: usize, rng: &mut StdRng) -> ContactCard {
         bundles.push(crate::handshake::PrekeySecrets::generate(rng, 0).bundle(&d, false));
     }
     let list = DeviceList::sign(&root, u64::MAX, certs).unwrap();
-    ContactCard::sign(&root, &"x".repeat(64), list, bundles, Vec::new()).unwrap()
+    let nodes =
+        vec![vec![0xab; crate::contact::MAX_NODE_HINT_BYTES]; crate::contact::MAX_CARD_NODES];
+    ContactCard::sign(&root, &"x".repeat(64), list, bundles, nodes).unwrap()
 }
 
 /// Heaviest contents that carry a card. A contact's card
@@ -2000,7 +2002,7 @@ fn contact_card_carries_card_nodes() {
     let (_db, mut b) = party("b", 2);
     let mut rng = StdRng::seed_from_u64(5);
     assert!(a.contact_card("Alice").unwrap().nodes.is_empty());
-    let hints = vec![vec![1u8, 2, 3], vec![4u8; 512]];
+    let hints = vec![vec![1u8, 2, 3], vec![4u8; 192]];
     a.set_card_nodes(hints.clone()).unwrap();
     let card = a.contact_card("Alice").unwrap();
     assert_eq!(card.nodes, hints);
@@ -2010,7 +2012,7 @@ fn contact_card_carries_card_nodes() {
     assert_eq!(b.contact_node_hints().unwrap(), hints);
     // Another contact sharing a hint: no duplicate.
     let (_dc, mut c) = party("c", 3);
-    c.set_card_nodes(vec![vec![4u8; 512], vec![7]]).unwrap();
+    c.set_card_nodes(vec![vec![4u8; 192], vec![7]]).unwrap();
     b.add_contact(
         &c.contact_card("Carol").unwrap(),
         Some("carol"),
@@ -2020,7 +2022,7 @@ fn contact_card_carries_card_nodes() {
     .unwrap();
     assert_eq!(
         b.contact_node_hints().unwrap(),
-        vec![vec![1u8, 2, 3], vec![4u8; 512], vec![7]]
+        vec![vec![1u8, 2, 3], vec![4u8; 192], vec![7]]
     );
 }
 
@@ -2029,10 +2031,10 @@ fn set_card_nodes_enforces_limits() {
     let (_da, mut a) = party("a", 1);
     assert_eq!(a.set_card_nodes(vec![vec![0]; 4]), Err(CoreError::TooLarge));
     assert_eq!(
-        a.set_card_nodes(vec![vec![0; 513]]),
+        a.set_card_nodes(vec![vec![0; 193]]),
         Err(CoreError::TooLarge)
     );
-    a.set_card_nodes(vec![vec![0; 512]; 3]).unwrap();
+    a.set_card_nodes(vec![vec![0; 192]; 3]).unwrap();
     a.set_card_nodes(Vec::new()).unwrap();
     assert!(a.contact_card("Alice").unwrap().nodes.is_empty());
 }
@@ -2086,4 +2088,34 @@ fn card_nodes_survive_card_update_and_reload() {
         panic!("variant");
     };
     assert_eq!(*back, card);
+}
+
+#[test]
+fn own_card_meta_in_old_form_is_still_read() {
+    let (_d, a, _t, _b, _v1, _rng) = alice_tablet_bob();
+    let card = a
+        .store
+        .get_meta::<ContactCard>(link::META_OWN_CARD)
+        .unwrap()
+        .unwrap();
+    let write = |bytes: &[u8]| {
+        a.store
+            .conn()
+            .execute(
+                "UPDATE meta SET v = ?1 WHERE k = ?2",
+                rusqlite::params![bytes, link::META_OWN_CARD],
+            )
+            .unwrap();
+    };
+    // Plain postcard of the card, as written by the previous build.
+    write(&card.encode());
+    assert!(
+        a.store
+            .get_meta::<ContactCard>(link::META_OWN_CARD)
+            .is_err()
+    );
+    assert_eq!(sync::own_card(&a.store).unwrap(), Some(card.clone()));
+    // Unreadable: treated as absent, never an error.
+    write(&[0xff; 9]);
+    assert_eq!(sync::own_card(&a.store).unwrap(), None);
 }

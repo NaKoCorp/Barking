@@ -408,6 +408,14 @@ pub trait Queries {
         Ok(())
     }
 
+    /// Raw bytes of a `meta` entry (for formats that changed over time).
+    fn get_meta_raw(&self, k: &str) -> Result<Option<Vec<u8>>> {
+        self.conn()
+            .query_row("SELECT v FROM meta WHERE k = ?1", params![k], |r| r.get(0))
+            .optional()
+            .map_err(map_err)
+    }
+
     fn get_meta<T: DeserializeOwned>(&self, k: &str) -> Result<Option<T>> {
         let mut raw: Option<Vec<u8>> = self
             .conn()

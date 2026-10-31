@@ -30,7 +30,7 @@ use std::path::Path;
 use rand_core::CryptoRng;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::contact::{ContactCard, MAX_CARD_NODES, MAX_NODE_HINT_BYTES};
+use crate::contact::ContactCard;
 use crate::fragment::Reassembler;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
@@ -401,12 +401,10 @@ impl Core {
     }
 
     /// Sets the node hints carried by my contact card (opaque to the core:
-    /// at most [`MAX_CARD_NODES`] of at most [`MAX_NODE_HINT_BYTES`] bytes
+    /// at most `MAX_CARD_NODES` of at most `MAX_NODE_HINT_BYTES` bytes
     /// each, otherwise `TooLarge`). They appear in the next card signed.
     pub fn set_card_nodes(&mut self, nodes: Vec<Vec<u8>>) -> Result<()> {
-        if nodes.len() > MAX_CARD_NODES || nodes.iter().any(|n| n.len() > MAX_NODE_HINT_BYTES) {
-            return Err(CoreError::TooLarge);
-        }
+        crate::contact::check_nodes(&nodes)?;
         self.store.put_meta(META_CARD_NODES, &nodes)
     }
 

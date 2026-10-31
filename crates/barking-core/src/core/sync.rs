@@ -99,6 +99,19 @@ pub(super) fn send_card_update(
     Ok(out)
 }
 
+/// My stored card. The `own_card` entry of a home created by an earlier
+/// build holds the plain postcard of the old card: read the current form
+/// first, then `ContactCard::decode`; an unreadable entry counts as none
+/// (the callers must never fail because of it).
+pub(super) fn own_card(q: &impl Queries) -> Result<Option<ContactCard>> {
+    let Some(raw) = q.get_meta_raw(META_OWN_CARD)? else {
+        return Ok(None);
+    };
+    Ok(postcard::from_bytes::<ContactCard>(&raw)
+        .ok()
+        .or_else(|| ContactCard::decode(&raw).ok()))
+}
+
 /// Queues my current card (`CardUpdate`) for only the `devices`
 /// of contact `fp`: its new devices, learned through an update of
 /// its card. They may have been linked with a copy of my card older
@@ -121,7 +134,7 @@ pub(super) fn send_own_card(
     if devices.is_empty() {
         return Ok(());
     }
-    let Some(card) = q.get_meta::<ContactCard>(META_OWN_CARD)? else {
+    let Some(card) = own_card(q)? else {
         return Ok(());
     };
     let body = Body::CardUpdate(Box::new(card));
