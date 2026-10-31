@@ -198,3 +198,59 @@ fn old_positions_read_back() {
     let d: Deposited = toml::from_str("id = \"x\"\nat = 5").unwrap();
     assert_eq!(d.until, 5);
 }
+
+/// A state with one entry in every part (the view's and the ledger's
+/// encodings are nested in it).
+fn golden_state() -> NetState {
+    let m = MailboxId([5; 16]);
+    let (a, b) = (id_of(0), id_of(1));
+    let mut s = NetState::new(true);
+    s.view.insert(record(0, NOW), NOW);
+    s.view.confirm(&a, NOW);
+    crate::plan::record_outcome(&mut s.ledger, [9; 32], a, &Ok(()), NOW);
+    s.positions.insert((a, m), 7);
+    s.unaudited.insert(b, 2);
+    s.note_audit(&a, &m, NOW);
+    s.note_reread(&a, &m, NOW);
+    s.note_crosscheck(&b, &m, NOW);
+    s.note_down_failures([b], NOW);
+    s.page_bytes.insert(a, 64 << 10);
+    s
+}
+
+/// The bytes of `golden_state` under `FORMAT` 1.
+const FORMAT_1: &str = concat!(
+    "01a701018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7c2069101ecc263",
+    "164bd7c90cda670b9e5b2c0c1c56b4c79187158d8a514015787006ba31010a000001a01f0080a4a7",
+    "da0640ff05568312955f35cb45b0adb7bab8e7f25877a6731b512daf9ecdd3085eabe8da09c17d6f",
+    "49d45e8a3a836db02bce038237099f75071c9009711ee56c0e6b0c00010080a4a7da0680a4a7da06",
+    "0000003f0080a4a7da06750109090909090909090909090909090909090909090909090909090909",
+    "090909090180a4a7da06018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7",
+    "c2069180a4a7da06018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7c206",
+    "9180c7acda060000018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7c206",
+    "9105050505050505050505050505050505070001c3fbc0923c6a6a8c64c0c62574ad50b04f05b53b",
+    "d5804daedd43d2b584259c1b02018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab",
+    "1a5fd7c206910505050505050505050505050505050580a4a7da06018d3a191424b7a6b371871d41",
+    "18e5b63e4e0d6d398e90910e60ab1a5fd7c206910505050505050505050505050505050580a4a7da",
+    "0601c3fbc0923c6a6a8c64c0c62574ad50b04f05b53bd5804daedd43d2b584259c1b050505050505",
+    "0505050505050505050580a4a7da0601c3fbc0923c6a6a8c64c0c62574ad50b04f05b53bd5804dae",
+    "dd43d2b584259c1b80a4a7da06018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab",
+    "1a5fd7c20691808004",
+);
+
+#[test]
+fn format_1_bytes_are_frozen() {
+    let bytes = golden_state().encode().unwrap();
+    assert_eq!(
+        hex(&bytes),
+        FORMAT_1,
+        "the stored network state changed: bump FORMAT and migrate"
+    );
+    let back = NetState::decode(
+        &data_encoding::HEXLOWER.decode(FORMAT_1.as_bytes()).unwrap(),
+        NOW,
+        true,
+    )
+    .expect("format 1 still reads");
+    assert_eq!(back.encode().unwrap(), bytes);
+}

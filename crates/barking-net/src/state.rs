@@ -30,6 +30,10 @@ pub const LEGACY_STATE_KEY: &str = "netsync";
 /// for this long.
 pub const DOWN_FAILED_SECS: u64 = 86_400;
 /// Version of the encoding: any other value reads as an unreadable state.
+/// Frozen: format 1 is the layout of `Stored` (and of the nested view and
+/// ledger encodings) as first released; any change to them must bump
+/// `FORMAT` and migrate the older format (`format_1_bytes_are_frozen` holds
+/// its bytes).
 const FORMAT: u8 = 1;
 
 /// Everything the network client keeps between synchronizations.
