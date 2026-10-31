@@ -1,0 +1,17 @@
+[package]
+name = "barking-net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+barking-core.workspace = true
+barking-dht.workspace = true
+barking-packet.workspace = true
+barking-proto.workspace = true
+postcard.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+rand.workspace = true

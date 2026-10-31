@@ -224,6 +224,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "barking-net"
+version = "0.1.0"
+dependencies = [
+ "barking-core",
+ "barking-dht",
+ "barking-packet",
+ "barking-proto",
+ "ed25519-dalek",
+ "postcard",
+ "rand",
+ "rand_core",
+ "serde",
+]
+
+[[package]]
 name = "barking-node"
 version = "0.1.0"
 dependencies = [
