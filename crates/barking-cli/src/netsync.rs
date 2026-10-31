@@ -38,20 +38,16 @@ use barking_core::Core;
 use barking_core::mailbox::MailboxId;
 use barking_core::packet::{Kind, Packet};
 use barking_core::transparency::TransparencyEvent;
+use barking_net::state::{Deposited, LegacyNode, LegacyState, from_resume, to_resume};
+use barking_net::sync::{INTRO_FETCH_BYTES, SESSION_FETCH_SLICE, intro_slice, pow_budget};
 use barking_proto::ErrorReason;
 use barking_proto::client::{Client, ClientError, FetchResume, MAX_FETCH_BYTES, Session};
-use serde::{Deserialize, Serialize};
 
 use super::nodes::{self, NodeEntry};
 use super::{AckSink, CliError, CliResult, fail, now, open_core, printable, show_outcome};
 
-/// Maximum bytes polled per sync from the introduction mailboxes.
-pub const INTRO_FETCH_BYTES: usize = 8 << 20;
 /// Maximum duration of the sync with a node.
 pub const SYNC_NODE_DEADLINE: Duration = Duration::from_secs(180);
-/// Proof-of-work allowed per sync (expected attempts): about 1,000
-/// deposits at 18 bits, 16 at 24 bits.
-pub const SYNC_POW_BUDGET: u64 = 1 << 28;
 /// Delay before redepositing on a node a packet it already accepted or
 /// refused for good (in case it lost it).
 pub const REDEPOSIT_AFTER_SECS: u64 = 86_400;
@@ -59,11 +55,6 @@ pub const REDEPOSIT_AFTER_SECS: u64 = 86_400;
 pub const FULL_RETRY_SECS: u64 = 600;
 /// Delay after a receipt that arrived before its packet (`UnknownAckTarget`).
 pub const DEFERRED_ACK_RETRY_SECS: u64 = 3_600;
-/// Share of `SYNC_NODE_DEADLINE` for polling the sessions.
-pub const SESSION_FETCH_SLICE: Duration = Duration::from_secs(90);
-/// Share of `SYNC_NODE_DEADLINE` for polling the introductions: beyond it,
-/// the poll is partial, without failing the node.
-pub const INTRO_FETCH_SLICE: Duration = Duration::from_secs(45);
 
 /// Key of the state in the core's database.
 const STATE_KEY: &str = "netsync";
@@ -121,72 +112,11 @@ fn tally(is_ack: bool, result: &Result<(), ErrorReason>) -> DepositTally {
     }
 }
 
-/// Position of a mailbox on a node (see `FetchResume`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Seen {
-    mailbox: String,
-    seq: u64,
-}
-
-/// Packet deposited (accepted, refused or deferred) on a node: no new
-/// deposit before `until`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Deposited {
-    id: String,
-    #[serde(alias = "at")]
-    until: u64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct NodeState {
-    id: String,
-    #[serde(default)]
-    sessions: Vec<Seen>,
-    #[serde(default)]
-    intro: Vec<Seen>,
-    #[serde(default)]
-    deposited: Vec<Deposited>,
-}
-
-fn to_resume(seen: &[Seen]) -> FetchResume {
-    let mut r = FetchResume::default();
-    for s in seen {
-        if let Ok(b) = data_encoding::HEXLOWER.decode(s.mailbox.as_bytes())
-            && let Ok(k) = <[u8; 16]>::try_from(b.as_slice())
-        {
-            r.seen.insert(k, s.seq);
-        }
-    }
-    r
-}
-
-/// Positions of the `current` mailboxes only, in a stable order.
-fn from_resume(r: &FetchResume, current: &[MailboxId]) -> Vec<Seen> {
-    let mut v: Vec<Seen> = current
-        .iter()
-        .filter_map(|m| {
-            r.seen.get(&m.0).filter(|s| **s > 0).map(|s| Seen {
-                mailbox: data_encoding::HEXLOWER.encode(&m.0),
-                seq: *s,
-            })
-        })
-        .collect();
-    v.sort_by(|a, b| a.mailbox.cmp(&b.mailbox));
-    v.dedup();
-    v
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct StateFile {
-    #[serde(default, rename = "node")]
-    nodes: Vec<NodeState>,
-}
-
 /// State kept in the database; absent or unreadable: from the start. An
 /// old plaintext file is first migrated (if the database has no state),
 /// then overwritten with zeros and erased.
-fn load_state(home: &Path, core: &mut Core) -> CliResult<Vec<NodeState>> {
-    let parse = |t: &str| toml::from_str::<StateFile>(t).ok().map(|f| f.nodes);
+fn load_state(home: &Path, core: &mut Core) -> CliResult<Vec<LegacyNode>> {
+    let parse = |t: &str| toml::from_str::<LegacyState>(t).ok().map(|f| f.nodes);
     let mut nodes = core
         .transport_state(STATE_KEY)?
         .and_then(|b| String::from_utf8(b).ok())
@@ -220,37 +150,13 @@ fn wipe(path: &Path) {
 }
 
 /// Writes the state to the core's encrypted database.
-fn save_state(core: &mut Core, nodes: &[NodeState]) -> CliResult<()> {
-    let text = toml::to_string(&StateFile {
+fn save_state(core: &mut Core, nodes: &[LegacyNode]) -> CliResult<()> {
+    let text = toml::to_string(&LegacyState {
         nodes: nodes.to_vec(),
     })
     .map_err(|_| CliError("Error: cannot write the sync state".into()))?;
     core.set_transport_state(STATE_KEY, text.as_bytes())?;
     Ok(())
-}
-
-fn intro_slice() -> Duration {
-    // Adjustable in test builds only.
-    #[cfg(debug_assertions)]
-    if let Some(ms) = std::env::var("BARKING_TEST_INTRO_SLICE_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        return Duration::from_millis(ms);
-    }
-    INTRO_FETCH_SLICE
-}
-
-fn pow_budget() -> u64 {
-    // Adjustable in test builds only.
-    #[cfg(debug_assertions)]
-    if let Some(b) = std::env::var("BARKING_TEST_POW_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        return b;
-    }
-    SYNC_POW_BUDGET
 }
 
 pub fn sync(home: &Path) -> CliResult<()> {
@@ -260,7 +166,7 @@ pub fn sync(home: &Path) -> CliResult<()> {
     }
     let mut core = open_core(home)?;
     // State of the configured nodes only.
-    let mut state: Vec<NodeState> = load_state(home, &mut core)?
+    let mut state: Vec<LegacyNode> = load_state(home, &mut core)?
         .into_iter()
         .filter(|c| nodes.iter().any(|n| n.id == c.id))
         .collect();
@@ -278,9 +184,9 @@ pub fn sync(home: &Path) -> CliResult<()> {
         let k = match state.iter().position(|c| c.id == node.id) {
             Some(k) => k,
             None => {
-                state.push(NodeState {
+                state.push(LegacyNode {
                     id: node.id.clone(),
-                    ..NodeState::default()
+                    ..LegacyNode::default()
                 });
                 state.len() - 1
             }
@@ -468,24 +374,19 @@ async fn deposit_all(
     }
 }
 
-/// Passes each polled item to `receive`. False if an item could not be
-/// processed.
+/// Passes each polled item to `receive` and shows the outcome. False if an
+/// item could not be processed.
 fn receive_all(core: &mut Core, items: &[Vec<u8>], label: &str) -> Result<bool, String> {
-    let mut all = true;
-    for item in items {
-        // A receipt may arrive in a mailbox other than those polled
-        // for it: everything goes through `receive`, which decides.
-        match core.receive(item, "nœud", now(), &mut rand::rng()) {
-            Ok(outcome) => {
-                show_outcome(label, outcome, AckSink::Queued).map_err(|e| e.0)?;
-            }
-            Err(e) => {
-                all = false;
-                eprintln!("{label}: item ignored ({})", printable(&e.to_string()));
+    let mut shown = Ok(());
+    let all = barking_net::sync::receive_all(core, items, now(), |r| match r {
+        Ok(outcome) => {
+            if shown.is_ok() {
+                shown = show_outcome(label, outcome, AckSink::Queued).map_err(|e| e.0);
             }
         }
-    }
-    Ok(all)
+        Err(e) => eprintln!("{label}: item ignored ({})", printable(&e.to_string())),
+    });
+    shown.map(|()| all)
 }
 
 /// Poll of a group of mailboxes.
@@ -519,7 +420,7 @@ async fn sync_node(
     core: &mut Core,
     node: &NodeEntry,
     report: &mut Report,
-    state: &mut NodeState,
+    state: &mut LegacyNode,
     pow_budget: u64,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + SYNC_NODE_DEADLINE;
@@ -687,21 +588,6 @@ mod tests {
         assert!(r.fully_polled());
     }
 
-    #[test]
-    fn seen_positions_roundtrip_and_prune() {
-        let m = |b: u8| MailboxId([b; 16]);
-        let mut r = FetchResume::default();
-        r.seen.insert([1; 16], 7);
-        r.seen.insert([2; 16], 0);
-        r.seen.insert([3; 16], 9);
-        // Only the mailboxes still watched, zero positions omitted.
-        let s = from_resume(&r, &[m(1), m(2)]);
-        assert_eq!(s.len(), 1);
-        let back = to_resume(&s);
-        assert_eq!(back.seen.get(&[1; 16]), Some(&7));
-        assert!(!back.seen.contains_key(&[3; 16]));
-    }
-
     fn pkt(n: u8, kind: Kind) -> Vec<u8> {
         Packet {
             kind,
@@ -762,9 +648,6 @@ mod tests {
         assert_eq!(r(false, &bad), REDEPOSIT_AFTER_SECS);
         assert_eq!(r(true, &early), DEFERRED_ACK_RETRY_SECS);
         assert_eq!((FULL_RETRY_SECS, DEFERRED_ACK_RETRY_SECS), (600, 3_600));
-        // Old format (`at`) read back as a deadline.
-        let d: Deposited = toml::from_str("id = \"x\"\nat = 5").unwrap();
-        assert_eq!(d.until, 5);
     }
 
     #[test]

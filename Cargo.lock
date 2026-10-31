@@ -165,6 +165,7 @@ dependencies = [
  "argon2",
  "assert_cmd",
  "barking-core",
+ "barking-net",
  "barking-node",
  "barking-proto",
  "clap",
@@ -231,13 +232,17 @@ dependencies = [
  "barking-dht",
  "barking-packet",
  "barking-proto",
+ "data-encoding",
  "ed25519-dalek",
  "postcard",
  "rand",
  "rand_core",
  "serde",
+ "tempfile",
  "thiserror",
  "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

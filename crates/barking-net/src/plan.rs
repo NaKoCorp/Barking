@@ -102,6 +102,12 @@ impl Ledger {
         Ok(ledger)
     }
 
+    /// No new deposit of packet `hash` on `node` before `until` (state
+    /// migrated from the old synchronization, which kept only that delay).
+    pub(crate) fn hold_off(&mut self, hash: [u8; 32], node: NodeId, until: u64) {
+        self.packets.entry(hash).or_default().set_retry(node, until);
+    }
+
     /// True if the packet is known to the ledger.
     pub fn contains(&self, hash: &[u8; 32]) -> bool {
         self.packets.contains_key(hash)

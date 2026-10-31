@@ -8,13 +8,17 @@ barking-core.workspace = true
 barking-dht.workspace = true
 barking-packet.workspace = true
 barking-proto.workspace = true
+data-encoding.workspace = true
 postcard.workspace = true
+rand.workspace = true
 rand_core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
-rand.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }

@@ -84,3 +84,39 @@ fn seeds_solve_puzzle() {
         assert!(id_of(n).puzzle_ok(), "key {n}");
     }
 }
+
+/// A core with a session and a send queue: Bob, after receiving Alice's
+/// first message (his receipt is queued) and replying on the session.
+/// Returns the temporary directory (to keep alive) and Bob's core.
+pub(crate) fn subject(now: u64) -> (tempfile::TempDir, barking_core::Core) {
+    use barking_core::Core;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(7);
+    let (mut alice, _) = Core::create(
+        &dir.path().join("alice.db"),
+        &[1; 32],
+        "alice",
+        now,
+        &mut rng,
+    )
+    .unwrap();
+    let (mut bob, _) =
+        Core::create(&dir.path().join("bob.db"), &[2; 32], "bob", now, &mut rng).unwrap();
+    let card_a = alice.contact_card("Alice").unwrap();
+    let card_b = bob.contact_card("Bob").unwrap();
+    let fa = bob
+        .add_contact(&card_a, Some("alice"), now, &mut rng)
+        .unwrap();
+    let fb = alice
+        .add_contact(&card_b, Some("bob"), now, &mut rng)
+        .unwrap();
+    for p in alice.send_text(&fb, "hello", now, &mut rng).unwrap() {
+        bob.receive(&p.encode(), "test", now, &mut rng).unwrap();
+    }
+    bob.send_text(&fa, "hi", now, &mut rng).unwrap();
+    drop(alice);
+    (dir, bob)
+}

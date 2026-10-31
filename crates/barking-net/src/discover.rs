@@ -116,7 +116,7 @@ impl QuicDialer {
     }
 }
 
-fn dial_error(e: ClientError) -> DialError {
+pub(crate) fn dial_error(e: ClientError) -> DialError {
     match e {
         ClientError::Timeout => DialError::Timeout,
         ClientError::Refused(reason) => DialError::Refused(reason),

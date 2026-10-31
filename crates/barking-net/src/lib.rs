@@ -1,10 +1,13 @@
 //! Client-side view of the Barking network: the local node view, the
 //! selection of the nodes responsible for a mailbox, node reliability scores
-//! and the deposit plan. Pure logic, no I/O.
+//! and the deposit plan, the state kept between synchronizations and the
+//! synchronization itself (the only part doing I/O, through traits).
 
 pub mod discover;
 pub mod plan;
 pub mod score;
+pub mod state;
+pub mod sync;
 pub mod view;
 
 #[cfg(test)]
@@ -16,6 +19,11 @@ pub use discover::{
 };
 pub use plan::{Ledger, PlannedDeposit};
 pub use score::{Score, ScoreEvent};
+pub use state::NetState;
+pub use sync::{
+    Connector, DepositOutcome, DepositReply, Depositor, FetchReply, Fetcher, SyncOptions,
+    SyncReport, sync,
+};
 pub use view::{NodeEntry, View};
 
 /// Maximum number of node entries kept in the view.
