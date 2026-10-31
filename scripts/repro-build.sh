@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Build reproductible de barking-cli et de barking-node (spec §15).
-# Usage : scripts/repro-build.sh [--target <triple>] [--ref <git-ref>] [--out <dir>] [--git-dir <dépôt>]
+# Reproducible build of barking-cli and barking-node (spec §15).
+# Usage: scripts/repro-build.sh [--target <triple>] [--ref <git-ref>] [--out <dir>] [--git-dir <repo>]
 #
-# L'environnement de build (ce script, docker/repro.Dockerfile, .xcode-version) est toujours celui du
-# répertoire où se trouve ce script. --git-dir désigne le dépôt git d'où extraire --ref : par défaut ce même
-# répertoire ; release-lib.sh s'en sert pour lancer l'environnement extrait d'un tag sur le dépôt réel.
+# The build environment (this script, docker/repro.Dockerfile, .xcode-version) is always the one from the
+# directory containing this script. --git-dir designates the git repository from which to extract --ref: by default that same
+# directory; release-lib.sh uses it to run the environment extracted from a tag on the real repository.
 set -euo pipefail
 
 racine="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/release-lib.sh
 . "$racine/scripts/release-lib.sh"
 
-usage() { echo "Usage : $0 [--target <triple>] [--ref <git-ref>] [--out <dir>] [--git-dir <dépôt>]"; }
+usage() { echo "Usage: $0 [--target <triple>] [--ref <git-ref>] [--out <dir>] [--git-dir <repo>]"; }
 
 cible=""
 ref="HEAD"
@@ -20,12 +20,12 @@ depot="$racine"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --target) [ $# -ge 2 ] || erreur "--target attend une valeur"; cible="$2"; shift 2 ;;
-    --ref)    [ $# -ge 2 ] || erreur "--ref attend une valeur";    ref="$2";   shift 2 ;;
-    --out)    [ $# -ge 2 ] || erreur "--out attend une valeur";    sortie="$2"; shift 2 ;;
-    --git-dir) [ $# -ge 2 ] || erreur "--git-dir attend une valeur"; depot="$2"; shift 2 ;;
+    --target) [ $# -ge 2 ] || erreur "--target expects a value"; cible="$2"; shift 2 ;;
+    --ref)    [ $# -ge 2 ] || erreur "--ref expects a value";       ref="$2";   shift 2 ;;
+    --out)    [ $# -ge 2 ] || erreur "--out expects a value";       sortie="$2"; shift 2 ;;
+    --git-dir) [ $# -ge 2 ] || erreur "--git-dir expects a value"; depot="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
-    *) erreur "option inconnue : $1" ;;
+    *) erreur "unknown option: $1" ;;
   esac
 done
 
@@ -33,7 +33,7 @@ if [ -z "$cible" ]; then
   case "$(uname -m)" in
     x86_64|amd64)  cible="x86_64-unknown-linux-musl" ;;
     arm64|aarch64) cible="aarch64-unknown-linux-musl" ;;
-    *) erreur "architecture hôte non prise en charge : $(uname -m)" ;;
+    *) erreur "unsupported host architecture: $(uname -m)" ;;
   esac
 fi
 
@@ -41,40 +41,40 @@ case "$cible" in
   x86_64-unknown-linux-musl)  plateforme="linux/amd64" ;;
   aarch64-unknown-linux-musl) plateforme="linux/arm64" ;;
   aarch64-apple-darwin)       plateforme="" ;;
-  *) erreur "cible non prise en charge : $cible" ;;
+  *) erreur "unsupported target: $cible" ;;
 esac
 
 git -C "$depot" rev-parse --verify --quiet "$ref^{commit}" >/dev/null \
-  || erreur "référence git introuvable : $ref"
+  || erreur "git reference not found: $ref"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/barking-repro.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 
-# Extraction propre de la référence : l'arbre de travail (éventuellement sale) n'est jamais compilé.
+# Clean extraction of the reference: the working tree (possibly dirty) is never built.
 src="$tmp/src"
 mkdir -p "$src"
 git -C "$depot" archive --format=tar "$ref" | tar -x -C "$src"
 
 version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-cli/Cargo.toml" | head -n1)"
-[ -n "$version" ] || erreur "version introuvable dans crates/barking-cli/Cargo.toml"
+[ -n "$version" ] || erreur "version not found in crates/barking-cli/Cargo.toml"
 version_node="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-node/Cargo.toml" | head -n1)"
-[ -n "$version_node" ] || erreur "version introuvable dans crates/barking-node/Cargo.toml"
+[ -n "$version_node" ] || erreur "version not found in crates/barking-node/Cargo.toml"
 [ "$version" = "$version_node" ] \
-  || erreur "barking-cli ($version) et barking-node ($version_node) doivent avoir la même version : une version publiée porte les deux binaires"
+  || erreur "barking-cli ($version) and barking-node ($version_node) must have the same version: a published release carries both binaries"
 SOURCE_DATE_EPOCH="$(git -C "$depot" log -1 --format=%ct "$ref")"
 export SOURCE_DATE_EPOCH
 
 nom="barking-cli-${version}-${cible}"
 nom_node="barking-node-${version}-${cible}"
-# Le nœud est compilé seul (cargo build -p barking-node, invocation distincte de celle de barking-cli) :
-# les features de libsqlite3-sys s'unifient dans un même build, et celles de barking-cli (SQLCipher,
-# OpenSSL) ne doivent pas entrer dans le nœud. Ce contrôle échoue si une feature SQLCipher ou OpenSSL
-# apparaît dans l'arbre de dépendances du nœud.
-# shellcheck disable=SC2016  # le script est interprété par le bash du conteneur ou de l hôte, pas ici
+# The node is built on its own (cargo build -p barking-node, a separate invocation from barking-cli's):
+# libsqlite3-sys features are unified within a single build, and those of barking-cli (SQLCipher,
+# OpenSSL) must not enter the node. This check fails if a SQLCipher or OpenSSL feature
+# appears in the node's dependency tree.
+# shellcheck disable=SC2016  # the script is interpreted by the bash of the container or the host, not here
 controle_node='
   arbre="$(cargo tree --locked -p barking-node -e normal,features --target "$TARGET")" || exit 1
   if printf "%s\n" "$arbre" | grep -qiE "openssl|sqlcipher"; then
-    echo "erreur : barking-node dépend d'\''OpenSSL ou de SQLCipher :" >&2
+    echo "error: barking-node depends on OpenSSL or SQLCipher:" >&2
     printf "%s\n" "$arbre" | grep -iE "openssl|sqlcipher" >&2
     exit 1
   fi'
@@ -82,27 +82,27 @@ mkdir -p "$sortie"
 sortie="$(cd "$sortie" && pwd)"
 
 if [ "$cible" = "aarch64-apple-darwin" ]; then
-  # Build natif (runner macOS), sans notarisation.
-  [ "$(uname -s)" = "Darwin" ] || erreur "la cible $cible se compile sur macOS"
-  # La chaîne officielle épinglée (rust-toolchain.toml, via rustup) : le rustc de Homebrew, même de la
-  # même version, n'est pas construit pareil et ne reproduit pas le binaire de la CI.
+  # Native build (macOS runner), without notarization.
+  [ "$(uname -s)" = "Darwin" ] || erreur "target $cible is built on macOS"
+  # The official pinned toolchain (rust-toolchain.toml, via rustup): Homebrew's rustc, even of the
+  # same version, is not built the same way and does not reproduce the CI binary.
   command -v rustup >/dev/null 2>&1 \
-    || erreur "rustup est requis pour la cible $cible : le rustc de Homebrew n'est pas la chaîne officielle et ne reproduit pas le binaire de la CI. Installez rustup (https://rustup.rs) ; rust-toolchain.toml fixe la version."
-  command -v cargo >/dev/null 2>&1 || erreur "cargo est requis pour la cible $cible"
-  # Même Xcode et même SDK que la CI (.xcode-version), sinon le binaire diffère.
+    || erreur "rustup is required for target $cible: Homebrew's rustc is not the official toolchain and does not reproduce the CI binary. Install rustup (https://rustup.rs); rust-toolchain.toml pins the version."
+  command -v cargo >/dev/null 2>&1 || erreur "cargo is required for target $cible"
+  # Same Xcode and same SDK as the CI (.xcode-version), otherwise the binary differs.
   environnement_darwin_conforme "$racine/.xcode-version" \
-    || erreur "$RAISON_DARWIN : le binaire ne serait pas identique à celui de la CI. Installez Xcode $XCODE_ATTENDU et sélectionnez-le (sudo xcode-select -s /Applications/Xcode_$XCODE_ATTENDU.app)."
+    || erreur "$RAISON_DARWIN: the binary would not be identical to the CI's. Install Xcode $XCODE_ATTENDU and select it (sudo xcode-select -s /Applications/Xcode_$XCODE_ATTENDU.app)."
   {
-    echo "Xcode : $(xcodebuild -version 2>/dev/null | tr '\n' ' ')"
-    echo "SDK macOS : $(xcrun --show-sdk-version) ($(xcrun --show-sdk-path))"
-    echo "clang : $(xcrun clang --version | head -n1)"
+    echo "Xcode: $(xcodebuild -version 2>/dev/null | tr '\n' ' ')"
+    echo "macOS SDK: $(xcrun --show-sdk-version) ($(xcrun --show-sdk-path))"
+    echo "clang: $(xcrun clang --version | head -n1)"
   } >&2
-  # Chemins FIXES : OpenSSL (code C vendorisé) enregistre dans le binaire __FILE__, le répertoire de
-  # sortie et les CFLAGS verbatim. Aucun chemin aléatoire ni propre à la machine ne doit donc apparaître.
-  # Le répertoire est créé atomiquement (verrou) ; s'il existe déjà, un autre build est en cours (ou a planté).
+  # FIXED paths: OpenSSL (vendored C code) records __FILE__, the output directory and the
+  # CFLAGS verbatim in the binary. No random or machine-specific path must therefore appear.
+  # The directory is created atomically (lock); if it already exists, another build is running (or crashed).
   fixe="/private/tmp/barking-repro-darwin"
   mkdir "$fixe" 2>/dev/null \
-    || erreur "$fixe existe déjà : un autre build macOS est en cours, ou un précédent a été interrompu (supprimez ce répertoire)"
+    || erreur "$fixe already exists: another macOS build is running, or a previous one was interrupted (delete this directory)"
   trap 'rm -rf "$tmp" "$fixe"' EXIT
   mv "$src" "$fixe/src"
   src="$fixe/src"
@@ -110,28 +110,28 @@ if [ "$cible" = "aarch64-apple-darwin" ]; then
   export RUSTFLAGS="--remap-path-prefix=$src=/build --remap-path-prefix=$CARGO_HOME=/cargo"
   export CFLAGS="-ffile-prefix-map=$src=/build -ffile-prefix-map=$CARGO_HOME=/cargo"
   export CARGO_TARGET_DIR="$fixe/target"
-  # Pas d'horodatage de liaison dans l'exécutable.
+  # No link timestamp in the executable.
   export ZERO_AR_DATE=1
-  # Cible de déploiement fixe : sinon cc/rustc prennent la version du macOS ou du SDK de la machine.
+  # Fixed deployment target: otherwise cc/rustc take the version of the machine's macOS or SDK.
   export MACOSX_DEPLOYMENT_TARGET="11.0"
-  # rust-toolchain.toml (dans les sources extraites) fait foi pour rustup.
+  # rust-toolchain.toml (in the extracted sources) is authoritative for rustup.
   (
     cd "$src"
-    echo "rustc : $(rustc --version)" >&2
+    echo "rustc: $(rustc --version)" >&2
     cargo build --release --locked -p barking-cli --target "$cible" || exit 1
     TARGET="$cible" bash -ec "$controle_node" || exit 1
     cargo build --release --locked -p barking-node --target "$cible" || exit 1
-  ) || erreur "compilation échouée"
+  ) || erreur "build failed"
   cp "$CARGO_TARGET_DIR/$cible/release/barking" "$sortie/$nom"
   cp "$CARGO_TARGET_DIR/$cible/release/barking-node" "$sortie/$nom_node"
 else
-  command -v docker >/dev/null 2>&1 || erreur "docker est requis pour la cible $cible"
+  command -v docker >/dev/null 2>&1 || erreur "docker is required for target $cible"
   empreinte_df="$(sha256_de "$racine/docker/repro.Dockerfile")"
   image="barking-repro:${empreinte_df:0:16}-${plateforme#linux/}"
   docker build --platform "$plateforme" -q -f "$racine/docker/repro.Dockerfile" \
-    -t "$image" "$racine/docker" >/dev/null || erreur "construction de l'image de build échouée"
-  # Le cache du registre cargo est un simple accélérateur : le binaire n'en dépend pas
-  # (--locked et sommes de contrôle de Cargo.lock).
+    -t "$image" "$racine/docker" >/dev/null || erreur "building the build image failed"
+  # The cargo registry cache is just an accelerator: the binary does not depend on it
+  # (--locked and Cargo.lock checksums).
   volume="barking-repro-cargo-${plateforme#linux/}"
   mkdir -p "$tmp/out"
   docker run --rm --platform "$plateforme" \
@@ -148,7 +148,7 @@ else
       cargo build --release --locked -p barking-node --target "$TARGET"
       cp "/tmp/target/$TARGET/release/barking" "/out/$NOM"
       cp "/tmp/target/$TARGET/release/barking-node" "/out/$NOM_NODE"
-    ' || erreur "compilation échouée dans le conteneur"
+    ' || erreur "build failed in the container"
   cp "$tmp/out/$nom" "$sortie/$nom"
   cp "$tmp/out/$nom_node" "$sortie/$nom_node"
 fi
@@ -157,7 +157,7 @@ chmod 755 "$sortie/$nom" "$sortie/$nom_node"
 somme="$(sha256_de "$sortie/$nom")"
 somme_node="$(sha256_de "$sortie/$nom_node")"
 
-# SHA256SUMS : une ligne par fichier, format sha256sum, trié par nom ; les lignes de ces fichiers sont remplacées.
+# SHA256SUMS: one line per file, sha256sum format, sorted by name; the lines of these files are replaced.
 sums="$sortie/SHA256SUMS"
 {
   if [ -f "$sums" ]; then grep -v -F -e "  $nom" -e "  $nom_node" "$sums" || true; fi

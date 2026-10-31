@@ -1,37 +1,37 @@
 #!/usr/bin/env bash
-# Fuzzing de barking-core et des trames de barking-proto, entièrement dans Docker (rien n'est installé sur l'hôte).
-# Usage : scripts/fuzz.sh [cible|all] [secondes]      (défaut : all 300)
-# Cibles : packet_decode, reassemble, receive, receive_frame, proto_frame (trames du protocole du nœud),
-# dht_response (filtrage des réponses `Nodes` de la table de hachage).
-# Le corpus versionné (crates/barking-core/fuzz/corpus/<cible>/) ne contient que les graines ; les
-# entrées découvertes vivent dans un volume Docker, sans salir le dépôt. Un plantage laisse son
-# artefact dans crates/barking-core/fuzz/artifacts/<cible>/ et fait sortir le script en erreur.
+# Fuzzing of barking-core and of barking-proto frames, entirely in Docker (nothing is installed on the host).
+# Usage: scripts/fuzz.sh [target|all] [seconds]      (default: all 300)
+# Targets: packet_decode, reassemble, receive, receive_frame, proto_frame (node protocol frames),
+# dht_response (filtering of `Nodes` responses of the hash table).
+# The versioned corpus (crates/barking-core/fuzz/corpus/<target>/) only contains seeds; discovered
+# inputs live in a Docker volume, without dirtying the repository. A crash leaves its
+# artifact in crates/barking-core/fuzz/artifacts/<target>/ and makes the script exit with an error.
 set -euo pipefail
 
 racine="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cibles_connues=(packet_decode reassemble receive receive_frame proto_frame dht_response)
 
-erreur() { echo "erreur : $*" >&2; exit 1; }
-usage() { echo "Usage : $0 [cible|all] [secondes]   (cibles : ${cibles_connues[*]})"; }
+erreur() { echo "error: $*" >&2; exit 1; }
+usage() { echo "Usage: $0 [target|all] [seconds]   (targets: ${cibles_connues[*]})"; }
 
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 choix="${1:-all}"
 duree="${2:-300}"
 [ $# -le 2 ] || { usage >&2; exit 2; }
-case "$duree" in ''|*[!0-9]*) erreur "durée invalide : $duree (secondes attendues)" ;; esac
-[ "$duree" -ge 1 ] || erreur "durée invalide : $duree"
+case "$duree" in ''|*[!0-9]*) erreur "invalid duration: $duree (seconds expected)" ;; esac
+[ "$duree" -ge 1 ] || erreur "invalid duration: $duree"
 
 if [ "$choix" = "all" ]; then
   cibles=("${cibles_connues[@]}")
 else
   trouve=0
   for c in "${cibles_connues[@]}"; do [ "$c" = "$choix" ] && trouve=1; done
-  [ "$trouve" = 1 ] || erreur "cible inconnue : $choix (cibles : ${cibles_connues[*]})"
+  [ "$trouve" = 1 ] || erreur "unknown target: $choix (targets: ${cibles_connues[*]})"
   cibles=("$choix")
 fi
 
-command -v docker >/dev/null 2>&1 || erreur "docker est requis"
-docker info >/dev/null 2>&1 || erreur "le démon docker ne répond pas"
+command -v docker >/dev/null 2>&1 || erreur "docker is required"
+docker info >/dev/null 2>&1 || erreur "the docker daemon is not responding"
 
 dockerfile="$racine/docker/fuzz.Dockerfile"
 if command -v sha256sum >/dev/null 2>&1; then
@@ -40,20 +40,20 @@ else
   empreinte="$(shasum -a 256 "$dockerfile" | cut -c1-16)"
 fi
 image="barking-fuzz:$empreinte"
-echo "Construction de l'image $image..." >&2
+echo "Building image $image..." >&2
 docker build -f "$dockerfile" -t "$image" "$racine/docker" >&2 \
-  || erreur "construction de l'image de fuzzing échouée (journal ci-dessus)"
+  || erreur "building the fuzzing image failed (log above)"
 
-# Caches : simples accélérateurs (registre cargo, compilation, entrées découvertes).
+# Caches: simple accelerators (cargo registry, build, discovered inputs).
 volume_cargo="barking-fuzz-cargo"
 volume_cible="barking-fuzz-target"
 volume_travail="barking-fuzz-work"
 fuzz_dir="/work/crates/barking-core/fuzz"
 
-# Le conteneur tourne en root (volumes de cache, HOME) ; à la sortie, les fichiers écrits dans le dépôt
-# (corpus, artefacts) sont rendus à l'utilisateur de l'hôte, sinon ils resteraient à root sous Linux.
+# The container runs as root (cache volumes, HOME); on exit, the files written to the repository
+# (corpus, artifacts) are handed back to the host user, otherwise they would stay owned by root on Linux.
 lancer() {
-  # shellcheck disable=SC2016  # le script est interprété par le bash du conteneur
+  # shellcheck disable=SC2016  # the script is interpreted by the container's bash
   docker run --rm \
     -v "$racine:/work" -v "$volume_cargo:/cargo" -v "$volume_cible:/target" \
     -v "$volume_travail:/fuzzwork" \
@@ -65,36 +65,36 @@ lancer() {
     ' _ "$@"
 }
 
-# Corpus initial : produit par le binaire `seed` pour les cibles dont le corpus est vide.
+# Initial corpus: produced by the `seed` binary for targets whose corpus is empty.
 corpus_vide() { [ -z "$(ls -A "$racine/crates/barking-core/fuzz/corpus/$1" 2>/dev/null)" ]; }
 for c in packet_decode receive receive_frame; do
   if corpus_vide "$c"; then
-    echo "Corpus de $c vide : génération des graines..." >&2
+    echo "Corpus of $c is empty: generating seeds..." >&2
     lancer cargo run --release --locked --bin seed -- "$fuzz_dir/corpus" "$c" \
-      || erreur "génération du corpus échouée"
+      || erreur "corpus generation failed"
   fi
 done
 
-# cargo-fuzz n'accepte pas --locked : on vérifie que Cargo.lock est à jour avant de lancer.
+# cargo-fuzz does not accept --locked: we check that Cargo.lock is up to date before running.
 lancer cargo metadata --locked --format-version 1 >/dev/null \
-  || erreur "Cargo.lock du crate de fuzzing n'est pas à jour"
+  || erreur "the fuzzing crate's Cargo.lock is not up to date"
 
 echec=()
 for cible in "${cibles[@]}"; do
-  echo "=== $cible : ${duree} s ===" >&2
+  echo "=== $cible: ${duree} s ===" >&2
   mkdir -p "$racine/crates/barking-core/fuzz/corpus/$cible"
-  # shellcheck disable=SC2016  # les $1 et $2 sont ceux du bash du conteneur
+  # shellcheck disable=SC2016  # $1 and $2 are those of the container's bash
   if ! lancer bash -c '
       mkdir -p "/fuzzwork/$1" && cargo fuzz run "$1" "/fuzzwork/$1" "corpus/$1" -- "-max_total_time=$2" -timeout=10 -rss_limit_mb=2048
     ' _ "$cible" "$duree"; then
     echec+=("$cible")
     artefact="$(find "$racine/crates/barking-core/fuzz/artifacts/$cible" -type f -print 2>/dev/null | head -n1 || true)"
-    echo "PLANTAGE de la cible $cible. Artefact : ${artefact:-introuvable (voir crates/barking-core/fuzz/artifacts/$cible/)}" >&2
+    echo "CRASH of target $cible. Artifact: ${artefact:-not found (see crates/barking-core/fuzz/artifacts/$cible/)}" >&2
   fi
 done
 
 if [ "${#echec[@]}" -gt 0 ]; then
-  echo "Cibles en échec : ${echec[*]}" >&2
+  echo "Failed targets: ${echec[*]}" >&2
   exit 1
 fi
-echo "Aucune cible ne plante (${duree} s chacune)." >&2
+echo "No target crashes (${duree} s each)." >&2

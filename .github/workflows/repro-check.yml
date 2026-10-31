@@ -20,11 +20,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Deux builds, deux chemins, mêmes empreintes
+      - name: Two builds, two paths, same checksums
         run: scripts/tests/repro-twice.sh
 
   rust:
-    name: contrôle Rust (fmt, clippy, tests)
+    name: Rust checks (fmt, clippy, tests)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -32,17 +32,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Chaîne épinglée par rust-toolchain.toml, installée explicitement (rustup est sur les runners Ubuntu).
-      - name: Installer la chaîne Rust épinglée
+      # Toolchain pinned by rust-toolchain.toml, installed explicitly (rustup is on the Ubuntu runners).
+      - name: Install the pinned Rust toolchain
         run: |
           canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
-          [ -n "$canal" ] || { echo "canal introuvable dans rust-toolchain.toml" >&2; exit 1; }
+          [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
           rustup toolchain install "$canal" --profile minimal --component rustfmt --component clippy
           rustup default "$canal"
       - run: scripts/check.sh
 
   release-scripts:
-    name: scripts de signature et de vérification
+    name: signing and verification scripts
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -74,18 +74,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # La cible macOS compile nativement avec rustup : il faut le compilateur épinglé
-      # (rust-toolchain.toml), installé explicitement plutôt que par l'installation automatique.
-      - name: Installer la chaîne Rust épinglée (macOS)
+      # The macOS target builds natively with rustup: the pinned compiler is needed
+      # (rust-toolchain.toml), installed explicitly rather than through automatic installation.
+      - name: Install the pinned Rust toolchain (macOS)
         if: matrix.target == 'aarch64-apple-darwin'
         run: |
           canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
-          [ -n "$canal" ] || { echo "canal introuvable dans rust-toolchain.toml" >&2; exit 1; }
+          [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
           rustup toolchain install "$canal" --profile minimal --target aarch64-apple-darwin
           rustup default "$canal"
 
-      # Le binaire macOS n'est reproductible qu'avec le même Xcode et le même SDK : ceux de .xcode-version.
-      - name: Sélectionner l'Xcode épinglé (macOS)
+      # The macOS binary is only reproducible with the same Xcode and the same SDK: those of .xcode-version.
+      - name: Select the pinned Xcode (macOS)
         if: matrix.target == 'aarch64-apple-darwin'
         env:
           RUNNER_LABEL: ${{ matrix.runner }}
@@ -94,17 +94,17 @@ jobs:
           runner="$(sed -n 's/^runner=//p' .xcode-version | head -n1)"
           xcode="$(sed -n 's/^xcode=//p' .xcode-version | head -n1)"
           sdk="$(sed -n 's/^sdk=//p' .xcode-version | head -n1)"
-          [ -n "$runner" ] && [ -n "$xcode" ] && [ -n "$sdk" ] || { echo ".xcode-version incomplet" >&2; exit 1; }
+          [ -n "$runner" ] && [ -n "$xcode" ] && [ -n "$sdk" ] || { echo ".xcode-version incomplete" >&2; exit 1; }
           [ "$runner" = "$RUNNER_LABEL" ] \
-            || { echo "runner $RUNNER_LABEL différent de celui de .xcode-version ($runner)" >&2; exit 1; }
+            || { echo "runner $RUNNER_LABEL differs from the one in .xcode-version ($runner)" >&2; exit 1; }
           sudo xcode-select -s "/Applications/Xcode_${xcode}.app"
           reel_xcode="$(xcodebuild -version | sed -n 's/^Xcode //p' | head -n1)"
           reel_sdk="$(xcrun --show-sdk-version)"
           echo "Xcode $reel_xcode, SDK $reel_sdk"
-          [ "$reel_xcode" = "$xcode" ] || { echo "Xcode $reel_xcode au lieu de $xcode" >&2; exit 1; }
-          [ "$reel_sdk" = "$sdk" ] || { echo "SDK $reel_sdk au lieu de $sdk" >&2; exit 1; }
+          [ "$reel_xcode" = "$xcode" ] || { echo "Xcode $reel_xcode instead of $xcode" >&2; exit 1; }
+          [ "$reel_sdk" = "$sdk" ] || { echo "SDK $reel_sdk instead of $sdk" >&2; exit 1; }
 
-      - name: Build reproductible
+      - name: Reproducible build
         env:
           TARGET: ${{ matrix.target }}
           COPIE: ${{ matrix.copie }}
@@ -120,7 +120,7 @@ jobs:
           retention-days: 3
 
   compare:
-    name: comparaison des copies
+    name: comparison of the copies
     needs: build
     runs-on: ubuntu-24.04
     permissions: {}
@@ -130,21 +130,21 @@ jobs:
           pattern: build-*
           path: copies
 
-      - name: Les copies a et b sont identiques
+      - name: Copies a and b are identical
         run: |
           set -euo pipefail
           for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
             a="copies/build-$t-a"; b="copies/build-$t-b"
-            [ -d "$a" ] && [ -d "$b" ] || { echo "copies manquantes pour $t" >&2; exit 1; }
+            [ -d "$a" ] && [ -d "$b" ] || { echo "missing copies for $t" >&2; exit 1; }
             for prog in barking-cli barking-node; do
               bins_a="$(cd "$a" && ls "$prog"-* 2>/dev/null || true)"
               bins_b="$(cd "$b" && ls "$prog"-* 2>/dev/null || true)"
               [ -n "$bins_a" ] && [ "$(printf '%s\n' "$bins_a" | wc -l)" -eq 1 ] \
-                || { echo "il faut exactement un binaire $prog pour $t (copie a) : $bins_a" >&2; exit 1; }
+                || { echo "there must be exactly one $prog binary for $t (copy a): $bins_a" >&2; exit 1; }
               [ "$bins_a" = "$bins_b" ] \
-                || { echo "noms de binaires différents pour $t : $bins_a / $bins_b" >&2; exit 1; }
-              case "$bins_a" in *"-$t") ;; *) echo "nom inattendu pour $t : $bins_a" >&2; exit 1 ;; esac
-              cmp "$a/$bins_a" "$b/$bins_a" || { echo "les deux copies de $t diffèrent ($prog) : build non reproductible" >&2; exit 1; }
+                || { echo "binary names differ for $t: $bins_a / $bins_b" >&2; exit 1; }
+              case "$bins_a" in *"-$t") ;; *) echo "unexpected name for $t: $bins_a" >&2; exit 1 ;; esac
+              cmp "$a/$bins_a" "$b/$bins_a" || { echo "the two copies of $t differ ($prog): non-reproducible build" >&2; exit 1; }
             done
             cmp "$a/SHA256SUMS" "$b/SHA256SUMS"
           done

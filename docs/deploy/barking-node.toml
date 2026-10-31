@@ -1,70 +1,70 @@
-# Configuration de barking-node. Toute clé absente prend la valeur par défaut
-# de la spécification (indiquée en commentaire) ; une clé inconnue est une
-# erreur au démarrage.
+# barking-node configuration. Any missing key takes the default value
+# of the specification (given in a comment); an unknown key is an
+# error at startup.
 
-# Adresses d'écoute UDP (QUIC). `[::]` accepte aussi l'IPv4 sous Linux quand
-# net.ipv6.bindv6only=0 (réglage habituel) ; sinon liste les deux familles :
+# UDP listen addresses (QUIC). `[::]` also accepts IPv4 on Linux when
+# net.ipv6.bindv6only=0 (the usual setting); otherwise list both families:
 # listen = ["0.0.0.0:4433", "[::]:4433"]
 listen = ["[::]:4433"]
 
-# Dossier de données : node.key (mode 0600) et node.db. Créé par `init`.
+# Data directory: node.key (mode 0600) and node.db. Created by `init`.
 data_dir = "/var/lib/barking-node"
 
-# Plafond d'octets gardés (paquets + accusés). Défaut : 1 Gio.
+# Cap on stored bytes (packets + acknowledgements). Default: 1 GiB.
 # storage_max_bytes = 1073741824
-# Petit appareil (Raspberry Pi, carte SD) : 256 Mio.
+# Small device (Raspberry Pi, SD card): 256 MiB.
 # storage_max_bytes = 268435456
 
-# Difficulté de base de la preuve de travail, de 1 à 24 bits. Défaut : 18.
+# Base difficulty of the proof of work, from 1 to 24 bits. Default: 18.
 pow_bits = 18
 
-# Connexions simultanées : au total (défaut 1 000) et par adresse IP, par
-# préfixe /64 en IPv6 (défaut 8).
+# Simultaneous connections: in total (default 1,000) and per IP address, per
+# /64 prefix for IPv6 (default 8).
 # max_connections = 1000
 # max_connections_per_ip = 8
-# Plafonds par préfixe plus large : IPv6 /56 (32) et /48 (64), IPv4 /24 (32).
-# Table pleine : la connexion la plus longtemps inactive du /48 ou /24 le plus
-# représenté cède sa place.
+# Caps per wider prefix: IPv6 /56 (32) and /48 (64), IPv4 /24 (32).
+# Full table: the longest-idle connection of the most represented /48 or /24
+# gives up its place.
 # max_connections_per_ipv6_56 = 32
 # max_connections_per_ipv6_48 = 64
 # max_connections_per_ipv4_24 = 32
-# Petit appareil : max_connections = 200
+# Small device: max_connections = 200
 
-# Mémoire des réponses : octets de réponses en vol, tous pairs confondus
-# (défaut 64 Mio ; la mémoire réelle vaut environ le double), et par adresse
-# (défaut 4 Mio, au moins 1 Mio).
+# Response memory: bytes of in-flight responses, all peers combined
+# (default 64 MiB; the actual memory is about double), and per address
+# (default 4 MiB, at least 1 MiB).
 # max_response_bytes_in_flight = 67108864
 # max_response_bytes_per_ip = 4194304
-# Petit appareil (Raspberry Pi avec 1 Gio de mémoire) :
+# Small device (Raspberry Pi with 1 GiB of memory):
 # max_response_bytes_in_flight = 16777216
 # max_response_bytes_per_ip = 2097152
 
-# Opérations de base simultanées ou en attente (défaut 64). Au-delà : RateLimited.
+# Simultaneous or pending base operations (default 64). Beyond that: RateLimited.
 # max_db_jobs = 64
-# Part de cette file par /64 ou /32 : max_db_jobs / 16 ; par /48 ou /24 :
-# max_db_jobs / 8 par défaut, réglable :
+# Share of this queue per /64 or /32: max_db_jobs / 16; per /48 or /24:
+# max_db_jobs / 8 by default, adjustable:
 # max_db_jobs_per_prefix = 8
-# Petit appareil : max_db_jobs = 16
+# Small device: max_db_jobs = 16
 
-# Débit minimal attendu d'un lecteur, en octets/s (défaut 32 Kio/s). Il allonge
-# l'échéance d'écriture d'une réponse de taille / débit, au plus 60 s.
+# Minimum throughput expected from a reader, in bytes/s (default 32 KiB/s). It extends
+# the write deadline of a response by size / throughput, at most 60 s.
 # min_send_rate = 32768
 
-# Période des journaux agrégés, en secondes (défaut 60).
+# Period of the aggregated logs, in seconds (default 60).
 # log_interval_secs = 60
 
-# Table de hachage entre nœuds (S/Kademlia). Sans `public_addr`, la table est
-# désactivée : le nœud reste un simple relais et répond `Unsupported` aux
-# requêtes de la table.
+# Hash table between nodes (S/Kademlia). Without `public_addr`, the table is
+# disabled: the node remains a simple relay and answers `Unsupported` to the
+# table's requests.
 # [dht]
-# Une ou deux adresses publiques (IPv4 et/ou IPv6, avec le port d'écoute),
-# publiées dans la fiche signée du nœud.
+# One or two public addresses (IPv4 and/or IPv6, with the listen port),
+# published in the node's signed record.
 # public_addr = ["203.0.113.7:4433", "[2001:db8::7]:4433"]
-# Nœuds d'amorçage supplémentaires `identifiant@adresse:port`, essayés après
-# la liste intégrée au binaire.
+# Additional bootstrap nodes `identifier@address:port`, tried after
+# the list built into the binary.
 # bootstrap = []
-# Accepte les adresses non routables : tests et réseaux locaux seulement.
+# Accepts non-routable addresses: tests and local networks only.
 # allow_private_addrs = false
-# Plafond de recopie sortante vers les autres responsables, en octets par
-# heure. Défaut : 512 Mio. Petit appareil (Raspberry Pi) : 128 Mio.
+# Cap on outgoing replication to the other responsible nodes, in bytes per
+# hour. Default: 512 MiB. Small device (Raspberry Pi): 128 MiB.
 # replication_bytes_per_hour = 134217728

@@ -1,7 +1,7 @@
-# Environnement de la CI pour la cible aarch64-apple-darwin (release.yml, repro-check.yml).
-# Le binaire macOS n'est reproductible qu'avec le même Xcode et le même SDK : repro-build.sh refuse
-# de compiler cette cible si `xcodebuild -version` et `xcrun --show-sdk-version` ne donnent pas ces valeurs.
-# Source : actions/runner-images, images/macos/macos-26-arm64-Readme.md (image 20261013.0424.1) :
+# CI environment for the aarch64-apple-darwin target (release.yml, repro-check.yml).
+# The macOS binary is only reproducible with the same Xcode and the same SDK: repro-build.sh refuses
+# to build this target if `xcodebuild -version` and `xcrun --show-sdk-version` do not give these values.
+# Source: actions/runner-images, images/macos/macos-26-arm64-Readme.md (image 20261013.0424.1):
 # Xcode 26.6 (build 17F113), /Applications/Xcode_26.6.app, SDK macosx26.5.
 runner=macos-26
 xcode=26.6

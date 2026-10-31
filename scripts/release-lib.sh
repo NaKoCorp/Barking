@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Fonctions communes à sign-release.sh et verify-release.sh (à sourcer, pas à exécuter).
-# Compatible bash 3.2 (macOS) : ni tableau associatif, ni mapfile.
+# Functions shared by sign-release.sh and verify-release.sh (to be sourced, not executed).
+# Compatible with bash 3.2 (macOS): no associative arrays, no mapfile.
 
-erreur() { echo "erreur : $*" >&2; exit 1; }
+erreur() { echo "error: $*" >&2; exit 1; }
 
-# sha256sum n'existe pas partout (macOS) : repli sur shasum.
+# sha256sum is not available everywhere (macOS): fall back to shasum.
 sha256_de() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
-# Format de version accepté (sert à construire des noms de fichiers et des tags).
+# Accepted version format (used to build file names and tags).
 valider_version() {
-  [[ $1 =~ ^[0-9A-Za-z.+-]+$ ]] || erreur "version invalide : « $1 » (caractères autorisés : lettres, chiffres, . + -)"
+  [[ $1 =~ ^[0-9A-Za-z.+-]+$ ]] || erreur "invalid version: « $1 » (allowed characters: letters, digits, . + -)"
 }
 
-# Dépôt GitHub pour gh : $1 (--repo), sinon $BARKING_REPO, sinon l'URL de origin (github https ou ssh).
-# Positionne REPO (vide si inconnu). $2 = racine du dépôt git.
+# GitHub repository for gh: $1 (--repo), otherwise $BARKING_REPO, otherwise the origin URL (github https or ssh).
+# Sets REPO (empty if unknown). $2 = root of the git repository.
 resoudre_repo() {
   local url
   REPO="${1:-${BARKING_REPO:-}}"
@@ -32,18 +32,18 @@ resoudre_repo() {
   return 0
 }
 exiger_repo() {
-  [ -n "$REPO" ] || erreur "dépôt GitHub inconnu : passez --repo <owner/repo> ou définissez BARKING_REPO"
+  [ -n "$REPO" ] || erreur "unknown GitHub repository: pass --repo <owner/repo> or set BARKING_REPO"
 }
 
-# Une clé publique minisign contient une ligne « RW… » (56 caractères base64), pas seulement des commentaires.
+# A minisign public key contains an « RW… » line (56 base64 characters), not just comments.
 exiger_cle_publique() { # $1 = fichier
-  [ -f "$1" ] || erreur "clé publique introuvable : $1"
+  [ -f "$1" ] || erreur "public key not found: $1"
   grep -qE '^RW[A-Za-z0-9+/]{54}$' "$1" \
-    || erreur "la clé publique $1 est vide ou invalide : le mainteneur doit d'abord y publier sa clé minisign (voir keys/README.md). Ou passez une clé avec --pubkey <fichier>."
+    || erreur "the public key $1 is empty or invalid: the maintainer must first publish their minisign key there (see keys/README.md). Or pass a key with --pubkey <file>."
 }
 
-# Environnement macOS de la CI, lu dans un fichier .xcode-version (lignes « clé=valeur »).
-# Positionne XCODE_ATTENDU et SDK_ATTENDU ; code 1 si le fichier est absent ou incomplet.
+# CI macOS environment, read from an .xcode-version file (« key=value » lines).
+# Sets XCODE_ATTENDU and SDK_ATTENDU; returns 1 if the file is missing or incomplete.
 lire_xcode_version() { # $1 = fichier
   XCODE_ATTENDU=""; SDK_ATTENDU=""
   [ -f "$1" ] || return 1
@@ -52,36 +52,36 @@ lire_xcode_version() { # $1 = fichier
   [ -n "$XCODE_ATTENDU" ] && [ -n "$SDK_ATTENDU" ]
 }
 
-# Cette machine peut-elle reproduire le binaire macOS de la CI ? Il faut rustup (la chaîne officielle
-# épinglée par rust-toolchain.toml, pas le rustc de Homebrew) et exactement l'Xcode et le SDK de la CI.
-# Code 0 si oui ; sinon 1, avec la raison dans RAISON_DARWIN.
+# Can this machine reproduce the CI's macOS binary? It needs rustup (the official toolchain
+# pinned by rust-toolchain.toml, not Homebrew's rustc) and exactly the CI's Xcode and SDK.
+# Returns 0 if so; otherwise 1, with the reason in RAISON_DARWIN.
 environnement_darwin_conforme() { # $1 = fichier .xcode-version
   local xcode sdk
   RAISON_DARWIN=""
   if ! command -v rustup >/dev/null 2>&1; then
-    RAISON_DARWIN="rustup absent (le rustc de Homebrew n'est pas la chaîne officielle épinglée)"
+    RAISON_DARWIN="rustup missing (Homebrew's rustc is not the official pinned toolchain)"
     return 1
   fi
   if ! lire_xcode_version "$1"; then
-    RAISON_DARWIN="fichier $1 absent ou incomplet (Xcode de la CI inconnu)"
+    RAISON_DARWIN="file $1 missing or incomplete (CI Xcode unknown)"
     return 1
   fi
   xcode="$(xcodebuild -version 2>/dev/null | sed -n 's/^Xcode //p' | head -n1 || true)"
   sdk="$(xcrun --show-sdk-version 2>/dev/null || true)"
   if [ "$xcode" != "$XCODE_ATTENDU" ] || [ "$sdk" != "$SDK_ATTENDU" ]; then
-    RAISON_DARWIN="SDK/Xcode différent de celui de la CI (ici : Xcode ${xcode:-inconnu}, SDK ${sdk:-inconnu} ; CI : Xcode $XCODE_ATTENDU, SDK $SDK_ATTENDU, voir .xcode-version)"
+    RAISON_DARWIN="Xcode/SDK differs from the CI's (here: Xcode ${xcode:-unknown}, SDK ${sdk:-unknown}; CI: Xcode $XCODE_ATTENDU, SDK $SDK_ATTENDU, see .xcode-version)"
     return 1
   fi
   return 0
 }
 
-# Fichier .xcode-version qui décrit l'environnement macOS attendu : celui du tag de la version
-# (voir fichier_xcode_du_tag et recompiler_localement), sinon celui de l'arbre de travail.
+# .xcode-version file describing the expected macOS environment: the one from the release tag
+# (see fichier_xcode_du_tag and recompiler_localement), otherwise the working tree's.
 XCODE_VERSION_FICHIER=""
 AVIS_DARWIN_DONNE=0
 
-# Prend le .xcode-version enregistré dans le tag v<version>, s'il existe.
-fichier_xcode_du_tag() { # $1 = racine du dépôt, $2 = version, $3 = répertoire de travail
+# Takes the .xcode-version recorded in tag v<version>, if it exists.
+fichier_xcode_du_tag() { # $1 = repository root, $2 = version, $3 = working directory
   if git -C "$1" show "v$2:.xcode-version" > "$3/xcode-version-du-tag" 2>/dev/null; then
     XCODE_VERSION_FICHIER="$3/xcode-version-du-tag"
   else
@@ -89,8 +89,8 @@ fichier_xcode_du_tag() { # $1 = racine du dépôt, $2 = version, $3 = répertoir
   fi
 }
 
-# Cibles compilables sur cette machine : cibles Linux musl de l'architecture de l'hôte
-# (via Docker) ; aarch64-apple-darwin seulement sur macOS arm64, avec rustup et l'Xcode/SDK de la CI.
+# Targets buildable on this machine: Linux musl targets of the host architecture
+# (via Docker); aarch64-apple-darwin only on macOS arm64, with rustup and the CI's Xcode/SDK.
 cible_compilable_ici() {
   local os arch
   os="$(uname -s)"; arch="$(uname -m)"
@@ -103,17 +103,17 @@ cible_compilable_ici() {
       environnement_darwin_conforme "$XCODE_VERSION_FICHIER" && return 0
       if [ "$AVIS_DARWIN_DONNE" -eq 0 ]; then
         AVIS_DARWIN_DONNE=1
-        echo "avis : aarch64-apple-darwin n'est pas recompilé sur cette machine : $RAISON_DARWIN." >&2
-        echo "avis : pour cette cible, la confiance repose sur le double build de la CI, l'attestation de provenance et les reconstructions indépendantes (barking-rebuilds). Seules les cibles Linux de cette machine sont recompilées et comparées." >&2
+        echo "notice: aarch64-apple-darwin is not rebuilt on this machine: $RAISON_DARWIN." >&2
+        echo "notice: for this target, trust rests on the CI double build, the provenance attestation and the independent rebuilds (barking-rebuilds). Only this machine's Linux targets are rebuilt and compared." >&2
       fi
       ;;
   esac
   return 1
 }
 
-# Cible d'un binaire de la version $2 : « barking-cli-<version>-<cible> » ou « barking-node-<version>-<cible> ».
-# Affiche la cible ; code 1 pour tout autre nom (autre binaire, autre version).
-# Les cibles publiées sont exactement CIBLES_PUBLIEES : toute autre cible est refusée.
+# Target of a binary of version $2: « barking-cli-<version>-<target> » or « barking-node-<version>-<target> ».
+# Prints the target; returns 1 for any other name (other binary, other version).
+# The published targets are exactly CIBLES_PUBLIEES: any other target is refused.
 CIBLES_PUBLIEES="x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
 cible_du_nom() { # $1 = nom, $2 = version
   local c
@@ -125,84 +125,84 @@ cible_du_nom() { # $1 = nom, $2 = version
   case " $CIBLES_PUBLIEES " in *" $c "*) printf '%s\n' "$c" ;; *) return 1 ;; esac
 }
 
-# Contrôle SHA256SUMS et les binaires barking-cli-<version>-* et barking-node-<version>-* d'un répertoire.
-# Calcule et compare soi-même les empreintes. Sort en erreur (exit 1) au premier problème.
-# Positionne NOMS_LISTES (noms séparés par des espaces).
-controler_somme_dir() { # $1 = répertoire, $2 = version
+# Checks SHA256SUMS and the barking-cli-<version>-* and barking-node-<version>-* binaries of a directory.
+# Computes and compares the checksums itself. Exits with an error (exit 1) at the first problem.
+# Sets NOMS_LISTES (names separated by spaces).
+controler_somme_dir() { # $1 = directory, $2 = version
   local dir="$1" version="$2" sums ligne somme nom reel f n c p
   local motif='^([0-9a-f]{64})  ([A-Za-z0-9._+-]+)$'
   local vus="|"
   NOMS_LISTES=""
   sums="$dir/SHA256SUMS"
-  [ -s "$sums" ] || erreur "SHA256SUMS absent ou vide dans $dir"
+  [ -s "$sums" ] || erreur "SHA256SUMS missing or empty in $dir"
   while IFS= read -r ligne || [ -n "$ligne" ]; do
-    [[ $ligne =~ $motif ]] || erreur "ligne illisible dans SHA256SUMS : $ligne"
+    [[ $ligne =~ $motif ]] || erreur "unreadable line in SHA256SUMS: $ligne"
     somme="${BASH_REMATCH[1]}"; nom="${BASH_REMATCH[2]}"
-    cible_du_nom "$nom" "$version" >/dev/null || erreur "entrée inattendue dans SHA256SUMS (pas un binaire barking-cli ou barking-node de la version $version pour une cible publiée : $CIBLES_PUBLIEES) : $nom"
-    case "$vus" in *"|$nom|"*) erreur "entrée en double dans SHA256SUMS : $nom" ;; esac
+    cible_du_nom "$nom" "$version" >/dev/null || erreur "unexpected entry in SHA256SUMS (not a barking-cli or barking-node binary of version $version for a published target: $CIBLES_PUBLIEES): $nom"
+    case "$vus" in *"|$nom|"*) erreur "duplicate entry in SHA256SUMS: $nom" ;; esac
     vus="$vus$nom|"
-    [ -f "$dir/$nom" ] || erreur "fichier manquant : $nom est listé dans SHA256SUMS mais absent de $dir"
+    [ -f "$dir/$nom" ] || erreur "missing file: $nom is listed in SHA256SUMS but absent from $dir"
     reel="$(sha256_de "$dir/$nom")" || reel=""
-    [ -n "$reel" ] || erreur "calcul de l'empreinte impossible pour $nom"
-    [ "$reel" = "$somme" ] || erreur "empreinte incorrecte pour $nom (SHA256SUMS : $somme, fichier : $reel)"
+    [ -n "$reel" ] || erreur "cannot compute the checksum for $nom"
+    [ "$reel" = "$somme" ] || erreur "incorrect checksum for $nom (SHA256SUMS: $somme, file: $reel)"
     NOMS_LISTES="$NOMS_LISTES $nom"
   done < "$sums"
   for f in "$dir"/barking-cli-* "$dir"/barking-node-*; do
     [ -e "$f" ] || continue
     n="$(basename "$f")"
-    case "$vus" in *"|$n|"*) ;; *) erreur "fichier en trop : $n est présent dans $dir mais absent de SHA256SUMS" ;; esac
+    case "$vus" in *"|$n|"*) ;; *) erreur "extra file: $n is present in $dir but absent from SHA256SUMS" ;; esac
   done
-  # Jeu complet exigé : barking-cli et barking-node pour chacune des cibles publiées, ni plus ni moins.
+  # Complete set required: barking-cli and barking-node for each published target, no more, no less.
   for c in $CIBLES_PUBLIEES; do
     for p in barking-cli barking-node; do
-      case "$vus" in *"|$p-$version-$c|"*) ;; *) erreur "jeu incomplet : $p-$version-$c est absent de SHA256SUMS (barking-cli et barking-node sont exigés pour chaque cible publiée)" ;; esac
+      case "$vus" in *"|$p-$version-$c|"*) ;; *) erreur "incomplete set: $p-$version-$c is absent from SHA256SUMS (barking-cli and barking-node are required for each published target)" ;; esac
     done
   done
   NOMS_LISTES="${NOMS_LISTES# }"
 }
 
-# Compare les binaires de $1 (liste NOMS_LISTES) à ceux d'un répertoire produit par repro-build.sh.
-comparer_reconstruction() { # $1 = répertoire de la version, $2 = répertoire reconstruit, $3 = version
+# Compares the binaries of $1 (list NOMS_LISTES) with those of a directory produced by repro-build.sh.
+comparer_reconstruction() { # $1 = release directory, $2 = rebuilt directory, $3 = version
   local dir="$1" rebuilt="$2" version="$3" nom cible compares=0 h_rec h_pub
   for nom in $NOMS_LISTES; do
-    cible="$(cible_du_nom "$nom" "$version")" || erreur "nom de binaire inattendu : $nom"
+    cible="$(cible_du_nom "$nom" "$version")" || erreur "unexpected binary name: $nom"
     if [ -f "$rebuilt/$nom" ]; then
       h_rec="$(sha256_de "$rebuilt/$nom")" || h_rec=""
       h_pub="$(sha256_de "$dir/$nom")" || h_pub=""
-      if [ -z "$h_rec" ] || [ -z "$h_pub" ]; then erreur "calcul de l'empreinte impossible pour $nom"; fi
+      if [ -z "$h_rec" ] || [ -z "$h_pub" ]; then erreur "cannot compute the checksum for $nom"; fi
       [ "$h_rec" = "$h_pub" ] \
-        || erreur "la recompilation locale diffère du binaire publié pour $nom (build non reproductible ou binaire altéré)"
+        || erreur "the local rebuild differs from the published binary for $nom (non-reproducible build or tampered binary)"
       compares=$((compares + 1))
     elif cible_compilable_ici "$cible"; then
-      erreur "cible compilable sur cette machine sans recompilation correspondante : $nom"
+      erreur "target buildable on this machine without a corresponding rebuild: $nom"
     fi
   done
-  [ "$compares" -gt 0 ] || erreur "aucune cible n'a pu être recompilée et comparée sur cette machine"
+  [ "$compares" -gt 0 ] || erreur "no target could be rebuilt and compared on this machine"
 }
 
-# Recompile avec repro-build.sh chaque cible listée compilable ici, dans $3.
-# L'environnement de build (scripts/, docker/, .xcode-version, rust-toolchain.toml) est celui enregistré
-# dans le tag v<version>, extrait dans $4 : jamais celui de l'arbre de travail.
-recompiler_localement() { # $1 = racine du dépôt, $2 = version, $3 = répertoire de sortie, $4 = répertoire de travail
+# Rebuilds with repro-build.sh each listed target buildable here, into $3.
+# The build environment (scripts/, docker/, .xcode-version, rust-toolchain.toml) is the one recorded
+# in tag v<version>, extracted into $4: never the working tree's.
+recompiler_localement() { # $1 = repository root, $2 = version, $3 = output directory, $4 = working directory
   local racine="$1" version="$2" out="$3" env="$4/env-du-tag" nom cible chemin faites=" "
   git -C "$racine" rev-parse --verify --quiet "v$version^{commit}" >/dev/null \
-    || erreur "le tag v$version est introuvable dans ce clone (git fetch --tags)"
+    || erreur "tag v$version not found in this clone (git fetch --tags)"
   for chemin in scripts/repro-build.sh scripts/release-lib.sh docker/repro.Dockerfile .xcode-version rust-toolchain.toml; do
     git -C "$racine" cat-file -e "v$version:$chemin" 2>/dev/null \
-      || erreur "le tag v$version ne contient pas $chemin : son environnement de build n'est pas enregistré (version antérieure à cette procédure). Recompilez à la main depuis le tag (voir docs/VERIFYING.md)."
+      || erreur "tag v$version does not contain $chemin: its build environment is not recorded (version predating this procedure). Rebuild by hand from the tag (see docs/VERIFYING.md)."
   done
   mkdir -p "$env" "$out"
   git -C "$racine" archive --format=tar "v$version" scripts docker .xcode-version rust-toolchain.toml \
-    | tar -x -C "$env" || erreur "extraction de l'environnement de build du tag v$version échouée"
+    | tar -x -C "$env" || erreur "extracting the build environment of tag v$version failed"
   XCODE_VERSION_FICHIER="$env/.xcode-version"
   for nom in $NOMS_LISTES; do
-    cible="$(cible_du_nom "$nom" "$version")" || erreur "nom de binaire inattendu : $nom"
-    # Une seule reconstruction par cible : repro-build.sh produit déjà les deux binaires.
+    cible="$(cible_du_nom "$nom" "$version")" || erreur "unexpected binary name: $nom"
+    # Only one rebuild per target: repro-build.sh already produces both binaries.
     case "$faites" in *" $cible "*) continue ;; esac
     cible_compilable_ici "$cible" || continue
     faites="$faites$cible "
-    echo "recompilation de $cible (environnement de build du tag v$version)…" >&2
+    echo "rebuilding $cible (build environment of tag v$version)…" >&2
     "$env/scripts/repro-build.sh" --git-dir "$racine" --target "$cible" --ref "v$version" --out "$out" >/dev/null \
-      || erreur "la recompilation de $cible a échoué"
+      || erreur "rebuilding $cible failed"
   done
 }

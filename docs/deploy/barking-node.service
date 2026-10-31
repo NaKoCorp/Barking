@@ -1,6 +1,6 @@
-# Unité systemd de barking-node.
+# systemd unit for barking-node.
 #
-# Installation (exemple) :
+# Installation (example):
 #   useradd --system --home-dir /var/lib/barking-node --shell /usr/sbin/nologin barking-node
 #   install -m 0755 barking-node /usr/local/bin/barking-node
 #   install -d -m 0700 -o barking-node -g barking-node /var/lib/barking-node
@@ -9,7 +9,7 @@
 #   install -m 0644 barking-node.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now barking-node
 [Unit]
-Description=Nœud Barking (paquets chiffrés en attente, QUIC)
+Description=Barking node (pending encrypted packets, QUIC)
 After=network-online.target
 Wants=network-online.target
 
@@ -20,7 +20,7 @@ Group=barking-node
 ExecStart=/usr/local/bin/barking-node run --config /etc/barking-node.toml
 Restart=on-failure
 RestartSec=5
-# Le dossier de données (clé, base) est le seul endroit inscriptible.
+# The data directory (key, database) is the only writable place.
 StateDirectory=barking-node
 StateDirectoryMode=0700
 ReadWritePaths=/var/lib/barking-node
@@ -33,8 +33,8 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
-# AF_UNIX : le pilote de signaux de tokio crée une paire de sockets Unix au
-# démarrage (tokio signal/unix.rs, `UnixStream::pair().expect(..)`).
+# AF_UNIX: tokio's signal driver creates a pair of Unix sockets at
+# startup (tokio signal/unix.rs, `UnixStream::pair().expect(..)`).
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
 LockPersonality=yes
@@ -47,13 +47,13 @@ ProtectProc=invisible
 ProcSubset=pid
 RestrictNamespaces=yes
 RestrictRealtime=yes
-# À tester sur une vraie machine avant de l'activer (un appel système manquant
-# tue le processus) :
+# Test on a real machine before enabling it (a missing system call
+# kills the process):
 # SystemCallFilter=@system-service
-# Petit appareil (Raspberry Pi) : plafond de mémoire du service.
+# Small device (Raspberry Pi): memory cap for the service.
 # MemoryMax=512M
 UMask=0077
-# Port UDP > 1024 : aucune capacité n'est nécessaire.
+# UDP port > 1024: no capability is needed.
 LimitNOFILE=4096
 
 [Install]

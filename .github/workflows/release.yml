@@ -1,12 +1,12 @@
 name: release
 
-# Publication reproductible : double build par cible, comparaison octet par octet,
-# attestation de provenance, puis version en brouillon (signée ensuite par le mainteneur).
+# Reproducible release: double build per target, byte-by-byte comparison,
+# provenance attestation, then draft release (signed afterwards by the maintainer).
 on:
   push:
     tags: ['v*']
 
-# Deux pushes de tags ne doivent pas se marcher dessus : file d'attente, pas d'annulation.
+# Two tag pushes must not step on each other: queue them, do not cancel.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -15,7 +15,7 @@ permissions: {}
 
 jobs:
   verifier-tag:
-    name: tag et version
+    name: tag and version
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -25,34 +25,34 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Le commit du tag est dans l'historique de main
+      - name: The tag's commit is in main's history
         env:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           commit="$(git rev-parse --verify "refs/tags/$TAG^{commit}")"
           git rev-parse --verify origin/main >/dev/null \
-            || { echo "origin/main introuvable dans le clone" >&2; exit 1; }
+            || { echo "origin/main not found in the clone" >&2; exit 1; }
           if ! git merge-base --is-ancestor "$commit" origin/main; then
-            echo "le commit $commit du tag $TAG n'est pas un ancêtre de origin/main : publiez depuis main" >&2
+            echo "commit $commit of tag $TAG is not an ancestor of origin/main: release from main" >&2
             exit 1
           fi
-          echo "tag $TAG : commit $commit, ancêtre de origin/main"
+          echo "tag $TAG: commit $commit, ancestor of origin/main"
 
-      - name: Le tag correspond à la version de barking-cli et de barking-node
+      - name: The tag matches the version of barking-cli and barking-node
         env:
           TAG: ${{ github.ref_name }}
         run: |
           version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-cli/Cargo.toml | head -n1)"
-          [ -n "$version" ] || { echo "version introuvable dans crates/barking-cli/Cargo.toml" >&2; exit 1; }
+          [ -n "$version" ] || { echo "version not found in crates/barking-cli/Cargo.toml" >&2; exit 1; }
           version_node="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-node/Cargo.toml | head -n1)"
-          [ -n "$version_node" ] || { echo "version introuvable dans crates/barking-node/Cargo.toml" >&2; exit 1; }
+          [ -n "$version_node" ] || { echo "version not found in crates/barking-node/Cargo.toml" >&2; exit 1; }
           if [ "$version" != "$version_node" ]; then
-            echo "barking-cli ($version) et barking-node ($version_node) doivent avoir la même version" >&2
+            echo "barking-cli ($version) and barking-node ($version_node) must have the same version" >&2
             exit 1
           fi
           if [ "$TAG" != "v$version" ]; then
-            echo "le tag $TAG ne correspond pas à la version v$version de crates/barking-cli/Cargo.toml et crates/barking-node/Cargo.toml" >&2
+            echo "tag $TAG does not match version v$version of crates/barking-cli/Cargo.toml and crates/barking-node/Cargo.toml" >&2
             exit 1
           fi
 
@@ -78,18 +78,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # La cible macOS compile nativement avec rustup : il faut le compilateur épinglé
-      # (rust-toolchain.toml), installé explicitement plutôt que par l'installation automatique.
-      - name: Installer la chaîne Rust épinglée (macOS)
+      # The macOS target builds natively with rustup: the pinned compiler is needed
+      # (rust-toolchain.toml), installed explicitly rather than through automatic installation.
+      - name: Install the pinned Rust toolchain (macOS)
         if: matrix.target == 'aarch64-apple-darwin'
         run: |
           canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
-          [ -n "$canal" ] || { echo "canal introuvable dans rust-toolchain.toml" >&2; exit 1; }
+          [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
           rustup toolchain install "$canal" --profile minimal --target aarch64-apple-darwin
           rustup default "$canal"
 
-      # Le binaire macOS n'est reproductible qu'avec le même Xcode et le même SDK : ceux de .xcode-version.
-      - name: Sélectionner l'Xcode épinglé (macOS)
+      # The macOS binary is only reproducible with the same Xcode and the same SDK: those of .xcode-version.
+      - name: Select the pinned Xcode (macOS)
         if: matrix.target == 'aarch64-apple-darwin'
         env:
           RUNNER_LABEL: ${{ matrix.runner }}
@@ -98,17 +98,17 @@ jobs:
           runner="$(sed -n 's/^runner=//p' .xcode-version | head -n1)"
           xcode="$(sed -n 's/^xcode=//p' .xcode-version | head -n1)"
           sdk="$(sed -n 's/^sdk=//p' .xcode-version | head -n1)"
-          [ -n "$runner" ] && [ -n "$xcode" ] && [ -n "$sdk" ] || { echo ".xcode-version incomplet" >&2; exit 1; }
+          [ -n "$runner" ] && [ -n "$xcode" ] && [ -n "$sdk" ] || { echo ".xcode-version incomplete" >&2; exit 1; }
           [ "$runner" = "$RUNNER_LABEL" ] \
-            || { echo "runner $RUNNER_LABEL différent de celui de .xcode-version ($runner)" >&2; exit 1; }
+            || { echo "runner $RUNNER_LABEL differs from the one in .xcode-version ($runner)" >&2; exit 1; }
           sudo xcode-select -s "/Applications/Xcode_${xcode}.app"
           reel_xcode="$(xcodebuild -version | sed -n 's/^Xcode //p' | head -n1)"
           reel_sdk="$(xcrun --show-sdk-version)"
           echo "Xcode $reel_xcode, SDK $reel_sdk"
-          [ "$reel_xcode" = "$xcode" ] || { echo "Xcode $reel_xcode au lieu de $xcode" >&2; exit 1; }
-          [ "$reel_sdk" = "$sdk" ] || { echo "SDK $reel_sdk au lieu de $sdk" >&2; exit 1; }
+          [ "$reel_xcode" = "$xcode" ] || { echo "Xcode $reel_xcode instead of $xcode" >&2; exit 1; }
+          [ "$reel_sdk" = "$sdk" ] || { echo "SDK $reel_sdk instead of $sdk" >&2; exit 1; }
 
-      - name: Build reproductible
+      - name: Reproducible build
         env:
           TARGET: ${{ matrix.target }}
           COPIE: ${{ matrix.copie }}
@@ -125,7 +125,7 @@ jobs:
           retention-days: 7
 
   compare:
-    name: comparaison des copies
+    name: comparison of the copies
     needs: build
     runs-on: ubuntu-24.04
     permissions: {}
@@ -135,33 +135,33 @@ jobs:
           pattern: build-*
           path: copies
 
-      - name: Comparer les copies a et b, fusionner SHA256SUMS
+      - name: Compare copies a and b, merge SHA256SUMS
         run: |
           set -euo pipefail
           targets="x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
           mkdir release
           for t in $targets; do
             a="copies/build-$t-a"; b="copies/build-$t-b"
-            [ -d "$a" ] && [ -d "$b" ] || { echo "copies manquantes pour $t" >&2; exit 1; }
+            [ -d "$a" ] && [ -d "$b" ] || { echo "missing copies for $t" >&2; exit 1; }
             for prog in barking-cli barking-node; do
               bins_a="$(cd "$a" && ls "$prog"-* 2>/dev/null || true)"
               bins_b="$(cd "$b" && ls "$prog"-* 2>/dev/null || true)"
               [ -n "$bins_a" ] && [ "$(printf '%s\n' "$bins_a" | wc -l)" -eq 1 ] \
-                || { echo "il faut exactement un binaire $prog pour $t (copie a) : $bins_a" >&2; exit 1; }
+                || { echo "there must be exactly one $prog binary for $t (copy a): $bins_a" >&2; exit 1; }
               [ "$bins_a" = "$bins_b" ] \
-                || { echo "noms de binaires différents pour $t : $bins_a / $bins_b" >&2; exit 1; }
-              case "$bins_a" in *"-$t") ;; *) echo "nom inattendu pour $t : $bins_a" >&2; exit 1 ;; esac
+                || { echo "binary names differ for $t: $bins_a / $bins_b" >&2; exit 1; }
+              case "$bins_a" in *"-$t") ;; *) echo "unexpected name for $t: $bins_a" >&2; exit 1 ;; esac
               cmp "$a/$bins_a" "$b/$bins_a" \
-                || { echo "les deux copies de $t diffèrent ($prog) : build non reproductible" >&2; exit 1; }
+                || { echo "the two copies of $t differ ($prog): non-reproducible build" >&2; exit 1; }
               cp "$a/$bins_a" release/
             done
             cmp "$a/SHA256SUMS" "$b/SHA256SUMS" \
-              || { echo "les SHA256SUMS des copies de $t diffèrent" >&2; exit 1; }
+              || { echo "the SHA256SUMS of the copies of $t differ" >&2; exit 1; }
             (cd "$a" && sha256sum -c SHA256SUMS)
           done
           chmod 755 release/barking-cli-* release/barking-node-*
-          [ "$(find release -maxdepth 1 -type f -name 'barking-cli-*' | wc -l)" -eq 3 ] || { echo "3 binaires barking-cli attendus" >&2; exit 1; }
-          [ "$(find release -maxdepth 1 -type f -name 'barking-node-*' | wc -l)" -eq 3 ] || { echo "3 binaires barking-node attendus" >&2; exit 1; }
+          [ "$(find release -maxdepth 1 -type f -name 'barking-cli-*' | wc -l)" -eq 3 ] || { echo "3 barking-cli binaries expected" >&2; exit 1; }
+          [ "$(find release -maxdepth 1 -type f -name 'barking-node-*' | wc -l)" -eq 3 ] || { echo "3 barking-node binaries expected" >&2; exit 1; }
           (cd release && sha256sum barking-cli-* barking-node-* | LC_ALL=C sort -k2 > SHA256SUMS && sha256sum -c SHA256SUMS)
           cat release/SHA256SUMS
 
@@ -173,7 +173,7 @@ jobs:
           retention-days: 7
 
   publish:
-    name: attestation et brouillon
+    name: attestation and draft
     needs: compare
     runs-on: ubuntu-24.04
     permissions:
@@ -185,7 +185,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Version du tag
+      - name: Tag version
         env:
           TAG: ${{ github.ref_name }}
         run: echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
@@ -195,10 +195,10 @@ jobs:
           name: release-files
           path: release
 
-      - name: Les binaires portent la version du tag
+      - name: The binaries carry the tag's version
         run: |
           for f in release/barking-cli-* release/barking-node-*; do
-            case "$f" in "release/barking-cli-${VERSION}-"*|"release/barking-node-${VERSION}-"*) ;; *) echo "binaire inattendu : $f" >&2; exit 1 ;; esac
+            case "$f" in "release/barking-cli-${VERSION}-"*|"release/barking-node-${VERSION}-"*) ;; *) echo "unexpected binary: $f" >&2; exit 1 ;; esac
           done
           (cd release && sha256sum -c SHA256SUMS)
 
@@ -208,21 +208,21 @@ jobs:
             release/barking-cli-*
             release/barking-node-*
 
-      - name: Créer la version en brouillon
+      - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Les brouillons n'ont pas de tag publié : on les cherche dans la liste complète des versions.
+          # Drafts have no published tag: look for them in the complete list of releases.
           ids="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
             --jq '.[] | select(.tag_name == env.TAG) | .id')" \
-            || { echo "impossible de lister les versions existantes (API GitHub)" >&2; exit 1; }
+            || { echo "cannot list existing releases (GitHub API)" >&2; exit 1; }
           if [ -n "$ids" ]; then
-            echo "une version $TAG existe déjà (brouillon d'un run précédent ?) : supprimez-la (gh release delete $TAG) puis relancez le workflow" >&2
+            echo "a release $TAG already exists (draft from a previous run?): delete it (gh release delete $TAG) then rerun the workflow" >&2
             exit 1
           fi
-          notes="Brouillon : en attente de la signature du mainteneur (\`scripts/sign-release.sh\`)."
+          notes="Draft: awaiting the maintainer's signature (\`scripts/sign-release.sh\`)."
           gh release create "$TAG" --draft --verify-tag -R "$GITHUB_REPOSITORY" \
             --title "$TAG" --notes "$notes" \
             release/barking-cli-* release/barking-node-* release/SHA256SUMS

@@ -1,8 +1,8 @@
-# Image du test des scripts de signature et de vérification (scripts/tests/release-scripts.sh).
-# Même base Debian bookworm que les autres images du projet (empreinte épinglée) et même
-# snapshot apt que docker/repro.Dockerfile : minisign et git viennent de ce snapshot.
-# git dépend de perl, dont le snapshot n'a pas le perl-base (plus récent) de l'image de base :
-# perl-base est donc ramené à la version du snapshot.
+# Test image for the signing and verification scripts (scripts/tests/release-scripts.sh).
+# Same Debian bookworm base as the project's other images (pinned digest) and same
+# apt snapshot as docker/repro.Dockerfile: minisign and git come from this snapshot.
+# git depends on perl, and the snapshot lacks the base image's (newer) perl-base:
+# perl-base is therefore brought down to the snapshot's version.
 FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
 ARG DEBIAN_SNAPSHOT=20261001T000000Z
