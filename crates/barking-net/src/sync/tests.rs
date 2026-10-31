@@ -68,7 +68,18 @@ struct Net {
     refuse_deposit: HashMap<NodeId, ErrorReason>,
     /// Proof work of a message deposit; beyond the budget: `PowBudget`.
     pow_cost: u64,
+    /// The session to that node dies right after any fetch (the node cut
+    /// it, or it went idle): later requests on it fail as unreachable.
+    die_after_fetch: HashSet<NodeId>,
+    /// Sessions that died, by connection number.
+    dead: Mutex<HashSet<usize>>,
     calls: Mutex<Vec<Call>>,
+}
+
+/// A session of the test network: the node, and the connection's number.
+struct Conn {
+    id: NodeId,
+    n: usize,
 }
 
 impl Net {
@@ -134,26 +145,36 @@ impl Dialer for Net {
 }
 
 impl Connector for Net {
-    type Conn = NodeId;
+    type Conn = Conn;
 
-    async fn connect(&self, id: NodeId, _addrs: &[SocketAddr]) -> Result<NodeId, DialError> {
-        self.log(Call::Connect(id));
+    async fn connect(&self, id: NodeId, _addrs: &[SocketAddr]) -> Result<Conn, DialError> {
+        let n = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(Call::Connect(id));
+            calls.len()
+        };
         if self.up(&id) {
-            Ok(id)
+            Ok(Conn { id, n })
         } else {
             Err(DialError::Unreachable)
         }
     }
 
-    async fn close(&self, conn: NodeId) {
-        self.log(Call::Close(conn));
+    async fn close(&self, conn: Conn) {
+        self.log(Call::Close(conn.id));
+    }
+}
+
+impl Net {
+    fn dead(&self, conn: &Conn) -> bool {
+        self.dead.lock().unwrap().contains(&conn.n)
     }
 }
 
 impl Fetcher for Net {
     async fn fetch(
         &self,
-        conn: &mut NodeId,
+        session: &mut Conn,
         mailboxes: &[MailboxId],
         resume: &mut FetchResume,
         _max_bytes: usize,
@@ -164,7 +185,14 @@ impl Fetcher for Net {
             .filter(|m| resume.seen.get(&m.0).is_some_and(|s| *s > 0))
             .copied()
             .collect();
+        let conn = &session.id;
         self.log(Call::Fetch(*conn, mailboxes.to_vec(), positioned.clone()));
+        if self.dead(session) {
+            return Err(DialError::Unreachable);
+        }
+        if self.die_after_fetch.contains(conn) {
+            self.dead.lock().unwrap().insert(session.n);
+        }
         let reread_delay = match mailboxes {
             [m] if positioned.is_empty() => self.reread_delay.get(m).copied(),
             _ => None,
@@ -202,7 +230,8 @@ impl Fetcher for Net {
 }
 
 impl Depositor for Net {
-    async fn deposit(&self, conn: &mut NodeId, packet: &[u8], pow_left: u64) -> DepositReply {
+    async fn deposit(&self, session: &mut Conn, packet: &[u8], pow_left: u64) -> DepositReply {
+        let conn = &session.id;
         let n = {
             let mut calls = self.calls.lock().unwrap();
             let n = calls
@@ -212,6 +241,12 @@ impl Depositor for Net {
             calls.push(Call::Deposit(*conn, content_hash(packet)));
             n
         };
+        if self.dead(session) {
+            return DepositReply {
+                outcome: Err(DialError::Unreachable),
+                pow_spent: 0,
+            };
+        }
         if self.stall_deposit_from.is_some_and(|from| n >= from) {
             std::future::pending::<()>().await;
         }
@@ -1372,4 +1407,62 @@ async fn slow_builtin_seed_joins_on_a_slow_link() {
     let e = state.view.get(&seed).expect("seed in the view");
     assert!(e.confirmed && e.record.is_some(), "{e:?}");
     assert!(e.score.value() >= 0.5, "{e:?}");
+}
+
+// --- Dead sessions -----------------------------------------------------------
+
+/// The best responsible of the message's mailbox, raised so that it is also
+/// the best responsible of a session mailbox: fetched from, then deposited
+/// on, in the same sync.
+fn fetched_then_deposited(core: &mut Core) -> (NodeId, Vec<u8>) {
+    let (bytes, m) = message(core);
+    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let mut state = load(core);
+    let x = state
+        .view
+        .responsibles_by_score(&m, NOW)
+        .into_iter()
+        .find(|id| {
+            sessions
+                .iter()
+                .any(|s| state.view.responsibles_by_score(s, NOW).contains(id))
+        })
+        .expect("a responsible of both");
+    state.view.entries.get_mut(&x).unwrap().score = Score::new(0.9);
+    state.save(core).unwrap();
+    (x, bytes)
+}
+
+fn connects_to(calls: &[Call], id: NodeId) -> usize {
+    connects(calls).into_iter().filter(|n| *n == id).count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn connection_stop_drops_the_session() {
+    let (_dir, mut core, mut net) = setup();
+    let (x, bytes) = fetched_then_deposited(&mut core);
+    // The node cuts the connection in the middle of the fetch.
+    net.truncate.insert(x, FetchStop::Connection);
+    net.die_after_fetch.insert(x);
+    sync(&mut core, &net, opts()).await;
+    let calls = net.calls();
+    // The deposit went out on a new connection, and was accepted there.
+    assert!(connects_to(&calls, x) >= 2, "{calls:?}");
+    assert!(holders(&mut core, &bytes).contains(&x));
+}
+
+#[tokio::test(start_paused = true)]
+async fn request_on_a_dead_kept_session_redials_once() {
+    let (_dir, mut core, mut net) = setup();
+    let (x, bytes) = fetched_then_deposited(&mut core);
+    // A complete fetch, then the session dies unnoticed (idle timeout).
+    net.die_after_fetch.insert(x);
+    let before = score_of(&mut core, &x);
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.polled_all_sessions, "{report:?}");
+    let calls = net.calls();
+    assert!(connects_to(&calls, x) >= 2, "{calls:?}");
+    assert!(holders(&mut core, &bytes).contains(&x));
+    // Never failed for its dead session.
+    assert!(score_of(&mut core, &x) > before, "{before}");
 }

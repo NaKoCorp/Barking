@@ -29,7 +29,10 @@
 //! answered during this sync (until then failures wait; if none answers, the
 //! client's own connection is at fault). Only full dial timeouts count: a
 //! lookup request or a candidate ping cut by the client's shorter caps is
-//! neither a failure nor a success. `Found` at most once per node per
+//! neither a failure nor a success. A request that fails on a session kept
+//! from an earlier one dials again once before the node fails (the session
+//! may have died: idle timeout, cut connection); a fetch ended by a cut
+//! connection leaves no session behind. `Found` at most once per node per
 //! sync, at most one failure per node per sync. A node whose session
 //! fetches are all cut by a lost connection for `UNAUDITED_SYNCS` syncs in a
 //! row cannot be audited: one failure per sync from then on. Loss audits of
@@ -277,6 +280,7 @@ impl<'a, D: Connector> Run<'a, D> {
             failed: HashSet::new(),
             limited: HashSet::new(),
             cut: HashSet::new(),
+            unused: HashSet::new(),
             pending_failures: Vec::new(),
             penalized: HashSet::new(),
             found: HashSet::new(),
@@ -312,6 +316,8 @@ struct Run<'a, D: Connector> {
     dialer: &'a D,
     state: NetState,
     conns: HashMap<NodeId, D::Conn>,
+    /// Kept connections on which no request was made yet (the seed probe's).
+    unused: HashSet<NodeId>,
     /// Nodes that failed (connection, timeout, protocol) during this sync.
     failed: HashSet<NodeId>,
     /// Nodes that answered `RateLimited`: nothing more asked this sync.
@@ -568,6 +574,7 @@ where
     fn fail(&mut self, id: NodeId) {
         self.failed.insert(id);
         self.conns.remove(&id);
+        self.unused.remove(&id);
         self.score(id, ScoreEvent::Failure);
         if !self.report.network_up {
             self.dial_failures = self.dial_failures.saturating_add(1);
@@ -603,6 +610,7 @@ where
                 self.answered();
                 self.state.view.confirm(&id, self.now);
                 self.conns.insert(id, conn);
+                self.unused.insert(id);
             }
             Ok(Err(DialError::Refused(_))) => {
                 self.answered();
@@ -653,11 +661,12 @@ where
         out
     }
 
-    /// The kept connection to `id`, or a new one. `None` if the node cannot
-    /// be reached (it is then marked failed) or the deadline is over.
-    async fn take_conn(&mut self, id: NodeId) -> Option<D::Conn> {
+    /// The kept connection to `id`, or a new one, and whether it was just
+    /// opened (no request made on it yet). `None` if the node cannot be
+    /// reached (it is then marked failed) or the deadline is over.
+    async fn take_conn(&mut self, id: NodeId) -> Option<(D::Conn, bool)> {
         if let Some(c) = self.conns.remove(&id) {
-            return Some(c);
+            return Some((c, self.unused.remove(&id)));
         }
         self.confirm_down().await;
         if self.down || self.failed.contains(&id) || self.limited.contains(&id) {
@@ -665,7 +674,7 @@ where
         }
         // The seed probe may have opened it.
         if let Some(c) = self.conns.remove(&id) {
-            return Some(c);
+            return Some((c, self.unused.remove(&id)));
         }
         self.dialed.insert(id);
         let addrs = self
@@ -681,7 +690,7 @@ where
                 self.answered();
                 // A pinned handshake proves the node.
                 self.state.view.confirm(&id, self.now);
-                Some(conn)
+                Some((conn, true))
             }
             Ok(Err(DialError::Refused(_) | DialError::NoAddress)) => {
                 self.failed.insert(id);
@@ -729,17 +738,27 @@ where
                 if !d.is_ack && (pow_exhausted || acks_only) {
                     continue;
                 }
-                let Some(mut conn) = self.take_conn(d.node).await else {
-                    if self.over() {
+                // A kept session may have died since its last request (cut
+                // connection, idle timeout): one new dial before the node
+                // is failed.
+                let mut redialled = false;
+                let (conn, reply) = loop {
+                    let Some((mut conn, fresh)) = self.take_conn(d.node).await else {
+                        if self.over() {
+                            break 'plan;
+                        }
+                        continue 'plan;
+                    };
+                    let deposit = self.dialer.deposit(&mut conn, &d.bytes, self.pow_left);
+                    let Ok(reply) = tokio::time::timeout_at(self.deadline, deposit).await else {
                         break 'plan;
+                    };
+                    self.pow_left = self.pow_left.saturating_sub(reply.pow_spent);
+                    match &reply.outcome {
+                        Err(e) if !fresh && !redialled && dead_session(e) => redialled = true,
+                        _ => break (conn, reply),
                     }
-                    continue 'plan;
                 };
-                let deposit = self.dialer.deposit(&mut conn, &d.bytes, self.pow_left);
-                let Ok(reply) = tokio::time::timeout_at(self.deadline, deposit).await else {
-                    break 'plan;
-                };
-                self.pow_left = self.pow_left.saturating_sub(reply.pow_spent);
                 let result = match reply.outcome {
                     Ok(DepositOutcome::Answered(result)) => result,
                     Ok(DepositOutcome::PowBudget) => {
@@ -931,6 +950,12 @@ where
         self.apply_observed(observed);
         self.save();
     }
+}
+
+/// A failure that a session kept from an earlier request may owe to its own
+/// death rather than to the node: worth one new dial.
+fn dead_session(e: &DialError) -> bool {
+    matches!(e, DialError::Unreachable | DialError::Timeout)
 }
 
 /// `id` answered a ping pinned on it with `record`: the record is kept if

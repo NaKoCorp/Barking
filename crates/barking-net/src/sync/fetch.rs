@@ -13,7 +13,7 @@ use super::FetchStop;
 use super::io::{Depositor, FetchReply, Fetcher};
 use super::{
     AUDIT_EVERY_SECS, CROSSCHECK_EVERY_SECS, INTRO_FETCH_BYTES, REREAD_BYTES, REREAD_TIME, Run,
-    SESSION_FETCH_SLICE, UNAUDITED_SYNCS, intro_slice, receive_all,
+    SESSION_FETCH_SLICE, UNAUDITED_SYNCS, dead_session, intro_slice, receive_all,
 };
 use crate::discover::{DialError, Dialer};
 use crate::plan::{detect_losses, found_messages};
@@ -223,17 +223,6 @@ where
         max_bytes: usize,
         slice_end: Instant,
     ) -> (GroupEnd, usize, bool) {
-        let Some(mut conn) = self.take_conn(node).await else {
-            let end = if self.over() {
-                GroupEnd::Stop
-            } else {
-                GroupEnd::Incomplete {
-                    truncated: false,
-                    counts: false,
-                }
-            };
-            return (end, 0, true);
-        };
         let mut resume = self.state.resume(&node, group);
         // Mailboxes read from their very start: the only ones a loss audit
         // may rely on (a resumed fetch skips the items already seen).
@@ -242,13 +231,36 @@ where
             .filter(|m| resume.seen.get(&m.0).copied().unwrap_or(0) == 0)
             .copied()
             .collect();
-        let slice = slice_end.saturating_duration_since(Instant::now());
-        let fetch = self
-            .dialer
-            .fetch(&mut conn, group, &mut resume, max_bytes, slice);
-        let reply = match tokio::time::timeout_at(self.deadline, fetch).await {
-            Err(_) => return (GroupEnd::Stop, 0, true),
-            Ok(r) => r,
+        // A kept session may have died since its last request: one new dial
+        // before the node is failed.
+        let mut redialled = false;
+        let (conn, reply) = loop {
+            let Some((mut conn, fresh)) = self.take_conn(node).await else {
+                let end = if self.over() {
+                    GroupEnd::Stop
+                } else {
+                    GroupEnd::Incomplete {
+                        truncated: false,
+                        counts: false,
+                    }
+                };
+                return (end, 0, true);
+            };
+            let slice = slice_end.saturating_duration_since(Instant::now());
+            let fetch = self
+                .dialer
+                .fetch(&mut conn, group, &mut resume, max_bytes, slice);
+            let reply = match tokio::time::timeout_at(self.deadline, fetch).await {
+                Err(_) => return (GroupEnd::Stop, 0, true),
+                Ok(r) => r,
+            };
+            match &reply {
+                Err(e) if !fresh && !redialled && dead_session(e) => {
+                    redialled = true;
+                    resume = self.state.resume(&node, group);
+                }
+                _ => break (conn, reply),
+            }
         };
         let not_served = |truncated| GroupEnd::Incomplete {
             truncated,
@@ -278,8 +290,14 @@ where
         // (a slow link) never count against it.
         let counts = stop == FetchStop::Connection && Instant::now() < slice_end;
         self.answered();
-        self.score(node, ScoreEvent::Success);
-        self.conns.insert(node, conn);
+        if stop == FetchStop::Connection {
+            // A cut connection leaves a dead session: the next request on
+            // this node dials again.
+            drop(conn);
+        } else {
+            self.score(node, ScoreEvent::Success);
+            self.conns.insert(node, conn);
+        }
         if stop == FetchStop::RateLimited {
             self.limited.insert(node);
         }
@@ -358,26 +376,50 @@ where
                 if self.limited.contains(&node) {
                     break;
                 }
-                let Some(mut conn) = self.conns.remove(&node) else {
+                let Some(kept) = self.conns.remove(&node) else {
                     break;
                 };
+                self.unused.remove(&node);
                 self.state.note_reread(&node, &m, self.now);
                 let one = [m];
-                let mut resume = FetchResume::default();
-                let slice = end.saturating_duration_since(Instant::now());
-                let fetch = self
-                    .dialer
-                    .fetch(&mut conn, &one, &mut resume, bytes_left, slice);
-                // Out of time: the session is dropped mid-request.
-                let Ok(reply) = tokio::time::timeout_at(end, fetch).await else {
-                    self.save();
-                    return;
+                // The kept session may have died since its last request:
+                // one new dial before the node is failed.
+                let mut conn = Some(kept);
+                let (conn, reply) = loop {
+                    let fresh = conn.is_none();
+                    let mut c = match conn.take() {
+                        Some(c) => c,
+                        None => match self.take_conn(node).await {
+                            Some((c, _)) => c,
+                            None => {
+                                self.save();
+                                return;
+                            }
+                        },
+                    };
+                    let mut resume = FetchResume::default();
+                    let slice = end.saturating_duration_since(Instant::now());
+                    let fetch = self
+                        .dialer
+                        .fetch(&mut c, &one, &mut resume, bytes_left, slice);
+                    // Out of time: the session is dropped mid-request.
+                    let Ok(reply) = tokio::time::timeout_at(end, fetch).await else {
+                        self.save();
+                        return;
+                    };
+                    match &reply {
+                        Err(e) if !fresh && dead_session(e) => {}
+                        _ => break (c, reply),
+                    }
                 };
                 match reply {
                     Ok(FetchReply::Items { items, stop }) => {
                         self.answered();
-                        self.score(node, ScoreEvent::Success);
-                        self.conns.insert(node, conn);
+                        // A cut connection leaves a dead session.
+                        if stop != FetchStop::Connection {
+                            self.score(node, ScoreEvent::Success);
+                            self.conns.insert(node, conn);
+                        }
                         bytes_left = bytes_left.saturating_sub(
                             items.iter().map(Vec::len).fold(0, usize::saturating_add),
                         );
