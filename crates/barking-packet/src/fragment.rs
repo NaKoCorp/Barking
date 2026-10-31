@@ -1,33 +1,33 @@
-//! Fragmentation et réassemblage pour les liaisons à petite MTU (LoRa).
+//! Fragmentation and reassembly for small-MTU links (LoRa).
 //!
-//! Trame = 8 octets de clé (hash du paquet entier), `index u8`, `count u8`,
-//! puis un morceau du paquet. Le réassemblage recalcule la clé : une trame
-//! falsifiée ou contradictoire est détectée et l'entrée abandonnée.
+//! Frame = 8 key bytes (hash of the whole packet), `index u8`, `count u8`,
+//! then a chunk of the packet. Reassembly recomputes the key: a forged
+//! or contradictory frame is detected and the entry dropped.
 
 use crate::error::{PacketError, Result};
 use crate::labels::FRAME_CONTEXT;
 
-/// Longueur de l'en-tête de trame.
+/// Length of the frame header.
 pub const FRAG_HEADER_LEN: usize = 10;
 
-/// Raison d'erreur : le paquet réassemblé ne correspond pas à la clé de trame.
-pub const REASON_BAD_HASH: &str = "hash de trame incorrect";
+/// Error reason: the reassembled packet does not match the frame key.
+pub const REASON_BAD_HASH: &str = "bad frame hash";
 
-/// Raison d'erreur : deux trames d'une même clé se contredisent.
-pub const REASON_CONTRADICTORY: &str = "trames contradictoires";
-/// Plus grand paquet décodable (palier L), en octets.
+/// Error reason: two frames with the same key contradict each other.
+pub const REASON_CONTRADICTORY: &str = "contradictory frames";
+/// Largest decodable packet (tier L), in bytes.
 pub const MAX_PACKET_LEN: usize = 16_384;
 
-/// Longueur maximale d'une trame : le plus grand paquet décodable (palier L)
-/// tient en une seule trame avec son en-tête. `fragment` ne produit jamais de
-/// trame plus longue, quelle que soit la MTU demandée, et le réassemblage
-/// refuse toute trame plus longue.
+/// Maximum frame length: the largest decodable packet (tier L)
+/// fits in a single frame together with its header. `fragment` never produces a
+/// longer frame, whatever MTU is requested, and reassembly
+/// rejects any longer frame.
 pub const MAX_FRAME_LEN: usize = MAX_PACKET_LEN + FRAG_HEADER_LEN;
 
-/// MTU minimale acceptée : en-tête + 64 octets de données.
+/// Minimum accepted MTU: header + 64 bytes of data.
 const MIN_MTU: usize = 74;
 
-/// Clé de trame : 8 premiers octets du hash BLAKE3 du paquet entier.
+/// Frame key: first 8 bytes of the BLAKE3 hash of the whole packet.
 pub fn frame_key(packet: &[u8]) -> [u8; 8] {
     let h = blake3::derive_key(FRAME_CONTEXT, packet);
     let mut k = [0u8; 8];
@@ -35,11 +35,11 @@ pub fn frame_key(packet: &[u8]) -> [u8; 8] {
     k
 }
 
-/// Découpe `packet` en trames d'au plus `mtu` octets (en-tête de trame compris).
+/// Splits `packet` into frames of at most `mtu` bytes (frame header included).
 ///
-/// Exige `mtu >= 74`, un paquet d'au plus `MAX_PACKET_LEN` octets et au plus
-/// 255 trames, sinon `TooLarge`. Une MTU plus grande que `MAX_FRAME_LEN` est
-/// ramenée à `MAX_FRAME_LEN`. Un paquet vide donne tout de même une trame.
+/// Requires `mtu >= 74`, a packet of at most `MAX_PACKET_LEN` bytes and at most
+/// 255 frames, otherwise `TooLarge`. An MTU larger than `MAX_FRAME_LEN` is
+/// clamped to `MAX_FRAME_LEN`. An empty packet still yields one frame.
 pub fn fragment(packet: &[u8], mtu: usize) -> Result<Vec<Vec<u8>>> {
     if mtu < MIN_MTU || packet.len() > MAX_PACKET_LEN {
         return Err(PacketError::TooLarge);
@@ -54,7 +54,7 @@ pub fn fragment(packet: &[u8], mtu: usize) -> Result<Vec<Vec<u8>>> {
         let part = packet.chunks(chunk).nth(index).unwrap_or(&[]);
         let mut f = Vec::with_capacity(FRAG_HEADER_LEN + part.len());
         f.extend_from_slice(&key);
-        // `index < count <= 255` : la conversion ne peut pas échouer.
+        // `index < count <= 255`: the conversion cannot fail.
         f.push(index as u8);
         f.push(count_u8);
         f.extend_from_slice(part);
@@ -71,20 +71,20 @@ struct Entry {
     count: usize,
     parts: Vec<Option<Vec<u8>>>,
     received: usize,
-    /// Longueur commune de tous les morceaux sauf le dernier.
+    /// Common length of all chunks except the last.
     full_len: Option<usize>,
     last_len: Option<usize>,
 }
 
-/// Réassemble des trames. Mémoire bornée : au plus `max_pending` paquets
-/// incomplets, chacun d'au plus 255 morceaux de longueur cohérente, dont
-/// `count - 1` morceaux pleins tiennent dans `MAX_PACKET_LEN` : une entrée
-/// garde au plus `MAX_PACKET_LEN` octets plus un morceau (moins de 32 Kio),
-/// soit environ 2 Mio pour 64 paquets en attente.
+/// Reassembles frames. Bounded memory: at most `max_pending` incomplete
+/// packets, each of at most 255 chunks of consistent length, of which
+/// `count - 1` full chunks fit in `MAX_PACKET_LEN`: an entry
+/// holds at most `MAX_PACKET_LEN` bytes plus one chunk (under 32 KiB),
+/// i.e. about 2 MiB for 64 pending packets.
 pub struct Reassembler {
     max_pending: usize,
     ttl_secs: u64,
-    /// Du plus ancien au plus récent.
+    /// From oldest to most recent.
     entries: Vec<Entry>,
 }
 
@@ -97,7 +97,7 @@ impl Reassembler {
         }
     }
 
-    /// Nombre de paquets incomplets en attente.
+    /// Number of incomplete packets pending.
     pub fn pending(&self) -> usize {
         self.entries.len()
     }
@@ -108,10 +108,10 @@ impl Reassembler {
             .retain(|e| now.saturating_sub(e.first_seen) <= ttl);
 
         if frame.len() < FRAG_HEADER_LEN {
-            return Err(PacketError::Malformed("trame trop courte"));
+            return Err(PacketError::Malformed("frame too short"));
         }
         if frame.len() > MAX_FRAME_LEN {
-            return Err(PacketError::Malformed("trame trop longue"));
+            return Err(PacketError::Malformed("frame too long"));
         }
         let mut key = [0u8; 8];
         key.copy_from_slice(&frame[..8]);
@@ -119,20 +119,20 @@ impl Reassembler {
         let count = usize::from(frame[9]);
         let chunk = &frame[FRAG_HEADER_LEN..];
         if count == 0 {
-            return Err(PacketError::Malformed("nombre de fragments nul"));
+            return Err(PacketError::Malformed("fragment count is zero"));
         }
         if index >= count {
-            return Err(PacketError::Malformed("index de fragment hors limites"));
+            return Err(PacketError::Malformed("fragment index out of range"));
         }
         if chunk.is_empty() && count > 1 {
-            return Err(PacketError::Malformed("fragment vide"));
+            return Err(PacketError::Malformed("empty fragment"));
         }
-        // Budget d'une entrée : les `count - 1` premiers morceaux ont tous la
-        // longueur du plus long, donc `(count - 1) * len` ne dépasse jamais un
-        // paquet décodable si la trame est légitime. Vaut pour le dernier
-        // morceau aussi (il n'est pas plus long que les autres).
+        // Budget of an entry: the first `count - 1` chunks all have the
+        // length of the longest, so `(count - 1) * len` never exceeds a
+        // decodable packet if the frame is legitimate. Holds for the last
+        // chunk too (it is no longer than the others).
         if (count - 1).saturating_mul(chunk.len()) > MAX_PACKET_LEN {
-            return Err(PacketError::Malformed("fragments trop volumineux"));
+            return Err(PacketError::Malformed("fragments too large"));
         }
         if count == 1 {
             if frame_key(chunk) != key {
@@ -164,32 +164,32 @@ impl Reassembler {
         };
         let entry = &mut self.entries[pos];
         if entry.count != count {
-            return Err(PacketError::Malformed("nombre de fragments incohérent"));
+            return Err(PacketError::Malformed("inconsistent fragment count"));
         }
         if let Some(prev) = &entry.parts[index] {
             if prev.as_slice() == chunk {
                 return Ok(None);
             }
-            // Deux contenus pour le même index : l'une des deux trames est
-            // fausse, on abandonne tout le paquet.
+            // Two contents for the same index: one of the two frames is
+            // false, so the whole packet is dropped.
             self.entries.remove(pos);
             return Err(PacketError::Malformed(REASON_CONTRADICTORY));
         }
-        // Cohérence des longueurs : tous les morceaux sauf le dernier ont la
-        // même longueur, et le dernier n'est pas plus long.
+        // Length consistency: all chunks except the last have the
+        // same length, and the last is no longer.
         let is_last = index == count - 1;
         let (full, last) = if is_last {
             (entry.full_len, Some(chunk.len()))
         } else {
             if entry.full_len.is_some_and(|f| f != chunk.len()) {
-                return Err(PacketError::Malformed("longueur de fragment incohérente"));
+                return Err(PacketError::Malformed("inconsistent fragment length"));
             }
             (Some(chunk.len()), entry.last_len)
         };
         if let (Some(f), Some(l)) = (full, last)
             && l > f
         {
-            return Err(PacketError::Malformed("longueur de fragment incohérente"));
+            return Err(PacketError::Malformed("inconsistent fragment length"));
         }
         entry.full_len = full;
         entry.last_len = last;
@@ -293,10 +293,10 @@ mod tests {
         assert!(r.push(&frames[0], 0).unwrap().is_none());
         assert!(r.push(&frames[1], 10).unwrap().is_none());
         assert_eq!(r.pending(), 1);
-        // Une trame invalide déclenche la purge sans rien ajouter.
+        // An invalid frame triggers the purge without adding anything.
         assert!(r.push(&[0; 3], 100).is_err());
         assert_eq!(r.pending(), 0);
-        // Le dernier fragment seul ne complète rien.
+        // The last fragment alone completes nothing.
         assert!(r.push(&frames[2], 100).unwrap().is_none());
         assert_eq!(r.pending(), 1);
     }
@@ -310,7 +310,7 @@ mod tests {
             assert!(r.pending() <= 4);
         }
         assert_eq!(r.pending(), 4);
-        // Le plus ancien (0) a été évincé, le plus récent (9) survit.
+        // The oldest (0) was evicted, the most recent (9) survives.
         let f0 = fragment(&bytes(500, 0), 200).unwrap();
         assert!(r.push(&f0[1], 20).unwrap().is_none());
         assert!(r.push(&f0[2], 20).unwrap().is_none());
@@ -357,7 +357,7 @@ mod tests {
         f.extend_from_slice(&[5, 3, 1]); // index >= count
         assert!(r.push(&f, 0).is_err());
         let mut f = vec![0u8; 8];
-        f.extend_from_slice(&[0, 3]); // morceau vide
+        f.extend_from_slice(&[0, 3]); // empty chunk
         assert!(r.push(&f, 0).is_err());
     }
 
@@ -412,7 +412,7 @@ mod tests {
         forged[FRAG_HEADER_LEN] ^= 1;
         assert!(matches!(r.push(&forged, 0), Err(PacketError::Malformed(_))));
         assert_eq!(r.pending(), 0);
-        // Les trames légitimes reconstituent le paquet.
+        // Legitimate frames rebuild the packet.
         assert!(r.push(&frames[0], 0).unwrap().is_none());
         assert!(r.push(&frames[1], 0).unwrap().is_none());
         assert_eq!(r.push(&frames[2], 0).unwrap().unwrap(), p);
@@ -433,13 +433,13 @@ mod tests {
     #[test]
     fn oversized_frame_refused() {
         let mut r = Reassembler::new(4, 60);
-        // 64 Ko annoncés comme premier morceau d'un paquet en deux trames.
+        // 64 KB announced as the first chunk of a two-frame packet.
         let mut f = vec![7u8; 8];
         f.extend_from_slice(&[0, 2]);
         f.extend(std::iter::repeat_n(0xaa, 64 * 1024));
         assert!(matches!(r.push(&f, 0), Err(PacketError::Malformed(_))));
         assert_eq!(r.pending(), 0);
-        // Même chose en une seule trame : refusée avant tout calcul de hash.
+        // Same thing in a single frame: rejected before any hash computation.
         let mut f = vec![7u8; 8];
         f.extend_from_slice(&[0, 1]);
         f.extend(std::iter::repeat_n(0xaa, 64 * 1024));
@@ -450,13 +450,13 @@ mod tests {
     #[test]
     fn entry_byte_budget_enforced() {
         let mut r = Reassembler::new(4, 60);
-        // 255 morceaux de 1 000 octets : bien plus qu'un paquet de palier L.
+        // 255 chunks of 1,000 bytes: far more than a tier L packet.
         let mut f = vec![9u8; 8];
         f.extend_from_slice(&[0, 255]);
         f.extend(std::iter::repeat_n(0x55, 1000));
         assert!(matches!(r.push(&f, 0), Err(PacketError::Malformed(_))));
         assert_eq!(r.pending(), 0);
-        // Le dernier morceau seul est soumis au même budget.
+        // The last chunk alone is subject to the same budget.
         let mut f = vec![9u8; 8];
         f.extend_from_slice(&[254, 255]);
         f.extend(std::iter::repeat_n(0x55, 1000));
@@ -466,8 +466,8 @@ mod tests {
 
     #[test]
     fn largest_packet_still_reassembles() {
-        // Un paquet de palier L passe le budget, pour toute MTU qui le découpe en
-        // 255 trames au plus (dès 75 octets).
+        // A tier L packet passes the budget, for any MTU that splits it into
+        // at most 255 frames (from 75 bytes).
         let p = bytes(Tier::L.size(), 3);
         for mtu in [75, 200, 255, 1500, MAX_FRAME_LEN, 100_000] {
             let frames = fragment(&p, mtu).unwrap();
@@ -493,7 +493,7 @@ mod tests {
             let Ok(frames) = fragment(&p, mtu) else { return Ok(()); };
             let mut seq: Vec<&Vec<u8>> = Vec::new();
             for (i, f) in frames.iter().enumerate() {
-                // Un paquet d'une trame dupliqué rendrait deux fois le paquet.
+                // A duplicated one-frame packet would yield the packet twice.
                 let extra = if frames.len() > 1 { dups[i % 64] } else { 0 };
                 for _ in 0..=extra { seq.push(f); }
             }
@@ -505,10 +505,10 @@ mod tests {
             let mut r = Reassembler::new(4, 60);
             let mut done = 0;
             for f in seq {
-                // Des doublons arrivant après la complétion repartent sur une
-                // nouvelle entrée qui peut se compléter à son tour : la
-                // déduplication des paquets est l'affaire de la couche
-                // au-dessus. Chaque paquet rendu doit être le bon.
+                // Duplicates arriving after completion start over on a
+                // new entry that may complete in turn: packet
+                // deduplication is the job of the layer
+                // above. Each returned packet must be the right one.
                 if let Some(out) = r.push(f, 0).unwrap() {
                     prop_assert_eq!(out, p.clone());
                     done += 1;
@@ -565,18 +565,18 @@ mod tests {
         ) {
             let pkt = bytes(len, 5);
             let Ok(mut frames) = fragment(&pkt, mtu) else { return Ok(()); };
-            // Ordre mélangé (déterministe selon la graine).
+            // Shuffled order (deterministic given the seed).
             let n = frames.len();
             for i in (1..n).rev() {
                 let j = (seed.wrapping_mul(6364136223846793005).wrapping_add(i as u64) >> 33) as usize % (i + 1);
                 frames.swap(i, j);
             }
-            // Un jeu complet, mélangé : doit toujours se réassembler.
+            // A full set, shuffled: must always reassemble.
             let mut r = Reassembler::new(4, 60);
             let mut out = None;
             for f in &frames { out = r.push(f, 0).unwrap(); }
             prop_assert_eq!(out.unwrap(), pkt);
-            // Même jeu avec pertes, doublons et corruption : aucune panique.
+            // Same set with losses, duplicates and corruption: no panic.
             let mut r = Reassembler::new(4, 60);
             for (i, f) in frames.iter().enumerate() {
                 if drops[i % 64] { continue; }
@@ -607,7 +607,7 @@ mod tests {
                 let j = (seed.wrapping_mul(6364136223846793005).wrapping_add(i as u64) >> 33) as usize % (i + 1);
                 frames.swap(i, j);
             }
-            // Corruption d'octets quelconques (en-tête compris) de trames quelconques.
+            // Arbitrary byte corruption (header included) of arbitrary frames.
             for (fi, pos, b) in &flips {
                 let f = &mut frames[fi % n];
                 let p = pos % f.len();

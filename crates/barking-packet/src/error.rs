@@ -1,12 +1,12 @@
-//! Erreurs du module paquet. Aucune entrée extérieure ne doit provoquer de panique.
+//! Errors of the packet module. No external input may cause a panic.
 
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PacketError {
-    #[error("données mal formées : {0}")]
+    #[error("malformed data: {0}")]
     Malformed(&'static str),
-    #[error("données trop volumineuses")]
+    #[error("data too large")]
     TooLarge,
 }
 

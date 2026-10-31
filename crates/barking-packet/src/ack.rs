@@ -1,22 +1,22 @@
-//! Accusés de réception par secret révélé.
+//! Acknowledgements by revealed secret.
 //!
-//! L'identifiant d'un paquet vaut `BLAKE3(ack_secret)[..16]` ; le secret
-//! n'existe que dans le contenu chiffré. Publier le secret prouve la
-//! réception sans révéler l'identité de l'émetteur de l'accusé.
+//! A packet identifier equals `BLAKE3(ack_secret)[..16]`; the secret
+//! exists only inside the encrypted content. Publishing the secret proves
+//! receipt without revealing the identity of the acknowledger.
 
 use rand_core::CryptoRng;
 
 use super::{DEFAULT_HOPS, Kind, Packet, PacketId, Tier, default_expiry};
 use crate::labels;
 
-/// Tire un secret d'accusé aléatoire.
+/// Draws a random acknowledgement secret.
 pub fn new_secret(rng: &mut impl CryptoRng) -> [u8; 16] {
     let mut s = [0u8; 16];
     rng.fill_bytes(&mut s);
     s
 }
 
-/// Identifiant de paquet attendu pour un secret d'accusé.
+/// Packet identifier expected for an acknowledgement secret.
 pub fn packet_id_for(secret: &[u8; 16]) -> PacketId {
     let full = blake3::derive_key(labels::ACK_CONTEXT, secret);
     let mut id = [0u8; 16];
@@ -24,10 +24,10 @@ pub fn packet_id_for(secret: &[u8; 16]) -> PacketId {
     PacketId(id)
 }
 
-/// Vrai si `secret` correspond à l'identifiant `id`.
+/// True if `secret` matches the identifier `id`.
 pub fn verify(id: &PacketId, secret: &[u8; 16]) -> bool {
-    // Comparaison en temps constant (les deux valeurs ne sont pas secrètes
-    // côté relais, mais l'identifiant ne doit pas servir d'oracle).
+    // Constant-time comparison (neither value is secret on the relay
+    // side, but the identifier must not serve as an oracle).
     let expected = packet_id_for(secret);
     expected
         .0
@@ -38,9 +38,9 @@ pub fn verify(id: &PacketId, secret: &[u8; 16]) -> bool {
 }
 
 impl Packet {
-    /// Accusé pour `acked` : palier S, dans la boîte du message accusé (les
-    /// nœuds qui en gardent une copie la relèvent, l'expéditeur aussi tant
-    /// qu'il attend l'accusé), charge `acked.id || secret`.
+    /// Acknowledgement for `acked`: tier S, in the mailbox of the acknowledged message (nodes
+    /// that keep a copy of it pick it up, and so does the sender while
+    /// it waits for the acknowledgement), payload `acked.id || secret`.
     pub fn ack(acked: &Packet, secret: [u8; 16], now: u64, rng: &mut impl CryptoRng) -> Packet {
         let mut id = [0u8; 16];
         rng.fill_bytes(&mut id);

@@ -1,4 +1,4 @@
-//! Paquet universel : en-tête en clair de 40 octets, trois paliers de taille.
+//! Universal packet: 40-byte cleartext header, three size tiers.
 
 pub mod ack;
 pub mod error;
@@ -10,18 +10,18 @@ use serde::{Deserialize, Serialize};
 
 pub use error::{PacketError, Result};
 
-/// Identifiant de boîte aux lettres (16 octets).
+/// Mailbox identifier (16 bytes).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct MailboxId(pub [u8; 16]);
 
-/// Taille de l'en-tête en clair (sans les 2 octets de longueur).
+/// Size of the cleartext header (excluding the 2 length bytes).
 pub const HEADER_LEN: usize = 40;
-/// Nombre de sauts par défaut.
+/// Default number of hops.
 pub const DEFAULT_HOPS: u8 = 8;
-/// Durée de vie par défaut : 7 jours.
+/// Default lifetime: 7 days.
 pub const DEFAULT_TTL_SECS: u64 = 7 * 86400;
 
-/// Octets d'en-tête + champ de longueur.
+/// Header bytes + length field.
 pub const OVERHEAD: usize = HEADER_LEN + 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,7 +38,7 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// Taille totale du paquet encodé.
+    /// Total size of the encoded packet.
     pub fn size(self) -> usize {
         match self {
             Tier::S => 245,
@@ -47,7 +47,7 @@ impl Tier {
         }
     }
 
-    /// Plus petit palier pouvant contenir `payload_len` octets de charge utile.
+    /// Smallest tier able to hold `payload_len` bytes of payload.
     pub fn fit(payload_len: usize) -> Result<Tier> {
         let total = payload_len
             .checked_add(OVERHEAD)
@@ -73,7 +73,7 @@ pub struct Packet {
     pub payload: Vec<u8>,
 }
 
-/// Expiration par défaut à partir de `now`, saturée dans un `u32`.
+/// Default expiry from `now`, saturated into a `u32`.
 pub fn default_expiry(now: u64) -> u32 {
     u32::try_from(now.saturating_add(DEFAULT_TTL_SECS)).unwrap_or(u32::MAX)
 }
