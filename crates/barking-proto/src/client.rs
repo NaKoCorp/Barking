@@ -6,8 +6,8 @@
 //! - a pickup stops at `MAX_FETCH_ITEMS` items, the byte budget
 //!   of the call (`MAX_FETCH_BYTES` by default), `MAX_FETCH_PAGES` pages or
 //!   `FETCH_DEADLINE` per call; the rest waits for the next pickup (nothing
-//!   is deleted on read) and `Session::last_fetch_truncated`
-//!   reports it. A page is taken whole or not at all; `FetchResume`
+//!   is deleted on read) and `Session::last_fetch_truncated` reports it,
+//!   `Session::last_fetch_stop` saying why. A page is taken whole or not at all; `FetchResume`
 //!   keeps the position reached so that the next pickup resumes there
 //!   instead of rereading the beginning (a flooded mailbox does not block the rest);
 //! - the proof of work of a deposit starts from the base difficulty plus the
@@ -141,6 +141,22 @@ impl FetchResume {
     }
 }
 
+/// Why a pickup returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FetchStop {
+    /// Every mailbox read to its end.
+    Complete,
+    /// The node's rate limit, after pages already taken.
+    RateLimited,
+    /// A client cap: items, bytes or pages.
+    ClientLimit,
+    /// The call's deadline (`set_fetch_deadline`).
+    Deadline,
+    /// Connection lost, or a page given up at the smallest size, after pages
+    /// already taken.
+    Connection,
+}
+
 pub type Result<T> = core::result::Result<T, ClientError>;
 
 /// Opens a QUIC connection pinned on `expected`, without `Hello`. The endpoint
@@ -199,7 +215,7 @@ impl Client {
             node_id: expected,
             pow_bits,
             limits,
-            truncated: false,
+            stop: FetchStop::Complete,
             pow_budget: None,
             pow_spent: 0,
             fetch_deadline: FETCH_DEADLINE,
@@ -322,7 +338,8 @@ pub struct Session {
     node_id: NodeId,
     pow_bits: u8,
     limits: Limits,
-    truncated: bool,
+    /// Why the last pickup stopped.
+    stop: FetchStop,
     /// Permitted proof work (expected attempts), `None`: unbounded.
     pow_budget: Option<u64>,
     /// Proof work spent (expected attempts, `2^bits` per proof).
@@ -449,7 +466,7 @@ impl Session {
         resume: &mut FetchResume,
         max_bytes: usize,
     ) -> Result<Vec<Vec<u8>>> {
-        self.truncated = false;
+        self.stop = FetchStop::Complete;
         let per = usize::from(self.limits.max_mailboxes_per_fetch).min(MAX_MAILBOXES);
         let chunks = resume.chunks(mailboxes, per.max(1));
         let mut out = Vec::new();
@@ -461,8 +478,12 @@ impl Session {
         for chunk in &chunks {
             let mut cursor: Option<u64> = resume.start(chunk);
             loop {
-                if pages >= MAX_FETCH_PAGES || tokio::time::Instant::now() >= deadline {
-                    self.truncated = true;
+                if pages >= MAX_FETCH_PAGES {
+                    self.stop = FetchStop::ClientLimit;
+                    return Ok(out);
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    self.stop = FetchStop::Deadline;
                     return Ok(out);
                 }
                 pages += 1;
@@ -474,7 +495,7 @@ impl Session {
                 let page = request_within(&self.conn, &req, FETCH_PAGE_TIMEOUT);
                 let resp = match tokio::time::timeout_at(deadline, page).await {
                     Err(_) => {
-                        self.truncated = true;
+                        self.stop = FetchStop::Deadline;
                         return Ok(out);
                     }
                     // Stream cut off or too slow: same cursor, smaller page.
@@ -484,6 +505,14 @@ impl Session {
                         size += 1;
                         continue;
                     }
+                    // Connection lost or page given up after pages already
+                    // taken: partial pickup, the rest on the next call.
+                    Ok(Err(
+                        ClientError::Frame(_) | ClientError::Timeout | ClientError::Connection(_),
+                    )) if !out.is_empty() => {
+                        self.stop = FetchStop::Connection;
+                        return Ok(out);
+                    }
                     Ok(r) => r?,
                 };
                 let (mut items, next) = match resp {
@@ -491,7 +520,7 @@ impl Session {
                     // Throughput exhausted after pages already taken: partial
                     // pickup, the rest on the next call.
                     Response::Error(ErrorReason::RateLimited) if !out.is_empty() => {
-                        self.truncated = true;
+                        self.stop = FetchStop::RateLimited;
                         return Ok(out);
                     }
                     Response::Error(r) => return Err(ClientError::Refused(r)),
@@ -513,13 +542,13 @@ impl Session {
                 let over_bytes = bytes.saturating_add(page_bytes) > max_bytes;
                 if !out.is_empty() && (over_items || over_bytes) {
                     // Page left: resume at `cursor` next time.
-                    self.truncated = true;
+                    self.stop = FetchStop::ClientLimit;
                     return Ok(out);
                 }
                 if over_items {
                     // First page already beyond the item cap (hostile
                     // node): truncated, without advancing the cursor.
-                    self.truncated = true;
+                    self.stop = FetchStop::ClientLimit;
                     items.truncate(MAX_FETCH_ITEMS);
                     return Ok(items);
                 }
@@ -540,7 +569,12 @@ impl Session {
     /// True if the last pickup stopped at a client cap:
     /// more items are waiting on the node.
     pub fn last_fetch_truncated(&self) -> bool {
-        self.truncated
+        self.stop != FetchStop::Complete
+    }
+
+    /// Why the last successful pickup stopped (meaningless after an error).
+    pub fn last_fetch_stop(&self) -> FetchStop {
+        self.stop
     }
 
     /// Closes the connection cleanly.

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use barking_packet::MailboxId;
-use barking_proto::client::{Client, ClientError, FetchResume, Session};
+use barking_proto::client::{Client, ClientError, FetchResume, FetchStop, Session};
 use barking_proto::{ErrorReason, NodeId, NodeRecord};
 
 use crate::discover::{DIAL_TIMEOUT, DialError, Dialer, QuicDialer, dial_error};
@@ -16,8 +16,11 @@ use crate::discover::{DIAL_TIMEOUT, DialError, Dialer, QuicDialer, dial_error};
 /// Answer to a fetch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FetchReply {
-    /// Items, and whether the fetch ran to the end.
-    Items { items: Vec<Vec<u8>>, complete: bool },
+    /// Items, and why the fetch stopped (`FetchStop::Complete`: ran to the end).
+    Items {
+        items: Vec<Vec<u8>>,
+        stop: FetchStop,
+    },
     /// Rate limit exhausted before the first page.
     RateLimited,
 }
@@ -109,14 +112,14 @@ impl Fetcher for QuicDialer {
         if mailboxes.is_empty() {
             return Ok(FetchReply::Items {
                 items: Vec::new(),
-                complete: true,
+                stop: FetchStop::Complete,
             });
         }
         conn.set_fetch_deadline(slice);
         match conn.fetch_resumable(mailboxes, resume, max_bytes).await {
             Ok(items) => Ok(FetchReply::Items {
                 items,
-                complete: !conn.last_fetch_truncated(),
+                stop: conn.last_fetch_stop(),
             }),
             Err(ClientError::Refused(ErrorReason::RateLimited)) => Ok(FetchReply::RateLimited),
             Err(e) => Err(dial_error(e)),

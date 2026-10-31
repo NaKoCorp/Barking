@@ -4,11 +4,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use barking_packet::{Kind, MailboxId, Packet};
-use barking_proto::client::MAX_FETCH_BYTES;
+use barking_proto::client::{FetchResume, MAX_FETCH_BYTES};
 use barking_proto::pow::content_hash;
 use barking_proto::{ErrorReason, NodeId};
 use tokio::time::Instant;
 
+use super::FetchStop;
 use super::io::{Depositor, FetchReply, Fetcher};
 use super::{
     AUDIT_EVERY_SECS, INTRO_FETCH_BYTES, Run, SESSION_FETCH_SLICE, UNAUDITED_SYNCS, intro_slice,
@@ -172,19 +173,6 @@ where
             return (end, 0, true);
         };
         let mut resume = self.state.resume(&node, group);
-        // Mailboxes holding a message this node accepted, not audited there
-        // for `AUDIT_EVERY_SECS`: read again from their start (without a
-        // position they get their own slices, so the others keep theirs).
-        let mut reread: Vec<(MailboxId, u64)> = Vec::new();
-        if !intro {
-            for m in self.audit_targets(node, group) {
-                if let Some(old) = resume.seen.remove(&m.0)
-                    && old > 0
-                {
-                    reread.push((m, old));
-                }
-            }
-        }
         // Mailboxes read from their very start: the only ones a loss audit
         // may rely on (a resumed fetch skips the items already seen).
         let from_start: Vec<MailboxId> = group
@@ -200,63 +188,45 @@ where
             Err(_) => return (GroupEnd::Stop, 0, true),
             Ok(r) => r,
         };
-        let (items, complete) = match reply {
-            Ok(FetchReply::Items { items, complete }) => (items, complete),
+        let not_served = |truncated| GroupEnd::Incomplete {
+            truncated,
+            counts: false,
+        };
+        let (items, stop) = match reply {
+            Ok(FetchReply::Items { items, stop }) => (items, stop),
             Ok(FetchReply::RateLimited) | Err(DialError::Refused(ErrorReason::RateLimited)) => {
                 self.answered();
                 self.limited.insert(node);
                 self.conns.insert(node, conn);
-                let end = GroupEnd::Incomplete {
-                    truncated: true,
-                    counts: false,
-                };
-                return (end, 0, true);
+                return (not_served(true), 0, true);
             }
             Err(DialError::Refused(_)) => {
                 self.answered();
                 self.conns.insert(node, conn);
-                let end = GroupEnd::Incomplete {
-                    truncated: false,
-                    counts: false,
-                };
-                return (end, 0, true);
+                return (not_served(false), 0, true);
             }
             Err(_) => {
                 self.fail(node);
-                let end = GroupEnd::Incomplete {
-                    truncated: false,
-                    counts: false,
-                };
-                return (end, 0, true);
+                return (not_served(false), 0, true);
             }
         };
-        // Truncated while the client's slice or deadline ran out: a slow
-        // link, not a node that never lets itself be read to the end.
-        let cut_by_client = Instant::now() >= slice_end;
+        let complete = stop == FetchStop::Complete;
+        // Only a cut connection may be the node's doing: a rate limit, a
+        // client cap, the call's deadline or the client's slice running out
+        // (a slow link) never count against it.
+        let counts = stop == FetchStop::Connection && Instant::now() < slice_end;
         self.answered();
         self.score(node, ScoreEvent::Success);
         self.conns.insert(node, conn);
+        if stop == FetchStop::RateLimited {
+            self.limited.insert(node);
+        }
         let bytes = items
             .iter()
             .map(Vec::len)
             .fold(0usize, usize::saturating_add);
-        let mut received = Vec::new();
-        let mut errors = 0;
-        let processed = receive_all(self.core, &items, self.now, |r| match r {
-            Ok(o) => received.push(o),
-            Err(_) => errors += 1,
-        });
-        self.report.received.append(&mut received);
-        self.report.receive_errors += errors;
-        self.report.items_received += items.len();
+        let processed = self.take_items(&items);
         if processed {
-            if !complete {
-                // A cut re-read does not take a mailbox back.
-                for (m, old) in &reread {
-                    let seen = resume.seen.entry(m.0).or_insert(0);
-                    *seen = (*seen).max(*old);
-                }
-            }
             self.state.set_positions(&node, group, &resume);
         }
         if !intro {
@@ -276,15 +246,88 @@ where
             .received
             .saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
         self.save();
+        if !intro {
+            self.rereads(node, group, slice_end).await;
+        }
         let end = if complete {
             GroupEnd::Complete
         } else {
             GroupEnd::Incomplete {
                 truncated: true,
-                counts: !cut_by_client,
+                counts,
             }
         };
         (end, bytes, processed)
+    }
+
+    /// Passes fetched items to the core. False if one could not be processed.
+    fn take_items(&mut self, items: &[Vec<u8>]) -> bool {
+        let mut received = Vec::new();
+        let mut errors = 0;
+        let processed = receive_all(self.core, items, self.now, |r| match r {
+            Ok(o) => received.push(o),
+            Err(_) => errors += 1,
+        });
+        self.report.received.append(&mut received);
+        self.report.receive_errors += errors;
+        self.report.items_received += items.len();
+        processed
+    }
+
+    /// Audit re-reads on `node`, after the group's regular fetch so that they
+    /// never starve its other mailboxes: each mailbox of `group` holding a
+    /// message the node accepted, not audited there for `AUDIT_EVERY_SECS`,
+    /// is read again from its start in a call of its own. A mailbox whose
+    /// re-read reaches its end is audited; positions are left as they are;
+    /// nothing here counts against the node's completion record.
+    async fn rereads(&mut self, node: NodeId, group: &[MailboxId], slice_end: Instant) {
+        for m in self.audit_targets(node, group) {
+            if Instant::now() >= slice_end || self.limited.contains(&node) {
+                return;
+            }
+            let Some(mut conn) = self.conns.remove(&node) else {
+                return;
+            };
+            let one = [m];
+            let mut resume = FetchResume::default();
+            let slice = slice_end.saturating_duration_since(Instant::now());
+            let fetch = self
+                .dialer
+                .fetch(&mut conn, &one, &mut resume, MAX_FETCH_BYTES, slice);
+            let Ok(reply) = tokio::time::timeout_at(self.deadline, fetch).await else {
+                return;
+            };
+            match reply {
+                Ok(FetchReply::Items { items, stop }) => {
+                    self.answered();
+                    self.score(node, ScoreEvent::Success);
+                    self.conns.insert(node, conn);
+                    self.take_items(&items);
+                    let finished = stop == FetchStop::Complete;
+                    self.audit(node, &items, if finished { &one } else { &[] });
+                    if finished {
+                        self.state.note_audit(&node, &m, self.now);
+                    }
+                    if stop == FetchStop::RateLimited {
+                        self.limited.insert(node);
+                    }
+                    self.save();
+                }
+                Ok(FetchReply::RateLimited) | Err(DialError::Refused(ErrorReason::RateLimited)) => {
+                    self.answered();
+                    self.limited.insert(node);
+                    self.conns.insert(node, conn);
+                }
+                Err(DialError::Refused(_)) => {
+                    self.answered();
+                    self.conns.insert(node, conn);
+                }
+                Err(_) => {
+                    self.fail(node);
+                    return;
+                }
+            }
+        }
     }
 
     /// Mailboxes of `group` holding one of my pending messages that `node`

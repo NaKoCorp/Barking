@@ -522,6 +522,7 @@ async fn fetch_splits_mailboxes_and_pages() {
     let items = s.fetch(&boxes).await.unwrap();
     assert_eq!(items.len(), 4);
     assert!(!s.last_fetch_truncated());
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::Complete);
     node.stop().await;
 }
 
@@ -621,6 +622,34 @@ async fn client_caps_hostile_pagination() {
         .unwrap();
     assert_eq!(items.len(), client::MAX_FETCH_ITEMS);
     assert!(s.last_fetch_truncated());
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::ClientLimit);
+    srv.abort();
+}
+
+/// `RateLimited` after a first page: partial pickup, and the reason says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limit_after_a_page_is_reported() {
+    let k = key(0);
+    let h = hello(&k, TEST_BITS);
+    let (addr, srv) = fake_node(k.clone(), move |req| {
+        Some(match req {
+            Request::Hello { .. } => h.clone(),
+            Request::Fetch { cursor: None, .. } => Response::Items {
+                items: vec![vec![1]],
+                next: Some(1),
+            },
+            Request::Fetch { .. } => Response::Error(ErrorReason::RateLimited),
+            _ => Response::Error(ErrorReason::Unsupported),
+        })
+    });
+    let mut s = Client::connect(addr, id_of(&k)).await.unwrap();
+    let items = timeout(LONG, s.fetch(&[MailboxId([1; 16])]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(items, vec![vec![1]]);
+    assert!(s.last_fetch_truncated());
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::RateLimited);
     srv.abort();
 }
 
@@ -645,6 +674,7 @@ async fn client_caps_page_count() {
         .unwrap();
     assert_eq!(items.len(), client::MAX_FETCH_PAGES);
     assert!(s.last_fetch_truncated());
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::ClientLimit);
     srv.abort();
 }
 
@@ -1190,6 +1220,7 @@ async fn resumable_fetch_continues_where_it_stopped() {
     // Budget under one page: a whole page anyway.
     let first = s.fetch_resumable(&nine, &mut resume, 1).await.unwrap();
     assert!(s.last_fetch_truncated());
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::ClientLimit);
     assert!(!first.is_empty() && first.len() < 100);
     assert!(resume.seen[&[9; 16]] > 0);
     // List changed (mailbox 8 added): mailbox 9 resumes at its position,

@@ -33,10 +33,12 @@ struct Net {
     records: HashMap<NodeId, NodeRecord>,
     /// Unreachable nodes.
     down: HashSet<NodeId>,
-    /// Nodes whose fetch is always truncated.
-    truncate: HashSet<NodeId>,
-    /// A fetch asking for one of these mailboxes is truncated.
-    truncate_mailbox: HashSet<MailboxId>,
+    /// Nodes whose fetch always stops early, for this reason.
+    truncate: HashMap<NodeId, FetchStop>,
+    /// A fetch asking for one of these mailboxes stops early.
+    truncate_mailbox: HashMap<MailboxId, FetchStop>,
+    /// A re-read of this mailbox alone, from its start, stops early.
+    cut_reread: HashMap<MailboxId, FetchStop>,
     /// Nodes whose fetch answers `RateLimited`.
     rate_limit_fetch: HashSet<NodeId>,
     /// Items every fetch from that node returns.
@@ -130,12 +132,12 @@ impl Fetcher for Net {
         _max_bytes: usize,
         _slice: Duration,
     ) -> Result<FetchReply, DialError> {
-        let positioned = mailboxes
+        let positioned: Vec<MailboxId> = mailboxes
             .iter()
             .filter(|m| resume.seen.get(&m.0).is_some_and(|s| *s > 0))
             .copied()
             .collect();
-        self.log(Call::Fetch(*conn, mailboxes.to_vec(), positioned));
+        self.log(Call::Fetch(*conn, mailboxes.to_vec(), positioned.clone()));
         tokio::time::sleep(self.fetch_delay).await;
         if self.rate_limit_fetch.contains(conn) {
             return Ok(FetchReply::RateLimited);
@@ -145,11 +147,24 @@ impl Fetcher for Net {
                 resume.seen.insert(m.0, self.position);
             }
         }
-        let truncated = self.truncate.contains(conn)
-            || mailboxes.iter().any(|m| self.truncate_mailbox.contains(m));
+        let reread = match mailboxes {
+            [m] if !positioned.contains(m) => self.cut_reread.get(m).copied(),
+            _ => None,
+        };
+        let stop = self
+            .truncate
+            .get(conn)
+            .copied()
+            .or_else(|| {
+                mailboxes
+                    .iter()
+                    .find_map(|m| self.truncate_mailbox.get(m).copied())
+            })
+            .or(reread)
+            .unwrap_or(FetchStop::Complete);
         Ok(FetchReply::Items {
             items: self.items.get(conn).cloned().unwrap_or_default(),
-            complete: !truncated,
+            stop,
         })
     }
 }
@@ -208,6 +223,10 @@ fn setup_with(core: &mut Core) -> Net {
     }
     state.save(core).unwrap();
     net
+}
+
+fn all_nodes(net: &Net, stop: FetchStop) -> HashMap<NodeId, FetchStop> {
+    net.records.keys().map(|k| (*k, stop)).collect()
 }
 
 fn opts() -> SyncOptions {
@@ -334,7 +353,7 @@ async fn second_responsible_on_failure_or_truncation() {
     let r = load(&mut core).view.responsibles_by_score(&m, NOW);
     // Best responsible unreachable, the second truncates: the third serves.
     net.down.insert(r[0]);
-    net.truncate.insert(r[1]);
+    net.truncate.insert(r[1], FetchStop::Connection);
     let report = sync(&mut core, &net, opts()).await;
     let calls = net.calls();
     let served: Vec<NodeId> = fetches_of(&calls, &sessions)
@@ -388,7 +407,7 @@ async fn mark_polled_only_when_all_sessions_polled() {
     core.mark_polled(NOW - 5 * DAY).unwrap();
     let wide = core.watched_mailbox_groups(NOW).intro.len();
     // Every node truncates: no session mailbox is fetched in full.
-    net.truncate = net.records.keys().copied().collect();
+    net.truncate = all_nodes(&net, FetchStop::Connection);
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.network_up && !report.polled_all_sessions);
     assert_eq!(core.watched_mailbox_groups(NOW).intro.len(), wide);
@@ -424,7 +443,7 @@ async fn no_node_answers_reports_network_down_and_keeps_outbox() {
 async fn never_completing_node_fails_after_three_syncs() {
     let (_dir, mut core, mut net) = setup();
     net.refuse_finds = true;
-    net.truncate = net.records.keys().copied().collect();
+    net.truncate = all_nodes(&net, FetchStop::Connection);
     let sessions = core.watched_mailbox_groups(NOW).sessions;
     let node = load(&mut core)
         .view
@@ -514,8 +533,9 @@ async fn positioned_mailbox_is_read_again_for_a_due_audit() {
     state.positions.insert((x, m), 5);
     state.save(&mut core).unwrap();
     sync(&mut core, &net, opts()).await;
-    // Read from the start (no position sent), and the loss is seen.
-    assert_eq!(fetches_for(&net.calls(), x, m), vec![false]);
+    // The regular fetch resumes, then a re-read from the start (no position
+    // sent) sees the loss.
+    assert_eq!(fetches_for(&net.calls(), x, m), vec![true, false]);
     assert!(!holders(&mut core, &bytes).contains(&x));
 }
 
@@ -545,9 +565,9 @@ async fn truncated_reread_audits_nothing_and_keeps_the_position() {
     let mut state = load(&mut core);
     state.positions.insert((x, m), 5);
     state.save(&mut core).unwrap();
-    net.truncate_mailbox.insert(m);
+    net.cut_reread.insert(m, FetchStop::ClientLimit);
     sync(&mut core, &net, opts()).await;
-    assert!(!fetches_for(&net.calls(), x, m)[0]);
+    assert_eq!(fetches_for(&net.calls(), x, m), vec![true, false]);
     let state = load(&mut core);
     assert!(state.ledger.holders(&content_hash(&bytes)).contains(&x));
     assert_eq!(state.positions.get(&(x, m)), Some(&5));
@@ -635,7 +655,7 @@ async fn complete_then_truncated_fetch_does_not_count_as_never_completing() {
     let (_dir, mut core, mut net) = setup();
     let (x, y, m2) = two_groups(&mut core);
     net.down.insert(y);
-    net.truncate_mailbox.insert(m2);
+    net.truncate_mailbox.insert(m2, FetchStop::Connection);
     sync(&mut core, &net, opts()).await;
     let calls = net.calls();
     let to_x: Vec<bool> = calls
@@ -661,7 +681,7 @@ async fn rate_limited_fetch_does_not_count_as_never_completing() {
 #[tokio::test(start_paused = true)]
 async fn truncation_when_the_slice_ran_out_does_not_count() {
     let (_dir, mut core, mut net) = setup();
-    net.truncate = net.records.keys().copied().collect();
+    net.truncate = all_nodes(&net, FetchStop::Connection);
     net.fetch_delay = SESSION_FETCH_SLICE + Duration::from_secs(10);
     sync(&mut core, &net, opts()).await;
     assert!(load(&mut core).unaudited.is_empty());
@@ -748,4 +768,120 @@ async fn rate_limited_deposit_replans_on_the_next_responsible() {
     );
     assert_eq!(report.first_copies, 1);
     assert!(holders(&mut core, &bytes).contains(&r[1]));
+}
+
+// --- Stop reasons and audit re-reads (R20) ----------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn rate_limit_after_some_pages_does_not_count_as_never_completing() {
+    let (_dir, mut core, mut net) = setup();
+    net.truncate = all_nodes(&net, FetchStop::RateLimited);
+    for _ in 0..UNAUDITED_SYNCS {
+        let report = sync(&mut core, &net, opts()).await;
+        assert!(report.network_up && !report.polled_all_sessions);
+    }
+    assert!(load(&mut core).unaudited.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn client_cap_truncation_does_not_count_as_never_completing() {
+    let (_dir, mut core, mut net) = setup();
+    net.truncate = all_nodes(&net, FetchStop::ClientLimit);
+    for _ in 0..UNAUDITED_SYNCS {
+        sync(&mut core, &net, opts()).await;
+    }
+    assert!(load(&mut core).unaudited.is_empty());
+    // A cut connection, on the other hand, does count.
+    net.truncate = all_nodes(&net, FetchStop::Connection);
+    sync(&mut core, &net, opts()).await;
+    assert!(!load(&mut core).unaudited.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn large_reread_neither_starves_group_mates_nor_counts() {
+    let (_dir, mut core, mut net) = setup();
+    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let (bytes, m) = message(&mut core);
+    let x = load(&mut core).view.responsibles_by_score(&m, NOW)[0];
+    accepted_by(&mut core, x, &bytes);
+    let mut state = load(&mut core);
+    for s in &sessions {
+        state.positions.insert((x, *s), 5);
+    }
+    state.save(&mut core).unwrap();
+    // The re-read of `m` never fits the client's caps.
+    net.cut_reread.insert(m, FetchStop::ClientLimit);
+    for _ in 0..UNAUDITED_SYNCS {
+        let report = sync(&mut core, &net, opts()).await;
+        assert!(report.polled_all_sessions);
+    }
+    let calls = net.calls();
+    // Every sync: the regular, positioned fetch first, then the re-read.
+    let to_x: Vec<(Vec<MailboxId>, Vec<MailboxId>)> = calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Fetch(n, mbs, positioned) if *n == x && mbs.contains(&m) => {
+                Some((mbs.clone(), positioned.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(to_x.len(), 2 * UNAUDITED_SYNCS as usize);
+    for pair in to_x.chunks(2) {
+        assert!(pair[0].1.contains(&m), "regular fetch resumes");
+        assert_eq!(pair[1], (vec![m], vec![]), "re-read alone, from the start");
+    }
+    let state = load(&mut core);
+    assert!(!state.unaudited.contains_key(&x));
+    assert!(!state.audited_at.contains_key(&(x, m)));
+    assert!(state.ledger.holders(&content_hash(&bytes)).contains(&x));
+}
+
+#[tokio::test(start_paused = true)]
+async fn finished_reread_is_audited_even_if_another_is_cut() {
+    let (_dir, mut core) = crate::test_support::subject_two_messages(NOW);
+    let mut net = setup_with(&mut core);
+    let messages: Vec<(Vec<u8>, MailboxId)> = core
+        .pending_outbox(NOW)
+        .unwrap()
+        .into_iter()
+        .filter_map(|b| {
+            let p = Packet::decode(&b).unwrap();
+            (p.kind == Kind::Message).then_some((b, p.mailbox))
+        })
+        .collect();
+    assert_eq!(messages.len(), 2);
+    let (m1, m2) = (messages[0].1, messages[1].1);
+    assert_ne!(m1, m2);
+    // One node responsible for both mailboxes, made the best for both.
+    let mut state = load(&mut core);
+    let r1 = state.view.responsibles(&m1, NOW);
+    let x = *state
+        .view
+        .responsibles(&m2, NOW)
+        .iter()
+        .find(|n| r1.contains(n))
+        .expect("overlapping responsibles");
+    state.view.entries.get_mut(&x).unwrap().score = Score::new(0.9);
+    for (b, m) in &messages {
+        plan::record_outcome(
+            &mut state.ledger,
+            content_hash(b),
+            x,
+            &Ok(()),
+            NOW - 7 * 3600,
+        );
+        state.positions.insert((x, *m), 5);
+    }
+    state.save(&mut core).unwrap();
+    net.cut_reread.insert(m2, FetchStop::ClientLimit);
+    sync(&mut core, &net, opts()).await;
+    let calls = net.calls();
+    // Both mailboxes come in one regular fetch from `x`.
+    assert!(calls.iter().any(
+        |c| matches!(c, Call::Fetch(n, mbs, _) if *n == x && mbs.contains(&m1) && mbs.contains(&m2))
+    ));
+    let state = load(&mut core);
+    assert!(state.audited_at.contains_key(&(x, m1)));
+    assert!(!state.audited_at.contains_key(&(x, m2)));
 }

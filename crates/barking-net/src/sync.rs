@@ -22,8 +22,11 @@
 //! **Score.** Successful requests +0.02, a failure −0.1 only once some node
 //! answered during this sync (until then failures wait; if none answers, the
 //! client's own connection is at fault). `Found` at most once per node per
-//! sync. A node whose session fetch never completes for `UNAUDITED_SYNCS`
-//! syncs in a row cannot be audited: one failure per sync from then on.
+//! sync, at most one failure per node per sync. A node whose session
+//! fetches are all cut by a lost connection for `UNAUDITED_SYNCS` syncs in a
+//! row cannot be audited: one failure per sync from then on. Loss audits of
+//! positioned mailboxes re-read them from their start every
+//! `AUDIT_EVERY_SECS`, each in a call of its own after the regular fetch.
 //!
 //! Nothing here logs an address or a mailbox: the transparency log gets the
 //! short node id only.
@@ -49,6 +52,7 @@ use crate::{BOOTSTRAP_VIEW, CandidateBudget};
 mod fetch;
 mod io;
 
+pub use barking_proto::client::FetchStop;
 pub use io::{Connector, DepositOutcome, DepositReply, Depositor, FetchReply, Fetcher};
 use io::{Observation, Observed};
 
@@ -76,11 +80,13 @@ pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 /// Reachable nodes below which the sync bootstraps first.
 pub const MIN_REACHABLE: usize = 3;
 /// Syncs in a row in which a node answered but none of its session fetches
-/// completed (rate limits and the client's own slow link aside), after which
-/// it gets one failure per sync: it cannot be audited for losses.
+/// completed, the connection being cut (never a rate limit, a client cap or
+/// the client's own deadline or slice), after which it gets one failure per
+/// sync: it cannot be audited for losses.
 pub const UNAUDITED_SYNCS: u32 = 3;
 /// A positioned mailbox holding a message the node accepted is read again
-/// from its start, for a loss audit, at most this often.
+/// from its start, for a loss audit, at most this often: in a call of its
+/// own, after the group's regular fetch.
 pub const AUDIT_EVERY_SECS: u64 = 6 * 3600;
 /// `NotResponsible` answers from distinct responsibles of one mailbox that
 /// trigger a fallback lookup.
