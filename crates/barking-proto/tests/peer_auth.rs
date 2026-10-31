@@ -1,5 +1,5 @@
-//! Authentification optionnelle des nœuds appelants : un serveur quinn
-//! minimal répond à `Hello` et publie ce que `peer_node_id` voit.
+//! Optional authentication of calling nodes: a minimal quinn server
+//! answers `Hello` and publishes what `peer_node_id` sees.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::OnceLock;
@@ -27,8 +27,8 @@ fn id_of(k: &SigningKey) -> NodeId {
     NodeId::from_public_key(&k.verifying_key())
 }
 
-/// Serveur minimal : chaque connexion acceptée publie `peer_node_id`, puis
-/// une requête `Hello` reçoit sa réponse.
+/// Minimal server: each accepted connection publishes `peer_node_id`, then
+/// a `Hello` request receives its response.
 fn spawn_server(
     key: &SigningKey,
 ) -> (
@@ -39,8 +39,8 @@ fn spawn_server(
     spawn_server_with(key, None)
 }
 
-/// Comme `spawn_server`, mais `refuse` remplace la réponse à `Hello` : le
-/// serveur l'envoie, attend l'accusé du client, puis ferme la connexion.
+/// Like `spawn_server`, but `refuse` replaces the response to `Hello`: the
+/// server sends it, waits for the client's acknowledgement, then closes the connection.
 fn spawn_server_with(
     key: &SigningKey,
     refuse: Option<Response>,
@@ -116,7 +116,7 @@ async fn node_client_is_identified() {
         .await
         .unwrap();
     assert_eq!(seen.recv().await, Some(Some(id_of(&caller))));
-    // La connexion reste utilisable pour d'autres requêtes.
+    // The connection remains usable for other requests.
     let hello = Request::Hello {
         version: PROTOCOL_VERSION,
         min_version: 0,
@@ -140,7 +140,7 @@ async fn one_identity_serves_many_connections_and_reports_pow_bits() {
         assert_eq!(pow_bits, 8);
         assert_eq!(seen.recv().await, Some(Some(id_of(&caller))));
     }
-    // Identifiant épinglé différent : refusé avec la même identité.
+    // Different pinned identifier: rejected with the same identity.
     assert!(
         client::connect_node(&ep, addr, NodeId([3; 32]), &identity)
             .await
@@ -151,7 +151,7 @@ async fn one_identity_serves_many_connections_and_reports_pow_bits() {
 #[tokio::test]
 async fn node_client_with_bad_puzzle_is_refused() {
     let server = key(0);
-    // Clé valide mais qui ne résout pas le puzzle de 20 bits.
+    // Valid key but one that does not solve the 20-bit puzzle.
     let weak = SigningKey::from_bytes(&[9; 32]);
     assert!(!id_of(&weak).puzzle_ok());
     let (addr, _seen, _ep) = spawn_server(&server);
@@ -175,8 +175,8 @@ async fn connect_peer_reports_version_refusal_not_connect() {
     let refuse = Response::Error(barking_proto::ErrorReason::VersionTooOld);
     let (addr, _seen, _ep) = spawn_server_with(&server, Some(refuse));
     let ep = client_endpoint();
-    // Plusieurs essais : le résultat ne doit pas dépendre de la course entre
-    // la réponse et la fermeture de la connexion.
+    // Several attempts: the result must not depend on the race between
+    // the response and the closing of the connection.
     for _ in 0..5 {
         let r = client::connect_peer(&ep, addr, id_of(&server), &caller).await;
         assert!(matches!(r, Err(ClientError::Version)), "{:?}", r.err());

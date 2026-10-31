@@ -1,5 +1,5 @@
-//! Identité de nœud : `BLAKE3(contexte, clé publique)` et puzzle statique
-//! S/Kademlia (20 bits à zéro sur `BLAKE3(contexte, identifiant)`).
+//! Node identity: `BLAKE3(context, public key)` and static S/Kademlia
+//! puzzle (20 zero bits on `BLAKE3(context, identifier)`).
 
 use std::{fmt, str::FromStr};
 
@@ -22,12 +22,12 @@ impl NodeId {
         NodeId(blake3::derive_key(NODE_ID_CONTEXT, key.as_bytes()))
     }
 
-    /// Vrai si le puzzle statique est résolu (20 bits à zéro).
+    /// True if the static puzzle is solved (20 zero bits).
     pub fn puzzle_ok(&self) -> bool {
         self.puzzle_ok_bits(NODE_PUZZLE_BITS)
     }
 
-    /// Vrai si au moins `bits` bits sont à zéro (0 : toujours vrai, pour les
+    /// True if at least `bits` bits are zero (0: always true, for
     /// simulations).
     pub fn puzzle_ok_bits(&self, bits: u32) -> bool {
         self.puzzle_bits() >= bits
@@ -52,7 +52,7 @@ impl fmt::Debug for NodeId {
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-#[error("identifiant de nœud invalide")]
+#[error("invalid node identifier")]
 pub struct ParseNodeIdError;
 
 impl FromStr for NodeId {
@@ -78,7 +78,7 @@ fn generate_with_bits(rng: &mut impl CryptoRng, bits: u32) -> SigningKey {
     }
 }
 
-/// Tire des clés jusqu'à résoudre le puzzle de 20 bits (~1 million d'essais).
+/// Draws keys until the 20-bit puzzle is solved (~1 million attempts).
 pub fn generate_node_key(rng: &mut impl CryptoRng) -> SigningKey {
     generate_with_bits(rng, NODE_PUZZLE_BITS)
 }
@@ -93,7 +93,7 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(1);
         let key = generate_node_key(&mut rng);
         assert!(NodeId::from_public_key(&key.verifying_key()).puzzle_ok());
-        // Une clé quelconque réussit avec probabilité 2^-20 : sur 64 clés, jamais en pratique.
+        // Any given key succeeds with probability 2^-20: over 64 keys, never in practice.
         let hits = (0..64u8)
             .filter(|i| {
                 let k = SigningKey::from_bytes(&[*i; 32]);
@@ -117,7 +117,7 @@ mod tests {
         let s = id.to_string();
         assert_eq!(s.len(), 52);
         assert_eq!(s.parse::<NodeId>().unwrap(), id);
-        assert!("pas-du-base32".parse::<NodeId>().is_err());
+        assert!("not-base32".parse::<NodeId>().is_err());
         assert!("AAAA".parse::<NodeId>().is_err());
         assert!(format!("{id:?}").len() < 30);
     }

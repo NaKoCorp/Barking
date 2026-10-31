@@ -1,18 +1,18 @@
-//! TLS 1.3 à identité épinglée (spec §3.2).
+//! TLS 1.3 with pinned identity (spec §3.2).
 //!
-//! - Le nœud présente un certificat X.509 autosigné qui porte sa clé Ed25519.
-//! - Le client n'utilise aucune autorité de certification : il accepte le
-//!   certificat seulement si sa clé donne l'identifiant attendu et que cet
-//!   identifiant résout le puzzle. La signature de la poignée de main TLS est
-//!   vérifiée avec cette même clé : un certificat copié sans la clé privée est
-//!   refusé.
-//! - Le client n'envoie pas de SNI. Un client anonyme ne présente aucun
-//!   certificat ; un nœud appelant présente le sien (autosigné, Ed25519, clé
-//!   qui résout le puzzle), que le serveur accepte sans l'exiger.
+//! - The node presents a self-signed X.509 certificate carrying its Ed25519 key.
+//! - The client uses no certificate authority: it accepts the
+//!   certificate only if its key yields the expected identifier and that
+//!   identifier solves the puzzle. The TLS handshake signature is
+//!   verified with that same key: a certificate copied without the private key is
+//!   rejected.
+//! - The client sends no SNI. An anonymous client presents no
+//!   certificate; a calling node presents its own (self-signed, Ed25519, key
+//!   that solves the puzzle), which the server accepts without requiring it.
 //!
-//! Fournisseur cryptographique : `ring` (pas d'aws-lc : ni cmake ni NASM, build
-//! musl et reproductible plus simple). Le même fournisseur sert au client et
-//! au nœud.
+//! Cryptographic provider: `ring` (no aws-lc: no cmake or NASM, simpler musl
+//! and reproducible build). The same provider serves the client and
+//! the node.
 
 use std::sync::Arc;
 
@@ -29,18 +29,18 @@ use zeroize::Zeroizing;
 
 use crate::{ALPN, NodeId};
 
-/// En-tête DER d'une clé privée Ed25519 PKCS#8 v1 (RFC 8410), suivi de la graine.
+/// DER header of an Ed25519 PKCS#8 v1 private key (RFC 8410), followed by the seed.
 const PKCS8_ED25519_PREFIX: [u8; 16] = [
     0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
 ];
-/// En-tête DER d'une `SubjectPublicKeyInfo` Ed25519 (RFC 8410), suivi de la clé.
+/// DER header of an Ed25519 `SubjectPublicKeyInfo` (RFC 8410), followed by the key.
 const SPKI_ED25519_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
-/// Nom interne du certificat (ignoré par le vérificateur, jamais envoyé en SNI).
+/// Internal name of the certificate (ignored by the verifier, never sent as SNI).
 pub const CERT_NAME: &str = "barking-node";
 
-/// Seuls les algorithmes Ed25519 sont acceptés pour la signature TLS.
+/// Only Ed25519 algorithms are accepted for the TLS signature.
 static ED25519_ONLY: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms {
     all: &[webpki::ring::ED25519],
     mapping: &[(SignatureScheme::ED25519, &[webpki::ring::ED25519])],
@@ -50,7 +50,7 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// Clé privée du nœud encodée en PKCS#8 v1 (DER).
+/// Node private key encoded as PKCS#8 v1 (DER).
 pub fn pkcs8_der(key: &SigningKey) -> Zeroizing<Vec<u8>> {
     let mut der = Zeroizing::new(Vec::with_capacity(48));
     der.extend_from_slice(&PKCS8_ED25519_PREFIX);
@@ -58,54 +58,54 @@ pub fn pkcs8_der(key: &SigningKey) -> Zeroizing<Vec<u8>> {
     der
 }
 
-/// Certificat autosigné portant la clé Ed25519 du nœud.
+/// Self-signed certificate carrying the node's Ed25519 key.
 pub fn self_signed_cert(key: &SigningKey) -> CertificateDer<'static> {
     let der = pkcs8_der(key);
-    // Entrées construites ici (clé Ed25519 valide, nom fixe) : ces appels ne
-    // dépendent d'aucun octet venu du réseau.
+    // Inputs built here (valid Ed25519 key, fixed name): these calls do not
+    // depend on any byte coming from the network.
     let kp = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(
         &PrivatePkcs8KeyDer::from(&der[..]),
         &rcgen::PKCS_ED25519,
     )
-    .expect("clé Ed25519 PKCS#8 valide");
+    .expect("valid Ed25519 PKCS#8 key");
     rcgen::CertificateParams::new(vec![CERT_NAME.to_string()])
-        .expect("nom de certificat valide")
+        .expect("valid certificate name")
         .self_signed(&kp)
-        .expect("signature du certificat")
+        .expect("certificate signature")
         .der()
         .clone()
 }
 
-/// Configuration TLS du nœud : TLS 1.3 seul, ALPN `barking/0`, certificat
-/// client optionnel (un nœud appelant peut s'identifier, un client non).
+/// TLS configuration of the node: TLS 1.3 only, ALPN `barking/0`, optional
+/// client certificate (a calling node may identify itself, a client need not).
 pub fn server_config(key: &SigningKey) -> rustls::ServerConfig {
     let cert = self_signed_cert(key);
     let der = pkcs8_der(key);
     let mut cfg = rustls::ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("TLS 1.3 pris en charge par ring")
+        .expect("TLS 1.3 supported by ring")
         .with_client_cert_verifier(Arc::new(PeerNode))
         .with_single_cert(
             vec![cert],
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der.to_vec())),
         )
-        .expect("certificat et clé cohérents");
+        .expect("consistent certificate and key");
     cfg.alpn_protocols = vec![ALPN.to_vec()];
     cfg
 }
 
-/// Configuration QUIC du nœud (transport par défaut ; le serveur l'ajuste).
+/// QUIC configuration of the node (default transport; the server adjusts it).
 pub fn quinn_server_config(key: &SigningKey) -> quinn::ServerConfig {
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_config(key))
-        .expect("suite TLS 1.3 initiale disponible");
+        .expect("initial TLS 1.3 suite available");
     quinn::ServerConfig::with_crypto(Arc::new(crypto))
 }
 
-/// Configuration TLS du client, épinglée sur `expected`.
+/// TLS configuration of the client, pinned on `expected`.
 pub fn client_config(expected: NodeId) -> rustls::ClientConfig {
     let mut cfg = rustls::ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("TLS 1.3 pris en charge par ring")
+        .expect("TLS 1.3 supported by ring")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedNode { expected }))
         .with_no_client_auth();
@@ -114,10 +114,10 @@ pub fn client_config(expected: NodeId) -> rustls::ClientConfig {
     cfg
 }
 
-/// Identité TLS d'un nœud appelant : certificat autosigné et clé de
-/// signature, construits une fois et partagés par toutes ses connexions
-/// sortantes. La copie DER de la graine qui sert à la construire est effacée
-/// aussitôt.
+/// TLS identity of a calling node: self-signed certificate and signing
+/// key, built once and shared by all its outgoing
+/// connections. The DER copy of the seed used to build it is erased
+/// immediately.
 #[derive(Clone, Debug)]
 pub struct NodeIdentity {
     certified: Arc<CertifiedKey>,
@@ -126,10 +126,10 @@ pub struct NodeIdentity {
 impl NodeIdentity {
     pub fn new(key: &SigningKey) -> NodeIdentity {
         let der = pkcs8_der(key);
-        // Entrée construite ici (clé Ed25519 valide) : aucun octet du réseau.
+        // Input built here (valid Ed25519 key): no byte from the network.
         let signer =
             rustls::crypto::ring::sign::any_eddsa_type(&PrivatePkcs8KeyDer::from(&der[..]))
-                .expect("clé Ed25519 PKCS#8 valide");
+                .expect("valid Ed25519 PKCS#8 key");
         NodeIdentity {
             certified: Arc::new(CertifiedKey::new(vec![self_signed_cert(key)], signer)),
         }
@@ -150,18 +150,18 @@ impl ResolvesClientCert for NodeIdentity {
     }
 }
 
-/// Configuration TLS d'un nœud appelant : même épinglage que `client_config`,
-/// plus le certificat autosigné de `key` pour s'identifier auprès du serveur.
+/// TLS configuration of a calling node: same pinning as `client_config`,
+/// plus the self-signed certificate of `key` to identify itself to the server.
 pub fn node_client_config(expected: NodeId, key: &SigningKey) -> rustls::ClientConfig {
     node_client_config_for(expected, &NodeIdentity::new(key))
 }
 
-/// Comme `node_client_config`, avec une identité déjà construite : seul
-/// l'identifiant épinglé change d'une connexion à l'autre.
+/// Like `node_client_config`, with an already-built identity: only
+/// the pinned identifier changes from one connection to the next.
 pub fn node_client_config_for(expected: NodeId, identity: &NodeIdentity) -> rustls::ClientConfig {
     let mut cfg = rustls::ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("TLS 1.3 pris en charge par ring")
+        .expect("TLS 1.3 supported by ring")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedNode { expected }))
         .with_client_cert_resolver(Arc::new(identity.clone()));
@@ -170,8 +170,8 @@ pub fn node_client_config_for(expected: NodeId, identity: &NodeIdentity) -> rust
     cfg
 }
 
-/// Identifiant du nœud appelant, si la connexion porte un certificat client
-/// (déjà validé par la poignée de main) dont la clé résout le puzzle.
+/// Identifier of the calling node, if the connection carries a client certificate
+/// (already validated by the handshake) whose key solves the puzzle.
 pub fn peer_node_id(conn: &quinn::Connection) -> Option<NodeId> {
     let identity = conn.peer_identity()?;
     let certs = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
@@ -182,7 +182,7 @@ pub fn peer_node_id(conn: &quinn::Connection) -> Option<NodeId> {
     id.puzzle_ok().then_some(id)
 }
 
-/// Clé Ed25519 portée par un certificat, si c'en est une.
+/// Ed25519 key carried by a certificate, if it is one.
 pub fn node_key_from_cert(cert: &CertificateDer<'_>) -> Option<VerifyingKey> {
     let ee = webpki::EndEntityCert::try_from(cert).ok()?;
     let spki = ee.subject_public_key_info();
@@ -191,7 +191,7 @@ pub fn node_key_from_cert(cert: &CertificateDer<'_>) -> Option<VerifyingKey> {
     VerifyingKey::from_bytes(&bytes).ok()
 }
 
-/// Vérificateur épinglé : identifiant attendu + puzzle + signature TLS.
+/// Pinned verifier: expected identifier + puzzle + TLS signature.
 #[derive(Debug)]
 struct PinnedNode {
     expected: NodeId,
@@ -223,7 +223,7 @@ impl ServerCertVerifier for PinnedNode {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        // Seul TLS 1.3 est négocié ; TLS 1.2 n'est jamais accepté.
+        // Only TLS 1.3 is negotiated; TLS 1.2 is never accepted.
         Err(rustls::Error::PeerIncompatible(
             rustls::PeerIncompatible::Tls12NotOffered,
         ))
@@ -235,8 +235,8 @@ impl ServerCertVerifier for PinnedNode {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        // `cert` est le certificat déjà accepté par `verify_server_cert` :
-        // la signature est vérifiée avec la clé épinglée.
+        // `cert` is the certificate already accepted by `verify_server_cert`:
+        // the signature is verified with the pinned key.
         rustls::crypto::verify_tls13_signature(message, cert, dss, &ED25519_ONLY)
     }
 
@@ -245,8 +245,8 @@ impl ServerCertVerifier for PinnedNode {
     }
 }
 
-/// Vérificateur de certificat client : optionnel, mais s'il est présenté,
-/// Ed25519 seul, clé qui résout le puzzle, signature TLS vérifiée.
+/// Client certificate verifier: optional, but if presented,
+/// Ed25519 only, key that solves the puzzle, TLS signature verified.
 #[derive(Debug)]
 struct PeerNode;
 
@@ -260,7 +260,7 @@ impl ClientCertVerifier for PeerNode {
     }
 
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        // Aucune autorité : pas d'indice à envoyer.
+        // No authority: no hint to send.
         &[]
     }
 
@@ -329,10 +329,10 @@ mod tests {
         let check = |expected| {
             PinnedNode { expected }.verify_server_cert(&cert, &[], &name, &[], UnixTime::now())
         };
-        // Bon identifiant mais puzzle non résolu : refusé.
+        // Right identifier but unsolved puzzle: rejected.
         assert!(!id.puzzle_ok());
         assert!(check(id).is_err());
-        // Autre identifiant : refusé.
+        // Other identifier: rejected.
         assert!(check(NodeId([0; 32])).is_err());
     }
 

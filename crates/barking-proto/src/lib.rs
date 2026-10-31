@@ -1,5 +1,5 @@
-//! Protocole client↔nœud : messages, trames, preuve de travail de dépôt,
-//! identité de nœud, TLS épinglé et client QUIC.
+//! Client-to-node protocol: messages, frames, deposit proof of work,
+//! node identity, pinned TLS and QUIC client.
 
 pub mod client;
 pub mod frame;
@@ -16,13 +16,13 @@ pub use msg::{
 pub use node_id::{NodeId, generate_node_key};
 pub use record::{NodeRecord, RecordError, RecordPolicy, embeds_ipv4, routable};
 
-/// Version du protocole.
+/// Protocol version.
 pub const PROTOCOL_VERSION: u16 = 0;
-/// Identifiant ALPN de la couche QUIC.
+/// ALPN identifier of the QUIC layer.
 pub const ALPN: &[u8] = b"barking/0";
 
-/// Vrai si les plages de versions `a_min..=a_max` et `b_min..=b_max` ont une
-/// version en commun.
+/// True if the version ranges `a_min..=a_max` and `b_min..=b_max` share at least
+/// one version.
 pub fn versions_overlap(a_min: u16, a_max: u16, b_min: u16, b_max: u16) -> bool {
     a_min.max(b_min) <= a_max.min(b_max)
 }

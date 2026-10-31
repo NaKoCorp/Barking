@@ -1,24 +1,24 @@
-//! Trames : longueur sur 4 octets en big-endian, puis le corps postcard.
+//! Frames: 4-byte big-endian length, then the postcard body.
 
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Taille maximale d'une requête (corps seul).
+/// Maximum size of a request (body only).
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
-/// Taille maximale d'une réponse (corps seul).
+/// Maximum size of a response (body only).
 pub const MAX_RESPONSE_BYTES: usize = 1 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
-    #[error("trame trop grande ({len} octets, maximum {max})")]
+    #[error("frame too large ({len} bytes, maximum {max})")]
     TooLarge { len: usize, max: usize },
-    #[error("flux fermé proprement avant toute trame")]
+    #[error("stream cleanly closed before any frame")]
     Closed,
-    #[error("trame tronquée")]
+    #[error("truncated frame")]
     Truncated,
-    #[error("corps de trame invalide")]
+    #[error("invalid frame body")]
     Malformed,
-    #[error("erreur d'entrée-sortie : {0}")]
+    #[error("I/O error: {0}")]
     Io(std::io::Error),
 }
 
@@ -32,8 +32,8 @@ fn io_err(e: std::io::Error) -> FrameError {
     }
 }
 
-/// Encode une trame complète (en-tête compris) ; refuse un corps plus grand
-/// que `max`.
+/// Encodes a complete frame (header included); rejects a body larger
+/// than `max`.
 pub fn encode<T: Serialize>(value: &T, max: usize) -> Result<Vec<u8>> {
     let body = postcard::to_allocvec(value).map_err(|_| FrameError::Malformed)?;
     if body.len() > max {
@@ -52,8 +52,8 @@ pub fn encode<T: Serialize>(value: &T, max: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Écrit une trame ; refuse un corps plus grand que `max`. Renvoie le nombre
-/// d'octets écrits (en-tête compris).
+/// Writes a frame; rejects a body larger than `max`. Returns the number
+/// of bytes written (header included).
 pub async fn write<T: Serialize>(
     w: &mut (impl AsyncWrite + Unpin),
     value: &T,
@@ -64,18 +64,18 @@ pub async fn write<T: Serialize>(
     Ok(bytes.len())
 }
 
-/// Lit une trame. La longueur annoncée est vérifiée avant toute allocation.
+/// Reads a frame. The announced length is checked before any allocation.
 pub async fn read<T: DeserializeOwned>(r: &mut (impl AsyncRead + Unpin), max: usize) -> Result<T> {
     Ok(read_counted(r, max).await?.0)
 }
 
-/// Comme `read`, et renvoie aussi le nombre d'octets lus (en-tête compris).
+/// Like `read`, and also returns the number of bytes read (header included).
 pub async fn read_counted<T: DeserializeOwned>(
     r: &mut (impl AsyncRead + Unpin),
     max: usize,
 ) -> Result<(T, usize)> {
     let mut head = [0u8; 4];
-    // EOF avant le premier octet : fermeture propre ; ensuite : tronquée.
+    // EOF before the first byte: clean close; afterwards: truncated.
     let mut got = 0;
     while got < head.len() {
         let n = r.read(&mut head[got..]).await.map_err(io_err)?;
@@ -92,8 +92,8 @@ pub async fn read_counted<T: DeserializeOwned>(
     if len > max {
         return Err(FrameError::TooLarge { len, max });
     }
-    // Le tampon grandit au fil des octets reçus : un en-tête seul ne réserve
-    // pas `len` octets (pas d'amplification par un pair qui n'envoie rien).
+    // The buffer grows as bytes are received: a header alone does not reserve
+    // `len` bytes (no amplification by a peer that sends nothing).
     let mut body = Vec::new();
     let n = r
         .take(len as u64)
@@ -171,7 +171,7 @@ mod tests {
             let err = read::<Request>(&mut r, MAX_REQUEST_BYTES)
                 .await
                 .unwrap_err();
-            assert!(matches!(err, FrameError::Truncated), "coupe à {cut}");
+            assert!(matches!(err, FrameError::Truncated), "cut at {cut}");
         }
     }
 

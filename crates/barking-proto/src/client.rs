@@ -1,27 +1,27 @@
-//! Client QUIC (spec §7.1) : connexion épinglée, `Hello`, dépôt et relève.
+//! QUIC client (spec §7.1): pinned connection, `Hello`, deposit and pickup.
 //!
-//! Le client se méfie du nœud autant que le nœud se méfie de lui :
-//! - une difficulté annoncée au-delà de `MAX_POW_BITS` est une erreur de
-//!   protocole (un nœud hostile ne fait pas tourner le client sans fin) ;
-//! - une relève s'arrête à `MAX_FETCH_ITEMS` éléments, au budget d'octets
-//!   de l'appel (`MAX_FETCH_BYTES` par défaut), `MAX_FETCH_PAGES` pages ou
-//!   `FETCH_DEADLINE` par appel ; le reste attend la relève suivante (rien
-//!   n'est supprimé à la lecture) et `Session::last_fetch_truncated` le
-//!   signale. Une page est prise entière ou pas du tout ; `FetchResume`
-//!   garde la position atteinte pour que la relève suivante reprenne là au
-//!   lieu de relire le début (une boîte inondée ne bloque pas la suite) ;
-//! - la preuve de travail d'un dépôt part de la difficulté de base plus le
-//!   supplément du palier, monte de 2 bits sur `PowTooWeak`, et peut être
-//!   bornée par un budget de travail (`Session::set_pow_budget`) ;
-//! - le curseur de pagination doit croître strictement, et une page vide ne
-//!   peut pas annoncer de suite ;
-//! - chaque requête a un délai ;
-//! - une page coupée en route (lien lent) est redemandée plus petite :
-//!   1 Mio, 256 Kio, 64 Kio puis 16 Kio, avant d'abandonner.
+//! The client distrusts the node as much as the node distrusts it:
+//! - a difficulty announced beyond `MAX_POW_BITS` is a protocol
+//!   error (a hostile node cannot make the client spin forever);
+//! - a pickup stops at `MAX_FETCH_ITEMS` items, the byte budget
+//!   of the call (`MAX_FETCH_BYTES` by default), `MAX_FETCH_PAGES` pages or
+//!   `FETCH_DEADLINE` per call; the rest waits for the next pickup (nothing
+//!   is deleted on read) and `Session::last_fetch_truncated`
+//!   reports it. A page is taken whole or not at all; `FetchResume`
+//!   keeps the position reached so that the next pickup resumes there
+//!   instead of rereading the beginning (a flooded mailbox does not block the rest);
+//! - the proof of work of a deposit starts from the base difficulty plus the
+//!   tier supplement, rises by 2 bits on `PowTooWeak`, and may be
+//!   bounded by a work budget (`Session::set_pow_budget`);
+//! - the pagination cursor must strictly increase, and an empty page cannot
+//!   announce a continuation;
+//! - each request has a timeout;
+//! - a page cut off in transit (slow link) is requested again smaller:
+//!   1 MiB, 256 KiB, 64 KiB then 16 KiB, before giving up.
 //!
-//! Les éléments relevés sont rendus tels quels : un accusé dont le champ boîte
-//! diffère de la boîte relevée n'est pas écarté (l'accusé est rangé dans
-//! chaque boîte qui tenait le paquet).
+//! Picked-up items are returned as is: an acknowledgement whose mailbox field
+//! differs from the mailbox picked up is not discarded (the acknowledgement is stored in
+//! each mailbox that held the packet).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -37,69 +37,69 @@ use crate::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use crate::msg::{ACK_CURSOR_BASE, ErrorReason, Limits, Request, Response};
 use crate::{NodeId, PROTOCOL_VERSION, pow, tls};
 
-/// Plus ancienne version du protocole que ce client sait parler.
+/// Oldest protocol version this client can speak.
 pub const MIN_PROTOCOL_VERSION: u16 = 0;
-/// Nombre maximal d'éléments acceptés par appel à `fetch`.
+/// Maximum number of items accepted per `fetch` call.
 pub const MAX_FETCH_ITEMS: usize = 10_000;
-/// Nombre maximal d'octets acceptés par appel à `fetch`.
+/// Maximum number of bytes accepted per `fetch` call.
 pub const MAX_FETCH_BYTES: usize = 64 << 20;
-/// Tailles de page demandées, de la plus grande à la plus petite : après un
-/// flux coupé ou un délai dépassé sur une page (lien trop lent pour la page
-/// dans le délai d'écriture du nœud), la même page est redemandée plus petite.
+/// Page sizes requested, from largest to smallest: after a
+/// stream cut off or a timeout on a page (link too slow for the page
+/// within the node's write timeout), the same page is requested again smaller.
 pub const FETCH_PAGE_SIZES: [u32; 4] = [1 << 20, 256 << 10, 64 << 10, crate::MIN_PAGE_BYTES];
-/// Délai d'une page de relève : au-delà du délai d'écriture maximal du nœud
-/// (60 s), pour que ce soit le nœud qui coupe un lien trop lent.
+/// Timeout for a pickup page: beyond the maximum write timeout of the node
+/// (60 s), so that the node is the one to cut off a link that is too slow.
 pub const FETCH_PAGE_TIMEOUT: Duration = Duration::from_secs(70);
-/// Nombre maximal de pages suivies par appel à `fetch`.
+/// Maximum number of pages followed per `fetch` call.
 pub const MAX_FETCH_PAGES: usize = 1_000;
-/// Durée maximale d'un appel à `fetch`.
+/// Maximum duration of a `fetch` call.
 pub const FETCH_DEADLINE: Duration = Duration::from_secs(120);
-/// Délai d'établissement de la connexion (poignée de main comprise).
+/// Timeout for establishing the connection (handshake included).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Délai d'une requête (envoi et réponse).
+/// Timeout for a request (send and response).
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Boîtes par requête `Fetch` au plus, quoi qu'annonce le nœud.
+/// At most this many mailboxes per `Fetch` request, whatever the node announces.
 const MAX_MAILBOXES: usize = 64;
-/// Hausse de difficulté après `PowTooWeak`.
+/// Difficulty increase after `PowTooWeak`.
 const POW_RETRY_STEP: u8 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    #[error("connexion au nœud impossible : {0}")]
+    #[error("cannot connect to the node: {0}")]
     Connect(String),
-    #[error("connexion au nœud perdue : {0}")]
+    #[error("connection to the node lost: {0}")]
     Connection(#[from] quinn::ConnectionError),
-    #[error("version du protocole incompatible avec ce nœud")]
+    #[error("protocol version incompatible with this node")]
     Version,
-    #[error("le nœud refuse : {}", .0.describe())]
+    #[error("the node refuses: {}", .0.describe())]
     Refused(ErrorReason),
-    #[error("réponse du nœud invalide : {0}")]
+    #[error("invalid response from the node: {0}")]
     Protocol(&'static str),
-    #[error("trame : {0}")]
+    #[error("frame: {0}")]
     Frame(#[from] FrameError),
-    #[error("le nœud ne répond pas à temps")]
+    #[error("the node does not respond in time")]
     Timeout,
-    #[error("budget de preuve de travail épuisé pour cette synchronisation")]
+    #[error("proof-of-work budget exhausted for this synchronization")]
     PowBudget,
 }
 
-/// Position de reprise d'une relève, par boîte : `seen[boîte] = n` dit que
-/// tous les paquets de cette boîte de curseur `<= n` ont été reçus (`n` est
-/// toujours un curseur de paquets, sous `ACK_CURSOR_BASE` : un curseur
-/// d'accusés sauterait les paquets arrivés depuis). Une tranche reprend au
-/// minimum des boîtes qu'elle contient (0 pour une boîte inconnue) : la
-/// liste des boîtes peut changer d'une relève à l'autre sans tout relire.
-/// Les boîtes sont regroupées en tranches selon leur position : les boîtes
-/// sans position ensemble, les autres par position décroissante, pour qu'une
-/// boîte nouvelle ne ramène pas une boîte avancée au début.
-/// Ne vaut que pour un même nœud.
+/// Resume position of a pickup, per mailbox: `seen[mailbox] = n` says that
+/// all packets of this mailbox with cursor `<= n` have been received (`n` is
+/// always a packet cursor, below `ACK_CURSOR_BASE`: an acknowledgement
+/// cursor would skip packets that arrived since). A slice resumes at the
+/// minimum of the mailboxes it contains (0 for an unknown mailbox): the
+/// list of mailboxes may change from one pickup to the next without rereading everything.
+/// Mailboxes are grouped into slices by position: mailboxes
+/// without a position together, the others by decreasing position, so that a
+/// new mailbox does not bring an advanced mailbox back to the start.
+/// Valid only for a single node.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FetchResume {
     pub seen: HashMap<[u8; 16], u64>,
 }
 
 impl FetchResume {
-    /// Curseur de départ d'une tranche.
+    /// Starting cursor of a slice.
     fn start(&self, chunk: &[MailboxId]) -> Option<u64> {
         let min = chunk
             .iter()
@@ -109,7 +109,7 @@ impl FetchResume {
         (min > 0).then_some(min)
     }
 
-    /// Une page de suite `n` a été prise pour `chunk`.
+    /// A page with continuation `n` was taken for `chunk`.
     fn advance(&mut self, chunk: &[MailboxId], n: u64) {
         if n >= ACK_CURSOR_BASE {
             return;
@@ -120,8 +120,8 @@ impl FetchResume {
         }
     }
 
-    /// Tranches de `per` boîtes au plus : boîtes sans position d'abord, puis
-    /// les autres par position décroissante.
+    /// Slices of at most `per` mailboxes: mailboxes without a position first, then
+    /// the others by decreasing position.
     fn chunks(&self, mailboxes: &[MailboxId], per: usize) -> Vec<Vec<MailboxId>> {
         let at = |m: &MailboxId| self.seen.get(&m.0).copied().unwrap_or(0);
         let mut zero: Vec<MailboxId> = mailboxes.iter().filter(|m| at(m) == 0).copied().collect();
@@ -135,7 +135,7 @@ impl FetchResume {
             .collect()
     }
 
-    /// Ne garde que ces boîtes.
+    /// Keeps only these mailboxes.
     pub fn retain(&mut self, mailboxes: &[MailboxId]) {
         self.seen.retain(|k, _| mailboxes.iter().any(|m| m.0 == *k));
     }
@@ -143,8 +143,8 @@ impl FetchResume {
 
 pub type Result<T> = core::result::Result<T, ClientError>;
 
-/// Ouvre une connexion QUIC épinglée sur `expected`, sans `Hello`. Le point
-/// d'accès doit vivre aussi longtemps que la connexion.
+/// Opens a QUIC connection pinned on `expected`, without `Hello`. The endpoint
+/// must live as long as the connection.
 pub async fn open_connection(addr: SocketAddr, expected: NodeId) -> Result<(Endpoint, Connection)> {
     let bind: SocketAddr = if addr.is_ipv6() {
         (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
@@ -167,7 +167,7 @@ pub async fn open_connection(addr: SocketAddr, expected: NodeId) -> Result<(Endp
     Ok((endpoint, conn))
 }
 
-/// Envoie une requête sur un nouveau flux et lit l'unique réponse.
+/// Sends a request on a new stream and reads the single response.
 pub async fn request(conn: &Connection, req: &Request) -> Result<Response> {
     request_within(conn, req, REQUEST_TIMEOUT).await
 }
@@ -176,7 +176,7 @@ async fn request_within(conn: &Connection, req: &Request, limit: Duration) -> Re
     timeout(limit, async {
         let (mut send, mut recv) = conn.open_bi().await?;
         frame::write(&mut send, req, MAX_REQUEST_BYTES).await?;
-        // Le flux peut déjà être fermé par le nœud : la lecture le dira.
+        // The stream may already be closed by the node: the read will tell.
         let _ = send.finish();
         Ok(frame::read::<Response>(&mut recv, MAX_RESPONSE_BYTES).await?)
     })
@@ -184,12 +184,12 @@ async fn request_within(conn: &Connection, req: &Request, limit: Duration) -> Re
     .map_err(|_| ClientError::Timeout)?
 }
 
-/// Point d'entrée du client.
+/// Client entry point.
 pub struct Client;
 
 impl Client {
-    /// Se connecte au nœud `expected` (identité vérifiée par TLS), envoie
-    /// `Hello` et vérifie la version et les paramètres annoncés.
+    /// Connects to node `expected` (identity verified by TLS), sends
+    /// `Hello` and checks the announced version and parameters.
     pub async fn connect(addr: SocketAddr, expected: NodeId) -> Result<Session> {
         let (endpoint, conn) = open_connection(addr, expected).await?;
         let (pow_bits, limits) = hello(&conn, expected).await?;
@@ -207,9 +207,9 @@ impl Client {
     }
 }
 
-/// Se connecte depuis l'endpoint d'un nœud : identité du serveur épinglée sur
-/// `expected`, certificat client de `key`, puis `Hello` et vérification de la
-/// version comme `Client::connect`. Les requêtes passent ensuite par
+/// Connects from a node's endpoint: server identity pinned on
+/// `expected`, client certificate of `key`, then `Hello` and version
+/// check like `Client::connect`. Requests then go through
 /// `request(&conn, &req)`.
 pub async fn connect_peer(
     endpoint: &Endpoint,
@@ -221,9 +221,9 @@ pub async fn connect_peer(
     Ok(connect_node(endpoint, addr, expected, &identity).await?.0)
 }
 
-/// Comme `connect_peer`, avec l'identité du nœud déjà construite (une fois
-/// pour toutes ses connexions) ; rend aussi la difficulté de base annoncée
-/// par le nœud appelé dans `Hello`.
+/// Like `connect_peer`, with the node identity already built (once
+/// for all its connections); also returns the base difficulty announced
+/// by the called node in `Hello`.
 pub async fn connect_node(
     endpoint: &Endpoint,
     addr: SocketAddr,
@@ -243,16 +243,16 @@ pub async fn connect_node(
         .await
         .map_err(|_| ClientError::Timeout)?
         .map_err(|e| ClientError::Connect(e.to_string()))?;
-    // TLS 1.3 : le serveur juge le certificat client après la fin de la
-    // poignée de main du client ; son refus n'apparaît qu'au premier flux,
-    // sous forme d'une connexion fermée (erreur de flux ou de connexion selon
-    // le moment). Une connexion fermée pendant `Hello` est donc un échec de
-    // connexion.
+    // TLS 1.3: the server judges the client certificate after the end of the
+    // client handshake; its rejection only appears on the first stream,
+    // as a closed connection (stream or connection error depending on
+    // timing). A connection closed during `Hello` is therefore a connection
+    // failure.
     match hello(&conn, expected).await {
         Ok((pow_bits, _)) => Ok((conn, pow_bits)),
-        // Seules les erreurs de transport sont remappées : `Version`,
-        // `Refused` et `Protocol` sont des réponses du nœud, rendues telles
-        // quelles même si la connexion se ferme juste après.
+        // Only transport errors are remapped: `Version`,
+        // `Refused` and `Protocol` are responses from the node, returned as
+        // they are even if the connection closes right after.
         Err(e @ (ClientError::Frame(_) | ClientError::Connection(_))) => {
             match conn.close_reason() {
                 Some(reason) => Err(ClientError::Connect(reason.to_string())),
@@ -263,7 +263,7 @@ pub async fn connect_node(
     }
 }
 
-/// Transport d'un appelant : le serveur n'ouvre aucun flux vers lui.
+/// Transport of a caller: the server opens no stream towards it.
 fn no_incoming_streams() -> quinn::TransportConfig {
     let mut transport = quinn::TransportConfig::default();
     transport
@@ -272,8 +272,8 @@ fn no_incoming_streams() -> quinn::TransportConfig {
     transport
 }
 
-/// Envoie `Hello` et vérifie la version et les paramètres annoncés ; rend la
-/// difficulté de base et les limites du nœud.
+/// Sends `Hello` and checks the announced version and parameters; returns the
+/// base difficulty and the node's limits.
 async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits)> {
     let hello = Request::Hello {
         version: PROTOCOL_VERSION,
@@ -288,10 +288,10 @@ async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits)> {
             limits,
         } => {
             if node_id != expected {
-                return Err(ClientError::Protocol("identifiant annoncé différent"));
+                return Err(ClientError::Protocol("announced identifier differs"));
             }
             if min_version > version {
-                return Err(ClientError::Protocol("versions annoncées incohérentes"));
+                return Err(ClientError::Protocol("inconsistent announced versions"));
             }
             if !crate::versions_overlap(
                 min_version,
@@ -302,20 +302,20 @@ async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits)> {
                 return Err(ClientError::Version);
             }
             if pow_bits > pow::MAX_POW_BITS {
-                return Err(ClientError::Protocol("preuve de travail exigée trop forte"));
+                return Err(ClientError::Protocol("required proof of work too strong"));
             }
             if limits.max_mailboxes_per_fetch == 0 {
-                return Err(ClientError::Protocol("limite de relève nulle"));
+                return Err(ClientError::Protocol("pickup limit is zero"));
             }
             Ok((pow_bits, limits))
         }
         Response::Error(ErrorReason::VersionTooOld) => Err(ClientError::Version),
         Response::Error(r) => Err(ClientError::Refused(r)),
-        _ => Err(ClientError::Protocol("réponse inattendue à Hello")),
+        _ => Err(ClientError::Protocol("unexpected response to Hello")),
     }
 }
 
-/// Connexion établie avec un nœud, après `Hello`.
+/// Connection established with a node, after `Hello`.
 pub struct Session {
     endpoint: Endpoint,
     conn: Connection,
@@ -323,29 +323,29 @@ pub struct Session {
     pow_bits: u8,
     limits: Limits,
     truncated: bool,
-    /// Travail de preuve permis (essais attendus), `None` : sans borne.
+    /// Permitted proof work (expected attempts), `None`: unbounded.
     pow_budget: Option<u64>,
-    /// Travail de preuve dépensé (essais attendus, `2^bits` par preuve).
+    /// Proof work spent (expected attempts, `2^bits` per proof).
     pow_spent: u64,
-    /// Durée maximale d'un appel à `fetch` / `fetch_resumable`.
+    /// Maximum duration of a `fetch` / `fetch_resumable` call.
     fetch_deadline: Duration,
 }
 
 impl Session {
-    /// Borne le travail de preuve des dépôts suivants (en essais attendus,
-    /// `2^bits` par preuve, compté avant de chercher) : au-delà, `deposit`
-    /// renvoie `ClientError::PowBudget` sans calculer.
+    /// Bounds the proof work of subsequent deposits (in expected attempts,
+    /// `2^bits` per proof, counted before searching): beyond that, `deposit`
+    /// returns `ClientError::PowBudget` without computing.
     pub fn set_pow_budget(&mut self, budget: Option<u64>) {
         self.pow_budget = budget;
     }
 
-    /// Durée maximale des appels de relève suivants (défaut `FETCH_DEADLINE`) :
-    /// au-delà, relève partielle avec ce qui a été pris.
+    /// Maximum duration of subsequent pickup calls (default `FETCH_DEADLINE`):
+    /// beyond that, partial pickup with what was taken.
     pub fn set_fetch_deadline(&mut self, d: Duration) {
         self.fetch_deadline = d;
     }
 
-    /// Travail de preuve dépensé par cette session.
+    /// Proof work spent by this session.
     pub fn pow_spent(&self) -> u64 {
         self.pow_spent
     }
@@ -354,7 +354,7 @@ impl Session {
         self.node_id
     }
 
-    /// Difficulté de base annoncée par le nœud (au plus `MAX_POW_BITS`).
+    /// Base difficulty announced by the node (at most `MAX_POW_BITS`).
     pub fn pow_bits(&self) -> u8 {
         self.pow_bits
     }
@@ -363,25 +363,25 @@ impl Session {
         self.limits
     }
 
-    /// Connexion QUIC sous-jacente (tests, diagnostics).
+    /// Underlying QUIC connection (tests, diagnostics).
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
 
-    /// Requête brute sur cette connexion.
+    /// Raw request on this connection.
     pub async fn request(&self, req: &Request) -> Result<Response> {
         request(&self.conn, req).await
     }
 
-    /// Dépose un paquet encodé. Calcule la preuve de travail d'un message
-    /// (pas d'un accusé), d'abord à la difficulté de base plus le supplément
-    /// du palier ; sur `PowTooWeak`, réessaie avec 2 bits de plus jusqu'à
-    /// `MAX_POW_BITS`. `Ok(Err(raison))` : refus du nœud.
+    /// Deposits an encoded packet. Computes the proof of work of a message
+    /// (not of an acknowledgement), first at the base difficulty plus the
+    /// tier supplement; on `PowTooWeak`, retries with 2 more bits up to
+    /// `MAX_POW_BITS`. `Ok(Err(reason))`: refusal by the node.
     pub async fn deposit(
         &mut self,
         packet: &[u8],
     ) -> Result<core::result::Result<(), ErrorReason>> {
-        // Un paquet illisible part sans preuve : le nœud répondra `Malformed`.
+        // An unreadable packet goes out without proof: the node will answer `Malformed`.
         let target = match Packet::decode(packet) {
             Ok(p) if p.kind == Kind::Message => Some((p.mailbox, p.tier)),
             _ => None,
@@ -425,24 +425,24 @@ impl Session {
         match self.request(&req).await? {
             Response::Ok => Ok(Ok(())),
             Response::Error(r) => Ok(Err(r)),
-            _ => Err(ClientError::Protocol("réponse inattendue à Deposit")),
+            _ => Err(ClientError::Protocol("unexpected response to Deposit")),
         }
     }
 
-    /// Relève paquets et accusés en attente pour `mailboxes` (découpage par
-    /// 64 boîtes, pages suivies), depuis le début. S'arrête à
-    /// `MAX_FETCH_ITEMS` éléments, `MAX_FETCH_BYTES` octets, `MAX_FETCH_PAGES`
-    /// pages ou après `FETCH_DEADLINE` : voir `last_fetch_truncated`.
+    /// Picks up packets and acknowledgements pending for `mailboxes` (split into
+    /// 64 mailboxes, pages followed), from the beginning. Stops at
+    /// `MAX_FETCH_ITEMS` items, `MAX_FETCH_BYTES` bytes, `MAX_FETCH_PAGES`
+    /// pages or after `FETCH_DEADLINE`: see `last_fetch_truncated`.
     pub async fn fetch(&mut self, mailboxes: &[MailboxId]) -> Result<Vec<Vec<u8>>> {
         let mut resume = FetchResume::default();
         self.fetch_resumable(mailboxes, &mut resume, MAX_FETCH_BYTES)
             .await
     }
 
-    /// Comme `fetch`, mais reprend chaque tranche de boîtes d'après `resume`
-    /// (voir `FetchResume`) et s'arrête à `max_bytes` octets (au moins une
-    /// page est prise). En sortie, `resume` donne où reprendre ; une erreur
-    /// le laisse à la dernière page prise.
+    /// Like `fetch`, but resumes each slice of mailboxes from `resume`
+    /// (see `FetchResume`) and stops at `max_bytes` bytes (at least one
+    /// page is taken). On output, `resume` gives where to resume; an error
+    /// leaves it at the last page taken.
     pub async fn fetch_resumable(
         &mut self,
         mailboxes: &[MailboxId],
@@ -455,7 +455,7 @@ impl Session {
         let mut out = Vec::new();
         let mut bytes = 0usize;
         let mut pages = 0usize;
-        // Indice dans `FETCH_PAGE_SIZES` : ne remonte pas au cours d'un appel.
+        // Index into `FETCH_PAGE_SIZES`: does not go back up during a call.
         let mut size = 0usize;
         let deadline = tokio::time::Instant::now() + self.fetch_deadline;
         for chunk in &chunks {
@@ -477,7 +477,7 @@ impl Session {
                         self.truncated = true;
                         return Ok(out);
                     }
-                    // Flux coupé ou trop lent : même curseur, page plus petite.
+                    // Stream cut off or too slow: same cursor, smaller page.
                     Ok(Err(ClientError::Frame(_) | ClientError::Timeout))
                         if size + 1 < FETCH_PAGE_SIZES.len() =>
                     {
@@ -488,22 +488,22 @@ impl Session {
                 };
                 let (mut items, next) = match resp {
                     Response::Items { items, next } => (items, next),
-                    // Débit épuisé après des pages déjà prises : relève
-                    // partielle, la suite au prochain appel.
+                    // Throughput exhausted after pages already taken: partial
+                    // pickup, the rest on the next call.
                     Response::Error(ErrorReason::RateLimited) if !out.is_empty() => {
                         self.truncated = true;
                         return Ok(out);
                     }
                     Response::Error(r) => return Err(ClientError::Refused(r)),
-                    _ => return Err(ClientError::Protocol("réponse inattendue à Fetch")),
+                    _ => return Err(ClientError::Protocol("unexpected response to Fetch")),
                 };
                 if next.is_some() && items.is_empty() {
-                    return Err(ClientError::Protocol("page vide avec suite"));
+                    return Err(ClientError::Protocol("empty page with continuation"));
                 }
                 if let (Some(n), Some(c)) = (next, cursor)
                     && n <= c
                 {
-                    return Err(ClientError::Protocol("curseur de relève non croissant"));
+                    return Err(ClientError::Protocol("non-increasing pickup cursor"));
                 }
                 let page_bytes = items
                     .iter()
@@ -512,13 +512,13 @@ impl Session {
                 let over_items = out.len().saturating_add(items.len()) > MAX_FETCH_ITEMS;
                 let over_bytes = bytes.saturating_add(page_bytes) > max_bytes;
                 if !out.is_empty() && (over_items || over_bytes) {
-                    // Page laissée : reprise à `cursor` la prochaine fois.
+                    // Page left: resume at `cursor` next time.
                     self.truncated = true;
                     return Ok(out);
                 }
                 if over_items {
-                    // Première page déjà au-delà du plafond d'éléments (nœud
-                    // hostile) : tronquée, sans avancer le curseur.
+                    // First page already beyond the item cap (hostile
+                    // node): truncated, without advancing the cursor.
                     self.truncated = true;
                     items.truncate(MAX_FETCH_ITEMS);
                     return Ok(items);
@@ -537,23 +537,23 @@ impl Session {
         Ok(out)
     }
 
-    /// Vrai si la dernière relève s'est arrêtée sur un plafond du client :
-    /// d'autres éléments attendent sur le nœud.
+    /// True if the last pickup stopped at a client cap:
+    /// more items are waiting on the node.
     pub fn last_fetch_truncated(&self) -> bool {
         self.truncated
     }
 
-    /// Ferme proprement la connexion.
+    /// Closes the connection cleanly.
     pub async fn close(self) {
         self.conn.close(0u32.into(), b"fin");
         let _ = timeout(Duration::from_secs(2), self.endpoint.wait_idle()).await;
     }
 }
 
-/// Recherche du nonce hors de la boucle asynchrone (calcul pur).
+/// Proof nonce search outside the async loop (pure computation).
 async fn solve(content: [u8; 32], mailbox: MailboxId, bits: u8) -> Result<u64> {
     tokio::task::spawn_blocking(move || pow::solve(&content, &mailbox, bits))
         .await
-        .map_err(|_| ClientError::Protocol("calcul de preuve interrompu"))?
-        .ok_or(ClientError::Protocol("preuve de travail exigée trop forte"))
+        .map_err(|_| ClientError::Protocol("proof computation interrupted"))?
+        .ok_or(ClientError::Protocol("required proof of work too strong"))
 }

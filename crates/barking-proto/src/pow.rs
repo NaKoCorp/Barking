@@ -1,16 +1,16 @@
-//! Preuve de travail de dépôt : `BLAKE3(contexte, empreinte du contenu ‖ boîte ‖
-//! nonce)` avec au moins `bits` bits de tête à zéro. L'empreinte du contenu
-//! (`content_hash`) couvre tout le paquet encodé sauf `hops` : la preuve est
-//! liée au contenu, un autre contenu sous le même identifiant en exige une autre.
+//! Deposit proof of work: `BLAKE3(context, content fingerprint ‖ mailbox ‖
+//! nonce)` with at least `bits` leading zero bits. The content fingerprint
+//! (`content_hash`) covers the whole encoded packet except `hops`: the proof is
+//! bound to the content, other content under the same identifier requires another.
 
 use barking_packet::{MailboxId, Tier};
 
-/// Position de l'octet `hops` dans le paquet encodé.
+/// Position of the `hops` byte in the encoded packet.
 const HOPS_OFFSET: usize = 2;
 
-/// BLAKE3 du paquet encodé avec l'octet `hops` mis à zéro (il change d'un
-/// relais à l'autre). Définition unique, partagée par le nœud (déduplication)
-/// et le client (preuve de travail).
+/// BLAKE3 of the encoded packet with the `hops` byte zeroed (it changes from
+/// one relay to the next). Single definition, shared by the node (deduplication)
+/// and the client (proof of work).
 pub fn content_hash(packet_bytes: &[u8]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     if packet_bytes.len() > HOPS_OFFSET {
@@ -23,12 +23,12 @@ pub fn content_hash(packet_bytes: &[u8]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// Contexte BLAKE3 de la preuve de travail de dépôt.
+/// BLAKE3 context of the deposit proof of work.
 pub const POW_CONTEXT: &str = "barking/v0/deposit-pow";
 pub const DEFAULT_POW_BITS: u8 = 18;
 pub const MAX_POW_BITS: u8 = 24;
 
-/// Nombre de bits à zéro en tête de `bytes`.
+/// Number of leading zero bits in `bytes`.
 pub fn leading_zero_bits(bytes: &[u8]) -> u32 {
     let mut n = 0;
     for b in bytes {
@@ -41,8 +41,8 @@ pub fn leading_zero_bits(bytes: &[u8]) -> u32 {
     n
 }
 
-/// Bits de difficulté ajoutés selon le palier : un gros paquet coûte plus
-/// de stockage, donc plus de travail (S +0, M +2, L +6).
+/// Difficulty bits added per tier: a large packet costs more
+/// storage, hence more work (S +0, M +2, L +6).
 pub fn tier_surcharge(tier: Tier) -> u8 {
     match tier {
         Tier::S => 0,
@@ -51,8 +51,8 @@ pub fn tier_surcharge(tier: Tier) -> u8 {
     }
 }
 
-/// État BLAKE3 après le contexte, l'empreinte et la boîte : calculé une
-/// fois, cloné pour chaque nonce.
+/// BLAKE3 state after the context, the fingerprint and the mailbox: computed once
+/// and cloned for each nonce.
 fn prefix(content: &[u8; 32], mailbox: &MailboxId) -> blake3::Hasher {
     let mut h = blake3::Hasher::new_derive_key(POW_CONTEXT);
     h.update(content);
@@ -66,13 +66,13 @@ fn passes(prefix: &blake3::Hasher, nonce: u64, bits: u8) -> bool {
     leading_zero_bits(h.finalize().as_bytes()) >= u32::from(bits)
 }
 
-/// Faux si `bits` dépasse `MAX_POW_BITS` : aucune preuve n'est valide au-delà.
+/// False if `bits` exceeds `MAX_POW_BITS`: no proof is valid beyond it.
 pub fn check(content: &[u8; 32], mailbox: &MailboxId, nonce: u64, bits: u8) -> bool {
     bits <= MAX_POW_BITS && passes(&prefix(content, mailbox), nonce, bits)
 }
 
-/// Cherche un nonce valide. Refuse (`None`) `bits > MAX_POW_BITS` : un nœud
-/// hostile ne peut pas faire tourner le client indéfiniment.
+/// Searches for a valid nonce. Rejects (`None`) `bits > MAX_POW_BITS`: a hostile
+/// node cannot make the client spin forever.
 pub fn solve(content: &[u8; 32], mailbox: &MailboxId, bits: u8) -> Option<u64> {
     if bits > MAX_POW_BITS {
         return None;
@@ -81,7 +81,7 @@ pub fn solve(content: &[u8; 32], mailbox: &MailboxId, bits: u8) -> Option<u64> {
     (0u64..).find(|n| passes(&p, *n, bits))
 }
 
-/// Travail attendu (nombre moyen d'essais) pour `bits` bits : `2^bits`.
+/// Expected work (average number of attempts) for `bits` bits: `2^bits`.
 pub fn expected_work(bits: u8) -> u64 {
     1u64 << bits.min(63)
 }
@@ -114,7 +114,7 @@ mod tests {
         let mut d = a.clone();
         d[40] ^= 1;
         assert_ne!(content_hash(&a), content_hash(&d));
-        // Entrées courtes : pas de panique.
+        // Short inputs: no panic.
         let _ = content_hash(&[]);
         let _ = content_hash(&[1, 2]);
     }
@@ -129,15 +129,15 @@ mod tests {
     fn pow_bound_to_content_and_mailbox() {
         let n = solve(&C, &MB, 16).unwrap();
         assert!(check(&C, &MB, n, 16));
-        // Une autre entrée passe par hasard avec probabilité 2^-16 : on en
-        // essaie plusieurs, la quasi-totalité doit échouer.
+        // Another input passes by chance with probability 2^-16: we try
+        // several, almost all must fail.
         let others = (0u8..32)
             .filter(|i| check(&[100 + i; 32], &MB, n, 16))
             .count()
             + (0u8..32)
                 .filter(|i| check(&C, &MailboxId([100 + i; 16]), n, 16))
                 .count();
-        assert!(others <= 1, "{others} entrées inattendues valides");
+        assert!(others <= 1, "{others} unexpected valid inputs");
     }
 
     #[test]
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn precomputed_prefix_matches_one_shot_digest() {
-        // Même résultat que le calcul d'un seul tenant.
+        // Same result as the single-pass computation.
         for nonce in [0u64, 1, 0xdead_beef, u64::MAX] {
             let mut h = blake3::Hasher::new_derive_key(POW_CONTEXT);
             h.update(&C);

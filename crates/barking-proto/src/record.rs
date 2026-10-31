@@ -1,6 +1,6 @@
-//! Fiche de nœud signée : clé publique, adresses publiques et date
-//! d'émission arrondie à l'heure, le tout signé par la clé du nœud. Seules
-//! ces fiches circulent entre nœuds et sont écrites sur disque.
+//! Signed node record: public key, public addresses and issue date
+//! rounded to the hour, all signed by the node key. Only
+//! these records circulate between nodes and are written to disk.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::node_id::{NODE_PUZZLE_BITS, NodeId};
 
-/// Contexte de la signature d'une fiche.
+/// Context of a record signature.
 pub const RECORD_CONTEXT: &[u8] = b"barking/v0/node-record";
-/// Avance tolérée au plus sur `issued_at`, en secondes.
+/// Maximum tolerated lead on `issued_at`, in seconds.
 pub const MAX_RECORD_SKEW_SECS: u64 = 3600;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,17 +23,17 @@ pub struct NodeRecord {
     pub signature: Signature,
 }
 
-/// Règles de validation d'une fiche.
+/// Validation rules for a record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordPolicy {
-    /// Accepte les adresses non routables (réseaux privés, tests).
+    /// Accepts non-routable addresses (private networks, tests).
     pub allow_private: bool,
-    /// Difficulté du puzzle d'identifiant exigée.
+    /// Required difficulty of the identifier puzzle.
     pub puzzle_bits: u32,
 }
 
 impl RecordPolicy {
-    /// Politique du réseau : puzzle complet.
+    /// Network policy: full puzzle.
     pub fn network(allow_private: bool) -> RecordPolicy {
         RecordPolicy {
             allow_private,
@@ -44,21 +44,21 @@ impl RecordPolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RecordError {
-    #[error("clé publique invalide")]
+    #[error("invalid public key")]
     BadKey,
-    #[error("signature invalide")]
+    #[error("invalid signature")]
     BadSignature,
-    #[error("le puzzle d'identifiant n'est pas résolu")]
+    #[error("the identifier puzzle is not solved")]
     Puzzle,
-    #[error("fiche émise dans le futur")]
+    #[error("record issued in the future")]
     FromFuture,
-    #[error("fiche sans adresse")]
+    #[error("record without address")]
     NoAddress,
-    #[error("adresse non routable")]
+    #[error("non-routable address")]
     Unroutable,
 }
 
-/// Octets signés : contexte, puis `postcard(public_key, v4, v6, issued_at)`.
+/// Signed bytes: context, then `postcard(public_key, v4, v6, issued_at)`.
 fn signed_bytes(
     public_key: &[u8; 32],
     v4: &Option<SocketAddrV4>,
@@ -68,13 +68,13 @@ fn signed_bytes(
     let mut out = RECORD_CONTEXT.to_vec();
     out.extend(
         postcard::to_allocvec(&(public_key, v4, v6, issued_at))
-            .expect("la sérialisation en mémoire ne échoue pas"),
+            .expect("in-memory serialization does not fail"),
     );
     out
 }
 
 impl NodeRecord {
-    /// Signe une fiche ; `now` est arrondi à l'heure inférieure.
+    /// Signs a record; `now` is rounded down to the hour.
     pub fn sign(
         key: &SigningKey,
         v4: Option<SocketAddrV4>,
@@ -101,7 +101,7 @@ impl NodeRecord {
         }
     }
 
-    /// Adresses de la fiche, v4 d'abord.
+    /// Addresses of the record, v4 first.
     pub fn addrs(&self) -> Vec<SocketAddr> {
         let mut out = Vec::with_capacity(2);
         if let Some(a) = self.v4 {
@@ -113,8 +113,8 @@ impl NodeRecord {
         out
     }
 
-    /// Vérifie clé, signature, puzzle, date et adresses ; renvoie
-    /// l'identifiant du nœud.
+    /// Checks key, signature, puzzle, date and addresses; returns
+    /// the node identifier.
     pub fn verify(&self, now: u64, policy: &RecordPolicy) -> Result<NodeId, RecordError> {
         let key = VerifyingKey::from_bytes(&self.public_key).map_err(|_| RecordError::BadKey)?;
         let msg = signed_bytes(&self.public_key, &self.v4, &self.v6, self.issued_at);
@@ -134,8 +134,8 @@ impl NodeRecord {
         if !policy.allow_private && !addrs.iter().all(routable) {
             return Err(RecordError::Unroutable);
         }
-        // Une IPv4 déguisée en IPv6 compterait dans le bloc `::/48` au lieu
-        // de son /24 : refusée même sous `allow_private`.
+        // An IPv4 disguised as IPv6 would count in the `::/48` block instead
+        // of its /24: rejected even under `allow_private`.
         if self.v6.is_some_and(|a| embeds_ipv4(a.ip())) {
             return Err(RecordError::Unroutable);
         }
@@ -143,9 +143,9 @@ impl NodeRecord {
     }
 }
 
-/// Vrai si `ip` porte une IPv4 : `::ffff:0:0/96` (IPv4 encapsulée) ou
-/// `::/96` (IPv4 compatible, obsolète, adresse non spécifiée comprise).
-/// `::1` (boucle locale) n'en est pas.
+/// True if `ip` carries an IPv4: `::ffff:0:0/96` (encapsulated IPv4) or
+/// `::/96` (IPv4-compatible, obsolete, unspecified address included).
+/// `::1` (loopback) is not one.
 pub fn embeds_ipv4(ip: &Ipv6Addr) -> bool {
     let s = ip.segments();
     s[..5] == [0; 5] && (s[5] == 0xffff || (s[5] == 0 && !ip.is_loopback()))
@@ -160,11 +160,11 @@ fn routable_v4(ip: &Ipv4Addr) -> bool {
         || ip.is_multicast()
         || ip.is_broadcast()
         || ip.is_documentation()
-        // 0.0.0.0/8 : ce réseau.
+        // 0.0.0.0/8: this network.
         || o[0] == 0
-        // 100.64.0.0/10 : espace partagé des opérateurs.
+        // 100.64.0.0/10: shared operator space.
         || (o[0] == 100 && (o[1] & 0xc0) == 64)
-        // 240.0.0.0/4 : réservé.
+        // 240.0.0.0/4: reserved.
         || o[0] >= 240)
 }
 
@@ -176,17 +176,17 @@ fn routable_v6(ip: &Ipv6Addr) -> bool {
     !(ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
-        // fe80::/10 lien local, fec0::/10 site local (obsolète).
+        // fe80::/10 link-local, fec0::/10 site-local (obsolete).
         || (s[0] & 0xffc0) == 0xfe80
         || (s[0] & 0xffc0) == 0xfec0
-        // fc00::/7 adresses locales uniques.
+        // fc00::/7 unique local addresses.
         || (s[0] & 0xfe00) == 0xfc00
         // 2001:db8::/32 documentation.
         || (s[0] == 0x2001 && s[1] == 0x0db8))
 }
 
-/// Vrai si l'adresse est joignable depuis Internet (ni privée, ni locale,
-/// ni de documentation, port non nul).
+/// True if the address is reachable from the Internet (neither private, nor local,
+/// nor documentation, non-zero port).
 pub fn routable(addr: &SocketAddr) -> bool {
     addr.port() != 0
         && match addr.ip() {
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn bad_key_is_refused() {
         let mut rec = NodeRecord::sign(&any_key(), v4("1.2.3.4:4433"), None, NOW);
-        // y = 2 n'est pas un point de la courbe.
+        // y = 2 is not a point on the curve.
         rec.public_key = [0; 32];
         rec.public_key[0] = 2;
         assert_eq!(rec.verify(NOW, &lax()), Err(RecordError::BadKey));
@@ -326,7 +326,7 @@ mod tests {
             for p in [lax(), private_ok] {
                 assert_eq!(rec.verify(NOW, &p), Err(RecordError::Unroutable), "{bad}");
             }
-            // Aussi en second d'une fiche à double pile.
+            // Also as the second address of a dual-stack record.
             let rec = NodeRecord::sign(
                 &any_key(),
                 v4("1.2.3.4:4433"),
@@ -339,7 +339,7 @@ mod tests {
                 "{bad}"
             );
         }
-        // Boucle locale permise sous `allow_private`, IPv6 publique partout.
+        // Loopback allowed under `allow_private`, public IPv6 everywhere.
         let rec = NodeRecord::sign(&any_key(), None, Some("[::1]:4433".parse().unwrap()), NOW);
         assert!(rec.verify(NOW, &private_ok).is_ok());
         let rec = NodeRecord::sign(

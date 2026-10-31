@@ -1,22 +1,22 @@
-//! Requêtes et réponses client↔nœud. Les nouvelles variantes vont toujours
-//! à la fin (le codage postcard numérote les variantes).
+//! Client-to-node requests and responses. New variants always go
+//! at the end (postcard encoding numbers the variants).
 
 use barking_packet::MailboxId;
 use serde::{Deserialize, Serialize};
 
 use crate::{node_id::NodeId, record::NodeRecord};
 
-/// Curseurs de relève : les paquets d'abord (curseur = leur numéro d'ordre,
-/// sous cette base), puis les accusés (`ACK_CURSOR_BASE + numéro`).
+/// Pickup cursors: packets first (cursor = their sequence number,
+/// below this base), then acknowledgements (`ACK_CURSOR_BASE + number`).
 pub const ACK_CURSOR_BASE: u64 = 1 << 62;
 
-/// Plus petite page de relève servie par un nœud (octets de paquets).
+/// Smallest pickup page served by a node (bytes of packets).
 pub const MIN_PAGE_BYTES: u32 = 16 * 1024;
 
-/// Fiches au plus dans une réponse `Nodes`.
+/// At most this many records in a `Nodes` response.
 pub const MAX_NODES_PER_RESPONSE: usize = 20;
 
-/// Empreintes au plus dans une page `Holdings`.
+/// At most this many fingerprints in a `Holdings` page.
 pub const MAX_HOLDINGS_PER_PAGE: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,13 +32,13 @@ pub enum Request {
     Fetch {
         mailboxes: Vec<MailboxId>,
         cursor: Option<u64>,
-        /// Taille de page souhaitée en octets de paquets ; le nœud la borne
-        /// entre `MIN_PAGE_BYTES` et sa propre limite (un élément plus gros
-        /// que la page est envoyé seul).
+        /// Desired page size in bytes of packets; the node clamps it
+        /// between `MIN_PAGE_BYTES` and its own limit (an item larger
+        /// than the page is sent alone).
         max_bytes: u32,
     },
-    /// Table de hachage entre nœuds. `from` est la fiche de l'appelant s'il
-    /// est un nœud.
+    /// Hash table between nodes. `from` is the caller's record if it
+    /// is a node.
     Ping {
         from: Option<NodeRecord>,
     },
@@ -46,12 +46,12 @@ pub enum Request {
         target: [u8; 32],
         from: Option<NodeRecord>,
     },
-    /// Dépôt d'un paquet recopié entre responsables.
+    /// Deposit of a packet replicated between responsible nodes.
     Store {
         packet: Vec<u8>,
         pow: u64,
     },
-    /// Empreintes des paquets détenus pour une boîte, par pages.
+    /// Fingerprints of the packets held for a mailbox, by pages.
     FindValue {
         mailbox: MailboxId,
         cursor: Option<u64>,
@@ -110,22 +110,24 @@ pub enum ErrorReason {
 }
 
 impl ErrorReason {
-    /// Texte français destiné à l'utilisateur.
+    /// English text intended for the user.
     pub fn describe(&self) -> &'static str {
         match self {
-            ErrorReason::VersionTooOld => "version du protocole trop ancienne pour ce nœud",
-            ErrorReason::Malformed => "requête ou paquet mal formé",
-            ErrorReason::Expired => "le paquet est déjà expiré",
-            ErrorReason::TooFarInFuture => "le paquet expire trop loin dans le futur",
-            ErrorReason::WrongTier => "la taille du paquet ne correspond à aucun palier",
-            ErrorReason::PowTooWeak => "la preuve de travail est trop faible",
-            ErrorReason::UnknownAckTarget => "l'accusé vise un paquet que le nœud ne connaît pas",
-            ErrorReason::MailboxFull => "la boîte aux lettres est pleine",
-            ErrorReason::NodeFull => "le nœud est plein",
-            ErrorReason::RateLimited => "trop de requêtes, réessayez plus tard",
-            ErrorReason::TooManyMailboxes => "trop de boîtes demandées en une seule requête",
-            ErrorReason::Unsupported => "requête non prise en charge par ce nœud",
-            ErrorReason::NotResponsible => "ce nœud n'est pas responsable de cette boîte",
+            ErrorReason::VersionTooOld => "protocol version too old for this node",
+            ErrorReason::Malformed => "malformed request or packet",
+            ErrorReason::Expired => "the packet has already expired",
+            ErrorReason::TooFarInFuture => "the packet expires too far in the future",
+            ErrorReason::WrongTier => "the packet size matches no tier",
+            ErrorReason::PowTooWeak => "the proof of work is too weak",
+            ErrorReason::UnknownAckTarget => {
+                "the acknowledgement targets a packet the node does not know"
+            }
+            ErrorReason::MailboxFull => "the mailbox is full",
+            ErrorReason::NodeFull => "the node is full",
+            ErrorReason::RateLimited => "too many requests, try again later",
+            ErrorReason::TooManyMailboxes => "too many mailboxes requested in a single request",
+            ErrorReason::Unsupported => "request not supported by this node",
+            ErrorReason::NotResponsible => "this node is not responsible for this mailbox",
         }
     }
 }
@@ -247,7 +249,7 @@ mod tests {
 
     #[test]
     fn variant_order_is_stable() {
-        // Les variantes réservées suivent les variantes actives : ordre figé.
+        // Reserved variants follow the active variants: frozen order.
         assert_eq!(
             postcard::to_allocvec(&Request::Ping { from: None }).unwrap(),
             [3, 0]
