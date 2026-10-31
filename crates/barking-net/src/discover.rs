@@ -15,9 +15,10 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use barking_core::contact::{MAX_CARD_NODES, MAX_NODE_HINT_BYTES};
+use barking_dht::lookup::{LOOKUP_TIMEOUT_MS, REQUEST_TIMEOUT_MS};
 use barking_dht::{BootstrapEntry, K, Lookup, PATHS, distance, filter_nodes, mailbox_key};
 use barking_packet::MailboxId;
 use barking_proto::client::{Client, ClientError};
@@ -36,7 +37,12 @@ pub const BOOTSTRAP_TRIES_PER_SOURCE: usize = 24;
 /// New candidates accepted at most per synchronization, on top of the
 /// `MAX_NODES_PER_RESPONSE` records of a response: blunts candidate floods.
 pub const MAX_NEW_CANDIDATES: usize = 200;
-/// Longest exchange with a node (connection, `Hello` and one request).
+/// Time given to each source's pings (all sent at once): with four sources
+/// and the lookup that follows a built-in answer, bootstrap fits in 25 s.
+pub const BOOTSTRAP_SOURCE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Longest exchange with a node at one address (connection, `Hello` and one
+/// request); a node with two addresses may take twice as long. Callers bound
+/// it further (lookup requests, bootstrap sources).
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Failure of an exchange with a node.
@@ -231,6 +237,11 @@ impl BootstrapReport {
 /// answered. Valid card hints enter the view as candidates whether or not
 /// they are tried. Built-in entries only have an identifier and an address:
 /// once one answered, a random lookup brings real records.
+///
+/// Worst case, nothing answering in time: 4 sources × `BOOTSTRAP_SOURCE_TIMEOUT`
+/// (12 s), plus, after a built-in answer, one lookup bounded by
+/// `LOOKUP_TIMEOUT_MS` (10 s) and its last requests' `REQUEST_TIMEOUT_MS` cut
+/// (3 s at most): about 25 s, well within the 3-minute synchronization.
 pub async fn bootstrap<D: Dialer>(
     view: &mut View,
     core_hints: Vec<Vec<u8>>,
@@ -284,7 +295,9 @@ pub async fn bootstrap<D: Dialer>(
     report
 }
 
-/// Pings the nodes of one source, as many at a time as still needed.
+/// Pings the first `BOOTSTRAP_TRIES_PER_SOURCE` nodes of one source all at
+/// once, keeps answers as they land until `BOOTSTRAP_REACHABLE` nodes answered,
+/// and drops the pings still pending then or at `BOOTSTRAP_SOURCE_TIMEOUT`.
 async fn try_source<D: Dialer>(
     view: &mut View,
     dialer: &D,
@@ -293,35 +306,37 @@ async fn try_source<D: Dialer>(
     report: &mut BootstrapReport,
     now: u64,
 ) {
-    let mut queue = list
+    let deadline = tokio::time::Instant::now() + BOOTSTRAP_SOURCE_TIMEOUT;
+    let mut pending: Vec<_> = list
         .into_iter()
         .filter(|(id, addrs)| !addrs.is_empty() && tried.insert(*id))
         .take(BOOTSTRAP_TRIES_PER_SOURCE)
-        .peekable();
-    while !report.bootstrapped() && queue.peek().is_some() {
-        let batch: Vec<_> = queue
-            .by_ref()
-            .take(BOOTSTRAP_REACHABLE - report.reachable.len())
-            .collect();
-        let answers = join_all(
-            batch
-                .into_iter()
-                .map(|(id, addrs)| async move { (id, dialer.ping(id, &addrs).await) })
-                .collect(),
-        )
-        .await;
-        for (id, answer) in answers {
-            let Ok(record) = answer else { continue };
-            match confirm_reached(view, id, record, now) {
-                Some(new) => report.added += usize::from(new),
-                // A hand-added node answered but its record does not fit the
-                // view (e.g. a private address): it is still reachable.
-                None if view.get(&id).is_some_and(|e| e.manual) => view.confirm(&id, now),
-                None => continue,
-            }
-            report.reachable.push(id);
+        .map(|(id, addrs)| Box::pin(timed_ping(dialer, id, addrs, deadline)))
+        .collect();
+    while !report.bootstrapped() && !pending.is_empty() {
+        let (id, answer) = next_ready(&mut pending).await;
+        let Ok(record) = answer else { continue };
+        match confirm_reached(view, id, record, now) {
+            Some(new) => report.added += usize::from(new),
+            // A hand-added node answered but its record does not fit the
+            // view (e.g. a private address): it is still reachable.
+            None if view.get(&id).is_some_and(|e| e.manual) => view.confirm(&id, now),
+            None => continue,
         }
+        report.reachable.push(id);
     }
+}
+
+async fn timed_ping<D: Dialer>(
+    dialer: &D,
+    id: NodeId,
+    addrs: Vec<SocketAddr>,
+    deadline: tokio::time::Instant,
+) -> (NodeId, Result<NodeRecord, DialError>) {
+    let answer = tokio::time::timeout_at(deadline, dialer.ping(id, &addrs))
+        .await
+        .unwrap_or(Err(DialError::Timeout));
+    (id, answer)
 }
 
 /// Decodes and verifies contact card hints; returns the valid ones (one per
@@ -364,7 +379,10 @@ pub async fn random_lookups<D: Dialer>(
     for _ in 0..count {
         let mut target = [0; 32];
         rng.fill_bytes(&mut target);
-        added += run_lookup(view, dialer, target, budget, now).await.added;
+        let seeds = seeds(view, &target, now);
+        added += run_lookup(view, dialer, target, seeds, budget, now)
+            .await
+            .added;
     }
     added
 }
@@ -382,11 +400,17 @@ pub async fn fallback_lookup<D: Dialer>(
     now: u64,
 ) -> Vec<NodeId> {
     let target = mailbox_key(mailbox);
-    if !log.due(mailbox, now) || seeds(view, &target, now).is_empty() {
+    if !log.due(mailbox, now) {
+        return Vec::new();
+    }
+    let seeds = seeds(view, &target, now);
+    if seeds.is_empty() {
         return Vec::new();
     }
     log.note(mailbox, now);
-    run_lookup(view, dialer, target, budget, now).await.result
+    run_lookup(view, dialer, target, seeds, budget, now)
+        .await
+        .result
 }
 
 /// Up to `MAX_CARD_NODES` encoded records for my contact card, drawn at random
@@ -450,54 +474,63 @@ fn seeds(view: &View, target: &[u8; 32], now: u64) -> Vec<(NodeId, NodeRecord)> 
 }
 
 /// Drives a `Lookup` over the dialer, then records what it learnt in the view.
+/// Requests are issued as soon as an answer frees a slot; each one is bounded
+/// by `REQUEST_TIMEOUT_MS` (a timeout counts as a failure) and the whole
+/// lookup by `LOOKUP_TIMEOUT_MS`, after which pending requests are dropped.
 async fn run_lookup<D: Dialer>(
     view: &mut View,
     dialer: &D,
     target: [u8; 32],
+    seeds: Vec<(NodeId, NodeRecord)>,
     budget: &mut CandidateBudget,
     now: u64,
 ) -> LookupOutcome {
-    let seeds = seeds(view, &target, now);
     if seeds.is_empty() {
         return LookupOutcome::default();
     }
     let policy = view.policy();
-    let start = Instant::now();
+    let start = tokio::time::Instant::now();
+    let lookup_end = start + Duration::from_millis(LOOKUP_TIMEOUT_MS);
     let clock = || {
         let elapsed = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         now.saturating_mul(1000).saturating_add(elapsed)
     };
     let mut lookup = Lookup::new(target, seeds, policy, clock());
+    let mut pending = Vec::new();
     let mut added = 0;
-    while !lookup.is_done(clock()) {
-        let batch = lookup.next_requests(clock());
-        if batch.is_empty() {
+    loop {
+        let t = clock();
+        if lookup.is_done(t) {
             break;
         }
-        let answers = join_all(
-            batch
-                .into_iter()
-                .map(|(id, record)| async move {
-                    (id, dialer.find_node(id, &record.addrs(), target).await)
-                })
-                .collect(),
-        )
-        .await;
-        for (id, answer) in answers {
-            match answer {
-                Ok(records) => {
-                    // A response with one invalid record is ignored whole.
-                    if let Ok(nodes) = filter_nodes(records.clone(), now, &policy) {
-                        for (nid, record) in nodes {
-                            if admit_candidate(view, nid, record, budget, now) {
-                                added += 1;
-                            }
+        let request_end = (tokio::time::Instant::now() + Duration::from_millis(REQUEST_TIMEOUT_MS))
+            .min(lookup_end);
+        for (id, record) in lookup.next_requests(t) {
+            pending.push(Box::pin(timed_find(
+                dialer,
+                id,
+                record.addrs(),
+                target,
+                request_end,
+            )));
+        }
+        if pending.is_empty() {
+            break;
+        }
+        let (id, answer) = next_ready(&mut pending).await;
+        match answer {
+            Ok(records) => {
+                // A response with one invalid record is ignored whole.
+                if let Ok(nodes) = filter_nodes(records.clone(), now, &policy) {
+                    for (nid, record) in nodes {
+                        if admit_candidate(view, nid, record, budget, now) {
+                            added += 1;
                         }
                     }
-                    lookup.on_response(&id, records, now);
                 }
-                Err(_) => lookup.on_failure(&id),
+                lookup.on_response(&id, records, now);
             }
+            Err(_) => lookup.on_failure(&id),
         }
     }
     for (id, record) in lookup.responders() {
@@ -509,6 +542,19 @@ async fn run_lookup<D: Dialer>(
         result: lookup.result().into_iter().map(|(id, _)| id).collect(),
         added,
     }
+}
+
+async fn timed_find<D: Dialer>(
+    dialer: &D,
+    id: NodeId,
+    addrs: Vec<SocketAddr>,
+    target: [u8; 32],
+    deadline: tokio::time::Instant,
+) -> (NodeId, Result<Vec<NodeRecord>, DialError>) {
+    let answer = tokio::time::timeout_at(deadline, dialer.find_node(id, &addrs, target))
+        .await
+        .unwrap_or(Err(DialError::Timeout));
+    (id, answer)
 }
 
 /// Adds a relayed record as a candidate. A known node is refreshed for free;
@@ -550,28 +596,20 @@ fn confirm_reached(view: &mut View, id: NodeId, record: NodeRecord, now: u64) ->
     Some(!known)
 }
 
-/// Polls all the futures together; outputs in input order.
-async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
-    let mut futures: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
-    let mut outputs: Vec<Option<F::Output>> = futures.iter().map(|_| None).collect();
+/// Waits for the first of `pending` to finish (the earliest in the list when
+/// several are ready), removes it and returns its output. `pending` must not
+/// be empty.
+async fn next_ready<F: Future + Unpin>(pending: &mut Vec<F>) -> F::Output {
     std::future::poll_fn(|cx| {
-        let mut pending = false;
-        for (future, output) in futures.iter_mut().zip(outputs.iter_mut()) {
-            if output.is_none() {
-                match future.as_mut().poll(cx) {
-                    Poll::Ready(v) => *output = Some(v),
-                    Poll::Pending => pending = true,
-                }
+        for i in 0..pending.len() {
+            if let Poll::Ready(v) = Pin::new(&mut pending[i]).poll(cx) {
+                pending.remove(i);
+                return Poll::Ready(v);
             }
         }
-        if pending {
-            Poll::Pending
-        } else {
-            Poll::Ready(())
-        }
+        Poll::Pending
     })
-    .await;
-    outputs.into_iter().flatten().collect()
+    .await
 }
 
 #[cfg(test)]

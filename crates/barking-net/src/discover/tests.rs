@@ -1,5 +1,4 @@
 use std::sync::Mutex;
-use std::task::{Context, Waker};
 
 use ed25519_dalek::SigningKey;
 use rand::{SeedableRng, rngs::StdRng};
@@ -16,6 +15,8 @@ const NOW: u64 = 1_800_000_000;
 struct MemNet {
     nodes: Vec<(NodeId, NodeRecord)>,
     down: HashSet<NodeId>,
+    /// Nodes whose answer never comes.
+    stall: HashSet<NodeId>,
     pings: Mutex<Vec<NodeId>>,
     finds: Mutex<Vec<NodeId>>,
 }
@@ -25,6 +26,7 @@ impl MemNet {
         MemNet {
             nodes,
             down: HashSet::new(),
+            stall: HashSet::new(),
             pings: Mutex::new(Vec::new()),
             finds: Mutex::new(Vec::new()),
         }
@@ -87,7 +89,7 @@ impl Dialer for MemNet {
             Some(r) if !self.down.contains(&id) => Ok(r),
             _ => Err(DialError::Unreachable),
         };
-        std::future::ready(answer)
+        stalling(self.stall.contains(&id), answer)
     }
 
     fn find_node(
@@ -109,19 +111,36 @@ impl Dialer for MemNet {
                 .map(|(_, r)| r.clone())
                 .collect())
         };
-        std::future::ready(answer)
+        stalling(self.stall.contains(&id), answer)
     }
 }
 
-/// Runs a future whose leaves are always ready (the in-memory dialer).
-fn block_on<F: Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let mut cx = Context::from_waker(Waker::noop());
-    loop {
-        if let Poll::Ready(v) = future.as_mut().poll(&mut cx) {
-            return v;
-        }
+/// `answer` at once, or never when `stall`.
+async fn stalling<T>(stall: bool, answer: T) -> T {
+    if stall {
+        std::future::pending::<()>().await;
     }
+    answer
+}
+
+/// Runs a future on a runtime whose clock is paused: it jumps ahead whenever
+/// every task waits, so timeouts cost no real time.
+fn block_on<F: Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
+/// Runs `future` and returns its output with the (virtual) time it took.
+fn timed<F: Future>(future: F) -> (F::Output, Duration) {
+    block_on(async {
+        let start = tokio::time::Instant::now();
+        let out = future.await;
+        (out, start.elapsed())
+    })
 }
 
 /// View that accepts runtime keys (no puzzle) and private addresses.
@@ -533,5 +552,100 @@ fn quic_dialer_without_address_fails_fast() {
     assert_eq!(
         block_on(QuicDialer.find_node(id, &[], [0; 32])),
         Err(DialError::NoAddress)
+    );
+}
+
+#[test]
+fn lookup_converges_despite_stalling_nodes() {
+    let mut net = MemNet::random(100, 21);
+    let mailbox = MailboxId([6; 16]);
+    let truth = net.closest(&mailbox_key(&mailbox), 5);
+    // Every fourth node never answers (none of the true closest).
+    let stalled: Vec<NodeId> = net
+        .nodes
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| !truth.contains(id))
+        .step_by(4)
+        .collect();
+    net.stall.extend(stalled.iter().copied());
+    let mut view = test_view();
+    // Seeds: stalling nodes first, so the very first requests hang.
+    for id in stalled.iter().take(5) {
+        view.insert(net.record(id).unwrap(), NOW);
+    }
+    for (id, r) in &net.nodes {
+        if !stalled.contains(id) && !truth.contains(id) && view.len() < 8 {
+            view.insert(r.clone(), NOW);
+        }
+    }
+    let (found, took) = timed(fallback_lookup(
+        &mut view,
+        &net,
+        &mailbox,
+        &mut FallbackLog::default(),
+        &mut CandidateBudget::default(),
+        NOW,
+    ));
+    assert_eq!(&found[..5], &truth[..], "true closest despite stalls");
+    assert!(
+        took <= Duration::from_millis(LOOKUP_TIMEOUT_MS),
+        "took {took:?}"
+    );
+    assert!(
+        stalled
+            .iter()
+            .all(|id| !view.get(id).is_some_and(|e| e.confirmed))
+    );
+}
+
+#[test]
+fn bootstrap_reaches_later_sources_despite_stalling_cache() {
+    let mut net = MemNet::random(100, 23);
+    let mut view = test_view();
+    // 30 cached nodes, all stalling: only the first 24 are tried.
+    for (id, r) in &net.nodes[0..30] {
+        view.insert(r.clone(), NOW);
+        net.stall.insert(*id);
+    }
+    // 24 card hints pointing at stalling nodes too.
+    let hints: Vec<Vec<u8>> = net.nodes[30..54]
+        .iter()
+        .map(|(id, r)| {
+            net.stall.insert(*id);
+            encode(r)
+        })
+        .collect();
+    let (manual_id, manual_rec) = net.nodes[60].clone();
+    view.add_manual(manual_id, manual_rec.addrs()[0], NOW);
+    let builtin = [entry_of(&net, 70), entry_of(&net, 71)];
+    let (report, took) = timed(bootstrap(
+        &mut view,
+        hints,
+        &builtin,
+        &net,
+        &mut StdRng::seed_from_u64(4),
+        &mut CandidateBudget::default(),
+        NOW,
+    ));
+    assert!(report.bootstrapped());
+    assert_eq!(
+        report.reachable,
+        vec![manual_id, net.nodes[70].0, net.nodes[71].0]
+    );
+    assert_eq!(report.sources.last(), Some(&BootstrapSource::Builtin));
+    let pinged: HashSet<NodeId> = net.pings().into_iter().collect();
+    assert_eq!(
+        net.nodes[0..30]
+            .iter()
+            .filter(|(id, _)| pinged.contains(id))
+            .count(),
+        BOOTSTRAP_TRIES_PER_SOURCE
+    );
+    assert!(took <= Duration::from_secs(45), "took {took:?}");
+    assert!(
+        took < 2 * BOOTSTRAP_SOURCE_TIMEOUT
+            + Duration::from_millis(LOOKUP_TIMEOUT_MS + REQUEST_TIMEOUT_MS),
+        "each stalling source costs one timeout, not one per round: {took:?}"
     );
 }
