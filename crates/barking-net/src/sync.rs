@@ -36,8 +36,10 @@
 //! fetches are over, within `REREAD_BYTES` and `REREAD_TIME`.
 //!
 //! **Network down.** While no node has answered, `DOWN_AFTER_FAILURES`
-//! failed dials in a row end the sync: nothing lost, no score lowered,
-//! no `mark_polled`.
+//! failed dials in a row, then one node added by hand or built-in not tried
+//! yet failing too (or none left), end the sync: nothing lost, no score
+//! lowered, no `mark_polled`. The nodes that failed then rank last for
+//! `DOWN_FAILED_SECS`, so the next sync dials other nodes first.
 //!
 //! Nothing here logs an address or a mailbox: the transparency log gets the
 //! short node id only.
@@ -263,6 +265,9 @@ where
         tried: false,
         dial_failures: 0,
         down: false,
+        seeds: Vec::new(),
+        dialed: HashSet::new(),
+        probed: false,
         reread_queue: Vec::new(),
         budget: CandidateBudget::default(),
         now,
@@ -304,8 +309,16 @@ struct Run<'a, D: Connector> {
     tried: bool,
     /// Failures in a row while no node has answered yet.
     dial_failures: u32,
-    /// `DOWN_AFTER_FAILURES` reached: the network is down, the sync ends.
+    /// `DOWN_AFTER_FAILURES` reached and the seed probe failed: the network
+    /// is down, the sync ends.
     down: bool,
+    /// Nodes added by hand and built-in entries: one not tried yet is dialled
+    /// before the network is taken as down.
+    seeds: Vec<(NodeId, Vec<SocketAddr>)>,
+    /// Nodes dialled during this sync.
+    dialed: HashSet<NodeId>,
+    /// The seed probe ran.
+    probed: bool,
     /// Groups served by a node this sync, for the audit re-reads.
     reread_queue: Vec<(NodeId, Vec<MailboxId>)>,
     budget: CandidateBudget,
@@ -328,7 +341,22 @@ where
         self.state.view.expire(now);
         self.state.view.decay_scores(now);
         self.state.fallbacks.prune(now);
+        self.state.prune_down_failed(now);
         self.save();
+        let mut seeds: Vec<(NodeId, Vec<SocketAddr>)> = self
+            .state
+            .view
+            .entries()
+            .filter(|(_, e)| e.manual)
+            .map(|(id, e)| (*id, e.addrs()))
+            .collect();
+        seeds.sort_unstable_by_key(|(id, _)| id.0);
+        for b in &opts.builtin {
+            if !seeds.iter().any(|(id, _)| *id == b.id) {
+                seeds.push((b.id, vec![b.addr]));
+            }
+        }
+        self.seeds = seeds;
 
         if self.reachable() < MIN_REACHABLE && !self.over() {
             let hints = self.core.contact_node_hints().unwrap_or_default();
@@ -396,6 +424,10 @@ where
         for (_, conn) in std::mem::take(&mut self.conns) {
             let close = self.dialer.close(conn);
             let _ = tokio::time::timeout_at(close_end, close).await;
+        }
+        if self.down {
+            let failed: Vec<NodeId> = self.failed.iter().copied().collect();
+            self.state.note_down_failures(failed, self.now);
         }
         self.save();
         for (_, (id, s)) in std::mem::take(&mut self.stats) {
@@ -472,6 +504,9 @@ where
     /// whatever failed (fetch, deposit, lookup, ping, audit); a failure
     /// waits until some node answered.
     fn score(&mut self, id: NodeId, event: ScoreEvent) {
+        if matches!(event, ScoreEvent::Success | ScoreEvent::Found) {
+            self.state.down_failed.remove(&id);
+        }
         if event == ScoreEvent::Failure {
             if !self.penalized.insert(id) {
                 return;
@@ -507,15 +542,53 @@ where
     }
 
     /// A node failed (connection, timeout, invalid answer).
-    /// While no node has answered, `DOWN_AFTER_FAILURES` of them in a row
-    /// end the sync: the client's own connection is down.
+    /// A node failed; while no node has answered, failures are counted for
+    /// `confirm_down`.
     fn fail(&mut self, id: NodeId) {
         self.failed.insert(id);
         self.conns.remove(&id);
         self.score(id, ScoreEvent::Failure);
         if !self.report.network_up {
             self.dial_failures = self.dial_failures.saturating_add(1);
-            if self.dial_failures >= DOWN_AFTER_FAILURES {
+        }
+    }
+
+    /// While no node has answered and `DOWN_AFTER_FAILURES` dials failed:
+    /// one node added by hand or built-in, not tried yet, is dialled. If it
+    /// answers the sync goes on; otherwise (or with none left) the network
+    /// is down and the sync ends.
+    async fn confirm_down(&mut self) {
+        if self.down || self.report.network_up || self.dial_failures < DOWN_AFTER_FAILURES {
+            return;
+        }
+        if self.probed {
+            self.down = true;
+            return;
+        }
+        self.probed = true;
+        let candidate = self
+            .seeds
+            .iter()
+            .find(|(id, _)| !self.dialed.contains(id) && !self.failed.contains(id))
+            .cloned();
+        let Some((id, addrs)) = candidate else {
+            self.down = true;
+            return;
+        };
+        self.dialed.insert(id);
+        self.tried = true;
+        match tokio::time::timeout_at(self.deadline, self.dialer.connect(id, &addrs)).await {
+            Ok(Ok(conn)) => {
+                self.answered();
+                self.state.view.confirm(&id, self.now);
+                self.conns.insert(id, conn);
+            }
+            Ok(Err(DialError::Refused(_))) => {
+                self.answered();
+                self.failed.insert(id);
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.failed.insert(id);
                 self.down = true;
             }
         }
@@ -551,9 +624,15 @@ where
         if let Some(c) = self.conns.remove(&id) {
             return Some(c);
         }
+        self.confirm_down().await;
         if self.down || self.failed.contains(&id) || self.limited.contains(&id) {
             return None;
         }
+        // The seed probe may have opened it.
+        if let Some(c) = self.conns.remove(&id) {
+            return Some(c);
+        }
+        self.dialed.insert(id);
         let addrs = self
             .state
             .view
@@ -575,6 +654,7 @@ where
             }
             Ok(Err(_)) => {
                 self.fail(id);
+                self.confirm_down().await;
                 None
             }
         }
@@ -595,12 +675,12 @@ where
         let mut fallback_tried: HashSet<MailboxId> = HashSet::new();
         'plan: loop {
             let excluded = self.excluded();
-            let view = &self.state.view;
+            let st = &self.state;
             let deposits = plan_deposits(
                 &outbox,
                 &self.state.ledger,
                 |m| {
-                    view.responsibles_by_score(m, now)
+                    st.order_responsibles(st.view.responsibles_by_score(m, now))
                         .into_iter()
                         .filter(|n| !excluded.contains(n))
                         .collect()

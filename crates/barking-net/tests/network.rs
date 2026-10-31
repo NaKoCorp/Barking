@@ -32,9 +32,10 @@ use tracing_subscriber::util::SubscriberInitExt;
 const NODES: usize = 8;
 /// Longest sync of these tests (nodes are local).
 const SYNC_DEADLINE: Duration = Duration::from_secs(60);
-/// A sync with every node down ends after 3 failed dials of 10 s each
-/// (spec §6), far within the production deadline it is given.
-const DOWN_ENDS_WITHIN: Duration = Duration::from_secs(45);
+/// A sync with every node down ends after 3 failed dials and the probe of
+/// the node added by hand, 10 s each (spec §6), far within the production
+/// deadline (180 s) it is given.
+const DOWN_ENDS_WITHIN: Duration = Duration::from_secs(55);
 
 /// The timing-sensitive tests run one at a time.
 static TIMING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

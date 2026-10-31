@@ -26,6 +26,9 @@ use crate::view::{View, hour};
 pub const STATE_KEY: &str = "net";
 /// Key of the old synchronization's state, migrated then erased.
 pub const LEGACY_STATE_KEY: &str = "netsync";
+/// Nodes that failed in a sync that ended as network down are ranked last
+/// for this long.
+pub const DOWN_FAILED_SECS: u64 = 86_400;
 /// Version of the encoding: any other value reads as an unreadable state.
 const FORMAT: u8 = 1;
 
@@ -49,6 +52,10 @@ pub struct NetState {
     /// Date (hour) of the last cross-check of a session mailbox on a node
     /// other than the one that served it (`CROSSCHECK_EVERY_SECS`).
     pub crosscheck_at: HashMap<(NodeId, MailboxId), u64>,
+    /// Date (hour) a node failed in a sync that ended as network down: for
+    /// `DOWN_FAILED_SECS` it ranks after every other node, so that the next
+    /// sync dials other nodes first.
+    pub down_failed: HashMap<NodeId, u64>,
 }
 
 /// Failure to read or write the state.
@@ -73,6 +80,7 @@ struct Stored {
     audited_at: Vec<(NodeId, MailboxId, u64)>,
     reread_at: Vec<(NodeId, MailboxId, u64)>,
     crosscheck_at: Vec<(NodeId, MailboxId, u64)>,
+    down_failed: Vec<(NodeId, u64)>,
 }
 
 impl NetState {
@@ -87,6 +95,7 @@ impl NetState {
             audited_at: HashMap::new(),
             reread_at: HashMap::new(),
             crosscheck_at: HashMap::new(),
+            down_failed: HashMap::new(),
         }
     }
 
@@ -123,6 +132,9 @@ impl NetState {
         let mut unaudited: Vec<(NodeId, u32)> =
             self.unaudited.iter().map(|(&n, &c)| (n, c)).collect();
         unaudited.sort_unstable_by_key(|(n, _)| n.0);
+        let mut down_failed: Vec<(NodeId, u64)> =
+            self.down_failed.iter().map(|(&n, &t)| (n, t)).collect();
+        down_failed.sort_unstable_by_key(|(n, _)| n.0);
         let encode_err = |_| StateError::Encode;
         let stored = Stored {
             format: FORMAT,
@@ -134,6 +146,7 @@ impl NetState {
             audited_at: triples(&self.audited_at),
             reread_at: triples(&self.reread_at),
             crosscheck_at: triples(&self.crosscheck_at),
+            down_failed,
         };
         postcard::to_allocvec(&stored).map_err(encode_err)
     }
@@ -161,6 +174,12 @@ impl NetState {
             audited_at: dates(stored.audited_at, now),
             reread_at: dates(stored.reread_at, now),
             crosscheck_at: dates(stored.crosscheck_at, now),
+            down_failed: stored
+                .down_failed
+                .into_iter()
+                .map(|(n, t)| (n, hour(t).min(hour(now))))
+                .filter(|(_, t)| now.saturating_sub(*t) < DOWN_FAILED_SECS)
+                .collect(),
         })
     }
 
@@ -204,6 +223,29 @@ impl NetState {
         self.crosscheck_at
             .get(&(*node, *mailbox))
             .is_none_or(|&t| now.saturating_sub(t) >= every)
+    }
+
+    /// `nodes` failed in a sync that ended as network down.
+    pub fn note_down_failures(&mut self, nodes: impl IntoIterator<Item = NodeId>, now: u64) {
+        for n in nodes {
+            self.down_failed.insert(n, hour(now));
+        }
+    }
+
+    /// Forgets the down failures older than `DOWN_FAILED_SECS`.
+    pub fn prune_down_failed(&mut self, now: u64) {
+        self.down_failed
+            .retain(|_, t| now.saturating_sub(*t) < DOWN_FAILED_SECS);
+    }
+
+    /// `ids` (best first) with the nodes that failed in a recent
+    /// network-down sync moved to the end, order kept otherwise.
+    pub fn order_responsibles(&self, ids: Vec<NodeId>) -> Vec<NodeId> {
+        let (mut ok, late): (Vec<NodeId>, Vec<NodeId>) = ids
+            .into_iter()
+            .partition(|id| !self.down_failed.contains_key(id));
+        ok.extend(late);
+        ok
     }
 
     /// A cross-check of `mailbox` on `node` was tried now.

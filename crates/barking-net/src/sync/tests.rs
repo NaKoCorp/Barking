@@ -452,7 +452,7 @@ async fn crosscheck_reads_another_responsible_every_six_hours() {
     assert_eq!(fetches_for(&net.calls()[seen..], r[0], m).len(), 1);
     assert!(fetches_for(&net.calls()[seen..], r[1], m).is_empty());
     let seen = net.calls().len();
-    sync(&mut core, &net, at(NOW + AUDIT_EVERY_SECS + 3600)).await;
+    sync(&mut core, &net, at(NOW + CROSSCHECK_EVERY_SECS + 3600)).await;
     assert_eq!(fetches_for(&net.calls()[seen..], r[1], m).len(), 1);
 }
 
@@ -473,6 +473,95 @@ async fn three_failed_dials_end_the_sync_as_network_down() {
     for (id, e) in after.view.entries() {
         assert_eq!(e.score, before.view.get(id).unwrap().score);
     }
+}
+
+/// Nodes dialled by `calls`, in order.
+fn connects(calls: &[Call]) -> Vec<NodeId> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Connect(n) => Some(*n),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn first_three_dead_then_live_manual_node_keeps_the_sync_going() {
+    let (_dir, mut core, mut net) = setup();
+    // The three nodes this sync dials first, found by a dry run on the
+    // same state.
+    let saved = core
+        .transport_state(crate::state::STATE_KEY)
+        .unwrap()
+        .unwrap();
+    sync(&mut core, &net, opts()).await;
+    let first: Vec<NodeId> = connects(&net.calls()).into_iter().take(3).collect();
+    assert_eq!(first.len(), 3);
+    core.set_transport_state(crate::state::STATE_KEY, &saved)
+        .unwrap();
+    net.calls.lock().unwrap().clear();
+    net.down = first.iter().copied().collect();
+    // A live node added by hand, not among the first dialled.
+    let manual = (0..NODES)
+        .map(id_of)
+        .find(|id| !first.contains(id))
+        .unwrap();
+    let addr = net.records[&manual].addrs()[0];
+    let report = sync(
+        &mut core,
+        &net,
+        SyncOptions {
+            manual_nodes: vec![(manual, addr)],
+            ..opts()
+        },
+    )
+    .await;
+    assert_eq!(
+        connects(&net.calls())[..4],
+        [first[0], first[1], first[2], manual]
+    );
+    assert!(report.network_up, "{report:?}");
+    assert!(
+        report.acks_deposited + report.first_copies > 0,
+        "{report:?}"
+    );
+    // The dead nodes were demoted.
+    for id in &first {
+        assert!(score_of(&mut core, id) < 0.5);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_down_sync_other_nodes_are_dialled_first() {
+    let (_dir, mut core, mut net) = setup();
+    net.down = net.records.keys().copied().collect();
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(!report.network_up);
+    let dead: Vec<NodeId> = connects(&net.calls());
+    assert_eq!(dead.len(), DOWN_AFTER_FAILURES as usize);
+    let state = load(&mut core);
+    for id in &dead {
+        assert!(state.down_failed.contains_key(id));
+    }
+    // Remembered 24 hours at most.
+    let later =
+        NetState::load(&mut core, NOW + crate::state::DOWN_FAILED_SECS + 3600, true).unwrap();
+    assert!(later.down_failed.is_empty());
+    // Back up: the next sync starts with other nodes.
+    net.down.clear();
+    net.calls.lock().unwrap().clear();
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.network_up);
+    let next: Vec<NodeId> = connects(&net.calls()).into_iter().take(3).collect();
+    assert!(
+        next.iter().all(|id| !dead.contains(id)),
+        "{next:?} {dead:?}"
+    );
+    // Remembered 24 hours at most.
+    let later =
+        NetState::load(&mut core, NOW + crate::state::DOWN_FAILED_SECS + 3600, true).unwrap();
+    assert!(later.down_failed.is_empty());
 }
 
 #[tokio::test(start_paused = true)]

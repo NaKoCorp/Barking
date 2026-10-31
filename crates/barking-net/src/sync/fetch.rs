@@ -49,7 +49,10 @@ where
         let slice_end = (Instant::now() + slice).min(self.deadline);
         let ranked: HashMap<MailboxId, Vec<NodeId>> = mailboxes
             .iter()
-            .map(|m| (*m, self.state.view.responsibles_by_score(m, now)))
+            .map(|m| {
+                let ids = self.state.view.responsibles_by_score(m, now);
+                (*m, self.state.order_responsibles(ids))
+            })
             .collect();
         // Next responsible to try, by mailbox; `None`: given up.
         let mut next: HashMap<MailboxId, Option<usize>> =
