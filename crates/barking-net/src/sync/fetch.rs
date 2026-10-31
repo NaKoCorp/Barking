@@ -12,8 +12,8 @@ use tokio::time::Instant;
 use super::FetchStop;
 use super::io::{Depositor, FetchReply, Fetcher};
 use super::{
-    AUDIT_EVERY_SECS, INTRO_FETCH_BYTES, REREAD_BYTES, REREAD_TIME, Run, SESSION_FETCH_SLICE,
-    UNAUDITED_SYNCS, intro_slice, receive_all,
+    AUDIT_EVERY_SECS, CROSSCHECK_EVERY_SECS, INTRO_FETCH_BYTES, REREAD_BYTES, REREAD_TIME, Run,
+    SESSION_FETCH_SLICE, UNAUDITED_SYNCS, intro_slice, receive_all,
 };
 use crate::discover::{DialError, Dialer};
 use crate::plan::{detect_losses, found_messages};
@@ -65,6 +65,8 @@ where
         // Only raised; a node enters only once it completed, or answered
         // without completing for a reason of its own.
         let mut complete_by_node: HashMap<NodeId, bool> = HashMap::new();
+        // Node that served each mailbox in full.
+        let mut served: HashMap<MailboxId, NodeId> = HashMap::new();
         'rounds: loop {
             let mut groups: BTreeMap<[u8; 32], (NodeId, Vec<MailboxId>)> = BTreeMap::new();
             for m in mailboxes {
@@ -102,6 +104,9 @@ where
                 match end {
                     GroupEnd::Complete => {
                         complete_by_node.insert(node, true);
+                        for m in &group {
+                            served.insert(*m, node);
+                        }
                         done.extend(group.iter().copied());
                         self.report.mailboxes_polled += group.len();
                     }
@@ -129,11 +134,63 @@ where
             }
         }
         if !intro {
+            self.crosschecks(&ranked, &served, slice_end).await;
             self.note_audits(complete_by_node);
             let queue = std::mem::take(&mut self.reread_queue);
             self.rereads(queue, slice_end).await;
         }
         all_processed && mailboxes.iter().all(|m| done.contains(m))
+    }
+
+    /// Cross-checks, once every primary round is over: each session mailbox
+    /// served in full is read again from the best other responsible, at
+    /// most every `CROSSCHECK_EVERY_SECS` per (node, mailbox), within the
+    /// session slice. Items go through the normal processing (positions,
+    /// loss audit). A best responsible that answers but keeps nothing would
+    /// otherwise never be left, its fetches succeeding empty.
+    async fn crosschecks(
+        &mut self,
+        ranked: &HashMap<MailboxId, Vec<NodeId>>,
+        served: &HashMap<MailboxId, NodeId>,
+        slice_end: Instant,
+    ) {
+        let now = self.now;
+        let mut by_mailbox: Vec<(&MailboxId, &NodeId)> = served.iter().collect();
+        by_mailbox.sort_unstable_by_key(|(m, _)| m.0);
+        let mut groups: BTreeMap<[u8; 32], (NodeId, Vec<MailboxId>)> = BTreeMap::new();
+        for (m, by) in by_mailbox {
+            let Some(other) = ranked.get(m).and_then(|list| {
+                list.iter()
+                    .find(|n| *n != by && !self.failed.contains(n) && !self.limited.contains(n))
+            }) else {
+                continue;
+            };
+            if self
+                .state
+                .crosscheck_due(other, m, now, CROSSCHECK_EVERY_SECS)
+            {
+                groups
+                    .entry(other.0)
+                    .or_insert_with(|| (*other, Vec::new()))
+                    .1
+                    .push(*m);
+            }
+        }
+        for (_, (node, group)) in groups {
+            if Instant::now() >= slice_end || self.over() {
+                break;
+            }
+            for m in &group {
+                self.state.note_crosscheck(&node, m, now);
+            }
+            let (end, _, _) = self
+                .fetch_group(node, &group, false, MAX_FETCH_BYTES, slice_end)
+                .await;
+            if matches!(end, GroupEnd::Stop) {
+                break;
+            }
+        }
+        self.save();
     }
 
     /// Counts the syncs in which none of a node's session fetches completed;

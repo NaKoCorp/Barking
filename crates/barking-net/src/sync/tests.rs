@@ -341,6 +341,18 @@ async fn first_copy_before_any_maintenance_under_tight_deadline() {
     assert!(fetches_of(&calls, &groups.intro).is_empty());
 }
 
+/// Cross-checks already done for `mailboxes` on every node: the sync only
+/// makes its primary rounds.
+fn no_crosschecks(core: &mut Core, mailboxes: &[MailboxId]) {
+    let mut state = load(core);
+    for n in 0..NODES {
+        for m in mailboxes {
+            state.note_crosscheck(&id_of(n), m, NOW);
+        }
+    }
+    state.save(core).unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn fetch_groups_mailboxes_by_best_responsible() {
     let (_dir, mut core, net) = setup();
@@ -357,6 +369,7 @@ async fn fetch_groups_mailboxes_by_best_responsible() {
         expected.entry(best.0).or_default().insert(m.0);
     }
     assert!(expected[&r[1].0].contains(&sessions[0].0));
+    no_crosschecks(&mut core, &sessions);
 
     sync(&mut core, &net, opts()).await;
     let mut actual: BTreeMap<[u8; 32], BTreeSet<[u8; 16]>> = BTreeMap::new();
@@ -378,6 +391,7 @@ async fn second_responsible_on_failure_or_truncation() {
     // Best responsible unreachable, the second truncates: the third serves.
     net.down.insert(r[0]);
     net.truncate.insert(r[1], FetchStop::Connection);
+    no_crosschecks(&mut core, &sessions);
     let report = sync(&mut core, &net, opts()).await;
     let calls = net.calls();
     let served: Vec<NodeId> = fetches_of(&calls, &sessions)
@@ -391,6 +405,74 @@ async fn second_responsible_on_failure_or_truncation() {
     // The unreachable node lost score (another node answered).
     let state = load(&mut core);
     assert!(state.view.get(&r[0]).unwrap().score.value() < 0.5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn crosscheck_reads_another_responsible_every_six_hours() {
+    let (_dir, mut core, mut net) = setup();
+    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let m = sessions[0];
+    let mut state = load(&mut core);
+    let r = state.view.responsibles_by_score(&m, NOW);
+    // The best responsible stays best through the three syncs.
+    state.view.entries.get_mut(&r[0]).unwrap().score = Score::new(0.9);
+    state.save(&mut core).unwrap();
+    // Only the second responsible holds the item: the best one answers
+    // empty, as a node that keeps nothing would.
+    let (item, _) = message(&mut core);
+    net.items.insert(r[1], vec![item]);
+    let report = sync(&mut core, &net, opts()).await;
+    let calls = net.calls();
+    assert_eq!(fetches_for(&calls, r[0], m).len(), 1);
+    assert_eq!(fetches_for(&calls, r[1], m).len(), 1);
+    // After every primary fetch, items processed as usual.
+    let last_primary = fetches_of(&calls, &sessions)
+        .iter()
+        .filter(|(_, n, mbs)| *n != r[1] || !mbs.contains(&m))
+        .map(|(i, _, _)| *i)
+        .filter(|i| !matches!(&calls[*i], Call::Fetch(n, mbs, _) if *n != r[0] && mbs.contains(&m)))
+        .max()
+        .unwrap();
+    let crosscheck = fetches_of(&calls, &sessions)
+        .into_iter()
+        .find(|(_, n, mbs)| *n == r[1] && mbs.contains(&m))
+        .unwrap()
+        .0;
+    assert!(crosscheck > last_primary);
+    assert!(report.items_received >= 1);
+    assert!(report.polled_all_sessions);
+
+    // Not again within six hours.
+    let seen = net.calls().len();
+    let at = |t: u64| SyncOptions {
+        now: Some(t),
+        ..opts()
+    };
+    sync(&mut core, &net, at(NOW + 3600)).await;
+    assert_eq!(fetches_for(&net.calls()[seen..], r[0], m).len(), 1);
+    assert!(fetches_for(&net.calls()[seen..], r[1], m).is_empty());
+    let seen = net.calls().len();
+    sync(&mut core, &net, at(NOW + AUDIT_EVERY_SECS + 3600)).await;
+    assert_eq!(fetches_for(&net.calls()[seen..], r[1], m).len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn three_failed_dials_end_the_sync_as_network_down() {
+    let (_dir, mut core, mut net) = setup();
+    net.down = net.records.keys().copied().collect();
+    let before = load(&mut core);
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(!report.network_up && !report.maintenance_done);
+    let dials = net
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, Call::Connect(_) | Call::Ping(_) | Call::Find(..)))
+        .count();
+    assert_eq!(dials, DOWN_AFTER_FAILURES as usize, "{:?}", net.calls());
+    let after = load(&mut core);
+    for (id, e) in after.view.entries() {
+        assert_eq!(e.score, before.view.get(id).unwrap().score);
+    }
 }
 
 #[tokio::test(start_paused = true)]

@@ -7,7 +7,9 @@
 //!    session splits each group into `Fetch` requests of 64 mailboxes at
 //!    most), resumed from the positions per (node, mailbox). On a failure
 //!    or a truncated fetch, the mailboxes concerned go to their next
-//!    responsible. Loss audit (spec §5.1) on the way.
+//!    responsible. Loss audit (spec §5.1) on the way. Then cross-checks:
+//!    each session mailbox served in full is read from the best other
+//!    responsible every `CROSSCHECK_EVERY_SECS` per (node, mailbox).
 //! 3. **Deposits**, following `plan_deposits`: receipts (no proof of work),
 //!    first copies, resends, extra copies. Proof budget exhausted: messages
 //!    wait, receipts go. `NotResponsible` from 2 responsibles of a mailbox:
@@ -32,6 +34,10 @@
 //! positioned mailboxes re-read them from their start every
 //! `AUDIT_EVERY_SECS`, each in a call of its own once all regular session
 //! fetches are over, within `REREAD_BYTES` and `REREAD_TIME`.
+//!
+//! **Network down.** While no node has answered, `DOWN_AFTER_FAILURES`
+//! failed dials in a row end the sync: nothing lost, no score lowered,
+//! no `mark_polled`.
 //!
 //! Nothing here logs an address or a mailbox: the transparency log gets the
 //! short node id only.
@@ -93,6 +99,13 @@ pub const UNAUDITED_SYNCS: u32 = 3;
 /// from its start, for a loss audit, at most this often: in a call of its
 /// own, once all regular session fetches are over.
 pub const AUDIT_EVERY_SECS: u64 = 6 * 3600;
+/// A session mailbox fetched in full from one responsible is also read, at
+/// most this often per (node, mailbox), from the best other responsible:
+/// a responsible that answers but keeps nothing is never left otherwise.
+pub const CROSSCHECK_EVERY_SECS: u64 = 6 * 3600;
+/// Dials failed or timed out in a row, no node having answered yet in the
+/// sync, after which the network is taken as down and the sync ends.
+pub const DOWN_AFTER_FAILURES: u32 = 3;
 /// Bytes all audit re-reads of a sync may fetch together.
 pub const REREAD_BYTES: usize = 8 << 20;
 /// Time all audit re-reads of a sync may take together (within the
@@ -248,6 +261,8 @@ where
         penalized: HashSet::new(),
         found: HashSet::new(),
         tried: false,
+        dial_failures: 0,
+        down: false,
         reread_queue: Vec::new(),
         budget: CandidateBudget::default(),
         now,
@@ -287,6 +302,10 @@ struct Run<'a, D: Connector> {
     found: HashSet<NodeId>,
     /// Some node was dialled during this sync.
     tried: bool,
+    /// Failures in a row while no node has answered yet.
+    dial_failures: u32,
+    /// `DOWN_AFTER_FAILURES` reached: the network is down, the sync ends.
+    down: bool,
     /// Groups served by a node this sync, for the audit re-reads.
     reread_queue: Vec<(NodeId, Vec<MailboxId>)>,
     budget: CandidateBudget,
@@ -407,8 +426,9 @@ where
         self.report
     }
 
+    /// The deadline passed, or the network is down.
     fn over(&self) -> bool {
-        Instant::now() >= self.deadline
+        self.down || Instant::now() >= self.deadline
     }
 
     fn network_up(&self) -> bool {
@@ -487,10 +507,18 @@ where
     }
 
     /// A node failed (connection, timeout, invalid answer).
+    /// While no node has answered, `DOWN_AFTER_FAILURES` of them in a row
+    /// end the sync: the client's own connection is down.
     fn fail(&mut self, id: NodeId) {
         self.failed.insert(id);
         self.conns.remove(&id);
         self.score(id, ScoreEvent::Failure);
+        if !self.report.network_up {
+            self.dial_failures = self.dial_failures.saturating_add(1);
+            if self.dial_failures >= DOWN_AFTER_FAILURES {
+                self.down = true;
+            }
+        }
     }
 
     /// Outcomes of the lookups and pings made through `observed`. A node
@@ -523,7 +551,7 @@ where
         if let Some(c) = self.conns.remove(&id) {
             return Some(c);
         }
-        if self.failed.contains(&id) || self.limited.contains(&id) {
+        if self.down || self.failed.contains(&id) || self.limited.contains(&id) {
             return None;
         }
         let addrs = self

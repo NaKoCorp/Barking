@@ -46,6 +46,9 @@ pub struct NetState {
     /// Date (hour) of the last audit re-read of a mailbox on a node, even one
     /// cut short: a re-read is not tried again before `AUDIT_EVERY_SECS`.
     pub reread_at: HashMap<(NodeId, MailboxId), u64>,
+    /// Date (hour) of the last cross-check of a session mailbox on a node
+    /// other than the one that served it (`CROSSCHECK_EVERY_SECS`).
+    pub crosscheck_at: HashMap<(NodeId, MailboxId), u64>,
 }
 
 /// Failure to read or write the state.
@@ -69,6 +72,7 @@ struct Stored {
     unaudited: Vec<(NodeId, u32)>,
     audited_at: Vec<(NodeId, MailboxId, u64)>,
     reread_at: Vec<(NodeId, MailboxId, u64)>,
+    crosscheck_at: Vec<(NodeId, MailboxId, u64)>,
 }
 
 impl NetState {
@@ -82,6 +86,7 @@ impl NetState {
             unaudited: HashMap::new(),
             audited_at: HashMap::new(),
             reread_at: HashMap::new(),
+            crosscheck_at: HashMap::new(),
         }
     }
 
@@ -128,6 +133,7 @@ impl NetState {
             unaudited,
             audited_at: triples(&self.audited_at),
             reread_at: triples(&self.reread_at),
+            crosscheck_at: triples(&self.crosscheck_at),
         };
         postcard::to_allocvec(&stored).map_err(encode_err)
     }
@@ -154,6 +160,7 @@ impl NetState {
             unaudited: stored.unaudited.into_iter().collect(),
             audited_at: dates(stored.audited_at, now),
             reread_at: dates(stored.reread_at, now),
+            crosscheck_at: dates(stored.crosscheck_at, now),
         })
     }
 
@@ -182,11 +189,26 @@ impl NetState {
         }
     }
 
-    /// Forgets the positions and audit dates of mailboxes no longer watched.
+    /// Forgets the positions, audit and cross-check dates of mailboxes no
+    /// longer watched.
     pub fn retain_positions(&mut self, watched: &HashSet<MailboxId>) {
         self.positions.retain(|(_, m), _| watched.contains(m));
         self.audited_at.retain(|(_, m), _| watched.contains(m));
         self.reread_at.retain(|(_, m), _| watched.contains(m));
+        self.crosscheck_at.retain(|(_, m), _| watched.contains(m));
+    }
+
+    /// True if `mailbox` was not cross-checked on `node` in the last
+    /// `every` seconds.
+    pub fn crosscheck_due(&self, node: &NodeId, mailbox: &MailboxId, now: u64, every: u64) -> bool {
+        self.crosscheck_at
+            .get(&(*node, *mailbox))
+            .is_none_or(|&t| now.saturating_sub(t) >= every)
+    }
+
+    /// A cross-check of `mailbox` on `node` was tried now.
+    pub fn note_crosscheck(&mut self, node: &NodeId, mailbox: &MailboxId, now: u64) {
+        self.crosscheck_at.insert((*node, *mailbox), hour(now));
     }
 
     /// True if `mailbox` was neither audited nor re-read on `node` in the
