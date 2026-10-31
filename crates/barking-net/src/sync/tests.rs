@@ -1,4 +1,8 @@
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::sync::Mutex;
+
+use barking_proto::client::FetchResume;
 
 use barking_core::Core;
 use tempfile::TempDir;
