@@ -1697,3 +1697,17 @@ async fn candidate_answering_with_another_record_gains_nothing() {
     assert!(!e.confirmed);
     assert!((e.score.value() - 0.5).abs() < 1e-4, "{e:?}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn unreadable_state_is_reported() {
+    let (_dir, mut core, net) = setup();
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(!report.state_reset && !report.state_unsaved);
+    core.set_transport_state(crate::state::STATE_KEY, b"not a state")
+        .unwrap();
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.state_reset, "{report:?}");
+    // Read again, the empty state saved since is fine.
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(!report.state_reset);
+}

@@ -1472,3 +1472,33 @@ fn now_secs() -> u64 {
         .unwrap()
         .as_secs()
 }
+
+/// Writes junk in place of `home`'s network state, through the core (the
+/// database is encrypted): the key is derived as the CLI derives it.
+fn corrupt_net_state(home: &Path) {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    let salt: [u8; 16] = fs::read(home.join("salt")).unwrap().try_into().unwrap();
+    let params = Params::new(65_536, 3, 1, Some(32)).unwrap();
+    let mut key = [0u8; 32];
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(PASS.as_bytes(), &salt, &mut key)
+        .unwrap();
+    let mut core = barking_core::Core::open(&home.join("barking.db"), &key, now_secs()).unwrap();
+    core.set_transport_state("net", b"junk").unwrap();
+}
+
+#[test]
+fn unreadable_network_state_is_reported() {
+    let (_d, home) = party("tel-a");
+    let quiet = barking(&home).args(["node", "list"]).assert().success();
+    assert!(!String::from_utf8_lossy(&quiet.get_output().stderr).contains("warning"));
+    corrupt_net_state(&home);
+    for args in [&["node", "list"][..], &["sync"][..]] {
+        let out = barking(&home).args(args).assert().get_output().clone();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("warning: the saved network state was unreadable"),
+            "{args:?}: {err}"
+        );
+    }
+}

@@ -240,6 +240,11 @@ pub struct SyncReport {
     pub maintenance_done: bool,
     /// Local error that stopped the sync (the state could not be read).
     pub error: Option<String>,
+    /// The stored network state was unreadable and replaced by an empty one
+    /// (nodes added by hand included): worth telling the user.
+    pub state_reset: bool,
+    /// The network state could not be saved at least once during the sync.
+    pub state_unsaved: bool,
 }
 
 /// Synchronizes with the network (see the module documentation).
@@ -253,7 +258,7 @@ where
             .map_or(0, |d| d.as_secs())
     });
     let deadline = Instant::now() + opts.deadline;
-    let state = match NetState::load(core, now, opts.allow_private) {
+    let (state, state_reset) = match NetState::load_checked(core, now, opts.allow_private) {
         Ok(s) => s,
         Err(e) => {
             return SyncReport {
@@ -263,6 +268,7 @@ where
         }
     };
     let mut run = Run::new(core, dialer, state, now, deadline, opts.pow_budget);
+    run.report.state_reset = state_reset;
     run.run(&opts).await;
     run.finish().await
 }
@@ -517,6 +523,7 @@ where
     fn save(&mut self) {
         if let Err(e) = self.state.save(self.core) {
             tracing::warn!("network state not saved: {e}");
+            self.report.state_unsaved = true;
         }
     }
 

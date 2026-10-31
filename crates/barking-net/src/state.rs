@@ -110,15 +110,28 @@ impl NetState {
     /// with a warning that carries no data. Only a database error fails:
     /// starting empty would then overwrite a good state.
     pub fn load(core: &mut Core, now: u64, allow_private: bool) -> Result<NetState, StateError> {
+        Ok(NetState::load_checked(core, now, allow_private)?.0)
+    }
+
+    /// Like `load`, also telling whether a stored state was unreadable and
+    /// replaced by an empty one (its nodes added by hand lost with it), for
+    /// the caller to tell the user.
+    pub fn load_checked(
+        core: &mut Core,
+        now: u64,
+        allow_private: bool,
+    ) -> Result<(NetState, bool), StateError> {
+        let mut reset = false;
         let mut state = match core.transport_state(STATE_KEY)? {
             Some(bytes) => NetState::decode(&bytes, now, allow_private).unwrap_or_else(|| {
                 tracing::warn!("unreadable network state: starting from an empty one");
+                reset = true;
                 NetState::new(allow_private)
             }),
             None => NetState::new(allow_private),
         };
         state.migrate_legacy(core, now)?;
-        Ok(state)
+        Ok((state, reset))
     }
 
     /// Writes the state to the core's encrypted database. A state that

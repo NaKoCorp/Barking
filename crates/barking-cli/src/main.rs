@@ -441,6 +441,7 @@ fn sync(home: &Path) -> CliResult<()> {
     let mut report = rt.block_on(barking_net::sync(&mut core, &barking_net::QuicDialer, opts));
     // A proof of work still being computed is not waited for.
     rt.shutdown_timeout(Duration::from_secs(1));
+    nodes::warn_state(report.state_reset, report.state_unsaved);
     if let Some(e) = &report.error {
         return fail(format!("Sync failed: {e}"));
     }

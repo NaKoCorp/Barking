@@ -139,8 +139,24 @@ fn wipe(path: &Path) {
 }
 
 fn load_state(core: &mut Core, now: u64) -> CliResult<NetState> {
-    NetState::load(core, now, allow_private())
-        .map_err(|e| CliError(format!("Cannot read the network state: {e}")))
+    let (state, reset) = NetState::load_checked(core, now, allow_private())
+        .map_err(|e| CliError(format!("Cannot read the network state: {e}")))?;
+    warn_state(reset, false);
+    Ok(state)
+}
+
+/// Tells the user about network state trouble (the library only logs it,
+/// and the CLI installs no log subscriber): an unreadable state replaced by
+/// an empty one, or a state that could not be saved. No path, no address.
+pub fn warn_state(reset: bool, unsaved: bool) {
+    if reset {
+        eprintln!(
+            "warning: the saved network state was unreadable: starting from an empty one (nodes added by hand must be added again)"
+        );
+    }
+    if unsaved {
+        eprintln!("warning: the network state could not be saved: some progress will be redone");
+    }
 }
 
 fn save_state(core: &mut Core, state: &NetState) -> CliResult<()> {
