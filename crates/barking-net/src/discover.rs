@@ -37,12 +37,13 @@ pub const BOOTSTRAP_TRIES_PER_SOURCE: usize = 24;
 /// New candidates accepted at most per synchronization, on top of the
 /// `MAX_NODES_PER_RESPONSE` records of a response: blunts candidate floods.
 pub const MAX_NEW_CANDIDATES: usize = 200;
-/// Time given to each source's pings (all sent at once): with four sources
-/// and the lookup that follows a built-in answer, bootstrap fits in 25 s.
+/// Time a source's pings (all sent at once) get before the next source
+/// starts; those still pending keep running (see `bootstrap`).
 pub const BOOTSTRAP_SOURCE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest exchange with a node at one address (connection, `Hello` and one
-/// request); a node with two addresses may take twice as long. Callers bound
-/// it further (lookup requests, bootstrap sources).
+/// request); a node with two addresses may take twice as long. Lookup
+/// requests and candidate pings are cut shorter: such a cut proves nothing
+/// against the node (see `Dialer::cut_short`).
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Failure of an exchange with a node.
@@ -82,6 +83,12 @@ pub trait Dialer {
     /// finished: the outcome its own future would have reported is a
     /// timeout. Nothing to do by default.
     fn timed_out(&self, _id: NodeId) {}
+
+    /// A `ping` or `find_node` to `id` was dropped at a cap of the client's
+    /// shorter than `DIAL_TIMEOUT` (a lookup request, a candidate ping): on a
+    /// slow link that proves nothing against the node. Nothing to do by
+    /// default.
+    fn cut_short(&self, _id: NodeId) {}
 }
 
 /// The real dialer: `Client::connect` (no client certificate, so anonymous),
@@ -243,10 +250,15 @@ impl BootstrapReport {
 /// they are tried. Built-in entries only have an identifier and an address:
 /// once one answered, a random lookup brings real records.
 ///
-/// Worst case, nothing answering in time: 4 sources × `BOOTSTRAP_SOURCE_TIMEOUT`
-/// (12 s), plus, after a built-in answer, one lookup bounded by
-/// `LOOKUP_TIMEOUT_MS` (10 s) and its last requests' `REQUEST_TIMEOUT_MS` cut
-/// (3 s at most): about 25 s, well within the 3-minute synchronization.
+/// A source's pings all leave at once; the next source starts once they all
+/// ended or after `BOOTSTRAP_SOURCE_TIMEOUT`, while those still pending keep
+/// running: each ping gets the full `DIAL_TIMEOUT`, so that a slow link is
+/// not taken for dead nodes (a ping that runs out of it is the timeout the
+/// dialer would report). Worst case, nothing answering: the last source
+/// starts after 3 × `BOOTSTRAP_SOURCE_TIMEOUT` (9 s), its pings end
+/// `DIAL_TIMEOUT` later (19 s), then, after a built-in answer, one lookup
+/// bounded by `LOOKUP_TIMEOUT_MS` (10 s): about 30 s, well within the
+/// 3-minute synchronization.
 pub async fn bootstrap<D: Dialer>(
     view: &mut View,
     core_hints: Vec<Vec<u8>>,
@@ -277,10 +289,12 @@ pub async fn bootstrap<D: Dialer>(
         .map(|(id, e)| (*id, e.addrs()))
         .collect();
     manual.sort_by_key(|(id, _)| id.0);
+    let builtin_ids: HashSet<NodeId> = builtin.iter().map(|b| b.id).collect();
     let builtin: Vec<(NodeId, Vec<SocketAddr>)> =
         builtin.iter().map(|b| (b.id, vec![b.addr])).collect();
 
     let mut tried = HashSet::new();
+    let mut pending = Vec::new();
     for (source, list) in [
         (BootstrapSource::Cache, cache),
         (BootstrapSource::Cards, cards),
@@ -291,36 +305,46 @@ pub async fn bootstrap<D: Dialer>(
             break;
         }
         report.sources.push(source);
-        let before = report.reachable.len();
-        try_source(view, dialer, list, &mut tried, &mut report, now).await;
-        if source == BootstrapSource::Builtin && report.reachable.len() > before {
-            let none = HashSet::new();
-            report.added += random_lookups(view, dialer, &none, 1, rng, budget, now).await;
-        }
+        let launch = tokio::time::Instant::now();
+        pending.extend(
+            list.into_iter()
+                .filter(|(id, addrs)| !addrs.is_empty() && tried.insert(*id))
+                .take(BOOTSTRAP_TRIES_PER_SOURCE)
+                .map(|(id, addrs)| Box::pin(timed_ping(dialer, id, addrs, launch + DIAL_TIMEOUT))),
+        );
+        let next_source = launch + BOOTSTRAP_SOURCE_TIMEOUT;
+        collect_pings(view, &mut pending, &mut report, Some(next_source), now).await;
+    }
+    // Every source started: the pings still pending run to their end.
+    collect_pings(view, &mut pending, &mut report, None, now).await;
+    if report.reachable.iter().any(|id| builtin_ids.contains(id)) {
+        let none = HashSet::new();
+        report.added += random_lookups(view, dialer, &none, 1, rng, budget, now).await;
     }
     report
 }
 
-/// Pings the first `BOOTSTRAP_TRIES_PER_SOURCE` nodes of one source all at
-/// once, keeps answers as they land until `BOOTSTRAP_REACHABLE` nodes answered,
-/// and drops the pings still pending then or at `BOOTSTRAP_SOURCE_TIMEOUT`.
-async fn try_source<D: Dialer>(
+/// Keeps the answers of `pending` pings as they land, until
+/// `BOOTSTRAP_REACHABLE` nodes answered, no ping is left, or `until`; the
+/// pings still pending then go on (dropped only once bootstrap is over).
+async fn collect_pings<F>(
     view: &mut View,
-    dialer: &D,
-    list: Vec<(NodeId, Vec<SocketAddr>)>,
-    tried: &mut HashSet<NodeId>,
+    pending: &mut Vec<F>,
     report: &mut BootstrapReport,
+    until: Option<tokio::time::Instant>,
     now: u64,
-) {
-    let deadline = tokio::time::Instant::now() + BOOTSTRAP_SOURCE_TIMEOUT;
-    let mut pending: Vec<_> = list
-        .into_iter()
-        .filter(|(id, addrs)| !addrs.is_empty() && tried.insert(*id))
-        .take(BOOTSTRAP_TRIES_PER_SOURCE)
-        .map(|(id, addrs)| Box::pin(timed_ping(dialer, id, addrs, deadline)))
-        .collect();
+) where
+    F: Future<Output = (NodeId, Result<NodeRecord, DialError>)> + Unpin,
+{
     while !report.bootstrapped() && !pending.is_empty() {
-        let (id, answer) = next_ready(&mut pending).await;
+        let next = next_ready(pending);
+        let (id, answer) = match until {
+            Some(t) => match tokio::time::timeout_at(t, next).await {
+                Ok(out) => out,
+                Err(_) => return,
+            },
+            None => next.await,
+        };
         let Ok(record) = answer else { continue };
         // A record that does not fit the view (e.g. a private address) is
         // refused even for a hand-added node, like `barking node add` does.
@@ -332,6 +356,8 @@ async fn try_source<D: Dialer>(
     }
 }
 
+/// One bootstrap ping, given up at `deadline` (the full dial timeout): the
+/// dialer then hears of it as the timeout it is.
 async fn timed_ping<D: Dialer>(
     dialer: &D,
     id: NodeId,
@@ -492,10 +518,12 @@ fn seeds(
 }
 
 /// Drives a `Lookup` over the dialer, then records what it learnt in the view.
-/// Requests are issued as soon as an answer frees a slot; each one is bounded
-/// by `REQUEST_TIMEOUT_MS` (a timeout counts as a failure) and the whole
-/// lookup by `LOOKUP_TIMEOUT_MS`, after which pending requests are dropped.
-/// Nodes in `exclude` learnt on the way count as failed without being asked.
+/// Requests are issued as soon as an answer frees a slot, never with less
+/// than `REQUEST_TIMEOUT_MS` left before `LOOKUP_TIMEOUT_MS`; each one is
+/// bounded by `REQUEST_TIMEOUT_MS`. A request cut there fails in the lookup
+/// but is only `cut_short` for the dialer: on a slow link a fresh connection
+/// may need longer. Nodes in `exclude` learnt on the way count as failed
+/// without being asked.
 async fn run_lookup<D: Dialer>(
     view: &mut View,
     dialer: &D,
@@ -523,28 +551,29 @@ async fn run_lookup<D: Dialer>(
         if lookup.is_done(t) {
             break;
         }
-        let request_end = (tokio::time::Instant::now() + Duration::from_millis(REQUEST_TIMEOUT_MS))
-            .min(lookup_end);
-        // An excluded node frees its slot at once: ask again until no
-        // excluded node is picked.
-        loop {
-            let mut skipped = false;
-            for (id, record) in lookup.next_requests(t) {
-                if exclude.contains(&id) {
-                    lookup.on_failure(&id);
-                    skipped = true;
-                    continue;
+        let request_end = tokio::time::Instant::now() + Duration::from_millis(REQUEST_TIMEOUT_MS);
+        // No request that the lookup's end would cut short. An excluded node
+        // frees its slot at once: ask again until no excluded node is picked.
+        if request_end <= lookup_end {
+            loop {
+                let mut skipped = false;
+                for (id, record) in lookup.next_requests(t) {
+                    if exclude.contains(&id) {
+                        lookup.on_failure(&id);
+                        skipped = true;
+                        continue;
+                    }
+                    pending.push(Box::pin(timed_find(
+                        dialer,
+                        id,
+                        record.addrs(),
+                        target,
+                        request_end,
+                    )));
                 }
-                pending.push(Box::pin(timed_find(
-                    dialer,
-                    id,
-                    record.addrs(),
-                    target,
-                    request_end,
-                )));
-            }
-            if !skipped {
-                break;
+                if !skipped {
+                    break;
+                }
             }
         }
         if pending.is_empty() {
@@ -588,7 +617,7 @@ async fn timed_find<D: Dialer>(
     {
         Ok(answer) => answer,
         Err(_) => {
-            dialer.timed_out(id);
+            dialer.cut_short(id);
             Err(DialError::Timeout)
         }
     };

@@ -149,6 +149,9 @@ pub(super) enum Observation {
     Answered,
     Refused,
     Failed,
+    /// Cut by a client cap shorter than the dial timeout: neither a failure
+    /// nor an answer (see `Dialer::cut_short`).
+    Cut,
 }
 
 /// A dialer that notes the outcome of every exchange, so that lookups and
@@ -174,6 +177,10 @@ impl<'a, D> Observed<'a, D> {
             Err(DialError::NoAddress) => return,
             Err(_) => Observation::Failed,
         };
+        self.push(id, o);
+    }
+
+    pub(super) fn push(&self, id: NodeId, o: Observation) {
         if let Ok(mut v) = self.outcomes.lock() {
             v.push((id, o));
         }
@@ -212,5 +219,9 @@ impl<D: Dialer + Sync> Dialer for Observed<'_, D> {
     /// noted here as the timeout it is.
     fn timed_out(&self, id: NodeId) {
         self.note::<()>(id, &Err(DialError::Timeout));
+    }
+
+    fn cut_short(&self, id: NodeId) {
+        self.push(id, Observation::Cut);
     }
 }

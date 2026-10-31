@@ -52,6 +52,10 @@ struct Net {
     items: HashMap<NodeId, Vec<Vec<u8>>>,
     /// Time each fetch takes.
     fetch_delay: Duration,
+    /// Time a `Ping` to that node takes (a slow link).
+    ping_delay: HashMap<NodeId, Duration>,
+    /// Time every `FindNode` takes (a slow link).
+    find_delay: Duration,
     /// `FindNode` answered with a refusal (neutral for the score).
     refuse_finds: bool,
     /// Position given to every fetched mailbox (0: none).
@@ -93,10 +97,12 @@ impl Dialer for Net {
             _ => Err(DialError::Unreachable),
         };
         let hang = self.hang.contains(&id);
+        let delay = self.ping_delay.get(&id).copied().unwrap_or_default();
         async move {
             if hang {
                 std::future::pending::<()>().await;
             }
+            tokio::time::sleep(delay).await;
             r
         }
     }
@@ -116,10 +122,12 @@ impl Dialer for Net {
             Ok(Vec::new())
         };
         let hang = self.hang.contains(&id);
+        let delay = self.find_delay;
         async move {
             if hang {
                 std::future::pending::<()>().await;
             }
+            tokio::time::sleep(delay).await;
             r
         }
     }
@@ -924,7 +932,12 @@ async fn only_node_down_ends_fast_without_maintenance() {
     let start = Instant::now();
     let report = sync(&mut core, &net, opts()).await;
     let took = start.elapsed();
-    assert!(took < Duration::from_secs(10), "took {took:?}");
+    // The bootstrap ping gets the full dial timeout (a slow link is not a
+    // dead node), nothing more.
+    assert!(
+        took <= crate::discover::DIAL_TIMEOUT + Duration::from_secs(1),
+        "took {took:?}"
+    );
     assert!(!report.network_up && !report.maintenance_done);
     // The bootstrap ping timed out: never dialled again this sync.
     assert_eq!(net.calls(), vec![Call::Ping(x)]);
@@ -1279,4 +1292,84 @@ async fn deadline_stop_does_not_count_as_never_completing() {
         sync(&mut core, &net, opts()).await;
     }
     assert!(load(&mut core).unaudited.is_empty());
+}
+
+// --- Slow links (client caps shorter than the dial timeout) ----------------
+
+#[tokio::test(start_paused = true)]
+async fn slow_lookups_lower_no_score() {
+    let (_dir, mut core, mut net) = setup();
+    // Every lookup request outlasts its 3 s cap: a slow link, not dead nodes.
+    net.find_delay = Duration::from_secs(4);
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.network_up && report.maintenance_done, "{report:?}");
+    let calls = net.calls();
+    // Nodes only asked by lookups: neither failed nor scored.
+    let connected: HashSet<NodeId> = connects(&calls).into_iter().collect();
+    let idle: Vec<NodeId> = (0..NODES)
+        .map(id_of)
+        .filter(|id| !connected.contains(id))
+        .collect();
+    assert!(!idle.is_empty());
+    for id in &idle {
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, Call::Find(n, _) if n == id)),
+            "{id:?} never asked"
+        );
+        assert!((score_of(&mut core, id) - 0.5).abs() < 1e-4, "{id:?}");
+    }
+}
+
+/// A run on `core`'s saved state, as `sync` starts one.
+fn run_on<'a>(core: &'a mut Core, net: &'a Net) -> Run<'a, Net> {
+    let state = load(core);
+    let deadline = Instant::now() + SYNC_DEADLINE;
+    Run::new(core, net, state, NOW, deadline, SYNC_POW_BUDGET)
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_candidate_ping_lowers_no_score() {
+    let (_dir, mut core, mut net) = setup();
+    let candidate = id_of(3);
+    let mut state = load(&mut core);
+    state.view.entries.get_mut(&candidate).unwrap().confirmed = false;
+    state.save(&mut core).unwrap();
+    net.ping_delay
+        .insert(candidate, CONFIRM_TIMEOUT + Duration::from_secs(1));
+    let mut run = run_on(&mut core, &net);
+    // Another node answered: a failure would count.
+    run.answered();
+    run.confirm_candidates().await;
+    assert!(run.failed.is_empty());
+    run.save();
+    drop(run);
+    assert_eq!(net.calls(), vec![Call::Ping(candidate)]);
+    let state = load(&mut core);
+    let e = state.view.get(&candidate).unwrap();
+    assert!(!e.confirmed);
+    assert!((e.score.value() - 0.5).abs() < 1e-4, "{e:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_builtin_seed_joins_on_a_slow_link() {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = Net::default();
+    for n in 0..NODES {
+        net.records.insert(id_of(n), record(n, NOW));
+    }
+    let seed = id_of(0);
+    // Its answer takes longer than a bootstrap source's turn.
+    net.ping_delay.insert(seed, Duration::from_secs(5));
+    let builtin = vec![BootstrapEntry {
+        id: seed,
+        addr: net.records[&seed].addrs()[0],
+    }];
+    let report = sync(&mut core, &net, SyncOptions { builtin, ..opts() }).await;
+    assert!(report.network_up, "{report:?}");
+    let state = load(&mut core);
+    let e = state.view.get(&seed).expect("seed in the view");
+    assert!(e.confirmed && e.record.is_some(), "{e:?}");
+    assert!(e.score.value() >= 0.5, "{e:?}");
 }

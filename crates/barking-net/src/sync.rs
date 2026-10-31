@@ -22,12 +22,14 @@
 //!    confirmation, fallback lookups while the view is small, then the node
 //!    hints of my contact card. Skipped when nodes were tried and none
 //!    answered (the client's own connection is down). Lookups never ask a
-//!    node that failed or rate-limited during this sync.
+//!    node that failed, rate-limited or was cut short during this sync.
 //! 6. `mark_polled` only if every session mailbox was fetched in full.
 //!
 //! **Score.** Successful requests +0.02, a failure −0.1 only once some node
 //! answered during this sync (until then failures wait; if none answers, the
-//! client's own connection is at fault). `Found` at most once per node per
+//! client's own connection is at fault). Only full dial timeouts count: a
+//! lookup request or a candidate ping cut by the client's shorter caps is
+//! neither a failure nor a success. `Found` at most once per node per
 //! sync, at most one failure per node per sync. A node whose session
 //! fetches are all cut by a lost connection for `UNAUDITED_SYNCS` syncs in a
 //! row cannot be audited: one failure per sync from then on. Loss audits of
@@ -88,7 +90,8 @@ pub const LOOKUPS_PER_SYNC: usize = 2;
 pub const BOOTSTRAP_LOOKUPS_PER_SYNC: usize = 8;
 /// Candidates pinged per sync to confirm them.
 pub const CONFIRMS_PER_SYNC: usize = 8;
-/// Longest ping of a candidate.
+/// Longest ping of a candidate: running out of it is neither a failure nor
+/// a success for the node.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 /// Reachable nodes below which the sync bootstraps first.
 pub const MIN_REACHABLE: usize = 3;
@@ -252,32 +255,46 @@ where
             };
         }
     };
-    let mut run = Run {
-        core,
-        dialer,
-        state,
-        conns: HashMap::new(),
-        failed: HashSet::new(),
-        limited: HashSet::new(),
-        pending_failures: Vec::new(),
-        penalized: HashSet::new(),
-        found: HashSet::new(),
-        tried: false,
-        dial_failures: 0,
-        down: false,
-        seeds: Vec::new(),
-        dialed: HashSet::new(),
-        probed: false,
-        reread_queue: Vec::new(),
-        budget: CandidateBudget::default(),
-        now,
-        deadline,
-        pow_left: opts.pow_budget,
-        stats: BTreeMap::new(),
-        report: SyncReport::default(),
-    };
+    let mut run = Run::new(core, dialer, state, now, deadline, opts.pow_budget);
     run.run(&opts).await;
     run.finish().await
+}
+
+impl<'a, D: Connector> Run<'a, D> {
+    fn new(
+        core: &'a mut Core,
+        dialer: &'a D,
+        state: NetState,
+        now: u64,
+        deadline: Instant,
+        pow_budget: u64,
+    ) -> Self {
+        Run {
+            core,
+            dialer,
+            state,
+            conns: HashMap::new(),
+            failed: HashSet::new(),
+            limited: HashSet::new(),
+            cut: HashSet::new(),
+            pending_failures: Vec::new(),
+            penalized: HashSet::new(),
+            found: HashSet::new(),
+            tried: false,
+            dial_failures: 0,
+            down: false,
+            seeds: Vec::new(),
+            dialed: HashSet::new(),
+            probed: false,
+            reread_queue: Vec::new(),
+            budget: CandidateBudget::default(),
+            now,
+            deadline,
+            pow_left: pow_budget,
+            stats: BTreeMap::new(),
+            report: SyncReport::default(),
+        }
+    }
 }
 
 /// Per-node counts for the transparency log.
@@ -299,6 +316,10 @@ struct Run<'a, D: Connector> {
     failed: HashSet<NodeId>,
     /// Nodes that answered `RateLimited`: nothing more asked this sync.
     limited: HashSet<NodeId>,
+    /// Nodes whose lookup request or candidate ping was cut by a client cap
+    /// shorter than the dial timeout: not asked again by lookups this sync,
+    /// but neither failed nor scored (a slow link is not a dead node).
+    cut: HashSet<NodeId>,
     /// Failures waiting for some node to answer (network up).
     pending_failures: Vec<NodeId>,
     /// Nodes that already took (or wait for) their failure this sync.
@@ -601,7 +622,10 @@ where
         if !outcomes.is_empty() {
             self.tried = true;
         }
-        if outcomes.iter().any(|(_, o)| *o != Observation::Failed) {
+        if outcomes
+            .iter()
+            .any(|(_, o)| matches!(o, Observation::Answered | Observation::Refused))
+        {
             self.answered();
         }
         for (id, o) in outcomes {
@@ -609,6 +633,9 @@ where
                 Observation::Answered => self.score(id, ScoreEvent::Success),
                 Observation::Refused => {}
                 Observation::Failed => self.fail(id),
+                Observation::Cut => {
+                    self.cut.insert(id);
+                }
             }
         }
     }
@@ -616,6 +643,14 @@ where
     /// Nodes not to ask again this sync: failed or rate-limited.
     fn excluded(&self) -> HashSet<NodeId> {
         self.failed.union(&self.limited).copied().collect()
+    }
+
+    /// Nodes lookups and candidate pings leave out: `excluded`, plus those
+    /// cut short by a lookup or ping cap this sync.
+    fn lookup_excluded(&self) -> HashSet<NodeId> {
+        let mut out = self.excluded();
+        out.extend(self.cut.iter().copied());
+        out
     }
 
     /// The kept connection to `id`, or a new one. `None` if the node cannot
@@ -784,7 +819,7 @@ where
         if self.over() || !self.state.fallbacks.due(mailbox, self.now) {
             return false;
         }
-        let exclude = self.excluded();
+        let exclude = self.lookup_excluded();
         let observed = Observed::new(self.dialer);
         let lookup = discover::fallback_lookup(
             &mut self.state.view,
@@ -818,7 +853,7 @@ where
             if self.over() {
                 break;
             }
-            let exclude = self.excluded();
+            let exclude = self.lookup_excluded();
             let observed = Observed::new(self.dialer);
             let lookups = discover::random_lookups(
                 &mut self.state.view,
@@ -868,7 +903,7 @@ where
     /// those that answer as themselves become confirmed.
     async fn confirm_candidates(&mut self) {
         let now = self.now;
-        let exclude = self.excluded();
+        let exclude = self.lookup_excluded();
         let mut candidates: Vec<(NodeId, u64, Vec<SocketAddr>)> = self
             .state
             .view
@@ -889,7 +924,8 @@ where
             match tokio::time::timeout_at(end, observed.ping(id, &addrs)).await {
                 Ok(Ok(record)) => confirm(&mut self.state.view, id, record, now),
                 Ok(Err(_)) => {}
-                Err(_) => observed.timed_out(id),
+                // A cap of the client's, shorter than the dial timeout.
+                Err(_) => observed.cut_short(id),
             }
         }
         self.apply_observed(observed);

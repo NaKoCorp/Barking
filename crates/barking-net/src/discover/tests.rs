@@ -17,8 +17,14 @@ struct MemNet {
     down: HashSet<NodeId>,
     /// Nodes whose answer never comes.
     stall: HashSet<NodeId>,
+    /// Time every answer takes (a slow link).
+    delay: Duration,
     pings: Mutex<Vec<NodeId>>,
     finds: Mutex<Vec<NodeId>>,
+    /// When each `FindNode` left.
+    find_times: Mutex<Vec<tokio::time::Instant>>,
+    /// `timed_out` and `cut_short` calls, in order.
+    timeouts: Mutex<Vec<(NodeId, bool)>>,
 }
 
 impl MemNet {
@@ -27,8 +33,11 @@ impl MemNet {
             nodes,
             down: HashSet::new(),
             stall: HashSet::new(),
+            delay: Duration::ZERO,
             pings: Mutex::new(Vec::new()),
             finds: Mutex::new(Vec::new()),
+            find_times: Mutex::new(Vec::new()),
+            timeouts: Mutex::new(Vec::new()),
         }
     }
 
@@ -89,7 +98,7 @@ impl Dialer for MemNet {
             Some(r) if !self.down.contains(&id) => Ok(r),
             _ => Err(DialError::Unreachable),
         };
-        stalling(self.stall.contains(&id), answer)
+        stalling(self.stall.contains(&id), self.delay, answer)
     }
 
     fn find_node(
@@ -99,6 +108,10 @@ impl Dialer for MemNet {
         target: [u8; 32],
     ) -> impl Future<Output = Result<Vec<NodeRecord>, DialError>> + Send {
         self.finds.lock().unwrap().push(id);
+        self.find_times
+            .lock()
+            .unwrap()
+            .push(tokio::time::Instant::now());
         let answer = if self.record(&id).is_none() || self.down.contains(&id) {
             Err(DialError::Unreachable)
         } else {
@@ -111,15 +124,24 @@ impl Dialer for MemNet {
                 .map(|(_, r)| r.clone())
                 .collect())
         };
-        stalling(self.stall.contains(&id), answer)
+        stalling(self.stall.contains(&id), self.delay, answer)
+    }
+
+    fn timed_out(&self, id: NodeId) {
+        self.timeouts.lock().unwrap().push((id, false));
+    }
+
+    fn cut_short(&self, id: NodeId) {
+        self.timeouts.lock().unwrap().push((id, true));
     }
 }
 
-/// `answer` at once, or never when `stall`.
-async fn stalling<T>(stall: bool, answer: T) -> T {
+/// `answer` after `delay`, or never when `stall`.
+async fn stalling<T>(stall: bool, delay: Duration, answer: T) -> T {
     if stall {
         std::future::pending::<()>().await;
     }
+    tokio::time::sleep(delay).await;
     answer
 }
 
@@ -655,4 +677,102 @@ fn bootstrap_reaches_later_sources_despite_stalling_cache() {
             + Duration::from_millis(LOOKUP_TIMEOUT_MS + REQUEST_TIMEOUT_MS),
         "each stalling source costs one timeout, not one per round: {took:?}"
     );
+}
+
+#[test]
+fn bootstrap_gives_slow_seeds_the_full_dial_timeout() {
+    // A slow link: every answer takes longer than a source's turn.
+    let mut net = MemNet::random(30, 31);
+    net.delay = BOOTSTRAP_SOURCE_TIMEOUT + Duration::from_secs(2);
+    let mut view = test_view();
+    let builtin = [entry_of(&net, 0)];
+    let (report, took) = timed(bootstrap(
+        &mut view,
+        Vec::new(),
+        &builtin,
+        &net,
+        &mut StdRng::seed_from_u64(5),
+        &mut CandidateBudget::default(),
+        NOW,
+    ));
+    assert_eq!(report.reachable, vec![net.nodes[0].0]);
+    let e = view.get(&net.nodes[0].0).unwrap();
+    assert!(e.confirmed && e.record.is_some());
+    // The lookup that follows is too slow for its requests' cap: cut short,
+    // never taken for timeouts.
+    let timeouts = net.timeouts.lock().unwrap().clone();
+    assert!(timeouts.iter().all(|(_, cut)| *cut), "{timeouts:?}");
+    assert!(took < Duration::from_secs(30), "took {took:?}");
+}
+
+#[test]
+fn bootstrap_ping_out_of_dial_time_is_a_timeout() {
+    let mut net = MemNet::random(3, 32);
+    net.stall.insert(net.nodes[0].0);
+    let mut view = test_view();
+    let builtin = [entry_of(&net, 0)];
+    let (report, took) = timed(bootstrap(
+        &mut view,
+        Vec::new(),
+        &builtin,
+        &net,
+        &mut StdRng::seed_from_u64(6),
+        &mut CandidateBudget::default(),
+        NOW,
+    ));
+    assert!(report.reachable.is_empty());
+    assert_eq!(*net.timeouts.lock().unwrap(), vec![(net.nodes[0].0, false)]);
+    assert_eq!(took, DIAL_TIMEOUT);
+}
+
+#[test]
+fn lookup_requests_never_start_too_late_and_are_only_cut_short() {
+    // Each answer takes 2.5 s: a request leaving after 7 s would be cut by
+    // the lookup's end (10 s).
+    let mut net = MemNet::random(200, 33);
+    net.delay = Duration::from_millis(2_500);
+    let mut view = test_view();
+    for (_, r) in net.nodes.iter().take(8) {
+        view.insert(r.clone(), NOW);
+    }
+    let start = block_on(async {
+        let start = tokio::time::Instant::now();
+        random_lookups(
+            &mut view,
+            &net,
+            &HashSet::new(),
+            1,
+            &mut StdRng::seed_from_u64(7),
+            &mut CandidateBudget::default(),
+            NOW,
+        )
+        .await;
+        start
+    });
+    let times = net.find_times.lock().unwrap().clone();
+    assert!(times.len() > 3, "{}", times.len());
+    let latest = Duration::from_millis(LOOKUP_TIMEOUT_MS - REQUEST_TIMEOUT_MS);
+    for t in &times {
+        assert!(
+            t.duration_since(start) <= latest,
+            "{:?}",
+            t.duration_since(start)
+        );
+    }
+    assert!(net.timeouts.lock().unwrap().is_empty());
+
+    // Slower than a request's cap: cut short, never a timeout.
+    net.delay = Duration::from_millis(REQUEST_TIMEOUT_MS + 1_000);
+    block_on(random_lookups(
+        &mut view,
+        &net,
+        &HashSet::new(),
+        1,
+        &mut StdRng::seed_from_u64(8),
+        &mut CandidateBudget::default(),
+        NOW,
+    ));
+    let timeouts = net.timeouts.lock().unwrap().clone();
+    assert!(!timeouts.is_empty());
+    assert!(timeouts.iter().all(|(_, cut)| *cut), "{timeouts:?}");
 }
