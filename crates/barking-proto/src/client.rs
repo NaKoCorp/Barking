@@ -13,8 +13,12 @@
 //! - the proof of work of a deposit starts from the base difficulty plus the
 //!   tier supplement, rises by 2 bits on `PowTooWeak`, and may be
 //!   bounded by a work budget (`Session::set_pow_budget`);
-//! - the pagination cursor must strictly increase, and an empty page cannot
-//!   announce a continuation;
+//! - the pagination cursor must strictly increase, an empty page cannot
+//!   announce a continuation, and a page holding more than `MAX_PAGE_ITEMS`
+//!   items is a protocol error;
+//! - a node that paces its pages (continued pages far below the page size,
+//!   which an honest node fills) until a cap or the call's deadline is
+//!   reported as `FetchStop::Paced`;
 //! - each request has a timeout;
 //! - a page cut off in transit (slow link) is requested again smaller:
 //!   1 MiB, 256 KiB, 64 KiB then 16 KiB, before giving up. The size reached
@@ -39,7 +43,7 @@ use quinn::{Connection, Endpoint};
 use tokio::time::timeout;
 
 use crate::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
-use crate::msg::{ACK_CURSOR_BASE, ErrorReason, Limits, Request, Response};
+use crate::msg::{ACK_CURSOR_BASE, ErrorReason, Limits, MAX_PAGE_ITEMS, Request, Response};
 use crate::{NodeId, PROTOCOL_VERSION, pow, tls};
 
 /// Oldest protocol version this client can speak.
@@ -69,6 +73,17 @@ pub fn page_timeout(bytes: u32) -> Duration {
     PAGE_TIMEOUT_BASE
         .saturating_add(transfer)
         .min(FETCH_PAGE_TIMEOUT)
+}
+
+/// True if a page asked at `asked` bytes, holding `items` items of `bytes`
+/// bytes in all, announced a continuation while far below what an honest
+/// node puts in it: it fills a page until the next item would not fit
+/// (`MAX_PACKET_LEN` at most) or `MAX_PAGE_ITEMS` items. The page size is
+/// taken at half a response at most, so that a node with a smaller own limit
+/// is not blamed.
+fn underfilled(asked: u32, items: usize, bytes: usize) -> bool {
+    let full = (asked as usize).min(MAX_RESPONSE_BYTES / 2);
+    items < MAX_PAGE_ITEMS && bytes.saturating_add(barking_packet::fragment::MAX_PACKET_LEN) < full
 }
 
 /// Index in `FETCH_PAGE_SIZES` of the largest size not above `bytes` (the
@@ -225,6 +240,10 @@ pub enum FetchStop {
     /// Connection lost, or a page given up at the smallest size, after pages
     /// already taken.
     Connection,
+    /// The item or page cap, or the call's deadline, after the node sent a
+    /// continued page far below the size asked (an honest node fills its
+    /// pages): the node's doing, not the link's.
+    Paced,
 }
 
 pub type Result<T> = core::result::Result<T, ClientError>;
@@ -562,16 +581,21 @@ impl Session {
         let mut pages = 0usize;
         // Throughput of the last page that measured it (bytes per second).
         let mut rate: Option<f64> = None;
+        // A continued page came far below the size asked.
+        let mut paced = false;
+        let node_cap = |paced: bool, client: FetchStop| {
+            if paced { FetchStop::Paced } else { client }
+        };
         let deadline = tokio::time::Instant::now() + self.fetch_deadline;
         for chunk in &chunks {
             let mut cursor: Option<u64> = resume.start(chunk);
             loop {
                 if pages >= MAX_FETCH_PAGES {
-                    self.stop = FetchStop::ClientLimit;
+                    self.stop = node_cap(paced, FetchStop::ClientLimit);
                     return Ok(out);
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    self.stop = FetchStop::Deadline;
+                    self.stop = node_cap(paced, FetchStop::Deadline);
                     return Ok(out);
                 }
                 pages += 1;
@@ -585,7 +609,7 @@ impl Session {
                 let page = request_within(&self.conn, &req, page_timeout(FETCH_PAGE_SIZES[size]));
                 let resp = match tokio::time::timeout_at(deadline, page).await {
                     Err(_) => {
-                        self.stop = FetchStop::Deadline;
+                        self.stop = node_cap(paced, FetchStop::Deadline);
                         return Ok(out);
                     }
                     // Stream cut off or too slow: same cursor, smaller page,
@@ -621,6 +645,9 @@ impl Session {
                 if next.is_some() && items.is_empty() {
                     return Err(ClientError::Protocol("empty page with continuation"));
                 }
+                if items.len() > MAX_PAGE_ITEMS {
+                    return Err(ClientError::Protocol("page beyond the item cap"));
+                }
                 if let (Some(n), Some(c)) = (next, cursor)
                     && n <= c
                 {
@@ -630,19 +657,21 @@ impl Session {
                     .iter()
                     .map(Vec::len)
                     .fold(0usize, usize::saturating_add);
+                if next.is_some() && underfilled(FETCH_PAGE_SIZES[size], items.len(), page_bytes) {
+                    paced = true;
+                }
+                // A first page is never beyond the item cap (`MAX_PAGE_ITEMS`
+                // is far below it).
                 let over_items = out.len().saturating_add(items.len()) > MAX_FETCH_ITEMS;
                 let over_bytes = bytes.saturating_add(page_bytes) > max_bytes;
                 if !out.is_empty() && (over_items || over_bytes) {
                     // Page left: resume at `cursor` next time.
-                    self.stop = FetchStop::ClientLimit;
+                    self.stop = if over_bytes {
+                        FetchStop::ClientLimit
+                    } else {
+                        node_cap(paced, FetchStop::ClientLimit)
+                    };
                     return Ok(out);
-                }
-                if over_items {
-                    // First page already beyond the item cap (hostile
-                    // node): truncated, without advancing the cursor.
-                    self.stop = FetchStop::ClientLimit;
-                    items.truncate(MAX_FETCH_ITEMS);
-                    return Ok(items);
                 }
                 // Pages too small to measure more than the round trip
                 // leave the estimate as it was.
@@ -733,6 +762,20 @@ mod tests {
         assert_eq!(grown(1, 3, Some(MIB)), 1);
         assert_eq!(grown(0, 0, Some(MIB)), 0);
         assert_eq!(grown(2, 2, None), 2);
+    }
+
+    #[test]
+    fn continued_pages_far_below_the_size_are_underfilled() {
+        use barking_packet::fragment::MAX_PACKET_LEN;
+        let mib = FETCH_PAGE_SIZES[0];
+        // An honest node stops when the next item would not fit.
+        assert!(!underfilled(mib, 40, (512 << 10) - MAX_PACKET_LEN));
+        assert!(underfilled(mib, 40, (512 << 10) - MAX_PACKET_LEN - 1));
+        assert!(underfilled(64 << 10, 1, 8));
+        // Or at `MAX_PAGE_ITEMS` items, however small.
+        assert!(!underfilled(mib, MAX_PAGE_ITEMS, 8 * MAX_PAGE_ITEMS));
+        // A 16 KiB page may hold a single item of any size.
+        assert!(!underfilled(crate::MIN_PAGE_BYTES, 1, 8));
     }
 
     #[test]

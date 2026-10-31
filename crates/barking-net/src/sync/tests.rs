@@ -66,6 +66,8 @@ struct Net {
     stall_deposit_from: Option<usize>,
     /// Message deposits on that node are refused with this reason.
     refuse_deposit: HashMap<NodeId, ErrorReason>,
+    /// `refuse_deposit` refuses receipts too.
+    refuse_acks: bool,
     /// Proof work of a message deposit; beyond the budget: `PowBudget`.
     pow_cost: u64,
     /// The session to that node dies right after any fetch (the node cut
@@ -268,7 +270,7 @@ impl Depositor for Net {
             };
         }
         let result = match self.refuse_deposit.get(conn) {
-            Some(reason) if message => Err(*reason),
+            Some(reason) if message || self.refuse_acks => Err(*reason),
             _ => Ok(()),
         };
         DepositReply {
@@ -1515,4 +1517,43 @@ fn slices_hold_twice_a_first_page() {
     // 256 KiB pages from the start.
     assert!(INTRO_FETCH_SLICE >= page_timeout(barking_proto::MIN_PAGE_BYTES) * 2);
     assert!(SESSION_FETCH_SLICE >= page_timeout(FETCH_PAGE_SIZES[1]) * 2);
+}
+
+// --- Nodes escaping the audit -----------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn paced_fetch_counts_as_never_completing() {
+    let (_dir, mut core, mut net) = setup();
+    net.refuse_finds = true;
+    net.truncate = all_nodes(&net, FetchStop::Paced);
+    for _ in 0..UNAUDITED_SYNCS {
+        sync(&mut core, &net, opts()).await;
+    }
+    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let node = load(&mut core)
+        .view
+        .responsibles_by_score(&sessions[0], NOW)[0];
+    assert_eq!(load(&mut core).unaudited.get(&node), Some(&UNAUDITED_SYNCS));
+}
+
+#[tokio::test(start_paused = true)]
+async fn paced_or_rate_limited_fetch_is_no_success() {
+    let (_dir, mut core, mut net) = setup();
+    // Lookups answered with a rate limit, deposits refused (both neutral):
+    // the fetches alone could move the score.
+    net.refuse_finds = true;
+    for n in 0..NODES {
+        net.refuse_deposit.insert(id_of(n), ErrorReason::NodeFull);
+    }
+    net.refuse_acks = true;
+    net.truncate = all_nodes(&net, FetchStop::Paced);
+    let before: Vec<f32> = (0..NODES).map(|n| score_of(&mut core, &id_of(n))).collect();
+    sync(&mut core, &net, opts()).await;
+    net.truncate = all_nodes(&net, FetchStop::RateLimited);
+    sync(&mut core, &net, opts()).await;
+    assert!(net.calls().iter().any(|c| matches!(c, Call::Fetch(..))));
+    for (n, was) in before.iter().enumerate() {
+        let after = score_of(&mut core, &id_of(n));
+        assert!((after - was).abs() < 1e-4, "node {n}: {was} -> {after}");
+    }
 }

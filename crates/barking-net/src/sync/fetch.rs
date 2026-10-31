@@ -19,6 +19,16 @@ use crate::discover::{DialError, Dialer};
 use crate::plan::{detect_losses, found_messages};
 use crate::score::ScoreEvent;
 
+/// A fetch that stopped this way is a successful request: run to the end,
+/// or cut by the client's own caps or time. A rate limit is neutral; a cut
+/// connection or paced pages are the node's doing.
+fn served_well(stop: FetchStop) -> bool {
+    matches!(
+        stop,
+        FetchStop::Complete | FetchStop::ClientLimit | FetchStop::Deadline
+    )
+}
+
 /// How one group fetch ended.
 pub(super) enum GroupEnd {
     /// Fetched in full.
@@ -287,17 +297,20 @@ where
             }
         };
         let complete = stop == FetchStop::Complete;
-        // Only a cut connection may be the node's doing: a rate limit, a
-        // client cap, the call's deadline or the client's slice running out
-        // (a slow link) never count against it.
-        let counts = stop == FetchStop::Connection && Instant::now() < slice_end;
+        // Only a cut connection or paced pages may be the node's doing: a
+        // rate limit, a client cap, the call's deadline or the client's
+        // slice running out (a slow link) never count against it.
+        let counts = (stop == FetchStop::Connection && Instant::now() < slice_end)
+            || stop == FetchStop::Paced;
         self.answered();
+        if served_well(stop) {
+            self.score(node, ScoreEvent::Success);
+        }
         if stop == FetchStop::Connection {
             // A cut connection leaves a dead session: the next request on
             // this node dials again.
             drop(conn);
         } else {
-            self.score(node, ScoreEvent::Success);
             self.conns.insert(node, conn);
         }
         if stop == FetchStop::RateLimited {
@@ -419,9 +432,11 @@ where
                 match reply {
                     Ok(FetchReply::Items { items, stop }) => {
                         self.answered();
+                        if served_well(stop) {
+                            self.score(node, ScoreEvent::Success);
+                        }
                         // A cut connection leaves a dead session.
                         if stop != FetchStop::Connection {
-                            self.score(node, ScoreEvent::Success);
                             self.conns.insert(node, conn);
                         }
                         bytes_left = bytes_left.saturating_sub(

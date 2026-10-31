@@ -12,6 +12,9 @@ pub const ACK_CURSOR_BASE: u64 = 1 << 62;
 
 /// Smallest pickup page served by a node (bytes of packets).
 pub const MIN_PAGE_BYTES: u32 = 16 * 1024;
+/// Most items a node puts in one fetch page, whatever its byte size: a page
+/// with more is a protocol violation.
+pub const MAX_PAGE_ITEMS: usize = 1024;
 
 /// At most this many records in a `Nodes` response.
 pub const MAX_NODES_PER_RESPONSE: usize = 20;

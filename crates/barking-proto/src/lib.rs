@@ -11,7 +11,7 @@ pub mod tls;
 
 pub use msg::{
     ACK_CURSOR_BASE, ErrorReason, Limits, MAX_HOLDINGS_PER_PAGE, MAX_NODES_PER_RESPONSE,
-    MIN_PAGE_BYTES, Request, Response,
+    MAX_PAGE_ITEMS, MIN_PAGE_BYTES, Request, Response,
 };
 pub use node_id::{NodeId, generate_node_key};
 pub use record::{NodeRecord, RecordError, RecordPolicy, embeds_ipv4, routable};

@@ -33,9 +33,12 @@
 //! from an earlier one dials again once before the node fails (the session
 //! may have died: idle timeout, cut connection); a fetch ended by a cut
 //! connection leaves no session behind. `Found` at most once per node per
-//! sync, at most one failure per node per sync. A node whose session
-//! fetches are all cut by a lost connection for `UNAUDITED_SYNCS` syncs in a
-//! row cannot be audited: one failure per sync from then on. Loss audits of
+//! sync, at most one failure per node per sync. A fetch the node ended
+//! badly (cut connection, paced pages: see `FetchStop::Paced`) or with a
+//! rate limit is no successful request, and a page beyond `MAX_PAGE_ITEMS`
+//! items fails the node. A node whose session fetches are all ended badly
+//! for `UNAUDITED_SYNCS` syncs in a row cannot be audited: one failure per
+//! sync from then on. Loss audits of
 //! positioned mailboxes re-read them from their start every
 //! `AUDIT_EVERY_SECS`, each in a call of its own once all regular session
 //! fetches are over, within `REREAD_BYTES` and `REREAD_TIME`.
@@ -99,8 +102,9 @@ pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 /// Reachable nodes below which the sync bootstraps first.
 pub const MIN_REACHABLE: usize = 3;
 /// Syncs in a row in which a node answered but none of its session fetches
-/// completed, the connection being cut (never a rate limit, a client cap or
-/// the client's own deadline or slice), after which it gets one failure per
+/// completed, the connection being cut or the pages paced (never a rate
+/// limit, a client cap or the client's own deadline or slice), after which
+/// it gets one failure per
 /// sync: it cannot be audited for losses.
 pub const UNAUDITED_SYNCS: u32 = 3;
 /// A positioned mailbox holding a message the node accepted is read again

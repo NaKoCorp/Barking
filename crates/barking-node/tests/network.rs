@@ -622,34 +622,29 @@ async fn client_caps_hostile_pagination() {
         .unwrap();
     assert_eq!(items.len(), client::MAX_FETCH_ITEMS);
     assert!(s.last_fetch_truncated());
-    assert_eq!(s.last_fetch_stop(), client::FetchStop::ClientLimit);
+    // Pages of 800 bytes announcing more: the node paces them.
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::Paced);
     srv.abort();
 }
 
-/// `RateLimited` after a first page: partial pickup, and the reason says so.
+/// A page holding more items than any node puts in one: protocol error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rate_limit_after_a_page_is_reported() {
+async fn client_rejects_page_beyond_item_cap() {
     let k = key(0);
     let h = hello(&k, TEST_BITS);
     let (addr, srv) = fake_node(k.clone(), move |req| {
         Some(match req {
             Request::Hello { .. } => h.clone(),
-            Request::Fetch { cursor: None, .. } => Response::Items {
-                items: vec![vec![1]],
-                next: Some(1),
+            Request::Fetch { .. } => Response::Items {
+                items: vec![vec![0; 8]; barking_proto::MAX_PAGE_ITEMS + 1],
+                next: None,
             },
-            Request::Fetch { .. } => Response::Error(ErrorReason::RateLimited),
             _ => Response::Error(ErrorReason::Unsupported),
         })
     });
     let mut s = Client::connect(addr, id_of(&k)).await.unwrap();
-    let items = timeout(LONG, s.fetch(&[MailboxId([1; 16])]))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(items, vec![vec![1]]);
-    assert!(s.last_fetch_truncated());
-    assert_eq!(s.last_fetch_stop(), client::FetchStop::RateLimited);
+    let r = timeout(LONG, s.fetch(&[MailboxId([1; 16])])).await.unwrap();
+    assert!(matches!(r, Err(ClientError::Protocol(_))), "{r:?}");
     srv.abort();
 }
 
@@ -674,7 +669,7 @@ async fn client_caps_page_count() {
         .unwrap();
     assert_eq!(items.len(), client::MAX_FETCH_PAGES);
     assert!(s.last_fetch_truncated());
-    assert_eq!(s.last_fetch_stop(), client::FetchStop::ClientLimit);
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::Paced);
     srv.abort();
 }
 

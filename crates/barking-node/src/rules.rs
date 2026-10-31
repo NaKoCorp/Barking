@@ -341,8 +341,9 @@ fn deposit_ack(
 /// A fetch page: (items, next cursor). Deletes nothing.
 pub type Page = (Vec<Vec<u8>>, Option<u64>);
 
-/// Maximum number of items per page (bounds the work of a fetch).
-pub const MAX_PAGE_ITEMS: usize = 1024;
+/// Maximum number of items per page (bounds the work of a fetch); a client
+/// takes a page with more as a protocol violation.
+pub const MAX_PAGE_ITEMS: usize = barking_proto::MAX_PAGE_ITEMS;
 
 /// Read of a mailbox in `seq` order, via the `(mailbox, rowid)` index: no
 /// sort, no payload read. `slot` (the mailbox's rank in the request) makes
