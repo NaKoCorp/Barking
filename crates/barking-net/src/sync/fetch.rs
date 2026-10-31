@@ -3,14 +3,16 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use barking_packet::MailboxId;
+use barking_packet::{Kind, MailboxId, Packet};
 use barking_proto::client::MAX_FETCH_BYTES;
+use barking_proto::pow::content_hash;
 use barking_proto::{ErrorReason, NodeId};
 use tokio::time::Instant;
 
 use super::io::{Depositor, FetchReply, Fetcher};
 use super::{
-    INTRO_FETCH_BYTES, Run, SESSION_FETCH_SLICE, UNAUDITED_SYNCS, intro_slice, receive_all,
+    AUDIT_EVERY_SECS, INTRO_FETCH_BYTES, Run, SESSION_FETCH_SLICE, UNAUDITED_SYNCS, intro_slice,
+    receive_all,
 };
 use crate::discover::{DialError, Dialer};
 use crate::plan::{detect_losses, found_messages};
@@ -21,7 +23,9 @@ pub(super) enum GroupEnd {
     /// Fetched in full.
     Complete,
     /// Failed, refused, rate limited or truncated: try the next responsible.
-    Incomplete { truncated: bool },
+    /// `counts`: the node answered and did not complete for a reason of its
+    /// own (not a rate limit, not the client's slice or deadline running out).
+    Incomplete { truncated: bool, counts: bool },
     /// Deadline or slice over: stop the stage.
     Stop,
 }
@@ -56,7 +60,9 @@ where
         } else {
             MAX_FETCH_BYTES
         };
-        // Per node: did all its session fetches of this sync complete?
+        // Per node: did any of its session fetches complete this sync?
+        // Only raised; a node enters only once it completed, or answered
+        // without completing for a reason of its own.
         let mut complete_by_node: HashMap<NodeId, bool> = HashMap::new();
         'rounds: loop {
             let mut groups: BTreeMap<[u8; 32], (NodeId, Vec<MailboxId>)> = BTreeMap::new();
@@ -94,15 +100,15 @@ where
                 all_processed &= processed;
                 match end {
                     GroupEnd::Complete => {
-                        complete_by_node.entry(node).or_insert(true);
+                        complete_by_node.insert(node, true);
                         done.extend(group.iter().copied());
                         self.report.mailboxes_polled += group.len();
                     }
-                    GroupEnd::Incomplete { truncated } => {
-                        // Only a node that answered without completing
-                        // escapes the audit; a dead one already failed.
-                        if truncated {
-                            complete_by_node.insert(node, false);
+                    GroupEnd::Incomplete { truncated, counts } => {
+                        // A dead node already failed; a rate limit or the
+                        // client's own slow link is not the node's doing.
+                        if counts {
+                            complete_by_node.entry(node).or_insert(false);
                         }
                         for m in &group {
                             let step = if intro && truncated {
@@ -127,7 +133,7 @@ where
         all_processed && mailboxes.iter().all(|m| done.contains(m))
     }
 
-    /// Counts the syncs in which a node's session fetch never completed;
+    /// Counts the syncs in which none of a node's session fetches completed;
     /// from `UNAUDITED_SYNCS` on, one failure per sync.
     fn note_audits(&mut self, complete_by_node: HashMap<NodeId, bool>) {
         for (node, complete) in complete_by_node {
@@ -158,11 +164,27 @@ where
             let end = if self.over() {
                 GroupEnd::Stop
             } else {
-                GroupEnd::Incomplete { truncated: false }
+                GroupEnd::Incomplete {
+                    truncated: false,
+                    counts: false,
+                }
             };
             return (end, 0, true);
         };
         let mut resume = self.state.resume(&node, group);
+        // Mailboxes holding a message this node accepted, not audited there
+        // for `AUDIT_EVERY_SECS`: read again from their start (without a
+        // position they get their own slices, so the others keep theirs).
+        let mut reread: Vec<(MailboxId, u64)> = Vec::new();
+        if !intro {
+            for m in self.audit_targets(node, group) {
+                if let Some(old) = resume.seen.remove(&m.0)
+                    && old > 0
+                {
+                    reread.push((m, old));
+                }
+            }
+        }
         // Mailboxes read from their very start: the only ones a loss audit
         // may rely on (a resumed fetch skips the items already seen).
         let from_start: Vec<MailboxId> = group
@@ -184,18 +206,33 @@ where
                 self.answered();
                 self.limited.insert(node);
                 self.conns.insert(node, conn);
-                return (GroupEnd::Incomplete { truncated: true }, 0, true);
+                let end = GroupEnd::Incomplete {
+                    truncated: true,
+                    counts: false,
+                };
+                return (end, 0, true);
             }
             Err(DialError::Refused(_)) => {
                 self.answered();
                 self.conns.insert(node, conn);
-                return (GroupEnd::Incomplete { truncated: false }, 0, true);
+                let end = GroupEnd::Incomplete {
+                    truncated: false,
+                    counts: false,
+                };
+                return (end, 0, true);
             }
             Err(_) => {
                 self.fail(node);
-                return (GroupEnd::Incomplete { truncated: false }, 0, true);
+                let end = GroupEnd::Incomplete {
+                    truncated: false,
+                    counts: false,
+                };
+                return (end, 0, true);
             }
         };
+        // Truncated while the client's slice or deadline ran out: a slow
+        // link, not a node that never lets itself be read to the end.
+        let cut_by_client = Instant::now() >= slice_end;
         self.answered();
         self.score(node, ScoreEvent::Success);
         self.conns.insert(node, conn);
@@ -213,10 +250,22 @@ where
         self.report.receive_errors += errors;
         self.report.items_received += items.len();
         if processed {
+            if !complete {
+                // A cut re-read does not take a mailbox back.
+                for (m, old) in &reread {
+                    let seen = resume.seen.entry(m.0).or_insert(0);
+                    *seen = (*seen).max(*old);
+                }
+            }
             self.state.set_positions(&node, group, &resume);
         }
         if !intro {
-            self.audit(node, &items, if complete { &from_start } else { &[] });
+            // A truncated fetch audits nothing.
+            let audited: &[MailboxId] = if complete { &from_start } else { &[] };
+            self.audit(node, &items, audited);
+            for m in audited {
+                self.state.note_audit(&node, m, self.now);
+            }
         }
         let s = self.stats(node);
         s.fetched = true;
@@ -230,9 +279,36 @@ where
         let end = if complete {
             GroupEnd::Complete
         } else {
-            GroupEnd::Incomplete { truncated: true }
+            GroupEnd::Incomplete {
+                truncated: true,
+                counts: !cut_by_client,
+            }
         };
         (end, bytes, processed)
+    }
+
+    /// Mailboxes of `group` holding one of my pending messages that `node`
+    /// accepted, whose last audit on `node` is `AUDIT_EVERY_SECS` old.
+    fn audit_targets(&mut self, node: NodeId, group: &[MailboxId]) -> Vec<MailboxId> {
+        let Ok(outbox) = self.core.pending_outbox(self.now) else {
+            return Vec::new();
+        };
+        let mut out: Vec<MailboxId> = outbox
+            .iter()
+            .filter_map(|b| {
+                let p = Packet::decode(b).ok()?;
+                (p.kind == Kind::Message
+                    && group.contains(&p.mailbox)
+                    && self.state.ledger.holders(&content_hash(b)).contains(&node)
+                    && self
+                        .state
+                        .audit_due(&node, &p.mailbox, self.now, AUDIT_EVERY_SECS))
+                .then_some(p.mailbox)
+            })
+            .collect();
+        out.sort_unstable_by_key(|m| m.0);
+        out.dedup();
+        out
     }
 
     /// Loss audit of a session fetch from `node`: `audited` are the

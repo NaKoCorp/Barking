@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::discover::FallbackLog;
 use crate::plan::{Ledger, REDEPOSIT_AFTER_SECS};
-use crate::view::View;
+use crate::view::{View, hour};
 
 /// Key of the state in the core's database.
 pub const STATE_KEY: &str = "net";
@@ -40,6 +40,18 @@ pub struct NetState {
     pub fallbacks: FallbackLog,
     /// Consecutive syncs in which the node's session fetch never completed.
     pub unaudited: HashMap<NodeId, u32>,
+    /// Date (hour) of the last loss audit of a mailbox on a node: a full
+    /// read from the start of the mailbox.
+    pub audited_at: HashMap<(NodeId, MailboxId), u64>,
+}
+
+/// Failure to read or write the state.
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    #[error(transparent)]
+    Core(#[from] CoreError),
+    #[error("the network state cannot be encoded")]
+    Encode,
 }
 
 /// Stored form. The view and the ledger are nested encodings so that their
@@ -52,6 +64,7 @@ struct Stored {
     positions: Vec<(NodeId, MailboxId, u64)>,
     fallbacks: FallbackLog,
     unaudited: Vec<(NodeId, u32)>,
+    audited_at: Vec<(NodeId, MailboxId, u64)>,
 }
 
 impl NetState {
@@ -63,6 +76,7 @@ impl NetState {
             positions: HashMap::new(),
             fallbacks: FallbackLog::default(),
             unaudited: HashMap::new(),
+            audited_at: HashMap::new(),
         }
     }
 
@@ -70,7 +84,7 @@ impl NetState {
     /// is one (it is then erased). An unreadable state gives an empty one,
     /// with a warning that carries no data. Only a database error fails:
     /// starting empty would then overwrite a good state.
-    pub fn load(core: &mut Core, now: u64, allow_private: bool) -> Result<NetState, CoreError> {
+    pub fn load(core: &mut Core, now: u64, allow_private: bool) -> Result<NetState, StateError> {
         let mut state = match core.transport_state(STATE_KEY)? {
             Some(bytes) => NetState::decode(&bytes, now, allow_private).unwrap_or_else(|| {
                 tracing::warn!("unreadable network state: starting from an empty one");
@@ -82,31 +96,34 @@ impl NetState {
         Ok(state)
     }
 
-    /// Writes the state to the core's encrypted database.
-    pub fn save(&self, core: &mut Core) -> Result<(), CoreError> {
-        core.set_transport_state(STATE_KEY, &self.encode())
+    /// Writes the state to the core's encrypted database. A state that
+    /// cannot be encoded is not written: the stored one stays.
+    pub fn save(&self, core: &mut Core) -> Result<(), StateError> {
+        Ok(core.set_transport_state(STATE_KEY, &self.encode()?)?)
     }
 
     /// Postcard encoding of the state.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut positions: Vec<(NodeId, MailboxId, u64)> = self
-            .positions
-            .iter()
-            .map(|(&(n, m), &s)| (n, m, s))
-            .collect();
-        positions.sort_unstable_by_key(|(n, m, _)| (n.0, m.0));
+    pub fn encode(&self) -> Result<Vec<u8>, StateError> {
+        let triples = |map: &HashMap<(NodeId, MailboxId), u64>| {
+            let mut v: Vec<(NodeId, MailboxId, u64)> =
+                map.iter().map(|(&(n, m), &s)| (n, m, s)).collect();
+            v.sort_unstable_by_key(|(n, m, _)| (n.0, m.0));
+            v
+        };
         let mut unaudited: Vec<(NodeId, u32)> =
             self.unaudited.iter().map(|(&n, &c)| (n, c)).collect();
         unaudited.sort_unstable_by_key(|(n, _)| n.0);
+        let encode_err = |_| StateError::Encode;
         let stored = Stored {
             format: FORMAT,
-            view: postcard::to_allocvec(&self.view).unwrap_or_default(),
-            ledger: postcard::to_allocvec(&self.ledger).unwrap_or_default(),
-            positions,
+            view: postcard::to_allocvec(&self.view).map_err(encode_err)?,
+            ledger: postcard::to_allocvec(&self.ledger).map_err(encode_err)?,
+            positions: triples(&self.positions),
             fallbacks: self.fallbacks.clone(),
             unaudited,
+            audited_at: triples(&self.audited_at),
         };
-        postcard::to_allocvec(&stored).unwrap_or_default()
+        postcard::to_allocvec(&stored).map_err(encode_err)
     }
 
     /// Rebuilds a state from `encode` output, under the current policy (see
@@ -129,6 +146,11 @@ impl NetState {
                 .collect(),
             fallbacks,
             unaudited: stored.unaudited.into_iter().collect(),
+            audited_at: stored
+                .audited_at
+                .into_iter()
+                .map(|(n, m, t)| ((n, m), hour(t).min(hour(now))))
+                .collect(),
         })
     }
 
@@ -157,16 +179,29 @@ impl NetState {
         }
     }
 
-    /// Forgets the positions of mailboxes no longer watched.
+    /// Forgets the positions and audit dates of mailboxes no longer watched.
     pub fn retain_positions(&mut self, watched: &HashSet<MailboxId>) {
         self.positions.retain(|(_, m), _| watched.contains(m));
+        self.audited_at.retain(|(_, m), _| watched.contains(m));
+    }
+
+    /// True if `mailbox` was not audited on `node` in the last `every` seconds.
+    pub fn audit_due(&self, node: &NodeId, mailbox: &MailboxId, now: u64, every: u64) -> bool {
+        self.audited_at
+            .get(&(*node, *mailbox))
+            .is_none_or(|&t| now.saturating_sub(t) >= every)
+    }
+
+    /// `mailbox` was just audited on `node`.
+    pub fn note_audit(&mut self, node: &NodeId, mailbox: &MailboxId, now: u64) {
+        self.audited_at.insert((*node, *mailbox), hour(now));
     }
 
     /// Takes over the old synchronization's positions and deposit delays,
     /// keyed by node id (the addresses are in the CLI's node list: those
     /// nodes enter the view when added by hand). Saves the state, then erases
     /// the old key by writing an empty state.
-    fn migrate_legacy(&mut self, core: &mut Core, now: u64) -> Result<(), CoreError> {
+    fn migrate_legacy(&mut self, core: &mut Core, now: u64) -> Result<(), StateError> {
         let bytes = match core.transport_state(LEGACY_STATE_KEY)? {
             Some(b) if !b.is_empty() => b,
             _ => return Ok(()),
@@ -182,7 +217,7 @@ impl NetState {
             None => tracing::warn!("unreadable old sync state: dropped"),
         }
         self.save(core)?;
-        core.set_transport_state(LEGACY_STATE_KEY, &[])
+        Ok(core.set_transport_state(LEGACY_STATE_KEY, &[])?)
     }
 
     fn absorb_legacy(&mut self, legacy: LegacyState, outbox: &[Vec<u8>], now: u64) {

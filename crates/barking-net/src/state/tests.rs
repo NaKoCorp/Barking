@@ -17,13 +17,21 @@ fn encode_decode_roundtrip() {
     s.view.confirm(&id_of(0), NOW);
     s.positions.insert((id_of(0), MailboxId([3; 16])), 42);
     s.unaudited.insert(id_of(1), 2);
-    let back = NetState::decode(&s.encode(), NOW, true).unwrap();
+    s.note_audit(&id_of(0), &MailboxId([3; 16]), NOW + 1800);
+    let back = NetState::decode(&s.encode().unwrap(), NOW, true).unwrap();
     assert!(back.view.get(&id_of(0)).unwrap().confirmed);
     assert_eq!(
         back.positions.get(&(id_of(0), MailboxId([3; 16]))),
         Some(&42)
     );
     assert_eq!(back.unaudited.get(&id_of(1)), Some(&2));
+    // Audit dates are kept to the hour.
+    assert_eq!(
+        back.audited_at.get(&(id_of(0), MailboxId([3; 16]))),
+        Some(&NOW)
+    );
+    assert!(!back.audit_due(&id_of(0), &MailboxId([3; 16]), NOW + 5 * 3600, 6 * 3600));
+    assert!(back.audit_due(&id_of(0), &MailboxId([3; 16]), NOW + 6 * 3600, 6 * 3600));
     assert_eq!(back.ledger, s.ledger);
 }
 
@@ -37,7 +45,7 @@ fn unreadable_state_starts_empty() {
     assert!(s.positions.is_empty());
     assert_eq!(s.ledger, Ledger::default());
     // An unknown format version reads as unreadable too.
-    let mut bytes = NetState::new(true).encode();
+    let mut bytes = NetState::new(true).encode().unwrap();
     bytes[0] = FORMAT + 1;
     assert!(NetState::decode(&bytes, NOW, true).is_none());
     // Nothing stored at all: empty as well.
@@ -156,8 +164,10 @@ fn positions_follow_resume_and_prune() {
     s.set_positions(&n, &[m1], &r);
     assert!(s.positions.is_empty());
     s.positions.insert((n, m2), 3);
+    s.note_audit(&n, &m2, 0);
     s.retain_positions(&HashSet::from([m1]));
     assert!(s.positions.is_empty());
+    assert!(s.audited_at.is_empty());
 }
 
 #[test]

@@ -89,7 +89,14 @@ fn seeds_solve_puzzle() {
 /// first message (his receipt is queued) and replying on the session.
 /// Returns the temporary directory (to keep alive) and Bob's core.
 pub(crate) fn subject(now: u64) -> (tempfile::TempDir, barking_core::Core) {
-    use barking_core::Core;
+    let (dir, bob, _) = subject_with_ack(now);
+    (dir, bob)
+}
+
+/// `subject`, plus Alice's receipt for Bob's reply (encoded), as a node
+/// would serve it in the reply's mailbox.
+pub(crate) fn subject_with_ack(now: u64) -> (tempfile::TempDir, barking_core::Core, Vec<u8>) {
+    use barking_core::{Core, ReceiveOutcome};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
@@ -116,7 +123,13 @@ pub(crate) fn subject(now: u64) -> (tempfile::TempDir, barking_core::Core) {
     for p in alice.send_text(&fb, "hello", now, &mut rng).unwrap() {
         bob.receive(&p.encode(), "test", now, &mut rng).unwrap();
     }
-    bob.send_text(&fa, "hi", now, &mut rng).unwrap();
-    drop(alice);
-    (dir, bob)
+    let mut ack = None;
+    for p in bob.send_text(&fa, "hi", now, &mut rng).unwrap() {
+        if let ReceiveOutcome::Message { ack: a, .. } =
+            alice.receive(&p.encode(), "test", now, &mut rng).unwrap()
+        {
+            ack = Some(a.encode());
+        }
+    }
+    (dir, bob, ack.unwrap())
 }

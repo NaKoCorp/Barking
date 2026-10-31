@@ -75,9 +75,13 @@ pub const CONFIRMS_PER_SYNC: usize = 8;
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 /// Reachable nodes below which the sync bootstraps first.
 pub const MIN_REACHABLE: usize = 3;
-/// Syncs in a row without a complete session fetch after which a node gets
-/// one failure per sync (it cannot be audited for losses).
+/// Syncs in a row in which a node answered but none of its session fetches
+/// completed (rate limits and the client's own slow link aside), after which
+/// it gets one failure per sync: it cannot be audited for losses.
 pub const UNAUDITED_SYNCS: u32 = 3;
+/// A positioned mailbox holding a message the node accepted is read again
+/// from its start, for a loss audit, at most this often.
+pub const AUDIT_EVERY_SECS: u64 = 6 * 3600;
 /// `NotResponsible` answers from distinct responsibles of one mailbox that
 /// trigger a fallback lookup.
 pub const NOT_RESPONSIBLE_FALLBACK: usize = 2;
@@ -225,6 +229,7 @@ where
         failed: HashSet::new(),
         limited: HashSet::new(),
         pending_failures: Vec::new(),
+        penalized: HashSet::new(),
         found: HashSet::new(),
         budget: CandidateBudget::default(),
         now,
@@ -258,6 +263,8 @@ struct Run<'a, D: Connector> {
     limited: HashSet<NodeId>,
     /// Failures waiting for some node to answer (network up).
     pending_failures: Vec<NodeId>,
+    /// Nodes that already took (or wait for) their failure this sync.
+    penalized: HashSet<NodeId>,
     /// Nodes that already got `Found` this sync.
     found: HashSet<NodeId>,
     budget: CandidateBudget,
@@ -409,17 +416,28 @@ where
         if !self.report.network_up {
             self.report.network_up = true;
             for id in std::mem::take(&mut self.pending_failures) {
-                self.score(id, ScoreEvent::Failure);
+                self.apply(id, ScoreEvent::Failure);
             }
         }
     }
 
-    /// Applies a score event; a failure waits until some node answered.
+    /// Applies a score event. A node takes at most one failure per sync,
+    /// whatever failed (fetch, deposit, lookup, ping, audit); a failure
+    /// waits until some node answered.
     fn score(&mut self, id: NodeId, event: ScoreEvent) {
-        if event == ScoreEvent::Failure && !self.report.network_up {
-            self.pending_failures.push(id);
-            return;
+        if event == ScoreEvent::Failure {
+            if !self.penalized.insert(id) {
+                return;
+            }
+            if !self.report.network_up {
+                self.pending_failures.push(id);
+                return;
+            }
         }
+        self.apply(id, event);
+    }
+
+    fn apply(&mut self, id: NodeId, event: ScoreEvent) {
         if let Some(reason) =
             self.state
                 .view
