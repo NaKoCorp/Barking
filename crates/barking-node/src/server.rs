@@ -158,16 +158,20 @@ pub struct ServerConfig {
     /// table's addresses. Default: those of the spec. The network tests lift
     /// them, all their nodes sharing the /24 of 127.0.0.1.
     pub dht_diversity: DiversityLimits,
-    /// Tests only, never read from the configuration: answers `Ok` to
-    /// `Deposit` and `Store` without keeping anything, as a node that loses
-    /// messages would. Default: false.
+    /// Tests only (feature `test-harness`, never in a production build),
+    /// never read from the configuration: answers `Ok` to `Deposit` and
+    /// `Store` without keeping anything, as a node that loses messages
+    /// would. Default: false.
+    #[cfg(feature = "test-harness")]
     pub test_swallow_deposits: bool,
-    /// Tests only, never read from the configuration: delays every response
-    /// (`Hello` included) by this much, as a slow link would. Default: `None`.
+    /// Tests only (feature `test-harness`): delays every response (`Hello`
+    /// included) by this much, as a slow link would. Default: `None`.
+    #[cfg(feature = "test-harness")]
     pub test_response_delay: Option<Duration>,
-    /// Tests only, never read from the configuration: sends every response
-    /// after `Hello` at this many bytes per second at most, as a slow link
-    /// would (the write deadline still applies). Default: `None`.
+    /// Tests only (feature `test-harness`): sends every response after
+    /// `Hello` at this many bytes per second at most, as a slow link would
+    /// (the write deadline still applies). Default: `None`.
+    #[cfg(feature = "test-harness")]
     pub test_send_rate: Option<u64>,
 }
 
@@ -498,8 +502,11 @@ impl ServerConfig {
             dht: None,
             dht_tick: None,
             dht_diversity: DiversityLimits::SPEC,
+            #[cfg(feature = "test-harness")]
             test_swallow_deposits: false,
+            #[cfg(feature = "test-harness")]
             test_response_delay: None,
+            #[cfg(feature = "test-harness")]
             test_send_rate: None,
         }
     }
@@ -528,10 +535,13 @@ pub(crate) struct Shared {
     /// Hash table, if `[dht]` is configured.
     dht: Option<Arc<Dht>>,
     /// Tests only: see `ServerConfig::test_swallow_deposits`.
+    #[cfg(feature = "test-harness")]
     swallow_deposits: bool,
     /// Tests only: see `ServerConfig::test_response_delay`.
+    #[cfg(feature = "test-harness")]
     response_delay: Option<Duration>,
     /// Tests only: see `ServerConfig::test_send_rate`.
+    #[cfg(feature = "test-harness")]
     send_rate: Option<u64>,
 }
 
@@ -542,9 +552,28 @@ impl Shared {
 
     /// Tests only: the artificial delay before a response, if configured.
     async fn test_delay(&self) {
+        #[cfg(feature = "test-harness")]
         if let Some(d) = self.response_delay {
             tokio::time::sleep(d).await;
         }
+    }
+
+    /// Tests only: this node loses what it accepts.
+    fn swallows_deposits(&self) -> bool {
+        #[cfg(feature = "test-harness")]
+        return self.swallow_deposits;
+        #[cfg(not(feature = "test-harness"))]
+        false
+    }
+
+    /// Sends a response (see `respond`), paced in tests if configured.
+    async fn send_response(&self, send: &mut SendStream, bytes: &[u8]) -> bool {
+        let limit = self.write_deadline(bytes.len());
+        #[cfg(feature = "test-harness")]
+        if let Some(rate) = self.send_rate {
+            return respond_paced(send, bytes, limit, rate).await;
+        }
+        respond(send, bytes, limit).await
     }
 
     /// Write deadline of a response of `len` bytes.
@@ -740,8 +769,11 @@ pub async fn run(
         min_send_rate: config.min_send_rate,
         stats: Arc::clone(&config.stats),
         dht: dht.clone(),
+        #[cfg(feature = "test-harness")]
         swallow_deposits: config.test_swallow_deposits,
+        #[cfg(feature = "test-harness")]
         response_delay: config.test_response_delay,
+        #[cfg(feature = "test-harness")]
         send_rate: config.test_send_rate,
     });
 
@@ -1040,6 +1072,7 @@ async fn respond(send: &mut SendStream, bytes: &[u8], limit: Duration) -> bool {
 }
 
 /// Tests only: `respond`, writing at `rate` bytes per second at most.
+#[cfg(feature = "test-harness")]
 async fn respond_paced(send: &mut SendStream, bytes: &[u8], limit: Duration, rate: u64) -> bool {
     const CHUNK: usize = 4096;
     let sent = timeout(limit, async {
@@ -1186,11 +1219,7 @@ async fn serve_stream(
     shared.test_delay().await;
     // Throughput counted on the size sent, whether the response is
     // acknowledged, cut, stopped by the peer or expired.
-    let limit = shared.write_deadline(bytes.len());
-    match shared.send_rate {
-        Some(rate) => respond_paced(&mut send, &bytes, limit, rate).await,
-        None => respond(&mut send, &bytes, limit).await,
-    };
+    shared.send_response(&mut send, &bytes).await;
     drop(held);
     state.charge(bytes.len());
 }
@@ -1227,7 +1256,7 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
     match req {
         Request::Hello { .. } => Stored::Done(Response::Error(ErrorReason::Malformed)),
         // Tests only: a node that loses what it accepts.
-        Request::Deposit { .. } | Request::Store { .. } if shared.swallow_deposits => {
+        Request::Deposit { .. } | Request::Store { .. } if shared.swallows_deposits() => {
             Stored::Done(Response::Ok)
         }
         Request::Deposit { packet, pow } => {
