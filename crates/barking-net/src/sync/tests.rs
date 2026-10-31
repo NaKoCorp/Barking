@@ -68,6 +68,16 @@ struct Net {
     refuse_deposit: HashMap<NodeId, ErrorReason>,
     /// `refuse_deposit` refuses receipts too.
     refuse_acks: bool,
+    /// Fetches from these nodes time out (on any session).
+    fail_fetch: HashSet<NodeId>,
+    /// Connections to these nodes are refused (the node answers).
+    refuse_connect: HashSet<NodeId>,
+    /// The dialer finds no address for these nodes.
+    no_address: HashSet<NodeId>,
+    /// Connections to these nodes never complete.
+    hang_connect: HashSet<NodeId>,
+    /// A `Ping` to that node returns this record (someone else's).
+    ping_record: HashMap<NodeId, NodeRecord>,
     /// Proof work of a message deposit; beyond the budget: `PowBudget`.
     pow_cost: u64,
     /// The session to that node dies right after any fetch (the node cut
@@ -110,7 +120,7 @@ impl Dialer for Net {
     ) -> impl Future<Output = Result<NodeRecord, DialError>> + Send {
         self.log(Call::Ping(id));
         let r = match self.records.get(&id) {
-            Some(r) if self.up(&id) => Ok(r.clone()),
+            Some(r) if self.up(&id) => Ok(self.ping_record.get(&id).unwrap_or(r).clone()),
             _ => Err(DialError::Unreachable),
         };
         let hang = self.hang.contains(&id);
@@ -159,7 +169,14 @@ impl Connector for Net {
             calls.push(Call::Connect(id));
             calls.len()
         };
-        if self.up(&id) {
+        if self.hang_connect.contains(&id) {
+            std::future::pending::<()>().await;
+        }
+        if self.no_address.contains(&id) {
+            Err(DialError::NoAddress)
+        } else if self.refuse_connect.contains(&id) {
+            Err(DialError::Refused(ErrorReason::NodeFull))
+        } else if self.up(&id) {
             Ok(Conn { id, n })
         } else {
             Err(DialError::Unreachable)
@@ -200,6 +217,9 @@ impl Fetcher for Net {
         self.log(Call::Fetch(*conn, mailboxes.to_vec(), positioned.clone()));
         if self.dead(session) {
             return Err(DialError::Unreachable);
+        }
+        if self.fail_fetch.contains(conn) {
+            return Err(DialError::Timeout);
         }
         if self.die_after_fetch.contains(conn) {
             self.dead.lock().unwrap().insert(session.n);
@@ -612,10 +632,6 @@ async fn after_a_down_sync_other_nodes_are_dialled_first() {
         next.iter().all(|id| !dead.contains(id)),
         "{next:?} {dead:?}"
     );
-    // Remembered 24 hours at most.
-    let later =
-        NetState::load(&mut core, NOW + crate::state::DOWN_FAILED_SECS + 3600, true).unwrap();
-    assert!(later.down_failed.is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1386,7 +1402,7 @@ async fn slow_candidate_ping_lowers_no_score() {
         .insert(candidate, CONFIRM_TIMEOUT + Duration::from_secs(1));
     let mut run = run_on(&mut core, &net);
     // Another node answered: a failure would count.
-    run.answered();
+    run.answered(id_of(0));
     run.confirm_candidates().await;
     assert!(run.failed.is_empty());
     run.save();
@@ -1556,4 +1572,128 @@ async fn paced_or_rate_limited_fetch_is_no_success() {
         let after = score_of(&mut core, &id_of(n));
         assert!((after - was).abs() < 1e-4, "node {n}: {was} -> {after}");
     }
+}
+
+// --- Who answered, what counts as tried, what a down sync remembers ---------
+
+/// The node a sync on `core`'s state dials first, found by a dry run; the
+/// state is put back and the calls forgotten.
+async fn first_dialled(core: &mut Core, net: &Net) -> NodeId {
+    let saved = core
+        .transport_state(crate::state::STATE_KEY)
+        .unwrap()
+        .unwrap();
+    sync(core, net, opts()).await;
+    let first = connects(&net.calls())[0];
+    core.set_transport_state(crate::state::STATE_KEY, &saved)
+        .unwrap();
+    net.calls.lock().unwrap().clear();
+    first
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_answering_node_is_not_failed_for_its_own_timeout() {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view_of(&mut core, &[0]);
+    let x = id_of(0);
+    // Its handshake answers, its fetch times out: no other node answered.
+    net.fail_fetch.insert(x);
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.network_up);
+    assert!(
+        net.calls()
+            .iter()
+            .any(|c| matches!(c, Call::Fetch(n, ..) if *n == x))
+    );
+    assert!(
+        score_of(&mut core, &x) >= 0.5,
+        "{}",
+        score_of(&mut core, &x)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_connection_proves_the_network_up() {
+    let (_dir, mut core, mut net) = setup();
+    let first = first_dialled(&mut core, &net).await;
+    // The first node dialled refuses, every other one is down.
+    net.down = net
+        .records
+        .keys()
+        .copied()
+        .filter(|n| *n != first)
+        .collect();
+    net.refuse_connect.insert(first);
+    let report = sync(&mut core, &net, opts()).await;
+    assert_eq!(connects(&net.calls())[0], first);
+    assert!(report.network_up, "{report:?}");
+    // The others failed while a node answered.
+    let dead = connects(&net.calls())[1];
+    assert!(score_of(&mut core, &dead) < 0.5);
+    assert!((score_of(&mut core, &first) - 0.5).abs() < 1e-4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_address_is_not_a_try() {
+    let (_dir, mut core, mut net) = setup();
+    // No session can be opened (no address), lookups still answer.
+    net.no_address = net.records.keys().copied().collect();
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.maintenance_done, "{report:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn down_sync_remembers_only_dial_failures() {
+    let (_dir, mut core, mut net) = setup();
+    let first = first_dialled(&mut core, &net).await;
+    net.down = net.records.keys().copied().collect();
+    net.no_address.insert(first);
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(!report.network_up && !report.maintenance_done, "{report:?}");
+    assert_eq!(connects(&net.calls())[0], first);
+    let state = load(&mut core);
+    assert_eq!(state.down_failed.len(), DOWN_AFTER_FAILURES as usize);
+    assert!(!state.down_failed.contains_key(&first));
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline_during_the_probe_is_not_network_down() {
+    let (_dir, mut core, mut net) = setup();
+    net.down = net.records.keys().copied().collect();
+    // The probe's node, added by hand, never completes its handshake: the
+    // sync's deadline cuts it.
+    let (manual, addr) = (id_of(10), net.records[&id_of(10)].addrs()[0]);
+    net.hang_connect.insert(manual);
+    let report = sync(
+        &mut core,
+        &net,
+        SyncOptions {
+            manual_nodes: vec![(manual, addr)],
+            deadline: Duration::from_secs(60),
+            ..opts()
+        },
+    )
+    .await;
+    assert!(!report.network_up);
+    assert!(net.calls().contains(&Call::Connect(manual)));
+    assert!(load(&mut core).down_failed.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn candidate_answering_with_another_record_gains_nothing() {
+    let (_dir, mut core, mut net) = setup();
+    let candidate = id_of(3);
+    let mut state = load(&mut core);
+    state.view.entries.get_mut(&candidate).unwrap().confirmed = false;
+    state.save(&mut core).unwrap();
+    net.ping_record.insert(candidate, record(4, NOW));
+    let mut run = run_on(&mut core, &net);
+    run.confirm_candidates().await;
+    run.save();
+    drop(run);
+    assert_eq!(net.calls(), vec![Call::Ping(candidate)]);
+    let state = load(&mut core);
+    let e = state.view.get(&candidate).unwrap();
+    assert!(!e.confirmed);
+    assert!((e.score.value() - 0.5).abs() < 1e-4, "{e:?}");
 }

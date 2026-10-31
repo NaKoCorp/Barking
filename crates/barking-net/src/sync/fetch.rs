@@ -281,13 +281,13 @@ where
         let (items, stop) = match reply {
             Ok(FetchReply::Items { items, stop }) => (items, stop),
             Ok(FetchReply::RateLimited) | Err(DialError::Refused(ErrorReason::RateLimited)) => {
-                self.answered();
+                self.answered(node);
                 self.limited.insert(node);
                 self.conns.insert(node, conn);
                 return (not_served(true), 0, true);
             }
             Err(DialError::Refused(_)) => {
-                self.answered();
+                self.answered(node);
                 self.conns.insert(node, conn);
                 return (not_served(false), 0, true);
             }
@@ -302,7 +302,7 @@ where
         // slice running out (a slow link) never count against it.
         let counts = (stop == FetchStop::Connection && Instant::now() < slice_end)
             || stop == FetchStop::Paced;
-        self.answered();
+        self.answered(node);
         if served_well(stop) {
             self.score(node, ScoreEvent::Success);
         }
@@ -431,7 +431,7 @@ where
                 };
                 match reply {
                     Ok(FetchReply::Items { items, stop }) => {
-                        self.answered();
+                        self.answered(node);
                         if served_well(stop) {
                             self.score(node, ScoreEvent::Success);
                         }
@@ -454,12 +454,12 @@ where
                     }
                     Ok(FetchReply::RateLimited)
                     | Err(DialError::Refused(ErrorReason::RateLimited)) => {
-                        self.answered();
+                        self.answered(node);
                         self.limited.insert(node);
                         self.conns.insert(node, conn);
                     }
                     Err(DialError::Refused(_)) => {
-                        self.answered();
+                        self.answered(node);
                         self.conns.insert(node, conn);
                     }
                     Err(_) => self.fail(node),

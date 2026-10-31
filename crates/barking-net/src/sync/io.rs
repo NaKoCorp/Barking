@@ -187,6 +187,19 @@ impl<'a, D> Observed<'a, D> {
         self.push(id, o);
     }
 
+    /// `id`'s last answer turned out worthless (a record not its own): it
+    /// stays an answer, but no successful request.
+    pub(super) fn retract(&self, id: NodeId) {
+        if let Ok(mut v) = self.outcomes.lock()
+            && let Some(last) = v
+                .iter_mut()
+                .rev()
+                .find(|(n, o)| *n == id && *o == Observation::Answered)
+        {
+            last.1 = Observation::Refused;
+        }
+    }
+
     pub(super) fn push(&self, id: NodeId, o: Observation) {
         if let Ok(mut v) = self.outcomes.lock() {
             v.push((id, o));

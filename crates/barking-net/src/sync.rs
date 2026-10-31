@@ -25,9 +25,9 @@
 //!    node that failed, rate-limited or was cut short during this sync.
 //! 6. `mark_polled` only if every session mailbox was fetched in full.
 //!
-//! **Score.** Successful requests +0.02, a failure −0.1 only once some node
-//! answered during this sync (until then failures wait; if none answers, the
-//! client's own connection is at fault). Only full dial timeouts count: a
+//! **Score.** Successful requests +0.02, a failure −0.1 only once a node
+//! other than the failed one answered during this sync (until then failures
+//! wait; if none answers, the client's own connection is at fault). Only full dial timeouts count: a
 //! lookup request or a candidate ping cut by the client's shorter caps is
 //! neither a failure nor a success. A request that fails on a session kept
 //! from an earlier one dials again once before the node fails (the session
@@ -285,6 +285,8 @@ impl<'a, D: Connector> Run<'a, D> {
             limited: HashSet::new(),
             cut: HashSet::new(),
             unused: HashSet::new(),
+            answerers: HashSet::new(),
+            dial_failed: HashSet::new(),
             pending_failures: Vec::new(),
             penalized: HashSet::new(),
             found: HashSet::new(),
@@ -322,6 +324,11 @@ struct Run<'a, D: Connector> {
     conns: HashMap<NodeId, D::Conn>,
     /// Kept connections on which no request was made yet (the seed probe's).
     unused: HashSet<NodeId>,
+    /// Nodes that answered during this sync (refusals included).
+    answerers: HashSet<NodeId>,
+    /// Nodes whose dial failed or timed out this sync: those a network-down
+    /// sync remembers (`NetState::down_failed`).
+    dial_failed: HashSet<NodeId>,
     /// Nodes that failed (connection, timeout, protocol) during this sync.
     failed: HashSet<NodeId>,
     /// Nodes that answered `RateLimited`: nothing more asked this sync.
@@ -330,7 +337,7 @@ struct Run<'a, D: Connector> {
     /// shorter than the dial timeout: not asked again by lookups this sync,
     /// but neither failed nor scored (a slow link is not a dead node).
     cut: HashSet<NodeId>,
-    /// Failures waiting for some node to answer (network up).
+    /// Failures waiting for a node other than theirs to answer.
     pending_failures: Vec<NodeId>,
     /// Nodes that already took (or wait for) their failure this sync.
     penalized: HashSet<NodeId>,
@@ -457,7 +464,7 @@ where
             let _ = tokio::time::timeout_at(close_end, close).await;
         }
         if self.down {
-            let failed: Vec<NodeId> = self.failed.iter().copied().collect();
+            let failed: Vec<NodeId> = self.dial_failed.iter().copied().collect();
             self.state.note_down_failures(failed, self.now);
         }
         self.save();
@@ -521,19 +528,32 @@ where
             .1
     }
 
-    /// Some node answered: the failures seen so far count now.
-    fn answered(&mut self) {
-        if !self.report.network_up {
-            self.report.network_up = true;
-            for id in std::mem::take(&mut self.pending_failures) {
-                self.apply(id, ScoreEvent::Failure);
+    /// `id` answered (a refusal included): the network is up, and the
+    /// failures waiting for a node other than theirs to answer count now.
+    fn answered(&mut self, id: NodeId) {
+        self.report.network_up = true;
+        if !self.answerers.insert(id) || self.pending_failures.is_empty() {
+            return;
+        }
+        for f in std::mem::take(&mut self.pending_failures) {
+            if self.other_answered(f) {
+                self.apply(f, ScoreEvent::Failure);
+            } else {
+                self.pending_failures.push(f);
             }
         }
     }
 
+    /// A node other than `id` answered during this sync (spec §5.1: a
+    /// failure counts only then; the only node that answers is not blamed
+    /// for its own later timeout).
+    fn other_answered(&self, id: NodeId) -> bool {
+        self.answerers.iter().any(|a| *a != id)
+    }
+
     /// Applies a score event. A node takes at most one failure per sync,
     /// whatever failed (fetch, deposit, lookup, ping, audit); a failure
-    /// waits until some node answered.
+    /// waits until another node answered.
     fn score(&mut self, id: NodeId, event: ScoreEvent) {
         if matches!(event, ScoreEvent::Success | ScoreEvent::Found) {
             self.state.down_failed.remove(&id);
@@ -542,7 +562,7 @@ where
             if !self.penalized.insert(id) {
                 return;
             }
-            if !self.report.network_up {
+            if !self.other_answered(id) {
                 self.pending_failures.push(id);
                 return;
             }
@@ -572,9 +592,15 @@ where
         self.report.avoided.push(node);
     }
 
-    /// A node failed (connection, timeout, invalid answer).
-    /// A node failed; while no node has answered, failures are counted for
-    /// `confirm_down`.
+    /// A dial to `id` failed or timed out: `fail`, and remembered for
+    /// `note_down_failures` should the network turn out to be down.
+    fn fail_dial(&mut self, id: NodeId) {
+        self.dial_failed.insert(id);
+        self.fail(id);
+    }
+
+    /// A node failed (connection, timeout, invalid answer); while no node
+    /// has answered, failures are counted for `confirm_down`.
     fn fail(&mut self, id: NodeId) {
         self.failed.insert(id);
         self.conns.remove(&id);
@@ -611,19 +637,27 @@ where
         self.tried = true;
         match tokio::time::timeout_at(self.deadline, self.dialer.connect(id, &addrs)).await {
             Ok(Ok(conn)) => {
-                self.answered();
+                self.answered(id);
                 self.state.view.confirm(&id, self.now);
                 self.conns.insert(id, conn);
                 self.unused.insert(id);
             }
             Ok(Err(DialError::Refused(_))) => {
-                self.answered();
+                self.answered(id);
                 self.failed.insert(id);
             }
-            Ok(Err(_)) | Err(_) => {
+            Ok(Err(DialError::NoAddress)) => {
                 self.failed.insert(id);
                 self.down = true;
             }
+            Ok(Err(_)) => {
+                self.failed.insert(id);
+                self.dial_failed.insert(id);
+                self.down = true;
+            }
+            // The sync's own deadline cut the probe: nothing proven, the
+            // sync ends without taking the network as down.
+            Err(_) => {}
         }
     }
 
@@ -634,17 +668,16 @@ where
         if !outcomes.is_empty() {
             self.tried = true;
         }
-        if outcomes
-            .iter()
-            .any(|(_, o)| matches!(o, Observation::Answered | Observation::Refused))
-        {
-            self.answered();
+        for (id, o) in &outcomes {
+            if matches!(o, Observation::Answered | Observation::Refused) {
+                self.answered(*id);
+            }
         }
         for (id, o) in outcomes {
             match o {
                 Observation::Answered => self.score(id, ScoreEvent::Success),
                 Observation::Refused => {}
-                Observation::Failed => self.fail(id),
+                Observation::Failed => self.fail_dial(id),
                 Observation::Cut => {
                     self.cut.insert(id);
                 }
@@ -680,28 +713,42 @@ where
         if let Some(c) = self.conns.remove(&id) {
             return Some((c, self.unused.remove(&id)));
         }
-        self.dialed.insert(id);
         let addrs = self
             .state
             .view
             .get(&id)
             .map(|e| e.addrs())
             .unwrap_or_default();
-        self.tried = true;
-        match tokio::time::timeout_at(self.deadline, self.dialer.connect(id, &addrs)).await {
+        // Nothing to dial: not a try, and nothing the node can be blamed for.
+        if addrs.is_empty() {
+            self.failed.insert(id);
+            return None;
+        }
+        self.dialed.insert(id);
+        let dial = tokio::time::timeout_at(self.deadline, self.dialer.connect(id, &addrs)).await;
+        if !matches!(dial, Ok(Err(DialError::NoAddress))) {
+            self.tried = true;
+        }
+        match dial {
             Err(_) => None,
             Ok(Ok(conn)) => {
-                self.answered();
+                self.answered(id);
                 // A pinned handshake proves the node.
                 self.state.view.confirm(&id, self.now);
                 Some((conn, true))
             }
-            Ok(Err(DialError::Refused(_) | DialError::NoAddress)) => {
+            // A refusal proves the network is up; the node is neutral.
+            Ok(Err(DialError::Refused(_))) => {
+                self.answered(id);
+                self.failed.insert(id);
+                None
+            }
+            Ok(Err(DialError::NoAddress)) => {
                 self.failed.insert(id);
                 None
             }
             Ok(Err(_)) => {
-                self.fail(id);
+                self.fail_dial(id);
                 self.confirm_down().await;
                 None
             }
@@ -777,7 +824,7 @@ where
                         continue 'plan;
                     }
                 };
-                self.answered();
+                self.answered(d.node);
                 self.conns.insert(d.node, conn);
                 let event = record_outcome(
                     &mut self.state.ledger,
@@ -945,7 +992,13 @@ where
             }
             let end = (Instant::now() + CONFIRM_TIMEOUT).min(self.deadline);
             match tokio::time::timeout_at(end, observed.ping(id, &addrs)).await {
-                Ok(Ok(record)) => confirm(&mut self.state.view, id, record, now),
+                Ok(Ok(record)) => {
+                    // A record that is not its own (or not valid): no
+                    // successful request.
+                    if !confirm(&mut self.state.view, id, record, now) {
+                        observed.retract(id);
+                    }
+                }
                 Ok(Err(_)) => {}
                 // A cap of the client's, shorter than the dial timeout.
                 Err(_) => observed.cut_short(id),
@@ -963,12 +1016,15 @@ fn dead_session(e: &DialError) -> bool {
 }
 
 /// `id` answered a ping pinned on it with `record`: the record is kept if
-/// it is valid and belongs to `id`, and the node is confirmed.
-fn confirm(view: &mut crate::View, id: NodeId, record: NodeRecord, now: u64) {
-    if record.verify(now, &view.policy()).ok() == Some(id) {
-        view.set_record(&id, record, now);
-        view.confirm(&id, now);
+/// it is valid and belongs to `id`, and the node is confirmed. False if
+/// the record was refused.
+fn confirm(view: &mut crate::View, id: NodeId, record: NodeRecord, now: u64) -> bool {
+    if record.verify(now, &view.policy()).ok() != Some(id) {
+        return false;
     }
+    view.set_record(&id, record, now);
+    view.confirm(&id, now);
+    true
 }
 
 /// The first 8 characters of the base32 identifier: what the log shows.
