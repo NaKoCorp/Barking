@@ -169,29 +169,31 @@ struct PageLearn {
     /// Smallest size (largest index) carried whatever the cause: the size
     /// set by the caller, or a shrink, at most down to `CARRIED_FLOOR`.
     kept: usize,
-    /// Largest index of a page that timed out.
+    /// Largest index of a page that failed slowly: a timeout, or a reset
+    /// or garbage after half the page's timeout or more.
     timed_out: Option<usize>,
     /// Last throughput measured (bytes per second).
     rate: Option<f64>,
 }
 
 impl PageLearn {
-    fn starting_at(page: usize) -> Self {
-        PageLearn {
-            page,
-            kept: page,
-            timed_out: None,
-            rate: None,
-        }
+    /// The caller's size index `page` to carry from: the session's pages
+    /// start from it, or from the smaller size already reached on this
+    /// link (only ever smaller: nothing a node could use). The evidence of
+    /// this session (slow failures, throughput) is kept.
+    fn start_from(&mut self, page: usize) {
+        self.page = self.page.max(page);
+        self.kept = page;
     }
 
-    /// The page at size index `size` failed: the session goes on smaller,
-    /// but only a timeout may carry a size below `CARRIED_FLOOR`.
-    fn shrink(&mut self, size: usize, timeout: bool) {
+    /// The page at size index `size` failed (`slow`: a timeout, or a late
+    /// reset): the session goes on smaller, but only a slow failure may
+    /// carry a size below `CARRIED_FLOOR`.
+    fn shrink(&mut self, size: usize, slow: bool) {
         let next = (size + 1).min(FETCH_PAGE_SIZES.len() - 1);
         self.page = self.page.max(next);
         self.kept = self.kept.max(next.min(CARRIED_FLOOR));
-        if timeout {
+        if slow {
             self.timed_out = self.timed_out.max(Some(size));
         }
     }
@@ -539,27 +541,29 @@ impl Session {
 
     /// Page size the next pickup starts from (one of `FETCH_PAGE_SIZES`,
     /// the largest not above `bytes`): typically the `page_bytes` of an
-    /// earlier session with the same node. Starts the evidence of
-    /// `page_bytes` and `page_confirmed` over.
+    /// earlier session with the same node. On a session that already
+    /// reached a smaller size, the pages start from that one; what this
+    /// session learned about the link (`page_confirmed`) is kept.
     pub fn set_page_bytes(&mut self, bytes: u32) {
-        self.learn = PageLearn::starting_at(size_index(bytes));
+        self.learn.start_from(size_index(bytes));
     }
 
     /// Page size to carry to a later session with this node (one of
     /// `FETCH_PAGE_SIZES`): the size reached on this link (smaller after
     /// pages cut off in transit, larger after full pages that came fast),
     /// but never below `MIN_CARRIED_PAGE_BYTES` (or the size set) unless a
-    /// page timed out at a measured throughput too low for it. A reset or
-    /// garbage costs a node nothing: it may shrink this session's pages,
-    /// not the ones of the sessions to come.
+    /// page failed slowly (timeout, or reset after half its timeout) at a
+    /// measured throughput too low for it. A fast reset or garbage costs a
+    /// node nothing: it may shrink this session's pages, not the ones of
+    /// the sessions to come.
     pub fn page_bytes(&self) -> u32 {
         FETCH_PAGE_SIZES[self.learn.carried()]
     }
 
-    /// True if, since the session started or `set_page_bytes`, a page
-    /// timeout (at a measured low throughput below `MIN_CARRIED_PAGE_BYTES`)
-    /// justified `page_bytes`: a caller lets a carried size grow back when
-    /// no timeout confirms it.
+    /// True if, since the session started, a slow page failure (at a
+    /// measured low throughput below `MIN_CARRIED_PAGE_BYTES`) justified
+    /// `page_bytes`: a caller lets a carried size grow back when no such
+    /// failure confirms it.
     pub fn page_confirmed(&self) -> bool {
         self.learn.confirmed()
     }
@@ -679,6 +683,10 @@ impl Session {
         // A continued page came far below the size asked, or without an
         // item that fitted in it.
         let mut paced = false;
+        // Continued pages cut before an item that fitted (`cut_early`): one
+        // may come from an honest node (the item that ended the page deleted
+        // in between, by an ack), two make the call paced.
+        let mut cut_early_pages = 0u32;
         let node_cap = |paced: bool, client: FetchStop| {
             if paced { FetchStop::Paced } else { client }
         };
@@ -721,7 +729,13 @@ impl Session {
                     Ok(Err(e @ (ClientError::Frame(_) | ClientError::Timeout)))
                         if size + 1 < FETCH_PAGE_SIZES.len() =>
                     {
-                        self.learn.shrink(size, matches!(e, ClientError::Timeout));
+                        // A failure after half the page's timeout or more
+                        // says as much of the link as a timeout (the node's
+                        // write deadline often cuts a slow page first); a
+                        // fast one, nothing.
+                        let slow = matches!(e, ClientError::Timeout)
+                            || sent.elapsed() >= page_timeout(FETCH_PAGE_SIZES[size]) / 2;
+                        self.learn.shrink(size, slow);
                         rate = None;
                         continue;
                     }
@@ -767,7 +781,8 @@ impl Session {
                 if let (Some((asked, n, b)), Some(first)) = (continued, items.first())
                     && cut_early(asked, n, b, first.len())
                 {
-                    paced = true;
+                    cut_early_pages += 1;
+                    paced |= cut_early_pages >= 2;
                 }
                 // A first page is never beyond the item cap (`MAX_PAGE_ITEMS`
                 // is far below it).
@@ -908,7 +923,8 @@ mod tests {
         l.shrink(0, false);
         assert_eq!(FETCH_PAGE_SIZES[l.carried()], 256 << 10);
         // A size set by the caller stays carried.
-        let mut l = PageLearn::starting_at(3);
+        let mut l = PageLearn::default();
+        l.start_from(3);
         l.shrink(3, false);
         assert_eq!(FETCH_PAGE_SIZES[l.carried()], crate::MIN_PAGE_BYTES);
     }
@@ -916,7 +932,8 @@ mod tests {
     #[test]
     fn only_a_timeout_at_a_measured_low_throughput_carries_16_kib() {
         // A 64 KiB timeout before any measure: 64 KiB carried.
-        let mut l = PageLearn::starting_at(2);
+        let mut l = PageLearn::default();
+        l.start_from(2);
         l.shrink(2, true);
         assert_eq!(FETCH_PAGE_SIZES[l.carried()], MIN_CARRIED_PAGE_BYTES);
         assert!(!l.confirmed());
@@ -941,6 +958,24 @@ mod tests {
         l.page = 1;
         assert_eq!(FETCH_PAGE_SIZES[l.carried()], 256 << 10);
         assert!(l.confirmed());
+    }
+
+    #[test]
+    fn a_kept_session_starts_from_the_smaller_size_and_keeps_its_evidence() {
+        // A slow failure at 64 KiB, 4 KiB/s measured: 16 KiB, confirmed.
+        let mut l = PageLearn::default();
+        l.start_from(2);
+        l.shrink(2, true);
+        l.rate = Some(4.0 * 1024.0);
+        // The caller sets 64 KiB again (its stored size) on the same session.
+        l.start_from(2);
+        assert_eq!(FETCH_PAGE_SIZES[l.page], crate::MIN_PAGE_BYTES);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], crate::MIN_PAGE_BYTES);
+        assert!(l.confirmed());
+        // A larger stored size never makes a fresh session start smaller.
+        let mut l = PageLearn::default();
+        l.start_from(1);
+        assert_eq!(FETCH_PAGE_SIZES[l.page], 256 << 10);
     }
 
     #[test]

@@ -547,6 +547,15 @@ fn fake_node(
     k: SigningKey,
     answer: impl Fn(Request) -> Option<Response> + Send + Sync + 'static,
 ) -> (SocketAddr, JoinHandle<()>) {
+    slow_fake_node(k, move |req| (answer(req), Duration::ZERO))
+}
+
+/// `fake_node` answering (or cutting the stream) after the delay given
+/// with each answer, as a slow link or a node's write deadline would.
+fn slow_fake_node(
+    k: SigningKey,
+    answer: impl Fn(Request) -> (Option<Response>, Duration) + Send + Sync + 'static,
+) -> (SocketAddr, JoinHandle<()>) {
     let ep = quinn::Endpoint::server(tls::quinn_server_config(&k), "127.0.0.1:0".parse().unwrap())
         .unwrap();
     let addr = ep.local_addr().unwrap();
@@ -560,7 +569,9 @@ fn fake_node(
                     let Ok(req) = frame::read::<Request>(&mut recv, MAX_REQUEST_BYTES).await else {
                         return;
                     };
-                    match answer(req) {
+                    let (resp, delay) = answer(req);
+                    tokio::time::sleep(delay).await;
+                    match resp {
                         Some(resp) => {
                             let _ = frame::write(&mut send, &resp, frame::MAX_RESPONSE_BYTES).await;
                             let _ = send.finish();
@@ -1050,6 +1061,142 @@ async fn honest_node_at_16_kib_is_never_paced() {
     assert!(items.len() > 2 * 16 && items.len() < 150, "{}", items.len());
     assert_eq!(s.last_fetch_stop(), client::FetchStop::Deadline);
     node.stop().await;
+}
+
+/// Delay before a slow node cuts a 64 KiB page: past half its timeout,
+/// as the node's write deadline (10 s + 64 KiB at 32 KiB/s) does.
+const LATE_CUT: Duration = Duration::from_millis(12_500);
+/// Delay of each 16 KiB page of a slow node: 10 KiB in it, about 4 KiB/s.
+const SLOW_PAGE: Duration = Duration::from_millis(2_500);
+
+/// A node on a slow link: pages above 64 KiB cut at once, 64 KiB pages cut
+/// after `cut_64k`, 16 KiB pages of one 10 KiB item after `SLOW_PAGE`,
+/// `pages` of them per call. Logs the sizes asked.
+fn slow_link_node(
+    k: SigningKey,
+    cut_64k: Duration,
+    pages: u64,
+) -> (SocketAddr, JoinHandle<()>, Arc<std::sync::Mutex<Vec<u32>>>) {
+    let h = hello(&k, TEST_BITS);
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let (addr, srv) = slow_fake_node(k, move |req| match req {
+        Request::Hello { .. } => (Some(h.clone()), Duration::ZERO),
+        Request::Fetch {
+            cursor, max_bytes, ..
+        } => {
+            log.lock().unwrap().push(max_bytes);
+            if max_bytes > 64 << 10 {
+                return (None, Duration::ZERO);
+            }
+            if max_bytes > barking_proto::MIN_PAGE_BYTES {
+                return (None, cut_64k);
+            }
+            let c = cursor.unwrap_or(0);
+            let page = Response::Items {
+                items: vec![vec![c as u8; 10 << 10]],
+                next: (c + 1 < pages).then_some(c + 1),
+            };
+            (Some(page), SLOW_PAGE)
+        }
+        _ => (
+            Some(Response::Error(ErrorReason::Unsupported)),
+            Duration::ZERO,
+        ),
+    });
+    (addr, srv, asked)
+}
+
+/// A 64 KiB page cut late, then a slow 16 KiB page measured: the link is
+/// slow, 16 KiB is carried and confirmed. Cut at once: 64 KiB carried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_cut_at_a_slow_rate_carries_16_kib() {
+    let (addr, srv, _) = slow_link_node(key(0), LATE_CUT, 1);
+    let mut s = Client::connect(addr, id_of(&key(0))).await.unwrap();
+    s.set_page_bytes(64 << 10);
+    s.fetch(&[MailboxId([1; 16])]).await.unwrap();
+    assert_eq!(s.page_bytes(), barking_proto::MIN_PAGE_BYTES);
+    assert!(s.page_confirmed());
+    srv.abort();
+
+    let (addr, srv, _) = slow_link_node(key(0), Duration::ZERO, 1);
+    let mut s = Client::connect(addr, id_of(&key(0))).await.unwrap();
+    s.set_page_bytes(64 << 10);
+    s.fetch(&[MailboxId([1; 16])]).await.unwrap();
+    assert_eq!(s.page_bytes(), client::MIN_CARRIED_PAGE_BYTES);
+    assert!(!s.page_confirmed());
+    srv.abort();
+}
+
+/// As `QuicDialer` does: the stored size set before each fetch on the same
+/// session. The calls after the first one start from the 16 KiB reached
+/// (no 64 KiB page cut again) and keep it confirmed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kept_session_keeps_its_small_pages_across_calls() {
+    let (addr, srv, asked) = slow_link_node(key(0), LATE_CUT, 1);
+    let mut s = Client::connect(addr, id_of(&key(0))).await.unwrap();
+    // The caller's stored size stays 64 KiB (say, grown back by a
+    // recovery since).
+    let stored = 64 << 10;
+    for call in 0..3 {
+        asked.lock().unwrap().clear();
+        s.set_page_bytes(stored);
+        s.fetch(&[MailboxId([1; 16])]).await.unwrap();
+        let first = asked.lock().unwrap()[0];
+        let want = if call == 0 { 64 << 10 } else { 16 << 10 };
+        assert_eq!(first, want, "call {call}");
+        assert!(s.page_confirmed(), "call {call}");
+        assert_eq!(s.page_bytes(), barking_proto::MIN_PAGE_BYTES);
+    }
+    srv.abort();
+}
+
+/// Pages of 245-byte items while the cursor is below `small`, then pages
+/// filled with 16 KiB items as an honest node would; every response after
+/// 50 ms.
+fn cut_early_node(k: SigningKey, small: u64) -> (SocketAddr, JoinHandle<()>) {
+    let h = hello(&k, TEST_BITS);
+    slow_fake_node(k, move |req| match req {
+        Request::Hello { .. } => (Some(h.clone()), Duration::ZERO),
+        Request::Fetch {
+            cursor, max_bytes, ..
+        } => {
+            let c = cursor.unwrap_or(0);
+            let items = if c < small {
+                vec![vec![0; Tier::S.size()]]
+            } else {
+                let n = (max_bytes as usize / Tier::L.size()).max(1);
+                vec![vec![1; Tier::L.size()]; n]
+            };
+            let page = Response::Items {
+                items,
+                next: Some(c + 1),
+            };
+            (Some(page), Duration::from_millis(50))
+        }
+        _ => (
+            Some(Response::Error(ErrorReason::Unsupported)),
+            Duration::ZERO,
+        ),
+    })
+}
+
+/// One page cut before an item that fitted may be an honest node's (an ack
+/// deleted the item that ended it in between): not paced. Two are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_single_page_cut_early_is_not_paced() {
+    for (small, stop) in [
+        (2, client::FetchStop::Deadline),
+        (3, client::FetchStop::Paced),
+    ] {
+        let (addr, srv) = cut_early_node(key(0), small);
+        let mut s = Client::connect(addr, id_of(&key(0))).await.unwrap();
+        s.set_page_bytes(barking_proto::MIN_PAGE_BYTES);
+        s.set_fetch_deadline(Duration::from_millis(1_500));
+        s.fetch(&[MailboxId([1; 16])]).await.unwrap();
+        assert_eq!(s.last_fetch_stop(), stop, "{small} small pages");
+        srv.abort();
+    }
 }
 
 /// The node serves the requested page size (floor 16 KiB).
