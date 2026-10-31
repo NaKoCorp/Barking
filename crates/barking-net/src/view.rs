@@ -20,6 +20,12 @@ use crate::{MAX_PER_PREFIX, MAX_VIEW, RESPONSIBLES, SMALL_VIEW, VIEW_TTL_SECS};
 /// Longest avoidance of a node, from the current time.
 const MAX_AVOID_SECS: u64 = 7 * 86_400;
 
+/// Date rounded down to the hour: the only precision stored, so the
+/// persisted view does not leak fine-grained contact times.
+fn hour(t: u64) -> u64 {
+    t - t % 3600
+}
+
 /// Reputation of a node in `[0, 1]`, starting at 0.5.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Score(f32);
@@ -32,7 +38,6 @@ impl Default for Score {
 
 impl Score {
     /// A score clamped to `[0, 1]`; NaN gives the default.
-    #[cfg(test)]
     pub(crate) fn new(value: f32) -> Score {
         if value.is_nan() {
             Score::default()
@@ -71,21 +76,21 @@ impl NodeEntry {
             manual_addr: Some(addr),
             confirmed: false,
             manual: true,
-            first_seen: now,
-            last_seen: now,
+            first_seen: hour(now),
+            last_seen: hour(now),
             score: Score::default(),
             avoided_until: None,
         }
     }
 
-    fn new(record: NodeRecord, now: u64, confirmed: bool) -> NodeEntry {
+    fn new(record: NodeRecord, now: u64) -> NodeEntry {
         NodeEntry {
             record: Some(record),
             manual_addr: None,
-            confirmed,
+            confirmed: false,
             manual: false,
-            first_seen: now,
-            last_seen: now,
+            first_seen: hour(now),
+            last_seen: hour(now),
             score: Score::default(),
             avoided_until: None,
         }
@@ -112,6 +117,8 @@ impl NodeEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct View {
     /// Accepts non-routable addresses in records (tests, private networks).
+    /// Runtime-only: never persisted, so a loaded view fails closed.
+    #[serde(skip)]
     allow_private: bool,
     pub(crate) entries: HashMap<NodeId, NodeEntry>,
 }
@@ -128,12 +135,13 @@ impl View {
         RecordPolicy::network(self.allow_private)
     }
 
-    /// Adds or updates a node from a signed record. An invalid record is
-    /// ignored; a newer one replaces the old; an older one only counts for
-    /// confirmation. Returns true if the view changed.
-    pub fn insert(&mut self, record: NodeRecord, now: u64, confirmed: bool) -> bool {
+    /// Adds or updates a node from a signed record, as a candidate: a record
+    /// never confirms a node, only `confirm` does (after a handshake with that
+    /// very node). An invalid record is ignored; a newer one replaces the old;
+    /// an older one is ignored. Returns true if the view changed.
+    pub fn insert(&mut self, record: NodeRecord, now: u64) -> bool {
         match record.verify(now, &self.policy()) {
-            Ok(id) => self.upsert(id, record, now, confirmed),
+            Ok(id) => self.upsert(id, record, now),
             Err(_) => false,
         }
     }
@@ -145,15 +153,14 @@ impl View {
             return false;
         }
         match record.verify(now, &self.policy()) {
-            Ok(rid) if rid == *id => self.upsert(rid, record, now, false),
+            Ok(rid) if rid == *id => self.upsert(rid, record, now),
             _ => false,
         }
     }
 
-    fn upsert(&mut self, id: NodeId, record: NodeRecord, now: u64, confirmed: bool) -> bool {
+    fn upsert(&mut self, id: NodeId, record: NodeRecord, now: u64) -> bool {
         let Some(e) = self.entries.get_mut(&id) else {
-            self.entries
-                .insert(id, NodeEntry::new(record, now, confirmed));
+            self.entries.insert(id, NodeEntry::new(record, now));
             self.evict_to_capacity();
             return self.entries.contains_key(&id);
         };
@@ -170,13 +177,9 @@ impl View {
             e.record = Some(record);
             changed = true;
         }
-        if confirmed && !e.confirmed {
-            e.confirmed = true;
-            changed = true;
-        }
-        // A stale record does not keep a node alive, unless confirmed.
-        if !older || confirmed {
-            e.last_seen = now;
+        // A stale record does not keep a node alive.
+        if !older {
+            e.last_seen = hour(now);
         }
         changed
     }
@@ -219,21 +222,21 @@ impl View {
     pub fn confirm(&mut self, id: &NodeId, now: u64) {
         if let Some(e) = self.entries.get_mut(id) {
             e.confirmed = true;
-            e.last_seen = now;
+            e.last_seen = hour(now);
         }
     }
 
     /// Marks a node as seen now.
     pub fn touch(&mut self, id: &NodeId, now: u64) {
         if let Some(e) = self.entries.get_mut(id) {
-            e.last_seen = now;
+            e.last_seen = hour(now);
         }
     }
 
     /// Avoids a node until `until`, at most 7 days from `now`.
     pub fn avoid(&mut self, id: &NodeId, until: u64, now: u64) {
         if let Some(e) = self.entries.get_mut(id) {
-            e.avoided_until = Some(until.min(now.saturating_add(MAX_AVOID_SECS)));
+            e.avoided_until = Some(hour(until.min(now.saturating_add(MAX_AVOID_SECS))));
         }
     }
 
@@ -247,10 +250,13 @@ impl View {
     /// Drops entries not seen for `VIEW_TTL_SECS`, hand-added ones excepted.
     /// Never drops more than half of the view in one call (stalest first).
     /// Dates from the future are brought back to `now`. Returns the count.
+    /// Meant to run once per synchronization: the halving cap makes a clock
+    /// jump drain the view over several runs, not in one.
     pub fn expire(&mut self, now: u64) -> usize {
+        let now_hour = hour(now);
         for e in self.entries.values_mut() {
-            e.first_seen = e.first_seen.min(now);
-            e.last_seen = e.last_seen.min(now);
+            e.first_seen = e.first_seen.min(now_hour);
+            e.last_seen = e.last_seen.min(now_hour);
             if let Some(t) = &mut e.avoided_until {
                 *t = (*t).min(now.saturating_add(MAX_AVOID_SECS));
             }
@@ -262,11 +268,48 @@ impl View {
             .map(|(id, e)| (e.last_seen, *id))
             .collect();
         stale.sort_by_key(|&(seen, id)| (seen, id.0));
-        stale.truncate(self.entries.len() / 2);
+        stale.truncate((self.entries.len() / 2).max(1));
         for (_, id) in &stale {
             self.entries.remove(id);
         }
         stale.len()
+    }
+
+    /// Rebuilds a view from `bytes` written by `Serialize`, under the current
+    /// policy. Entries that do not hold up are dropped: a record that fails
+    /// verification or does not match its key (a hand-added node keeps its
+    /// address and loses the record), an entry with neither record nor
+    /// address. Scores are clamped to `[0, 1]`, dates to the present, and the
+    /// view is brought back to `MAX_VIEW`. Unreadable `bytes` give an error:
+    /// the caller starts from an empty view.
+    pub fn restore(bytes: &[u8], allow_private: bool, now: u64) -> Result<View, postcard::Error> {
+        let mut view: View = postcard::from_bytes(bytes)?;
+        view.allow_private = allow_private;
+        view.sanitize(now);
+        Ok(view)
+    }
+
+    fn sanitize(&mut self, now: u64) {
+        let policy = self.policy();
+        let now_hour = hour(now);
+        self.entries.retain(|id, e| {
+            if let Some(r) = &e.record
+                && r.verify(now, &policy).ok() != Some(*id)
+            {
+                e.record = None;
+            }
+            if e.record.is_none() && !(e.manual && e.manual_addr.is_some()) {
+                return false;
+            }
+            e.score = Score::new(e.score.0);
+            e.first_seen = hour(e.first_seen).min(now_hour);
+            e.last_seen = hour(e.last_seen).min(now_hour);
+            e.avoided_until = e
+                .avoided_until
+                .map(|t| hour(t).min(hour(now.saturating_add(MAX_AVOID_SECS))));
+            true
+        });
+        self.evict_to_capacity();
     }
 
     /// Brings the view down to `MAX_VIEW`: oldest candidates first, then the
@@ -412,44 +455,44 @@ mod tests {
         let mut v = view();
         let old = record(0, NOW - 7200);
         let new = record(0, NOW);
-        assert!(v.insert(old.clone(), NOW, false));
-        assert!(v.insert(new.clone(), NOW, false));
+        assert!(v.insert(old.clone(), NOW));
+        assert!(v.insert(new.clone(), NOW));
         assert_eq!(v.get(&id_of(0)).unwrap().record.as_ref(), Some(&new));
         // An older record is ignored.
-        assert!(!v.insert(old, NOW, false));
+        assert!(!v.insert(old, NOW));
         assert_eq!(v.get(&id_of(0)).unwrap().record.as_ref(), Some(&new));
         assert_eq!(v.len(), 1);
         // An invalid record (tampered address) is rejected.
         let mut bad = record(1, NOW);
         bad.v4 = Some(addr(7, 7, 7));
-        assert!(!v.insert(bad, NOW, false));
+        assert!(!v.insert(bad, NOW));
         assert_eq!(v.len(), 1);
         // Strict network policy rejects private addresses.
         let mut strict = View::new(false);
-        assert!(!strict.insert(record(2, NOW), NOW, false));
+        assert!(!strict.insert(record(2, NOW), NOW));
     }
 
     #[test]
     fn candidate_becomes_confirmed_never_back() {
         let mut v = view();
-        v.insert(record(0, NOW), NOW, false);
+        v.insert(record(0, NOW), NOW);
         assert!(!v.get(&id_of(0)).unwrap().confirmed);
         v.confirm(&id_of(0), NOW);
         assert!(v.get(&id_of(0)).unwrap().confirmed);
         // A later candidate sighting, even with a newer record, stays confirmed.
-        v.insert(record(0, NOW + 3600), NOW + 3600, false);
+        v.insert(record(0, NOW + 3600), NOW + 3600);
         assert!(v.get(&id_of(0)).unwrap().confirmed);
-        // Inserting directly as confirmed upgrades a candidate.
-        v.insert(record(1, NOW), NOW, false);
-        assert!(v.insert(record(1, NOW), NOW, true));
-        assert!(v.get(&id_of(1)).unwrap().confirmed);
+        // A record alone never confirms.
+        v.insert(record(1, NOW), NOW);
+        assert!(!v.insert(record(1, NOW), NOW));
+        assert!(!v.get(&id_of(1)).unwrap().confirmed);
     }
 
     #[test]
     fn expire_after_ttl_except_manual() {
         let mut v = view();
-        v.insert(record(0, NOW), NOW, false);
-        v.insert(record(1, NOW), NOW, false);
+        v.insert(record(0, NOW), NOW);
+        v.insert(record(1, NOW), NOW);
         v.add_manual(id_of(2), addr(9, 9, 9).into(), NOW);
         v.add_manual(id_of(4), addr(8, 8, 8).into(), NOW);
         v.set_record(&id_of(4), record(4, NOW), NOW);
@@ -476,10 +519,12 @@ mod tests {
         let mut v = view();
         // 0: confirmed, 1: candidate seen late, 2: candidate seen early,
         // 3: confirmed with a low score, 4: manual candidate.
-        v.insert(record(0, NOW), NOW, true);
-        v.insert(record(1, NOW), NOW + 20, false);
-        v.insert(record(2, NOW), NOW + 10, false);
-        v.insert(record(3, NOW), NOW, true);
+        v.insert(record(0, NOW), NOW);
+        v.insert(record(1, NOW), NOW + 7200);
+        v.insert(record(2, NOW), NOW + 3600);
+        v.insert(record(3, NOW), NOW);
+        v.confirm(&id_of(0), NOW);
+        v.confirm(&id_of(3), NOW);
         v.set_score(&id_of(3), 0.1);
         v.set_score(&id_of(0), 0.9);
         v.add_manual(id_of(4), addr(9, 9, 9).into(), NOW);
@@ -503,7 +548,7 @@ mod tests {
         v.add_manual(id_of(0), addr(9, 9, 9).into(), NOW);
         v.add_manual(id_of(1), addr(8, 8, 8).into(), NOW);
         v.set_record(&id_of(1), record(1, NOW), NOW);
-        v.insert(record(2, NOW), NOW, false);
+        v.insert(record(2, NOW), NOW);
         assert!(v.remove_manual(&id_of(0)));
         assert!(v.get(&id_of(0)).is_none());
         // With a record the node stays, as a normal one.
@@ -526,7 +571,7 @@ mod tests {
             )
         }));
         // All manual: nothing to evict, but a new candidate is evicted at once.
-        v.insert(record(0, NOW), NOW, false);
+        v.insert(record(0, NOW), NOW);
         assert_eq!(v.len(), MAX_VIEW);
         assert!(v.get(&id_of(0)).is_none());
     }
@@ -536,7 +581,10 @@ mod tests {
         let mut v = view();
         let mut ids = Vec::new();
         for n in 0..10 {
-            v.insert(record(n, NOW), NOW, n % 2 == 0);
+            v.insert(record(n, NOW), NOW);
+            if n % 2 == 0 {
+                v.confirm(&id_of(n), NOW);
+            }
             ids.push(id_of(n));
         }
         // A record-less manual node never counts.
@@ -563,7 +611,8 @@ mod tests {
             } else {
                 addr(6, n as u8, 1)
             };
-            v.insert(record_at(n, at, NOW), NOW, true);
+            v.insert(record_at(n, at, NOW), NOW);
+            v.confirm(&id_of(n), NOW);
         }
         let got = v.responsibles(&mb, NOW);
         let mut expected = ids[..2].to_vec();
@@ -578,7 +627,8 @@ mod tests {
         sorted_by_distance(&mut ids, &mb);
         let mut v = view();
         for n in 0..7 {
-            v.insert(record(n, NOW), NOW, true);
+            v.insert(record(n, NOW), NOW);
+            v.confirm(&id_of(n), NOW);
         }
         // The two closest are avoided: skipped while five others exist.
         v.avoid(&ids[0], NOW + DAY, NOW);
@@ -609,7 +659,7 @@ mod tests {
     fn clock_jump_does_not_wipe_view_or_ban_forever() {
         let mut v = view();
         for n in 0..10 {
-            v.insert(record(n, NOW), NOW, false);
+            v.insert(record(n, NOW), NOW);
         }
         // +30 days: everything is stale, but at most half goes per call.
         let later = NOW + 30 * DAY;
@@ -617,11 +667,17 @@ mod tests {
         assert_eq!(v.len(), 5);
         assert_eq!(v.expire(later), 2);
         assert_eq!(v.expire(later), 1);
+        assert_eq!(v.expire(later), 1);
+        assert_eq!(v.len(), 1);
+        // A lone stale entry can go.
+        assert_eq!(v.expire(later), 1);
+        assert!(v.is_empty());
 
         // -30 days: entries seen "in the future" are clamped to now.
         let mut v = view();
         for n in 0..4 {
-            v.insert(record(n, NOW), NOW, true);
+            v.insert(record(n, NOW), NOW);
+            v.confirm(&id_of(n), NOW);
         }
         v.avoid(&id_of(0), NOW + 365 * DAY, NOW);
         let back = NOW - 30 * DAY;
@@ -638,8 +694,8 @@ mod tests {
     #[test]
     fn view_roundtrip_postcard() {
         let mut v = view();
-        v.insert(record(0, NOW), NOW, true);
-        v.insert(record(1, NOW), NOW, false);
+        v.insert(record(0, NOW), NOW);
+        v.insert(record(1, NOW), NOW);
         v.add_manual(id_of(2), addr(9, 9, 9).into(), NOW);
         v.avoid(&id_of(0), NOW + DAY, NOW);
         let bytes = postcard::to_allocvec(&v).unwrap();
@@ -654,8 +710,9 @@ mod tests {
     #[test]
     fn bootstrap_candidates_prefer_confirmed_and_manual_addr() {
         let mut v = view();
-        v.insert(record(0, NOW), NOW, false);
-        v.insert(record(1, NOW), NOW, true);
+        v.insert(record(0, NOW), NOW);
+        v.insert(record(1, NOW), NOW);
+        v.confirm(&id_of(1), NOW);
         v.add_manual(id_of(2), addr(9, 9, 9).into(), NOW);
         let c = v.reachable_candidates_for_bootstrap();
         assert_eq!(c.len(), 3);
@@ -664,5 +721,90 @@ mod tests {
             c.iter()
                 .any(|(id, a)| *id == id_of(2) && a == &[SocketAddr::from(addr(9, 9, 9))])
         );
+    }
+
+    #[test]
+    fn dates_are_rounded_to_the_hour() {
+        let t = NOW + 1234;
+        let mut v = view();
+        v.insert(record(0, NOW), t);
+        v.add_manual(id_of(1), addr(9, 9, 9).into(), t);
+        v.touch(&id_of(0), t + 5);
+        v.avoid(&id_of(0), t + 4000, t);
+        v.confirm(&id_of(0), t + 7);
+        for (_, e) in v.entries() {
+            assert_eq!(e.first_seen % 3600, 0);
+            assert_eq!(e.last_seen % 3600, 0);
+            assert_eq!(e.avoided_until.unwrap_or(0) % 3600, 0);
+        }
+        v.set_record(&id_of(1), record(1, NOW), t + 99);
+        assert_eq!(v.get(&id_of(1)).unwrap().last_seen % 3600, 0);
+        v.expire(t + 3);
+        assert!(v.entries().all(|(_, e)| e.last_seen % 3600 == 0));
+    }
+
+    #[test]
+    fn policy_is_not_persisted() {
+        let mut v = view();
+        v.insert(record(0, NOW), NOW);
+        let bytes = postcard::to_allocvec(&v).unwrap();
+        // Plain deserialization fails closed.
+        let back: View = postcard::from_bytes(&bytes).unwrap();
+        assert!(!back.allow_private);
+        // Restoring under the strict policy drops private-address records.
+        let strict = View::restore(&bytes, false, NOW).unwrap();
+        assert_eq!(strict.len(), 0);
+        let loose = View::restore(&bytes, true, NOW).unwrap();
+        assert_eq!(loose.len(), 1);
+        assert!(View::restore(&bytes[..bytes.len() / 2], true, NOW).is_err());
+    }
+
+    #[test]
+    fn restore_drops_mismatched_and_invalid_entries() {
+        let mut v = view();
+        v.insert(record(0, NOW), NOW);
+        v.insert(record(1, NOW), NOW);
+        v.add_manual(id_of(2), addr(9, 9, 9).into(), NOW);
+        v.insert(record(3, NOW), NOW);
+        // Key does not match its record: swap the entries of 0 and 1.
+        let e0 = v.entries.remove(&id_of(0)).unwrap();
+        v.entries.insert(id_of(1), e0);
+        // Manual node carrying a foreign record keeps its address only.
+        v.entries.get_mut(&id_of(2)).unwrap().record = Some(record(4, NOW));
+        // Record-less, non-manual entry is meaningless.
+        v.entries
+            .insert(id_of(5), NodeEntry::manual_only(addr(1, 1, 1).into(), NOW));
+        v.entries.get_mut(&id_of(5)).unwrap().manual = false;
+        let bytes = postcard::to_allocvec(&v).unwrap();
+        let r = View::restore(&bytes, true, NOW).unwrap();
+        assert!(r.get(&id_of(1)).is_none());
+        assert!(r.get(&id_of(5)).is_none());
+        let m = r.get(&id_of(2)).unwrap();
+        assert!(m.record.is_none() && m.manual_addr.is_some());
+        assert!(r.get(&id_of(3)).is_some());
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn restore_clamps_scores_and_dates() {
+        let mut v = view();
+        v.insert(record(0, NOW), NOW);
+        v.insert(record(1, NOW), NOW);
+        v.insert(record(2, NOW), NOW);
+        v.entries.get_mut(&id_of(0)).unwrap().score = Score(f32::NAN);
+        v.entries.get_mut(&id_of(1)).unwrap().score = Score(7.0);
+        let e = v.entries.get_mut(&id_of(2)).unwrap();
+        e.score = Score(f32::NEG_INFINITY);
+        e.last_seen = NOW + 365 * DAY;
+        e.avoided_until = Some(u64::MAX);
+        let bytes = postcard::to_allocvec(&v).unwrap();
+        let r = View::restore(&bytes, true, NOW).unwrap();
+        for n in 0..3 {
+            let s = r.get(&id_of(n)).unwrap().score.value();
+            assert!(s.is_finite() && (0.0..=1.0).contains(&s), "score {s}");
+        }
+        let e = r.get(&id_of(2)).unwrap();
+        assert!(e.last_seen <= NOW);
+        assert!(e.avoided_until.unwrap() <= NOW + 7 * DAY);
     }
 }
