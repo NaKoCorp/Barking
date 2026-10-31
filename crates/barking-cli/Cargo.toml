@@ -22,6 +22,7 @@ toml.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+barking-dht.workspace = true
 barking-node.workspace = true
 ed25519-dalek.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time"] }

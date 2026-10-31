@@ -165,6 +165,7 @@ dependencies = [
  "argon2",
  "assert_cmd",
  "barking-core",
+ "barking-dht",
  "barking-net",
  "barking-node",
  "barking-proto",

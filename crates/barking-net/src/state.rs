@@ -6,8 +6,8 @@
 //!
 //! The old synchronization (`barking-cli`, key `"netsync"`) kept positions
 //! and deposits per node in TOML; [`NetState::load`] migrates them, then
-//! erases that key. Its format lives here ([`LegacyState`]) and the CLI
-//! reuses it until it switches to this crate.
+//! erases that key. Its format lives here ([`LegacyState`]); the CLI uses it
+//! to move even older plaintext files to that key before loading.
 
 use std::collections::{HashMap, HashSet};
 
@@ -210,9 +210,9 @@ impl NetState {
     }
 
     /// Takes over the old synchronization's positions and deposit delays,
-    /// keyed by node id (the addresses are in the CLI's node list: those
-    /// nodes enter the view when added by hand). Saves the state, then erases
-    /// the old key by writing an empty state.
+    /// keyed by node id (the addresses were in the CLI's `nodes.toml`, which
+    /// the CLI migrates into the view as nodes added by hand). Saves the
+    /// state, then erases the old key by writing an empty state.
     fn migrate_legacy(&mut self, core: &mut Core, now: u64) -> Result<(), StateError> {
         let bytes = match core.transport_state(LEGACY_STATE_KEY)? {
             Some(b) if !b.is_empty() => b,

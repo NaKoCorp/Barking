@@ -100,7 +100,7 @@ pub const NOT_RESPONSIBLE_FALLBACK: usize = 2;
 /// Time given to closing the connections at the end of a sync.
 pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Transport name given to `Core::receive` (noted in the core's log).
-pub const TRANSPORT: &str = "nœud";
+pub const TRANSPORT: &str = "node";
 
 /// Introduction fetch slice; adjustable in test builds only.
 pub fn intro_slice() -> Duration {

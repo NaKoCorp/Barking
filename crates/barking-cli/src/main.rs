@@ -1,7 +1,7 @@
-//! `barking`: CLI on top of `barking-core`. The v0 transport is the file:
-//! one packet = one `.pkt` file.
+//! `barking`: CLI on top of `barking-core`. Two transports: files (one
+//! packet = one `.pkt` file) and the network (`barking sync`, through
+//! `barking-net`).
 
-mod netsync;
 mod nodes;
 mod passphrase;
 
@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::contact::ContactCard;
 use barking_core::identity::Fingerprint;
@@ -116,11 +116,12 @@ enum Command {
 
 #[derive(Subcommand)]
 enum NodeCommand {
-    /// Adds a node: address (IP:port) and identifier published by its operator.
+    /// Adds a node by hand: address (IP:port) and identifier published by its
+    /// operator. The node must answer and prove its identity.
     Add { address: String, id: String },
-    /// Lists the configured nodes.
+    /// Lists the known nodes (the address only for those added by hand).
     List,
-    /// Removes a node.
+    /// Removes a node added by hand.
     Remove { id: String },
 }
 
@@ -419,7 +420,71 @@ fn run(cli: Cli) -> CliResult<()> {
         }
         Command::Link(cmd) => link(&home, cmd)?,
         Command::Node(cmd) => nodes::run(&home, cmd)?,
-        Command::Sync => return netsync::sync(&home),
+        Command::Sync => return sync(&home),
+    }
+    Ok(())
+}
+
+/// `barking sync`: one synchronization with the network (`barking_net::sync`),
+/// then what was received and a summary.
+fn sync(home: &Path) -> CliResult<()> {
+    let mut core = nodes::open(home)?;
+    let opts = barking_net::SyncOptions {
+        allow_private: nodes::allow_private(),
+        ..barking_net::SyncOptions::default()
+    };
+    // The runtime only exists for the duration of the sync.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError(format!("I/O error: {e}")))?;
+    let mut report = rt.block_on(barking_net::sync(&mut core, &barking_net::QuicDialer, opts));
+    // A proof of work still being computed is not waited for.
+    rt.shutdown_timeout(Duration::from_secs(1));
+    if let Some(e) = &report.error {
+        return fail(format!("Sync failed: {e}"));
+    }
+    for outcome in std::mem::take(&mut report.received) {
+        show_outcome("network", outcome, AckSink::Queued)?;
+    }
+    if report.receive_errors > 0 {
+        println!(
+            "{} item(s) not processed: fetched again at the next sync",
+            report.receive_errors
+        );
+    }
+    if report.intro_partial {
+        println!("introductions: partial poll, the rest at the next sync");
+    }
+    if report.pow_exhausted {
+        println!("proof-of-work budget exhausted: remaining messages at the next sync");
+    }
+    for node in &report.avoided {
+        println!(
+            "Node {} avoided: it lost messages or kept failing",
+            printable(node)
+        );
+    }
+    if report.polled_all_sessions {
+        println!("Poll recorded");
+    } else {
+        println!("Poll not recorded: some mailboxes were not fetched in full");
+    }
+    println!(
+        "polled {} mailboxes, received {} items, deposited {} (first copies {}, extra {}), avoided {} nodes, view {} nodes",
+        report.mailboxes_polled,
+        report.items_received,
+        report.acks_deposited + report.first_copies + report.extra_copies,
+        report.first_copies,
+        report.extra_copies,
+        report.avoided.len(),
+        report.view_size,
+    );
+    if report.view_size == 0 {
+        return fail("no known node: add a contact or a node");
+    }
+    if !report.network_up {
+        println!("network unreachable, nothing is lost");
     }
     Ok(())
 }
@@ -791,7 +856,7 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
                 continue;
             }
         };
-        let outcome = core.receive(&bytes, "fichier", now(), &mut rand::rng())?;
+        let outcome = core.receive(&bytes, "file", now(), &mut rand::rng())?;
         show_outcome(&label.to_string(), outcome, AckSink::from(out))?;
     }
     if failed {

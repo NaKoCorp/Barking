@@ -11,7 +11,11 @@ const PASS: &str = "test";
 
 fn barking(home: &Path) -> Command {
     let mut cmd = Command::cargo_bin("barking").unwrap();
-    cmd.env("BARKING_PASSPHRASE", PASS).arg("--home").arg(home);
+    // The test nodes listen on 127.0.0.1: non-routable addresses accepted.
+    cmd.env("BARKING_PASSPHRASE", PASS)
+        .env("BARKING_TEST_ALLOW_PRIVATE", "1")
+        .arg("--home")
+        .arg(home);
     cmd
 }
 
@@ -751,29 +755,48 @@ fn log_neutralises_control_characters_in_names() {
 
 mod node {
     use std::net::{SocketAddr, UdpSocket};
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::OnceLock;
+    use std::time::Duration;
 
+    use barking_dht::BootstrapEntry;
+    use barking_node::config::{DEFAULT_REPLICATION_BYTES_PER_HOUR, DhtConfig};
     use barking_node::server::{self, ServerConfig};
     use barking_node::{NodeStore, Policy};
-    use barking_proto::{NodeId, generate_node_key};
+    use barking_proto::NodeId;
     use ed25519_dalek::SigningKey;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
     use tokio::sync::oneshot;
 
     use super::*;
 
+    /// Key seeds that solve the 20-bit identity puzzle (the first keys of
+    /// `generate_node_key` on `StdRng::seed_from_u64(4243)`, as in
+    /// barking-node's tests): drawing them at runtime takes ~15 s each.
+    const SEEDS: [[u8; 32]; 2] = [
+        [
+            66, 125, 129, 83, 32, 106, 225, 91, 180, 232, 72, 26, 247, 131, 101, 82, 217, 244, 181,
+            75, 156, 236, 14, 63, 198, 19, 50, 80, 99, 40, 172, 214,
+        ],
+        [
+            132, 124, 253, 169, 65, 12, 180, 150, 216, 192, 72, 216, 245, 177, 206, 219, 134, 97,
+            245, 5, 63, 158, 43, 124, 74, 232, 33, 130, 79, 123, 173, 159,
+        ],
+    ];
+
     fn key(n: usize) -> SigningKey {
-        static KEYS: OnceLock<Vec<SigningKey>> = OnceLock::new();
-        KEYS.get_or_init(|| {
-            let mut rng = StdRng::seed_from_u64(4242);
-            (0..2).map(|_| generate_node_key(&mut rng)).collect()
-        })[n]
-            .clone()
+        SigningKey::from_bytes(&SEEDS[n])
     }
 
-    /// A real node in this process, on 127.0.0.1 (free port).
+    #[test]
+    fn test_keys_solve_puzzle() {
+        for n in 0..SEEDS.len() {
+            assert!(
+                NodeId::from_public_key(&key(n).verifying_key()).puzzle_ok(),
+                "key {n}"
+            );
+        }
+    }
+
+    /// A real node in this process, on 127.0.0.1 (free port), with its
+    /// hash table on (it answers `Ping` with its record).
     struct TestNode {
         addr: SocketAddr,
         id: String,
@@ -796,6 +819,16 @@ mod node {
             let key = key(n);
             let id = NodeId::from_public_key(&key.verifying_key()).to_string();
             let mut cfg = ServerConfig::new(vec![socket], key);
+            cfg.dht = Some(DhtConfig {
+                public_v4: match addr {
+                    SocketAddr::V4(a) => Some(a),
+                    SocketAddr::V6(_) => None,
+                },
+                public_v6: None,
+                bootstrap: Vec::new(),
+                allow_private_addrs: true,
+                replication_bytes_per_hour: DEFAULT_REPLICATION_BYTES_PER_HOUR,
+            });
             tweak(&mut cfg);
             let store = NodeStore::open(&db).unwrap();
             let policy = Policy {
@@ -821,6 +854,13 @@ mod node {
 
         fn stats(&self) -> barking_node::Stats {
             NodeStore::open(&self.db).unwrap().stats().unwrap()
+        }
+
+        fn entry(&self) -> BootstrapEntry {
+            BootstrapEntry {
+                id: self.id.parse().unwrap(),
+                addr: self.addr,
+            }
         }
     }
 
@@ -849,14 +889,20 @@ mod node {
         let out = da.path().join("out");
         ok(&a, &["send", "bob", "hi via node", "--out", path_arg(&out)]);
         let sync_a = ok(&a, &["sync"]);
-        assert!(sync_a.contains(&node.id[..8]), "{sync_a}");
+        assert!(
+            sync_a.contains("deposited 1 (first copies 1, extra 0)"),
+            "{sync_a}"
+        );
         assert_eq!(node.stats().packets, 1);
 
         let sync_b = ok(&b, &["sync"]);
         assert!(sync_b.contains("[alice] hi via node"), "{sync_b}");
-        // Bob's receipt erased the packet from the node.
+        // A first contact arrives in an introduction mailbox, fetched after
+        // the deposits: the receipt goes out at the next sync, and erases
+        // the packet from the node.
+        let sync_b2 = ok(&b, &["sync"]);
         let st = node.stats();
-        assert_eq!((st.packets, st.acks), (0, 1));
+        assert_eq!((st.packets, st.acks), (0, 1), "{sync_b2}");
 
         let sync_a2 = ok(&a, &["sync"]);
         assert!(sync_a2.contains("delivered"), "{sync_a2}");
@@ -907,11 +953,11 @@ mod node {
         }
     }
 
-    /// Number of items received announced for the node in the output of `sync`.
+    /// Number of items received announced by the summary of `sync`.
     fn received(out: &str) -> usize {
-        let line = out.lines().find(|l| l.contains("items received")).unwrap();
-        let before = &line[..line.find(" items received").unwrap()];
-        before.rsplit(' ').next().unwrap().parse().unwrap()
+        let line = out.lines().find(|l| l.starts_with("polled ")).unwrap();
+        let after = &line[line.find("received ").unwrap() + "received ".len()..];
+        after.split(' ').next().unwrap().parse().unwrap()
     }
 
     /// A flooded introduction mailbox (anyone can compute it) does not
@@ -1010,7 +1056,7 @@ mod node {
 
     /// A long send queue (receipts and messages) does not block the poll:
     /// it happens first, the receipts go out first, and a `RateLimited` on
-    /// the deposits stops the deposits without failing the node; the
+    /// the deposits stops the deposits without failing the sync; the
     /// following syncs finish without redepositing.
     #[test]
     fn outbox_backlog_does_not_block_fetch() {
@@ -1018,7 +1064,20 @@ mod node {
         let ((da, a), (db, b)) = pair();
         node_add(&a, node.addr, &node.id);
         node_add(&b, node.addr, &node.id);
+        // Session established through files: Bob's messages then arrive in
+        // session mailboxes, fetched before the deposits.
+        let out_a = da.path().join("out");
         let out_b = db.path().join("out");
+        ok(&a, &["send", "bob", "ouverture", "--out", path_arg(&out_a)]);
+        for p in packets(&out_a) {
+            ok(&b, &["receive", path_arg(&p), "--out", path_arg(&out_b)]);
+        }
+        ok(&b, &["send", "alice", "retour", "--out", path_arg(&out_b)]);
+        for p in packets(&out_b) {
+            ok(&a, &["receive", path_arg(&p), "--out", path_arg(&out_a)]);
+        }
+        let acks_before = node.stats().acks;
+        let out_b = db.path().join("out-node");
         for i in 0..3 {
             ok(
                 &b,
@@ -1033,7 +1092,7 @@ mod node {
         }
         ok(&b, &["sync"]);
         const N: usize = 100;
-        let out_a = da.path().join("out");
+        let out_a = da.path().join("out-node");
         for i in 0..N {
             ok(
                 &a,
@@ -1047,25 +1106,25 @@ mod node {
             assert!(s1.contains(&format!("[bob] de Bob {i}")), "{s1}");
         }
         assert!(s1.contains("Poll recorded"), "{s1}");
-        assert!(s1.contains("deposits interrupted"), "{s1}");
+        // Rate limited: not everything went out in one sync.
+        assert!(node.stats().packets < N as u64);
         // The three receipts went out before the messages.
-        assert!(node.stats().acks >= 3);
+        assert!(node.stats().acks >= acks_before + 3);
         let mut done = false;
         for _ in 0..8 {
             std::thread::sleep(std::time::Duration::from_secs(3));
             let s = ok(&a, &["sync"]);
             assert!(s.contains("Poll recorded"), "{s}");
-            assert!(!s.contains(" 0 already present"), "{s}");
-            if !s.contains("deposits interrupted") {
+            if node.stats().packets == N as u64 {
                 done = true;
                 break;
             }
         }
         assert!(done);
-        assert_eq!(node.stats().packets, N as u64);
         // Everything is already deposited: nothing is redeposited.
+        std::thread::sleep(std::time::Duration::from_secs(3));
         let s = ok(&a, &["sync"]);
-        assert!(s.contains(" 0 deposited"), "{s}");
+        assert!(s.contains("deposited 0 "), "{s}");
     }
 
     /// Proof budget exhausted: the receipts (without proof) still go out.
@@ -1083,15 +1142,22 @@ mod node {
             &b,
             &["send", "alice", "en attente", "--out", path_arg(&out_b)],
         );
-        let got = barking(&b)
-            .env("BARKING_TEST_POW_BUDGET", "0")
-            .arg("sync")
-            .assert()
-            .success()
-            .get_output()
-            .clone();
-        let s = String::from_utf8(got.stdout).unwrap();
+        let sync_b = || {
+            let got = barking(&b)
+                .env("BARKING_TEST_POW_BUDGET", "0")
+                .arg("sync")
+                .assert()
+                .success()
+                .get_output()
+                .clone();
+            String::from_utf8(got.stdout).unwrap()
+        };
+        let s = sync_b();
         assert!(s.contains("[alice] bonjour"), "{s}");
+        assert!(s.contains("proof-of-work budget exhausted"), "{s}");
+        // The receipt of a first contact (introduction mailbox, fetched
+        // after the deposits) goes out at the next sync.
+        let s = sync_b();
         assert!(s.contains("proof-of-work budget exhausted"), "{s}");
         // The receipt is deposited (it erased the message), not Bob's message.
         let st = node.stats();
@@ -1167,68 +1233,73 @@ mod node {
         assert_eq!(node.stats().acks, 1);
     }
 
+    /// A node that went down does not prevent receiving nor recording the
+    /// poll: its mailboxes go to the next responsible.
     #[test]
     fn sync_with_one_dead_node() {
         let live = TestNode::start(0);
-        // Unreachable node: a UDP port released right away.
-        let dead_addr = UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        let dead_id = NodeId::from_public_key(&key(1).verifying_key()).to_string();
+        let dead = TestNode::start(1);
+        let dead_id = dead.id.clone();
         let ((da, a), (_db, b)) = pair();
         // Alice only has the live node; only Bob also has the dead node.
         node_add(&a, live.addr, &live.id);
-        node_add(&b, dead_addr, &dead_id);
+        node_add(&b, dead.addr, &dead_id);
         node_add(&b, live.addr, &live.id);
+        drop(dead);
         let out = da.path().join("out");
         ok(&a, &["send", "bob", "live", "--out", path_arg(&out)]);
         ok(&a, &["sync"]);
         assert_eq!(live.stats().packets, 1);
 
-        // The dead node does not prevent receiving, but `mark_polled` does not happen.
-        let got = barking(&b)
-            .arg("sync")
-            .assert()
-            .success()
-            .get_output()
-            .clone();
-        let stdout = String::from_utf8(got.stdout).unwrap();
-        let stderr = String::from_utf8(got.stderr).unwrap();
-        assert!(stdout.contains("[alice] live"), "{stdout}");
-        assert!(stderr.contains(&dead_id[..8]), "{stderr}");
-        assert!(stdout.contains("Poll not recorded"), "{stdout}");
+        let s = ok(&b, &["sync"]);
+        assert!(s.contains("[alice] live"), "{s}");
+        assert!(s.contains("Poll recorded"), "{s}");
 
-        // With only the live node, the poll is recorded.
         ok(&b, &["node", "remove", &dead_id]);
+        assert!(!list_line(&b, &dead_id).contains("manual"));
         assert!(ok(&b, &["sync"]).contains("Poll recorded"));
+    }
+
+    /// The line of `node list` for the node whose id starts with `short`.
+    fn list_line(home: &Path, id: &str) -> String {
+        ok(home, &["node", "list"])
+            .lines()
+            .find(|l| l.starts_with(&id[..8]))
+            .unwrap_or_else(|| panic!("{} not listed", &id[..8]))
+            .to_owned()
     }
 
     #[test]
     fn node_add_list_remove() {
+        let node = TestNode::start(0);
         let (_d, home) = party("tel");
-        let addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
-        let id = NodeId::from_public_key(&key(0).verifying_key()).to_string();
         // Whitespace and lowercase tolerated.
         ok(
             &home,
             &[
                 "node",
                 "add",
-                &addr.to_string(),
-                &format!(" {} ", id.to_lowercase()),
+                &node.addr.to_string(),
+                &format!(" {} ", node.id.to_lowercase()),
             ],
         );
-        let list = ok(&home, &["node", "list"]);
-        assert!(
-            list.contains(&id) && list.contains("127.0.0.1:4433"),
-            "{list}"
+        // Pinged at addition: confirmed, added by hand, with its address.
+        let line = list_line(&home, &node.id);
+        assert_eq!(
+            line,
+            format!(
+                "{}  confirmed  score 0.50  manual {}",
+                &node.id[..8],
+                node.addr
+            )
         );
-        let mode = fs::metadata(home.join("nodes.toml"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        // The list lives in the encrypted database: no plaintext file.
+        assert!(!home.join("nodes.toml").exists());
+        barking(&home)
+            .args(["node", "add", &node.addr.to_string(), &node.id])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("already"));
         // Identifier that fails the puzzle.
         let bad = data_encoding::BASE32_NOPAD.encode(&[7u8; 32]);
         barking(&home)
@@ -1240,12 +1311,159 @@ mod node {
             .args(["node", "add", "127.0.0.1:1", "not-base32"])
             .assert()
             .failure();
-        ok(&home, &["node", "remove", &id]);
-        assert!(!ok(&home, &["node", "list"]).contains(&id));
+        // No longer added by hand: its address is gone, the node stays in
+        // the view like any node learned from the network.
+        ok(&home, &["node", "remove", &node.id]);
+        let line = list_line(&home, &node.id);
+        assert!(
+            !line.contains("manual") && !line.contains("127.0.0.1"),
+            "{line}"
+        );
         barking(&home)
-            .args(["node", "remove", &id])
+            .args(["node", "remove", &node.id])
             .assert()
             .failure();
+    }
+
+    /// `node add` proves the node's identity first: another node at that
+    /// address, or no node at all, and nothing is added. The error names
+    /// neither the address nor a path.
+    #[test]
+    fn node_add_refuses_unproven_node() {
+        let node = TestNode::start(0);
+        let other_id = NodeId::from_public_key(&key(1).verifying_key()).to_string();
+        let (_d, home) = party("tel");
+        let wrong = barking(&home)
+            .args(["node", "add", &node.addr.to_string(), &other_id])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let err = String::from_utf8(wrong.stderr).unwrap();
+        assert!(err.contains("nothing was added"), "{err}");
+        assert!(!err.contains("127.0.0.1"), "{err}");
+        assert!(!err.contains(home.to_str().unwrap()), "{err}");
+        drop(node);
+        let dead = UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        barking(&home)
+            .args(["node", "add", &dead.to_string(), &other_id])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("nothing was added"));
+        assert!(ok(&home, &["node", "list"]).contains("No known node"));
+    }
+
+    /// Nodes learned from the network are listed without their address:
+    /// only those added by hand show one.
+    #[test]
+    fn node_list_shows_addresses_only_for_manual() {
+        let a = TestNode::start_with(0, |c| c.dht_tick = Some(Duration::from_millis(200)));
+        let a_entry = a.entry();
+        let b = TestNode::start_with(1, move |c| {
+            c.dht_tick = Some(Duration::from_millis(200));
+            c.dht.as_mut().unwrap().bootstrap = vec![a_entry];
+        });
+        wait_known(&a, &b);
+        let (_d, home) = party("tel");
+        node_add(&home, a.addr, &a.id);
+        ok(&home, &["sync"]);
+        let list = ok(&home, &["node", "list"]);
+        assert!(list.contains(&b.id[..8]), "{list}");
+        let mut learned = 0;
+        for line in list.lines() {
+            if line.contains("manual") {
+                assert!(line.ends_with(&format!("manual {}", a.addr)), "{line}");
+                continue;
+            }
+            learned += 1;
+            for word in line.split_whitespace() {
+                assert!(word.parse::<std::net::IpAddr>().is_err(), "{line}");
+                assert!(word.parse::<SocketAddr>().is_err(), "{line}");
+            }
+        }
+        assert!(learned >= 1, "{list}");
+    }
+
+    /// Waits until `b` is in the table of `a`.
+    fn wait_known(a: &TestNode, b: &TestNode) {
+        use barking_proto::client::Client;
+        use barking_proto::{RecordPolicy, Request, Response};
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a_id: NodeId = a.id.parse().unwrap();
+        let b_id: NodeId = b.id.parse().unwrap();
+        rt.block_on(async {
+            for _ in 0..100 {
+                let s = Client::connect(a.addr, a_id).await.unwrap();
+                let resp = s
+                    .request(&Request::FindNode {
+                        target: b_id.0,
+                        from: None,
+                    })
+                    .await;
+                s.close().await;
+                if let Ok(Response::Nodes { records }) = resp
+                    && records
+                        .iter()
+                        .any(|r| r.verify(now_secs(), &RecordPolicy::network(true)) == Ok(b_id))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            panic!("b never entered the table of a");
+        });
+    }
+
+    /// No node at all, not even after bootstrap: exit code 1 and a hint.
+    #[test]
+    fn sync_without_any_node_says_add_contact() {
+        let (_d, home) = party("tel");
+        barking(&home)
+            .arg("sync")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "no known node: add a contact or a node",
+            ));
+    }
+
+    /// Known nodes, none reachable: success, and the queue waits.
+    #[test]
+    fn sync_with_unreachable_nodes_says_nothing_lost() {
+        let node = TestNode::start(0);
+        let ((da, a), _b) = pair();
+        node_add(&a, node.addr, &node.id);
+        drop(node);
+        let out = da.path().join("out");
+        ok(&a, &["send", "bob", "later", "--out", path_arg(&out)]);
+        let s = ok(&a, &["sync"]);
+        assert!(s.contains("network unreachable, nothing is lost"), "{s}");
+        assert!(!s.contains("Poll recorded"), "{s}");
+        let pending = ok(&a, &["outbox", "--out", path_arg(&da.path().join("again"))]);
+        assert!(pending.contains("1 packet pending"), "{pending}");
+    }
+
+    /// The old plaintext node list enters the view as nodes added by hand,
+    /// then the file is removed.
+    #[test]
+    fn nodes_toml_migrated_then_removed() {
+        let node = TestNode::start(0);
+        let (_d, home) = party("tel");
+        fs::write(
+            home.join("nodes.toml"),
+            format!("[[node]]\naddr = \"{}\"\nid = \"{}\"\n", node.addr, node.id),
+        )
+        .unwrap();
+        let line = list_line(&home, &node.id);
+        assert!(line.contains("candidate"), "{line}");
+        assert!(line.ends_with(&format!("manual {}", node.addr)), "{line}");
+        assert!(!home.join("nodes.toml").exists());
+        // The sync reaches it and confirms it.
+        assert!(ok(&home, &["sync"]).contains("Poll recorded"));
+        assert!(list_line(&home, &node.id).contains("confirmed"));
     }
 }
 

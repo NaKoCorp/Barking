@@ -174,7 +174,7 @@ async fn deposit_then_fetch_roundtrip() {
     let mut text = None;
     for it in &items {
         if let ReceiveOutcome::Message { text: m, ack, .. } =
-            bob.receive(it, "nœud", t, &mut rng).unwrap()
+            bob.receive(it, "node", t, &mut rng).unwrap()
         {
             text = Some(m);
             acks.push(ack);
@@ -189,7 +189,7 @@ async fn deposit_then_fetch_roundtrip() {
     let items = sa.fetch(&alice.watched_mailboxes(t)).await.unwrap();
     let got_ack = items.iter().any(|it| {
         matches!(
-            alice.receive(it, "nœud", t, &mut rng).unwrap(),
+            alice.receive(it, "node", t, &mut rng).unwrap(),
             ReceiveOutcome::AckReceived { .. }
         )
     });
