@@ -344,6 +344,7 @@ fn random_lookups_fill_view_and_confirm_responders() {
     let added = block_on(random_lookups(
         &mut view,
         &net,
+        &HashSet::new(),
         2,
         &mut StdRng::seed_from_u64(5),
         &mut budget,
@@ -381,6 +382,7 @@ fn random_lookups_respect_candidate_budget() {
     block_on(random_lookups(
         &mut view,
         &net,
+        &HashSet::new(),
         2,
         &mut StdRng::seed_from_u64(6),
         &mut budget,
@@ -404,6 +406,7 @@ fn fallback_respects_cooldown() {
     let found = block_on(fallback_lookup(
         &mut empty,
         &net,
+        &HashSet::new(),
         &mailbox,
         &mut log,
         &mut budget,
@@ -419,6 +422,7 @@ fn fallback_respects_cooldown() {
     let found = block_on(fallback_lookup(
         &mut view,
         &net,
+        &HashSet::new(),
         &mailbox,
         &mut log,
         &mut budget,
@@ -435,6 +439,7 @@ fn fallback_respects_cooldown() {
     let again = block_on(fallback_lookup(
         &mut view,
         &net,
+        &HashSet::new(),
         &mailbox,
         &mut log,
         &mut budget,
@@ -449,6 +454,7 @@ fn fallback_respects_cooldown() {
     let later = block_on(fallback_lookup(
         &mut view,
         &net,
+        &HashSet::new(),
         &mailbox,
         &mut log,
         &mut budget,
@@ -582,6 +588,7 @@ fn lookup_converges_despite_stalling_nodes() {
     let (found, took) = timed(fallback_lookup(
         &mut view,
         &net,
+        &HashSet::new(),
         &mailbox,
         &mut FallbackLog::default(),
         &mut CandidateBudget::default(),

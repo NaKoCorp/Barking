@@ -16,8 +16,8 @@ use std::path::Path;
 
 use barking_core::Core;
 use barking_net::state::{LEGACY_STATE_KEY, LegacyState, STATE_KEY};
-use barking_net::{Dialer, NetState, QuicDialer};
-use barking_proto::{NodeId, RecordPolicy};
+use barking_net::{DialError, Dialer, NetState, QuicDialer};
+use barking_proto::{ErrorReason, NodeId, RecordPolicy};
 use serde::Deserialize;
 
 use super::{CliError, CliResult, NodeCommand, fail, now, open_core};
@@ -97,8 +97,10 @@ fn migrate_sync_files(home: &Path, core: &mut Core) -> CliResult<()> {
 }
 
 /// Adds the nodes of `nodes.toml` to the view as added by hand, saves, then
-/// erases the file. A file that cannot be read is left in place.
+/// erases the file. A file that cannot be read is left in place. A leftover
+/// temporary file of the old writer (`nodes.toml.tmp`) is erased too.
 fn migrate_nodes_file(home: &Path, core: &mut Core) -> CliResult<()> {
+    wipe(&home.join(format!("{NODES_FILE}.tmp")));
     let path = home.join(NODES_FILE);
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
@@ -122,7 +124,9 @@ fn migrate_nodes_file(home: &Path, core: &mut Core) -> CliResult<()> {
     Ok(())
 }
 
-/// Overwrites a file with zeros then erases it (best effort).
+/// Overwrites a file with zeros then erases it. Best effort: errors are
+/// ignored, and on copy-on-write or journaling file systems the old blocks
+/// may survive the overwrite.
 fn wipe(path: &Path) {
     if let Ok(meta) = fs::metadata(path)
         && let Ok(mut f) = fs::OpenOptions::new().write(true).open(path)
@@ -236,7 +240,14 @@ pub fn run(home: &Path, cmd: NodeCommand) -> CliResult<()> {
                 });
             }
             save_state(&mut core, &state)?;
-            println!("Node {} removed", short_id(&id));
+            if state.view.get(&id).is_some() {
+                println!(
+                    "Node {} is no longer added by hand (it stays known from the network)",
+                    short_id(&id)
+                );
+            } else {
+                println!("Node {} removed", short_id(&id));
+            }
         }
     }
     Ok(())
@@ -250,10 +261,15 @@ fn ping(id: NodeId, addr: SocketAddr) -> CliResult<barking_proto::NodeRecord> {
         .map_err(|e| CliError(format!("I/O error: {e}")))?;
     let r = rt.block_on(QuicDialer.ping(id, &[addr]));
     rt.shutdown_timeout(std::time::Duration::from_secs(1));
-    r.map_err(|e| {
-        CliError(format!(
+    r.map_err(|e| match e {
+        // A relay-only node (no `[dht]`) answers `Ping` with `Unsupported`.
+        DialError::Refused(ErrorReason::Unsupported) => CliError(format!(
+            "Node {} does not take part in the network table (no public address): nothing was added",
+            short_id(&id)
+        )),
+        e => CliError(format!(
             "Node {} could not prove its identity at this address ({e}): nothing was added",
             short_id(&id)
-        ))
+        )),
     })
 }

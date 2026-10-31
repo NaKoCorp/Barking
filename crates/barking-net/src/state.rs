@@ -323,22 +323,5 @@ pub fn to_resume(seen: &[Seen]) -> FetchResume {
     r
 }
 
-/// Stored form of the positions of the `current` mailboxes only, in a
-/// stable order, zero positions omitted.
-pub fn from_resume(r: &FetchResume, current: &[MailboxId]) -> Vec<Seen> {
-    let mut v: Vec<Seen> = current
-        .iter()
-        .filter_map(|m| {
-            r.seen.get(&m.0).filter(|s| **s > 0).map(|s| Seen {
-                mailbox: data_encoding::HEXLOWER.encode(&m.0),
-                seq: *s,
-            })
-        })
-        .collect();
-    v.sort_by(|a, b| a.mailbox.cmp(&b.mailbox));
-    v.dedup();
-    v
-}
-
 #[cfg(test)]
 mod tests;

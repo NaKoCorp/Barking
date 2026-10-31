@@ -13,10 +13,14 @@
 //!    wait, receipts go. `NotResponsible` from 2 responsibles of a mailbox:
 //!    fallback lookup, then the plan is redone.
 //! 4. **Introduction fetch**, within `INTRO_FETCH_BYTES` and
-//!    `INTRO_FETCH_SLICE`; a partial one blocks nothing.
+//!    `INTRO_FETCH_SLICE`; a partial one blocks nothing. Then a second
+//!    deposit pass for receipts only (no proof of work), so that the
+//!    receipts of first contacts leave in the same sync.
 //! 5. **Maintenance**, with the time left: random lookups, candidate
 //!    confirmation, fallback lookups while the view is small, then the node
-//!    hints of my contact card.
+//!    hints of my contact card. Skipped when nodes were tried and none
+//!    answered (the client's own connection is down). Lookups never ask a
+//!    node that failed or rate-limited during this sync.
 //! 6. `mark_polled` only if every session mailbox was fetched in full.
 //!
 //! **Score.** Successful requests +0.02, a failure −0.1 only once some node
@@ -243,6 +247,7 @@ where
         pending_failures: Vec::new(),
         penalized: HashSet::new(),
         found: HashSet::new(),
+        tried: false,
         reread_queue: Vec::new(),
         budget: CandidateBudget::default(),
         now,
@@ -280,6 +285,8 @@ struct Run<'a, D: Connector> {
     penalized: HashSet<NodeId>,
     /// Nodes that already got `Found` this sync.
     found: HashSet<NodeId>,
+    /// Some node was dialled during this sync.
+    tried: bool,
     /// Groups served by a node this sync, for the audit re-reads.
     reread_queue: Vec<(NodeId, Vec<MailboxId>)>,
     budget: CandidateBudget,
@@ -335,14 +342,19 @@ where
         let polled_sessions = self.fetch_stage(&sessions, false).await;
         self.report.polled_all_sessions = polled_sessions;
 
-        self.deposit_stage().await;
+        self.deposit_stage(false).await;
 
         if !intro.is_empty() {
             let polled_intro = self.fetch_stage(&intro, true).await;
             self.report.intro_partial = !polled_intro;
+            // Receipts of what the introductions brought.
+            if !self.over() {
+                self.deposit_stage(true).await;
+            }
         }
 
-        if !self.over() {
+        // Nodes tried and none answered: lookups would only dial dead ends.
+        if !self.over() && (self.network_up() || !self.tried) {
             self.maintenance(&sessions, &intro).await;
         }
 
@@ -481,9 +493,13 @@ where
         self.score(id, ScoreEvent::Failure);
     }
 
-    /// Outcomes of the lookups and pings made through `observed`.
+    /// Outcomes of the lookups and pings made through `observed`. A node
+    /// that failed (timeouts included) is not dialled again this sync.
     fn apply_observed(&mut self, observed: Observed<'_, D>) {
         let outcomes = observed.outcomes.into_inner().unwrap_or_default();
+        if !outcomes.is_empty() {
+            self.tried = true;
+        }
         if outcomes.iter().any(|(_, o)| *o != Observation::Failed) {
             self.answered();
         }
@@ -491,9 +507,14 @@ where
             match o {
                 Observation::Answered => self.score(id, ScoreEvent::Success),
                 Observation::Refused => {}
-                Observation::Failed => self.score(id, ScoreEvent::Failure),
+                Observation::Failed => self.fail(id),
             }
         }
+    }
+
+    /// Nodes not to ask again this sync: failed or rate-limited.
+    fn excluded(&self) -> HashSet<NodeId> {
+        self.failed.union(&self.limited).copied().collect()
     }
 
     /// The kept connection to `id`, or a new one. `None` if the node cannot
@@ -511,6 +532,7 @@ where
             .get(&id)
             .map(|e| e.addrs())
             .unwrap_or_default();
+        self.tried = true;
         match tokio::time::timeout_at(self.deadline, self.dialer.connect(id, &addrs)).await {
             Err(_) => None,
             Ok(Ok(conn)) => {
@@ -532,8 +554,9 @@ where
 
     /// Deposits the send queue following `plan_deposits`, redoing the plan
     /// when a node drops out (failure, rate limit) or a fallback lookup
-    /// enriched the view.
-    async fn deposit_stage(&mut self) {
+    /// enriched the view. `acks_only`: receipts only (the pass after the
+    /// introduction fetch).
+    async fn deposit_stage(&mut self, acks_only: bool) {
         let now = self.now;
         let Ok(outbox) = self.core.pending_outbox(now) else {
             return;
@@ -543,7 +566,7 @@ where
         let mut not_responsible: HashMap<MailboxId, HashSet<NodeId>> = HashMap::new();
         let mut fallback_tried: HashSet<MailboxId> = HashSet::new();
         'plan: loop {
-            let excluded: HashSet<NodeId> = self.failed.union(&self.limited).copied().collect();
+            let excluded = self.excluded();
             let view = &self.state.view;
             let deposits = plan_deposits(
                 &outbox,
@@ -560,7 +583,7 @@ where
                 if self.over() {
                     break 'plan;
                 }
-                if !d.is_ack && pow_exhausted {
+                if !d.is_ack && (pow_exhausted || acks_only) {
                     continue;
                 }
                 let Some(mut conn) = self.take_conn(d.node).await else {
@@ -653,10 +676,12 @@ where
         if self.over() || !self.state.fallbacks.due(mailbox, self.now) {
             return false;
         }
+        let exclude = self.excluded();
         let observed = Observed::new(self.dialer);
         let lookup = discover::fallback_lookup(
             &mut self.state.view,
             &observed,
+            &exclude,
             mailbox,
             &mut self.state.fallbacks,
             &mut self.budget,
@@ -679,17 +704,26 @@ where
             LOOKUPS_PER_SYNC
         };
         let mut rng = rand::rng();
-        let observed = Observed::new(self.dialer);
-        let lookups = discover::random_lookups(
-            &mut self.state.view,
-            &observed,
-            count,
-            &mut rng,
-            &mut self.budget,
-            now,
-        );
-        let _ = tokio::time::timeout_at(self.deadline, lookups).await;
-        self.apply_observed(observed);
+        // One lookup at a time: a node that failed in one is not asked by
+        // the next.
+        for _ in 0..count {
+            if self.over() {
+                break;
+            }
+            let exclude = self.excluded();
+            let observed = Observed::new(self.dialer);
+            let lookups = discover::random_lookups(
+                &mut self.state.view,
+                &observed,
+                &exclude,
+                1,
+                &mut rng,
+                &mut self.budget,
+                now,
+            );
+            let _ = tokio::time::timeout_at(self.deadline, lookups).await;
+            self.apply_observed(observed);
+        }
         self.save();
 
         self.confirm_candidates().await;
@@ -726,11 +760,14 @@ where
     /// those that answer as themselves become confirmed.
     async fn confirm_candidates(&mut self) {
         let now = self.now;
+        let exclude = self.excluded();
         let mut candidates: Vec<(NodeId, u64, Vec<SocketAddr>)> = self
             .state
             .view
             .entries()
-            .filter(|(_, e)| !e.confirmed && e.record.is_some() && !e.avoided(now))
+            .filter(|(id, e)| {
+                !e.confirmed && e.record.is_some() && !e.avoided(now) && !exclude.contains(id)
+            })
             .map(|(id, e)| (*id, e.last_seen, e.addrs()))
             .collect();
         candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.0.cmp(&b.0.0)));
@@ -741,8 +778,10 @@ where
                 break;
             }
             let end = (Instant::now() + CONFIRM_TIMEOUT).min(self.deadline);
-            if let Ok(Ok(record)) = tokio::time::timeout_at(end, observed.ping(id, &addrs)).await {
-                confirm(&mut self.state.view, id, record, now);
+            match tokio::time::timeout_at(end, observed.ping(id, &addrs)).await {
+                Ok(Ok(record)) => confirm(&mut self.state.view, id, record, now),
+                Ok(Err(_)) => {}
+                Err(_) => observed.timed_out(id),
             }
         }
         self.apply_observed(observed);

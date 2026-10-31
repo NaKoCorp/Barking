@@ -33,6 +33,11 @@ struct Net {
     records: HashMap<NodeId, NodeRecord>,
     /// Unreachable nodes.
     down: HashSet<NodeId>,
+    /// Nodes whose `Ping` and `FindNode` never get an answer (the caller's
+    /// deadline drops them).
+    hang: HashSet<NodeId>,
+    /// Items served by any node to a fetch that asks for this mailbox.
+    mailbox_items: HashMap<MailboxId, Vec<Vec<u8>>>,
     /// Nodes whose fetch always stops early, for this reason.
     truncate: HashMap<NodeId, FetchStop>,
     /// A fetch asking for one of these mailboxes stops early.
@@ -87,7 +92,13 @@ impl Dialer for Net {
             Some(r) if self.up(&id) => Ok(r.clone()),
             _ => Err(DialError::Unreachable),
         };
-        async move { r }
+        let hang = self.hang.contains(&id);
+        async move {
+            if hang {
+                std::future::pending::<()>().await;
+            }
+            r
+        }
     }
 
     fn find_node(
@@ -104,7 +115,13 @@ impl Dialer for Net {
         } else {
             Ok(Vec::new())
         };
-        async move { r }
+        let hang = self.hang.contains(&id);
+        async move {
+            if hang {
+                std::future::pending::<()>().await;
+            }
+            r
+        }
     }
 }
 
@@ -168,10 +185,11 @@ impl Fetcher for Net {
             })
             .or(reread)
             .unwrap_or(FetchStop::Complete);
-        Ok(FetchReply::Items {
-            items: self.items.get(conn).cloned().unwrap_or_default(),
-            stop,
-        })
+        let mut items = self.items.get(conn).cloned().unwrap_or_default();
+        for m in mailboxes {
+            items.extend(self.mailbox_items.get(m).cloned().unwrap_or_default());
+        }
+        Ok(FetchReply::Items { items, stop })
     }
 }
 
@@ -698,17 +716,114 @@ async fn one_failure_per_node_per_sync() {
     let (_dir, mut core, mut net) = setup();
     let x = id_of(0);
     net.down.insert(x);
-    // The connection fails, then every lookup and fallback to it fails too.
-    sync(&mut core, &net, opts()).await;
+    // The connection fails: lookups, fallbacks and pings never ask it again.
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.maintenance_done);
     let calls = net.calls();
-    assert!(
+    assert_eq!(
         calls
             .iter()
-            .filter(|c| matches!(c, Call::Connect(n) | Call::Find(n, _) if *n == x))
-            .count()
-            >= 2
+            .filter(|c| matches!(c, Call::Connect(n) | Call::Find(n, _) | Call::Ping(n) if *n == x))
+            .count(),
+        1
     );
     assert!((score_of(&mut core, &x) - 0.4).abs() < 1e-4);
+}
+
+/// Bob's core whose view holds only the nodes `ns`, confirmed.
+fn view_of(core: &mut Core, ns: &[usize]) -> Net {
+    let mut state = NetState::new(true);
+    let mut net = Net::default();
+    for &n in ns {
+        let r = record(n, NOW);
+        state.view.insert(r.clone(), NOW);
+        state.view.confirm(&id_of(n), NOW);
+        net.records.insert(id_of(n), r);
+    }
+    state.save(core).unwrap();
+    net
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_node_down_ends_fast_without_maintenance() {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view_of(&mut core, &[0]);
+    let x = id_of(0);
+    net.hang.insert(x);
+    let start = Instant::now();
+    let report = sync(&mut core, &net, opts()).await;
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(10), "took {took:?}");
+    assert!(!report.network_up && !report.maintenance_done);
+    // The bootstrap ping timed out: never dialled again this sync.
+    assert_eq!(net.calls(), vec![Call::Ping(x)]);
+    // Nobody answered: no score drop.
+    assert!((score_of(&mut core, &x) - 0.5).abs() < 1e-4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bootstrap_ping_timeout_counts_as_one_failure() {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view_of(&mut core, &[0, 1]);
+    let x = id_of(0);
+    net.hang.insert(x);
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.network_up);
+    let calls = net.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| matches!(c, Call::Connect(n) | Call::Find(n, _) | Call::Ping(n) if *n == x))
+            .count(),
+        1
+    );
+    assert!((score_of(&mut core, &x) - 0.4).abs() < 1e-4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn first_contact_receipt_leaves_in_the_same_sync() {
+    use rand::SeedableRng;
+    let (dir, mut core, mut net) = setup();
+    // Carol writes to Bob for the first time: her message waits in Bob's
+    // introduction mailbox.
+    let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+    let (mut carol, _) = Core::create(
+        &dir.path().join("carol.db"),
+        &[3; 32],
+        "carol",
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    let card_c = carol.contact_card("Carol").unwrap();
+    let card_b = core.contact_card("Bob").unwrap();
+    core.add_contact(&card_c, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    let fb = carol
+        .add_contact(&card_b, Some("bob"), NOW, &mut rng)
+        .unwrap();
+    let intro = core.watched_mailbox_groups(NOW).intro;
+    for p in carol.send_text(&fb, "first", NOW, &mut rng).unwrap() {
+        assert!(intro.contains(&p.mailbox));
+        net.mailbox_items
+            .entry(p.mailbox)
+            .or_default()
+            .push(p.encode());
+    }
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(
+        report
+            .received
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::Message { .. }))
+    );
+    // Bob's earlier receipt in the first pass, Carol's after the
+    // introductions, in the same sync.
+    assert_eq!(report.acks_deposited, 2);
+    let calls = net.calls();
+    let intro_fetch = fetches_of(&calls, &intro)[0].0;
+    let deposits = positions_of(&calls, |c| matches!(c, Call::Deposit(..)));
+    assert!(deposits.iter().any(|&d| d > intro_fetch));
 }
 
 #[tokio::test(start_paused = true)]

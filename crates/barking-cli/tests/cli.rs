@@ -897,12 +897,9 @@ mod node {
 
         let sync_b = ok(&b, &["sync"]);
         assert!(sync_b.contains("[alice] hi via node"), "{sync_b}");
-        // A first contact arrives in an introduction mailbox, fetched after
-        // the deposits: the receipt goes out at the next sync, and erases
-        // the packet from the node.
-        let sync_b2 = ok(&b, &["sync"]);
+        // Bob's receipt erased the packet from the node.
         let st = node.stats();
-        assert_eq!((st.packets, st.acks), (0, 1), "{sync_b2}");
+        assert_eq!((st.packets, st.acks), (0, 1), "{sync_b}");
 
         let sync_a2 = ok(&a, &["sync"]);
         assert!(sync_a2.contains("delivered"), "{sync_a2}");
@@ -1155,10 +1152,6 @@ mod node {
         let s = sync_b();
         assert!(s.contains("[alice] bonjour"), "{s}");
         assert!(s.contains("proof-of-work budget exhausted"), "{s}");
-        // The receipt of a first contact (introduction mailbox, fetched
-        // after the deposits) goes out at the next sync.
-        let s = sync_b();
-        assert!(s.contains("proof-of-work budget exhausted"), "{s}");
         // The receipt is deposited (it erased the message), not Bob's message.
         let st = node.stats();
         assert_eq!((st.packets, st.acks), (0, 1));
@@ -1313,7 +1306,11 @@ mod node {
             .failure();
         // No longer added by hand: its address is gone, the node stays in
         // the view like any node learned from the network.
-        ok(&home, &["node", "remove", &node.id]);
+        let removed = ok(&home, &["node", "remove", &node.id]);
+        assert!(
+            removed.contains("no longer added by hand") && !removed.contains("removed"),
+            "{removed}"
+        );
         let line = list_line(&home, &node.id);
         assert!(
             !line.contains("manual") && !line.contains("127.0.0.1"),
@@ -1354,6 +1351,30 @@ mod node {
             .failure()
             .stderr(predicate::str::contains("nothing was added"));
         assert!(ok(&home, &["node", "list"]).contains("No known node"));
+    }
+
+    /// A relay-only node (no hash table) cannot be added: it says so.
+    #[test]
+    fn node_add_refuses_relay_only_node() {
+        let node = TestNode::start_with(0, |c| c.dht = None);
+        let (_d, home) = party("tel");
+        barking(&home)
+            .args(["node", "add", &node.addr.to_string(), &node.id])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "does not take part in the network table (no public address)",
+            ));
+        assert!(ok(&home, &["node", "list"]).contains("No known node"));
+    }
+
+    /// A leftover temporary file of the old node list is erased too.
+    #[test]
+    fn nodes_toml_tmp_leftover_is_removed() {
+        let (_d, home) = party("tel");
+        fs::write(home.join("nodes.toml.tmp"), "[[node]]\n").unwrap();
+        ok(&home, &["node", "list"]);
+        assert!(!home.join("nodes.toml.tmp").exists());
     }
 
     /// Nodes learned from the network are listed without their address:
@@ -1439,7 +1460,12 @@ mod node {
         drop(node);
         let out = da.path().join("out");
         ok(&a, &["send", "bob", "later", "--out", path_arg(&out)]);
+        // The node's bootstrap ping times out: it is not dialled again and
+        // no maintenance runs, so the sync ends within seconds.
+        let start = std::time::Instant::now();
         let s = ok(&a, &["sync"]);
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(15), "took {took:?}");
         assert!(s.contains("network unreachable, nothing is lost"), "{s}");
         assert!(!s.contains("Poll recorded"), "{s}");
         let pending = ok(&a, &["outbox", "--out", path_arg(&da.path().join("again"))]);

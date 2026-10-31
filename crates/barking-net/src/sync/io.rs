@@ -207,4 +207,10 @@ impl<D: Dialer + Sync> Dialer for Observed<'_, D> {
             r
         }
     }
+
+    /// The exchange's future was dropped at its deadline before `note` ran:
+    /// noted here as the timeout it is.
+    fn timed_out(&self, id: NodeId) {
+        self.note::<()>(id, &Err(DialError::Timeout));
+    }
 }

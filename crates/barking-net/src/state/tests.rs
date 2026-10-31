@@ -179,18 +179,21 @@ fn positions_follow_resume_and_prune() {
 }
 
 #[test]
-fn seen_positions_roundtrip_and_prune() {
-    let m = |b: u8| MailboxId([b; 16]);
-    let mut r = FetchResume::default();
-    r.seen.insert([1; 16], 7);
-    r.seen.insert([2; 16], 0);
-    r.seen.insert([3; 16], 9);
-    // Only the mailboxes still watched, zero positions omitted.
-    let s = from_resume(&r, &[m(1), m(2)]);
-    assert_eq!(s.len(), 1);
-    let back = to_resume(&s);
+fn old_positions_read_back() {
+    let seen = vec![
+        Seen {
+            mailbox: data_encoding::HEXLOWER.encode(&[1; 16]),
+            seq: 7,
+        },
+        // Malformed entries are skipped.
+        Seen {
+            mailbox: "zz".into(),
+            seq: 9,
+        },
+    ];
+    let back = to_resume(&seen);
+    assert_eq!(back.seen.len(), 1);
     assert_eq!(back.seen.get(&[1; 16]), Some(&7));
-    assert!(!back.seen.contains_key(&[3; 16]));
     // Old format (`at`) read back as a deadline.
     let d: Deposited = toml::from_str("id = \"x\"\nat = 5").unwrap();
     assert_eq!(d.until, 5);

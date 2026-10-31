@@ -77,6 +77,11 @@ pub trait Dialer {
         addrs: &[SocketAddr],
         target: [u8; 32],
     ) -> impl Future<Output = Result<Vec<NodeRecord>, DialError>> + Send;
+
+    /// A `ping` or `find_node` to `id` was dropped at its deadline before it
+    /// finished: the outcome its own future would have reported is a
+    /// timeout. Nothing to do by default.
+    fn timed_out(&self, _id: NodeId) {}
 }
 
 /// The real dialer: `Client::connect` (no client certificate, so anonymous),
@@ -289,7 +294,8 @@ pub async fn bootstrap<D: Dialer>(
         let before = report.reachable.len();
         try_source(view, dialer, list, &mut tried, &mut report, now).await;
         if source == BootstrapSource::Builtin && report.reachable.len() > before {
-            report.added += random_lookups(view, dialer, 1, rng, budget, now).await;
+            let none = HashSet::new();
+            report.added += random_lookups(view, dialer, &none, 1, rng, budget, now).await;
         }
     }
     report
@@ -316,11 +322,10 @@ async fn try_source<D: Dialer>(
     while !report.bootstrapped() && !pending.is_empty() {
         let (id, answer) = next_ready(&mut pending).await;
         let Ok(record) = answer else { continue };
+        // A record that does not fit the view (e.g. a private address) is
+        // refused even for a hand-added node, like `barking node add` does.
         match confirm_reached(view, id, record, now) {
             Some(new) => report.added += usize::from(new),
-            // A hand-added node answered but its record does not fit the
-            // view (e.g. a private address): it is still reachable.
-            None if view.get(&id).is_some_and(|e| e.manual) => view.confirm(&id, now),
             None => continue,
         }
         report.reachable.push(id);
@@ -333,9 +338,13 @@ async fn timed_ping<D: Dialer>(
     addrs: Vec<SocketAddr>,
     deadline: tokio::time::Instant,
 ) -> (NodeId, Result<NodeRecord, DialError>) {
-    let answer = tokio::time::timeout_at(deadline, dialer.ping(id, &addrs))
-        .await
-        .unwrap_or(Err(DialError::Timeout));
+    let answer = match tokio::time::timeout_at(deadline, dialer.ping(id, &addrs)).await {
+        Ok(answer) => answer,
+        Err(_) => {
+            dialer.timed_out(id);
+            Err(DialError::Timeout)
+        }
+    };
     (id, answer)
 }
 
@@ -365,11 +374,13 @@ fn decode_hints(view: &View, hints: &[Vec<u8>], now: u64) -> (Vec<(NodeId, NodeR
 }
 
 /// Runs `count` lookups of random identifiers; responders become confirmed,
-/// the other records received enter as candidates. Returns the number of
-/// entries added to the view.
+/// the other records received enter as candidates. Nodes in `exclude` (for
+/// example those that failed during this sync) are never asked. Returns the
+/// number of entries added to the view.
 pub async fn random_lookups<D: Dialer>(
     view: &mut View,
     dialer: &D,
+    exclude: &HashSet<NodeId>,
     count: usize,
     rng: &mut impl rand_core::Rng,
     budget: &mut CandidateBudget,
@@ -379,8 +390,8 @@ pub async fn random_lookups<D: Dialer>(
     for _ in 0..count {
         let mut target = [0; 32];
         rng.fill_bytes(&mut target);
-        let seeds = seeds(view, &target, now);
-        added += run_lookup(view, dialer, target, seeds, budget, now)
+        let seeds = seeds(view, &target, exclude, now);
+        added += run_lookup(view, dialer, target, seeds, exclude, budget, now)
             .await
             .added;
     }
@@ -390,10 +401,12 @@ pub async fn random_lookups<D: Dialer>(
 /// Fallback lookup on the key of `mailbox` (spec §4), at most once per
 /// `FALLBACK_COOLDOWN_SECS` for the same mailbox. Its result enriches the
 /// view; returns the closest nodes that answered (empty when not due or
-/// when the view holds no node to start from).
+/// when the view holds no node to start from). Nodes in `exclude` are never
+/// asked.
 pub async fn fallback_lookup<D: Dialer>(
     view: &mut View,
     dialer: &D,
+    exclude: &HashSet<NodeId>,
     mailbox: &MailboxId,
     log: &mut FallbackLog,
     budget: &mut CandidateBudget,
@@ -403,12 +416,12 @@ pub async fn fallback_lookup<D: Dialer>(
     if !log.due(mailbox, now) {
         return Vec::new();
     }
-    let seeds = seeds(view, &target, now);
+    let seeds = seeds(view, &target, exclude, now);
     if seeds.is_empty() {
         return Vec::new();
     }
     log.note(mailbox, now);
-    run_lookup(view, dialer, target, seeds, budget, now)
+    run_lookup(view, dialer, target, seeds, exclude, budget, now)
         .await
         .result
 }
@@ -460,12 +473,17 @@ struct LookupOutcome {
     added: usize,
 }
 
-/// Starting points of a lookup: the entries with a record that are not
-/// avoided, closest to the target first.
-fn seeds(view: &View, target: &[u8; 32], now: u64) -> Vec<(NodeId, NodeRecord)> {
+/// Starting points of a lookup: the entries with a record that are neither
+/// avoided nor excluded, closest to the target first.
+fn seeds(
+    view: &View,
+    target: &[u8; 32],
+    exclude: &HashSet<NodeId>,
+    now: u64,
+) -> Vec<(NodeId, NodeRecord)> {
     let mut seeds: Vec<(NodeId, NodeRecord)> = view
         .entries()
-        .filter(|(_, e)| !e.avoided(now))
+        .filter(|(id, e)| !e.avoided(now) && !exclude.contains(id))
         .filter_map(|(id, e)| Some((*id, e.record.clone()?)))
         .collect();
     seeds.sort_by_cached_key(|(id, _)| distance(&id.0, target));
@@ -477,11 +495,13 @@ fn seeds(view: &View, target: &[u8; 32], now: u64) -> Vec<(NodeId, NodeRecord)> 
 /// Requests are issued as soon as an answer frees a slot; each one is bounded
 /// by `REQUEST_TIMEOUT_MS` (a timeout counts as a failure) and the whole
 /// lookup by `LOOKUP_TIMEOUT_MS`, after which pending requests are dropped.
+/// Nodes in `exclude` learnt on the way count as failed without being asked.
 async fn run_lookup<D: Dialer>(
     view: &mut View,
     dialer: &D,
     target: [u8; 32],
     seeds: Vec<(NodeId, NodeRecord)>,
+    exclude: &HashSet<NodeId>,
     budget: &mut CandidateBudget,
     now: u64,
 ) -> LookupOutcome {
@@ -505,14 +525,27 @@ async fn run_lookup<D: Dialer>(
         }
         let request_end = (tokio::time::Instant::now() + Duration::from_millis(REQUEST_TIMEOUT_MS))
             .min(lookup_end);
-        for (id, record) in lookup.next_requests(t) {
-            pending.push(Box::pin(timed_find(
-                dialer,
-                id,
-                record.addrs(),
-                target,
-                request_end,
-            )));
+        // An excluded node frees its slot at once: ask again until no
+        // excluded node is picked.
+        loop {
+            let mut skipped = false;
+            for (id, record) in lookup.next_requests(t) {
+                if exclude.contains(&id) {
+                    lookup.on_failure(&id);
+                    skipped = true;
+                    continue;
+                }
+                pending.push(Box::pin(timed_find(
+                    dialer,
+                    id,
+                    record.addrs(),
+                    target,
+                    request_end,
+                )));
+            }
+            if !skipped {
+                break;
+            }
         }
         if pending.is_empty() {
             break;
@@ -551,9 +584,14 @@ async fn timed_find<D: Dialer>(
     target: [u8; 32],
     deadline: tokio::time::Instant,
 ) -> (NodeId, Result<Vec<NodeRecord>, DialError>) {
-    let answer = tokio::time::timeout_at(deadline, dialer.find_node(id, &addrs, target))
-        .await
-        .unwrap_or(Err(DialError::Timeout));
+    let answer = match tokio::time::timeout_at(deadline, dialer.find_node(id, &addrs, target)).await
+    {
+        Ok(answer) => answer,
+        Err(_) => {
+            dialer.timed_out(id);
+            Err(DialError::Timeout)
+        }
+    };
     (id, answer)
 }
 
