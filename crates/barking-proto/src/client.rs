@@ -17,14 +17,18 @@
 //!   announce a continuation, and a page holding more than `MAX_PAGE_ITEMS`
 //!   items is a protocol error;
 //! - a node that paces its pages (continued pages far below the page size,
-//!   which an honest node fills) until a cap or the call's deadline is
+//!   or a continued page the next page's first item would have fitted in:
+//!   an honest node fills its pages) until a cap or the call's deadline is
 //!   reported as `FetchStop::Paced`;
 //! - each request has a timeout;
 //! - a page cut off in transit (slow link) is requested again smaller:
 //!   1 MiB, 256 KiB, 64 KiB then 16 KiB, before giving up. The size reached
-//!   is kept by the session for the next calls (`Session::page_bytes`, which
-//!   a caller may carry to a later session), grows again when full pages
-//!   arrive fast, and a page is never asked bigger than what twice its
+//!   is kept by the session for the next calls and grows again when full
+//!   pages arrive fast. The size a caller may carry to a later session
+//!   (`Session::page_bytes`) is never below `MIN_CARRIED_PAGE_BYTES` after
+//!   a stream reset or garbage, which a node causes for free: only a page
+//!   timeout at a measured low throughput carries a smaller size
+//!   (`Session::page_confirmed`). A page is never asked bigger than what twice its
 //!   timeout (or, once pages were measured, twice their expected time) lets
 //!   fit in the time left: a short call on a slow link still makes progress.
 //!
@@ -60,6 +64,14 @@ pub const FETCH_PAGE_SIZES: [u32; 4] = [1 << 20, 256 << 10, 64 << 10, crate::MIN
 /// the node (60 s), so that the node is the one to cut off a link that is
 /// too slow. Smaller pages get less (`page_timeout`).
 pub const FETCH_PAGE_TIMEOUT: Duration = Duration::from_secs(70);
+/// Smallest page size `Session::page_bytes` carries after a stream reset,
+/// truncated or garbage bytes: a node causes those instantly, so they
+/// prove nothing about the link. Only a page timeout at a measured
+/// throughput too low for the page carries a smaller size.
+pub const MIN_CARRIED_PAGE_BYTES: u32 = 64 << 10;
+/// Index of `MIN_CARRIED_PAGE_BYTES` in `FETCH_PAGE_SIZES`.
+const CARRIED_FLOOR: usize = 2;
+const _: () = assert!(FETCH_PAGE_SIZES[CARRIED_FLOOR] == MIN_CARRIED_PAGE_BYTES);
 /// Lowest throughput a page's timeout allows for (`page_timeout`).
 pub const PAGE_TIMEOUT_RATE: u64 = 16 * 1024;
 /// Part of a page's timeout that does not depend on its size.
@@ -84,6 +96,18 @@ pub fn page_timeout(bytes: u32) -> Duration {
 fn underfilled(asked: u32, items: usize, bytes: usize) -> bool {
     let full = (asked as usize).min(MAX_RESPONSE_BYTES / 2);
     items < MAX_PAGE_ITEMS && bytes.saturating_add(barking_packet::fragment::MAX_PACKET_LEN) < full
+}
+
+/// True if a continued page asked at `asked` bytes, holding `items` items of
+/// `bytes` bytes in all, was cut before the next page's first item, of
+/// `next_len` bytes, although that item fitted in it: an honest node only
+/// ends a page at `MAX_PAGE_ITEMS` items or when the next item does not fit.
+/// The page size is taken at half a response at most (see `underfilled`).
+/// At the smallest page size, where `underfilled` cannot tell, this still
+/// catches a node pacing small items.
+fn cut_early(asked: u32, items: usize, bytes: usize, next_len: usize) -> bool {
+    let full = (asked as usize).min(MAX_RESPONSE_BYTES / 2);
+    items < MAX_PAGE_ITEMS && bytes.saturating_add(next_len) <= full
 }
 
 /// Index in `FETCH_PAGE_SIZES` of the largest size not above `bytes` (the
@@ -118,21 +142,79 @@ fn page_for(learned: usize, left: Duration, rate: Option<f64>) -> usize {
     i
 }
 
+/// True if twice the expected time of a page of size `FETCH_PAGE_SIZES[i]`
+/// at the throughput `rate` fits within its own timeout.
+fn fits_timeout(i: usize, rate: f64) -> bool {
+    let bytes = FETCH_PAGE_SIZES[i];
+    rate > 0.0
+        && Duration::from_secs_f64(f64::from(bytes) / rate).saturating_mul(2) <= page_timeout(bytes)
+}
+
 /// After a full page (one with a continuation) asked at size index `asked`,
 /// with the session at `learned` and `rate` measured: the next size up if
 /// twice its expected time fits within its own timeout, else `learned`.
 fn grown(learned: usize, asked: usize, rate: Option<f64>) -> usize {
     match (asked.checked_sub(1), rate) {
-        (Some(up), Some(r)) if asked <= learned && r > 0.0 => {
-            let bytes = FETCH_PAGE_SIZES[up];
-            let expected = Duration::from_secs_f64(f64::from(bytes) / r);
-            if expected.saturating_mul(2) <= page_timeout(bytes) {
-                up
-            } else {
-                learned
-            }
-        }
+        (Some(up), Some(r)) if asked <= learned && fits_timeout(up, r) => up,
         _ => learned,
+    }
+}
+
+/// Page size learned on a link: the one the session asks (`page`), and
+/// what of it a caller may carry to a later session (`carried`).
+#[derive(Clone, Copy, Debug, Default)]
+struct PageLearn {
+    /// Index in `FETCH_PAGE_SIZES` of the size the next page starts from.
+    page: usize,
+    /// Smallest size (largest index) carried whatever the cause: the size
+    /// set by the caller, or a shrink, at most down to `CARRIED_FLOOR`.
+    kept: usize,
+    /// Largest index of a page that timed out.
+    timed_out: Option<usize>,
+    /// Last throughput measured (bytes per second).
+    rate: Option<f64>,
+}
+
+impl PageLearn {
+    fn starting_at(page: usize) -> Self {
+        PageLearn {
+            page,
+            kept: page,
+            timed_out: None,
+            rate: None,
+        }
+    }
+
+    /// The page at size index `size` failed: the session goes on smaller,
+    /// but only a timeout may carry a size below `CARRIED_FLOOR`.
+    fn shrink(&mut self, size: usize, timeout: bool) {
+        let next = (size + 1).min(FETCH_PAGE_SIZES.len() - 1);
+        self.page = self.page.max(next);
+        self.kept = self.kept.max(next.min(CARRIED_FLOOR));
+        if timeout {
+            self.timed_out = self.timed_out.max(Some(size));
+        }
+    }
+
+    /// Size index a timeout carries: the one below the page that timed
+    /// out, if that is not below `CARRIED_FLOOR` or if the throughput
+    /// measured makes the page too large for its timeout.
+    fn timeout_floor(&self) -> Option<usize> {
+        let t = self.timed_out?;
+        let next = (t + 1).min(FETCH_PAGE_SIZES.len() - 1);
+        (next <= CARRIED_FLOOR || self.rate.is_some_and(|r| !fits_timeout(t, r))).then_some(next)
+    }
+
+    /// Size index a caller may carry: the session's, not below what the
+    /// failures justify.
+    fn carried(&self) -> usize {
+        self.page
+            .min(self.kept.max(self.timeout_floor().unwrap_or(0)))
+    }
+
+    /// True if a timeout justifies the carried size.
+    fn confirmed(&self) -> bool {
+        self.timeout_floor().is_some_and(|t| t >= self.carried())
     }
 }
 /// Maximum number of pages followed per `fetch` call.
@@ -241,8 +323,9 @@ pub enum FetchStop {
     /// already taken.
     Connection,
     /// The item or page cap, or the call's deadline, after the node sent a
-    /// continued page far below the size asked (an honest node fills its
-    /// pages): the node's doing, not the link's.
+    /// continued page far below the size asked, or one the next page's
+    /// first item would have fitted in (an honest node fills its pages):
+    /// the node's doing, not the link's.
     Paced,
 }
 
@@ -308,7 +391,7 @@ impl Client {
             pow_budget: None,
             pow_spent: 0,
             fetch_deadline: FETCH_DEADLINE,
-            page: 0,
+            learn: PageLearn::default(),
         })
     }
 }
@@ -436,9 +519,8 @@ pub struct Session {
     pow_spent: u64,
     /// Maximum duration of a `fetch` / `fetch_resumable` call.
     fetch_deadline: Duration,
-    /// Index in `FETCH_PAGE_SIZES` of the page size reached on this link,
-    /// kept from one call to the next.
-    page: usize,
+    /// Page size reached on this link, kept from one call to the next.
+    learn: PageLearn,
 }
 
 impl Session {
@@ -457,16 +539,29 @@ impl Session {
 
     /// Page size the next pickup starts from (one of `FETCH_PAGE_SIZES`,
     /// the largest not above `bytes`): typically the `page_bytes` of an
-    /// earlier session with the same node.
+    /// earlier session with the same node. Starts the evidence of
+    /// `page_bytes` and `page_confirmed` over.
     pub fn set_page_bytes(&mut self, bytes: u32) {
-        self.page = size_index(bytes);
+        self.learn = PageLearn::starting_at(size_index(bytes));
     }
 
-    /// Page size reached on this link (one of `FETCH_PAGE_SIZES`): smaller
-    /// after pages cut off in transit, larger after full pages that came
-    /// fast.
+    /// Page size to carry to a later session with this node (one of
+    /// `FETCH_PAGE_SIZES`): the size reached on this link (smaller after
+    /// pages cut off in transit, larger after full pages that came fast),
+    /// but never below `MIN_CARRIED_PAGE_BYTES` (or the size set) unless a
+    /// page timed out at a measured throughput too low for it. A reset or
+    /// garbage costs a node nothing: it may shrink this session's pages,
+    /// not the ones of the sessions to come.
     pub fn page_bytes(&self) -> u32 {
-        FETCH_PAGE_SIZES[self.page]
+        FETCH_PAGE_SIZES[self.learn.carried()]
+    }
+
+    /// True if, since the session started or `set_page_bytes`, a page
+    /// timeout (at a measured low throughput below `MIN_CARRIED_PAGE_BYTES`)
+    /// justified `page_bytes`: a caller lets a carried size grow back when
+    /// no timeout confirms it.
+    pub fn page_confirmed(&self) -> bool {
+        self.learn.confirmed()
     }
 
     /// Proof work spent by this session.
@@ -581,7 +676,8 @@ impl Session {
         let mut pages = 0usize;
         // Throughput of the last page that measured it (bytes per second).
         let mut rate: Option<f64> = None;
-        // A continued page came far below the size asked.
+        // A continued page came far below the size asked, or without an
+        // item that fitted in it.
         let mut paced = false;
         let node_cap = |paced: bool, client: FetchStop| {
             if paced { FetchStop::Paced } else { client }
@@ -589,6 +685,9 @@ impl Session {
         let deadline = tokio::time::Instant::now() + self.fetch_deadline;
         for chunk in &chunks {
             let mut cursor: Option<u64> = resume.start(chunk);
+            // Last continued page taken in this chunk: (size asked, items,
+            // bytes).
+            let mut continued: Option<(u32, usize, usize)> = None;
             loop {
                 if pages >= MAX_FETCH_PAGES {
                     self.stop = node_cap(paced, FetchStop::ClientLimit);
@@ -600,7 +699,11 @@ impl Session {
                 }
                 pages += 1;
                 let sent = tokio::time::Instant::now();
-                let size = page_for(self.page, deadline.saturating_duration_since(sent), rate);
+                let size = page_for(
+                    self.learn.page,
+                    deadline.saturating_duration_since(sent),
+                    rate,
+                );
                 let req = Request::Fetch {
                     mailboxes: chunk.to_vec(),
                     cursor,
@@ -613,11 +716,12 @@ impl Session {
                         return Ok(out);
                     }
                     // Stream cut off or too slow: same cursor, smaller page,
-                    // kept for the next pages and calls.
-                    Ok(Err(ClientError::Frame(_) | ClientError::Timeout))
+                    // kept for the next pages and calls (carried to later
+                    // sessions only as `PageLearn::shrink` allows).
+                    Ok(Err(e @ (ClientError::Frame(_) | ClientError::Timeout)))
                         if size + 1 < FETCH_PAGE_SIZES.len() =>
                     {
-                        self.page = self.page.max(size + 1);
+                        self.learn.shrink(size, matches!(e, ClientError::Timeout));
                         rate = None;
                         continue;
                     }
@@ -660,6 +764,11 @@ impl Session {
                 if next.is_some() && underfilled(FETCH_PAGE_SIZES[size], items.len(), page_bytes) {
                     paced = true;
                 }
+                if let (Some((asked, n, b)), Some(first)) = (continued, items.first())
+                    && cut_early(asked, n, b, first.len())
+                {
+                    paced = true;
+                }
                 // A first page is never beyond the item cap (`MAX_PAGE_ITEMS`
                 // is far below it).
                 let over_items = out.len().saturating_add(items.len()) > MAX_FETCH_ITEMS;
@@ -678,10 +787,12 @@ impl Session {
                 if page_bytes >= crate::MIN_PAGE_BYTES as usize / 2 {
                     let took = sent.elapsed().as_secs_f64().max(1e-3);
                     rate = Some(page_bytes as f64 / took);
+                    self.learn.rate = rate;
                 }
                 if next.is_some() {
-                    self.page = grown(self.page, size, rate);
+                    self.learn.page = grown(self.learn.page, size, rate);
                 }
+                continued = next.map(|_| (FETCH_PAGE_SIZES[size], items.len(), page_bytes));
                 bytes += page_bytes;
                 out.append(&mut items);
                 if let Some(n) = next {
@@ -776,6 +887,84 @@ mod tests {
         assert!(!underfilled(mib, MAX_PAGE_ITEMS, 8 * MAX_PAGE_ITEMS));
         // A 16 KiB page may hold a single item of any size.
         assert!(!underfilled(crate::MIN_PAGE_BYTES, 1, 8));
+    }
+
+    #[test]
+    fn resets_carry_no_page_below_64_kib() {
+        // Resets at every size: the session goes down to 16 KiB, what it
+        // carries stops at 64 KiB.
+        let mut l = PageLearn::default();
+        for size in 0..3 {
+            l.shrink(size, false);
+        }
+        assert_eq!(FETCH_PAGE_SIZES[l.page], crate::MIN_PAGE_BYTES);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], MIN_CARRIED_PAGE_BYTES);
+        assert!(!l.confirmed());
+        // Even with a low throughput measured afterwards.
+        l.rate = Some(1024.0);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], MIN_CARRIED_PAGE_BYTES);
+        // Above 64 KiB, a reset is carried as is.
+        let mut l = PageLearn::default();
+        l.shrink(0, false);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], 256 << 10);
+        // A size set by the caller stays carried.
+        let mut l = PageLearn::starting_at(3);
+        l.shrink(3, false);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], crate::MIN_PAGE_BYTES);
+    }
+
+    #[test]
+    fn only_a_timeout_at_a_measured_low_throughput_carries_16_kib() {
+        // A 64 KiB timeout before any measure: 64 KiB carried.
+        let mut l = PageLearn::starting_at(2);
+        l.shrink(2, true);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], MIN_CARRIED_PAGE_BYTES);
+        assert!(!l.confirmed());
+        // A throughput at which 64 KiB fits twice in its timeout (24 s):
+        // the timeout proves nothing about the link.
+        l.rate = Some(8.0 * 1024.0);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], MIN_CARRIED_PAGE_BYTES);
+        // 4 KiB/s: 64 KiB takes 16 s, twice that is beyond 24 s.
+        l.rate = Some(4.0 * 1024.0);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], crate::MIN_PAGE_BYTES);
+        assert!(l.confirmed());
+        // Timeouts above 64 KiB carry their size and confirm it.
+        let mut l = PageLearn::default();
+        l.shrink(0, true);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], 256 << 10);
+        assert!(l.confirmed());
+        // A later reset below it is not confirmed by that timeout.
+        l.shrink(1, false);
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], MIN_CARRIED_PAGE_BYTES);
+        assert!(!l.confirmed());
+        // Pages growing back: the larger size is carried.
+        l.page = 1;
+        assert_eq!(FETCH_PAGE_SIZES[l.carried()], 256 << 10);
+        assert!(l.confirmed());
+    }
+
+    #[test]
+    fn page_cut_before_an_item_that_fitted_is_cut_early() {
+        let min = crate::MIN_PAGE_BYTES;
+        // One 245-byte item per 16 KiB page: the next one fitted.
+        assert!(cut_early(min, 1, 245, 245));
+        assert!(cut_early(min, 10, 16_000, 384));
+        // The honest node's two reasons to end a page (`rules::fetch`):
+        // the next item does not fit, or the item cap.
+        assert!(!cut_early(min, 16, 16 * 1024, 1024));
+        assert!(!cut_early(min, 15, 15 * 1024 + 245, 1024));
+        assert!(!cut_early(min, 1, 245, 16_384));
+        assert!(!cut_early(
+            1 << 20,
+            MAX_PAGE_ITEMS,
+            245 * MAX_PAGE_ITEMS,
+            245
+        ));
+        // A single item larger than the page.
+        assert!(!cut_early(min, 1, 16_384 + 245, 245));
+        // Pages beyond half a response are taken at half a response: a
+        // node whose own limit is that low is not blamed.
+        assert!(!cut_early(1 << 20, 500, 512 << 10, 1));
     }
 
     #[test]

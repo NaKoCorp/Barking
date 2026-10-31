@@ -25,6 +25,33 @@ pub enum FetchReply {
     RateLimited,
 }
 
+/// Fetch page size of the link to a node: on input, the size to start from;
+/// on output, the size to carry to the next fetches (`Session::page_bytes`)
+/// and whether a page timeout at a measured low throughput confirmed it
+/// (`Session::page_confirmed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkPage {
+    pub bytes: u32,
+    pub confirmed: bool,
+}
+
+impl LinkPage {
+    /// After a fetch that started from `self` (rounded down by the session
+    /// to `start`, one of `FETCH_PAGE_SIZES`), the session carrying
+    /// `reached`: `reached`, except that an unchanged and unconfirmed size
+    /// keeps its exact value, so that a size growing back by doubling
+    /// (`NetState::recover_page_bytes`) is not rounded down again at every
+    /// sync.
+    pub(crate) fn reached(self, start: u32, reached: u32, confirmed: bool) -> LinkPage {
+        let bytes = if reached == start && !confirmed {
+            self.bytes
+        } else {
+            reached
+        };
+        LinkPage { bytes, confirmed }
+    }
+}
+
 /// What happened to a deposit that reached the node or not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DepositOutcome {
@@ -58,9 +85,9 @@ pub trait Connector {
 /// Fetches on a kept connection (see `Session::fetch_resumable`).
 pub trait Fetcher: Connector {
     /// Fetches `mailboxes` from `resume`, at most `max_bytes` bytes and
-    /// `slice` long, starting with pages of `page_bytes` (see
+    /// `slice` long, starting with pages of `page.bytes` (see
     /// `Session::set_page_bytes`); `resume` gives where to resume
-    /// afterwards, `page_bytes` the page size the link reached.
+    /// afterwards, `page` the page size to carry (see `LinkPage`).
     fn fetch(
         &self,
         conn: &mut Self::Conn,
@@ -68,7 +95,7 @@ pub trait Fetcher: Connector {
         resume: &mut FetchResume,
         max_bytes: usize,
         slice: Duration,
-        page_bytes: &mut u32,
+        page: &mut LinkPage,
     ) -> impl Future<Output = Result<FetchReply, DialError>> + Send;
 }
 
@@ -111,7 +138,7 @@ impl Fetcher for QuicDialer {
         resume: &mut FetchResume,
         max_bytes: usize,
         slice: Duration,
-        page_bytes: &mut u32,
+        page: &mut LinkPage,
     ) -> Result<FetchReply, DialError> {
         if mailboxes.is_empty() {
             return Ok(FetchReply::Items {
@@ -120,9 +147,10 @@ impl Fetcher for QuicDialer {
             });
         }
         conn.set_fetch_deadline(slice);
-        conn.set_page_bytes(*page_bytes);
+        conn.set_page_bytes(page.bytes);
+        let start = conn.page_bytes();
         let r = conn.fetch_resumable(mailboxes, resume, max_bytes).await;
-        *page_bytes = conn.page_bytes();
+        *page = page.reached(start, conn.page_bytes(), conn.page_confirmed());
         match r {
             Ok(items) => Ok(FetchReply::Items {
                 items,
@@ -243,5 +271,30 @@ impl<D: Dialer + Sync> Dialer for Observed<'_, D> {
 
     fn cut_short(&self, id: NodeId) {
         self.push(id, Observation::Cut);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LinkPage;
+
+    #[test]
+    fn unchanged_page_size_keeps_its_doubling_progress() {
+        let start = LinkPage {
+            bytes: 32 << 10,
+            confirmed: false,
+        };
+        // The session started from 16 KiB and carried it unchanged: 32 KiB
+        // stays, the next recovery making it 64 KiB.
+        assert_eq!(start.reached(16 << 10, 16 << 10, false).bytes, 32 << 10);
+        // Grown, shrunk, or confirmed by a timeout: the session's size.
+        assert_eq!(start.reached(16 << 10, 64 << 10, false).bytes, 64 << 10);
+        let p = start.reached(16 << 10, 16 << 10, true);
+        assert_eq!((p.bytes, p.confirmed), (16 << 10, true));
+        let big = LinkPage {
+            bytes: 512 << 10,
+            confirmed: false,
+        };
+        assert_eq!(big.reached(256 << 10, 64 << 10, false).bytes, 64 << 10);
     }
 }

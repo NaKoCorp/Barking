@@ -87,6 +87,9 @@ struct Net {
     dead: Mutex<HashSet<usize>>,
     /// Page size a fetch from that node ends with (the link's).
     page_after: HashMap<NodeId, u32>,
+    /// Nodes whose fetches end with that page size confirmed by a page
+    /// timeout at a low throughput.
+    page_confirmed: HashSet<NodeId>,
     /// Page size each fetch started from.
     pages: Mutex<Vec<(NodeId, u32)>>,
     calls: Mutex<Vec<Call>>,
@@ -202,12 +205,13 @@ impl Fetcher for Net {
         resume: &mut FetchResume,
         _max_bytes: usize,
         _slice: Duration,
-        page_bytes: &mut u32,
+        page: &mut LinkPage,
     ) -> Result<FetchReply, DialError> {
-        self.pages.lock().unwrap().push((session.id, *page_bytes));
+        self.pages.lock().unwrap().push((session.id, page.bytes));
         if let Some(&p) = self.page_after.get(&session.id) {
-            *page_bytes = p;
+            page.bytes = p;
         }
+        page.confirmed = self.page_confirmed.contains(&session.id);
         let positioned: Vec<MailboxId> = mailboxes
             .iter()
             .filter(|m| resume.seen.get(&m.0).is_some_and(|s| *s > 0))
@@ -1501,8 +1505,10 @@ async fn page_size_reached_is_carried_to_the_next_sync() {
     let x = load(&mut core)
         .view
         .responsibles_by_score(&sessions[0], NOW)[0];
-    // A slow link to x: its pages ended at 64 KiB.
+    // A slow link to x: its pages ended at 64 KiB, page timeouts
+    // confirming it.
     net.page_after.insert(x, 64 << 10);
+    net.page_confirmed.insert(x);
     sync(&mut core, &net, opts()).await;
     let first: Vec<u32> = net
         .pages
@@ -1524,6 +1530,57 @@ async fn page_size_reached_is_carried_to_the_next_sync() {
         .map(|(_, p)| *p)
         .collect();
     assert_eq!(to_x.first(), Some(&(64 << 10)), "{pages:?}");
+}
+
+/// First page size each sync's fetches from `x` started from.
+fn first_pages_to(net: &Net, x: NodeId) -> Option<u32> {
+    let pages = std::mem::take(&mut *net.pages.lock().unwrap());
+    pages.iter().find(|(n, _)| *n == x).map(|(_, p)| *p)
+}
+
+#[tokio::test(start_paused = true)]
+async fn forced_page_shrink_recovers_across_syncs() {
+    use barking_proto::client::FETCH_PAGE_SIZES;
+    let (_dir, mut core, mut net) = setup();
+    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let x = load(&mut core)
+        .view
+        .responsibles_by_score(&sessions[0], NOW)[0];
+    // One sync where x forced its pages down to 16 KiB, no page timeout
+    // confirming it.
+    net.page_after.insert(x, 16 << 10);
+    sync(&mut core, &net, opts()).await;
+    net.page_after.clear();
+    assert_eq!(first_pages_to(&net, x), Some(FETCH_PAGE_SIZES[0]));
+    // It doubles back at each sync, up to the default.
+    let mut seen = Vec::new();
+    for _ in 0..6 {
+        seen.push(load(&mut core).page_bytes(&x));
+        sync(&mut core, &net, opts()).await;
+        assert_eq!(first_pages_to(&net, x), seen.last().copied());
+    }
+    assert_eq!(
+        seen,
+        [32 << 10, 64 << 10, 128 << 10, 256 << 10, 512 << 10, 1 << 20]
+    );
+    assert_eq!(load(&mut core).page_bytes(&x), FETCH_PAGE_SIZES[0]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn page_size_confirmed_by_timeouts_stays() {
+    let (_dir, mut core, mut net) = setup();
+    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let x = load(&mut core)
+        .view
+        .responsibles_by_score(&sessions[0], NOW)[0];
+    // A slow link: each sync, page timeouts at a low throughput confirm
+    // 16 KiB.
+    net.page_after.insert(x, 16 << 10);
+    net.page_confirmed.insert(x);
+    for _ in 0..3 {
+        sync(&mut core, &net, opts()).await;
+        assert_eq!(load(&mut core).page_bytes(&x), 16 << 10);
+    }
 }
 
 #[test]

@@ -62,7 +62,9 @@ pub struct NetState {
     pub down_failed: HashMap<NodeId, u64>,
     /// Fetch page size the link to a node reached (`Session::page_bytes`),
     /// carried to the next sync: a slow link does not start again from the
-    /// largest page every time. Absent: `FETCH_PAGE_SIZES[0]`.
+    /// largest page every time. It doubles back toward the default at each
+    /// sync no page timeout confirmed it (`recover_page_bytes`), so that a
+    /// forced shrink does not last. Absent: `FETCH_PAGE_SIZES[0]`.
     pub page_bytes: HashMap<NodeId, u32>,
 }
 
@@ -229,6 +231,17 @@ impl NetState {
         self.page_bytes.insert(*node, bytes);
         let view = &self.view;
         self.page_bytes.retain(|n, _| view.get(n).is_some());
+    }
+
+    /// End of a sync: the page size of each node not in `confirmed` (no page
+    /// timeout at a measured low throughput confirmed it in this sync)
+    /// doubles, up to the default.
+    pub fn recover_page_bytes(&mut self, confirmed: &HashSet<NodeId>) {
+        for (node, bytes) in &mut self.page_bytes {
+            if !confirmed.contains(node) {
+                *bytes = bytes.saturating_mul(2).min(FETCH_PAGE_SIZES[0]);
+            }
+        }
     }
 
     /// Fetch positions of `mailboxes` on `node`.

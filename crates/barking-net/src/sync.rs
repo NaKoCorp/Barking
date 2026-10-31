@@ -74,7 +74,7 @@ mod fetch;
 mod io;
 
 pub use barking_proto::client::FetchStop;
-pub use io::{Connector, DepositOutcome, DepositReply, Depositor, FetchReply, Fetcher};
+pub use io::{Connector, DepositOutcome, DepositReply, Depositor, FetchReply, Fetcher, LinkPage};
 use io::{Observation, Observed};
 
 /// Longest synchronization.
@@ -303,6 +303,7 @@ impl<'a, D: Connector> Run<'a, D> {
             dialed: HashSet::new(),
             probed: false,
             reread_queue: Vec::new(),
+            page_confirmed: HashSet::new(),
             budget: CandidateBudget::default(),
             now,
             deadline,
@@ -365,6 +366,9 @@ struct Run<'a, D: Connector> {
     probed: bool,
     /// Groups served by a node this sync, for the audit re-reads.
     reread_queue: Vec<(NodeId, Vec<MailboxId>)>,
+    /// Nodes whose carried page size a page timeout confirmed this sync:
+    /// the others' grows back (`NetState::recover_page_bytes`).
+    page_confirmed: HashSet<NodeId>,
     budget: CandidateBudget,
     now: u64,
     deadline: Instant,
@@ -473,6 +477,7 @@ where
             let failed: Vec<NodeId> = self.dial_failed.iter().copied().collect();
             self.state.note_down_failures(failed, self.now);
         }
+        self.state.recover_page_bytes(&self.page_confirmed);
         self.save();
         for (_, (id, s)) in std::mem::take(&mut self.stats) {
             let node = short_id(&id);

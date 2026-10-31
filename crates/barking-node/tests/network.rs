@@ -949,6 +949,109 @@ async fn client_gives_up_below_smallest_page() {
     srv.abort();
 }
 
+/// A node resetting every page above 16 KiB costs it nothing: this
+/// session goes on at 16 KiB, but the size carried to the next sessions
+/// stops at 64 KiB.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resets_carry_no_page_below_64_kib() {
+    let k = key(0);
+    let h = hello(&k, TEST_BITS);
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let (addr, srv) = fake_node(k.clone(), move |req| match req {
+        Request::Hello { .. } => Some(h.clone()),
+        Request::Fetch {
+            cursor, max_bytes, ..
+        } => {
+            log.lock().unwrap().push(max_bytes);
+            if max_bytes > barking_proto::MIN_PAGE_BYTES {
+                return None;
+            }
+            let c = cursor.unwrap_or(0);
+            Some(Response::Items {
+                items: vec![vec![c as u8; 12 * 1024]],
+                next: (c < 2).then_some(c + 1),
+            })
+        }
+        _ => Some(Response::Error(ErrorReason::Unsupported)),
+    });
+    let mut s = Client::connect(addr, id_of(&k)).await.unwrap();
+    s.fetch(&[MailboxId([1; 16])]).await.unwrap();
+    assert_eq!(asked.lock().unwrap()[..2], [256 << 10, 64 << 10]);
+    assert_eq!(*asked.lock().unwrap().last().unwrap(), 16 << 10);
+    assert_eq!(s.page_bytes(), client::MIN_CARRIED_PAGE_BYTES);
+    assert!(!s.page_confirmed());
+    // The session itself keeps its 16 KiB pages.
+    asked.lock().unwrap().clear();
+    s.fetch(&[MailboxId([1; 16])]).await.unwrap();
+    assert_eq!(asked.lock().unwrap()[0], 16 << 10);
+    srv.abort();
+}
+
+/// A node that resets its larger pages, then paces one small item per
+/// 16 KiB page until the page cap: reported paced, although no 16 KiB page
+/// is far below its size.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn small_items_paced_at_16_kib_are_paced() {
+    let k = key(0);
+    let h = hello(&k, TEST_BITS);
+    let (addr, srv) = fake_node(k.clone(), move |req| match req {
+        Request::Hello { .. } => Some(h.clone()),
+        Request::Fetch {
+            cursor, max_bytes, ..
+        } => {
+            if max_bytes > barking_proto::MIN_PAGE_BYTES {
+                return None;
+            }
+            Some(Response::Items {
+                items: vec![vec![0; Tier::S.size()]],
+                next: Some(cursor.unwrap_or(0) + 1),
+            })
+        }
+        _ => Some(Response::Error(ErrorReason::Unsupported)),
+    });
+    let mut s = Client::connect(addr, id_of(&k)).await.unwrap();
+    let items = timeout(Duration::from_secs(60), s.fetch(&[MailboxId([1; 16])]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(items.len(), client::MAX_FETCH_PAGES - 2);
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::Paced);
+    srv.abort();
+}
+
+/// A real node serving 16 KiB pages of mixed sizes, cut by the call's
+/// deadline: its pages end where the next item does not fit, never paced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn honest_node_at_16_kib_is_never_paced() {
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 10_000;
+    });
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    let boxes: Vec<MailboxId> = (40..44).map(|b| MailboxId([b; 16])).collect();
+    for n in 0..150u32 {
+        let tier = if n % 3 == 2 { Tier::S } else { Tier::M };
+        let mb = 40 + (n % 4) as u8;
+        assert_eq!(s.deposit(&message_tier(n, mb, tier)).await.unwrap(), Ok(()));
+    }
+    s.close().await;
+    node.stop().await;
+    // The same store behind a slow node: a few pages per call.
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 10_000;
+        c.test_response_delay = Some(Duration::from_millis(250));
+    });
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    s.set_page_bytes(barking_proto::MIN_PAGE_BYTES);
+    s.set_fetch_deadline(Duration::from_millis(1_200));
+    let items = s.fetch(&boxes).await.unwrap();
+    // Several continued pages taken, the rest left by the deadline.
+    assert!(items.len() > 2 * 16 && items.len() < 150, "{}", items.len());
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::Deadline);
+    node.stop().await;
+}
+
 /// The node serves the requested page size (floor 16 KiB).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn node_honors_requested_page_size() {

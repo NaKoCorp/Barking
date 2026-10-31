@@ -10,7 +10,7 @@ use barking_proto::{ErrorReason, NodeId};
 use tokio::time::Instant;
 
 use super::FetchStop;
-use super::io::{Depositor, FetchReply, Fetcher};
+use super::io::{Depositor, FetchReply, Fetcher, LinkPage};
 use super::{
     AUDIT_EVERY_SECS, CROSSCHECK_EVERY_SECS, INTRO_FETCH_BYTES, REREAD_BYTES, REREAD_TIME, Run,
     SESSION_FETCH_SLICE, UNAUDITED_SYNCS, dead_session, intro_slice, receive_all,
@@ -223,6 +223,23 @@ where
         self.save();
     }
 
+    /// Page size a fetch from `node` starts from.
+    fn link_page(&self, node: NodeId) -> LinkPage {
+        LinkPage {
+            bytes: self.state.page_bytes(&node),
+            confirmed: false,
+        }
+    }
+
+    /// Records the page size a fetch from `node` reached, and whether a
+    /// timeout confirmed it in this sync (see `NetState::recover_page_bytes`).
+    fn note_link_page(&mut self, node: NodeId, page: LinkPage) {
+        self.state.set_page_bytes(&node, page.bytes);
+        if page.confirmed {
+            self.page_confirmed.insert(node);
+        }
+    }
+
     /// One fetch of `group` from `node`. Returns how it ended, the bytes
     /// received and whether every item was processed.
     async fn fetch_group(
@@ -257,7 +274,7 @@ where
                 return (end, 0, true);
             };
             let slice = slice_end.saturating_duration_since(Instant::now());
-            let mut page = self.state.page_bytes(&node);
+            let mut page = self.link_page(node);
             let fetch =
                 self.dialer
                     .fetch(&mut conn, group, &mut resume, max_bytes, slice, &mut page);
@@ -265,7 +282,7 @@ where
                 Err(_) => return (GroupEnd::Stop, 0, true),
                 Ok(r) => r,
             };
-            self.state.set_page_bytes(&node, page);
+            self.note_link_page(node, page);
             match &reply {
                 Err(e) if !fresh && !redialled && dead_session(e) => {
                     redialled = true;
@@ -415,7 +432,7 @@ where
                     };
                     let mut resume = FetchResume::default();
                     let slice = end.saturating_duration_since(Instant::now());
-                    let mut page = self.state.page_bytes(&node);
+                    let mut page = self.link_page(node);
                     let fetch =
                         self.dialer
                             .fetch(&mut c, &one, &mut resume, bytes_left, slice, &mut page);
@@ -424,7 +441,7 @@ where
                         self.save();
                         return;
                     };
-                    self.state.set_page_bytes(&node, page);
+                    self.note_link_page(node, page);
                     match &reply {
                         Err(e) if !fresh && dead_session(e) => {}
                         _ => break (c, reply),
