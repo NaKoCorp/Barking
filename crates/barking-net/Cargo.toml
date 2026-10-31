@@ -11,6 +11,8 @@ barking-proto.workspace = true
 postcard.workspace = true
 rand_core.workspace = true
 serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 ed25519-dalek.workspace = true

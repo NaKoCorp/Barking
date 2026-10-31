@@ -2,6 +2,7 @@
 //! selection of the nodes responsible for a mailbox, node reliability scores
 //! and the deposit plan. Pure logic, no I/O.
 
+pub mod discover;
 pub mod plan;
 pub mod score;
 pub mod view;
@@ -9,6 +10,10 @@ pub mod view;
 #[cfg(test)]
 mod test_support;
 
+pub use discover::{
+    BootstrapReport, BootstrapSource, CandidateBudget, DialError, Dialer, FallbackLog, QuicDialer,
+    bootstrap, choose_card_nodes, fallback_lookup, random_lookups,
+};
 pub use plan::{Ledger, PlannedDeposit};
 pub use score::{Score, ScoreEvent};
 pub use view::{NodeEntry, View};

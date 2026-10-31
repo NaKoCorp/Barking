@@ -99,6 +99,11 @@ pub struct View {
     /// Runtime-only: never persisted, so a loaded view fails closed.
     #[serde(skip)]
     allow_private: bool,
+    /// Tests only: drop the identifier puzzle so large simulated networks can
+    /// use keys drawn at runtime. Defaults to false (puzzle enforced).
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(crate) no_puzzle: bool,
     pub(crate) entries: HashMap<NodeId, NodeEntry>,
 }
 
@@ -106,12 +111,21 @@ impl View {
     pub fn new(allow_private: bool) -> View {
         View {
             allow_private,
+            #[cfg(test)]
+            no_puzzle: false,
             entries: HashMap::new(),
         }
     }
 
-    fn policy(&self) -> RecordPolicy {
-        RecordPolicy::network(self.allow_private)
+    /// Rules records must follow to enter the view.
+    pub(crate) fn policy(&self) -> RecordPolicy {
+        #[allow(unused_mut)]
+        let mut policy = RecordPolicy::network(self.allow_private);
+        #[cfg(test)]
+        if self.no_puzzle {
+            policy.puzzle_bits = 0;
+        }
+        policy
     }
 
     /// Adds or updates a node from a signed record, as a candidate: a record
