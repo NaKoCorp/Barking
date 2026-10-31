@@ -1,5 +1,5 @@
-//! `barking` : CLI au-dessus de `barking-core`. Le transport de la v0 est le
-//! fichier : un paquet = un fichier `.pkt`.
+//! `barking`: CLI on top of `barking-core`. The v0 transport is the file:
+//! one packet = one `.pkt` file.
 
 mod netsync;
 mod nodes;
@@ -29,10 +29,10 @@ const DEFAULT_LOG_LIMIT: usize = 50;
 #[derive(Parser)]
 #[command(
     name = "barking",
-    about = "Messagerie décentralisée chiffrée de bout en bout"
+    about = "End-to-end encrypted decentralized messaging"
 )]
 struct Cli {
-    /// Dossier de données (défaut : ~/.barking).
+    /// Data directory (default: ~/.barking).
     #[arg(long, global = true, value_name = "DIR")]
     home: Option<PathBuf>,
     #[command(subcommand)]
@@ -41,152 +41,153 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Crée une nouvelle identité.
+    /// Creates a new identity.
     Init {
-        #[arg(long, value_name = "APPAREIL")]
+        #[arg(long, value_name = "DEVICE")]
         name: String,
     },
-    /// Retrouve une identité à partir de sa phrase de 24 mots (lue sur l'entrée standard).
+    /// Recovers an identity from its 24-word phrase (read from standard input).
     Recover {
-        #[arg(long, value_name = "APPAREIL")]
+        #[arg(long, value_name = "DEVICE")]
         name: String,
     },
-    /// Affiche mon empreinte.
+    /// Shows my fingerprint.
     Whoami,
-    /// Affiche ma carte de contact.
+    /// Shows my contact card.
     Card {
-        #[arg(long, value_name = "NOM")]
+        #[arg(long, value_name = "NAME")]
         display_name: String,
     },
-    /// Ajoute un contact à partir de sa carte.
+    /// Adds a contact from their card.
     Add {
         card: String,
         #[arg(long)]
         alias: Option<String>,
     },
-    /// Supprime un contact et ses sessions (l'historique est conservé).
+    /// Removes a contact and their sessions (the history is kept).
     Remove { contact: String },
-    /// Liste les contacts.
+    /// Lists the contacts.
     Contacts,
-    /// Chiffre un texte pour un contact : un fichier .pkt par paquet.
+    /// Encrypts a text for a contact: one .pkt file per packet.
     Send {
         contact: String,
         text: String,
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
-    /// Traite des fichiers de paquets reçus.
+    /// Processes received packet files.
     Receive {
         #[arg(required = true)]
         files: Vec<PathBuf>,
-        /// Dossier où écrire les accusés de réception.
+        /// Directory where to write the delivery receipts.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
-    /// Réécrit les paquets en attente d'accusé (à retransmettre).
+    /// Rewrites the packets awaiting a receipt (to retransmit).
     Outbox {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
-    /// Affiche le code de sécurité d'un contact.
+    /// Shows a contact's safety code.
     Safety {
         contact: String,
-        /// Marque le contact comme vérifié.
+        /// Marks the contact as verified.
         #[arg(long)]
         verified: bool,
     },
-    /// Affiche le journal de transparence.
+    /// Shows the transparency log.
     Log {
         #[arg(long, default_value_t = DEFAULT_LOG_LIMIT)]
         limit: usize,
     },
-    /// Affiche les messages échangés avec un contact : une ligne par message.
+    /// Shows the messages exchanged with a contact: one line per message.
     Messages { contact: String },
-    /// Change l'alias d'un contact (un alias vide le retire).
+    /// Changes a contact's alias (an empty alias removes it).
     Alias { contact: String, alias: String },
-    /// Lie un nouvel appareil à cette identité.
+    /// Links a new device to this identity.
     #[command(subcommand)]
     Link(LinkCommand),
-    /// Gère les nœuds de relais.
+    /// Manages the relay nodes.
     #[command(subcommand)]
     Node(NodeCommand),
-    /// Dépose les paquets en attente sur les nœuds, relève mes boîtes et traite le reçu.
+    /// Drops the pending packets on the nodes, polls my mailboxes and processes what was received.
     Sync,
 }
 
 #[derive(Subcommand)]
 enum NodeCommand {
-    /// Ajoute un nœud : adresse (IP:port) et identifiant publié par son opérateur.
+    /// Adds a node: address (IP:port) and identifier published by its operator.
     Add { address: String, id: String },
-    /// Liste les nœuds configurés.
+    /// Lists the configured nodes.
     List,
-    /// Retire un nœud.
+    /// Removes a node.
     Remove { id: String },
 }
 
 #[derive(Subcommand)]
 enum LinkCommand {
-    /// Sur l'appareil administrateur : écrit une offre de liaison (valable 10 minutes).
+    /// On the admin device: writes a link offer (valid for 10 minutes).
     Offer {
-        #[arg(long, value_name = "FICHIER")]
+        #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
-    /// Sur le nouvel appareil : crée le dossier de données et écrit la demande de liaison.
+    /// On the new device: creates the data directory and writes the link request.
     Request {
-        #[arg(long, value_name = "FICHIER")]
+        #[arg(long, value_name = "FILE")]
         offer: PathBuf,
-        #[arg(long, value_name = "APPAREIL")]
+        #[arg(long, value_name = "DEVICE")]
         name: String,
-        #[arg(long, value_name = "FICHIER")]
+        #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
-    /// Sur l'appareil administrateur : accepte la demande et écrit le paquet de liaison.
+    /// On the admin device: accepts the request and writes the link bundle.
     Accept {
-        #[arg(long, value_name = "FICHIER")]
+        #[arg(long, value_name = "FILE")]
         request: PathBuf,
-        #[arg(long, value_name = "FICHIER")]
+        #[arg(long, value_name = "FILE")]
         out: PathBuf,
-        /// Écrit aussi l'historique chiffré dans ce fichier.
-        #[arg(long, value_name = "FICHIER")]
+        /// Also writes the encrypted history to this file.
+        #[arg(long, value_name = "FILE")]
         history: Option<PathBuf>,
-        /// Dossier où écrire les paquets à envoyer (comme `send --out`) ;
-        /// sans lui, ils restent en attente (`barking outbox`).
+        /// Directory where to write the packets to send (like `send --out`);
+        /// without it, they stay pending (`barking outbox`).
         #[arg(long, value_name = "DIR")]
         packets: Option<PathBuf>,
     },
-    /// Sur le nouvel appareil : termine la liaison avec le paquet reçu.
+    /// On the new device: completes the link with the received bundle.
     Finish {
-        #[arg(long, value_name = "FICHIER")]
+        #[arg(long, value_name = "FILE")]
         bundle: PathBuf,
-        /// Historique chiffré remis avec le paquet de liaison.
-        #[arg(long, value_name = "FICHIER")]
+        /// Encrypted history delivered with the link bundle.
+        #[arg(long, value_name = "FILE")]
         history: Option<PathBuf>,
     },
 }
 
-/// Erreur affichée sur la sortie d'erreur ; le programme sort avec le code 1.
+/// Error printed on the error output; the program exits with code 1.
 struct CliError(String);
 
 impl From<CoreError> for CliError {
     fn from(e: CoreError) -> Self {
         CliError(match e {
-            CoreError::StoreLocked => "Phrase de passe incorrecte".to_owned(),
-            CoreError::UnknownContact => "Contact inconnu".to_owned(),
-            CoreError::InvalidPhrase => "Phrase de récupération invalide".to_owned(),
-            CoreError::NotAdmin => "Cet appareil ne détient pas la clé racine".to_owned(),
-            CoreError::TooLarge => "Texte trop long".to_owned(),
+            CoreError::StoreLocked => "Incorrect passphrase".to_owned(),
+            CoreError::UnknownContact => "Unknown contact".to_owned(),
+            CoreError::InvalidPhrase => "Invalid recovery phrase".to_owned(),
+            CoreError::NotAdmin => "This device does not hold the root key".to_owned(),
+            CoreError::TooLarge => "Text too long".to_owned(),
             CoreError::LinkPending => {
-                "Cet appareil attend la fin de sa liaison : lance `barking link finish`".to_owned()
+                "This device is waiting for its link to finish: run `barking link finish`"
+                    .to_owned()
             }
-            CoreError::Link(reason) => format!("Liaison refusée : {reason}"),
-            other => format!("Erreur : {other}"),
+            CoreError::Link(reason) => format!("Link rejected: {reason}"),
+            other => format!("Error: {other}"),
         })
     }
 }
 
 impl From<io::Error> for CliError {
     fn from(e: io::Error) -> Self {
-        CliError(format!("Erreur d'entrée/sortie : {e}"))
+        CliError(format!("I/O error: {e}"))
     }
 }
 
@@ -216,30 +217,28 @@ fn now() -> u64 {
 fn default_home() -> CliResult<PathBuf> {
     match std::env::var_os("HOME") {
         Some(h) if !h.is_empty() => Ok(PathBuf::from(h).join(".barking")),
-        _ => fail("Dossier personnel introuvable : utilise --home"),
+        _ => fail("Home directory not found: use --home"),
     }
 }
 
-/// Phrase de passe : `BARKING_PASSPHRASE`, sinon saisie masquée.
+/// Passphrase: `BARKING_PASSPHRASE`, otherwise hidden input.
 fn read_passphrase(confirm: bool) -> CliResult<Zeroizing<String>> {
     if let Ok(p) = std::env::var("BARKING_PASSPHRASE") {
         let p = Zeroizing::new(p);
         if p.is_empty() {
-            return fail("La phrase de passe ne peut pas être vide");
+            return fail("The passphrase cannot be empty");
         }
         return Ok(p);
     }
-    let first = Zeroizing::new(rpassword::prompt_password("Phrase de passe : ")?);
+    let first = Zeroizing::new(rpassword::prompt_password("Passphrase: ")?);
     if confirm {
-        let again = Zeroizing::new(rpassword::prompt_password(
-            "Confirme la phrase de passe : ",
-        )?);
+        let again = Zeroizing::new(rpassword::prompt_password("Confirm the passphrase: ")?);
         if *first != *again {
-            return fail("Les deux phrases de passe sont différentes");
+            return fail("The two passphrases differ");
         }
     }
     if first.is_empty() {
-        return fail("La phrase de passe ne peut pas être vide");
+        return fail("The passphrase cannot be empty");
     }
     Ok(first)
 }
@@ -247,18 +246,18 @@ fn read_passphrase(confirm: bool) -> CliResult<Zeroizing<String>> {
 fn read_salt(home: &Path) -> CliResult<[u8; 16]> {
     let bytes = fs::read(home.join(SALT_FILE)).map_err(|_| {
         CliError(format!(
-            "Aucune identité dans {} : lance `barking init`",
+            "No identity in {}: run `barking init`",
             home.display()
         ))
     })?;
-    <[u8; 16]>::try_from(bytes.as_slice()).or_else(|_| fail("Fichier de sel corrompu"))
+    <[u8; 16]>::try_from(bytes.as_slice()).or_else(|_| fail("Salt file corrupted"))
 }
 
-/// Prépare le dossier et le sel d'une nouvelle identité ; refuse si la base existe.
+/// Prepares the directory and the salt of a new identity; refuses if the database exists.
 fn prepare_new_home(home: &Path) -> CliResult<[u8; 16]> {
     if home.join(DB_FILE).exists() {
         return fail(format!(
-            "Une identité existe déjà dans {} : rien n'a été modifié",
+            "An identity already exists in {}: nothing was modified",
             home.display()
         ));
     }
@@ -282,7 +281,7 @@ fn open_core(home: &Path) -> CliResult<Core> {
 }
 
 fn show_created(core: &Core) {
-    println!("Empreinte : {}", core.fingerprint());
+    println!("Fingerprint: {}", core.fingerprint());
 }
 
 fn run(cli: Cli) -> CliResult<()> {
@@ -297,13 +296,13 @@ fn run(cli: Cli) -> CliResult<()> {
             let key = passphrase::derive_key(&pass, &salt);
             let (core, phrase) =
                 Core::create(&home.join(DB_FILE), &key, &name, now(), &mut rand::rng())?;
-            println!("Identité créée.");
+            println!("Identity created.");
             show_created(&core);
             println!();
-            println!("Phrase de récupération (24 mots) :");
+            println!("Recovery phrase (24 words):");
             println!("{}", phrase.as_str());
             println!();
-            println!("Note-la hors ligne : elle seule permet de retrouver ton identité.");
+            println!("Write it down offline: it alone lets you recover your identity.");
         }
         Command::Recover { name } => {
             let mut phrase = Zeroizing::new(String::new());
@@ -319,9 +318,9 @@ fn run(cli: Cli) -> CliResult<()> {
                 now(),
                 &mut rand::rng(),
             )?;
-            println!("Identité retrouvée.");
+            println!("Identity recovered.");
             show_created(&core);
-            println!("Les contacts ne sont pas restaurés : ajoute-les de nouveau.");
+            println!("Contacts are not restored: add them again.");
         }
         Command::Whoami => println!("{}", open_core(&home)?.fingerprint()),
         Command::Card { display_name } => {
@@ -332,31 +331,27 @@ fn run(cli: Cli) -> CliResult<()> {
         }
         Command::Add { card, alias } => {
             let card = ContactCard::from_text(&card)
-                .map_err(|e| CliError(format!("Carte de contact invalide : {e}")))?;
+                .map_err(|e| CliError(format!("Invalid contact card: {e}")))?;
             let mut core = open_core(&home)?;
             let fp = core
                 .add_contact(&card, alias.as_deref(), now(), &mut rand::rng())
                 .map_err(|e| match e {
                     CoreError::StoreLocked => CliError::from(e),
-                    other => CliError(format!("Carte de contact invalide : {other}")),
+                    other => CliError(format!("Invalid contact card: {other}")),
                 })?;
-            println!("Contact ajouté : {fp}");
+            println!("Contact added: {fp}");
         }
         Command::Remove { contact } => {
             let mut core = open_core(&home)?;
             let fp = resolve(&core, &contact)?;
             core.remove_contact(&fp, now(), &mut rand::rng())?;
-            println!("Contact supprimé : {fp} (l'historique est conservé)");
+            println!("Contact removed: {fp} (the history is kept)");
         }
         Command::Contacts => {
             let core = open_core(&home)?;
             for c in core.contacts()? {
                 let alias = c.alias.as_deref().unwrap_or("-");
-                let state = if c.verified {
-                    "vérifié"
-                } else {
-                    "non vérifié"
-                };
+                let state = if c.verified { "verified" } else { "unverified" };
                 println!("{}  {}  {state}", printable(alias), c.fingerprint);
             }
         }
@@ -377,14 +372,14 @@ fn run(cli: Cli) -> CliResult<()> {
             fs::create_dir_all(&out)?;
             for bytes in &pending {
                 let packet = Packet::decode(bytes)
-                    .map_err(|e| CliError(format!("Paquet en file illisible : {e}")))?;
+                    .map_err(|e| CliError(format!("Queued packet unreadable: {e}")))?;
                 let path = write_packet(&out, &packet)?;
                 println!("{}", path.display());
             }
             match pending.len() {
-                0 => println!("0 paquet en attente"),
-                1 => println!("1 paquet en attente"),
-                n => println!("{n} paquets en attente"),
+                0 => println!("0 packets pending"),
+                1 => println!("1 packet pending"),
+                n => println!("{n} packets pending"),
             }
         }
         Command::Safety { contact, verified } => {
@@ -395,13 +390,13 @@ fn run(cli: Cli) -> CliResult<()> {
             }
             println!("{}", core.safety_number(&fp)?);
             if verified {
-                println!("Contact marqué comme vérifié.");
+                println!("Contact marked as verified.");
             }
         }
         Command::Log { limit } => {
             let core = open_core(&home)?;
             for (at, event) in core.transparency_log(limit)? {
-                // Le texte reprend des noms et alias choisis par d'autres.
+                // The text reuses names and aliases chosen by others.
                 println!("[{}] {}", format_time(at), printable(&event.describe()));
             }
         }
@@ -417,10 +412,10 @@ fn run(cli: Cli) -> CliResult<()> {
             let fp = resolve(&core, &contact)?;
             core.set_alias(&fp, &alias, now(), &mut rand::rng())
                 .map_err(|e| match e {
-                    CoreError::TooLarge => CliError("Alias trop long".to_owned()),
+                    CoreError::TooLarge => CliError("Alias too long".to_owned()),
                     other => other.into(),
                 })?;
-            println!("Alias de {fp} : {}", printable(&alias));
+            println!("Alias of {fp}: {}", printable(&alias));
         }
         Command::Link(cmd) => link(&home, cmd)?,
         Command::Node(cmd) => nodes::run(&home, cmd)?,
@@ -441,14 +436,14 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
                     return Err(e.into());
                 }
             };
-            // Le fichier contient le secret de liaison : jamais affiché.
+            // The file contains the link secret: never displayed.
             file.write(&offer.to_bytes())?;
-            println!("Offre de liaison écrite : {}", out.display());
-            println!("Elle est valable 10 minutes et ne sert qu'une fois.");
-            println!("Remets ce fichier au nouvel appareil par un canal que tu maîtrises.");
+            println!("Link offer written: {}", out.display());
+            println!("It is valid for 10 minutes and can be used only once.");
+            println!("Hand this file to the new device over a channel you control.");
         }
         LinkCommand::Request { offer, name, out } => {
-            // Tout est lu et vérifié avant de créer le dossier.
+            // Everything is read and checked before the directory is created.
             let bytes = read_limited(&offer, MAX_LINK_FILE_BYTES)?;
             let parsed = LinkOffer::from_bytes(&bytes)?;
             drop(bytes);
@@ -479,7 +474,7 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
                 Err(e) => Err(e.into()),
             };
             if let Err(e) = written {
-                // Aucun état à moitié prêt : un nouvel essai doit être possible.
+                // No half-ready state: a new attempt must be possible.
                 for suffix in ["", "-wal", "-shm", "-journal"] {
                     let _ = fs::remove_file(home.join(format!("{DB_FILE}{suffix}")));
                 }
@@ -490,12 +485,9 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
                 file.discard();
                 return Err(e);
             }
-            println!("Demande de liaison écrite : {}", out.display());
-            println!("Remets-la à l'appareil administrateur (`barking link accept`).");
-            println!(
-                "Supprime maintenant le fichier d'offre : {}",
-                offer.display()
-            );
+            println!("Link request written: {}", out.display());
+            println!("Hand it to the admin device (`barking link accept`).");
+            println!("Delete the offer file now: {}", offer.display());
         }
         LinkCommand::Accept {
             request,
@@ -506,12 +498,12 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
             let bytes = read_limited(&request, MAX_LINK_FILE_BYTES)?;
             let request = LinkRequest::from_bytes(&bytes)?;
             if history.as_ref().is_some_and(|h| *h == out) {
-                return fail("--out et --history doivent désigner deux fichiers différents");
+                return fail("--out and --history must name two different files");
             }
             let mut core = open_core(home)?;
-            // `link_device` consomme l'offre : toutes les sorties sont ouvertes
-            // et validées avant, pour ne pas perdre le paquet sur une erreur
-            // d'écriture.
+            // `link_device` consumes the offer: all outputs are opened and
+            // validated beforehand, so the bundle is not lost on a write
+            // error.
             let mut bundle_file = OutFile::open(&out)?;
             let mut history_file = match &history {
                 Some(path) => match OutFile::open(path) {
@@ -549,10 +541,10 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
             if let (Some(file), Some(archive)) = (history_file.as_mut(), &outcome.history) {
                 file.write(&archive.to_bytes())?;
             }
-            println!("Appareil lié : {}", printable(&request.name));
-            println!("Paquet de liaison écrit : {}", out.display());
+            println!("Device linked: {}", printable(&request.name));
+            println!("Link bundle written: {}", out.display());
             if let Some(path) = &history {
-                println!("Historique écrit : {}", path.display());
+                println!("History written: {}", path.display());
             }
             match packets {
                 Some(dir) => {
@@ -562,7 +554,7 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
                 }
                 None if !outcome.packets.is_empty() => {
                     println!(
-                        "{} paquet(s) à envoyer à tes contacts et appareils : `barking outbox`",
+                        "{} packet(s) to send to your contacts and devices: `barking outbox`",
                         outcome.packets.len()
                     );
                 }
@@ -582,36 +574,36 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
             };
             let mut core = open_core(home)?;
             core.finish_link(&bundle, archive.as_ref(), now())?;
-            println!("Liaison terminée.");
+            println!("Link completed.");
             show_created(&core);
             println!(
-                "Supprime maintenant les fichiers de liaison : l'offre, le paquet de liaison \
-                 et l'historique. Ils ne servent plus, et le paquet et l'historique \
-                 contiennent tes contacts et tes messages."
+                "Delete the link files now: the offer, the link bundle \
+                 and the history. They are no longer needed, and the bundle and the \
+                 history contain your contacts and your messages."
             );
         }
     }
     Ok(())
 }
 
-/// Lit un fichier d'au plus `max` octets : la taille est vérifiée avant la
-/// lecture, et la lecture elle-même est bornée.
+/// Reads a file of at most `max` bytes: the size is checked before
+/// reading, and the read itself is bounded.
 fn read_limited(path: &Path, max: usize) -> CliResult<Zeroizing<Vec<u8>>> {
     let too_large = || {
         CliError(format!(
-            "{} : fichier trop volumineux (au plus {max} octets)",
+            "{}: file too large (at most {max} bytes)",
             path.display()
         ))
     };
     let meta = fs::metadata(path)
-        .map_err(|e| CliError(format!("{} : lecture impossible ({e})", path.display())))?;
+        .map_err(|e| CliError(format!("{}: cannot read ({e})", path.display())))?;
     if !meta.is_file() {
-        return fail(format!("{} : ce n'est pas un fichier", path.display()));
+        return fail(format!("{}: not a file", path.display()));
     }
     if meta.len() > max as u64 {
         return Err(too_large());
     }
-    // Effacé à la destruction : l'offre contient le secret de liaison.
+    // Wiped on drop: the offer contains the link secret.
     let mut buf = Zeroizing::new(Vec::new());
     fs::File::open(path)?
         .take(max as u64 + 1)
@@ -622,8 +614,8 @@ fn read_limited(path: &Path, max: usize) -> CliResult<Zeroizing<Vec<u8>>> {
     Ok(buf)
 }
 
-/// Fichier de sortie ouvert à l'avance, en 0600 : une erreur d'écriture
-/// possible est connue avant toute action irréversible.
+/// Output file opened in advance, as 0600: a possible write error is
+/// known before any irreversible action.
 struct OutFile {
     file: fs::File,
     path: PathBuf,
@@ -631,7 +623,7 @@ struct OutFile {
 }
 
 impl OutFile {
-    /// Ouvre (ou crée) le fichier sans le vider.
+    /// Opens (or creates) the file without truncating it.
     fn open(path: &Path) -> CliResult<Self> {
         let created = !path.exists();
         let mut opts = fs::OpenOptions::new();
@@ -643,14 +635,14 @@ impl OutFile {
         }
         let file = opts.open(path).map_err(|e| {
             CliError(format!(
-                "{} : écriture impossible ({e}) ; rien n'a été modifié",
+                "{}: cannot write ({e}); nothing was modified",
                 path.display()
             ))
         })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            // Un fichier déjà présent garde ses droits à l'ouverture.
+            // A file that already exists keeps its permissions on open.
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
         Ok(Self {
@@ -667,15 +659,10 @@ impl OutFile {
             self.file.write_all(bytes)?;
             self.file.sync_all()
         })();
-        r.map_err(|e| {
-            CliError(format!(
-                "{} : écriture impossible ({e})",
-                self.path.display()
-            ))
-        })
+        r.map_err(|e| CliError(format!("{}: cannot write ({e})", self.path.display())))
     }
 
-    /// Abandon : un fichier créé par nous et resté vide est supprimé.
+    /// Abandon: a file we created and left empty is removed.
     fn discard(&mut self) {
         if self.created {
             let _ = fs::remove_file(&self.path);
@@ -683,11 +670,11 @@ impl OutFile {
     }
 }
 
-/// Crée le dossier des paquets s'il manque et vérifie qu'on peut y écrire.
+/// Creates the packets directory if missing and checks that it is writable.
 fn check_packets_dir(dir: &Path) -> CliResult<()> {
     let bad = |e: io::Error| {
         CliError(format!(
-            "{} : dossier des paquets inutilisable ({e}) ; rien n'a été modifié",
+            "{}: packets directory unusable ({e}); nothing was modified",
             dir.display()
         ))
     };
@@ -698,19 +685,19 @@ fn check_packets_dir(dir: &Path) -> CliResult<()> {
     Ok(())
 }
 
-/// Une ligne par message : `date  sens  statut  texte`. Le texte est
-/// assaini : un message ne peut ni ajouter de ligne ni piloter le terminal.
+/// One line per message: `date  direction  status  text`. The text is
+/// sanitized: a message can neither add a line nor drive the terminal.
 fn render_row(at: u64, direction: Direction, status: MessageStatus, body: &str) -> String {
     let arrow = match direction {
         Direction::Out => "→",
         Direction::In => "←",
     };
     let status = match (direction, status) {
-        (Direction::In, _) => "reçu",
-        (_, MessageStatus::Queued) => "en attente",
-        (_, MessageStatus::Sent) => "envoyé",
-        (_, MessageStatus::Delivered) => "livré",
-        (_, MessageStatus::Failed) => "échec",
+        (Direction::In, _) => "received",
+        (_, MessageStatus::Queued) => "pending",
+        (_, MessageStatus::Sent) => "sent",
+        (_, MessageStatus::Delivered) => "delivered",
+        (_, MessageStatus::Failed) => "failed",
     };
     format!(
         "{}  {arrow}  {status}  {}",
@@ -721,7 +708,7 @@ fn render_row(at: u64, direction: Direction, status: MessageStatus, body: &str) 
 
 fn resolve(core: &Core, who: &str) -> CliResult<Fingerprint> {
     core.resolve(who).map_err(|e| match e {
-        CoreError::UnknownContact => CliError(format!("Contact inconnu : {}", printable(who))),
+        CoreError::UnknownContact => CliError(format!("Unknown contact: {}", printable(who))),
         other => other.into(),
     })
 }
@@ -733,14 +720,14 @@ fn write_packet(dir: &Path, packet: &Packet) -> CliResult<PathBuf> {
     Ok(path)
 }
 
-/// Où va l'accusé d'un message reçu.
+/// Where the receipt of a received message goes.
 #[derive(Clone, Copy)]
 enum AckSink<'a> {
-    /// Aucun dossier de sortie : l'accusé n'est pas écrit.
+    /// No output directory: the receipt is not written.
     Unwritten,
-    /// Écrit en `.pkt` dans ce dossier.
+    /// Written as `.pkt` in this directory.
     Dir(&'a Path),
-    /// Rangé dans la file d'envoi du cœur (déposé par la synchronisation).
+    /// Stored in the core's send queue (dropped by the sync).
     Queued,
 }
 
@@ -750,7 +737,7 @@ impl<'a> From<Option<&'a Path>> for AckSink<'a> {
     }
 }
 
-/// Affiche le résultat du traitement d'un paquet reçu (fichier ou nœud).
+/// Shows the result of processing a received packet (file or node).
 fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> CliResult<()> {
     match outcome {
         ReceiveOutcome::Message {
@@ -765,30 +752,27 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
                 AckSink::Dir(dir) => {
                     fs::create_dir_all(dir)?;
                     let path = write_packet(dir, &ack)?;
-                    println!("  accusé : {}", path.display());
+                    println!("  receipt: {}", path.display());
                 }
-                AckSink::Unwritten => println!("  accusé non écrit (aucun --out)"),
-                AckSink::Queued => println!("  accusé en file d'envoi"),
+                AckSink::Unwritten => println!("  receipt not written (no --out)"),
+                AckSink::Queued => println!("  receipt queued for sending"),
             }
         }
-        ReceiveOutcome::AckReceived { .. } => println!("{label} : livré ✓"),
-        ReceiveOutcome::Partial => println!("{label} : trame partielle"),
-        ReceiveOutcome::Duplicate => println!("{label} : doublon"),
-        ReceiveOutcome::NotForUs => println!("{label} : pas pour toi"),
-        ReceiveOutcome::Expired => println!("{label} : expiré"),
+        ReceiveOutcome::AckReceived { .. } => println!("{label}: delivered ✓"),
+        ReceiveOutcome::Partial => println!("{label}: partial frame"),
+        ReceiveOutcome::Duplicate => println!("{label}: duplicate"),
+        ReceiveOutcome::NotForUs => println!("{label}: not for you"),
+        ReceiveOutcome::Expired => println!("{label}: expired"),
         ReceiveOutcome::Quarantined { reason } => {
-            println!("{label} : mis en quarantaine : {reason}");
+            println!("{label}: quarantined: {reason}");
         }
         ReceiveOutcome::Synced { kind } => println!(
-            "{label} : synchronisé depuis un de tes appareils ({})",
+            "{label}: synced from one of your devices ({})",
             kind.label()
         ),
         ReceiveOutcome::CardUpdated { from, alias } => {
             let who = alias.unwrap_or_else(|| from.to_string());
-            println!(
-                "{label} : {} a mis à jour sa liste d'appareils",
-                printable(&who)
-            );
+            println!("{label}: {} updated their device list", printable(&who));
         }
     }
     Ok(())
@@ -802,7 +786,7 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
         let bytes = match fs::read(file) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("{label} : lecture impossible ({e})");
+                eprintln!("{label}: cannot read ({e})");
                 failed = true;
                 continue;
             }
@@ -811,18 +795,18 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
         show_outcome(&label.to_string(), outcome, AckSink::from(out))?;
     }
     if failed {
-        return fail("Certains fichiers n'ont pas pu être lus");
+        return fail("Some files could not be read");
     }
     core.mark_polled(now())?;
     Ok(())
 }
 
-/// Préfixe des lignes de suite d'un message : chaque ligne affichée reste
-/// attribuable, un texte reçu ne peut pas imiter la ligne d'un autre expéditeur.
+/// Prefix of a message's continuation lines: every displayed line stays
+/// attributable, a received text cannot imitate another sender's line.
 const CONTINUATION: &str = "  │ ";
 
-/// Message reçu, prêt à afficher : `[expéditeur] première ligne`, puis une
-/// ligne préfixée par [`CONTINUATION`] pour chaque ligne suivante.
+/// Received message, ready to display: `[sender] first line`, then one
+/// line prefixed by [`CONTINUATION`] for each following line.
 fn render_message(who: &str, text: &str) -> String {
     let mut lines = text.split('\n');
     let first = lines.next().unwrap_or("");
@@ -835,9 +819,9 @@ fn render_message(who: &str, text: &str) -> String {
     out
 }
 
-/// Caractères de mise en forme invisibles (catégorie Unicode Cf, dont les
-/// contrôles bidirectionnels) et séparateurs de ligne ou de paragraphe : ils
-/// peuvent réordonner ou masquer le texte affiché.
+/// Invisible formatting characters (Unicode category Cf, including the
+/// bidirectional controls) and line or paragraph separators: they can
+/// reorder or hide the displayed text.
 fn is_format_control(c: char) -> bool {
     matches!(
         c,
@@ -865,9 +849,9 @@ fn is_format_control(c: char) -> bool {
     )
 }
 
-/// Texte venu de l'extérieur, sur une seule ligne : les caractères de
-/// contrôle (séquences d'échappement du terminal, retours à la ligne) et de
-/// mise en forme invisibles sont remplacés ; seule la tabulation est gardée.
+/// Text from the outside, on a single line: control characters (terminal
+/// escape sequences, line breaks) and invisible formatting characters are
+/// replaced; only the tab is kept.
 fn printable(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -880,7 +864,7 @@ fn printable(s: &str) -> String {
         .collect()
 }
 
-/// Date UTC `AAAA-MM-JJ HH:MM:SS` (algorithme civil de Howard Hinnant).
+/// UTC date `YYYY-MM-DD HH:MM:SS` (Howard Hinnant's civil algorithm).
 fn format_time(secs: u64) -> String {
     let days = i64::try_from(secs / 86_400).unwrap_or(0);
     let rem = secs % 86_400;
@@ -914,8 +898,8 @@ mod tests {
 
     #[test]
     fn printable_strips_terminal_escapes() {
-        // Une seule ligne : le retour à la ligne est remplacé aussi (les
-        // messages multilignes passent par `render_message`).
+        // A single line: the line break is replaced too (multi-line
+        // messages go through `render_message`).
         assert_eq!(
             printable("a\u{1b}[31mb\nc\td"),
             "a\u{FFFD}[31mb\u{FFFD}c\td"
@@ -952,7 +936,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "1970-01-01 00:00:00  →  livré  a\u{FFFD}[bob] x\u{FFFD}[31m"
+            "1970-01-01 00:00:00  →  delivered  a\u{FFFD}[bob] x\u{FFFD}[31m"
         );
         assert!(!line.contains('\n'));
     }

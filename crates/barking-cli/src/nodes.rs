@@ -1,6 +1,6 @@
-//! Nœuds de relais configurés : `<home>/nodes.toml`, en mode 0600. Ce ne sont
-//! pas des données du cœur (adresse et identifiant publics d'un nœud choisi
-//! par l'utilisateur), mais la liste dit quels nœuds il utilise.
+//! Configured relay nodes: `<home>/nodes.toml`, mode 0600. This is not core
+//! data (the public address and identifier of a node chosen by the user),
+//! but the list does reveal which nodes they use.
 
 use std::fs;
 use std::io::Write;
@@ -18,7 +18,7 @@ const NODES_FILE: &str = "nodes.toml";
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NodeEntry {
     pub addr: SocketAddr,
-    /// Identifiant en base32 majuscule.
+    /// Identifier in uppercase base32.
     pub id: String,
 }
 
@@ -27,7 +27,7 @@ impl NodeEntry {
         parse_id(&self.id)
     }
 
-    /// Les 8 premiers caractères de l'identifiant : ce que le journal affiche.
+    /// The first 8 characters of the identifier: what the log shows.
     pub fn short_id(&self) -> String {
         short_id(&self.id)
     }
@@ -47,15 +47,14 @@ fn path(home: &Path) -> PathBuf {
     home.join(NODES_FILE)
 }
 
-/// Identifiant saisi : espaces retirés, majuscules, base32, puzzle résolu.
+/// Identifier as typed: whitespace trimmed, uppercased, base32, puzzle solved.
 fn parse_id(raw: &str) -> CliResult<NodeId> {
-    let id: NodeId = raw.trim().to_ascii_uppercase().parse().map_err(|_| {
-        CliError("Identifiant de nœud invalide (base32 de 52 caractères attendu)".into())
-    })?;
+    let id: NodeId =
+        raw.trim().to_ascii_uppercase().parse().map_err(|_| {
+            CliError("Invalid node identifier (52-character base32 expected)".into())
+        })?;
     if !id.puzzle_ok() {
-        return fail(
-            "Identifiant de nœud refusé : il ne résout pas le puzzle d'identité (20 bits)",
-        );
+        return fail("Node identifier rejected: it does not solve the identity puzzle (20 bits)");
     }
     Ok(id)
 }
@@ -66,12 +65,9 @@ pub fn load(home: &Path) -> CliResult<Vec<NodeEntry>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
-    let file: NodesFile = toml::from_str(&text).map_err(|_| {
-        CliError(format!(
-            "{NODES_FILE} illisible : corrige-le ou supprime-le"
-        ))
-    })?;
-    // Fichier éventuellement édité à la main : forme canonique, ou refus.
+    let file: NodesFile = toml::from_str(&text)
+        .map_err(|_| CliError(format!("{NODES_FILE} is unreadable: fix it or delete it")))?;
+    // File possibly edited by hand: canonical form, or rejection.
     file.nodes
         .into_iter()
         .map(|n| {
@@ -85,9 +81,9 @@ pub fn load(home: &Path) -> CliResult<Vec<NodeEntry>> {
 
 fn save(home: &Path, nodes: Vec<NodeEntry>) -> CliResult<()> {
     let text = toml::to_string(&NodesFile { nodes })
-        .map_err(|_| CliError("Erreur : écriture des nœuds impossible".into()))?;
-    // Fichier temporaire créé en 0600 (pas de fenêtre en lecture large),
-    // puis renommé : l'ancienne liste reste intacte en cas d'échec.
+        .map_err(|_| CliError("Error: cannot write the nodes".into()))?;
+    // Temporary file created as 0600 (no window of wide read access),
+    // then renamed: the old list stays intact on failure.
     let tmp = home.join(format!("{NODES_FILE}.tmp"));
     let _ = fs::remove_file(&tmp);
     let mut f = fs::OpenOptions::new()
@@ -104,31 +100,29 @@ fn save(home: &Path, nodes: Vec<NodeEntry>) -> CliResult<()> {
 
 pub fn run(home: &Path, cmd: NodeCommand) -> CliResult<()> {
     if !home.is_dir() {
-        return fail("Aucune identité dans ce dossier : lance `barking init`");
+        return fail("No identity in this directory: run `barking init`");
     }
     match cmd {
         NodeCommand::Add { address, id } => {
             let addr: SocketAddr = address.trim().parse().map_err(|_| {
-                CliError(
-                    "Adresse invalide (attendu : IP:port, par exemple 203.0.113.7:4433)".into(),
-                )
+                CliError("Invalid address (expected: IP:port, for example 203.0.113.7:4433)".into())
             })?;
             let id = parse_id(&id)?.to_string();
             let mut nodes = load(home)?;
             if nodes.iter().any(|n| n.id == id) {
-                return fail("Ce nœud est déjà configuré");
+                return fail("This node is already configured");
             }
             nodes.push(NodeEntry {
                 addr,
                 id: id.clone(),
             });
             save(home, nodes)?;
-            println!("Nœud {} ajouté ({addr})", short_id(&id));
+            println!("Node {} added ({addr})", short_id(&id));
         }
         NodeCommand::List => {
             let nodes = load(home)?;
             if nodes.is_empty() {
-                println!("Aucun nœud configuré");
+                println!("No node configured");
             }
             for n in nodes {
                 println!("{}  {}", n.id, n.addr);
@@ -140,10 +134,10 @@ pub fn run(home: &Path, cmd: NodeCommand) -> CliResult<()> {
             let before = nodes.len();
             nodes.retain(|n| n.id != id);
             if nodes.len() == before {
-                return fail("Nœud inconnu");
+                return fail("Unknown node");
             }
             save(home, nodes)?;
-            println!("Nœud {} retiré", short_id(&id));
+            println!("Node {} removed", short_id(&id));
         }
     }
     Ok(())

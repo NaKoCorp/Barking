@@ -1,4 +1,4 @@
-//! Tests de bout en bout du binaire `barking` (transport : fichiers).
+//! End-to-end tests of the `barking` binary (transport: files).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ fn barking(home: &Path) -> Command {
     cmd
 }
 
-/// Lance une commande qui doit réussir et rend sa sortie standard.
+/// Runs a command that must succeed and returns its standard output.
 fn ok(home: &Path, args: &[&str]) -> String {
     let out = barking(home)
         .args(args)
@@ -26,7 +26,7 @@ fn ok(home: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// Un appareil initialisé.
+/// An initialized device.
 fn party(name: &str) -> (TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -40,7 +40,7 @@ fn card(home: &Path, display: &str) -> String {
         .to_owned()
 }
 
-/// A et B se connaissent : `bob` chez A, `alice` chez B.
+/// A and B know each other: `bob` at A, `alice` at B.
 fn pair() -> ((TempDir, PathBuf), (TempDir, PathBuf)) {
     let a = party("tel-a");
     let b = party("tel-b");
@@ -49,7 +49,7 @@ fn pair() -> ((TempDir, PathBuf), (TempDir, PathBuf)) {
     (a, b)
 }
 
-/// Les fichiers `.pkt` d'un dossier, triés.
+/// The `.pkt` files of a directory, sorted.
 fn packets(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(dir)
         .unwrap()
@@ -70,7 +70,7 @@ fn full_conversation() {
     let out_a = da.path().join("out");
     let out_b = db.path().join("out");
 
-    let sent = ok(&a, &["send", "bob", "salut", "--out", path_arg(&out_a)]);
+    let sent = ok(&a, &["send", "bob", "hello", "--out", path_arg(&out_a)]);
     let pkts = packets(&out_a);
     assert_eq!(pkts.len(), 1);
     assert!(sent.contains(path_arg(&pkts[0])), "{sent}");
@@ -82,24 +82,24 @@ fn full_conversation() {
         &b,
         &["receive", path_arg(&pkts[0]), "--out", path_arg(&out_b)],
     );
-    assert!(got.contains("[alice] salut"), "{got}");
+    assert!(got.contains("[alice] hello"), "{got}");
     let acks = packets(&out_b);
     assert_eq!(acks.len(), 1);
 
     let ack = ok(&a, &["receive", path_arg(&acks[0])]);
-    assert!(ack.contains("livré"), "{ack}");
+    assert!(ack.contains("delivered"), "{ack}");
 }
 
 #[test]
 fn wrong_passphrase_exits_nonzero() {
     let (_d, home) = party("tel");
     barking(&home)
-        .env("BARKING_PASSPHRASE", "mauvaise")
+        .env("BARKING_PASSPHRASE", "wrong")
         .arg("whoami")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Phrase de passe incorrecte"));
-    // La bonne phrase fonctionne toujours.
+        .stderr(predicate::str::contains("Incorrect passphrase"));
+    // The right passphrase still works.
     barking(&home).arg("whoami").assert().success();
 }
 
@@ -111,7 +111,7 @@ fn init_twice_refused() {
         .args(["init", "--name", "autre"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("existe déjà"));
+        .stderr(predicate::str::contains("already exists"));
     assert_eq!(ok(&home, &["whoami"]), before);
 }
 
@@ -120,15 +120,15 @@ fn init_shows_fingerprint_and_recovery_phrase() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let out = ok(&home, &["init", "--name", "tel"]);
-    assert!(out.contains("Note-la hors ligne"), "{out}");
+    assert!(out.contains("Write it down offline"), "{out}");
     let phrase = out
         .lines()
         .find(|l| l.split_whitespace().count() == 24)
-        .expect("phrase de 24 mots");
+        .expect("24-word phrase");
     let fp = ok(&home, &["whoami"]);
     assert!(out.contains(fp.trim()), "{out}");
 
-    // `recover` relit la phrase sur l'entrée standard et retrouve l'identité.
+    // `recover` reads the phrase back from standard input and recovers the identity.
     let other = dir.path().join("autre");
     barking(&other)
         .args(["recover", "--name", "nouveau"])
@@ -143,7 +143,7 @@ fn log_shows_relay_view() {
     let ((da, a), (db, b)) = pair();
     let out_a = da.path().join("out");
     let out_b = db.path().join("out");
-    ok(&a, &["send", "bob", "salut", "--out", path_arg(&out_a)]);
+    ok(&a, &["send", "bob", "hello", "--out", path_arg(&out_a)]);
     ok(
         &b,
         &[
@@ -155,8 +155,8 @@ fn log_shows_relay_view() {
     );
     for home in [&a, &b] {
         let log = ok(home, &["log"]);
-        assert!(log.contains("Les relais voient"), "{log}");
-        assert!(!log.contains("salut"), "le journal ne montre pas le texte");
+        assert!(log.contains("Relays see"), "{log}");
+        assert!(!log.contains("hello"), "the log does not show the text");
     }
     let limited = ok(&a, &["log", "--limit", "1"]);
     assert_eq!(limited.lines().count(), 1, "{limited}");
@@ -168,15 +168,15 @@ fn contacts_and_safety_verification() {
     let list = ok(&a, &["contacts"]);
     assert!(list.contains("bob"), "{list}");
     assert!(list.contains(ok(&b, &["whoami"]).trim()), "{list}");
-    assert!(list.contains("non vérifié"), "{list}");
+    assert!(list.contains("unverified"), "{list}");
 
     let code = ok(&a, &["safety", "bob"]);
     assert_eq!(code, ok(&b, &["safety", "alice"]));
     let again = ok(&a, &["safety", "bob", "--verified"]);
     assert!(again.contains(code.trim()), "{again}");
     let list = ok(&a, &["contacts"]);
-    assert!(!list.contains("non vérifié"), "{list}");
-    assert!(list.contains("vérifié"), "{list}");
+    assert!(!list.contains("unverified"), "{list}");
+    assert!(list.contains("verified"), "{list}");
 }
 
 #[test]
@@ -187,22 +187,22 @@ fn unknown_contact_and_invalid_card_exit_nonzero() {
         .args(["send", "personne", "x", "--out", path_arg(&out)])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Contact inconnu"));
+        .stderr(predicate::str::contains("Unknown contact"));
     barking(&home)
         .args(["safety", "personne"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Contact inconnu"));
+        .stderr(predicate::str::contains("Unknown contact"));
     barking(&home)
-        .args(["add", "pas-une-carte"])
+        .args(["add", "not-a-card"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Carte de contact invalide"));
+        .stderr(predicate::str::contains("Invalid contact card"));
     barking(&home)
         .args(["add", "barking1:AAAA"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Carte de contact invalide"));
+        .stderr(predicate::str::contains("Invalid contact card"));
     assert!(!out.exists() || packets(&out).is_empty());
 }
 
@@ -211,23 +211,23 @@ fn receive_reports_duplicate_and_not_for_us() {
     let ((da, a), (db, b)) = pair();
     let out_a = da.path().join("out");
     let out_b = db.path().join("out");
-    ok(&a, &["send", "bob", "salut", "--out", path_arg(&out_a)]);
+    ok(&a, &["send", "bob", "hello", "--out", path_arg(&out_a)]);
     let pkt = packets(&out_a).remove(0);
 
     ok(&b, &["receive", path_arg(&pkt), "--out", path_arg(&out_b)]);
     let again = ok(&b, &["receive", path_arg(&pkt), "--out", path_arg(&out_b)]);
-    assert!(again.contains("doublon"), "{again}");
-    assert!(!again.contains("salut"), "{again}");
+    assert!(again.contains("duplicate"), "{again}");
+    assert!(!again.contains("hello"), "{again}");
 
-    // Mon propre paquet n'est pas pour moi.
+    // My own packet is not for me.
     let mine = ok(&a, &["receive", path_arg(&pkt)]);
-    assert!(mine.contains("pas pour toi"), "{mine}");
+    assert!(mine.contains("not for you"), "{mine}");
 
-    // Un fichier illisible n'est pas pour moi non plus.
+    // An unreadable file is not for me either.
     let junk = da.path().join("junk.pkt");
-    fs::write(&junk, b"n'importe quoi").unwrap();
+    fs::write(&junk, b"anything").unwrap();
     let out = ok(&b, &["receive", path_arg(&junk)]);
-    assert!(out.contains("pas pour toi"), "{out}");
+    assert!(out.contains("not for you"), "{out}");
 }
 
 #[test]
@@ -248,20 +248,20 @@ fn remove_then_readd() {
     );
 
     let removed = ok(&a, &["remove", "bob"]);
-    assert!(removed.contains("supprimé"), "{removed}");
+    assert!(removed.contains("removed"), "{removed}");
     assert!(!ok(&a, &["contacts"]).contains("bob"));
     barking(&a)
         .args(["send", "bob", "deux", "--out", path_arg(&out_a)])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Contact inconnu"));
+        .stderr(predicate::str::contains("Unknown contact"));
     barking(&a)
         .args(["remove", "bob"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Contact inconnu"));
+        .stderr(predicate::str::contains("Unknown contact"));
 
-    // Rajouté, il redevient joignable.
+    // Added back, they become reachable again.
     ok(&a, &["add", &card(&b, "Bob"), "--alias", "bob"]);
     let before = packets(&out_a).len();
     ok(&a, &["send", "bob", "trois", "--out", path_arg(&out_a)]);
@@ -280,13 +280,13 @@ fn outbox_rewrites_unacked_packets() {
     let out_b = db.path().join("out");
     let again = da.path().join("again");
 
-    ok(&a, &["send", "bob", "salut", "--out", path_arg(&out_a)]);
+    ok(&a, &["send", "bob", "hello", "--out", path_arg(&out_a)]);
     let pkts = packets(&out_a);
     assert_eq!(pkts.len(), 1);
 
-    // Non acquitté : le paquet est réécrit à l'identique.
+    // Not acknowledged: the packet is rewritten identically.
     let listed = ok(&a, &["outbox", "--out", path_arg(&again)]);
-    assert!(listed.contains("1 paquet"), "{listed}");
+    assert!(listed.contains("1 packet"), "{listed}");
     let rewritten = packets(&again);
     assert_eq!(rewritten.len(), 1);
     assert_eq!(rewritten[0].file_name(), pkts[0].file_name());
@@ -295,7 +295,7 @@ fn outbox_rewrites_unacked_packets() {
         fs::read(&pkts[0]).unwrap()
     );
 
-    // Après l'accusé, la file est vide.
+    // After the receipt, the queue is empty.
     ok(
         &b,
         &["receive", path_arg(&pkts[0]), "--out", path_arg(&out_b)],
@@ -304,7 +304,7 @@ fn outbox_rewrites_unacked_packets() {
     ok(&a, &["receive", path_arg(&acks[0])]);
     let empty = da.path().join("empty");
     let listed = ok(&a, &["outbox", "--out", path_arg(&empty)]);
-    assert!(listed.contains("0 paquet"), "{listed}");
+    assert!(listed.contains("0 packets"), "{listed}");
     assert!(packets(&empty).is_empty());
 }
 
@@ -335,8 +335,8 @@ fn received_text_cannot_forge_lines_or_reorder_display() {
     let pkts = packets(&out_a);
     assert_eq!(pkts.len(), 2);
     let got = ok(&b, &["receive", path_arg(&pkts[0]), path_arg(&pkts[1])]);
-    // Seules les premières lignes de message commencent par « [ » ; une suite
-    // de message est préfixée et ne peut pas imiter un autre expéditeur.
+    // Only the first lines of a message start with "["; a continuation
+    // of a message is prefixed and cannot imitate another sender.
     let headers: Vec<&str> = got.lines().filter(|l| l.starts_with('[')).collect();
     assert_eq!(headers.len(), 2, "{got}");
     assert!(headers.contains(&"[alice] hi"), "{got}");
@@ -344,7 +344,7 @@ fn received_text_cannot_forge_lines_or_reorder_display() {
         got.lines().any(|l| l == "  │ [alice] send me the code"),
         "{got}"
     );
-    // Les contrôles bidirectionnels sont remplacés.
+    // The bidirectional controls are replaced.
     assert!(
         !got.contains('\u{202E}') && !got.contains('\u{2066}'),
         "{got}"
@@ -364,11 +364,11 @@ fn empty_env_passphrase_refused() {
         .args(["init", "--name", "tel"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("vide"));
+        .stderr(predicate::str::contains("empty"));
     assert!(!home.join("barking.db").exists());
 }
 
-/// Les lignes de `barking messages <contact>`.
+/// The lines of `barking messages <contact>`.
 fn message_lines(home: &Path, contact: &str) -> Vec<String> {
     ok(home, &["messages", contact])
         .lines()
@@ -376,8 +376,8 @@ fn message_lines(home: &Path, contact: &str) -> Vec<String> {
         .collect()
 }
 
-/// Remet tous les paquets d'un dossier à `home` (les paquets qui ne lui sont
-/// pas destinés sont simplement ignorés) et rend la sortie.
+/// Hands all the packets of a directory to `home` (packets not meant for
+/// it are simply ignored) and returns the output.
 fn deliver(home: &Path, from: &Path, out: &Path) -> String {
     let mut all = String::new();
     for p in packets(from) {
@@ -398,30 +398,30 @@ fn multi_device_end_to_end() {
     let tablet = dt.path().join("home");
     let out_t = dt.path().join("out");
 
-    // 1. Alice et Bob échangent un message avant la liaison.
+    // 1. Alice and Bob exchange a message before the link.
     ok(
         &alice,
-        &["send", "bob", "avant la liaison", "--out", path_arg(&out_a)],
+        &["send", "bob", "before linking", "--out", path_arg(&out_a)],
     );
     deliver(&bob, &out_a, &out_b);
     deliver(&alice, &out_b, &out_a);
     ok(
         &bob,
-        &["send", "alice", "réponse de bob", "--out", path_arg(&out_b)],
+        &["send", "alice", "reply from bob", "--out", path_arg(&out_b)],
     );
-    // Les paquets de Bob reçus par Alice (l'accusé précédent est déjà traité).
+    // Bob's packets received by Alice (the previous receipt is already processed).
     let got = deliver(&alice, &out_b, &out_a);
-    assert!(got.contains("[bob] réponse de bob"), "{got}");
+    assert!(got.contains("[bob] reply from bob"), "{got}");
     let before = message_lines(&alice, "bob");
     assert_eq!(before.len(), 2, "{before:?}");
 
-    // 2. Liaison de la tablette, avec l'historique.
+    // 2. Linking the tablet, with the history.
     let files = dt.path().join("files");
     fs::create_dir_all(&files).unwrap();
-    let offer = files.join("offre.bin");
-    let request = files.join("demande.bin");
-    let bundle = files.join("liaison.bin");
-    let history = files.join("historique.bin");
+    let offer = files.join("offer.bin");
+    let request = files.join("request.bin");
+    let bundle = files.join("link.bin");
+    let history = files.join("history.bin");
     let shown = ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
     let secret = fs::read(&offer).unwrap();
     assert!(!shown.is_empty());
@@ -430,7 +430,7 @@ fn multi_device_end_to_end() {
             .as_bytes()
             .windows(8)
             .any(|w| secret.windows(8).any(|s| s == w)),
-        "l'offre ne doit pas être affichée"
+        "the offer must not be displayed"
     );
     ok(
         &tablet,
@@ -440,7 +440,7 @@ fn multi_device_end_to_end() {
             "--offer",
             path_arg(&offer),
             "--name",
-            "tablette",
+            "tablet",
             "--out",
             path_arg(&request),
         ],
@@ -461,8 +461,8 @@ fn multi_device_end_to_end() {
             path_arg(&link_out),
         ],
     );
-    assert!(accepted.contains("Appareil lié"), "{accepted}");
-    // La tablette refuse d'agir avant la fin de la liaison.
+    assert!(accepted.contains("Device linked"), "{accepted}");
+    // The tablet refuses to act before the link is finished.
     barking(&tablet)
         .args(["messages", "bob"])
         .assert()
@@ -478,14 +478,11 @@ fn multi_device_end_to_end() {
             path_arg(&history),
         ],
     );
-    assert!(
-        finished.contains("Supprime maintenant les fichiers de liaison"),
-        "{finished}"
-    );
+    assert!(finished.contains("Delete the link files now"), "{finished}");
 
-    // 3. Bob reçoit la nouvelle carte d'Alice, puis lui écrit : la tablette reçoit.
+    // 3. Bob receives Alice's new card, then writes to her: the tablet receives.
     let got = deliver(&bob, &link_out, &out_b);
-    assert!(got.contains("liste d'appareils"), "{got}");
+    assert!(got.contains("device list"), "{got}");
     let to_alice = db.path().join("to-alice");
     ok(
         &bob,
@@ -503,32 +500,26 @@ fn multi_device_end_to_end() {
     let got_a = deliver(&alice, &to_alice, &out_a);
     assert!(got_a.contains("[bob] bonjour aux deux"), "{got_a}");
 
-    // 4. Alice écrit depuis le téléphone : la tablette voit le message.
+    // 4. Alice writes from the phone: the tablet sees the message.
     let from_a = da.path().join("from-a");
     ok(
         &alice,
-        &[
-            "send",
-            "bob",
-            "depuis le téléphone",
-            "--out",
-            path_arg(&from_a),
-        ],
+        &["send", "bob", "from the phone", "--out", path_arg(&from_a)],
     );
     let got_t = deliver(&tablet, &from_a, &out_t);
-    assert!(got_t.contains("synchronisé"), "{got_t}");
+    assert!(got_t.contains("synced"), "{got_t}");
     deliver(&bob, &from_a, &out_b);
 
-    // 5. Historique présent sur la tablette, une ligne par message.
+    // 5. History present on the tablet, one line per message.
     let on_t = message_lines(&tablet, "bob");
     let on_a = message_lines(&alice, "bob");
     assert_eq!(on_t.len(), 4, "{on_t:?}");
     assert_eq!(on_a.len(), 4, "{on_a:?}");
     for text in [
-        "avant la liaison",
-        "réponse de bob",
+        "before linking",
+        "reply from bob",
         "bonjour aux deux",
-        "depuis le téléphone",
+        "from the phone",
     ] {
         assert_eq!(
             on_t.iter().filter(|l| l.contains(text)).count(),
@@ -536,14 +527,14 @@ fn multi_device_end_to_end() {
             "{text} : {on_t:?}"
         );
     }
-    // Le sens est affiché.
+    // The direction is displayed.
     assert!(
         on_t.iter()
-            .any(|l| l.contains('→') && l.contains("avant la liaison"))
+            .any(|l| l.contains('→') && l.contains("before linking"))
     );
     assert!(
         on_t.iter()
-            .any(|l| l.contains('←') && l.contains("réponse de bob"))
+            .any(|l| l.contains('←') && l.contains("reply from bob"))
     );
 }
 
@@ -552,7 +543,7 @@ fn multi_device_end_to_end() {
 fn link_files_are_private() {
     use std::os::unix::fs::PermissionsExt;
     let (d, alice) = party("tel-a");
-    let offer = d.path().join("offre.bin");
+    let offer = d.path().join("offer.bin");
     ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
     let mode = fs::metadata(&offer).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
@@ -561,9 +552,9 @@ fn link_files_are_private() {
 #[test]
 fn link_request_refuses_existing_home_and_oversized_files() {
     let (d, alice) = party("tel-a");
-    let offer = d.path().join("offre.bin");
+    let offer = d.path().join("offer.bin");
     ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
-    // Le dossier contient déjà une identité : rien n'est modifié.
+    // The directory already contains an identity: nothing is modified.
     let before = ok(&alice, &["whoami"]);
     barking(&alice)
         .args([
@@ -575,15 +566,15 @@ fn link_request_refuses_existing_home_and_oversized_files() {
             "x",
             "--out",
         ])
-        .arg(d.path().join("demande.bin"))
+        .arg(d.path().join("request.bin"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("existe déjà"));
+        .stderr(predicate::str::contains("already exists"));
     assert_eq!(ok(&alice, &["whoami"]), before);
-    // Fichier démesuré : refusé avant lecture, avant de créer le dossier.
-    let big = d.path().join("gros.bin");
+    // Oversized file: refused before reading, before creating the directory.
+    let big = d.path().join("big.bin");
     fs::write(&big, vec![0u8; 100 * 1024]).unwrap();
-    let tablet = d.path().join("tablette");
+    let tablet = d.path().join("tablet");
     barking(&tablet)
         .args([
             "link",
@@ -594,10 +585,10 @@ fn link_request_refuses_existing_home_and_oversized_files() {
             "x",
             "--out",
         ])
-        .arg(d.path().join("demande.bin"))
+        .arg(d.path().join("request.bin"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("trop volumineux"));
+        .stderr(predicate::str::contains("too large"));
     assert!(!tablet.exists());
 }
 
@@ -612,7 +603,7 @@ fn alias_command_renames_contact() {
         .args(["alias", "inconnu", "x"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Contact inconnu"));
+        .stderr(predicate::str::contains("Unknown contact"));
 }
 
 #[test]
@@ -620,8 +611,8 @@ fn link_accept_unusable_output_keeps_offer_usable() {
     let (d, alice) = party("tel-a");
     let dt = tempfile::tempdir().unwrap();
     let tablet = dt.path().join("home");
-    let offer = d.path().join("offre.bin");
-    let request = d.path().join("demande.bin");
+    let offer = d.path().join("offer.bin");
+    let request = d.path().join("request.bin");
     ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
     ok(
         &tablet,
@@ -636,16 +627,16 @@ fn link_accept_unusable_output_keeps_offer_usable() {
             path_arg(&request),
         ],
     );
-    let missing = d.path().join("absent").join("liaison.bin");
-    let bundle = d.path().join("liaison.bin");
-    // Sortie inutilisable : refusé, rien n'est consommé.
+    let missing = d.path().join("absent").join("link.bin");
+    let bundle = d.path().join("link.bin");
+    // Unusable output: refused, nothing is consumed.
     barking(&alice)
         .args(["link", "accept", "--request", path_arg(&request), "--out"])
         .arg(&missing)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("écriture impossible"));
-    // Idem pour le dossier des paquets (un fichier à la place d'un dossier).
+        .stderr(predicate::str::contains("cannot write"));
+    // Same for the packets directory (a file in place of a directory).
     let blocker = d.path().join("bloque");
     fs::write(&blocker, b"x").unwrap();
     barking(&alice)
@@ -655,9 +646,9 @@ fn link_accept_unusable_output_keeps_offer_usable() {
         .arg(blocker.join("paquets"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("dossier des paquets"));
+        .stderr(predicate::str::contains("packets directory"));
     assert!(!bundle.exists());
-    // Un second accept correct réussit avec la même offre.
+    // A second, correct accept succeeds with the same offer.
     ok(
         &alice,
         &[
@@ -677,12 +668,12 @@ fn link_accept_unusable_output_keeps_offer_usable() {
 fn link_request_unwritable_output_leaves_no_home() {
     use std::os::unix::fs::PermissionsExt;
     let (d, alice) = party("tel-a");
-    let offer = d.path().join("offre.bin");
+    let offer = d.path().join("offer.bin");
     ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
     let ro = d.path().join("ro");
     fs::create_dir(&ro).unwrap();
     fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap();
-    let tablet = d.path().join("tablette");
+    let tablet = d.path().join("tablet");
     let r = barking(&tablet)
         .args([
             "link",
@@ -693,14 +684,14 @@ fn link_request_unwritable_output_leaves_no_home() {
             "t",
             "--out",
         ])
-        .arg(ro.join("demande.bin"))
+        .arg(ro.join("request.bin"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("écriture impossible"));
+        .stderr(predicate::str::contains("cannot write"));
     drop(r);
     fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(!tablet.exists());
-    // Nouvel essai possible, et l'indication de supprimer l'offre s'affiche.
+    // A new attempt is possible, and the hint to delete the offer is displayed.
     let out = ok(
         &tablet,
         &[
@@ -711,21 +702,21 @@ fn link_request_unwritable_output_leaves_no_home() {
             "--name",
             "t",
             "--out",
-            path_arg(&d.path().join("demande.bin")),
+            path_arg(&d.path().join("request.bin")),
         ],
     );
-    assert!(out.contains("Supprime"), "{out}");
+    assert!(out.contains("Delete"), "{out}");
 }
 
 #[test]
 fn log_neutralises_control_characters_in_names() {
-    // Le nom d'appareil vient de la demande de liaison (choisi par T) et
-    // revient dans le journal de l'administrateur.
+    // The device name comes from the link request (chosen by T) and
+    // comes back in the admin's log.
     let (d, alice) = party("tel-a");
-    let offer = d.path().join("offre.bin");
-    let request = d.path().join("demande.bin");
-    let bundle = d.path().join("liaison.bin");
-    let tablet = d.path().join("tablette");
+    let offer = d.path().join("offer.bin");
+    let request = d.path().join("request.bin");
+    let bundle = d.path().join("link.bin");
+    let tablet = d.path().join("tablet");
     ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
     ok(
         &tablet,
@@ -756,7 +747,7 @@ fn log_neutralises_control_characters_in_names() {
     assert!(log.contains("tab\u{FFFD}[2Jlette"), "{log}");
 }
 
-// --- Synchronisation par les nœuds (transport réseau) ---
+// --- Sync through the nodes (network transport) ---
 
 mod node {
     use std::net::{SocketAddr, UdpSocket};
@@ -782,7 +773,7 @@ mod node {
             .clone()
     }
 
-    /// Un nœud réel dans ce processus, sur 127.0.0.1 (port libre).
+    /// A real node in this process, on 127.0.0.1 (free port).
     struct TestNode {
         addr: SocketAddr,
         id: String,
@@ -856,31 +847,28 @@ mod node {
         node_add(&b, node.addr, &node.id);
 
         let out = da.path().join("out");
-        ok(
-            &a,
-            &["send", "bob", "salut via nœud", "--out", path_arg(&out)],
-        );
+        ok(&a, &["send", "bob", "hi via node", "--out", path_arg(&out)]);
         let sync_a = ok(&a, &["sync"]);
         assert!(sync_a.contains(&node.id[..8]), "{sync_a}");
         assert_eq!(node.stats().packets, 1);
 
         let sync_b = ok(&b, &["sync"]);
-        assert!(sync_b.contains("[alice] salut via nœud"), "{sync_b}");
-        // L'accusé de Bob a effacé le paquet du nœud.
+        assert!(sync_b.contains("[alice] hi via node"), "{sync_b}");
+        // Bob's receipt erased the packet from the node.
         let st = node.stats();
         assert_eq!((st.packets, st.acks), (0, 1));
 
         let sync_a2 = ok(&a, &["sync"]);
-        assert!(sync_a2.contains("livré"), "{sync_a2}");
+        assert!(sync_a2.contains("delivered"), "{sync_a2}");
         assert_eq!(node.stats().packets, 0);
-        assert!(ok(&a, &["messages", "bob"]).contains("livré"));
+        assert!(ok(&a, &["messages", "bob"]).contains("delivered"));
 
         let log = ok(&a, &["log"]);
-        assert!(log.contains("paquets déposés sur le nœud"), "{log}");
-        assert!(log.contains("Boîtes relevées sur le nœud"), "{log}");
-        // Ni boîte ni adresse dans le journal.
+        assert!(log.contains("packets deposited on node"), "{log}");
+        assert!(log.contains("Mailboxes fetched from node"), "{log}");
+        // Neither mailbox nor address in the log.
         assert!(!log.contains("127.0.0.1"), "{log}");
-        // Aucun identifiant de boîte (hex ou base32) : aucune longue suite alphanumérique.
+        // No mailbox identifier (hex or base32): no long alphanumeric run.
         assert!(
             log.split(|c: char| !c.is_ascii_alphanumeric())
                 .all(|w| w.len() < 20),
@@ -888,8 +876,8 @@ mod node {
         );
     }
 
-    /// Aucun fichier sous `home` ne contient ces identifiants (octets bruts,
-    /// hex ou base32).
+    /// No file under `home` contains these identifiers (raw bytes,
+    /// hex or base32).
     fn assert_no_ids_in(home: &Path, ids: &[[u8; 16]]) {
         let mut stack = vec![home.to_path_buf()];
         while let Some(d) = stack.pop() {
@@ -907,11 +895,11 @@ mod node {
                         data_encoding::BASE32_NOPAD.encode(id).to_ascii_lowercase(),
                     ];
                     for f in &forms {
-                        assert!(!text.contains(f.as_str()), "{} contient {f}", p.display());
+                        assert!(!text.contains(f.as_str()), "{} contains {f}", p.display());
                     }
                     assert!(
                         !bytes.windows(16).any(|w| w == id),
-                        "{} contient un identifiant brut",
+                        "{} contains a raw identifier",
                         p.display()
                     );
                 }
@@ -919,17 +907,17 @@ mod node {
         }
     }
 
-    /// Nombre d'éléments reçus annoncé pour le nœud dans la sortie de `sync`.
+    /// Number of items received announced for the node in the output of `sync`.
     fn received(out: &str) -> usize {
-        let line = out.lines().find(|l| l.contains("éléments reçus")).unwrap();
-        let before = &line[..line.find(" éléments reçus").unwrap()];
+        let line = out.lines().find(|l| l.contains("items received")).unwrap();
+        let before = &line[..line.find(" items received").unwrap()];
         before.rsplit(' ').next().unwrap().parse().unwrap()
     }
 
-    /// Une boîte d'introduction inondée (n'importe qui peut la calculer) ne
-    /// retarde pas les sessions : le message de session arrive dans la même
-    /// synchronisation, la relève est enregistrée, et la relève des
-    /// introductions reprend là où elle s'était arrêtée.
+    /// A flooded introduction mailbox (anyone can compute it) does not
+    /// delay the sessions: the session message arrives in the same sync,
+    /// the poll is recorded, and the introduction poll resumes where it
+    /// had stopped.
     #[test]
     fn flooded_intro_mailbox_does_not_block_sessions() {
         use barking_core::packet::{DEFAULT_HOPS, Kind, Packet, PacketId, Tier};
@@ -943,8 +931,8 @@ mod node {
         node_add(&a, node.addr, &node.id);
         node_add(&b, node.addr, &node.id);
 
-        // Session établie par fichiers ; le premier contact donne la boîte
-        // d'introduction de Bob pour aujourd'hui.
+        // Session established through files; the first contact gives Bob's
+        // introduction mailbox for today.
         let out_a = da.path().join("out");
         ok(&a, &["send", "bob", "ouverture", "--out", path_arg(&out_a)]);
         let first = packets(&out_a).remove(0);
@@ -959,7 +947,7 @@ mod node {
             ok(&a, &["receive", path_arg(&p), "--out", path_arg(&out_a)]);
         }
 
-        // Inondation : 600 paquets L (~9,4 Mio) dans la boîte d'introduction.
+        // Flood: 600 L packets (~9.4 MiB) in the introduction mailbox.
         const JUNK: u32 = 600;
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -983,41 +971,47 @@ mod node {
             s.close().await;
         });
 
-        // Alice écrit sur la session, par le nœud.
+        // Alice writes on the session, through the node.
         let out2 = da.path().join("out2");
         ok(
             &a,
-            &["send", "bob", "par la session", "--out", path_arg(&out2)],
+            &[
+                "send",
+                "bob",
+                "through the session",
+                "--out",
+                path_arg(&out2),
+            ],
         );
         ok(&a, &["sync"]);
 
         let s1 = ok(&b, &["sync"]);
-        assert!(s1.contains("[alice] par la session"), "{s1}");
-        assert!(s1.contains("introductions : relève partielle"), "{s1}");
-        assert!(s1.contains("Relève enregistrée"), "{s1}");
+        assert!(s1.contains("[alice] through the session"), "{s1}");
+        assert!(s1.contains("introductions: partial poll"), "{s1}");
+        assert!(s1.contains("Poll recorded"), "{s1}");
         let r1 = received(&s1);
         assert!(r1 < JUNK as usize, "{r1}");
-        // L'état de synchronisation (positions, dépôts) est dans la base
-        // chiffrée : aucun identifiant de boîte ou de paquet en clair.
+        // The sync state (positions, deposits) is in the encrypted database:
+        // no mailbox or packet identifier in the clear.
         let sent = Packet::decode(&fs::read(packets(&out2).remove(0)).unwrap()).unwrap();
         let first_id = Packet::decode(&fs::read(&first).unwrap()).unwrap().id;
         let ids = [intro.0, sent.mailbox.0, sent.id.0, first_id.0];
         assert_no_ids_in(&a, &ids);
         assert_no_ids_in(&b, &ids);
 
-        // La synchronisation suivante reprend au curseur : le reste seulement.
+        // The next sync resumes at the cursor: only the rest.
         let s2 = ok(&b, &["sync"]);
-        assert!(!s2.contains("introductions : relève partielle"), "{s2}");
-        assert!(s2.contains("Relève enregistrée"), "{s2}");
+        assert!(!s2.contains("introductions: partial poll"), "{s2}");
+        assert!(s2.contains("Poll recorded"), "{s2}");
         let r2 = received(&s2);
         assert!(r1 + r2 >= JUNK as usize, "{r1} + {r2}");
         assert!(r2 < JUNK as usize - r1 + 50, "{r1} + {r2}");
     }
 
-    /// Une longue file d'envoi (accusés et messages) ne bloque pas la
-    /// relève : elle a lieu d'abord, les accusés partent en premier, et un
-    /// `RateLimited` sur les dépôts arrête les dépôts sans faire échouer le
-    /// nœud ; les synchronisations suivantes finissent sans redéposer.
+    /// A long send queue (receipts and messages) does not block the poll:
+    /// it happens first, the receipts go out first, and a `RateLimited` on
+    /// the deposits stops the deposits without failing the node; the
+    /// following syncs finish without redepositing.
     #[test]
     fn outbox_backlog_does_not_block_fetch() {
         let node = TestNode::start(0);
@@ -1046,35 +1040,35 @@ mod node {
                 &["send", "bob", &format!("m{i}"), "--out", path_arg(&out_a)],
             );
         }
-        // Seau du groupe 127.0.0.1 rechargé.
+        // Bucket of the 127.0.0.1 group refilled.
         std::thread::sleep(std::time::Duration::from_secs(3));
         let s1 = ok(&a, &["sync"]);
         for i in 0..3 {
             assert!(s1.contains(&format!("[bob] de Bob {i}")), "{s1}");
         }
-        assert!(s1.contains("Relève enregistrée"), "{s1}");
-        assert!(s1.contains("dépôts interrompus"), "{s1}");
-        // Les trois accusés sont partis avant les messages.
+        assert!(s1.contains("Poll recorded"), "{s1}");
+        assert!(s1.contains("deposits interrupted"), "{s1}");
+        // The three receipts went out before the messages.
         assert!(node.stats().acks >= 3);
         let mut done = false;
         for _ in 0..8 {
             std::thread::sleep(std::time::Duration::from_secs(3));
             let s = ok(&a, &["sync"]);
-            assert!(s.contains("Relève enregistrée"), "{s}");
-            assert!(!s.contains(" 0 déjà présents"), "{s}");
-            if !s.contains("dépôts interrompus") {
+            assert!(s.contains("Poll recorded"), "{s}");
+            assert!(!s.contains(" 0 already present"), "{s}");
+            if !s.contains("deposits interrupted") {
                 done = true;
                 break;
             }
         }
         assert!(done);
         assert_eq!(node.stats().packets, N as u64);
-        // Tout est déjà déposé : rien n'est redéposé.
+        // Everything is already deposited: nothing is redeposited.
         let s = ok(&a, &["sync"]);
-        assert!(s.contains(" 0 déposés"), "{s}");
+        assert!(s.contains(" 0 deposited"), "{s}");
     }
 
-    /// Budget de preuve épuisé : les accusés (sans preuve) partent quand même.
+    /// Proof budget exhausted: the receipts (without proof) still go out.
     #[test]
     fn pow_budget_exhausted_still_sends_acks() {
         let node = TestNode::start(0);
@@ -1098,14 +1092,14 @@ mod node {
             .clone();
         let s = String::from_utf8(got.stdout).unwrap();
         assert!(s.contains("[alice] bonjour"), "{s}");
-        assert!(s.contains("budget de preuve de travail épuisé"), "{s}");
-        // L'accusé est déposé (il a effacé le message), pas le message de Bob.
+        assert!(s.contains("proof-of-work budget exhausted"), "{s}");
+        // The receipt is deposited (it erased the message), not Bob's message.
         let st = node.stats();
         assert_eq!((st.packets, st.acks), (0, 1));
-        assert!(ok(&a, &["sync"]).contains("livré"));
+        assert!(ok(&a, &["sync"]).contains("delivered"));
     }
 
-    /// Un ancien fichier d'état en clair est migré dans la base puis effacé.
+    /// An old plaintext state file is migrated into the database then erased.
     #[test]
     fn legacy_plaintext_state_is_migrated_and_removed() {
         let node = TestNode::start(0);
@@ -1118,21 +1112,21 @@ mod node {
         );
         fs::write(home.join("sync_state.toml"), &legacy).unwrap();
         fs::write(home.join("fetch_cursors.toml"), "[[node]]\nid = \"x\"\n").unwrap();
-        assert!(ok(&home, &["sync"]).contains("Relève enregistrée"));
+        assert!(ok(&home, &["sync"]).contains("Poll recorded"));
         assert!(!home.join("sync_state.toml").exists());
         assert!(!home.join("fetch_cursors.toml").exists());
         assert_no_ids_in(&home, &[[0xab; 16]]);
     }
 
-    /// La relève des introductions a sa propre part du délai : dépassée, elle
-    /// est partielle, sans empêcher sessions, dépôts ni `mark_polled`.
+    /// The introduction poll has its own share of the deadline: when exceeded,
+    /// it is partial, without preventing sessions, deposits or `mark_polled`.
     #[test]
     fn intro_fetch_overrun_is_partial_not_failure() {
         let node = TestNode::start(0);
         let ((da, a), (db, b)) = pair();
         node_add(&a, node.addr, &node.id);
         node_add(&b, node.addr, &node.id);
-        // Session établie par fichiers.
+        // Session established through files.
         let out_a = da.path().join("out");
         ok(&a, &["send", "bob", "ouverture", "--out", path_arg(&out_a)]);
         let first = packets(&out_a).remove(0);
@@ -1148,7 +1142,13 @@ mod node {
         let out2 = da.path().join("out2");
         ok(
             &a,
-            &["send", "bob", "par la session", "--out", path_arg(&out2)],
+            &[
+                "send",
+                "bob",
+                "through the session",
+                "--out",
+                path_arg(&out2),
+            ],
         );
         ok(&a, &["sync"]);
         let got = barking(&b)
@@ -1159,37 +1159,34 @@ mod node {
             .get_output()
             .clone();
         let s = String::from_utf8(got.stdout).unwrap();
-        assert!(s.contains("[alice] par la session"), "{s}");
-        assert!(s.contains("introductions : relève partielle"), "{s}");
-        assert!(s.contains("Relève enregistrée"), "{s}");
-        // L'accusé de Bob est déposé (celui d'Alice pour « retour » attend
-        // son paquet : différé, non gardé par le nœud).
+        assert!(s.contains("[alice] through the session"), "{s}");
+        assert!(s.contains("introductions: partial poll"), "{s}");
+        assert!(s.contains("Poll recorded"), "{s}");
+        // Bob's receipt is deposited (Alice's for "retour" awaits its
+        // packet: deferred, not kept by the node).
         assert_eq!(node.stats().acks, 1);
     }
 
     #[test]
     fn sync_with_one_dead_node() {
         let live = TestNode::start(0);
-        // Nœud injoignable : un port UDP libéré aussitôt.
+        // Unreachable node: a UDP port released right away.
         let dead_addr = UdpSocket::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap();
         let dead_id = NodeId::from_public_key(&key(1).verifying_key()).to_string();
         let ((da, a), (_db, b)) = pair();
-        // Alice n'a que le nœud vivant ; seul Bob a aussi le nœud mort.
+        // Alice only has the live node; only Bob also has the dead node.
         node_add(&a, live.addr, &live.id);
         node_add(&b, dead_addr, &dead_id);
         node_add(&b, live.addr, &live.id);
         let out = da.path().join("out");
-        ok(
-            &a,
-            &["send", "bob", "par le vivant", "--out", path_arg(&out)],
-        );
+        ok(&a, &["send", "bob", "live", "--out", path_arg(&out)]);
         ok(&a, &["sync"]);
         assert_eq!(live.stats().packets, 1);
 
-        // Le nœud mort n'empêche pas de recevoir, mais `mark_polled` n'a pas lieu.
+        // The dead node does not prevent receiving, but `mark_polled` does not happen.
         let got = barking(&b)
             .arg("sync")
             .assert()
@@ -1198,13 +1195,13 @@ mod node {
             .clone();
         let stdout = String::from_utf8(got.stdout).unwrap();
         let stderr = String::from_utf8(got.stderr).unwrap();
-        assert!(stdout.contains("[alice] par le vivant"), "{stdout}");
+        assert!(stdout.contains("[alice] live"), "{stdout}");
         assert!(stderr.contains(&dead_id[..8]), "{stderr}");
-        assert!(stdout.contains("Relève non enregistrée"), "{stdout}");
+        assert!(stdout.contains("Poll not recorded"), "{stdout}");
 
-        // Avec le seul nœud vivant, la relève est enregistrée.
+        // With only the live node, the poll is recorded.
         ok(&b, &["node", "remove", &dead_id]);
-        assert!(ok(&b, &["sync"]).contains("Relève enregistrée"));
+        assert!(ok(&b, &["sync"]).contains("Poll recorded"));
     }
 
     #[test]
@@ -1212,7 +1209,7 @@ mod node {
         let (_d, home) = party("tel");
         let addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
         let id = NodeId::from_public_key(&key(0).verifying_key()).to_string();
-        // Espaces et minuscules tolérés.
+        // Whitespace and lowercase tolerated.
         ok(
             &home,
             &[
@@ -1232,7 +1229,7 @@ mod node {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
-        // Identifiant qui échoue au puzzle.
+        // Identifier that fails the puzzle.
         let bad = data_encoding::BASE32_NOPAD.encode(&[7u8; 32]);
         barking(&home)
             .args(["node", "add", "127.0.0.1:1", &bad])
@@ -1240,7 +1237,7 @@ mod node {
             .failure()
             .stderr(predicate::str::contains("puzzle"));
         barking(&home)
-            .args(["node", "add", "127.0.0.1:1", "pas-base32"])
+            .args(["node", "add", "127.0.0.1:1", "not-base32"])
             .assert()
             .failure();
         ok(&home, &["node", "remove", &id]);
