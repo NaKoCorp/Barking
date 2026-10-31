@@ -6,7 +6,8 @@
 //! it. Everything here relaxes the spec for a single shared address: private
 //! addresses allowed, diversity limits lifted, per-address caps raised,
 //! cadences brought down to `TICK`, and the test-only hooks of
-//! `ServerConfig` (`test_swallow_deposits`, `test_response_delay`).
+//! `ServerConfig` (`test_swallow_deposits`, `test_response_delay`,
+//! `test_send_rate`).
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
@@ -119,6 +120,8 @@ pub struct NodeSpec {
     pub swallow_deposits: bool,
     /// `ServerConfig::test_response_delay`.
     pub response_delay: Option<Duration>,
+    /// `ServerConfig::test_send_rate`.
+    pub send_rate: Option<u64>,
 }
 
 impl NodeSpec {
@@ -133,6 +136,7 @@ impl NodeSpec {
             pow_bits: TEST_BITS,
             swallow_deposits: false,
             response_delay: None,
+            send_rate: None,
         }
     }
 }
@@ -236,6 +240,7 @@ fn launch(
     }
     cfg.test_swallow_deposits = spec.swallow_deposits;
     cfg.test_response_delay = spec.response_delay;
+    cfg.test_send_rate = spec.send_rate;
     let stats = Arc::clone(&cfg.stats);
     let store = NodeStore::open(dir.path().join("node.db")).expect("node database");
     let (tx, rx) = oneshot::channel::<()>();

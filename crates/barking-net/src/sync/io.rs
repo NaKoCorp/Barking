@@ -58,7 +58,9 @@ pub trait Connector {
 /// Fetches on a kept connection (see `Session::fetch_resumable`).
 pub trait Fetcher: Connector {
     /// Fetches `mailboxes` from `resume`, at most `max_bytes` bytes and
-    /// `slice` long; `resume` gives where to resume afterwards.
+    /// `slice` long, starting with pages of `page_bytes` (see
+    /// `Session::set_page_bytes`); `resume` gives where to resume
+    /// afterwards, `page_bytes` the page size the link reached.
     fn fetch(
         &self,
         conn: &mut Self::Conn,
@@ -66,6 +68,7 @@ pub trait Fetcher: Connector {
         resume: &mut FetchResume,
         max_bytes: usize,
         slice: Duration,
+        page_bytes: &mut u32,
     ) -> impl Future<Output = Result<FetchReply, DialError>> + Send;
 }
 
@@ -108,6 +111,7 @@ impl Fetcher for QuicDialer {
         resume: &mut FetchResume,
         max_bytes: usize,
         slice: Duration,
+        page_bytes: &mut u32,
     ) -> Result<FetchReply, DialError> {
         if mailboxes.is_empty() {
             return Ok(FetchReply::Items {
@@ -116,7 +120,10 @@ impl Fetcher for QuicDialer {
             });
         }
         conn.set_fetch_deadline(slice);
-        match conn.fetch_resumable(mailboxes, resume, max_bytes).await {
+        conn.set_page_bytes(*page_bytes);
+        let r = conn.fetch_resumable(mailboxes, resume, max_bytes).await;
+        *page_bytes = conn.page_bytes();
+        match r {
             Ok(items) => Ok(FetchReply::Items {
                 items,
                 stop: conn.last_fetch_stop(),

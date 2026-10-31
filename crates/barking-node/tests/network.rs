@@ -921,16 +921,22 @@ async fn client_shrinks_page_after_reset() {
     let items = s.fetch(&[MailboxId([1; 16])]).await.unwrap();
     assert_eq!(items, vec![vec![0], vec![1], vec![2]]);
     assert!(!s.last_fetch_truncated());
+    // The default call deadline (120 s) holds two 256 KiB page timeouts,
+    // not two 1 MiB ones: the first page is asked at 256 KiB.
     assert_eq!(
         *asked.lock().unwrap(),
         vec![
-            (None, 1 << 20),
             (None, 256 << 10),
             (None, 64 << 10),
             (Some(1), 64 << 10),
             (Some(2), 64 << 10)
         ]
     );
+    assert_eq!(s.page_bytes(), 64 << 10);
+    // The size reached is kept for the next call on the session.
+    asked.lock().unwrap().clear();
+    s.fetch(&[MailboxId([1; 16])]).await.unwrap();
+    assert_eq!(asked.lock().unwrap()[0], (None, 64 << 10));
     srv.abort();
 }
 

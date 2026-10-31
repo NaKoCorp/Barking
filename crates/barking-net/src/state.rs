@@ -13,9 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 use barking_core::{Core, CoreError};
 use barking_packet::{MailboxId, Packet};
-use barking_proto::NodeId;
-use barking_proto::client::FetchResume;
+use barking_proto::client::{FETCH_PAGE_SIZES, FetchResume};
 use barking_proto::pow::content_hash;
+use barking_proto::{MIN_PAGE_BYTES, NodeId};
 use serde::{Deserialize, Serialize};
 
 use crate::discover::FallbackLog;
@@ -56,6 +56,10 @@ pub struct NetState {
     /// `DOWN_FAILED_SECS` it ranks after every other node, so that the next
     /// sync dials other nodes first.
     pub down_failed: HashMap<NodeId, u64>,
+    /// Fetch page size the link to a node reached (`Session::page_bytes`),
+    /// carried to the next sync: a slow link does not start again from the
+    /// largest page every time. Absent: `FETCH_PAGE_SIZES[0]`.
+    pub page_bytes: HashMap<NodeId, u32>,
 }
 
 /// Failure to read or write the state.
@@ -81,6 +85,7 @@ struct Stored {
     reread_at: Vec<(NodeId, MailboxId, u64)>,
     crosscheck_at: Vec<(NodeId, MailboxId, u64)>,
     down_failed: Vec<(NodeId, u64)>,
+    page_bytes: Vec<(NodeId, u32)>,
 }
 
 impl NetState {
@@ -96,6 +101,7 @@ impl NetState {
             reread_at: HashMap::new(),
             crosscheck_at: HashMap::new(),
             down_failed: HashMap::new(),
+            page_bytes: HashMap::new(),
         }
     }
 
@@ -135,6 +141,9 @@ impl NetState {
         let mut down_failed: Vec<(NodeId, u64)> =
             self.down_failed.iter().map(|(&n, &t)| (n, t)).collect();
         down_failed.sort_unstable_by_key(|(n, _)| n.0);
+        let mut page_bytes: Vec<(NodeId, u32)> =
+            self.page_bytes.iter().map(|(&n, &b)| (n, b)).collect();
+        page_bytes.sort_unstable_by_key(|(n, _)| n.0);
         let encode_err = |_| StateError::Encode;
         let stored = Stored {
             format: FORMAT,
@@ -147,6 +156,7 @@ impl NetState {
             reread_at: triples(&self.reread_at),
             crosscheck_at: triples(&self.crosscheck_at),
             down_failed,
+            page_bytes,
         };
         postcard::to_allocvec(&stored).map_err(encode_err)
     }
@@ -180,7 +190,28 @@ impl NetState {
                 .map(|(n, t)| (n, hour(t).min(hour(now))))
                 .filter(|(_, t)| now.saturating_sub(*t) < DOWN_FAILED_SECS)
                 .collect(),
+            page_bytes: stored
+                .page_bytes
+                .into_iter()
+                .map(|(n, b)| (n, b.clamp(MIN_PAGE_BYTES, FETCH_PAGE_SIZES[0])))
+                .collect(),
         })
+    }
+
+    /// Fetch page size to start from with `node` (see `page_bytes`).
+    pub fn page_bytes(&self, node: &NodeId) -> u32 {
+        self.page_bytes
+            .get(node)
+            .copied()
+            .unwrap_or(FETCH_PAGE_SIZES[0])
+    }
+
+    /// Records the page size the link to `node` reached; forgets those of
+    /// nodes no longer in the view.
+    pub fn set_page_bytes(&mut self, node: &NodeId, bytes: u32) {
+        self.page_bytes.insert(*node, bytes);
+        let view = &self.view;
+        self.page_bytes.retain(|n, _| view.get(n).is_some());
     }
 
     /// Fetch positions of `mailboxes` on `node`.

@@ -165,6 +165,10 @@ pub struct ServerConfig {
     /// Tests only, never read from the configuration: delays every response
     /// (`Hello` included) by this much, as a slow link would. Default: `None`.
     pub test_response_delay: Option<Duration>,
+    /// Tests only, never read from the configuration: sends every response
+    /// after `Hello` at this many bytes per second at most, as a slow link
+    /// would (the write deadline still applies). Default: `None`.
+    pub test_send_rate: Option<u64>,
 }
 
 /// Gauge: current value and maximum reached.
@@ -496,6 +500,7 @@ impl ServerConfig {
             dht_diversity: DiversityLimits::SPEC,
             test_swallow_deposits: false,
             test_response_delay: None,
+            test_send_rate: None,
         }
     }
 }
@@ -526,6 +531,8 @@ pub(crate) struct Shared {
     swallow_deposits: bool,
     /// Tests only: see `ServerConfig::test_response_delay`.
     response_delay: Option<Duration>,
+    /// Tests only: see `ServerConfig::test_send_rate`.
+    send_rate: Option<u64>,
 }
 
 impl Shared {
@@ -735,6 +742,7 @@ pub async fn run(
         dht: dht.clone(),
         swallow_deposits: config.test_swallow_deposits,
         response_delay: config.test_response_delay,
+        send_rate: config.test_send_rate,
     });
 
     if let Stored::Done(n) = shared
@@ -1031,6 +1039,28 @@ async fn respond(send: &mut SendStream, bytes: &[u8], limit: Duration) -> bool {
     }
 }
 
+/// Tests only: `respond`, writing at `rate` bytes per second at most.
+async fn respond_paced(send: &mut SendStream, bytes: &[u8], limit: Duration, rate: u64) -> bool {
+    const CHUNK: usize = 4096;
+    let sent = timeout(limit, async {
+        for chunk in bytes.chunks(CHUNK) {
+            send.write_all(chunk).await.ok()?;
+            let pause = chunk.len() as f64 / rate.max(1) as f64;
+            tokio::time::sleep(Duration::from_secs_f64(pause)).await;
+        }
+        send.finish().ok()?;
+        send.stopped().await.ok()
+    })
+    .await;
+    match sent {
+        Ok(Some(None)) => true,
+        _ => {
+            let _ = send.reset(STREAM_REFUSED.into());
+            false
+        }
+    }
+}
+
 fn encode(resp: &Response) -> Vec<u8> {
     frame::encode(resp, MAX_RESPONSE_BYTES).unwrap_or_else(|_| {
         // A page is bounded under `MAX_RESPONSE_BYTES`: does not happen.
@@ -1156,7 +1186,11 @@ async fn serve_stream(
     shared.test_delay().await;
     // Throughput counted on the size sent, whether the response is
     // acknowledged, cut, stopped by the peer or expired.
-    respond(&mut send, &bytes, shared.write_deadline(bytes.len())).await;
+    let limit = shared.write_deadline(bytes.len());
+    match shared.send_rate {
+        Some(rate) => respond_paced(&mut send, &bytes, limit, rate).await,
+        None => respond(&mut send, &bytes, limit).await,
+    };
     drop(held);
     state.charge(bytes.len());
 }

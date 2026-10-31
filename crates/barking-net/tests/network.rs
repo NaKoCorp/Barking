@@ -279,6 +279,16 @@ async fn restart_all(stopped: Vec<StoppedNode>, delay: Option<Duration>) -> Vec<
     out
 }
 
+/// Every node started again, its responses sent at `rate` bytes per second.
+async fn restart_paced(stopped: Vec<StoppedNode>, rate: u64) -> Vec<TestNode> {
+    let mut out = Vec::new();
+    for mut s in stopped {
+        s.spec.send_rate = Some(rate);
+        out.push(s.restart().await);
+    }
+    out
+}
+
 async fn stop_all(nodes: Vec<TestNode>) {
     barking_node::testing::stop_all(nodes).await;
 }
@@ -733,4 +743,84 @@ async fn no_ip_or_mailbox_in_logs_or_plaintext_state() {
             assert_clean(&f.display().to_string(), &bytes, &mailboxes, &addrs);
         }
     }
+}
+
+/// Messages per mailbox of `slow_link_backlog_and_intro_progress`: large
+/// (16 KiB) packets, about 200 KiB in all.
+const SLOW_BATCH: usize = 12;
+/// Throughput of the nodes' responses in that test.
+const SLOW_RATE: u64 = 32 * 1024;
+/// Deadline of each of Bob's syncs there: a single page holding the whole
+/// backlog of a mailbox (about 6 s at `SLOW_RATE`) would never fit.
+const SLOW_SYNC: Duration = Duration::from_secs(5);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_link_backlog_and_intro_progress() {
+    let _timing = TIMING.lock().await;
+    capture_logs();
+    let (mut alice, mut bob, fb, fa) = acquainted();
+    // Carol writes to Bob for the first time: his introduction mailbox.
+    let mut carol = client("carol", 3);
+    let rng = &mut rand::rng();
+    let card_b = bob.core.contact_card("Bob").unwrap();
+    let card_c = carol.core.contact_card("Carol").unwrap();
+    let fc = bob
+        .core
+        .add_contact(&card_c, Some("carol"), now(), rng)
+        .unwrap();
+    let fbc = carol
+        .core
+        .add_contact(&card_b, Some("bob"), now(), rng)
+        .unwrap();
+    let nodes = network(0..NODES, |_| {
+        barking_node::config::DEFAULT_REPLICATION_BYTES_PER_HOUR
+    })
+    .await;
+    let boot = seed(&nodes[4]);
+    for c in [&mut alice, &mut bob, &mut carol] {
+        warm_up(c, boot).await;
+    }
+    let from_alice = batch("session");
+    let from_carol = batch("intro");
+    for t in &from_alice[..SLOW_BATCH] {
+        alice.core.send_text(&fb, t, now(), rng).unwrap();
+    }
+    for t in &from_carol[..SLOW_BATCH] {
+        carol.core.send_text(&fbc, t, now(), rng).unwrap();
+    }
+    for c in [&mut alice, &mut carol] {
+        let r = sync_on(c, boot).await;
+        assert_eq!(r.first_copies, SLOW_BATCH, "{r:?}");
+    }
+
+    // A slow link from now on: every response at `SLOW_RATE`.
+    let nodes = restart_paced(halt_all(nodes).await, SLOW_RATE).await;
+    let mut syncs = 0;
+    while inbox(&bob, &fa).len() < 1 + SLOW_BATCH || inbox(&bob, &fc).len() < SLOW_BATCH {
+        syncs += 1;
+        assert!(syncs <= 8, "backlog stuck: {} syncs", syncs - 1);
+        let opts = SyncOptions {
+            deadline: SLOW_SYNC,
+            ..options(boot)
+        };
+        let r = sync(&mut bob.core, &QuicDialer, opts).await;
+        // Every sync takes its share of the backlog.
+        assert!(r.items_received > 0, "sync {syncs}: {r:?}");
+    }
+    assert!(
+        syncs > 1,
+        "the backlog fitted in one sync: the link is not slow"
+    );
+    // The page size each link reached is kept for the next syncs.
+    assert!(!state(&mut bob).page_bytes.is_empty());
+    eprintln!("slow link: backlog fetched in {syncs} syncs");
+    let mut got = inbox(&bob, &fa);
+    got.extend(inbox(&bob, &fc));
+    got.sort();
+    let mut want = vec!["hello".to_string()];
+    want.extend(from_alice[..SLOW_BATCH].iter().cloned());
+    want.extend(from_carol[..SLOW_BATCH].iter().cloned());
+    want.sort();
+    assert_eq!(got, want);
+    stop_all(nodes).await;
 }

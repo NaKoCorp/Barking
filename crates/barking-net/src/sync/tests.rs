@@ -73,6 +73,10 @@ struct Net {
     die_after_fetch: HashSet<NodeId>,
     /// Sessions that died, by connection number.
     dead: Mutex<HashSet<usize>>,
+    /// Page size a fetch from that node ends with (the link's).
+    page_after: HashMap<NodeId, u32>,
+    /// Page size each fetch started from.
+    pages: Mutex<Vec<(NodeId, u32)>>,
     calls: Mutex<Vec<Call>>,
 }
 
@@ -179,7 +183,12 @@ impl Fetcher for Net {
         resume: &mut FetchResume,
         _max_bytes: usize,
         _slice: Duration,
+        page_bytes: &mut u32,
     ) -> Result<FetchReply, DialError> {
+        self.pages.lock().unwrap().push((session.id, *page_bytes));
+        if let Some(&p) = self.page_after.get(&session.id) {
+            *page_bytes = p;
+        }
         let positioned: Vec<MailboxId> = mailboxes
             .iter()
             .filter(|m| resume.seen.get(&m.0).is_some_and(|s| *s > 0))
@@ -1465,4 +1474,45 @@ async fn request_on_a_dead_kept_session_redials_once() {
     assert!(holders(&mut core, &bytes).contains(&x));
     // Never failed for its dead session.
     assert!(score_of(&mut core, &x) > before, "{before}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn page_size_reached_is_carried_to_the_next_sync() {
+    let (_dir, mut core, mut net) = setup();
+    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let x = load(&mut core)
+        .view
+        .responsibles_by_score(&sessions[0], NOW)[0];
+    // A slow link to x: its pages ended at 64 KiB.
+    net.page_after.insert(x, 64 << 10);
+    sync(&mut core, &net, opts()).await;
+    let first: Vec<u32> = net
+        .pages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(n, _)| *n == x)
+        .map(|(_, p)| *p)
+        .collect();
+    assert_eq!(first[0], barking_proto::client::FETCH_PAGE_SIZES[0]);
+    assert_eq!(load(&mut core).page_bytes(&x), 64 << 10);
+    net.pages.lock().unwrap().clear();
+    net.page_after.clear();
+    sync(&mut core, &net, opts()).await;
+    let pages = net.pages.lock().unwrap().clone();
+    let to_x: Vec<u32> = pages
+        .iter()
+        .filter(|(n, _)| *n == x)
+        .map(|(_, p)| *p)
+        .collect();
+    assert_eq!(to_x.first(), Some(&(64 << 10)), "{pages:?}");
+}
+
+#[test]
+fn slices_hold_twice_a_first_page() {
+    use barking_proto::client::{FETCH_PAGE_SIZES, page_timeout};
+    // The smallest page fits twice in every slice; the session slice takes
+    // 256 KiB pages from the start.
+    assert!(INTRO_FETCH_SLICE >= page_timeout(barking_proto::MIN_PAGE_BYTES) * 2);
+    assert!(SESSION_FETCH_SLICE >= page_timeout(FETCH_PAGE_SIZES[1]) * 2);
 }

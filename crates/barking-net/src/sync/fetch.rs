@@ -247,13 +247,15 @@ where
                 return (end, 0, true);
             };
             let slice = slice_end.saturating_duration_since(Instant::now());
-            let fetch = self
-                .dialer
-                .fetch(&mut conn, group, &mut resume, max_bytes, slice);
+            let mut page = self.state.page_bytes(&node);
+            let fetch =
+                self.dialer
+                    .fetch(&mut conn, group, &mut resume, max_bytes, slice, &mut page);
             let reply = match tokio::time::timeout_at(self.deadline, fetch).await {
                 Err(_) => return (GroupEnd::Stop, 0, true),
                 Ok(r) => r,
             };
+            self.state.set_page_bytes(&node, page);
             match &reply {
                 Err(e) if !fresh && !redialled && dead_session(e) => {
                     redialled = true;
@@ -399,14 +401,16 @@ where
                     };
                     let mut resume = FetchResume::default();
                     let slice = end.saturating_duration_since(Instant::now());
-                    let fetch = self
-                        .dialer
-                        .fetch(&mut c, &one, &mut resume, bytes_left, slice);
+                    let mut page = self.state.page_bytes(&node);
+                    let fetch =
+                        self.dialer
+                            .fetch(&mut c, &one, &mut resume, bytes_left, slice, &mut page);
                     // Out of time: the session is dropped mid-request.
                     let Ok(reply) = tokio::time::timeout_at(end, fetch).await else {
                         self.save();
                         return;
                     };
+                    self.state.set_page_bytes(&node, page);
                     match &reply {
                         Err(e) if !fresh && dead_session(e) => {}
                         _ => break (c, reply),

@@ -17,7 +17,12 @@
 //!   announce a continuation;
 //! - each request has a timeout;
 //! - a page cut off in transit (slow link) is requested again smaller:
-//!   1 MiB, 256 KiB, 64 KiB then 16 KiB, before giving up.
+//!   1 MiB, 256 KiB, 64 KiB then 16 KiB, before giving up. The size reached
+//!   is kept by the session for the next calls (`Session::page_bytes`, which
+//!   a caller may carry to a later session), grows again when full pages
+//!   arrive fast, and a page is never asked bigger than what twice its
+//!   timeout (or, once pages were measured, twice their expected time) lets
+//!   fit in the time left: a short call on a slow link still makes progress.
 //!
 //! Picked-up items are returned as is: an acknowledgement whose mailbox field
 //! differs from the mailbox picked up is not discarded (the acknowledgement is stored in
@@ -47,9 +52,74 @@ pub const MAX_FETCH_BYTES: usize = 64 << 20;
 /// stream cut off or a timeout on a page (link too slow for the page
 /// within the node's write timeout), the same page is requested again smaller.
 pub const FETCH_PAGE_SIZES: [u32; 4] = [1 << 20, 256 << 10, 64 << 10, crate::MIN_PAGE_BYTES];
-/// Timeout for a pickup page: beyond the maximum write timeout of the node
-/// (60 s), so that the node is the one to cut off a link that is too slow.
+/// Longest timeout of a pickup page: beyond the maximum write timeout of
+/// the node (60 s), so that the node is the one to cut off a link that is
+/// too slow. Smaller pages get less (`page_timeout`).
 pub const FETCH_PAGE_TIMEOUT: Duration = Duration::from_secs(70);
+/// Lowest throughput a page's timeout allows for (`page_timeout`).
+pub const PAGE_TIMEOUT_RATE: u64 = 16 * 1024;
+/// Part of a page's timeout that does not depend on its size.
+pub const PAGE_TIMEOUT_BASE: Duration = Duration::from_secs(20);
+
+/// Timeout of a pickup page of `bytes`: `PAGE_TIMEOUT_BASE` plus the time
+/// it takes at `PAGE_TIMEOUT_RATE`, at most `FETCH_PAGE_TIMEOUT` (16 KiB:
+/// 21 s, 64 KiB: 24 s, 256 KiB: 36 s, 1 MiB: 70 s).
+pub fn page_timeout(bytes: u32) -> Duration {
+    let transfer = Duration::from_secs_f64(f64::from(bytes) / PAGE_TIMEOUT_RATE as f64);
+    PAGE_TIMEOUT_BASE
+        .saturating_add(transfer)
+        .min(FETCH_PAGE_TIMEOUT)
+}
+
+/// Index in `FETCH_PAGE_SIZES` of the largest size not above `bytes` (the
+/// smallest size below it).
+fn size_index(bytes: u32) -> usize {
+    FETCH_PAGE_SIZES
+        .iter()
+        .position(|&s| s <= bytes)
+        .unwrap_or(FETCH_PAGE_SIZES.len() - 1)
+}
+
+/// True if a page of size `FETCH_PAGE_SIZES[i]` fits twice in `left`: twice
+/// its expected time at the throughput `rate` measured in this call, or,
+/// before any measure, twice its timeout.
+fn page_fits(i: usize, left: Duration, rate: Option<f64>) -> bool {
+    let bytes = FETCH_PAGE_SIZES[i];
+    let need = match rate {
+        Some(r) if r > 0.0 => Duration::from_secs_f64(f64::from(bytes) / r),
+        _ => page_timeout(bytes),
+    };
+    need.saturating_mul(2) <= left
+}
+
+/// Size index a page is asked at: the session's `learned` one, smaller
+/// while it does not fit in `left` (see `page_fits`), never below the
+/// smallest.
+fn page_for(learned: usize, left: Duration, rate: Option<f64>) -> usize {
+    let mut i = learned.min(FETCH_PAGE_SIZES.len() - 1);
+    while i + 1 < FETCH_PAGE_SIZES.len() && !page_fits(i, left, rate) {
+        i += 1;
+    }
+    i
+}
+
+/// After a full page (one with a continuation) asked at size index `asked`,
+/// with the session at `learned` and `rate` measured: the next size up if
+/// twice its expected time fits within its own timeout, else `learned`.
+fn grown(learned: usize, asked: usize, rate: Option<f64>) -> usize {
+    match (asked.checked_sub(1), rate) {
+        (Some(up), Some(r)) if asked <= learned && r > 0.0 => {
+            let bytes = FETCH_PAGE_SIZES[up];
+            let expected = Duration::from_secs_f64(f64::from(bytes) / r);
+            if expected.saturating_mul(2) <= page_timeout(bytes) {
+                up
+            } else {
+                learned
+            }
+        }
+        _ => learned,
+    }
+}
 /// Maximum number of pages followed per `fetch` call.
 pub const MAX_FETCH_PAGES: usize = 1_000;
 /// Maximum duration of a `fetch` call.
@@ -219,6 +289,7 @@ impl Client {
             pow_budget: None,
             pow_spent: 0,
             fetch_deadline: FETCH_DEADLINE,
+            page: 0,
         })
     }
 }
@@ -346,6 +417,9 @@ pub struct Session {
     pow_spent: u64,
     /// Maximum duration of a `fetch` / `fetch_resumable` call.
     fetch_deadline: Duration,
+    /// Index in `FETCH_PAGE_SIZES` of the page size reached on this link,
+    /// kept from one call to the next.
+    page: usize,
 }
 
 impl Session {
@@ -360,6 +434,20 @@ impl Session {
     /// beyond that, partial pickup with what was taken.
     pub fn set_fetch_deadline(&mut self, d: Duration) {
         self.fetch_deadline = d;
+    }
+
+    /// Page size the next pickup starts from (one of `FETCH_PAGE_SIZES`,
+    /// the largest not above `bytes`): typically the `page_bytes` of an
+    /// earlier session with the same node.
+    pub fn set_page_bytes(&mut self, bytes: u32) {
+        self.page = size_index(bytes);
+    }
+
+    /// Page size reached on this link (one of `FETCH_PAGE_SIZES`): smaller
+    /// after pages cut off in transit, larger after full pages that came
+    /// fast.
+    pub fn page_bytes(&self) -> u32 {
+        FETCH_PAGE_SIZES[self.page]
     }
 
     /// Proof work spent by this session.
@@ -472,8 +560,8 @@ impl Session {
         let mut out = Vec::new();
         let mut bytes = 0usize;
         let mut pages = 0usize;
-        // Index into `FETCH_PAGE_SIZES`: does not go back up during a call.
-        let mut size = 0usize;
+        // Throughput of the last page that measured it (bytes per second).
+        let mut rate: Option<f64> = None;
         let deadline = tokio::time::Instant::now() + self.fetch_deadline;
         for chunk in &chunks {
             let mut cursor: Option<u64> = resume.start(chunk);
@@ -487,22 +575,26 @@ impl Session {
                     return Ok(out);
                 }
                 pages += 1;
+                let sent = tokio::time::Instant::now();
+                let size = page_for(self.page, deadline.saturating_duration_since(sent), rate);
                 let req = Request::Fetch {
                     mailboxes: chunk.to_vec(),
                     cursor,
                     max_bytes: FETCH_PAGE_SIZES[size],
                 };
-                let page = request_within(&self.conn, &req, FETCH_PAGE_TIMEOUT);
+                let page = request_within(&self.conn, &req, page_timeout(FETCH_PAGE_SIZES[size]));
                 let resp = match tokio::time::timeout_at(deadline, page).await {
                     Err(_) => {
                         self.stop = FetchStop::Deadline;
                         return Ok(out);
                     }
-                    // Stream cut off or too slow: same cursor, smaller page.
+                    // Stream cut off or too slow: same cursor, smaller page,
+                    // kept for the next pages and calls.
                     Ok(Err(ClientError::Frame(_) | ClientError::Timeout))
                         if size + 1 < FETCH_PAGE_SIZES.len() =>
                     {
-                        size += 1;
+                        self.page = self.page.max(size + 1);
+                        rate = None;
                         continue;
                     }
                     // Connection lost or page given up after pages already
@@ -552,6 +644,15 @@ impl Session {
                     items.truncate(MAX_FETCH_ITEMS);
                     return Ok(items);
                 }
+                // Pages too small to measure more than the round trip
+                // leave the estimate as it was.
+                if page_bytes >= crate::MIN_PAGE_BYTES as usize / 2 {
+                    let took = sent.elapsed().as_secs_f64().max(1e-3);
+                    rate = Some(page_bytes as f64 / took);
+                }
+                if next.is_some() {
+                    self.page = grown(self.page, size, rate);
+                }
                 bytes += page_bytes;
                 out.append(&mut items);
                 if let Some(n) = next {
@@ -590,4 +691,55 @@ async fn solve(content: [u8; 32], mailbox: MailboxId, bits: u8) -> Result<u64> {
         .await
         .map_err(|_| ClientError::Protocol("proof computation interrupted"))?
         .ok_or(ClientError::Protocol("required proof of work too strong"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: f64 = 1_048_576.0;
+
+    #[test]
+    fn page_timeouts_grow_with_the_page() {
+        let t: Vec<u64> = FETCH_PAGE_SIZES
+            .iter()
+            .map(|&b| page_timeout(b).as_secs())
+            .collect();
+        assert_eq!(t, [FETCH_PAGE_TIMEOUT.as_secs(), 36, 24, 21]);
+    }
+
+    #[test]
+    fn first_page_fits_twice_in_the_time_left() {
+        // No measure yet: twice the timeout.
+        assert_eq!(page_for(0, Duration::from_secs(140), None), 0);
+        assert_eq!(page_for(0, Duration::from_secs(90), None), 1);
+        assert_eq!(page_for(0, Duration::from_secs(45), None), 3);
+        // Never below the smallest, never above the learned size.
+        assert_eq!(page_for(0, Duration::from_secs(1), None), 3);
+        assert_eq!(page_for(2, Duration::from_secs(1_000), None), 2);
+        // Once measured: twice the expected time.
+        assert_eq!(page_for(0, Duration::from_secs(5), Some(MIB)), 0);
+        assert_eq!(page_for(0, Duration::from_secs(5), Some(32.0 * 1024.0)), 2);
+    }
+
+    #[test]
+    fn full_fast_pages_grow_the_size_one_step() {
+        // 64 KiB pages at 32 KiB/s: 256 KiB would take 8 s, within half
+        // its 36 s timeout.
+        assert_eq!(grown(2, 2, Some(32.0 * 1024.0)), 1);
+        // 256 KiB pages at 16 KiB/s: 1 MiB would take 64 s.
+        assert_eq!(grown(1, 1, Some(16.0 * 1024.0)), 1);
+        // A page asked smaller than learned (short time left) proves nothing.
+        assert_eq!(grown(1, 3, Some(MIB)), 1);
+        assert_eq!(grown(0, 0, Some(MIB)), 0);
+        assert_eq!(grown(2, 2, None), 2);
+    }
+
+    #[test]
+    fn set_page_bytes_takes_the_largest_size_not_above() {
+        assert_eq!(size_index(u32::MAX), 0);
+        assert_eq!(size_index(300 << 10), 1);
+        assert_eq!(size_index(64 << 10), 2);
+        assert_eq!(size_index(1), 3);
+    }
 }
