@@ -25,6 +25,9 @@ pub const REDEPOSIT_AFTER_SECS: u64 = 86_400;
 pub const FULL_RETRY_SECS: u64 = 600;
 /// Delay after a receipt that arrived before its packet (`UnknownAckTarget`).
 pub const DEFERRED_ACK_RETRY_SECS: u64 = 3_600;
+/// A message this close to expiry is not checked for losses: a node whose
+/// clock runs ahead may already have purged it.
+pub const LOSS_GRACE_SECS: u64 = 3_600;
 
 /// Deposit state of the outgoing packets, keyed by packet hash.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +49,6 @@ struct PacketState {
     resend_now: bool,
 }
 
-/// One deposit to make, in plan order.
 impl PacketState {
     /// A node the packet may be deposited on now.
     fn eligible(&self, node: &NodeId, now: u64) -> bool {
@@ -69,6 +71,7 @@ impl PacketState {
     }
 }
 
+/// One deposit to make, in plan order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedDeposit {
     pub bytes: Vec<u8>,
@@ -207,7 +210,8 @@ pub fn record_outcome(
 /// Loss check after fetching from `node`. A message of `outbox` is lost
 /// there when `node` had accepted it, its mailbox is among
 /// `fetched_mailboxes` (mailboxes fetched in full), it is missing from
-/// `fetched_items` and it has not expired. The node is recorded as having
+/// `fetched_items` and it is not within `LOSS_GRACE_SECS` of expiry. A
+/// receipt for it among `fetched_items` proves delivery. The node is recorded as having
 /// lost it (and no longer holds it), so a second call for the same fetch
 /// returns nothing. Returns the hashes of the lost messages.
 pub fn detect_losses(
@@ -219,14 +223,27 @@ pub fn detect_losses(
     now: u64,
 ) -> Vec<[u8; 32]> {
     let present: HashSet<[u8; 32]> = fetched_items.iter().map(|b| content_hash(b)).collect();
+    // A receipt in the mailbox replaced its message on the node: the
+    // message was delivered, not lost.
+    let acked: HashSet<[u8; 16]> = fetched_items
+        .iter()
+        .filter_map(|b| Packet::decode(b).ok())
+        .filter(|p| p.kind == Kind::Ack)
+        .filter_map(|p| {
+            p.payload
+                .get(..16)
+                .and_then(|t| <[u8; 16]>::try_from(t).ok())
+        })
+        .collect();
     let mut lost = Vec::new();
     for bytes in outbox {
         let Ok(p) = Packet::decode(bytes) else {
             continue;
         };
         if p.kind != Kind::Message
-            || u64::from(p.expires_at) <= now
+            || u64::from(p.expires_at) <= now.saturating_add(LOSS_GRACE_SECS)
             || !fetched_mailboxes.contains(&p.mailbox)
+            || acked.contains(&p.id.0)
         {
             continue;
         }
@@ -533,6 +550,33 @@ mod tests {
     }
 
     #[test]
+    fn ack_in_fetch_proves_message_not_lost() {
+        let mut ledger = Ledger::default();
+        let m = msg(1);
+        accept(&mut ledger, &m, 1, NOW);
+        // The recipient's receipt replaced the message on the node, and the
+        // outbox has not been refreshed yet.
+        let receipt = Packet {
+            kind: Kind::Ack,
+            hops: 8,
+            tier: Tier::S,
+            id: PacketId([42; 16]),
+            expires_at: (NOW + 86_400) as u32,
+            mailbox: MB,
+            payload: [[1u8; 16], [9u8; 16]].concat(),
+        }
+        .encode();
+        let ob = std::slice::from_ref(&m);
+        let lost = detect_losses(&mut ledger, &node(1), &[MB], &[receipt], ob, NOW + 60);
+        assert!(lost.is_empty());
+        assert_eq!(ledger.holders(&content_hash(&m)), vec![node(1)]);
+        // A receipt for another message proves nothing.
+        let other = packet(5, Kind::Ack, NOW + 86_400);
+        let lost = detect_losses(&mut ledger, &node(1), &[MB], &[other], ob, NOW + 60);
+        assert_eq!(lost, vec![content_hash(&m)]);
+    }
+
+    #[test]
     fn truncated_fetch_detects_no_loss() {
         let mut ledger = Ledger::default();
         let m = msg(1);
@@ -567,6 +611,15 @@ mod tests {
         assert!(lost.is_empty());
         // Nor planned.
         assert!(plan_deposits(&[m], &Ledger::default(), five, NOW + 100).is_empty());
+        // Within the grace before expiry a node with a fast clock may have
+        // purged it already: not checkable.
+        let m = packet(3, Kind::Message, NOW + LOSS_GRACE_SECS);
+        accept(&mut ledger, &m, 1, NOW);
+        let ob = std::slice::from_ref(&m);
+        assert!(detect_losses(&mut ledger, &node(1), &[MB], &[], ob, NOW).is_empty());
+        // Just beyond the grace it is checked.
+        let lost = detect_losses(&mut ledger, &node(1), &[MB], &[], ob, NOW - 1);
+        assert_eq!(lost, vec![content_hash(&m)]);
         // Receipts are never checked for losses.
         let a = ack(2);
         accept(&mut ledger, &a, 1, NOW);

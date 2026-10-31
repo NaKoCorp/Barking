@@ -91,9 +91,10 @@ impl ScoreEvent {
 
 /// Applies `event` to the node's score. `network_up` is false when no node
 /// answered during this synchronization: the client's own connection is at
-/// fault and no score goes down. A node falling below `AVOID_BELOW` is
-/// avoided for `AVOID_SECS` and the reason is returned (once, when the
-/// avoidance starts); its score is kept, not reset.
+/// fault and no score goes down. A negative event (`Lost`, `Failure`) that
+/// leaves the score below `AVOID_BELOW` avoids the node for `AVOID_SECS` and
+/// the reason is returned (once, when the avoidance starts); its score is
+/// kept, not reset. Other events never start an avoidance.
 pub fn apply(
     entry: &mut NodeEntry,
     event: ScoreEvent,
@@ -109,15 +110,20 @@ pub fn apply(
         entry.decayed_at = hour(now);
     }
     entry.score = Score::new(entry.score.0 + delta);
+    // Only a negative event starts an avoidance, so one always has a reason
+    // to report.
+    let reason = event.avoid_reason()?;
     if entry.score.0 < AVOID_BELOW && !entry.avoided(now) {
         entry.avoided_until = Some(hour(now.saturating_add(AVOID_SECS)));
-        return event.avoid_reason();
+        return Some(reason);
     }
     None
 }
 
 /// Recovery: +`RECOVERY_PER_DAY` per elapsed day for a score below
-/// `START_SCORE`, up to it; ends the avoidance once its date is reached.
+/// `START_SCORE`, up to it; ends the avoidance once its date is reached,
+/// even with a score still below `AVOID_BELOW` (the next negative event
+/// avoids it again, with its reason).
 pub fn decay(entry: &mut NodeEntry, now: u64) {
     // A date from the future (clock gone back) restarts the count now.
     entry.decayed_at = entry.decayed_at.min(hour(now));
@@ -225,6 +231,35 @@ mod tests {
         e.score = Score::new(0.9);
         decay(&mut e, NOW + 10 * DAY);
         assert_eq!(score(&e), 0.9);
+    }
+
+    #[test]
+    fn only_negative_events_start_avoidance() {
+        // The avoidance ran out while the score is still low.
+        let mut e = entry();
+        apply(&mut e, ScoreEvent::Lost, NOW, true);
+        apply(&mut e, ScoreEvent::Lost, NOW, true);
+        assert_eq!(score(&e), 0.0);
+        // A loss late in the avoidance keeps the score low past its end.
+        decay(&mut e, NOW + AVOID_SECS - DAY);
+        assert_eq!(
+            apply(&mut e, ScoreEvent::Lost, NOW + AVOID_SECS - DAY, true),
+            None
+        );
+        decay(&mut e, NOW + AVOID_SECS);
+        assert_eq!(e.avoided_until, None);
+        assert!(score(&e) < AVOID_BELOW, "decay does not re-avoid silently");
+        // Positive or neutral events never start an avoidance.
+        for ev in [ScoreEvent::Success, ScoreEvent::Found, ScoreEvent::Neutral] {
+            assert_eq!(apply(&mut e, ev, NOW + AVOID_SECS, true), None);
+            assert_eq!(e.avoided_until, None);
+        }
+        // The next negative event does, with its reason.
+        assert_eq!(
+            apply(&mut e, ScoreEvent::Failure, NOW + AVOID_SECS, true),
+            Some(AvoidReason::Unreachable)
+        );
+        assert!(e.avoided(NOW + AVOID_SECS));
     }
 
     #[test]

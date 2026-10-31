@@ -372,7 +372,10 @@ impl View {
         let rank = |id: &NodeId| self.entries.get(id).map(|e| (e.avoided(now), e.score.0));
         ids.sort_by(|a, b| match (rank(a), rank(b)) {
             (Some((av_a, sa)), Some((av_b, sb))) => av_a.cmp(&av_b).then(sb.total_cmp(&sa)),
-            _ => Ordering::Equal,
+            _ => {
+                debug_assert!(false, "responsibles come from the view");
+                Ordering::Equal
+            }
         });
         ids
     }
