@@ -14,28 +14,79 @@ pub const CARD_PREFIX: &str = "barking1:";
 /// Maximum size of a decoded card (bytes): that of an L-tier
 /// packet (16 KiB). A larger card could not be sent by a card
 /// update or a synchronisation. The heaviest possible one
-/// (`MAX_DEVICES` devices, names at their maximum size) is about
-/// 13.5 KiB (test `max_card_text_roundtrip`).
+/// (`MAX_DEVICES` devices, names at their maximum size, plus
+/// `MAX_CARD_NODES` hints of `MAX_NODE_HINT_BYTES` bytes) is about
+/// 15 KiB (test `max_card_text_roundtrip`).
 pub const MAX_CARD_BYTES: usize = 16 * 1024;
 /// Maximum size of the text (unpadded base64url of `MAX_CARD_BYTES`,
 /// about 22,000 characters), specific to the card: unrelated to the
 /// maximum size of a text message.
 pub const MAX_TEXT_LEN: usize = CARD_PREFIX.len() + MAX_CARD_BYTES.div_ceil(3) * 4;
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// Maximum number of node hints in a card.
+pub const MAX_CARD_NODES: usize = 3;
+/// Maximum size of one node hint (bytes). Hints are opaque to the core.
+pub const MAX_NODE_HINT_BYTES: usize = 512;
+
+/// A contact card. Serialized with serde (inside a message body or the
+/// encrypted store) as the length-prefixed bytes of [`ContactCard::encode`],
+/// so that every decode goes through [`ContactCard::decode`].
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ContactCard {
     pub display_name: String,
     pub devices: DeviceList,
     pub bundles: Vec<PrekeyBundle>,
-    #[serde(with = "sig_bytes")]
     pub sig: [u8; 64],
+    /// Opaque node hints (at most [`MAX_CARD_NODES`] of at most
+    /// [`MAX_NODE_HINT_BYTES`] bytes), covered by the signature. The core
+    /// never decodes them.
+    pub nodes: Vec<Vec<u8>>,
+}
+
+/// Original card format (no `nodes`): also the encoding of a card
+/// whose `nodes` is empty.
+#[derive(Serialize, Deserialize)]
+struct CardV1 {
+    display_name: String,
+    devices: DeviceList,
+    bundles: Vec<PrekeyBundle>,
+    #[serde(with = "sig_bytes")]
+    sig: [u8; 64],
+}
+
+/// Format with node hints, used only when there is at least one.
+#[derive(Serialize, Deserialize)]
+struct CardV2 {
+    display_name: String,
+    devices: DeviceList,
+    bundles: Vec<PrekeyBundle>,
+    #[serde(with = "sig_bytes")]
+    sig: [u8; 64],
+    nodes: Vec<Vec<u8>>,
+}
+
+fn check_nodes(nodes: &[Vec<u8>]) -> Result<()> {
+    if nodes.len() > MAX_CARD_NODES || nodes.iter().any(|n| n.len() > MAX_NODE_HINT_BYTES) {
+        return Err(CoreError::TooLarge);
+    }
+    Ok(())
 }
 
 impl ContactCard {
-    /// Signed bytes: postcard of the fields without `sig`.
-    fn signed_bytes(name: &str, devices: &DeviceList, bundles: &[PrekeyBundle]) -> Result<Vec<u8>> {
-        postcard::to_allocvec(&(name, devices, bundles))
-            .map_err(|_| CoreError::Malformed("card not serializable"))
+    /// Signed bytes: postcard of the fields without `sig`. Without `nodes`,
+    /// exactly the original form, so older cards still verify.
+    fn signed_bytes(
+        name: &str,
+        devices: &DeviceList,
+        bundles: &[PrekeyBundle],
+        nodes: &[Vec<u8>],
+    ) -> Result<Vec<u8>> {
+        let bytes = if nodes.is_empty() {
+            postcard::to_allocvec(&(name, devices, bundles))
+        } else {
+            postcard::to_allocvec(&(name, devices, bundles, nodes))
+        };
+        bytes.map_err(|_| CoreError::Malformed("card not serializable"))
     }
 
     pub fn sign(
@@ -43,25 +94,87 @@ impl ContactCard {
         name: &str,
         devices: DeviceList,
         bundles: Vec<PrekeyBundle>,
+        nodes: Vec<Vec<u8>>,
     ) -> Result<Self> {
         if name.len() > MAX_NAME_LEN {
             return Err(CoreError::TooLarge);
         }
-        let bytes = Self::signed_bytes(name, &devices, &bundles)?;
+        check_nodes(&nodes)?;
+        let bytes = Self::signed_bytes(name, &devices, &bundles, &nodes)?;
         let sig = root.sign(labels::CONTACT_CARD, &bytes);
         Ok(ContactCard {
             display_name: name.to_owned(),
             devices,
             bundles,
             sig,
+            nodes,
         })
+    }
+
+    /// Binary encoding: the original format when `nodes` is empty (byte for
+    /// byte), otherwise the same fields followed by `nodes`.
+    pub fn encode(&self) -> Vec<u8> {
+        // Serialization of a structure with no invalid state: cannot fail
+        // (postcard into a `Vec`).
+        if self.nodes.is_empty() {
+            postcard::to_allocvec(&CardV1 {
+                display_name: self.display_name.clone(),
+                devices: self.devices.clone(),
+                bundles: self.bundles.clone(),
+                sig: self.sig,
+            })
+        } else {
+            postcard::to_allocvec(&CardV2 {
+                display_name: self.display_name.clone(),
+                devices: self.devices.clone(),
+                bundles: self.bundles.clone(),
+                sig: self.sig,
+                nodes: self.nodes.clone(),
+            })
+        }
+        .unwrap_or_default()
+    }
+
+    /// Decodes a card (without verifying it): the full form first, then the
+    /// original form without `nodes`. Trailing bytes are an error, and so is
+    /// an explicit empty `nodes` (its canonical form omits it).
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if let Ok((c, [])) = postcard::take_from_bytes::<CardV2>(bytes) {
+            if c.nodes.is_empty() {
+                return Err(CoreError::Malformed("non canonical card"));
+            }
+            return Ok(ContactCard {
+                display_name: c.display_name,
+                devices: c.devices,
+                bundles: c.bundles,
+                sig: c.sig,
+                nodes: c.nodes,
+            });
+        }
+        match postcard::take_from_bytes::<CardV1>(bytes) {
+            Ok((c, [])) => Ok(ContactCard {
+                display_name: c.display_name,
+                devices: c.devices,
+                bundles: c.bundles,
+                sig: c.sig,
+                nodes: Vec::new(),
+            }),
+            Ok(_) => Err(CoreError::Malformed("extra bytes after the card")),
+            Err(_) => Err(CoreError::Malformed("unreadable card")),
+        }
     }
 
     pub fn verify(&self) -> Result<()> {
         if self.display_name.len() > MAX_NAME_LEN || self.bundles.len() > MAX_DEVICES {
             return Err(CoreError::TooLarge);
         }
-        let bytes = Self::signed_bytes(&self.display_name, &self.devices, &self.bundles)?;
+        check_nodes(&self.nodes)?;
+        let bytes = Self::signed_bytes(
+            &self.display_name,
+            &self.devices,
+            &self.bundles,
+            &self.nodes,
+        )?;
         self.devices
             .root
             .verify(labels::CONTACT_CARD, &bytes, &self.sig)?;
@@ -89,9 +202,7 @@ impl ContactCard {
     }
 
     pub fn to_text(&self) -> String {
-        // Serialization of a structure with no invalid state: cannot fail
-        // (postcard into a `Vec`).
-        let bytes = postcard::to_allocvec(self).unwrap_or_default();
+        let bytes = self.encode();
         format!(
             "{CARD_PREFIX}{}",
             data_encoding::BASE64URL_NOPAD.encode(&bytes)
@@ -109,13 +220,37 @@ impl ContactCard {
         let bytes = data_encoding::BASE64URL_NOPAD
             .decode(body.as_bytes())
             .map_err(|_| CoreError::Malformed("unreadable card"))?;
-        let (card, rest): (ContactCard, &[u8]) = postcard::take_from_bytes(&bytes)
-            .map_err(|_| CoreError::Malformed("unreadable card"))?;
-        if !rest.is_empty() {
-            return Err(CoreError::Malformed("extra bytes after the card"));
-        }
+        let card = Self::decode(&bytes)?;
         card.verify()?;
         Ok(card)
+    }
+}
+
+impl Serialize for ContactCard {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_bytes(&self.encode())
+    }
+}
+
+impl<'de> Deserialize<'de> for ContactCard {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = ContactCard;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an encoded contact card")
+            }
+            fn visit_bytes<E: serde::de::Error>(
+                self,
+                v: &[u8],
+            ) -> std::result::Result<Self::Value, E> {
+                if v.len() > MAX_CARD_BYTES {
+                    return Err(E::custom("card too large"));
+                }
+                ContactCard::decode(v).map_err(E::custom)
+            }
+        }
+        d.deserialize_bytes(V)
     }
 }
 
@@ -152,7 +287,7 @@ mod tests {
 
     fn card(f: &Fixture) -> ContactCard {
         let b = f.secrets.bundle(&f.dev, false);
-        ContactCard::sign(&f.root, "Alice", f.list.clone(), vec![b]).unwrap()
+        ContactCard::sign(&f.root, "Alice", f.list.clone(), vec![b], Vec::new()).unwrap()
     }
 
     #[test]
@@ -179,7 +314,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(11);
         let other = DeviceKeys::generate(&mut rng);
         let b = f.secrets.bundle(&other, false);
-        let c = ContactCard::sign(&f.root, "Alice", f.list.clone(), vec![b]).unwrap();
+        let c = ContactCard::sign(&f.root, "Alice", f.list.clone(), vec![b], Vec::new()).unwrap();
         assert!(c.verify().is_err());
         assert!(ContactCard::from_text(&c.to_text()).is_err());
     }
@@ -189,7 +324,7 @@ mod tests {
         let f = fixture();
         let b = f.secrets.bundle(&f.dev, true);
         assert!(b.opk.is_some());
-        let c = ContactCard::sign(&f.root, "Alice", f.list.clone(), vec![b]).unwrap();
+        let c = ContactCard::sign(&f.root, "Alice", f.list.clone(), vec![b], Vec::new()).unwrap();
         assert!(c.verify().is_err());
     }
 
@@ -197,7 +332,8 @@ mod tests {
     fn duplicate_bundle_rejected() {
         let f = fixture();
         let b = f.secrets.bundle(&f.dev, false);
-        let c = ContactCard::sign(&f.root, "A", f.list.clone(), vec![b.clone(), b]).unwrap();
+        let c = ContactCard::sign(&f.root, "A", f.list.clone(), vec![b.clone(), b], Vec::new())
+            .unwrap();
         assert!(c.verify().is_err());
     }
 
@@ -213,13 +349,14 @@ mod tests {
     fn long_name_rejected() {
         let f = fixture();
         let long = "x".repeat(65);
-        assert!(ContactCard::sign(&f.root, &long, f.list.clone(), vec![]).is_err());
+        assert!(ContactCard::sign(&f.root, &long, f.list.clone(), vec![], Vec::new()).is_err());
         let mut c = card(&f);
         c.display_name = long;
         assert!(c.verify().is_err());
     }
 
-    /// Heaviest card: `MAX_DEVICES` devices, names at their maximum size.
+    /// Heaviest card: `MAX_DEVICES` devices, names at their maximum size,
+    /// `MAX_CARD_NODES` hints of `MAX_NODE_HINT_BYTES` bytes.
     fn max_card() -> ContactCard {
         let mut rng = StdRng::seed_from_u64(12);
         let (root, _) = RootIdentity::generate(&mut rng);
@@ -232,7 +369,10 @@ mod tests {
             bundles.push(PrekeySecrets::generate(&mut rng, 0).bundle(&d, false));
         }
         let list = DeviceList::sign(&root, u64::MAX, certs).unwrap();
-        ContactCard::sign(&root, &"x".repeat(MAX_NAME_LEN), list, bundles).unwrap()
+        let nodes = (0..MAX_CARD_NODES)
+            .map(|i| vec![i as u8; MAX_NODE_HINT_BYTES])
+            .collect();
+        ContactCard::sign(&root, &"x".repeat(MAX_NAME_LEN), list, bundles, nodes).unwrap()
     }
 
     #[test]
@@ -250,6 +390,103 @@ mod tests {
             "A".repeat(MAX_TEXT_LEN - CARD_PREFIX.len() + 1)
         );
         assert_eq!(ContactCard::from_text(&over), Err(CoreError::TooLarge));
+    }
+
+    #[test]
+    fn max_card_still_fits() {
+        let c = max_card();
+        assert_eq!(c.nodes.len(), MAX_CARD_NODES);
+        assert!(c.encode().len() <= MAX_CARD_BYTES);
+        assert_eq!(ContactCard::decode(&c.encode()).unwrap(), c);
+        // Also inside a message body (serde form, length-prefixed).
+        let bytes = postcard::to_allocvec(&c).unwrap();
+        assert_eq!(postcard::from_bytes::<ContactCard>(&bytes).unwrap(), c);
+    }
+
+    /// Text of the card of `fixture()` / `card()` encoded before node hints
+    /// existed (captured on the previous format).
+    const CARD_V1_TEXT: &str = include_str!("../tests/data/card_v1.txt");
+
+    #[test]
+    fn card_without_nodes_is_byte_identical() {
+        let f = fixture();
+        let c = card(&f);
+        assert!(c.nodes.is_empty());
+        assert_eq!(c.to_text(), CARD_V1_TEXT.trim());
+        // An old card decodes with no nodes and still verifies.
+        let old = ContactCard::from_text(CARD_V1_TEXT).unwrap();
+        assert!(old.nodes.is_empty());
+        old.verify().unwrap();
+        assert_eq!(old, c);
+    }
+
+    #[test]
+    fn card_nodes_roundtrip() {
+        let f = fixture();
+        let b = f.secrets.bundle(&f.dev, false);
+        let nodes = vec![vec![1, 2, 3], vec![9; 512]];
+        let c =
+            ContactCard::sign(&f.root, "Alice", f.list.clone(), vec![b], nodes.clone()).unwrap();
+        c.verify().unwrap();
+        let back = ContactCard::from_text(&c.to_text()).unwrap();
+        assert_eq!(back.nodes, nodes);
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn card_nodes_are_signed() {
+        let f = fixture();
+        let b = f.secrets.bundle(&f.dev, false);
+        let mut c = ContactCard::sign(
+            &f.root,
+            "Alice",
+            f.list.clone(),
+            vec![b],
+            vec![vec![1, 2, 3]],
+        )
+        .unwrap();
+        c.nodes[0][1] ^= 1;
+        assert_eq!(c.verify(), Err(CoreError::InvalidSignature));
+        assert_eq!(
+            ContactCard::from_text(&c.to_text()),
+            Err(CoreError::InvalidSignature)
+        );
+        // Removing the hints changes the signed bytes too.
+        c.nodes.clear();
+        assert_eq!(c.verify(), Err(CoreError::InvalidSignature));
+    }
+
+    #[test]
+    fn card_nodes_limits() {
+        let f = fixture();
+        let sign = |nodes: Vec<Vec<u8>>| {
+            ContactCard::sign(&f.root, "Alice", f.list.clone(), vec![], nodes)
+        };
+        assert_eq!(sign(vec![vec![0]; 4]).map(|_| ()), Err(CoreError::TooLarge));
+        assert_eq!(
+            sign(vec![vec![0; 513]]).map(|_| ()),
+            Err(CoreError::TooLarge)
+        );
+        sign(vec![vec![0; 512]; 3]).unwrap();
+        // The same limits apply when decoding a card signed elsewhere.
+        for nodes in [vec![vec![0u8]; 4], vec![vec![0u8; 513]]] {
+            let mut c = sign(vec![vec![0]]).unwrap();
+            c.nodes = nodes;
+            assert_eq!(c.verify(), Err(CoreError::TooLarge));
+            assert_eq!(
+                ContactCard::from_text(&c.to_text()),
+                Err(CoreError::TooLarge)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_empty_nodes_rejected() {
+        let f = fixture();
+        let c = card(&f);
+        let mut bytes = c.encode();
+        bytes.push(0);
+        assert!(ContactCard::decode(&bytes).is_err());
     }
 
     #[test]

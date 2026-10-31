@@ -30,7 +30,7 @@ use std::path::Path;
 use rand_core::CryptoRng;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::contact::ContactCard;
+use crate::contact::{ContactCard, MAX_CARD_NODES, MAX_NODE_HINT_BYTES};
 use crate::fragment::Reassembler;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
@@ -64,6 +64,8 @@ const META_DEVICE_NAME: &str = "device_name";
 /// carried by the cards the core signs itself (link, card update
 /// sent to contacts). Absent: empty name.
 const META_DISPLAY_NAME: &str = "display_name";
+/// Node hints carried by my contact card (`set_card_nodes`).
+pub(super) const META_CARD_NODES: &str = "card_nodes";
 const META_PREKEYS: &str = "prekeys";
 const META_DEVICE_LIST: &str = "device_list";
 const META_LINKED_BUNDLES: &str = "linked_bundles";
@@ -387,11 +389,42 @@ impl Core {
                 .filter(|b| self.devices.certs.iter().any(|c| c.device == b.device))
                 .cloned(),
         );
-        let card = ContactCard::sign(root, display_name, self.devices.clone(), bundles)?;
+        let nodes = self
+            .store
+            .get_meta::<Vec<Vec<u8>>>(META_CARD_NODES)?
+            .unwrap_or_default();
+        let card = ContactCard::sign(root, display_name, self.devices.clone(), bundles, nodes)?;
         if self.store.get_meta::<String>(META_DISPLAY_NAME)?.as_deref() != Some(display_name) {
             self.store.put_meta(META_DISPLAY_NAME, &display_name)?;
         }
         Ok(card)
+    }
+
+    /// Sets the node hints carried by my contact card (opaque to the core:
+    /// at most [`MAX_CARD_NODES`] of at most [`MAX_NODE_HINT_BYTES`] bytes
+    /// each, otherwise `TooLarge`). They appear in the next card signed.
+    pub fn set_card_nodes(&mut self, nodes: Vec<Vec<u8>>) -> Result<()> {
+        if nodes.len() > MAX_CARD_NODES || nodes.iter().any(|n| n.len() > MAX_NODE_HINT_BYTES) {
+            return Err(CoreError::TooLarge);
+        }
+        self.store.put_meta(META_CARD_NODES, &nodes)
+    }
+
+    /// Node hints carried by the cards of all my contacts, without
+    /// duplicates. A stored card that cannot be read is skipped.
+    pub fn contact_node_hints(&self) -> Result<Vec<Vec<u8>>> {
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        for row in self.store.list_contacts()? {
+            let Ok(card) = load_card(&row.card) else {
+                continue;
+            };
+            for n in card.nodes {
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Changes my display name, carried by the cards the core signs
@@ -562,11 +595,13 @@ impl Core {
     }
 
     /// Logs a transport event (deposit or poll on a node):
-    /// only `NodeDeposit` and `NodeFetch` are accepted.
+    /// only `NodeDeposit`, `NodeFetch` and `NodeAvoided` are accepted.
     pub fn log_transport_event(&mut self, event: TransparencyEvent, now: u64) -> Result<()> {
         if !matches!(
             event,
-            TransparencyEvent::NodeDeposit { .. } | TransparencyEvent::NodeFetch { .. }
+            TransparencyEvent::NodeDeposit { .. }
+                | TransparencyEvent::NodeFetch { .. }
+                | TransparencyEvent::NodeAvoided { .. }
         ) {
             return Err(CoreError::Malformed("transport event"));
         }
@@ -682,7 +717,7 @@ impl OwnDevices {
 }
 
 fn load_card(bytes: &[u8]) -> Result<ContactCard> {
-    postcard::from_bytes(bytes).map_err(|_| CoreError::Store("unreadable stored card".into()))
+    ContactCard::decode(bytes).map_err(|_| CoreError::Store("unreadable stored card".into()))
 }
 
 fn ser_state(state: &RatchetState) -> Result<Vec<u8>> {

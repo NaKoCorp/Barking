@@ -607,7 +607,15 @@ impl Core {
             .store
             .get_meta::<String>(META_DISPLAY_NAME)?
             .unwrap_or_default();
-        let card = ContactCard::sign(root, &display_name, devices.clone(), bundles)?;
+        let card = ContactCard::sign(
+            root,
+            &display_name,
+            devices.clone(),
+            bundles,
+            self.store
+                .get_meta::<Vec<Vec<u8>>>(super::META_CARD_NODES)?
+                .unwrap_or_default(),
+        )?;
         let contacts = self
             .store
             .list_contacts()?
@@ -794,8 +802,7 @@ impl Core {
                 {
                     return Err(BAD_CONTACT);
                 }
-                let bytes =
-                    postcard::to_allocvec(card).map_err(|_| CoreError::Malformed("card"))?;
+                let bytes = card.encode();
                 tx.upsert_contact(fp, &bytes, alias, snap.verified)?;
             }
             tx.put_meta(META_DEVICE_LIST, &plain.devices)?;
@@ -965,7 +972,7 @@ mod tests {
             .cloned()
             .collect();
         let list = DeviceList::sign(&a_root, good.devices.version + 1, only_a).unwrap();
-        let card = ContactCard::sign(&a_root, "", list.clone(), Vec::new()).unwrap();
+        let card = ContactCard::sign(&a_root, "", list.clone(), Vec::new(), Vec::new()).unwrap();
         let missing = LinkPlain {
             devices: list,
             card,

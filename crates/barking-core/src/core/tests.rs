@@ -358,7 +358,7 @@ fn mixed_card(
             vec![b]
         })
         .unwrap_or_default();
-    let card = ContactCard::sign(&mroot, "Alice", list, bundles).unwrap();
+    let card = ContactCard::sign(&mroot, "Alice", list, bundles, Vec::new()).unwrap();
     card.verify().unwrap();
     card
 }
@@ -412,12 +412,7 @@ fn ambiguous_sender_never_misattributed() {
     let card = mixed_card(&a.device.public(), None, &mut rng);
     // Alias sorted first: the old code would have chosen it.
     b.store
-        .upsert_contact(
-            card.fingerprint(),
-            &postcard::to_allocvec(&card).unwrap(),
-            "aa-mallory",
-            false,
-        )
+        .upsert_contact(card.fingerprint(), &card.encode(), "aa-mallory", false)
         .unwrap();
     let p = a
         .send_text(&b.fingerprint(), "from Alice", NOW, &mut rng)
@@ -1183,7 +1178,7 @@ fn card_for(
         .filter(|b| Some(&b.device) != skip)
         .cloned()
         .collect();
-    ContactCard::sign(root, "", list, bundles).unwrap()
+    ContactCard::sign(root, "", list, bundles, Vec::new()).unwrap()
 }
 
 /// Key packets of all of A's devices.
@@ -1447,7 +1442,7 @@ fn max_card(n: usize, rng: &mut StdRng) -> ContactCard {
         bundles.push(crate::handshake::PrekeySecrets::generate(rng, 0).bundle(&d, false));
     }
     let list = DeviceList::sign(&root, u64::MAX, certs).unwrap();
-    ContactCard::sign(&root, &"x".repeat(64), list, bundles).unwrap()
+    ContactCard::sign(&root, &"x".repeat(64), list, bundles, Vec::new()).unwrap()
 }
 
 /// Heaviest contents that carry a card. A contact's card
@@ -1632,7 +1627,7 @@ fn trapped_card_does_not_block_receive() {
     certs.push(DeviceCertificate::issue(&bob_root, &trap, "trap", NOW).unwrap());
     let list = DeviceList::sign(&bob_root, b.devices.version + 1, certs).unwrap();
     let bundles = vec![b.prekeys.bundle(&b.device, false), bundle];
-    let card = ContactCard::sign(&bob_root, "Bob", list, bundles).unwrap();
+    let card = ContactCard::sign(&bob_root, "Bob", list, bundles, Vec::new()).unwrap();
     b.root = Some(bob_root);
     let a_id = a.device.public().id();
     let body = Body::CardUpdate(Box::new(card));
@@ -1720,7 +1715,7 @@ fn card_update_refusals() {
         let mut certs = current.devices.certs.clone();
         certs.push(DeviceCertificate::issue(&root, extra, "vol", NOW).unwrap());
         let list = DeviceList::sign(&root, current.devices.version + 1, certs).unwrap();
-        ContactCard::sign(&root, "Alice", list, current.bundles.clone()).unwrap()
+        ContactCard::sign(&root, "Alice", list, current.bundles.clone(), Vec::new()).unwrap()
     };
     let cases = [
         (carol_card.clone(), "card of another contact"),
@@ -1760,6 +1755,7 @@ fn card_update_removing_sender_device() {
         "Alice",
         list,
         vec![a.prekeys.bundle(&a.device, false)],
+        Vec::new(),
     )
     .unwrap();
     let p = card_update(&mut t, bob, card.clone(), &mut rng);
@@ -1844,7 +1840,7 @@ fn card_update_same_version_divergent_list_refused() {
         .collect();
     let list = DeviceList::sign(root, current.devices.version, certs).unwrap();
     let bundles = vec![a.prekeys.bundle(&a.device, false)];
-    let divergent = ContactCard::sign(root, "Alice", list, bundles).unwrap();
+    let divergent = ContactCard::sign(root, "Alice", list, bundles, Vec::new()).unwrap();
     // Superseded but invalid card (altered signature): refused too.
     let mut forged = current.clone();
     forged.sig[0] ^= 1;
@@ -1996,4 +1992,98 @@ fn transport_state_roundtrip_and_key_rules() {
         a.transport_state("netsync").unwrap().as_deref(),
         Some(&b"persists"[..])
     );
+}
+
+#[test]
+fn contact_card_carries_card_nodes() {
+    let (_da, mut a) = party("a", 1);
+    let (_db, mut b) = party("b", 2);
+    let mut rng = StdRng::seed_from_u64(5);
+    assert!(a.contact_card("Alice").unwrap().nodes.is_empty());
+    let hints = vec![vec![1u8, 2, 3], vec![4u8; 512]];
+    a.set_card_nodes(hints.clone()).unwrap();
+    let card = a.contact_card("Alice").unwrap();
+    assert_eq!(card.nodes, hints);
+    card.verify().unwrap();
+    assert!(b.contact_node_hints().unwrap().is_empty());
+    b.add_contact(&card, Some("alice"), NOW, &mut rng).unwrap();
+    assert_eq!(b.contact_node_hints().unwrap(), hints);
+    // Another contact sharing a hint: no duplicate.
+    let (_dc, mut c) = party("c", 3);
+    c.set_card_nodes(vec![vec![4u8; 512], vec![7]]).unwrap();
+    b.add_contact(
+        &c.contact_card("Carol").unwrap(),
+        Some("carol"),
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    assert_eq!(
+        b.contact_node_hints().unwrap(),
+        vec![vec![1u8, 2, 3], vec![4u8; 512], vec![7]]
+    );
+}
+
+#[test]
+fn set_card_nodes_enforces_limits() {
+    let (_da, mut a) = party("a", 1);
+    assert_eq!(a.set_card_nodes(vec![vec![0]; 4]), Err(CoreError::TooLarge));
+    assert_eq!(
+        a.set_card_nodes(vec![vec![0; 513]]),
+        Err(CoreError::TooLarge)
+    );
+    a.set_card_nodes(vec![vec![0; 512]; 3]).unwrap();
+    a.set_card_nodes(Vec::new()).unwrap();
+    assert!(a.contact_card("Alice").unwrap().nodes.is_empty());
+}
+
+#[test]
+fn invalid_node_hint_is_ignored() {
+    // The core never decodes hints: arbitrary bytes do not prevent a card
+    // from being accepted.
+    let (_da, mut a) = party("a", 1);
+    let (_db, mut b) = party("b", 2);
+    a.set_card_nodes(vec![
+        vec![0xff; 40],
+        Vec::new(),
+        b"not a node card".to_vec(),
+    ])
+    .unwrap();
+    let card = a.contact_card("Alice").unwrap();
+    b.add_contact(&card, Some("alice"), NOW, &mut StdRng::seed_from_u64(0))
+        .unwrap();
+    assert_eq!(b.contact_node_hints().unwrap(), card.nodes);
+}
+
+#[test]
+fn log_transport_event_accepts_node_avoided() {
+    let mut p = pair();
+    let e = TransparencyEvent::NodeAvoided {
+        node: "ABCDEFGH".into(),
+        reason: crate::transparency::AvoidReason::Unreachable,
+    };
+    p.a.log_transport_event(e.clone(), NOW).unwrap();
+    assert!(
+        p.a.transparency_log(10)
+            .unwrap()
+            .iter()
+            .any(|(_, x)| *x == e)
+    );
+}
+
+#[test]
+fn card_nodes_survive_card_update_and_reload() {
+    let (_da, mut a) = party("a", 1);
+    let (_db, mut b) = party("b", 2);
+    a.set_card_nodes(vec![vec![5; 10]]).unwrap();
+    let card = a.contact_card("Alice").unwrap();
+    b.add_contact(&card, Some("alice"), NOW, &mut StdRng::seed_from_u64(0))
+        .unwrap();
+    assert_eq!(stored_card(&b, card.fingerprint()), card);
+    // Serde form (message bodies, own-card meta) round-trips too.
+    let bytes = postcard::to_allocvec(&Body::CardUpdate(Box::new(card.clone()))).unwrap();
+    let Body::CardUpdate(back) = postcard::from_bytes(&bytes).unwrap() else {
+        panic!("variant");
+    };
+    assert_eq!(*back, card);
 }

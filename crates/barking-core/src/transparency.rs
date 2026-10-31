@@ -107,6 +107,21 @@ pub enum TransparencyEvent {
         mailboxes: u32,
         received: u32,
     },
+    /// A node was set aside by the client's scoring (`node` is the short
+    /// identifier, never an address). Added last.
+    NodeAvoided {
+        node: String,
+        reason: AvoidReason,
+    },
+}
+
+/// Why a node was set aside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AvoidReason {
+    /// A message deposited there was lost.
+    MessageLost,
+    /// The node kept failing to answer.
+    Unreachable,
 }
 
 /// Type of synchronisation between my devices.
@@ -335,6 +350,13 @@ impl TransparencyEvent {
                  connection. Your introduction mailbox is computed from your public key: \
                  fetching it links your identity to this IP address."
             ),
+            Self::NodeAvoided { node, reason } => {
+                let why = match reason {
+                    AvoidReason::MessageLost => "a message deposited there was lost",
+                    AvoidReason::Unreachable => "it kept failing to answer",
+                };
+                format!("Node {node} is set aside for 7 days: {why}.")
+            }
         }
     }
 }
@@ -486,7 +508,41 @@ mod tests {
                 mailboxes: 5,
                 received: 3,
             },
+            TransparencyEvent::NodeAvoided {
+                node: "ABCDEFGH".into(),
+                reason: AvoidReason::MessageLost,
+            },
+            TransparencyEvent::NodeAvoided {
+                node: "ABCDEFGH".into(),
+                reason: AvoidReason::Unreachable,
+            },
         ]
+    }
+
+    #[test]
+    fn node_avoided_event_roundtrip() {
+        let e = TransparencyEvent::NodeAvoided {
+            node: "ABCDEFGH".into(),
+            reason: AvoidReason::MessageLost,
+        };
+        assert!(!e.is_security());
+        let bytes = postcard::to_allocvec(&e).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<TransparencyEvent>(&bytes).unwrap(),
+            e
+        );
+        assert_eq!(
+            e.describe(),
+            "Node ABCDEFGH is set aside for 7 days: a message deposited there was lost."
+        );
+        let u = TransparencyEvent::NodeAvoided {
+            node: "ABCDEFGH".into(),
+            reason: AvoidReason::Unreachable,
+        };
+        assert_eq!(
+            u.describe(),
+            "Node ABCDEFGH is set aside for 7 days: it kept failing to answer."
+        );
     }
 
     #[test]

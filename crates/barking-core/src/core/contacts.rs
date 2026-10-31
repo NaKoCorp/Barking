@@ -194,7 +194,7 @@ fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
     {
         return Err(CoreError::Malformed("card claiming one of my devices"));
     }
-    let bytes = postcard::to_allocvec(card).map_err(|_| CoreError::Malformed("card"))?;
+    let bytes = card.encode();
     let at = card
         .devices
         .certs

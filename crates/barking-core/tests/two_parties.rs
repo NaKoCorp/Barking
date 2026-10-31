@@ -1053,7 +1053,7 @@ fn revoked_device_refused_for_normal_and_initial() {
         .unwrap()
         .clone();
     let v3 = DeviceList::sign(&root, v2.devices.version + 1, vec![bob1_cert]).unwrap();
-    let card3 = ContactCard::sign(&root, "Bob", v3, vec![bob1_bundle]).unwrap();
+    let card3 = ContactCard::sign(&root, "Bob", v3, vec![bob1_bundle], Vec::new()).unwrap();
     alice
         .core
         .add_contact(&card3, Some("bob"), NOW, &mut rng)
