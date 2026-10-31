@@ -8,6 +8,8 @@ pub mod logging;
 pub mod rules;
 pub mod server;
 pub mod store;
+#[cfg(feature = "test-harness")]
+pub mod testing;
 
 pub use rules::{Policy, deposit, fetch};
 pub use store::{NodeStore, Stats};

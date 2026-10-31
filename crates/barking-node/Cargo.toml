@@ -7,6 +7,12 @@ edition = "2024"
 name = "barking-node"
 path = "src/main.rs"
 
+[features]
+# Test harness (`barking_node::testing`): local test networks for this crate's
+# and the client crates' integration tests. Never enabled by production
+# builds (scripts/repro-build.sh builds `-p barking-node` without features).
+test-harness = ["dep:tempfile"]
+
 [dependencies]
 barking-dht.workspace = true
 barking-packet.workspace = true
@@ -27,11 +33,14 @@ tracing.workspace = true
 # Plain SQLite: packets are end-to-end encrypted, the database holds no
 # secret. Specification distinct from the core's (SQLCipher).
 rusqlite = { version = "0.41.0", features = ["bundled"] }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The core (and therefore SQLCipher) only enters the tests: the node binary
 # does not depend on it (resolver 3, no unification of dev dependencies).
 barking-core.workspace = true
+# This crate's own tests use the harness.
+barking-node = { workspace = true, features = ["test-harness"] }
 rustls.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }

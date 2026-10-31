@@ -3,94 +3,19 @@
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, UdpSocket};
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_dht::{BootstrapEntry, DiversityLimits, distance, mailbox_key};
+use barking_node::Policy;
 use barking_node::config::{DEFAULT_REPLICATION_BYTES_PER_HOUR, DhtConfig};
-use barking_node::server::{self, ServerConfig, ServerStats};
-use barking_node::{NodeStore, Policy};
+use barking_node::testing::{
+    LOCAL, LONG, NodeSpec, TEST_BITS, TICK, TestNode as Node, anon, id_of, key, known_by, network,
+    start_dht, start_node, stop_all, wait_full_tables,
+};
 use barking_packet::{DEFAULT_HOPS, Kind, MailboxId, Packet, PacketId, Tier, ack};
-use barking_proto::client::{self, Client, Session};
+use barking_proto::client::{self, Client};
 use barking_proto::{ErrorReason, NodeId, NodeRecord, RecordPolicy, Request, Response, pow};
-use ed25519_dalek::SigningKey;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 use tokio::time::timeout;
-
-/// Generous timeout for any test wait.
-const LONG: Duration = Duration::from_secs(20);
-/// Reduced difficulty for fast tests.
-const TEST_BITS: u8 = 8;
-/// Maintenance cadence of the tests.
-const TICK: Duration = Duration::from_millis(200);
-
-/// Key seeds that solve the 20-bit puzzle: the first eleven keys of
-/// `generate_node_key` on `StdRng::seed_from_u64(4243)`, drawn once in
-/// optimized mode (~15 s per key without optimization). Verified by
-/// `test_keys_solve_puzzle`.
-const SEEDS: [[u8; 32]; 11] = [
-    [
-        66, 125, 129, 83, 32, 106, 225, 91, 180, 232, 72, 26, 247, 131, 101, 82, 217, 244, 181, 75,
-        156, 236, 14, 63, 198, 19, 50, 80, 99, 40, 172, 214,
-    ],
-    [
-        132, 124, 253, 169, 65, 12, 180, 150, 216, 192, 72, 216, 245, 177, 206, 219, 134, 97, 245,
-        5, 63, 158, 43, 124, 74, 232, 33, 130, 79, 123, 173, 159,
-    ],
-    [
-        234, 137, 237, 175, 142, 105, 110, 146, 110, 20, 38, 242, 125, 235, 114, 172, 231, 15, 182,
-        90, 226, 94, 55, 247, 224, 138, 67, 252, 70, 225, 56, 156,
-    ],
-    [
-        166, 182, 165, 103, 105, 4, 202, 102, 34, 253, 254, 113, 121, 70, 72, 199, 59, 6, 50, 5, 5,
-        79, 142, 48, 79, 62, 60, 146, 133, 166, 36, 137,
-    ],
-    [
-        181, 107, 144, 32, 133, 91, 24, 125, 131, 19, 59, 4, 163, 25, 94, 26, 188, 68, 48, 99, 139,
-        21, 14, 153, 137, 147, 95, 178, 173, 241, 135, 60,
-    ],
-    [
-        143, 9, 122, 62, 15, 150, 214, 180, 8, 202, 136, 239, 60, 164, 122, 76, 126, 126, 205, 31,
-        254, 86, 31, 61, 35, 75, 140, 11, 153, 195, 38, 31,
-    ],
-    [
-        100, 45, 18, 125, 17, 100, 71, 236, 188, 86, 88, 173, 1, 219, 74, 150, 172, 49, 7, 166, 21,
-        85, 113, 31, 196, 96, 235, 121, 65, 81, 37, 79,
-    ],
-    [
-        108, 2, 96, 230, 104, 186, 14, 87, 51, 93, 113, 146, 186, 122, 40, 106, 197, 25, 211, 137,
-        48, 62, 158, 201, 63, 90, 197, 153, 234, 2, 137, 198,
-    ],
-    [
-        100, 235, 137, 137, 164, 69, 18, 125, 42, 2, 92, 148, 76, 239, 254, 124, 121, 53, 100, 210,
-        223, 3, 61, 255, 247, 186, 230, 223, 182, 226, 78, 49,
-    ],
-    [
-        31, 218, 187, 199, 22, 51, 5, 234, 203, 4, 46, 116, 191, 59, 174, 161, 96, 208, 232, 157,
-        43, 32, 245, 66, 69, 19, 53, 207, 121, 21, 18, 98,
-    ],
-    [
-        154, 84, 109, 217, 229, 209, 30, 44, 94, 56, 148, 35, 60, 27, 37, 204, 66, 116, 195, 68,
-        71, 85, 233, 218, 72, 130, 249, 253, 120, 51, 172, 162,
-    ],
-];
-
-fn key(n: usize) -> SigningKey {
-    SigningKey::from_bytes(&SEEDS[n])
-}
-
-#[test]
-fn test_keys_solve_puzzle() {
-    for n in 0..SEEDS.len() {
-        assert!(id_of(&key(n)).puzzle_ok(), "key {n}");
-    }
-}
-
-fn id_of(k: &SigningKey) -> NodeId {
-    NodeId::from_public_key(&k.verifying_key())
-}
 
 fn now() -> u64 {
     SystemTime::now()
@@ -103,31 +28,6 @@ fn policy() -> Policy {
     Policy {
         pow_bits: TEST_BITS,
         ..Policy::default()
-    }
-}
-
-struct Node {
-    addr: SocketAddr,
-    /// Listening IPv6 address, if the node also has a `[::1]` socket.
-    v6: Option<SocketAddr>,
-    id: NodeId,
-    stats: Arc<ServerStats>,
-    stop: Option<oneshot::Sender<()>>,
-    task: JoinHandle<barking_node::Result<()>>,
-    _dir: tempfile::TempDir,
-}
-
-impl Node {
-    fn entry(&self) -> BootstrapEntry {
-        BootstrapEntry {
-            id: self.id,
-            addr: self.addr,
-        }
-    }
-
-    async fn stop(mut self) {
-        let _ = self.stop.take().unwrap().send(());
-        timeout(LONG, self.task).await.unwrap().unwrap().unwrap();
     }
 }
 
@@ -192,46 +92,11 @@ fn start_limited(
     shared_ip: bool,
     pow_bits: u8,
 ) -> Node {
-    let k = key(n);
-    let id = id_of(&k);
-    let mut cfg = ServerConfig::new(sockets, k);
-    cfg.dht = dht;
-    cfg.dht_tick = Some(TICK);
-    cfg.dht_diversity = limits;
-    cfg.limits.max_connections_per_ipv4_24 = 1_000;
-    if shared_ip {
-        cfg.limits.max_connections_per_ip = 1_000;
-        cfg.limits.requests_per_sec = 10_000;
-        cfg.limits.bytes_per_sec = 1 << 30;
-    }
-    let stats = Arc::clone(&cfg.stats);
-    let dir = tempfile::tempdir().unwrap();
-    let db: PathBuf = dir.path().join("node.db");
-    let store = NodeStore::open(&db).unwrap();
-    let (tx, rx) = oneshot::channel::<()>();
-    let policy = Policy {
-        pow_bits,
-        ..Policy::default()
-    };
-    let task = tokio::spawn(server::run(cfg, store, policy, async move {
-        let _ = rx.await;
-    }));
-    Node {
-        addr,
-        v6: None,
-        id,
-        stats,
-        stop: Some(tx),
-        task,
-        _dir: dir,
-    }
-}
-
-async fn anon(node: &Node) -> Session {
-    timeout(LONG, Client::connect(node.addr, node.id))
-        .await
-        .unwrap()
-        .unwrap()
+    let mut spec = NodeSpec::new(n, dht);
+    spec.limits = limits;
+    spec.shared_ip = shared_ip;
+    spec.pow_bits = pow_bits;
+    start_node(spec, sockets, addr)
 }
 
 /// Connection of a calling node, authenticated by the certificate of
@@ -455,25 +320,6 @@ async fn store_and_find_value_from_peer() {
         }
     );
     node.stop().await;
-}
-
-/// Identifiers returned by `FindNode` on `node`'s table.
-async fn known_by(node: &Node) -> HashSet<NodeId> {
-    let s = anon(node).await;
-    let Response::Nodes { records } = s
-        .request(&Request::FindNode {
-            target: node.id.0,
-            from: None,
-        })
-        .await
-        .unwrap()
-    else {
-        panic!("Nodes expected");
-    };
-    records
-        .iter()
-        .map(|r| r.verify(now(), &RecordPolicy::network(true)).unwrap())
-        .collect()
 }
 
 #[tokio::test]
@@ -717,76 +563,6 @@ async fn dual_stack_record_with_silent_second_address_is_refused() {
 /// Timeout of the replication scenarios (several passes, 3 s call timeouts).
 const REPLICATION_WAIT: Duration = Duration::from_secs(90);
 
-/// Diversity limits of the tests: all nodes share the /24 of
-/// 127.0.0.1.
-const LOCAL: DiversityLimits = DiversityLimits::NONE;
-
-/// Starts node `n` on local IPv4, table active bootstrapped on
-/// `bootstrap`, with `budget` replication bytes per hour.
-fn start_dht(
-    n: usize,
-    bootstrap: Vec<BootstrapEntry>,
-    limits: DiversityLimits,
-    budget: u64,
-) -> Node {
-    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let addr = socket.local_addr().unwrap();
-    let SocketAddr::V4(v4) = addr else {
-        unreachable!()
-    };
-    let dht = DhtConfig {
-        public_v4: Some(v4),
-        public_v6: None,
-        bootstrap,
-        allow_private_addrs: true,
-        replication_bytes_per_hour: budget,
-    };
-    start_raw(n, vec![socket], addr, Some(dht), limits)
-}
-
-/// Waits for each node of `nodes` to know all the others.
-async fn wait_full_tables(nodes: &[&Node]) {
-    let deadline = tokio::time::Instant::now() + LONG;
-    for n in nodes {
-        let want: HashSet<NodeId> = nodes
-            .iter()
-            .map(|m| m.id)
-            .filter(|id| *id != n.id)
-            .collect();
-        while !known_by(n).await.is_superset(&want) {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the tables did not fill up"
-            );
-            tokio::time::sleep(TICK).await;
-        }
-    }
-}
-
-/// Network of the nodes `keys`, bootstrapped from the first, started one after
-/// the other (each known to the first before the next), with `budget(n)`
-/// replication bytes per hour.
-async fn network(keys: std::ops::Range<usize>, budget: impl Fn(usize) -> u64) -> Vec<Node> {
-    let mut nodes: Vec<Node> = Vec::new();
-    for n in keys {
-        let boot = nodes.first().map(|f| vec![f.entry()]).unwrap_or_default();
-        let node = start_dht(n, boot, LOCAL, budget(n));
-        if let Some(first) = nodes.first() {
-            let deadline = tokio::time::Instant::now() + LONG;
-            while !known_by(first).await.contains(&node.id) {
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "node {n} not reached"
-                );
-                tokio::time::sleep(TICK).await;
-            }
-        }
-        nodes.push(node);
-    }
-    wait_full_tables(&nodes.iter().collect::<Vec<_>>()).await;
-    nodes
-}
-
 /// Indices of `ids` sorted by distance to the key of `mailbox`.
 fn by_distance(ids: &[NodeId], mailbox: &MailboxId) -> Vec<usize> {
     let key = mailbox_key(mailbox);
@@ -850,12 +626,6 @@ where
 
 fn ids(nodes: &[Node]) -> Vec<NodeId> {
     nodes.iter().map(|n| n.id).collect()
-}
-
-async fn stop_all(nodes: Vec<Node>) {
-    for n in nodes {
-        n.stop().await;
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

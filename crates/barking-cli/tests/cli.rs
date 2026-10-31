@@ -762,38 +762,11 @@ mod node {
     use barking_node::server::{self, ServerConfig};
     use barking_node::{NodeStore, Policy};
     use barking_proto::NodeId;
-    use ed25519_dalek::SigningKey;
     use tokio::sync::oneshot;
 
     use super::*;
 
-    /// Key seeds that solve the 20-bit identity puzzle (the first keys of
-    /// `generate_node_key` on `StdRng::seed_from_u64(4243)`, as in
-    /// barking-node's tests): drawing them at runtime takes ~15 s each.
-    const SEEDS: [[u8; 32]; 2] = [
-        [
-            66, 125, 129, 83, 32, 106, 225, 91, 180, 232, 72, 26, 247, 131, 101, 82, 217, 244, 181,
-            75, 156, 236, 14, 63, 198, 19, 50, 80, 99, 40, 172, 214,
-        ],
-        [
-            132, 124, 253, 169, 65, 12, 180, 150, 216, 192, 72, 216, 245, 177, 206, 219, 134, 97,
-            245, 5, 63, 158, 43, 124, 74, 232, 33, 130, 79, 123, 173, 159,
-        ],
-    ];
-
-    fn key(n: usize) -> SigningKey {
-        SigningKey::from_bytes(&SEEDS[n])
-    }
-
-    #[test]
-    fn test_keys_solve_puzzle() {
-        for n in 0..SEEDS.len() {
-            assert!(
-                NodeId::from_public_key(&key(n).verifying_key()).puzzle_ok(),
-                "key {n}"
-            );
-        }
-    }
+    use barking_node::testing::key;
 
     /// A real node in this process, on 127.0.0.1 (free port), with its
     /// hash table on (it answers `Ping` with its record).

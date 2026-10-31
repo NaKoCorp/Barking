@@ -171,7 +171,6 @@ dependencies = [
  "barking-proto",
  "clap",
  "data-encoding",
- "ed25519-dalek",
  "predicates",
  "rand",
  "rpassword",
@@ -231,6 +230,7 @@ version = "0.1.0"
 dependencies = [
  "barking-core",
  "barking-dht",
+ "barking-node",
  "barking-packet",
  "barking-proto",
  "data-encoding",
@@ -244,6 +244,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -252,6 +253,7 @@ version = "0.1.0"
 dependencies = [
  "barking-core",
  "barking-dht",
+ "barking-node",
  "barking-packet",
  "barking-proto",
  "clap",

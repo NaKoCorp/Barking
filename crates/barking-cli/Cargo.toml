@@ -23,8 +23,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 barking-dht.workspace = true
-barking-node.workspace = true
-ed25519-dalek.workspace = true
+barking-node = { workspace = true, features = ["test-harness"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time"] }
 assert_cmd.workspace = true
 predicates.workspace = true

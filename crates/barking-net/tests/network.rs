@@ -1,0 +1,679 @@
+//! The network client against real nodes: 8 `barking-node`s on 127.0.0.1
+//! (`barking_node::testing`), and clients driving real `barking-core` cores
+//! through `barking_net::sync` (spec §1, success criteria; §9).
+//!
+//! On a single address the client keeps at most `MAX_PER_PREFIX` (2)
+//! responsibles per mailbox: the two closest nodes.
+
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use barking_core::identity::Fingerprint;
+use barking_core::transparency::{AvoidReason, TransparencyEvent};
+use barking_core::{Core, ReceiveOutcome};
+use barking_dht::{distance, mailbox_key};
+use barking_net::score::{START_SCORE, ScoreEvent};
+use barking_net::sync::short_id;
+use barking_net::{NetState, QuicDialer, SyncOptions, SyncReport, sync};
+use barking_node::testing::{StoppedNode, TestNode, id_of, key, network, network_with};
+use barking_packet::{Kind, MailboxId, Packet};
+use barking_proto::NodeId;
+use barking_proto::pow::content_hash;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+/// Nodes of the test network.
+const NODES: usize = 8;
+/// Longest sync of these tests (nodes are local).
+const SYNC_DEADLINE: Duration = Duration::from_secs(60);
+/// Longest sync while every node is down: each dial waits for its own
+/// timeout (10 s), so a full attempt would only make the tests slow.
+const DOWN_DEADLINE: Duration = Duration::from_secs(5);
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+// --- Client log capture ---
+
+/// Everything the client crates logged in this test binary.
+static LOGS: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+
+struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+impl Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Installs (once) a subscriber keeping every event of the client crates,
+/// at every level. The nodes run in the same process: their own crate
+/// (`barking_node`) and the transport libraries they share with the client
+/// (`quinn`, `rustls`) are left out.
+fn capture_logs() -> Arc<Mutex<Vec<u8>>> {
+    Arc::clone(LOGS.get_or_init(|| {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buf);
+        let targets = Targets::new()
+            .with_target("barking_net", tracing::Level::TRACE)
+            .with_target("barking_core", tracing::Level::TRACE)
+            .with_target("barking_proto", tracing::Level::TRACE)
+            .with_target("barking_dht", tracing::Level::TRACE);
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(move || LogSink(Arc::clone(&sink)))
+            .with_filter(targets);
+        tracing_subscriber::registry().with(layer).init();
+        buf
+    }))
+}
+
+// --- Clients ---
+
+/// A client: its home directory (the core's database) and its core.
+struct Client {
+    home: tempfile::TempDir,
+    core: Core,
+}
+
+fn client(name: &str, seed: u8) -> Client {
+    let home = tempfile::tempdir().unwrap();
+    let (core, _) = Core::create(
+        &home.path().join("core.db"),
+        &[seed; 32],
+        name,
+        now(),
+        &mut rand::rng(),
+    )
+    .unwrap();
+    Client { home, core }
+}
+
+/// Alice and Bob, each holding the other's contact card (handed over out of
+/// band, before any sync: the cards carry no node hint). Returns their
+/// contact entries for each other: (Bob in Alice's, Alice in Bob's).
+fn strangers() -> (Client, Client, Fingerprint, Fingerprint) {
+    let mut alice = client("alice", 1);
+    let mut bob = client("bob", 2);
+    let card_a = alice.core.contact_card("Alice").unwrap();
+    let card_b = bob.core.contact_card("Bob").unwrap();
+    let rng = &mut rand::rng();
+    let fa = bob
+        .core
+        .add_contact(&card_a, Some("alice"), now(), rng)
+        .unwrap();
+    let fb = alice
+        .core
+        .add_contact(&card_b, Some("bob"), now(), rng)
+        .unwrap();
+    (alice, bob, fb, fa)
+}
+
+/// `strangers` who already exchanged a first message and its reply
+/// directly (receipts included): both hold a session, nothing waits.
+fn acquainted() -> (Client, Client, Fingerprint, Fingerprint) {
+    let (mut alice, mut bob, fb, fa) = strangers();
+    let rng = &mut rand::rng();
+    let t = now();
+    for p in alice.core.send_text(&fb, "hello", t, rng).unwrap() {
+        let ReceiveOutcome::Message { ack, .. } =
+            bob.core.receive(&p.encode(), "test", t, rng).unwrap()
+        else {
+            panic!("message expected");
+        };
+        alice.core.receive(&ack.encode(), "test", t, rng).unwrap();
+    }
+    for p in bob.core.send_text(&fa, "hi", t, rng).unwrap() {
+        let ReceiveOutcome::Message { ack, .. } =
+            alice.core.receive(&p.encode(), "test", t, rng).unwrap()
+        else {
+            panic!("message expected");
+        };
+        bob.core.receive(&ack.encode(), "test", t, rng).unwrap();
+    }
+    (alice, bob, fb, fa)
+}
+
+/// What a client is bootstrapped on: one node, added by hand.
+fn seed(node: &TestNode) -> (NodeId, SocketAddr) {
+    (node.id, node.addr)
+}
+
+fn options(seed: (NodeId, SocketAddr)) -> SyncOptions {
+    SyncOptions {
+        deadline: SYNC_DEADLINE,
+        manual_nodes: vec![seed],
+        builtin: Vec::new(),
+        allow_private: true,
+        ..SyncOptions::default()
+    }
+}
+
+/// One sync of `c`, bootstrapped (if needed) on `seed` only.
+async fn sync_on(c: &mut Client, node: &TestNode) -> SyncReport {
+    let report = sync(&mut c.core, &QuicDialer, options(seed(node))).await;
+    assert_eq!(report.error, None);
+    report
+}
+
+/// Syncs `c` until its view holds every node of the network with its
+/// record: deposits and fetches then go to the true responsibles.
+async fn warm_up(c: &mut Client, node: &TestNode) {
+    for _ in 0..3 {
+        sync_on(c, node).await;
+        let st = state(c);
+        if st
+            .view
+            .entries()
+            .filter(|(_, e)| e.record.is_some())
+            .count()
+            == NODES
+        {
+            return;
+        }
+    }
+    panic!("the view did not fill up");
+}
+
+/// Texts of the messages a sync received.
+fn texts(report: &SyncReport) -> Vec<String> {
+    report
+        .received
+        .iter()
+        .filter_map(|o| match o {
+            ReceiveOutcome::Message { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn state(c: &mut Client) -> NetState {
+    NetState::load(&mut c.core, now(), true).unwrap()
+}
+
+/// Mailboxes of the messages waiting in the send queue.
+fn outbox_mailboxes(c: &mut Client) -> Vec<MailboxId> {
+    c.core
+        .pending_outbox(now())
+        .unwrap()
+        .iter()
+        .filter_map(|b| Packet::decode(b).ok())
+        .filter(|p| p.kind == Kind::Message)
+        .map(|p| p.mailbox)
+        .collect()
+}
+
+/// Node indices sorted by distance to `mailbox`'s key: the first two are
+/// its responsibles for a client on 127.0.0.1.
+fn closest(mailbox: &MailboxId) -> Vec<usize> {
+    let target = mailbox_key(mailbox);
+    let mut order: Vec<usize> = (0..NODES).collect();
+    order.sort_by_key(|&n| distance(&id_of(&key(n)).0, &target));
+    order
+}
+
+/// Raises `id`'s score in `c`'s view with `Found` events (as loss audits
+/// would) until it ranks first among `others` for deposits and fetches
+/// (on a tie, the closer node ranks first).
+fn pin_best(c: &mut Client, id: NodeId, others: &[NodeId], closer: bool) {
+    let mut st = state(c);
+    let score = |st: &NetState, id: &NodeId| st.view.get(id).map_or(0.0, |e| e.score.value());
+    let best_other = others.iter().map(|o| score(&st, o)).fold(0.0f32, f32::max);
+    let ahead = |s: f32| {
+        if closer {
+            s >= best_other
+        } else {
+            s > best_other
+        }
+    };
+    while !ahead(score(&st, &id)) {
+        assert!(score(&st, &id) < 1.0, "cannot rank first");
+        st.view.apply_score(&id, ScoreEvent::Found, now(), true);
+    }
+    st.save(&mut c.core).unwrap();
+}
+
+/// Every node, stopped together (databases kept).
+async fn halt_all(nodes: Vec<TestNode>) -> Vec<StoppedNode> {
+    let tasks: Vec<_> = nodes.into_iter().map(|n| tokio::spawn(n.halt())).collect();
+    let mut out = Vec::new();
+    for t in tasks {
+        out.push(t.await.unwrap());
+    }
+    out
+}
+
+/// Every node started again, with `delay` before each response.
+async fn restart_all(stopped: Vec<StoppedNode>, delay: Option<Duration>) -> Vec<TestNode> {
+    let mut out = Vec::new();
+    for mut s in stopped {
+        s.spec.response_delay = delay;
+        out.push(s.restart().await);
+    }
+    out
+}
+
+async fn stop_all(nodes: Vec<TestNode>) {
+    barking_node::testing::stop_all(nodes).await;
+}
+
+/// Alice bootstrapped on node `a` only, Bob on node `b` only; Alice's first
+/// message goes through Bob's introduction mailbox, his reply through
+/// their session. Returns both clients once each received the other's
+/// message.
+async fn exchange_from_single_seeds(nodes: &[TestNode], a: usize, b: usize) -> (Client, Client) {
+    let (mut alice, mut bob, fb, fa) = strangers();
+    let rng = &mut rand::rng();
+    alice
+        .core
+        .send_text(&fb, "hello from alice", now(), rng)
+        .unwrap();
+    let mut bob_got = Vec::new();
+    for _ in 0..4 {
+        let r = sync_on(&mut alice, &nodes[a]).await;
+        assert!(r.network_up);
+        bob_got.extend(texts(&sync_on(&mut bob, &nodes[b]).await));
+        if !bob_got.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(bob_got, ["hello from alice"]);
+
+    bob.core
+        .send_text(&fa, "hello from bob", now(), rng)
+        .unwrap();
+    let mut alice_got = Vec::new();
+    for _ in 0..4 {
+        sync_on(&mut bob, &nodes[b]).await;
+        alice_got.extend(texts(&sync_on(&mut alice, &nodes[a]).await));
+        if !alice_got.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(alice_got, ["hello from bob"]);
+    (alice, bob)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_clients_discover_from_different_single_seeds() {
+    capture_logs();
+    let nodes = network(0..NODES, |_| {
+        barking_node::config::DEFAULT_REPLICATION_BYTES_PER_HOUR
+    })
+    .await;
+    let (mut alice, mut bob) = exchange_from_single_seeds(&nodes, 0, 5).await;
+    for (name, c) in [("alice", &mut alice), ("bob", &mut bob)] {
+        let st = state(c);
+        let known: HashSet<NodeId> = st.view.entries().map(|(id, _)| *id).collect();
+        assert!(known.len() >= 6, "{name} knows only {} nodes", known.len());
+    }
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn swallowing_node_is_avoided_and_message_still_arrives() {
+    capture_logs();
+    let (mut alice, mut bob, fb, _) = acquainted();
+    let rng = &mut rand::rng();
+    let sent = ["one", "two", "three"];
+    for text in sent {
+        alice.core.send_text(&fb, text, now(), rng).unwrap();
+    }
+    // All three in one session mailbox: its closest node swallows deposits.
+    let mailboxes = outbox_mailboxes(&mut alice);
+    assert_eq!(mailboxes.len(), 3);
+    let mailbox = mailboxes[0];
+    assert!(mailboxes.iter().all(|m| *m == mailbox));
+    let order = closest(&mailbox);
+    let (swallower, honest) = (order[0], order[1]);
+    let swallower_id = id_of(&key(swallower));
+    let honest_id = id_of(&key(honest));
+    let nodes = network_with(0..NODES, |spec| {
+        spec.swallow_deposits = spec.n == swallower;
+    })
+    .await;
+    let seed = &nodes[(swallower + 2) % NODES];
+
+    // Bootstrap with no proof-of-work budget: the messages wait.
+    let mut opts = options(self::seed(seed));
+    opts.pow_budget = 0;
+    let r = sync(&mut alice.core, &QuicDialer, opts).await;
+    assert!(r.network_up && r.first_copies == 0, "{r:?}");
+    let st = state(&mut alice);
+    for id in [swallower_id, honest_id] {
+        assert!(st.view.get(&id).is_some_and(|e| e.record.is_some()));
+    }
+
+    // The swallowing node is the best responsible: it gets the first
+    // copies, the other responsible the extra ones.
+    pin_best(&mut alice, swallower_id, &[honest_id], true);
+    let r = sync_on(&mut alice, seed).await;
+    assert_eq!((r.first_copies, r.extra_copies), (3, 3), "{r:?}");
+    assert!(r.avoided.is_empty());
+
+    // The next fetch from it audits the mailbox: three losses.
+    pin_best(&mut alice, swallower_id, &[honest_id], true);
+    let r = sync_on(&mut alice, seed).await;
+    assert_eq!(r.avoided, [short_id(&swallower_id)], "{r:?}");
+    let st = state(&mut alice);
+    let entry = st.view.get(&swallower_id).unwrap();
+    // An avoidance only starts when a loss leaves the score under
+    // `AVOID_BELOW` (0.2); requests answered later in the same sync may
+    // raise it a little since.
+    assert!(entry.avoided(now()), "{entry:?}");
+    assert!(entry.score.value() < START_SCORE, "{entry:?}");
+    let log = alice.core.transparency_log(1000).unwrap();
+    assert!(log.iter().any(|(_, e)| matches!(
+        e,
+        TransparencyEvent::NodeAvoided { node, reason: AvoidReason::MessageLost }
+            if *node == short_id(&swallower_id)
+    )));
+    // The copies are held elsewhere.
+    for bytes in alice.core.pending_outbox(now()).unwrap() {
+        let p = Packet::decode(&bytes).unwrap();
+        if p.kind == Kind::Message {
+            let holders = st.ledger.holders(&content_hash(&bytes));
+            assert!(holders.contains(&honest_id) && !holders.contains(&swallower_id));
+        }
+    }
+
+    // Bob reads at the responsible holding them (his own scores pinned:
+    // the recipient only moves to the next responsible on a failure).
+    let mut got = texts(&sync_on(&mut bob, seed).await);
+    pin_best(&mut bob, honest_id, &[swallower_id], false);
+    for _ in 0..3 {
+        if got.len() == sent.len() {
+            break;
+        }
+        got.extend(texts(&sync_on(&mut bob, seed).await));
+    }
+    got.sort();
+    let mut want: Vec<String> = sent.iter().map(|s| s.to_string()).collect();
+    want.sort();
+    assert_eq!(got, want);
+    stop_all(nodes).await;
+}
+
+/// Fetch positions of `c`.
+fn positions(c: &mut Client) -> HashMap<(NodeId, MailboxId), u64> {
+    state(c).positions
+}
+
+fn scores(c: &mut Client) -> HashMap<NodeId, f32> {
+    state(c)
+        .view
+        .entries()
+        .map(|(id, e)| (*id, e.score.value()))
+        .collect()
+}
+
+/// No position of `before` went missing or back.
+fn assert_positions_kept(
+    before: &HashMap<(NodeId, MailboxId), u64>,
+    after: &HashMap<(NodeId, MailboxId), u64>,
+    when: &str,
+) {
+    for (k, v) in before {
+        let now = after.get(k).copied();
+        assert!(now.is_some_and(|n| n >= *v), "{when}: {v} -> {now:?}");
+    }
+}
+
+/// Incoming messages of `c` from `from`, in order.
+fn inbox(c: &Client, from: &Fingerprint) -> Vec<String> {
+    c.core
+        .messages_with(from)
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.direction == barking_core::store::Direction::In)
+        .map(|m| m.body)
+        .collect()
+}
+
+/// Messages per batch of `cut_mid_sync_resumes`: 70 large (tier L, 16 KiB)
+/// packets fill more than a 1 MiB fetch page.
+const BATCH: usize = 70;
+
+/// `BATCH` large messages tagged `tag`.
+fn batch(tag: &str) -> Vec<String> {
+    (0..BATCH)
+        .map(|i| format!("{tag} {i:03} {}", "x".repeat(3_000)))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cut_mid_sync_resumes() {
+    capture_logs();
+    let (mut alice, mut bob, fb, fa) = acquainted();
+    let rng = &mut rand::rng();
+    let nodes = network(0..NODES, |_| {
+        barking_node::config::DEFAULT_REPLICATION_BYTES_PER_HOUR
+    })
+    .await;
+    let (sa, sb) = (&nodes[1], &nodes[6]);
+
+    warm_up(&mut alice, sa).await;
+    warm_up(&mut bob, sb).await;
+
+    // A first batch, fetched by Bob: more than one page (1 MiB) of large
+    // messages in one mailbox, so that a position is recorded.
+    let first = batch("first");
+    for t in &first {
+        alice.core.send_text(&fb, t, now(), rng).unwrap();
+    }
+    let r = sync_on(&mut alice, sa).await;
+    assert_eq!(r.first_copies, BATCH, "{r:?}");
+    let mut got = Vec::new();
+    for _ in 0..3 {
+        let r = sync_on(&mut bob, sb).await;
+        got.extend(texts(&r));
+        if got.len() == first.len() {
+            break;
+        }
+    }
+    assert_eq!(got.len(), first.len());
+    let before = positions(&mut bob);
+    assert!(before.values().any(|&p| p > 0), "{before:?}");
+
+    // A second batch waits on the nodes.
+    let second = batch("second");
+    for t in &second {
+        alice.core.send_text(&fb, t, now(), rng).unwrap();
+    }
+    let r = sync_on(&mut alice, sa).await;
+    assert_eq!(r.first_copies, BATCH, "{r:?}");
+    let bob_seed = seed(sb);
+
+    // Every response now waits `DELAY`, and every node stops while Bob's
+    // fetch of the second batch is under way: a full page (1 MiB) waiting
+    // on a node is the first one; it reaches Bob `DELAY` later, the next
+    // one `DELAY` after that. The nodes stop in between.
+    const DELAY: Duration = Duration::from_millis(400);
+    let nodes = restart_all(halt_all(nodes).await, Some(DELAY)).await;
+    let stats: Vec<_> = nodes.iter().map(|n| Arc::clone(&n.stats)).collect();
+    let opts = options(bob_seed);
+    let cut = async {
+        let give_up = tokio::time::Instant::now() + SYNC_DEADLINE;
+        while !stats.iter().any(|s| s.response_bytes.now() > 512 << 10)
+            && tokio::time::Instant::now() < give_up
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(DELAY * 3 / 2).await;
+        halt_all(nodes).await
+    };
+    let (r, stopped) = tokio::join!(sync(&mut bob.core, &QuicDialer, opts), cut);
+    let after_cut = positions(&mut bob);
+    assert_positions_kept(&before, &after_cut, "cut sync");
+    // The page taken before the cut was kept: the fetch resumes past it.
+    assert!(r.items_received > 0 && !r.polled_all_sessions, "{r:?}");
+    assert!(
+        after_cut
+            .iter()
+            .any(|(k, v)| before.get(k).is_some_and(|b| v > b)),
+        "{before:?} -> {after_cut:?}"
+    );
+
+    // Network down: no node answers, no score goes down, nothing moves back.
+    let scores_before = scores(&mut bob);
+    let mut down = options(bob_seed);
+    down.deadline = DOWN_DEADLINE;
+    let r = sync(&mut bob.core, &QuicDialer, down).await;
+    assert!(!r.network_up, "{r:?}");
+    for (id, s) in scores(&mut bob) {
+        let was = scores_before.get(&id).copied().unwrap_or(s);
+        assert!(s >= was, "score lowered while the network was down");
+    }
+    let after_down = positions(&mut bob);
+    assert_positions_kept(&after_cut, &after_down, "down sync");
+
+    // Back up: the rest arrives, nothing lost, nothing twice.
+    let nodes = restart_all(stopped, None).await;
+    for _ in 0..3 {
+        sync_on(&mut bob, &nodes[6]).await;
+        if inbox(&bob, &fa).len() > first.len() + second.len() {
+            break;
+        }
+    }
+    assert_positions_kept(&after_down, &positions(&mut bob), "resumed sync");
+    let mut want = vec!["hello".to_string()];
+    want.extend(first.iter().chain(&second).cloned());
+    let mut got = inbox(&bob, &fa);
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_network_puts_first_copy_before_maintenance() {
+    capture_logs();
+    let (mut alice, _bob, fb, _) = acquainted();
+    let rng = &mut rand::rng();
+    let nodes = network(0..NODES, |_| {
+        barking_node::config::DEFAULT_REPLICATION_BYTES_PER_HOUR
+    })
+    .await;
+    // Bootstrap and view maintenance at full speed.
+    let r = sync_on(&mut alice, &nodes[3]).await;
+    assert!(r.network_up && r.maintenance_done);
+
+    // Every response now waits `DELAY`; the sync gets `22 * DELAY`. Worst
+    // case before the last first copy: 4 session groups on 4 nodes (8
+    // delays), 10 first copies and a connection (11). Best case before
+    // maintenance: one group (2), the first copies (11), the extra copies
+    // (11), at least one introduction fetch (1).
+    const DELAY: Duration = Duration::from_millis(500);
+    const MESSAGES: usize = 10;
+    let nodes = restart_all(halt_all(nodes).await, Some(DELAY)).await;
+    for i in 0..MESSAGES {
+        alice
+            .core
+            .send_text(&fb, &format!("slow {i}"), now(), rng)
+            .unwrap();
+    }
+    let mut opts = options(seed(&nodes[3]));
+    opts.deadline = DELAY * 22;
+    let r = sync(&mut alice.core, &QuicDialer, opts).await;
+    assert!(r.network_up, "{r:?}");
+    assert!(r.polled_all_sessions, "{r:?}");
+    assert_eq!(r.first_copies, MESSAGES, "{r:?}");
+    assert!(!r.maintenance_done, "{r:?}");
+    stop_all(nodes).await;
+}
+
+/// Lowercase hex and base32 forms of `id`.
+fn forms(id: &[u8]) -> [String; 2] {
+    [
+        data_encoding::HEXLOWER.encode(id),
+        data_encoding::BASE32_NOPAD.encode(id).to_ascii_lowercase(),
+    ]
+}
+
+/// Neither an address nor a mailbox (raw, hex or base32) in `text`/`bytes`.
+fn assert_clean(what: &str, bytes: &[u8], mailboxes: &[MailboxId], addrs: &[String]) {
+    let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    for a in addrs {
+        assert!(!text.contains(a.as_str()), "{what} contains an address");
+    }
+    for m in mailboxes {
+        for f in forms(&m.0) {
+            assert!(!text.contains(f.as_str()), "{what} contains a mailbox");
+        }
+        assert!(
+            !bytes.windows(16).any(|w| w == m.0),
+            "{what} contains a raw mailbox"
+        );
+    }
+}
+
+fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_ip_or_mailbox_in_logs_or_plaintext_state() {
+    let logs = capture_logs();
+    tracing::info!(target: "barking_net", "log capture probe");
+    let nodes = network(0..NODES, |_| {
+        barking_node::config::DEFAULT_REPLICATION_BYTES_PER_HOUR
+    })
+    .await;
+    let (mut alice, mut bob) = exchange_from_single_seeds(&nodes, 2, 7).await;
+    let down_seed = seed(&nodes[2]);
+    // A sync while nodes are down too (failures, avoidance paths).
+    let t = now();
+    let mut mailboxes = Vec::new();
+    for c in [&mut alice, &mut bob] {
+        mailboxes.extend(c.core.watched_mailboxes(t));
+        mailboxes.extend(outbox_mailboxes(c));
+    }
+    let mut addrs: Vec<String> = vec!["127.0.0.1".into()];
+    addrs.extend(nodes.iter().map(|n| n.addr.to_string()));
+    let _stopped = halt_all(nodes).await;
+    for c in [&mut alice, &mut bob] {
+        let mut down = options(down_seed);
+        down.deadline = DOWN_DEADLINE;
+        let r = sync(&mut c.core, &QuicDialer, down).await;
+        assert!(!r.network_up);
+    }
+
+    let logs = logs.lock().unwrap().clone();
+    assert!(
+        String::from_utf8_lossy(&logs).contains("log capture probe"),
+        "logs not captured"
+    );
+    assert_clean("client logs", &logs, &mailboxes, &addrs);
+    for c in [&alice, &bob] {
+        for f in files_under(c.home.path()) {
+            let bytes = std::fs::read(&f).unwrap();
+            assert_clean(&f.display().to_string(), &bytes, &mailboxes, &addrs);
+        }
+    }
+}

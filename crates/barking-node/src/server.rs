@@ -158,6 +158,13 @@ pub struct ServerConfig {
     /// table's addresses. Default: those of the spec. The network tests lift
     /// them, all their nodes sharing the /24 of 127.0.0.1.
     pub dht_diversity: DiversityLimits,
+    /// Tests only, never read from the configuration: answers `Ok` to
+    /// `Deposit` and `Store` without keeping anything, as a node that loses
+    /// messages would. Default: false.
+    pub test_swallow_deposits: bool,
+    /// Tests only, never read from the configuration: delays every response
+    /// (`Hello` included) by this much, as a slow link would. Default: `None`.
+    pub test_response_delay: Option<Duration>,
 }
 
 /// Gauge: current value and maximum reached.
@@ -487,6 +494,8 @@ impl ServerConfig {
             dht: None,
             dht_tick: None,
             dht_diversity: DiversityLimits::SPEC,
+            test_swallow_deposits: false,
+            test_response_delay: None,
         }
     }
 }
@@ -513,11 +522,22 @@ pub(crate) struct Shared {
     stats: Arc<ServerStats>,
     /// Hash table, if `[dht]` is configured.
     dht: Option<Arc<Dht>>,
+    /// Tests only: see `ServerConfig::test_swallow_deposits`.
+    swallow_deposits: bool,
+    /// Tests only: see `ServerConfig::test_response_delay`.
+    response_delay: Option<Duration>,
 }
 
 impl Shared {
     pub(crate) fn stats(&self) -> &ServerStats {
         &self.stats
+    }
+
+    /// Tests only: the artificial delay before a response, if configured.
+    async fn test_delay(&self) {
+        if let Some(d) = self.response_delay {
+            tokio::time::sleep(d).await;
+        }
     }
 
     /// Write deadline of a response of `len` bytes.
@@ -713,6 +733,8 @@ pub async fn run(
         min_send_rate: config.min_send_rate,
         stats: Arc::clone(&config.stats),
         dht: dht.clone(),
+        swallow_deposits: config.test_swallow_deposits,
+        response_delay: config.test_response_delay,
     });
 
     if let Stored::Done(n) = shared
@@ -1059,6 +1081,7 @@ async fn hello(conn: &Connection, shared: &Arc<Shared>) -> bool {
     if let Response::Error(r) = &resp {
         shared.stats.refuse(*r);
     }
+    shared.test_delay().await;
     // Waits for the acknowledgement: the response arrives before any close.
     respond(&mut send, &encode(&resp), shared.hello_timeout).await;
     ok
@@ -1088,6 +1111,7 @@ async fn serve_stream(
             return;
         }
         let bytes = encode(&Response::Error(ErrorReason::RateLimited));
+        shared.test_delay().await;
         respond(&mut send, &bytes, shared.write_deadline(bytes.len())).await;
         state.charge(bytes.len());
         return;
@@ -1129,6 +1153,7 @@ async fn serve_stream(
             (bytes, Some(held))
         }
     };
+    shared.test_delay().await;
     // Throughput counted on the size sent, whether the response is
     // acknowledged, cut, stopped by the peer or expired.
     respond(&mut send, &bytes, shared.write_deadline(bytes.len())).await;
@@ -1167,6 +1192,10 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
     };
     match req {
         Request::Hello { .. } => Stored::Done(Response::Error(ErrorReason::Malformed)),
+        // Tests only: a node that loses what it accepts.
+        Request::Deposit { .. } | Request::Store { .. } if shared.swallow_deposits => {
+            Stored::Done(Response::Ok)
+        }
         Request::Deposit { packet, pow } => {
             // Shape, expiry and proof at the base difficulty are checked before
             // taking a slot in the database queue.
