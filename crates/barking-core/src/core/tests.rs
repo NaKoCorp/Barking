@@ -1,5 +1,5 @@
-//! Tests internes de la façade : paquets authentifiés mais refusés, forgés
-//! avec l'état réel d'une session (impossible depuis l'API publique).
+//! Internal tests of the facade: authenticated but refused packets, forged
+//! with the real state of a session (impossible from the public API).
 
 use super::*;
 use crate::contact::ContactCard;
@@ -32,7 +32,7 @@ struct Pair {
     rng: StdRng,
 }
 
-/// Alice et Bob avec une session établie dans les deux sens (plus d'Initial).
+/// Alice and Bob with a session established in both directions (no more Initial).
 fn pair() -> Pair {
     let (da, mut a) = party("a", 1);
     let (db, mut b) = party("b", 2);
@@ -78,8 +78,8 @@ fn best_session(c: &Core) -> SessionRow {
         .unwrap()
 }
 
-/// Chiffre `pt` brut dans la meilleure session de `from` (état sauvegardé),
-/// emballé en `Wire::Normal` vers la boîte de session du pair.
+/// Encrypts raw `pt` in the best session of `from` (saved state),
+/// wrapped in `Wire::Normal` toward the peer's session mailbox.
 fn forge(from: &mut Core, pt: &[u8], id: PacketId, rng: &mut StdRng) -> Packet {
     let mut row = best_session(from);
     assert!(row.pending_initial.is_none());
@@ -112,7 +112,7 @@ fn envelope_bytes(secret: [u8; 16], sent_at: u64, text: &str) -> Vec<u8> {
 fn reason(o: ReceiveOutcome) -> String {
     match o {
         ReceiveOutcome::Quarantined { reason } => reason,
-        other => panic!("Quarantined attendu, obtenu {other:?}"),
+        other => panic!("Quarantined expected, got {other:?}"),
     }
 }
 
@@ -123,15 +123,15 @@ fn authenticated_malformed_envelope_keeps_ratchet_and_quarantines() {
     let id = PacketId([7; 16]);
     let bad = forge(&mut p.a, &[0xff, 0xff, 0xff], id, &mut p.rng);
     let r = reason(p.b.receive(&bad.encode(), "t", NOW, &mut p.rng).unwrap());
-    assert_eq!(r, "contenu authentifié mais mal formé");
-    // L'état avancé du ratchet est sauvegardé : un rejeu ne se déchiffre plus.
-    // (Sans secret d'accusé authentifié, rien n'est marqué vu.)
+    assert_eq!(r, "authenticated but malformed content");
+    // The advanced ratchet state is saved: a replay no longer decrypts.
+    // (Without an authenticated ack secret, nothing is marked seen.)
     assert_ne!(best_session(&p.b).state, before);
     assert_eq!(
         reason(p.b.receive(&bad.encode(), "t", NOW, &mut p.rng).unwrap()),
-        "déchiffrement impossible"
+        "decryption impossible"
     );
-    // Rien n'apparaît dans l'historique, et la conversation continue.
+    // Nothing appears in the history, and the conversation continues.
     assert_eq!(p.b.messages_with(&p.a.fingerprint()).unwrap().len(), 2);
     let next =
         p.a.send_text(&p.b.fingerprint(), "suite", NOW, &mut p.rng)
@@ -144,7 +144,7 @@ fn authenticated_malformed_envelope_keeps_ratchet_and_quarantines() {
         ReceiveOutcome::Message { text, .. } => assert_eq!(text, "suite"),
         other => panic!("{other:?}"),
     }
-    // Le journal ne contient que des raisons fixes.
+    // The log contains only fixed reasons.
     for (_, e) in p.b.transparency_log(100).unwrap() {
         if let TransparencyEvent::DecryptFailed { reason, .. } = e {
             assert!(!reason.contains('\u{fffd}'));
@@ -159,29 +159,29 @@ fn packet_id_not_bound_to_ack_secret_quarantined() {
     let env = envelope_bytes(secret, NOW, "x");
     let bad = forge(&mut p.a, &env, PacketId([9; 16]), &mut p.rng);
     let r = reason(p.b.receive(&bad.encode(), "t", NOW, &mut p.rng).unwrap());
-    assert_eq!(r, "identifiant de paquet incohérent");
+    assert_eq!(r, "inconsistent packet identifier");
 }
 
 #[test]
 fn contact_reusing_my_packet_id_is_quarantined_not_err() {
-    // Bob connaît le secret d'accusé de mon message : il pourrait forger un
-    // message portant le même identifiant (colonne UNIQUE en base).
+    // Bob knows the ack secret of my message: he could forge a
+    // message carrying the same identifier (UNIQUE column in the database).
     let mut p = pair();
     let mine =
-        p.a.send_text(&p.b.fingerprint(), "à Bob", NOW, &mut p.rng)
+        p.a.send_text(&p.b.fingerprint(), "to Bob", NOW, &mut p.rng)
             .unwrap()
             .remove(0);
     let ReceiveOutcome::Message { ack: ack_pkt, .. } =
         p.b.receive(&mine.encode(), "t", NOW, &mut p.rng).unwrap()
     else {
-        panic!("Message attendu");
+        panic!("Message expected");
     };
     let mut secret = [0u8; 16];
     secret.copy_from_slice(&ack_pkt.payload[16..32]);
-    let env = envelope_bytes(secret, NOW, "piège");
+    let env = envelope_bytes(secret, NOW, "trap");
     let evil = forge(&mut p.b, &env, mine.id, &mut p.rng);
     let out = p.a.receive(&evil.encode(), "t", NOW, &mut p.rng);
-    assert_eq!(reason(out.unwrap()), "identifiant de paquet déjà utilisé");
+    assert_eq!(reason(out.unwrap()), "packet identifier already used");
 }
 
 #[test]
@@ -192,9 +192,9 @@ fn stale_or_future_sent_at_quarantined() {
         let env = envelope_bytes(secret, sent_at, "x");
         let pkt = forge(&mut p.a, &env, ack::packet_id_for(&secret), &mut p.rng);
         let r = reason(p.b.receive(&pkt.encode(), "t", NOW, &mut p.rng).unwrap());
-        assert_eq!(r, "message trop ancien ou daté du futur");
+        assert_eq!(r, "message too old or dated in the future");
     }
-    // Aux limites exactes, le message passe.
+    // At the exact limits, the message passes.
     for sent_at in [NOW - MAX_AGE_SECS, NOW + MAX_FUTURE_SECS] {
         let secret = ack::new_secret(&mut p.rng);
         let env = envelope_bytes(secret, sent_at, "ok");
@@ -229,7 +229,7 @@ fn at_most_two_sessions_per_device() {
     let mut rng = StdRng::seed_from_u64(3);
     let mut ids = Vec::new();
     for i in 0..3u64 {
-        // Alice oublie ses sessions : elle en rouvre une nouvelle.
+        // Alice forgets her sessions: she opens a new one.
         a.store
             .delete_sessions_for_device(b.fingerprint(), b_dev)
             .unwrap();
@@ -249,7 +249,7 @@ fn at_most_two_sessions_per_device() {
         .map(|s| s.session_id)
         .collect();
     assert_eq!(kept.len(), 2);
-    assert!(!kept.contains(&ids[0]), "la plus ancienne est supprimée");
+    assert!(!kept.contains(&ids[0]), "the oldest is deleted");
     assert!(kept.contains(&ids[1]) && kept.contains(&ids[2]));
 }
 
@@ -259,7 +259,7 @@ fn seen_rows_are_purged_after_retention() {
     let old = PacketId([1; 16]);
     p.b.store.mark_seen(old, NOW).unwrap();
     let later = NOW + SEEN_RETENTION_SECS + 1;
-    // N'importe quel paquet pour une boîte surveillée déclenche la purge.
+    // Any packet for a watched mailbox triggers the purge.
     let me = p.b.device.public();
     let junk = Packet {
         kind: Kind::Message,
@@ -292,41 +292,41 @@ fn session_id_uses_inner_pqxdh_ek() {
     assert_eq!(row.session_id, session_id(&init.ek));
     let Wire::Initial { ek: seal_ek, .. } = crate::envelope::parse_wire(&p[0].payload).unwrap()
     else {
-        panic!("Initial attendu");
+        panic!("Initial expected");
     };
-    assert_ne!(seal_ek, init.ek, "l'éphémère de scellement est distincte");
+    assert_ne!(seal_ek, init.ek, "the sealing ephemeral is distinct");
 }
 
 #[test]
 fn relay_rewritten_id_does_not_suppress_genuine_packet() {
-    // Un relais recopie l'identifiant de P2 dans l'en-tête de P1.
+    // A relay copies P2's identifier into P1's header.
     let mut p = pair();
     let p1 =
-        p.a.send_text(&p.b.fingerprint(), "un", NOW, &mut p.rng)
+        p.a.send_text(&p.b.fingerprint(), "one", NOW, &mut p.rng)
             .unwrap()
             .remove(0);
     let p2 =
-        p.a.send_text(&p.b.fingerprint(), "deux", NOW, &mut p.rng)
+        p.a.send_text(&p.b.fingerprint(), "two", NOW, &mut p.rng)
             .unwrap()
             .remove(0);
     let mut evil = p1.clone();
     evil.id = p2.id;
     assert_eq!(
         reason(p.b.receive(&evil.encode(), "t", NOW, &mut p.rng).unwrap()),
-        "identifiant de paquet incohérent"
+        "inconsistent packet identifier"
     );
-    // L'identifiant authentifié (celui de P1) est marqué vu, pas celui de P2.
+    // The authenticated identifier (P1's) is marked seen, not P2's.
     assert!(p.b.store.is_seen(p1.id).unwrap());
     assert!(!p.b.store.is_seen(p2.id).unwrap());
     match p.b.receive(&p2.encode(), "t", NOW, &mut p.rng).unwrap() {
-        ReceiveOutcome::Message { text, .. } => assert_eq!(text, "deux"),
-        other => panic!("Message attendu, obtenu {other:?}"),
+        ReceiveOutcome::Message { text, .. } => assert_eq!(text, "two"),
+        other => panic!("Message expected, got {other:?}"),
     }
 }
 
-/// Carte de Mallory dont l'unique appareil associe SA clé de signature à la
-/// clé X25519 `dh` d'un tiers. Certificat et carte sont valides : la preuve
-/// de possession ne couvre que la clé de signature.
+/// Mallory's card whose only device pairs HER signing key with a third
+/// party's X25519 key `dh`. Certificate and card are valid: the proof
+/// of possession covers only the signing key.
 fn mixed_card(
     dh_of: &DevicePublic,
     bundle_of: Option<&PrekeyBundle>,
@@ -371,16 +371,16 @@ fn card_sharing_a_contacts_dh_key_rejected() {
     assert_eq!(
         p.b.add_contact(&card, Some("mallory"), NOW, &mut p.rng),
         Err(CoreError::Malformed(
-            "appareil déjà associé à un autre contact"
+            "device already associated with another contact"
         ))
     );
-    // Ni sous l'alias d'Alice (changement de clé simulé).
+    // Nor under Alice's alias (simulated key change).
     assert!(
         p.b.add_contact(&card, Some("alice"), NOW, &mut p.rng)
             .is_err()
     );
     assert_eq!(p.b.contacts().unwrap().len(), 1);
-    // Ma propre clé non plus.
+    // Nor my own key.
     let mine = mixed_card(&p.b.device.public(), None, &mut p.rng);
     assert!(
         p.b.add_contact(&mine, Some("moi"), NOW, &mut p.rng)
@@ -390,8 +390,8 @@ fn card_sharing_a_contacts_dh_key_rejected() {
 
 #[test]
 fn ambiguous_sender_never_misattributed() {
-    // Défense en profondeur : même si la carte de Mallory avait été stockée
-    // (vérification d'ajout contournée), l'Initial d'Alice n'est pas attribué à Mallory.
+    // Defense in depth: even if Mallory's card had been stored
+    // (add verification bypassed), Alice's Initial is not attributed to Mallory.
     let (_da, mut a) = party("a", 1);
     let (_db, mut b) = party("b", 2);
     a.add_contact(
@@ -410,7 +410,7 @@ fn ambiguous_sender_never_misattributed() {
     .unwrap();
     let mut rng = StdRng::seed_from_u64(31);
     let card = mixed_card(&a.device.public(), None, &mut rng);
-    // Alias trié en premier : l'ancien code l'aurait choisi.
+    // Alias sorted first: the old code would have chosen it.
     b.store
         .upsert_contact(
             card.fingerprint(),
@@ -420,22 +420,22 @@ fn ambiguous_sender_never_misattributed() {
         )
         .unwrap();
     let p = a
-        .send_text(&b.fingerprint(), "de la part d'Alice", NOW, &mut rng)
+        .send_text(&b.fingerprint(), "from Alice", NOW, &mut rng)
         .unwrap();
     assert_eq!(
         reason(b.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap()),
-        "expéditeur ambigu"
+        "ambiguous sender"
     );
     assert!(b.messages_with(&card.fingerprint()).unwrap().is_empty());
 }
 
 #[test]
 fn session_to_mixed_device_fails_at_its_real_owner() {
-    // Carol ne connaît pas Alice : elle accepte la carte « mixte » de Mallory
-    // (clé dh d'Alice). Son Initial arrive chez Alice, qui connaît Carol. Les
-    // identifiants d'appareil liés aux données associées font échouer le
-    // déchiffrement : Alice ne prend pas pour elle un message destiné à Mallory,
-    // et ne peut pas y répondre dans une session que Carol attribuerait à Mallory.
+    // Carol does not know Alice: she accepts Mallory's "mixed" card
+    // (Alice's dh key). Her Initial arrives at Alice, who knows Carol. The
+    // device identifiers bound to the associated data make
+    // decryption fail: Alice does not take for herself a message meant for Mallory,
+    // and cannot reply to it in a session that Carol would attribute to Mallory.
     let (_da, mut alice) = party("a", 1);
     let (_dc, mut carol) = party("c", 3);
     alice
@@ -457,12 +457,12 @@ fn session_to_mixed_device_fails_at_its_real_owner() {
         .add_contact(&card, Some("mallory"), NOW, &mut rng)
         .unwrap();
     let p = carol
-        .send_text(&mallory, "pour Mallory", NOW, &mut rng)
+        .send_text(&mallory, "for Mallory", NOW, &mut rng)
         .unwrap();
     assert!(alice.watched_mailboxes(NOW).contains(&p[0].mailbox));
     assert_eq!(
         reason(alice.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap()),
-        "déchiffrement impossible"
+        "decryption impossible"
     );
     assert!(
         alice
@@ -484,12 +484,12 @@ fn remove_contact_deletes_contact_card_and_sessions_but_keeps_history() {
     assert!(p.a.store.get_contact(bob).unwrap().is_none());
     assert!(p.a.store.all_sessions().unwrap().is_empty());
     assert!(!p.a.messages_with(&bob).unwrap().is_empty());
-    // Inconnu : erreur, rien n'est cassé.
+    // Unknown: error, nothing is broken.
     assert_eq!(
         p.a.remove_contact(&bob, NOW, &mut p.rng),
         Err(CoreError::UnknownContact)
     );
-    // On peut le rajouter, puis lui écrire (nouvelle session).
+    // It can be added back, then written to (new session).
     p.a.add_contact(
         &p.b.contact_card("Bob").unwrap(),
         Some("bob"),
@@ -504,16 +504,16 @@ fn remove_contact_deletes_contact_card_and_sessions_but_keeps_history() {
     ));
 }
 
-/// Copies d'état de ratchet faites par `decrypt` sur ce fil (compteur par fil,
-/// donc insensible aux tests parallèles).
+/// Ratchet state copies made by `decrypt` on this thread (per-thread counter,
+/// hence insensitive to parallel tests).
 fn clones() -> usize {
     crate::ratchet::STATE_CLONES.with(|c| c.get())
 }
 
-/// Même paquet avec la charge `Wire::Normal` modifiée par `f`.
+/// Same packet with the `Wire::Normal` payload modified by `f`.
 fn tamper(p: &Packet, f: impl FnOnce(&mut crate::ratchet::RatchetMessage)) -> Packet {
     let Wire::Normal { mut msg } = postcard::from_bytes(&p.payload).unwrap() else {
-        panic!("Wire::Normal attendu");
+        panic!("Wire::Normal expected");
     };
     f(&mut msg);
     let payload = postcard::to_allocvec(&Wire::Normal { msg }).unwrap();
@@ -540,7 +540,11 @@ fn junk_packet_never_clones_state() {
             out,
             ReceiveOutcome::Quarantined { .. } | ReceiveOutcome::NotForUs
         ));
-        assert_eq!(clones(), before, "un paquet piégé ne copie pas l'état");
+        assert_eq!(
+            clones(),
+            before,
+            "a booby-trapped packet does not copy the state"
+        );
     }
     let before = clones();
     let next =
@@ -563,14 +567,14 @@ fn valid_header_bad_body_keeps_session() {
             .remove(0);
     let bad = tamper(&good, |m| m.ct[0] ^= 1);
     let r = reason(p.b.receive(&bad.encode(), "t", NOW, &mut p.rng).unwrap());
-    assert_eq!(r, "déchiffrement impossible");
+    assert_eq!(r, "decryption impossible");
     match p.b.receive(&good.encode(), "t", NOW, &mut p.rng).unwrap() {
         ReceiveOutcome::Message { text, .. } => assert_eq!(text, "vrai"),
         other => panic!("{other:?}"),
     }
 }
 
-/// Bob reçoit seulement le 3e message d'Alice : 2 clés sautées, datées de NOW.
+/// Bob receives only Alice's 3rd message: 2 skipped keys, dated NOW.
 fn bob_with_two_skipped() -> Pair {
     let mut p = pair();
     let mut pkts = Vec::new();
@@ -601,7 +605,7 @@ fn skipped_total(c: &Core) -> usize {
 #[test]
 fn idle_session_purges_skipped_keys() {
     let mut p = bob_with_two_skipped();
-    // Contrôle négatif : à 6 jours, les clés sont encore là.
+    // Negative control: at 6 days, the keys are still there.
     p.b.pending_outbox(NOW + 6 * 86_400).unwrap();
     assert_eq!(skipped_total(&p.b), 2);
     p.b.pending_outbox(NOW + 8 * 86_400).unwrap();
@@ -630,7 +634,7 @@ fn open_purges_skipped_keys() {
         let v = a.send_text(&b.fingerprint(), t, NOW, &mut rng).unwrap();
         pkts.push(v.into_iter().next().unwrap());
     }
-    // L'Initial d'Alice (1er message) établit la session, puis on saute le 2e.
+    // Alice's Initial (1st message) establishes the session, then the 2nd is skipped.
     b.receive(&pkts[0].encode(), "t", NOW, &mut rng).unwrap();
     b.receive(&pkts[2].encode(), "t", NOW, &mut rng).unwrap();
     assert_eq!(skipped_total(&b), 1);
@@ -645,7 +649,7 @@ fn open_purges_skipped_keys() {
 #[test]
 fn corrupt_session_row_does_not_block_pending_outbox() {
     let mut p = bob_with_two_skipped();
-    // Seconde ligne de session, illisible.
+    // Second session row, unreadable.
     let mut bad = best_session(&p.b);
     bad.session_id = [0xee; 16];
     bad.state = vec![0xff; 7];
@@ -653,7 +657,7 @@ fn corrupt_session_row_does_not_block_pending_outbox() {
     let later = NOW + 8 * 86_400;
     p.b.pending_outbox(later).unwrap();
     assert_eq!(skipped_total(&p.b), 0);
-    // La ligne illisible est intacte et n'empêche pas la réouverture.
+    // The unreadable row is intact and does not prevent reopening.
     assert!(
         p.b.store
             .all_sessions()
@@ -696,7 +700,7 @@ fn corrupt_session_row_does_not_block_open() {
     assert_eq!(skipped_total(&b), 0);
 }
 
-/// Paquet de bruit dans la boîte d'introduction de `to` au jour de `now`.
+/// Noise packet in the introduction mailbox of `to` on the day of `now`.
 fn junk_to_intro(to: &Core, n: u32, now: u64) -> Vec<u8> {
     let mut id = [0u8; 16];
     id[..4].copy_from_slice(&n.to_be_bytes());
@@ -720,7 +724,7 @@ fn count_events(c: &Core, f: impl Fn(&TransparencyEvent) -> bool) -> usize {
         .count()
 }
 
-/// Bob avec une session établie et une clé de contact changée au journal.
+/// Bob with an established session and a changed contact key in the log.
 fn bob_with_security_events() -> Pair {
     let mut p = pair();
     let (_dc, c) = party("c", 3);
@@ -774,7 +778,7 @@ fn junk_to_intro_mailbox_is_coalesced_and_keeps_security_events() {
         )),
         1
     );
-    // 100 s de bruit : une entrée par minute au plus.
+    // 100 s of noise: at most one entry per minute.
     let failed = count_events(&p.b, |e| {
         matches!(e, TransparencyEvent::DecryptFailed { .. })
     });
@@ -784,7 +788,7 @@ fn junk_to_intro_mailbox_is_coalesced_and_keeps_security_events() {
 #[test]
 fn spaced_junk_fills_log_but_never_evicts_security_events() {
     let mut p = bob_with_security_events();
-    // Une minute entre deux paquets : rien n'est regroupé, le plafond joue.
+    // One minute between two packets: nothing is grouped, the cap applies.
     for i in 0..10_050u32 {
         let now = NOW + 60 * u64::from(i + 1);
         p.b.receive(&junk_to_intro(&p.b, i, now), "t", now, &mut p.rng)
@@ -837,7 +841,7 @@ fn replayed_packets_and_acks_are_coalesced() {
     }
     assert_eq!(dup(&p.b), 1);
     assert_eq!(dup(&p.a), 1);
-    // Après l'intervalle, une nouvelle entrée.
+    // After the interval, a new entry.
     let later = NOW + FRAME_REJECT_LOG_INTERVAL_SECS + 60;
     p.b.receive(&m.encode(), "t", later, &mut p.rng).unwrap();
     assert_eq!(dup(&p.b), 2);
@@ -846,14 +850,14 @@ fn replayed_packets_and_acks_are_coalesced() {
 #[test]
 fn corrupt_session_row_does_not_abort_receive() {
     let mut p = pair();
-    // Ligne de session illisible, même boîte, essayée en premier.
+    // Unreadable session row, same mailbox, tried first.
     let mut bad = best_session(&p.b);
     bad.session_id = [0xee; 16];
     bad.state = vec![0xff; 7];
     bad.last_rx = NOW + 1_000;
     p.b.store.put_session(&bad).unwrap();
     let m =
-        p.a.send_text(&p.b.fingerprint(), "toujours là", NOW, &mut p.rng)
+        p.a.send_text(&p.b.fingerprint(), "still here", NOW, &mut p.rng)
             .unwrap()
             .remove(0);
     assert!(matches!(
@@ -884,7 +888,7 @@ fn corrupt_session_row_quarantines_resent_initial() {
     let p1 = a.send_text(&b.fingerprint(), "1", NOW, &mut rng).unwrap();
     let p2 = a.send_text(&b.fingerprint(), "2", NOW, &mut rng).unwrap();
     b.receive(&p1[0].encode(), "t", NOW, &mut rng).unwrap();
-    // La session ouverte par le premier Initial devient illisible.
+    // The session opened by the first Initial becomes unreadable.
     let mut row = best_session(&b);
     row.state = vec![0xff; 7];
     b.store.put_session(&row).unwrap();
@@ -894,9 +898,9 @@ fn corrupt_session_row_quarantines_resent_initial() {
     ));
 }
 
-// --- Lot 1B, tâche 3 : identifiant de message, sessions entre mes appareils.
+// --- Batch 1B, task 3: message identifier, sessions between my devices.
 
-/// A (administrateur) et T, lié à A.
+/// A (admin) and T, linked to A.
 fn linked() -> (TempDir, Core, Core, StdRng) {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(77);
@@ -909,7 +913,7 @@ fn linked() -> (TempDir, Core, Core, StdRng) {
     (dir, a, t, rng)
 }
 
-/// Scelle `body` pour `target` depuis `from`, dans une transaction.
+/// Seals `body` for `target` from `from`, in one transaction.
 fn seal_body(
     from: &mut Core,
     target: &send::Target,
@@ -938,7 +942,7 @@ fn own_devices_open_sessions() {
     let (_d, mut a, mut t, mut rng) = linked();
     let me = a.fingerprint();
     let body = Body::Text("interne".into());
-    // A → T : une session ouverte avec mon autre appareil, rangée sous mon empreinte.
+    // A → T: a session opened with my other device, filed under my fingerprint.
     let out = seal_body(
         &mut a,
         &send::Target::OwnDevices,
@@ -951,12 +955,12 @@ fn own_devices_open_sessions() {
     let sessions = a.store.all_sessions().unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].contact_fp, me);
-    // T l'ouvre et reconnaît l'expéditeur (moi) : un texte venant de moi est
-    // inattendu, mais il a bien été authentifié et attribué.
+    // T opens it and recognizes the sender (me): a text coming from me is
+    // unexpected, but it was indeed authenticated and attributed.
     assert!(t.watched_mailboxes(NOW).contains(&out[0].0.mailbox));
     let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
-    assert_eq!(reason(r), "contenu inattendu pour cette boîte aux lettres");
-    // T → A, dans l'autre sens.
+    assert_eq!(reason(r), "unexpected content for this mailbox");
+    // T → A, in the other direction.
     let back = seal_body(
         &mut t,
         &send::Target::OwnDevices,
@@ -967,7 +971,7 @@ fn own_devices_open_sessions() {
     assert_eq!(back.len(), 1);
     assert_eq!(back[0].1, a.device.public().id());
     let r = a.receive(&back[0].0.encode(), "t", NOW, &mut rng).unwrap();
-    assert_eq!(reason(r), "contenu inattendu pour cette boîte aux lettres");
+    assert_eq!(reason(r), "unexpected content for this mailbox");
     assert!(t.messages_with(&me).unwrap().is_empty());
     assert!(a.messages_with(&me).unwrap().is_empty());
 }
@@ -977,7 +981,7 @@ fn contact_claiming_own_device_refused() {
     let (_d, mut a, mut t, mut rng) = linked();
     let t_dev = t.device.public();
     let a_dev = a.device.public();
-    // Lu dans la base : vrai sur A comme sur T.
+    // Read from the database: true on A as on T.
     assert!(contacts::claimed_by_other(&a.store, None, &[t_dev]).unwrap());
     assert!(contacts::claimed_by_other(&t.store, None, &[a_dev]).unwrap());
     let card = mixed_card(&t_dev, None, &mut rng);
@@ -993,8 +997,8 @@ fn message_id_dedups_resend() {
     let mut p = pair();
     let b_fp = p.b.fingerprint();
     let a_fp = p.a.fingerprint();
-    p.a.send_text(&b_fp, "une fois", NOW, &mut p.rng).unwrap();
-    // Dernier message de A pour B : on le renvoie, même identifiant, nouveau paquet.
+    p.a.send_text(&b_fp, "once", NOW, &mut p.rng).unwrap();
+    // A's last message to B: resent, same identifier, new packet.
     let first =
         p.a.send_text(&b_fp, "unique", NOW, &mut p.rng)
             .unwrap()
@@ -1020,7 +1024,7 @@ fn message_id_dedups_resend() {
         ReceiveOutcome::Duplicate
     ));
     assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before);
-    // Le doublon est tout de même accusé : l'expéditeur cesse de le renvoyer.
+    // The duplicate is still acked: the sender stops resending it.
     let acks: Vec<Packet> =
         p.b.pending_outbox(NOW)
             .unwrap()
@@ -1033,8 +1037,8 @@ fn message_id_dedups_resend() {
 
 #[test]
 fn message_ids_scoped_to_sender() {
-    // Un contact choisit librement l'identifiant de ses messages : il ne peut
-    // ni effacer ni écraser un message d'un autre contact, ni un des miens.
+    // A contact freely chooses the identifier of its messages: it can
+    // neither erase nor overwrite a message of another contact, nor one of mine.
     let mut p = pair();
     let (_dc, mut c) = party("c", 3);
     let b_fp = p.b.fingerprint();
@@ -1053,7 +1057,7 @@ fn message_ids_scoped_to_sender() {
         &mut p.rng,
     )
     .unwrap();
-    // Identifiant d'un message reçu par Bob (d'Alice), et d'un message de Bob.
+    // Identifier of a message received by Bob (from Alice), and of a message from Bob.
     let from_a = p.b.messages_with(&a_fp).unwrap();
     let in_id = from_a
         .iter()
@@ -1086,8 +1090,8 @@ fn message_ids_scoped_to_sender() {
     assert_eq!(p.b.messages_with(&c.fingerprint()).unwrap().len(), 3);
 }
 
-/// Raison de quarantaine d'une synchronisation venue d'ailleurs que de mes appareils.
-const NOT_MINE: &str = "synchronisation d'un appareil qui n'est pas à moi";
+/// Quarantine reason of a synchronization coming from somewhere other than my devices.
+const NOT_MINE: &str = "synchronization from a device that is not mine";
 
 #[test]
 fn sync_from_contact_quarantined() {
@@ -1117,7 +1121,7 @@ fn sync_from_contact_quarantined() {
         let r =
             p.a.receive(&out[0].0.encode(), "t", NOW, &mut p.rng)
                 .unwrap();
-        assert_eq!(reason(r), NOT_MINE, "cas {i}");
+        assert_eq!(reason(r), NOT_MINE, "case {i}");
     }
     assert_eq!(p.a.messages_with(&b_fp).unwrap().len(), before);
     let c = p.a.contacts().unwrap();
@@ -1128,7 +1132,7 @@ fn sync_from_contact_quarantined() {
     );
 }
 
-/// A lié à T1 puis à T2 ; T1 ne connaît encore que la liste de sa liaison.
+/// A linked to T1 then to T2; T1 only knows the list from its link.
 fn linked_twice() -> (TempDir, Core, Core, Core, StdRng) {
     let (dir, mut a, t1, mut rng) = linked();
     let offer = a.link_offer(NOW, &mut rng).unwrap();
@@ -1146,7 +1150,7 @@ fn linked_twice() -> (TempDir, Core, Core, Core, StdRng) {
     (dir, a, t1, t2, rng)
 }
 
-/// `SyncDevices` scellé par A pour `to` (un de ses autres appareils).
+/// `SyncDevices` sealed by A for `to` (one of its other devices).
 fn devices_packet(a: &mut Core, to: &Core, card: ContactCard, id: u8, rng: &mut StdRng) -> Packet {
     let body = Body::SyncDevices {
         card: Box::new(card),
@@ -1165,8 +1169,8 @@ fn devices_packet(a: &mut Core, to: &Core, card: ContactCard, id: u8, rng: &mut 
     .0
 }
 
-/// Carte de `root` pour `list`, avec les paquets de clés (parmi `all`) des
-/// appareils de la liste, sauf `skip`.
+/// Card of `root` for `list`, with the key packets (among `all`) of the
+/// devices in the list, except `skip`.
 fn card_for(
     root: &RootIdentity,
     list: DeviceList,
@@ -1182,7 +1186,7 @@ fn card_for(
     ContactCard::sign(root, "", list, bundles).unwrap()
 }
 
-/// Paquets de clés de tous les appareils de A.
+/// Key packets of all of A's devices.
 fn all_bundles(a: &Core) -> Vec<PrekeyBundle> {
     let mut all = vec![a.prekeys.bundle(&a.device, false)];
     all.extend(a.linked_bundles.iter().cloned());
@@ -1208,10 +1212,10 @@ fn sync_devices_requires_newer_signed_list() {
     let certs = a.devices.certs.clone();
     let v = a.devices.version;
     let mut cases = Vec::new();
-    // Version égale à celle de T1, signée par ma racine.
+    // Version equal to T1's, signed by my root.
     let same = DeviceList::sign(&root, t1_before.version, certs.clone()).unwrap();
     cases.push(card_for(&root, same, &all, None));
-    // Version supérieure qui ne contient pas T1.
+    // Higher version that does not contain T1.
     let without: Vec<_> = certs
         .iter()
         .filter(|c| c.device != t1_dev)
@@ -1219,37 +1223,37 @@ fn sync_devices_requires_newer_signed_list() {
         .collect();
     let list = DeviceList::sign(&root, v + 1, without).unwrap();
     cases.push(card_for(&root, list, &all, None));
-    // Signature de liste invalide (version réécrite).
+    // Invalid list signature (rewritten version).
     let mut forged = a.devices.clone();
     forged.version += 10;
     cases.push(card_for(&root, forged, &all, None));
-    // Carte d'une autre racine.
+    // Card of another root.
     let (other, _) = RootIdentity::generate(&mut rng);
     let oc = DeviceCertificate::issue(&other, &t1.device, "t1", NOW).unwrap();
     let ol = DeviceList::sign(&other, v + 5, vec![oc]).unwrap();
     cases.push(card_for(&other, ol, &all, None));
-    // Liste valide et plus récente, mais pas de paquet de clés pour T1.
+    // Valid and newer list, but no key packet for T1.
     let list = DeviceList::sign(&root, v + 1, certs.clone()).unwrap();
     cases.push(card_for(&root, list, &all, Some(&t1_dev)));
     a.root = Some(root);
     for (i, card) in cases.into_iter().enumerate() {
         let pkt = devices_packet(&mut a, &t1, card, 10 + i as u8, &mut rng);
         let r = t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap();
-        assert_eq!(reason(r), "liste d'appareils refusée", "cas {i}");
-        assert_eq!(t1.devices, t1_before, "cas {i}");
-        assert_eq!(stored(&t1), t1_before, "cas {i}");
+        assert_eq!(reason(r), "device list refused", "case {i}");
+        assert_eq!(t1.devices, t1_before, "case {i}");
+        assert_eq!(stored(&t1), t1_before, "case {i}");
     }
 
-    // La vraie carte, plus récente : appliquée, T1 peut joindre T2.
+    // The real card, newer: applied, T1 can reach T2.
     let card = a.contact_card("").unwrap();
     let pkt = devices_packet(&mut a, &t1, card, 30, &mut rng);
     match t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap() {
         ReceiveOutcome::Synced { kind } => assert_eq!(kind, SyncKind::Devices),
-        other => panic!("Synced attendu, obtenu {other:?}"),
+        other => panic!("Synced expected, got {other:?}"),
     }
     assert_eq!(t1.devices, a.devices);
     assert_eq!(stored(&t1), a.devices);
-    // Les paquets de mes autres appareils viennent de la carte, sans le mien.
+    // The key packets of my other devices come from the card, without mine.
     assert_eq!(t1.linked_bundles.len(), 2);
     assert!(t1.linked_bundles.iter().all(|b| b.device != t1_dev));
     let out = seal_body(
@@ -1264,7 +1268,7 @@ fn sync_devices_requires_newer_signed_list() {
     assert!(out.iter().any(|(_, d)| *d == t2_id));
     assert!(!t1.store.sessions_for(me, t2_id).unwrap().is_empty());
 
-    // Une carte plus récente qui retire T2 : les sessions de T1 avec T2 disparaissent.
+    // A newer card that removes T2: T1's sessions with T2 disappear.
     let shrunk = {
         let root = a.root.as_ref().unwrap();
         let certs = a
@@ -1291,7 +1295,7 @@ fn sync_devices_requires_newer_signed_list() {
             .is_empty()
     );
 
-    // T2, retiré, envoie encore une synchronisation à T1 : refusée.
+    // T2, removed, still sends a synchronization to T1: refused.
     let op = Body::SyncContact(SyncOp::Remove(Fingerprint([9; 32])));
     let out = seal_body(
         &mut t2,
@@ -1320,9 +1324,9 @@ fn sync_devices_requires_newer_signed_list() {
 
 #[test]
 fn older_valid_sync_devices_is_acked_duplicate() {
-    // T1 a appliqué la liste v3 (T2 lié) ; la v2 (celle de sa liaison),
-    // authentique et qui le contient, arrive en retard : doublon accusé,
-    // pas de quarantaine, rien de changé.
+    // T1 applied list v3 (T2 linked); v2 (the one from its link),
+    // authentic and containing it, arrives late: duplicate acked,
+    // no quarantine, nothing changed.
     let (dir, mut a, mut t1, mut rng) = linked();
     let v2 = a
         .store
@@ -1354,7 +1358,7 @@ fn older_valid_sync_devices_is_acked_duplicate() {
     let r = t1.receive(&late.encode(), "t", NOW, &mut rng).unwrap();
     assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
     assert_eq!(t1.devices, current);
-    // Accusé émis pour ce paquet : A cesse de renvoyer la vieille liste.
+    // Ack emitted for this packet: A stops resending the old list.
     let acks = t1.pending_outbox(NOW).unwrap();
     assert_eq!(acks.len(), acks_before + 1);
     assert!(acks.iter().any(|b| {
@@ -1365,9 +1369,9 @@ fn older_valid_sync_devices_is_acked_duplicate() {
 
 #[test]
 fn sync_from_removed_device_with_session_refused() {
-    // Session T1 ↔ T2 établie, puis T2 retiré de la liste de T1 sans que
-    // la session ne soit purgée (état d'avant la purge) : la synchronisation
-    // est tout de même refusée, car T2 n'est plus dans ma liste.
+    // Session T1 ↔ T2 established, then T2 removed from T1's list without
+    // the session being purged (state from before the purge): the synchronization
+    // is still refused, because T2 is no longer in my list.
     let (_d, mut a, mut t1, mut t2, mut rng) = linked_twice();
     let card = a.contact_card("").unwrap();
     let pkt = devices_packet(&mut a, &t1, card, 1, &mut rng);
@@ -1386,7 +1390,7 @@ fn sync_from_removed_device_with_session_refused() {
         t1.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
         ReceiveOutcome::Synced { .. }
     ));
-    // Réponse de T1 : la session de T2 n'attend plus d'Initial.
+    // T1's reply: T2's session no longer awaits an Initial.
     let t2_id = t2.device.public().id();
     let back = seal_body(
         &mut t1,
@@ -1400,7 +1404,7 @@ fn sync_from_removed_device_with_session_refused() {
         t2.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
         ReceiveOutcome::Synced { .. }
     ));
-    // Liste réécrite en base sans T2 (sessions gardées).
+    // List rewritten in the database without T2 (sessions kept).
     let root = a.root.as_ref().unwrap();
     let certs = a
         .devices
@@ -1431,7 +1435,7 @@ fn sync_from_removed_device_with_session_refused() {
     );
 }
 
-/// Carte de `n` appareils aux noms de taille maximale.
+/// Card of `n` devices with maximum-size names.
 fn max_card(n: usize, rng: &mut StdRng) -> ContactCard {
     let (root, _) = RootIdentity::generate(rng);
     let mut certs = Vec::new();
@@ -1446,9 +1450,9 @@ fn max_card(n: usize, rng: &mut StdRng) -> ContactCard {
     ContactCard::sign(&root, &"x".repeat(64), list, bundles).unwrap()
 }
 
-/// Contenus les plus lourds qui transportent une carte. La mise à jour de
-/// carte d'un contact (`CardUpdate`) a la taille de `SyncDevices` : une
-/// étiquette et la carte.
+/// Heaviest contents that carry a card. A contact's card
+/// update (`CardUpdate`) has the size of `SyncDevices`: a
+/// label and the card.
 fn card_bodies(card: &ContactCard) -> [Body; 3] {
     [
         Body::SyncContact(SyncOp::Upsert {
@@ -1471,7 +1475,7 @@ fn device_cap_fits_one_packet() {
     for body in card_bodies(&card) {
         assert!(crate::envelope::fits_in_packet(&body), "{body:?}");
     }
-    // Un appareil de plus ne tiendrait pas : la liste est refusée à la signature.
+    // One more device would not fit: the list is refused at signing.
     let mut bigger = card.clone();
     let extra = max_card(1, &mut rng);
     bigger.devices.certs.push(extra.devices.certs[0].clone());
@@ -1493,7 +1497,7 @@ fn device_cap_fits_one_packet() {
 
 #[test]
 fn wire_overhead_bound_holds() {
-    // Ouverture de session (Wire::Initial, la plus lourde) avec la plus grosse carte.
+    // Session opening (Wire::Initial, the heaviest) with the largest card.
     let (_d, mut a, _t, mut rng) = linked();
     let card = max_card(crate::identity::device_list::MAX_DEVICES, &mut rng);
     for body in card_bodies(&card) {
@@ -1523,7 +1527,7 @@ fn wire_overhead_bound_holds() {
             env_len,
             crate::envelope::MAX_WIRE_OVERHEAD
         );
-        // Session ouverte : on en refait une neuve pour le contenu suivant.
+        // Session opened: a new one is made for the next content.
         for s in a.store.all_sessions().unwrap() {
             a.store
                 .delete_session(s.contact_fp, s.contact_device, &s.session_id)
@@ -1536,8 +1540,8 @@ fn wire_overhead_bound_holds() {
 fn oversized_sync_is_skipped_not_fatal() {
     let (_d, mut a, _t, mut rng) = linked();
     let before = a.pending_outbox(NOW).unwrap().len();
-    // Carte qui ne tient pas dans un paquet (non signable telle quelle :
-    // forgée pour le seul calcul de taille).
+    // Card that does not fit in a packet (not signable as is:
+    // forged for the size computation only).
     let mut big = max_card(crate::identity::device_list::MAX_DEVICES, &mut rng);
     let extra = max_card(1, &mut rng);
     big.devices.certs.push(extra.devices.certs[0].clone());
@@ -1552,7 +1556,7 @@ fn oversized_sync_is_skipped_not_fatal() {
     store
         .transaction(|tx| sync::send_op(tx, device, op, send::SealTime::at(NOW), &mut rng))
         .unwrap();
-    // Rien de scellé, aucune session ouverte, l'événement est journalisé.
+    // Nothing sealed, no session opened, the event is logged.
     assert_eq!(a.pending_outbox(NOW).unwrap().len(), before);
     assert_eq!(a.store.all_sessions().unwrap().len(), sessions);
     let events: Vec<_> = a
@@ -1570,11 +1574,11 @@ fn oversized_sync_is_skipped_not_fatal() {
     )));
 }
 
-// --- Lot 1B, tâche 5 : nouvelle carte envoyée aux contacts.
+// --- Batch 1B, task 5: new card sent to contacts.
 
-/// Alice (A, administrateur, liée à T) et Bob, contacts l'un de l'autre. Bob
-/// a appliqué la mise à jour de carte d'Alice (A et T). Rend aussi la carte
-/// d'Alice d'avant la liaison.
+/// Alice (A, admin, linked to T) and Bob, contacts of each other. Bob
+/// applied Alice's card update (A and T). Also returns Alice's card
+/// from before the link.
 fn alice_tablet_bob() -> (TempDir, Core, Core, Core, ContactCard, StdRng) {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(78);
@@ -1613,9 +1617,9 @@ fn card_update(from: &mut Core, to: Fingerprint, card: ContactCard, rng: &mut St
 
 #[test]
 fn trapped_card_does_not_block_receive() {
-    // Bob signe une carte qui ajoute un appareil dont la préclé signée est
-    // d'ordre faible ([0; 32]). Alice, liée (carte stockée), lui enverrait sa
-    // carte : le scellement échoue pour cet appareil, qui est ignoré.
+    // Bob signs a card that adds a device whose signed prekey is
+    // low-order ([0; 32]). Alice, linked (stored card), would send him her
+    // card: sealing fails for this device, which is skipped.
     let (_dir, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
     let alice = a.fingerprint();
     let bob = b.fingerprint();
@@ -1625,7 +1629,7 @@ fn trapped_card_does_not_block_receive() {
     bundle.spk = [0; 32];
     bundle.sig = trap.sign(crate::crypto::labels::PREKEYS, &bundle.signed_bytes());
     let mut certs = b.devices.certs.clone();
-    certs.push(DeviceCertificate::issue(&bob_root, &trap, "piège", NOW).unwrap());
+    certs.push(DeviceCertificate::issue(&bob_root, &trap, "trap", NOW).unwrap());
     let list = DeviceList::sign(&bob_root, b.devices.version + 1, certs).unwrap();
     let bundles = vec![b.prekeys.bundle(&b.device, false), bundle];
     let card = ContactCard::sign(&bob_root, "Bob", list, bundles).unwrap();
@@ -1649,16 +1653,16 @@ fn trapped_card_does_not_block_receive() {
     assert!(a.store.is_seen(p.id).unwrap());
     let again = a.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
     assert!(matches!(again, ReceiveOutcome::Duplicate), "{again:?}");
-    // Alice écrit encore à Bob : son appareil valide reçoit (l'appareil
-    // piégé est ignoré), plus la copie pour T.
-    let pkts = a.send_text(&bob, "toujours là", NOW, &mut rng).unwrap();
+    // Alice writes to Bob again: his valid device receives (the
+    // booby-trapped device is skipped), plus the copy for T.
+    let pkts = a.send_text(&bob, "still here", NOW, &mut rng).unwrap();
     assert_eq!(pkts.len(), 2);
     let opened = pkts
         .iter()
         .filter(|p| {
             matches!(
                 b.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
-                ReceiveOutcome::Message { ref text, .. } if text == "toujours là"
+                ReceiveOutcome::Message { ref text, .. } if text == "still here"
             )
         })
         .count();
@@ -1672,17 +1676,17 @@ fn card_update_wrong_root_or_older_ignored() {
     let bob = b.fingerprint();
     let current = stored_card(&b, alice);
     assert_eq!(current.devices.certs.len(), 2);
-    // Autre racine : quarantaine, carte inchangée.
+    // Other root: quarantine, card unchanged.
     let (c, _) = Core::create(&dir.path().join("c"), &[5; 32], "c", NOW, &mut rng).unwrap();
     let p = card_update(&mut a, bob, c.contact_card("Carol").unwrap(), &mut rng);
     assert_eq!(
         reason(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
-        "mise à jour de carte refusée"
+        "card update refused"
     );
     assert_eq!(stored_card(&b, alice), current);
-    // Version inférieure, ou la même carte : dépassée, doublon accusé
-    // (l'expéditeur cesse de la renvoyer), carte inchangée.
-    for (card, why) in [(v1, "version inférieure"), (current.clone(), "même carte")] {
+    // Lower version, or the same card: superseded, duplicate acked
+    // (the sender stops resending it), card unchanged.
+    for (card, why) in [(v1, "lower version"), (current.clone(), "same card")] {
         let acks = b.pending_outbox(NOW).unwrap().len();
         let p = card_update(&mut a, bob, card, &mut rng);
         assert!(
@@ -1702,7 +1706,7 @@ fn card_update_refusals() {
     let (dir, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
     let alice = a.fingerprint();
     let bob = b.fingerprint();
-    // Carol, autre contact de Bob.
+    // Carol, another contact of Bob.
     let (carol, _) = Core::create(&dir.path().join("c"), &[5; 32], "c", NOW, &mut rng).unwrap();
     let carol_card = carol.contact_card("Carol").unwrap();
     b.add_contact(&carol_card, Some("carol"), NOW, &mut rng)
@@ -1711,7 +1715,7 @@ fn card_update_refusals() {
     let root = RootIdentity::from_seed(&Zeroizing::new(
         a.store.get_meta::<[u8; 32]>(META_ROOT).unwrap().unwrap(),
     ));
-    // Liste d'Alice plus récente, avec en plus l'appareil `extra`.
+    // Alice's newer list, with the extra device `extra`.
     let claiming = |extra: &DeviceKeys| {
         let mut certs = current.devices.certs.clone();
         certs.push(DeviceCertificate::issue(&root, extra, "vol", NOW).unwrap());
@@ -1719,15 +1723,15 @@ fn card_update_refusals() {
         ContactCard::sign(&root, "Alice", list, current.bundles.clone()).unwrap()
     };
     let cases = [
-        (carol_card.clone(), "carte d'un autre contact"),
-        (claiming(&b.device), "un de mes appareils"),
-        (claiming(&carol.device), "un appareil d'un autre contact"),
+        (carol_card.clone(), "card of another contact"),
+        (claiming(&b.device), "one of my devices"),
+        (claiming(&carol.device), "a device of another contact"),
     ];
     for (card, why) in cases {
         let p = card_update(&mut a, bob, card, &mut rng);
         assert_eq!(
             reason(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
-            "mise à jour de carte refusée",
+            "card update refused",
             "{why}"
         );
         assert_eq!(stored_card(&b, alice), current, "{why}");
@@ -1741,7 +1745,7 @@ fn card_update_removing_sender_device() {
     let alice = a.fingerprint();
     let bob = b.fingerprint();
     let t_id = t.device.public().id();
-    // Nouvelle liste d'Alice sans T, envoyée par T lui-même.
+    // Alice's new list without T, sent by T itself.
     let root = a.root.as_ref().unwrap();
     let certs: Vec<_> = a
         .devices
@@ -1775,7 +1779,7 @@ fn card_update_removing_sender_device() {
             })
             == 1
     );
-    // Bob n'écrit plus qu'à A.
+    // Bob now writes only to A.
     assert_eq!(b.send_text(&alice, "x", NOW, &mut rng).unwrap().len(), 1);
 }
 
@@ -1792,13 +1796,13 @@ fn card_update_from_own_device_quarantined() {
         &mut rng,
     );
     let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
-    assert_eq!(reason(r), "contenu inattendu pour cette boîte aux lettres");
+    assert_eq!(reason(r), "unexpected content for this mailbox");
 }
 
 #[test]
 fn display_name_stored_and_used_for_link() {
     let (_d, mut a, _t, _b, _v1, _rng) = alice_tablet_bob();
-    // `contact_card` l'a enregistré ; la carte de la liaison le porte.
+    // `contact_card` recorded it; the link's card carries it.
     assert_eq!(
         a.store.get_meta::<String>(META_DISPLAY_NAME).unwrap(),
         Some("Alice".to_owned())
@@ -1828,7 +1832,7 @@ fn card_update_same_version_divergent_list_refused() {
     let alice = a.fingerprint();
     let bob = b.fingerprint();
     let current = stored_card(&b, alice);
-    // Autre liste signée par la racine d'Alice, à la même version.
+    // Another list signed by Alice's root, at the same version.
     let root = a.root.as_ref().unwrap();
     let a_id = a.device.public().id();
     let certs: Vec<_> = current
@@ -1841,14 +1845,14 @@ fn card_update_same_version_divergent_list_refused() {
     let list = DeviceList::sign(root, current.devices.version, certs).unwrap();
     let bundles = vec![a.prekeys.bundle(&a.device, false)];
     let divergent = ContactCard::sign(root, "Alice", list, bundles).unwrap();
-    // Carte dépassée mais invalide (signature altérée) : refusée aussi.
+    // Superseded but invalid card (altered signature): refused too.
     let mut forged = current.clone();
     forged.sig[0] ^= 1;
-    for (card, why) in [(divergent, "liste divergente"), (forged, "signature")] {
+    for (card, why) in [(divergent, "divergent list"), (forged, "signature")] {
         let p = card_update(&mut a, bob, card, &mut rng);
         assert_eq!(
             reason(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
-            "mise à jour de carte refusée",
+            "card update refused",
             "{why}"
         );
         assert_eq!(stored_card(&b, alice), current, "{why}");
@@ -1867,16 +1871,16 @@ fn sync_sent_matching_imported_history_message_not_duplicated() {
             &mut rng,
         )
         .unwrap();
-    let packets = a.send_text(&bob_fp, "salut", NOW + 1, &mut rng).unwrap();
+    let packets = a.send_text(&bob_fp, "hello", NOW + 1, &mut rng).unwrap();
     let sent = a.messages_with(&bob_fp).unwrap();
     assert_eq!(sent.len(), 1);
-    // T a déjà ce message (importé avec l'historique), même identifiant.
+    // T already has this message (imported with the history), same identifier.
     let inserted = t
         .store
         .insert_message(
             bob_fp,
             Direction::Out,
-            "salut",
+            "hello",
             MessageStatus::Sent,
             NOW + 1,
             sent[0].message_id,
@@ -1920,7 +1924,7 @@ fn log_transport_event_accepts_only_node_events() {
             },
             NOW
         ),
-        Err(CoreError::Malformed("événement de transport"))
+        Err(CoreError::Malformed("transport event"))
     );
 }
 
@@ -1938,7 +1942,7 @@ fn watched_mailboxes_split_by_class() {
         &mut rng,
     )
     .unwrap();
-    // Premier contact : vers la boîte d'introduction de Bob, accusé attendu là.
+    // First contact: toward Bob's introduction mailbox, ack expected there.
     let p = a.send_text(&b.fingerprint(), "x", NOW, &mut rng).unwrap();
     let g = a.watched_mailbox_groups(NOW);
     let my_intro = intro_mailbox(&a.device.public(), day_of(NOW));
@@ -1946,8 +1950,8 @@ fn watched_mailboxes_split_by_class() {
     assert!(g.intro.contains(&p[0].mailbox));
     assert!(!g.sessions.contains(&p[0].mailbox));
     assert!(!g.sessions.contains(&my_intro));
-    // Session établie : la boîte de session et celle de l'accusé attendu
-    // sont dans le groupe des sessions.
+    // Session established: the session mailbox and that of the expected ack
+    // are in the sessions group.
     b.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap();
     let q = b.send_text(&a.fingerprint(), "y", NOW, &mut rng).unwrap();
     a.receive(&q[0].encode(), "t", NOW, &mut rng).unwrap();
@@ -1956,7 +1960,7 @@ fn watched_mailboxes_split_by_class() {
     assert!(g.sessions.contains(&q[0].mailbox));
     assert!(g.sessions.contains(&r[0].mailbox));
     assert!(!g.intro.contains(&r[0].mailbox));
-    // Union, sans doublon.
+    // Union, without duplicates.
     let all = a.watched_mailboxes(NOW);
     assert_eq!(all.len(), g.intro.len() + g.sessions.len());
     assert!(g.intro.iter().chain(&g.sessions).all(|m| all.contains(m)));
@@ -1966,10 +1970,10 @@ fn watched_mailboxes_split_by_class() {
 fn transport_state_roundtrip_and_key_rules() {
     let (d, mut a) = party("a", 1);
     assert_eq!(a.transport_state("netsync").unwrap(), None);
-    a.set_transport_state("netsync", b"etat").unwrap();
+    a.set_transport_state("netsync", b"state").unwrap();
     assert_eq!(
         a.transport_state("netsync").unwrap().as_deref(),
-        Some(&b"etat"[..])
+        Some(&b"state"[..])
     );
     a.set_transport_state("netsync", b"").unwrap();
     assert_eq!(
@@ -1984,12 +1988,12 @@ fn transport_state_roundtrip_and_key_rules() {
         a.set_transport_state("big", &vec![0; MAX_TRANSPORT_STATE + 1]),
         Err(CoreError::TooLarge)
     ));
-    // Gardé dans la base (chiffrée) : relu après réouverture.
-    a.set_transport_state("netsync", b"persiste").unwrap();
+    // Kept in the (encrypted) database: reread after reopening.
+    a.set_transport_state("netsync", b"persists").unwrap();
     drop(a);
     let a = Core::open(&d.path().join("db"), &[1; 32], NOW).unwrap();
     assert_eq!(
         a.transport_state("netsync").unwrap().as_deref(),
-        Some(&b"persiste"[..])
+        Some(&b"persists"[..])
     );
 }

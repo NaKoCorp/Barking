@@ -1,7 +1,7 @@
 #![no_main]
 
-//! `Core::receive` sur des octets quelconques, avec une session ouverte : jamais de panique,
-//! toujours `Ok(_)`. Bob repart de l'état post-mise en place à chaque entrée.
+//! `Core::receive` on arbitrary bytes, with an open session: never a panic,
+//! always `Ok(_)`. Bob restarts from the post-setup state on every input.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -17,5 +17,5 @@ fuzz_target!(|data: &[u8]| {
     let guard = shared().lock().unwrap_or_else(|e| e.into_inner());
     let (mut bob, mut rng) = guard.fresh_bob();
     let out = bob.receive(data, "fuzz", NOW, &mut rng);
-    assert!(out.is_ok(), "receive a renvoyé une erreur : {out:?}");
+    assert!(out.is_ok(), "receive returned an error: {out:?}");
 });

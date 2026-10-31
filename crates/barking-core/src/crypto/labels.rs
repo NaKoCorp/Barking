@@ -1,89 +1,89 @@
-//! Étiquettes de séparation de domaine.
+//! Domain separation labels.
 //!
-//! Chaque signature et chaque dérivation de clé utilise une étiquette de la
-//! forme `b"barking/v0/<usage>"`, centralisée ici. Les tâches suivantes y
-//! ajoutent leurs propres constantes.
+//! Every signature and every key derivation uses a label of the
+//! form `b"barking/v0/<usage>"`, centralised here. Later tasks add
+//! their own constants here.
 
-/// Graine de l'identité racine dérivée de l'entropie de la phrase de récupération.
+/// Seed of the root identity derived from the entropy of the recovery phrase.
 pub const ROOT_FROM_ENTROPY: &[u8] = b"barking/v0/root-from-entropy";
 
-/// Contexte BLAKE3 de l'empreinte d'une clé racine publique.
+/// BLAKE3 context of the fingerprint of a public root key.
 pub const FINGERPRINT_CONTEXT: &str = "barking/v0/fingerprint";
 
-/// Domaine du code de sécurité (hash des deux empreintes triées).
+/// Safety code domain (hash of the two sorted fingerprints).
 pub const SAFETY_NUMBER: &[u8] = b"barking/v0/safety-number";
 
-/// Domaine de signature du certificat d'appareil par la racine.
+/// Signature domain of the device certificate by the root.
 pub const DEVICE_CERT: &[u8] = b"barking/v0/device-cert";
 
-/// Preuve de possession : l'appareil signe son propre certificat (racine,
-/// clés publiques, nom, date) avec sa clé de signature.
+/// Proof of possession: the device signs its own certificate (root,
+/// public keys, name, date) with its signing key.
 pub const DEVICE_POSSESSION: &[u8] = b"barking/v0/device-possession";
 
-/// Domaine de signature de la liste d'appareils par la racine.
+/// Signature domain of the device list by the root.
 pub const DEVICE_LIST: &[u8] = b"barking/v0/device-list";
 
-/// Contexte BLAKE3 de l'identifiant d'appareil.
+/// BLAKE3 context of the device identifier.
 pub const DEVICE_ID_CONTEXT: &str = "barking/v0/device-id";
 
-/// Domaine de signature d'un paquet de clés par l'appareil.
+/// Signature domain of a key bundle by the device.
 pub const PREKEYS: &[u8] = b"barking/v0/prekeys";
 
-/// Dérivation de la clé de session PQXDH.
+/// Derivation of the PQXDH session key.
 pub const PQXDH_SK: &[u8] = b"barking/v0/pqxdh-sk";
 
-/// Dérivation du secret des boîtes aux lettres à l'ouverture de session.
+/// Derivation of the mailbox secret at session opening.
 pub const PQXDH_MAILBOX: &[u8] = b"barking/v0/pqxdh-mailbox";
 
-/// Clés d'en-tête initiales du double ratchet (`shared_hka || shared_nhkb`).
+/// Initial header keys of the double ratchet (`shared_hka || shared_nhkb`).
 pub const RATCHET_HK: &[u8] = b"barking/v0/ratchet-hk";
 
-/// KDF_RK du double ratchet : `RK' || CK || NHK`.
+/// KDF_RK of the double ratchet : `RK' || CK || NHK`.
 pub const RATCHET_RK: &[u8] = b"barking/v0/ratchet-rk";
 
-/// Clé et nonce du corps d'un message, dérivés de la clé de message.
+/// Key and nonce of a message body, derived from the message key.
 pub const RATCHET_MK: &[u8] = b"barking/v0/ratchet-mk";
 
-/// Domaine de la boîte aux lettres de session (hash à clé par `mailbox_secret`).
+/// Session mailbox domain (hash keyed by `mailbox_secret`).
 pub const MAILBOX: &[u8] = b"barking/v0/mailbox";
 
-/// Contexte BLAKE3 de la boîte aux lettres d'introduction (premier message).
+/// BLAKE3 context of the introduction mailbox (first message).
 pub const INTRO_MAILBOX_CONTEXT: &str = "barking/v0/intro-mailbox";
 
-/// Contexte BLAKE3 de l'identifiant de paquet dérivé du secret d'accusé.
+/// BLAKE3 context of the packet identifier derived from the acknowledgement secret.
 pub use barking_packet::labels::ACK_CONTEXT;
 
-/// Scellement du message initial : `key(32) || nonce(12)` dérivés de
-/// `DH(e_seal, IK_B)`, avec une éphémère propre à chaque paquet Initial.
+/// Sealing of the initial message: `key(32) || nonce(12)` derived from
+/// `DH(e_seal, IK_B)`, with an ephemeral key specific to each Initial packet.
 pub const INITIAL_SEAL: &[u8] = b"barking/v0/initial-seal";
 
-/// Domaine de signature de la carte de contact par la racine.
+/// Signature domain of the contact card by the root.
 pub const CONTACT_CARD: &[u8] = b"barking/v0/contact-card";
 
-/// Contexte BLAKE3 de la clé de trame : 8 octets du hash du paquet entier.
+/// BLAKE3 context of the frame key: 8 bytes of the hash of the whole packet.
 pub use barking_packet::labels::FRAME_CONTEXT;
 
-/// Contexte BLAKE3 de la clé du MAC de la demande de liaison (dérivée du
-/// secret de liaison).
+/// BLAKE3 context of the MAC key of the link request (derived from the
+/// link secret).
 pub const LINK_MAC: &str = "barking/v0/link/mac";
 
-/// Contexte BLAKE3 de la clé du paquet de liaison (dérivée du secret de liaison).
+/// BLAKE3 context of the key of the link bundle (derived from the link secret).
 pub const LINK_BUNDLE: &str = "barking/v0/link/bundle";
 
-/// Contexte BLAKE3 de la clé de l'archive d'historique (dérivée du secret de liaison).
+/// BLAKE3 context of the key of the history archive (derived from the link secret).
 pub const LINK_HISTORY: &str = "barking/v0/link/history";
 
-/// Contexte BLAKE3 de l'identifiant stocké d'un message reçu :
-/// `derive_key(MESSAGE_ID_IN, empreinte de l'expéditeur || identifiant de
-/// l'enveloppe)[..16]`. L'expéditeur choisit l'identifiant de l'enveloppe ;
-/// le lier à son empreinte l'empêche d'atteindre les messages d'un autre.
+/// BLAKE3 context of the stored identifier of a received message:
+/// `derive_key(MESSAGE_ID_IN, sender fingerprint || envelope
+/// identifier)[..16]`. The sender chooses the envelope identifier;
+/// binding it to their fingerprint prevents them from reaching another sender's messages.
 pub const MESSAGE_ID_IN: &str = "barking/v0/message-id/in";
 
-/// Domaine de la signature, par la racine, du clair du paquet de liaison
-/// (`BLAKE3(postcard(clair))`) : seul l'administrateur peut le produire, pas
-/// un simple détenteur du secret de liaison.
+/// Domain of the root's signature over the plaintext of the link bundle
+/// (`BLAKE3(postcard(plaintext))`): only the administrator can produce it, not
+/// a mere holder of the link secret.
 pub const LINK_BUNDLE_SIG: &[u8] = b"barking/v0/link/bundle-sig";
 
-/// Domaine de la signature, par la racine, du clair de l'archive d'historique
-/// (`BLAKE3(postcard(entrées))`).
+/// Domain of the root's signature over the plaintext of the history archive
+/// (`BLAKE3(postcard(entries))`).
 pub const LINK_HISTORY_SIG: &[u8] = b"barking/v0/link/history-sig";

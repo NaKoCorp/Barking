@@ -1,6 +1,6 @@
-//! Écrit le corpus initial (vrais paquets et vraies trames de l'échange du harnais) :
-//! `seed <répertoire du corpus> [cible]` écrit les graines de `receive`, `receive_frame` et
-//! `packet_decode` (ou de la seule cible donnée).
+//! Writes the initial corpus (real packets and real frames from the harness exchange):
+//! `seed <corpus directory> [target]` writes the seeds of `receive`, `receive_frame` and
+//! `packet_decode` (or of the given target only).
 
 use std::fs;
 use std::path::PathBuf;
@@ -9,28 +9,28 @@ use barking_core::ReceiveOutcome;
 use barking_core_fuzz::NOW;
 
 fn write(dir: PathBuf, items: &[Vec<u8>]) {
-    fs::create_dir_all(&dir).expect("création du répertoire de corpus");
+    fs::create_dir_all(&dir).expect("creating the corpus directory");
     for (i, item) in items.iter().enumerate() {
-        fs::write(dir.join(format!("seed-{i:02}")), item).expect("écriture d'une graine");
+        fs::write(dir.join(format!("seed-{i:02}")), item).expect("writing a seed");
     }
 }
 
 fn main() {
     let Some(root) = std::env::args().nth(1) else {
-        eprintln!("usage : seed <répertoire du corpus>");
+        eprintln!("usage: seed <corpus directory>");
         std::process::exit(2);
     };
     let only = std::env::args().nth(2);
     let root = PathBuf::from(root);
     let h = barking_core_fuzz::fixture();
-    // Graines vivantes : Bob déchiffre chaque paquet. Une graine refusée dès
-    // l'en-tête (`NotForUs`) ne ferait fuzzer que le décodage.
+    // Live seeds: Bob decrypts every packet. A seed rejected right at
+    // the header (`NotForUs`) would only fuzz the decoding.
     for (i, p) in h.packets.iter().enumerate() {
         let (mut bob, mut rng) = h.fresh_bob();
         match bob.receive(p, "seed", NOW, &mut rng) {
             Ok(ReceiveOutcome::Message { .. }) => {}
             other => {
-                eprintln!("graine {i} inutilisable : {other:?}");
+                eprintln!("seed {i} unusable: {other:?}");
                 std::process::exit(1);
             }
         }
@@ -46,7 +46,7 @@ fn main() {
         write(root.join("receive_frame"), &h.frames);
     }
     println!(
-        "{} paquets, {} trames disponibles ; graines écrites dans {}",
+        "{} packets, {} frames available; seeds written to {}",
         h.packets.len(),
         h.frames.len(),
         root.display()

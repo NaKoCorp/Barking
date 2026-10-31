@@ -1,4 +1,4 @@
-//! Carte de contact signée : liste d'appareils et paquets de clés, partageable en texte.
+//! Signed contact card: device list and key bundles, shareable as text.
 
 use crate::crypto::labels;
 use crate::handshake::PrekeyBundle;
@@ -9,17 +9,17 @@ use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// Préfixe du format texte.
+/// Prefix of the text format.
 pub const CARD_PREFIX: &str = "barking1:";
-/// Taille maximale d'une carte décodée (octets) : celle d'un paquet de palier
-/// L (16 Kio). Une carte plus grande ne pourrait pas être envoyée par une mise
-/// à jour de carte ou une synchronisation. La plus lourde possible
-/// (`MAX_DEVICES` appareils, noms à leur taille maximale) fait environ
-/// 13,5 Kio (test `max_card_text_roundtrip`).
+/// Maximum size of a decoded card (bytes): that of an L-tier
+/// packet (16 KiB). A larger card could not be sent by a card
+/// update or a synchronisation. The heaviest possible one
+/// (`MAX_DEVICES` devices, names at their maximum size) is about
+/// 13.5 KiB (test `max_card_text_roundtrip`).
 pub const MAX_CARD_BYTES: usize = 16 * 1024;
-/// Taille maximale du texte (base64url sans remplissage de `MAX_CARD_BYTES`,
-/// environ 22 000 caractères), propre à la carte : sans rapport avec la
-/// taille maximale d'un message texte.
+/// Maximum size of the text (unpadded base64url of `MAX_CARD_BYTES`,
+/// about 22,000 characters), specific to the card: unrelated to the
+/// maximum size of a text message.
 pub const MAX_TEXT_LEN: usize = CARD_PREFIX.len() + MAX_CARD_BYTES.div_ceil(3) * 4;
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -32,10 +32,10 @@ pub struct ContactCard {
 }
 
 impl ContactCard {
-    /// Octets signés : postcard des champs sans `sig`.
+    /// Signed bytes: postcard of the fields without `sig`.
     fn signed_bytes(name: &str, devices: &DeviceList, bundles: &[PrekeyBundle]) -> Result<Vec<u8>> {
         postcard::to_allocvec(&(name, devices, bundles))
-            .map_err(|_| CoreError::Malformed("carte non sérialisable"))
+            .map_err(|_| CoreError::Malformed("card not serializable"))
     }
 
     pub fn sign(
@@ -72,13 +72,13 @@ impl ContactCard {
             b.verify()?;
             let id = b.device.id();
             if !known.contains(&id) {
-                return Err(CoreError::Malformed("paquet de clés d'un appareil inconnu"));
+                return Err(CoreError::Malformed("key bundle of an unknown device"));
             }
             if !seen.insert(id) {
-                return Err(CoreError::Malformed("paquet de clés en double"));
+                return Err(CoreError::Malformed("duplicate key bundle"));
             }
             if b.opk.is_some() {
-                return Err(CoreError::Malformed("clé à usage unique interdite"));
+                return Err(CoreError::Malformed("one-time key forbidden"));
             }
         }
         Ok(())
@@ -89,8 +89,8 @@ impl ContactCard {
     }
 
     pub fn to_text(&self) -> String {
-        // Sérialisation d'une structure sans état invalide : ne peut pas échouer
-        // (postcard vers un `Vec`).
+        // Serialization of a structure with no invalid state: cannot fail
+        // (postcard into a `Vec`).
         let bytes = postcard::to_allocvec(self).unwrap_or_default();
         format!(
             "{CARD_PREFIX}{}",
@@ -102,17 +102,17 @@ impl ContactCard {
         let body = s
             .trim()
             .strip_prefix(CARD_PREFIX)
-            .ok_or(CoreError::Malformed("préfixe de carte inconnu"))?;
+            .ok_or(CoreError::Malformed("unknown card prefix"))?;
         if CARD_PREFIX.len() + body.len() > MAX_TEXT_LEN {
             return Err(CoreError::TooLarge);
         }
         let bytes = data_encoding::BASE64URL_NOPAD
             .decode(body.as_bytes())
-            .map_err(|_| CoreError::Malformed("carte illisible"))?;
+            .map_err(|_| CoreError::Malformed("unreadable card"))?;
         let (card, rest): (ContactCard, &[u8]) = postcard::take_from_bytes(&bytes)
-            .map_err(|_| CoreError::Malformed("carte illisible"))?;
+            .map_err(|_| CoreError::Malformed("unreadable card"))?;
         if !rest.is_empty() {
-            return Err(CoreError::Malformed("octets en trop après la carte"));
+            return Err(CoreError::Malformed("extra bytes after the card"));
         }
         card.verify()?;
         Ok(card)
@@ -219,7 +219,7 @@ mod tests {
         assert!(c.verify().is_err());
     }
 
-    /// Carte la plus lourde : `MAX_DEVICES` appareils, noms à leur taille maximale.
+    /// Heaviest card: `MAX_DEVICES` devices, names at their maximum size.
     fn max_card() -> ContactCard {
         let mut rng = StdRng::seed_from_u64(12);
         let (root, _) = RootIdentity::generate(&mut rng);
@@ -241,10 +241,10 @@ mod tests {
         let t = c.to_text();
         assert!(postcard::to_allocvec(&c).unwrap().len() <= MAX_CARD_BYTES);
         assert!(t.len() <= MAX_TEXT_LEN, "{} > {MAX_TEXT_LEN}", t.len());
-        // Bien au-delà de la taille d'un message texte (4 000 octets).
+        // Well beyond the size of a text message (4,000 bytes).
         assert!(t.len() > crate::envelope::MAX_TEXT_LEN);
         assert_eq!(ContactCard::from_text(&t).unwrap(), c);
-        // Un caractère de plus que la limite : refusé avant décodage.
+        // One character more than the limit: rejected before decoding.
         let over = format!(
             "{CARD_PREFIX}{}",
             "A".repeat(MAX_TEXT_LEN - CARD_PREFIX.len() + 1)

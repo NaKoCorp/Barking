@@ -1,16 +1,16 @@
-//! Façade `Core` : assemble identité, poignée de main, ratchet, boîtes aux
-//! lettres, paquets, stockage et journal de transparence.
+//! `Core` facade: assembles identity, handshake, ratchet, mailboxes,
+//! packets, storage and the transparency log.
 //!
-//! Octets en entrée et en sortie ; l'horloge (`now`, secondes Unix) et le
-//! générateur aléatoire sont toujours passés en paramètres. Chaque opération
-//! qui écrit (`send_text`, `receive`, `add_contact`, …) le fait dans une seule
-//! transaction du stockage.
+//! Bytes in and bytes out; the clock (`now`, Unix seconds) and the
+//! random generator are always passed as parameters. Each operation
+//! that writes (`send_text`, `receive`, `add_contact`, …) does so in a single
+//! storage transaction.
 //!
-//! Découpage : `contacts.rs` (cartes, alias, vérification), `send.rs`
-//! (`send_text`), `receive.rs` (`receive`), `frames.rs` (fragmentation et
-//! réassemblage des trames), `link.rs` (liaison d'un nouvel appareil),
-//! `history.rs` (archive de l'historique transférée à la liaison), `sync.rs`
-//! (synchronisation entre mes appareils).
+//! Layout: `contacts.rs` (cards, alias, verification), `send.rs`
+//! (`send_text`), `receive.rs` (`receive`), `frames.rs` (fragmentation and
+//! reassembly of frames), `link.rs` (linking a new device),
+//! `history.rs` (history archive transferred at link time), `sync.rs`
+//! (synchronization between my devices).
 
 mod contacts;
 mod frames;
@@ -60,34 +60,34 @@ use log_limit::LogLimiter;
 const META_ROOT: &str = "root_seed";
 const META_DEVICE: &str = "device_keys";
 const META_DEVICE_NAME: &str = "device_name";
-/// Mon nom affiché : dernier nom passé à `contact_card` ou `set_display_name`,
-/// porté par les cartes que le cœur signe lui-même (liaison, mise à jour de
-/// carte envoyée aux contacts). Absent : nom vide.
+/// My display name: last name passed to `contact_card` or `set_display_name`,
+/// carried by the cards the core signs itself (link, card update
+/// sent to contacts). Absent: empty name.
 const META_DISPLAY_NAME: &str = "display_name";
 const META_PREKEYS: &str = "prekeys";
 const META_DEVICE_LIST: &str = "device_list";
 const META_LINKED_BUNDLES: &str = "linked_bundles";
-/// Dernier jour (numéro de jour) où cet appareil a relevé ses boîtes.
+/// Last day (day number) on which this device polled its mailboxes.
 const META_LAST_POLLED: &str = "last_polled_day";
-/// Fenêtre de relève : 7 jours en arrière, le jour même et le lendemain =
-/// 9 jours au plus. Couvre chaque jour de `accepted_days` (réception) qui peut
-/// encore contenir un paquet non expiré (durée de vie de 7 jours).
+/// Polling window: 7 days back, the current day and the next day =
+/// 9 days at most. Covers each day of `accepted_days` (receive) that may
+/// still hold an unexpired packet (7-day lifetime).
 const MAX_POLL_BACK_DAYS: u32 = 7;
 
-/// Boîtes à relever, par classe. Une relève lit les sessions d'abord : la
-/// boîte d'introduction est dérivable de ma clé publique, donc quiconque a ma
-/// carte peut la remplir, et sa lecture ne doit pas retarder les sessions.
+/// Mailboxes to poll, by class. A poll reads the sessions first: the
+/// introduction mailbox is derivable from my public key, so anyone who has my
+/// card can fill it, and reading it must not delay the sessions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WatchedMailboxes {
-    /// Mes boîtes de session, et les boîtes de session où j'attends un
-    /// accusé : connues de mes seuls correspondants.
+    /// My session mailboxes, and the session mailboxes where I await an
+    /// ack: known only to my correspondents.
     pub sessions: Vec<MailboxId>,
-    /// Mes boîtes d'introduction, et celles de mes contacts où j'attends
-    /// l'accusé d'un premier contact.
+    /// My introduction mailboxes, and those of my contacts where I await
+    /// the ack of a first contact.
     pub intro: Vec<MailboxId>,
 }
 
-/// Taille maximale de l'état d'un transport.
+/// Maximum size of a transport's state.
 pub const MAX_TRANSPORT_STATE: usize = 4 << 20;
 
 fn transport_key(key: &str) -> Result<String> {
@@ -97,50 +97,50 @@ fn transport_key(key: &str) -> Result<String> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     {
-        return Err(CoreError::Malformed("clé d'état de transport"));
+        return Err(CoreError::Malformed("transport state key"));
     }
     Ok(format!("transport/{key}"))
 }
 
-/// Âge maximal accepté d'un message (horodatage authentifié de l'enveloppe) :
-/// durée de vie d'un paquet plus un jour de décalage d'horloge.
+/// Maximum accepted age of a message (authenticated envelope timestamp):
+/// packet lifetime plus one day of clock skew.
 const MAX_AGE_SECS: u64 = DEFAULT_TTL_SECS + 86_400;
-/// Avance maximale acceptée de l'horloge de l'expéditeur.
+/// Maximum accepted lead of the sender's clock.
 const MAX_FUTURE_SECS: u64 = 86_400;
-/// Conservation de la table `seen`. Un paquet vu il y a plus longtemps a un
-/// horodatage authentifié `sent_at <= vu + MAX_FUTURE`, donc il est désormais
-/// refusé comme trop ancien : la purge ne rouvre pas la porte aux rejeux.
+/// Retention of the `seen` table. A packet seen longer ago has an
+/// authenticated timestamp `sent_at <= seen + MAX_FUTURE`, so it is now
+/// refused as too old: the purge does not reopen the door to replays.
 const SEEN_RETENTION_SECS: u64 = MAX_AGE_SECS + MAX_FUTURE_SECS;
 
-/// Résultat de la réception d'octets venus de l'extérieur.
+/// Result of receiving bytes from outside.
 pub enum ReceiveOutcome {
-    /// Message déchiffré. `ack` est l'accusé de réception à renvoyer.
+    /// Decrypted message. `ack` is the receipt acknowledgement to send back.
     Message {
         from: Fingerprint,
         alias: Option<String>,
         text: String,
         ack: Packet,
     },
-    /// Accusé vérifié pour un de mes paquets, désormais `Delivered`.
+    /// Verified ack for one of my packets, now `Delivered`.
     AckReceived {
         packet_id: PacketId,
     },
-    /// Trame acceptée, mais le paquet qu'elle annonce est encore incomplet.
+    /// Frame accepted, but the packet it announces is still incomplete.
     Partial,
     Duplicate,
     NotForUs,
     Expired,
-    /// Paquet pour moi mais refusé ; son contenu n'est jamais montré.
+    /// Packet for me but refused; its content is never shown.
     Quarantined {
         reason: String,
     },
-    /// Synchronisation venue d'un de mes appareils, appliquée ; son accusé
-    /// est en file d'envoi.
+    /// Synchronization coming from one of my devices, applied; its ack
+    /// is in the send queue.
     Synced {
         kind: SyncKind,
     },
-    /// Nouvelle carte d'un contact (nouvelle liste d'appareils), appliquée ;
-    /// son accusé est en file d'envoi.
+    /// New card from a contact (new device list), applied;
+    /// its ack is in the send queue.
     CardUpdated {
         from: Fingerprint,
         alias: Option<String>,
@@ -156,7 +156,7 @@ impl fmt::Debug for ReceiveOutcome {
                 .debug_struct("Message")
                 .field("from", from)
                 .field("alias", alias)
-                .field("text", &format_args!("<{} octets>", text.len()))
+                .field("text", &format_args!("<{} bytes>", text.len()))
                 .finish_non_exhaustive(),
             Self::AckReceived { packet_id } => f
                 .debug_struct("AckReceived")
@@ -180,26 +180,26 @@ impl fmt::Debug for ReceiveOutcome {
     }
 }
 
-/// Cœur de la messagerie pour un appareil.
+/// Messaging core for one device.
 pub struct Core {
     store: Store,
-    /// Absente sur un appareil non administrateur.
+    /// Absent on a non-admin device.
     root: Option<RootIdentity>,
     device: DeviceKeys,
     prekeys: PrekeySecrets,
-    /// Ma liste d'appareils signée (la plus récente que je connais).
+    /// My signed device list (the most recent one I know).
     devices: DeviceList,
-    /// Paquets de clés de mes autres appareils (`link_device` sur
-    /// l'administrateur, paquet de liaison sur un appareil lié).
+    /// Key packets of my other devices (`link_device` on
+    /// the admin, link packet on a linked device).
     linked_bundles: Vec<PrekeyBundle>,
-    /// En attente de liaison (`begin_link` sans `finish_link`) : `devices`
-    /// est alors une liste factice (voir `link.rs`) et toute opération qui
-    /// exige un appareil lié renvoie `CoreError::LinkPending`.
+    /// Awaiting link (`begin_link` without `finish_link`): `devices`
+    /// is then a dummy list (see `link.rs`) and any operation that
+    /// requires a linked device returns `CoreError::LinkPending`.
     pending: bool,
-    /// Trames reçues d'un paquet encore incomplet (en mémoire, non persisté).
+    /// Frames received for a still-incomplete packet (in memory, not persisted).
     frames: Reassembler,
-    /// Regroupement des événements bruyants au journal (trames rejetées,
-    /// paquets indéchiffrables, doublons), en mémoire.
+    /// Grouping of noisy events in the log (rejected frames,
+    /// undecryptable packets, duplicates), in memory.
     log_limiter: LogLimiter,
 }
 
@@ -215,8 +215,8 @@ impl fmt::Debug for Core {
 }
 
 impl Core {
-    /// Nouvelle identité : racine, phrase de récupération, appareil, liste
-    /// initiale (version `max(1, now)`).
+    /// New identity: root, recovery phrase, device, initial list
+    /// (version `max(1, now)`).
     pub fn create(
         path: &Path,
         db_key: &[u8; 32],
@@ -231,10 +231,10 @@ impl Core {
         Ok((core, phrase))
     }
 
-    /// Nouvel appareil pour une identité existante, à partir de sa phrase.
-    /// Les contacts ne sont pas restaurés (v0). La liste d'appareils est
-    /// signée avec la version `max(1, now)` : elle remplace chez les contacts
-    /// la liste de l'appareil perdu (signée plus tôt).
+    /// New device for an existing identity, from its phrase.
+    /// Contacts are not restored (v0). The device list is
+    /// signed with version `max(1, now)`: it replaces, on contacts,
+    /// the list of the lost device (signed earlier).
     pub fn recover(
         path: &Path,
         db_key: &[u8; 32],
@@ -257,11 +257,11 @@ impl Core {
         rng: &mut impl CryptoRng,
     ) -> Result<Core> {
         let device = DeviceKeys::generate(rng);
-        // Pas de clé à usage unique : les cartes sont publiques et réutilisées.
+        // No one-time key: cards are public and reused.
         let prekeys = PrekeySecrets::generate(rng, 0);
         let cert = DeviceCertificate::issue(&root, &device, device_name, now)?;
-        // Version = horodatage (au moins 1) : une récupération ultérieure
-        // remplace la liste connue des contacts, `link_device` reste monotone.
+        // Version = timestamp (at least 1): a later recovery
+        // replaces the contacts' known list, `link_device` stays monotonic.
         let devices = DeviceList::sign(&root, now.max(1), vec![cert])?;
         let linked_bundles: Vec<PrekeyBundle> = Vec::new();
         store.transaction(|tx| {
@@ -306,23 +306,23 @@ impl Core {
         }
     }
 
-    /// Rouvre une base existante. Mauvaise clé : `StoreLocked`. Les clés
-    /// sautées de plus de 7 jours à `now` sont purgées (irréversible, un `now`
-    /// très éloigné dans le futur y compris, comme au déchiffrement).
+    /// Reopens an existing database. Wrong key: `StoreLocked`. Skipped keys
+    /// older than 7 days at `now` are purged (irreversible, including a `now`
+    /// very far in the future, as in decryption).
     pub fn open(path: &Path, db_key: &[u8; 32], now: u64) -> Result<Core> {
-        // Ne pas créer de base vide en cherchant à en ouvrir une.
+        // Do not create an empty database when trying to open one.
         if !path.exists() {
-            return Err(CoreError::Store("base absente".into()));
+            return Err(CoreError::Store("database missing".into()));
         }
         let mut store = Store::open(path, db_key)?;
         let dev = Zeroizing::new(
             store
                 .get_meta::<Vec<u8>>(META_DEVICE)?
-                .ok_or_else(|| CoreError::Store("base non initialisée".into()))?,
+                .ok_or_else(|| CoreError::Store("database not initialized".into()))?,
         );
         let mut dev_bytes = Zeroizing::new([0u8; 64]);
         if dev.len() != 64 {
-            return Err(CoreError::Store("clés d'appareil corrompues".into()));
+            return Err(CoreError::Store("corrupted device keys".into()));
         }
         dev_bytes.copy_from_slice(&dev);
         let device = DeviceKeys::from_bytes(&dev_bytes);
@@ -331,14 +331,14 @@ impl Core {
             .map(|seed| RootIdentity::from_seed(&Zeroizing::new(seed)));
         let prekeys = store
             .get_meta::<PrekeySecrets>(META_PREKEYS)?
-            .ok_or_else(|| CoreError::Store("paquets de clés absents".into()))?;
-        // Appareil en attente de liaison : pas encore de liste signée.
+            .ok_or_else(|| CoreError::Store("key packets missing".into()))?;
+        // Device awaiting link: no signed list yet.
         let pending_root = link::pending_root(&store)?;
         let devices = match pending_root {
             Some(root) => link::pending_devices(root),
             None => store
                 .get_meta::<DeviceList>(META_DEVICE_LIST)?
-                .ok_or_else(|| CoreError::Store("liste d'appareils absente".into()))?,
+                .ok_or_else(|| CoreError::Store("device list missing".into()))?,
         };
         let linked_bundles = store
             .get_meta::<Vec<PrekeyBundle>>(META_LINKED_BUNDLES)?
@@ -358,9 +358,9 @@ impl Core {
         ))
     }
 
-    /// Relit ma liste d'appareils et les paquets de clés de mes autres
-    /// appareils depuis la base (après une `SyncDevices`, ou une liaison
-    /// refusée parce qu'une autre ouverture de la base a changé la liste).
+    /// Rereads my device list and the key packets of my other
+    /// devices from the database (after a `SyncDevices`, or a link
+    /// refused because another opening of the database changed the list).
     fn reload_own_devices(&mut self) -> Result<()> {
         if let Some(own) = OwnDevices::read(&self.store)? {
             self.devices = own.list;
@@ -369,14 +369,14 @@ impl Core {
         Ok(())
     }
 
-    /// Empreinte de mon identité (racine).
+    /// Fingerprint of my identity (root).
     pub fn fingerprint(&self) -> Fingerprint {
         self.devices.root.fingerprint()
     }
 
-    /// Ma carte de contact signée : liste d'appareils et un paquet de clés par
-    /// appareil. `display_name` est enregistré comme mon nom affiché (repris
-    /// par les cartes que le cœur signe lui-même, voir `set_display_name`).
+    /// My signed contact card: device list and one key packet per
+    /// device. `display_name` is recorded as my display name (reused
+    /// by the cards the core signs itself, see `set_display_name`).
     pub fn contact_card(&self, display_name: &str) -> Result<ContactCard> {
         self.ensure_linked()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
@@ -394,9 +394,9 @@ impl Core {
         Ok(card)
     }
 
-    /// Change mon nom affiché, porté par les cartes que le cœur signe
-    /// lui-même (paquet de liaison, mise à jour de carte envoyée aux
-    /// contacts). Plus de 64 octets : `TooLarge`.
+    /// Changes my display name, carried by the cards the core signs
+    /// itself (link packet, card update sent to
+    /// contacts). More than 64 bytes: `TooLarge`.
     pub fn set_display_name(&mut self, name: &str) -> Result<()> {
         if name.len() > crate::identity::device::MAX_NAME_LEN {
             return Err(CoreError::TooLarge);
@@ -404,15 +404,15 @@ impl Core {
         self.store.put_meta(META_DISPLAY_NAME, &name)
     }
 
-    /// Boîtes aux lettres à relever : la boîte d'introduction de cet appareil
-    /// et celles de chaque session (de la dernière relève au lendemain, 9 jours
-    /// au plus ; veille, jour et lendemain sans relève enregistrée), plus la boîte de
-    /// chacun de mes messages en attente d'accusé, où l'accusé arrivera.
-    /// Union des deux groupes de `watched_mailbox_groups`, introduction
-    /// d'abord.
+    /// Mailboxes to poll: this device's introduction mailbox
+    /// and those of each session (from the last poll to the next day, 9 days
+    /// at most; the day before, the day and the next day when no poll is recorded), plus the mailbox of
+    /// each of my messages awaiting an ack, where the ack will arrive.
+    /// Union of the two groups of `watched_mailbox_groups`, introduction
+    /// first.
     ///
-    /// En cas d'erreur de lecture du stockage, seules les boîtes
-    /// d'introduction sont renvoyées (`receive` refait le calcul lui-même).
+    /// On a storage read error, only the introduction mailboxes
+    /// are returned (`receive` redoes the computation itself).
     pub fn watched_mailboxes(&self, now: u64) -> Vec<MailboxId> {
         let g = self.watched_mailbox_groups(now);
         let mut out = g.intro;
@@ -424,13 +424,13 @@ impl Core {
         out
     }
 
-    /// Boîtes à relever, par classe (voir `WatchedMailboxes`). Une boîte
-    /// d'accusé attendu est de session si elle est la boîte d'envoi d'une de
-    /// mes sessions (sur la fenêtre de réception), sinon d'introduction
-    /// (premier contact).
+    /// Mailboxes to poll, by class (see `WatchedMailboxes`). An expected-ack
+    /// mailbox is a session mailbox if it is the send mailbox of one of
+    /// my sessions (over the receive window), otherwise an introduction mailbox
+    /// (first contact).
     pub fn watched_mailbox_groups(&self, now: u64) -> WatchedMailboxes {
         let mut g = WatchedMailboxes::default();
-        // En attente de liaison : rien à relever (`receive` refuserait).
+        // Awaiting link: nothing to poll (`receive` would refuse).
         if self.pending {
             return g;
         }
@@ -455,8 +455,8 @@ impl Core {
             }
         }
         if let Ok(pending) = self.store.outbox_pending(now) {
-            // Boîtes d'envoi de mes sessions, sur toute la fenêtre où un
-            // paquet en file peut avoir été scellé.
+            // Send mailboxes of my sessions, over the whole window in which a
+            // queued packet may have been sealed.
             let first = day_of(now.saturating_sub(MAX_AGE_SECS));
             let last = day_of(now).saturating_add(1);
             let mut sent: Vec<MailboxId> = Vec::new();
@@ -483,21 +483,21 @@ impl Core {
                 }
             }
         }
-        // Une boîte n'est que dans un groupe : celui des sessions prime.
+        // A mailbox is in one group only: the sessions group takes precedence.
         g.intro.retain(|m| !g.sessions.contains(m));
         g
     }
 
-    /// Enregistre que les boîtes ont été relevées à `now`. À appeler après
-    /// avoir relevé toutes les boîtes avec succès ; écrase volontairement la
-    /// valeur précédente (une valeur antérieure ne fait qu'élargir la fenêtre).
+    /// Records that the mailboxes were polled at `now`. To be called after
+    /// polling all mailboxes successfully; deliberately overwrites the
+    /// previous value (an earlier value only widens the window).
     pub fn mark_polled(&mut self, now: u64) -> Result<()> {
         self.store.put_meta(META_LAST_POLLED, &day_of(now))
     }
 
-    /// Jours à relever : de la dernière relève (ou de la veille) au lendemain,
-    /// 9 jours au plus. Une lecture ratée ou une relève datée du futur
-    /// (horloge reculée) ramène à la fenêtre normale.
+    /// Days to poll: from the last poll (or the day before) to the next day,
+    /// 9 days at most. A failed read or a poll dated in the future
+    /// (clock set back) falls back to the normal window.
     fn watched_days(&self, now: u64) -> Vec<u32> {
         let today = day_of(now);
         let end = today.saturating_add(1);
@@ -510,7 +510,7 @@ impl Core {
         (start..=end).collect()
     }
 
-    /// Code de sécurité à comparer avec le contact.
+    /// Security code to compare with the contact.
     pub fn safety_number(&self, contact: &Fingerprint) -> Result<String> {
         self.store
             .get_contact(*contact)?
@@ -518,7 +518,7 @@ impl Core {
         Ok(safety_number(&self.fingerprint(), contact))
     }
 
-    /// Les `limit` événements les plus récents, du plus ancien au plus récent.
+    /// The `limit` most recent events, from oldest to newest.
     pub fn transparency_log(&self, limit: usize) -> Result<Vec<(u64, TransparencyEvent)>> {
         self.store
             .recent_events(limit)?
@@ -526,14 +526,14 @@ impl Core {
             .map(|(at, bytes)| {
                 postcard::from_bytes(&bytes)
                     .map(|e| (at, e))
-                    .map_err(|_| CoreError::Store("événement illisible".into()))
+                    .map_err(|_| CoreError::Store("unreadable event".into()))
             })
             .collect()
     }
 
-    /// Purge les paquets expirés de la file d'envoi puis rend les octets à
-    /// (re)transmettre, du plus ancien au plus récent. Un paquet y reste
-    /// jusqu'à son accusé de réception ou son expiration.
+    /// Purges expired packets from the send queue then returns the bytes to
+    /// (re)transmit, from oldest to newest. A packet stays there
+    /// until its receipt ack or its expiry.
     pub fn pending_outbox(&mut self, now: u64) -> Result<Vec<Vec<u8>>> {
         self.store.transaction(|tx| {
             tx.outbox_purge_expired(now)?;
@@ -546,14 +546,14 @@ impl Core {
         })
     }
 
-    /// État opaque d'un transport (par exemple positions de relève et dépôts
-    /// par nœud du CLI), gardé dans la base chiffrée sous `transport/<key>`.
-    /// `key` : 1 à 64 caractères ASCII alphanumériques, `_` ou `-`.
+    /// Opaque state of a transport (for example poll positions and deposits
+    /// per node of the CLI), kept in the encrypted database under `transport/<key>`.
+    /// `key`: 1 to 64 ASCII alphanumeric characters, `_` or `-`.
     pub fn transport_state(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.store.get_meta(&transport_key(key)?)
     }
 
-    /// Remplace l'état d'un transport (au plus `MAX_TRANSPORT_STATE` octets).
+    /// Replaces a transport's state (at most `MAX_TRANSPORT_STATE` bytes).
     pub fn set_transport_state(&mut self, key: &str, bytes: &[u8]) -> Result<()> {
         if bytes.len() > MAX_TRANSPORT_STATE {
             return Err(CoreError::TooLarge);
@@ -561,29 +561,29 @@ impl Core {
         self.store.put_meta(&transport_key(key)?, &bytes)
     }
 
-    /// Journalise un événement de transport (dépôt ou relève sur un nœud) :
-    /// seules `NodeDeposit` et `NodeFetch` sont acceptées.
+    /// Logs a transport event (deposit or poll on a node):
+    /// only `NodeDeposit` and `NodeFetch` are accepted.
     pub fn log_transport_event(&mut self, event: TransparencyEvent, now: u64) -> Result<()> {
         if !matches!(
             event,
             TransparencyEvent::NodeDeposit { .. } | TransparencyEvent::NodeFetch { .. }
         ) {
-            return Err(CoreError::Malformed("événement de transport"));
+            return Err(CoreError::Malformed("transport event"));
         }
         log(&self.store, now, None, &event)
     }
 
-    /// Historique avec un contact, du plus ancien au plus récent.
+    /// History with a contact, from oldest to newest.
     pub fn messages_with(&self, contact: &Fingerprint) -> Result<Vec<MessageRow>> {
         self.store.messages_with(*contact)
     }
 }
 
-/// Purge les clés sautées trop anciennes de toutes les sessions, même
-/// inactives ; ne réécrit que les sessions modifiées. Une session illisible
-/// est ignorée (elle ne doit pas bloquer l'ouverture). Un `now` très éloigné
-/// dans le futur purge les clés de façon irréversible, exactement comme le
-/// déchiffrement.
+/// Purges too-old skipped keys from all sessions, even
+/// inactive ones; rewrites only the modified sessions. An unreadable session
+/// is ignored (it must not block opening). A `now` very far
+/// in the future purges keys irreversibly, exactly like
+/// decryption.
 fn sweep_skipped(q: &impl Queries, now: u64) -> Result<()> {
     for mut row in q.all_sessions()? {
         let Ok(mut state) = de_state(&row.state) else {
@@ -591,7 +591,7 @@ fn sweep_skipped(q: &impl Queries, now: u64) -> Result<()> {
         };
         if state.purge_skipped(now) {
             let new = ser_state(&state)?;
-            // L'ancien état sérialisé contient les clés purgées.
+            // The old serialized state contains the purged keys.
             let mut old = std::mem::replace(&mut row.state, new);
             old.zeroize();
             q.put_session(&row)?;
@@ -600,30 +600,30 @@ fn sweep_skipped(q: &impl Queries, now: u64) -> Result<()> {
     Ok(())
 }
 
-/// Refuse d'écraser une base déjà initialisée.
+/// Refuses to overwrite an already initialized database.
 fn ensure_empty(store: &Store) -> Result<()> {
     if store.get_meta::<Vec<u8>>(META_DEVICE)?.is_some() {
-        return Err(CoreError::Store("base déjà initialisée".into()));
+        return Err(CoreError::Store("database already initialized".into()));
     }
     Ok(())
 }
 
-/// Identifiant de session : `BLAKE3(ek)[..16]`, où `ek` est la clé éphémère
-/// PQXDH du message initial (jamais l'éphémère de scellement du paquet).
+/// Session identifier: `BLAKE3(ek)[..16]`, where `ek` is the ephemeral PQXDH
+/// key of the initial message (never the packet's sealing ephemeral).
 fn session_id(ek: &[u8; 32]) -> [u8; 16] {
     let mut id = [0u8; 16];
     id.copy_from_slice(&blake3::hash(ek).as_bytes()[..16]);
     id
 }
 
-/// Données associées du ratchet : `IK_A || IK_B` (PQXDH), puis les
-/// identifiants complets des deux appareils (initiateur, répondeur).
+/// Ratchet associated data: `IK_A || IK_B` (PQXDH), then the
+/// full identifiers of both devices (initiator, responder).
 ///
-/// La preuve de possession d'un certificat ne couvre que la clé de signature,
-/// pas la clé X25519 : une carte pourrait associer sa propre clé de signature
-/// à la clé `dh` d'un tiers. L'identifiant d'appareil hache les deux clés ;
-/// le lier ici fait échouer toute session dont les deux côtés ne voient pas
-/// exactement les mêmes appareils.
+/// The proof of possession of a certificate covers only the signing key,
+/// not the X25519 key: a card could pair its own signing key
+/// with a third party's `dh` key. The device identifier hashes both keys;
+/// binding it here makes any session fail whose two sides do not see
+/// exactly the same devices.
 fn session_ad(pqxdh_ad: &[u8], initiator: &DeviceId, responder: &DeviceId) -> Vec<u8> {
     let mut ad = Vec::with_capacity(pqxdh_ad.len() + 32);
     ad.extend_from_slice(pqxdh_ad);
@@ -638,7 +638,7 @@ fn log(
     packet: Option<PacketId>,
     event: &TransparencyEvent,
 ) -> Result<()> {
-    let bytes = postcard::to_allocvec(event).map_err(|_| CoreError::Store("événement".into()))?;
+    let bytes = postcard::to_allocvec(event).map_err(|_| CoreError::Store("event".into()))?;
     let class = if event.is_security() {
         EventClass::Security
     } else {
@@ -647,10 +647,10 @@ fn log(
     q.append_event(at, packet, class, &bytes)
 }
 
-/// Mes appareils tels que stockés : ma liste signée et les paquets de clés
-/// de mes autres appareils. Même source sur l'administrateur (`link_device`)
-/// et sur un appareil lié (`finish_link`) ; absente tant qu'une liaison est
-/// en attente.
+/// My devices as stored: my signed list and the key packets
+/// of my other devices. Same source on the admin (`link_device`)
+/// and on a linked device (`finish_link`); absent while a link is
+/// pending.
 pub(super) struct OwnDevices {
     pub list: DeviceList,
     pub bundles: Vec<PrekeyBundle>,
@@ -667,7 +667,7 @@ impl OwnDevices {
         Ok(Some(OwnDevices { list, bundles }))
     }
 
-    /// Mes autres appareils (tous sauf `me`), avec leur paquet de clés s'il est connu.
+    /// My other devices (all except `me`), with their key packet if known.
     pub fn others(&self, me: &DevicePublic) -> Vec<(DevicePublic, Option<PrekeyBundle>)> {
         self.list
             .certs
@@ -682,21 +682,21 @@ impl OwnDevices {
 }
 
 fn load_card(bytes: &[u8]) -> Result<ContactCard> {
-    postcard::from_bytes(bytes).map_err(|_| CoreError::Store("carte stockée illisible".into()))
+    postcard::from_bytes(bytes).map_err(|_| CoreError::Store("unreadable stored card".into()))
 }
 
 fn ser_state(state: &RatchetState) -> Result<Vec<u8>> {
-    postcard::to_allocvec(state).map_err(|_| CoreError::Store("sérialisation".into()))
+    postcard::to_allocvec(state).map_err(|_| CoreError::Store("serialization".into()))
 }
 
 fn de_state(bytes: &[u8]) -> Result<RatchetState> {
-    postcard::from_bytes(bytes).map_err(|_| CoreError::Store("session corrompue".into()))
+    postcard::from_bytes(bytes).map_err(|_| CoreError::Store("corrupted session".into()))
 }
 
 fn ser_init(init: &InitialMessage) -> Result<Vec<u8>> {
-    postcard::to_allocvec(init).map_err(|_| CoreError::Store("sérialisation".into()))
+    postcard::to_allocvec(init).map_err(|_| CoreError::Store("serialization".into()))
 }
 
 fn de_init(bytes: &[u8]) -> Result<InitialMessage> {
-    postcard::from_bytes(bytes).map_err(|_| CoreError::Store("session corrompue".into()))
+    postcard::from_bytes(bytes).map_err(|_| CoreError::Store("corrupted session".into()))
 }

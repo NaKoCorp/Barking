@@ -4,10 +4,10 @@ use barking_dht::filter_nodes;
 use barking_proto::{RecordPolicy, Response};
 use libfuzzer_sys::fuzz_target;
 
-// Le premier octet choisit la politique (bit 0 : adresses privées, bit 1 :
-// puzzle complet), les huit suivants l'heure courante ; le reste est décodé
-// comme une `Response`. Une réponse `Nodes` passe par `filter_nodes`, qui ne
-// doit jamais paniquer.
+// The first byte selects the policy (bit 0: private addresses, bit 1:
+// full puzzle), the next eight the current time; the rest is decoded
+// as a `Response`. A `Nodes` response goes through `filter_nodes`, which must
+// never panic.
 fuzz_target!(|data: &[u8]| {
     let Some((&sel, rest)) = data.split_first() else {
         return;

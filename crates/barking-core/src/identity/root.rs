@@ -1,4 +1,4 @@
-//! Identité racine Ed25519, dérivée d'une phrase de récupération BIP39.
+//! Ed25519 root identity, derived from a BIP39 recovery phrase.
 
 use crate::crypto::{kdf::hkdf_sha256, labels};
 use crate::{CoreError, Result};
@@ -9,7 +9,7 @@ use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-/// Phrase de récupération (24 mots anglais BIP39). Effacée à la destruction.
+/// Recovery phrase (24 English BIP39 words). Erased on drop.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct RecoveryPhrase(String);
 
@@ -25,7 +25,7 @@ impl fmt::Debug for RecoveryPhrase {
     }
 }
 
-/// Clé secrète racine (ZeroizeOnDrop via `SigningKey`).
+/// Root secret key (ZeroizeOnDrop via `SigningKey`).
 pub struct RootIdentity {
     key: SigningKey,
 }
@@ -36,7 +36,7 @@ impl fmt::Debug for RootIdentity {
     }
 }
 
-/// `label || msg`, le message réellement signé.
+/// `label || msg`, the message actually signed.
 fn labelled(label: &[u8], msg: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(label.len() + msg.len());
     data.extend_from_slice(label);
@@ -45,7 +45,7 @@ fn labelled(label: &[u8], msg: &[u8]) -> Vec<u8> {
 }
 
 impl RootIdentity {
-    /// Tire 32 octets d'entropie, les convertit en phrase, puis dérive la clé.
+    /// Draws 32 bytes of entropy, converts them to a phrase, then derives the key.
     pub fn generate(rng: &mut impl CryptoRng) -> (RootIdentity, RecoveryPhrase) {
         let mut entropy = [0u8; 32];
         rng.fill_bytes(&mut entropy);
@@ -55,24 +55,23 @@ impl RootIdentity {
     }
 
     fn from_entropy(entropy: &[u8; 32]) -> (RootIdentity, RecoveryPhrase) {
-        // Invariant : 32 octets est une taille d'entropie BIP39 valide (24 mots).
-        let mnemonic =
-            Mnemonic::from_entropy(entropy).expect("32 octets d'entropie donnent 24 mots");
+        // Invariant: 32 bytes is a valid BIP39 entropy size (24 words).
+        let mnemonic = Mnemonic::from_entropy(entropy).expect("32 bytes of entropy give 24 words");
         let phrase = RecoveryPhrase(mnemonic.to_string());
         (Self::derive(entropy), phrase)
     }
 
     fn derive(entropy: &[u8; 32]) -> RootIdentity {
         let mut seed = [0u8; 32];
-        // Invariant : 32 octets de sortie HKDF ne dépassent jamais la limite.
+        // Invariant: 32 bytes of HKDF output never exceed the limit.
         hkdf_sha256(None, entropy, labels::ROOT_FROM_ENTROPY, &mut seed)
-            .expect("32 octets de sortie HKDF");
+            .expect("32 bytes of HKDF output");
         let key = SigningKey::from_bytes(&seed);
         seed.zeroize();
         RootIdentity { key }
     }
 
-    /// Restaure l'identité depuis une phrase de 24 mots anglais.
+    /// Restores the identity from a phrase of 24 English words.
     pub fn from_phrase(phrase: &str) -> Result<RootIdentity> {
         let mnemonic =
             Mnemonic::parse_in(Language::English, phrase).map_err(|_| CoreError::InvalidPhrase)?;
@@ -92,12 +91,12 @@ impl RootIdentity {
         Ok(identity)
     }
 
-    /// Graine secrète, pour le stockage chiffré uniquement.
+    /// Secret seed, for encrypted storage only.
     pub(crate) fn to_seed(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.key.to_bytes())
     }
 
-    /// Inverse de [`RootIdentity::to_seed`].
+    /// Inverse of [`RootIdentity::to_seed`].
     pub(crate) fn from_seed(seed: &[u8; 32]) -> RootIdentity {
         RootIdentity {
             key: SigningKey::from_bytes(seed),
@@ -108,18 +107,18 @@ impl RootIdentity {
         RootPublic(self.key.verifying_key().to_bytes())
     }
 
-    /// Signe `label || msg`.
+    /// Signs `label || msg`.
     pub fn sign(&self, label: &[u8], msg: &[u8]) -> [u8; 64] {
         self.key.sign(&labelled(label, msg)).to_bytes()
     }
 }
 
-/// Clé racine publique (32 octets).
+/// Public root key (32 bytes).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct RootPublic(pub [u8; 32]);
 
 impl RootPublic {
-    /// Vérifie une signature de `label || msg` (vérification stricte).
+    /// Verifies a signature over `label || msg` (strict verification).
     pub fn verify(&self, label: &[u8], msg: &[u8], sig: &[u8; 64]) -> Result<()> {
         let key = VerifyingKey::from_bytes(&self.0).map_err(|_| CoreError::InvalidSignature)?;
         let sig = Signature::from_bytes(sig);
@@ -132,12 +131,12 @@ impl RootPublic {
     }
 }
 
-/// Empreinte de la clé racine publique.
+/// Fingerprint of the public root key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct Fingerprint(pub [u8; 32]);
 
 impl fmt::Display for Fingerprint {
-    /// Base32 minuscule sans remplissage, groupes de 4 séparés par `-`.
+    /// Lowercase base32 without padding, groups of 4 separated by `-`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let encoded = data_encoding::BASE32_NOPAD
             .encode(&self.0)
@@ -146,7 +145,7 @@ impl fmt::Display for Fingerprint {
             if i > 0 {
                 f.write_str("-")?;
             }
-            // Les octets sont de l'ASCII base32 : UTF-8 valide.
+            // The bytes are base32 ASCII: valid UTF-8.
             f.write_str(core::str::from_utf8(chunk).map_err(|_| fmt::Error)?)?;
         }
         Ok(())
@@ -211,7 +210,7 @@ mod tests {
 
     #[test]
     fn invalid_public_key_does_not_panic() {
-        // Point hors courbe / ordre faible : doit être une erreur, pas une panique.
+        // Off-curve point / weak order: must be an error, not a panic.
         let weak = RootPublic([0u8; 32]);
         assert_eq!(
             weak.verify(b"l", b"m", &[0u8; 64]),
@@ -223,7 +222,7 @@ mod tests {
     fn fingerprint_display_shape() {
         let fp = RootPublic([9; 32]).fingerprint();
         let s = fp.to_string();
-        // 52 caractères base32 en 13 groupes de 4.
+        // 52 base32 characters in 13 groups of 4.
         assert_eq!(s.split('-').count(), 13);
         assert!(s.split('-').all(|g| g.len() == 4));
         assert!(

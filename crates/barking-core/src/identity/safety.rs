@@ -1,16 +1,16 @@
-//! Code de sécurité : 12 groupes de 5 chiffres, identique des deux côtés.
+//! Safety code: 12 groups of 5 digits, identical on both sides.
 
 use super::root::Fingerprint;
 use crate::crypto::labels;
 
-/// Code de sécurité entre deux empreintes (indépendant de l'ordre).
+/// Safety code between two fingerprints (order-independent).
 pub fn safety_number(a: &Fingerprint, b: &Fingerprint) -> String {
     let (lo, hi) = if a.0 <= b.0 { (a, b) } else { (b, a) };
     let mut hasher = blake3::Hasher::new();
     hasher.update(labels::SAFETY_NUMBER);
     hasher.update(&lo.0);
     hasher.update(&hi.0);
-    let mut digest = [0u8; 60]; // 12 groupes x 5 octets
+    let mut digest = [0u8; 60]; // 12 groups x 5 bytes
     hasher.finalize_xof().fill(&mut digest);
     digest
         .chunks_exact(5)

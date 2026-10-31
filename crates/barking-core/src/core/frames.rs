@@ -1,5 +1,5 @@
-//! Fragmentation et réassemblage : `frames` découpe un paquet pour un
-//! transport à petit MTU, `receive_frame` recolle les trames reçues.
+//! Fragmentation and reassembly: `frames` splits a packet for a
+//! small-MTU transport, `receive_frame` glues received frames back together.
 
 use rand_core::CryptoRng;
 
@@ -9,30 +9,30 @@ use crate::Result;
 use crate::fragment::{REASON_BAD_HASH, REASON_CONTRADICTORY, fragment};
 use crate::transparency::TransparencyEvent;
 
-/// Nombre maximal de paquets incomplets gardés en mémoire.
+/// Maximum number of incomplete packets kept in memory.
 pub const MAX_PENDING_FRAMES: usize = 64;
 
-/// Durée de vie, en secondes, d'un paquet incomplet.
+/// Lifetime, in seconds, of an incomplete packet.
 pub const FRAME_TTL_SECS: u64 = 3600;
 
-/// Intervalle minimal, par raison, entre deux entrées `FrameRejected` au journal
-/// (celui de tous les événements bruyants).
+/// Minimum interval, per reason, between two `FrameRejected` log entries
+/// (the same as for all noisy events).
 pub const FRAME_REJECT_LOG_INTERVAL_SECS: u64 = NOISY_EVENT_LOG_INTERVAL_SECS;
 
 impl Core {
-    /// Découpe un paquet encodé en trames d'au plus `mtu` octets.
+    /// Splits an encoded packet into frames of at most `mtu` bytes.
     pub fn frames(&self, packet: &[u8], mtu: usize) -> Result<Vec<Vec<u8>>> {
         Ok(fragment(packet, mtu)?)
     }
 
-    /// Nombre de paquets incomplets en attente de trames (diagnostic).
+    /// Number of incomplete packets waiting for frames (diagnostics).
     pub fn pending_frames(&self) -> usize {
         self.frames.pending()
     }
 
-    /// Traite une trame reçue par `transport`. `Partial` tant que le paquet
-    /// est incomplet ; une trame invalide est journalisée puis ignorée
-    /// (`NotForUs`) : son contenu n'est jamais conservé.
+    /// Handles a frame received by `transport`. `Partial` while the packet
+    /// is incomplete; an invalid frame is logged then ignored
+    /// (`NotForUs`): its content is never kept.
     pub fn receive_frame(
         &mut self,
         frame: &[u8],
@@ -45,9 +45,9 @@ impl Core {
             Ok(None) => Ok(ReceiveOutcome::Partial),
             Ok(Some(bytes)) => self.receive(&bytes, transport, now, rng),
             Err(barking_packet::PacketError::Malformed(r)) => {
-                // Seuls un hash faux et des trames contradictoires sont
-                // journalisés, et au plus une fois par raison et par minute :
-                // le reste (bruit d'en-tête) est ignoré sans écriture.
+                // Only a wrong hash and contradictory frames are
+                // logged, and at most once per reason per minute:
+                // the rest (header noise) is ignored without writing.
                 if r != REASON_BAD_HASH && r != REASON_CONTRADICTORY {
                     return Ok(ReceiveOutcome::NotForUs);
                 }

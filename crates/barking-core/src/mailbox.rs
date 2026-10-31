@@ -1,5 +1,5 @@
-//! Boîtes aux lettres tournantes : un identifiant de 16 octets qui change
-//! chaque jour et que seuls les deux interlocuteurs savent calculer.
+//! Rotating mailboxes: a 16-byte identifier that changes
+//! every day and that only the two correspondents can compute.
 
 use crate::crypto::labels;
 use crate::identity::{DeviceId, DevicePublic};
@@ -12,18 +12,18 @@ fn truncate(full: &[u8; 32]) -> MailboxId {
     MailboxId(out)
 }
 
-/// Numéro du jour (`now / 86400`).
+/// Day number (`now / 86400`).
 pub fn day_of(now: u64) -> u32 {
     u32::try_from(now / 86400).unwrap_or(u32::MAX)
 }
 
-/// Veille, jour et lendemain, avec saturation à 0.
+/// Previous day, current day and next day, saturating at 0.
 pub fn candidate_days(now: u64) -> [u32; 3] {
     let d = day_of(now);
     [d.saturating_sub(1), d, d.saturating_add(1)]
 }
 
-/// Boîte de session d'un destinataire pour un jour donné.
+/// Session mailbox of a recipient for a given day.
 pub fn session_mailbox(secret: &[u8; 32], recipient: &DeviceId, day: u32) -> MailboxId {
     let mut h = blake3::Hasher::new_keyed(secret);
     h.update(labels::MAILBOX);
@@ -32,7 +32,7 @@ pub fn session_mailbox(secret: &[u8; 32], recipient: &DeviceId, day: u32) -> Mai
     truncate(h.finalize().as_bytes())
 }
 
-/// Boîte d'introduction, pour le premier message.
+/// Introduction mailbox, for the first message.
 pub fn intro_mailbox(recipient: &DevicePublic, day: u32) -> MailboxId {
     let mut input = [0u8; 36];
     input[..32].copy_from_slice(&recipient.dh);

@@ -1,10 +1,10 @@
-//! Double ratchet avec en-têtes chiffrés (spec Double Ratchet de Signal, §3.5 et §4).
+//! Double ratchet with encrypted headers (Signal Double Ratchet spec, §3.5 and §4).
 //!
-//! Écart d'implémentation assumé : `decrypt` ne reçoit pas de générateur
-//! aléatoire. La moitié « envoi » de l'étape DH (nouvelle paire `DHs`, puis
-//! `KDF_RK` pour `CKs` et `NHKs`) est donc reportée au prochain `encrypt`.
-//! L'ancienne clé privée `DHs` est effacée dès la réception, comme chez
-//! Signal ; la suite des clés produites est identique.
+//! Deliberate implementation deviation: `decrypt` does not receive a random
+//! generator. The "send" half of the DH step (new `DHs` pair, then
+//! `KDF_RK` for `CKs` and `NHKs`) is therefore deferred to the next `encrypt`.
+//! The old `DHs` private key is erased upon reception, as in
+//! Signal; the resulting sequence of keys is identical.
 
 mod header;
 mod state;
@@ -17,12 +17,12 @@ pub use state::RatchetState;
 #[cfg(test)]
 pub(crate) use state::STATE_CLONES;
 
-/// Nombre maximal de clés de message sautées dans une même chaîne.
+/// Maximum number of skipped message keys within a single chain.
 pub const MAX_SKIP: u32 = 1000;
 
-/// Nombre maximal de clés sautées gardées au total ; au-delà, les plus anciennes sont supprimées.
+/// Maximum number of skipped keys kept in total; beyond that, the oldest are dropped.
 pub const MAX_SKIPPED_TOTAL: usize = 2000;
 
-/// Durée de conservation d'une clé sautée (spec §11 : 7 jours au maximum),
-/// comptée depuis sa mise de côté.
+/// Retention time of a skipped key (spec §11: 7 days at most),
+/// counted from when it was set aside.
 pub const MAX_SKIPPED_AGE_SECS: u64 = 7 * 86_400;

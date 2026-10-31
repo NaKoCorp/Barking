@@ -59,8 +59,8 @@ test = false
 doc = false
 bench = false
 
-# Décoder des octets arbitraires comme trame de requête ne doit jamais paniquer.
-# Lancer : cd crates/barking-core/fuzz && cargo fuzz run proto_frame
+# Decoding arbitrary bytes as a request frame must never panic.
+# Run: cd crates/barking-core/fuzz && cargo fuzz run proto_frame
 [[bin]]
 name = "proto_frame"
 path = "fuzz_targets/proto_frame.rs"
@@ -68,8 +68,8 @@ test = false
 doc = false
 bench = false
 
-# Filtrer une réponse `Nodes` arbitraire ne doit jamais paniquer.
-# Lancer : cd crates/barking-core/fuzz && cargo fuzz run dht_response
+# Filtering an arbitrary `Nodes` response must never panic.
+# Run: cd crates/barking-core/fuzz && cargo fuzz run dht_response
 [[bin]]
 name = "dht_response"
 path = "fuzz_targets/dht_response.rs"
@@ -77,7 +77,7 @@ test = false
 doc = false
 bench = false
 
-# Pas une cible de fuzzing : écrit le corpus initial.
+# Not a fuzzing target: writes the initial corpus.
 [[bin]]
 name = "seed"
 path = "src/seed.rs"

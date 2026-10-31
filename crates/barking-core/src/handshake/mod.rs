@@ -1,5 +1,5 @@
-//! Ouverture de session : paquets de clés publiés et poignée de main PQXDH hybride
-//! (X25519 + ML-KEM-768), d'après la spécification PQXDH de Signal.
+//! Session opening: published key bundles and the hybrid PQXDH handshake
+//! (X25519 + ML-KEM-768), following Signal's PQXDH specification.
 
 pub mod pqxdh;
 pub mod prekeys;

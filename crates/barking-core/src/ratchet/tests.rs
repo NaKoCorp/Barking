@@ -7,7 +7,7 @@ use rand_core::{Rng, SeedableRng};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const AD: &[u8] = b"IK_A || IK_B";
-/// Horloge des tests (secondes Unix).
+/// Test clock (Unix seconds).
 const T0: u64 = 1_800_000_000;
 
 fn pair(rng: &mut ChaCha20Rng, sk: &[u8; 32]) -> (RatchetState, RatchetState) {
@@ -66,7 +66,7 @@ fn out_of_order_across_ratchet() {
     let r = b.encrypt(&msg(10), AD, &mut rng).unwrap();
     assert_eq!(a.decrypt(&r, AD, T0).unwrap(), msg(10));
     let m2 = a.encrypt(&msg(2), AD, &mut rng).unwrap();
-    // Nouvelle clé DH d'Alice reçue avant l'ancien message m1.
+    // New DH key from Alice received before the old message m1.
     assert_eq!(b.decrypt(&m2, AD, T0).unwrap(), msg(2));
     assert_eq!(b.decrypt(&m1, AD, T0).unwrap(), msg(1));
     assert!(b.mkskipped.is_empty());
@@ -81,7 +81,7 @@ fn skip_over_max_rejected() {
     let before = snapshot(&b);
     assert_eq!(b.decrypt(&msgs[1001], AD, T0), Err(CoreError::TooLarge));
     assert_eq!(snapshot(&b), before);
-    // Exactement MAX_SKIP d'avance : accepté.
+    // Exactly MAX_SKIP ahead: accepted.
     assert_eq!(b.decrypt(&msgs[1000], AD, T0).unwrap(), msg(1000));
     assert_eq!(b.mkskipped.len(), MAX_SKIP as usize);
     assert_eq!(b.decrypt(&msgs[0], AD, T0).unwrap(), msg(0));
@@ -95,7 +95,7 @@ fn replay_rejected() {
     let m2 = a.encrypt(&msg(2), AD, &mut rng).unwrap();
     assert_eq!(b.decrypt(&m0, AD, T0).unwrap(), msg(0));
     assert!(b.decrypt(&m0, AD, T0).is_err());
-    // Rejeu d'une clé sautée.
+    // Replay of a skipped key.
     assert_eq!(b.decrypt(&m2, AD, T0).unwrap(), msg(2));
     assert_eq!(b.decrypt(&m1, AD, T0).unwrap(), msg(1));
     let before = snapshot(&b);
@@ -120,8 +120,8 @@ fn tamper_header_or_body_rejected_state_unchanged() {
         bad.ct[i] ^= 1;
         assert!(b.decrypt(&bad, AD, T0).is_err());
     }
-    assert!(b.decrypt(&m0, b"autre AD", T0).is_err());
-    // Tailles mal formées : erreur, jamais de panique.
+    assert!(b.decrypt(&m0, b"other AD", T0).is_err());
+    // Malformed sizes: error, never a panic.
     for len in [
         0,
         1,
@@ -145,7 +145,7 @@ fn tamper_header_or_body_rejected_state_unchanged() {
     assert_eq!(b.decrypt(&m1, AD, T0).unwrap(), msg(1));
     assert_eq!(b.decrypt(&m0, AD, T0).unwrap(), msg(0));
 
-    // Altération d'un message sauté : la clé sautée n'est pas consommée.
+    // Tampering with a skipped message: the skipped key is not consumed.
     let m2 = a.encrypt(&msg(2), AD, &mut rng).unwrap();
     let m3 = a.encrypt(&msg(3), AD, &mut rng).unwrap();
     assert_eq!(b.decrypt(&m3, AD, T0).unwrap(), msg(3));
@@ -160,9 +160,9 @@ fn tamper_header_or_body_rejected_state_unchanged() {
 
 #[test]
 fn regression_vector() {
-    // R7 : octets produits par CETTE implémentation, figés pour détecter
-    // toute dérive involontaire du format (Signal ne publie aucun vecteur
-    // pour le double ratchet). Calculé une fois, puis recopié ici.
+    // R7: bytes produced by THIS implementation, frozen to detect
+    // any unintended drift of the format (Signal publishes no vector
+    // for the double ratchet). Computed once, then copied here.
     let mut rng = ChaCha20Rng::seed_from_u64(7);
     let (mut a, mut b) = pair(&mut rng, &[7u8; 32]);
     let m = a.encrypt(b"barking", b"ad", &mut rng).unwrap();
@@ -206,7 +206,7 @@ fn zero_dh_rejected() {
         RatchetState::init_initiator(&[1u8; 32], [0u8; 32], &mut rng).unwrap_err(),
         CoreError::Crypto
     );
-    // En-tête valide (bonne clé d'en-tête) mais clé DH d'ordre faible.
+    // Valid header (right header key) but weak-order DH key.
     let (_a, mut b) = pair(&mut rng, &[1u8; 32]);
     let h = Header {
         dh: [0u8; 32],
@@ -239,7 +239,7 @@ fn skipped_total_evicts_oldest() {
         assert_eq!(a.decrypt(&r, AD, T0).unwrap(), msg(round));
     }
     assert_eq!(b.mkskipped.len(), MAX_SKIPPED_TOTAL);
-    // Chaîne la plus ancienne évincée ; les deux plus récentes restent.
+    // Oldest chain evicted; the two most recent remain.
     assert!(b.decrypt(&firsts[0], AD, T0).is_err());
     assert_eq!(b.decrypt(&firsts[1], AD, T0).unwrap(), msg(0));
     assert_eq!(b.decrypt(&firsts[2], AD, T0).unwrap(), msg(0));
@@ -251,30 +251,30 @@ fn skipped_keys_expire_after_seven_days() {
     let m0 = a.encrypt(&msg(0), AD, &mut rng).unwrap();
     let m1 = a.encrypt(&msg(1), AD, &mut rng).unwrap();
     let m2 = a.encrypt(&msg(2), AD, &mut rng).unwrap();
-    // m2 d'abord : les clés de m0 et m1 sont mises de côté à T0.
+    // m2 first: the keys of m0 and m1 are set aside at T0.
     assert_eq!(b.decrypt(&m2, AD, T0).unwrap(), msg(2));
     assert_eq!(b.mkskipped.len(), 2);
-    // Exactement 7 jours : encore utilisable.
+    // Exactly 7 days: still usable.
     assert_eq!(
         b.decrypt(&m1, AD, T0 + MAX_SKIPPED_AGE_SECS).unwrap(),
         msg(1)
     );
-    // Au-delà : la clé est effacée, le message tardif ne se déchiffre plus,
-    // et l'état est inchangé (déchiffrement transactionnel).
+    // Beyond that: the key is erased, the late message can no longer be decrypted,
+    // and the state is unchanged (transactional decryption).
     let before = snapshot(&b);
     assert_eq!(
         b.decrypt(&m0, AD, T0 + MAX_SKIPPED_AGE_SECS + 1),
         Err(CoreError::Crypto)
     );
     assert_eq!(snapshot(&b), before);
-    // Le prochain déchiffrement réussi enregistre la purge.
+    // The next successful decryption records the purge.
     let m3 = a.encrypt(&msg(3), AD, &mut rng).unwrap();
     assert_eq!(
         b.decrypt(&m3, AD, T0 + MAX_SKIPPED_AGE_SECS + 1).unwrap(),
         msg(3)
     );
     assert!(b.mkskipped.is_empty());
-    // Une horloge revenue en arrière n'efface rien.
+    // A clock that went backwards erases nothing.
     let m4 = a.encrypt(&msg(4), AD, &mut rng).unwrap();
     let m5 = a.encrypt(&msg(5), AD, &mut rng).unwrap();
     assert_eq!(b.decrypt(&m5, AD, T0 + 30 * 86_400).unwrap(), msg(5));
@@ -295,7 +295,7 @@ fn state_serde_roundtrip_and_debug_hides_secrets() {
     assert_eq!(dbg, "RatchetState { ns: 1, nr: 2, pn: 0, skipped: 0, .. }");
 }
 
-/// Messages d'une direction : texte attendu et indicateur « déjà déchiffré ».
+/// Messages of one direction: expected text and "already decrypted" flag.
 struct Flight {
     msgs: Vec<(RatchetMessage, Vec<u8>, usize)>,
     pending: Vec<usize>,
@@ -317,7 +317,7 @@ impl Flight {
         self.pending.push(id);
     }
 
-    /// Livre un message en attente choisi par `choice` ; renvoie son tour.
+    /// Delivers a pending message chosen by `choice`; returns its turn.
     fn deliver(&mut self, to: &mut RatchetState, choice: usize) -> usize {
         let id = self.pending.remove(choice % self.pending.len());
         let (m, pt, round) = &self.msgs[id];
@@ -343,7 +343,7 @@ proptest! {
             for _ in 0..counts[2 * round] {
                 ab.send(&mut a, round, &mut rng);
             }
-            // Bob répond après avoir reçu au moins un message de ce tour.
+            // Bob replies after having received at least one message of this turn.
             while ab.deliver(&mut b, c.next().unwrap()) != round {}
             for _ in 0..counts[2 * round + 1] {
                 ba.send(&mut b, round, &mut rng);
@@ -356,7 +356,7 @@ proptest! {
         while !ba.pending.is_empty() {
             ba.deliver(&mut a, c.next().unwrap());
         }
-        // Chaque message a été déchiffré une fois ; un second essai échoue.
+        // Each message was decrypted once; a second attempt fails.
         for (m, _, _) in &ab.msgs {
             prop_assert!(b.decrypt(m, AD, T0).is_err());
         }
@@ -371,10 +371,10 @@ proptest! {
 #[test]
 fn could_open_matches_decrypt() {
     let (mut rng, mut a, mut b) = setup(77);
-    let m = a.encrypt(b"vrai", AD, &mut rng).unwrap();
+    let m = a.encrypt(b"true", AD, &mut rng).unwrap();
     let before = snapshot(&b);
     assert!(b.could_open(&m));
-    assert_eq!(snapshot(&b), before, "could_open ne modifie rien");
+    assert_eq!(snapshot(&b), before, "could_open modifies nothing");
     for _ in 0..1000 {
         let mut enc_header = vec![0u8; ENC_HEADER_LEN];
         rng.fill_bytes(&mut enc_header);
@@ -389,7 +389,7 @@ fn could_open_matches_decrypt() {
         ct: Vec::new(),
     }));
     assert_eq!(snapshot(&b), before);
-    assert_eq!(b.decrypt(&m, AD, T0).unwrap(), b"vrai");
+    assert_eq!(b.decrypt(&m, AD, T0).unwrap(), b"true");
 }
 
 #[test]
@@ -409,10 +409,10 @@ fn purge_with_clock_behind() {
     let m1 = a.encrypt(&msg(1), AD, &mut rng).unwrap();
     assert_eq!(b.decrypt(&m1, AD, T0).unwrap(), msg(1));
     assert_eq!(b.mkskipped.len(), 1);
-    // Horloge en retard d'un jour : rien n'est retiré, pas de panique.
+    // Clock one day behind: nothing is removed, no panic.
     assert!(!b.purge_skipped(T0 - 86_400));
     assert_eq!(b.mkskipped.len(), 1);
-    // Exactement 7 jours : conservée ; au-delà : retirée.
+    // Exactly 7 days: kept; beyond that: removed.
     assert!(!b.purge_skipped(T0 + MAX_SKIPPED_AGE_SECS));
     assert!(b.purge_skipped(T0 + MAX_SKIPPED_AGE_SECS + 1));
     assert!(b.mkskipped.is_empty());

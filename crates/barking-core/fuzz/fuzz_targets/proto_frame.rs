@@ -3,8 +3,8 @@
 use barking_proto::{Request, Response, frame};
 use libfuzzer_sys::fuzz_target;
 
-// Le premier octet choisit le type décodé (pair : requête, impair : réponse),
-// le reste est le flux d'octets.
+// The first byte selects the decoded type (even: request, odd: response),
+// the rest is the byte stream.
 fuzz_target!(|data: &[u8]| {
     let Some((sel, rest)) = data.split_first() else {
         return;

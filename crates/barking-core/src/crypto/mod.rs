@@ -1,4 +1,4 @@
-//! Primitives cryptographiques : uniquement des crates auditées, rien de maison.
+//! Cryptographic primitives: audited crates only, nothing home-grown.
 
 pub mod aead;
 pub mod kdf;

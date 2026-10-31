@@ -1,44 +1,44 @@
-//! Archive de l'historique transférée pendant une liaison (spec §3.4).
+//! History archive transferred during a link (spec §3.4).
 //!
-//! **Production (A, `link_device`).** Le clair est
-//! `postcard(Vec<HistoryEntry>) || h || sig`, où `h = blake3(ce postcard)` et
-//! `sig` la signature de `h` par la racine (`LINK_HISTORY_SIG`) : hash et
-//! signature occupent les 96 derniers octets. Le secret de liaison seul ne
-//! suffit donc pas à fabriquer une archive. Ce clair est découpé en morceaux
-//! de [`HISTORY_CHUNK_LEN`] octets (64 Kio, le dernier pouvant être plus
-//! court), chacun chiffré par `xseal(derive_key(LINK_HISTORY, secret),
-//! ad = index_u32_be || count_u32_be, morceau)`. Seuls les messages des
-//! contacts copiés dans le paquet de liaison sont archivés (un contact
-//! supprimé garde ses messages sur A, mais T ne le connaît pas).
+//! **Production (A, `link_device`).** The plaintext is
+//! `postcard(Vec<HistoryEntry>) || h || sig`, where `h = blake3(that postcard)` and
+//! `sig` is the root's signature of `h` (`LINK_HISTORY_SIG`): hash and
+//! signature take up the last 96 bytes. The link secret alone is therefore not
+//! enough to forge an archive. This plaintext is split into chunks
+//! of [`HISTORY_CHUNK_LEN`] bytes (64 KiB, the last one possibly
+//! shorter), each encrypted by `xseal(derive_key(LINK_HISTORY, secret),
+//! ad = index_u32_be || count_u32_be, chunk)`. Only the messages of the
+//! contacts copied into the link packet are archived (a deleted
+//! contact keeps its messages on A, but T does not know it).
 //!
-//! **Import (T, `finish_link`).** Tout est vérifié avant la moindre
-//! écriture : nombre de morceaux (au moins un, au plus
-//! [`MAX_HISTORY_CHUNKS`]), taille de chaque chiffré, déchiffrement de chaque
-//! morceau avec son index et le nombre total dans les données associées (un
-//! morceau manquant, en double, déplacé ou modifié échoue ici), découpage
-//! canonique, hash final, signature de la racine attendue, décodage exact, puis chaque entrée : contact
-//! présent dans le paquet de liaison (sinon toute l'archive est refusée, et
-//! pas seulement l'entrée : une archive authentique n'en contient jamais),
-//! identifiants de message uniques. L'insertion se fait ensuite dans la
-//! transaction de `finish_link` ; un identifiant déjà présent est ignoré
-//! (`insert_message` rend faux), donc importer deux fois ne crée aucun
-//! doublon, et une copie `SyncSent` reçue plus tard pour un message archivé
-//! (même identifiant brut, sens sortant) est ignorée de même.
+//! **Import (T, `finish_link`).** Everything is verified before any
+//! write: number of chunks (at least one, at most
+//! [`MAX_HISTORY_CHUNKS`]), size of each ciphertext, decryption of each
+//! chunk with its index and the total count in the associated data (a
+//! missing, duplicated, moved or modified chunk fails here), canonical
+//! splitting, final hash, expected root signature, exact decoding, then each entry: contact
+//! present in the link packet (otherwise the whole archive is refused, and
+//! not only the entry: an authentic archive never contains one),
+//! unique message identifiers. Insertion then happens in the
+//! `finish_link` transaction; an already present identifier is ignored
+//! (`insert_message` returns false), so importing twice creates no
+//! duplicate, and a `SyncSent` copy received later for an archived message
+//! (same raw identifier, outgoing direction) is likewise ignored.
 //!
-//! **Ce qui n'est pas copié.** Les livraisons (`deliveries`), les paquets
-//! reçus (`inbound`) et la file d'envoi restent sur A : T ne recevra jamais
-//! les accusés des paquets de A, ni de renvoi des paquets que A a reçus.
-//! Le statut de chaque message est recopié tel quel (vue identique à A) ;
-//! il n'évolue plus sur T.
+//! **What is not copied.** Deliveries (`deliveries`), received packets
+//! (`inbound`) and the send queue stay on A: T will never receive
+//! the acks of A's packets, nor any resend of the packets A received.
+//! The status of each message is copied as is (view identical to A);
+//! it no longer evolves on T.
 //!
-//! **Plafond.** Au plus [`MAX_HISTORY_CHUNKS`] morceaux (32 Mio de clair) :
-//! un fichier malveillant ne peut pas épuiser la mémoire de T, et A refuse
-//! la liaison (« historique trop volumineux », sans rien écrire) plutôt que
-//! de produire une archive que T refuserait ; il faut alors lier sans
-//! historique.
+//! **Cap.** At most [`MAX_HISTORY_CHUNKS`] chunks (32 MiB of plaintext):
+//! a malicious file cannot exhaust T's memory, and A refuses
+//! the link ("history too large", writing nothing) rather than
+//! produce an archive that T would refuse; one must then link without
+//! history.
 //!
-//! **Secrets.** La clé dérivée est dans `Zeroizing`, comme les clairs ; le
-//! texte de chaque entrée est effacé à sa destruction.
+//! **Secrets.** The derived key is in `Zeroizing`, like the plaintexts; the
+//! text of each entry is wiped on drop.
 
 use std::collections::HashSet;
 
@@ -52,29 +52,29 @@ use crate::identity::root::{Fingerprint, RootIdentity, RootPublic};
 use crate::store::{Direction, MessageId, MessageRow, MessageStatus, Queries};
 use crate::{CoreError, Result};
 
-/// Taille d'un morceau clair : 64 Kio (le dernier peut être plus court).
+/// Size of a plaintext chunk: 64 KiB (the last one may be shorter).
 pub const HISTORY_CHUNK_LEN: usize = 64 * 1024;
-/// Nombre maximal de morceaux d'une archive : 512, soit 32 Mio de clair.
+/// Maximum number of chunks in an archive: 512, i.e. 32 MiB of plaintext.
 pub const MAX_HISTORY_CHUNKS: usize = 512;
-/// Taille maximale d'un fichier d'archive : chaque morceau chiffré tient dans
-/// `64 Kio + 24 (nonce) + 16 (tag)` plus 3 octets de longueur, plus la
-/// longueur de la liste. Au-delà, l'entrée est refusée avant tout décodage
-/// (des morceaux vides en nombre feraient gonfler la mémoire).
+/// Maximum size of an archive file: each encrypted chunk fits in
+/// `64 KiB + 24 (nonce) + 16 (tag)` plus 3 bytes of length, plus the
+/// length of the list. Beyond that, the input is refused before any decoding
+/// (many empty chunks would inflate memory).
 pub const MAX_ARCHIVE_BYTES: usize = MAX_HISTORY_CHUNKS * (HISTORY_CHUNK_LEN + 43) + 64;
 
-/// Taille du hash BLAKE3 final.
+/// Size of the final BLAKE3 hash.
 const HASH_LEN: usize = 32;
-/// Taille de la signature de la racine qui suit le hash.
+/// Size of the root signature that follows the hash.
 const SIG_LEN: usize = 64;
-/// Fin du clair : hash puis signature.
+/// End of the plaintext: hash then signature.
 const TRAILER_LEN: usize = HASH_LEN + SIG_LEN;
-/// Étiquette d'authentification de XChaCha20-Poly1305.
+/// Authentication tag of XChaCha20-Poly1305.
 const TAG_LEN: usize = 16;
 
-const BAD_HISTORY: CoreError = CoreError::Link("historique invalide");
-const TOO_LARGE: CoreError = CoreError::Link("historique trop volumineux");
+const BAD_HISTORY: CoreError = CoreError::Link("invalid history");
+const TOO_LARGE: CoreError = CoreError::Link("history too large");
 
-/// Archive de l'historique : morceaux chiffrés, dans l'ordre.
+/// History archive: encrypted chunks, in order.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryArchive {
     pub chunks: Vec<Vec<u8>>,
@@ -89,13 +89,13 @@ impl core::fmt::Debug for HistoryArchive {
 }
 
 impl HistoryArchive {
-    /// Octets du fichier d'historique (postcard).
+    /// Bytes of the history file (postcard).
     pub fn to_bytes(&self) -> Vec<u8> {
-        // Sérialisation vers un `Vec` d'une structure sans état invalide.
+        // Serialization into a `Vec` of a structure without invalid state.
         postcard::to_allocvec(self).unwrap_or_default()
     }
 
-    /// Inverse de [`HistoryArchive::to_bytes`] ; octets en trop refusés.
+    /// Inverse of [`HistoryArchive::to_bytes`]; extra bytes refused.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > MAX_ARCHIVE_BYTES {
             return Err(TOO_LARGE);
@@ -104,14 +104,14 @@ impl HistoryArchive {
     }
 }
 
-/// Sens d'un message dans l'archive (format figé, indépendant du stockage).
+/// Direction of a message in the archive (frozen format, independent of storage).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 enum WireDirection {
     Out,
     In,
 }
 
-/// Statut d'un message dans l'archive.
+/// Status of a message in the archive.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 enum WireStatus {
     Queued,
@@ -120,12 +120,12 @@ enum WireStatus {
     Failed,
 }
 
-/// Un message de l'historique, tel que stocké sur A. Le texte est effacé à
-/// la destruction ; `Debug` ne l'affiche pas.
+/// A history message, as stored on A. The text is wiped on
+/// drop; `Debug` does not display it.
 #[derive(Serialize, Deserialize)]
 pub(super) struct HistoryEntry {
-    /// Identifiant stocké (brut pour un message sortant, dérivé de
-    /// l'expéditeur pour un message reçu) : recopié tel quel.
+    /// Stored identifier (raw for an outgoing message, derived from
+    /// the sender for a received one): copied as is.
     message_id: [u8; 16],
     contact: Fingerprint,
     direction: WireDirection,
@@ -146,7 +146,7 @@ impl core::fmt::Debug for HistoryEntry {
             .field("message_id", &MessageId(self.message_id))
             .field("contact", &self.contact)
             .field("direction", &self.direction)
-            .field("body", &format_args!("<{} octets>", self.body.len()))
+            .field("body", &format_args!("<{} bytes>", self.body.len()))
             .field("status", &self.status)
             .field("at", &self.at)
             .finish()
@@ -203,7 +203,7 @@ fn history_key(secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(blake3::derive_key(labels::LINK_HISTORY, secret))
 }
 
-/// Données associées d'un morceau : `index_u32_be || count_u32_be`.
+/// Associated data of a chunk: `index_u32_be || count_u32_be`.
 fn chunk_ad(index: usize, count: usize) -> Result<[u8; 8]> {
     let index = u32::try_from(index).map_err(|_| TOO_LARGE)?;
     let count = u32::try_from(count).map_err(|_| TOO_LARGE)?;
@@ -213,8 +213,8 @@ fn chunk_ad(index: usize, count: usize) -> Result<[u8; 8]> {
     Ok(ad)
 }
 
-/// Messages de A à archiver : ceux des contacts `contacts` (copiés dans le
-/// paquet de liaison), dans l'ordre d'insertion.
+/// A's messages to archive: those of the `contacts` (copied into the
+/// link packet), in insertion order.
 pub(super) fn export(
     q: &impl Queries,
     contacts: &HashSet<Fingerprint>,
@@ -230,9 +230,9 @@ pub(super) fn export(
     Ok(out)
 }
 
-/// Chiffre l'archive avec la clé dérivée du secret de liaison, signée par
-/// `root`. Plus de [`MAX_HISTORY_CHUNKS`] morceaux → « historique trop
-/// volumineux ».
+/// Encrypts the archive with the key derived from the link secret, signed by
+/// `root`. More than [`MAX_HISTORY_CHUNKS`] chunks → "history too
+/// large".
 pub(super) fn seal_archive(
     secret: &[u8; 32],
     root: &RootIdentity,
@@ -240,21 +240,21 @@ pub(super) fn seal_archive(
     rng: &mut impl CryptoRng,
 ) -> Result<HistoryArchive> {
     let size = postcard::experimental::serialized_size(entries)
-        .map_err(|_| CoreError::Malformed("historique"))?;
+        .map_err(|_| CoreError::Malformed("history"))?;
     let total = size.checked_add(TRAILER_LEN).ok_or(TOO_LARGE)?;
     let count = total.div_ceil(HISTORY_CHUNK_LEN);
     if count > MAX_HISTORY_CHUNKS {
         return Err(TOO_LARGE);
     }
-    // Tampon de taille exacte : aucune réallocation ne laisse de copie du
-    // clair en mémoire libérée.
+    // Exact-size buffer: no reallocation leaves a copy of the
+    // plaintext in freed memory.
     let mut plain = Zeroizing::new(vec![0u8; total]);
     let (body, trailer) = plain.split_at_mut(size);
     let written = postcard::to_slice(entries, body)
-        .map_err(|_| CoreError::Malformed("historique"))?
+        .map_err(|_| CoreError::Malformed("history"))?
         .len();
     if written != size {
-        return Err(CoreError::Malformed("historique"));
+        return Err(CoreError::Malformed("history"));
     }
     let hash = blake3::hash(body);
     let (h, sig) = trailer.split_at_mut(HASH_LEN);
@@ -269,8 +269,8 @@ pub(super) fn seal_archive(
     Ok(HistoryArchive { chunks })
 }
 
-/// Vérifie et déchiffre toute l'archive (voir la documentation du module),
-/// signée par `root`. N'écrit rien.
+/// Verifies and decrypts the whole archive (see the module documentation),
+/// signed by `root`. Writes nothing.
 pub(super) fn open_archive(
     secret: &[u8; 32],
     root: &RootPublic,
@@ -288,13 +288,13 @@ pub(super) fn open_archive(
         return Err(BAD_HISTORY);
     }
     let key = history_key(secret);
-    // Capacité bornée par les octets réellement fournis.
+    // Capacity bounded by the bytes actually supplied.
     let capacity: usize = archive.chunks.iter().map(Vec::len).sum();
     let mut plain = Zeroizing::new(Vec::with_capacity(capacity));
     for (i, sealed) in archive.chunks.iter().enumerate() {
         let pt =
             Zeroizing::new(xopen(&key, &chunk_ad(i, count)?, sealed).map_err(|_| BAD_HISTORY)?);
-        // Découpage canonique : morceaux pleins, sauf le dernier (non vide).
+        // Canonical splitting: full chunks, except the last (non-empty).
         let last = i + 1 == count;
         if (!last && pt.len() != HISTORY_CHUNK_LEN) || (last && pt.is_empty()) {
             return Err(BAD_HISTORY);
@@ -306,7 +306,7 @@ pub(super) fn open_archive(
     let (hash, sig) = trailer.split_at(HASH_LEN);
     let hash: [u8; HASH_LEN] = hash.try_into().map_err(|_| BAD_HISTORY)?;
     let sig: [u8; SIG_LEN] = sig.try_into().map_err(|_| BAD_HISTORY)?;
-    // Comparaison en temps constant (`blake3::Hash`).
+    // Constant-time comparison (`blake3::Hash`).
     if blake3::hash(body) != blake3::Hash::from(hash) {
         return Err(BAD_HISTORY);
     }
@@ -318,9 +318,9 @@ pub(super) fn open_archive(
     }
 }
 
-/// Chaque entrée concerne un contact de `contacts` (ceux du paquet de
-/// liaison) et les identifiants de message sont uniques ; sinon toute
-/// l'archive est refusée.
+/// Each entry concerns a contact of `contacts` (those of the link
+/// packet) and message identifiers are unique; otherwise the whole
+/// archive is refused.
 pub(super) fn check_entries(
     entries: &[HistoryEntry],
     contacts: &HashSet<Fingerprint>,
@@ -334,8 +334,8 @@ pub(super) fn check_entries(
     Ok(())
 }
 
-/// Insère les entrées absentes (un identifiant déjà présent est ignoré).
-/// Rend le nombre de messages insérés.
+/// Inserts the absent entries (an already present identifier is ignored).
+/// Returns the number of messages inserted.
 pub(super) fn import(q: &impl Queries, entries: &[HistoryEntry]) -> Result<u32> {
     let mut inserted = 0u32;
     for e in entries {
@@ -394,21 +394,21 @@ mod tests {
         assert_eq!(HistoryArchive::from_bytes(&a.to_bytes()).unwrap(), a);
         assert_eq!(
             HistoryArchive::from_bytes(&[0xff, 0xff]),
-            Err(CoreError::Link("fichier de liaison illisible"))
+            Err(CoreError::Link("unreadable link file"))
         );
     }
 
     #[test]
     fn from_bytes_refuses_oversized_input() {
-        // Des morceaux vides en nombre : peu d'octets, beaucoup de mémoire.
+        // Many empty chunks: few bytes, lots of memory.
         let mut bytes = vec![0u8; MAX_ARCHIVE_BYTES + 1];
         bytes[0] = 0xff;
         assert_eq!(HistoryArchive::from_bytes(&bytes), Err(TOO_LARGE));
-        // À la limite : décodé (et refusé comme illisible), pas « trop gros ».
+        // At the limit: decoded (and refused as unreadable), not "too big".
         bytes.truncate(MAX_ARCHIVE_BYTES);
         assert_eq!(
             HistoryArchive::from_bytes(&bytes),
-            Err(CoreError::Link("fichier de liaison illisible"))
+            Err(CoreError::Link("unreadable link file"))
         );
     }
 
@@ -430,17 +430,17 @@ mod tests {
                     && a.direction == b.direction
                     && a.at == b.at)
         );
-        // Autre racine attendue : refusé.
+        // Other expected root: refused.
         assert_eq!(
             open_archive(&secret, &root(2).public(), &archive).err(),
             Some(BAD_HISTORY)
         );
-        // Autre secret : refusé.
+        // Other secret: refused.
         assert_eq!(
             open_archive(&[6u8; 32], &root(1).public(), &archive).err(),
             Some(BAD_HISTORY)
         );
-        // Debug n'affiche pas le texte.
+        // Debug does not display the text.
         assert!(!format!("{:?}", back[0]).contains("yyy"));
     }
 
@@ -468,7 +468,7 @@ mod tests {
         let mut rng = rand::rng();
         let secret = [5u8; 32];
         let key = history_key(&secret);
-        let entries = vec![entry(1, 1, "salut")];
+        let entries = vec![entry(1, 1, "hello")];
         let size = postcard::experimental::serialized_size(&entries).unwrap();
         let mut plain = vec![0u8; size + TRAILER_LEN];
         postcard::to_slice(&entries, &mut plain[..size]).unwrap();
@@ -476,7 +476,7 @@ mod tests {
         plain[size..size + HASH_LEN].copy_from_slice(h.as_bytes());
         let sig = root(1).sign(labels::LINK_HISTORY_SIG, h.as_bytes());
         plain[size + HASH_LEN..].copy_from_slice(&sig);
-        // Valide, en un morceau.
+        // Valid, in one chunk.
         let one = HistoryArchive {
             chunks: vec![xseal(&key, &chunk_ad(0, 1).unwrap(), &plain, &mut rng)],
         };
@@ -486,7 +486,7 @@ mod tests {
                 .len(),
             1
         );
-        // Même clair découpé en deux morceaux non pleins : refusé.
+        // Same plaintext split into two non-full chunks: refused.
         let (x, y) = plain.split_at(3);
         let split = HistoryArchive {
             chunks: vec![
@@ -498,7 +498,7 @@ mod tests {
             open_archive(&secret, &root(1).public(), &split).err(),
             Some(BAD_HISTORY)
         );
-        // Signature incorrecte (chiffrement et hash valides).
+        // Incorrect signature (valid encryption and hash).
         let mut wrong = plain.clone();
         let last = wrong.len() - 1;
         wrong[last] ^= 1;
@@ -509,7 +509,7 @@ mod tests {
             open_archive(&secret, &root(1).public(), &bad_sig).err(),
             Some(BAD_HISTORY)
         );
-        // Hash incorrect (chiffrement valide).
+        // Incorrect hash (valid encryption).
         let mut wrong = plain.clone();
         wrong[size] ^= 1;
         let bad = HistoryArchive {
@@ -519,7 +519,7 @@ mod tests {
             open_archive(&secret, &root(1).public(), &bad).err(),
             Some(BAD_HISTORY)
         );
-        // Clair plus court que le hash.
+        // Plaintext shorter than the hash.
         let short = HistoryArchive {
             chunks: vec![xseal(&key, &chunk_ad(0, 1).unwrap(), &[1, 2], &mut rng)],
         };
@@ -565,7 +565,7 @@ mod tests {
                 "a"
             )
         );
-        // Export depuis ce stockage : seuls les contacts connus.
+        // Export from this store: only the known contacts.
         let out = export(&store, &known(&[2])).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].message_id, [3; 16]);

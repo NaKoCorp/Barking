@@ -1,4 +1,4 @@
-//! Paquets de clés (prekeys) : clé signée X25519, clé ML-KEM-768 et clés à usage unique.
+//! Key bundles (prekeys): signed X25519 key, ML-KEM-768 key and one-time keys.
 
 use crate::crypto::labels;
 use crate::identity::device::sig_bytes;
@@ -14,18 +14,18 @@ use std::collections::btree_map::Entry;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Taille d'une clé d'encapsulation ML-KEM-768 encodée.
+/// Size of an encoded ML-KEM-768 encapsulation key.
 pub const PQ_EK_LEN: usize = 1184;
-/// Taille d'un chiffré ML-KEM-768.
+/// Size of an ML-KEM-768 ciphertext.
 pub const PQ_CT_LEN: usize = 1088;
 
 pub(crate) type PqDecapsulationKey = ml_kem::DecapsulationKey<MlKem768>;
 
-/// Clés secrètes des paquets de clés d'un appareil.
+/// Secret keys of a device's key bundles.
 ///
-/// Chaque champ secret s'efface lui-même à la destruction : `StaticSecret`
-/// (x25519-dalek, feature `zeroize`) et `DecapsulationKey` (ml-kem, feature
-/// `zeroize`) sont `ZeroizeOnDrop`, y compris dans la `BTreeMap`.
+/// Each secret field erases itself on drop: `StaticSecret`
+/// (x25519-dalek, feature `zeroize`) and `DecapsulationKey` (ml-kem, feature
+/// `zeroize`) are `ZeroizeOnDrop`, including inside the `BTreeMap`.
 pub struct PrekeySecrets {
     spk_id: u32,
     spk: StaticSecret,
@@ -34,7 +34,7 @@ pub struct PrekeySecrets {
     opks: BTreeMap<u32, StaticSecret>,
 }
 
-// Tous les champs secrets sont eux-mêmes `ZeroizeOnDrop` (voir ci-dessus).
+// All secret fields are themselves `ZeroizeOnDrop` (see above).
 impl ZeroizeOnDrop for PrekeySecrets {}
 
 impl fmt::Debug for PrekeySecrets {
@@ -52,8 +52,8 @@ fn random_static(rng: &mut impl CryptoRng) -> StaticSecret {
 }
 
 impl PrekeySecrets {
-    /// Tire une clé signée X25519, une clé ML-KEM-768 et `n_opk` clés à usage
-    /// unique, avec des identifiants aléatoires (distincts entre clés à usage unique).
+    /// Draws a signed X25519 key, an ML-KEM-768 key and `n_opk` one-time
+    /// keys, with random identifiers (distinct among one-time keys).
     pub fn generate(rng: &mut impl CryptoRng, n_opk: usize) -> PrekeySecrets {
         let spk_id = rng.next_u32();
         let spk = random_static(rng);
@@ -74,8 +74,8 @@ impl PrekeySecrets {
         }
     }
 
-    /// Paquet de clés publiques signé par l'appareil. Avec `with_opk`, il propose
-    /// la clé à usage unique de plus petit identifiant, s'il en reste une.
+    /// Public key bundle signed by the device. With `with_opk`, it offers
+    /// the one-time key with the smallest identifier, if any remains.
     pub fn bundle(&self, dev: &DeviceKeys, with_opk: bool) -> PrekeyBundle {
         let opk = if with_opk {
             self.opks
@@ -98,7 +98,7 @@ impl PrekeySecrets {
         bundle
     }
 
-    /// Nombre de clés à usage unique restantes.
+    /// Number of remaining one-time keys.
     pub fn opk_count(&self) -> usize {
         self.opks.len()
     }
@@ -123,19 +123,19 @@ impl PrekeySecrets {
         self.opks.get(&id)
     }
 
-    /// Retire (et détruit) une clé à usage unique.
+    /// Removes (and destroys) a one-time key.
     pub(crate) fn remove_opk(&mut self, id: u32) {
         self.opks.remove(&id);
     }
 }
 
-/// Forme stockée des secrets ; effacée à la destruction.
+/// Stored form of the secrets; erased on drop.
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct StoredPrekeys {
     spk_id: u32,
     spk: [u8; 32],
     pq_id: u32,
-    /// Graine de 64 octets (d || z) de la clé ML-KEM.
+    /// 64-byte seed (d || z) of the ML-KEM key.
     #[serde(with = "sig_bytes")]
     pq_seed: [u8; 64],
     opks: Vec<(u32, [u8; 32])>,
@@ -146,7 +146,7 @@ impl Serialize for PrekeySecrets {
         let mut seed = self
             .pq_dk
             .to_seed()
-            .ok_or_else(|| serde::ser::Error::custom("clé ML-KEM sans graine"))?;
+            .ok_or_else(|| serde::ser::Error::custom("ML-KEM key without seed"))?;
         let mut stored = StoredPrekeys {
             spk_id: self.spk_id,
             spk: self.spk.to_bytes(),
@@ -170,7 +170,7 @@ impl<'de> Deserialize<'de> for PrekeySecrets {
         let mut opks = BTreeMap::new();
         for (id, k) in &stored.opks {
             if opks.insert(*id, StaticSecret::from(*k)).is_some() {
-                return Err(serde::de::Error::custom("identifiant de clé en double"));
+                return Err(serde::de::Error::custom("duplicate key identifier"));
             }
         }
         Ok(PrekeySecrets {
@@ -183,14 +183,14 @@ impl<'de> Deserialize<'de> for PrekeySecrets {
     }
 }
 
-/// Paquet de clés publiques, signé par la clé de signature de l'appareil.
+/// Public key bundle, signed by the device's signing key.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PrekeyBundle {
     pub device: DevicePublic,
     pub spk_id: u32,
     pub spk: [u8; 32],
     pub pq_id: u32,
-    /// Clé d'encapsulation ML-KEM-768 (1184 octets).
+    /// ML-KEM-768 encapsulation key (1184 bytes).
     pub pq_ek: Vec<u8>,
     pub opk: Option<(u32, [u8; 32])>,
     #[serde(with = "sig_bytes")]
@@ -198,9 +198,9 @@ pub struct PrekeyBundle {
 }
 
 impl PrekeyBundle {
-    /// Octets signés (encodage fixe, sans ambiguïté) :
+    /// Signed bytes (fixed, unambiguous encoding):
     /// `device.sig || device.dh || spk_id || spk || pq_id || len(pq_ek) || pq_ek || opk`,
-    /// entiers en petit-boutiste sur 4 octets, `opk` = `0` ou `1 || id || clé`.
+    /// little-endian 4-byte integers, `opk` = `0` or `1 || id || key`.
     pub(crate) fn signed_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 * 3 + 4 * 3 + self.pq_ek.len() + 37);
         out.extend_from_slice(&self.device.sig);
@@ -208,7 +208,7 @@ impl PrekeyBundle {
         out.extend_from_slice(&self.spk_id.to_le_bytes());
         out.extend_from_slice(&self.spk);
         out.extend_from_slice(&self.pq_id.to_le_bytes());
-        // Longueur bornée par `verify` ; un `u32` suffit largement sinon.
+        // Length bounded by `verify`; a `u32` is more than enough otherwise.
         let len = u32::try_from(self.pq_ek.len()).unwrap_or(u32::MAX);
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(&self.pq_ek);
@@ -223,10 +223,10 @@ impl PrekeyBundle {
         out
     }
 
-    /// Vérifie la taille de `pq_ek` puis la signature de l'appareil (étiquette `PREKEYS`).
+    /// Checks the size of `pq_ek` then the device signature (label `PREKEYS`).
     pub fn verify(&self) -> Result<()> {
         if self.pq_ek.len() != PQ_EK_LEN {
-            return Err(CoreError::Malformed("taille de clé ML-KEM"));
+            return Err(CoreError::Malformed("ML-KEM key size"));
         }
         let key =
             VerifyingKey::from_bytes(&self.device.sig).map_err(|_| CoreError::InvalidSignature)?;
@@ -293,7 +293,7 @@ mod tests {
         b.sig[0] ^= 1;
         assert_eq!(b.verify(), Err(CoreError::InvalidSignature));
 
-        // Signé par un autre appareil.
+        // Signed by another device.
         let other = DeviceKeys::generate(&mut StdRng::seed_from_u64(99));
         let mut b = good.clone();
         b.device = other.public();
@@ -305,7 +305,7 @@ mod tests {
         let (dev, pre) = setup();
         let mut b = pre.bundle(&dev, false);
         b.pq_ek.pop();
-        // Même re-signé, une clé de mauvaise taille est refusée.
+        // Even re-signed, a key of the wrong size is rejected.
         b.sig = dev.sign(crate::crypto::labels::PREKEYS, &b.signed_bytes());
         assert!(matches!(b.verify(), Err(CoreError::Malformed(_))));
     }

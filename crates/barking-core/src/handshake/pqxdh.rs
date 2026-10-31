@@ -1,4 +1,4 @@
-//! Poignée de main PQXDH hybride (X25519 + ML-KEM-768).
+//! Hybrid PQXDH handshake (X25519 + ML-KEM-768).
 
 use super::prekeys::{PQ_CT_LEN, PrekeyBundle, PrekeySecrets};
 use crate::crypto::{kdf::hkdf_sha256, labels};
@@ -11,32 +11,32 @@ use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-/// Préfixe du matériel de clé (spec PQXDH : 32 octets 0xFF pour X25519).
+/// Key material prefix (PQXDH spec: 32 bytes of 0xFF for X25519).
 const KM_PREFIX: [u8; 32] = [0xFF; 32];
-/// Taille maximale du matériel de clé : préfixe, 4 DH, secret ML-KEM.
+/// Maximum size of the key material: prefix, 4 DH, ML-KEM secret.
 const KM_MAX: usize = 32 * 6;
 
-/// Premier message de l'initiateur : ce dont le répondeur a besoin pour
-/// reproduire le calcul.
+/// First message from the initiator: what the responder needs to
+/// reproduce the computation.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct InitialMessage {
-    /// Clé d'identité X25519 de l'appareil initiateur (`DevicePublic.dh`).
+    /// X25519 identity key of the initiating device (`DevicePublic.dh`).
     pub ik: [u8; 32],
-    /// Clé éphémère X25519 de l'initiateur.
+    /// Initiator's X25519 ephemeral key.
     pub ek: [u8; 32],
     pub spk_id: u32,
     pub pq_id: u32,
     pub opk_id: Option<u32>,
-    /// Chiffré ML-KEM-768 (1088 octets).
+    /// ML-KEM-768 ciphertext (1088 bytes).
     pub kem_ct: Vec<u8>,
 }
 
-/// Secrets issus de la poignée de main, partagés par les deux côtés.
+/// Secrets resulting from the handshake, shared by both sides.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SessionSecrets {
     pub sk: [u8; 32],
     pub mailbox_secret: [u8; 32],
-    /// Données associées : `IK_A_pub || IK_B_pub`.
+    /// Associated data: `IK_A_pub || IK_B_pub`.
     pub ad: Vec<u8>,
 }
 
@@ -46,10 +46,10 @@ impl fmt::Debug for SessionSecrets {
     }
 }
 
-/// Côté initiateur : vérifie le paquet de clés et dérive les secrets de session.
+/// Initiator side: verifies the key bundle and derives the session secrets.
 ///
-/// Le paquet doit en plus appartenir à un appareil attendu (certificat, liste
-/// d'appareils) : c'est à l'appelant de le vérifier.
+/// The bundle must in addition belong to an expected device (certificate, device
+/// list): it is up to the caller to verify this.
 pub fn initiate(
     me: &DeviceKeys,
     bundle: &PrekeyBundle,
@@ -92,10 +92,10 @@ pub fn initiate(
     Ok((secrets, init))
 }
 
-/// Côté répondeur : reproduit le calcul et consomme la clé à usage unique utilisée.
+/// Responder side: reproduces the computation and consumes the one-time key used.
 ///
-/// Identifiant de clé (signée, ML-KEM ou à usage unique) inconnu : `NoSession`.
-/// En cas d'échec, la clé à usage unique n'est pas consommée.
+/// Unknown key identifier (signed, ML-KEM or one-time): `NoSession`.
+/// On failure, the one-time key is not consumed.
 pub fn respond(
     me: &DeviceKeys,
     secrets: &mut PrekeySecrets,
@@ -105,10 +105,10 @@ pub fn respond(
         return Err(CoreError::NoSession);
     }
     if init.kem_ct.len() != PQ_CT_LEN {
-        return Err(CoreError::Malformed("taille du chiffré ML-KEM"));
+        return Err(CoreError::Malformed("ML-KEM ciphertext size"));
     }
     let ct = Ciphertext::<MlKem768>::try_from(init.kem_ct.as_slice())
-        .map_err(|_| CoreError::Malformed("taille du chiffré ML-KEM"))?;
+        .map_err(|_| CoreError::Malformed("ML-KEM ciphertext size"))?;
     let opk = match init.opk_id {
         Some(id) => Some(secrets.opk(id).ok_or(CoreError::NoSession)?),
         None => None,
@@ -136,14 +136,14 @@ pub fn respond(
 }
 
 fn new_km() -> Zeroizing<Vec<u8>> {
-    // Capacité fixée d'avance : aucune réallocation ne laisse de copie non effacée.
+    // Capacity fixed in advance: no reallocation leaves an unerased copy behind.
     let mut km = Zeroizing::new(Vec::with_capacity(KM_MAX));
     km.extend_from_slice(&KM_PREFIX);
     km
 }
 
-/// Ajoute une sortie X25519 au matériel de clé, en refusant la sortie nulle
-/// (point d'ordre faible : l'échange ne serait pas contributif).
+/// Appends an X25519 output to the key material, rejecting the all-zero output
+/// (weak-order point: the exchange would not be contributory).
 fn push_dh(km: &mut Zeroizing<Vec<u8>>, mut dh: [u8; 32]) -> Result<()> {
     let acc = dh.iter().fold(0u8, |acc, b| acc | b);
     if acc == 0 {
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn opk_changes_secret() {
-        // Même aléa côté initiateur : seule la présence de la clé à usage unique diffère.
+        // Same randomness on the initiator side: only the presence of the one-time key differs.
         let mut rng = StdRng::seed_from_u64(2);
         let alice = DeviceKeys::generate(&mut rng);
         let b = bob(&mut rng);
@@ -269,7 +269,7 @@ mod tests {
             respond(&b.dev, &mut b.pre, &init).err(),
             Some(CoreError::NoSession)
         );
-        // Le paquet suivant propose une autre clé à usage unique.
+        // The next bundle offers another one-time key.
         assert_ne!(b.pre.bundle(&b.dev, true).opk, bundle.opk);
     }
 
@@ -280,7 +280,7 @@ mod tests {
         let mut b = bob(&mut rng);
         let (_, mut init) = initiate(&alice, &b.pre.bundle(&b.dev, true), &mut rng).unwrap();
         init.opk_id = init.opk_id.map(|id| id.wrapping_add(1));
-        // Un identifiant inconnu (sauf collision improbable avec la seconde clé).
+        // An unknown identifier (barring an unlikely collision with the second key).
         if b.pre.bundle(&b.dev, true).opk.map(|(id, _)| id) != init.opk_id {
             assert_eq!(
                 respond(&b.dev, &mut b.pre, &init).err(),
@@ -336,11 +336,11 @@ mod tests {
         let (_, init) = initiate(&alice, &b.pre.bundle(&b.dev, true), &mut rng).unwrap();
         assert_eq!(init.kem_ct.len(), PQ_CT_LEN);
         let len = postcard::to_allocvec(&init).unwrap().len();
-        assert!((1100..=1300).contains(&len), "taille {len}");
-        assert!(len > 1024, "au-delà du palier M : part en L");
+        assert!((1100..=1300).contains(&len), "size {len}");
+        assert!(len > 1024, "beyond the M tier: goes in L");
     }
 
-    /// Re-signe un paquet modifié, pour atteindre les vérifications après la signature.
+    /// Re-signs a modified bundle, to reach the checks after the signature.
     fn resign(bundle: &mut PrekeyBundle, dev: &DeviceKeys) {
         bundle.sig = dev.sign(labels::PREKEYS, &bundle.signed_bytes());
     }
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn zero_identity_dh_rejected() {
-        // Clé d'identité de l'appareil distant = point d'ordre faible (0) : DH2 nul.
+        // Identity key of the remote device = weak-order point (0): DH2 is zero.
         let mut rng = StdRng::seed_from_u64(12);
         let alice = DeviceKeys::generate(&mut rng);
         let b = bob(&mut rng);
@@ -407,7 +407,7 @@ mod tests {
             respond(&b.dev, &mut b.pre, &i).err(),
             Some(CoreError::Crypto)
         );
-        // Un échec ne consomme pas la clé à usage unique.
+        // A failure does not consume the one-time key.
         assert_eq!(b.pre.opk_count(), 2);
         assert!(respond(&b.dev, &mut b.pre, &init).is_ok());
     }
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn tampered_kem_ct_gives_different_secret() {
-        // ML-KEM rejette implicitement : le répondeur dérive un autre secret.
+        // ML-KEM rejects implicitly: the responder derives a different secret.
         let mut rng = StdRng::seed_from_u64(15);
         let alice = DeviceKeys::generate(&mut rng);
         let mut b = bob(&mut rng);

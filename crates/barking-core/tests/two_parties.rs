@@ -1,4 +1,4 @@
-//! Scénario de bout en bout : deux (ou trois) personnes, chacune avec sa base.
+//! End-to-end scenario: two (or three) people, each with their own database.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 86_400;
-const T: &str = "fichier";
+const T: &str = "file";
 
 struct Party {
     core: Core,
@@ -52,7 +52,7 @@ impl Party {
     }
 
     fn reopen(&mut self) {
-        // L'ancienne connexion est fermée avant la réouverture.
+        // The old connection is closed before reopening.
         let placeholder = Core::open(&self.path, &self.key, NOW).unwrap();
         let old = std::mem::replace(&mut self.core, placeholder);
         drop(old);
@@ -77,7 +77,7 @@ impl Party {
     }
 }
 
-/// Alice et Bob, chacun dans sa base temporaire, ont échangé leurs cartes.
+/// Alice and Bob, each in their own temporary database, have exchanged cards.
 fn pair() -> (Party, Party, StdRng) {
     let mut a = Party::new("tel-alice", 1);
     let mut b = Party::new("tel-bob", 2);
@@ -98,8 +98,8 @@ fn pair() -> (Party, Party, StdRng) {
     (a, b, StdRng::seed_from_u64(99))
 }
 
-/// Lie un nouvel appareil `name` (base `path`) à l'administrateur `admin`,
-/// par le flux complet : offre, demande, acceptation, fin.
+/// Links a new device `name` (database `path`) to the administrator `admin`,
+/// through the full flow: offer, request, acceptance, completion.
 fn link_new(
     admin: &mut Core,
     path: &std::path::Path,
@@ -114,7 +114,7 @@ fn link_new(
     t
 }
 
-/// Déballe un `Message`, sinon échoue.
+/// Unwraps a `Message`, otherwise fails.
 fn expect_msg(o: ReceiveOutcome) -> (Fingerprint, Option<String>, String, Packet) {
     match o {
         ReceiveOutcome::Message {
@@ -123,12 +123,12 @@ fn expect_msg(o: ReceiveOutcome) -> (Fingerprint, Option<String>, String, Packet
             text,
             ack,
         } => (from, alias, text, ack),
-        other => panic!("Message attendu, obtenu {other:?}"),
+        other => panic!("Message expected, got {other:?}"),
     }
 }
 
 fn one(mut v: Vec<Packet>) -> Packet {
-    assert_eq!(v.len(), 1, "un seul paquet attendu");
+    assert_eq!(v.len(), 1, "exactly one packet expected");
     v.remove(0)
 }
 
@@ -139,56 +139,52 @@ fn is_initial(p: &Packet) -> bool {
 #[test]
 fn alice_to_bob_and_back() {
     let (mut a, mut b, mut rng) = pair();
-    let p1 = one(a.send(&b.fp(), "Salut Bob ! 🐕", NOW, &mut rng));
+    let p1 = one(a.send(&b.fp(), "Hi Bob! 🐕", NOW, &mut rng));
     assert_eq!(p1.kind, Kind::Message);
     assert!(is_initial(&p1));
-    assert_ne!(
-        p1.tier,
-        Tier::S,
-        "jamais d'ouverture de session en palier S"
-    );
+    assert_ne!(p1.tier, Tier::S, "never a session opening in tier S");
 
     let (from, alias, text, _) = expect_msg(b.recv(&p1, NOW, &mut rng));
     assert_eq!(from, a.fp());
     assert_eq!(alias.as_deref(), Some("alice"));
-    assert_eq!(text, "Salut Bob ! 🐕");
+    assert_eq!(text, "Hi Bob! 🐕");
 
-    // Bob répond dans la session ouverte par Alice : pas d'Initial.
-    let p2 = one(b.send(&a.fp(), "Salut Alice", NOW + 5, &mut rng));
+    // Bob replies in the session opened by Alice: no Initial.
+    let p2 = one(b.send(&a.fp(), "Hi Alice", NOW + 5, &mut rng));
     assert!(!is_initial(&p2));
     assert_eq!(p2.tier, Tier::S);
     let (from, alias, text, _) = expect_msg(a.recv(&p2, NOW + 5, &mut rng));
     assert_eq!(from, b.fp());
     assert_eq!(alias.as_deref(), Some("bob"));
-    assert_eq!(text, "Salut Alice");
+    assert_eq!(text, "Hi Alice");
 
-    // Après la réponse de Bob, Alice n'envoie plus d'Initial.
-    let p3 = one(a.send(&b.fp(), "ça marche", NOW + 10, &mut rng));
+    // After Bob's reply, Alice no longer sends an Initial.
+    let p3 = one(a.send(&b.fp(), "works for me", NOW + 10, &mut rng));
     assert!(!is_initial(&p3));
     let (_, _, text, _) = expect_msg(b.recv(&p3, NOW + 10, &mut rng));
-    assert_eq!(text, "ça marche");
+    assert_eq!(text, "works for me");
 
     let hist = a.core.messages_with(&b.fp()).unwrap();
     assert_eq!(hist.len(), 3);
     assert_eq!(hist[1].direction, Direction::In);
-    assert_eq!(hist[1].body, "Salut Alice");
+    assert_eq!(hist[1].body, "Hi Alice");
 }
 
 #[test]
 fn initial_resent_until_first_reply() {
     let (mut a, mut b, mut rng) = pair();
-    let p1 = one(a.send(&b.fp(), "un", NOW, &mut rng));
-    let p2 = one(a.send(&b.fp(), "deux", NOW + 1, &mut rng));
+    let p1 = one(a.send(&b.fp(), "one", NOW, &mut rng));
+    let p2 = one(a.send(&b.fp(), "two", NOW + 1, &mut rng));
     assert!(is_initial(&p1) && is_initial(&p2));
-    // Ordre inversé : le second Initial ouvre la session, le premier la réutilise.
-    assert_eq!(expect_msg(b.recv(&p2, NOW + 2, &mut rng)).2, "deux");
-    assert_eq!(expect_msg(b.recv(&p1, NOW + 3, &mut rng)).2, "un");
+    // Reversed order: the second Initial opens the session, the first reuses it.
+    assert_eq!(expect_msg(b.recv(&p2, NOW + 2, &mut rng)).2, "two");
+    assert_eq!(expect_msg(b.recv(&p1, NOW + 3, &mut rng)).2, "one");
 }
 
 #[test]
 fn ack_marks_delivered() {
     let (mut a, mut b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "accuse-moi", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "ack-me", NOW, &mut rng));
     let sent = a.core.messages_with(&b.fp()).unwrap();
     assert_eq!(sent[0].status, MessageStatus::Sent);
     assert_eq!(sent.len(), 1);
@@ -198,14 +194,14 @@ fn ack_marks_delivered() {
     assert_eq!(ack.tier, Tier::S);
     match a.recv(&ack, NOW + 1, &mut rng) {
         ReceiveOutcome::AckReceived { packet_id } => assert_eq!(packet_id, p.id),
-        other => panic!("AckReceived attendu, obtenu {other:?}"),
+        other => panic!("AckReceived expected, got {other:?}"),
     }
     let after = a.core.messages_with(&b.fp()).unwrap();
     assert_eq!(after[0].status, MessageStatus::Delivered);
     assert!(a.events().iter().any(
         |e| matches!(e, TransparencyEvent::AckVerified { for_packet } if *for_packet == p.id)
     ));
-    // Le même accusé une seconde fois n'est pas compté deux fois.
+    // The same ack a second time is not counted twice.
     assert!(matches!(
         a.recv(&ack, NOW + 2, &mut rng),
         ReceiveOutcome::Duplicate
@@ -218,14 +214,14 @@ fn forged_or_malformed_acks_are_not_for_us() {
     let p = one(a.send(&b.fp(), "x", NOW, &mut rng));
     let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
 
-    // Mauvais secret.
+    // Wrong secret.
     let mut bad = ack.clone();
     bad.payload[20] ^= 1;
     assert!(matches!(
         a.recv(&bad, NOW, &mut rng),
         ReceiveOutcome::NotForUs
     ));
-    // Charge d'accusé de mauvaise longueur (31 et 33 octets).
+    // Ack payload of the wrong length (31 and 33 bytes).
     for len in [31usize, 33] {
         let mut odd = ack.clone();
         odd.payload.resize(len, 0);
@@ -237,7 +233,7 @@ fn forged_or_malformed_acks_are_not_for_us() {
             ReceiveOutcome::NotForUs
         ));
     }
-    // Accusé valide pour un paquet que je n'ai pas envoyé (celui de Bob vers moi).
+    // Valid ack for a packet I did not send (Bob's packet to me).
     let q = one(b.send(&a.fp(), "y", NOW, &mut rng));
     let (_, _, _, ack_q) = expect_msg(a.recv(&q, NOW, &mut rng));
     assert!(matches!(
@@ -253,14 +249,14 @@ fn forged_or_malformed_acks_are_not_for_us() {
 #[test]
 fn duplicate_shown_once() {
     let (mut a, mut b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "une fois", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "once", NOW, &mut rng));
     expect_msg(b.recv(&p, NOW, &mut rng));
     assert!(matches!(
         b.recv(&p, NOW + 1, &mut rng),
         ReceiveOutcome::Duplicate
     ));
-    // Aussi pour un message normal (après l'ouverture de session).
-    let q = one(b.send(&a.fp(), "retour", NOW + 2, &mut rng));
+    // Also for a normal message (after the session is opened).
+    let q = one(b.send(&a.fp(), "back", NOW + 2, &mut rng));
     expect_msg(a.recv(&q, NOW + 2, &mut rng));
     assert!(matches!(
         a.recv(&q, NOW + 3, &mut rng),
@@ -277,7 +273,7 @@ fn duplicate_shown_once() {
 #[test]
 fn expired_packet() {
     let (mut a, mut b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "vieux", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "old", NOW, &mut rng));
     let late = u64::from(p.expires_at) + 1;
     assert!(matches!(
         b.recv(&p, late, &mut rng),
@@ -288,32 +284,32 @@ fn expired_packet() {
 #[test]
 fn late_delivery_within_freshness_window() {
     let (mut a, mut b, mut rng) = pair();
-    // Initial livré 5 jours après l'envoi : boîte d'introduction du jour d'envoi.
-    let p1 = one(a.send(&b.fp(), "cinq jours de retard", NOW, &mut rng));
+    // Initial delivered 5 days after sending: intro mailbox of the sending day.
+    let p1 = one(a.send(&b.fp(), "five days late", NOW, &mut rng));
     assert_eq!(
         expect_msg(b.recv(&p1, NOW + 5 * DAY, &mut rng)).2,
-        "cinq jours de retard"
+        "five days late"
     );
-    // Session établie dans les deux sens.
-    let r = one(b.send(&a.fp(), "reçu", NOW + 5 * DAY, &mut rng));
+    // Session established in both directions.
+    let r = one(b.send(&a.fp(), "received", NOW + 5 * DAY, &mut rng));
     expect_msg(a.recv(&r, NOW + 5 * DAY, &mut rng));
-    // Message normal (boîte de session) livré 5 jours après l'envoi.
+    // Normal message (session mailbox) delivered 5 days after sending.
     let t = NOW + 5 * DAY + 10;
-    let p2 = one(a.send(&b.fp(), "normal en retard", t, &mut rng));
+    let p2 = one(a.send(&b.fp(), "normal but late", t, &mut rng));
     assert!(!is_initial(&p2));
     assert_eq!(
         expect_msg(b.recv(&p2, t + 5 * DAY, &mut rng)).2,
-        "normal en retard"
+        "normal but late"
     );
-    // Au-delà de la fenêtre de fraîcheur : expiré.
-    let p3 = one(a.send(&b.fp(), "trop tard", t + 1, &mut rng));
+    // Beyond the freshness window: expired.
+    let p3 = one(a.send(&b.fp(), "too late", t + 1, &mut rng));
     assert!(matches!(
         b.recv(&p3, t + 1 + DEFAULT_TTL_SECS + DAY + 1, &mut rng),
         ReceiveOutcome::Expired
     ));
-    // Même avec une expiration réécrite par un relais : la boîte du jour
-    // d'envoi est hors de la fenêtre acceptée.
-    let p4 = one(a.send(&b.fp(), "réécrit", t + 2, &mut rng));
+    // Even with an expiry rewritten by a relay: the sending-day mailbox
+    // is outside the accepted window.
+    let p4 = one(a.send(&b.fp(), "rewritten", t + 2, &mut rng));
     let later = t + 2 + DEFAULT_TTL_SECS + 2 * DAY;
     let mut rewritten = p4.clone();
     rewritten.expires_at = u32::try_from(later + DEFAULT_TTL_SECS).unwrap();
@@ -326,17 +322,17 @@ fn late_delivery_within_freshness_window() {
 #[test]
 fn clock_skew_one_day_ok() {
     let (mut a, mut b, mut rng) = pair();
-    // Horloge de Bob en avance d'un jour.
-    let p1 = one(a.send(&b.fp(), "décalé d'un jour", NOW, &mut rng));
+    // Bob's clock is one day ahead.
+    let p1 = one(a.send(&b.fp(), "one day off", NOW, &mut rng));
     assert_eq!(
         expect_msg(b.recv(&p1, NOW + DAY, &mut rng)).2,
-        "décalé d'un jour"
+        "one day off"
     );
-    // Horloge de Bob en retard d'un jour : boîte du lendemain pour Alice.
-    let p3 = one(b.send(&a.fp(), "retour", NOW + DAY, &mut rng));
-    assert_eq!(expect_msg(a.recv(&p3, NOW, &mut rng)).2, "retour");
-    // Deux jours d'avance de l'expéditeur : boîte hors fenêtre.
-    let p4 = one(b.send(&a.fp(), "trop en avance", NOW + 3 * DAY, &mut rng));
+    // Bob's clock is one day behind: next-day mailbox for Alice.
+    let p3 = one(b.send(&a.fp(), "back", NOW + DAY, &mut rng));
+    assert_eq!(expect_msg(a.recv(&p3, NOW, &mut rng)).2, "back");
+    // Sender two days ahead: mailbox outside the window.
+    let p4 = one(b.send(&a.fp(), "too far ahead", NOW + 3 * DAY, &mut rng));
     assert!(matches!(
         a.recv(&p4, NOW, &mut rng),
         ReceiveOutcome::NotForUs
@@ -346,16 +342,16 @@ fn clock_skew_one_day_ok() {
 #[test]
 fn simultaneous_first_messages() {
     let (mut a, mut b, mut rng) = pair();
-    let pa = one(a.send(&b.fp(), "de A", NOW, &mut rng));
-    let pb = one(b.send(&a.fp(), "de B", NOW, &mut rng));
+    let pa = one(a.send(&b.fp(), "from A", NOW, &mut rng));
+    let pb = one(b.send(&a.fp(), "from B", NOW, &mut rng));
     assert!(is_initial(&pa) && is_initial(&pb));
-    assert_eq!(expect_msg(b.recv(&pa, NOW + 1, &mut rng)).2, "de A");
-    assert_eq!(expect_msg(a.recv(&pb, NOW + 1, &mut rng)).2, "de B");
+    assert_eq!(expect_msg(b.recv(&pa, NOW + 1, &mut rng)).2, "from A");
+    assert_eq!(expect_msg(a.recv(&pb, NOW + 1, &mut rng)).2, "from B");
 
     let mut t = NOW + 10;
     for i in 0..3 {
         let x = one(a.send(&b.fp(), &format!("A{i}"), t, &mut rng));
-        assert!(!is_initial(&x), "plus d'Initial après une réception");
+        assert!(!is_initial(&x), "no more Initial after a reception");
         assert_eq!(expect_msg(b.recv(&x, t, &mut rng)).2, format!("A{i}"));
         t += 1;
         let y = one(b.send(&a.fp(), &format!("B{i}"), t, &mut rng));
@@ -368,21 +364,21 @@ fn simultaneous_first_messages() {
 #[test]
 fn garbage_and_truncated_never_panic() {
     let (mut a, mut b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "vrai message", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "real message", NOW, &mut rng));
     let good = p.encode();
 
     let mut inputs: Vec<Vec<u8>> = vec![vec![], vec![0], vec![0xff; 245], vec![0; 1024]];
     for cut in [1usize, 41, 42, 100, good.len() - 1] {
         inputs.push(good[..cut].to_vec());
     }
-    // Palier menteur : annonce S mais longueur M, et l'inverse.
+    // Lying tier: announces S but length M, and the reverse.
     let mut liar = good.clone();
     liar[3] = Tier::S as u8;
     inputs.push(liar);
     let mut liar2 = good[..245].to_vec();
     liar2[3] = Tier::L as u8;
     inputs.push(liar2);
-    // Charge altérée, longueur de charge mensongère.
+    // Tampered payload, lying payload length.
     let mut flipped = good.clone();
     flipped[60] ^= 0x55;
     inputs.push(flipped);
@@ -401,11 +397,11 @@ fn garbage_and_truncated_never_panic() {
         let out = b.core.receive(input, T, NOW, &mut rng);
         match out {
             Ok(ReceiveOutcome::NotForUs) | Ok(ReceiveOutcome::Quarantined { .. }) => {}
-            other => panic!("NotForUs ou Quarantined attendu, obtenu {other:?}"),
+            other => panic!("NotForUs or Quarantined expected, got {other:?}"),
         }
     }
-    // Le vrai message passe toujours.
-    assert_eq!(expect_msg(b.recv(&p, NOW, &mut rng)).2, "vrai message");
+    // The real message still gets through.
+    assert_eq!(expect_msg(b.recv(&p, NOW, &mut rng)).2, "real message");
 }
 
 #[test]
@@ -417,16 +413,16 @@ fn tampered_body_quarantined_then_original_ok() {
     bad.payload[n - 3] ^= 1;
     match b.recv(&bad, NOW, &mut rng) {
         ReceiveOutcome::Quarantined { reason } => {
-            assert_eq!(reason, "déchiffrement impossible");
+            assert_eq!(reason, "decryption impossible");
         }
-        other => panic!("Quarantined attendu, obtenu {other:?}"),
+        other => panic!("Quarantined expected, got {other:?}"),
     }
     assert!(
         b.events()
             .iter()
             .any(|e| matches!(e, TransparencyEvent::DecryptFailed { .. }))
     );
-    // Le paquet falsifié ne bloque pas l'original (même identifiant).
+    // The forged packet does not block the original (same identifier).
     assert_eq!(expect_msg(b.recv(&p, NOW, &mut rng)).2, "intact");
 }
 
@@ -438,10 +434,10 @@ fn unknown_sender_quarantined() {
         .core
         .add_contact(&b.card("Bob"), Some("bob"), NOW, &mut rng)
         .unwrap();
-    let p = one(carol.send(&b.fp(), "coucou, c'est Carol", NOW, &mut rng));
+    let p = one(carol.send(&b.fp(), "hi, it's Carol", NOW, &mut rng));
     match b.recv(&p, NOW, &mut rng) {
-        ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("inconnu"), "{reason}"),
-        other => panic!("Quarantined attendu, obtenu {other:?}"),
+        ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("unknown"), "{reason}"),
+        other => panic!("Quarantined expected, got {other:?}"),
     }
     assert!(
         b.core
@@ -454,20 +450,20 @@ fn unknown_sender_quarantined() {
 
 #[test]
 fn stale_initial_replayed_into_today_mailbox_quarantined() {
-    // Un relais rejoue un vieil Initial en réécrivant l'en-tête (boîte du jour,
-    // expiration) : l'horodatage authentifié de l'enveloppe le trahit.
+    // A relay replays an old Initial by rewriting the header (day mailbox,
+    // expiry): the authenticated timestamp of the envelope gives it away.
     let (mut a, mut b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "vieux", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "old", NOW, &mut rng));
     let later = NOW + 10 * DAY;
     let bob_dev = b.card("Bob").devices.certs[0].device;
     let mut replay = p.clone();
     replay.mailbox = intro_mailbox(&bob_dev, day_of(later));
     replay.expires_at = u32::try_from(later + DEFAULT_TTL_SECS).unwrap();
     match b.recv(&replay, later, &mut rng) {
-        ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("ancien"), "{reason}"),
-        other => panic!("Quarantined attendu, obtenu {other:?}"),
+        ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("too old"), "{reason}"),
+        other => panic!("Quarantined expected, got {other:?}"),
     }
-    // La session que ce vieil Initial aurait ouverte n'est pas créée.
+    // The session that this old Initial would have opened is not created.
     assert_eq!(b.core.watched_mailboxes(later).len(), 3);
     assert!(b.core.messages_with(&a.fp()).unwrap().is_empty());
 }
@@ -475,17 +471,17 @@ fn stale_initial_replayed_into_today_mailbox_quarantined() {
 #[test]
 fn persists_across_reopen() {
     let (mut a, mut b, mut rng) = pair();
-    let p1 = one(a.send(&b.fp(), "avant", NOW, &mut rng));
+    let p1 = one(a.send(&b.fp(), "before", NOW, &mut rng));
     a.reopen();
     b.reopen();
-    assert_eq!(expect_msg(b.recv(&p1, NOW, &mut rng)).2, "avant");
+    assert_eq!(expect_msg(b.recv(&p1, NOW, &mut rng)).2, "before");
     b.reopen();
-    let p2 = one(b.send(&a.fp(), "réponse", NOW + 1, &mut rng));
+    let p2 = one(b.send(&a.fp(), "reply", NOW + 1, &mut rng));
     a.reopen();
     let (from, alias, text, ack) = expect_msg(a.recv(&p2, NOW + 1, &mut rng));
     assert_eq!(
         (from, alias.as_deref(), text.as_str()),
-        (b.fp(), Some("bob"), "réponse")
+        (b.fp(), Some("bob"), "reply")
     );
     b.reopen();
     assert!(matches!(
@@ -496,27 +492,27 @@ fn persists_across_reopen() {
         b.recv(&p1, NOW + 2, &mut rng),
         ReceiveOutcome::Duplicate
     ));
-    let p3 = one(a.send(&b.fp(), "après", NOW + 3, &mut rng));
+    let p3 = one(a.send(&b.fp(), "after", NOW + 3, &mut rng));
     assert!(!is_initial(&p3));
-    assert_eq!(expect_msg(b.recv(&p3, NOW + 3, &mut rng)).2, "après");
+    assert_eq!(expect_msg(b.recv(&p3, NOW + 3, &mut rng)).2, "after");
     assert_eq!(a.core.fingerprint(), a.fp());
     assert_eq!(a.core.contacts().unwrap().len(), 1);
 }
 
 #[test]
 fn send_state_persisted_before_return() {
-    // Une réouverture entre deux envois ne doit jamais réutiliser une clé de message.
+    // A reopen between two sends must never reuse a message key.
     let (mut a, mut b, mut rng) = pair();
-    let p1 = one(a.send(&b.fp(), "un", NOW, &mut rng));
+    let p1 = one(a.send(&b.fp(), "one", NOW, &mut rng));
     expect_msg(b.recv(&p1, NOW, &mut rng));
     let p2 = one(b.send(&a.fp(), "r", NOW, &mut rng));
     expect_msg(a.recv(&p2, NOW, &mut rng));
-    let p3 = one(a.send(&b.fp(), "deux", NOW, &mut rng));
+    let p3 = one(a.send(&b.fp(), "two", NOW, &mut rng));
     a.reopen();
-    let p4 = one(a.send(&b.fp(), "trois", NOW, &mut rng));
+    let p4 = one(a.send(&b.fp(), "three", NOW, &mut rng));
     assert_ne!(p3.payload, p4.payload);
-    assert_eq!(expect_msg(b.recv(&p4, NOW, &mut rng)).2, "trois");
-    assert_eq!(expect_msg(b.recv(&p3, NOW, &mut rng)).2, "deux");
+    assert_eq!(expect_msg(b.recv(&p4, NOW, &mut rng)).2, "three");
+    assert_eq!(expect_msg(b.recv(&p3, NOW, &mut rng)).2, "two");
 }
 
 #[test]
@@ -530,7 +526,7 @@ fn multi_device_fanout() {
     let mut bob2 = link_new(&mut bob1, &p2, [3; 32], "pc-bob", &mut rng);
     assert_eq!(bob1.fingerprint(), bob2.fingerprint());
     let card = bob1.contact_card("Bob").unwrap();
-    // Liste initiale signée à la version `NOW`, puis `version + 1` à la liaison.
+    // Initial list signed at version `NOW`, then `version + 1` on linking.
     assert_eq!(card.devices.version, NOW + 1);
     assert_eq!(card.devices.certs.len(), 2);
     assert_eq!(card.bundles.len(), 2);
@@ -546,7 +542,7 @@ fn multi_device_fanout() {
     bob2.add_contact(&alice_card, Some("alice"), NOW, &mut rng)
         .unwrap();
 
-    let pkts = a.send(&bob_fp, "à tous tes appareils", NOW, &mut rng);
+    let pkts = a.send(&bob_fp, "to all your devices", NOW, &mut rng);
     assert_eq!(pkts.len(), 2);
     assert_ne!(pkts[0].id, pkts[1].id);
     for core in [&mut bob1, &mut bob2] {
@@ -554,14 +550,14 @@ fn multi_device_fanout() {
         for p in &pkts {
             match core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
                 ReceiveOutcome::Message { text, .. } => {
-                    assert_eq!(text, "à tous tes appareils");
+                    assert_eq!(text, "to all your devices");
                     opened += 1;
                 }
                 ReceiveOutcome::NotForUs => {}
-                other => panic!("inattendu : {other:?}"),
+                other => panic!("unexpected : {other:?}"),
             }
         }
-        assert_eq!(opened, 1, "chaque appareil déchiffre exactement un paquet");
+        assert_eq!(opened, 1, "each device decrypts exactly one packet");
     }
 }
 
@@ -584,7 +580,7 @@ fn send_to_multi_device_contact_is_one_message() {
     bob2.add_contact(&alice_card, Some("alice"), NOW, &mut rng)
         .unwrap();
 
-    let pkts = a.send(&bob, "un seul message", NOW, &mut rng);
+    let pkts = a.send(&bob, "a single message", NOW, &mut rng);
     assert_eq!(pkts.len(), 2);
     let rows = a.core.messages_with(&bob).unwrap();
     assert_eq!(rows.len(), 1);
@@ -598,7 +594,7 @@ fn send_to_multi_device_contact_is_one_message() {
                 ack = Some(k);
             }
         }
-        let ack = ack.expect("chaque appareil ouvre un paquet");
+        let ack = ack.expect("each device opens a packet");
         let out = a.core.receive(&ack.encode(), T, NOW + 1, &mut rng).unwrap();
         assert!(matches!(out, ReceiveOutcome::AckReceived { .. }), "{out:?}");
         let rows = a.core.messages_with(&bob).unwrap();
@@ -620,7 +616,7 @@ fn device_list_rollback_refused() {
     a.core
         .add_contact(&new_card, Some("bob"), NOW, &mut rng)
         .unwrap();
-    // Une carte avec une liste plus ancienne est refusée.
+    // A card with an older list is refused.
     assert!(
         a.core
             .add_contact(&old_card, Some("bob"), NOW, &mut rng)
@@ -693,7 +689,7 @@ fn own_card_and_tampered_card_refused() {
         a.core
             .add_contact(
                 &a.card("Alice"),
-                Some("moi"),
+                Some("me"),
                 NOW,
                 &mut StdRng::seed_from_u64(0)
             )
@@ -711,7 +707,7 @@ fn own_card_and_tampered_card_refused() {
 #[test]
 fn transparency_has_no_plaintext() {
     let (mut a, mut b, mut rng) = pair();
-    let secret = "texte-tres-secret-42";
+    let secret = "very-secret-text-42";
     let p = one(a.send(&b.fp(), secret, NOW, &mut rng));
     let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
     a.recv(&ack, NOW, &mut rng);
@@ -727,7 +723,7 @@ fn transparency_has_no_plaintext() {
             assert!(!format!("{e:?}").contains(secret));
         }
     }
-    // Le premier contact ne prétend pas cacher le destinataire.
+    // The first contact does not claim to hide the recipient.
     for e in a.events().into_iter().chain(b.events()) {
         let first = matches!(
             e,
@@ -741,8 +737,8 @@ fn transparency_has_no_plaintext() {
         );
         if first {
             let d = e.describe();
-            assert!(!d.contains("à qui tu écris"), "{d}");
-            assert!(d.contains("carte de contact"), "{d}");
+            assert!(!d.contains("whom you are writing to"), "{d}");
+            assert!(d.contains("contact card"), "{d}");
         }
     }
     assert!(a.events().iter().any(|e| matches!(
@@ -778,9 +774,9 @@ fn transparency_log_returns_most_recent() {
 #[test]
 fn debug_hides_secrets_and_text() {
     let (mut a, mut b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "chut-chut", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "hush-hush", NOW, &mut rng));
     let out = b.recv(&p, NOW, &mut rng);
-    assert!(!format!("{out:?}").contains("chut-chut"));
+    assert!(!format!("{out:?}").contains("hush-hush"));
     let dbg = format!("{:?}", a.core);
     assert!(dbg.starts_with("Core"), "{dbg}");
     assert!(!dbg.contains("signing") && !dbg.contains("spk"));
@@ -800,16 +796,16 @@ fn open_wrong_key_and_double_create() {
     assert!(Core::create(&path, &key, "again", NOW, &mut rng).is_err());
     assert!(Core::open(&path, &key, NOW).is_ok());
     let dir = tempfile::tempdir().unwrap();
-    assert!(Core::open(&dir.path().join("vide.db"), &key, NOW).is_err());
+    assert!(Core::open(&dir.path().join("empty.db"), &key, NOW).is_err());
     assert!(
-        !dir.path().join("vide.db").exists(),
-        "open ne crée pas de base"
+        !dir.path().join("empty.db").exists(),
+        "open does not create a database"
     );
     assert_eq!(
         Core::recover(
             &dir.path().join("r.db"),
             &key,
-            "pas une phrase",
+            "not a phrase",
             "x",
             NOW,
             &mut rng
@@ -822,14 +818,14 @@ fn open_wrong_key_and_double_create() {
 #[test]
 fn watched_mailboxes_cover_three_days() {
     let (mut a, mut b, mut rng) = pair();
-    // Sans session : 3 boîtes d'introduction.
+    // Without a session: 3 intro mailboxes.
     assert_eq!(b.core.watched_mailboxes(NOW).len(), 3);
     let p = one(a.send(&b.fp(), "x", NOW, &mut rng));
     assert!(b.core.watched_mailboxes(NOW).contains(&p.mailbox));
     assert!(b.core.watched_mailboxes(NOW + DAY).contains(&p.mailbox));
     assert!(!b.core.watched_mailboxes(NOW + 2 * DAY).contains(&p.mailbox));
     expect_msg(b.recv(&p, NOW, &mut rng));
-    // Avec une session : 3 boîtes de plus.
+    // With a session: 3 more mailboxes.
     assert_eq!(b.core.watched_mailboxes(NOW).len(), 6);
 }
 
@@ -841,11 +837,11 @@ fn offline_five_days_still_watches_missed_days() {
     b.core.mark_polled(NOW).unwrap();
     let later = NOW + 5 * DAY;
     let watched = b.core.watched_mailboxes(later);
-    // Alice écrit chaque jour : la boîte du paquet est celle de Bob ce jour-là.
+    // Alice writes every day: the packet's mailbox is Bob's for that day.
     for d in day_of(NOW)..=day_of(later) + 1 {
         let t = u64::from(d) * DAY;
-        let q = one(a.send(&b.fp(), "jour", t, &mut rng));
-        assert!(watched.contains(&q.mailbox), "jour {d} non relevé");
+        let q = one(a.send(&b.fp(), "day", t, &mut rng));
+        assert!(watched.contains(&q.mailbox), "day {d} not watched");
     }
 }
 
@@ -856,11 +852,11 @@ fn polling_window_capped_at_nine_days() {
     b.core.mark_polled(NOW).unwrap();
     let later = NOW + 20 * DAY;
     let watched = b.core.watched_mailboxes(later);
-    // 7 jours en arrière, le jour même et le lendemain.
+    // 7 days back, the same day and the next day.
     assert_eq!(watched.len(), 9);
     let last = day_of(later) + 1;
     for d in last - 8..=last {
-        assert!(watched.contains(&intro_mailbox(&bob_dev, d)), "jour {d}");
+        assert!(watched.contains(&intro_mailbox(&bob_dev, d)), "day {d}");
     }
 }
 
@@ -875,9 +871,9 @@ fn polled_in_future_falls_back() {
 fn arb_packet_bytes(watched: Vec<MailboxId>) -> impl Strategy<Value = Vec<u8>> {
     let n = watched.len();
     prop_oneof![
-        // Octets quelconques.
+        // Arbitrary bytes.
         proptest::collection::vec(any::<u8>(), 0..2048),
-        // Paquets bien formés vers une boîte surveillée, charge quelconque.
+        // Well-formed packets to a watched mailbox, arbitrary payload.
         (
             0usize..n,
             prop_oneof![Just(Tier::S), Just(Tier::M)],
@@ -904,7 +900,7 @@ fn arb_packet_bytes(watched: Vec<MailboxId>) -> impl Strategy<Value = Vec<u8>> {
 #[test]
 fn receive_arbitrary_bytes_always_ok() {
     let (mut a, mut b, mut rng) = pair();
-    // Une session existe, pour atteindre aussi les boîtes de session.
+    // A session exists, so that session mailboxes are reached too.
     let p = one(a.send(&b.fp(), "x", NOW, &mut rng));
     expect_msg(b.recv(&p, NOW, &mut rng));
     let watched = b.core.watched_mailboxes(NOW);
@@ -916,7 +912,7 @@ fn receive_arbitrary_bytes_always_ok() {
             let out = b.core.receive(&bytes, T, NOW, rng);
             prop_assert!(out.is_ok(), "{out:?}");
             let shown = matches!(out, Ok(ReceiveOutcome::Message { .. }));
-            prop_assert!(!shown, "aucun message ne doit sortir d'octets aléatoires");
+            prop_assert!(!shown, "no message must come out of random bytes");
             Ok(())
         })
         .unwrap();
@@ -924,9 +920,9 @@ fn receive_arbitrary_bytes_always_ok() {
 
 #[test]
 fn link_request_tampering_is_refused() {
-    // Toute falsification de la demande est refusée (par le MAC ; la preuve
-    // de possession sous un MAC valide est testée dans `core/link.rs`), et
-    // la demande intacte passe ensuite : un refus ne consomme pas l'offre.
+    // Any tampering with the request is refused (by the MAC; the proof
+    // of possession under a valid MAC is tested in `core/link.rs`), and
+    // the intact request then goes through: a refusal does not consume the offer.
     let dir = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(12);
     let (mut bob1, _) =
@@ -945,12 +941,12 @@ fn link_request_tampering_is_refused() {
         let mut req = good.clone();
         match tamper {
             0 => req.device_sig[0] ^= 1,
-            1 => req.name = "autre".into(),
+            1 => req.name = "other".into(),
             _ => req.issued_at += 1,
         }
         assert!(
             bob1.link_device(&req, false, NOW, &mut rng).is_err(),
-            "falsification {tamper}"
+            "tampering {tamper}"
         );
     }
     bob1.link_device(&good, false, NOW, &mut rng).unwrap();
@@ -958,7 +954,7 @@ fn link_request_tampering_is_refused() {
 
 #[test]
 fn card_claiming_another_contacts_device_rejected() {
-    // Mallory veut revendiquer l'appareil d'Alice sous sa propre racine.
+    // Mallory wants to claim Alice's device under her own root.
     let (_a, mut b, mut rng) = pair();
     let alice_card = _a.card("Alice");
     let alice_cert = alice_card.devices.certs[0].clone();
@@ -966,7 +962,7 @@ fn card_claiming_another_contacts_device_rejected() {
     let (mallory, phrase) =
         Core::create(&dir.path().join("m"), &[5; 32], "m", NOW, &mut rng).unwrap();
     let mroot = RootIdentity::from_phrase(phrase.as_str()).unwrap();
-    // 1. La preuve de possession d'Alice est liée à sa racine.
+    // 1. Alice's proof of possession is bound to her root.
     assert_eq!(
         DeviceCertificate::issue_with_proof(
             &mroot,
@@ -978,7 +974,7 @@ fn card_claiming_another_contacts_device_rejected() {
         .err(),
         Some(CoreError::InvalidSignature)
     );
-    // 2. Le certificat d'Alice tel quel ne peut pas entrer dans la liste de Mallory.
+    // 2. Alice's certificate as is cannot enter Mallory's list.
     let mut forged = mallory.contact_card("Alice").unwrap();
     assert!(DeviceList::sign(&mroot, 2, vec![alice_cert.clone()]).is_err());
     forged.devices.certs.push(alice_cert);
@@ -987,9 +983,9 @@ fn card_claiming_another_contacts_device_rejected() {
             .add_contact(&forged, Some("alice2"), NOW, &mut rng)
             .is_err()
     );
-    // 3. Les messages d'Alice restent attribués à Alice.
+    // 3. Alice's messages stay attributed to Alice.
     let mut a = _a;
-    let p = one(a.send(&b.fp(), "c'est Alice", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "it's Alice", NOW, &mut rng));
     let (from, alias, ..) = expect_msg(b.recv(&p, NOW, &mut rng));
     assert_eq!((from, alias.as_deref()), (a.fp(), Some("alice")));
 }
@@ -1011,7 +1007,7 @@ fn revoked_device_refused_for_normal_and_initial() {
     bob2.add_contact(&alice_card, Some("alice"), NOW, &mut rng)
         .unwrap();
 
-    // Bob2 ouvre la session (deux Initial), Alice en reçoit un et répond.
+    // Bob2 opens the session (two Initials), Alice receives one and replies.
     let i1 = bob2
         .send_text(&alice.fp(), "i1", NOW, &mut rng)
         .unwrap()
@@ -1022,8 +1018,8 @@ fn revoked_device_refused_for_normal_and_initial() {
         .remove(0);
     assert!(is_initial(&i1) && is_initial(&i2));
     assert_eq!(expect_msg(alice.recv(&i1, NOW, &mut rng)).2, "i1");
-    // Un paquet par appareil de Bob ; Bob2 déchiffre le sien (sa session
-    // n'est plus en attente : il enverra ensuite des messages normaux).
+    // One packet per Bob device; Bob2 decrypts its own (its session
+    // is no longer pending: it will send normal messages from now on).
     let replies = alice.send(&bob_fp, "r", NOW, &mut rng);
     let opened = replies
         .iter()
@@ -1044,10 +1040,10 @@ fn revoked_device_refused_for_normal_and_initial() {
         .unwrap()
         .remove(0);
     assert!(!is_initial(&n0) && !is_initial(&n1));
-    // Avant révocation, un message normal de Bob2 passe.
+    // Before revocation, a normal message from Bob2 gets through.
     assert_eq!(expect_msg(alice.recv(&n0, NOW, &mut rng)).2, "n0");
 
-    // Bob révoque Bob2 : liste suivante sans lui.
+    // Bob revokes Bob2: next list without it.
     let root = RootIdentity::from_phrase(phrase.as_str()).unwrap();
     let bob1_cert = v2.devices.certs[0].clone();
     let bob1_bundle = v2
@@ -1063,7 +1059,7 @@ fn revoked_device_refused_for_normal_and_initial() {
         .add_contact(&card3, Some("bob"), NOW, &mut rng)
         .unwrap();
 
-    // Ni le message normal, ni l'Initial de l'appareil révoqué ne passent.
+    // Neither Bob2's normal message nor its Initial get through once revoked.
     let normal = alice.recv(&n1, NOW, &mut rng);
     assert!(
         matches!(
@@ -1073,8 +1069,8 @@ fn revoked_device_refused_for_normal_and_initial() {
         "{normal:?}"
     );
     match alice.recv(&i2, NOW, &mut rng) {
-        ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("inconnu"), "{reason}"),
-        other => panic!("Quarantined attendu, obtenu {other:?}"),
+        ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("unknown"), "{reason}"),
+        other => panic!("Quarantined expected, got {other:?}"),
     }
     let texts: Vec<String> = alice
         .core
@@ -1090,7 +1086,7 @@ fn revoked_device_refused_for_normal_and_initial() {
 #[test]
 fn outbox_survives_reopen() {
     let (mut a, b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "ne me perds pas", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "don't lose me", NOW, &mut rng));
     assert_eq!(a.core.pending_outbox(NOW).unwrap(), vec![p.encode()]);
     a.reopen();
     assert_eq!(a.core.pending_outbox(NOW).unwrap(), vec![p.encode()]);
@@ -1099,7 +1095,7 @@ fn outbox_survives_reopen() {
 #[test]
 fn ack_clears_outbox() {
     let (mut a, mut b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "accuse-moi", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "ack-me", NOW, &mut rng));
     let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
     assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 1);
     assert!(matches!(
@@ -1112,7 +1108,7 @@ fn ack_clears_outbox() {
 #[test]
 fn expired_leaves_outbox() {
     let (mut a, b, mut rng) = pair();
-    one(a.send(&b.fp(), "trop tard", NOW, &mut rng));
+    one(a.send(&b.fp(), "too late", NOW, &mut rng));
     assert_eq!(
         a.core.pending_outbox(NOW + DEFAULT_TTL_SECS).unwrap().len(),
         1
@@ -1128,7 +1124,7 @@ fn expired_leaves_outbox() {
 #[test]
 fn emitted_ack_is_queued() {
     let (mut a, mut b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "salut", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "hi", NOW, &mut rng));
     let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
     assert_eq!(b.core.pending_outbox(NOW).unwrap(), vec![ack.encode()]);
 }
@@ -1164,10 +1160,10 @@ fn recovered_identity_reachable_by_existing_contact() {
         .unwrap();
     bob1.add_contact(&a.card("Alice"), Some("alice"), NOW, &mut rng)
         .unwrap();
-    let p = one(a.send(&bob_fp, "avant", NOW, &mut rng));
+    let p = one(a.send(&bob_fp, "before", NOW, &mut rng));
     expect_msg(bob1.receive(&p.encode(), T, NOW, &mut rng).unwrap());
 
-    // Bob perd son téléphone et retrouve son identité plus tard.
+    // Bob loses his phone and recovers his identity later.
     let later = NOW + 30 * DAY;
     let mut bob2 = Core::recover(
         &dir.path().join("b2"),
@@ -1179,7 +1175,7 @@ fn recovered_identity_reachable_by_existing_contact() {
     )
     .unwrap();
     assert_eq!(bob2.fingerprint(), bob_fp);
-    // Alice ajoute la nouvelle carte sans retirer l'ancienne.
+    // Alice adds the new card without removing the old one.
     assert_eq!(
         a.core
             .add_contact(
@@ -1194,79 +1190,79 @@ fn recovered_identity_reachable_by_existing_contact() {
     bob2.add_contact(&a.card("Alice"), Some("alice"), NOW, &mut rng)
         .unwrap();
 
-    let p = one(a.send(&bob_fp, "après", later, &mut rng));
+    let p = one(a.send(&bob_fp, "after", later, &mut rng));
     let (from, _, text, _) = expect_msg(bob2.receive(&p.encode(), T, later, &mut rng).unwrap());
-    assert_eq!((from, text.as_str()), (a.fp(), "après"));
+    assert_eq!((from, text.as_str()), (a.fp(), "after"));
     let r = one(bob2
-        .send_text(&a.fp(), "bien reçu", later + 1, &mut rng)
+        .send_text(&a.fp(), "well received", later + 1, &mut rng)
         .unwrap());
     let (from, alias, text, _) = expect_msg(a.recv(&r, later + 1, &mut rng));
     assert_eq!(from, bob_fp);
     assert_eq!(alias.as_deref(), Some("bob"));
-    assert_eq!(text, "bien reçu");
+    assert_eq!(text, "well received");
 }
 
 #[test]
 fn skipped_keys_expire_after_seven_days() {
     let (mut a, mut b, mut rng) = pair();
-    let p = one(a.send(&b.fp(), "ouverture", NOW, &mut rng));
+    let p = one(a.send(&b.fp(), "opening", NOW, &mut rng));
     expect_msg(b.recv(&p, NOW, &mut rng));
     let r = one(b.send(&a.fp(), "ok", NOW, &mut rng));
     expect_msg(a.recv(&r, NOW, &mut rng));
 
-    // L'horloge d'Alice avance d'un jour sur celle de Bob.
+    // Alice's clock is one day ahead of Bob's.
     let s = NOW + 100;
     let q0 = one(a.send(&b.fp(), "q0", s, &mut rng));
     let q1 = one(a.send(&b.fp(), "q1", s, &mut rng));
     let p2 = one(a.send(&b.fp(), "p2", s + 1, &mut rng));
     assert!(!is_initial(&q0));
-    // Bob reçoit p2 en premier : les clés de q0 et q1 sont sautées à `stored`.
+    // Bob receives p2 first: the keys of q0 and q1 are skipped up to `stored`.
     let stored = s + 1 - DAY;
     assert_eq!(expect_msg(b.recv(&p2, stored, &mut rng)).2, "p2");
-    // Clé sautée de moins de 7 jours : encore utilisable.
+    // Key skipped for less than 7 days: still usable.
     assert_eq!(expect_msg(b.recv(&q1, stored + 3 * DAY, &mut rng)).2, "q1");
-    // Clé sautée de plus de 7 jours : purgée, alors que le paquet n'est pas
-    // encore expiré et que son horodatage reste frais.
-    // (Expiration arrondie à 10 min vers le bas : juste avant.)
+    // Key skipped for more than 7 days: purged, even though the packet is not
+    // yet expired and its timestamp is still fresh.
+    // (Expiry rounded down to 10 min: just before.)
     let late = u64::from(q0.expires_at) - 1;
     assert!(late >= s + DEFAULT_TTL_SECS - 600);
     assert!(late - stored > 7 * DAY);
     match b.recv(&q0, late, &mut rng) {
         ReceiveOutcome::Quarantined { .. } | ReceiveOutcome::NotForUs => {}
-        other => panic!("clé sautée expirée, obtenu {other:?}"),
+        other => panic!("expired skipped key, got {other:?}"),
     }
 }
 
 #[test]
 fn ack_goes_to_the_original_mailbox_which_the_sender_watches_until_acked() {
     let (mut a, mut b, mut rng) = pair();
-    // Accusé d'un Initial : même boîte que le message, relevée par A tant
-    // que le message attend son accusé.
-    let p = one(a.send(&b.fp(), "ouverture", NOW, &mut rng));
+    // Ack of an Initial: same mailbox as the message, watched by A as long as
+    // the message awaits its ack.
+    let p = one(a.send(&b.fp(), "opening", NOW, &mut rng));
     assert!(a.core.watched_mailboxes(NOW).contains(&p.mailbox));
     let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
     assert_eq!(ack.mailbox, p.mailbox);
-    // Accusé d'un message normal, dans l'autre sens.
-    let r = one(b.send(&a.fp(), "réponse", NOW + 1, &mut rng));
+    // Ack of a normal message, in the other direction.
+    let r = one(b.send(&a.fp(), "reply", NOW + 1, &mut rng));
     let (_, _, _, ack_r) = expect_msg(a.recv(&r, NOW + 1, &mut rng));
     assert_eq!(ack_r.mailbox, r.mailbox);
     assert!(b.core.watched_mailboxes(NOW + 1).contains(&ack_r.mailbox));
-    // Message livré trois jours plus tard : sa boîte sort de la fenêtre de
-    // trois jours, mais A la relève toujours tant qu'il attend l'accusé.
-    let q = one(a.send(&b.fp(), "en retard", NOW + 2, &mut rng));
+    // Message delivered three days later: its mailbox falls out of the
+    // three-day window, but A still watches it as long as it awaits the ack.
+    let q = one(a.send(&b.fp(), "late", NOW + 2, &mut rng));
     assert!(!is_initial(&q));
     let late = NOW + 3 * DAY;
     let (_, _, _, ack_q) = expect_msg(b.recv(&q, late, &mut rng));
     assert_eq!(ack_q.mailbox, q.mailbox);
     assert!(a.core.watched_mailboxes(late).contains(&ack_q.mailbox));
-    // Les accusés se vérifient toujours par l'identifiant et le secret.
+    // Acks are still verified by identifier and secret.
     for (ack, at, id) in [(ack, late, p.id), (ack_q, late, q.id)] {
         match a.recv(&ack, at, &mut rng) {
             ReceiveOutcome::AckReceived { packet_id } => assert_eq!(packet_id, id),
-            other => panic!("AckReceived attendu, obtenu {other:?}"),
+            other => panic!("AckReceived expected, got {other:?}"),
         }
     }
-    // Accusé reçu : A ne relève plus la boîte du message en retard.
+    // Ack received: A no longer watches the late message's mailbox.
     assert!(!a.core.watched_mailboxes(late).contains(&q.mailbox));
     assert!(matches!(
         b.recv(&ack_r, NOW + 2, &mut rng),
@@ -1276,24 +1272,24 @@ fn ack_goes_to_the_original_mailbox_which_the_sender_watches_until_acked() {
 
 #[test]
 fn removed_or_replaced_contact_leaves_no_outbox_rows() {
-    // Suppression : messages et accusés en attente pour Bob disparaissent.
+    // Deletion: pending messages and acks for Bob disappear.
     let (mut a, mut b, mut rng) = pair();
-    one(a.send(&b.fp(), "en attente", NOW, &mut rng));
-    let q = one(b.send(&a.fp(), "de Bob", NOW, &mut rng));
+    one(a.send(&b.fp(), "pending", NOW, &mut rng));
+    let q = one(b.send(&a.fp(), "from Bob", NOW, &mut rng));
     expect_msg(a.recv(&q, NOW, &mut rng));
     let carol = Party::new("tel-carol", 5);
     a.core
         .add_contact(&carol.card("Carol"), Some("carol"), NOW, &mut rng)
         .unwrap();
-    let c = one(a.send(&carol.fp(), "pour Carol", NOW, &mut rng));
+    let c = one(a.send(&carol.fp(), "for Carol", NOW, &mut rng));
     assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 3);
     a.core.remove_contact(&b.fp(), NOW, &mut rng).unwrap();
     assert_eq!(a.core.pending_outbox(NOW).unwrap(), vec![c.encode()]);
 
-    // Remplacement par alias : idem pour l'ancien contact.
+    // Replacement by alias: same for the old contact.
     let (mut a, mut b, mut rng) = pair();
-    one(a.send(&b.fp(), "en attente", NOW, &mut rng));
-    let q = one(b.send(&a.fp(), "de Bob", NOW, &mut rng));
+    one(a.send(&b.fp(), "pending", NOW, &mut rng));
+    let q = one(b.send(&a.fp(), "from Bob", NOW, &mut rng));
     expect_msg(a.recv(&q, NOW, &mut rng));
     assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 2);
     let mallory = Party::new("tel-mallory", 4);
@@ -1310,7 +1306,7 @@ fn large_packet_crosses_lora_mtu() {
     let p = one(a.send(&b.fp(), &text, NOW, &mut rng));
     assert_eq!(p.tier, Tier::L);
     let frames = a.core.frames(&p.encode(), 255).unwrap();
-    assert!(frames.len() > 60, "{} trames", frames.len());
+    assert!(frames.len() > 60, "{} frames", frames.len());
     assert!(frames.iter().all(|f| f.len() <= 255));
     let n = frames.len();
     for (i, f) in frames.iter().rev().enumerate() {
@@ -1327,7 +1323,7 @@ fn large_packet_crosses_lora_mtu() {
 #[test]
 fn tampered_frame_is_rejected_and_logged() {
     let (mut a, mut b, mut rng) = pair();
-    let text = "secret-très-privé ".repeat(100);
+    let text = "secret-very-private ".repeat(100);
     let p = one(a.send(&b.fp(), &text, NOW, &mut rng));
     let frames = a.core.frames(&p.encode(), 255).unwrap();
     assert!(frames.len() > 1);
@@ -1350,18 +1346,14 @@ fn tampered_frame_is_rejected_and_logged() {
         .map(|e| e.describe())
         .collect();
     assert_eq!(rejected.len(), 1);
-    assert!(
-        rejected[0].contains("hash de trame incorrect"),
-        "{}",
-        rejected[0]
-    );
+    assert!(rejected[0].contains("bad frame hash"), "{}", rejected[0]);
     assert!(!rejected[0].contains("secret"));
     assert_eq!(
         rejected[0],
-        "Trame rejetée (hash de trame incorrect) : elle ne correspond pas au paquet annoncé. \
-         Le paquet n'a pas été reconstitué ; l'expéditeur le renverra."
+        "Frame rejected (bad frame hash): it does not match the announced packet. \
+         The packet was not reassembled; the sender will resend it."
     );
-    // Les trames d'origine aboutissent.
+    // The original frames succeed.
     let mut done = None;
     for f in &frames {
         let out = b.core.receive_frame(f, T, NOW, &mut rng).unwrap();
@@ -1369,7 +1361,7 @@ fn tampered_frame_is_rejected_and_logged() {
             done = Some(out);
         }
     }
-    let (_, _, got, _) = expect_msg(done.expect("paquet reconstitué"));
+    let (_, _, got, _) = expect_msg(done.expect("packet rebuilt"));
     assert_eq!(got, text);
 }
 
@@ -1387,26 +1379,26 @@ fn pending_is_bounded_and_expires() {
         firsts.push(frames);
     }
     assert_eq!(b.core.pending_frames(), 64);
-    // Le plus ancien paquet a été évincé : ses trames restantes ne complètent rien.
+    // The oldest packet was evicted: its remaining frames complete nothing.
     for f in &firsts[0][1..] {
         let out = b.core.receive_frame(f, T, NOW, &mut rng).unwrap();
         assert!(matches!(out, ReceiveOutcome::Partial), "{out:?}");
     }
 
-    // Paquet commencé à NOW, fini après le TTL : ne se complète pas.
+    // Packet started at NOW, finished after the TTL: does not complete.
     let frames = firsts.last().unwrap();
     let late = NOW + 3601;
     for f in &frames[1..] {
         let out = b.core.receive_frame(f, T, late, &mut rng).unwrap();
         assert!(matches!(out, ReceiveOutcome::Partial), "{out:?}");
     }
-    // Une trame tardive redémarre une entrée sans planter ; l'ensemble des
-    // trames reconstitue alors le paquet.
+    // A late frame restarts an entry without crashing; all the
+    // frames then rebuild the packet.
     let done = frames
         .iter()
         .map(|f| b.core.receive_frame(f, T, late, &mut rng).unwrap())
         .find(|o| !matches!(o, ReceiveOutcome::Partial));
-    expect_msg(done.expect("paquet reconstitué"));
+    expect_msg(done.expect("packet rebuilt"));
 }
 
 fn frame_rejections(p: &Party) -> usize {
@@ -1425,13 +1417,13 @@ fn junk_frames_are_not_logged() {
         let mut f = vec![0u8; 32];
         junk.fill(&mut f[..]);
         match i % 4 {
-            0 => f.truncate(i % 10), // trop courte
-            1 => f[9] = 0,           // nombre nul
+            0 => f.truncate(i % 10), // too short
+            1 => f[9] = 0,           // zero count
             2 => {
                 f[9] = 3;
-                f[8] = 3 + (i % 200) as u8; // index hors limites
+                f[8] = 3 + (i % 200) as u8; // index out of range
             }
-            _ => f.truncate(10), // fragment vide
+            _ => f.truncate(10), // empty fragment
         }
         let out = b.core.receive_frame(&f, T, NOW, &mut rng).unwrap();
         assert!(matches!(out, ReceiveOutcome::NotForUs), "{out:?}");

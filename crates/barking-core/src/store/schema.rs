@@ -1,11 +1,11 @@
-//! Schéma SQL du stockage (v2) et migration depuis la v1.
+//! SQL storage schema (v2) and migration from v1.
 
 use rusqlite::{Connection, params};
 
 pub const SCHEMA_VERSION: u32 = 2;
 
-/// Schéma v1 (lot 1A), conservé pour la migration et pour ses tests : une
-/// base v1 est ouverte avec ce schéma, puis migrée.
+/// Schema v1 (batch 1A), kept for the migration and for its tests: a
+/// v1 database is opened with this schema, then migrated.
 pub const SCHEMA_V1_LEGACY: &str = "
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY NOT NULL,
@@ -54,21 +54,21 @@ CREATE TABLE IF NOT EXISTS transparency (
     at INTEGER NOT NULL,
     packet_id BLOB,
     event BLOB NOT NULL,
-    -- 0 : courant, 1 : sécurité (voir `EventClass`).
+    -- 0: regular, 1: security (see `EventClass`).
     class INTEGER NOT NULL DEFAULT 0
 );
 ";
 
-/// Tables de la v2 : un message par identifiant logique, une livraison par
-/// paquet (donc par appareil destinataire), et pour chaque paquet reçu le
-/// message qu'il porte (`inbound`, retrouvé par l'accusé que j'ai émis).
+/// Tables of v2: one message per logical identifier, one delivery per
+/// packet (hence per recipient device), and for each received packet the
+/// message it carries (`inbound`, found via the acknowledgement I emitted).
 ///
-/// Unicité de `messages.message_id` : un message sortant porte l'identifiant
-/// tiré par un de mes appareils ; un message reçu, l'identifiant dérivé de
-/// l'empreinte de l'expéditeur et de l'identifiant de son enveloppe
-/// (`MessageId::incoming`). Un contact ne peut donc ni masquer ni écraser un
-/// message d'un autre contact ou un des miens : seul un renvoi de ses propres
-/// messages entre en collision (doublon).
+/// Uniqueness of `messages.message_id`: an outgoing message carries the identifier
+/// drawn by one of my devices; a received message, the identifier derived from
+/// the sender's fingerprint and the identifier of its envelope
+/// (`MessageId::incoming`). A contact can therefore neither hide nor overwrite a
+/// message of another contact or one of mine: only a resend of their own
+/// messages collides (duplicate).
 pub const SCHEMA_V2_TABLES: &str = "
 CREATE TABLE messages (
     id INTEGER PRIMARY KEY,
@@ -84,21 +84,21 @@ CREATE TABLE IF NOT EXISTS deliveries (
     packet_id BLOB UNIQUE NOT NULL,
     device BLOB NOT NULL,
     status INTEGER NOT NULL,
-    -- 1 : copie de synchronisation pour un de mes appareils (son accusé ne
-    -- rend jamais le message livré).
+    -- 1: synchronisation copy for one of my devices (its acknowledgement
+    -- never marks the message as delivered).
     own INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries(message_id);
 ";
 
-/// Tables de la v2 ajoutées après coup : appliquées à chaque ouverture
-/// (idempotent), car des bases v2 de développement ont été créées avant leur
-/// ajout. La migration v1 → v2 les crée aussi, avant de remplir `inbound`.
+/// Tables of v2 added after the fact: applied on every open
+/// (idempotent), because development v2 databases were created before they
+/// were added. The v1 → v2 migration creates them too, before filling `inbound`.
 ///
-/// `contact_clock` : pour chaque empreinte, date (horodatage d'enveloppe ou
-/// heure locale) de la dernière opération sur ce contact, et si c'était une
-/// suppression (pierre tombale), et l'appareil qui l'a faite (départage à
-/// date égale). Dernier écrivain gagnant entre mes appareils.
+/// `contact_clock`: for each fingerprint, date (envelope timestamp or
+/// local time) of the last operation on this contact, and whether it was a
+/// deletion (tombstone), and the device that performed it (tie-breaker at
+/// equal date). Last writer wins between my devices.
 pub const SCHEMA_V2_INBOUND: &str = "
 CREATE TABLE IF NOT EXISTS inbound (
     packet_id BLOB PRIMARY KEY NOT NULL,
@@ -112,28 +112,28 @@ CREATE TABLE IF NOT EXISTS contact_clock (
 );
 ";
 
-/// Colonne `own` de `deliveries`, pour une base v2 créée avant son ajout.
+/// Column `own` of `deliveries`, for a v2 database created before it was added.
 pub const DELIVERIES_ADD_OWN: &str =
     "ALTER TABLE deliveries ADD COLUMN own INTEGER NOT NULL DEFAULT 0;";
 
-/// Colonne `writer` de `contact_clock`, pour une base v2 créée avant son
-/// ajout (auteur inconnu : identifiant nul).
+/// Column `writer` of `contact_clock`, for a v2 database created before it was
+/// added (unknown author: null identifier).
 pub const CONTACT_CLOCK_ADD_WRITER: &str = "ALTER TABLE contact_clock ADD COLUMN writer BLOB \
      NOT NULL DEFAULT x'00000000000000000000000000000000';";
 
-/// Contexte de dérivation d'un identifiant de message à partir d'un
-/// identifiant de paquet (messages v1 et messages reçus avant le lot 1B).
+/// Derivation context of a message identifier from a
+/// packet identifier (v1 messages and messages received before batch 1B).
 pub const LEGACY_MESSAGE_ID_CONTEXT: &str = "barking/v0/legacy-message-id";
 
-/// Statuts persistés (voir `MessageStatus`) utilisés par la migration.
+/// Persisted statuses (see `MessageStatus`) used by the migration.
 const STATUS_DELIVERED: i64 = 3;
 const DIRECTION_OUT: i64 = 0;
 
-/// Migre une base v1 en v2, dans une seule transaction : les lignes de
-/// `messages` reçoivent un `message_id` dérivé de leur `packet_id` (ou de
-/// leur `id` s'il est nul), les messages sortants ayant un paquet reçoivent
-/// la livraison correspondante, les messages reçus ayant un paquet sont
-/// inscrits dans `inbound`, puis `schema_version` passe à 2.
+/// Migrates a v1 database to v2, in a single transaction: the rows of
+/// `messages` receive a `message_id` derived from their `packet_id` (or from
+/// their `id` if it is null), outgoing messages having a packet receive
+/// the matching delivery, received messages having a packet are
+/// recorded in `inbound`, then `schema_version` is set to 2.
 pub fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch("ALTER TABLE messages RENAME TO messages_v1;")?;
@@ -169,7 +169,7 @@ pub fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
             match (dir, packet) {
                 (_, None) => {}
                 (DIRECTION_OUT, Some(pid)) => {
-                    // L'appareil destinataire d'un paquet v1 n'est pas connu.
+                    // The recipient device of a v1 packet is not known.
                     tx.execute(
                         "INSERT INTO deliveries(message_id, packet_id, device, status) \
                          VALUES (?1, ?2, ?3, ?4)",
@@ -203,14 +203,14 @@ fn delivery_status(message_status: i64) -> i64 {
     }
 }
 
-/// Migration dans le schéma v1 : colonne `class` du journal, pour une base
-/// créée avant son ajout. Appliquée à l'ouverture si la colonne manque.
+/// Migration within the v1 schema: `class` column of the log, for a database
+/// created before it was added. Applied on open if the column is missing.
 pub const TRANSPARENCY_ADD_CLASS: &str =
     "ALTER TABLE transparency ADD COLUMN class INTEGER NOT NULL DEFAULT 0;";
 
-/// Index du journal (après la migration : `class` doit exister). La purge
-/// lit `max(at)` et le plafond parcourt une classe par identifiant à chaque
-/// ajout.
+/// Log index (after the migration: `class` must exist). The purge
+/// reads `max(at)` and the cap walks one class per identifier on each
+/// append.
 pub const TRANSPARENCY_INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS transparency_at ON transparency(at);
 CREATE INDEX IF NOT EXISTS transparency_class_id ON transparency(class, id);

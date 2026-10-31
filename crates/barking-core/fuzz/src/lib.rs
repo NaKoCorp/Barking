@@ -1,12 +1,12 @@
-//! Harnais commun des cibles `receive` et `receive_frame` et du binaire `seed`.
+//! Common harness for the `receive` and `receive_frame` targets and the `seed` binary.
 //!
-//! Déterministe : générateur à graine fixe, horloge fixe. Alice et Bob sont contacts l'un de
-//! l'autre, la session est ouverte dans les deux sens, puis Alice prépare des messages que Bob
-//! n'a pas encore reçus : ce sont eux (paquets et trames) qui amorcent le corpus.
+//! Deterministic: fixed-seed generator, fixed clock. Alice and Bob are contacts of each
+//! other, the session is opened in both directions, then Alice prepares messages that Bob
+//! has not received yet: these (packets and frames) seed the corpus.
 //!
-//! La mise en place n'est faite qu'une fois ; la base de Bob est ensuite figée dans un instantané
-//! et restaurée avant chaque entrée (`Fixture::fresh_bob`) : chaque entrée part du même état, donc
-//! un plantage se rejoue à l'identique avec `cargo fuzz run <cible> <artefact>`.
+//! The setup is done only once; Bob's database is then frozen in a snapshot
+//! and restored before each input (`Fixture::fresh_bob`): every input starts from the same state, so
+//! a crash replays identically with `cargo fuzz run <target> <artifact>`.
 
 use std::path::PathBuf;
 
@@ -16,16 +16,16 @@ use rand::rngs::StdRng;
 
 pub const NOW: u64 = 1_800_000_000;
 
-/// MTU des trames du corpus : en-tête de 10 octets + 90 octets de données.
+/// MTU of the corpus frames: 10-byte header + 90 bytes of data.
 pub const MTU: usize = 100;
 
-/// Clé de base de Bob : valeur propre au fuzzing, jamais une vraie clé.
+/// Bob's database key: fuzzing-specific value, never a real key.
 const BOB_KEY: [u8; 32] = [12; 32];
 
 pub struct Fixture {
-    /// Paquets d'Alice jamais livrés à Bob, encodés.
+    /// Alice's packets never delivered to Bob, encoded.
     pub packets: Vec<Vec<u8>>,
-    /// Les mêmes paquets, découpés en trames.
+    /// The same packets, split into frames.
     pub frames: Vec<Vec<u8>>,
     snapshot: PathBuf,
     work: PathBuf,
@@ -33,76 +33,76 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    /// Bob tel qu'après la mise en place, avec un générateur neuf et un réassembleur vide.
+    /// Bob as after the setup, with a fresh generator and an empty reassembler.
     pub fn fresh_bob(&self) -> (Core, StdRng) {
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let mut f = self.work.clone().into_os_string();
             f.push(suffix);
             let _ = std::fs::remove_file(f);
         }
-        std::fs::copy(&self.snapshot, &self.work).expect("restauration de la base de Bob");
-        let bob = Core::open(&self.work, &BOB_KEY, NOW).expect("ouverture de Bob");
+        std::fs::copy(&self.snapshot, &self.work).expect("restoring Bob's database");
+        let bob = Core::open(&self.work, &BOB_KEY, NOW).expect("opening Bob");
         (bob, StdRng::seed_from_u64(2))
     }
 }
 
-// Les clés de base ([seed; 32]) sont des valeurs fixes, propres au fuzzing.
+// The database keys ([seed; 32]) are fixed values specific to fuzzing.
 fn create(name: &str, rng: &mut StdRng, key: &[u8; 32], dir: &tempfile::TempDir) -> Core {
     let (core, _) = Core::create(&dir.path().join(format!("{name}.db")), key, name, NOW, rng)
-        .expect("création du Core");
+        .expect("creating the Core");
     core
 }
 
 pub fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().expect("répertoire temporaire");
+    let dir = tempfile::tempdir().expect("temporary directory");
     let mut rng = StdRng::seed_from_u64(1);
     let mut alice = create("alice", &mut rng, &[11; 32], &dir);
     let mut bob = create("bob", &mut rng, &BOB_KEY, &dir);
-    let card_a = alice.contact_card("Alice").expect("carte d'Alice");
-    let card_b = bob.contact_card("Bob").expect("carte de Bob");
+    let card_a = alice.contact_card("Alice").expect("Alice's card");
+    let card_b = bob.contact_card("Bob").expect("Bob's card");
     let fp_b = alice
         .add_contact(&card_b, Some("bob"), NOW, &mut rng)
-        .expect("contact Bob");
+        .expect("Bob contact");
     let fp_a = bob
         .add_contact(&card_a, Some("alice"), NOW, &mut rng)
-        .expect("contact Alice");
+        .expect("Alice contact");
 
-    // Alice -> Bob (Initial), puis Bob -> Alice : la session est ouverte dans les deux sens.
+    // Alice -> Bob (Initial), then Bob -> Alice: the session is opened in both directions.
     let first = alice
-        .send_text(&fp_b, "ouverture", NOW, &mut rng)
-        .expect("envoi");
+        .send_text(&fp_b, "opening", NOW, &mut rng)
+        .expect("send");
     for p in &first {
         bob.receive(&p.encode(), "fuzz", NOW, &mut rng)
-            .expect("réception");
+            .expect("receive");
     }
     let reply = bob
-        .send_text(&fp_a, "réponse", NOW, &mut rng)
-        .expect("réponse");
+        .send_text(&fp_a, "reply", NOW, &mut rng)
+        .expect("reply");
     for p in &reply {
         alice
             .receive(&p.encode(), "fuzz", NOW, &mut rng)
-            .expect("réception");
+            .expect("receive");
     }
 
-    // Messages d'Alice que Bob n'a pas reçus : un court (une trame) et un long (plusieurs).
+    // Alice's messages that Bob has not received: a short one (one frame) and a long one (several).
     let long =
-        "Salut Bob, voici un message assez long pour être découpé en plusieurs trames. ".repeat(4);
+        "Hi Bob, here is a message long enough to be split into several frames. ".repeat(4);
     let mut packets = Vec::new();
-    for text in ["court", long.as_str()] {
-        for p in alice.send_text(&fp_b, text, NOW, &mut rng).expect("envoi") {
+    for text in ["short", long.as_str()] {
+        for p in alice.send_text(&fp_b, text, NOW, &mut rng).expect("send") {
             packets.push(p.encode());
         }
     }
     let frames: Vec<Vec<u8>> = packets
         .iter()
-        .flat_map(|p| alice.frames(p, MTU).expect("découpage"))
+        .flat_map(|p| alice.frames(p, MTU).expect("splitting"))
         .collect();
 
-    // Instantané : Bob est fermé (journal vidé) avant la copie du fichier.
+    // Snapshot: Bob is closed (journal flushed) before the file is copied.
     drop(bob);
     drop(alice);
     let snapshot = dir.path().join("bob-snapshot.db");
-    std::fs::copy(dir.path().join("bob.db"), &snapshot).expect("instantané de Bob");
+    std::fs::copy(dir.path().join("bob.db"), &snapshot).expect("Bob snapshot");
     Fixture {
         packets,
         frames,

@@ -1,11 +1,11 @@
-//! Dérivation de clés : HKDF-SHA256 et HMAC-SHA256.
+//! Key derivation: HKDF-SHA256 and HMAC-SHA256.
 
 use crate::{CoreError, Result};
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
-/// HKDF-SHA256 (RFC 5869). Échoue si `out` dépasse 255 * 32 octets.
+/// HKDF-SHA256 (RFC 5869). Fails if `out` exceeds 255 * 32 bytes.
 pub fn hkdf_sha256(salt: Option<&[u8]>, ikm: &[u8], info: &[u8], out: &mut [u8]) -> Result<()> {
     Hkdf::<Sha256>::new(salt, ikm)
         .expand(info, out)
@@ -14,17 +14,17 @@ pub fn hkdf_sha256(salt: Option<&[u8]>, ikm: &[u8], info: &[u8], out: &mut [u8])
 
 /// HMAC-SHA256 (RFC 2104).
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    // HMAC accepte toute longueur de clé : `new_from_slice` ne peut pas échouer.
+    // HMAC accepts any key length: `new_from_slice` cannot fail.
     let mut mac =
-        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepte toute taille de clé");
+        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepts any key size");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
 
-/// Vérifie `tag = HMAC-SHA256(key, data)` en temps constant (`verify_slice`).
+/// Verifies `tag = HMAC-SHA256(key, data)` in constant time (`verify_slice`).
 pub fn hmac_sha256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> bool {
     let mut mac =
-        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepte toute taille de clé");
+        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepts any key size");
     mac.update(data);
     mac.verify_slice(tag).is_ok()
 }

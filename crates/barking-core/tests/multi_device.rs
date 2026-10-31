@@ -1,5 +1,5 @@
-//! Multi-appareils : liaison d'un nouvel appareil (offre, demande,
-//! acceptation, fin), à deux et trois parties.
+//! Multi-device: linking a new device (offer, request,
+//! acceptance, completion), with two and three parties.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +15,7 @@ use rand::rngs::StdRng;
 use tempfile::TempDir;
 
 const NOW: u64 = 1_800_000_000;
-const T: &str = "fichier";
+const T: &str = "file";
 
 struct Dev {
     core: Core,
@@ -23,7 +23,7 @@ struct Dev {
     key: [u8; 32],
 }
 
-/// Un dossier temporaire par test, plusieurs bases dedans.
+/// One temporary directory per test, several databases inside.
 fn dir() -> TempDir {
     tempfile::tempdir().unwrap()
 }
@@ -59,12 +59,12 @@ fn events(core: &Core) -> Vec<TransparencyEvent> {
 fn link_err(r: Result<impl Sized, CoreError>) -> &'static str {
     match r {
         Err(CoreError::Link(reason)) => reason,
-        Err(e) => panic!("CoreError::Link attendue, obtenu {e:?}"),
-        Ok(_) => panic!("CoreError::Link attendue, obtenu Ok"),
+        Err(e) => panic!("CoreError::Link expected, got {e:?}"),
+        Ok(_) => panic!("CoreError::Link expected, got Ok"),
     }
 }
 
-/// A (administrateur) avec deux contacts, Alice et Bob ; Bob vérifié.
+/// A (administrator) with two contacts, Alice and Bob; Bob verified.
 fn admin_with_contacts(d: &Path, rng: &mut StdRng) -> (Dev, Dev, Dev) {
     let mut a = create(d, "a", 1, rng);
     let alice = create(d, "alice", 2, rng);
@@ -98,9 +98,9 @@ fn link_full_flow() {
     assert_eq!(t.core.fingerprint(), a.core.fingerprint());
     let out = a.core.link_device(&req, false, NOW + 1, &mut rng).unwrap();
     assert!(out.history.is_none());
-    // Une mise à jour de carte pour Alice et une pour Bob (un appareil chacun).
+    // A card update for Alice and one for Bob (one device each).
     assert_eq!(out.packets.len(), 2);
-    // Passage par les octets, comme dans le CLI.
+    // Going through bytes, as in the CLI.
     let bundle = LinkBundle::from_bytes(&out.bundle.to_bytes()).unwrap();
     t.core.finish_link(&bundle, None, NOW + 2).unwrap();
 
@@ -127,7 +127,7 @@ fn link_full_flow() {
         Err(CoreError::NotAdmin)
     ));
 
-    // Journal de chaque côté.
+    // Log on each side.
     assert!(events(&a.core).iter().any(|e| matches!(
         e,
         TransparencyEvent::DeviceLinked { name, .. } if name == "t"
@@ -140,26 +140,26 @@ fn link_full_flow() {
         }
     )));
 
-    // T rouvert : lié, plus en attente.
+    // T reopened: linked, no longer pending.
     drop(t.core);
     let mut t2 = Core::open(&t.path, &t.key, NOW + 3).unwrap();
     assert_eq!(t2.fingerprint(), a.core.fingerprint());
     assert_eq!(t2.contacts().unwrap().len(), 2);
-    // T peut écrire à Alice (un paquet par appareil d'Alice), plus une copie
-    // `SyncSent` pour A.
+    // T can write to Alice (one packet per Alice device), plus a
+    // `SyncSent` copy for A.
     let pkts = t2
         .send_text(
             &alice.core.fingerprint(),
-            "depuis la tablette",
+            "from the tablet",
             NOW + 3,
             &mut rng,
         )
         .unwrap();
     assert_eq!(pkts.len(), 2);
-    // Une seconde fin de liaison est refusée.
+    // A second link completion is refused.
     assert_eq!(
         link_err(t2.finish_link(&bundle, None, NOW + 4)),
-        "aucune liaison en attente"
+        "no pending link"
     );
     let _ = (a.path, a.key);
 }
@@ -186,17 +186,14 @@ fn linked_device_receives_from_contact() {
             &mut rng,
         )
         .unwrap();
-    let pkts = alice
-        .core
-        .send_text(&me, "aux deux", NOW, &mut rng)
-        .unwrap();
+    let pkts = alice.core.send_text(&me, "to both", NOW, &mut rng).unwrap();
     assert_eq!(pkts.len(), 2);
     let opened = pkts
         .iter()
         .filter(|p| {
             matches!(
                 t.core.receive(&p.encode(), T, NOW, &mut rng).unwrap(),
-                ReceiveOutcome::Message { ref text, .. } if text == "aux deux"
+                ReceiveOutcome::Message { ref text, .. } if text == "to both"
             )
         })
         .count();
@@ -239,7 +236,7 @@ fn pending_device_cannot_send_or_receive() {
     ));
     assert!(t.core.watched_mailboxes(NOW).is_empty());
 
-    // Toujours en attente après réouverture.
+    // Still pending after reopening.
     drop(t.core);
     let mut t2 = Core::open(&t.path, &t.key, NOW).unwrap();
     assert_eq!(t2.fingerprint(), a.core.fingerprint());
@@ -247,13 +244,13 @@ fn pending_device_cannot_send_or_receive() {
         t2.send_text(&alice_fp, "x", NOW, &mut rng),
         Err(CoreError::LinkPending)
     ));
-    // Le paquet de liaison d'un autre appareil (autre offre) est refusé.
+    // The link bundle of another device (other offer) is refused.
     let offer2 = a.core.link_offer(NOW, &mut rng).unwrap();
     let (_t4, req) = begin(d.path(), "t4", 11, &offer2, &mut rng);
     let out = a.core.link_device(&req, false, NOW, &mut rng).unwrap();
     assert_eq!(
         link_err(t2.finish_link(&out.bundle, None, NOW)),
-        "paquet de liaison invalide"
+        "invalid link bundle"
     );
     assert!(matches!(
         t2.send_text(&alice_fp, "x", NOW, &mut rng),
@@ -286,24 +283,24 @@ fn link_request_replay_refused() {
     let card = a.core.contact_card("A").unwrap();
     assert_eq!(
         link_err(a.core.link_device(&req, false, NOW, &mut rng)),
-        "offre absente ou déjà utilisée"
+        "offer missing or already used"
     );
     assert_eq!(a.core.contact_card("A").unwrap(), card);
-    // Sans offre du tout.
+    // Without any offer at all.
     let mut b = create(d.path(), "b", 2, &mut rng);
     assert_eq!(
         link_err(b.core.link_device(&req, false, NOW, &mut rng)),
-        "offre absente ou déjà utilisée"
+        "offer missing or already used"
     );
-    // Une nouvelle offre remplace l'ancienne : la demande liée à l'ancienne
-    // échoue (MAC), celle liée à la nouvelle passe.
+    // A new offer replaces the old one: the request tied to the old one
+    // fails (MAC), the one tied to the new one goes through.
     let o1 = a.core.link_offer(NOW, &mut rng).unwrap();
     let o2 = a.core.link_offer(NOW, &mut rng).unwrap();
     let (_t1, r1) = begin(d.path(), "t1", 10, &o1, &mut rng);
     let (_t2, r2) = begin(d.path(), "t2", 11, &o2, &mut rng);
     assert_eq!(
         link_err(a.core.link_device(&r1, false, NOW, &mut rng)),
-        "MAC invalide"
+        "invalid MAC"
     );
     a.core.link_device(&r2, false, NOW, &mut rng).unwrap();
 }
@@ -318,33 +315,33 @@ fn link_rejects_bad_mac_expired_wrong_root() {
     let offer = a.core.link_offer(NOW, &mut rng).unwrap();
     let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
 
-    // MAC modifié, ou champ modifié sous le MAC d'origine.
+    // MAC modified, or field modified under the original MAC.
     for tamper in 0..4 {
         let mut bad = req.clone();
         match tamper {
             0 => bad.mac[0] ^= 1,
-            1 => bad.name = "autre".into(),
+            1 => bad.name = "other".into(),
             2 => bad.issued_at += 1,
             _ => bad.device_sig[0] ^= 1,
         }
         assert_eq!(
             link_err(a.core.link_device(&bad, false, NOW, &mut rng)),
-            "MAC invalide",
+            "invalid MAC",
             "falsification {tamper}"
         );
     }
-    // Aucun état modifié : même carte, et l'offre est toujours valable.
+    // No state modified: same card, and the offer is still valid.
     assert_eq!(a.core.contact_card("A").unwrap(), card);
 
-    // Paquet de liaison d'une autre identité : refusé, T reste en attente.
+    // Link bundle from another identity: refused, T stays pending.
     let offer_b = b.core.link_offer(NOW, &mut rng).unwrap();
     let (_tb, req_b) = begin(d.path(), "tb", 12, &offer_b, &mut rng);
     let other = b.core.link_device(&req_b, false, NOW, &mut rng).unwrap();
     assert_eq!(
         link_err(t.core.finish_link(&other.bundle, None, NOW)),
-        "paquet de liaison invalide"
+        "invalid link bundle"
     );
-    // Paquet tronqué ou modifié.
+    // Truncated or modified bundle.
     let good = a.core.link_device(&req, false, NOW, &mut rng).unwrap();
     let bytes = good.bundle.to_bytes();
     let mut flipped = bytes.clone();
@@ -355,31 +352,31 @@ fn link_rejects_bad_mac_expired_wrong_root() {
             t.core
                 .finish_link(&LinkBundle::from_bytes(&flipped).unwrap(), None, NOW)
         ),
-        "paquet de liaison invalide"
+        "invalid link bundle"
     );
     assert_eq!(
         link_err(LinkBundle::from_bytes(&bytes[..3])),
-        "fichier de liaison illisible"
+        "unreadable link file"
     );
     assert!(matches!(
         t.core.send_text(&b.core.fingerprint(), "x", NOW, &mut rng),
         Err(CoreError::LinkPending)
     ));
     assert!(events(&t.core).is_empty());
-    // Le bon paquet passe ensuite.
+    // The right bundle then goes through.
     t.core.finish_link(&good.bundle, None, NOW).unwrap();
 
-    // Offre expirée (11 minutes plus tard) : refusée, puis effacée.
+    // Expired offer (11 minutes later): refused, then erased.
     let card = a.core.contact_card("A").unwrap();
     let offer = a.core.link_offer(NOW, &mut rng).unwrap();
     let (_t3, req) = begin(d.path(), "t3", 13, &offer, &mut rng);
     assert_eq!(
         link_err(a.core.link_device(&req, false, NOW + 11 * 60, &mut rng)),
-        "offre expirée"
+        "offer expired"
     );
     assert_eq!(
         link_err(a.core.link_device(&req, false, NOW, &mut rng)),
-        "offre absente ou déjà utilisée"
+        "offer missing or already used"
     );
     assert_eq!(a.core.contact_card("A").unwrap(), card);
 }
@@ -400,7 +397,7 @@ fn begin_link_refuses_expired_offer() {
             NOW + 601,
             &mut rng
         )),
-        "offre expirée"
+        "offer expired"
     );
 }
 
@@ -419,19 +416,19 @@ fn link_files_roundtrip_and_garbage() {
     for garbage in [&[][..], &[0xff; 7][..], &[1, 2, 3][..]] {
         assert_eq!(
             link_err(LinkOffer::from_bytes(garbage)),
-            "fichier de liaison illisible"
+            "unreadable link file"
         );
         assert_eq!(
             link_err(LinkRequest::from_bytes(garbage)),
-            "fichier de liaison illisible"
+            "unreadable link file"
         );
     }
-    // Octets en trop refusés.
+    // Extra bytes refused.
     let mut long = offer.to_bytes().to_vec();
     long.push(0);
     assert_eq!(
         link_err(LinkOffer::from_bytes(&long)),
-        "fichier de liaison illisible"
+        "unreadable link file"
     );
 }
 
@@ -476,7 +473,7 @@ fn link_refuses_device_beyond_cap() {
         MAX_DEVICES
     );
     let offer = a.core.link_offer(NOW, &mut rng).unwrap();
-    let (_t, req) = begin(d.path(), "trop", 99, &offer, &mut rng);
+    let (_t, req) = begin(d.path(), "too-many", 99, &offer, &mut rng);
     assert_eq!(
         a.core.link_device(&req, false, NOW, &mut rng).err(),
         Some(CoreError::TooLarge)
@@ -487,7 +484,7 @@ fn link_refuses_device_beyond_cap() {
     );
 }
 
-/// A lié à T, sans contact.
+/// A linked to T, without contacts.
 fn admin_and_tablet(d: &Path, rng: &mut StdRng) -> (Dev, Dev) {
     let mut a = create(d, "a", 1, rng);
     let offer = a.core.link_offer(NOW, rng).unwrap();
@@ -497,8 +494,8 @@ fn admin_and_tablet(d: &Path, rng: &mut StdRng) -> (Dev, Dev) {
     (a, t)
 }
 
-/// Livre à `to` chaque paquet de la file d'envoi de `from`, puis rend à
-/// `from` les accusés de `to`. Renvoie les synchronisations appliquées.
+/// Delivers to `to` every packet of `from`'s send queue, then hands back
+/// to `from` the acks of `to`. Returns the syncs applied.
 fn sync_round(from: &mut Dev, to: &mut Dev, rng: &mut StdRng) -> Vec<SyncKind> {
     let mut applied = Vec::new();
     for bytes in from.core.pending_outbox(NOW).unwrap() {
@@ -544,8 +541,8 @@ fn sent_on_a_appears_on_t() {
     );
     assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
 
-    // Un paquet pour Bob, un `SyncSent` pour T, le même identifiant.
-    let pkts = a.core.send_text(&bob_fp, "bonjour", NOW, &mut rng).unwrap();
+    // One packet for Bob, one `SyncSent` for T, the same identifier.
+    let pkts = a.core.send_text(&bob_fp, "hello", NOW, &mut rng).unwrap();
     assert_eq!(pkts.len(), 2);
     let sent = a.core.messages_with(&bob_fp).unwrap();
     assert_eq!(sent.len(), 1);
@@ -554,7 +551,7 @@ fn sent_on_a_appears_on_t() {
         match t.core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
             ReceiveOutcome::Synced { kind } => on_t.push((kind, p.id)),
             ReceiveOutcome::NotForUs => {}
-            other => panic!("inattendu : {other:?}"),
+            other => panic!("unexpected : {other:?}"),
         }
     }
     assert_eq!(on_t.len(), 1);
@@ -568,12 +565,12 @@ fn sent_on_a_appears_on_t() {
             rows[0].message_id,
             rows[0].at
         ),
-        (Direction::Out, "bonjour", sent[0].message_id, NOW)
+        (Direction::Out, "hello", sent[0].message_id, NOW)
     );
     assert!(events(&t.core).contains(&TransparencyEvent::SyncApplied {
         kind: SyncKind::Sent
     }));
-    // Reçu deux fois : toujours une ligne.
+    // Received twice: still one row.
     for p in &pkts {
         let r = t.core.receive(&p.encode(), T, NOW, &mut rng).unwrap();
         assert!(matches!(
@@ -583,8 +580,8 @@ fn sent_on_a_appears_on_t() {
     }
     assert_eq!(t.core.messages_with(&bob_fp).unwrap().len(), 1);
 
-    // L'accusé de T retire le `SyncSent` de la file de A, mais le message
-    // pour Bob n'est pas livré pour autant.
+    // T's ack removes the `SyncSent` from A's queue, but the message
+    // for Bob is not delivered for all that.
     let sync_id = on_t[0].1;
     let mut acked = Vec::new();
     for bytes in t.core.pending_outbox(NOW).unwrap() {
@@ -600,7 +597,7 @@ fn sent_on_a_appears_on_t() {
         a.core.messages_with(&bob_fp).unwrap()[0].status,
         MessageStatus::Sent
     );
-    // L'accusé de Bob, lui, le marque livré.
+    // Bob's ack, on the other hand, marks it delivered.
     let to_bob = pkts.iter().find(|p| p.id != sync_id).unwrap();
     assert!(matches!(
         bob.core
@@ -639,10 +636,10 @@ fn sent_on_t_reaches_bob_and_a() {
         .unwrap();
     sync_round(&mut a, &mut t, &mut rng);
 
-    // T écrit à Bob : un paquet pour Bob, une copie `SyncSent` pour A.
+    // T writes to Bob: one packet for Bob, a `SyncSent` copy for A.
     let pkts = t
         .core
-        .send_text(&bob_fp, "de la tablette", NOW, &mut rng)
+        .send_text(&bob_fp, "from the tablet", NOW, &mut rng)
         .unwrap();
     assert_eq!(pkts.len(), 2);
     let sent = t.core.messages_with(&bob_fp).unwrap();
@@ -651,11 +648,11 @@ fn sent_on_t_reaches_bob_and_a() {
     for p in &pkts {
         match bob.core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
             ReceiveOutcome::Message { from, text, .. } => {
-                assert_eq!((from, text.as_str()), (alice_fp, "de la tablette"));
+                assert_eq!((from, text.as_str()), (alice_fp, "from the tablet"));
                 at_bob += 1;
             }
             ReceiveOutcome::NotForUs => {}
-            o => panic!("inattendu chez Bob : {o:?}"),
+            o => panic!("unexpected at Bob : {o:?}"),
         }
         match a.core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
             ReceiveOutcome::Synced { kind } => {
@@ -663,7 +660,7 @@ fn sent_on_t_reaches_bob_and_a() {
                 at_a += 1;
             }
             ReceiveOutcome::NotForUs => {}
-            o => panic!("inattendu chez A : {o:?}"),
+            o => panic!("unexpected at A : {o:?}"),
         }
     }
     assert_eq!((at_bob, at_a), (1, 1));
@@ -671,13 +668,13 @@ fn sent_on_t_reaches_bob_and_a() {
     assert_eq!(on_a.len(), 1);
     assert_eq!(
         (on_a[0].direction, on_a[0].body.as_str(), on_a[0].message_id),
-        (Direction::Out, "de la tablette", sent[0].message_id)
+        (Direction::Out, "from the tablet", sent[0].message_id)
     );
 
-    // La réponse de Bob arrive sur T (et sur A).
+    // Bob's reply arrives on T (and on A).
     let reply = bob
         .core
-        .send_text(&alice_fp, "reçu", NOW, &mut rng)
+        .send_text(&alice_fp, "received", NOW, &mut rng)
         .unwrap();
     assert_eq!(reply.len(), 2);
     for dev in [&mut t, &mut a] {
@@ -686,14 +683,14 @@ fn sent_on_t_reaches_bob_and_a() {
             .filter(|p| {
                 matches!(
                     dev.core.receive(&p.encode(), T, NOW, &mut rng).unwrap(),
-                    ReceiveOutcome::Message { ref text, .. } if text == "reçu"
+                    ReceiveOutcome::Message { ref text, .. } if text == "received"
                 )
             })
             .count();
         assert_eq!(opened, 1);
     }
 
-    // Les accusés vident toutes les files ; le message de T est livré.
+    // The acks empty all the queues; T's message is delivered.
     deliver_all(&mut [&mut a, &mut t, &mut bob], &mut rng);
     for dev in [&mut a, &mut t, &mut bob] {
         assert_eq!(unacked(dev), 0);
@@ -702,7 +699,7 @@ fn sent_on_t_reaches_bob_and_a() {
         t.core.messages_with(&bob_fp).unwrap()[0].status,
         MessageStatus::Delivered
     );
-    // Sur A, la copie reste « envoyée » : seul T reçoit l'accusé de Bob.
+    // On A, the copy stays "sent": only T receives Bob's ack.
     assert_eq!(on_a[0].status, MessageStatus::Sent);
 }
 
@@ -710,7 +707,7 @@ fn sent_on_t_reaches_bob_and_a() {
 fn contact_ops_sync() {
     let d = dir();
     let mut rng = StdRng::seed_from_u64(21);
-    // Sans autre appareil : aucune synchronisation en file.
+    // Without another device: no sync queued.
     let mut solo = create(d.path(), "solo", 4, &mut rng);
     let x = create(d.path(), "x", 5, &mut rng);
     solo.core
@@ -758,10 +755,10 @@ fn contact_ops_sync() {
         vec![SyncKind::Contact]
     );
     assert!(contact_state(&t.core).is_empty());
-    // Chaque accusé de T a vidé la file de A.
+    // Each ack from T emptied A's queue.
     assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
 
-    // Dans l'autre sens : une opération sur T arrive sur A.
+    // The other way: an operation on T arrives on A.
     t.core.add_contact(&card, None, NOW, &mut rng).unwrap();
     t.core.set_alias(&carol_fp, "c", NOW, &mut rng).unwrap();
     assert_eq!(
@@ -772,7 +769,7 @@ fn contact_ops_sync() {
         contact_state(&a.core),
         vec![(carol_fp, Some("c".to_owned()), false)]
     );
-    // `set_alias` : contact inconnu, alias trop long.
+    // `set_alias`: unknown contact, alias too long.
     assert_eq!(
         a.core.set_alias(&Fingerprint([9; 32]), "z", NOW, &mut rng),
         Err(CoreError::UnknownContact)
@@ -783,7 +780,7 @@ fn contact_ops_sync() {
     );
 }
 
-/// Paquets de la file de `dev` produits par `op`.
+/// Packets of `dev`'s queue produced by `op`.
 fn produced(dev: &mut Dev, op: impl FnOnce(&mut Core)) -> Vec<Vec<u8>> {
     let before = dev.core.pending_outbox(NOW).unwrap();
     op(&mut dev.core);
@@ -816,8 +813,8 @@ fn contact_sync_is_order_independent() {
     let dave_fp = dave.fingerprint();
     let mut r2 = StdRng::seed_from_u64(1);
 
-    // Ajout puis suppression, livrés à l'envers : la suppression d'un contact
-    // inconnu est appliquée (et accusée), l'ajout plus ancien n'y change rien.
+    // Add then delete, delivered in reverse: deleting an unknown contact
+    // is applied (and acked), the older add changes nothing.
     let add = produced(&mut a, |c| {
         c.add_contact(&carol, Some("carol"), NOW, &mut r2).unwrap();
     });
@@ -834,15 +831,15 @@ fn contact_sync_is_order_independent() {
         ));
     }
     assert!(contact_state(&t.core).is_empty());
-    // Le même paquet une seconde fois : doublon, rien ne change.
+    // The same packet a second time: duplicate, nothing changes.
     assert!(matches!(
         deliver(&mut t, &add[0], &mut rng),
         ReceiveOutcome::Duplicate
     ));
     assert!(contact_state(&t.core).is_empty());
 
-    // État vérifié livré avant l'ajout : le contact est vérifié, l'ajout
-    // plus ancien ne le dé-vérifie pas.
+    // Verified state delivered before the add: the contact is verified, the
+    // older add does not un-verify it.
     let add = produced(&mut a, |c| {
         c.add_contact(&dave, Some("dave"), NOW + 2, &mut r2)
             .unwrap();
@@ -857,14 +854,14 @@ fn contact_sync_is_order_independent() {
         contact_state(&t.core),
         vec![(dave_fp, Some("dave".to_owned()), true)]
     );
-    // La même opération refaite (nouveau paquet) : même état.
+    // The same operation redone (new packet): same state.
     let again = produced(&mut a, |c| {
         c.mark_verified(&dave_fp, NOW + 4, &mut r2).unwrap()
     });
     deliver(&mut t, &again[0], &mut rng);
     assert_eq!(contact_state(&t.core), contact_state(&a.core));
 
-    // Un ajout plus récent que la suppression rend le contact.
+    // An add more recent than the deletion brings the contact back.
     let re = produced(&mut a, |c| {
         c.add_contact(&carol, Some("carol"), NOW + 5, &mut r2)
             .unwrap();
@@ -873,8 +870,8 @@ fn contact_sync_is_order_independent() {
     assert_eq!(contact_state(&t.core), contact_state(&a.core));
     assert_eq!(contact_state(&t.core).len(), 2);
 
-    // Opérations locales : une suppression sur T (plus récente) l'emporte
-    // sur un changement d'alias de A plus ancien, livré ensuite.
+    // Local operations: a deletion on T (more recent) wins
+    // over an older alias change on A, delivered afterwards.
     let late = produced(&mut a, |c| {
         c.set_alias(&carol_fp, "c", NOW + 6, &mut r2).unwrap()
     });
@@ -885,8 +882,8 @@ fn contact_sync_is_order_independent() {
         vec![(dave_fp, Some("dave".to_owned()), true)]
     );
 
-    // Tous les accusés de T vident la file de A : il n'y reste que l'accusé
-    // de la suppression faite sur T.
+    // All of T's acks empty A's queue: only the ack of the
+    // deletion done on T remains.
     for bytes in t.core.pending_outbox(NOW).unwrap() {
         a.core.receive(&bytes, T, NOW, &mut rng).unwrap();
     }
@@ -895,8 +892,8 @@ fn contact_sync_is_order_independent() {
     assert_eq!(Packet::decode(&left[0]).unwrap().kind, Kind::Ack);
 }
 
-/// A et T, avec Carol et Dave connus des deux (ajoutés sur A à `NOW`, copiés
-/// sur T).
+/// A and T, with Carol and Dave known to both (added on A at `NOW`, copied
+/// to T).
 fn pair_with_two_contacts(d: &Path, rng: &mut StdRng) -> (Dev, Dev, Fingerprint, Fingerprint) {
     let (mut a, mut t) = admin_and_tablet(d, rng);
     let carol = create(d, "carol", 6, rng)
@@ -916,7 +913,7 @@ fn alias_replacement_warns_other_devices() {
     let d = dir();
     let mut rng = StdRng::seed_from_u64(33);
     let (mut a, mut t, carol, dave) = pair_with_two_contacts(d.path(), &mut rng);
-    // Sur A, une nouvelle carte prend l'alias de Carol : Carol est remplacée.
+    // On A, a new card takes Carol's alias: Carol is replaced.
     let eve_card = create(d.path(), "eve", 8, &mut rng)
         .core
         .contact_card("Eve")
@@ -932,7 +929,7 @@ fn alias_replacement_warns_other_devices() {
     };
     assert!(events(&a.core).contains(&changed));
     sync_round(&mut a, &mut t, &mut rng);
-    // T voit le même avertissement, et le même état.
+    // T sees the same warning, and the same state.
     assert!(events(&t.core).contains(&changed));
     assert!(changed.is_security());
     let mut sa = contact_state(&a.core);
@@ -949,7 +946,7 @@ fn same_second_edits_converge() {
     let d = dir();
     let mut rng = StdRng::seed_from_u64(30);
     let (mut a, mut t, carol, _) = pair_with_two_contacts(d.path(), &mut rng);
-    // Même seconde, deux appareils, deux alias différents pour Carol.
+    // Same second, two devices, two different aliases for Carol.
     let mut r2 = StdRng::seed_from_u64(2);
     let from_a = produced(&mut a, |c| {
         c.set_alias(&carol, "x", NOW + 10, &mut r2).unwrap()
@@ -969,7 +966,7 @@ fn concurrent_alias_move_converges() {
     let mut rng = StdRng::seed_from_u64(31);
     let (mut a, mut t, carol, dave) = pair_with_two_contacts(d.path(), &mut rng);
     let mut r2 = StdRng::seed_from_u64(3);
-    // A donne « z » à Carol ; T, plus tard, donne « z » à Dave.
+    // A gives "z" to Carol; T, later, gives "z" to Dave.
     let from_a = produced(&mut a, |c| {
         c.set_alias(&carol, "z", NOW + 10, &mut r2).unwrap()
     });
@@ -978,8 +975,8 @@ fn concurrent_alias_move_converges() {
     });
     deliver(&mut t, &from_a[0], &mut rng);
     deliver(&mut a, &from_t[0], &mut rng);
-    // L'opération la plus récente garde l'alias, partout. Sur A, l'alias
-    // passe à une autre empreinte : avertissement, comme pour un ajout local.
+    // The most recent operation keeps the alias, everywhere. On A, the alias
+    // moves to another fingerprint: warning, as for a local add.
     let moved = TransparencyEvent::ContactKeyChanged {
         alias: "z".into(),
         old: carol,
@@ -1008,8 +1005,8 @@ fn bumped_clock_only_moves_envelope_date() {
     let mut rng = StdRng::seed_from_u64(32);
     let (mut a, _t, carol, _) = pair_with_two_contacts(d.path(), &mut rng);
     let mut r2 = StdRng::seed_from_u64(4);
-    // Plusieurs opérations dans la même seconde : l'horloge du contact avance
-    // (NOW + 1, NOW + 2…), mais l'expiration du paquet suit l'horloge murale.
+    // Several operations in the same second: the contact clock advances
+    // (NOW + 1, NOW + 2...), but the packet expiry follows the wall clock.
     for alias in ["a", "b", "c"] {
         let p = produced(&mut a, |c| {
             c.set_alias(&carol, alias, NOW, &mut r2).unwrap()
@@ -1048,7 +1045,7 @@ fn bob_reaches_new_tablet() {
         .unwrap();
     let before = bob
         .core
-        .send_text(&alice_fp, "avant", NOW, &mut rng)
+        .send_text(&alice_fp, "before", NOW, &mut rng)
         .unwrap()
         .len();
     assert_eq!(before, 1);
@@ -1057,8 +1054,8 @@ fn bob_reaches_new_tablet() {
     let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
     let out = alice.core.link_device(&req, false, NOW, &mut rng).unwrap();
     t.core.finish_link(&out.bundle, None, NOW).unwrap();
-    // Une mise à jour de carte pour l'appareil de Bob ; pas d'autre appareil
-    // à moi que T, qui a tout reçu par le paquet de liaison.
+    // A card update for Bob's device; no device of mine other than T,
+    // which received everything through the link bundle.
     assert_eq!(out.packets.len(), 1);
     let card_update = out.packets[0].encode();
     assert!(
@@ -1073,9 +1070,9 @@ fn bob_reaches_new_tablet() {
             assert_eq!(from, alice_fp);
             assert_eq!(alias.as_deref(), Some("alice"));
         }
-        o => panic!("CardUpdated attendu, obtenu {o:?}"),
+        o => panic!("CardUpdated expected, got {o:?}"),
     }
-    // Le nom affiché d'Alice est conservé dans la nouvelle carte.
+    // Alice's display name is kept in the new card.
     let c = bob.core.contacts().unwrap();
     assert_eq!(c[0].display_name, "Alice");
     let updated = TransparencyEvent::ContactCardUpdated {
@@ -1087,10 +1084,10 @@ fn bob_reaches_new_tablet() {
     assert!(events(&bob.core).contains(&updated));
     assert!(updated.is_security());
 
-    // Bob chiffre désormais aussi pour T.
+    // Bob now also encrypts for T.
     let pkts = bob
         .core
-        .send_text(&alice_fp, "aux deux", NOW, &mut rng)
+        .send_text(&alice_fp, "to both", NOW, &mut rng)
         .unwrap();
     assert_eq!(pkts.len(), before + 1);
     let opened = pkts
@@ -1098,12 +1095,12 @@ fn bob_reaches_new_tablet() {
         .filter(|p| {
             matches!(
                 t.core.receive(&p.encode(), T, NOW, &mut rng).unwrap(),
-                ReceiveOutcome::Message { ref text, .. } if text == "aux deux"
+                ReceiveOutcome::Message { ref text, .. } if text == "to both"
             )
         })
         .count();
     assert_eq!(opened, 1);
-    // L'accusé de Bob retire la mise à jour de la file d'Alice.
+    // Bob's ack removes the update from Alice's queue.
     for bytes in bob.core.pending_outbox(NOW).unwrap() {
         alice.core.receive(&bytes, T, NOW, &mut rng).unwrap();
     }
@@ -1124,7 +1121,7 @@ fn second_link_sends_devices_to_first_tablet() {
     let offer = a.core.link_offer(NOW, &mut rng).unwrap();
     let (mut t2, req) = begin(d.path(), "t2", 10, &offer, &mut rng);
     let out = a.core.link_device(&req, false, NOW, &mut rng).unwrap();
-    // Un `SyncDevices` pour T, rien pour T2 (ni contact).
+    // A `SyncDevices` for T, nothing for T2 (nor contact).
     assert_eq!(out.packets.len(), 1);
     assert!(matches!(
         t.core
@@ -1135,14 +1132,14 @@ fn second_link_sends_devices_to_first_tablet() {
         }
     ));
     t2.core.finish_link(&out.bundle, None, NOW).unwrap();
-    // Sur T, le changement de ma liste est une entrée de sécurité.
+    // On T, the change to my list is a security entry.
     let updated = TransparencyEvent::OwnDevicesUpdated {
         added: 1,
         removed: 0,
     };
     assert!(events(&t.core).contains(&updated));
     assert!(updated.is_security());
-    // T connaît T2 : une opération sur un contact part vers A et T2.
+    // T knows T2: an operation on a contact goes to A and T2.
     let carol = create(d.path(), "carol", 6, &mut rng)
         .core
         .contact_card("Carol")
@@ -1181,7 +1178,7 @@ fn card_updates_in_reverse_order_converge() {
         t.core.finish_link(&out.bundle, None, NOW).unwrap();
         updates.push(out.packets);
     }
-    // La plus récente (3 appareils) d'abord, puis l'ancienne (2 appareils).
+    // The most recent (3 devices) first, then the old one (2 devices).
     let mut outcomes = Vec::new();
     for packets in updates.iter().rev() {
         for p in packets {
@@ -1194,7 +1191,7 @@ fn card_updates_in_reverse_order_converge() {
     assert_eq!(outcomes.len(), 2);
     assert!(matches!(outcomes[0], ReceiveOutcome::CardUpdated { .. }));
     assert!(matches!(outcomes[1], ReceiveOutcome::Duplicate));
-    // Bob chiffre pour les 3 appareils d'Alice.
+    // Bob encrypts for Alice's 3 devices.
     assert_eq!(
         bob.core
             .send_text(&alice_fp, "x", NOW, &mut rng)
@@ -1202,21 +1199,21 @@ fn card_updates_in_reverse_order_converge() {
             .len(),
         3
     );
-    // Les deux mises à jour sont accusées : elles quittent la file d'Alice.
+    // Both updates are acked: they leave Alice's queue.
     for bytes in bob.core.pending_outbox(NOW).unwrap() {
         alice.core.receive(&bytes, T, NOW, &mut rng).unwrap();
     }
-    // Seul le `SyncDevices` pour T1 (non relayé ici) reste.
+    // Only the `SyncDevices` for T1 (not relayed here) remains.
     let left = alice.core.pending_outbox(NOW).unwrap();
     let card_updates_left = updates
         .iter()
         .flatten()
         .filter(|p| left.contains(&p.encode()))
         .count();
-    assert_eq!(card_updates_left, 1, "seul le SyncDevices pour T1 reste");
+    assert_eq!(card_updates_left, 1, "only the SyncDevices for T1 remains");
 }
 
-/// Vue comparable d'une conversation : identifiant, sens, texte, statut, date.
+/// Comparable view of a conversation: identifier, direction, text, status, date.
 type MsgView = Vec<([u8; 16], Direction, String, MessageStatus, u64)>;
 
 fn conversation(core: &Core, fp: &Fingerprint) -> MsgView {
@@ -1227,9 +1224,9 @@ fn conversation(core: &Core, fp: &Fingerprint) -> MsgView {
         .collect()
 }
 
-/// A avec trois conversations (Alice, Bob, Carol), dont un message reçu et
-/// un message livré, et assez de texte pour plusieurs morceaux de 64 Kio.
-/// Rend A, T en attente, l'archive et le paquet de liaison.
+/// A with three conversations (Alice, Bob, Carol), including a received message and
+/// a delivered message, and enough text for several 64 KiB chunks.
+/// Returns A, T pending, the archive and the link bundle.
 fn history_setup(
     d: &Path,
     rng: &mut StdRng,
@@ -1247,17 +1244,17 @@ fn history_setup(
         .unwrap();
     let alice_fp = alice.core.fingerprint();
     let bob_fp = bob.core.fingerprint();
-    // Alice écrit à A ; A lui répond, Alice accuse réception.
+    // Alice writes to A; A replies, Alice acks.
     let a_fp = alice
         .core
         .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, rng)
         .unwrap();
-    for p in alice.core.send_text(&a_fp, "bonjour A", NOW, rng).unwrap() {
+    for p in alice.core.send_text(&a_fp, "hello A", NOW, rng).unwrap() {
         a.core.receive(&p.encode(), T, NOW, rng).unwrap();
     }
     for p in a
         .core
-        .send_text(&alice_fp, "bonjour Alice", NOW + 1, rng)
+        .send_text(&alice_fp, "hello Alice", NOW + 1, rng)
         .unwrap()
     {
         alice.core.receive(&p.encode(), T, NOW + 1, rng).unwrap();
@@ -1265,7 +1262,7 @@ fn history_setup(
     for bytes in alice.core.pending_outbox(NOW + 1).unwrap() {
         a.core.receive(&bytes, T, NOW + 1, rng).unwrap();
     }
-    // Beaucoup de texte vers Bob et Carol : plusieurs morceaux.
+    // Lots of text to Bob and Carol: several chunks.
     for i in 0..20u64 {
         let text = format!("{i:02}{}", "x".repeat(3900));
         a.core.send_text(&bob_fp, &text, NOW + 2 + i, rng).unwrap();
@@ -1280,17 +1277,13 @@ fn history_setup(
     let offer = a.core.link_offer(NOW, rng).unwrap();
     let (t, req) = begin(d, "t", 9, &offer, rng);
     let out = a.core.link_device(&req, true, NOW + 30, rng).unwrap();
-    // Passage par les octets, comme dans le CLI.
+    // Going through bytes, as in the CLI.
     let archive = HistoryArchive::from_bytes(&out.history.unwrap().to_bytes()).unwrap();
-    assert!(
-        archive.chunks.len() >= 2,
-        "{} morceaux",
-        archive.chunks.len()
-    );
+    assert!(archive.chunks.len() >= 2, "{} chunks", archive.chunks.len());
     (a, t, out.bundle, archive, vec![alice_fp, bob_fp, carol_fp])
 }
 
-/// T toujours en attente : aucun contact, aucun message, aucun événement.
+/// T still pending: no contact, no message, no event.
 fn assert_still_pending(t: &mut Dev, fps: &[Fingerprint], rng: &mut StdRng) {
     assert!(t.core.contacts().unwrap().is_empty());
     for fp in fps {
@@ -1319,7 +1312,7 @@ fn history_round_trip() {
         total += on_a.len();
     }
     assert_eq!(total, 42);
-    // Dernier événement : l'import, après la fin de liaison.
+    // Last event: the import, after the link completion.
     let ev = events(&t.core);
     assert_eq!(
         ev.last(),
@@ -1329,7 +1322,7 @@ fn history_round_trip() {
         ev[ev.len() - 2],
         TransparencyEvent::LinkFinished { .. }
     ));
-    // Rouvert : l'historique est toujours là.
+    // Reopened: the history is still there.
     drop(t.core);
     let t2 = Core::open(&t.path, &t.key, NOW + 32).unwrap();
     for fp in &fps {
@@ -1351,18 +1344,18 @@ fn history_truncated_refused() {
         }
         assert_eq!(
             link_err(t.core.finish_link(&bundle, Some(&bad), NOW + 31)),
-            "historique invalide",
-            "coupure {cut}"
+            "invalid history",
+            "cut {cut}"
         );
         assert_still_pending(&mut t, &fps, &mut rng);
     }
     let empty = HistoryArchive { chunks: Vec::new() };
     assert_eq!(
         link_err(t.core.finish_link(&bundle, Some(&empty), NOW + 31)),
-        "historique invalide"
+        "invalid history"
     );
     assert_still_pending(&mut t, &fps, &mut rng);
-    // La bonne archive passe ensuite.
+    // The right archive then goes through.
     t.core
         .finish_link(&bundle, Some(&archive), NOW + 31)
         .unwrap();
@@ -1373,7 +1366,7 @@ fn history_duplicate_chunk_refused() {
     let d = dir();
     let mut rng = StdRng::seed_from_u64(42);
     let (_a, mut t, bundle, archive, fps) = history_setup(d.path(), &mut rng);
-    // Morceau en double ajouté, morceau remplacé par un autre, ordre inversé.
+    // Chunk added twice, chunk replaced by another, reversed order.
     let mut added = archive.clone();
     added.chunks.insert(1, archive.chunks[1].clone());
     let mut replaced = archive.clone();
@@ -1383,7 +1376,7 @@ fn history_duplicate_chunk_refused() {
     for bad in [added, replaced, swapped] {
         assert_eq!(
             link_err(t.core.finish_link(&bundle, Some(&bad), NOW + 31)),
-            "historique invalide"
+            "invalid history"
         );
         assert_still_pending(&mut t, &fps, &mut rng);
     }
@@ -1404,11 +1397,11 @@ fn history_tampered_refused() {
         c[i] ^= 1;
         assert_eq!(
             link_err(t.core.finish_link(&bundle, Some(&bad), NOW + 31)),
-            "historique invalide"
+            "invalid history"
         );
         assert_still_pending(&mut t, &fps, &mut rng);
     }
-    // Archive d'une autre liaison (autre secret) : refusée.
+    // Archive from another link (other secret): refused.
     let offer = a.core.link_offer(NOW + 40, &mut rng).unwrap();
     let (_t2, req) = begin(d.path(), "t2", 10, &offer, &mut rng);
     let other = a.core.link_device(&req, true, NOW + 41, &mut rng).unwrap();
@@ -1417,7 +1410,7 @@ fn history_tampered_refused() {
             t.core
                 .finish_link(&bundle, other.history.as_ref(), NOW + 31)
         ),
-        "historique invalide"
+        "invalid history"
     );
     assert_still_pending(&mut t, &fps, &mut rng);
     t.core
@@ -1444,10 +1437,10 @@ fn history_empty_and_without_history() {
     );
 }
 
-/// Livre chaque paquet en file de chaque appareil à tous les autres, par
-/// tours, jusqu'à ce qu'un tour ne produise plus rien de nouveau (messages,
-/// cartes, synchronisations, premiers accusés). Les paquets refusés
-/// (expéditeur encore inconnu) restent en file et sont rejoués au tour suivant.
+/// Delivers every queued packet of every device to all the others, in
+/// rounds, until a round produces nothing new (messages,
+/// cards, syncs, first acks). Refused packets
+/// (sender still unknown) stay queued and are replayed next round.
 fn deliver_all(devs: &mut [&mut Dev], rng: &mut StdRng) {
     for _ in 0..12 {
         let mut progress = false;
@@ -1474,10 +1467,10 @@ fn deliver_all(devs: &mut [&mut Dev], rng: &mut StdRng) {
             return;
         }
     }
-    panic!("la livraison ne converge pas");
+    panic!("delivery does not converge");
 }
 
-/// Paquets de type message encore en file (les accusés n'attendent rien).
+/// Message-type packets still queued (acks wait for nothing).
 fn unacked(dev: &mut Dev) -> usize {
     dev.core
         .pending_outbox(NOW)
@@ -1487,7 +1480,7 @@ fn unacked(dev: &mut Dev) -> usize {
         .count()
 }
 
-/// Nombre d'appareils (parmi `to`) qui déchiffrent `text` dans `pkts`.
+/// Number of devices (among `to`) that decrypt `text` in `pkts`.
 fn opened_by(pkts: &[Packet], to: &mut [&mut Dev], text: &str, rng: &mut StdRng) -> usize {
     let mut n = 0;
     for dev in to.iter_mut() {
@@ -1528,13 +1521,13 @@ fn crossing_links_converge_to_full_mesh() {
         )
         .unwrap();
 
-    // Bob lie B2 ; sa mise à jour de carte pour A reste en file (retardée).
+    // Bob links B2; his card update for A stays queued (delayed).
     let offer = b1.core.link_offer(NOW, &mut rng).unwrap();
     let (mut b2, req) = begin(d.path(), "b2", 4, &offer, &mut rng);
     let out = b1.core.link_device(&req, false, NOW, &mut rng).unwrap();
     b2.core.finish_link(&out.bundle, None, NOW).unwrap();
-    // Alice lie T : son instantané porte l'ancienne carte de Bob (B1 seul),
-    // et la mise à jour d'Alice ne part que vers B1.
+    // Alice links T: her snapshot carries Bob's old card (B1 only),
+    // and Alice's update only goes to B1.
     let offer = a.core.link_offer(NOW, &mut rng).unwrap();
     let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
     let out = a.core.link_device(&req, false, NOW, &mut rng).unwrap();
@@ -1543,9 +1536,9 @@ fn crossing_links_converge_to_full_mesh() {
 
     deliver_all(&mut [&mut a, &mut t, &mut b1, &mut b2], &mut rng);
 
-    // Chaque appareil d'Alice chiffre pour les deux appareils de Bob (plus
-    // une copie pour son autre appareil), et réciproquement.
-    for (i, text) in ["de A", "de T"].into_iter().enumerate() {
+    // Each Alice device encrypts for both of Bob's devices (plus
+    // a copy for her other device), and vice versa.
+    for (i, text) in ["from A", "from T"].into_iter().enumerate() {
         let from = if i == 0 { &mut a } else { &mut t };
         let pkts = from.core.send_text(&bob_fp, text, NOW, &mut rng).unwrap();
         assert_eq!(pkts.len(), 3, "{text}");
@@ -1555,7 +1548,7 @@ fn crossing_links_converge_to_full_mesh() {
             "{text}"
         );
     }
-    for (i, text) in ["de B1", "de B2"].into_iter().enumerate() {
+    for (i, text) in ["from B1", "from B2"].into_iter().enumerate() {
         let from = if i == 0 { &mut b1 } else { &mut b2 };
         let pkts = from.core.send_text(&alice_fp, text, NOW, &mut rng).unwrap();
         assert_eq!(pkts.len(), 3, "{text}");
@@ -1565,7 +1558,7 @@ fn crossing_links_converge_to_full_mesh() {
             "{text}"
         );
     }
-    // Tout est accusé : plus aucun message en file.
+    // Everything is acked: no more messages queued.
     deliver_all(&mut [&mut a, &mut t, &mut b1, &mut b2], &mut rng);
     for dev in [&mut a, &mut t, &mut b1, &mut b2] {
         assert_eq!(unacked(dev), 0);

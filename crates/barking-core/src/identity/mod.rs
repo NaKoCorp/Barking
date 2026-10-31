@@ -1,4 +1,4 @@
-//! Identité : clé racine, empreinte, phrase de récupération, code de sécurité.
+//! Identity: root key, fingerprint, recovery phrase, safety code.
 
 pub mod device;
 pub mod device_list;

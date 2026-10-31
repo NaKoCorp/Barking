@@ -1,5 +1,5 @@
-//! Liste signée des appareils d'une identité. Une liste plus récente sans un
-//! appareil vaut révocation de cet appareil.
+//! Signed list of an identity's devices. A more recent list without a
+//! device amounts to revoking that device.
 
 use super::device::{DeviceCertificate, DeviceId, sig_bytes};
 use super::root::{RootIdentity, RootPublic};
@@ -8,12 +8,12 @@ use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// Nombre maximal d'appareils par identité : le plus grand nombre dont la
-/// carte (noms à leur taille maximale), dans le contenu le plus lourd qui la
-/// transporte (`SyncContact`, `SyncDevices`, mise à jour de carte), tient dans
-/// un seul paquet de palier L (16 Kio). Mesuré par
-/// `core::tests::device_cap_fits_one_packet`. Des contenus sur plusieurs
-/// paquets viendront plus tard.
+/// Maximum number of devices per identity: the largest number for which the
+/// card (names at their maximum size), in the heaviest content that
+/// carries it (`SyncContact`, `SyncDevices`, card update), fits in
+/// a single L-tier packet (16 KiB). Measured by
+/// `core::tests::device_cap_fits_one_packet`. Contents spanning several
+/// packets will come later.
 pub const MAX_DEVICES: usize = 8;
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -26,17 +26,17 @@ pub struct DeviceList {
 }
 
 impl DeviceList {
-    /// Octets signés : postcard des champs sans `sig`.
+    /// Signed bytes: postcard of the fields without `sig`.
     fn signed_bytes(
         root: &RootPublic,
         version: u64,
         certs: &[DeviceCertificate],
     ) -> Result<Vec<u8>> {
         postcard::to_allocvec(&(root, version, certs))
-            .map_err(|_| CoreError::Malformed("liste non sérialisable"))
+            .map_err(|_| CoreError::Malformed("list not serializable"))
     }
 
-    /// Vérifie taille, appartenance à la racine, validité et unicité des appareils.
+    /// Checks size, membership of the root, validity and uniqueness of the devices.
     fn check_certs(root: &RootPublic, certs: &[DeviceCertificate]) -> Result<()> {
         if certs.len() > MAX_DEVICES {
             return Err(CoreError::TooLarge);
@@ -48,7 +48,7 @@ impl DeviceList {
             }
             cert.verify()?;
             if !seen.insert(cert.device.id()) {
-                return Err(CoreError::Malformed("appareil en double"));
+                return Err(CoreError::Malformed("duplicate device"));
             }
         }
         Ok(())
@@ -75,7 +75,7 @@ impl DeviceList {
         Self::check_certs(&self.root, &self.certs)
     }
 
-    /// Même racine et version strictement supérieure.
+    /// Same root and strictly higher version.
     pub fn supersedes(&self, older: &DeviceList) -> bool {
         self.root == older.root && self.version > older.version
     }
@@ -131,7 +131,7 @@ mod tests {
         assert!(DeviceList::sign(&r, 1, over.clone()).is_err());
         let full: Vec<_> = (0..n).map(|i| cert(&r, 100 + i, "d")).collect();
         let list = DeviceList::sign(&r, 1, full).unwrap();
-        // Une liste signée au-delà du plafond (ancienne version) est refusée à la vérification.
+        // A list signed beyond the cap (older version) is rejected at verification.
         let mut big = list.clone();
         big.certs = over;
         assert!(big.verify().is_err());
@@ -169,7 +169,7 @@ mod tests {
         assert!(!other.supersedes(&v1));
     }
 
-    /// Liste forgée par un détenteur légitime de la racine, sans passer par `sign`.
+    /// List forged by a legitimate holder of the root, without going through `sign`.
     fn forged(r: &RootIdentity, certs: Vec<DeviceCertificate>) -> DeviceList {
         let root = r.public();
         let bytes = DeviceList::signed_bytes(&root, 1, &certs).unwrap();

@@ -1,5 +1,5 @@
-//! Journal de transparence : ce que le cœur a fait, et ce que les
-//! intermédiaires ont pu en voir (spec §8). Local uniquement.
+//! Transparency log: what the core did, and what the
+//! intermediaries could see of it (spec §8). Local only.
 
 use crate::identity::device::DeviceId;
 use crate::identity::root::Fingerprint;
@@ -22,14 +22,14 @@ pub enum TransparencyEvent {
         mailbox: MailboxId,
         expires_at: u32,
         recipient_device: DeviceId,
-        /// Premier message d'une session (boîte aux lettres d'introduction).
+        /// First message of a session (introduction mailbox).
         first_contact: bool,
     },
     PacketOpened {
         packet_id: PacketId,
         sender: Fingerprint,
         transport: String,
-        /// Le paquet ouvrait une session (boîte aux lettres d'introduction).
+        /// The packet opened a session (introduction mailbox).
         first_contact: bool,
     },
     AckEmitted {
@@ -50,58 +50,58 @@ pub enum TransparencyEvent {
         old: Fingerprint,
         new: Fingerprint,
     },
-    /// Trame rejetée au réassemblage ; `reason` est un texte fixe.
+    /// Frame rejected at reassembly; `reason` is a fixed text.
     FrameRejected {
         reason: String,
     },
-    /// Côté administrateur : un nouvel appareil a été lié à mon compte.
+    /// Administrator side: a new device was linked to my account.
     DeviceLinked {
         device: DeviceId,
         name: String,
     },
-    /// Côté nouvel appareil : la liaison est terminée.
+    /// New device side: the linking is finished.
     LinkFinished {
         device_count: u32,
         contacts: u32,
     },
-    /// Contenu de synchronisation reçu d'un de mes appareils et appliqué.
+    /// Synchronisation content received from one of my devices and applied.
     SyncApplied {
         kind: SyncKind,
     },
-    /// Copie de synchronisation non envoyée : trop volumineuse pour un paquet.
+    /// Synchronisation copy not sent: too large for a packet.
     SyncSkipped {
         kind: SyncKind,
     },
-    /// Carte d'un contact remplacée par une nouvelle liste d'appareils :
-    /// `added` appareils ajoutés, `removed` retirés. `alias` : celui du
-    /// contact au moment de la mise à jour (vide : aucun).
+    /// Card of a contact replaced by a new device list:
+    /// `added` devices added, `removed` removed. `alias`: that of the
+    /// contact at the time of the update (empty: none).
     ContactCardUpdated {
         contact: Fingerprint,
         alias: String,
         added: u32,
         removed: u32,
     },
-    /// Côté nouvel appareil : `count` messages de l'historique importés
-    /// pendant la liaison (archive hors réseau).
+    /// New device side: `count` history messages imported
+    /// during the linking (offline archive).
     HistoryImported {
         count: u32,
     },
-    /// Ma liste d'appareils a changé, reçue d'un de mes appareils
-    /// (`SyncDevices`) : `added` appareils ajoutés, `removed` retirés.
-    /// Ajouté en dernier : l'ordre des variantes est le format stocké.
+    /// My device list changed, received from one of my devices
+    /// (`SyncDevices`): `added` devices added, `removed` removed.
+    /// Added last: the order of the variants is the stored format.
     OwnDevicesUpdated {
         added: u32,
         removed: u32,
     },
-    /// Dépôts sur un nœud : `node` est l'identifiant court (8 caractères
-    /// base32), jamais de boîte ni d'adresse. Ajouté en dernier.
+    /// Deposits on a node: `node` is the short identifier (8 base32
+    /// characters), never a mailbox or an address. Added last.
     NodeDeposit {
         node: String,
         count: u32,
         refused: u32,
     },
-    /// Relève sur un nœud : `mailboxes` boîtes relevées, `received` éléments
-    /// reçus. Ajouté en dernier.
+    /// Fetch on a node: `mailboxes` mailboxes fetched, `received` items
+    /// received. Added last.
     NodeFetch {
         node: String,
         mailboxes: u32,
@@ -109,7 +109,7 @@ pub enum TransparencyEvent {
     },
 }
 
-/// Type de synchronisation entre mes appareils.
+/// Type of synchronisation between my devices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncKind {
     Sent,
@@ -118,47 +118,47 @@ pub enum SyncKind {
 }
 
 impl SyncKind {
-    /// Nom affiché : « message envoyé », « contact », « liste d'appareils ».
+    /// Displayed name: "sent message", "contact", "device list".
     pub fn label(self) -> &'static str {
         match self {
-            SyncKind::Sent => "message envoyé",
+            SyncKind::Sent => "sent message",
             SyncKind::Contact => "contact",
-            SyncKind::Devices => "liste d'appareils",
+            SyncKind::Devices => "device list",
         }
     }
 }
 
-/// Ce que tout relais lit dans l'en-tête en clair d'un paquet.
-const RELAYS_SEE: &str = "Les relais voient : la taille, le type (message ou accusé), \
-    le nombre de sauts, un identifiant de paquet, la boîte aux lettres, l'expiration.";
+/// What any relay reads in the plaintext header of a packet.
+const RELAYS_SEE: &str = "Relays see: the size, the type (message or acknowledgement), \
+    the hop count, a packet identifier, the mailbox, the expiry.";
 
-/// Ce que les relais ne voient pas (identité réelle, destinataire réel, contenu).
-const RELAYS_DONT_SEE: &str = "Ils ne voient pas : qui tu es, à qui tu écris, le contenu.";
+/// What relays do not see (real identity, real recipient, content).
+const RELAYS_DONT_SEE: &str = "They do not see: who you are, whom you are writing to, the content.";
 
-/// Variante pour un premier message : la boîte d'introduction désigne le destinataire.
-const RELAYS_DONT_SEE_FIRST: &str = "Ils ne voient ni qui tu es, ni le contenu. Mais \
-    quiconque possède la carte de contact du destinataire peut savoir que c'est un premier \
-    message pour cette personne.";
+/// Variant for a first message: the introduction mailbox designates the recipient.
+const RELAYS_DONT_SEE_FIRST: &str = "They see neither who you are nor the content. But \
+    anyone who has the recipient's contact card can tell that this is a first \
+    message for that person.";
 
-/// Liaison message / accusé, visible des relais.
-const ACK_LINK: &str = "L'identifiant du paquet permet aux relais de relier un message à son \
-    accusé, et l'accusé reprend la boîte aux lettres du message : ils peuvent donc relier \
-    les deux, sans apprendre l'identité réelle de personne.";
+/// Message / acknowledgement link, visible to relays.
+const ACK_LINK: &str = "The packet identifier lets relays link a message to its \
+    acknowledgement, and the acknowledgement reuses the message's mailbox: they can therefore link \
+    the two, without learning anyone's real identity.";
 
 fn tier_label(tier: Tier) -> &'static str {
     match tier {
-        Tier::S => "petit",
-        Tier::M => "moyen",
-        Tier::L => "grand",
+        Tier::S => "small",
+        Tier::M => "medium",
+        Tier::L => "large",
     }
 }
 
 impl TransparencyEvent {
-    /// Preuve de sécurité : une session établie, une clé de contact
-    /// changée, la liste d'appareils d'un contact mise à jour, un appareil lié à mon compte (côté administrateur) ou une
-    /// liaison terminée (côté nouvel appareil : c'est la preuve de l'identité
-    /// qu'il a rejointe). Ces entrées ont leur propre plafond au journal ; les
-    /// autres (qu'un tiers peut provoquer en masse) ne les évincent jamais.
+    /// Security proof: an established session, a changed contact
+    /// key, a contact's updated device list, a device linked to my account (administrator side) or a
+    /// finished linking (new device side: it is the proof of the identity
+    /// it has joined). These entries have their own cap in the log; the
+    /// others (which a third party can trigger in bulk) never evict them.
     pub fn is_security(&self) -> bool {
         matches!(
             self,
@@ -171,8 +171,8 @@ impl TransparencyEvent {
         )
     }
 
-    /// Texte français destiné à l'utilisateur. N'inclut jamais de texte de
-    /// message (les événements n'en portent pas).
+    /// English text intended for the user. Never includes message
+    /// text (events do not carry any).
     pub fn describe(&self) -> String {
         match self {
             Self::SessionEstablished {
@@ -182,17 +182,17 @@ impl TransparencyEvent {
                 post_quantum,
             } => {
                 let role = if *initiator {
-                    "Tu as ouvert"
+                    "You opened"
                 } else {
-                    "Ton contact a ouvert"
+                    "Your contact opened"
                 };
                 let crypto = if *post_quantum {
-                    "protégée aussi contre les ordinateurs quantiques"
+                    "also protected against quantum computers"
                 } else {
-                    "sans protection post-quantique"
+                    "without post-quantum protection"
                 };
                 format!(
-                    "{role} une session avec le contact {contact} (appareil {}), {crypto}.",
+                    "{role} a session with contact {contact} (device {}), {crypto}.",
                     hex(&device.0[..4])
                 )
             }
@@ -205,20 +205,20 @@ impl TransparencyEvent {
             } => {
                 let (mailbox, hidden) = if *first_contact {
                     (
-                        "Premier message d'une session : la boîte aux lettres d'introduction \
-                         est calculée à partir de la clé publique de l'appareil destinataire \
-                         et du jour.",
+                        "First message of a session: the introduction mailbox \
+                         is computed from the public key of the recipient device \
+                         and the day.",
                         RELAYS_DONT_SEE_FIRST,
                     )
                 } else {
                     (
-                        "La boîte aux lettres est temporaire : elle change chaque jour et ne \
-                         révèle pas l'identité réelle de ton contact.",
+                        "The mailbox is temporary: it changes every day and does not \
+                         reveal your contact's real identity.",
                         RELAYS_DONT_SEE,
                     )
                 };
                 format!(
-                    "Paquet chiffré de {size} octets (palier {}), expire le {}. {mailbox} \
+                    "Encrypted packet of {size} bytes ({} tier), expires on {}. {mailbox} \
                      {RELAYS_SEE} {hidden}",
                     tier_label(*tier),
                     format_utc(*expires_at)
@@ -232,66 +232,66 @@ impl TransparencyEvent {
             } => {
                 let (intro, hidden) = if *first_contact {
                     (
-                        " Il ouvrait une session : il est arrivé dans ta boîte aux lettres \
-                         d'introduction, calculée à partir de la clé publique de ton appareil \
-                         et du jour.",
+                        " It opened a session: it arrived in your introduction \
+                         mailbox, computed from the public key of your device \
+                         and the day.",
                         RELAYS_DONT_SEE_FIRST,
                     )
                 } else {
                     ("", RELAYS_DONT_SEE)
                 };
                 format!(
-                    "Paquet reçu par {transport} et déchiffré : il vient de {sender}.{intro} \
-                     Les relais qui l'ont transporté ont pu lire son en-tête. {RELAYS_SEE} \
+                    "Packet received via {transport} and decrypted: it comes from {sender}.{intro} \
+                     The relays that carried it were able to read its header. {RELAYS_SEE} \
                      {hidden}"
                 )
             }
             Self::AckEmitted { for_packet } => format!(
-                "Accusé de réception publié pour le paquet {}. {RELAYS_SEE} {ACK_LINK} \
-                 Le secret de l'accusé leur permet de supprimer leurs copies.",
+                "Acknowledgement published for packet {}. {RELAYS_SEE} {ACK_LINK} \
+                 The acknowledgement secret lets them delete their copies.",
                 hex(&for_packet.0[..4])
             ),
             Self::AckVerified { for_packet } => format!(
-                "Ton paquet {} est arrivé : l'accusé de réception a été vérifié. \
+                "Your packet {} has arrived: the acknowledgement has been verified. \
                  {RELAYS_SEE} {ACK_LINK}",
                 hex(&for_packet.0[..4])
             ),
             Self::DecryptFailed { packet_id, reason } => format!(
-                "Paquet {} impossible à déchiffrer ({reason}). Il a été ignoré. \
-                 {RELAYS_SEE} Ils ne savent pas s'il a été lu.",
+                "Packet {} could not be decrypted ({reason}). It was ignored. \
+                 {RELAYS_SEE} They do not know whether it was read.",
                 hex(&packet_id.0[..4])
             ),
             Self::DuplicateIgnored { packet_id } => format!(
-                "Paquet {} déjà reçu : la copie a été ignorée. \
-                 Les relais peuvent en transporter plusieurs copies ; c'est normal.",
+                "Packet {} already received: the copy was ignored. \
+                 Relays may carry several copies of it; this is normal.",
                 hex(&packet_id.0[..4])
             ),
             Self::ContactKeyChanged { alias, old, new } => format!(
-                "Attention : la clé de {alias} a changé (ancienne empreinte {old}, \
-                 nouvelle {new}). Vérifie le numéro de sécurité avec cette personne \
-                 avant de continuer."
+                "Warning: the key of {alias} has changed (old fingerprint {old}, \
+                 new {new}). Check the safety number with this person \
+                 before continuing."
             ),
             Self::FrameRejected { reason } => format!(
-                "Trame rejetée ({reason}) : elle ne correspond pas au paquet annoncé. \
-                 Le paquet n'a pas été reconstitué ; l'expéditeur le renverra."
+                "Frame rejected ({reason}): it does not match the announced packet. \
+                 The packet was not reassembled; the sender will resend it."
             ),
             Self::DeviceLinked { name, .. } => format!(
-                "Nouvel appareil « {name} » lié à ton compte. \
-                 Tes contacts vont recevoir ta nouvelle liste d'appareils."
+                "New device \"{name}\" linked to your account. \
+                 Your contacts will receive your new device list."
             ),
             Self::LinkFinished {
                 device_count,
                 contacts,
             } => format!(
-                "Cet appareil est maintenant lié à ton compte ({device_count} appareils, \
-                 {contacts} contacts copiés). La clé racine n'a pas été copiée."
+                "This device is now linked to your account ({device_count} devices, \
+                 {contacts} contacts copied). The root key was not copied."
             ),
             Self::SyncApplied { kind } => {
-                format!("Synchronisé depuis un de tes appareils : {}.", kind.label())
+                format!("Synchronized from one of your devices: {}.", kind.label())
             }
             Self::SyncSkipped { kind } => format!(
-                "Copie vers tes autres appareils non envoyée ({}) : trop volumineuse. \
-                 Tes appareils peuvent différer sur ce point.",
+                "Copy to your other devices not sent ({}): too large. \
+                 Your devices may differ on this point.",
                 kind.label()
             ),
             Self::ContactCardUpdated {
@@ -300,8 +300,8 @@ impl TransparencyEvent {
                 added,
                 removed,
             } => format!(
-                "{} a mis à jour sa liste d'appareils (+{added}, \u{2212}{removed}). \
-                 Les messages seront aussi chiffrés pour ses nouveaux appareils.",
+                "{} updated their device list (+{added}, \u{2212}{removed}). \
+                 Messages will also be encrypted for their new devices.",
                 if alias.is_empty() {
                     contact.to_string()
                 } else {
@@ -309,31 +309,31 @@ impl TransparencyEvent {
                 }
             ),
             Self::HistoryImported { count } => format!(
-                "{count} messages de l'historique copiés depuis ton autre appareil. \
-                 Ils n'ont transité par aucun nœud."
+                "{count} history messages copied from your other device. \
+                 They did not pass through any node."
             ),
             Self::OwnDevicesUpdated { added, removed } => {
-                format!("Ta liste d'appareils a changé (+{added}, \u{2212}{removed}).")
+                format!("Your device list has changed (+{added}, \u{2212}{removed}).")
             }
             Self::NodeDeposit {
                 node,
                 count,
                 refused,
             } => format!(
-                "{count} paquets déposés sur le nœud {node} ({refused} refusés). \
-                 Le nœud voit la boîte aux lettres, la taille, l'heure et ton adresse IP ; \
-                 pas le contenu."
+                "{count} packets deposited on node {node} ({refused} refused). \
+                 The node sees the mailbox, the size, the time and your IP address; \
+                 not the content."
             ),
             Self::NodeFetch {
                 node,
                 mailboxes,
                 received,
             } => format!(
-                "Boîtes relevées sur le nœud {node} : {mailboxes} boîtes, {received} éléments \
-                 reçus. Le nœud voit quelles boîtes tu relèves et ton adresse IP pendant la \
-                 connexion, et peut lier entre eux les dépôts et la relève d'une même \
-                 connexion. Ta boîte d'introduction se calcule à partir de ta clé publique : \
-                 la relever lie ton identité à cette adresse IP."
+                "Mailboxes fetched from node {node}: {mailboxes} mailboxes, {received} items \
+                 received. The node sees which mailboxes you fetch and your IP address during the \
+                 connection, and can link together the deposits and the fetch of a single \
+                 connection. Your introduction mailbox is computed from your public key: \
+                 fetching it links your identity to this IP address."
             ),
         }
     }
@@ -343,8 +343,8 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Date UTC lisible `AAAA-MM-JJ HH:MM UTC`, sans horloge ni dépendance
-/// (algorithme « civil from days » de Howard Hinnant).
+/// Readable UTC date `YYYY-MM-DD HH:MM UTC`, with no clock or dependency
+/// (Howard Hinnant's "civil from days" algorithm).
 fn format_utc(secs: u32) -> String {
     let secs = i64::from(secs);
     let days = secs.div_euclid(86_400);
@@ -421,20 +421,20 @@ mod tests {
             TransparencyEvent::PacketOpened {
                 packet_id: pid(),
                 sender: fp(3),
-                transport: "fichier".into(),
+                transport: "file".into(),
                 first_contact: false,
             },
             TransparencyEvent::PacketOpened {
                 packet_id: pid(),
                 sender: fp(3),
-                transport: "fichier".into(),
+                transport: "file".into(),
                 first_contact: true,
             },
             TransparencyEvent::AckEmitted { for_packet: pid() },
             TransparencyEvent::AckVerified { for_packet: pid() },
             TransparencyEvent::DecryptFailed {
                 packet_id: pid(),
-                reason: "authentification invalide".into(),
+                reason: "invalid authentication".into(),
             },
             TransparencyEvent::DuplicateIgnored { packet_id: pid() },
             TransparencyEvent::ContactKeyChanged {
@@ -443,11 +443,11 @@ mod tests {
                 new: fp(5),
             },
             TransparencyEvent::FrameRejected {
-                reason: "hash de trame incorrect".into(),
+                reason: "bad frame hash".into(),
             },
             TransparencyEvent::DeviceLinked {
                 device: DeviceId([6; 16]),
-                name: "tablette".into(),
+                name: "tablet".into(),
             },
             TransparencyEvent::LinkFinished {
                 device_count: 2,
@@ -494,15 +494,15 @@ mod tests {
         let d = |kind| TransparencyEvent::SyncApplied { kind }.describe();
         assert_eq!(
             d(SyncKind::Sent),
-            "Synchronisé depuis un de tes appareils : message envoyé."
+            "Synchronized from one of your devices: sent message."
         );
         assert_eq!(
             d(SyncKind::Contact),
-            "Synchronisé depuis un de tes appareils : contact."
+            "Synchronized from one of your devices: contact."
         );
         assert_eq!(
             d(SyncKind::Devices),
-            "Synchronisé depuis un de tes appareils : liste d'appareils."
+            "Synchronized from one of your devices: device list."
         );
         assert!(
             !TransparencyEvent::SyncApplied {
@@ -513,13 +513,13 @@ mod tests {
         let skipped = |kind| TransparencyEvent::SyncSkipped { kind };
         assert_eq!(
             skipped(SyncKind::Contact).describe(),
-            "Copie vers tes autres appareils non envoyée (contact) : trop volumineuse. \
-             Tes appareils peuvent différer sur ce point."
+            "Copy to your other devices not sent (contact): too large. \
+             Your devices may differ on this point."
         );
         assert_eq!(
             skipped(SyncKind::Devices).describe(),
-            "Copie vers tes autres appareils non envoyée (liste d'appareils) : trop \
-             volumineuse. Tes appareils peuvent différer sur ce point."
+            "Copy to your other devices not sent (device list): too \
+             large. Your devices may differ on this point."
         );
         assert!(!skipped(SyncKind::Sent).is_security());
     }
@@ -527,9 +527,9 @@ mod tests {
     #[test]
     fn describe_sealed_mentions_what_relays_see() {
         let d = sealed().describe();
-        assert!(d.contains("Les relais voient"), "{d}");
-        assert!(d.contains("Ils ne voient pas"), "{d}");
-        assert!(d.contains("1024 octets"), "{d}");
+        assert!(d.contains("Relays see"), "{d}");
+        assert!(d.contains("They do not see"), "{d}");
+        assert!(d.contains("1024 bytes"), "{d}");
         // 1_700_000_000 = 2023-11-14 22:13:20 UTC
         assert!(d.contains("2023-11-14 22:13 UTC"), "{d}");
     }
@@ -551,7 +551,7 @@ mod tests {
                     | TransparencyEvent::AckEmitted { .. }
             ) {
                 let d = e.describe();
-                assert!(d.contains("relais"), "{d}");
+                assert!(d.contains("Relays see"), "{d}");
             }
         }
     }
@@ -560,31 +560,25 @@ mod tests {
     fn describe_lists_all_visible_header_fields() {
         let ack = TransparencyEvent::AckEmitted { for_packet: pid() }.describe();
         for d in [sealed().describe(), ack] {
-            for w in [
-                "type",
-                "sauts",
-                "identifiant",
-                "boîte aux lettres",
-                "expiration",
-            ] {
-                assert!(d.contains(w), "{w} manque : {d}");
+            for w in ["type", "hop count", "identifier", "mailbox", "expiry"] {
+                assert!(d.contains(w), "{w} missing: {d}");
             }
         }
         assert!(!sealed().describe().contains("Tier"));
-        assert!(sealed().describe().contains("moyen"));
+        assert!(sealed().describe().contains("medium"));
     }
 
     #[test]
     fn describe_ack_states_linkability() {
         let d = TransparencyEvent::AckVerified { for_packet: pid() }.describe();
-        assert!(d.contains("relier"), "{d}");
+        assert!(d.contains("link"), "{d}");
     }
 
     #[test]
     fn describe_first_contact_mentions_contact_card() {
         let d = sealed_first().describe();
-        assert!(d.contains("carte de contact"), "{d}");
-        assert!(!sealed().describe().contains("carte de contact"));
+        assert!(d.contains("contact card"), "{d}");
+        assert!(!sealed().describe().contains("contact card"));
     }
 
     #[test]
@@ -592,17 +586,17 @@ mod tests {
         let opened = |first_contact| TransparencyEvent::PacketOpened {
             packet_id: pid(),
             sender: fp(3),
-            transport: "fichier".into(),
+            transport: "file".into(),
             first_contact,
         };
         for d in [sealed_first().describe(), opened(true).describe()] {
-            assert!(!d.contains("à qui tu écris"), "{d}");
-            assert!(d.contains("carte de contact"), "{d}");
-            assert!(d.contains("Les relais voient"), "{d}");
-            assert!(d.contains("qui tu es"), "{d}");
+            assert!(!d.contains("whom you are writing to"), "{d}");
+            assert!(d.contains("contact card"), "{d}");
+            assert!(d.contains("Relays see"), "{d}");
+            assert!(d.contains("who you are"), "{d}");
         }
-        assert!(sealed().describe().contains("à qui tu écris"));
-        assert!(!opened(false).describe().contains("carte de contact"));
+        assert!(sealed().describe().contains("whom you are writing to"));
+        assert!(!opened(false).describe().contains("contact card"));
     }
 
     #[test]
@@ -624,12 +618,12 @@ mod tests {
     fn describe_link_events_exact() {
         let linked = TransparencyEvent::DeviceLinked {
             device: DeviceId([6; 16]),
-            name: "tablette".into(),
+            name: "tablet".into(),
         };
         assert_eq!(
             linked.describe(),
-            "Nouvel appareil « tablette » lié à ton compte. \
-             Tes contacts vont recevoir ta nouvelle liste d'appareils."
+            "New device \"tablet\" linked to your account. \
+             Your contacts will receive your new device list."
         );
         let finished = TransparencyEvent::LinkFinished {
             device_count: 2,
@@ -637,8 +631,8 @@ mod tests {
         };
         assert_eq!(
             finished.describe(),
-            "Cet appareil est maintenant lié à ton compte (2 appareils, 3 contacts copiés). \
-             La clé racine n'a pas été copiée."
+            "This device is now linked to your account (2 devices, 3 contacts copied). \
+             The root key was not copied."
         );
     }
 
@@ -648,8 +642,8 @@ mod tests {
         assert!(!e.is_security());
         assert_eq!(
             e.describe(),
-            "42 messages de l'historique copiés depuis ton autre appareil. \
-             Ils n'ont transité par aucun nœud."
+            "42 history messages copied from your other device. \
+             They did not pass through any node."
         );
     }
 
@@ -663,15 +657,15 @@ mod tests {
         };
         assert_eq!(
             e("Alice").describe(),
-            "Alice a mis à jour sa liste d'appareils (+1, \u{2212}2). \
-             Les messages seront aussi chiffrés pour ses nouveaux appareils."
+            "Alice updated their device list (+1, \u{2212}2). \
+             Messages will also be encrypted for their new devices."
         );
-        // Sans alias : l'empreinte.
+        // Without alias: the fingerprint.
         assert_eq!(
             e("").describe(),
             format!(
-                "{} a mis à jour sa liste d'appareils (+1, \u{2212}2). \
-                 Les messages seront aussi chiffrés pour ses nouveaux appareils.",
+                "{} updated their device list (+1, \u{2212}2). \
+                 Messages will also be encrypted for their new devices.",
                 fp(7)
             )
         );
@@ -686,7 +680,7 @@ mod tests {
         assert!(e.is_security());
         assert_eq!(
             e.describe(),
-            "Ta liste d'appareils a changé (+2, \u{2212}1)."
+            "Your device list has changed (+2, \u{2212}1)."
         );
     }
 
@@ -700,9 +694,9 @@ mod tests {
         assert!(!dep.is_security());
         assert_eq!(
             dep.describe(),
-            "2 paquets déposés sur le nœud ABCDEFGH (1 refusés). \
-             Le nœud voit la boîte aux lettres, la taille, l'heure et ton adresse IP ; \
-             pas le contenu."
+            "2 packets deposited on node ABCDEFGH (1 refused). \
+             The node sees the mailbox, the size, the time and your IP address; \
+             not the content."
         );
         let fetch = TransparencyEvent::NodeFetch {
             node: "ABCDEFGH".into(),
@@ -712,11 +706,11 @@ mod tests {
         assert!(!fetch.is_security());
         assert_eq!(
             fetch.describe(),
-            "Boîtes relevées sur le nœud ABCDEFGH : 5 boîtes, 3 éléments reçus. \
-             Le nœud voit quelles boîtes tu relèves et ton adresse IP pendant la connexion, \
-             et peut lier entre eux les dépôts et la relève d'une même connexion. \
-             Ta boîte d'introduction se calcule à partir de ta clé publique : \
-             la relever lie ton identité à cette adresse IP."
+            "Mailboxes fetched from node ABCDEFGH: 5 mailboxes, 3 items received. \
+             The node sees which mailboxes you fetch and your IP address during the connection, \
+             and can link together the deposits and the fetch of a single connection. \
+             Your introduction mailbox is computed from your public key: \
+             fetching it links your identity to this IP address."
         );
     }
 

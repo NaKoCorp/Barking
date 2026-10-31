@@ -1,10 +1,10 @@
-//! Enveloppe à expéditeur caché.
+//! Envelope with hidden sender.
 //!
-//! Le contenu chiffré ne transporte aucune identité d'expéditeur : le
-//! destinataire l'obtient grâce à la session qui déchiffre (`Wire::Normal`) ou
-//! grâce à `InitialMessage::ik` (`Wire::Initial`). Le message initial est
-//! lui-même scellé pour que les relais ne voient pas la clé `ik` de
-//! l'expéditeur.
+//! The encrypted content carries no sender identity: the
+//! recipient obtains it from the session that decrypts (`Wire::Normal`) or
+//! from `InitialMessage::ik` (`Wire::Initial`). The initial message is
+//! itself sealed so that relays cannot see the sender's `ik`
+//! key.
 
 use core::fmt;
 
@@ -25,57 +25,57 @@ use crate::packet::{DEFAULT_HOPS, DEFAULT_TTL_SECS, Kind, Packet, Tier, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
 use crate::{CoreError, Result};
 
-/// Taille maximale d'un texte, en octets.
+/// Maximum size of a text, in bytes.
 pub const MAX_TEXT_LEN: usize = 4000;
 
-/// Contenu d'un message. Nouvelles variantes : toujours à la fin (format
-/// postcard, indice de variante).
+/// Content of a message. New variants: always at the end (postcard
+/// format, variant index).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Body {
     Text(String),
-    /// Copie d'un message que j'ai envoyé à `to` depuis un autre de mes
-    /// appareils. L'identifiant et la date sont ceux de l'enveloppe.
+    /// Copy of a message I sent to `to` from another of my
+    /// devices. The identifier and date are those of the envelope.
     SyncSent {
         to: Fingerprint,
         text: String,
     },
-    /// État d'un de mes contacts après une opération faite sur un autre de
-    /// mes appareils (dernier écrivain gagnant, voir `core/sync.rs`).
+    /// State of one of my contacts after an operation done on another of
+    /// my devices (last writer wins, see `core/sync.rs`).
     SyncContact(SyncOp),
-    /// Nouvelle liste de mes appareils : ma carte, signée par ma racine, qui
-    /// porte la liste et un paquet de clés par appareil.
+    /// New list of my devices: my card, signed by my root, which
+    /// carries the list and one key bundle per device.
     SyncDevices {
         card: Box<ContactCard>,
     },
-    /// Nouvelle carte d'un contact (nouvelle liste d'appareils), envoyée à
-    /// chacun de ses contacts après une liaison. Carte en boîte (taille de
-    /// l'enum) ; même format postcard que `CardUpdate(ContactCard)`.
+    /// New card of a contact (new device list), sent to
+    /// each of its contacts after a linking. Boxed card (size of
+    /// the enum); same postcard format as `CardUpdate(ContactCard)`.
     CardUpdate(Box<ContactCard>),
 }
 
-/// État d'un contact, rejoué sur mes autres appareils. Idempotent : le même
-/// état appliqué deux fois ne change rien.
+/// State of a contact, replayed on my other devices. Idempotent: the same
+/// state applied twice changes nothing.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncOp {
-    /// Contact présent avec cette carte, cet alias (vide : aucun) et ce
-    /// statut vérifié (fusionné par « ou »). Carte en boîte (taille de
-    /// l'enum) ; même format postcard.
+    /// Contact present with this card, this alias (empty: none) and this
+    /// verified status (merged by "or"). Boxed card (size of
+    /// the enum); same postcard format.
     Upsert {
         card: Box<ContactCard>,
         alias: String,
         verified: bool,
     },
-    /// Contact supprimé (sans effet s'il est inconnu).
+    /// Contact removed (no effect if unknown).
     Remove(Fingerprint),
 }
 
-/// Contenu chiffré d'un paquet. Aucune identité d'expéditeur.
+/// Encrypted content of a packet. No sender identity.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     pub sent_at: u64,
     pub ack_secret: [u8; 16],
-    /// Identifiant logique du message, choisi par l'expéditeur : le même pour
-    /// chaque paquet (un par appareil destinataire) et pour chaque renvoi.
+    /// Logical identifier of the message, chosen by the sender: the same for
+    /// every packet (one per recipient device) and for every resend.
     pub message_id: [u8; 16],
     pub body: Body,
 }
@@ -83,8 +83,8 @@ pub struct Envelope {
 impl fmt::Debug for Body {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Body::Text(t) => write!(f, "Text(<{} octets>)", t.len()),
-            Body::SyncSent { text, .. } => write!(f, "SyncSent(<{} octets>)", text.len()),
+            Body::Text(t) => write!(f, "Text(<{} bytes>)", t.len()),
+            Body::SyncSent { text, .. } => write!(f, "SyncSent(<{} bytes>)", text.len()),
             Body::SyncContact(op) => write!(f, "SyncContact({op:?})"),
             Body::SyncDevices { card } => {
                 write!(f, "SyncDevices(version {})", card.devices.version)
@@ -98,7 +98,7 @@ impl fmt::Debug for Body {
 
 impl fmt::Debug for SyncOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Ni carte, ni alias, ni empreinte : seulement le type d'opération.
+        // No card, no alias, no fingerprint: only the operation type.
         f.write_str(match self {
             SyncOp::Upsert { .. } => "Upsert",
             SyncOp::Remove(_) => "Remove",
@@ -119,7 +119,7 @@ impl fmt::Debug for Envelope {
     }
 }
 
-/// Charge utile d'un paquet de message.
+/// Payload of a message packet.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Wire {
     Initial {
@@ -133,7 +133,7 @@ pub enum Wire {
 }
 
 impl Body {
-    /// Refuse un texte de plus de [`MAX_TEXT_LEN`] octets.
+    /// Rejects a text longer than [`MAX_TEXT_LEN`] bytes.
     fn check(&self) -> Result<()> {
         match self {
             Body::Text(t) | Body::SyncSent { text: t, .. } if t.len() > MAX_TEXT_LEN => {
@@ -144,18 +144,18 @@ impl Body {
     }
 }
 
-/// Majorant de ce qu'ajoute la charge `Wire::Initial` (la plus lourde) à
-/// l'enveloppe sérialisée : étiquette, `ek` (32), message initial scellé
-/// (clés, identifiants, chiffré ML-KEM de 1088 octets, étiquette AEAD,
-/// longueurs ≈ 1 190), en-tête chiffré (80) et étiquette du corps (16),
-/// longueurs comprises. Vérifié par un test sur de vrais paquets.
+/// Upper bound of what the `Wire::Initial` payload (the heaviest) adds to
+/// the serialized envelope: tag, `ek` (32), sealed initial message
+/// (keys, identifiers, 1088-byte ML-KEM ciphertext, AEAD tag,
+/// lengths ≈ 1,190), encrypted header (80) and body tag (16),
+/// lengths included. Verified by a test on real packets.
 pub const MAX_WIRE_OVERHEAD: usize = 1_340;
 
-/// Le contenu tient-il dans un seul paquet (palier L), quelle que soit la
-/// session (ouverture comprise) ? Calcul sans rien écrire ni faire avancer :
-/// à appeler avant `seal`, qui refuserait (`TooLarge`) après coup.
+/// Does the content fit in a single packet (L tier), whatever the
+/// session (opening included)? Computed without writing or advancing anything:
+/// to be called before `seal`, which would refuse (`TooLarge`) after the fact.
 pub fn fits_in_packet(body: &Body) -> bool {
-    // Horodatage maximal : l'entier variable le plus long.
+    // Maximum timestamp: the longest variable-length integer.
     let env = Envelope {
         sent_at: u64::MAX,
         ack_secret: [0; 16],
@@ -168,7 +168,7 @@ pub fn fits_in_packet(body: &Body) -> bool {
         .is_some_and(|len| Tier::fit(len).is_ok())
 }
 
-/// Sortie X25519 non nulle (sinon point d'ordre faible : échange non contributif).
+/// Non-zero X25519 output (otherwise weak-order point: non-contributory exchange).
 fn nonzero_dh(dh: [u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
     let dh = Zeroizing::new(dh);
     if dh.iter().fold(0u8, |acc, b| acc | b) == 0 {
@@ -188,7 +188,7 @@ fn initial_key(dh: &[u8; 32]) -> Result<(Zeroizing<[u8; 32]>, [u8; 12])> {
     Ok((key, nonce))
 }
 
-/// Scelle `init` pour `ik_b` avec une éphémère fraîche ; renvoie `(ek, sealed_init)`.
+/// Seals `init` for `ik_b` with a fresh ephemeral key; returns `(ek, sealed_init)`.
 fn seal_initial(
     init: &InitialMessage,
     ik_b: &[u8; 32],
@@ -200,16 +200,16 @@ fn seal_initial(
     let ek = PublicKey::from(&e_seal).to_bytes();
     let dh = nonzero_dh(e_seal.diffie_hellman(&PublicKey::from(*ik_b)).to_bytes())?;
     let (key, nonce) = initial_key(&dh)?;
-    let pt = postcard::to_allocvec(init).map_err(|_| CoreError::Malformed("message initial"))?;
-    // Chaque éphémère est neuve : le couple (clé, nonce) n'est jamais réutilisé.
+    let pt = postcard::to_allocvec(init).map_err(|_| CoreError::Malformed("initial message"))?;
+    // Each ephemeral key is new: the (key, nonce) pair is never reused.
     Ok((ek, aead::seal(&key, &nonce, &ek, &pt)))
 }
 
-/// Chiffre `env` dans la session `ratchet` et l'emballe dans un paquet de message.
+/// Encrypts `env` in the `ratchet` session and wraps it in a message packet.
 ///
-/// Avec `initial = Some((init, ik_b))`, le paquet est un `Wire::Initial` : le
-/// message PQXDH est scellé pour la clé d'identité X25519 `ik_b` du destinataire.
-/// En cas d'erreur, `ratchet` n'a pas avancé.
+/// With `initial = Some((init, ik_b))`, the packet is a `Wire::Initial`: the
+/// PQXDH message is sealed for the recipient's X25519 identity key `ik_b`.
+/// On error, `ratchet` has not advanced.
 pub fn seal(
     env: &Envelope,
     ratchet: &mut RatchetState,
@@ -221,8 +221,8 @@ pub fn seal(
 ) -> Result<Packet> {
     env.body.check()?;
     let pt =
-        Zeroizing::new(postcard::to_allocvec(env).map_err(|_| CoreError::Malformed("enveloppe"))?);
-    // Toutes les vérifications faillibles avant de faire avancer le ratchet.
+        Zeroizing::new(postcard::to_allocvec(env).map_err(|_| CoreError::Malformed("envelope"))?);
+    // All fallible checks before advancing the ratchet.
     let sealed = initial
         .map(|(init, ik_b)| seal_initial(init, ik_b, rng))
         .transpose()?;
@@ -236,10 +236,10 @@ pub fn seal(
         },
         None => Wire::Normal { msg },
     };
-    let payload = postcard::to_allocvec(&wire).map_err(|_| CoreError::Malformed("charge"))?;
+    let payload = postcard::to_allocvec(&wire).map_err(|_| CoreError::Malformed("payload"))?;
     let mut tier = Tier::fit(payload.len())?;
     if matches!(wire, Wire::Initial { .. }) && tier == Tier::S {
-        // Ouverture de session : jamais en palier S (pas en LoRa).
+        // Session opening: never in tier S (not over LoRa).
         tier = Tier::M;
     }
     *ratchet = next;
@@ -254,12 +254,12 @@ pub fn seal(
     })
 }
 
-/// Granularité de l'expiration d'un paquet scellé par le cœur.
+/// Granularity of the expiry of a packet sealed by the core.
 pub const EXPIRY_GRANULARITY_SECS: u64 = 600;
 
-/// Expiration d'un paquet scellé à `now` : `now` + 7 jours, arrondie vers le
-/// bas à 10 minutes (les nœuds ne voient pas la seconde du scellement).
-/// Saturée à `u32::MAX`.
+/// Expiry of a packet sealed at `now`: `now` + 7 days, rounded down
+/// to 10 minutes (nodes do not see the second of sealing).
+/// Saturated at `u32::MAX`.
 pub fn sealed_expiry(now: u64) -> u32 {
     match u32::try_from(now.saturating_add(DEFAULT_TTL_SECS)) {
         Ok(e) => {
@@ -270,36 +270,34 @@ pub fn sealed_expiry(now: u64) -> u32 {
     }
 }
 
-/// Décode la charge d'un paquet de message. Refuse les octets en trop.
+/// Decodes the payload of a message packet. Rejects extra bytes.
 pub fn parse_wire(payload: &[u8]) -> Result<Wire> {
     let (wire, rest) =
-        postcard::take_from_bytes(payload).map_err(|_| CoreError::Malformed("charge"))?;
+        postcard::take_from_bytes(payload).map_err(|_| CoreError::Malformed("payload"))?;
     if !rest.is_empty() {
-        return Err(CoreError::Malformed("octets en trop dans la charge"));
+        return Err(CoreError::Malformed("extra bytes in the payload"));
     }
     Ok(wire)
 }
 
-/// Ouvre le message initial scellé pour `me` avec la clé éphémère `ek`.
+/// Opens the initial message sealed for `me` with the ephemeral key `ek`.
 pub fn open_initial(me: &DeviceKeys, ek: &[u8; 32], sealed_init: &[u8]) -> Result<InitialMessage> {
     let dh = nonzero_dh(me.dh(&PublicKey::from(*ek)))?;
     let (key, nonce) = initial_key(&dh)?;
     let pt = Zeroizing::new(aead::open(&key, &nonce, ek, sealed_init)?);
     let (init, rest) =
-        postcard::take_from_bytes(&pt).map_err(|_| CoreError::Malformed("message initial"))?;
+        postcard::take_from_bytes(&pt).map_err(|_| CoreError::Malformed("initial message"))?;
     if !rest.is_empty() {
-        return Err(CoreError::Malformed(
-            "octets en trop dans le message initial",
-        ));
+        return Err(CoreError::Malformed("extra bytes in the initial message"));
     }
     Ok(init)
 }
 
-/// Déchiffre `msg` dans la session `ratchet` et décode l'enveloppe.
+/// Decrypts `msg` in the `ratchet` session and decodes the envelope.
 ///
-/// Le déchiffrement est transactionnel ; une fois le message authentifié, le
-/// ratchet avance même si l'enveloppe est ensuite refusée (contenu mal formé
-/// ou texte trop long), car le message vient bien de l'interlocuteur.
+/// Decryption is transactional; once the message is authenticated, the
+/// ratchet advances even if the envelope is subsequently rejected (malformed content
+/// or text too long), since the message does come from the correspondent.
 pub fn open(
     msg: &RatchetMessage,
     ratchet: &mut RatchetState,
@@ -310,15 +308,15 @@ pub fn open(
     decode(&pt)
 }
 
-/// Décode et valide une enveloppe déjà déchiffrée et authentifiée.
+/// Decodes and validates an envelope that is already decrypted and authenticated.
 ///
-/// Séparé de [`open`] pour que l'appelant distingue un échec de déchiffrement
-/// (ratchet inchangé) d'un contenu authentifié mais refusé (ratchet avancé).
+/// Separate from [`open`] so that the caller can tell a decryption failure
+/// (ratchet unchanged) from authenticated but rejected content (ratchet advanced).
 pub fn decode(pt: &[u8]) -> Result<Envelope> {
     let (env, rest): (Envelope, _) =
-        postcard::take_from_bytes(pt).map_err(|_| CoreError::Malformed("enveloppe"))?;
+        postcard::take_from_bytes(pt).map_err(|_| CoreError::Malformed("envelope"))?;
     if !rest.is_empty() {
-        return Err(CoreError::Malformed("octets en trop dans l'enveloppe"));
+        return Err(CoreError::Malformed("extra bytes in the envelope"));
     }
     env.body.check()?;
     Ok(env)
@@ -349,7 +347,7 @@ mod tests {
         init: InitialMessage,
     }
 
-    /// Ouvre une vraie session PQXDH entre Alice et Bob, puis les deux ratchets.
+    /// Opens a real PQXDH session between Alice and Bob, then the two ratchets.
     fn setup(seed: u64) -> Setup {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         let (alice_root, _) = RootIdentity::generate(&mut rng);
@@ -386,7 +384,7 @@ mod tests {
         hay.windows(needle.len()).any(|w| w == needle)
     }
 
-    /// Alice envoie l'Initial, Bob le reçoit ; renvoie le paquet.
+    /// Alice sends the Initial, Bob receives it; returns the packet.
     fn send_initial(s: &mut Setup, e: &Envelope) -> Packet {
         let ik_b = s.bob.public().dh;
         let ad = s.sa.ad.clone();
@@ -405,16 +403,16 @@ mod tests {
     #[test]
     fn seal_open_roundtrip_normal() {
         let mut s = setup(1);
-        // Premier message en Initial, puis réponse et échanges en Normal.
-        let e0 = env(&mut s.rng, "bonjour");
+        // First message as Initial, then reply and exchanges as Normal.
+        let e0 = env(&mut s.rng, "hello");
         let p0 = send_initial(&mut s, &e0);
         let Wire::Initial { msg, .. } = parse_wire(&p0.payload).unwrap() else {
-            panic!("Initial attendu");
+            panic!("Initial expected");
         };
         let ad = s.sa.ad.clone();
         assert_eq!(open(&msg, &mut s.b, &ad, NOW).unwrap(), e0);
 
-        for (i, (from_b, text)) in [(true, "salut"), (false, "ça va ?"), (true, "oui")]
+        for (i, (from_b, text)) in [(true, "hi"), (false, "how are you?"), (true, "yes")]
             .into_iter()
             .enumerate()
         {
@@ -434,7 +432,7 @@ mod tests {
             );
             let decoded = Packet::decode(&p.encode()).unwrap();
             let Wire::Normal { msg } = parse_wire(&decoded.payload).unwrap() else {
-                panic!("Normal attendu");
+                panic!("Normal expected");
             };
             assert_eq!(open(&msg, rcv, &ad, NOW).unwrap(), e);
         }
@@ -443,7 +441,7 @@ mod tests {
     #[test]
     fn seal_open_roundtrip_initial() {
         let mut s = setup(2);
-        let e = env(&mut s.rng, "premier message");
+        let e = env(&mut s.rng, "first message");
         let p = send_initial(&mut s, &e);
         let decoded = Packet::decode(&p.encode()).unwrap();
         let Wire::Initial {
@@ -452,9 +450,9 @@ mod tests {
             msg,
         } = parse_wire(&decoded.payload).unwrap()
         else {
-            panic!("Initial attendu");
+            panic!("Initial expected");
         };
-        // Le scellement utilise une éphémère propre, distincte de celle du PQXDH.
+        // The sealing uses its own ephemeral key, distinct from that of the PQXDH.
         assert_ne!(ek, s.init.ek);
         let init = open_initial(&s.bob, &ek, &sealed_init).unwrap();
         assert_eq!(init, s.init);
@@ -471,21 +469,21 @@ mod tests {
             ek, sealed_init, ..
         } = parse_wire(&p.payload).unwrap()
         else {
-            panic!("Initial attendu");
+            panic!("Initial expected");
         };
-        // Mauvais destinataire.
+        // Wrong recipient.
         assert_eq!(
             open_initial(&s.alice, &ek, &sealed_init),
             Err(CoreError::Crypto)
         );
-        // Altération du scellé ou de la clé éphémère (données associées).
+        // Tampering with the seal or the ephemeral key (associated data).
         let mut bad = sealed_init.clone();
         bad[0] ^= 1;
         assert_eq!(open_initial(&s.bob, &ek, &bad), Err(CoreError::Crypto));
         let mut bad_ek = ek;
         bad_ek[0] ^= 1;
         assert!(open_initial(&s.bob, &bad_ek, &sealed_init).is_err());
-        // Point d'ordre faible : sortie DH nulle refusée.
+        // Weak-order point: all-zero DH output rejected.
         assert_eq!(
             open_initial(&s.bob, &[0u8; 32], &sealed_init),
             Err(CoreError::Crypto)
@@ -509,7 +507,7 @@ mod tests {
             &mut s.rng,
         );
         assert_eq!(r, Err(CoreError::Crypto));
-        // Le ratchet n'a pas avancé.
+        // The ratchet has not advanced.
         assert_eq!(postcard::to_allocvec(&s.a).unwrap(), snapshot);
     }
 
@@ -523,10 +521,10 @@ mod tests {
         let p0 = send_initial(&mut s, &e).encode();
         let Wire::Initial { msg, .. } = parse_wire(&Packet::decode(&p0).unwrap().payload).unwrap()
         else {
-            panic!("Initial attendu");
+            panic!("Initial expected");
         };
         open(&msg, &mut s.b, &ad, NOW).unwrap();
-        let e = env(&mut s.rng, "réponse");
+        let e = env(&mut s.rng, "reply");
         let p1 = seal(&e, &mut s.a, &ad, None, MB, NOW, &mut s.rng)
             .unwrap()
             .encode();
@@ -534,7 +532,7 @@ mod tests {
             assert!(!contains(bytes, &root));
             assert!(!contains(bytes, &dev.dh));
             assert!(!contains(bytes, &dev.sig));
-            // Ni l'éphémère du PQXDH, qui relierait l'Initial à la session.
+            // Nor the PQXDH ephemeral key, which would link the Initial to the session.
             assert!(!contains(bytes, &s.init.ek));
         }
     }
@@ -542,7 +540,7 @@ mod tests {
     #[test]
     fn packet_id_is_ack_hash() {
         let mut s = setup(6);
-        let e = env(&mut s.rng, "accusé");
+        let e = env(&mut s.rng, "ack");
         let p = send_initial(&mut s, &e);
         assert_eq!(p.id, ack::packet_id_for(&e.ack_secret));
         assert!(ack::verify(&p.id, &e.ack_secret));
@@ -560,11 +558,11 @@ mod tests {
     fn short_text_tier_s() {
         let mut s = setup(8);
         let ad = s.sa.ad.clone();
-        // Normal : Bob répond après avoir reçu l'Initial.
+        // Normal: Bob replies after having received the Initial.
         let e0 = env(&mut s.rng, "x");
         let p0 = send_initial(&mut s, &e0);
         let Wire::Initial { msg, .. } = parse_wire(&p0.payload).unwrap() else {
-            panic!("Initial attendu");
+            panic!("Initial expected");
         };
         open(&msg, &mut s.b, &ad, NOW).unwrap();
         for (len, tier) in [(60, Tier::S), (120, Tier::M)] {
@@ -573,7 +571,7 @@ mod tests {
             assert_eq!(p.tier, tier);
             let decoded = Packet::decode(&p.encode()).unwrap();
             let Wire::Normal { msg } = parse_wire(&decoded.payload).unwrap() else {
-                panic!("Normal attendu");
+                panic!("Normal expected");
             };
             assert_eq!(open(&msg, &mut s.a, &ad, NOW).unwrap(), e);
         }
@@ -590,7 +588,7 @@ mod tests {
             Err(CoreError::TooLarge)
         );
         assert_eq!(postcard::to_allocvec(&s.a).unwrap(), snapshot);
-        // 4000 octets passent.
+        // 4000 bytes pass.
         let e = env(&mut s.rng, &"a".repeat(MAX_TEXT_LEN));
         let p = seal(&e, &mut s.a, &ad, None, MB, NOW, &mut s.rng).unwrap();
         assert_eq!(p.tier, Tier::L);
@@ -606,7 +604,7 @@ mod tests {
             (base + 600, base + 600 + DEFAULT_TTL_SECS),
         ] {
             assert_eq!(u64::from(sealed_expiry(now)), want);
-            // Toujours accepté par un nœud : dans le futur, à 7 j + 1 h au plus.
+            // Always accepted by a node: in the future, at 7 d + 1 h at most.
             assert!(want > now && want <= now + 7 * 86_400 + 3_600);
         }
     }
@@ -624,19 +622,19 @@ mod tests {
     fn open_rejects_garbage_plaintext_and_wrong_ad() {
         let mut s = setup(11);
         let ad = s.sa.ad.clone();
-        // Contenu chiffré authentique mais qui n'est pas une enveloppe.
+        // Authentic encrypted content that is not an envelope.
         let msg = s.a.encrypt(b"\xff\xff\xff", &ad, &mut s.rng).unwrap();
         assert!(matches!(
             open(&msg, &mut s.b, &ad, NOW),
             Err(CoreError::Malformed(_))
         ));
-        // Mauvaises données associées.
+        // Wrong associated data.
         let e = env(&mut s.rng, "x");
         let p = seal(&e, &mut s.a, &ad, None, MB, NOW, &mut s.rng).unwrap();
         let Wire::Normal { msg } = parse_wire(&p.payload).unwrap() else {
-            panic!("Normal attendu");
+            panic!("Normal expected");
         };
-        assert_eq!(open(&msg, &mut s.b, b"autre", NOW), Err(CoreError::Crypto));
+        assert_eq!(open(&msg, &mut s.b, b"other", NOW), Err(CoreError::Crypto));
         assert_eq!(open(&msg, &mut s.b, &ad, NOW).unwrap(), e);
     }
 

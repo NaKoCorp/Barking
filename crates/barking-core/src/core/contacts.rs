@@ -1,4 +1,4 @@
-//! Contacts : ajout d'une carte, alias, résolution, liste.
+//! Contacts: adding a card, alias, resolution, list.
 
 use std::collections::HashSet;
 
@@ -12,10 +12,10 @@ use crate::store::{ContactClock, ContactRow, Queries};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
-/// Taille maximale d'un alias, en octets.
+/// Maximum size of an alias, in bytes.
 pub const MAX_ALIAS_LEN: usize = 64;
 
-/// Vue d'un contact pour l'interface.
+/// View of a contact for the interface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactSummary {
     pub fingerprint: Fingerprint,
@@ -24,22 +24,22 @@ pub struct ContactSummary {
     pub verified: bool,
 }
 
-/// Alias stocké : la chaîne vide signifie « pas d'alias ».
+/// Stored alias: the empty string means "no alias".
 fn alias_of(stored: &str) -> Option<String> {
     (!stored.is_empty()).then(|| stored.to_owned())
 }
 
 impl Core {
-    /// Ajoute (ou met à jour) un contact à partir de sa carte signée.
+    /// Adds (or updates) a contact from its signed card.
     ///
-    /// - La carte est entièrement vérifiée (racine, liste d'appareils, paquets de clés).
-    /// - Empreinte déjà connue : la liste d'appareils doit être identique ou la
-    ///   remplacer (`supersedes`) ; les sessions des appareils retirés sont supprimées.
-    /// - Alias déjà pris par une autre empreinte : événement `ContactKeyChanged`,
-    ///   l'ancien contact est remplacé et le nouveau n'est pas vérifié.
+    /// - The card is fully verified (root, device list, key packets).
+    /// - Fingerprint already known: the device list must be identical or
+    ///   replace the known one (`supersedes`); the sessions of removed devices are deleted.
+    /// - Alias already taken by another fingerprint: `ContactKeyChanged` event,
+    ///   the old contact is replaced and the new one is not verified.
     ///
-    /// L'état obtenu (et la suppression du contact remplacé) est mis en file
-    /// pour chacun de mes autres appareils (`SyncContact`), dans la même
+    /// The resulting state (and the deletion of the replaced contact) is queued
+    /// for each of my other devices (`SyncContact`), in the same
     /// transaction.
     pub fn add_contact(
         &mut self,
@@ -53,11 +53,11 @@ impl Core {
         store.transaction(|tx| {
             let me = device.public().id();
             let (fp, replaced) = add_in(tx, card, alias)?;
-            // Le nouvel état part avant la suppression du contact remplacé :
-            // reçus dans cet ordre, l'alias passe d'une empreinte à l'autre
-            // chez mes autres appareils, qui journalisent le même
-            // `ContactKeyChanged` (dans l'ordre inverse, l'état final est le
-            // même, sans l'avertissement).
+            // The new state goes out before the deletion of the replaced contact:
+            // received in that order, the alias moves from one fingerprint to the other
+            // on my other devices, which log the same
+            // `ContactKeyChanged` (in the reverse order, the final state is the
+            // same, without the warning).
             let time = sync::touch(tx, fp, now, false, me)?;
             sync::send_state(tx, device, fp, time, rng)?;
             if let Some(old) = replaced {
@@ -68,11 +68,11 @@ impl Core {
         })
     }
 
-    /// Supprime un contact, ses sessions, sa carte stockée et ses paquets en
-    /// file d'envoi, en une seule transaction. L'historique des messages est
-    /// conservé. Sert à se débloquer après l'ajout d'une carte frauduleuse
-    /// qui revendiquait les clés d'un vrai contact. Inconnu : `UnknownContact`.
-    /// Synchronisé avec mes autres appareils.
+    /// Deletes a contact, its sessions, its stored card and its packets in the
+    /// send queue, in a single transaction. The message history is
+    /// kept. Used to get unstuck after adding a fraudulent card
+    /// that claimed the keys of a real contact. Unknown: `UnknownContact`.
+    /// Synchronized with my other devices.
     pub fn remove_contact(
         &mut self,
         contact: &Fingerprint,
@@ -88,8 +88,8 @@ impl Core {
         })
     }
 
-    /// Marque le contact comme vérifié (code de sécurité comparé).
-    /// Synchronisé avec mes autres appareils.
+    /// Marks the contact as verified (security code compared).
+    /// Synchronized with my other devices.
     pub fn mark_verified(
         &mut self,
         contact: &Fingerprint,
@@ -105,9 +105,9 @@ impl Core {
         })
     }
 
-    /// Change l'alias d'un contact connu ; un alias vide le retire. Alias
-    /// trop long : `TooLarge` ; déjà pris par un autre contact : refusé.
-    /// Synchronisé avec mes autres appareils.
+    /// Changes the alias of a known contact; an empty alias removes it. Alias
+    /// too long: `TooLarge`; already taken by another contact: refused.
+    /// Synchronized with my other devices.
     pub fn set_alias(
         &mut self,
         contact: &Fingerprint,
@@ -124,8 +124,8 @@ impl Core {
         })
     }
 
-    /// Trouve un contact par alias, sinon par empreinte (forme affichée, avec
-    /// ou sans tirets). Inconnu : `UnknownContact`.
+    /// Finds a contact by alias, otherwise by fingerprint (displayed form, with
+    /// or without dashes). Unknown: `UnknownContact`.
     pub fn resolve(&self, fp_or_alias: &str) -> Result<Fingerprint> {
         let s = fp_or_alias.trim();
         if !s.is_empty()
@@ -141,7 +141,7 @@ impl Core {
         Err(CoreError::UnknownContact)
     }
 
-    /// Tous les contacts, triés par alias.
+    /// All contacts, sorted by alias.
     pub fn contacts(&self) -> Result<Vec<ContactSummary>> {
         self.store
             .list_contacts()?
@@ -158,32 +158,32 @@ impl Core {
             .collect()
     }
 
-    /// Alias d'un contact connu, s'il en a un.
+    /// Alias of a known contact, if it has one.
     pub(super) fn alias_in(q: &impl Queries, fp: Fingerprint) -> Result<Option<String>> {
         Ok(q.get_contact(fp)?.and_then(|c| alias_of(&c.alias)))
     }
 }
 
-/// Carte vérifiée, prête à être écrite.
+/// Verified card, ready to be written.
 struct Checked {
     fp: Fingerprint,
     bytes: Vec<u8>,
-    /// Horodatage du journal : celui de la liste (aucune horloge ici).
+    /// Log timestamp: the list's (no clock here).
     at: u64,
-    /// Appareils retirés par rapport à la carte connue.
+    /// Devices removed relative to the known card.
     revoked: Vec<DeviceId>,
     old: Option<ContactRow>,
 }
 
-/// Toutes les vérifications d'une carte de contact, sans rien écrire :
-/// signature, pas mon identité ni un de mes appareils, aucun appareil d'un
-/// autre contact, liste identique ou plus récente que celle connue.
+/// All the checks of a contact card, without writing anything:
+/// signature, not my identity nor one of my devices, no device of
+/// another contact, list identical to or newer than the known one.
 fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
     card.verify()?;
     let fp = card.fingerprint();
     let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
     if fp == own.list.root.fingerprint() {
-        return Err(CoreError::Malformed("carte de ma propre identité"));
+        return Err(CoreError::Malformed("card of my own identity"));
     }
     let claimed: Vec<DevicePublic> = card.devices.certs.iter().map(|c| c.device).collect();
     if own
@@ -192,11 +192,9 @@ fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
         .iter()
         .any(|mine| claimed.iter().any(|d| overlaps(d, &mine.device)))
     {
-        return Err(CoreError::Malformed(
-            "carte revendiquant un de mes appareils",
-        ));
+        return Err(CoreError::Malformed("card claiming one of my devices"));
     }
-    let bytes = postcard::to_allocvec(card).map_err(|_| CoreError::Malformed("carte"))?;
+    let bytes = postcard::to_allocvec(card).map_err(|_| CoreError::Malformed("card"))?;
     let at = card
         .devices
         .certs
@@ -204,12 +202,12 @@ fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
         .map(|c| c.issued_at)
         .max()
         .unwrap_or(0);
-    // Un appareil (identifiant, clé de signature ou clé X25519) n'appartient
-    // qu'à un seul contact : sinon un contact pourrait se faire attribuer
-    // les messages d'un autre.
+    // A device (identifier, signing key or X25519 key) belongs to
+    // a single contact only: otherwise a contact could get itself attributed
+    // another's messages.
     if claimed_by_contact(q, Some(fp), &claimed)? {
         return Err(CoreError::Malformed(
-            "appareil déjà associé à un autre contact",
+            "device already associated with another contact",
         ));
     }
     let old = q.get_contact(fp)?;
@@ -219,7 +217,7 @@ fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
         if card.devices != old_card.devices {
             if !card.devices.supersedes(&old_card.devices) {
                 return Err(CoreError::Malformed(
-                    "liste d'appareils plus ancienne ou divergente",
+                    "device list older than or diverging from the known one",
                 ));
             }
             let kept: HashSet<DeviceId> =
@@ -242,7 +240,7 @@ fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
     })
 }
 
-/// Normalise un alias : sans espaces autour, au plus `MAX_ALIAS_LEN` octets.
+/// Normalizes an alias: no surrounding whitespace, at most `MAX_ALIAS_LEN` bytes.
 fn clean_alias(alias: &str) -> Result<&str> {
     let alias = alias.trim();
     if alias.len() > MAX_ALIAS_LEN {
@@ -251,10 +249,10 @@ fn clean_alias(alias: &str) -> Result<&str> {
     Ok(alias)
 }
 
-/// Ajout (ou mise à jour) d'un contact dans `q`, avec toutes les
-/// vérifications d'`add_contact`. Toute vérification précède la première
-/// écriture. Renvoie l'empreinte et le contact remplacé (même alias, autre
-/// empreinte), s'il y en a un.
+/// Adds (or updates) a contact in `q`, with all the
+/// checks of `add_contact`. Every check precedes the first
+/// write. Returns the fingerprint and the replaced contact (same alias, other
+/// fingerprint), if there is one.
 pub(super) fn add_in(
     q: &impl Queries,
     card: &ContactCard,
@@ -273,7 +271,7 @@ pub(super) fn add_in(
         (None, None) => String::new(),
     };
     for id in &c.revoked {
-        // Appareil révoqué : plus aucune session avec lui.
+        // Revoked device: no more sessions with it.
         q.delete_sessions_for_device(fp, *id)?;
     }
     let mut replaced = None;
@@ -299,16 +297,16 @@ pub(super) fn add_in(
     Ok((fp, replaced))
 }
 
-/// État d'un contact reçu d'un de mes appareils (`SyncOp::Upsert`) : carte
-/// (gardée si la carte connue est plus récente), alias exact (vide : aucun),
-/// statut vérifié fusionné par « ou ». Toute vérification précède la
-/// première écriture.
+/// State of a contact received from one of my devices (`SyncOp::Upsert`): card
+/// (kept if the known card is newer), exact alias (empty: none),
+/// verified status merged by "or". Every check precedes the
+/// first write.
 ///
-/// Alias porté par un autre contact : si l'opération (`clock`) l'emporte sur
-/// la dernière opération connue sur cet autre contact, il le perd ; sinon
-/// l'alias reçu est abandonné (le contact n'en a plus). Ainsi l'alias va à
-/// l'opération la plus récente sur tous mes appareils, quel que soit l'ordre
-/// d'arrivée.
+/// Alias held by another contact: if the operation (`clock`) beats
+/// the last known operation on that other contact, it loses it; otherwise
+/// the received alias is dropped (the contact no longer has one). Thus the alias goes to
+/// the most recent operation on all my devices, whatever the
+/// arrival order.
 pub(super) fn upsert_in(
     q: &impl Queries,
     card: &ContactCard,
@@ -319,7 +317,7 @@ pub(super) fn upsert_in(
     let mut alias = clean_alias(alias)?;
     let fp = card.fingerprint();
     let known = q.get_contact(fp)?;
-    // Carte connue plus récente (déjà mise à jour) : seul l'état change.
+    // Known card is newer (already updated): only the state changes.
     let keep_known = match &known {
         Some(old) => {
             card.verify().is_ok() && load_card(&old.card)?.devices.supersedes(&card.devices)
@@ -339,8 +337,8 @@ pub(super) fn upsert_in(
         && other.fp != fp
     {
         if clock.newer_than(q.contact_clock(other.fp)?.as_ref()) {
-            // L'alias passe à une autre empreinte : même avertissement qu'un
-            // ajout local (`add_in`).
+            // The alias moves to another fingerprint: same warning as a local
+            // add (`add_in`).
             log(
                 q,
                 clock.at,
@@ -366,32 +364,32 @@ pub(super) fn upsert_in(
     q.upsert_contact(fp, &bytes, alias, verified)
 }
 
-/// Raison de quarantaine d'une mise à jour de carte refusée (texte fixe).
-pub(super) const R_CARD_REFUSED: &str = "mise à jour de carte refusée";
+/// Quarantine reason for a refused card update (fixed text).
+pub(super) const R_CARD_REFUSED: &str = "card update refused";
 
-/// Issue de la vérification d'une mise à jour de carte acceptable.
+/// Outcome of verifying an acceptable card update.
 pub(super) enum CardUpdate {
-    /// Carte valide, de même racine, de version inférieure à celle connue ou
-    /// identique : déjà dépassée, rien à écrire (doublon accusé).
+    /// Valid card, with the same root, with a version lower than or identical to the known one:
+    /// already superseded, nothing to write (duplicate acked).
     Superseded,
-    /// Plus récente et vérifiée : à appliquer avec [`apply_card_update`].
+    /// Newer and verified: to apply with [`apply_card_update`].
     Newer(VerifiedCard),
 }
 
-/// Nouvelle carte entièrement vérifiée, prête à être écrite.
+/// New card, fully verified, ready to be written.
 pub(super) struct VerifiedCard {
     checked: Checked,
-    /// Appareils absents de la carte connue.
+    /// Devices absent from the known card.
     added: Vec<DeviceId>,
 }
 
-/// Vérifie la nouvelle carte `card` d'un contact connu (`current`), reçue de
-/// lui (`Body::CardUpdate`) : même empreinte et même racine (sinon refus) ;
-/// carte valide de version inférieure, ou de même version et même liste :
-/// dépassée ; même version et liste différente : refus ; plus récente : toutes
-/// les vérifications d'`add_contact` (`check_card`, partagée : signatures,
-/// aucun de mes appareils, aucun appareil d'un autre contact). N'écrit rien.
-/// Refus : `Ok(Err(raison))` ; `Err` : échec du stockage seulement.
+/// Verifies the new card `card` of a known contact (`current`), received from
+/// it (`Body::CardUpdate`): same fingerprint and same root (otherwise refusal);
+/// valid card with a lower version, or same version and same list:
+/// superseded; same version and different list: refusal; newer: all
+/// the checks of `add_contact` (`check_card`, shared: signatures,
+/// none of my devices, no device of another contact). Writes nothing.
+/// Refusal: `Ok(Err(reason))`; `Err`: storage failure only.
 pub(super) fn verify_card_update(
     q: &impl Queries,
     current: &ContactRow,
@@ -405,16 +403,16 @@ pub(super) fn verify_card_update(
     if version < old.devices.version
         || (version == old.devices.version && card.devices == old.devices)
     {
-        // Accusée seulement si elle est valide : l'accusé ne couvre jamais
-        // une carte forgée.
+        // Acked only if valid: the ack never covers
+        // a forged card.
         if card.verify().is_err() {
             return Ok(Err(R_CARD_REFUSED));
         }
         return Ok(Ok(CardUpdate::Superseded));
     }
     if version == old.devices.version {
-        // Deux listes différentes signées à la même version : équivoque de
-        // la racine, jamais masquée.
+        // Two different lists signed at the same version: root
+        // equivocation, never masked.
         return Ok(Err(R_CARD_REFUSED));
     }
     let checked = match check_card(q, card) {
@@ -432,12 +430,12 @@ pub(super) fn verify_card_update(
     Ok(Ok(CardUpdate::Newer(VerifiedCard { checked, added })))
 }
 
-/// Applique une mise à jour de carte vérifiée par [`verify_card_update`] :
-/// la carte est remplacée (alias et statut vérifié gardés : même racine) et
-/// les sessions des appareils retirés sont supprimées, y compris celle de
-/// l'appareil qui l'a envoyée s'il en fait partie. Renvoie les appareils
-/// ajoutés et le nombre d'appareils retirés. À appeler dans la transaction de la
-/// réception, après l'écriture de la session. Aucune erreur due au contenu.
+/// Applies a card update verified by [`verify_card_update`]:
+/// the card is replaced (alias and verified status kept: same root) and
+/// the sessions of removed devices are deleted, including that of
+/// the device that sent it if it is one of them. Returns the added devices
+/// and the number of removed devices. To be called in the receive
+/// transaction, after the session is written. No error due to the content.
 pub(super) fn apply_card_update(
     q: &impl Queries,
     current: &ContactRow,
@@ -452,19 +450,19 @@ pub(super) fn apply_card_update(
     Ok((verified.added, removed))
 }
 
-/// Supprime un contact connu de `q` (voir `remove_contact`).
+/// Deletes a known contact from `q` (see `remove_contact`).
 pub(super) fn remove_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
     q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
     q.delete_contact(fp)
 }
 
-/// Marque vérifié un contact connu de `q`.
+/// Marks a known contact of `q` as verified.
 pub(super) fn verify_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
     let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
     q.upsert_contact(row.fp, &row.card, &row.alias, true)
 }
 
-/// Change l'alias d'un contact connu de `q` ; renvoie l'alias stocké.
+/// Changes the alias of a known contact of `q`; returns the stored alias.
 pub(super) fn set_alias_in(q: &impl Queries, fp: Fingerprint, alias: &str) -> Result<String> {
     let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
     let alias = clean_alias(alias)?;
@@ -473,22 +471,22 @@ pub(super) fn set_alias_in(q: &impl Queries, fp: Fingerprint, alias: &str) -> Re
             .is_some_and(|other| other.fp != fp)
     {
         return Err(CoreError::Malformed(
-            "alias déjà utilisé par un autre contact",
+            "alias already used by another contact",
         ));
     }
     q.upsert_contact(row.fp, &row.card, alias, row.verified)?;
     Ok(alias.to_owned())
 }
 
-/// Deux appareils partagent-ils un identifiant ou une clé publique ?
+/// Do two devices share an identifier or a public key?
 pub(super) fn overlaps(a: &DevicePublic, b: &DevicePublic) -> bool {
     a.id() == b.id() || a.dh == b.dh || a.sig == b.sig
 }
 
-/// Vrai si un contact autre que `except`, ou si ma propre liste d'appareils
-/// (lue dans la base, sur l'administrateur comme sur un appareil lié),
-/// revendique l'un de ces appareils. Mes appareils ouvrent des sessions entre
-/// eux : un contact qui en revendiquait un pourrait se faire passer pour moi.
+/// True if a contact other than `except`, or if my own device list
+/// (read from the database, on the admin as on a linked device),
+/// claims one of these devices. My devices open sessions between
+/// themselves: a contact claiming one could impersonate me.
 pub(super) fn claimed_by_other(
     q: &impl Queries,
     except: Option<Fingerprint>,
@@ -506,7 +504,7 @@ pub(super) fn claimed_by_other(
     claimed_by_contact(q, except, devices)
 }
 
-/// Vrai si un contact autre que `except` revendique l'un de ces appareils.
+/// True if a contact other than `except` claims one of these devices.
 pub(super) fn claimed_by_contact(
     q: &impl Queries,
     except: Option<Fingerprint>,
@@ -529,7 +527,7 @@ pub(super) fn claimed_by_contact(
     Ok(false)
 }
 
-/// Inverse de `Display` pour `Fingerprint` : base32 minuscule, groupes séparés par `-`.
+/// Inverse of `Display` for `Fingerprint`: lowercase base32, groups separated by `-`.
 fn parse_fingerprint(s: &str) -> Option<Fingerprint> {
     let compact: String = s
         .chars()

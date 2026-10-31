@@ -1,4 +1,4 @@
-//! Clés d'appareil (signature Ed25519 + échange X25519) et certificat signé par la racine.
+//! Device keys (Ed25519 signature + X25519 exchange) and certificate signed by the root.
 
 use super::root::{RootIdentity, RootPublic};
 use crate::crypto::labels;
@@ -9,11 +9,11 @@ use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
-/// Taille maximale du nom d'un appareil, en octets.
+/// Maximum size of a device name, in bytes.
 pub const MAX_NAME_LEN: usize = 64;
 
-/// Sérialisation serde d'un `[u8; 64]` (serde ne le gère pas nativement) :
-/// tuple de 64 octets, soit 64 octets en postcard.
+/// Serde serialization of a `[u8; 64]` (serde does not handle it natively):
+/// 64-byte tuple, i.e. 64 bytes in postcard.
 pub(crate) mod sig_bytes {
     use core::fmt;
     use serde::de::{Error, SeqAccess, Visitor};
@@ -33,7 +33,7 @@ pub(crate) mod sig_bytes {
         impl<'de> Visitor<'de> for V {
             type Value = [u8; 64];
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("64 octets")
+                f.write_str("64 bytes")
             }
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[u8; 64], A::Error> {
                 let mut out = [0u8; 64];
@@ -49,11 +49,11 @@ pub(crate) mod sig_bytes {
     }
 }
 
-/// Identifiant d'appareil : 16 octets dérivés des clés publiques.
+/// Device identifier: 16 bytes derived from the public keys.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct DeviceId(pub [u8; 16]);
 
-/// Clés publiques d'un appareil.
+/// Public keys of a device.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct DevicePublic {
     pub sig: [u8; 32],
@@ -72,8 +72,8 @@ impl DevicePublic {
     }
 }
 
-/// Clés secrètes d'un appareil. Chaque champ s'efface à la destruction
-/// (`SigningKey` et `StaticSecret` sont `ZeroizeOnDrop`).
+/// Secret keys of a device. Each field is erased on drop
+/// (`SigningKey` and `StaticSecret` are `ZeroizeOnDrop`).
 pub struct DeviceKeys {
     signing: SigningKey,
     dh: x25519_dalek::StaticSecret,
@@ -100,7 +100,7 @@ impl DeviceKeys {
         keys
     }
 
-    /// Clés secrètes `signature(32) || dh(32)`, pour le stockage chiffré uniquement.
+    /// Secret keys `signature(32) || dh(32)`, for encrypted storage only.
     pub(crate) fn to_bytes(&self) -> Zeroizing<[u8; 64]> {
         let mut out = Zeroizing::new([0u8; 64]);
         out[..32].copy_from_slice(&self.signing.to_bytes());
@@ -108,7 +108,7 @@ impl DeviceKeys {
         out
     }
 
-    /// Inverse de [`DeviceKeys::to_bytes`].
+    /// Inverse of [`DeviceKeys::to_bytes`].
     pub(crate) fn from_bytes(bytes: &[u8; 64]) -> DeviceKeys {
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];
@@ -130,7 +130,7 @@ impl DeviceKeys {
         }
     }
 
-    /// Signe `label || msg`.
+    /// Signs `label || msg`.
     pub fn sign(&self, label: &[u8], msg: &[u8]) -> [u8; 64] {
         let mut data = Vec::with_capacity(label.len() + msg.len());
         data.extend_from_slice(label);
@@ -138,32 +138,32 @@ impl DeviceKeys {
         self.signing.sign(&data).to_bytes()
     }
 
-    /// Secret partagé X25519 avec une clé publique distante.
+    /// X25519 shared secret with a remote public key.
     pub fn dh(&self, their: &x25519_dalek::PublicKey) -> [u8; 32] {
         self.dh.diffie_hellman(their).to_bytes()
     }
 }
 
-/// Certificat : la racine atteste qu'un appareil lui appartient, et
-/// l'appareil atteste qu'il appartient à cette racine (preuve de possession
-/// de sa clé de signature). Sans cette seconde signature, une racine pourrait
-/// certifier les clés publiques de l'appareil de quelqu'un d'autre.
+/// Certificate: the root attests that a device belongs to it, and
+/// the device attests that it belongs to this root (proof of possession
+/// of its signing key). Without this second signature, a root could
+/// certify the public keys of someone else's device.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DeviceCertificate {
     pub root: RootPublic,
     pub device: DevicePublic,
     pub name: String,
     pub issued_at: u64,
-    /// Signature de la racine (étiquette `DEVICE_CERT`).
+    /// Root signature (label `DEVICE_CERT`).
     #[serde(with = "sig_bytes")]
     pub sig: [u8; 64],
-    /// Signature de l'appareil (étiquette `DEVICE_POSSESSION`).
+    /// Device signature (label `DEVICE_POSSESSION`).
     #[serde(with = "sig_bytes")]
     pub device_sig: [u8; 64],
 }
 
-/// Octets signés par la racine et par l'appareil : postcard de
-/// `(root, device, name, issued_at)` (les étiquettes diffèrent).
+/// Bytes signed by the root and by the device: postcard of
+/// `(root, device, name, issued_at)` (the labels differ).
 fn cert_bytes(
     root: &RootPublic,
     device: &DevicePublic,
@@ -174,13 +174,13 @@ fn cert_bytes(
         return Err(CoreError::TooLarge);
     }
     postcard::to_allocvec(&(root, device, name, issued_at))
-        .map_err(|_| CoreError::Malformed("certificat non sérialisable"))
+        .map_err(|_| CoreError::Malformed("certificate not serializable"))
 }
 
 impl DeviceKeys {
-    /// Preuve de possession : signature par cet appareil de
-    /// `(root, self.public(), name, issued_at)`. Remise à la racine pour
-    /// qu'elle émette le certificat (`DeviceCertificate::issue_with_proof`).
+    /// Proof of possession: signature by this device of
+    /// `(root, self.public(), name, issued_at)`. Handed to the root so
+    /// that it issues the certificate (`DeviceCertificate::issue_with_proof`).
     pub fn possession_proof(
         &self,
         root: &RootPublic,
@@ -192,7 +192,7 @@ impl DeviceKeys {
     }
 }
 
-/// Vérifie la preuve de possession de `device` (vérification stricte).
+/// Verifies the proof of possession of `device` (strict verification).
 fn verify_possession(device: &DevicePublic, bytes: &[u8], sig: &[u8; 64]) -> Result<()> {
     let key = ed25519_dalek::VerifyingKey::from_bytes(&device.sig)
         .map_err(|_| CoreError::InvalidSignature)?;
@@ -204,14 +204,14 @@ fn verify_possession(device: &DevicePublic, bytes: &[u8], sig: &[u8; 64]) -> Res
 }
 
 impl DeviceCertificate {
-    /// Certificat pour un appareil dont on détient les clés (appareil local).
+    /// Certificate for a device whose keys we hold (local device).
     pub fn issue(root: &RootIdentity, device: &DeviceKeys, name: &str, now: u64) -> Result<Self> {
         let proof = device.possession_proof(&root.public(), name, now)?;
         Self::issue_with_proof(root, device.public(), name, now, proof)
     }
 
-    /// Certificat pour un appareil distant (liaison) : sa preuve de possession
-    /// est vérifiée avant que la racine ne signe.
+    /// Certificate for a remote device (linking): its proof of possession
+    /// is verified before the root signs.
     pub fn issue_with_proof(
         root: &RootIdentity,
         device: DevicePublic,
@@ -232,7 +232,7 @@ impl DeviceCertificate {
         })
     }
 
-    /// Vérifie la signature de la racine et la preuve de possession de l'appareil.
+    /// Verifies the root signature and the device's proof of possession.
     pub fn verify(&self) -> Result<()> {
         let bytes = cert_bytes(&self.root, &self.device, &self.name, self.issued_at)?;
         self.root.verify(labels::DEVICE_CERT, &bytes, &self.sig)?;
@@ -255,7 +255,7 @@ mod tests {
     fn cert_verifies() {
         let (root, _) = RootIdentity::generate(&mut rng());
         let dev = DeviceKeys::generate(&mut rng());
-        let cert = DeviceCertificate::issue(&root, &dev, "téléphone", 1000).unwrap();
+        let cert = DeviceCertificate::issue(&root, &dev, "phone", 1000).unwrap();
         assert!(cert.verify().is_ok());
         assert_eq!(cert.root, root.public());
     }
@@ -299,12 +299,12 @@ mod tests {
         let mut forged = good.clone();
         forged.device_sig[3] ^= 1;
         assert_eq!(forged.verify(), Err(crate::CoreError::InvalidSignature));
-        // Preuve d'un autre appareil.
+        // Proof from another device.
         let other = DeviceKeys::generate(&mut StdRng::seed_from_u64(77));
         let mut swapped = good.clone();
         swapped.device_sig = other.possession_proof(&root.public(), "p", 5).unwrap();
         assert_eq!(swapped.verify(), Err(crate::CoreError::InvalidSignature));
-        // La preuve ne se recycle pas sous une autre date ou un autre nom.
+        // The proof cannot be recycled under another date or name.
         assert!(
             DeviceCertificate::issue_with_proof(&root, dev.public(), "p", 6, good.device_sig)
                 .is_err()
@@ -313,13 +313,13 @@ mod tests {
 
     #[test]
     fn root_cannot_certify_foreign_device() {
-        // Mallory veut certifier l'appareil d'Alice sous sa propre racine.
+        // Mallory wants to certify Alice's device under her own root.
         let mut r = StdRng::seed_from_u64(21);
         let (alice_root, _) = RootIdentity::generate(&mut r);
         let (mallory_root, _) = RootIdentity::generate(&mut r);
         let alice_dev = DeviceKeys::generate(&mut r);
         let alice_cert = DeviceCertificate::issue(&alice_root, &alice_dev, "tel", 1).unwrap();
-        // La preuve d'Alice est liée à sa racine : refusée sous celle de Mallory.
+        // Alice's proof is bound to her root: rejected under Mallory's.
         assert_eq!(
             DeviceCertificate::issue_with_proof(
                 &mallory_root,
@@ -331,7 +331,7 @@ mod tests {
             .err(),
             Some(crate::CoreError::InvalidSignature)
         );
-        // Certificat bricolé à la main : la racine signe, la preuve ne colle pas.
+        // Hand-crafted certificate: the root signs, the proof does not match.
         let bytes = cert_bytes(&mallory_root.public(), &alice_dev.public(), "tel", 1).unwrap();
         let forged = DeviceCertificate {
             root: mallory_root.public(),

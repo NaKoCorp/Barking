@@ -1,8 +1,8 @@
-//! Limiteur d'écritures au journal pour les événements qu'un tiers peut
-//! provoquer à volonté (trames rejetées, paquets indéchiffrables, doublons) :
-//! au plus une entrée par type et par raison toutes les
-//! `NOISY_EVENT_LOG_INTERVAL_SECS`. En mémoire seulement : une réouverture
-//! repart de zéro.
+//! Log-write limiter for events a third party can trigger at will
+//! (rejected frames, undecryptable packets, duplicates):
+//! at most one entry per type and per reason every
+//! `NOISY_EVENT_LOG_INTERVAL_SECS`. In memory only: a reopen
+//! starts from zero.
 
 use super::log;
 use crate::Result;
@@ -10,18 +10,18 @@ use crate::packet::PacketId;
 use crate::store::Queries;
 use crate::transparency::TransparencyEvent;
 
-/// Intervalle minimal, par type d'événement bruyant et par raison, entre
-/// deux entrées au journal.
+/// Minimum interval, per noisy event type and per reason, between
+/// two log entries.
 pub const NOISY_EVENT_LOG_INTERVAL_SECS: u64 = 60;
 
-/// Dernière écriture au journal par clé (type, raison). Les raisons sont des
-/// textes fixes du cœur : le nombre de clés est borné.
+/// Last log write per key (type, reason). The reasons are fixed
+/// core texts: the number of keys is bounded.
 #[derive(Default)]
 pub(super) struct LogLimiter {
     last: Vec<(u8, String, u64)>,
 }
 
-/// Clé de regroupement d'un événement bruyant ; `None` : jamais regroupé.
+/// Grouping key of a noisy event; `None`: never grouped.
 fn key(e: &TransparencyEvent) -> Option<(u8, &str)> {
     match e {
         TransparencyEvent::FrameRejected { reason } => Some((0, reason)),
@@ -32,9 +32,9 @@ fn key(e: &TransparencyEvent) -> Option<(u8, &str)> {
 }
 
 impl LogLimiter {
-    /// `true` si `e` doit être écrit à `now` ; l'écriture est alors comptée
-    /// (si la transaction qui l'écrit échoue, l'entrée est perdue : au plus
-    /// une par intervalle).
+    /// `true` if `e` must be written at `now`; the write is then counted
+    /// (if the transaction writing it fails, the entry is lost: at most
+    /// one per interval).
     fn admit(&mut self, e: &TransparencyEvent, now: u64) -> bool {
         let Some((kind, reason)) = key(e) else {
             return true;
@@ -56,8 +56,8 @@ impl LogLimiter {
     }
 }
 
-/// Journalise `e`, sauf s'il est bruyant et qu'une entrée de même type et
-/// de même raison a été écrite il y a moins d'un intervalle.
+/// Logs `e`, unless it is noisy and an entry of the same type and
+/// same reason was written less than one interval ago.
 pub(super) fn log_limited(
     q: &impl Queries,
     limiter: &mut LogLimiter,

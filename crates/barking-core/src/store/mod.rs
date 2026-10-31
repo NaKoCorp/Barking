@@ -1,11 +1,11 @@
-//! Stockage chiffré SQLCipher.
+//! Encrypted SQLCipher storage.
 //!
-//! Partage des méthodes typées : elles sont définies une seule fois dans le
-//! trait [`Queries`] (méthodes par défaut au-dessus d'une `&Connection`), que
-//! [`Store`] (appel simple) et [`Tx`] (dans [`Store::transaction`]) implémentent.
-//! Le trait doit être importé (`use barking_core::store::Queries`).
-//! Tout `Err` renvoyé par la fermeture de `transaction` annule toutes les
-//! écritures (rollback).
+//! Shared typed methods: they are defined once in the
+//! [`Queries`] trait (default methods on top of a `&Connection`), which
+//! [`Store`] (plain call) and [`Tx`] (inside [`Store::transaction`]) implement.
+//! The trait must be imported (`use barking_core::store::Queries`).
+//! Any `Err` returned by the `transaction` closure rolls back all
+//! writes.
 
 mod schema;
 
@@ -37,7 +37,7 @@ impl MessageStatus {
             1 => Ok(Self::Sent),
             3 => Ok(Self::Delivered),
             5 => Ok(Self::Failed),
-            _ => Err(CoreError::Store("statut inconnu".into())),
+            _ => Err(CoreError::Store("unknown status".into())),
         }
     }
 }
@@ -53,12 +53,12 @@ impl Direction {
         match v {
             0 => Ok(Self::Out),
             1 => Ok(Self::In),
-            _ => Err(CoreError::Store("direction inconnue".into())),
+            _ => Err(CoreError::Store("unknown direction".into())),
         }
     }
 }
 
-/// Contact stocké : `card` est le postcard de `ContactCard` (opaque ici).
+/// Stored contact: `card` is the postcard of `ContactCard` (opaque here).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactRow {
     pub fp: Fingerprint,
@@ -67,33 +67,33 @@ pub struct ContactRow {
     pub verified: bool,
 }
 
-/// Dernière opération connue sur un contact (dernier écrivain gagnant entre
-/// mes appareils). L'ordre est `(at, removed, writer)` : à date égale, une
-/// suppression l'emporte, puis l'appareil d'identifiant le plus grand, pour
-/// que tous mes appareils tranchent de la même façon.
+/// Last known operation on a contact (last writer wins between
+/// my devices). The order is `(at, removed, writer)`: at equal date, a
+/// deletion wins, then the device with the greatest identifier, so
+/// that all my devices decide the same way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContactClock {
     pub at: u64,
     pub removed: bool,
-    /// Appareil auteur de l'opération (zéro : inconnu, base antérieure).
+    /// Device that performed the operation (zero: unknown, earlier database).
     pub writer: DeviceId,
 }
 
 impl ContactClock {
-    /// Clé de comparaison : `(at, removed, writer)`.
+    /// Comparison key: `(at, removed, writer)`.
     pub fn key(&self) -> (u64, bool, [u8; 16]) {
         (self.at, self.removed, self.writer.0)
     }
 
-    /// `true` si `self` l'emporte strictement sur `other` (absent : toujours).
+    /// `true` if `self` strictly wins over `other` (absent: always).
     pub fn newer_than(&self, other: Option<&ContactClock>) -> bool {
         other.is_none_or(|o| self.key() > o.key())
     }
 }
 
-/// Session stockée. `state` est le postcard de `RatchetState` et
-/// `pending_initial` celui de `InitialMessage` ; Core les (dé)sérialise.
-/// Ne dérive pas `Debug` : contient des secrets.
+/// Stored session. `state` is the postcard of `RatchetState` and
+/// `pending_initial` that of `InitialMessage`; Core (de)serializes them.
+/// Does not derive `Debug`: contains secrets.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SessionRow {
     pub contact_device: DeviceId,
@@ -128,13 +128,13 @@ impl Drop for SessionRow {
     }
 }
 
-/// Identifiant logique d'un message (16 octets), commun à tous les paquets
-/// (un par appareil destinataire) qui le portent.
+/// Logical identifier of a message (16 bytes), common to all the packets
+/// (one per recipient device) that carry it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MessageId(pub [u8; 16]);
 
 impl MessageId {
-    /// Identifiant dérivé d'un identifiant de paquet : messages migrés de la v1.
+    /// Identifier derived from a packet identifier: messages migrated from v1.
     #[must_use]
     pub fn legacy_from_packet(packet_id: PacketId) -> MessageId {
         let full = blake3::derive_key(schema::LEGACY_MESSAGE_ID_CONTEXT, &packet_id.0);
@@ -143,10 +143,10 @@ impl MessageId {
         MessageId(id)
     }
 
-    /// Identifiant stocké d'un message reçu de `sender` avec l'identifiant
-    /// d'enveloppe `envelope_id` (choisi par l'expéditeur) : voir
-    /// `schema::SCHEMA_V2_TABLES`. Deux paquets du même message (renvoi) ont
-    /// le même identifiant stocké ; deux expéditeurs, jamais.
+    /// Stored identifier of a message received from `sender` with envelope
+    /// identifier `envelope_id` (chosen by the sender): see
+    /// `schema::SCHEMA_V2_TABLES`. Two packets of the same message (resend) have
+    /// the same stored identifier; two senders, never.
     #[must_use]
     pub fn incoming(sender: &Fingerprint, envelope_id: &[u8; 16]) -> MessageId {
         let mut material = [0u8; 48];
@@ -182,12 +182,12 @@ pub struct MessageRow {
 
 impl fmt::Debug for MessageRow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Le texte du message n'apparaît jamais : seulement sa taille.
+        // The message text never appears: only its size.
         f.debug_struct("MessageRow")
             .field("id", &self.id)
             .field("contact_fp", &self.contact_fp)
             .field("direction", &self.direction)
-            .field("body", &format_args!("<{} octets>", self.body.len()))
+            .field("body", &format_args!("<{} bytes>", self.body.len()))
             .field("status", &self.status)
             .field("at", &self.at)
             .field("message_id", &self.message_id)
@@ -201,47 +201,47 @@ fn map_err(e: rusqlite::Error) -> CoreError {
     {
         return CoreError::StoreLocked;
     }
-    // Le message SQLite ne contient pas de données utilisateur ni de clé.
+    // The SQLite message contains no user data or key.
     CoreError::Store(e.to_string())
 }
 
 fn ser<T: Serialize>(v: &T) -> Result<Vec<u8>> {
-    postcard::to_allocvec(v).map_err(|_| CoreError::Store("sérialisation".into()))
+    postcard::to_allocvec(v).map_err(|_| CoreError::Store("serialization".into()))
 }
 
 fn arr<const N: usize>(b: Vec<u8>) -> Result<[u8; N]> {
     b.try_into()
-        .map_err(|_| CoreError::Store("longueur de champ invalide".into()))
+        .map_err(|_| CoreError::Store("invalid field length".into()))
 }
 
-/// Âge maximal des entrées du journal de transparence (30 jours).
+/// Maximum age of transparency log entries (30 days).
 pub const LOG_MAX_AGE_SECS: u64 = 30 * 86_400;
-/// Avance maximale de l'horloge de purge du journal par événement (2 jours).
+/// Maximum advance of the log purge clock per event (2 days).
 ///
-/// Plus d'un jour : une activité quotidienne fait regagner un jour par jour
-/// à une horloge en retard (après une période d'activité rare), qui rattrape
-/// donc l'heure réelle. Avec exactement un jour, un retard serait permanent.
+/// More than one day: daily activity makes a lagging clock gain a day per day
+/// (after a period of rare activity), so it catches up
+/// with real time. With exactly one day, a lag would be permanent.
 pub const LOG_PURGE_CLOCK_STEP_SECS: u64 = 2 * 86_400;
-/// Clé `meta` de l'horloge de purge du journal (u64, monotone).
+/// `meta` key of the log purge clock (u64, monotonic).
 const META_LOG_PURGE_CLOCK: &str = "transparency_purge_clock";
-/// Nombre maximal d'entrées courantes conservées dans le journal de transparence.
+/// Maximum number of regular entries kept in the transparency log.
 pub const LOG_MAX_ROWS: u64 = 10_000;
-/// Nombre maximal d'entrées de sécurité conservées, plafond distinct : les
-/// entrées courantes (qu'un tiers peut provoquer) ne les évincent jamais.
+/// Maximum number of security entries kept, a separate cap: regular
+/// entries (which a third party can trigger) never evict them.
 pub const LOG_MAX_SECURITY_ROWS: u64 = 10_000;
 
-/// Classe d'une entrée du journal (colonne `class`).
+/// Class of a log entry (column `class`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventClass {
-    /// Entrée courante, soumise au plafond `LOG_MAX_ROWS`.
+    /// Regular entry, subject to the `LOG_MAX_ROWS` cap.
     Routine = 0,
-    /// Preuve de sécurité (session établie, clé de contact changée), soumise
-    /// au plafond distinct `LOG_MAX_SECURITY_ROWS`.
+    /// Security proof (established session, changed contact key), subject
+    /// to the separate `LOG_MAX_SECURITY_ROWS` cap.
     Security = 1,
 }
 
 fn to_i64(v: u64) -> i64 {
-    // Les secondes Unix tiennent largement dans i64.
+    // Unix seconds fit comfortably in an i64.
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
@@ -259,17 +259,17 @@ impl fmt::Debug for Store {
     }
 }
 
-/// Poignée de transaction, passée à la fermeture de [`Store::transaction`].
+/// Transaction handle, passed to the closure of [`Store::transaction`].
 pub struct Tx<'a> {
     conn: &'a Connection,
 }
 
 impl Store {
-    /// Ouvre (ou crée) la base chiffrée avec une clé de 32 octets.
+    /// Opens (or creates) the encrypted database with a 32-byte key.
     pub fn open(path: &Path, key: &[u8; 32]) -> Result<Store> {
         let conn = Connection::open(path).map_err(map_err)?;
-        // Un autre processus (`barking send` pendant `barking sync`) peut tenir
-        // l'écriture : attendre un peu plutôt qu'échouer aussitôt.
+        // Another process (`barking send` during `barking sync`) may hold
+        // the write lock: wait a bit rather than failing immediately.
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(map_err)?;
         let mut hex = data_encoding::HEXLOWER.encode(key);
@@ -282,7 +282,7 @@ impl Store {
             r.get::<_, i64>(0)
         })
         .map_err(map_err)?;
-        // Pages libérées écrasées par des zéros (messages, sessions supprimés).
+        // Freed pages overwritten with zeros (deleted messages, sessions).
         conn.execute_batch("PRAGMA secure_delete = ON;")
             .map_err(map_err)?;
         let store = Store { conn };
@@ -291,8 +291,8 @@ impl Store {
     }
 
     fn apply_schema(&self) -> Result<()> {
-        // Version déjà écrite : une base plus récente que le code est refusée
-        // avant toute écriture.
+        // Version already written: a database newer than the code is rejected
+        // before any write.
         let has_meta: bool = self
             .conn
             .query_row(
@@ -308,19 +308,19 @@ impl Store {
         };
         if stored.is_some_and(|v| v > schema::SCHEMA_VERSION) {
             return Err(CoreError::Store(
-                "base de données plus récente que cette version de Barking".into(),
+                "database newer than this version of Barking".into(),
             ));
         }
-        // Une base neuve (ou v1 sans version) passe par le schéma v1, puis
-        // la migration : un seul chemin pour toutes les bases à migrer.
+        // A new database (or v1 without version) goes through the v1 schema, then
+        // the migration: a single path for all databases to migrate.
         if stored.is_none_or(|v| v < 2) {
             self.conn
                 .execute_batch(schema::SCHEMA_V1_LEGACY)
                 .map_err(map_err)?;
         }
-        // Colonne `class` du journal, ajoutée au schéma v1 après coup : une
-        // base créée avant la reçoit ici (idempotent) ; ses entrées existantes
-        // sont classées courantes.
+        // `class` column of the log, added to the v1 schema after the fact: a
+        // database created before it receives it here (idempotent); its existing entries
+        // are classed as regular.
         let has_class: bool = self
             .conn
             .query_row(
@@ -374,7 +374,7 @@ impl Store {
         Ok(())
     }
 
-    /// Exécute `f` dans une transaction unique ; `Err` => rollback complet.
+    /// Runs `f` in a single transaction; `Err` => full rollback.
     pub fn transaction<R>(&mut self, f: impl FnOnce(&Tx) -> Result<R>) -> Result<R> {
         let txn = self.conn.transaction().map_err(map_err)?;
         let out = f(&Tx { conn: &txn });
@@ -391,7 +391,7 @@ impl Store {
     }
 }
 
-/// Méthodes typées, communes à [`Store`] et [`Tx`].
+/// Typed methods, common to [`Store`] and [`Tx`].
 pub trait Queries {
     #[doc(hidden)]
     fn conn(&self) -> &Connection;
@@ -418,7 +418,7 @@ pub trait Queries {
             None => Ok(None),
             Some(b) => postcard::from_bytes(b)
                 .map(Some)
-                .map_err(|_| CoreError::Store("donnée meta corrompue".into())),
+                .map_err(|_| CoreError::Store("corrupted meta data".into())),
         };
         if let Some(r) = raw.as_mut() {
             r.zeroize();
@@ -426,7 +426,7 @@ pub trait Queries {
         out
     }
 
-    /// Supprime une entrée ; `true` si elle existait.
+    /// Deletes an entry; `true` if it existed.
     fn delete_meta(&self, k: &str) -> Result<bool> {
         let n = self
             .conn()
@@ -520,9 +520,9 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Sessions avec l'appareil `device` du contact `contact_fp`. Une session
-    /// appartient toujours à un couple (contact, appareil) : un même appareil
-    /// revendiqué par deux contacts ne partage jamais de session.
+    /// Sessions with device `device` of contact `contact_fp`. A session
+    /// always belongs to a (contact, device) pair: the same device
+    /// claimed by two contacts never shares a session.
     fn sessions_for(&self, contact_fp: Fingerprint, device: DeviceId) -> Result<Vec<SessionRow>> {
         query_sessions(
             self.conn(),
@@ -535,7 +535,7 @@ pub trait Queries {
         query_sessions(self.conn(), "ORDER BY created_at, session_id", [])
     }
 
-    /// Insère un message. `false` si `message_id` existe déjà (rien n'est écrit).
+    /// Inserts a message. `false` if `message_id` already exists (nothing is written).
     fn insert_message(
         &self,
         contact_fp: Fingerprint,
@@ -563,8 +563,8 @@ pub trait Queries {
         Ok(n == 1)
     }
 
-    /// Enregistre que le paquet reçu `packet_id` portait le message
-    /// `message_id` (un renvoi ajoute une ligne pour le même message).
+    /// Records that the received packet `packet_id` carried the message
+    /// `message_id` (a resend adds a row for the same message).
     fn record_inbound(&self, packet_id: PacketId, message_id: MessageId) -> Result<()> {
         self.conn()
             .execute(
@@ -575,9 +575,9 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Enregistre le paquet `packet_id`, destiné à l'appareil `device`, comme
-    /// livraison (en attente d'accusé) du message `message_id`. `own` : copie
-    /// de synchronisation pour un de mes appareils.
+    /// Records the packet `packet_id`, destined for device `device`, as a
+    /// delivery (awaiting acknowledgement) of the message `message_id`. `own`: synchronisation
+    /// copy for one of my devices.
     fn add_delivery(
         &self,
         message_id: MessageId,
@@ -601,8 +601,8 @@ pub trait Queries {
         Ok(())
     }
 
-    /// `true` si un paquet reçu portant le message `message_id` est déjà
-    /// inscrit dans `inbound`.
+    /// `true` if a received packet carrying the message `message_id` is already
+    /// recorded in `inbound`.
     fn inbound_has_message(&self, message_id: MessageId) -> Result<bool> {
         let n: i64 = self
             .conn()
@@ -615,10 +615,10 @@ pub trait Queries {
         Ok(n > 0)
     }
 
-    /// Marque la livraison `packet_id` livrée et le message `Delivered` (un
-    /// accusé d'un seul appareil du destinataire suffit ; celui d'une copie
-    /// pour un de mes appareils, `own`, ne compte jamais). Renvoie le message
-    /// concerné, ou `None` si aucune livraison ne porte ce paquet.
+    /// Marks the delivery `packet_id` as delivered and the message `Delivered` (an
+    /// acknowledgement from a single recipient device is enough; that of a copy
+    /// for one of my devices, `own`, never counts). Returns the message
+    /// concerned, or `None` if no delivery carries this packet.
     fn mark_delivered_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageId>> {
         let row: Option<(Vec<u8>, i64)> = self
             .conn()
@@ -649,7 +649,7 @@ pub trait Queries {
         Ok(Some(MessageId(arr(mid)?)))
     }
 
-    /// Dernière opération connue sur le contact `fp`.
+    /// Last known operation on the contact `fp`.
     fn contact_clock(&self, fp: Fingerprint) -> Result<Option<ContactClock>> {
         let row: Option<(i64, i64, Vec<u8>)> = self
             .conn()
@@ -670,8 +670,8 @@ pub trait Queries {
         .transpose()
     }
 
-    /// Enregistre la dernière opération sur le contact `fp` (`removed` :
-    /// pierre tombale d'une suppression).
+    /// Records the last operation on the contact `fp` (`removed`:
+    /// tombstone of a deletion).
     fn set_contact_clock(&self, fp: Fingerprint, clock: &ContactClock) -> Result<()> {
         self.conn()
             .execute(
@@ -689,7 +689,7 @@ pub trait Queries {
         Ok(())
     }
 
-    /// `true` si la livraison portant `packet_id` a déjà reçu son accusé.
+    /// `true` if the delivery carrying `packet_id` has already received its acknowledgement.
     fn delivery_acked(&self, packet_id: PacketId) -> Result<bool> {
         let n: i64 = self
             .conn()
@@ -702,7 +702,7 @@ pub trait Queries {
         Ok(n > 0)
     }
 
-    /// `true` si `packet_id` est l'un de mes paquets envoyés (une livraison).
+    /// `true` if `packet_id` is one of my sent packets (a delivery).
     fn is_my_packet(&self, packet_id: PacketId) -> Result<bool> {
         let n: i64 = self
             .conn()
@@ -715,7 +715,7 @@ pub trait Queries {
         Ok(n > 0)
     }
 
-    /// Messages d'un contact, du plus ancien au plus récent.
+    /// Messages of a contact, from oldest to newest.
     fn messages_with(&self, contact_fp: Fingerprint) -> Result<Vec<MessageRow>> {
         let mut stmt = self
             .conn()
@@ -732,7 +732,7 @@ pub trait Queries {
         raws.into_iter().map(message_from_raw).collect()
     }
 
-    /// Tous les messages, dans l'ordre d'insertion (archive d'historique).
+    /// All messages, in insertion order (history archive).
     fn all_messages(&self) -> Result<Vec<MessageRow>> {
         let mut stmt = self
             .conn()
@@ -749,7 +749,7 @@ pub trait Queries {
         raws.into_iter().map(message_from_raw).collect()
     }
 
-    /// `true` si le paquet est nouveau, `false` s'il était déjà vu.
+    /// `true` if the packet is new, `false` if it was already seen.
     fn mark_seen(&self, packet_id: PacketId, at: u64) -> Result<bool> {
         let n = self
             .conn()
@@ -761,7 +761,7 @@ pub trait Queries {
         Ok(n == 1)
     }
 
-    /// `true` si le paquet a déjà été vu (sans l'enregistrer).
+    /// `true` if the packet has already been seen (without recording it).
     fn is_seen(&self, packet_id: PacketId) -> Result<bool> {
         let n: i64 = self
             .conn()
@@ -774,14 +774,14 @@ pub trait Queries {
         Ok(n > 0)
     }
 
-    /// Supprime les paquets vus avant `before` ; renvoie le nombre de lignes supprimées.
+    /// Deletes packets seen before `before`; returns the number of rows deleted.
     fn purge_seen(&self, before: u64) -> Result<usize> {
         self.conn()
             .execute("DELETE FROM seen WHERE at < ?1", params![to_i64(before)])
             .map_err(map_err)
     }
 
-    /// Met un paquet en file d'envoi ; sans effet s'il y est déjà.
+    /// Puts a packet in the send queue; no effect if it is already there.
     fn outbox_put(
         &self,
         packet_id: PacketId,
@@ -806,7 +806,7 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Retire un paquet de la file ; `true` s'il y était.
+    /// Removes a packet from the queue; `true` if it was there.
     fn outbox_remove(&self, packet_id: PacketId) -> Result<bool> {
         let n = self
             .conn()
@@ -818,7 +818,7 @@ pub trait Queries {
         Ok(n > 0)
     }
 
-    /// Paquets non expirés (`expires_at >= now`), du plus ancien au plus récent.
+    /// Unexpired packets (`expires_at >= now`), from oldest to newest.
     fn outbox_pending(&self, now: u64) -> Result<Vec<(PacketId, Vec<u8>)>> {
         let mut stmt = self
             .conn()
@@ -839,7 +839,7 @@ pub trait Queries {
             .collect()
     }
 
-    /// Supprime les paquets expirés ; renvoie le nombre de lignes supprimées.
+    /// Deletes expired packets; returns the number of rows deleted.
     fn outbox_purge_expired(&self, now: u64) -> Result<usize> {
         self.conn()
             .execute(
@@ -849,9 +849,9 @@ pub trait Queries {
             .map_err(map_err)
     }
 
-    /// Message lié à l'identifiant de paquet `packet_id`. Sortant : via la
-    /// table `deliveries`. Entrant : via la table `inbound` (jamais purgée,
-    /// contrairement à `seen`).
+    /// Message linked to the packet identifier `packet_id`. Outgoing: via the
+    /// `deliveries` table. Incoming: via the `inbound` table (never purged,
+    /// unlike `seen`).
     fn message_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageRow>> {
         const COLS: &str = "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, \
                             m.message_id FROM messages m";
@@ -885,10 +885,10 @@ pub trait Queries {
         raw.map(message_from_raw).transpose()
     }
 
-    /// Supprime un contact, toutes ses sessions et ses paquets en file
-    /// d'envoi : mes messages pour lui et mes accusés de ses messages
-    /// (l'historique est gardé). Les copies `SyncSent` de mes messages pour
-    /// mes autres appareils restent en file.
+    /// Deletes a contact, all its sessions and its packets in the send
+    /// queue: my messages for it and my acknowledgements of its messages
+    /// (the history is kept). The `SyncSent` copies of my messages for
+    /// my other devices stay in the queue.
     fn delete_contact(&self, fp: Fingerprint) -> Result<()> {
         self.conn()
             .execute(
@@ -899,7 +899,7 @@ pub trait Queries {
                 params![fp.0.as_slice(), Direction::Out as i64],
             )
             .map_err(map_err)?;
-        // Un accusé porte l'identifiant du message reçu qu'il confirme.
+        // An acknowledgement carries the identifier of the received message it confirms.
         let acks = {
             let mut stmt = self
                 .conn()
@@ -942,7 +942,7 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Supprime une session.
+    /// Deletes a session.
     fn delete_session(
         &self,
         contact_fp: Fingerprint,
@@ -963,7 +963,7 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Supprime toutes les sessions avec un appareil d'un contact (appareil révoqué).
+    /// Deletes all sessions with a contact's device (revoked device).
     fn delete_sessions_for_device(&self, contact_fp: Fingerprint, device: DeviceId) -> Result<()> {
         self.conn()
             .execute(
@@ -974,7 +974,7 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Les `limit` événements les plus récents, du plus ancien au plus récent.
+    /// The `limit` most recent events, from oldest to newest.
     fn recent_events(&self, limit: usize) -> Result<Vec<(u64, Vec<u8>)>> {
         let mut stmt = self
             .conn()
@@ -993,7 +993,7 @@ pub trait Queries {
         Ok(rows.into_iter().map(|(a, e)| (to_u64(a), e)).collect())
     }
 
-    /// Ajoute un événement de transparence (postcard opaque ici).
+    /// Appends a transparency event (postcard, opaque here).
     fn append_event(
         &self,
         at: u64,
@@ -1001,20 +1001,20 @@ pub trait Queries {
         class: EventClass,
         event: &[u8],
     ) -> Result<()> {
-        // Horloge de purge monotone, stockée dans `meta` (même transaction) :
-        // elle ne recule jamais et n'avance que de LOG_PURGE_CLOCK_STEP_SECS
-        // au plus par événement. Des événements datés du futur lointain
-        // (horloge locale déréglée) ne la font avancer que de 2 jours chacun :
-        // le journal n'est pas vidé. Contrepartie : un journal peu actif (moins
-        // d'un événement tous les 2 jours) garde ses entrées un peu plus de
-        // 30 jours, jusqu'à ce que l'activité fasse rattraper l'horloge (au
-        // plus les plafonds de lignes) ; on préfère garder trop longtemps que
-        // perdre une preuve.
+        // Monotonic purge clock, stored in `meta` (same transaction):
+        // it never goes backwards and advances by at most LOG_PURGE_CLOCK_STEP_SECS
+        // per event. Events dated far in the future
+        // (misadjusted local clock) only advance it by 2 days each:
+        // the log is not emptied. Trade-off: a low-activity log (fewer
+        // than one event every 2 days) keeps its entries a bit longer than
+        // 30 days, until activity lets the clock catch up (at
+        // most the row caps); we prefer keeping too long to
+        // losing a proof.
         let previous: Option<u64> = self.get_meta(META_LOG_PURGE_CLOCK)?;
         let clock = match previous {
             Some(p) => at.min(p.saturating_add(LOG_PURGE_CLOCK_STEP_SECS)).max(p),
-            // Première écriture (ou base antérieure à l'horloge) : partir de
-            // l'entrée existante la plus récente, bornée de la même façon.
+            // First write (or database predating the clock): start from
+            // the most recent existing entry, bounded in the same way.
             None => {
                 let newest: Option<i64> = self
                     .conn()
@@ -1028,9 +1028,9 @@ pub trait Queries {
         if previous != Some(clock) {
             self.put_meta(META_LOG_PURGE_CLOCK, &clock)?;
         }
-        // Heure de purge : jamais après `at` non plus, pour qu'une horloge
-        // remise à l'heure après une avance ne purge pas aussitôt les
-        // nouvelles entrées.
+        // Purge time: never after `at` either, so that a clock
+        // set back to the right time after an advance does not immediately purge the
+        // new entries.
         let purge_at = at.min(clock);
         self.conn()
             .execute(
@@ -1043,15 +1043,15 @@ pub trait Queries {
                 ],
             )
             .map_err(map_err)?;
-        // Purge bornée, sur la même connexion (donc dans la même transaction).
-        // L'âge vaut pour toutes les classes.
+        // Bounded purge, on the same connection (hence in the same transaction).
+        // The age applies to all classes.
         self.conn()
             .execute(
                 "DELETE FROM transparency WHERE at < ?1",
                 params![to_i64(purge_at.saturating_sub(LOG_MAX_AGE_SECS))],
             )
             .map_err(map_err)?;
-        // Plafond par classe : seule la classe de l'entrée ajoutée a grandi.
+        // Per-class cap: only the class of the added entry has grown.
         let cap = match class {
             EventClass::Routine => LOG_MAX_ROWS,
             EventClass::Security => LOG_MAX_SECURITY_ROWS,
@@ -1067,7 +1067,7 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Les `limit` premiers événements, dans l'ordre d'insertion : `(at, event)`.
+    /// The first `limit` events, in insertion order: `(at, event)`.
     fn events(&self, limit: usize) -> Result<Vec<(u64, Vec<u8>)>> {
         let mut stmt = self
             .conn()

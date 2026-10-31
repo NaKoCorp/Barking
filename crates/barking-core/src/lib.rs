@@ -1,4 +1,4 @@
-//! barking-core : cœur de la messagerie Barking (sans réseau ni plateforme).
+//! barking-core: core of the Barking messenger (no network, no platform).
 
 pub mod contact;
 pub mod core;
@@ -6,14 +6,14 @@ pub mod crypto;
 pub mod envelope;
 pub mod error;
 pub mod fragment {
-    //! Fragmentation : réexportée depuis `barking-packet`.
+    //! Fragmentation: re-exported from `barking-packet`.
     pub use barking_packet::fragment::*;
 }
 pub mod handshake;
 pub mod identity;
 pub mod mailbox;
 pub mod packet {
-    //! Paquet universel : réexporté depuis `barking-packet`.
+    //! Universal packet: re-exported from `barking-packet`.
     pub use barking_packet::*;
 }
 pub mod ratchet;

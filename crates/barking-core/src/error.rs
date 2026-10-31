@@ -1,37 +1,37 @@
-//! Erreurs du cœur. Aucune entrée extérieure ne doit provoquer de panique.
+//! Core errors. No external input may cause a panic.
 
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CoreError {
-    #[error("erreur cryptographique")]
+    #[error("cryptographic error")]
     Crypto,
-    #[error("signature invalide")]
+    #[error("invalid signature")]
     InvalidSignature,
-    #[error("données mal formées : {0}")]
+    #[error("malformed data: {0}")]
     Malformed(&'static str),
-    #[error("données trop volumineuses")]
+    #[error("data too large")]
     TooLarge,
-    #[error("contact inconnu")]
+    #[error("unknown contact")]
     UnknownContact,
-    #[error("aucune session")]
+    #[error("no session")]
     NoSession,
-    #[error("expiré")]
+    #[error("expired")]
     Expired,
-    #[error("base verrouillée")]
+    #[error("database locked")]
     StoreLocked,
-    #[error("erreur de stockage : {0}")]
+    #[error("storage error: {0}")]
     Store(String),
-    #[error("phrase de récupération invalide")]
+    #[error("invalid recovery phrase")]
     InvalidPhrase,
-    #[error("cet appareil ne détient pas la clé racine")]
+    #[error("this device does not hold the root key")]
     NotAdmin,
-    /// Appareil en attente de liaison (`begin_link` sans `finish_link`) :
-    /// état local, jamais causé par le contenu d'un paquet.
-    #[error("appareil en attente de liaison")]
+    /// Device awaiting linking (`begin_link` without `finish_link`):
+    /// local state, never caused by the content of a packet.
+    #[error("device awaiting linking")]
     LinkPending,
-    /// Liaison refusée ; la raison est un texte fixe. Aucun état modifié.
-    #[error("liaison refusée : {0}")]
+    /// Linking refused; the reason is a fixed text. No state modified.
+    #[error("linking refused: {0}")]
     Link(&'static str),
 }
 

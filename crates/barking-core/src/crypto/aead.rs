@@ -1,23 +1,23 @@
-//! AEAD : ChaCha20-Poly1305 (nonce explicite) et XChaCha20-Poly1305 (nonce aléatoire préfixé).
+//! AEAD: ChaCha20-Poly1305 (explicit nonce) and XChaCha20-Poly1305 (random prefixed nonce).
 
 use crate::{CoreError, Result};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, XChaCha20Poly1305};
 use rand_core::CryptoRng;
 
-/// Taille du nonce XChaCha20-Poly1305, préfixé au chiffré par [`xseal`].
+/// Size of the XChaCha20-Poly1305 nonce, prefixed to the ciphertext by [`xseal`].
 pub const XNONCE_LEN: usize = 24;
 
-/// Chiffre avec ChaCha20-Poly1305. L'appelant garantit l'unicité du couple (clé, nonce).
+/// Encrypts with ChaCha20-Poly1305. The caller guarantees the uniqueness of the (key, nonce) pair.
 pub fn seal(key: &[u8; 32], nonce: &[u8; 12], ad: &[u8], pt: &[u8]) -> Vec<u8> {
     let cipher = ChaCha20Poly1305::new(&(*key).into());
-    // Le chiffrement ne peut échouer que sur une taille démesurée (> 2^38 octets).
+    // Encryption can only fail on an excessive size (> 2^38 bytes).
     cipher
         .encrypt(&(*nonce).into(), Payload { msg: pt, aad: ad })
-        .expect("taille de message dans les limites de l'AEAD")
+        .expect("message size within the AEAD limits")
 }
 
-/// Déchiffre et authentifie. Toute altération donne `CoreError::Crypto`.
+/// Decrypts and authenticates. Any tampering yields `CoreError::Crypto`.
 pub fn open(key: &[u8; 32], nonce: &[u8; 12], ad: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new(&(*key).into());
     cipher
@@ -25,21 +25,21 @@ pub fn open(key: &[u8; 32], nonce: &[u8; 12], ad: &[u8], ct: &[u8]) -> Result<Ve
         .map_err(|_| CoreError::Crypto)
 }
 
-/// Chiffre avec XChaCha20-Poly1305 ; le nonce aléatoire de 24 octets est préfixé.
+/// Encrypts with XChaCha20-Poly1305; the 24-byte random nonce is prefixed.
 pub fn xseal(key: &[u8; 32], ad: &[u8], pt: &[u8], rng: &mut impl CryptoRng) -> Vec<u8> {
     let mut nonce = [0u8; XNONCE_LEN];
     rng.fill_bytes(&mut nonce);
     let cipher = XChaCha20Poly1305::new(&(*key).into());
     let body = cipher
         .encrypt(&nonce.into(), Payload { msg: pt, aad: ad })
-        .expect("taille de message dans les limites de l'AEAD");
+        .expect("message size within the AEAD limits");
     let mut out = Vec::with_capacity(XNONCE_LEN + body.len());
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&body);
     out
 }
 
-/// Inverse de [`xseal`] : lit le nonce préfixé, puis déchiffre.
+/// Inverse of [`xseal`]: reads the prefixed nonce, then decrypts.
 pub fn xopen(key: &[u8; 32], ad: &[u8], ct: &[u8]) -> Result<Vec<u8>> {
     let (nonce, body) = ct.split_at_checked(XNONCE_LEN).ok_or(CoreError::Crypto)?;
     let nonce: [u8; XNONCE_LEN] = nonce.try_into().map_err(|_| CoreError::Crypto)?;

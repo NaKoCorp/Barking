@@ -1,4 +1,4 @@
-//! État du double ratchet (variante « header encryption » de Signal, §4).
+//! Double ratchet state (Signal's "header encryption" variant, §4).
 
 use super::header::{ENC_HEADER_LEN, Header, RatchetMessage};
 use super::{MAX_SKIP, MAX_SKIPPED_AGE_SECS, MAX_SKIPPED_TOTAL};
@@ -14,24 +14,24 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 #[cfg(test)]
 thread_local! {
-    /// Nombre de copies d'état faites par `decrypt` sur le fil courant.
-    /// Par fil (et non global) : les tests tournent en parallèle et
-    /// mesurent des écarts sans se gêner.
+    /// Number of state copies made by `decrypt` on the current thread.
+    /// Per thread (not global): tests run in parallel and
+    /// measure differences without interfering with each other.
     pub(crate) static STATE_CLONES: core::cell::Cell<usize> =
         const { core::cell::Cell::new(0) };
 }
 
-/// Clé de message sautée, rangée sous la clé d'en-tête de sa chaîne.
+/// Skipped message key, stored under the header key of its chain.
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub(super) struct SkippedKey {
     pub hk: [u8; 32],
     pub n: u32,
     pub mk: [u8; 32],
-    /// Mise de côté (secondes Unix, horloge du destinataire).
+    /// Set aside (Unix seconds, recipient's clock).
     pub stored_at: u64,
 }
 
-/// État d'une session de double ratchet.
+/// State of a double ratchet session.
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct RatchetState {
     pub(super) dhs: Option<[u8; 32]>,
@@ -51,7 +51,7 @@ pub struct RatchetState {
 
 impl fmt::Debug for RatchetState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Compteurs seulement : aucune clé n'apparaît.
+        // Counters only: no key appears.
         f.debug_struct("RatchetState")
             .field("ns", &self.ns)
             .field("nr", &self.nr)
@@ -62,8 +62,8 @@ impl fmt::Debug for RatchetState {
 }
 
 impl RatchetState {
-    /// RatchetInitAliceHE : l'initiateur fait tout de suite l'étape DH d'envoi
-    /// vers la clé signée du répondeur (`their_spk`).
+    /// RatchetInitAliceHE: the initiator immediately performs the sending DH step
+    /// towards the responder's signed key (`their_spk`).
     pub fn init_initiator(
         sk: &[u8; 32],
         their_spk: [u8; 32],
@@ -89,11 +89,11 @@ impl RatchetState {
         Ok(s)
     }
 
-    /// RatchetInitBobHE : la paire DH initiale du répondeur est sa clé signée.
+    /// RatchetInitBobHE: the responder's initial DH pair is its signed key.
     pub fn init_responder(sk: &[u8; 32], our_spk: &StaticSecret) -> Self {
-        // Invariant interne : HKDF-SHA256 sur 64 octets ne peut pas échouer
-        // (limite : 255 * 32 octets), quelle que soit l'entrée.
-        let (hka, nhkb) = initial_header_keys(sk).expect("HKDF de 64 octets");
+        // Internal invariant: HKDF-SHA256 over 64 bytes cannot fail
+        // (limit: 255 * 32 bytes), whatever the input.
+        let (hka, nhkb) = initial_header_keys(sk).expect("64-byte HKDF");
         RatchetState {
             dhs: Some(our_spk.to_bytes()),
             dhr: None,
@@ -111,8 +111,8 @@ impl RatchetState {
         }
     }
 
-    /// RatchetEncryptHE. Le répondeur ne peut pas émettre avant d'avoir reçu
-    /// un premier message (`NoSession`).
+    /// RatchetEncryptHE. The responder cannot send before having received
+    /// a first message (`NoSession`).
     pub fn encrypt(
         &mut self,
         pt: &[u8],
@@ -120,7 +120,7 @@ impl RatchetState {
         rng: &mut impl CryptoRng,
     ) -> Result<RatchetMessage> {
         if self.cks.is_none() {
-            // Moitié « envoi » de DHRatchetHE, reportée depuis la réception.
+            // "Send" half of DHRatchetHE, deferred from reception.
             self.send_ratchet(rng)?;
         }
         let (Some(cks), Some(hks), Some(dhs)) = (&self.cks, &self.hks, &self.dhs) else {
@@ -140,31 +140,31 @@ impl RatchetState {
         Ok(RatchetMessage { enc_header, ct })
     }
 
-    /// RatchetDecryptHE, transactionnelle : en cas d'échec, `self` est inchangé.
+    /// RatchetDecryptHE, transactional: on failure, `self` is unchanged.
     ///
-    /// `now` (secondes Unix) date les clés sautées ; celles mises de côté
-    /// depuis plus de `MAX_SKIPPED_AGE_SECS` sont effacées avant tout essai.
+    /// `now` (Unix seconds) dates the skipped keys; those set aside
+    /// for more than `MAX_SKIPPED_AGE_SECS` are erased before any attempt.
     pub fn decrypt(&mut self, msg: &RatchetMessage, ad: &[u8], now: u64) -> Result<Vec<u8>> {
         #[cfg(test)]
         STATE_CLONES.with(|c| c.set(c.get() + 1));
         let mut next = self.clone();
         let pt = next.decrypt_in_place(msg, ad, now)?;
-        // L'ancien état est effacé à la destruction (`ZeroizeOnDrop`).
+        // The old state is erased on drop (`ZeroizeOnDrop`).
         *self = next;
         Ok(pt)
     }
 
-    /// Pré-contrôle bon marché : l'en-tête chiffré a la bonne taille et
-    /// s'ouvre avec une clé d'en-tête sautée, `hkr` ou `nhkr` (miroir des
-    /// contrôles d'en-tête de `decrypt`, sans la purge par date : `decrypt`
-    /// tranche). Ni copie ni modification.
+    /// Cheap pre-check: the encrypted header has the right size and
+    /// opens with a skipped header key, `hkr` or `nhkr` (mirror of the
+    /// header checks of `decrypt`, without the purge by date: `decrypt`
+    /// decides). Neither copies nor modifies.
     pub(crate) fn could_open(&self, msg: &RatchetMessage) -> bool {
         let enc = &msg.enc_header;
         if enc.len() != ENC_HEADER_LEN {
             return false;
         }
-        // Capacité fixée d'avance : aucune réallocation ne laisse de copie
-        // non effacée des clés d'en-tête.
+        // Capacity fixed in advance: no reallocation leaves an unerased
+        // copy of the header keys.
         let mut tried: Vec<[u8; 32]> = Vec::with_capacity(self.mkskipped.len());
         let mut skipped_ok = false;
         for entry in &self.mkskipped {
@@ -183,7 +183,7 @@ impl RatchetState {
 
     fn decrypt_in_place(&mut self, msg: &RatchetMessage, ad: &[u8], now: u64) -> Result<Vec<u8>> {
         if msg.enc_header.len() != ENC_HEADER_LEN {
-            return Err(CoreError::Malformed("taille de l'en-tête chiffré"));
+            return Err(CoreError::Malformed("encrypted header size"));
         }
         self.purge_skipped(now);
         if let Some(pt) = self.try_skipped_message_keys(msg, ad)? {
@@ -195,7 +195,7 @@ impl RatchetState {
             self.receive_ratchet(&header)?;
         }
         if header.n < self.nr {
-            // Message déjà déchiffré (rejeu) ou clé sautée évincée.
+            // Message already decrypted (replay) or skipped key evicted.
             return Err(CoreError::Crypto);
         }
         self.skip_message_keys(header.n, now)?;
@@ -206,15 +206,15 @@ impl RatchetState {
         open_body(&mk, ad, &msg.enc_header, &msg.ct)
     }
 
-    /// TrySkippedMessageKeysHE. Chaque clé d'en-tête distincte n'est essayée
-    /// qu'une fois (les clés sautées sont groupées par chaîne).
+    /// TrySkippedMessageKeysHE. Each distinct header key is tried
+    /// only once (skipped keys are grouped by chain).
     fn try_skipped_message_keys(
         &mut self,
         msg: &RatchetMessage,
         ad: &[u8],
     ) -> Result<Option<Vec<u8>>> {
-        // Capacité fixée d'avance : aucune réallocation ne laisse de copie
-        // non effacée des clés d'en-tête.
+        // Capacity fixed in advance: no reallocation leaves an unerased
+        // copy of the header keys.
         let mut tried: Vec<[u8; 32]> = Vec::with_capacity(self.mkskipped.len());
         let mut found = None;
         for entry in &self.mkskipped {
@@ -232,15 +232,15 @@ impl RatchetState {
             return Ok(None);
         };
         let Some(pos) = self.mkskipped.iter().position(|e| e.hk == hk && e.n == n) else {
-            // Bonne clé d'en-tête mais numéro absent : la suite décide (rejeu,
-            // message de la chaîne courante).
+            // Right header key but number absent: what follows decides (replay,
+            // message of the current chain).
             return Ok(None);
         };
         let entry = self.mkskipped.remove(pos);
         open_body(&entry.mk, ad, &msg.enc_header, &msg.ct).map(Some)
     }
 
-    /// DecryptHeader : HKr d'abord, puis NHKr (qui annonce une étape DH).
+    /// DecryptHeader: HKr first, then NHKr (which announces a DH step).
     fn decrypt_header(&self, enc: &[u8]) -> Result<(Header, bool)> {
         if let Some(hkr) = &self.hkr
             && let Ok(h) = Header::open(hkr, enc)
@@ -252,24 +252,24 @@ impl RatchetState {
             .map_err(|_| CoreError::Crypto)
     }
 
-    /// Efface les clés sautées mises de côté depuis plus de
-    /// `MAX_SKIPPED_AGE_SECS` (une horloge revenue en arrière n'efface rien).
-    /// Rend vrai si au moins une clé a été retirée.
+    /// Erases the skipped keys set aside for more than
+    /// `MAX_SKIPPED_AGE_SECS` (a clock that went backwards erases nothing).
+    /// Returns true if at least one key was removed.
     pub(crate) fn purge_skipped(&mut self, now: u64) -> bool {
         let before = self.mkskipped.len();
-        // Les éléments retirés sont effacés à la destruction.
+        // Removed elements are erased on drop.
         self.mkskipped
             .retain(|k| now.saturating_sub(k.stored_at) <= MAX_SKIPPED_AGE_SECS);
         self.mkskipped.len() != before
     }
 
-    /// Nombre de clés sautées en réserve (tests).
+    /// Number of skipped keys held in reserve (tests).
     #[cfg(test)]
     pub(crate) fn skipped_len(&self) -> usize {
         self.mkskipped.len()
     }
 
-    /// SkipMessageKeysHE : au plus `MAX_SKIP` clés d'avance dans la chaîne.
+    /// SkipMessageKeysHE: at most `MAX_SKIP` keys ahead in the chain.
     fn skip_message_keys(&mut self, until: u32, now: u64) -> Result<()> {
         if u64::from(self.nr) + u64::from(MAX_SKIP) < u64::from(until) {
             return Err(CoreError::TooLarge);
@@ -293,11 +293,11 @@ impl RatchetState {
         Ok(())
     }
 
-    /// Ajoute une clé sautée, évince les plus anciennes au-delà de
-    /// `MAX_SKIPPED_TOTAL`, sans laisser de copie non effacée en mémoire.
+    /// Adds a skipped key, evicts the oldest beyond
+    /// `MAX_SKIPPED_TOTAL`, without leaving an unerased copy in memory.
     fn push_skipped(&mut self, key: SkippedKey) {
         if self.mkskipped.len() == self.mkskipped.capacity() {
-            // Réallocation manuelle : l'ancien tampon est effacé avant d'être libéré.
+            // Manual reallocation: the old buffer is erased before being freed.
             let cap = (self.mkskipped.capacity() * 2).clamp(16, MAX_SKIPPED_TOTAL + 1);
             let mut grown = Vec::with_capacity(cap.max(self.mkskipped.len() + 1));
             grown.extend(self.mkskipped.iter().cloned());
@@ -307,15 +307,15 @@ impl RatchetState {
         self.mkskipped.push(key);
         if self.mkskipped.len() > MAX_SKIPPED_TOTAL {
             let excess = self.mkskipped.len() - MAX_SKIPPED_TOTAL;
-            // Les éléments retirés sont effacés à la destruction.
+            // Removed elements are erased on drop.
             self.mkskipped.drain(..excess);
         }
     }
 
-    /// Moitié « réception » de DHRatchetHE. L'ancienne clé privée `DHs` est
-    /// effacée ; la nouvelle sera tirée au prochain `encrypt`.
+    /// "Receive" half of DHRatchetHE. The old `DHs` private key is
+    /// erased; the new one will be drawn at the next `encrypt`.
     fn receive_ratchet(&mut self, header: &Header) -> Result<()> {
-        // Sans `DHs`, le pair ne peut pas avoir fait d'étape DH légitime.
+        // Without `DHs`, the peer cannot have performed a legitimate DH step.
         let dhs = self.dhs.as_ref().ok_or(CoreError::Crypto)?;
         let shared = dh(dhs, &header.dh)?;
         self.pn = self.ns;
@@ -335,7 +335,7 @@ impl RatchetState {
         Ok(())
     }
 
-    /// Moitié « envoi » de DHRatchetHE : nouvelle paire DH, puis KDF_RK.
+    /// "Send" half of DHRatchetHE: new DH pair, then KDF_RK.
     fn send_ratchet(&mut self, rng: &mut impl CryptoRng) -> Result<()> {
         let dhr = self.dhr.ok_or(CoreError::NoSession)?;
         let mut fresh = Zeroizing::new([0u8; 32]);
@@ -350,14 +350,14 @@ impl RatchetState {
     }
 }
 
-/// Clés d'en-tête initiales : `shared_hka || shared_nhkb`.
+/// Initial header keys: `shared_hka || shared_nhkb`.
 fn initial_header_keys(sk: &[u8; 32]) -> Result<([u8; 32], [u8; 32])> {
     let mut okm = Zeroizing::new([0u8; 64]);
     hkdf_sha256(None, sk, labels::RATCHET_HK, okm.as_mut())?;
     Ok((split32(&okm[..32]), split32(&okm[32..])))
 }
 
-/// X25519, en refusant une sortie nulle (point d'ordre faible).
+/// X25519, rejecting an all-zero output (weak-order point).
 fn dh(secret: &[u8; 32], public: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
     let shared = StaticSecret::from(*secret).diffie_hellman(&PublicKey::from(*public));
     if !shared.was_contributory() {
@@ -377,14 +377,14 @@ fn kdf_rk(rk: &[u8; 32], dh_out: &[u8; 32]) -> Result<([u8; 32], [u8; 32], [u8; 
     ))
 }
 
-/// KDF_CK : `MK = HMAC(CK, 0x01)`, `CK' = HMAC(CK, 0x02)`. Renvoie `(CK', MK)`.
+/// KDF_CK : `MK = HMAC(CK, 0x01)`, `CK' = HMAC(CK, 0x02)`. Returns `(CK', MK)`.
 fn kdf_ck(ck: &[u8; 32]) -> (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>) {
     let mk = Zeroizing::new(hmac_sha256(ck, &[0x01]));
     let next = Zeroizing::new(hmac_sha256(ck, &[0x02]));
     (next, mk)
 }
 
-/// Clé et nonce du corps : `HKDF(None, MK, RATCHET_MK)` → 44 octets.
+/// Body key and nonce: `HKDF(None, MK, RATCHET_MK)` → 44 bytes.
 fn body_key(mk: &[u8; 32]) -> Result<(Zeroizing<[u8; 32]>, [u8; 12])> {
     let mut okm = Zeroizing::new([0u8; 44]);
     hkdf_sha256(None, mk, labels::RATCHET_MK, okm.as_mut())?;
@@ -411,7 +411,7 @@ fn open_body(mk: &[u8; 32], ad: &[u8], enc_header: &[u8], ct: &[u8]) -> Result<V
     open(&key, &nonce, &body_ad(ad, enc_header), ct)
 }
 
-/// Copie une tranche de 32 octets (les appelants passent toujours 32 octets).
+/// Copies a 32-byte slice (callers always pass 32 bytes).
 fn split32(bytes: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(bytes);

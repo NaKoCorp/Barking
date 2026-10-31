@@ -109,7 +109,7 @@ fn contacts_sessions_messages_events() {
     let mid = MessageId([6; 16]);
     assert!(
         store
-            .insert_message(fp, Direction::Out, "salut", MessageStatus::Queued, 5, mid)
+            .insert_message(fp, Direction::Out, "hi", MessageStatus::Queued, 5, mid)
             .unwrap()
     );
     store.add_delivery(mid, pid, dev, false).unwrap();
@@ -203,7 +203,7 @@ fn message_lookup_and_deletions() {
     store.delete_sessions_for_device(fp, dev).unwrap();
     assert!(store.sessions_for(fp, dev).unwrap().is_empty());
     store.put_session(&row(4)).unwrap();
-    // Même appareil, autre contact : sessions distinctes, jamais écrasées.
+    // Same device, other contact: distinct sessions, never overwritten.
     let other = Fingerprint([9; 32]);
     let mut foreign = row(4);
     foreign.contact_fp = other;
@@ -218,7 +218,7 @@ fn message_lookup_and_deletions() {
     store.delete_contact(other).unwrap();
     assert!(store.get_contact(fp).unwrap().is_none());
     assert!(store.all_sessions().unwrap().is_empty());
-    // L'historique reste.
+    // The history remains.
     assert_eq!(store.messages_with(fp).unwrap().len(), 1);
 }
 
@@ -245,7 +245,7 @@ fn outbox_put_pending_remove_purge() {
     store.outbox_put(b, b"bb", Kind::Message, 500, 20).unwrap();
     store.outbox_put(a, b"aa", Kind::Message, 500, 10).unwrap();
     store.outbox_put(c, b"cc", Kind::Ack, 100, 30).unwrap();
-    // Du plus ancien au plus récent.
+    // From oldest to newest.
     assert_eq!(
         store.outbox_pending(50).unwrap(),
         vec![
@@ -254,7 +254,7 @@ fn outbox_put_pending_remove_purge() {
             (c, b"cc".to_vec())
         ]
     );
-    // Une entrée expirée n'est plus rendue.
+    // An expired entry is no longer returned.
     assert_eq!(store.outbox_pending(101).unwrap().len(), 2);
     assert_eq!(store.outbox_purge_expired(101).unwrap(), 1);
     assert_eq!(store.outbox_purge_expired(101).unwrap(), 0);
@@ -264,7 +264,7 @@ fn outbox_put_pending_remove_purge() {
         store.outbox_pending(101).unwrap(),
         vec![(b, b"bb".to_vec())]
     );
-    // Réinsérer le même identifiant ne duplique pas la ligne.
+    // Reinserting the same identifier does not duplicate the row.
     store.outbox_put(b, b"bb", Kind::Message, 500, 20).unwrap();
     assert_eq!(store.outbox_pending(101).unwrap().len(), 1);
 }
@@ -299,7 +299,7 @@ fn message_row_debug_hides_body() {
         .insert_message(
             fp,
             Direction::In,
-            "secret du corps",
+            "the body secret",
             MessageStatus::Delivered,
             5,
             MessageId([1; 16]),
@@ -307,11 +307,11 @@ fn message_row_debug_hides_body() {
         .unwrap();
     let row = store.messages_with(fp).unwrap().remove(0);
     let dbg = format!("{row:?}");
-    assert!(!dbg.contains("secret du corps"), "{dbg}");
-    assert!(dbg.contains("15 octets"), "{dbg}");
+    assert!(!dbg.contains("the body secret"), "{dbg}");
+    assert!(dbg.contains("15 bytes"), "{dbg}");
 }
 
-/// Nombre de lignes de la classe donnée.
+/// Number of rows of the given class.
 fn count_class(store: &Store, class: EventClass) -> i64 {
     store
         .conn()
@@ -358,11 +358,11 @@ fn log_row_cap_boundary() {
                 Ok(())
             })
             .unwrap();
-        // Exactement le plafond : rien n'est supprimé.
+        // Exactly the cap: nothing is deleted.
         let rows = store.events(20_000).unwrap();
         assert_eq!(rows.len(), cap as usize);
         assert_eq!(rows[0].1, 0u32.to_be_bytes().to_vec());
-        // Une de plus : seule la plus ancienne part.
+        // One more: only the oldest goes.
         store
             .append_event(t, None, class, &cap.to_be_bytes())
             .unwrap();
@@ -402,26 +402,26 @@ fn log_age_boundary_30_days() {
     let t = 1_000_000_000u64;
     let day = 86_400u64;
     for class in [EventClass::Routine, EventClass::Security] {
-        store.append_event(t, None, class, b"vieux").unwrap();
+        store.append_event(t, None, class, b"old").unwrap();
     }
-    // Horloge qui avance d'un jour au plus par événement : pas de bornage.
+    // Clock advancing by at most one day per event: no clamping.
     for d in 1..30 {
         store
-            .append_event(t + d * day, None, EventClass::Routine, b"jour")
+            .append_event(t + d * day, None, EventClass::Routine, b"day")
             .unwrap();
     }
-    // Exactement 30 jours : conservé.
+    // Exactly 30 days: kept.
     store
         .append_event(t + 30 * day, None, EventClass::Routine, b"j30")
         .unwrap();
     let rows = store.events(100).unwrap();
-    assert_eq!(rows.iter().filter(|r| r.1 == b"vieux").count(), 2);
-    // 30 jours et 1 s : supprimé, sécurité comprise.
+    assert_eq!(rows.iter().filter(|r| r.1 == b"old").count(), 2);
+    // 30 days and 1 s: deleted, security included.
     store
         .append_event(t + 30 * day + 1, None, EventClass::Routine, b"j30+1")
         .unwrap();
     let rows = store.events(100).unwrap();
-    assert!(rows.iter().all(|r| r.1 != b"vieux"), "{rows:?}");
+    assert!(rows.iter().all(|r| r.1 != b"old"), "{rows:?}");
     assert_eq!(rows.len(), 31);
 }
 
@@ -435,9 +435,9 @@ fn log_far_future_event_does_not_wipe() {
     store
         .append_event(t + 10, None, EventClass::Routine, b"b")
         .unwrap();
-    // Horloge locale déréglée : 10 ans d'avance.
+    // Misadjusted local clock: 10 years ahead.
     store
-        .append_event(t + 3_650 * 86_400, None, EventClass::Routine, b"futur")
+        .append_event(t + 3_650 * 86_400, None, EventClass::Routine, b"future")
         .unwrap();
     assert_eq!(store.events(10).unwrap().len(), 3);
 }
@@ -459,11 +459,11 @@ fn log_survives_repeated_far_future_events() {
             Ok(())
         })
         .unwrap();
-    // Horloge locale bloquée 10 ans en avance, plusieurs événements de suite.
+    // Local clock stuck 10 years ahead, several events in a row.
     let future = t + 3_650 * 86_400;
     for _ in 0..5 {
         store
-            .append_event(future, None, EventClass::Routine, b"futur")
+            .append_event(future, None, EventClass::Routine, b"future")
             .unwrap();
     }
     assert_eq!(store.events(1_000).unwrap().len(), 105);
@@ -480,7 +480,7 @@ fn log_still_purges_with_normal_clock() {
             .unwrap();
     }
     let rows = store.events(100).unwrap();
-    // Jour 40 : tout ce qui a plus de 30 jours (jours 0 à 9) est parti.
+    // Day 40: everything older than 30 days (days 0 to 9) is gone.
     assert_eq!(rows.len(), 31);
     assert_eq!(rows[0].0, t + 10 * 86_400);
 }
@@ -491,30 +491,30 @@ fn log_sparse_retention_lags_then_catches_up() {
     let t = 1_000_000_000u64;
     let day = 86_400u64;
     store
-        .append_event(t, None, EventClass::Routine, b"vieux")
+        .append_event(t, None, EventClass::Routine, b"old")
         .unwrap();
-    // Un événement tous les 10 jours : l'horloge de purge n'avance que de
-    // 2 jours par événement, l'entrée de plus de 30 jours est encore là.
+    // One event every 10 days: the purge clock only advances by
+    // 2 days per event, the entry older than 30 days is still there.
     for k in 1..=4u64 {
         store
             .append_event(t + 10 * k * day, None, EventClass::Routine, b"rare")
             .unwrap();
     }
     let rows = store.events(100).unwrap();
-    assert!(rows.iter().any(|r| r.1 == b"vieux"), "{rows:?}");
-    // Activité quotidienne : l'horloge gagne un jour par jour et rattrape.
+    assert!(rows.iter().any(|r| r.1 == b"old"), "{rows:?}");
+    // Daily activity: the clock gains a day per day and catches up.
     let mut purged_on = None;
     for d in 41..=80u64 {
         store
-            .append_event(t + d * day, None, EventClass::Routine, b"jour")
+            .append_event(t + d * day, None, EventClass::Routine, b"day")
             .unwrap();
-        if purged_on.is_none() && !store.events(100).unwrap().iter().any(|r| r.1 == b"vieux") {
+        if purged_on.is_none() && !store.events(100).unwrap().iter().any(|r| r.1 == b"old") {
             purged_on = Some(d);
         }
     }
-    // Horloge de purge à t + 8 j après le 4e événement rare, puis +2 j par
-    // jour d'activité : elle dépasse t + 30 j au jour 52 (purge), rattrape
-    // l'heure réelle au jour 72 et la suit ensuite.
+    // Purge clock at t + 8 d after the 4th rare event, then +2 d per
+    // day of activity: it exceeds t + 30 d on day 52 (purge), catches up with
+    // real time on day 72 and follows it afterwards.
     assert_eq!(purged_on, Some(52));
     let rows = store.events(100).unwrap();
     assert!(rows.iter().all(|r| r.0 >= t + 50 * day), "{rows:?}");
@@ -529,22 +529,22 @@ fn log_clock_set_back_after_future_still_records() {
         .unwrap();
     for _ in 0..3 {
         store
-            .append_event(t + 3_650 * 86_400, None, EventClass::Routine, b"futur")
+            .append_event(t + 3_650 * 86_400, None, EventClass::Routine, b"future")
             .unwrap();
     }
-    // Horloge corrigée : les nouvelles entrées ne sont pas purgées d'emblée.
+    // Clock corrected: new entries are not purged right away.
     store
-        .append_event(t + 60, None, EventClass::Routine, b"maintenant")
+        .append_event(t + 60, None, EventClass::Routine, b"now")
         .unwrap();
     let rows = store.events(10).unwrap();
     assert_eq!(rows.len(), 5);
-    assert!(rows.iter().any(|r| r.1 == b"maintenant"));
+    assert!(rows.iter().any(|r| r.1 == b"now"));
 }
 
 #[test]
 fn log_class_column_added_to_old_database() {
     let (_d, path, store) = open_tmp();
-    // Table du journal telle que créée avant la colonne `class`.
+    // Log table as created before the `class` column.
     store
         .conn()
         .execute_batch(
@@ -561,7 +561,7 @@ fn log_class_column_added_to_old_database() {
         .append_event(6, None, EventClass::Security, b"s")
         .unwrap();
     assert_eq!(count_class(&store, EventClass::Security), 1);
-    // Réouverture : la migration est idempotente.
+    // Reopening: the migration is idempotent.
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
     assert_eq!(store.events(10).unwrap().len(), 2);
@@ -605,9 +605,9 @@ fn newer_schema_refused() {
     drop(store);
     assert!(matches!(
         Store::open(&path, &KEY),
-        Err(CoreError::Store(m)) if m.contains("plus récent")
+        Err(CoreError::Store(m)) if m.contains("newer")
     ));
-    // Rien n'a été modifié.
+    // Nothing was modified.
     let raw = raw_conn(&path);
     let n: i64 = raw
         .query_row("SELECT count(*) FROM meta", [], |r| r.get(0))
@@ -645,9 +645,9 @@ fn migration_v1_keeps_history_and_acks() {
             )
             .unwrap();
         };
-        ins(1, "reçu", 3, 10, Some(&pin));
+        ins(1, "received", 3, 10, Some(&pin));
         ins(0, "en attente", 1, 20, Some(&pout));
-        ins(1, "sans paquet", 3, 30, None);
+        ins(1, "no packet", 3, 30, None);
         raw.execute(
             "INSERT INTO outbox(packet_id, bytes, kind, expires_at, created_at) \
              VALUES (?1, x'00', 0, 999, 20)",
@@ -666,9 +666,9 @@ fn migration_v1_keeps_history_and_acks() {
     assert_eq!(
         bodies,
         vec![
-            ("reçu", Direction::In, MessageStatus::Delivered),
+            ("received", Direction::In, MessageStatus::Delivered),
             ("en attente", Direction::Out, MessageStatus::Sent),
-            ("sans paquet", Direction::In, MessageStatus::Delivered),
+            ("no packet", Direction::In, MessageStatus::Delivered),
         ]
     );
     assert_eq!(
@@ -676,10 +676,13 @@ fn migration_v1_keeps_history_and_acks() {
         MessageId::legacy_from_packet(PacketId(pout))
     );
     assert_eq!(store.outbox_pending(0).unwrap().len(), 1);
-    // Le paquet v1 reçu retrouve son message (accusé émis, suppression du contact).
+    // The received v1 packet finds its message (acknowledgement emitted, contact deletion).
     let got = store.message_by_packet(PacketId(pin)).unwrap().unwrap();
-    assert_eq!((got.body.as_str(), got.direction), ("reçu", Direction::In));
-    // L'accusé du paquet v1 en attente marque le message livré.
+    assert_eq!(
+        (got.body.as_str(), got.direction),
+        ("received", Direction::In)
+    );
+    // The acknowledgement of the pending v1 packet marks the message as delivered.
     assert_eq!(
         store.mark_delivered_by_packet(PacketId(pout)).unwrap(),
         Some(m[1].message_id)
@@ -687,7 +690,7 @@ fn migration_v1_keeps_history_and_acks() {
     let after = store.messages_with(fp).unwrap();
     assert_eq!(after.len(), 3);
     assert_eq!(after[1].status, MessageStatus::Delivered);
-    // Réouverture : la migration n'est pas rejouée.
+    // Reopening: the migration is not replayed.
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
     assert_eq!(store.messages_with(fp).unwrap().len(), 3);
@@ -695,13 +698,13 @@ fn migration_v1_keeps_history_and_acks() {
 
 #[test]
 fn migration_from_pre_1a_database() {
-    // Base v1 telle qu'écrite avant le lot 1A : pas de colonne `class` au
-    // journal, pas de `schema_version`.
+    // v1 database as written before batch 1A: no `class` column in the
+    // log, no `schema_version`.
     let dir = tempdir().unwrap();
     let path = dir.path().join("v1-pre-1a.sqlite");
     let fp = Fingerprint([4; 32]);
     let pre_1a = schema::SCHEMA_V1_LEGACY.replace(
-        ",\n    -- 0 : courant, 1 : sécurité (voir `EventClass`).\n    \
+        ",\n    -- 0: regular, 1: security (see `EventClass`).\n    \
          class INTEGER NOT NULL DEFAULT 0",
         "",
     );
@@ -711,7 +714,7 @@ fn migration_from_pre_1a_database() {
         raw.execute_batch(&pre_1a).unwrap();
         raw.execute(
             "INSERT INTO messages(contact_fp, direction, body, status, at, packet_id) \
-             VALUES (?1, 1, 'ancien', 3, 10, ?2)",
+             VALUES (?1, 1, 'old', 3, 10, ?2)",
             params![fp.0.as_slice(), [1u8; 16].as_slice()],
         )
         .unwrap();
@@ -727,13 +730,13 @@ fn migration_from_pre_1a_database() {
     assert_eq!(m.len(), 1);
     assert_eq!(
         (m[0].body.as_str(), m[0].direction, m[0].status, m[0].at),
-        ("ancien", Direction::In, MessageStatus::Delivered, 10)
+        ("old", Direction::In, MessageStatus::Delivered, 10)
     );
     assert_eq!(
         m[0].message_id,
         MessageId::legacy_from_packet(PacketId([1; 16]))
     );
-    // Ancien journal conservé, classé courant ; les nouvelles tables servent.
+    // Old log kept, classed as regular; the new tables work.
     assert_eq!(store.events(10).unwrap(), vec![(7, vec![2])]);
     assert_eq!(count_class(&store, EventClass::Routine), 1);
     store
@@ -749,7 +752,7 @@ fn migration_from_pre_1a_database() {
             .unwrap()
             .is_some()
     );
-    // Réouverture : rien n'est rejoué.
+    // Reopening: nothing is replayed.
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
     assert_eq!(store.messages_with(fp).unwrap().len(), 1);
@@ -761,18 +764,18 @@ fn inbound_packets_map_to_their_message() {
     let (_d, _p, store) = open_tmp();
     let fp = Fingerprint([4; 32]);
     let mid = MessageId::incoming(&fp, &[1; 16]);
-    // Lié à l'expéditeur : un autre expéditeur, même identifiant d'enveloppe, autre message.
+    // Bound to the sender: another sender, same envelope identifier, another message.
     assert_ne!(mid, MessageId::incoming(&Fingerprint([5; 32]), &[1; 16]));
     store
         .insert_message(fp, Direction::In, "x", MessageStatus::Delivered, 5, mid)
         .unwrap();
-    // Le message et son renvoi (deux paquets) mènent au même message.
+    // The message and its resend (two packets) lead to the same message.
     for pid in [PacketId([1; 16]), PacketId([2; 16])] {
         store.record_inbound(pid, mid).unwrap();
         let m = store.message_by_packet(pid).unwrap().unwrap();
         assert_eq!((m.message_id, m.direction), (mid, Direction::In));
     }
-    // Un paquet reçu n'est jamais une de mes livraisons.
+    // A received packet is never one of my deliveries.
     assert!(!store.is_my_packet(PacketId([1; 16])).unwrap());
     assert!(
         store
@@ -784,7 +787,7 @@ fn inbound_packets_map_to_their_message() {
 
 #[test]
 fn v2_database_without_inbound_gets_it() {
-    // Base v2 de développement créée avant l'ajout de la table `inbound`.
+    // Development v2 database created before the `inbound` table was added.
     let (_d, path, store) = open_tmp();
     drop(store);
     raw_conn(&path)
@@ -822,14 +825,14 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
     for id in [to_bob, to_me] {
         store.outbox_put(id, b"p", Kind::Message, 999, 5).unwrap();
     }
-    // L'accusé de mon appareil : livraison notée, message toujours `Sent`.
+    // My device's acknowledgement: delivery recorded, message still `Sent`.
     assert_eq!(store.mark_delivered_by_packet(to_me).unwrap(), Some(mid));
     assert!(store.delivery_acked(to_me).unwrap());
     assert_eq!(
         store.messages_with(fp).unwrap()[0].status,
         MessageStatus::Sent
     );
-    // Suppression du contact : la copie pour mon appareil reste en file.
+    // Contact deletion: the copy for my device stays in the queue.
     store.upsert_contact(fp, b"c", "", false).unwrap();
     store.delete_contact(fp).unwrap();
     let left: Vec<PacketId> = store
@@ -839,7 +842,7 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
         .map(|(id, _)| id)
         .collect();
     assert_eq!(left, vec![to_me]);
-    // Base v2 créée avant la colonne `own` : elle est ajoutée à l'ouverture.
+    // v2 database created before the `own` column: it is added on open.
     drop(store);
     let raw = raw_conn(&path);
     raw.execute_batch(
@@ -854,7 +857,7 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
     drop(raw);
     let store = Store::open(&path, &KEY).unwrap();
     store.add_delivery(mid, to_me, mine, true).unwrap();
-    // Colonne `writer` ajoutée : auteur inconnu (nul) pour l'ancienne ligne.
+    // Column `writer` added: unknown author (null) for the old row.
     let zero = crate::identity::device::DeviceId([0; 16]);
     assert_eq!(
         store.contact_clock(Fingerprint([9; 32])).unwrap(),
@@ -886,6 +889,6 @@ fn contact_clock_order_breaks_ties() {
     assert!(c(2, true, 0).newer_than(Some(&c(2, false, 9))));
     assert!(c(2, false, 5).newer_than(Some(&c(2, false, 4))));
     assert!(!c(2, false, 4).newer_than(Some(&c(2, false, 5))));
-    // La même opération n'est pas plus récente qu'elle-même.
+    // The same operation is not more recent than itself.
     assert!(!c(2, false, 4).newer_than(Some(&c(2, false, 4))));
 }

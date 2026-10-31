@@ -1,32 +1,32 @@
-//! En-tête du double ratchet : `dh(32) || pn u32 BE || n u32 BE`, chiffré à part.
+//! Double ratchet header: `dh(32) || pn u32 BE || n u32 BE`, encrypted separately.
 
 use crate::crypto::aead::{XNONCE_LEN, xopen, xseal};
 use crate::{CoreError, Result};
 use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
 
-/// Taille de l'en-tête en clair.
+/// Size of the plaintext header.
 pub(super) const HEADER_LEN: usize = 32 + 4 + 4;
-/// Taille de l'en-tête chiffré : nonce XChaCha20, en-tête, étiquette Poly1305.
+/// Size of the encrypted header: XChaCha20 nonce, header, Poly1305 tag.
 pub(super) const ENC_HEADER_LEN: usize = XNONCE_LEN + HEADER_LEN + 16;
 
-/// Message du double ratchet tel qu'il circule.
+/// Double ratchet message as it travels.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RatchetMessage {
-    /// En-tête chiffré (80 octets).
+    /// Encrypted header (80 bytes).
     pub enc_header: Vec<u8>,
-    /// Corps chiffré (texte clair + 16 octets d'authentification).
+    /// Encrypted body (plaintext + 16 authentication bytes).
     pub ct: Vec<u8>,
 }
 
-/// En-tête en clair.
+/// Plaintext header.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Header {
-    /// Clé publique de ratchet de l'émetteur.
+    /// Sender's ratchet public key.
     pub dh: [u8; 32],
-    /// Longueur de la chaîne d'envoi précédente.
+    /// Length of the previous sending chain.
     pub pn: u32,
-    /// Numéro du message dans la chaîne d'envoi.
+    /// Message number in the sending chain.
     pub n: u32,
 }
 
@@ -42,7 +42,7 @@ impl Header {
     pub(super) fn decode(bytes: &[u8]) -> Result<Self> {
         let bytes: &[u8; HEADER_LEN] = bytes
             .try_into()
-            .map_err(|_| CoreError::Malformed("en-tête du ratchet"))?;
+            .map_err(|_| CoreError::Malformed("ratchet header"))?;
         let mut dh = [0u8; 32];
         dh.copy_from_slice(&bytes[..32]);
         let mut pn = [0u8; 4];
@@ -56,15 +56,15 @@ impl Header {
         })
     }
 
-    /// HENCRYPT : XChaCha20-Poly1305, nonce aléatoire préfixé, sans données associées.
+    /// HENCRYPT: XChaCha20-Poly1305, random prefixed nonce, no associated data.
     pub(super) fn seal(&self, hk: &[u8; 32], rng: &mut impl CryptoRng) -> Vec<u8> {
         xseal(hk, &[], &self.encode(), rng)
     }
 
-    /// HDECRYPT : échoue si la clé ne convient pas ou si la taille est fausse.
+    /// HDECRYPT: fails if the key does not fit or if the size is wrong.
     pub(super) fn open(hk: &[u8; 32], enc: &[u8]) -> Result<Self> {
         if enc.len() != ENC_HEADER_LEN {
-            return Err(CoreError::Malformed("taille de l'en-tête chiffré"));
+            return Err(CoreError::Malformed("encrypted header size"));
         }
         let pt = xopen(hk, &[], enc)?;
         Header::decode(&pt)

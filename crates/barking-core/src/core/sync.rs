@@ -1,12 +1,12 @@
-//! Synchronisation entre mes propres appareils : copies de mes messages
-//! envoyés (`SyncSent`), opérations sur les contacts (`SyncContact`) et
-//! nouvelle liste d'appareils (`SyncDevices`).
+//! Synchronization between my own devices: copies of my sent
+//! messages (`SyncSent`), operations on contacts (`SyncContact`) and
+//! new device list (`SyncDevices`).
 //!
-//! Envoi : par les sessions double ratchet avec mes autres appareils
-//! (`Target::OwnDevices`), une livraison par paquet pour que leurs accusés
-//! vident la file d'envoi. Réception : seulement depuis un de mes appareils
-//! (vérifié par l'appelant), avec les mêmes contrôles que l'opération locale.
-//! Un contenu refusé est mis en quarantaine, jamais une `Err`.
+//! Sending: through the double ratchet sessions with my other devices
+//! (`Target::OwnDevices`), one delivery per packet so that their acks
+//! drain the send queue. Receiving: only from one of my devices
+//! (checked by the caller), with the same checks as the local operation.
+//! A refused content is quarantined, never an `Err`.
 
 use std::collections::HashSet;
 
@@ -24,18 +24,18 @@ use crate::store::{ContactClock, Direction, MessageId, MessageStatus, Queries};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
-// Raisons de quarantaine : textes fixes.
-pub(super) const R_NOT_MINE: &str = "synchronisation d'un appareil qui n'est pas à moi";
-pub(super) const R_SYNC_REFUSED: &str = "synchronisation refusée";
-pub(super) const R_DEVICES_REFUSED: &str = "liste d'appareils refusée";
+// Quarantine reasons: fixed texts.
+pub(super) const R_NOT_MINE: &str = "synchronization from a device that is not mine";
+pub(super) const R_SYNC_REFUSED: &str = "synchronization refused";
+pub(super) const R_DEVICES_REFUSED: &str = "device list refused";
 
-/// Scelle `body` pour chacun de mes autres appareils ; chaque paquet est
-/// enregistré comme livraison `own` de `message_id` (son accusé ne rend pas
-/// le message « livré »). Sans autre appareil, rien n'est fait.
+/// Seals `body` for each of my other devices; each packet is
+/// recorded as an `own` delivery of `message_id` (its ack does not make
+/// the message "delivered"). Without another device, nothing is done.
 ///
-/// Un contenu trop volumineux pour un paquet n'est pas envoyé : l'opération
-/// locale réussit quand même, et `SyncSkipped` est journalisé. La taille est
-/// vérifiée avant `seal_for`, qui écrit déjà sessions et journal.
+/// A content too large for a packet is not sent: the local
+/// operation succeeds anyway, and `SyncSkipped` is logged. The size is
+/// checked before `seal_for`, which already writes sessions and log.
 pub(super) fn seal_to_own(
     q: &impl Queries,
     device: &DeviceKeys,
@@ -60,11 +60,11 @@ pub(super) fn seal_to_own(
     Ok(sealed.into_iter().map(|(p, _)| p).collect())
 }
 
-/// Met en file ma nouvelle carte (`CardUpdate`) pour chaque appareil
-/// joignable de chacun de mes contacts, une livraison par paquet (sans ligne
-/// de message, sous un identifiant neuf par contact). Taille vérifiée avant
-/// tout scellement : une carte trop grande pour un paquet (impossible avec le
-/// plafond d'appareils) fait échouer l'appel (`TooLarge`) sans rien écrire.
+/// Queues my new card (`CardUpdate`) for each reachable device
+/// of each of my contacts, one delivery per packet (without a message
+/// row, under a fresh identifier per contact). Size checked before
+/// any sealing: a card too large for a packet (impossible with the
+/// device cap) makes the call fail (`TooLarge`) without writing anything.
 pub(super) fn send_card_update(
     q: &impl Queries,
     device: &DeviceKeys,
@@ -99,17 +99,17 @@ pub(super) fn send_card_update(
     Ok(out)
 }
 
-/// Met en file ma carte actuelle (`CardUpdate`) pour les seuls appareils
-/// `devices` du contact `fp` : ses nouveaux appareils, appris par une mise à
-/// jour de sa carte. Ils ont pu être liés avec une copie de ma carte plus
-/// ancienne que celle que j'ai envoyée à ses autres appareils (deux liaisons
-/// croisées) ; sans cela, ils ne connaîtraient mes nouveaux appareils qu'au
-/// prochain changement de ma liste. Une carte déjà connue est un doublon
-/// accusé chez eux.
+/// Queues my current card (`CardUpdate`) for only the `devices`
+/// of contact `fp`: its new devices, learned through an update of
+/// its card. They may have been linked with a copy of my card older
+/// than the one I sent to its other devices (two crossed
+/// linkings); without this, they would only learn about my new devices at the
+/// next change of my list. An already known card is a duplicate
+/// acked on their side.
 ///
-/// Sans carte stockée (aucune liaison sur ce compte : mes contacts ont la
-/// carte que je leur ai donnée) ou carte trop grande pour un paquet, rien
-/// n'est envoyé : la réception ne doit jamais échouer pour autant.
+/// Without a stored card (no linking on this account: my contacts have the
+/// card I gave them) or a card too large for a packet, nothing
+/// is sent: the receipt must never fail because of it.
 pub(super) fn send_own_card(
     q: &impl Queries,
     device: &DeviceKeys,
@@ -147,9 +147,9 @@ pub(super) fn send_own_card(
     Ok(())
 }
 
-/// Met en file l'opération `op` pour chacun de mes autres appareils, sous un
-/// identifiant de message neuf (sans ligne de message). `time.sent_at` est
-/// la date de l'opération (horloge du contact, voir [`touch`]).
+/// Queues operation `op` for each of my other devices, under a fresh
+/// message identifier (without a message row). `time.sent_at` is
+/// the operation date (contact's clock, see [`touch`]).
 pub(super) fn send_op(
     q: &impl Queries,
     device: &DeviceKeys,
@@ -172,7 +172,7 @@ pub(super) fn send_op(
     Ok(())
 }
 
-/// Met en file l'état stocké du contact `fp` (`SyncOp::Upsert`).
+/// Queues the stored state of contact `fp` (`SyncOp::Upsert`).
 pub(super) fn send_state(
     q: &impl Queries,
     device: &DeviceKeys,
@@ -189,11 +189,11 @@ pub(super) fn send_state(
     send_op(q, device, op, time, rng)
 }
 
-/// Opération locale de l'appareil `me` sur le contact `fp` à `now` :
-/// l'horloge du contact avance strictement (une opération locale l'emporte
-/// sur tout ce que cet appareil connaît déjà), et `removed` pose ou lève la
-/// pierre tombale. Renvoie les dates du scellement de sa copie : `sent_at`
-/// est la date de l'opération, `now` reste l'horloge murale.
+/// Local operation of device `me` on contact `fp` at `now`:
+/// the contact's clock advances strictly (a local operation wins
+/// over everything this device already knows), and `removed` sets or clears the
+/// tombstone. Returns the dates for sealing its copy: `sent_at`
+/// is the operation date, `now` remains the wall clock.
 pub(super) fn touch(
     q: &impl Queries,
     fp: Fingerprint,
@@ -214,15 +214,15 @@ pub(super) fn touch(
     Ok(SealTime { now, sent_at: at })
 }
 
-/// Applique un contenu de synchronisation authentifié, venu d'un de mes
-/// appareils. Toute vérification précède la première écriture : un refus
-/// (`Ok(Err(raison))`) ne laisse rien d'écrit. `Err` : échec local seulement.
-/// `Ok(Ok(None))` : contenu valide mais déjà dépassé (une liste d'appareils
-/// authentique plus ancienne que la mienne), rien d'écrit, à accuser comme
-/// un doublon.
+/// Applies an authenticated sync content, coming from one of my
+/// devices. Every check precedes the first write: a refusal
+/// (`Ok(Err(reason))`) leaves nothing written. `Err`: local failure only.
+/// `Ok(Ok(None))`: valid content but already superseded (an authentic
+/// device list older than mine), nothing written, to be acked like
+/// a duplicate.
 ///
-/// `sender` : l'appareil (des miens) qui a authentifié le contenu ; il
-/// départage deux opérations de même date sur un contact.
+/// `sender`: the device (among mine) that authenticated the content; it
+/// breaks the tie between two operations with the same date on a contact.
 pub(super) fn apply(
     q: &impl Queries,
     me: &DevicePublic,
@@ -236,8 +236,8 @@ pub(super) fn apply(
             if *to == own.list.root.fingerprint() {
                 return Ok(Err(R_SYNC_REFUSED));
             }
-            // Identifiant brut, sens sortant : le même que sur l'appareil
-            // qui a envoyé. Déjà présent (historique importé) : rien à faire.
+            // Raw identifier, outgoing direction: the same as on the device
+            // that sent it. Already present (imported history): nothing to do.
             q.insert_message(
                 *to,
                 Direction::Out,
@@ -274,11 +274,11 @@ pub(super) fn apply(
     }
 }
 
-/// Liste reçue de version inférieure ou égale à la mienne. Authentique (carte
-/// et liste signées par ma racine) et contenant cet appareil : déjà dépassée,
-/// doublon accusé (une copie retardée, comme pour `CardUpdate`). Même
-/// version mais liste différente : équivoque de la racine, refus ; de même
-/// pour une carte invalide ou qui ne me contient pas.
+/// List received with a version lower than or equal to mine. Authentic (card
+/// and list signed by my root) and containing this device: already superseded,
+/// duplicate acked (a delayed copy, as for `CardUpdate`). Same
+/// version but different list: root equivocation, refusal; likewise
+/// for an invalid card or one that does not contain me.
 fn older_devices(
     current: &DeviceList,
     me: &DevicePublic,
@@ -292,7 +292,7 @@ fn older_devices(
     Ok(None)
 }
 
-/// Erreur due au contenu → refus ; erreur du stockage → propagée.
+/// Error due to the content → refusal; storage error → propagated.
 fn content<T>(r: Result<T>) -> Result<core::result::Result<T, &'static str>> {
     match r {
         Ok(v) => Ok(Ok(v)),
@@ -301,15 +301,15 @@ fn content<T>(r: Result<T>) -> Result<core::result::Result<T, &'static str>> {
     }
 }
 
-/// État d'un contact, dernier écrivain gagnant par empreinte, sur
-/// `(at, supprimé, auteur)` ([`ContactClock`]) : `at` est l'horodatage
-/// authentifié de l'enveloppe, `sender` l'appareil qui l'a envoyée. Une
-/// opération qui ne l'emporte pas sur la dernière connue est sans effet
-/// (acceptée et accusée). À date égale, une suppression l'emporte sur un état
-/// présent, puis l'appareil d'identifiant le plus grand : tous mes appareils
-/// tranchent pareil, quel que soit l'ordre d'arrivée. La pierre tombale d'une
-/// suppression empêche un état plus ancien de ressusciter le contact ; un
-/// état plus récent la lève.
+/// State of a contact, last writer wins per fingerprint, on
+/// `(at, deleted, author)` ([`ContactClock`]): `at` is the authenticated
+/// timestamp of the envelope, `sender` the device that sent it. An
+/// operation that does not beat the last known one has no effect
+/// (accepted and acked). On equal dates, a deletion beats a present
+/// state, then the device with the greatest identifier: all my devices
+/// decide the same way, whatever the arrival order. The tombstone of a
+/// deletion prevents an older state from resurrecting the contact; a
+/// more recent state clears it.
 fn apply_op(q: &impl Queries, op: &SyncOp, at: u64, sender: DeviceId) -> Result<()> {
     let (fp, removing) = match op {
         SyncOp::Upsert { card, .. } => (card.fingerprint(), false),
@@ -338,9 +338,9 @@ fn apply_op(q: &impl Queries, op: &SyncOp, at: u64, sender: DeviceId) -> Result<
     q.set_contact_clock(fp, &clock)
 }
 
-/// Nouvelle carte acceptable : liste signée par ma racine, de version
-/// strictement supérieure, contenant cet appareil ; carte vérifiée, avec un
-/// paquet de clés pour cet appareil ; aucun nouvel appareil revendiqué par un
+/// Acceptable new card: list signed by my root, with a strictly
+/// greater version, containing this device; verified card, with a
+/// key packet for this device; no new device claimed by a
 /// contact.
 fn devices_ok(
     q: &impl Queries,
@@ -364,8 +364,8 @@ fn devices_ok(
         .collect();
     Ok(!contacts::claimed_by_contact(q, None, &added)?)
 }
-/// Supprime les sessions rangées sous mon empreinte avec un appareil absent
-/// de `list` (ma nouvelle liste).
+/// Removes the sessions filed under my fingerprint with a device absent
+/// from `list` (my new list).
 pub(super) fn purge_removed_own_sessions(q: &impl Queries, list: &DeviceList) -> Result<()> {
     let fp = list.root.fingerprint();
     let kept: HashSet<DeviceId> = list.certs.iter().map(|c| c.device.id()).collect();

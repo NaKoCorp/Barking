@@ -1,5 +1,5 @@
-//! Envoi : chiffrement d'un contenu pour chaque appareil d'un contact, ou
-//! pour chacun de mes autres appareils.
+//! Sending: encrypting a content for each device of a contact, or
+//! for each of my other devices.
 
 use rand_core::CryptoRng;
 
@@ -17,24 +17,24 @@ use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
-/// Destinataires d'un envoi.
+/// Recipients of a send.
 pub(super) enum Target {
-    /// Chaque appareil de la carte du contact.
+    /// Every device in the contact's card.
     Contact(Fingerprint),
-    /// Seulement ces appareils de la carte du contact (ses nouveaux
-    /// appareils, voir `sync::send_own_card`).
+    /// Only these devices of the contact's card (its new
+    /// devices, see `sync::send_own_card`).
     ContactDevices(Fingerprint, Vec<DeviceId>),
-    /// Chacun de mes autres appareils (ma liste, sauf cet appareil). Les
-    /// sessions sont rangées sous ma propre empreinte. Utilisé par les
-    /// contenus de synchronisation (`Sync*`, voir `sync.rs`).
+    /// Each of my other devices (my list, minus this device). The
+    /// sessions are filed under my own fingerprint. Used by the
+    /// sync contents (`Sync*`, see `sync.rs`).
     OwnDevices,
 }
 
-/// Dates d'un scellement : `now` (horloge murale) fixe le jour de la boîte,
-/// l'expiration du paquet, la création d'une session, la file d'envoi et le
-/// journal ; `sent_at` est la seule date portée par l'enveloppe. Elles ne
-/// diffèrent que pour une copie de synchronisation de contact, datée de
-/// l'horloge du contact (qui peut dépasser `now` de quelques secondes).
+/// Dates of a sealing: `now` (wall clock) sets the mailbox day,
+/// the packet expiry, the creation of a session, the send queue and the
+/// log; `sent_at` is the only date carried by the envelope. They
+/// differ only for a contact sync copy, dated with
+/// the contact's clock (which may exceed `now` by a few seconds).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SealTime {
     pub now: u64,
@@ -42,7 +42,7 @@ pub(super) struct SealTime {
 }
 
 impl SealTime {
-    /// Enveloppe datée de l'horloge murale.
+    /// Envelope dated with the wall clock.
     pub fn at(now: u64) -> Self {
         SealTime { now, sent_at: now }
     }
@@ -54,16 +54,16 @@ fn new_message_id(rng: &mut impl CryptoRng) -> MessageId {
     MessageId(id)
 }
 
-/// Chiffre `body` pour chaque appareil joignable de `target` : un paquet par
-/// appareil, tous porteurs de `message_id`. Sessions (nouvelles ou avancées),
-/// file d'envoi et journal sont écrits dans `q` ; c'est à l'appelant
-/// d'enregistrer le message lui-même. Un appareil sans session ni paquet de
-/// clés est ignoré (injoignable pour l'instant), de même qu'un appareil dont
-/// les clés publiques font échouer la poignée de main ou le scellement
-/// (préclé d'ordre faible, clé ML-KEM invalide, signées par le contact
-/// lui-même) : une carte piégée ne doit faire échouer ni l'envoi à ses
-/// autres appareils, ni la réception qui la fait connaître. Seules les
-/// erreurs du stockage sont propagées.
+/// Encrypts `body` for each reachable device of `target`: one packet per
+/// device, all carrying `message_id`. Sessions (new or advanced),
+/// send queue and log are written to `q`; it is up to the caller
+/// to record the message itself. A device with neither a session nor a key
+/// packet is skipped (unreachable for now), as is a device whose
+/// public keys make the handshake or the sealing fail
+/// (low-order prekey, invalid ML-KEM key, signed by the contact
+/// itself): a booby-trapped card must make neither the send to its
+/// other devices nor the receipt that reveals it fail. Only
+/// storage errors are propagated.
 pub(super) fn seal_for(
     q: &impl Queries,
     device: &DeviceKeys,
@@ -78,8 +78,8 @@ pub(super) fn seal_for(
     let (fp, peers): (Fingerprint, Vec<(DevicePublic, Option<PrekeyBundle>)>) = match target {
         Target::Contact(fp) | Target::ContactDevices(fp, _) => {
             let contact = q.get_contact(*fp)?.ok_or(CoreError::UnknownContact)?;
-            // Carte vérifiée à l'ajout (`add_contact`) : chaque paquet de clés
-            // est lié à un appareil certifié par la racine du contact.
+            // Card verified when added (`add_contact`): each key packet
+            // is tied to a device certified by the contact's root.
             let card = load_card(&contact.card)?;
             let peers = card
                 .devices
@@ -106,7 +106,7 @@ pub(super) fn seal_for(
     for (peer, bundle) in peers {
         let peer_id = peer.id();
         let sessions = q.sessions_for(fp, peer_id)?;
-        // Session reçue le plus récemment, sinon créée le plus récemment.
+        // Most recently received session, otherwise most recently created.
         let chosen = sessions
             .into_iter()
             .max_by_key(|s| (s.last_rx, s.created_at));
@@ -166,10 +166,10 @@ pub(super) fn seal_for(
         ) {
             Ok(p) => p,
             Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => return Err(e),
-            // Rien n'a été écrit pour cet appareil.
+            // Nothing was written for this device.
             Err(_) => continue,
         };
-        // Session ouverte par ce scellement : journalisée une fois scellée.
+        // Session opened by this sealing: logged once sealed.
         if opened_here {
             log(
                 q,
@@ -213,13 +213,13 @@ pub(super) fn seal_for(
 }
 
 impl Core {
-    /// Chiffre `text` pour chaque appareil de la liste du contact ; un paquet
-    /// par appareil joignable. Un seul message (un identifiant tiré au
-    /// hasard), une livraison par paquet. Une copie `SyncSent`, de même
-    /// identifiant, est aussi chiffrée pour chacun de mes autres appareils
-    /// (paquets rendus après ceux du contact). Tout est écrit dans une seule
-    /// transaction, y compris l'état du ratchet avancé, avant que les paquets
-    /// ne soient rendus.
+    /// Encrypts `text` for each device in the contact's list; one packet
+    /// per reachable device. A single message (a randomly drawn
+    /// identifier), one delivery per packet. A `SyncSent` copy, with the same
+    /// identifier, is also encrypted for each of my other devices
+    /// (packets returned after the contact's). Everything is written in a single
+    /// transaction, including the advanced ratchet state, before the packets
+    /// are returned.
     pub fn send_text(
         &mut self,
         to: &Fingerprint,
@@ -247,7 +247,7 @@ impl Core {
             if sealed.is_empty() {
                 return Err(CoreError::NoSession);
             }
-            // Identifiant tiré sur 128 bits : une collision est une panne locale.
+            // Identifier drawn on 128 bits: a collision is a local failure.
             if !tx.insert_message(
                 *to,
                 Direction::Out,
@@ -256,7 +256,7 @@ impl Core {
                 now,
                 message_id,
             )? {
-                return Err(CoreError::Store("identifiant de message en double".into()));
+                return Err(CoreError::Store("duplicate message identifier".into()));
             }
             for (packet, peer_id) in &sealed {
                 tx.add_delivery(message_id, packet.id, *peer_id, false)?;
