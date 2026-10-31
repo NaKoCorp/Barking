@@ -383,7 +383,7 @@ where
     async fn rereads(&mut self, queue: Vec<(NodeId, Vec<MailboxId>)>, slice_end: Instant) {
         let end = (Instant::now() + REREAD_TIME).min(slice_end);
         let mut bytes_left = REREAD_BYTES;
-        for (node, group) in queue {
+        'nodes: for (node, group) in queue {
             for m in self.audit_targets(node, &group) {
                 if Instant::now() >= end || bytes_left == 0 {
                     return;
@@ -404,11 +404,12 @@ where
                     let fresh = conn.is_none();
                     let mut c = match conn.take() {
                         Some(c) => c,
+                        // The new dial failed: on to the next node.
                         None => match self.take_conn(node).await {
                             Some((c, _)) => c,
                             None => {
                                 self.save();
-                                return;
+                                continue 'nodes;
                             }
                         },
                     };
