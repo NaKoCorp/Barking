@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use barking_packet::{Kind, MailboxId, Packet};
+use barking_packet::{Kind, MailboxId, Packet, PacketId, ack};
 use barking_proto::pow::content_hash;
 use barking_proto::{ErrorReason, NodeId};
 use serde::{Deserialize, Serialize};
@@ -211,7 +211,8 @@ pub fn record_outcome(
 /// there when `node` had accepted it, its mailbox is among
 /// `fetched_mailboxes` (mailboxes fetched in full), it is missing from
 /// `fetched_items` and it is not within `LOSS_GRACE_SECS` of expiry. A
-/// receipt for it among `fetched_items` proves delivery. The node is recorded as having
+/// receipt for it among `fetched_items` (with a secret that verifies)
+/// proves delivery. The node is recorded as having
 /// lost it (and no longer holds it), so a second call for the same fetch
 /// returns nothing. Returns the hashes of the lost messages.
 pub fn detect_losses(
@@ -224,15 +225,16 @@ pub fn detect_losses(
 ) -> Vec<[u8; 32]> {
     let present: HashSet<[u8; 32]> = fetched_items.iter().map(|b| content_hash(b)).collect();
     // A receipt in the mailbox replaced its message on the node: the
-    // message was delivered, not lost.
+    // message was delivered, not lost. Only a receipt revealing the secret
+    // that matches the target id counts (a node cannot forge one).
     let acked: HashSet<[u8; 16]> = fetched_items
         .iter()
         .filter_map(|b| Packet::decode(b).ok())
         .filter(|p| p.kind == Kind::Ack)
         .filter_map(|p| {
-            p.payload
-                .get(..16)
-                .and_then(|t| <[u8; 16]>::try_from(t).ok())
+            let target = <[u8; 16]>::try_from(p.payload.get(..16)?).ok()?;
+            let secret = <[u8; 16]>::try_from(p.payload.get(16..32)?).ok()?;
+            ack::verify(&PacketId(target), &secret).then_some(target)
         })
         .collect();
     let mut lost = Vec::new();
@@ -298,7 +300,7 @@ pub fn prune(ledger: &mut Ledger, outbox: &[Vec<u8>], now: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use barking_packet::{PacketId, Tier};
+    use barking_packet::Tier;
 
     const NOW: u64 = 1_800_000_000; // On the hour.
     const MB: MailboxId = MailboxId([7; 16]);
@@ -551,12 +553,46 @@ mod tests {
 
     #[test]
     fn ack_in_fetch_proves_message_not_lost() {
+        let secret = [9u8; 16];
+        let mut ledger = Ledger::default();
+        let mut m = Packet::decode(&msg(1)).unwrap();
+        m.id = barking_packet::ack::packet_id_for(&secret);
+        let m = m.encode();
+        accept(&mut ledger, &m, 1, NOW);
+        let receipt = |target: [u8; 16], secret: [u8; 16]| {
+            Packet {
+                kind: Kind::Ack,
+                hops: 8,
+                tier: Tier::S,
+                id: PacketId([42; 16]),
+                expires_at: (NOW + 86_400) as u32,
+                mailbox: MB,
+                payload: [target, secret].concat(),
+            }
+            .encode()
+        };
+        let target = Packet::decode(&m).unwrap().id.0;
+        let ob = std::slice::from_ref(&m);
+        // The recipient's receipt replaced the message on the node, and the
+        // outbox has not been refreshed yet.
+        let genuine = receipt(target, secret);
+        let lost = detect_losses(&mut ledger, &node(1), &[MB], &[genuine], ob, NOW + 60);
+        assert!(lost.is_empty());
+        assert_eq!(ledger.holders(&content_hash(&m)), vec![node(1)]);
+        // A receipt for another message proves nothing.
+        let other = packet(5, Kind::Ack, NOW + 86_400);
+        let lost = detect_losses(&mut ledger, &node(1), &[MB], &[other], ob, NOW + 60);
+        assert_eq!(lost, vec![content_hash(&m)]);
+    }
+
+    #[test]
+    fn forged_ack_does_not_hide_a_loss() {
         let mut ledger = Ledger::default();
         let m = msg(1);
         accept(&mut ledger, &m, 1, NOW);
-        // The recipient's receipt replaced the message on the node, and the
-        // outbox has not been refreshed yet.
-        let receipt = Packet {
+        // A node that dropped the message returns a receipt naming its id
+        // with a secret that does not match.
+        let forged = Packet {
             kind: Kind::Ack,
             hops: 8,
             tier: Tier::S,
@@ -566,13 +602,14 @@ mod tests {
             payload: [[1u8; 16], [9u8; 16]].concat(),
         }
         .encode();
+        // A truncated payload (target only) proves nothing either.
+        let short = Packet {
+            payload: vec![1u8; 16],
+            ..Packet::decode(&forged).unwrap()
+        }
+        .encode();
         let ob = std::slice::from_ref(&m);
-        let lost = detect_losses(&mut ledger, &node(1), &[MB], &[receipt], ob, NOW + 60);
-        assert!(lost.is_empty());
-        assert_eq!(ledger.holders(&content_hash(&m)), vec![node(1)]);
-        // A receipt for another message proves nothing.
-        let other = packet(5, Kind::Ack, NOW + 86_400);
-        let lost = detect_losses(&mut ledger, &node(1), &[MB], &[other], ob, NOW + 60);
+        let lost = detect_losses(&mut ledger, &node(1), &[MB], &[forged, short], ob, NOW + 60);
         assert_eq!(lost, vec![content_hash(&m)]);
     }
 
