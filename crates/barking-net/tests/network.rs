@@ -32,9 +32,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 const NODES: usize = 8;
 /// Longest sync of these tests (nodes are local).
 const SYNC_DEADLINE: Duration = Duration::from_secs(60);
-/// Longest sync while every node is down: each dial waits for its own
-/// timeout (10 s), so a full attempt would only make the tests slow.
-const DOWN_DEADLINE: Duration = Duration::from_secs(5);
+/// A sync with every node down ends after 3 failed dials of 10 s each
+/// (spec §6), far within the production deadline it is given.
+const DOWN_ENDS_WITHIN: Duration = Duration::from_secs(45);
+
+/// The timing-sensitive tests run one at a time.
+static TIMING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn now() -> u64 {
     SystemTime::now()
@@ -163,18 +166,34 @@ fn options(seed: (NodeId, SocketAddr)) -> SyncOptions {
     }
 }
 
+/// A sync of `c` with every node down: it ends early, as network down,
+/// although it is given the production deadline.
+async fn down_sync(c: &mut Client, boot: (NodeId, SocketAddr)) -> SyncReport {
+    let opts = SyncOptions {
+        deadline: barking_net::sync::SYNC_DEADLINE,
+        ..options(boot)
+    };
+    let start = tokio::time::Instant::now();
+    let r = sync(&mut c.core, &QuicDialer, opts).await;
+    let took = start.elapsed();
+    assert!(took < DOWN_ENDS_WITHIN, "took {took:?}");
+    assert!(!r.network_up && !r.maintenance_done, "{r:?}");
+    assert!(!r.polled_all_sessions, "{r:?}");
+    r
+}
+
 /// One sync of `c`, bootstrapped (if needed) on `seed` only.
-async fn sync_on(c: &mut Client, node: &TestNode) -> SyncReport {
-    let report = sync(&mut c.core, &QuicDialer, options(seed(node))).await;
+async fn sync_on(c: &mut Client, boot: (NodeId, SocketAddr)) -> SyncReport {
+    let report = sync(&mut c.core, &QuicDialer, options(boot)).await;
     assert_eq!(report.error, None);
     report
 }
 
 /// Syncs `c` until its view holds every node of the network with its
 /// record: deposits and fetches then go to the true responsibles.
-async fn warm_up(c: &mut Client, node: &TestNode) {
+async fn warm_up(c: &mut Client, boot: (NodeId, SocketAddr)) {
     for _ in 0..3 {
-        sync_on(c, node).await;
+        sync_on(c, boot).await;
         let st = state(c);
         if st
             .view
@@ -228,20 +247,12 @@ fn closest(mailbox: &MailboxId) -> Vec<usize> {
 
 /// Raises `id`'s score in `c`'s view with `Found` events (as loss audits
 /// would) until it ranks first among `others` for deposits and fetches
-/// (on a tie, the closer node ranks first).
-fn pin_best(c: &mut Client, id: NodeId, others: &[NodeId], closer: bool) {
+/// (`id` is the closer node: it ranks first on a tie).
+fn pin_best(c: &mut Client, id: NodeId, others: &[NodeId]) {
     let mut st = state(c);
     let score = |st: &NetState, id: &NodeId| st.view.get(id).map_or(0.0, |e| e.score.value());
     let best_other = others.iter().map(|o| score(&st, o)).fold(0.0f32, f32::max);
-    let ahead = |s: f32| {
-        if closer {
-            s >= best_other
-        } else {
-            s > best_other
-        }
-    };
-    while !ahead(score(&st, &id)) {
-        assert!(score(&st, &id) < 1.0, "cannot rank first");
+    while score(&st, &id) < best_other {
         st.view.apply_score(&id, ScoreEvent::Found, now(), true);
     }
     st.save(&mut c.core).unwrap();
@@ -284,9 +295,9 @@ async fn exchange_from_single_seeds(nodes: &[TestNode], a: usize, b: usize) -> (
         .unwrap();
     let mut bob_got = Vec::new();
     for _ in 0..4 {
-        let r = sync_on(&mut alice, &nodes[a]).await;
+        let r = sync_on(&mut alice, seed(&nodes[a])).await;
         assert!(r.network_up);
-        bob_got.extend(texts(&sync_on(&mut bob, &nodes[b]).await));
+        bob_got.extend(texts(&sync_on(&mut bob, seed(&nodes[b])).await));
         if !bob_got.is_empty() {
             break;
         }
@@ -298,8 +309,8 @@ async fn exchange_from_single_seeds(nodes: &[TestNode], a: usize, b: usize) -> (
         .unwrap();
     let mut alice_got = Vec::new();
     for _ in 0..4 {
-        sync_on(&mut bob, &nodes[b]).await;
-        alice_got.extend(texts(&sync_on(&mut alice, &nodes[a]).await));
+        sync_on(&mut bob, seed(&nodes[b])).await;
+        alice_got.extend(texts(&sync_on(&mut alice, seed(&nodes[a])).await));
         if !alice_got.is_empty() {
             break;
         }
@@ -342,14 +353,15 @@ async fn swallowing_node_is_avoided_and_message_still_arrives() {
     let (swallower, honest) = (order[0], order[1]);
     let swallower_id = id_of(&key(swallower));
     let honest_id = id_of(&key(honest));
-    let nodes = network_with(0..NODES, |spec| {
+    let mut nodes = network_with(0..NODES, |spec| {
         spec.swallow_deposits = spec.n == swallower;
     })
     .await;
-    let seed = &nodes[(swallower + 2) % NODES];
+    // Both clients start on a node that is neither responsible.
+    let boot = seed(&nodes[order[2]]);
 
     // Bootstrap with no proof-of-work budget: the messages wait.
-    let mut opts = options(self::seed(seed));
+    let mut opts = options(boot);
     opts.pow_budget = 0;
     let r = sync(&mut alice.core, &QuicDialer, opts).await;
     assert!(r.network_up && r.first_copies == 0, "{r:?}");
@@ -358,17 +370,28 @@ async fn swallowing_node_is_avoided_and_message_still_arrives() {
         assert!(st.view.get(&id).is_some_and(|e| e.record.is_some()));
     }
 
-    // The swallowing node is the best responsible: it gets the first
-    // copies, the other responsible the extra ones.
-    pin_best(&mut alice, swallower_id, &[honest_id], true);
-    let r = sync_on(&mut alice, seed).await;
-    assert_eq!((r.first_copies, r.extra_copies), (3, 3), "{r:?}");
+    // The swallowing node is the best responsible and the other one is
+    // unreachable: the first copies all go to the swallowing node, and no
+    // copy lands anywhere else.
+    let stopped = nodes.remove(honest).halt().await;
+    pin_best(&mut alice, swallower_id, &[honest_id]);
+    let r = sync_on(&mut alice, boot).await;
+    assert_eq!((r.first_copies, r.extra_copies), (3, 0), "{r:?}");
     assert!(r.avoided.is_empty());
+    let st = state(&mut alice);
+    for bytes in message_packets(&mut alice) {
+        assert_eq!(st.ledger.holders(&content_hash(&bytes)), [swallower_id]);
+    }
+    nodes.insert(honest, stopped.restart().await);
 
-    // The next fetch from it audits the mailbox: three losses.
-    pin_best(&mut alice, swallower_id, &[honest_id], true);
-    let r = sync_on(&mut alice, seed).await;
+    // The next fetch from it audits the mailbox: three losses, the node is
+    // avoided, and the messages are deposited again elsewhere right away:
+    // on the other responsible and, the avoided node leaving room among
+    // the closest, on the next one (three client copies at most).
+    pin_best(&mut alice, swallower_id, &[honest_id]);
+    let r = sync_on(&mut alice, boot).await;
     assert_eq!(r.avoided, [short_id(&swallower_id)], "{r:?}");
+    assert_eq!((r.first_copies, r.extra_copies), (0, 6), "{r:?}");
     let st = state(&mut alice);
     let entry = st.view.get(&swallower_id).unwrap();
     // An avoidance only starts when a loss leaves the score under
@@ -382,30 +405,39 @@ async fn swallowing_node_is_avoided_and_message_still_arrives() {
         TransparencyEvent::NodeAvoided { node, reason: AvoidReason::MessageLost }
             if *node == short_id(&swallower_id)
     )));
-    // The copies are held elsewhere.
-    for bytes in alice.core.pending_outbox(now()).unwrap() {
-        let p = Packet::decode(&bytes).unwrap();
-        if p.kind == Kind::Message {
-            let holders = st.ledger.holders(&content_hash(&bytes));
-            assert!(holders.contains(&honest_id) && !holders.contains(&swallower_id));
-        }
+    let next_id = id_of(&key(order[2]));
+    for bytes in message_packets(&mut alice) {
+        let mut holders = st.ledger.holders(&content_hash(&bytes));
+        holders.sort_unstable_by_key(|n| n.0);
+        let mut want = vec![honest_id, next_id];
+        want.sort_unstable_by_key(|n| n.0);
+        assert_eq!(holders, want);
     }
 
-    // Bob reads at the responsible holding them (his own scores pinned:
-    // the recipient only moves to the next responsible on a failure).
-    let mut got = texts(&sync_on(&mut bob, seed).await);
-    pin_best(&mut bob, honest_id, &[swallower_id], false);
-    for _ in 0..3 {
-        if got.len() == sent.len() {
+    // Bob, with no help: whichever responsible he prefers, the cross-check
+    // reads the other one.
+    let mut got = Vec::new();
+    for _ in 0..4 {
+        got.extend(texts(&sync_on(&mut bob, boot).await));
+        if got.len() >= sent.len() {
             break;
         }
-        got.extend(texts(&sync_on(&mut bob, seed).await));
     }
     got.sort();
     let mut want: Vec<String> = sent.iter().map(|s| s.to_string()).collect();
     want.sort();
     assert_eq!(got, want);
     stop_all(nodes).await;
+}
+
+/// Messages (not receipts) waiting in `c`'s send queue.
+fn message_packets(c: &mut Client) -> Vec<Vec<u8>> {
+    c.core
+        .pending_outbox(now())
+        .unwrap()
+        .into_iter()
+        .filter(|b| Packet::decode(b).is_ok_and(|p| p.kind == Kind::Message))
+        .collect()
 }
 
 /// Fetch positions of `c`.
@@ -457,6 +489,7 @@ fn batch(tag: &str) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cut_mid_sync_resumes() {
+    let _timing = TIMING.lock().await;
     capture_logs();
     let (mut alice, mut bob, fb, fa) = acquainted();
     let rng = &mut rand::rng();
@@ -464,7 +497,7 @@ async fn cut_mid_sync_resumes() {
         barking_node::config::DEFAULT_REPLICATION_BYTES_PER_HOUR
     })
     .await;
-    let (sa, sb) = (&nodes[1], &nodes[6]);
+    let (sa, sb) = (seed(&nodes[1]), seed(&nodes[6]));
 
     warm_up(&mut alice, sa).await;
     warm_up(&mut bob, sb).await;
@@ -496,24 +529,34 @@ async fn cut_mid_sync_resumes() {
     }
     let r = sync_on(&mut alice, sa).await;
     assert_eq!(r.first_copies, BATCH, "{r:?}");
-    let bob_seed = seed(sb);
+    let bob_seed = sb;
 
     // Every response now waits `DELAY`, and every node stops while Bob's
     // fetch of the second batch is under way: a full page (1 MiB) waiting
     // on a node is the first one; it reaches Bob `DELAY` later, the next
-    // one `DELAY` after that. The nodes stop in between.
+    // one `DELAY` after that. The nodes stop in between. A fetch reserves
+    // about 1 MiB before it reads anything, even an empty one, but only
+    // briefly: the full page is the reservation still held 50 ms later.
     const DELAY: Duration = Duration::from_millis(400);
     let nodes = restart_all(halt_all(nodes).await, Some(DELAY)).await;
     let stats: Vec<_> = nodes.iter().map(|n| Arc::clone(&n.stats)).collect();
     let opts = options(bob_seed);
     let cut = async {
         let give_up = tokio::time::Instant::now() + SYNC_DEADLINE;
-        while !stats.iter().any(|s| s.response_bytes.now() > 512 << 10)
-            && tokio::time::Instant::now() < give_up
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        let full = |s: &Arc<barking_node::server::ServerStats>| s.response_bytes.now() > 512 << 10;
+        loop {
+            if tokio::time::Instant::now() >= give_up {
+                break;
+            }
+            let before: Vec<bool> = stats.iter().map(full).collect();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if stats.iter().zip(&before).any(|(s, b)| *b && full(s)) {
+                break;
+            }
         }
-        tokio::time::sleep(DELAY * 3 / 2).await;
+        // Seen 50 to 100 ms into the first page's wait: stop halfway between
+        // its delivery and the next page's.
+        tokio::time::sleep(DELAY * 5 / 4).await;
         halt_all(nodes).await
     };
     let (r, stopped) = tokio::join!(sync(&mut bob.core, &QuicDialer, opts), cut);
@@ -530,10 +573,7 @@ async fn cut_mid_sync_resumes() {
 
     // Network down: no node answers, no score goes down, nothing moves back.
     let scores_before = scores(&mut bob);
-    let mut down = options(bob_seed);
-    down.deadline = DOWN_DEADLINE;
-    let r = sync(&mut bob.core, &QuicDialer, down).await;
-    assert!(!r.network_up, "{r:?}");
+    down_sync(&mut bob, bob_seed).await;
     for (id, s) in scores(&mut bob) {
         let was = scores_before.get(&id).copied().unwrap_or(s);
         assert!(s >= was, "score lowered while the network was down");
@@ -544,7 +584,7 @@ async fn cut_mid_sync_resumes() {
     // Back up: the rest arrives, nothing lost, nothing twice.
     let nodes = restart_all(stopped, None).await;
     for _ in 0..3 {
-        sync_on(&mut bob, &nodes[6]).await;
+        sync_on(&mut bob, sb).await;
         if inbox(&bob, &fa).len() > first.len() + second.len() {
             break;
         }
@@ -561,6 +601,7 @@ async fn cut_mid_sync_resumes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slow_network_puts_first_copy_before_maintenance() {
+    let _timing = TIMING.lock().await;
     capture_logs();
     let (mut alice, _bob, fb, _) = acquainted();
     let rng = &mut rand::rng();
@@ -569,16 +610,17 @@ async fn slow_network_puts_first_copy_before_maintenance() {
     })
     .await;
     // Bootstrap and view maintenance at full speed.
-    let r = sync_on(&mut alice, &nodes[3]).await;
+    let r = sync_on(&mut alice, seed(&nodes[3])).await;
     assert!(r.network_up && r.maintenance_done);
 
-    // Every response now waits `DELAY`; the sync gets `22 * DELAY`. Worst
+    // Every response now waits `DELAY`; the sync gets `55 * DELAY`. Worst
     // case before the last first copy: 4 session groups on 4 nodes (8
-    // delays), 10 first copies and a connection (11). Best case before
-    // maintenance: one group (2), the first copies (11), the extra copies
-    // (11), at least one introduction fetch (1).
-    const DELAY: Duration = Duration::from_millis(500);
-    const MESSAGES: usize = 10;
+    // delays), as many cross-checks on 4 other nodes (8), 30 first copies
+    // and a connection (31): 47. Best case before maintenance: one group
+    // (2), the cross-check of the new send mailbox (1), the first copies
+    // (30), the extra copies (30), one introduction fetch (1): 64.
+    const DELAY: Duration = Duration::from_millis(300);
+    const MESSAGES: usize = 30;
     let nodes = restart_all(halt_all(nodes).await, Some(DELAY)).await;
     for i in 0..MESSAGES {
         alice
@@ -587,7 +629,7 @@ async fn slow_network_puts_first_copy_before_maintenance() {
             .unwrap();
     }
     let mut opts = options(seed(&nodes[3]));
-    opts.deadline = DELAY * 22;
+    opts.deadline = DELAY * 55;
     let r = sync(&mut alice.core, &QuicDialer, opts).await;
     assert!(r.network_up, "{r:?}");
     assert!(r.polled_all_sessions, "{r:?}");
@@ -646,23 +688,37 @@ async fn no_ip_or_mailbox_in_logs_or_plaintext_state() {
     })
     .await;
     let (mut alice, mut bob) = exchange_from_single_seeds(&nodes, 2, 7).await;
-    let down_seed = seed(&nodes[2]);
-    // A sync while nodes are down too (failures, avoidance paths).
+    let (sa, sb) = (seed(&nodes[2]), seed(&nodes[7]));
+    warm_up(&mut alice, sa).await;
     let t = now();
     let mut mailboxes = Vec::new();
     for c in [&mut alice, &mut bob] {
         mailboxes.extend(c.core.watched_mailboxes(t));
         mailboxes.extend(outbox_mailboxes(c));
     }
-    let mut addrs: Vec<String> = vec!["127.0.0.1".into()];
+    let mut addrs: Vec<String> = vec!["127.0.0.1".into(), "7f000001".into()];
     addrs.extend(nodes.iter().map(|n| n.addr.to_string()));
-    let _stopped = halt_all(nodes).await;
-    for c in [&mut alice, &mut bob] {
-        let mut down = options(down_seed);
-        down.deadline = DOWN_DEADLINE;
-        let r = sync(&mut c.core, &QuicDialer, down).await;
-        assert!(!r.network_up);
-    }
+
+    // Failures while other nodes answer: both responsibles of one of
+    // Alice's session mailboxes are down.
+    let m = alice.core.watched_mailbox_groups(t).sessions[0];
+    let dead: Vec<NodeId> = closest(&m)[..2].iter().map(|&n| id_of(&key(n))).collect();
+    let (gone, alive): (Vec<TestNode>, Vec<TestNode>) =
+        nodes.into_iter().partition(|n| dead.contains(&n.id));
+    let _gone = halt_all(gone).await;
+    let before = scores(&mut alice);
+    let r = sync_on(&mut alice, sa).await;
+    assert!(r.network_up, "{r:?}");
+    let after = scores(&mut alice);
+    assert!(
+        dead.iter().any(|id| after.get(id) < before.get(id)),
+        "no failure counted: {before:?} -> {after:?}"
+    );
+
+    // Then every node down: both clients end early, as network down.
+    let _stopped = halt_all(alive).await;
+    let (ra, rb) = tokio::join!(down_sync(&mut alice, sa), down_sync(&mut bob, sb));
+    assert!(ra.avoided.is_empty() && rb.avoided.is_empty());
 
     let logs = logs.lock().unwrap().clone();
     assert!(
