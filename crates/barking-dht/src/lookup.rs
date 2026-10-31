@@ -1,8 +1,8 @@
-//! Recherche itérative S/Kademlia sur `PATHS` chemins disjoints (spec §6.3).
-//! Machine à états pure : l'appelant envoie les `FindNode` que donne
-//! `next_requests`, puis lui rend les réponses (`on_response`) et les échecs
-//! (`on_failure`). Les délais se mesurent avec l'horloge fournie par
-//! l'appelant, en millisecondes.
+//! Iterative S/Kademlia lookup over `PATHS` disjoint paths (spec §6.3).
+//! Pure state machine: the caller sends the `FindNode`s given by
+//! `next_requests`, then hands back the responses (`on_response`) and failures
+//! (`on_failure`). Timeouts are measured with the clock supplied by
+//! the caller, in milliseconds.
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,19 +13,19 @@ use ed25519_dalek::Signature;
 
 use crate::{ALPHA, K, MAX_PER_PREFIX, PATHS, Prefix, distance, prefixes};
 
-/// Délai d'une requête `FindNode`, en millisecondes.
+/// Timeout of a `FindNode` request, in milliseconds.
 pub const REQUEST_TIMEOUT_MS: u64 = 3_000;
-/// Durée maximale d'une recherche, en millisecondes.
+/// Maximum duration of a lookup, in milliseconds.
 pub const LOOKUP_TIMEOUT_MS: u64 = 10_000;
 
-/// Réponse `Nodes` dont l'auteur devient suspect : au moins une fiche
-/// invalide, ou plus de `MAX_NODES_PER_RESPONSE` fiches.
+/// `Nodes` response whose author becomes suspect: at least one invalid
+/// record, or more than `MAX_NODES_PER_RESPONSE` records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Suspect;
 
-/// Filtre une réponse `Nodes` : vérifie chaque fiche et écarte les doublons.
-/// Une seule fiche invalide, ou une réponse trop longue, rend l'auteur
-/// suspect et fait ignorer la réponse entière.
+/// Filters a `Nodes` response: checks each record and drops duplicates.
+/// A single invalid record, or a response that is too long, makes the author
+/// suspect and causes the whole response to be ignored.
 pub fn filter_nodes(
     records: Vec<NodeRecord>,
     now_secs: u64,
@@ -34,13 +34,13 @@ pub fn filter_nodes(
     filter_known(records, now_secs, policy, &mut HashMap::new())
 }
 
-/// Fiches valides déjà vérifiées, par signature.
+/// Valid records already verified, by signature.
 type Verified = HashMap<Signature, (NodeRecord, NodeId)>;
 
-/// Comme `filter_nodes`, sans revérifier la signature d'une fiche identique
-/// à une fiche de `verified`, qui reçoit les fiches valides. Une fiche valide
-/// le reste quand l'horloge avance ; seule sa date est revue, au cas où
-/// l'horloge aurait reculé.
+/// Like `filter_nodes`, without rechecking the signature of a record identical
+/// to one in `verified`, which receives the valid records. A valid record
+/// stays valid as the clock advances; only its date is rechecked, in case
+/// the clock went backwards.
 fn filter_known(
     records: Vec<NodeRecord>,
     now_secs: u64,
@@ -72,7 +72,7 @@ fn filter_known(
     Ok(out)
 }
 
-/// État d'un nœud dans la liste d'un chemin.
+/// State of a node in a path's list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Waiting,
@@ -89,32 +89,32 @@ struct Entry {
     state: State,
 }
 
-/// Recherche en cours d'une cible.
+/// Lookup in progress for a target.
 #[derive(Debug)]
 pub struct Lookup {
     target: [u8; 32],
     policy: RecordPolicy,
     started_ms: u64,
-    /// Liste de chaque chemin, triée par distance.
+    /// List of each path, sorted by distance.
     paths: Vec<Vec<Entry>>,
-    /// Chemin propriétaire de chaque nœud pris : présent dans la liste de ce
-    /// chemin, ou déjà interrogé par lui. Un nœud n'appartient qu'à un chemin ;
-    /// un nœud écarté de sa liste sans avoir été interrogé est libéré.
+    /// Path owning each taken node: present in that path's list,
+    /// or already queried by it. A node belongs to a single path;
+    /// a node dropped from its list without having been queried is released.
     owner: HashMap<NodeId, usize>,
-    /// Nœuds jamais repris (le nœud qui cherche).
+    /// Nodes never taken (the node doing the lookup).
     excluded: HashSet<NodeId>,
     suspects: HashSet<NodeId>,
-    /// Nœuds qui ont répondu correctement, dans l'ordre des réponses.
+    /// Nodes that responded correctly, in the order of the responses.
     responded: Vec<(NodeId, NodeRecord)>,
-    /// Fiches déjà vérifiées pendant la recherche : les réponses se
-    /// recoupent largement (douze fois en moyenne dans la simulation de
-    /// 500 nœuds), et la vérification des signatures dominait le coût.
+    /// Records already verified during the lookup: responses
+    /// overlap heavily (twelve times on average in the
+    /// 500-node simulation), and signature verification dominated the cost.
     verified: Verified,
 }
 
 impl Lookup {
-    /// Démarre une recherche ; les graines sont triées par distance puis
-    /// réparties à tour de rôle entre les chemins.
+    /// Starts a lookup; the seeds are sorted by distance then
+    /// distributed in turn among the paths.
     pub fn new(
         target: [u8; 32],
         mut seeds: Vec<(NodeId, NodeRecord)>,
@@ -147,8 +147,8 @@ impl Lookup {
         lookup
     }
 
-    /// Écarte un identifiant de la recherche (le nœud qui cherche) : il n'est
-    /// jamais interrogé ni retenu.
+    /// Drops an identifier from the lookup (the node doing the lookup): it is
+    /// never queried nor retained.
     pub fn excluding(mut self, id: NodeId) -> Lookup {
         if let Some(path) = self.owner.remove(&id) {
             self.paths[path].retain(|e| e.id != id);
@@ -158,7 +158,7 @@ impl Lookup {
         self
     }
 
-    /// Ajoute un nœud à la liste d'un chemin, sans trier.
+    /// Adds a node to a path's list, without sorting.
     fn add(&mut self, path: usize, id: NodeId, record: NodeRecord) {
         self.owner.insert(id, path);
         self.paths[path].push(Entry {
@@ -169,8 +169,8 @@ impl Lookup {
         });
     }
 
-    /// Trie la liste d'un chemin et la tronque à `K` ; les nœuds en vol
-    /// au-delà restent, pour que leur réponse soit encore attendue.
+    /// Sorts a path's list and truncates it to `K`; in-flight nodes
+    /// beyond that stay, so that their response is still awaited.
     fn trim(&mut self, path: usize) {
         let list = &mut self.paths[path];
         let owner = &mut self.owner;
@@ -179,8 +179,8 @@ impl Lookup {
         list.retain(|e| {
             rank += 1;
             let keep = rank <= K || matches!(e.state, State::InFlight { .. });
-            // Un nœud écarté sans avoir été interrogé est libéré : un autre
-            // chemin pourra le reprendre. Un nœud interrogé reste pris.
+            // A node dropped without having been queried is released: another
+            // path may take it. A queried node stays taken.
             if !keep && e.state == State::Waiting {
                 owner.remove(&e.id);
             }
@@ -198,8 +198,8 @@ impl Lookup {
         now_ms.saturating_sub(self.started_ms) >= LOOKUP_TIMEOUT_MS
     }
 
-    /// `FindNode` à envoyer maintenant, `ALPHA` en vol au plus par chemin.
-    /// Une requête en vol depuis `REQUEST_TIMEOUT_MS` compte comme un échec.
+    /// `FindNode`s to send now, at most `ALPHA` in flight per path.
+    /// A request in flight for `REQUEST_TIMEOUT_MS` counts as a failure.
     pub fn next_requests(&mut self, now_ms: u64) -> Vec<(NodeId, NodeRecord)> {
         if self.timed_out(now_ms) {
             return Vec::new();
@@ -216,8 +216,8 @@ impl Lookup {
                     }
                 }
             }
-            // La liste est triée : les premiers en attente sont les plus
-            // proches.
+            // The list is sorted: the first pending ones are the
+            // closest.
             for e in list.iter_mut().filter(|e| e.state == State::Waiting) {
                 if in_flight >= ALPHA {
                     break;
@@ -230,8 +230,8 @@ impl Lookup {
         out
     }
 
-    /// Réponse `Nodes` de `from` ; ignorée si aucune requête n'est en vol
-    /// vers lui.
+    /// `Nodes` response from `from`; ignored if no request is in flight
+    /// to it.
     pub fn on_response(&mut self, from: &NodeId, records: Vec<NodeRecord>, now_secs: u64) {
         let policy = self.policy;
         let Some(path) = self.owner.get(from).copied() else {
@@ -256,10 +256,10 @@ impl Lookup {
                 continue;
             }
             match self.owner.get(&id) {
-                // Déjà dans un autre chemin : jamais repris (chemins disjoints).
+                // Already in another path: never retaken (disjoint paths).
                 Some(&other) if other != path => {}
-                // Déjà dans ce chemin : une fiche plus récente remplace
-                // l'ancienne tant que le nœud n'a pas été interrogé.
+                // Already in this path: a more recent record replaces
+                // the old one as long as the node has not been queried.
                 Some(_) => {
                     if let Some((_, e)) = self.entry_mut(&id)
                         && e.state == State::Waiting
@@ -274,7 +274,7 @@ impl Lookup {
         self.trim(path);
     }
 
-    /// Échec de la requête vers `from` (connexion, erreur, délai).
+    /// Failure of the request to `from` (connection, error, timeout).
     pub fn on_failure(&mut self, from: &NodeId) {
         if let Some((_, entry)) = self.entry_mut(from)
             && matches!(entry.state, State::InFlight { .. })
@@ -283,7 +283,7 @@ impl Lookup {
         }
     }
 
-    /// Vrai quand tous les chemins sont épuisés, ou après `LOOKUP_TIMEOUT_MS`.
+    /// True when all paths are exhausted, or after `LOOKUP_TIMEOUT_MS`.
     pub fn is_done(&self, now_ms: u64) -> bool {
         if self.timed_out(now_ms) {
             return true;
@@ -295,8 +295,8 @@ impl Lookup {
         })
     }
 
-    /// Nœuds qui ont répondu, triés par distance à la cible, `K` au plus et
-    /// `MAX_PER_PREFIX` par bloc.
+    /// Nodes that responded, sorted by distance to the target, at most `K` and
+    /// `MAX_PER_PREFIX` per block.
     pub fn result(&self) -> Vec<(NodeId, NodeRecord)> {
         let mut sorted: Vec<&(NodeId, NodeRecord)> = self.responded.iter().collect();
         sorted.sort_by_cached_key(|(id, _)| distance(&id.0, &self.target));
@@ -321,7 +321,7 @@ impl Lookup {
         out
     }
 
-    /// Nœuds qui ont répondu correctement : candidats pour la table.
+    /// Nodes that responded correctly: candidates for the table.
     pub fn responders(&self) -> Vec<(NodeId, NodeRecord)> {
         self.responded.clone()
     }
@@ -348,7 +348,7 @@ mod tests {
         out
     }
 
-    /// Nœud au /24 propre à `i`.
+    /// Node in the /24 specific to `i`.
     fn node(rng: &mut StdRng, i: usize) -> (NodeId, NodeRecord) {
         let seed = bytes(rng);
         let addr = format!("11.{}.{}.1:4433", i / 256, i % 256);
@@ -365,8 +365,8 @@ mod tests {
         (0..n).map(|i| node(rng, i)).collect()
     }
 
-    /// Réseau factice : chaque nœud connaît tous les autres (dans la limite
-    /// de sa table) et répond par `closest_diverse`.
+    /// Fake network: each node knows all the others (within the limit
+    /// of its table) and answers with `closest_diverse`.
     fn network(all: &[(NodeId, NodeRecord)]) -> HashMap<NodeId, RoutingTable> {
         all.iter()
             .map(|(id, _)| {
@@ -390,8 +390,8 @@ mod tests {
             .collect()
     }
 
-    /// Fait tourner la recherche sur le réseau factice ; renvoie le journal
-    /// des requêtes émises.
+    /// Runs the lookup on the fake network; returns the log
+    /// of requests issued.
     fn run(
         lookup: &mut Lookup,
         net: &HashMap<NodeId, RoutingTable>,
@@ -401,7 +401,7 @@ mod tests {
         let now_ms = 0;
         while !lookup.is_done(now_ms) {
             let reqs = lookup.next_requests(now_ms);
-            assert!(!reqs.is_empty(), "recherche bloquée");
+            assert!(!reqs.is_empty(), "lookup stuck");
             for (id, _) in reqs {
                 log.push(id);
                 let records = net[&id].closest_diverse(target, K);
@@ -431,10 +431,10 @@ mod tests {
             let found = ids(&lookup.result());
             assert!(found.len() <= K);
             for id in &truth[..5] {
-                assert!(found.contains(id), "tour {round} : {id:?} manquant");
+                assert!(found.contains(id), "round {round}: {id:?} missing");
             }
             assert!(!found.contains(&me));
-            // Trié par distance.
+            // Sorted by distance.
             let mut sorted = found.clone();
             sorted.sort_by_key(|id| distance(&id.0, &target));
             assert_eq!(found, sorted);
@@ -452,21 +452,21 @@ mod tests {
             Lookup::new(target, seeds_from(&net[&me], &target), POLICY, 0).excluding(me);
         let log = run(&mut lookup, &net, &target);
         let unique: HashSet<NodeId> = log.iter().copied().collect();
-        assert_eq!(unique.len(), log.len(), "un nœud interrogé deux fois");
-        // Chaque nœud interrogé n'apparaît que dans un seul chemin.
+        assert_eq!(unique.len(), log.len(), "a node was queried twice");
+        // Each queried node appears in a single path only.
         for id in &log {
             let n = lookup
                 .paths
                 .iter()
                 .filter(|p| p.iter().any(|e| e.id == *id))
                 .count();
-            assert!(n <= 1, "{id:?} dans {n} chemins");
+            assert!(n <= 1, "{id:?} in {n} paths");
         }
-        assert!(log.len() > PATHS * ALPHA, "la recherche n'a pas progressé");
+        assert!(log.len() > PATHS * ALPHA, "the lookup made no progress");
     }
 
-    /// Graines `seeds`, un premier tour de requêtes, et la réponse de
-    /// `from` faite de `records`.
+    /// Seeds `seeds`, a first round of requests, and the response of
+    /// `from` made of `records`.
     fn lookup_with(seeds: &[(NodeId, NodeRecord)]) -> (Lookup, Vec<NodeId>) {
         let mut lookup = Lookup::new([0; 32], seeds.to_vec(), POLICY, 0);
         let sent = ids(&lookup.next_requests(0));
@@ -482,20 +482,20 @@ mod tests {
         assert_eq!(sent.len(), 3);
         let liar = sent[0];
         let mut records: Vec<NodeRecord> = fresh.iter().map(|(_, r)| r.clone()).collect();
-        // Mauvaise signature : la date signée ne correspond plus.
+        // Bad signature: the signed date no longer matches.
         records[3].issued_at -= 3600;
         lookup.on_response(&liar, records, NOW_SECS);
-        // Les autres graines répondent sans rien apprendre.
+        // The other seeds answer without teaching anything.
         for id in &sent[1..] {
             lookup.on_response(id, vec![], NOW_SECS);
         }
-        // Aucune fiche de la réponse suspecte n'est interrogée.
+        // No record from the suspect response is queried.
         assert!(lookup.next_requests(0).is_empty());
         assert!(lookup.is_done(0));
         assert!(!ids(&lookup.result()).contains(&liar));
         assert!(!ids(&lookup.responders()).contains(&liar));
         assert_eq!(lookup.result().len(), 2);
-        // Une seconde réponse du suspect reste ignorée.
+        // A second response from the suspect remains ignored.
         let valid: Vec<NodeRecord> = fresh.iter().map(|(_, r)| r.clone()).collect();
         lookup.on_response(&liar, valid, NOW_SECS);
         assert!(lookup.next_requests(0).is_empty());
@@ -543,7 +543,7 @@ mod tests {
         let second = ids(&lookup.next_requests(REQUEST_TIMEOUT_MS));
         assert_eq!(second.len(), PATHS * ALPHA);
         assert!(second.iter().all(|id| !first.contains(id)));
-        // Une réponse tardive d'un nœud expiré est ignorée.
+        // A late response from an expired node is ignored.
         lookup.on_response(&first[0], vec![], NOW_SECS);
         assert!(lookup.responders().is_empty());
         assert!(!lookup.is_done(LOOKUP_TIMEOUT_MS - 1));
@@ -582,8 +582,8 @@ mod tests {
         let (_, rec) = node(&mut rng, 2);
         let (mut lookup, sent) = lookup_with(&seeds);
         lookup.on_response(&sent[0], vec![rec.clone()], NOW_SECS);
-        // Même signature, autre adresse : la fiche déjà vérifiée ne la
-        // couvre pas.
+        // Same signature, other address: the already verified record does not
+        // cover it.
         let mut forged = rec;
         forged.v4 = Some("11.200.0.1:4433".parse().unwrap());
         lookup.on_response(&sent[1], vec![forged], NOW_SECS);
@@ -597,7 +597,7 @@ mod tests {
         let (_, rec) = node(&mut rng, 2);
         let (mut lookup, sent) = lookup_with(&seeds);
         lookup.on_response(&sent[0], vec![rec.clone()], NOW_SECS);
-        // L'horloge a reculé : la même fiche vient désormais du futur.
+        // The clock went backwards: the same record now comes from the future.
         let past = rec.issued_at - MAX_RECORD_SKEW_SECS - 1;
         lookup.on_response(&sent[1], vec![rec], past);
         assert_eq!(ids(&lookup.responders()), vec![sent[0]]);
@@ -609,18 +609,18 @@ mod tests {
         let target = [0; 32];
         let mut all = nodes(&mut rng, 30);
         all.sort_by_key(|(id, _)| distance(&id.0, &target));
-        // Les deux plus proches : une graine par chemin (0 puis 1).
+        // The two closest: one seed per path (0 then 1).
         let mut lookup = Lookup::new(target, all[..2].to_vec(), POLICY, 0);
         let sent = ids(&lookup.next_requests(0));
         assert_eq!(sent, ids(&all[..2]));
         let (x, x_rec) = all[29].clone();
-        // Le chemin 0 apprend X avec 19 nœuds plus proches : sa liste
-        // (graine comprise) dépasse K, X en est écarté sans être interrogé.
+        // Path 0 learns X with 19 closer nodes: its list
+        // (seed included) exceeds K, X is dropped from it without being queried.
         let mut records: Vec<NodeRecord> = all[2..21].iter().map(|(_, r)| r.clone()).collect();
         records.push(x_rec.clone());
         lookup.on_response(&sent[0], records, NOW_SECS);
         assert!(lookup.paths[0].iter().all(|e| e.id != x));
-        // Le chemin 1 reçoit X d'un nœud honnête et doit le reprendre.
+        // Path 1 receives X from an honest node and must retake it.
         lookup.on_response(&sent[1], vec![x_rec], NOW_SECS);
         assert!(lookup.paths[1].iter().any(|e| e.id == x));
         let log = ids(&lookup.next_requests(0));

@@ -1,10 +1,10 @@
-# Liste d'amorçage intégrée au binaire : nœuds publics essayés au démarrage
-# quand moins de 3 nœuds de `peers` répondent, avant `bootstrap` de la config.
-# Format : une entrée "<identifiant base32>@<ip:port>" par nœud, par exemple
+# Bootstrap list built into the binary: public nodes tried at startup
+# when fewer than 3 nodes from `peers` respond, before the config's `bootstrap`.
+# Format: one "<base32 identifier>@<ip:port>" entry per node, for example
 #   nodes = [
-#     "<identifiant>@203.0.113.7:4433",
-#     "<identifiant>@[2001:db8::7]:4433",
+#     "<identifier>@203.0.113.7:4433",
+#     "<identifier>@[2001:db8::7]:4433",
 #   ]
-# Vide tant qu'aucun nœud public n'existe ; le mainteneur la remplit à la
-# première mise en ligne.
+# Empty as long as no public node exists; the maintainer fills it in at the
+# first launch.
 nodes = []

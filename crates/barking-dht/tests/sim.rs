@@ -1,11 +1,11 @@
-//! Simulation déterministe de 500 nœuds (spec §1, critères 1 à 4 ; §9).
+//! Deterministic simulation of 500 nodes (spec §1, criteria 1 to 4; §9).
 //!
-//! Aucun réseau : chaque nœud n'est qu'une `RoutingTable`, et le harnais
-//! répond de manière synchrone aux `FindNode` d'une recherche depuis la table
-//! du nœud interrogé. Un nœud mort ou muet ne répond jamais : sa requête
-//! reste en vol et occupe sa place jusqu'à l'expiration du délai de 3 s, et
-//! la recherche entière reste bornée à 10 s. Une graine fixe et une horloge
-//! simulée rendent chaque exécution identique.
+//! No network: each node is just a `RoutingTable`, and the harness
+//! answers a lookup's `FindNode`s synchronously from the table
+//! of the queried node. A dead or mute node never answers: its request
+//! stays in flight and holds its slot until the 3 s timeout expires, and
+//! the whole lookup remains bounded to 10 s. A fixed seed and a simulated
+//! clock make every run identical.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -17,32 +17,32 @@ use barking_proto::{NodeId, NodeRecord, RecordPolicy};
 use ed25519_dalek::SigningKey;
 use rand::{Rng, RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 
-/// Fiches sans puzzle, adresses privées admises : seule la simulation le peut.
+/// Records without puzzle, private addresses allowed: only the simulation may do so.
 const POLICY: RecordPolicy = RecordPolicy {
     allow_private: true,
     puzzle_bits: 0,
 };
-/// Nœuds du réseau.
+/// Nodes of the network.
 const NODES: usize = 500;
-/// Recherches mesurées par scénario.
+/// Lookups measured per scenario.
 const LOOKUPS: usize = 1_000;
-/// Début de l'horloge simulée, en secondes.
+/// Start of the simulated clock, in seconds.
 const T0: u64 = 1_700_000_000;
-/// Aller-retour simulé d'un tour de requêtes, en millisecondes.
+/// Simulated round trip of one round of requests, in milliseconds.
 const ROUND_MS: u64 = 50;
-/// Bloc /24 commun à toutes les identités Sybil.
+/// /24 block shared by all Sybil identities.
 const SYBIL_BLOCK: [u8; 3] = [10, 9, 8];
-/// Nœud d'amorçage commun.
+/// Common bootstrap node.
 const BOOT: usize = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Behaviour {
     Honest,
-    /// Ne renvoie que les 20 complices les plus proches de la cible.
+    /// Returns only the 20 accomplices closest to the target.
     OnlyColluders,
-    /// Renvoie des fiches invalides.
+    /// Returns invalid records.
     Garbage,
-    /// Ne répond rien, pas même aux `Ping`.
+    /// Answers nothing, not even `Ping`s.
     Silent,
 }
 
@@ -54,24 +54,24 @@ struct Node {
     alive: bool,
 }
 
-/// Issue d'une recherche : le harnais applique ensuite ce que chaque nœud
-/// en apprend (`learn`).
+/// Outcome of a lookup: the harness then applies what each node
+/// learns from it (`learn`).
 struct Search {
     lookup: Lookup,
-    /// Nœuds interrogés qui ont répondu.
+    /// Queried nodes that responded.
     answered: Vec<usize>,
-    /// Nœuds interrogés qui n'ont pas répondu.
+    /// Queried nodes that did not respond.
     failed: Vec<usize>,
-    /// Durée simulée de la recherche.
+    /// Simulated duration of the lookup.
     elapsed_ms: u64,
 }
 
 struct Net {
     nodes: Vec<Node>,
     index: HashMap<NodeId, usize>,
-    /// Complices `OnlyColluders`, dans l'ordre d'arrivée.
+    /// `OnlyColluders` accomplices, in order of arrival.
     colluders: Vec<usize>,
-    /// Prochain /24 libre pour un nœud à bloc propre.
+    /// Next free /24 for a node with its own block.
     next_block: usize,
     rng: StdRng,
     now_ms: u64,
@@ -93,9 +93,9 @@ impl Net {
         self.now_ms / 1000
     }
 
-    /// Réseau amorcé depuis `BOOT` : `honest` nœuds honnêtes et les
-    /// adversaires donnés, arrivés dans un ordre aléatoire, chacun sur un /24
-    /// propre.
+    /// Network bootstrapped from `BOOT`: `honest` honest nodes and the
+    /// given adversaries, arrived in random order, each on its own
+    /// /24.
     fn build(seed: u64, honest: usize, adversaries: &[(Behaviour, usize)]) -> Net {
         let mut net = Net::new(seed);
         let boot = net.add(Behaviour::Honest, None);
@@ -112,7 +112,7 @@ impl Net {
         net
     }
 
-    /// Crée un nœud, sur un /24 propre si `addr` est `None`.
+    /// Creates a node, on its own /24 if `addr` is `None`.
     fn add(&mut self, behaviour: Behaviour, addr: Option<String>) -> usize {
         let addr = addr.unwrap_or_else(|| {
             let b = self.next_block;
@@ -143,12 +143,12 @@ impl Net {
         i
     }
 
-    /// Le nœud répond à un `Ping` (connexion et `Pong`).
+    /// The node answers a `Ping` (connection and `Pong`).
     fn answers_ping(&self, i: usize) -> bool {
         self.nodes[i].alive && self.nodes[i].behaviour != Behaviour::Silent
     }
 
-    /// `at` contacte directement `peer` (connexion puis `Pong` valide).
+    /// `at` contacts `peer` directly (connection then valid `Pong`).
     fn contact(&mut self, at: usize, peer: usize) {
         if !self.answers_ping(peer) {
             self.fail(at, peer);
@@ -161,8 +161,8 @@ impl Net {
         }
     }
 
-    /// `at` pinge un nœud déjà connu : il reste s'il répond, sinon l'échec
-    /// est compté.
+    /// `at` pings an already known node: it stays if it answers, otherwise the failure
+    /// is counted.
     fn ping(&mut self, at: usize, peer: usize) {
         if self.answers_ping(peer) {
             let (id, record) = (self.nodes[peer].id, self.nodes[peer].record.clone());
@@ -173,8 +173,8 @@ impl Net {
         }
     }
 
-    /// Échec de contact de `at` vers `peer` ; au retrait de `peer`, la
-    /// candidate de la réserve est contactée pour être promue.
+    /// Contact failure from `at` to `peer`; when `peer` is removed, the
+    /// reserve candidate is contacted to be promoted.
     fn fail(&mut self, at: usize, peer: usize) {
         let id = self.nodes[peer].id;
         let Some(candidate) = self.nodes[at].table.on_failure(&id) else {
@@ -190,7 +190,7 @@ impl Net {
         }
     }
 
-    /// Réponse de `to` à un `FindNode` de `target` ; `None` si rien ne vient.
+    /// Response of `to` to a `FindNode` for `target`; `None` if nothing comes.
     fn answer(&self, to: usize, target: &[u8; 32]) -> Option<Vec<NodeRecord>> {
         let node = &self.nodes[to];
         if !node.alive {
@@ -214,7 +214,7 @@ impl Net {
                     .closest_diverse(target, K)
                     .into_iter()
                     .map(|mut r| {
-                        // La signature ne couvre plus la date.
+                        // The signature no longer covers the date.
                         r.issued_at -= 3600;
                         r
                     })
@@ -224,7 +224,7 @@ impl Net {
         }
     }
 
-    /// Recherche synchrone de `target` par `from`, sans rien modifier.
+    /// Synchronous lookup of `target` by `from`, modifying nothing.
     fn search(&self, from: usize, target: &[u8; 32]) -> Search {
         let me = &self.nodes[from];
         let seeds = me
@@ -238,9 +238,9 @@ impl Net {
         let mut lookup = Lookup::new(*target, seeds, POLICY, now_ms).excluding(me.id);
         let (mut answered, mut failed) = (Vec::new(), Vec::new());
         while !lookup.is_done(now_ms) {
-            // Une réponse arrive dans le tour de sa requête. Sans réponse, la
-            // requête reste en vol : `next_requests` la déclare échouée après
-            // `REQUEST_TIMEOUT_MS`, et `is_done` arrête la recherche après
+            // A response arrives within the round of its request. Without a response, the
+            // request stays in flight: `next_requests` declares it failed after
+            // `REQUEST_TIMEOUT_MS`, and `is_done` stops the lookup after
             // `LOOKUP_TIMEOUT_MS`.
             for (id, _) in lookup.next_requests(now_ms) {
                 let to = self.index[&id];
@@ -262,14 +262,14 @@ impl Net {
         }
     }
 
-    /// Recherche menée par un nœud vivant : les nœuds interrogés apprennent
-    /// l'appelant, l'appelant compte les échecs et contacte les répondeurs.
+    /// Lookup run by a live node: the queried nodes learn about
+    /// the caller, the caller counts failures and contacts the responders.
     fn run_lookup(&mut self, from: usize, target: &[u8; 32]) {
         let search = self.search(from, target);
         self.learn(from, search);
     }
 
-    /// Applique aux tables ce que la recherche de `from` a appris.
+    /// Applies to the tables what the lookup of `from` learned.
     fn learn(&mut self, from: usize, search: Search) {
         for &to in &search.answered {
             self.contact(to, from);
@@ -282,8 +282,8 @@ impl Net {
         }
     }
 
-    /// Recherche de mesure : identifiants trouvés et durée simulée, sans
-    /// effet sur les tables.
+    /// Measurement lookup: identifiers found and simulated duration, without
+    /// effect on the tables.
     fn probe(&self, from: usize, target: &[u8; 32]) -> (Vec<NodeId>, u64) {
         let search = self.search(from, target);
         let found = search
@@ -295,7 +295,7 @@ impl Net {
         (found, search.elapsed_ms)
     }
 
-    /// Amorçage depuis `BOOT` puis recherche de son propre identifiant.
+    /// Bootstrap from `BOOT` then lookup of its own identifier.
     fn join(&mut self, i: usize) {
         self.contact(i, BOOT);
         self.contact(BOOT, i);
@@ -303,8 +303,8 @@ impl Net {
         self.run_lookup(i, &own);
     }
 
-    /// Fait passer `count` nœuds honnêtes au hasard (hors amorçage) au
-    /// comportement donné, une fois le réseau formé.
+    /// Switches `count` random honest nodes (excluding bootstrap) to the
+    /// given behaviour, once the network is formed.
     fn turn(&mut self, behaviour: Behaviour, count: usize) {
         let mut candidates: Vec<usize> = (0..self.nodes.len())
             .filter(|&i| i != BOOT && self.nodes[i].behaviour == Behaviour::Honest)
@@ -315,7 +315,7 @@ impl Net {
         }
     }
 
-    /// Tue `count` nœuds au hasard (hors amorçage).
+    /// Kills `count` random nodes (excluding bootstrap).
     fn kill(&mut self, count: usize) {
         let mut candidates: Vec<usize> = (0..self.nodes.len())
             .filter(|&i| i != BOOT && self.nodes[i].alive)
@@ -326,8 +326,8 @@ impl Net {
         }
     }
 
-    /// Les `n` nœuds honnêtes vivants les plus proches de `key`, calculés sur
-    /// l'ensemble du réseau.
+    /// The `n` live honest nodes closest to `key`, computed over
+    /// the whole network.
     fn truth(&self, key: &[u8; 32], n: usize) -> Vec<usize> {
         let mut honest: Vec<usize> = (0..self.nodes.len())
             .filter(|&i| self.nodes[i].alive && self.nodes[i].behaviour == Behaviour::Honest)
@@ -352,15 +352,15 @@ impl Net {
         key
     }
 
-    /// Cycle d'entretien de chaque nœud vivant, une heure plus tard : pings
-    /// des têtes périmées jusqu'à l'éviction des morts (avec promotion depuis
-    /// la réserve), puis rafraîchissement de chaque compartiment par une
-    /// recherche.
+    /// Maintenance cycle of each live node, one hour later: pings
+    /// of stale heads until dead ones are evicted (with promotion from
+    /// the reserve), then refresh of each bucket by a
+    /// lookup.
     ///
-    /// Les recherches de rafraîchissement de tous les nœuds partent ensemble,
-    /// sur les tables issues des pings, comme dans un réseau où chacun
-    /// entretient sa table en même temps ; ce qu'elles apprennent est
-    /// appliqué ensuite, dans l'ordre des nœuds.
+    /// The refresh lookups of all nodes start together,
+    /// on the tables resulting from the pings, as in a network where everyone
+    /// maintains their table at the same time; what they learn is
+    /// applied afterwards, in node order.
     fn maintenance_cycle(&mut self) {
         self.now_ms += 3_600_000;
         let now = self.now_secs();
@@ -394,9 +394,9 @@ impl Net {
         }
     }
 
-    /// Passe de recopie : chaque gardien vivant recopie vers les responsables
-    /// que lui donne sa table ; un responsable accepte si l'appelant et
-    /// lui-même sont dans sa fenêtre de responsabilité (spec §5.2, point 4).
+    /// Replication pass: each live keeper replicates to the responsible nodes
+    /// given by its table; a responsible node accepts if the caller and
+    /// itself are within its responsibility window (spec §5.2, point 4).
     fn replication_pass(&self, boxes: &mut [Mailbox]) {
         for mailbox in boxes {
             let holders: Vec<usize> = mailbox
@@ -426,7 +426,7 @@ impl Net {
     }
 }
 
-/// Boîte aux lettres : sa clé et les nœuds qui en gardent une copie.
+/// Mailbox: its key and the nodes that keep a copy of it.
 struct Mailbox {
     key: [u8; 32],
     holders: BTreeSet<usize>,
@@ -442,9 +442,9 @@ impl Mailbox {
     }
 }
 
-/// Part des recherches qui trouvent au moins `need` des 5 vrais
-/// responsables honnêtes, lancées depuis des nœuds honnêtes au hasard ;
-/// affiche aussi leur durée simulée.
+/// Share of lookups that find at least `need` of the 5 true
+/// honest responsible nodes, launched from random honest nodes;
+/// also prints their simulated duration.
 fn success_rate(net: &mut Net, need: usize) -> f64 {
     let jobs: Vec<([u8; 32], usize)> = (0..LOOKUPS)
         .map(|_| (net.key(), net.random_honest()))
@@ -453,7 +453,7 @@ fn success_rate(net: &mut Net, need: usize) -> f64 {
     let outcomes = par_map(&jobs, |(key, from)| {
         let truth = net.truth(key, REPLICAS);
         let (mut found, elapsed_ms) = net.probe(*from, key);
-        // Le nœud qui cherche se connaît lui-même.
+        // The searching node knows itself.
         found.push(net.nodes[*from].id);
         let hit = truth
             .iter()
@@ -470,15 +470,15 @@ fn success_rate(net: &mut Net, need: usize) -> f64 {
         .filter(|&&ms| ms >= LOOKUP_TIMEOUT_MS)
         .count();
     eprintln!(
-        "durée simulée : médiane {} ms, max {} ms, {timed_out} recherches arrêtées à {LOOKUP_TIMEOUT_MS} ms",
+        "simulated duration: median {} ms, max {} ms, {timed_out} lookups stopped at {LOOKUP_TIMEOUT_MS} ms",
         durations[durations.len() / 2],
         durations[durations.len() - 1],
     );
     hits as f64 / LOOKUPS as f64
 }
 
-/// `f` appliquée à chaque élément sur tous les cœurs, résultats dans l'ordre
-/// des éléments : la vérification des signatures domine le temps de calcul.
+/// `f` applied to each element on all cores, results in the order
+/// of the elements: signature verification dominates the compute time.
 fn par_map<I: Sync, T: Send>(items: &[I], f: impl Fn(&I) -> T + Sync) -> Vec<T> {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let chunk = items.len().div_ceil(threads).max(1);
@@ -498,8 +498,8 @@ fn par_map<I: Sync, T: Send>(items: &[I], f: impl Fn(&I) -> T + Sync) -> Vec<T> 
 fn honest_lookup_finds_all_five() {
     let mut net = Net::build(1, NODES, &[]);
     let rate = success_rate(&mut net, REPLICAS);
-    eprintln!("réseau honnête : {:.1} % trouvent les 5", rate * 100.0);
-    assert!(rate > 0.99, "taux {rate}");
+    eprintln!("honest network: {:.1} % find all 5", rate * 100.0);
+    assert!(rate > 0.99, "rate {rate}");
 }
 
 #[test]
@@ -507,23 +507,23 @@ fn twenty_percent_liars_still_find_three() {
     let liars = NODES / 5;
     let mut net = Net::build(2, NODES - liars, &[(Behaviour::OnlyColluders, liars)]);
     let rate = success_rate(&mut net, 3);
-    eprintln!("20 % de menteurs : {:.1} % trouvent 3 des 5", rate * 100.0);
-    assert!(rate > 0.95, "taux {rate}");
+    eprintln!("20 % liars: {:.1} % find 3 of 5", rate * 100.0);
+    assert!(rate > 0.95, "rate {rate}");
 }
 
 #[test]
 fn liars_garbage_and_silent_do_not_break_lookups() {
-    // Les nœuds entrent honnêtes dans les tables, puis tournent : sinon un
-    // nœud muet n'y entrerait jamais.
+    // Nodes enter the tables honest, then turn: otherwise a mute
+    // node would never get in.
     let mut net = Net::build(5, NODES, &[]);
     net.turn(Behaviour::Garbage, NODES / 10);
     net.turn(Behaviour::Silent, NODES / 10);
     let rate = success_rate(&mut net, 3);
     eprintln!(
-        "10 % de fiches invalides, 10 % de muets : {:.1} % trouvent 3 des 5",
+        "10 % invalid records, 10 % mute: {:.1} % find 3 of 5",
         rate * 100.0
     );
-    assert!(rate > 0.95, "taux {rate}");
+    assert!(rate > 0.95, "rate {rate}");
 }
 
 #[test]
@@ -536,7 +536,7 @@ fn sybil_slash24_is_capped() {
         let addr = format!("{a}.{b}.{c}.{}:4433", s + 1);
         let i = net.add(Behaviour::Honest, Some(addr));
         net.join(i);
-        // L'attaquant se fait contacter par chaque nœud honnête.
+        // The attacker is contacted by each honest node.
         for h in 0..honest {
             net.contact(h, i);
         }
@@ -552,18 +552,18 @@ fn sybil_slash24_is_capped() {
         let limit = 2usize.max(active.len() / 10);
         assert!(
             sybils <= limit,
-            "nœud {h} : {sybils} Sybil sur {} actifs",
+            "node {h}: {sybils} Sybil out of {} active",
             active.len()
         );
         worst = worst.max(sybils as f64 / active.len() as f64);
     }
-    eprintln!("Sybil : part maximale {:.1} % d'une table", worst * 100.0);
+    eprintln!("Sybil: maximum share {:.1} % of a table", worst * 100.0);
 }
 
 #[test]
 fn churn_restores_five_copies_in_two_passes() {
     let mut net = Net::build(4, NODES, &[]);
-    // 1. Dépôt de chaque boîte sur 3 de ses responsables.
+    // 1. Deposit of each mailbox on 3 of its responsible nodes.
     let mut boxes: Vec<Mailbox> = (0..100)
         .map(|_| {
             let key = net.key();
@@ -571,7 +571,7 @@ fn churn_restores_five_copies_in_two_passes() {
             Mailbox { key, holders }
         })
         .collect();
-    // 2. Recopie jusqu'à 5 copies, sur les 5 vrais responsables.
+    // 2. Replication up to 5 copies, on the 5 true responsible nodes.
     for _ in 0..3 {
         net.replication_pass(&mut boxes);
     }
@@ -579,33 +579,35 @@ fn churn_restores_five_copies_in_two_passes() {
         let truth: BTreeSet<usize> = net.truth(&mailbox.key, REPLICAS).into_iter().collect();
         assert!(
             mailbox.holders.is_superset(&truth),
-            "recopie initiale incomplète"
+            "initial replication incomplete"
         );
     }
-    // 3. Départ de 30 % des nœuds.
+    // 3. Departure of 30 % of the nodes.
     net.kill(NODES * 3 / 10);
     for mailbox in &boxes {
         assert!(
             !mailbox.live_holders(&net).is_empty(),
-            "boîte perdue avec toutes ses copies"
+            "mailbox lost with all its copies"
         );
     }
-    // Les départs ont bien privé des boîtes de copies : c'est la réparation
-    // qui fait passer le test.
+    // The departures did deprive mailboxes of copies: it is the repair
+    // that makes the test pass.
     let damaged = short_of_five(&net, &boxes);
-    assert!(damaged > 0, "aucune boîte touchée par les départs");
-    // 4. Un cycle d'entretien des tables.
+    assert!(damaged > 0, "no mailbox hit by the departures");
+    // 4. One maintenance cycle of the tables.
     net.maintenance_cycle();
-    // 5. Deux passes de recopie.
+    // 5. Two replication passes.
     net.replication_pass(&mut boxes);
     net.replication_pass(&mut boxes);
     let short = short_of_five(&net, &boxes);
-    eprintln!("départs : {damaged} boîtes sur 100 touchées, {short} encore sans leurs 5 copies");
+    eprintln!(
+        "departures: {damaged} mailboxes out of 100 hit, {short} still without their 5 copies"
+    );
     assert_eq!(short, 0);
 }
 
-/// Boîtes qui n'ont pas une copie vivante sur chacun de leurs 5 vrais
-/// responsables vivants.
+/// Mailboxes that do not have a live copy on each of their 5 true
+/// responsible nodes that are alive.
 fn short_of_five(net: &Net, boxes: &[Mailbox]) -> usize {
     boxes
         .iter()

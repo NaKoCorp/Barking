@@ -1,12 +1,12 @@
-//! Liste d'amorçage : entrées `<identifiant base32>@<ip:port>`, celles de
-//! `bootstrap.toml` (intégré au binaire) puis celles de la config.
+//! Bootstrap list: entries `<base32 identifier>@<ip:port>`, those of
+//! `bootstrap.toml` (built into the binary) then those of the config.
 
 use std::net::SocketAddr;
 
 use barking_proto::NodeId;
 use serde::Deserialize;
 
-/// Nœud d'amorçage : identifiant attendu et adresse à joindre.
+/// Bootstrap node: expected identifier and address to reach.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BootstrapEntry {
     pub id: NodeId,
@@ -15,15 +15,15 @@ pub struct BootstrapEntry {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BootstrapError {
-    #[error("entrée d'amorçage sans « @ » (attendu : identifiant@ip:port)")]
+    #[error("bootstrap entry without '@' (expected: identifier@ip:port)")]
     MissingAt,
-    #[error("identifiant de nœud invalide dans l'entrée d'amorçage")]
+    #[error("invalid node identifier in the bootstrap entry")]
     BadId,
-    #[error("adresse invalide dans l'entrée d'amorçage (attendu : ip:port)")]
+    #[error("invalid address in the bootstrap entry (expected: ip:port)")]
     BadAddr,
 }
 
-/// Lit une entrée `<identifiant base32>@<ip:port>`.
+/// Reads an entry `<base32 identifier>@<ip:port>`.
 pub fn parse_bootstrap(s: &str) -> Result<BootstrapEntry, BootstrapError> {
     let (id, addr) = s.trim().split_once('@').ok_or(BootstrapError::MissingAt)?;
     Ok(BootstrapEntry {
@@ -39,8 +39,8 @@ struct BootstrapFile {
     nodes: Vec<String>,
 }
 
-/// Liste intégrée au binaire. Une entrée illisible est écartée ; le test
-/// `builtin_list_is_valid` garantit qu'il n'y en a pas.
+/// List built into the binary. An unreadable entry is discarded; the test
+/// `builtin_list_is_valid` guarantees there are none.
 pub fn builtin_bootstrap() -> Vec<BootstrapEntry> {
     toml::from_str::<BootstrapFile>(BUILTIN)
         .map(|f| {

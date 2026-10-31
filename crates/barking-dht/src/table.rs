@@ -1,8 +1,8 @@
-//! Table de routage S/Kademlia : 256 compartiments ordonnés par dernier
-//! contact, les anciens d'abord, réserve par compartiment et règles de
-//! diversité des adresses contre l'éclipse. La table ne vérifie aucune
-//! fiche : l'appelant n'y fait entrer un nœud qu'après un contact direct
-//! dont la fiche est valide.
+//! S/Kademlia routing table: 256 buckets ordered by last
+//! contact, oldest first, a reserve per bucket and address
+//! diversity rules against eclipse attacks. The table verifies no
+//! record: the caller only admits a node after a direct contact
+//! whose record is valid.
 
 use std::{collections::HashMap, iter};
 
@@ -15,29 +15,29 @@ use crate::{
     distance, prefixes,
 };
 
-/// Limites de diversité des adresses d'une table. `SPEC` (valeurs de la
-/// spec) partout ; d'autres valeurs ne servent qu'aux tests réseau du nœud,
-/// où tous les nœuds partagent le /24 de 127.0.0.1.
+/// Address diversity limits of a table. `SPEC` (values from the
+/// spec) everywhere; other values only serve the node's network tests,
+/// where all nodes share the /24 of 127.0.0.1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiversityLimits {
-    /// Nœuds d'un même bloc par compartiment (réserve comprise) et par
-    /// résultat.
+    /// Nodes from the same block per bucket (reserve included) and per
+    /// result.
     pub per_prefix: usize,
-    /// Part maximale des nœuds actifs de la table pour un même bloc.
+    /// Maximum share of the table's active nodes for a single block.
     pub share_percent: usize,
-    /// Nœuds toujours autorisés par bloc.
+    /// Nodes always allowed per block.
     pub min_allowed: usize,
 }
 
 impl DiversityLimits {
-    /// Valeurs de la spec.
+    /// Values from the spec.
     pub const SPEC: DiversityLimits = DiversityLimits {
         per_prefix: MAX_PER_PREFIX,
         share_percent: MAX_PREFIX_SHARE_PERCENT,
         min_allowed: MIN_PREFIX_ALLOWED,
     };
 
-    /// Aucune limite (tests réseau en local seulement).
+    /// No limit (local network tests only).
     pub const NONE: DiversityLimits = DiversityLimits {
         per_prefix: usize::MAX,
         share_percent: 100,
@@ -51,29 +51,29 @@ impl Default for DiversityLimits {
     }
 }
 
-/// Nombre de compartiments (un par longueur de préfixe commun).
+/// Number of buckets (one per common prefix length).
 const BUCKETS: usize = 256;
 
-/// Nœud connu de la table, actif ou en réserve.
+/// Node known to the table, active or in reserve.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Peer {
     pub id: NodeId,
     pub record: NodeRecord,
     pub first_seen: u64,
     pub last_seen: u64,
-    /// Échecs consécutifs, remis à zéro à chaque contact.
+    /// Consecutive failures, reset on each contact.
     pub fails: u8,
 }
 
-/// Issue d'un contact.
+/// Outcome of a contact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Insert {
-    /// Nœud déjà actif, rafraîchi.
+    /// Node already active, refreshed.
     Updated,
-    /// Nœud devenu actif.
+    /// Node became active.
     Added,
-    /// Compartiment plein : la candidate est en réserve, et l'appelant doit
-    /// pinger `ping`, le nœud actif vu le moins récemment.
+    /// Bucket full: the candidate is in reserve, and the caller must
+    /// ping `ping`, the least recently seen active node.
     Pending {
         ping: NodeId,
     },
@@ -82,21 +82,21 @@ pub enum Insert {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reject {
-    /// Notre propre identifiant.
+    /// Our own identifier.
     Own,
-    /// Le nœud ferait dépasser une limite de diversité des adresses.
+    /// The node would exceed an address diversity limit.
     Diversity,
-    /// Fiche plus ancienne que celle déjà connue.
+    /// Record older than the one already known.
     Older,
 }
 
 #[derive(Clone, Debug, Default)]
 struct Bucket {
-    /// Nœuds actifs, du moins récemment vu au plus récemment vu.
+    /// Active nodes, from least recently seen to most recently seen.
     active: Vec<Peer>,
-    /// Réserve, dans le même ordre.
+    /// Reserve, in the same order.
     reserve: Vec<Peer>,
-    /// Date de la dernière recherche dans ce compartiment.
+    /// Date of the last lookup in this bucket.
     refreshed_at: u64,
 }
 
@@ -110,8 +110,8 @@ fn position(peers: &[Peer], id: &NodeId) -> Option<usize> {
     peers.iter().position(|p| p.id == *id)
 }
 
-/// Compte un échec de `peers[i]` et le retire au `FAILS_BEFORE_EVICT`ᵉ ;
-/// vrai s'il a été retiré.
+/// Counts a failure of `peers[i]` and removes it at the `FAILS_BEFORE_EVICT`th;
+/// true if it was removed.
 fn count_failure(peers: &mut Vec<Peer>, i: usize) -> bool {
     peers[i].fails = peers[i].fails.saturating_add(1);
     if peers[i].fails < FAILS_BEFORE_EVICT {
@@ -126,12 +126,12 @@ fn in_block(peer: &Peer, block: &Prefix) -> bool {
 }
 
 impl RoutingTable {
-    /// Table aux limites de diversité de la spec.
+    /// Table with the spec's diversity limits.
     pub fn new(own: NodeId) -> RoutingTable {
         RoutingTable::with_limits(own, DiversityLimits::SPEC)
     }
 
-    /// Table aux limites de diversité `limits` (tests réseau du nœud).
+    /// Table with diversity limits `limits` (the node's network tests).
     pub fn with_limits(own: NodeId, limits: DiversityLimits) -> RoutingTable {
         RoutingTable {
             own,
@@ -144,8 +144,8 @@ impl RoutingTable {
         self.own
     }
 
-    /// Enregistre un contact direct réussi avec `id`, dont la fiche a été
-    /// vérifiée par l'appelant.
+    /// Records a successful direct contact with `id`, whose record was
+    /// verified by the caller.
     pub fn on_contact(&mut self, id: NodeId, record: NodeRecord, now: u64) -> Insert {
         let Some(b) = bucket_index(&self.own, &id) else {
             return Insert::Rejected(Reject::Own);
@@ -165,8 +165,8 @@ impl RoutingTable {
         if record.issued_at < old.record.issued_at {
             return Insert::Rejected(Reject::Older);
         }
-        // Une fiche de même date garde l'ancienne ; une plus récente la
-        // remplace si ses blocs respectent encore la diversité.
+        // A record with the same date keeps the old one; a more recent one
+        // replaces it if its blocks still respect diversity.
         let replace = record.issued_at > old.record.issued_at;
         let blocks = prefixes(if replace { &record } else { &old.record });
         if replace
@@ -197,7 +197,7 @@ impl RoutingTable {
             bucket.active.push(peer);
             return Insert::Added;
         }
-        // Candidate de la réserve recontactée sans pouvoir être promue.
+        // Reserve candidate contacted again without being promotable.
         bucket.reserve.push(peer);
         match bucket.active.first() {
             Some(head) if !room => Insert::Pending { ping: head.id },
@@ -205,10 +205,10 @@ impl RoutingTable {
         }
     }
 
-    /// Réponse lisible d'un nœud connu, hors contact vérifié : ses échecs
-    /// sont remis à zéro et il est vu à `now` (fin de l'ordre de son
-    /// compartiment, comme après un contact), sa fiche est inchangée. Vrai
-    /// s'il est connu.
+    /// Readable response from a known node, outside a verified contact: its failures
+    /// are reset and it is seen at `now` (end of the order of its
+    /// bucket, as after a contact), its record is unchanged. True
+    /// if it is known.
     pub fn mark_alive(&mut self, id: &NodeId, now: u64) -> bool {
         let Some(b) = bucket_index(&self.own, id) else {
             return false;
@@ -252,9 +252,9 @@ impl RoutingTable {
         }
     }
 
-    /// Vrai si `id`, avec les blocs `blocks`, respecte la limite par
-    /// compartiment (réserve comprise) et, s'il devient actif, la part
-    /// maximale de la table. `id` lui-même n'est pas compté.
+    /// True if `id`, with blocks `blocks`, respects the per-
+    /// bucket limit (reserve included) and, if it becomes active, the maximum
+    /// share of the table. `id` itself is not counted.
     fn diversity_ok(&self, b: usize, id: &NodeId, blocks: &[Prefix], to_active: bool) -> bool {
         let bucket = &self.buckets[b];
         let neighbours = || {
@@ -280,10 +280,10 @@ impl RoutingTable {
             .all(|block| others().filter(|p| in_block(p, block)).count() < limit)
     }
 
-    /// Compte un échec de contact avec `id`. Au `FAILS_BEFORE_EVICT`ᵉ échec
-    /// consécutif, un nœud actif est retiré et la candidate de la réserve
-    /// vue le plus récemment est renvoyée : l'appelant la contacte, et
-    /// `on_contact` la promeut.
+    /// Counts a contact failure with `id`. On the `FAILS_BEFORE_EVICT`th consecutive
+    /// failure, an active node is removed and the most recently seen
+    /// reserve candidate is returned: the caller contacts it, and
+    /// `on_contact` promotes it.
     pub fn on_failure(&mut self, id: &NodeId) -> Option<NodeId> {
         let bucket = &mut self.buckets[bucket_index(&self.own, id)?];
         if let Some(i) = position(&bucket.active, id) {
@@ -301,14 +301,14 @@ impl RoutingTable {
         self.buckets.iter().flat_map(|b| &b.active)
     }
 
-    /// Les `n` nœuds actifs les plus proches de `target`.
+    /// The `n` active nodes closest to `target`.
     pub fn closest(&self, target: &[u8; 32], n: usize) -> Vec<Peer> {
         let mut peers: Vec<&Peer> = self.active().collect();
         peers.sort_by_cached_key(|p| distance(&p.id.0, target));
         peers.into_iter().take(n).cloned().collect()
     }
 
-    /// Comme `closest`, avec au plus `per_prefix` nœuds par bloc.
+    /// Like `closest`, with at most `per_prefix` nodes per block.
     pub fn closest_diverse(&self, target: &[u8; 32], n: usize) -> Vec<NodeRecord> {
         let mut peers: Vec<&Peer> = self.active().collect();
         peers.sort_by_cached_key(|p| distance(&p.id.0, target));
@@ -333,9 +333,9 @@ impl RoutingTable {
         out
     }
 
-    /// Distance à `key` du `RESPONSIBLE_WINDOW`ᵉ nœud le plus proche, nous
-    /// compris ; `None` (borne infinie) si la table compte moins de
-    /// `RESPONSIBLE_WINDOW` nœuds actifs (spec §5.2, point 4).
+    /// Distance to `key` of the `RESPONSIBLE_WINDOW`th closest node, us
+    /// included; `None` (infinite bound) if the table holds fewer than
+    /// `RESPONSIBLE_WINDOW` active nodes (spec §5.2, point 4).
     pub fn proximity_bound(&self, key: &[u8; 32]) -> Option<[u8; 32]> {
         if self.len() < RESPONSIBLE_WINDOW {
             return None;
@@ -349,15 +349,15 @@ impl RoutingTable {
         Some(*nth)
     }
 
-    /// Vrai si `id` est dans la fenêtre de responsabilité de `key`.
+    /// True if `id` is within the responsibility window of `key`.
     pub fn may_hold(&self, key: &[u8; 32], id: &NodeId) -> bool {
         self.proximity_bound(key)
             .is_none_or(|bound| distance(&id.0, key) <= bound)
     }
 
-    /// Responsables de `key` vers qui recopier : les `REPLICAS` plus
-    /// proches, nous compris, moins nous. `None` si nous sommes hors de la
-    /// fenêtre de responsabilité.
+    /// Nodes responsible for `key` to replicate to: the `REPLICAS` closest,
+    /// us included, minus us. `None` if we are outside the
+    /// responsibility window.
     pub fn replica_targets(&self, key: &[u8; 32]) -> Option<Vec<NodeId>> {
         if !self.may_hold(key, &self.own) {
             return None;
@@ -376,8 +376,8 @@ impl RoutingTable {
         )
     }
 
-    /// Tête (nœud actif vu le moins récemment) de chaque compartiment, si
-    /// elle n'a pas été vue depuis `STALE_AFTER_SECS`.
+    /// Head (least recently seen active node) of each bucket, if
+    /// it has not been seen since `STALE_AFTER_SECS`.
     pub fn stale_heads(&self, now: u64) -> Vec<NodeId> {
         self.buckets
             .iter()
@@ -387,8 +387,8 @@ impl RoutingTable {
             .collect()
     }
 
-    /// Compartiments sans recherche depuis `REFRESH_AFTER_SECS`, jusqu'au
-    /// plus profond compartiment non vide.
+    /// Buckets without a lookup since `REFRESH_AFTER_SECS`, up to the
+    /// deepest non-empty bucket.
     pub fn buckets_to_refresh(&self, now: u64) -> Vec<usize> {
         let Some(deepest) = self.buckets.iter().rposition(|b| !b.active.is_empty()) else {
             return Vec::new();
@@ -404,8 +404,8 @@ impl RoutingTable {
         }
     }
 
-    /// Identifiant aléatoire dont le préfixe commun avec le nôtre mesure
-    /// exactement `bucket` bits.
+    /// Random identifier whose common prefix with ours measures
+    /// exactly `bucket` bits.
     pub fn random_id_in_bucket(&self, bucket: usize, rng: &mut impl Rng) -> [u8; 32] {
         let bucket = bucket.min(BUCKETS - 1);
         let mut id = [0u8; 32];
@@ -413,7 +413,7 @@ impl RoutingTable {
         let (byte, bit) = (bucket / 8, bucket % 8);
         let own = &self.own.0;
         id[..byte].copy_from_slice(&own[..byte]);
-        // Bits gardés de notre identifiant, puis le bit inversé.
+        // Bits kept from our identifier, then the flipped bit.
         let keep = !(0xffu8 >> bit);
         let flip = 0x80u8 >> bit;
         id[byte] = (own[byte] & keep) | (!own[byte] & flip) | (id[byte] & !keep & !flip);
@@ -429,13 +429,13 @@ impl RoutingTable {
             .find(|p| p.id == *id)
     }
 
-    /// Tous les nœuds connus, les actifs d'abord puis la réserve.
+    /// All known nodes, active ones first then the reserve.
     pub fn peers(&self) -> impl Iterator<Item = &Peer> {
         self.active()
             .chain(self.buckets.iter().flat_map(|b| &b.reserve))
     }
 
-    /// Nombre de nœuds actifs.
+    /// Number of active nodes.
     pub fn len(&self) -> usize {
         self.active().count()
     }
@@ -444,7 +444,7 @@ impl RoutingTable {
         self.len() == 0
     }
 
-    /// Nombre de compartiments ayant au moins un nœud actif.
+    /// Number of buckets with at least one active node.
     pub fn non_empty_buckets(&self) -> usize {
         self.buckets.iter().filter(|b| !b.active.is_empty()).count()
     }
@@ -481,7 +481,7 @@ mod tests {
         node_at(rng, addr, NOW)
     }
 
-    /// Nœud tiré jusqu'à tomber dans le compartiment `b`.
+    /// Node drawn until it falls into bucket `b`.
     fn node_in(rng: &mut StdRng, b: usize, addr: &str) -> (NodeId, NodeRecord) {
         loop {
             let (id, rec) = node(rng, addr);
@@ -491,18 +491,18 @@ mod tests {
         }
     }
 
-    /// Adresse dans un /24 propre à `i`.
+    /// Address in a /24 specific to `i`.
     fn distinct(i: usize) -> String {
         format!("11.{}.{}.1:4433", i / 256, i % 256)
     }
 
-    /// Adresse dans un /24 commun.
+    /// Address in a shared /24.
     fn shared(i: usize) -> String {
         format!("10.9.8.{}:4433", i % 250 + 1)
     }
 
-    /// Remplit le compartiment 0 de `K` nœuds (le premier est le plus
-    /// ancien), puis présente un 21ᵉ nœud.
+    /// Fills bucket 0 with `K` nodes (the first is the
+    /// oldest), then presents a 21st node.
     fn full_bucket(rng: &mut StdRng) -> (RoutingTable, Vec<NodeId>, NodeId) {
         let mut table = RoutingTable::new(OWN);
         let mut ids = Vec::new();
@@ -519,7 +519,7 @@ mod tests {
         (table, ids, extra)
     }
 
-    /// Table de `n` nœuds aux /24 distincts, tous actifs.
+    /// Table of `n` nodes in distinct /24s, all active.
     fn table_of(rng: &mut StdRng, n: usize) -> RoutingTable {
         let mut table = RoutingTable::new(OWN);
         for i in 0..n {
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(table.len(), K);
         assert!(table.get(&extra).is_some());
         assert!(!active_ids(&table).contains(&extra));
-        // Le plus ancien répond : il reste, et passe en queue.
+        // The oldest responds: it stays, and moves to the tail.
         let rec = table.get(&ids[0]).unwrap().record.clone();
         assert_eq!(table.on_contact(ids[0], rec, NOW + 200), Insert::Updated);
         assert!(active_ids(&table).contains(&ids[0]));
@@ -564,7 +564,7 @@ mod tests {
             table.on_contact(other, rec, NOW + 300),
             Insert::Pending { ping: ids[1] }
         );
-        // Actifs d'abord, puis la réserve.
+        // Active ones first, then the reserve.
         let order: Vec<NodeId> = table.peers().map(|p| p.id).collect();
         assert_eq!(&order[K..], &[extra, other]);
     }
@@ -600,8 +600,8 @@ mod tests {
     #[test]
     fn bucket_diversity_caps_two_per_prefix() {
         let mut rng = StdRng::seed_from_u64(5);
-        // 30 nœuds hors des compartiments 0 et 1 : la part de table
-        // autorise alors 3 nœuds par bloc.
+        // 30 nodes outside buckets 0 and 1: the table share
+        // then allows 3 nodes per block.
         let mut table = RoutingTable::new(OWN);
         let mut i = 0;
         while table.len() < 30 {
@@ -620,7 +620,7 @@ mod tests {
             table.on_contact(id, rec, NOW),
             Insert::Rejected(Reject::Diversity)
         );
-        // La limite vaut par compartiment.
+        // The limit applies per bucket.
         let (id, rec) = node_in(&mut rng, 1, &shared(3));
         assert_eq!(table.on_contact(id, rec, NOW), Insert::Added);
     }
@@ -629,8 +629,8 @@ mod tests {
     fn reserve_obeys_bucket_diversity() {
         let mut rng = StdRng::seed_from_u64(6);
         let (mut table, _, _) = full_bucket(&mut rng);
-        // Le 21ᵉ est en réserve sur son propre /24 ; deux candidates d'un
-        // même bloc passent, la troisième est ignorée.
+        // The 21st is in reserve on its own /24; two candidates of the same
+        // block pass, the third is ignored.
         for j in 0..2 {
             let (id, rec) = node_in(&mut rng, 0, &shared(j));
             assert!(matches!(
@@ -702,9 +702,9 @@ mod tests {
         assert!(table.mark_alive(&a, NOW + 50));
         let p = table.get(&a).unwrap();
         assert_eq!((p.fails, p.last_seen, &p.record), (0, NOW + 50, &ra));
-        // Vu le plus récemment : `b` devient la tête du compartiment.
+        // Most recently seen: `b` becomes the head of the bucket.
         assert_eq!(table.stale_heads(NOW + STALE_AFTER_SECS), vec![b]);
-        // Deux nouveaux échecs ne le retirent pas : la série a recommencé.
+        // Two new failures do not remove it: the series started over.
         table.on_failure(&a);
         table.on_failure(&a);
         assert!(table.get(&a).is_some());
@@ -716,7 +716,7 @@ mod tests {
     fn relaxed_limits_admit_a_shared_block() {
         let mut rng = StdRng::seed_from_u64(12);
         let nodes: Vec<_> = (0..8).map(|i| node(&mut rng, &shared(i))).collect();
-        // Limites de la spec : 2 nœuds du /24 au plus dans toute la table.
+        // Spec limits: at most 2 nodes of the /24 in the whole table.
         let mut spec = RoutingTable::new(OWN);
         let mut relaxed = RoutingTable::with_limits(OWN, DiversityLimits::NONE);
         for (id, rec) in &nodes {
@@ -780,7 +780,7 @@ mod tests {
         assert!(!table.may_hold(&key, &far));
     }
 
-    /// Rang de notre identifiant parmi les nœuds actifs, pour `key`.
+    /// Rank of our identifier among the active nodes, for `key`.
     fn own_rank(table: &RoutingTable, key: &[u8; 32]) -> usize {
         let own = distance(&OWN.0, key);
         active_ids(table)
@@ -816,7 +816,7 @@ mod tests {
                 }
             }
         }
-        // Notre propre identifiant comme clé : nous sommes le plus proche.
+        // Our own identifier as key: we are the closest.
         assert_eq!(table.replica_targets(&OWN.0).unwrap().len(), REPLICAS - 1);
     }
 

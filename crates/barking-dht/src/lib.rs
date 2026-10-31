@@ -1,5 +1,5 @@
-//! Table de hachage distribuée S/Kademlia entre nœuds : distance, clés de
-//! boîte, blocs d'adresses et table de routage.
+//! S/Kademlia distributed hash table between nodes: distance, mailbox
+//! keys, address blocks and routing table.
 
 pub mod bootstrap;
 pub mod lookup;
@@ -12,61 +12,61 @@ pub use bootstrap::{BootstrapEntry, BootstrapError, builtin_bootstrap, parse_boo
 pub use lookup::{Lookup, Suspect, filter_nodes};
 pub use table::{DiversityLimits, Insert, Peer, Reject, RoutingTable};
 
-/// Nœuds actifs par compartiment.
+/// Active nodes per bucket.
 pub const K: usize = 20;
-/// Requêtes parallèles par chemin de recherche.
+/// Parallel requests per lookup path.
 pub const ALPHA: usize = 3;
-/// Chemins disjoints d'une recherche.
+/// Disjoint paths of a lookup.
 pub const PATHS: usize = 3;
-/// Responsables d'une boîte.
+/// Nodes responsible for a mailbox.
 pub const REPLICAS: usize = 5;
-/// Copies déposées par le client.
+/// Copies deposited by the client.
 pub const CLIENT_COPIES: usize = 3;
-/// Fenêtre de responsabilité (2r) : rang du nœud qui borne la proximité.
+/// Responsibility window (2r): rank of the node that bounds proximity.
 pub const RESPONSIBLE_WINDOW: usize = 10;
-/// Taille de la réserve d'un compartiment.
+/// Size of a bucket's reserve.
 pub const REPLACEMENTS: usize = 10;
-/// Nœuds d'un même bloc par compartiment (réserve comprise) et par résultat.
+/// Nodes from the same block per bucket (reserve included) and per result.
 pub const MAX_PER_PREFIX: usize = 2;
-/// Part maximale des nœuds actifs de la table pour un même bloc.
+/// Maximum share of the table's active nodes for a single block.
 pub const MAX_PREFIX_SHARE_PERCENT: usize = 10;
-/// Nœuds toujours autorisés par bloc, quelle que soit la taille de la table.
+/// Nodes always allowed per block, whatever the table size.
 pub const MIN_PREFIX_ALLOWED: usize = 2;
-/// Échecs consécutifs avant retrait d'un nœud actif.
+/// Consecutive failures before an active node is removed.
 pub const FAILS_BEFORE_EVICT: u8 = 3;
-/// Un nœud non vu depuis ce délai est pingé à l'entretien.
+/// A node not seen for this long is pinged during maintenance.
 pub const STALE_AFTER_SECS: u64 = 900;
-/// Un compartiment sans recherche depuis ce délai est rafraîchi.
+/// A bucket without a lookup for this long is refreshed.
 pub const REFRESH_AFTER_SECS: u64 = 3600;
-/// Contexte de dérivation de la clé d'une boîte.
+/// Derivation context of a mailbox key.
 pub const MAILBOX_KEY_CONTEXT: &str = "barking/v0/mailbox-key";
 
-/// Clé d'une boîte dans la table : `BLAKE3(contexte, boîte)`.
+/// Key of a mailbox in the table: `BLAKE3(context, mailbox)`.
 pub fn mailbox_key(mailbox: &MailboxId) -> [u8; 32] {
     blake3::derive_key(MAILBOX_KEY_CONTEXT, &mailbox.0)
 }
 
-/// Distance XOR ; comparer deux distances comme des tableaux revient à les
-/// comparer en big-endian.
+/// XOR distance; comparing two distances as arrays amounts to comparing
+/// them in big-endian.
 pub fn distance(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     std::array::from_fn(|i| a[i] ^ b[i])
 }
 
-/// Nombre de bits de tête communs, `None` si les identifiants sont égaux.
+/// Number of common leading bits, `None` if the identifiers are equal.
 pub fn bucket_index(own: &NodeId, other: &NodeId) -> Option<usize> {
     let d = distance(&own.0, &other.0);
     let i = d.iter().position(|&b| b != 0)?;
     Some(i * 8 + d[i].leading_zeros() as usize)
 }
 
-/// Bloc d'adresses : /24 en IPv4, /48 en IPv6.
+/// Address block: /24 in IPv4, /48 in IPv6.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Prefix {
     V4([u8; 3]),
     V6([u8; 6]),
 }
 
-/// Blocs d'une fiche : un nœud à double pile compte dans les deux.
+/// Blocks of a record: a dual-stack node counts in both.
 pub fn prefixes(record: &NodeRecord) -> Vec<Prefix> {
     let mut out = Vec::with_capacity(2);
     if let Some(a) = record.v4 {
@@ -97,7 +97,7 @@ mod tests {
         assert_eq!(d, expected);
         assert_eq!(distance(&b, &a), d);
         assert_eq!(distance(&a, &a), [0; 32]);
-        // Comparaison big-endian : l'octet de tête l'emporte.
+        // Big-endian comparison: the leading byte wins.
         let mut near = [0; 32];
         near[31] = 0xff;
         let mut far = [0; 32];
