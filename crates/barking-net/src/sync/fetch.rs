@@ -12,8 +12,8 @@ use tokio::time::Instant;
 use super::FetchStop;
 use super::io::{Depositor, FetchReply, Fetcher};
 use super::{
-    AUDIT_EVERY_SECS, INTRO_FETCH_BYTES, Run, SESSION_FETCH_SLICE, UNAUDITED_SYNCS, intro_slice,
-    receive_all,
+    AUDIT_EVERY_SECS, INTRO_FETCH_BYTES, REREAD_BYTES, REREAD_TIME, Run, SESSION_FETCH_SLICE,
+    UNAUDITED_SYNCS, intro_slice, receive_all,
 };
 use crate::discover::{DialError, Dialer};
 use crate::plan::{detect_losses, found_messages};
@@ -130,6 +130,8 @@ where
         }
         if !intro {
             self.note_audits(complete_by_node);
+            let queue = std::mem::take(&mut self.reread_queue);
+            self.rereads(queue, slice_end).await;
         }
         all_processed && mailboxes.iter().all(|m| done.contains(m))
     }
@@ -246,8 +248,9 @@ where
             .received
             .saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
         self.save();
-        if !intro {
-            self.rereads(node, group, slice_end).await;
+        // A cut connection leaves no session worth re-reading on.
+        if !intro && stop != FetchStop::Connection {
+            self.reread_queue.push((node, group.to_vec()));
         }
         let end = if complete {
             GroupEnd::Complete
@@ -274,58 +277,73 @@ where
         processed
     }
 
-    /// Audit re-reads on `node`, after the group's regular fetch so that they
-    /// never starve its other mailboxes: each mailbox of `group` holding a
-    /// message the node accepted, not audited there for `AUDIT_EVERY_SECS`,
-    /// is read again from its start in a call of its own. A mailbox whose
-    /// re-read reaches its end is audited; positions are left as they are;
-    /// nothing here counts against the node's completion record.
-    async fn rereads(&mut self, node: NodeId, group: &[MailboxId], slice_end: Instant) {
-        for m in self.audit_targets(node, group) {
-            if Instant::now() >= slice_end || self.limited.contains(&node) {
-                return;
-            }
-            let Some(mut conn) = self.conns.remove(&node) else {
-                return;
-            };
-            let one = [m];
-            let mut resume = FetchResume::default();
-            let slice = slice_end.saturating_duration_since(Instant::now());
-            let fetch = self
-                .dialer
-                .fetch(&mut conn, &one, &mut resume, MAX_FETCH_BYTES, slice);
-            let Ok(reply) = tokio::time::timeout_at(self.deadline, fetch).await else {
-                return;
-            };
-            match reply {
-                Ok(FetchReply::Items { items, stop }) => {
-                    self.answered();
-                    self.score(node, ScoreEvent::Success);
-                    self.conns.insert(node, conn);
-                    self.take_items(&items);
-                    let finished = stop == FetchStop::Complete;
-                    self.audit(node, &items, if finished { &one } else { &[] });
-                    if finished {
-                        self.state.note_audit(&node, &m, self.now);
-                    }
-                    if stop == FetchStop::RateLimited {
-                        self.limited.insert(node);
-                    }
-                    self.save();
-                }
-                Ok(FetchReply::RateLimited) | Err(DialError::Refused(ErrorReason::RateLimited)) => {
-                    self.answered();
-                    self.limited.insert(node);
-                    self.conns.insert(node, conn);
-                }
-                Err(DialError::Refused(_)) => {
-                    self.answered();
-                    self.conns.insert(node, conn);
-                }
-                Err(_) => {
-                    self.fail(node);
+    /// Audit re-reads, once every regular round of the session fetch is
+    /// over, so that they never take time from a regular fetch: each mailbox
+    /// fetched from a node, holding a message the node accepted and neither
+    /// audited nor re-read there for `AUDIT_EVERY_SECS`, is read again from
+    /// its start in a call of its own, on the session already open. All
+    /// re-reads together get at most `REREAD_BYTES` and `REREAD_TIME`, never
+    /// past `slice_end`. Every try is dated (a cut one backs off like an
+    /// audit); a mailbox is audited only if its re-read reached its end and
+    /// its items were processed. Positions are left as they are, and nothing
+    /// here counts against a node's completion record.
+    async fn rereads(&mut self, queue: Vec<(NodeId, Vec<MailboxId>)>, slice_end: Instant) {
+        let end = (Instant::now() + REREAD_TIME).min(slice_end);
+        let mut bytes_left = REREAD_BYTES;
+        for (node, group) in queue {
+            for m in self.audit_targets(node, &group) {
+                if Instant::now() >= end || bytes_left == 0 {
                     return;
                 }
+                if self.limited.contains(&node) {
+                    break;
+                }
+                let Some(mut conn) = self.conns.remove(&node) else {
+                    break;
+                };
+                self.state.note_reread(&node, &m, self.now);
+                let one = [m];
+                let mut resume = FetchResume::default();
+                let slice = end.saturating_duration_since(Instant::now());
+                let fetch = self
+                    .dialer
+                    .fetch(&mut conn, &one, &mut resume, bytes_left, slice);
+                // Out of time: the session is dropped mid-request.
+                let Ok(reply) = tokio::time::timeout_at(end, fetch).await else {
+                    self.save();
+                    return;
+                };
+                match reply {
+                    Ok(FetchReply::Items { items, stop }) => {
+                        self.answered();
+                        self.score(node, ScoreEvent::Success);
+                        self.conns.insert(node, conn);
+                        bytes_left = bytes_left.saturating_sub(
+                            items.iter().map(Vec::len).fold(0, usize::saturating_add),
+                        );
+                        let processed = self.take_items(&items);
+                        let finished = stop == FetchStop::Complete && processed;
+                        self.audit(node, &items, if finished { &one } else { &[] });
+                        if finished {
+                            self.state.note_audit(&node, &m, self.now);
+                        }
+                        if stop == FetchStop::RateLimited {
+                            self.limited.insert(node);
+                        }
+                    }
+                    Ok(FetchReply::RateLimited)
+                    | Err(DialError::Refused(ErrorReason::RateLimited)) => {
+                        self.answered();
+                        self.limited.insert(node);
+                        self.conns.insert(node, conn);
+                    }
+                    Err(DialError::Refused(_)) => {
+                        self.answered();
+                        self.conns.insert(node, conn);
+                    }
+                    Err(_) => self.fail(node),
+                }
+                self.save();
             }
         }
     }

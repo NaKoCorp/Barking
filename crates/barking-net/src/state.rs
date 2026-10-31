@@ -43,6 +43,9 @@ pub struct NetState {
     /// Date (hour) of the last loss audit of a mailbox on a node: a full
     /// read from the start of the mailbox.
     pub audited_at: HashMap<(NodeId, MailboxId), u64>,
+    /// Date (hour) of the last audit re-read of a mailbox on a node, even one
+    /// cut short: a re-read is not tried again before `AUDIT_EVERY_SECS`.
+    pub reread_at: HashMap<(NodeId, MailboxId), u64>,
 }
 
 /// Failure to read or write the state.
@@ -65,6 +68,7 @@ struct Stored {
     fallbacks: FallbackLog,
     unaudited: Vec<(NodeId, u32)>,
     audited_at: Vec<(NodeId, MailboxId, u64)>,
+    reread_at: Vec<(NodeId, MailboxId, u64)>,
 }
 
 impl NetState {
@@ -77,6 +81,7 @@ impl NetState {
             fallbacks: FallbackLog::default(),
             unaudited: HashMap::new(),
             audited_at: HashMap::new(),
+            reread_at: HashMap::new(),
         }
     }
 
@@ -122,6 +127,7 @@ impl NetState {
             fallbacks: self.fallbacks.clone(),
             unaudited,
             audited_at: triples(&self.audited_at),
+            reread_at: triples(&self.reread_at),
         };
         postcard::to_allocvec(&stored).map_err(encode_err)
     }
@@ -146,11 +152,8 @@ impl NetState {
                 .collect(),
             fallbacks,
             unaudited: stored.unaudited.into_iter().collect(),
-            audited_at: stored
-                .audited_at
-                .into_iter()
-                .map(|(n, m, t)| ((n, m), hour(t).min(hour(now))))
-                .collect(),
+            audited_at: dates(stored.audited_at, now),
+            reread_at: dates(stored.reread_at, now),
         })
     }
 
@@ -183,13 +186,22 @@ impl NetState {
     pub fn retain_positions(&mut self, watched: &HashSet<MailboxId>) {
         self.positions.retain(|(_, m), _| watched.contains(m));
         self.audited_at.retain(|(_, m), _| watched.contains(m));
+        self.reread_at.retain(|(_, m), _| watched.contains(m));
     }
 
-    /// True if `mailbox` was not audited on `node` in the last `every` seconds.
+    /// True if `mailbox` was neither audited nor re-read on `node` in the
+    /// last `every` seconds.
     pub fn audit_due(&self, node: &NodeId, mailbox: &MailboxId, now: u64, every: u64) -> bool {
-        self.audited_at
-            .get(&(*node, *mailbox))
-            .is_none_or(|&t| now.saturating_sub(t) >= every)
+        let key = (*node, *mailbox);
+        [&self.audited_at, &self.reread_at].iter().all(|map| {
+            map.get(&key)
+                .is_none_or(|&t| now.saturating_sub(t) >= every)
+        })
+    }
+
+    /// An audit re-read of `mailbox` on `node` was tried now.
+    pub fn note_reread(&mut self, node: &NodeId, mailbox: &MailboxId, now: u64) {
+        self.reread_at.insert((*node, *mailbox), hour(now));
     }
 
     /// `mailbox` was just audited on `node`.
@@ -253,6 +265,13 @@ impl NetState {
             }
         }
     }
+}
+
+/// Dates rounded to the hour, those from the future brought back to now.
+fn dates(v: Vec<(NodeId, MailboxId, u64)>, now: u64) -> HashMap<(NodeId, MailboxId), u64> {
+    v.into_iter()
+        .map(|(n, m, t)| ((n, m), hour(t).min(hour(now))))
+        .collect()
 }
 
 /// Position of a mailbox on a node, as the old synchronization stored it

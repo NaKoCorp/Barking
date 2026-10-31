@@ -26,7 +26,8 @@
 //! fetches are all cut by a lost connection for `UNAUDITED_SYNCS` syncs in a
 //! row cannot be audited: one failure per sync from then on. Loss audits of
 //! positioned mailboxes re-read them from their start every
-//! `AUDIT_EVERY_SECS`, each in a call of its own after the regular fetch.
+//! `AUDIT_EVERY_SECS`, each in a call of its own once all regular session
+//! fetches are over, within `REREAD_BYTES` and `REREAD_TIME`.
 //!
 //! Nothing here logs an address or a mailbox: the transparency log gets the
 //! short node id only.
@@ -86,8 +87,13 @@ pub const MIN_REACHABLE: usize = 3;
 pub const UNAUDITED_SYNCS: u32 = 3;
 /// A positioned mailbox holding a message the node accepted is read again
 /// from its start, for a loss audit, at most this often: in a call of its
-/// own, after the group's regular fetch.
+/// own, once all regular session fetches are over.
 pub const AUDIT_EVERY_SECS: u64 = 6 * 3600;
+/// Bytes all audit re-reads of a sync may fetch together.
+pub const REREAD_BYTES: usize = 8 << 20;
+/// Time all audit re-reads of a sync may take together (within the
+/// session fetch slice).
+pub const REREAD_TIME: Duration = Duration::from_secs(20);
 /// `NotResponsible` answers from distinct responsibles of one mailbox that
 /// trigger a fallback lookup.
 pub const NOT_RESPONSIBLE_FALLBACK: usize = 2;
@@ -237,6 +243,7 @@ where
         pending_failures: Vec::new(),
         penalized: HashSet::new(),
         found: HashSet::new(),
+        reread_queue: Vec::new(),
         budget: CandidateBudget::default(),
         now,
         deadline,
@@ -273,6 +280,8 @@ struct Run<'a, D: Connector> {
     penalized: HashSet<NodeId>,
     /// Nodes that already got `Found` this sync.
     found: HashSet<NodeId>,
+    /// Groups served by a node this sync, for the audit re-reads.
+    reread_queue: Vec<(NodeId, Vec<MailboxId>)>,
     budget: CandidateBudget,
     now: u64,
     deadline: Instant,

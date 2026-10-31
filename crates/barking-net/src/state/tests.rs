@@ -165,9 +165,17 @@ fn positions_follow_resume_and_prune() {
     assert!(s.positions.is_empty());
     s.positions.insert((n, m2), 3);
     s.note_audit(&n, &m2, 0);
+    s.note_reread(&n, &m2, 0);
     s.retain_positions(&HashSet::from([m1]));
     assert!(s.positions.is_empty());
     assert!(s.audited_at.is_empty());
+    assert!(s.reread_at.is_empty());
+    // A recent re-read try holds the next one back, like an audit.
+    s.note_reread(&n, &m1, NOW);
+    assert!(!s.audit_due(&n, &m1, NOW + 3600, 6 * 3600));
+    assert!(s.audit_due(&n, &m1, NOW + 6 * 3600, 6 * 3600));
+    let back = NetState::decode(&s.encode().unwrap(), NOW, true).unwrap();
+    assert_eq!(back.reread_at.get(&(n, m1)), Some(&NOW));
 }
 
 #[test]

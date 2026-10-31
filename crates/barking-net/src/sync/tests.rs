@@ -39,6 +39,8 @@ struct Net {
     truncate_mailbox: HashMap<MailboxId, FetchStop>,
     /// A re-read of this mailbox alone, from its start, stops early.
     cut_reread: HashMap<MailboxId, FetchStop>,
+    /// Time a re-read of this mailbox (alone, from its start) takes.
+    reread_delay: HashMap<MailboxId, Duration>,
     /// Nodes whose fetch answers `RateLimited`.
     rate_limit_fetch: HashSet<NodeId>,
     /// Items every fetch from that node returns.
@@ -138,7 +140,11 @@ impl Fetcher for Net {
             .copied()
             .collect();
         self.log(Call::Fetch(*conn, mailboxes.to_vec(), positioned.clone()));
-        tokio::time::sleep(self.fetch_delay).await;
+        let reread_delay = match mailboxes {
+            [m] if positioned.is_empty() => self.reread_delay.get(m).copied(),
+            _ => None,
+        };
+        tokio::time::sleep(reread_delay.unwrap_or(self.fetch_delay)).await;
         if self.rate_limit_fetch.contains(conn) {
             return Ok(FetchReply::RateLimited);
         }
@@ -826,11 +832,12 @@ async fn large_reread_neither_starves_group_mates_nor_counts() {
             _ => None,
         })
         .collect();
-    assert_eq!(to_x.len(), 2 * UNAUDITED_SYNCS as usize);
-    for pair in to_x.chunks(2) {
-        assert!(pair[0].1.contains(&m), "regular fetch resumes");
-        assert_eq!(pair[1], (vec![m], vec![]), "re-read alone, from the start");
-    }
+    // Regular fetch every sync; the cut re-read only once (it backs off).
+    let rereads = to_x.iter().filter(|c| c.1.is_empty()).count();
+    assert_eq!(rereads, 1);
+    assert_eq!(to_x.len(), UNAUDITED_SYNCS as usize + 1);
+    assert!(to_x[0].1.contains(&m), "regular fetch resumes");
+    assert_eq!(to_x[1], (vec![m], vec![]), "re-read alone, from the start");
     let state = load(&mut core);
     assert!(!state.unaudited.contains_key(&x));
     assert!(!state.audited_at.contains_key(&(x, m)));
@@ -884,4 +891,106 @@ async fn finished_reread_is_audited_even_if_another_is_cut() {
     let state = load(&mut core);
     assert!(state.audited_at.contains_key(&(x, m1)));
     assert!(!state.audited_at.contains_key(&(x, m2)));
+}
+
+// --- Re-reads after every regular fetch, capped and backed off (R21) -------
+
+/// Lone, positionless fetches of `m` from `node`: audit re-reads.
+fn rereads_of(calls: &[Call], node: NodeId, m: MailboxId) -> Vec<usize> {
+    positions_of(
+        calls,
+        |c| matches!(c, Call::Fetch(n, mbs, p) if *n == node && *mbs == [m] && p.is_empty()),
+    )
+}
+
+/// Bob's core with the message accepted by its best responsible `x`, and
+/// every session mailbox positioned on `x`.
+fn due_reread(core: &mut Core) -> (NodeId, MailboxId, Vec<u8>) {
+    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let (bytes, m) = message(core);
+    let x = load(core).view.responsibles_by_score(&m, NOW)[0];
+    accepted_by(core, x, &bytes);
+    let mut state = load(core);
+    for s in &sessions {
+        state.positions.insert((x, *s), 5);
+    }
+    // At the top score, `x` stays the best responsible of `m` (ties go by
+    // distance, and it is the closest) however the others' scores grow.
+    state.view.entries.get_mut(&x).unwrap().score = Score::new(1.0);
+    state.save(core).unwrap();
+    (x, m, bytes)
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_reread_waits_for_every_regular_fetch_and_mark_polled() {
+    let (_dir, mut core, mut net) = setup();
+    core.mark_polled(NOW - 5 * DAY).unwrap();
+    let wide = core.watched_mailbox_groups(NOW).intro.len();
+    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let (x, m, _) = due_reread(&mut core);
+    // The re-read would take longer than the whole session slice.
+    net.reread_delay.insert(m, Duration::from_secs(200));
+    let start = Instant::now();
+    let report = sync(&mut core, &net, opts()).await;
+    let calls = net.calls();
+    let reread = rereads_of(&calls, x, m);
+    assert_eq!(reread.len(), 1);
+    let regular: Vec<(usize, NodeId)> = fetches_of(&calls, &sessions)
+        .into_iter()
+        .filter(|(i, _, _)| *i != reread[0])
+        .map(|(i, n, _)| (i, n))
+        .collect();
+    assert!(
+        regular.iter().any(|(_, n)| *n != x),
+        "another node serves a group"
+    );
+    assert!(regular.iter().all(|(i, _)| *i < reread[0]));
+    assert!(report.polled_all_sessions);
+    assert!(core.watched_mailbox_groups(NOW).intro.len() < wide);
+    // The re-read was cut by its own cap, and dated.
+    let state = load(&mut core);
+    assert!(state.reread_at.contains_key(&(x, m)));
+    assert!(!state.audited_at.contains_key(&(x, m)));
+    assert!(Instant::now() - start < SYNC_DEADLINE);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cut_reread_backs_off_six_hours() {
+    let (_dir, mut core, mut net) = setup();
+    let (x, m, _) = due_reread(&mut core);
+    net.reread_delay.insert(m, Duration::from_secs(200));
+    sync(&mut core, &net, opts()).await;
+    sync(&mut core, &net, opts()).await;
+    assert_eq!(rereads_of(&net.calls(), x, m).len(), 1);
+    // Once the try is 6 h old, the re-read is due again.
+    let mut state = load(&mut core);
+    state.note_reread(&x, &m, NOW - AUDIT_EVERY_SECS);
+    state.save(&mut core).unwrap();
+    sync(&mut core, &net, opts()).await;
+    assert_eq!(rereads_of(&net.calls(), x, m).len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_reread_after_a_cut_connection() {
+    let (_dir, mut core, mut net) = setup();
+    let (x, m, _) = due_reread(&mut core);
+    net.truncate.insert(x, FetchStop::Connection);
+    sync(&mut core, &net, opts()).await;
+    let calls = net.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|c| matches!(c, Call::Fetch(n, ..) if *n == x))
+    );
+    assert!(rereads_of(&calls, x, m).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline_stop_does_not_count_as_never_completing() {
+    let (_dir, mut core, mut net) = setup();
+    net.truncate = all_nodes(&net, FetchStop::Deadline);
+    for _ in 0..UNAUDITED_SYNCS {
+        sync(&mut core, &net, opts()).await;
+    }
+    assert!(load(&mut core).unaudited.is_empty());
 }
