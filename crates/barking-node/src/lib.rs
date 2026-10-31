@@ -1,5 +1,5 @@
-//! Nœud Barking : stockage SQLite, règles de dépôt et de relève (sans réseau),
-//! limites anti-abus et serveur QUIC.
+//! Barking node: SQLite storage, deposit and fetch rules (network-free),
+//! anti-abuse limits and QUIC server.
 
 pub mod config;
 pub mod dht;
@@ -12,16 +12,16 @@ pub mod store;
 pub use rules::{Policy, deposit, fetch};
 pub use store::{NodeStore, Stats};
 
-/// Erreur de stockage (les refus métier passent par `ErrorReason`).
+/// Storage error (business refusals go through `ErrorReason`).
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("erreur de stockage : {0}")]
+    #[error("storage error: {0}")]
     Storage(#[from] rusqlite::Error),
-    #[error("base de données incompatible (schema_version {0})")]
+    #[error("incompatible database (schema_version {0})")]
     SchemaVersion(i64),
-    #[error("configuration invalide : {0}")]
+    #[error("invalid configuration: {0}")]
     Config(String),
-    #[error("erreur réseau : {0}")]
+    #[error("network error: {0}")]
     Io(#[from] std::io::Error),
 }
 

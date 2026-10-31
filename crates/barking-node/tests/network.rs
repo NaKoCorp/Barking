@@ -1,5 +1,5 @@
-//! Intégration réseau : un vrai nœud QUIC sur 127.0.0.1 (port libre), le
-//! client de `barking-proto`, et des pairs bricolés pour les cas hostiles.
+//! Network integration: a real QUIC node on 127.0.0.1 (free port), the
+//! `barking-proto` client, and rigged peers for the hostile cases.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -21,9 +21,9 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-/// Délai généreux pour toute attente de test.
+/// Generous timeout for any test wait.
 const LONG: Duration = Duration::from_secs(20);
-/// Difficulté réduite pour des tests rapides.
+/// Reduced difficulty for fast tests.
 const TEST_BITS: u8 = 8;
 
 fn key(n: usize) -> SigningKey {
@@ -101,13 +101,13 @@ fn db() -> (tempfile::TempDir, PathBuf) {
     (d, p)
 }
 
-/// Paquet de message synthétique valide (palier S) dans la boîte `mb`.
+/// Valid synthetic message packet (tier S) in mailbox `mb`.
 fn message(n: u32, mb: u8) -> Vec<u8> {
     message_tier(n, mb, Tier::S)
 }
 
-/// Expiration fixée une fois pour toutes : un même paquet a les mêmes octets
-/// d'un appel à l'autre.
+/// Expiry fixed once and for all: the same packet has the same bytes
+/// from one call to the next.
 fn expiry() -> u32 {
     static E: OnceLock<u32> = OnceLock::new();
     *E.get_or_init(|| u32::try_from(now() + 86_400).unwrap())
@@ -131,14 +131,14 @@ fn message_tier(n: u32, mb: u8, tier: Tier) -> Vec<u8> {
 
 async fn raw_stream(conn: &quinn::Connection, bytes: &[u8], finish: bool) -> Vec<u8> {
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
-    // Le nœud peut couper le flux pendant l'envoi : erreurs ignorées.
+    // The node may cut the stream during the send: errors ignored.
     let _ = send.write_all(bytes).await;
     if finish {
         let _ = send.finish();
     }
     timeout(LONG, recv.read_to_end(1 << 21))
         .await
-        .expect("le nœud doit fermer le flux")
+        .expect("the node must close the stream")
         .unwrap_or_default()
 }
 
@@ -159,7 +159,7 @@ async fn deposit_then_fetch_roundtrip() {
     let bob_fp = alice.add_contact(&cb, Some("bob"), t, &mut rng).unwrap();
     bob.add_contact(&ca, Some("alice"), t, &mut rng).unwrap();
 
-    let packets = alice.send_text(&bob_fp, "salut Bob", t, &mut rng).unwrap();
+    let packets = alice.send_text(&bob_fp, "hello Bob", t, &mut rng).unwrap();
     let mut sa = Client::connect(node.addr, node.id).await.unwrap();
     assert_eq!(sa.node_id(), node.id);
     assert_eq!(sa.pow_bits(), TEST_BITS);
@@ -180,12 +180,12 @@ async fn deposit_then_fetch_roundtrip() {
             acks.push(ack);
         }
     }
-    assert_eq!(text.as_deref(), Some("salut Bob"));
+    assert_eq!(text.as_deref(), Some("hello Bob"));
     for a in &acks {
         assert_eq!(sb.deposit(&a.encode()).await.unwrap(), Ok(()));
     }
 
-    // L'accusé a supprimé la copie : Alice ne relève plus que l'accusé.
+    // The ack deleted the copy: Alice now fetches only the ack.
     let items = sa.fetch(&alice.watched_mailboxes(t)).await.unwrap();
     let got_ack = items.iter().any(|it| {
         matches!(
@@ -202,12 +202,12 @@ async fn deposit_then_fetch_roundtrip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wrong_node_id_refused_by_client() {
     let (_d, path) = db();
-    // Le nœud présente un certificat autosigné valide, mais pour un autre
-    // identifiant (puzzle résolu) : homme du milieu refusé.
+    // The node presents a valid self-signed certificate, but for another
+    // identifier (puzzle solved): man in the middle refused.
     let node = start_with(&path, key(1), policy(), |_| {});
     let r = Client::connect(node.addr, id_of(&key(0))).await;
     assert!(matches!(r, Err(ClientError::Connect(_))), "{:?}", r.err());
-    // Témoin : le bon identifiant passe.
+    // Control: the right identifier passes.
     Client::connect(node.addr, node.id).await.unwrap();
     node.stop().await;
 }
@@ -223,8 +223,8 @@ async fn node_id_without_puzzle_refused() {
     node.stop().await;
 }
 
-/// Pair bricolé : présente le certificat du vrai nœud `victim` mais signe la
-/// poignée de main TLS avec une autre clé.
+/// Rigged peer: presents the real node's certificate `victim` but signs the
+/// TLS handshake with another key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stolen_certificate_without_key_refused() {
     let victim = key(0);
@@ -272,14 +272,14 @@ async fn stolen_certificate_without_key_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn old_version_refused() {
     let (_d, path) = db();
-    // Nœud d'une version future qui n'accepte plus la version 0.
+    // Node of a future version that no longer accepts version 0.
     let node = start_with(&path, key(0), policy(), |c| {
         c.version = 1;
         c.min_version = 1;
     });
     let r = Client::connect(node.addr, node.id).await;
     assert!(matches!(r, Err(ClientError::Version)), "{:?}", r.err());
-    // Requête brute : `Error(VersionTooOld)`, puis fermeture.
+    // Raw request: `Error(VersionTooOld)`, then closing.
     let (_ep, conn) = client::open_connection(node.addr, node.id).await.unwrap();
     let resp = client::request(
         &conn,
@@ -322,10 +322,10 @@ async fn hello_timeout_and_idle_close_connection() {
         c.hello_timeout = Duration::from_millis(500);
         c.idle_timeout = Duration::from_millis(800);
     });
-    // Pas de Hello : fermée.
+    // No Hello: closed.
     let (_ep, conn) = client::open_connection(node.addr, node.id).await.unwrap();
     timeout(LONG, conn.closed()).await.unwrap();
-    // Hello puis silence : fermée pour inactivité.
+    // Hello then silence: closed for inactivity.
     let s = Client::connect(node.addr, node.id).await.unwrap();
     timeout(LONG, s.connection().closed()).await.unwrap();
     node.stop().await;
@@ -340,21 +340,21 @@ async fn oversized_or_truncated_frame_closes_stream() {
     let s = Client::connect(node.addr, node.id).await.unwrap();
     let conn = s.connection().clone();
 
-    // Longueur annoncée au-delà de 64 Kio : flux fermé sans réponse.
+    // Announced length beyond 64 KiB: stream closed without a response.
     let mut big = ((MAX_REQUEST_BYTES + 1) as u32).to_be_bytes().to_vec();
     big.extend_from_slice(&[0u8; 1024]);
     assert!(raw_stream(&conn, &big, true).await.is_empty());
-    // 4 Gio annoncés : pas de tampon, flux fermé.
+    // 4 GiB announced: no buffer, stream closed.
     assert!(
         raw_stream(&conn, &u32::MAX.to_be_bytes(), false)
             .await
             .is_empty()
     );
-    // Trame tronquée (le client coupe au milieu).
+    // Truncated frame (the client cuts in the middle).
     let mut cut = 100u32.to_be_bytes().to_vec();
     cut.extend_from_slice(&[0u8; 10]);
     assert!(raw_stream(&conn, &cut, true).await.is_empty());
-    // Trame tronquée sans fin de flux : coupée par le délai de lecture.
+    // Truncated frame without end of stream: cut by the read timeout.
     assert!(raw_stream(&conn, &cut, false).await.is_empty());
     // Corps invalide : `Error(Malformed)`.
     let mut junk = 3u32.to_be_bytes().to_vec();
@@ -368,7 +368,7 @@ async fn oversized_or_truncated_frame_closes_stream() {
         Response::Error(ErrorReason::Malformed)
     );
 
-    // La même connexion et une seconde connexion sont toujours servies.
+    // The same connection and a second connection are still served.
     assert_eq!(
         s.request(&Request::Ping { from: None }).await.unwrap(),
         Response::Error(ErrorReason::Unsupported)
@@ -428,7 +428,7 @@ async fn too_many_connections_per_ip() {
     let _b = Client::connect(node.addr, node.id).await.unwrap();
     let r = Client::connect(node.addr, node.id).await;
     assert!(matches!(r, Err(ClientError::Connect(_))), "{:?}", r.err());
-    // Une place se libère à la fermeture.
+    // A slot frees up on close.
     a.close().await;
     let deadline = tokio::time::Instant::now() + LONG;
     loop {
@@ -478,7 +478,7 @@ async fn restart_keeps_confirmed_deposits() {
         assert_eq!(s.deposit(&message(n, 3)).await.unwrap(), Ok(()));
     }
     drop(s);
-    // Arrêt brutal : la tâche du serveur est abandonnée sans fermeture propre.
+    // Abrupt shutdown: the server task is abandoned without clean closing.
     node.task.abort();
     let _ = node.task.await;
 
@@ -492,8 +492,8 @@ async fn restart_keeps_confirmed_deposits() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deposit_retries_progressive_pow() {
     let (_d, path) = db();
-    // Difficulté de base 4 : au-delà de 64 paquets la boîte en exige 5,
-    // au-delà de 128, 6. Le client relève sa preuve sur `PowTooWeak`.
+    // Base difficulty 4: beyond 64 packets the mailbox requires 5,
+    // beyond 128, 6. The client raises its proof on `PowTooWeak`.
     let node = start_with(
         &path,
         key(0),
@@ -541,7 +541,7 @@ async fn policy_with_excessive_pow_refused() {
     assert!(r.is_err());
 }
 
-/// Faux nœud : TLS authentique (clé `k`), réponses fournies par `answer`.
+/// Fake node: authentic TLS (key `k`), responses supplied by `answer`.
 fn fake_node(
     k: SigningKey,
     answer: impl Fn(Request) -> Option<Response> + Send + Sync + 'static,
@@ -564,7 +564,7 @@ fn fake_node(
                             let _ = frame::write(&mut send, &resp, frame::MAX_RESPONSE_BYTES).await;
                             let _ = send.finish();
                         }
-                        // Flux coupé, comme un nœud dont l'échéance d'écriture expire.
+                        // Stream cut, like a node whose write deadline expires.
                         None => {
                             let _ = send.reset(1u32.into());
                         }
@@ -648,8 +648,8 @@ async fn client_caps_page_count() {
     srv.abort();
 }
 
-/// Connexion dont le lecteur n'ouvre presque pas sa fenêtre de réception :
-/// les réponses restent bloquées côté nœud.
+/// Connection whose reader barely opens its receive window:
+/// responses stay blocked on the node side.
 async fn stuck_connection(addr: SocketAddr, id: NodeId) -> (quinn::Endpoint, quinn::Connection) {
     let mut ep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls::client_config(id)).unwrap();
@@ -683,12 +683,12 @@ async fn stuck_readers_bounded_by_global_cap() {
         c.stats = st;
         c.max_response_bytes_in_flight = CAP;
         c.request_timeout = Duration::from_secs(5);
-        // Échéance d'écriture ≈ request_timeout : test court.
+        // Write deadline ≈ request_timeout: short test.
         c.min_send_rate = 1 << 30;
         c.limits.requests_per_sec = 10_000;
         c.limits.bytes_per_sec = 1 << 30;
     });
-    // Plus d'une page de paquets L dans la boîte 9.
+    // More than one page of L packets in mailbox 9.
     let mut s = Client::connect(node.addr, node.id).await.unwrap();
     for n in 0..70 {
         assert_eq!(
@@ -696,7 +696,7 @@ async fn stuck_readers_bounded_by_global_cap() {
             Ok(())
         );
     }
-    // 3 connexions × 4 flux de relève jamais lus.
+    // 3 connections × 4 fetch streams never read.
     let fetch = frame::encode(
         &Request::Fetch {
             mailboxes: vec![MailboxId([9; 16])],
@@ -718,20 +718,20 @@ async fn stuck_readers_bounded_by_global_cap() {
         }
         endpoints.push((ep, conn));
     }
-    // Synchronisation sur la jauge du nœud plutôt qu'un délai fixe.
+    // Synchronize on the node's gauge rather than a fixed delay.
     let deadline = tokio::time::Instant::now() + LONG;
     while stats.response_bytes.now() <= 1 << 20 {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "flux bloqués non réservés"
+            "blocked streams not reserved"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(stats.response_bytes.peak() <= CAP);
-    // Un autre client est toujours servi.
+    // Another client is still served.
     let mut other = Client::connect(node.addr, node.id).await.unwrap();
     assert_eq!(other.deposit(&message(1, 1)).await.unwrap(), Ok(()));
-    // Passé `request_timeout`, les flux bloqués sont coupés et la mémoire rendue.
+    // Past `request_timeout`, the blocked streams are cut and memory returned.
     let deadline = tokio::time::Instant::now() + LONG;
     while stats.response_bytes.now() != 0 {
         assert!(tokio::time::Instant::now() < deadline);
@@ -757,7 +757,7 @@ async fn db_queue_bounded_across_connection_churn() {
         c.max_db_jobs = 1;
         c.limits.requests_per_sec = 10_000;
     });
-    // De quoi rendre une relève de 64 boîtes non instantanée.
+    // Enough to make a 64-mailbox fetch non-instantaneous.
     let mut s = Client::connect(node.addr, node.id).await.unwrap();
     for n in 0..64u32 {
         assert_eq!(s.deposit(&message(n, n as u8)).await.unwrap(), Ok(()));
@@ -786,13 +786,13 @@ async fn db_queue_bounded_across_connection_churn() {
                 }
             }
         }
-        // Tours impairs : fermeture pendant que les requêtes sont en cours.
+        // Odd rounds: closing while requests are in progress.
         s.close().await;
         assert!(stats.db_jobs.peak() <= 1);
     }
-    // Quatre relèves simultanées pour une seule place : des refus.
+    // Four simultaneous fetches for a single slot: refusals.
     assert!(limited > 0);
-    // Toutes les connexions et leurs travaux de base se terminent.
+    // All connections and their base jobs finish.
     let deadline = tokio::time::Instant::now() + LONG;
     while stats.db_jobs.now() != 0 || stats.connections.now() != 0 {
         assert!(tokio::time::Instant::now() < deadline);
@@ -804,8 +804,8 @@ async fn db_queue_bounded_across_connection_churn() {
     node.stop().await;
 }
 
-/// Lecteur qui arrête le flux (STOP_SENDING) : la réponse est quand même
-/// débitée de son seau d'octets.
+/// Reader that stops the stream (STOP_SENDING): the response is still
+/// debited from its byte bucket.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stopped_reader_is_charged() {
     let (_d, path) = db();
@@ -815,8 +815,8 @@ async fn stopped_reader_is_charged() {
         c.limits.burst = 2;
     });
     let mut s = Client::connect(node.addr, node.id).await.unwrap();
-    // 20 paquets L (320 Kio) déposés depuis une autre connexion (son propre
-    // seau, attendu quand il est vide).
+    // 20 L packets (320 KiB) deposited from another connection (its own
+    // bucket, awaited when it is empty).
     let mut filler = Client::connect(node.addr, node.id).await.unwrap();
     for n in 0..20 {
         loop {
@@ -843,8 +843,8 @@ async fn stopped_reader_is_charged() {
     send.write_all(&page).await.unwrap();
     send.finish().unwrap();
     recv.stop(7u32.into()).unwrap();
-    // La réponse arrêtée (~320 Kio) dépasse la capacité du seau (200 Kio) :
-    // les requêtes suivantes sont limitées tant qu'il n'est pas rechargé.
+    // The stopped response (~320 KiB) exceeds the bucket's capacity (200 KiB):
+    // the following requests are limited until it is refilled.
     let deadline = tokio::time::Instant::now() + LONG;
     loop {
         if s.request(&Request::Ping { from: None }).await.unwrap()
@@ -854,7 +854,7 @@ async fn stopped_reader_is_charged() {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "réponse arrêtée non débitée"
+            "stopped response not debited"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -862,7 +862,7 @@ async fn stopped_reader_is_charged() {
     node.stop().await;
 }
 
-/// Une page trop lente (flux coupé par le nœud) est redemandée plus petite.
+/// A page that is too slow (stream cut by the node) is requested again smaller.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_shrinks_page_after_reset() {
     let k = key(0);
@@ -875,7 +875,7 @@ async fn client_shrinks_page_after_reset() {
             cursor, max_bytes, ..
         } => {
             log.lock().unwrap().push((cursor, max_bytes));
-            // Lien « lent » : toute page au-delà de 64 Kio est coupée.
+            // "Slow" link: any page beyond 64 KiB is cut.
             if max_bytes > 64 * 1024 {
                 return None;
             }
@@ -904,7 +904,7 @@ async fn client_shrinks_page_after_reset() {
     srv.abort();
 }
 
-/// Toutes les tailles coupées : abandon après 16 Kio.
+/// All sizes cut: give up after 16 KiB.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_gives_up_below_smallest_page() {
     let k = key(0);
@@ -918,7 +918,7 @@ async fn client_gives_up_below_smallest_page() {
     srv.abort();
 }
 
-/// Le nœud sert la taille de page demandée (plancher 16 Kio).
+/// The node serves the requested page size (floor 16 KiB).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn node_honors_requested_page_size() {
     let (_d, path) = db();
@@ -944,18 +944,18 @@ async fn node_honors_requested_page_size() {
         let Response::Items { items, next } = r else {
             panic!("{r:?}")
         };
-        assert_eq!(items.len(), per_page, "demande {asked}");
+        assert_eq!(items.len(), per_page, "requested {asked}");
         assert!(next.is_some());
     }
     node.stop().await;
 }
 
-/// Un groupe d'adresses ne prend que sa part du budget de réponses ; un
-/// client d'un autre groupe relève toujours.
+/// An address group takes only its share of the response budget; a
+/// client of another group always fetches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ip_group_capped_share_of_response_budget() {
     let Ok(v6) = UdpSocket::bind("[::1]:0") else {
-        eprintln!("IPv6 local indisponible : test ignoré");
+        eprintln!("local IPv6 unavailable: test skipped");
         return;
     };
     let v6_addr = v6.local_addr().unwrap();
@@ -994,7 +994,7 @@ async fn ip_group_capped_share_of_response_budget() {
             Ok(())
         );
     }
-    // 7 connexions IPv4 bloquées (une page chacune au plus).
+    // 7 blocked IPv4 connections (one page each at most).
     let fetch = frame::encode(
         &Request::Fetch {
             mailboxes: vec![MailboxId([9; 16])],
@@ -1017,12 +1017,12 @@ async fn ip_group_capped_share_of_response_budget() {
         }
         endpoints.push((ep, conn));
     }
-    // Quatre pages (~1 Mio chacune) tiennent dans la part du groupe.
+    // Four pages (~1 MiB each) fit within the group's share.
     let deadline = tokio::time::Instant::now() + LONG;
     while stats.response_bytes.now() < 4_000_000 {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "flux bloqués non réservés"
+            "blocked streams not reserved"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -1032,13 +1032,13 @@ async fn ip_group_capped_share_of_response_budget() {
         "{}",
         stats.response_bytes.peak()
     );
-    // Le groupe IPv4 est plein : sa relève est refusée.
+    // The IPv4 group is full: its fetch is refused.
     let mut v4c = Client::connect(addr, id).await.unwrap();
     assert!(matches!(
         v4c.fetch(&[MailboxId([9; 16])]).await,
         Err(ClientError::Refused(ErrorReason::RateLimited))
     ));
-    // Un client IPv6 relève normalement.
+    // An IPv6 client fetches normally.
     let mut v6c = Client::connect(v6_addr, id).await.unwrap();
     let items = v6c.fetch(&[MailboxId([9; 16])]).await.unwrap();
     assert_eq!(items.len(), 70);
@@ -1087,8 +1087,8 @@ fn limit_defaults_match_spec() {
     assert_eq!(c.max_response_bytes_in_flight, 64 << 20);
 }
 
-/// Le seau de débit est celui du groupe d'adresses : se reconnecter ne le
-/// remplit pas.
+/// The rate bucket is the address group's: reconnecting does not
+/// refill it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconnect_does_not_refill_rate_bucket() {
     let (_d, path) = db();
@@ -1097,7 +1097,7 @@ async fn reconnect_does_not_refill_rate_bucket() {
         c.limits.burst = 10;
     });
     let s = Client::connect(node.addr, node.id).await.unwrap();
-    // Seau vidé (sans atteindre la fermeture pour abus).
+    // Bucket emptied (without reaching the abuse close).
     let mut drained = false;
     for _ in 0..15 {
         if s.request(&Request::Ping { from: None }).await.unwrap()
@@ -1109,7 +1109,7 @@ async fn reconnect_does_not_refill_rate_bucket() {
     }
     assert!(drained);
     s.close().await;
-    // Nouvelle connexion depuis la même adresse : toujours limitée.
+    // New connection from the same address: still limited.
     let s = Client::connect(node.addr, node.id).await.unwrap();
     assert_eq!(
         s.request(&Request::Ping { from: None }).await.unwrap(),
@@ -1118,8 +1118,8 @@ async fn reconnect_does_not_refill_rate_bucket() {
     node.stop().await;
 }
 
-/// Une preuve de travail fausse à la difficulté de base est refusée sans
-/// prendre de place dans la file de la base.
+/// A false proof of work at the base difficulty is refused without
+/// taking a place in the database queue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_pow_never_takes_db_job() {
     let (_d, path) = db();
@@ -1138,14 +1138,14 @@ async fn invalid_pow_never_takes_db_job() {
         },
     );
     let s = Client::connect(node.addr, node.id).await.unwrap();
-    // La purge de démarrage (faite avant d'accepter) a pris sa place : oubliée.
+    // The startup purge (done before accepting) took its place: forgotten.
     assert_eq!(stats.db_jobs.now(), 0);
     stats.db_jobs.take_peak();
     let mut refused = 0;
     for n in 0..20u32 {
         let p = message(n, 7);
         let h = barking_proto::pow::content_hash(&p);
-        // Un nonce qui ne passe pas la difficulté de base.
+        // A nonce that does not pass the base difficulty.
         let bad = (0u64..)
             .find(|x| !barking_proto::pow::check(&h, &MailboxId([7; 16]), *x, 20))
             .unwrap();
@@ -1165,9 +1165,9 @@ async fn invalid_pow_never_takes_db_job() {
     node.stop().await;
 }
 
-/// Relève reprise : un budget d'octets coupe la relève, la suivante reprend
-/// à la position de chaque boîte ; la position survit à un changement de la
-/// liste des boîtes.
+/// Resumed fetch: a byte budget cuts the fetch, the next resumes
+/// at each mailbox's position; the position survives a change of the
+/// mailbox list.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resumable_fetch_continues_where_it_stopped() {
     let (_d, path) = db();
@@ -1187,13 +1187,13 @@ async fn resumable_fetch_continues_where_it_stopped() {
     }
     let nine = [MailboxId([9; 16])];
     let mut resume = client::FetchResume::default();
-    // Budget sous une page : une page entière quand même.
+    // Budget under one page: a whole page anyway.
     let first = s.fetch_resumable(&nine, &mut resume, 1).await.unwrap();
     assert!(s.last_fetch_truncated());
     assert!(!first.is_empty() && first.len() < 100);
     assert!(resume.seen[&[9; 16]] > 0);
-    // Liste changée (boîte 8 ajoutée) : la boîte 9 reprend à sa position,
-    // la boîte 8 est lue depuis le début.
+    // List changed (mailbox 8 added): mailbox 9 resumes at its position,
+    // mailbox 8 is read from the start.
     let both = [MailboxId([8; 16]), MailboxId([9; 16])];
     let mut all = first.clone();
     loop {
@@ -1211,16 +1211,16 @@ async fn resumable_fetch_continues_where_it_stopped() {
     for w in &want {
         assert!(all.contains(w));
     }
-    // Pas de relecture depuis le début : au plus une page relue par boîte.
+    // No re-read from the start: at most one page re-read per mailbox.
     assert!(all.len() < want.len() + 70, "{}", all.len());
-    // Boîte retirée : oubliée.
+    // Mailbox removed: forgotten.
     resume.retain(&nine);
     assert!(!resume.seen.contains_key(&[8; 16]));
     node.stop().await;
 }
 
-/// Le client part de la difficulté de base plus le supplément du palier, et
-/// un budget de preuve l'arrête avant de calculer.
+/// The client starts from the base difficulty plus the tier surcharge, and
+/// a proof budget stops it before computing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deposit_pow_budget_and_tier_surcharge() {
     let (_d, path) = db();
@@ -1230,7 +1230,7 @@ async fn deposit_pow_budget_and_tier_surcharge() {
         s.deposit(&message_tier(1, 5, Tier::L)).await.unwrap(),
         Ok(())
     );
-    // Une seule preuve, à base + 6 bits : pas de nouvel essai.
+    // A single proof, at base + 6 bits: no new attempt.
     assert_eq!(
         s.pow_spent(),
         barking_proto::pow::expected_work(TEST_BITS + 6)

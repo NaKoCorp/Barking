@@ -1,5 +1,5 @@
-//! Le binaire `barking-node` lancé comme sous-processus : `init`, `run`,
-//! `status`, configuration et journaux.
+//! The `barking-node` binary run as a subprocess: `init`, `run`, `status`,
+//! configuration and logs.
 
 use std::fs;
 use std::net::{SocketAddr, UdpSocket};
@@ -22,14 +22,14 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-/// Valeur de la ligne `<clé> : <valeur>` de la sortie.
+/// Value of the `<key> : <value>` line of the output.
 fn field(out: &str, key: &str) -> String {
     out.lines()
         .find_map(|l| {
             let (k, v) = l.split_once(':')?;
             (k.trim() == key).then(|| v.trim().to_string())
         })
-        .unwrap_or_else(|| panic!("champ {key} absent de : {out}"))
+        .unwrap_or_else(|| panic!("field {key} missing from: {out}"))
 }
 
 fn init(dir: &Path) -> Output {
@@ -44,9 +44,9 @@ fn init_creates_private_key_and_prints_id() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
 
-    let id: NodeId = field(&stdout, "identifiant").parse().unwrap();
-    assert!(id.puzzle_ok(), "l'identifiant doit résoudre le puzzle");
-    assert!(!field(&stdout, "adresse").is_empty());
+    let id: NodeId = field(&stdout, "identifier").parse().unwrap();
+    assert!(id.puzzle_ok(), "the identifier must solve the puzzle");
+    assert!(!field(&stdout, "address").is_empty());
 
     let key = dir.join("node.key");
     assert_eq!(
@@ -67,10 +67,10 @@ fn init_creates_private_key_and_prints_id() {
         0o600
     );
     assert!(!dir.join("node.key.tmp").exists());
-    // La clé écrite redonne bien cet identifiant (status le relit).
+    // The written key does give back this identifier (status re-reads it).
     let st = node(&["status", "--data-dir", dir.to_str().unwrap()]);
     assert!(st.status.success(), "{}", text(&st.stderr));
-    assert_eq!(field(&text(&st.stdout), "identifiant"), id.to_string());
+    assert_eq!(field(&text(&st.stdout), "identifier"), id.to_string());
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn init_refuses_existing_dir() {
     let key_before = fs::read(dir.join("node.key")).unwrap();
     let again = init(&dir);
     assert!(!again.status.success());
-    assert!(text(&again.stderr).contains("déjà initialisé"));
+    assert!(text(&again.stderr).contains("already initialized"));
     assert_eq!(fs::read(dir.join("node.key")).unwrap(), key_before);
 }
 
@@ -97,7 +97,7 @@ fn config_rejects_unknown_key() {
         "{}",
         text(&out.stderr)
     );
-    // Valeurs hors bornes : refusées aussi.
+    // Out-of-range values: refused too.
     fs::write(&cfg, "pow_bits = 25\n").unwrap();
     let out = node(&["run", "--config", cfg.to_str().unwrap()]);
     assert!(!out.status.success());
@@ -126,7 +126,7 @@ impl Running {
         Running { child: Some(child) }
     }
 
-    /// Arrêt propre (SIGTERM) puis sortie capturée.
+    /// Clean shutdown (SIGTERM) then captured output.
     fn stop(mut self) -> Output {
         let child = self.child.take().unwrap();
         let pid = child.id().to_string();
@@ -169,7 +169,7 @@ async fn connect_when_ready(addr: SocketAddr, id: NodeId) -> barking_proto::clie
     loop {
         match Client::connect(addr, id).await {
             Ok(s) => return s,
-            Err(e) if Instant::now() > end => panic!("le nœud ne répond pas : {e}"),
+            Err(e) if Instant::now() > end => panic!("the node does not answer: {e}"),
             Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
@@ -187,7 +187,7 @@ async fn run_and_status() {
     let data = tmp.path().join("data");
     let out = init(&data);
     assert!(out.status.success());
-    let id: NodeId = field(&text(&out.stdout), "identifiant").parse().unwrap();
+    let id: NodeId = field(&text(&out.stdout), "identifier").parse().unwrap();
 
     let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
     let cfg = write_config(tmp.path(), &data, &[addr]);
@@ -198,11 +198,11 @@ async fn run_and_status() {
     session.close().await;
 
     let s = status_of(&data);
-    assert_eq!(field(&s, "paquets"), "0");
-    assert_eq!(field(&s, "accusés"), "0");
+    assert_eq!(field(&s, "packets"), "0");
+    assert_eq!(field(&s, "acks"), "0");
 
     let out = running.stop();
-    assert!(out.status.success(), "arrêt propre : {:?}", out.status);
+    assert!(out.status.success(), "clean shutdown: {:?}", out.status);
 }
 
 fn message(n: u8, mailbox: [u8; 16]) -> Vec<u8> {
@@ -223,7 +223,7 @@ fn message(n: u8, mailbox: [u8; 16]) -> Vec<u8> {
     .encode()
 }
 
-/// Cherche `needle` dans tous les fichiers du dossier (base, WAL…).
+/// Looks for `needle` in all the files of the directory (database, WAL...).
 fn files_contain(dir: &Path, needle: &[u8]) -> bool {
     fs::read_dir(dir).unwrap().any(|e| {
         let bytes = fs::read(e.unwrap().path()).unwrap();
@@ -237,9 +237,9 @@ async fn logs_and_db_contain_no_ip() {
     let data = tmp.path().join("data");
     let out = init(&data);
     assert!(out.status.success());
-    let id: NodeId = field(&text(&out.stdout), "identifiant").parse().unwrap();
+    let id: NodeId = field(&text(&out.stdout), "identifier").parse().unwrap();
 
-    // IPv4 et, si la machine l'a, IPv6 sur le même port.
+    // IPv4 and, if the machine has it, IPv6 on the same port.
     let port = free_port();
     let v4: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let v6: SocketAddr = format!("[::1]:{port}").parse().unwrap();
@@ -262,15 +262,15 @@ async fn logs_and_db_contain_no_ip() {
             s.deposit(&message(i as u8 + 1, mailbox)).await.unwrap(),
             Ok(())
         );
-        // Un refus (expiré) alimente aussi les compteurs de refus.
+        // A refusal (expired) also feeds the refusal counters.
         let mut old = Packet::decode(&message(9, mailbox)).unwrap();
         old.expires_at = 1;
         assert!(s.deposit(&old.encode()).await.unwrap().is_err());
         s.close().await;
     }
 
-    // Cas d'erreur : poignée de main ratée (mauvais identifiant attendu),
-    // octets UDP quelconques, flux tronqué.
+    // Error cases: failed handshake (wrong expected identifier), arbitrary
+    // UDP bytes, truncated stream.
     let wrong = NodeId([7; 32]);
     assert!(Client::connect(v4, wrong).await.is_err());
     let junk = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -282,21 +282,21 @@ async fn logs_and_db_contain_no_ip() {
         let _ = send.write_all(&[0, 0, 0xFF, 0xFF, 1, 2, 3]).await;
         let _ = send.finish();
     }
-    // Laisse passer au moins un rapport agrégé (intervalle de 1 s).
+    // Lets at least one aggregated report through (1 s interval).
     tokio::time::sleep(Duration::from_millis(2500)).await;
     sess.close().await;
 
     let s = status_of(&data);
-    assert_eq!(field(&s, "paquets"), targets.len().to_string());
+    assert_eq!(field(&s, "packets"), targets.len().to_string());
 
     let out = running.stop();
     assert!(out.status.success());
     let logs = text(&out.stderr) + &text(&out.stdout);
     assert!(
-        logs.contains("dépôts"),
-        "le rapport agrégé doit apparaître dans les journaux : {logs:?}"
+        logs.contains("deposits accepted"),
+        "the aggregated report must appear in the logs: {logs:?}"
     );
-    assert!(!logs.contains("quinn_udp"), "journaux : {logs:?}");
+    assert!(!logs.contains("quinn_udp"), "logs: {logs:?}");
     let b32 = data_encoding::BASE32_NOPAD.encode(&mailbox);
     let b32_lower = b32.to_lowercase();
     for needle in [
@@ -307,14 +307,14 @@ async fn logs_and_db_contain_no_ip() {
         &b32,
         &b32_lower,
     ] {
-        assert!(
-            !logs.contains(needle),
-            "journaux : {needle} trouvé dans {logs:?}"
-        );
+        assert!(!logs.contains(needle), "logs: {needle} found in {logs:?}");
     }
-    // Aucune adresse ni boîte lisible dans la base (et son WAL).
+    // No readable address or mailbox in the database (and its WAL).
     for needle in ["127.0.0.1", "::1", &"a7".repeat(16), &b32, &b32_lower] {
-        assert!(!files_contain(&data, needle.as_bytes()), "base : {needle}");
+        assert!(
+            !files_contain(&data, needle.as_bytes()),
+            "database: {needle}"
+        );
     }
 }
 
@@ -329,28 +329,28 @@ fn key_symlink_is_refused_and_init_recovers() {
     let st = node(&["status", "--data-dir", dir.to_str().unwrap()]);
     assert!(!st.status.success());
     assert!(
-        text(&st.stderr).contains("fichier ordinaire"),
+        text(&st.stderr).contains("regular file"),
         "{}",
         text(&st.stderr)
     );
 
-    // Dossier ouvert au groupe : avertissement en français.
+    // Directory open to the group: warning.
     let open = tmp.path().join("open");
     fs::create_dir(&open).unwrap();
     fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
     let out = init(&open);
     assert!(out.status.success());
     assert!(
-        text(&out.stderr).contains("avertissement"),
+        text(&out.stderr).contains("warning"),
         "{}",
         text(&out.stderr)
     );
 }
 
-// --- `status` et `peers` avec la table de hachage (spec §8) ---
+// --- `status` and `peers` with the hash table (spec §8) ---
 
-/// Dossier de données sans `init` (pas de puzzle à résoudre) : clé de
-/// graine fixe, base neuve.
+/// Data directory without `init` (no puzzle to solve): fixed-seed key,
+/// fresh database.
 fn data_dir_with_key(tmp: &Path) -> (std::path::PathBuf, NodeId) {
     let dir = tmp.join("data");
     fs::create_dir(&dir).unwrap();
@@ -373,8 +373,8 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Trois pairs aux /24 distincts, vus il y a 1 h, connus depuis 5 h ; un
-/// message gardé ; 12 345 octets recopiés dans l'heure.
+/// Three peers in distinct /24s, seen 1 h ago, known for 5 h; one kept
+/// message; 12 345 bytes replicated within the hour.
 fn fill_dht_base(dir: &Path) -> Vec<NodeId> {
     use barking_node::rules;
     use barking_node::store::PeerRow;
@@ -414,13 +414,13 @@ fn fill_dht_base(dir: &Path) -> Vec<NodeId> {
     ids
 }
 
-/// Aucun mot de la sortie ne se lit comme une adresse IP ou de socket.
+/// No word of the output reads as an IP or socket address.
 fn assert_no_address(out: &str) {
     for word in out.split_whitespace() {
         let w = word.trim_matches(|c: char| ",;()[]".contains(c));
         assert!(
             w.parse::<std::net::IpAddr>().is_err() && w.parse::<SocketAddr>().is_err(),
-            "adresse dans la sortie : {w} ({out})"
+            "address in the output: {w} ({out})"
         );
     }
     assert!(!out.contains("11.0."), "{out}");
@@ -432,13 +432,13 @@ fn status_shows_dht_lines_without_addresses() {
     let (dir, id) = data_dir_with_key(tmp.path());
     fill_dht_base(&dir);
     let s = status_of(&dir);
-    assert_eq!(field(&s, "identifiant"), id.to_string());
-    assert_eq!(field(&s, "paquets"), "1");
-    assert_eq!(field(&s, "pairs"), "3");
-    assert_eq!(field(&s, "compartiments"), "3 non vides");
-    // Moins de 10 nœuds connus : responsable de toutes ses boîtes.
-    assert_eq!(field(&s, "responsable"), "1 boîtes");
-    assert_eq!(field(&s, "recopié"), "12345 octets dans l'heure");
+    assert_eq!(field(&s, "identifier"), id.to_string());
+    assert_eq!(field(&s, "packets"), "1");
+    assert_eq!(field(&s, "peers"), "3");
+    assert_eq!(field(&s, "buckets"), "3 non-empty");
+    // Fewer than 10 known nodes: responsible for all its mailboxes.
+    assert_eq!(field(&s, "responsible"), "1 mailboxes");
+    assert_eq!(field(&s, "replicated"), "12345 bytes in the last hour");
     assert_no_address(&s);
 }
 
@@ -452,8 +452,8 @@ fn peers_lists_ids_without_addresses() {
     let out = text(&out.stdout);
     assert_eq!(out.lines().count(), 3, "{out}");
     for id in ids {
-        let line = format!("{id}  ancienneté 5 h  vu il y a 1 h");
-        assert!(out.lines().any(|l| l == line), "{line} absent de {out}");
+        let line = format!("{id}  age 5 h  seen 1 h ago");
+        assert!(out.lines().any(|l| l == line), "{line} missing from {out}");
     }
     assert_no_address(&out);
 }
@@ -473,7 +473,7 @@ fn status_on_v2_base_asks_to_run() {
         let out = node(&[cmd, "--data-dir", dir.to_str().unwrap()]);
         assert!(!out.status.success(), "{cmd}");
         assert!(
-            text(&out.stderr).contains("lancez le nœud une fois pour migrer la base")
+            text(&out.stderr).contains("run the node once to migrate it")
                 && !text(&out.stderr).contains("configuration"),
             "{cmd} : {}",
             text(&out.stderr)
@@ -491,7 +491,7 @@ fn status_with_empty_table_says_so() {
         .save_peers(&[])
         .unwrap();
     let s = status_of(&dir);
-    assert_eq!(field(&s, "pairs"), "0");
-    // Sans pair connu, les boîtes gardées ne sont pas dites « responsables ».
-    assert_eq!(field(&s, "responsable"), "table vide ou désactivée");
+    assert_eq!(field(&s, "peers"), "0");
+    // With no known peer, held mailboxes are not called "responsible".
+    assert_eq!(field(&s, "responsible"), "table empty or disabled");
 }

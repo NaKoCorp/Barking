@@ -1,25 +1,23 @@
-//! Table de hachage dans le nœud (spec §3.3, §4, §5.2, §6) : requêtes
-//! `Ping`, `FindNode`, `Store` et `FindValue`, contacts directs, recherche
-//! sur le réseau et entretien (`maintain`).
+//! Hash table in the node (spec §3.3, §4, §5.2, §6): `Ping`, `FindNode`,
+//! `Store` and `FindValue` requests, direct contacts, network lookup and
+//! maintenance (`maintain`).
 //!
-//! **Contact direct** (spec §6.1, et règle R5) : un nœud n'entre dans la
-//! table (`on_contact`) qu'avec une fiche qui
-//! - est valide (`NodeRecord::verify`) ;
-//! - donne l'identifiant épinglé par TLS sur la connexion qui l'a apportée ;
-//! - a été renvoyée à l'identique par un `Pong` à **chacune** de ses
-//!   adresses que ce nœud peut joindre (au moins une), chaque `Ping` partant
-//!   vers cette adresse précise. Une famille est joignable si nous publions
-//!   une adresse de cette famille et avons un endpoint pour elle ; une
-//!   adresse d'une autre famille n'est ni appelée, ni vérifiée, ni comptée
-//!   comme un échec (spec §10).
+//! **Direct contact** (spec §6.1, and rule R5): a node enters the table
+//! (`on_contact`) only with a record that
+//! - is valid (`NodeRecord::verify`);
+//! - gives the identifier pinned by TLS on the connection that carried it;
+//! - was returned unchanged by a `Pong` at **each** of its addresses that
+//!   this node can reach (at least one), each `Ping` going to that exact
+//!   address. A family is reachable if we publish an address of that family
+//!   and have an endpoint for it; an address of another family is neither
+//!   called, nor verified, nor counted as a failure (spec §10).
 //!
-//! Sans la dernière condition, une fiche à double pile pourrait revendiquer
-//! une adresse dans le /24 ou le /48 d'une victime et en prendre les places.
-//! Une fiche reçue en `Nodes`, jointe en `from`, ou un nœud qui a répondu
-//! pendant une recherche ne sont que des candidats, vérifiés ainsi.
+//! Without the last condition, a dual-stack record could claim an address in
+//! a victim's /24 or /48 and take its slots. A record received in `Nodes`,
+//! attached as `from`, or a node that answered during a lookup are only
+//! candidates, verified this way.
 //!
-//! Les journaux ne donnent que des identifiants de nœud (base32), jamais
-//! d'adresse ni de boîte.
+//! Logs give only node identifiers (base32), never an address or a mailbox.
 
 pub mod maintain;
 pub mod pool;
@@ -51,51 +49,51 @@ use crate::store::{MAX_PEER_ROWS, PeerRow};
 use pool::PeerPool;
 use replicate::Queue;
 
-/// Délai d'un appel à un pair, connexion comprise (spec §6.3 : 3 s).
+/// Timeout of a call to a peer, connection included (spec §6.3: 3 s).
 pub const CALL_TIMEOUT: Duration = Duration::from_millis(REQUEST_TIMEOUT_MS);
-/// Un `Ping` de rappel au plus par identifiant sur cette durée (spec §6.2).
+/// At most one callback `Ping` per identifier over this duration (spec §6.2).
 pub const RECALL_INTERVAL: Duration = Duration::from_secs(600);
-/// Un contrôle de vie demandé par la recopie au plus par identifiant sur
-/// cette durée.
+/// At most one liveness check requested by replication per identifier over
+/// this duration.
 pub const LIVENESS_INTERVAL: Duration = Duration::from_secs(600);
-/// Rappels en cours au plus, tous identifiants confondus : un afflux de
-/// fiches jointes ne fait pas du nœud un amplificateur.
+/// At most this many callbacks in flight, all identifiers combined: a flood
+/// of attached records does not turn the node into an amplifier.
 const MAX_RECALLS_IN_FLIGHT: usize = 16;
-/// Identifiants rappelés gardés au-delà desquels les anciens sont oubliés.
+/// Called-back identifiers kept; beyond this, the oldest are forgotten.
 const RECALLS_SWEEP_AT: usize = 1024;
-/// Octets comptés au seau d'un pair pour une requête sans paquet.
+/// Bytes charged to a peer's bucket for a request without a packet.
 const SMALL_REQUEST_BYTES: usize = 256;
-/// Promotions enchaînées au plus après un contact (anciens d'abord).
+/// At most this many chained promotions after a contact (oldest first).
 const MAX_CONTACT_STEPS: usize = 4;
 
-/// État de la table de hachage d'un nœud.
+/// State of a node's hash table.
 pub struct Dht {
     key: SigningKey,
     id: NodeId,
     cfg: DhtConfig,
     policy: RecordPolicy,
-    /// Notre fiche, republiée par l'entretien.
+    /// Our record, republished by maintenance.
     record: Mutex<NodeRecord>,
     table: Mutex<RoutingTable>,
     pool: PeerPool,
     limiter: PeerLimiter,
-    /// Dernier rappel par identifiant (spec §6.2).
+    /// Last callback per identifier (spec §6.2).
     recalls: Mutex<HashMap<NodeId, Instant>>,
     recall_slots: Arc<Semaphore>,
-    /// Nœuds de la table en cours de contrôle (`check_alive`) : un second
-    /// contrôle simultané n'ajoute pas d'échec.
+    /// Table nodes currently being checked (`check_alive`): a second
+    /// simultaneous check adds no failure.
     checking: Mutex<HashSet<NodeId>>,
-    /// Part de la file de base d'un identifiant appelant.
+    /// Share of the database queue for a calling identifier.
     db_jobs_per_peer: u32,
-    /// Tests : période qui remplace toutes les cadences d'entretien.
+    /// Tests: period that replaces all maintenance cadences.
     tick: Option<Duration>,
-    /// Ordre et file des boîtes à recopier (spec §5.3).
+    /// Order and queue of mailboxes to replicate (spec §5.3).
     queue: Mutex<Queue>,
-    /// Réveille la recopie quand la file gagne une boîte.
+    /// Wakes replication when the queue gains a mailbox.
     wake: Notify,
-    /// Dernier contrôle de vie demandé par la recopie, par identifiant.
+    /// Last liveness check requested by replication, per identifier.
     liveness: Mutex<HashMap<NodeId, Instant>>,
-    /// Prochain instant où la recopie peut appeler chaque identifiant.
+    /// Next instant at which replication may call each identifier.
     pace: Mutex<HashMap<NodeId, tokio::time::Instant>>,
 }
 
@@ -103,7 +101,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Heure arrondie à l'heure inférieure (lignes de `peers`).
+/// Time rounded down to the hour (`peers` rows).
 fn hour(t: u64) -> u64 {
     t - t % 3600
 }
@@ -157,18 +155,18 @@ impl Dht {
         self.tick
     }
 
-    /// Notre fiche courante, transmise par `Pong` et `from`.
+    /// Our current record, sent by `Pong` and `from`.
     pub fn own_record(&self) -> NodeRecord {
         lock(&self.record).clone()
     }
 
-    /// Signe une nouvelle fiche datée de l'heure `now` (spec §6.1).
+    /// Signs a new record dated `now` (spec §6.1).
     pub fn republish(&self, now: u64) {
         *lock(&self.record) =
             NodeRecord::sign(&self.key, self.cfg.public_v4, self.cfg.public_v6, now);
     }
 
-    /// Accès à la table (jamais tenu pendant une attente).
+    /// Access to the table (never held across an await).
     pub fn table(&self) -> MutexGuard<'_, RoutingTable> {
         lock(&self.table)
     }
@@ -185,17 +183,17 @@ impl Dht {
         &self.wake
     }
 
-    /// Un nœud vient d'entrer dans la table : les boîtes gardées dont il
-    /// devient l'un des responsables sont mises en file (spec §5.3), d'après
-    /// les distances notées à la dernière passe, sans parcourir la table.
+    /// A node has just entered the table: the held mailboxes for which it
+    /// becomes one of the responsible nodes are queued (spec §5.3), based on
+    /// the distances noted on the last pass, without walking the table.
     fn enqueue_for(&self, id: NodeId) {
         if self.replication_queue().enqueue_near(&id) {
             self.wake.notify_one();
         }
     }
 
-    /// Instant où la recopie peut appeler `id` : le premier libre, puis
-    /// réservé ; l'appel suivant attendra `spacing` de plus.
+    /// Instant at which replication may call `id`: the first free one, then
+    /// reserved; the next call will wait `spacing` longer.
     pub(crate) fn replication_slot(&self, id: NodeId, spacing: Duration) -> tokio::time::Instant {
         let now = tokio::time::Instant::now();
         let mut pace = lock(&self.pace);
@@ -207,11 +205,11 @@ impl Dht {
         at
     }
 
-    /// Contrôle de vie d'un responsable resté sans réponse pendant la
-    /// recopie : au plus un par identifiant et par `LIVENESS_INTERVAL`
-    /// (`dht_tick` en test), par `check_alive` (qui seul compte l'échec, et
-    /// saute un contrôle déjà en cours). Vrai si le nœud est encore dans la
-    /// table.
+    /// Liveness check of a responsible node left unanswered during
+    /// replication: at most one per identifier and per `LIVENESS_INTERVAL`
+    /// (`dht_tick` in tests), through `check_alive` (which alone counts the
+    /// failure, and skips a check already in progress). True if the node is
+    /// still in the table.
     pub async fn liveness_check(&self, id: NodeId) -> bool {
         let every = self.tick.unwrap_or(LIVENESS_INTERVAL);
         let now = Instant::now();
@@ -234,8 +232,8 @@ impl Dht {
         self.table().get(&id).is_some()
     }
 
-    /// Lignes de `peers` : les actifs d'abord, `MAX_PEER_ROWS` au plus,
-    /// dates arrondies à l'heure.
+    /// `peers` rows: active ones first, at most `MAX_PEER_ROWS`, dates
+    /// rounded to the hour.
     pub fn peer_rows(&self) -> Vec<PeerRow> {
         self.table()
             .peers()
@@ -251,10 +249,10 @@ impl Dht {
             .collect()
     }
 
-    /// Traite une requête de la table. `peer` : nœud appelant authentifié
-    /// par son certificat ; `remote` : adresse source de la connexion ;
-    /// `group` : sa place dans le limiteur d'adresses, dont le seau a déjà
-    /// admis la requête.
+    /// Handles a table request. `peer`: calling node authenticated by its
+    /// certificate; `remote`: source address of the connection; `group`: its
+    /// slot in the address limiter, whose bucket has already admitted the
+    /// request.
     pub(crate) async fn handle(
         self: &Arc<Self>,
         req: Request,
@@ -290,19 +288,19 @@ impl Dht {
                 })
             }
             Request::Store { packet, pow } => {
-                // §5.2 : 1. appelant authentifié ; 2. débit.
+                // §5.2: 1. authenticated caller; 2. rate.
                 let Some(id) = peer else {
                     return err(ErrorReason::Unsupported);
                 };
                 if let Err(r) = self.admit(peer, packet.len()) {
                     return err(r);
                 }
-                // 3. à 5. paquet, proximité, preuve.
+                // 3. to 5. packet, proximity, proof.
                 if let Err(r) = self.check_store(&shared.policy, &id, &packet, pow, unix_now()) {
                     return err(r);
                 }
-                // 6. et 7. accusé et stockage, avec la part de file de
-                // l'identifiant, tenue par la tâche bloquante.
+                // 6. and 7. acknowledgement and storage, with the identifier's
+                // share of the queue, held by the blocking task.
                 let Some(job) = self.limiter.try_db_job(&id, self.db_jobs_per_peer) else {
                     return Stored::Busy;
                 };
@@ -350,8 +348,8 @@ impl Dht {
         }
     }
 
-    /// Seau de l'identifiant appelant, s'il est authentifié (spec §5.2,
-    /// point 2) ; celui du groupe d'adresses est déjà passé.
+    /// Bucket of the calling identifier, if authenticated (spec §5.2,
+    /// point 2); the address group's bucket has already been passed.
     fn admit(&self, peer: Option<NodeId>, bytes: usize) -> Result<(), ErrorReason> {
         match peer {
             Some(id) if !self.limiter.admit(&id, bytes, Instant::now()) => {
@@ -361,11 +359,11 @@ impl Dht {
         }
     }
 
-    /// Fiche jointe `from` (spec §4, §6.2) : réservée à un appelant
-    /// authentifié, valide et à son identifiant, sinon `Malformed`. Elle est
-    /// ensuite rappelée, au plus une fois par identifiant et par
-    /// `RECALL_INTERVAL`, et seulement si elle annonce l'IP source de la
-    /// connexion (`remote`).
+    /// Attached record `from` (spec §4, §6.2): reserved to an authenticated
+    /// caller, valid and matching its identifier, otherwise `Malformed`. It
+    /// is then called back, at most once per identifier and per
+    /// `RECALL_INTERVAL`, and only if it announces the connection's source
+    /// IP (`remote`).
     fn check_from(
         self: &Arc<Self>,
         from: Option<NodeRecord>,
@@ -387,12 +385,13 @@ impl Dht {
         }
     }
 
-    /// Rappelle une candidate jointe en `from` : `Ping` d'abord vers son
-    /// adresse qui porte l'IP source `remote`, puis vers les autres, et
-    /// contact si tout concorde. Rien si aucune de ses adresses n'a cette IP :
-    /// sinon n'importe quel identifiant ferait pinger par chaque nœud des
-    /// adresses de son choix (réflexion vers une victime). Rien non plus si
-    /// elle est déjà dans la table avec cette fiche et vue récemment.
+    /// Calls back a candidate attached as `from`: `Ping` first to its
+    /// address carrying the source IP `remote`, then to the others, and
+    /// contact if everything matches. Nothing if none of its addresses has
+    /// this IP: otherwise any identifier could make every node ping
+    /// addresses of its choosing (reflection toward a victim). Nothing
+    /// either if it is already in the table with this record and seen
+    /// recently.
     fn recall(self: &Arc<Self>, id: NodeId, record: NodeRecord, remote: SocketAddr) {
         if id == self.id {
             return;
@@ -431,9 +430,9 @@ impl Dht {
         });
     }
 
-    /// Préconditions d'un `Store` sans base de données (spec §5.2, points 3
-    /// à 5), dans l'ordre : paquet, proximité de l'appelant et de nous,
-    /// preuve de base.
+    /// Preconditions of a `Store` without a database (spec §5.2, points 3 to
+    /// 5), in order: packet, proximity of the caller and of ourselves, base
+    /// proof.
     pub fn check_store(
         &self,
         policy: &Policy,
@@ -453,8 +452,8 @@ impl Dht {
         rules::copy_pow_ok(policy, packet, pow)
     }
 
-    /// `Ping` du nœud `id` à l'adresse `addr` ; sa fiche si elle est valide
-    /// et donne `id` (la connexion est épinglée sur `id` par TLS).
+    /// `Ping` of node `id` at address `addr`; its record if it is valid and
+    /// gives `id` (the connection is pinned to `id` by TLS).
     async fn ping_at(&self, id: NodeId, addr: SocketAddr) -> Option<NodeRecord> {
         let req = Request::Ping {
             from: Some(self.own_record()),
@@ -469,11 +468,11 @@ impl Dht {
         (record.verify(unix_now(), &self.policy).ok()? == id).then_some(record)
     }
 
-    /// Contact direct avec `id`, joint d'abord à l'une de `start` : sa fiche
-    /// si elle est valide, donne `id`, et revient à l'identique d'un `Ping`
-    /// à chacune de ses adresses joignables d'ici, dont au moins une. Une
-    /// adresse d'une famille injoignable d'ici (non publiée, ou sans endpoint)
-    /// est sautée.
+    /// Direct contact with `id`, first reached at one of `start`: its record
+    /// if it is valid, gives `id`, and comes back unchanged from a `Ping` at
+    /// each of its addresses reachable from here, at least one. An address
+    /// of a family unreachable from here (unpublished, or without endpoint)
+    /// is skipped.
     pub async fn verify(&self, id: NodeId, start: &[SocketAddr]) -> Option<NodeRecord> {
         if id == self.id {
             return None;
@@ -503,22 +502,22 @@ impl Dht {
         verified.then_some(record)
     }
 
-    /// Fait entrer dans la table un nœud dont la fiche vient d'être vérifiée
-    /// par `verify`. Compartiment plein : le plus ancien est pingé ; il
-    /// reste s'il répond, sinon son échec est compté et, s'il est retiré,
-    /// la candidate de la réserve est contactée puis promue.
+    /// Brings into the table a node whose record has just been verified by
+    /// `verify`. Full bucket: the oldest is pinged; it stays if it answers,
+    /// otherwise its failure is counted and, if it is removed, the reserve
+    /// candidate is contacted and then promoted.
     pub async fn admit_contact(&self, id: NodeId, record: NodeRecord) {
         let mut next = Some((id, record));
         for _ in 0..MAX_CONTACT_STEPS {
             let Some((id, record)) = next.take() else {
                 return;
             };
-            // Résultat lié d'abord : la garde de la table est rendue avant
-            // `enqueue_for`, qui la reprend.
+            // Result bound first: the table guard is released before
+            // `enqueue_for`, which takes it again.
             let inserted = self.table().on_contact(id, record, unix_now());
             let head = match inserted {
                 Insert::Added => {
-                    tracing::debug!("pair ajouté à la table : {id}");
+                    tracing::debug!("peer added to the table: {id}");
                     self.enqueue_for(id);
                     return;
                 }
@@ -529,11 +528,11 @@ impl Dht {
         }
     }
 
-    /// Pinge un nœud de la table. S'il répond, le contact est noté ; sinon
-    /// l'échec est compté, et la candidate de réserve qui le remplace, s'il
-    /// est retiré, est renvoyée une fois vérifiée. Un contrôle déjà en cours
-    /// pour `id` fait sauter celui-ci : un même délai dépassé n'est compté
-    /// qu'une fois. Une fiche sans adresse joignable d'ici n'est pas jugée.
+    /// Pings a table node. If it answers, the contact is noted; otherwise
+    /// the failure is counted, and the reserve candidate that replaces it, if
+    /// it is removed, is returned once verified. A check already in progress
+    /// for `id` makes this one skip: the same timeout is counted only once.
+    /// A record with no address reachable from here is not judged.
     async fn check_alive(&self, id: NodeId) -> Option<(NodeId, NodeRecord)> {
         let _check = self.begin_check(id)?;
         let known = self.table().get(&id).map(|p| p.record.clone())?;
@@ -541,17 +540,17 @@ impl Dht {
             return None;
         }
         if let Some(r) = self.verify(id, &known.addrs()).await {
-            // Toujours actif : il reste (rafraîchi), rien à promouvoir.
+            // Still active: it stays (refreshed), nothing to promote.
             self.table().on_contact(id, r, unix_now());
             return None;
         }
         let candidate = self.table().on_failure(&id)?;
-        tracing::debug!("pair retiré de la table : {id}");
+        tracing::debug!("peer removed from the table: {id}");
         self.try_candidate(candidate).await
     }
 
-    /// Contacte la candidate de réserve qui remplace un nœud retiré : sa
-    /// fiche si elle répond, sinon son échec est compté.
+    /// Contacts the reserve candidate that replaces a removed node: its
+    /// record if it answers, otherwise its failure is counted.
     async fn try_candidate(&self, candidate: NodeId) -> Option<(NodeId, NodeRecord)> {
         let rec = self.table().get(&candidate).map(|p| p.record.clone())?;
         match self.verify(candidate, &rec.addrs()).await {
@@ -563,24 +562,24 @@ impl Dht {
         }
     }
 
-    /// Marque `id` en cours de contrôle ; `None` s'il l'est déjà.
+    /// Marks `id` as being checked; `None` if it already is.
     fn begin_check(&self, id: NodeId) -> Option<CheckGuard<'_>> {
-        // `then` et non `then_some` : une garde construite pour rien serait
-        // détruite sous le verrou, et retirerait le contrôle en cours.
+        // `then` and not `then_some`: a guard built for nothing would be
+        // dropped under the lock, and would remove the check in progress.
         let fresh = lock(&self.checking).insert(id);
         fresh.then(|| CheckGuard { dht: self, id })
     }
 
-    /// Entretien d'un nœud de la table : contrôle, puis promotion éventuelle
-    /// de sa remplaçante.
+    /// Maintenance of a table node: check, then possible promotion of its
+    /// replacement.
     pub async fn refresh_peer(&self, id: NodeId) {
         if let Some((c, r)) = self.check_alive(id).await {
             self.admit_contact(c, r).await;
         }
     }
 
-    /// Contacte chaque nœud de `targets` (identifiant, adresses de départ),
-    /// `parallel` à la fois ; renvoie le nombre de nœuds joints.
+    /// Contacts each node of `targets` (identifier, starting addresses),
+    /// `parallel` at a time; returns the number of nodes reached.
     pub async fn contact_all(
         self: &Arc<Self>,
         targets: Vec<(NodeId, Vec<SocketAddr>)>,
@@ -610,9 +609,9 @@ impl Dht {
         reached
     }
 
-    /// Recherche itérative de `target` sur le réseau (spec §6.3), avec
-    /// `FindNode { from: notre fiche }`. Les nœuds qui ont répondu et ne
-    /// sont pas encore dans la table sont ensuite contactés (candidats).
+    /// Iterative lookup of `target` on the network (spec §6.3), with
+    /// `FindNode { from: our record }`. Nodes that answered and are not yet
+    /// in the table are then contacted (candidates).
     pub async fn lookup(self: &Arc<Self>, target: [u8; 32]) -> Vec<(NodeId, NodeRecord)> {
         let seeds: Vec<(NodeId, NodeRecord)> = self
             .table()
@@ -644,8 +643,8 @@ impl Dht {
                 break;
             }
             match timeout(Duration::from_millis(100), calls.join_next()).await {
-                // `from` : identifiant épinglé par TLS de la connexion
-                // interrogée.
+                // `from`: identifier pinned by TLS of the queried
+                // connection.
                 Ok(Some(Ok((id, Some(records))))) => lookup.on_response(&id, records, unix_now()),
                 Ok(Some(Ok((id, None)))) => lookup.on_failure(&id),
                 Ok(Some(Err(_))) | Err(_) => {}
@@ -667,11 +666,11 @@ impl Dht {
     }
 }
 
-/// Table reconstruite hors ligne depuis les lignes de `peers` (commandes
-/// `status` et `peers`), aux limites de la spec : les plus anciens d'abord,
-/// comme la table vivante les garde. Une ligne illisible ou dont la fiche ne
-/// donne pas l'identifiant est écartée ; les fiches ne sont pas revérifiées
-/// (date, puzzle), le nœud l'a fait avant de les enregistrer.
+/// Table rebuilt offline from the `peers` rows (`status` and `peers`
+/// commands), at the spec's limits: oldest first, as the live table keeps
+/// them. An unreadable row, or one whose record does not give the
+/// identifier, is discarded; records are not re-verified (date, puzzle), the
+/// node did it before storing them.
 pub fn table_from_rows(own: NodeId, rows: &[PeerRow]) -> RoutingTable {
     let mut table = RoutingTable::new(own);
     let mut sorted: Vec<&PeerRow> = rows.iter().collect();
@@ -691,7 +690,7 @@ pub fn table_from_rows(own: NodeId, rows: &[PeerRow]) -> RoutingTable {
     table
 }
 
-/// Contrôle en cours d'un nœud de la table, levé à la destruction.
+/// Check in progress of a table node, lifted on drop.
 struct CheckGuard<'a> {
     dht: &'a Dht,
     id: NodeId,
@@ -703,8 +702,8 @@ impl Drop for CheckGuard<'_> {
     }
 }
 
-/// Adresse de `record` qui porte l'IP source `remote` (le port peut
-/// différer), par où commence le rappel ; `None` si aucune.
+/// Address of `record` carrying the source IP `remote` (the port may
+/// differ), where the callback starts; `None` if none.
 fn recall_start(record: &NodeRecord, remote: SocketAddr) -> Option<SocketAddr> {
     let ip = remote.ip().to_canonical();
     record
@@ -754,8 +753,8 @@ mod tests {
         .encode()
     }
 
-    /// Ajoute à la table un nœud d'identifiant `id`, dans son propre /24 ;
-    /// la table ne vérifie pas les fiches.
+    /// Adds to the table a node with identifier `id`, in its own /24; the
+    /// table does not verify records.
     fn add(dht: &Dht, id: NodeId, n: u8) {
         let addr = SocketAddrV4::new([10, 0, n, 1].into(), 4433);
         let rec = NodeRecord::sign(&SigningKey::from_bytes(&[n; 32]), Some(addr), None, 0);
@@ -778,11 +777,11 @@ mod tests {
         let key = mailbox_key(&mailbox);
         let far = NodeId(key.map(|b| !b));
 
-        // Moins de 10 nœuds : fenêtre infinie, tout appelant est accepté.
+        // Fewer than 10 nodes: infinite window, every caller is accepted.
         assert_eq!(d.check_store(&policy, &far, &packet, good, now), Ok(()));
 
-        // Dix nœuds plus loin de la clé que nous : chacun ne diffère de notre
-        // identifiant que par un bit que notre distance à la clé a à zéro.
+        // Ten nodes farther from the key than we are: each differs from our
+        // identifier only by a bit that our distance to the key has at zero.
         let own = d.id().0;
         let dist = distance(&own, &key);
         let mut added = Vec::new();
@@ -800,7 +799,7 @@ mod tests {
             }
         }
         let near = added[0];
-        // Ordre de §5.2 : le paquet avant la proximité.
+        // Order of §5.2: the packet before proximity.
         assert_eq!(
             d.check_store(&policy, &far, &[1, 2, 3], good, now),
             Err(ErrorReason::Malformed)
@@ -809,7 +808,7 @@ mod tests {
             d.check_store(&policy, &far, &packet, good, now),
             Err(ErrorReason::NotResponsible)
         );
-        // Proche : la preuve est vérifiée ensuite.
+        // Near: the proof is verified next.
         assert_eq!(d.check_store(&policy, &near, &packet, good, now), Ok(()));
         let weak = (0..)
             .find(|n| !pow::check(&hash, &mailbox, *n, bits))
@@ -829,7 +828,7 @@ mod tests {
             Some("[2a01::1]:4433".parse().unwrap()),
             0,
         );
-        // Même IP, autre port : le rappel part de l'adresse annoncée.
+        // Same IP, other port: the callback starts from the announced address.
         assert_eq!(
             recall_start(&rec, "1.2.3.4:9999".parse().unwrap()),
             Some("1.2.3.4:4433".parse().unwrap())
@@ -838,20 +837,20 @@ mod tests {
             recall_start(&rec, "[2a01::1]:1".parse().unwrap()),
             Some("[2a01::1]:4433".parse().unwrap())
         );
-        // IPv4 vue en IPv6 encapsulée (socket double pile).
+        // IPv4 seen as encapsulated IPv6 (dual-stack socket).
         assert_eq!(
             recall_start(&rec, "[::ffff:1.2.3.4]:1".parse().unwrap()),
             Some("1.2.3.4:4433".parse().unwrap())
         );
-        // IP absente de la fiche : aucun rappel.
+        // IP absent from the record: no callback.
         assert_eq!(recall_start(&rec, "1.2.3.5:4433".parse().unwrap()), None);
         assert_eq!(recall_start(&rec, "[2a01::2]:4433".parse().unwrap()), None);
     }
 
     #[tokio::test]
     async fn concurrent_head_checks_count_one_failure() {
-        // Endpoint IPv4 : l'adresse du nœud est joignable, mais personne
-        // n'écoute (délai dépassé).
+        // IPv4 endpoint: the node's address is reachable, but nobody is
+        // listening (timeout).
         let ep = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
         let cfg = dht().cfg.clone();
         let d = Dht::new(
@@ -870,13 +869,13 @@ mod tests {
         let rec = NodeRecord::sign(&SigningKey::from_bytes(&[9; 32]), Some(addr), None, 0);
         assert_eq!(d.table().on_contact(id, rec, 0), Insert::Added);
         let fails = |d: &Dht| d.table().get(&id).map(|p| p.fails);
-        // Contrôle déjà en cours : le second ne compte rien.
+        // Check already in progress: the second counts nothing.
         let guard = d.begin_check(id).unwrap();
         assert!(d.begin_check(id).is_none());
         assert_eq!(d.check_alive(id).await, None);
         assert_eq!(fails(&d), Some(0));
         drop(guard);
-        // Seul : l'échec est compté.
+        // Alone: the failure is counted.
         assert_eq!(d.check_alive(id).await, None);
         assert_eq!(fails(&d), Some(1));
     }
@@ -890,7 +889,7 @@ mod tests {
         let second = d.replication_slot(a, gap);
         assert!(second >= first + gap);
         assert!(d.replication_slot(a, gap) >= second + gap);
-        // Un autre responsable n'attend pas.
+        // Another responsible node does not wait.
         assert!(d.replication_slot(b, gap) < second);
     }
 
@@ -913,17 +912,17 @@ mod tests {
         };
         let rec = NodeRecord::sign(&SigningKey::from_bytes(&[9; 32]), Some(addr), None, 0);
         assert_eq!(d.table().on_contact(id, rec, 0), Insert::Added);
-        // Premier contrôle : sans réponse, un échec.
+        // First check: no answer, one failure.
         assert!(d.liveness_check(id).await);
         assert_eq!(d.table().get(&id).map(|p| p.fails), Some(1));
-        // Dans les 10 min : aucun nouveau contrôle, rien de compté.
+        // Within 10 min: no new check, nothing counted.
         assert!(d.liveness_check(id).await);
         assert_eq!(d.table().get(&id).map(|p| p.fails), Some(1));
     }
 
     #[tokio::test]
     async fn unreachable_family_is_never_a_failure() {
-        // Aucun endpoint : aucune adresse joignable, rien n'est jugé.
+        // No endpoint: no reachable address, nothing is judged.
         let d = dht();
         let id = NodeId([9; 32]);
         add(&d, id, 1);

@@ -1,13 +1,13 @@
-//! Journaux `tracing` sur stderr : jamais d'adresse IP.
+//! `tracing` logs on stderr: never an IP address.
 //!
-//! Filtre par cible, tout éteint sauf :
-//! - `barking_node` et `barking_proto` : rapports agrégés et erreurs internes ;
-//! - `quinn`, `quinn_proto` : `warn` et au-dessus, dont les messages ne
-//!   contiennent pas d'adresse (vérifié dans les sources de quinn 0.11.12 et
-//!   quinn-proto 0.11.19) ;
-//! - `quinn_udp` : **éteint**, `log_sendmsg_error` y écrit adresse de
-//!   destination et adresse source au niveau `warn` ;
-//! - `rustls` et le reste : éteints (valeur par défaut).
+//! Per-target filter, everything off except:
+//! - `barking_node` and `barking_proto`: aggregated reports and internal errors;
+//! - `quinn`, `quinn_proto`: `warn` and above, whose messages do not
+//!   contain addresses (checked in the sources of quinn 0.11.12 and
+//!   quinn-proto 0.11.19);
+//! - `quinn_udp`: **off**, `log_sendmsg_error` writes the destination and
+//!   source addresses there at `warn` level;
+//! - `rustls` and the rest: off (default value).
 
 use tracing::Subscriber;
 use tracing::level_filters::LevelFilter;
@@ -26,7 +26,7 @@ pub fn filter() -> Targets {
         .with_target("quinn_udp", LevelFilter::OFF)
 }
 
-/// Abonné texte (sans horodatage : journald s'en charge) écrivant dans `w`.
+/// Text subscriber (no timestamp: journald handles it) writing to `w`.
 pub fn subscriber<W>(w: W) -> impl Subscriber + Send + Sync
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
@@ -40,7 +40,7 @@ where
     )
 }
 
-/// Installe l'abonné sur stderr.
+/// Installs the subscriber on stderr.
 pub fn init_stderr() {
     let _ = tracing::subscriber::set_global_default(subscriber(std::io::stderr));
 }
@@ -90,12 +90,12 @@ mod tests {
     #[test]
     fn quinn_keeps_warn_and_above_only() {
         let out = captured(|| {
-            tracing::debug!(target: "quinn_proto::endpoint", "paquet de 203.0.113.9");
-            tracing::info!(target: "quinn", "connexion de 203.0.113.9");
+            tracing::debug!(target: "quinn_proto::endpoint", "packet from 203.0.113.9");
+            tracing::info!(target: "quinn", "connection from 203.0.113.9");
             tracing::trace!(target: "quinn_proto::connection", "x");
             tracing::warn!(target: "quinn_proto::connection", "illegal packet");
             tracing::error!(target: "quinn", "I/O error");
-            tracing::warn!(target: "rustls::common_state", "alerte");
+            tracing::warn!(target: "rustls::common_state", "alert");
             tracing::info!(target: "tokio", "x");
         });
         assert!(!out.contains("203.0.113.9"), "{out}");
@@ -103,13 +103,13 @@ mod tests {
             out.contains("illegal packet") && out.contains("I/O error"),
             "{out}"
         );
-        assert!(!out.contains("alerte"), "{out}");
+        assert!(!out.contains("alert"), "{out}");
         assert!(!out.contains(" x"), "{out}");
     }
 
     #[test]
     fn node_reports_pass() {
-        let out = captured(|| tracing::info!(target: "barking_node::server", "rapport"));
-        assert!(out.contains("rapport"));
+        let out = captured(|| tracing::info!(target: "barking_node::server", "report"));
+        assert!(out.contains("report"));
     }
 }

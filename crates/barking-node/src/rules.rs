@@ -1,28 +1,28 @@
-//! Règles du nœud (spec §4.3, §5) : fonctions sans réseau.
+//! Node rules (spec §4.3, §5): functions without networking.
 //!
-//! Choix documentés :
-//! - « taille ≠ palier » : le paquet encodé doit faire exactement `Tier::size()`
-//!   (c'est aussi ce que vérifie `Packet::decode`). Si l'octet de palier est
-//!   valide mais la longueur reçue ne correspond pas, la raison est `WrongTier` ;
-//!   tout autre défaut de forme donne `Malformed`.
-//! - Déduplication par (identifiant, BLAKE3 des octets sans `hops`) : même
-//!   contenu = sans effet ; contenu différent sous le même identifiant = gardé à
-//!   côté (compte dans les quotas), pour qu'un identifiant ne puisse être squatté.
-//! - Un accusé est un paquet de palier S à charge de 32 octets, dans la boîte du
-//!   paquet accusé (sinon `UnknownAckTarget`). Il supprime toutes les lignes de
-//!   cet identifiant et est rangé dans chaque boîte distincte qui en tenait une
-//!   ligne (une ligne d'accusé par (identifiant, boîte)) ; il reste gardé jusqu'à `max(expiration de l'accusé,
-//!   expiration des paquets supprimés)` : le message ne ressuscite pas, ni par
-//!   redépôt ni par accusé raccourci.
-//! - Preuve de travail progressive : par boîte, par palier et selon le
-//!   remplissage global, voir `pow_bits_for`. `precheck` vérifie forme,
-//!   expiration et preuve au minimum (base + palier) sans la base de données.
-//! - Recopie entre nœuds (spec §5.2) : mêmes règles de forme, d'accusé, de
-//!   quotas et de déduplication que `deposit`, mais la preuve exigée est la
-//!   base du nœud (`pow_bits` + palier), sans le supplément progressif ; le
-//!   nonce reçu est gardé pour pouvoir recopier à son tour.
-//! - Curseur de `fetch` : `seq` (AUTOINCREMENT, jamais réutilisé) des paquets,
-//!   puis `ACK_BASE + seq` des accusés.
+//! Documented choices:
+//! - "size ≠ tier": the encoded packet must be exactly `Tier::size()` long
+//!   (this is also what `Packet::decode` checks). If the tier byte is valid
+//!   but the received length does not match, the reason is `WrongTier`; any
+//!   other malformation gives `Malformed`.
+//! - Deduplication by (identifier, BLAKE3 of the bytes without `hops`): same
+//!   content = no effect; different content under the same identifier = kept
+//!   aside (counts toward quotas), so that an identifier cannot be squatted.
+//! - An acknowledgement is a tier S packet with a 32-byte payload, in the
+//!   acknowledged packet's mailbox (otherwise `UnknownAckTarget`). It deletes
+//!   all rows of that identifier and is stored in each distinct mailbox that
+//!   held one (one ack row per (identifier, mailbox)); it stays kept until
+//!   `max(ack expiry, expiry of the deleted packets)`: the message does not
+//!   come back, neither through redeposit nor through a shortened ack.
+//! - Progressive proof of work: per mailbox, per tier and according to the
+//!   global fill level, see `pow_bits_for`. `precheck` verifies form, expiry
+//!   and proof at the minimum (base + tier) without the database.
+//! - Replication between nodes (spec §5.2): same form, ack, quota and
+//!   deduplication rules as `deposit`, but the required proof is the node's
+//!   base (`pow_bits` + tier), without the progressive surcharge; the
+//!   received nonce is kept so it can be replicated in turn.
+//! - `fetch` cursor: `seq` (AUTOINCREMENT, never reused) of packets, then
+//!   `ACK_BASE + seq` of acks.
 
 use barking_packet::{Kind, MailboxId, OVERHEAD, Packet, PacketId, Tier, ack};
 use barking_proto::{ErrorReason, pow};
@@ -34,12 +34,12 @@ use rusqlite::params;
 use crate::Result;
 use crate::store::{NodeStore, add_stored_bytes, stored_bytes};
 
-/// Nombre de paquets par palier de difficulté supplémentaire.
+/// Number of packets per additional difficulty step.
 const POW_STEP_PACKETS: i64 = 64;
 
-/// Marge d'expiration : 7 jours + 1 h (tolérance d'horloge d'une heure).
+/// Expiry margin: 7 days + 1 h (one-hour clock tolerance).
 pub const MAX_EXPIRY_SECS: u64 = 7 * 86_400 + 3_600;
-/// Nombre maximal de boîtes par relève.
+/// Maximum number of mailboxes per fetch.
 pub const MAX_MAILBOXES_PER_FETCH: usize = 64;
 const ACK_BASE: u64 = barking_proto::ACK_CURSOR_BASE;
 const MAX_HOLDINGS: usize = barking_proto::MAX_HOLDINGS_PER_PAGE;
@@ -62,12 +62,12 @@ impl Default for Policy {
 }
 
 impl Policy {
-    /// Refuse une politique incohérente (difficulté au-delà de `MAX_POW_BITS`,
-    /// qu'aucun client ne pourrait satisfaire).
+    /// Rejects an inconsistent policy (difficulty beyond `MAX_POW_BITS`,
+    /// which no client could satisfy).
     pub fn validate(&self) -> Result<()> {
         if self.pow_bits > pow::MAX_POW_BITS {
             return Err(crate::Error::Config(format!(
-                "pow_bits = {} dépasse le maximum {}",
+                "pow_bits = {} exceeds the maximum {}",
                 self.pow_bits,
                 pow::MAX_POW_BITS
             )));
@@ -83,9 +83,9 @@ fn i(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// Forme et expiration d'un dépôt.
+/// Form and expiry of a deposit.
 fn parse_checked(bytes: &[u8], now: u64) -> core::result::Result<Packet, ErrorReason> {
-    // Palier valide mais longueur différente : WrongTier.
+    // Valid tier but different length: WrongTier.
     if bytes.len() >= OVERHEAD
         && let Some(tier) = tier_from_byte(bytes[3])
         && bytes.len() != tier.size()
@@ -105,10 +105,9 @@ fn parse_checked(bytes: &[u8], now: u64) -> core::result::Result<Packet, ErrorRe
     Ok(packet)
 }
 
-/// Contrôles sans base de données, faits avant de prendre une place dans la
-/// file : forme, expiration, et pour un message une preuve à la difficulté
-/// minimale (base + palier). `deposit` refait tout, avec la difficulté
-/// complète.
+/// Checks without a database, done before taking a place in the queue:
+/// form, expiry, and for a message a proof at the minimum difficulty (base
+/// + tier). `deposit` redoes everything, with the full difficulty.
 pub fn precheck(
     policy: &Policy,
     bytes: &[u8],
@@ -130,7 +129,7 @@ pub fn precheck(
     Ok(())
 }
 
-/// Valide et enregistre un dépôt. `Err` : stockage ; `Ok(Err(raison))` : refus.
+/// Validates and records a deposit. `Err`: storage; `Ok(Err(reason))`: refusal.
 pub fn deposit(
     store: &mut NodeStore,
     policy: &Policy,
@@ -165,8 +164,8 @@ fn tier_from_byte(b: u8) -> Option<Tier> {
     }
 }
 
-/// Bits ajoutés selon le remplissage global : +1 par doublement au-delà de
-/// 1/8 du plafond (`stored` ≤ 1/8 : 0 ; ≤ 1/4 : 1 ; ≤ 1/2 : 2 ; au-delà : 3).
+/// Bits added according to the global fill level: +1 per doubling beyond
+/// 1/8 of the cap (`stored` ≤ 1/8: 0; ≤ 1/4: 1; ≤ 1/2: 2; beyond: 3).
 pub fn fill_surcharge(stored: u64, storage_max: u64) -> u32 {
     let mut level = (storage_max / 8).max(1);
     let mut extra = 0;
@@ -177,10 +176,10 @@ pub fn fill_surcharge(stored: u64, storage_max: u64) -> u32 {
     extra
 }
 
-/// Difficulté exigée : `min(MAX_POW_BITS, pow_bits + floor(log2(max(1,
-/// in_box / 64))) + palier (S 0, M 2, L 6) + remplissage global)`, `in_box`
-/// étant le nombre de paquets déjà gardés dans la boîte visée et `stored`
-/// les octets gardés par le nœud.
+/// Required difficulty: `min(MAX_POW_BITS, pow_bits + floor(log2(max(1,
+/// in_box / 64))) + tier (S 0, M 2, L 6) + global fill)`, `in_box` being the
+/// number of packets already kept in the target mailbox and `stored` the
+/// bytes kept by the node.
 pub fn pow_bits_for(policy: &Policy, in_box: i64, tier: Tier, stored: u64) -> u8 {
     let steps = in_box / POW_STEP_PACKETS;
     let per_box = if steps >= 1 { steps.ilog2() } else { 0 };
@@ -191,8 +190,8 @@ pub fn pow_bits_for(policy: &Policy, in_box: i64, tier: Tier, stored: u64) -> u8
     u8::try_from(bits.min(u32::from(pow::MAX_POW_BITS))).unwrap_or(pow::MAX_POW_BITS)
 }
 
-/// Difficulté exigée maintenant pour un dépôt de palier `tier` dans
-/// `mailbox` (voir `pow_bits_for`).
+/// Difficulty required now for a deposit of tier `tier` into `mailbox` (see
+/// `pow_bits_for`).
 pub fn required_pow_bits(
     store: &NodeStore,
     policy: &Policy,
@@ -212,13 +211,13 @@ pub fn required_pow_bits(
     ))
 }
 
-/// Difficulté exigée d'un message déposé.
+/// Difficulty required of a deposited message.
 #[derive(Clone, Copy)]
 enum Difficulty {
-    /// Dépôt d'un client : base, palier, boîte et remplissage (`pow_bits_for`).
+    /// Client deposit: base, tier, mailbox and fill (`pow_bits_for`).
     Progressive,
-    /// Recopie d'un pair : base et palier seulement (le client a déjà payé le
-    /// progressif au premier nœud).
+    /// Peer replication: base and tier only (the client already paid the
+    /// progressive part at the first node).
     Base,
 }
 
@@ -233,7 +232,7 @@ fn deposit_message(
 ) -> Result<core::result::Result<(), ErrorReason>> {
     let hash = pow::content_hash(bytes);
     let tx = store.conn_mut().transaction()?;
-    // Déjà accusé, ou même contenu déjà gardé : sans effet.
+    // Already acknowledged, or same content already kept: no effect.
     let known: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM packets WHERE id=?1 AND hash=?2) OR EXISTS(SELECT 1 FROM acks WHERE packet_id=?1)",
         params![&p.id.0[..], &hash[..]],
@@ -273,7 +272,7 @@ fn deposit_message(
             i(now / 60 * 60),
             &hash[..],
             bytes,
-            // Le nonce est gardé tel quel (réinterprété en i64, sans perte).
+            // The nonce is kept as is (reinterpreted as i64, losslessly).
             nonce as i64
         ],
     )?;
@@ -288,7 +287,7 @@ fn deposit_ack(
     p: &Packet,
     bytes: &[u8],
 ) -> Result<core::result::Result<(), ErrorReason>> {
-    // Palier S, charge : id du paquet accusé (16) || secret (16).
+    // Tier S, payload: acknowledged packet id (16) || secret (16).
     if p.tier != Tier::S || p.payload.len() != 32 {
         return Ok(Err(ErrorReason::Malformed));
     }
@@ -306,8 +305,8 @@ fn deposit_ack(
     if known {
         return Ok(Ok(()));
     }
-    // Lignes de cet identifiant : octets, expiration maximale, et boîtes
-    // distinctes (l'accusé est rangé dans chacune).
+    // Rows of this identifier: bytes, maximum expiry, and distinct mailboxes
+    // (the ack is stored in each).
     let (n, old_len, max_exp): (i64, i64, i64) = tx.query_row(
         "SELECT COUNT(*), COALESCE(SUM(length(bytes)),0), COALESCE(MAX(expires_at),0)
          FROM packets WHERE id=?1",
@@ -339,32 +338,32 @@ fn deposit_ack(
     Ok(Ok(()))
 }
 
-/// Une page de relève : (éléments, curseur suivant). Ne supprime rien.
+/// A fetch page: (items, next cursor). Deletes nothing.
 pub type Page = (Vec<Vec<u8>>, Option<u64>);
 
-/// Nombre maximal d'éléments par page (borne le travail d'une relève).
+/// Maximum number of items per page (bounds the work of a fetch).
 pub const MAX_PAGE_ITEMS: usize = 1024;
 
-/// Lecture d'une boîte dans l'ordre de `seq`, via l'index `(mailbox, rowid)` :
-/// ni tri, ni lecture des charges utiles. `slot` (rang de la boîte dans la
-/// requête) rend le texte unique : le cache de requêtes préparées en garde
-/// une par texte, et une relève en tient jusqu'à 64 à la fois par table.
+/// Read of a mailbox in `seq` order, via the `(mailbox, rowid)` index: no
+/// sort, no payload read. `slot` (the mailbox's rank in the request) makes
+/// the text unique: the prepared statement cache keeps one per text, and a
+/// fetch holds up to 64 at a time per table.
 pub(crate) fn fetch_scan_sql(table: &str, slot: usize) -> String {
     format!(
         "SELECT seq, length(bytes) FROM {table} WHERE mailbox=?1 AND seq>?2 ORDER BY seq /*{slot}*/"
     )
 }
 
-/// Requêtes préparées gardées en cache : 64 lectures par table, plus la
-/// lecture des charges de chaque table.
-/// Plus les deux lectures de `holdings` et les deux de `copy_items`.
+/// Prepared statements kept in cache: 64 reads per table, plus the payload
+/// read of each table.
+/// Plus the two reads of `holdings` and the two of `copy_items`.
 pub const STATEMENT_CACHE: usize = 2 * MAX_MAILBOXES_PER_FETCH + 2 + 4;
 
-/// Relève paginée : paquets puis accusés des `mailboxes`, dans l'ordre de
-/// `seq`. Fusion des lectures indexées de chaque boîte : le travail d'une
-/// page est proportionnel à sa taille (au plus `MAX_PAGE_ITEMS` éléments),
-/// pas au contenu des boîtes. Seules les charges retenues sont lues.
-/// La page ne dépasse `max_bytes` que si un seul élément est plus gros.
+/// Paginated fetch: packets then acks of `mailboxes`, in `seq` order. Merge
+/// of each mailbox's indexed reads: the work of a page is proportional to
+/// its size (at most `MAX_PAGE_ITEMS` items), not to the mailboxes'
+/// contents. Only the selected payloads are read.
+/// The page exceeds `max_bytes` only if a single item is larger.
 pub fn fetch(
     store: &NodeStore,
     mailboxes: &[MailboxId],
@@ -382,7 +381,7 @@ pub fn fetch(
     }
     let after = cursor.unwrap_or(0);
     let conn = store.conn();
-    // (table, seq) retenus, dans l'ordre.
+    // Selected (table, seq), in order.
     let mut chosen: Vec<(&str, i64)> = Vec::new();
     let mut used = 0usize;
     let mut last: Option<u64> = None;
@@ -431,9 +430,8 @@ pub fn fetch(
     Ok(Ok((page, if more { last } else { None })))
 }
 
-/// Boîte visée par un paquet à recopier, et `true` si c'est un accusé :
-/// forme, expiration et palier vérifiés comme pour un dépôt (spec §5.2,
-/// point 3).
+/// Mailbox targeted by a packet to replicate, and `true` if it is an ack:
+/// form, expiry and tier verified as for a deposit (spec §5.2, point 3).
 pub fn copy_target(
     packet: &[u8],
     now: u64,
@@ -442,8 +440,8 @@ pub fn copy_target(
     Ok((p.mailbox, p.kind == Kind::Ack))
 }
 
-/// Preuve d'un message recopié (spec §5.2, point 5) : `pow_bits` + palier,
-/// sans le supplément progressif. Un accusé n'en exige aucune.
+/// Proof of a replicated message (spec §5.2, point 5): `pow_bits` + tier,
+/// without the progressive surcharge. An ack requires none.
 pub fn copy_pow_ok(
     policy: &Policy,
     packet: &[u8],
@@ -468,8 +466,8 @@ pub fn copy_pow_ok(
     }
 }
 
-/// Difficulté qu'un pair de difficulté de base `pow_bits` exige d'un
-/// message recopié de palier `tier` (spec §5.2, point 5).
+/// Difficulty that a peer with base difficulty `pow_bits` requires of a
+/// replicated message of tier `tier` (spec §5.2, point 5).
 pub fn copy_pow_bits(pow_bits: u8, tier: Tier) -> u8 {
     let policy = Policy {
         pow_bits,
@@ -478,9 +476,9 @@ pub fn copy_pow_bits(pow_bits: u8, tier: Tier) -> u8 {
     pow_bits_for(&policy, 0, tier, 0)
 }
 
-/// Enregistre une copie reçue d'un pair (spec §5.2, points 6 et 7) : comme
-/// `deposit`, sans la surcharge progressive. Quotas et déduplication sont
-/// ceux du dépôt. La proximité (point 4) est vérifiée par l'appelant.
+/// Records a copy received from a peer (spec §5.2, points 6 and 7): like
+/// `deposit`, without the progressive surcharge. Quotas and deduplication
+/// are those of the deposit. Proximity (point 4) is verified by the caller.
 pub fn store_copy(
     store: &mut NodeStore,
     policy: &Policy,
@@ -500,13 +498,12 @@ pub fn store_copy(
     }
 }
 
-/// Une page d'empreintes : (empreintes, curseur suivant).
+/// A page of hashes: (hashes, next cursor).
 pub type HoldingsPage = (Vec<[u8; 32]>, Option<u64>);
 
-/// Page des empreintes tenues pour une boîte : paquets (par `seq`) puis
-/// accusés (`ACK_BASE + seq`), même ordre de curseur que `fetch`. L'empreinte
-/// d'un paquet est la colonne `hash`, celle d'un accusé `content_hash` de ses
-/// octets.
+/// Page of the hashes held for a mailbox: packets (by `seq`) then acks
+/// (`ACK_BASE + seq`), same cursor order as `fetch`. A packet's hash is the
+/// `hash` column, an ack's is the `content_hash` of its bytes.
 pub fn holdings(
     store: &NodeStore,
     mailbox: &MailboxId,
@@ -514,8 +511,8 @@ pub fn holdings(
 ) -> Result<core::result::Result<HoldingsPage, ErrorReason>> {
     let after = cursor.unwrap_or(0);
     let conn = store.conn();
-    // (curseur, empreinte), une ligne de plus que la page pour savoir s'il reste
-    // quelque chose.
+    // (cursor, hash), one row more than the page to know whether anything
+    // remains.
     let want = MAX_HOLDINGS + 1;
     let mut items: Vec<(u64, [u8; 32])> = Vec::with_capacity(want);
     for (table, base) in [("packets", 0u64), ("acks", ACK_BASE)] {
@@ -539,8 +536,8 @@ pub fn holdings(
             let seq = u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0);
             let blob: Vec<u8> = row.get(1)?;
             let hash = if table == "packets" {
-                // Une empreinte de longueur inattendue (base abîmée) est recalculée
-                // à défaut : on ne ment pas au pair sur ce qu'on tient.
+                // A hash of unexpected length (damaged database) is recomputed
+                // instead: we do not lie to the peer about what we hold.
                 <[u8; 32]>::try_from(blob.as_slice()).unwrap_or_else(|_| pow::content_hash(&blob))
             } else {
                 pow::content_hash(&blob)
@@ -558,21 +555,20 @@ pub fn holdings(
     Ok(Ok((items.into_iter().map(|(_, h)| h).collect(), next)))
 }
 
-/// Un élément à recopier chez un responsable.
+/// An item to replicate to a responsible node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyItem {
     pub bytes: Vec<u8>,
-    /// Nonce de preuve gardé au dépôt (0 pour un accusé ou une ligne migrée).
+    /// Proof nonce kept at deposit (0 for an ack or a migrated row).
     pub pow: u64,
     pub hash: [u8; 32],
     pub is_ack: bool,
-    /// Palier (accusé : S ; colonne illisible : L, le supplément le plus
-    /// fort).
+    /// Tier (ack: S; unreadable column: L, the strongest surcharge).
     pub tier: Tier,
 }
 
-/// Tout ce que le nœud tient pour `mailbox` et qui n'a pas expiré : les
-/// accusés d'abord, puis les paquets (spec §5.2, point 6).
+/// Everything the node holds for `mailbox` that has not expired: acks
+/// first, then packets (spec §5.2, point 6).
 pub fn copy_items(
     store: &NodeStore,
     mailbox: &MailboxId,

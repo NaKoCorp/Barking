@@ -1,59 +1,59 @@
-//! Serveur QUIC du nœud (spec §3.2, §4, §5) : coquille réseau autour des
-//! règles de `rules`.
+//! QUIC server of the node (spec §3.2, §4, §5): network shell around the
+//! rules of `rules`.
 //!
-//! Choix documentés :
-//! - **Base de données** : un seul `NodeStore` derrière un `Mutex`, chaque
-//!   opération dans `spawn_blocking`. Écritures (et lectures) sérialisées sur
-//!   une seule connexion SQLite : pas de course entre la vérification des
-//!   quotas et l'insertion. La file est bornée : au plus `max_db_jobs` (64)
-//!   opérations en cours ou en attente, `max(1, max_db_jobs / 16)` par
-//!   groupe d'adresses (/64, /32) et `max(1, max_db_jobs / 8)` par /48 ou /24 ; au-delà `RateLimited`. Un dépôt passe d'abord
-//!   `rules::precheck` (forme, expiration, preuve minimale) sans prendre de
-//!   place. Le jeton est
-//!   tenu par la tâche bloquante elle-même : abandonner la requête ne libère
-//!   la place qu'une fois le travail fini.
-//! - **Mémoire des réponses** : chaque requête réserve d'avance la taille
-//!   maximale de sa réponse (pour `Fetch` : la page demandée par le client,
-//!   entre 16 Kio et ~1 Mio, plus la marge d'encodage), ramenée ensuite à la
-//!   taille encodée. Trois plafonds : une page par connexion (1 Mio), 1/16 du
-//!   budget global par groupe d'adresses (`max_response_bytes_per_ip`, 4 Mio)
-//!   et le budget global (`max_response_bytes_in_flight`, 64 Mio). Plafond
-//!   atteint : `RateLimited`. La réserve est rendue quand le pair a acquitté
-//!   toute la réponse, ou à l'échéance d'écriture (flux alors réinitialisé) :
-//!   `request_timeout + taille / min_send_rate` (32 Kio/s), au plus 60 s.
-//!   Mémoire réelle : environ deux fois le budget (éléments lus de la base,
-//!   corps encodé, puis copie tenue par quinn jusqu'à l'acquittement).
-//! - **Tâches** : les flux d'une connexion vivent dans un `JoinSet` de la
-//!   connexion ; la place du limiteur n'est rendue qu'après leur fin
-//!   (abandonnées à la fermeture).
-//! - **Adresses** : une connexion n'est acceptée qu'après validation de
-//!   l'adresse (jeton QUIC `Retry`), pour qu'une adresse usurpée ne réserve
-//!   pas de place dans le limiteur. Le limiteur regroupe par IP (/64 en IPv6)
-//!   avec des plafonds par /56, /48 et /24, en mémoire seulement ; aucune
-//!   adresse n'est journalisée. Une connexion évincée (table pleine) est
-//!   fermée avec le code `CLOSE_EVICTED`.
-//! - **Délais** : poignée de main et `Hello` sous `hello_timeout` (5 s) ;
-//!   connexion fermée sans nouvelle requête pendant `idle_timeout` (60 s, aussi
-//!   le délai d'inactivité QUIC) ; lecture d'une requête sous
-//!   `request_timeout` (10 s).
-//! - **Flux** : au plus `max_streams` (4) flux bidirectionnels simultanés par
-//!   connexion, aucun flux unidirectionnel ; fenêtres de réception (256 Kio)
-//!   et d'envoi (2 Mio) réduites : mémoire bornée par connexion.
-//! - **Trames** : une trame trop grande, tronquée ou trop lente ferme le flux
-//!   sans réponse ; un corps illisible reçoit `Error(Malformed)`.
-//! - **Débit** : chaque requête après `Hello` passe par le seau de jetons de son
-//!   groupe d'adresses (`RateLimited` sinon ; une relève coûte `fetch_cost`) ;
-//!   les octets de chaque réponse y sont
-//!   débités qu'elle soit acquittée, coupée, arrêtée par le pair ou expirée.
-//!   Après `MAX_CONSECUTIVE_REFUSALS` (20) refus de débit d'affilée, la
-//!   connexion est fermée.
-//! - **Purge** des expirés au démarrage puis toutes les 60 s.
-//! - **Table de hachage** (`[dht]`, spec §3.3, §4) : l'identifiant d'un
-//!   appelant qui présente un certificat de nœud est lu une fois par
-//!   connexion et passé aux requêtes de la table (`dht`). Sans `[dht]`, elles
-//!   reçoivent `Unsupported` et aucune tâche de la table ne démarre. Avec
-//!   elle, deux tâches de fond : entretien de la table (`dht::maintain`) et
-//!   recopie entre responsables (`dht::replicate`).
+//! Documented choices:
+//! - **Database**: a single `NodeStore` behind a `Mutex`, each operation in
+//!   `spawn_blocking`. Writes (and reads) are serialized on a single SQLite
+//!   connection: no race between the quota check and the insertion. The
+//!   queue is bounded: at most `max_db_jobs` (64) operations in progress or
+//!   pending, `max(1, max_db_jobs / 16)` per address group (/64, /32) and
+//!   `max(1, max_db_jobs / 8)` per /48 or /24; beyond that `RateLimited`. A
+//!   deposit first goes through `rules::precheck` (shape, expiry, minimal
+//!   proof) without taking a slot. The token is held by the blocking task
+//!   itself: abandoning the request only frees the slot once the work is
+//!   finished.
+//! - **Response memory**: each request reserves in advance the maximum size
+//!   of its response (for `Fetch`: the page requested by the client,
+//!   between 16 KiB and ~1 MiB, plus the encoding margin), then brought down
+//!   to the encoded size. Three caps: one page per connection (1 MiB), 1/16
+//!   of the global budget per address group (`max_response_bytes_per_ip`,
+//!   4 MiB) and the global budget (`max_response_bytes_in_flight`, 64 MiB).
+//!   Cap reached: `RateLimited`. The reservation is returned when the peer
+//!   has acknowledged the whole response, or at the write deadline (stream
+//!   then reset): `request_timeout + size / min_send_rate` (32 KiB/s), at
+//!   most 60 s. Real memory: about twice the budget (items read from the
+//!   database, encoded body, then copy held by quinn until acknowledgement).
+//! - **Tasks**: the streams of a connection live in a `JoinSet` of the
+//!   connection; the limiter slot is only returned after they end
+//!   (abandoned on close).
+//! - **Addresses**: a connection is only accepted after address validation
+//!   (QUIC `Retry` token), so that a spoofed address does not reserve a slot
+//!   in the limiter. The limiter groups by IP (/64 in IPv6) with caps per
+//!   /56, /48 and /24, in memory only; no address is logged. An evicted
+//!   connection (full table) is closed with the `CLOSE_EVICTED` code.
+//! - **Timeouts**: handshake and `Hello` under `hello_timeout` (5 s);
+//!   connection closed without a new request for `idle_timeout` (60 s, also
+//!   the QUIC idle timeout); reading a request under `request_timeout`
+//!   (10 s).
+//! - **Streams**: at most `max_streams` (4) simultaneous bidirectional
+//!   streams per connection, no unidirectional stream; reduced receive
+//!   (256 KiB) and send (2 MiB) windows: bounded memory per connection.
+//! - **Frames**: a frame that is too large, truncated or too slow closes the
+//!   stream without a response; an unreadable body receives
+//!   `Error(Malformed)`.
+//! - **Throughput**: each request after `Hello` goes through the token
+//!   bucket of its address group (`RateLimited` otherwise; a fetch costs
+//!   `fetch_cost`); the bytes of each response are debited from it whether
+//!   the response is acknowledged, cut, stopped by the peer or expired.
+//!   After `MAX_CONSECUTIVE_REFUSALS` (20) consecutive throughput refusals,
+//!   the connection is closed.
+//! - **Purge** of expired items at startup then every 60 s.
+//! - **Hash table** (`[dht]`, spec §3.3, §4): the identifier of a caller
+//!   presenting a node certificate is read once per connection and passed to
+//!   the table requests (`dht`). Without `[dht]`, they receive `Unsupported`
+//!   and no table task starts. With it, two background tasks: table
+//!   maintenance (`dht::maintain`) and replication between responsible
+//!   nodes (`dht::replicate`).
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -83,37 +83,38 @@ use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
 use crate::store::NodeStore;
 use crate::{Error, Result};
 
-/// Intervalle de purge des expirés.
+/// Interval between purges of expired items.
 pub const PURGE_INTERVAL: Duration = Duration::from_secs(60);
-/// Octets de paquets par page de relève : la marge laisse la place à
-/// l'encodage de la réponse (longueurs, curseur) sous `MAX_RESPONSE_BYTES`.
+/// Packet bytes per fetch page: the margin leaves room for the encoding of
+/// the response (lengths, cursor) under `MAX_RESPONSE_BYTES`.
 pub const FETCH_PAGE_BYTES: usize = MAX_RESPONSE_BYTES - 32 * 1024;
-/// Fenêtre de réception par flux : une requête fait au plus 64 Kio.
+/// Receive window per stream: a request is at most 64 KiB.
 const STREAM_WINDOW: u32 = 2 * MAX_REQUEST_BYTES as u32;
-/// Octets de réponses non acquittés par connexion.
+/// Unacknowledged response bytes per connection.
 const SEND_WINDOW: u64 = 2 * MAX_RESPONSE_BYTES as u64;
 
-/// Marge d'encodage d'une page (longueurs des éléments, curseur, en-tête).
+/// Encoding margin of a page (item lengths, cursor, header).
 const PAGE_OVERHEAD: usize = 8 * 1024;
-/// Échéance d'écriture maximale d'une réponse.
+/// Maximum write deadline of a response.
 pub const MAX_WRITE_DEADLINE: Duration = Duration::from_secs(60);
-/// Réserve de réponse d'une requête autre que `Fetch`, `FindNode` et
+/// Response reservation of a request other than `Fetch`, `FindNode` and
 /// `FindValue`.
 const SMALL_RESPONSE_BYTES: usize = 4 * 1024;
-/// Réserve d'une réponse `Nodes` (20 fiches de moins de 200 octets).
+/// Reservation of a `Nodes` response (20 records of under 200 bytes).
 const NODES_RESPONSE_BYTES: usize = 8 * 1024;
-/// Réserve d'une page `Holdings` : 1 024 empreintes et la marge d'encodage.
+/// Reservation of a `Holdings` page: 1,024 fingerprints and the encoding
+/// margin.
 const HOLDINGS_RESPONSE_BYTES: usize = MAX_HOLDINGS_PER_PAGE * 32 + 1024;
-/// Refus de débit consécutifs avant fermeture de la connexion.
+/// Consecutive throughput refusals before the connection is closed.
 pub const MAX_CONSECUTIVE_REFUSALS: u32 = 20;
 
-/// Valeurs par défaut de la spec (reprises par la configuration).
+/// Default values from the spec (reused by the configuration).
 pub const DEFAULT_MAX_RESPONSE_BYTES_IN_FLIGHT: usize = 64 << 20;
 pub const DEFAULT_MAX_RESPONSE_BYTES_PER_IP: usize = 4 << 20;
 pub const DEFAULT_MIN_SEND_RATE: u64 = 32 * 1024;
 pub const DEFAULT_MAX_DB_JOBS: usize = 64;
 
-/// Codes de fermeture (application).
+/// Close codes (application).
 const CLOSE_NORMAL: u32 = 0;
 const CLOSE_PROTOCOL: u32 = 1;
 const CLOSE_IDLE: u32 = 2;
@@ -122,44 +123,44 @@ const CLOSE_EVICTED: u32 = 4;
 const STREAM_REFUSED: u32 = 1;
 
 pub struct ServerConfig {
-    /// Sockets UDP déjà liés (une par adresse d'écoute).
+    /// Already-bound UDP sockets (one per listen address).
     pub sockets: Vec<UdpSocket>,
-    /// Clé d'identité du nœud.
+    /// Identity key of the node.
     pub key: SigningKey,
     pub limits: LimitConfig,
     pub hello_timeout: Duration,
     pub idle_timeout: Duration,
     pub request_timeout: Duration,
     pub max_streams: u32,
-    /// Octets de réponses en vol (réservés, non acquittés), tous pairs confondus.
+    /// Response bytes in flight (reserved, unacknowledged), all peers combined.
     pub max_response_bytes_in_flight: usize,
-    /// Octets de réponses en vol par groupe d'adresses (/64 en IPv6).
+    /// Response bytes in flight per address group (/64 in IPv6).
     pub max_response_bytes_per_ip: usize,
-    /// Débit minimal attendu d'un lecteur : allonge l'échéance d'écriture
-    /// d'une réponse de `taille / min_send_rate`.
+    /// Minimum expected rate of a reader: extends the write deadline of a
+    /// response by `size / min_send_rate`.
     pub min_send_rate: u64,
-    /// Opérations de base en cours ou en attente, tous pairs confondus.
+    /// Database operations in progress or pending, all peers combined.
     pub max_db_jobs: usize,
-    /// Part d'un /48 ou /24 ; `None` : `max_db_jobs / 8` (au moins 1). Celle
-    /// d'un /64 ou /32 vaut `max_db_jobs / 16` (au moins 1).
+    /// Share of a /48 or /24; `None`: `max_db_jobs / 8` (at least 1). That of
+    /// a /64 or /32 is `max_db_jobs / 16` (at least 1).
     pub max_db_jobs_per_prefix: Option<usize>,
-    /// Versions du protocole servies : `min_version..=version`.
+    /// Protocol versions served: `min_version..=version`.
     pub version: u16,
     pub min_version: u16,
-    /// Jauges observables (tests, journaux agrégés).
+    /// Observable gauges (tests, aggregated logs).
     pub stats: Arc<ServerStats>,
-    /// Table de hachage entre nœuds ; `None` : désactivée.
+    /// Hash table between nodes; `None`: disabled.
     pub dht: Option<DhtConfig>,
-    /// Tests : ramène toutes les cadences d'entretien de la table et de la
-    /// recopie à cette période. `None` : valeurs de la spec.
+    /// Tests: brings all the table maintenance and replication cadences down
+    /// to this period. `None`: spec values.
     pub dht_tick: Option<Duration>,
-    /// Tests seulement, jamais lu de la configuration : limites de diversité
-    /// des adresses de la table. Défaut : celles de la spec. Les tests réseau
-    /// les lèvent, tous leurs nœuds partageant le /24 de 127.0.0.1.
+    /// Tests only, never read from the configuration: diversity limits on the
+    /// table's addresses. Default: those of the spec. The network tests lift
+    /// them, all their nodes sharing the /24 of 127.0.0.1.
     pub dht_diversity: DiversityLimits,
 }
 
-/// Jauge : valeur courante et maximum atteint.
+/// Gauge: current value and maximum reached.
 #[derive(Debug, Default)]
 pub struct Gauge {
     now: AtomicUsize,
@@ -175,8 +176,8 @@ impl Gauge {
         self.peak.load(Ordering::Relaxed)
     }
 
-    /// Maximum atteint depuis le dernier appel, puis remise du pic à la valeur
-    /// courante (rapports périodiques).
+    /// Maximum reached since the last call, then the peak is reset to the
+    /// current value (periodic reports).
     pub fn take_peak(&self) -> usize {
         self.peak
             .swap(self.now.load(Ordering::Relaxed), Ordering::Relaxed)
@@ -192,39 +193,39 @@ impl Gauge {
     }
 }
 
-/// Jauges du serveur (aucune donnée par pair).
+/// Server gauges (no per-peer data).
 #[derive(Debug, Default)]
 pub struct ServerStats {
-    /// Opérations de base en cours ou en attente.
+    /// Database operations in progress or pending.
     pub db_jobs: Gauge,
-    /// Octets de réponses réservés.
+    /// Reserved response bytes.
     pub response_bytes: Gauge,
-    /// Connexions ouvertes.
+    /// Open connections.
     pub connections: Gauge,
-    /// Dépôts acceptés (cumul depuis le dernier `drain`).
+    /// Accepted deposits (cumulative since the last `drain`).
     deposits_ok: AtomicU64,
-    /// Relèves servies.
+    /// Fetches served.
     fetches: AtomicU64,
-    /// Lignes expirées purgées.
+    /// Expired rows purged.
     purged: AtomicU64,
-    /// Refus par raison (indice : `reason_index`).
+    /// Refusals per reason (index: `reason_index`).
     refusals: [AtomicU64; REASONS.len()],
-    /// Recopie : depuis le démarrage, et depuis le dernier `drain`.
+    /// Replication: since startup, and since the last `drain`.
     replication: Mutex<ReplicationStats>,
     replication_period: Mutex<ReplicationStats>,
 }
 
-/// Numéros des dernières passes qui ont recopié quelque chose, gardés.
+/// Numbers of the last passes that replicated something, kept.
 const SENDING_PASSES_KEPT: usize = 64;
 
-/// Passes de recopie : nombre, somme des bilans et dernier bilan.
+/// Replication passes: count, sum of the tallies and last tally.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReplicationStats {
     pub passes: u64,
     pub total: PassReport,
     pub last: Option<PassReport>,
-    /// Numéros (1, 2…) des `SENDING_PASSES_KEPT` dernières passes dont au
-    /// moins un envoi a été accepté.
+    /// Numbers (1, 2…) of the last `SENDING_PASSES_KEPT` passes of which at
+    /// least one send was accepted.
     pub sending_passes: VecDeque<u64>,
 }
 
@@ -242,7 +243,7 @@ impl ReplicationStats {
     }
 }
 
-/// Raisons d'erreur, dans l'ordre de `reason_index`.
+/// Error reasons, in the order of `reason_index`.
 const REASONS: [ErrorReason; 13] = [
     ErrorReason::VersionTooOld,
     ErrorReason::Malformed,
@@ -260,7 +261,7 @@ const REASONS: [ErrorReason; 13] = [
 ];
 
 fn reason_index(r: ErrorReason) -> usize {
-    // Sans joker : une nouvelle raison fait échouer la compilation ici.
+    // No wildcard: a new reason makes compilation fail here.
     match r {
         ErrorReason::VersionTooOld => 0,
         ErrorReason::Malformed => 1,
@@ -279,7 +280,7 @@ fn reason_index(r: ErrorReason) -> usize {
 }
 
 impl ServerStats {
-    /// Compte un refus (jamais d'adresse, de boîte ni d'identifiant de paquet).
+    /// Counts a refusal (never an address, mailbox or packet identifier).
     pub fn refuse(&self, reason: ErrorReason) {
         self.refusals[reason_index(reason)].fetch_add(1, Ordering::Relaxed);
     }
@@ -296,14 +297,14 @@ impl ServerStats {
         self.purged.fetch_add(n as u64, Ordering::Relaxed);
     }
 
-    /// Compte une passe de recopie.
+    /// Counts a replication pass.
     pub fn replicated(&self, r: &PassReport) {
         for m in [&self.replication, &self.replication_period] {
             m.lock().unwrap_or_else(PoisonError::into_inner).record(r);
         }
     }
 
-    /// Passes de recopie depuis le démarrage.
+    /// Replication passes since startup.
     pub fn replication(&self) -> ReplicationStats {
         self.replication
             .lock()
@@ -311,8 +312,8 @@ impl ServerStats {
             .clone()
     }
 
-    /// Relève les compteurs depuis le dernier appel (remis à zéro, pics
-    /// ramenés à la valeur courante) : un rapport par période.
+    /// Collects the counters since the last call (reset to zero, peaks
+    /// brought down to the current value): one report per period.
     pub fn drain(&self) -> Report {
         let take = |c: &AtomicU64| c.swap(0, Ordering::Relaxed);
         Report {
@@ -338,19 +339,19 @@ impl ServerStats {
     }
 }
 
-/// Compteurs agrégés d'une période (aucune donnée par pair).
+/// Aggregated counters of a period (no per-peer data).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub deposits_ok: u64,
     pub fetches: u64,
     pub purged: u64,
-    /// Refus par raison (raisons nulles omises).
+    /// Refusals per reason (zero reasons omitted).
     pub refusals: Vec<(ErrorReason, u64)>,
     pub connections: usize,
     pub connections_peak: usize,
     pub db_jobs_peak: usize,
     pub response_bytes_peak: usize,
-    /// Passes de recopie de la période (`last` : la dernière).
+    /// Replication passes of the period (`last`: the latest).
     pub replication: ReplicationStats,
 }
 
@@ -358,24 +359,24 @@ impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "dépôts acceptés : {}, relèves : {}, expirés purgés : {}, refus : ",
+            "deposits accepted: {}, fetches: {}, expired purged: {}, refusals: ",
             self.deposits_ok, self.fetches, self.purged
         )?;
         if self.refusals.is_empty() {
-            f.write_str("aucun")?;
+            f.write_str("none")?;
         }
         for (i, (r, n)) in self.refusals.iter().enumerate() {
             write!(f, "{}{r:?}={n}", if i == 0 { "" } else { ", " })?;
         }
         write!(
             f,
-            ", connexions ouvertes : {} (pic {}), pic d'opérations de base : {}, pic d'octets de réponse : {}",
+            ", open connections: {} (peak {}), database operations peak: {}, response bytes peak: {}",
             self.connections, self.connections_peak, self.db_jobs_peak, self.response_bytes_peak
         )?;
         if self.replication.passes > 0 {
             write!(
                 f,
-                ", recopie : {} passes, {}",
+                ", replication: {} passes, {}",
                 self.replication.passes, self.replication.total
             )?;
         }
@@ -383,7 +384,7 @@ impl fmt::Display for Report {
     }
 }
 
-/// Journalise un rapport agrégé à chaque période (aucune adresse).
+/// Logs an aggregated report every period (no address).
 pub async fn report_loop(stats: Arc<ServerStats>, every: Duration) {
     let mut tick = tokio::time::interval(every);
     tick.tick().await;
@@ -393,7 +394,7 @@ pub async fn report_loop(stats: Arc<ServerStats>, every: Duration) {
     }
 }
 
-/// Budget global à jetons, reflété dans une jauge.
+/// Global token budget, mirrored in a gauge.
 struct Budget {
     sem: Arc<Semaphore>,
     stats: Arc<ServerStats>,
@@ -421,33 +422,33 @@ impl Budget {
         }
     }
 
-    /// Réserve `n` jetons sans attendre.
+    /// Reserves `n` tokens without waiting.
     fn try_take(self: &Arc<Self>, n: usize) -> Option<Held> {
         let n = u32::try_from(n).ok()?;
         let permit = Arc::clone(&self.sem).try_acquire_many_owned(n).ok()?;
         Some(self.held(permit))
     }
 
-    /// Réserve `n` jetons en attendant (tâches internes).
+    /// Reserves `n` tokens, waiting if needed (internal tasks).
     async fn take(self: &Arc<Self>, n: u32) -> Option<Held> {
         let permit = Arc::clone(&self.sem).acquire_many_owned(n).await.ok()?;
         Some(self.held(permit))
     }
 }
 
-/// Jetons réservés, rendus à la destruction.
+/// Reserved tokens, returned on drop.
 struct Held {
     budget: Arc<Budget>,
     permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Held {
-    /// Ramène la réserve à `keep` jetons.
+    /// Brings the reservation down to `keep` tokens.
     fn shrink(&mut self, keep: usize) {
         if let Some(p) = self.permit.as_mut() {
             let extra = p.num_permits().saturating_sub(keep);
             if let Some(e) = p.split(extra) {
-                // Jauge décrémentée avant que les jetons redeviennent libres.
+                // Gauge decremented before the tokens become free again.
                 self.budget.gauge().sub(e.num_permits());
                 drop(e);
             }
@@ -465,7 +466,7 @@ impl Drop for Held {
 }
 
 impl ServerConfig {
-    /// Valeurs de la spec.
+    /// Spec values.
     pub fn new(sockets: Vec<UdpSocket>, key: SigningKey) -> ServerConfig {
         ServerConfig {
             sockets,
@@ -490,7 +491,7 @@ impl ServerConfig {
     }
 }
 
-/// État partagé par toutes les connexions.
+/// State shared by all connections.
 pub(crate) struct Shared {
     store: Mutex<NodeStore>,
     pub(crate) policy: Policy,
@@ -502,15 +503,15 @@ pub(crate) struct Shared {
     request_timeout: Duration,
     limiter: Arc<Limiter>,
     db: Arc<Budget>,
-    /// Opérations de base en cours ou en attente par groupe d'adresses.
+    /// Database operations in progress or pending per address group.
     db_jobs_per_group: u32,
-    /// Même chose par /48 (IPv6) ou /24 (IPv4).
+    /// Same per /48 (IPv6) or /24 (IPv4).
     db_jobs_per_prefix: u32,
     responses: Arc<Budget>,
     response_bytes_per_ip: usize,
     min_send_rate: u64,
     stats: Arc<ServerStats>,
-    /// Table de hachage, si `[dht]` est configurée.
+    /// Hash table, if `[dht]` is configured.
     dht: Option<Arc<Dht>>,
 }
 
@@ -519,13 +520,13 @@ impl Shared {
         &self.stats
     }
 
-    /// Échéance d'écriture d'une réponse de `len` octets.
+    /// Write deadline of a response of `len` bytes.
     fn write_deadline(&self, len: usize) -> Duration {
         write_deadline(self.request_timeout, len, self.min_send_rate)
     }
 }
 
-/// `request_timeout + len / rate`, au plus `MAX_WRITE_DEADLINE`.
+/// `request_timeout + len / rate`, at most `MAX_WRITE_DEADLINE`.
 pub fn write_deadline(request_timeout: Duration, len: usize, rate: u64) -> Duration {
     let extra = Duration::from_secs_f64(len as f64 / rate.max(1) as f64);
     request_timeout
@@ -533,23 +534,23 @@ pub fn write_deadline(request_timeout: Duration, len: usize, rate: u64) -> Durat
         .min(MAX_WRITE_DEADLINE)
 }
 
-/// Taille de page servie pour une demande de `max_bytes`.
+/// Page size served for a request of `max_bytes`.
 pub fn fetch_page_bytes(max_bytes: u32) -> usize {
     (max_bytes as usize).clamp(barking_proto::MIN_PAGE_BYTES as usize, FETCH_PAGE_BYTES)
 }
 
-/// Réserve de réponse d'une page : la page, ou un élément seul plus gros
-/// (palier L), plus la marge d'encodage.
+/// Response reservation of a page: the page, or a single larger item
+/// (tier L), plus the encoding margin.
 fn fetch_reserve(max_bytes: u32) -> usize {
     (fetch_page_bytes(max_bytes).max(Tier::L.size()) + PAGE_OVERHEAD).min(MAX_RESPONSE_BYTES)
 }
 
-/// Issue d'une opération de base.
+/// Outcome of a database operation.
 pub(crate) enum Stored<T> {
     Done(T),
-    /// File de base pleine.
+    /// Database queue full.
     Busy,
-    /// Erreur interne (journalisée).
+    /// Internal error (logged).
     Failed,
 }
 
@@ -561,10 +562,10 @@ pub(crate) fn unix_now() -> u64 {
 }
 
 impl Shared {
-    /// Exécute `f` sur la base, hors de la boucle asynchrone. `wait` : attend
-    /// une place dans la file (tâches internes) au lieu de répondre `Busy`.
-    /// `group` : la requête vient de ce groupe d'adresses, qui n'a droit
-    /// qu'à `db_jobs_per_group` places à la fois (`Busy` au-delà).
+    /// Runs `f` on the database, outside the async loop. `wait`: waits for a
+    /// slot in the queue (internal tasks) instead of answering `Busy`.
+    /// `group`: the request comes from this address group, which is only
+    /// entitled to `db_jobs_per_group` slots at a time (`Busy` beyond).
     pub(crate) async fn with_store<T: Send + 'static>(
         self: &Arc<Self>,
         wait: bool,
@@ -588,8 +589,8 @@ impl Shared {
         };
         let me = Arc::clone(self);
         let r = tokio::task::spawn_blocking(move || {
-            // Les places sont rendues à la fin du travail, même si la requête
-            // a été abandonnée entre-temps.
+            // The slots are returned at the end of the work, even if the request
+            // was abandoned in the meantime.
             let _slot = slot;
             let _group_job = group_job;
             let mut store = me.store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -599,18 +600,18 @@ impl Shared {
         match r {
             Ok(Ok(v)) => Stored::Done(v),
             Ok(Err(e)) => {
-                tracing::error!("erreur interne de stockage : {e}");
+                tracing::error!("internal storage error: {e}");
                 Stored::Failed
             }
             Err(_) => {
-                tracing::error!("tâche de stockage interrompue");
+                tracing::error!("storage task interrupted");
                 Stored::Failed
             }
         }
     }
 }
 
-/// Fait tourner le nœud jusqu'à `shutdown`.
+/// Runs the node until `shutdown`.
 pub async fn run(
     config: ServerConfig,
     store: NodeStore,
@@ -622,7 +623,7 @@ pub async fn run(
         return Err(Error::Config("min_version > version".into()));
     }
     if config.sockets.is_empty() {
-        return Err(Error::Config("aucune adresse d'écoute".into()));
+        return Err(Error::Config("no listen address".into()));
     }
     if config.max_db_jobs == 0
         || config.max_response_bytes_in_flight < MAX_RESPONSE_BYTES
@@ -630,7 +631,7 @@ pub async fn run(
         || config.min_send_rate == 0
     {
         return Err(Error::Config(
-            "max_db_jobs ou min_send_rate nul, ou budget de réponse sous 1 Mio".into(),
+            "max_db_jobs or min_send_rate is zero, or response budget under 1 MiB".into(),
         ));
     }
 
@@ -640,21 +641,21 @@ pub async fn run(
         .max_concurrent_bidi_streams(config.max_streams.into())
         .max_concurrent_uni_streams(0u32.into())
         .stream_receive_window(STREAM_WINDOW.into())
-        // Mémoire tenue par connexion bornée : 256 Kio en réception, 2 Mio
-        // de réponses en attente d'acquittement.
+        // Memory held per connection is bounded: 256 KiB on receive, 2 MiB of
+        // responses awaiting acknowledgement.
         .receive_window((2 * STREAM_WINDOW).into())
         .send_window(SEND_WINDOW)
         .max_idle_timeout(Some(
             config
                 .idle_timeout
                 .try_into()
-                .map_err(|_| Error::Config("idle_timeout trop grand".into()))?,
+                .map_err(|_| Error::Config("idle_timeout too large".into()))?,
         ));
     qcfg.transport_config(Arc::new(transport));
     qcfg.migration(false);
 
     let runtime =
-        quinn::default_runtime().ok_or_else(|| Error::Config("pas de runtime tokio".into()))?;
+        quinn::default_runtime().ok_or_else(|| Error::Config("no tokio runtime".into()))?;
     let mut endpoints = Vec::new();
     for socket in config.sockets {
         endpoints.push(Endpoint::new(
@@ -664,13 +665,13 @@ pub async fn run(
             runtime.clone(),
         )?);
     }
-    // Les appels sortants vers les pairs partent des mêmes endpoints, donc
-    // du même port UDP (spec §3.3).
-    // Sans adresse publique, la table est désactivée (spec §8).
+    // Outbound calls to peers leave from the same endpoints, hence from the
+    // same UDP port (spec §3.3).
+    // Without a public address, the table is disabled (spec §8).
     let dht_cfg = config.dht.filter(|d| {
         let has_addr = d.public_v4.is_some() || d.public_v6.is_some();
         if !has_addr {
-            tracing::warn!("[dht] sans public_addr : table désactivée, simple relais");
+            tracing::warn!("[dht] without public_addr: table disabled, plain relay");
         }
         has_addr
     });
@@ -738,7 +739,7 @@ pub async fn run(
             stop_rx.clone(),
         ));
     }
-    // Entretien de la table, attendu à l'arrêt : il enregistre `peers`.
+    // Table maintenance, awaited on shutdown: it saves `peers`.
     let maintenance =
         dht.map(|d| tokio::spawn(maintain::run(d, Arc::clone(&shared), stop_rx.clone())));
 
@@ -761,7 +762,7 @@ pub async fn run(
 
 async fn purge_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let mut tick = tokio::time::interval(PURGE_INTERVAL);
-    tick.tick().await; // premier tic immédiat : la purge de démarrage est faite.
+    tick.tick().await; // first tick is immediate: the startup purge is done.
     loop {
         tokio::select! {
             _ = tick.tick() => {
@@ -784,7 +785,7 @@ async fn accept_loop(ep: Endpoint, shared: Arc<Shared>, mut stop: watch::Receive
             _ = stop.changed() => None,
         };
         let Some(incoming) = incoming else { break };
-        // Ramasse les tâches terminées.
+        // Reaps finished tasks.
         while conns.try_join_next().is_some() {}
         admit(incoming, &shared, &mut conns, &stop);
     }
@@ -799,7 +800,7 @@ fn admit(
 ) {
     if !incoming.remote_address_validated() {
         if incoming.may_retry() {
-            // Jeton sans état : le client revient prouver son adresse.
+            // Stateless token: the client comes back to prove its address.
             let _ = incoming.retry();
         } else {
             incoming.ignore();
@@ -822,7 +823,7 @@ fn admit(
     });
 }
 
-/// Décompte d'une connexion ouverte (même si sa tâche est abandonnée).
+/// Count of an open connection (even if its task is abandoned).
 struct OpenConnection(Arc<ServerStats>);
 
 impl Drop for OpenConnection {
@@ -850,7 +851,7 @@ async fn serve_connection(
         }
     }
 
-    // Identifiant de l'appelant s'il a présenté un certificat de nœud.
+    // Identifier of the caller if it presented a node certificate.
     let peer = tls::peer_node_id(&conn);
     let conn_state = Arc::new(ConnState {
         peer,
@@ -860,8 +861,8 @@ async fn serve_connection(
         reserved: AtomicUsize::new(0),
         slot,
     });
-    // Flux de cette connexion : bornés par QUIC (`max_streams`), attendus ou
-    // abandonnés avant de rendre la place du limiteur.
+    // Streams of this connection: bounded by QUIC (`max_streams`), awaited or
+    // abandoned before returning the limiter slot.
     let mut streams = JoinSet::new();
     loop {
         while streams.try_join_next().is_some() {}
@@ -871,7 +872,7 @@ async fn serve_connection(
                 conn.close(CLOSE_NORMAL.into(), b"arret");
                 break;
             }
-            // Table des connexions pleine : place cédée à un autre groupe.
+            // Connection table full: slot ceded to another group.
             _ = conn_state.slot.evicted().notified() => {
                 conn.close(CLOSE_EVICTED.into(), b"evince");
                 break;
@@ -896,25 +897,25 @@ async fn serve_connection(
     streams.shutdown().await;
 }
 
-/// État d'une connexion partagé par ses flux.
+/// State of a connection shared by its streams.
 struct ConnState {
-    /// Nœud appelant authentifié par son certificat (spec §3.3).
+    /// Calling node authenticated by its certificate (spec §3.3).
     peer: Option<NodeId>,
-    /// Adresse source (en mémoire seulement, jamais journalisée) : le rappel
-    /// d'une fiche `from` n'est fait que si elle l'annonce (spec §6.2).
+    /// Source address (in memory only, never logged): the callback for a
+    /// `from` record is only made if it announces it (spec §6.2).
     remote: SocketAddr,
-    /// Refus de débit consécutifs.
+    /// Consecutive throughput refusals.
     refusals: AtomicU32,
     conn: Connection,
-    /// Octets de réponses réservés par cette connexion (au plus une page).
+    /// Response bytes reserved by this connection (at most one page).
     reserved: AtomicUsize,
-    /// Place du limiteur (et état du groupe d'adresses : seau de débit,
-    /// réserves) : rendue quand la connexion et ses flux sont finis.
+    /// Limiter slot (and address-group state: rate bucket, reservations):
+    /// returned when the connection and its streams are finished.
     slot: ConnectionSlot,
 }
 
-/// Réserve de réponse comptée à trois niveaux : connexion, groupe
-/// d'adresses, budget global.
+/// Response reservation counted at three levels: connection, address
+/// group, global budget.
 struct Reservation {
     held: Held,
     state: Arc<ConnState>,
@@ -948,7 +949,8 @@ impl Reservation {
         })
     }
 
-    /// Ramène la réserve à `keep` octets (jamais au-dessus de la réserve).
+    /// Brings the reservation down to `keep` bytes (never above the
+    /// reservation).
     fn shrink(&mut self, keep: usize) {
         let extra = self.n.saturating_sub(keep);
         self.held.shrink(keep);
@@ -965,8 +967,8 @@ impl Drop for Reservation {
     }
 }
 
-/// Lit une requête ; `None` si le flux a été fermé (trame trop grande,
-/// tronquée, trop lente). Renvoie aussi la taille lue.
+/// Reads a request; `None` if the stream was closed (frame too large,
+/// truncated, too slow). Also returns the size read.
 async fn read_request(
     send: &mut SendStream,
     recv: &mut RecvStream,
@@ -988,8 +990,9 @@ async fn read_request(
     }
 }
 
-/// Écrit la réponse et attend son acquittement complet, sous `limit` ; sinon
-/// (délai, arrêt par le pair) le flux est réinitialisé. Vrai si acquittée.
+/// Writes the response and waits for its complete acknowledgement, within
+/// `limit`; otherwise (timeout, stopped by the peer) the stream is reset.
+/// True if acknowledged.
 async fn respond(send: &mut SendStream, bytes: &[u8], limit: Duration) -> bool {
     let sent = timeout(limit, async {
         send.write_all(bytes).await.ok()?;
@@ -1008,13 +1011,13 @@ async fn respond(send: &mut SendStream, bytes: &[u8], limit: Duration) -> bool {
 
 fn encode(resp: &Response) -> Vec<u8> {
     frame::encode(resp, MAX_RESPONSE_BYTES).unwrap_or_else(|_| {
-        // Une page est bornée sous `MAX_RESPONSE_BYTES` : n'arrive pas.
+        // A page is bounded under `MAX_RESPONSE_BYTES`: does not happen.
         frame::encode(&Response::Error(ErrorReason::NodeFull), MAX_RESPONSE_BYTES)
             .unwrap_or_default()
     })
 }
 
-/// Premier flux : `Hello` obligatoire. Vrai si la connexion peut continuer.
+/// First stream: `Hello` is mandatory. True if the connection can continue.
 async fn hello(conn: &Connection, shared: &Arc<Shared>) -> bool {
     let Ok((mut send, mut recv)) = conn.accept_bi().await else {
         return false;
@@ -1056,7 +1059,7 @@ async fn hello(conn: &Connection, shared: &Arc<Shared>) -> bool {
     if let Response::Error(r) = &resp {
         shared.stats.refuse(*r);
     }
-    // Attend l'acquittement : la réponse arrive avant toute fermeture.
+    // Waits for the acknowledgement: the response arrives before any close.
     respond(&mut send, &encode(&resp), shared.hello_timeout).await;
     ok
 }
@@ -1091,10 +1094,10 @@ async fn serve_stream(
     }
     state.refusals.store(0, Ordering::Relaxed);
 
-    // Réserve de réponse prise avant tout travail ; plafond atteint : refus.
+    // Response reservation taken before any work; cap reached: refusal.
     let reserve = match &req {
         Ok(Request::Fetch { max_bytes, .. }) => fetch_reserve(*max_bytes),
-        // Sans table, ces requêtes reçoivent `Unsupported` : petite réserve.
+        // Without a table, these requests receive `Unsupported`: small reservation.
         Ok(Request::FindNode { .. }) if shared.dht.is_some() => NODES_RESPONSE_BYTES,
         Ok(Request::FindValue { .. }) if shared.dht.is_some() => HOLDINGS_RESPONSE_BYTES,
         _ => SMALL_RESPONSE_BYTES,
@@ -1111,7 +1114,7 @@ async fn serve_stream(
                     Stored::Done(r) => r,
                     Stored::Busy => Response::Error(ErrorReason::RateLimited),
                     Stored::Failed => {
-                        // Erreur interne (déjà journalisée) : flux fermé.
+                        // Internal error (already logged): stream closed.
                         let _ = send.reset(STREAM_REFUSED.into());
                         return;
                     }
@@ -1120,14 +1123,14 @@ async fn serve_stream(
             if let Response::Error(r) = &resp {
                 shared.stats.refuse(*r);
             }
-            // La réserve couvre la réponse : page bornée par `fetch_reserve`.
+            // The reservation covers the response: page bounded by `fetch_reserve`.
             let bytes = encode(&resp);
             held.shrink(bytes.len());
             (bytes, Some(held))
         }
     };
-    // Débit compté sur la taille envoyée, que la réponse soit acquittée,
-    // coupée, arrêtée par le pair ou expirée.
+    // Throughput counted on the size sent, whether the response is
+    // acknowledged, cut, stopped by the peer or expired.
     respond(&mut send, &bytes, shared.write_deadline(bytes.len())).await;
     drop(held);
     state.charge(bytes.len());
@@ -1139,23 +1142,23 @@ impl ConnState {
     }
 }
 
-/// Coût d'une relève en jetons de requêtes : 1, plus 1 par tranche de 8
-/// boîtes (chaque boîte est une lecture d'index).
+/// Cost of a fetch in request tokens: 1, plus 1 per block of 8 mailboxes
+/// (each mailbox is an index read).
 pub fn fetch_cost(mailboxes: usize) -> u32 {
     u32::try_from(1 + mailboxes.div_ceil(8)).unwrap_or(u32::MAX)
 }
 
-/// Part de la file de base d'un groupe d'adresses : 1/16, au moins 1.
+/// Share of the database queue of an address group: 1/16, at least 1.
 pub fn db_jobs_per_group(max_db_jobs: usize) -> u32 {
     u32::try_from((max_db_jobs / 16).max(1)).unwrap_or(u32::MAX)
 }
 
-/// Part de la file de base d'un /48 ou /24 : 1/8, au moins 1.
+/// Share of the database queue of a /48 or /24: 1/8, at least 1.
 pub fn db_jobs_per_prefix(max_db_jobs: usize) -> u32 {
     u32::try_from((max_db_jobs / 8).max(1)).unwrap_or(u32::MAX)
 }
 
-/// Traite une requête après `Hello` ; `peer` : nœud appelant authentifié.
+/// Handles a request after `Hello`; `peer`: authenticated calling node.
 async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored<Response> {
     let group = &state.slot;
     let to_resp = |r: core::result::Result<Response, ErrorReason>| match r {
@@ -1165,8 +1168,8 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
     match req {
         Request::Hello { .. } => Stored::Done(Response::Error(ErrorReason::Malformed)),
         Request::Deposit { packet, pow } => {
-            // Forme, expiration et preuve à la difficulté de base vérifiées
-            // avant de prendre une place dans la file de la base.
+            // Shape, expiry and proof at the base difficulty are checked before
+            // taking a slot in the database queue.
             if let Err(r) = rules::precheck(&shared.policy, &packet, pow, unix_now()) {
                 return Stored::Done(Response::Error(r));
             }
@@ -1242,10 +1245,10 @@ mod tests {
         assert_eq!((r.connections, r.connections_peak), (2, 5));
         let line = r.to_string();
         assert!(
-            line.contains("PowTooWeak=2") && line.contains("pic 5"),
+            line.contains("PowTooWeak=2") && line.contains("peak 5"),
             "{line}"
         );
-        // Période suivante : compteurs à zéro, pic ramené à la valeur courante.
+        // Next period: counters at zero, peak brought down to the current value.
         let r = st.drain();
         assert_eq!((r.deposits_ok, r.fetches, r.purged), (0, 0, 0));
         assert!(r.refusals.is_empty());
@@ -1267,7 +1270,7 @@ mod tests {
         assert_eq!(fetch_page_bytes(0), 16 * 1024);
         assert_eq!(fetch_page_bytes(64 * 1024), 64 * 1024);
         assert_eq!(fetch_page_bytes(u32::MAX), FETCH_PAGE_BYTES);
-        // Un élément L seul tient toujours dans la réserve.
+        // A single L item always fits in the reservation.
         assert!(fetch_reserve(0) >= Tier::L.size() + PAGE_OVERHEAD);
         assert!(fetch_reserve(u32::MAX) <= MAX_RESPONSE_BYTES);
         assert!(fetch_reserve(u32::MAX) >= FETCH_PAGE_BYTES + PAGE_OVERHEAD);

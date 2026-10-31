@@ -1,17 +1,16 @@
-//! Entretien de la table (spec §6.1) :
-//! - **démarrage** : `peers` rechargée et pingée ; moins de 3 nœuds joints :
-//!   liste intégrée puis `bootstrap` de la config ; puis recherche de notre
-//!   propre identifiant ;
-//! - **toutes les 10 min** : ping de la tête de chaque compartiment non vue
-//!   depuis 15 min, nouvel amorçage si la table compte moins de 3 nœuds, et
-//!   sauvegarde de `peers` ;
-//! - **toutes les heures** : rafraîchissement des compartiments sans
-//!   recherche depuis 1 h ;
-//! - **toutes les 24 h** : nouvelle fiche ;
-//! - **à l'arrêt** : sauvegarde de `peers`.
+//! Table maintenance (spec §6.1):
+//! - **startup**: `peers` reloaded and pinged; fewer than 3 nodes reached:
+//!   built-in list, then the config's `bootstrap`; then a lookup of our own
+//!   identifier;
+//! - **every 10 min**: ping of the head of each bucket not seen for 15 min,
+//!   new bootstrap if the table has fewer than 3 nodes, and saving of
+//!   `peers`;
+//! - **every hour**: refresh of buckets without a lookup for 1 h;
+//! - **every 24 h**: new record;
+//! - **at shutdown**: saving of `peers`.
 //!
-//! `ServerConfig::dht_tick` ramène toutes ces cadences à une seule période
-//! (tests réseau).
+//! `ServerConfig::dht_tick` reduces all these cadences to a single period
+//! (network tests).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,18 +24,18 @@ use tokio::time::{Instant, interval_at};
 use super::Dht;
 use crate::server::{Shared, Stored, unix_now};
 
-/// Cycle d'entretien : pings et sauvegarde.
+/// Maintenance cycle: pings and saving.
 pub const MAINTAIN_EVERY: Duration = Duration::from_secs(600);
-/// Rafraîchissement des compartiments.
+/// Bucket refresh.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(3600);
-/// Republication de la fiche.
+/// Record republication.
 pub const REPUBLISH_EVERY: Duration = Duration::from_secs(86_400);
-/// En dessous de ce nombre de nœuds joints, la liste d'amorçage est essayée.
+/// Below this number of nodes reached, the bootstrap list is tried.
 pub const MIN_BOOTSTRAP_PEERS: usize = 3;
-/// Contacts simultanés au plus pendant l'amorçage et les pings.
+/// At most this many simultaneous contacts during bootstrap and pings.
 const PARALLEL_CONTACTS: usize = 16;
 
-/// Fait tourner l'entretien jusqu'à `stop`, puis enregistre `peers`.
+/// Runs maintenance until `stop`, then saves `peers`.
 pub(crate) async fn run(dht: Arc<Dht>, shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let work = async {
         startup(&dht, &shared).await;
@@ -63,7 +62,7 @@ pub(crate) async fn run(dht: Arc<Dht>, shared: Arc<Shared>, mut stop: watch::Rec
     save(&dht, &shared).await;
 }
 
-/// Démarrage : `peers`, amorçage si besoin, recherche de soi.
+/// Startup: `peers`, bootstrap if needed, self lookup.
 async fn startup(dht: &Arc<Dht>, shared: &Arc<Shared>) {
     let rows = match shared.with_store(true, None, |s, _| s.load_peers()).await {
         Stored::Done(rows) => rows,
@@ -71,7 +70,7 @@ async fn startup(dht: &Arc<Dht>, shared: &Arc<Shared>) {
     };
     let now = unix_now();
     let policy = barking_proto::RecordPolicy::network(dht.config().allow_private_addrs);
-    // Une ligne illisible, invalide ou d'un autre identifiant est écartée.
+    // A row that is unreadable, invalid or for another identifier is discarded.
     let saved: Vec<(NodeId, Vec<SocketAddr>)> = rows
         .iter()
         .filter_map(|row| {
@@ -84,16 +83,13 @@ async fn startup(dht: &Arc<Dht>, shared: &Arc<Shared>) {
     if reached < MIN_BOOTSTRAP_PEERS {
         reached += bootstrap(dht).await;
     }
-    tracing::info!("table : {reached} pairs joints au démarrage");
+    tracing::info!("table: {reached} peers reached at startup");
     dht.lookup(dht.id().0).await;
-    tracing::info!(
-        "table : {} pairs après la recherche de soi",
-        dht.table().len()
-    );
+    tracing::info!("table: {} peers after the self lookup", dht.table().len());
 }
 
-/// Contacte la liste intégrée puis celle de la config ; nombre de nœuds
-/// joints.
+/// Contacts the built-in list then the config's; number of nodes
+/// reached.
 async fn bootstrap(dht: &Arc<Dht>) -> usize {
     let entries = builtin_bootstrap()
         .into_iter()
@@ -103,8 +99,8 @@ async fn bootstrap(dht: &Arc<Dht>) -> usize {
     dht.contact_all(entries, PARALLEL_CONTACTS).await
 }
 
-/// Cycle de 10 min : têtes de compartiment anciennes, amorçage d'une table
-/// trop petite, sauvegarde.
+/// 10 min cycle: old bucket heads, bootstrap of a too-small table,
+/// saving.
 async fn cycle(dht: &Arc<Dht>, shared: &Arc<Shared>) {
     let stale = dht.table().stale_heads(unix_now());
     let mut set = tokio::task::JoinSet::new();
@@ -121,8 +117,8 @@ async fn cycle(dht: &Arc<Dht>, shared: &Arc<Shared>) {
     save(dht, shared).await;
 }
 
-/// Rafraîchit chaque compartiment sans recherche depuis 1 h par la
-/// recherche d'un identifiant tiré dans ce compartiment.
+/// Refreshes each bucket without a lookup for 1 h by looking up an
+/// identifier drawn in that bucket.
 async fn refresh_buckets(dht: &Arc<Dht>) {
     let buckets = dht.table().buckets_to_refresh(unix_now());
     for b in buckets {
@@ -138,6 +134,6 @@ async fn save(dht: &Dht, shared: &Arc<Shared>) {
         .with_store(true, None, move |s, _| s.save_peers(&rows))
         .await
     {
-        tracing::debug!("table : peers enregistrée");
+        tracing::debug!("table: peers saved");
     }
 }

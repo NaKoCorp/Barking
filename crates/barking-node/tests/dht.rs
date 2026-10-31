@@ -1,5 +1,5 @@
-//! Table de hachage entre nœuds sur 127.0.0.1 : fiches, appels authentifiés,
-//! refus et amorçage, avec de vrais nœuds QUIC.
+//! Hash table between nodes on 127.0.0.1: records, authenticated calls,
+//! refusals and bootstrap, with real QUIC nodes.
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, UdpSocket};
@@ -19,16 +19,16 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-/// Délai généreux pour toute attente de test.
+/// Generous timeout for any test wait.
 const LONG: Duration = Duration::from_secs(20);
-/// Difficulté réduite pour des tests rapides.
+/// Reduced difficulty for fast tests.
 const TEST_BITS: u8 = 8;
-/// Cadence d'entretien des tests.
+/// Maintenance cadence of the tests.
 const TICK: Duration = Duration::from_millis(200);
 
-/// Graines de clés qui résolvent le puzzle de 20 bits : les onze premières
-/// clés de `generate_node_key` sur `StdRng::seed_from_u64(4243)`, tirées une
-/// fois en mode optimisé (~15 s par clé sans optimisation). Vérifiées par
+/// Key seeds that solve the 20-bit puzzle: the first eleven keys of
+/// `generate_node_key` on `StdRng::seed_from_u64(4243)`, drawn once in
+/// optimized mode (~15 s per key without optimization). Verified by
 /// `test_keys_solve_puzzle`.
 const SEEDS: [[u8; 32]; 11] = [
     [
@@ -84,7 +84,7 @@ fn key(n: usize) -> SigningKey {
 #[test]
 fn test_keys_solve_puzzle() {
     for n in 0..SEEDS.len() {
-        assert!(id_of(&key(n)).puzzle_ok(), "clé {n}");
+        assert!(id_of(&key(n)).puzzle_ok(), "key {n}");
     }
 }
 
@@ -108,7 +108,7 @@ fn policy() -> Policy {
 
 struct Node {
     addr: SocketAddr,
-    /// Adresse IPv6 d'écoute, si le nœud a aussi un socket `[::1]`.
+    /// Listening IPv6 address, if the node also has a `[::1]` socket.
     v6: Option<SocketAddr>,
     id: NodeId,
     stats: Arc<ServerStats>,
@@ -131,13 +131,13 @@ impl Node {
     }
 }
 
-/// Démarre le nœud de clé `key(n)` ; table active si `bootstrap` est
-/// `Some`, amorcée sur ces nœuds.
+/// Starts the node with key `key(n)`; table active if `bootstrap` is
+/// `Some`, bootstrapped on those nodes.
 fn start(n: usize, bootstrap: Option<Vec<BootstrapEntry>>) -> Node {
     start_with(n, bootstrap, None, false)
 }
 
-/// Comme `start`, avec en plus le socket IPv6 `v6`, publié dans la fiche si
+/// Like `start`, plus the IPv6 socket `v6`, published in the record if
 /// `publish_v6`.
 fn start_with(
     n: usize,
@@ -167,8 +167,8 @@ fn start_with(
     node
 }
 
-/// Démarre le nœud de clé `key(n)` sur `sockets`, joint par les tests à
-/// `addr`, avec la table `dht` aux limites de diversité `limits`.
+/// Starts the node with key `key(n)` on `sockets`, reached by the tests at
+/// `addr`, with the `dht` table at diversity limits `limits`.
 fn start_raw(
     n: usize,
     sockets: Vec<UdpSocket>,
@@ -179,10 +179,10 @@ fn start_raw(
     start_limited(n, sockets, addr, dht, limits, true, TEST_BITS)
 }
 
-/// Comme `start_raw` ; `shared_ip` : tous les nœuds et le client de test
-/// partagent 127.0.0.1, les plafonds par adresse et le débit de ce groupe
-/// sont levés. Sinon seul le plafond de connexions par /24 l'est, et les
-/// seaux de débit gardent leurs valeurs de la spec.
+/// Like `start_raw`; `shared_ip`: all nodes and the test client
+/// share 127.0.0.1, the per-address caps and this group's rate
+/// are lifted. Otherwise only the per-/24 connection cap is, and the
+/// rate buckets keep their spec values.
 fn start_limited(
     n: usize,
     sockets: Vec<UdpSocket>,
@@ -234,13 +234,13 @@ async fn anon(node: &Node) -> Session {
         .unwrap()
 }
 
-/// Connexion d'un nœud appelant, authentifié par le certificat de
+/// Connection of a calling node, authenticated by the certificate of
 /// `key(caller)`.
 async fn as_peer(node: &Node, caller: usize) -> (quinn::Endpoint, quinn::Connection) {
     as_peer_at(node, node.addr, caller).await
 }
 
-/// Comme `as_peer`, vers l'adresse `addr` du nœud.
+/// Like `as_peer`, to the node's address `addr`.
 async fn as_peer_at(
     node: &Node,
     addr: SocketAddr,
@@ -279,7 +279,7 @@ fn message(n: u8) -> Vec<u8> {
     .encode()
 }
 
-/// Les quatre requêtes de la table.
+/// The four table requests.
 fn dht_requests() -> Vec<Request> {
     vec![
         Request::Ping { from: None },
@@ -312,7 +312,7 @@ async fn dht_disabled_without_public_addr() {
         assert_eq!(
             ask(&peer, &req).await,
             Response::Error(ErrorReason::Unsupported),
-            "{req:?} (appelant authentifié)"
+            "{req:?} (authenticated caller)"
         );
     }
     node.stop().await;
@@ -323,14 +323,14 @@ async fn ping_returns_own_record() {
     let node = start(0, Some(vec![]));
     let s = anon(&node).await;
     let Response::Pong { record } = s.request(&Request::Ping { from: None }).await.unwrap() else {
-        panic!("Pong attendu");
+        panic!("Pong expected");
     };
     assert_eq!(
         record.verify(now(), &RecordPolicy::network(true)),
         Ok(node.id)
     );
     assert_eq!(record.addrs(), vec![node.addr]);
-    // Sans adresse privée permise, la fiche de test n'est pas routable.
+    // Without private addresses allowed, the test record is not routable.
     assert!(record.verify(now(), &RecordPolicy::network(false)).is_err());
     node.stop().await;
 }
@@ -359,7 +359,7 @@ async fn from_record_must_match_certificate() {
     let other = NodeRecord::sign(&key(2), Some(addr), None, now());
     let mine = NodeRecord::sign(&key(1), Some(addr), None, now());
     let (_ep, peer) = as_peer(&node, 1).await;
-    // Fiche d'une autre clé que le certificat : refusée.
+    // Record of a key other than the certificate's: refused.
     for req in [
         Request::Ping {
             from: Some(other.clone()),
@@ -375,7 +375,7 @@ async fn from_record_must_match_certificate() {
             "{req:?}"
         );
     }
-    // Fiche jointe par un client anonyme : refusée.
+    // Record attached by an anonymous client: refused.
     let s = anon(&node).await;
     assert_eq!(
         s.request(&Request::Ping {
@@ -385,7 +385,7 @@ async fn from_record_must_match_certificate() {
         .unwrap(),
         Response::Error(ErrorReason::Malformed)
     );
-    // Fiche du certificat : acceptée.
+    // Certificate's record: accepted.
     assert!(matches!(
         ask(&peer, &Request::Ping { from: Some(mine) }).await,
         Response::Pong { .. }
@@ -400,7 +400,7 @@ async fn store_and_find_value_from_peer() {
     let packet = message(7);
     let mailbox = MailboxId([7; 16]);
     let hash = pow::content_hash(&packet);
-    // Preuve de base sans le palier : trop faible (point 5 de §5.2).
+    // Base proof without the tier: too weak (point 5 of §5.2).
     let weak = pow::solve(&hash, &mailbox, TEST_BITS).unwrap();
     let base = barking_node::rules::pow_bits_for(&policy(), 0, Tier::S, 0);
     let good = pow::solve(&hash, &mailbox, base).unwrap();
@@ -417,7 +417,7 @@ async fn store_and_find_value_from_peer() {
             Response::Error(ErrorReason::PowTooWeak)
         );
     }
-    // Paquet illisible : refusé avant toute autre règle.
+    // Unreadable packet: refused before any other rule.
     assert_eq!(
         ask(
             &peer,
@@ -457,7 +457,7 @@ async fn store_and_find_value_from_peer() {
     node.stop().await;
 }
 
-/// Identifiants renvoyés par `FindNode` sur la table de `node`.
+/// Identifiers returned by `FindNode` on `node`'s table.
 async fn known_by(node: &Node) -> HashSet<NodeId> {
     let s = anon(node).await;
     let Response::Nodes { records } = s
@@ -468,7 +468,7 @@ async fn known_by(node: &Node) -> HashSet<NodeId> {
         .await
         .unwrap()
     else {
-        panic!("Nodes attendu");
+        panic!("Nodes expected");
     };
     records
         .iter()
@@ -500,7 +500,7 @@ async fn three_nodes_learn_each_other() {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "les tables ne se sont pas remplies"
+            "the tables did not fill up"
         );
         tokio::time::sleep(TICK).await;
     }
@@ -509,11 +509,11 @@ async fn three_nodes_learn_each_other() {
     }
 }
 
-/// Socket `[::1]`, ou `None` si l'IPv6 locale manque (test ignoré).
+/// `[::1]` socket, or `None` if local IPv6 is missing (test skipped).
 fn local_v6() -> Option<UdpSocket> {
     let s = UdpSocket::bind("[::1]:0").ok();
     if s.is_none() {
-        eprintln!("IPv6 local indisponible : test ignoré");
+        eprintln!("local IPv6 unavailable: test skipped");
     }
     s
 }
@@ -522,8 +522,8 @@ fn local_v6() -> Option<UdpSocket> {
 async fn recall_requires_source_ip() {
     let Some(v6) = local_v6() else { return };
     let node = start_with(0, Some(vec![]), Some(v6), false);
-    // Observateur : l'adresse annoncée par la fiche jointe ; il ne fait que
-    // compter les datagrammes reçus (un rappel y enverrait un `Initial`).
+    // Observer: the address announced by the attached record; it only
+    // counts received datagrams (a callback would send an `Initial` there).
     let watch = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let SocketAddr::V4(at) = watch.local_addr().unwrap() else {
         unreachable!()
@@ -531,21 +531,21 @@ async fn recall_requires_source_ip() {
     let record = NodeRecord::sign(&key(1), Some(at), None, now());
     let ping = Request::Ping { from: Some(record) };
     let mut buf = [0u8; 2048];
-    // Appel depuis ::1 : la fiche n'annonce pas cette IP, aucun rappel.
+    // Call from ::1: the record does not announce this IP, no callback.
     let (_ep6, from_v6) = as_peer_at(&node, node.v6.unwrap(), 1).await;
     assert!(matches!(ask(&from_v6, &ping).await, Response::Pong { .. }));
     assert!(
         timeout(Duration::from_millis(1500), watch.recv_from(&mut buf))
             .await
             .is_err(),
-        "rappel vers une adresse que l'appelant n'utilise pas"
+        "callback to an address the caller does not use"
     );
-    // Appel depuis 127.0.0.1 (autre port que l'adresse annoncée) : rappel.
+    // Call from 127.0.0.1 (port other than the announced address): callback.
     let (_ep4, from_v4) = as_peer(&node, 1).await;
     assert!(matches!(ask(&from_v4, &ping).await, Response::Pong { .. }));
     timeout(LONG, watch.recv_from(&mut buf))
         .await
-        .expect("rappel attendu")
+        .expect("callback expected")
         .unwrap();
     node.stop().await;
 }
@@ -553,19 +553,19 @@ async fn recall_requires_source_ip() {
 #[tokio::test]
 async fn dual_stack_peer_is_admitted_by_v4_only_node() {
     let Some(v6) = local_v6() else { return };
-    // B publie une IPv4 et une IPv6 ; A n'a qu'un endpoint IPv4 et ne peut
-    // pas vérifier l'IPv6 de B : elle est sautée, pas comptée en échec.
+    // B publishes an IPv4 and an IPv6; A has only an IPv4 endpoint and cannot
+    // verify B's IPv6: it is skipped, not counted as a failure.
     let b = start_with(1, Some(vec![]), Some(v6), true);
     let a = start(0, Some(vec![b.entry()]));
     let deadline = tokio::time::Instant::now() + LONG;
     while !known_by(&a).await.contains(&b.id) {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "le pair à double pile n'est pas entré"
+            "the dual-stack peer did not enter"
         );
         tokio::time::sleep(TICK).await;
     }
-    // Et il y reste au fil des cycles d'entretien.
+    // And it stays there across maintenance cycles.
     tokio::time::sleep(5 * TICK).await;
     assert!(known_by(&a).await.contains(&b.id));
     for n in [a, b] {
@@ -578,15 +578,15 @@ async fn dual_stack_listener_publishing_v4_skips_peer_v6() {
     if local_v6().is_none() {
         return;
     }
-    // A écoute sur `[::]` (double pile, comme `listen` par défaut) mais ne
-    // publie qu'une IPv4 : l'IPv6 d'un pair n'est pas vérifiée chez lui.
+    // A listens on `[::]` (dual stack, like the default `listen`) but only
+    // publishes an IPv4: a peer's IPv6 is not verified here.
     let Ok(any) = UdpSocket::bind("[::]:0") else {
-        eprintln!("[::] indisponible : test ignoré");
+        eprintln!("[::] unavailable: test skipped");
         return;
     };
     let port = any.local_addr().unwrap().port();
     let a_addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    // B publie une IPv4 qui répond et une IPv6 où personne n'écoute.
+    // B publishes an IPv4 that answers and an IPv6 where nobody listens.
     let dead = UdpSocket::bind("[::1]:0").unwrap();
     let SocketAddr::V6(dead_v6) = dead.local_addr().unwrap() else {
         unreachable!()
@@ -621,7 +621,7 @@ async fn dual_stack_listener_publishing_v4_skips_peer_v6() {
     while !known_by(&a).await.contains(&b.id) {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "le pair à double pile n'est pas entré"
+            "the dual-stack peer did not enter"
         );
         tokio::time::sleep(TICK).await;
     }
@@ -633,8 +633,8 @@ async fn dual_stack_listener_publishing_v4_skips_peer_v6() {
     }
 }
 
-/// Attend que `watch` reste muet pendant `quiet` (les `Initial` d'un appel
-/// sans réponse sont répétés jusqu'à son délai).
+/// Waits for `watch` to stay silent for `quiet` (the `Initial`s of an
+/// unanswered call are repeated until its timeout).
 async fn drain_until_quiet(watch: &tokio::net::UdpSocket, quiet: Duration) {
     let mut buf = [0u8; 2048];
     while timeout(quiet, watch.recv_from(&mut buf)).await.is_ok() {}
@@ -654,17 +654,17 @@ async fn recall_at_most_once_per_interval() {
     assert!(matches!(ask(&peer, &ping).await, Response::Pong { .. }));
     timeout(LONG, watch.recv_from(&mut buf))
         .await
-        .expect("premier rappel attendu")
+        .expect("first callback expected")
         .unwrap();
-    // Le rappel abandonne après son délai (3 s) : plus rien n'arrive.
+    // The callback gives up after its timeout (3 s): nothing arrives anymore.
     drain_until_quiet(&watch, Duration::from_millis(3500)).await;
-    // Même identifiant dans les 10 min : aucun nouveau rappel.
+    // Same identifier within 10 min: no new callback.
     assert!(matches!(ask(&peer, &ping).await, Response::Pong { .. }));
     assert!(
         timeout(Duration::from_millis(2000), watch.recv_from(&mut buf))
             .await
             .is_err(),
-        "second rappel du même identifiant dans l'intervalle"
+        "second callback for the same identifier within the interval"
     );
     node.stop().await;
 }
@@ -672,9 +672,9 @@ async fn recall_at_most_once_per_interval() {
 #[tokio::test]
 async fn dual_stack_record_with_silent_second_address_is_refused() {
     let Some(v6) = local_v6() else { return };
-    // A publie IPv4 et IPv6 et peut joindre les deux familles. B publie une
-    // IPv4 qui répond et une IPv6 où personne n'écoute : sa fiche n'est pas
-    // vérifiée à chacune de ses adresses, il n'entre jamais chez A.
+    // A publishes IPv4 and IPv6 and can reach both families. B publishes an
+    // IPv4 that answers and an IPv6 where nobody listens: its record is not
+    // verified at each of its addresses, it never enters A.
     let dead = UdpSocket::bind("[::1]:0").unwrap();
     let SocketAddr::V6(dead_v6) = dead.local_addr().unwrap() else {
         unreachable!()
@@ -697,13 +697,13 @@ async fn dual_stack_record_with_silent_second_address_is_refused() {
         DiversityLimits::SPEC,
     );
     let a = start_with(0, Some(vec![b.entry()]), Some(v6), true);
-    // Témoin : B, qui ne joint que l'IPv4, fait entrer A.
+    // Control: B, which reaches only IPv4, makes A enter.
     let deadline = tokio::time::Instant::now() + LONG;
     while !known_by(&b).await.contains(&a.id) {
-        assert!(tokio::time::Instant::now() < deadline, "A n'est pas entré");
+        assert!(tokio::time::Instant::now() < deadline, "A did not enter");
         tokio::time::sleep(TICK).await;
     }
-    // Plusieurs délais d'appel plus tard, B n'est toujours pas chez A.
+    // Several call timeouts later, B is still not in A.
     tokio::time::sleep(Duration::from_secs(8)).await;
     assert!(!known_by(&a).await.contains(&b.id));
     drop(dead);
@@ -712,17 +712,17 @@ async fn dual_stack_record_with_silent_second_address_is_refused() {
     }
 }
 
-// --- Recopie entre responsables, sur un réseau de 8 nœuds (spec §5.3, §9) ---
+// --- Replication between responsible nodes, on an 8-node network (spec §5.3, §9) ---
 
-/// Délai des scénarios de recopie (plusieurs passes, délais d'appel de 3 s).
+/// Timeout of the replication scenarios (several passes, 3 s call timeouts).
 const REPLICATION_WAIT: Duration = Duration::from_secs(90);
 
-/// Limites de diversité des tests : tous les nœuds partagent le /24 de
+/// Diversity limits of the tests: all nodes share the /24 of
 /// 127.0.0.1.
 const LOCAL: DiversityLimits = DiversityLimits::NONE;
 
-/// Démarre le nœud `n` en IPv4 local, table active amorcée sur
-/// `bootstrap`, avec `budget` octets de recopie par heure.
+/// Starts node `n` on local IPv4, table active bootstrapped on
+/// `bootstrap`, with `budget` replication bytes per hour.
 fn start_dht(
     n: usize,
     bootstrap: Vec<BootstrapEntry>,
@@ -744,7 +744,7 @@ fn start_dht(
     start_raw(n, vec![socket], addr, Some(dht), limits)
 }
 
-/// Attend que chaque nœud de `nodes` connaisse tous les autres.
+/// Waits for each node of `nodes` to know all the others.
 async fn wait_full_tables(nodes: &[&Node]) {
     let deadline = tokio::time::Instant::now() + LONG;
     for n in nodes {
@@ -756,16 +756,16 @@ async fn wait_full_tables(nodes: &[&Node]) {
         while !known_by(n).await.is_superset(&want) {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "les tables ne se sont pas remplies"
+                "the tables did not fill up"
             );
             tokio::time::sleep(TICK).await;
         }
     }
 }
 
-/// Réseau des nœuds `keys`, amorcés depuis le premier, démarrés l'un après
-/// l'autre (chacun connu du premier avant le suivant), avec `budget(n)`
-/// octets de recopie par heure.
+/// Network of the nodes `keys`, bootstrapped from the first, started one after
+/// the other (each known to the first before the next), with `budget(n)`
+/// replication bytes per hour.
 async fn network(keys: std::ops::Range<usize>, budget: impl Fn(usize) -> u64) -> Vec<Node> {
     let mut nodes: Vec<Node> = Vec::new();
     for n in keys {
@@ -774,7 +774,10 @@ async fn network(keys: std::ops::Range<usize>, budget: impl Fn(usize) -> u64) ->
         if let Some(first) = nodes.first() {
             let deadline = tokio::time::Instant::now() + LONG;
             while !known_by(first).await.contains(&node.id) {
-                assert!(tokio::time::Instant::now() < deadline, "nœud {n} non joint");
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "node {n} not reached"
+                );
                 tokio::time::sleep(TICK).await;
             }
         }
@@ -784,7 +787,7 @@ async fn network(keys: std::ops::Range<usize>, budget: impl Fn(usize) -> u64) ->
     nodes
 }
 
-/// Indices de `ids` triés par distance à la clé de `mailbox`.
+/// Indices of `ids` sorted by distance to the key of `mailbox`.
 fn by_distance(ids: &[NodeId], mailbox: &MailboxId) -> Vec<usize> {
     let key = mailbox_key(mailbox);
     let mut order: Vec<usize> = (0..ids.len()).collect();
@@ -792,7 +795,7 @@ fn by_distance(ids: &[NodeId], mailbox: &MailboxId) -> Vec<usize> {
     order
 }
 
-/// Message `id` de la boîte `mailbox`.
+/// Message `id` of mailbox `mailbox`.
 fn message_in(mailbox: MailboxId, id: PacketId) -> Vec<u8> {
     Packet {
         kind: Kind::Message,
@@ -806,7 +809,7 @@ fn message_in(mailbox: MailboxId, id: PacketId) -> Vec<u8> {
     .encode()
 }
 
-/// Message accusable et son accusé.
+/// Acknowledgeable message and its ack.
 fn message_and_ack(mailbox: MailboxId, secret: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
     let msg = message_in(mailbox, ack::packet_id_for(&secret));
     let acked = Packet::decode(&msg).unwrap();
@@ -823,7 +826,7 @@ async fn deposit(node: &Node, packet: &[u8]) {
     s.close().await;
 }
 
-/// Ce que `node` sert pour `mailbox`.
+/// What `node` serves for `mailbox`.
 async fn held(node: &Node, mailbox: MailboxId) -> Vec<Vec<u8>> {
     let mut s = anon(node).await;
     let items = timeout(LONG, s.fetch(&[mailbox])).await.unwrap().unwrap();
@@ -831,7 +834,7 @@ async fn held(node: &Node, mailbox: MailboxId) -> Vec<Vec<u8>> {
     items
 }
 
-/// Attend que `cond` soit vrai de chacun de `nodes`.
+/// Waits for `cond` to hold for each of `nodes`.
 async fn wait_all<F>(nodes: &[&Node], mailbox: MailboxId, what: &str, cond: F)
 where
     F: Fn(&[Vec<u8>]) -> bool,
@@ -865,9 +868,12 @@ async fn deposit_reaches_all_five_responsibles() {
         deposit(&nodes[i], &msg).await;
     }
     let five: Vec<&Node> = order[..5].iter().map(|&i| &nodes[i]).collect();
-    wait_all(&five, mailbox, "copie absente d'un responsable", |items| {
-        items.contains(&msg)
-    })
+    wait_all(
+        &five,
+        mailbox,
+        "copy missing from a responsible node",
+        |items| items.contains(&msg),
+    )
     .await;
     stop_all(nodes).await;
 }
@@ -882,15 +888,18 @@ async fn ack_on_one_clears_all_five() {
         deposit(&nodes[i], &msg).await;
     }
     let five: Vec<&Node> = order[..5].iter().map(|&i| &nodes[i]).collect();
-    wait_all(&five, mailbox, "copie absente d'un responsable", |items| {
-        items.contains(&msg)
-    })
+    wait_all(
+        &five,
+        mailbox,
+        "copy missing from a responsible node",
+        |items| items.contains(&msg),
+    )
     .await;
     deposit(&nodes[order[4]], &ack).await;
     wait_all(
         &five,
         mailbox,
-        "message encore servi après l'accusé",
+        "message still served after the ack",
         |items| !items.contains(&msg),
     )
     .await;
@@ -907,11 +916,14 @@ async fn stopping_two_responsibles_recopies_to_next() {
         deposit(&nodes[i], &msg).await;
     }
     let five: Vec<&Node> = order[..5].iter().map(|&i| &nodes[i]).collect();
-    wait_all(&five, mailbox, "copie absente d'un responsable", |items| {
-        items.contains(&msg)
-    })
+    wait_all(
+        &five,
+        mailbox,
+        "copy missing from a responsible node",
+        |items| items.contains(&msg),
+    )
     .await;
-    // Arrêt des 4ᵉ et 5ᵉ responsables.
+    // Shutdown of the 4th and 5th responsible nodes.
     let mut slots: Vec<Option<Node>> = nodes.into_iter().map(Some).collect();
     for &i in &order[3..5] {
         slots[i].take().unwrap().stop().await;
@@ -928,17 +940,17 @@ async fn stopping_two_responsibles_recopies_to_next() {
     wait_all(
         &next,
         mailbox,
-        "pas de recopie vers les suivants",
+        "no replication to the following ones",
         |items| items.contains(&msg),
     )
     .await;
-    // Recopie dans les 3 passes qui suivent l'arrêt, chez au moins un des
-    // gardiens restants : chaque passe sans réponse demande un contrôle de
-    // vie (un par pair et par `TICK` ici), 3 contrôles sans réponse
-    // retirent le nœud, et la boîte va au suivant dans la même passe. La
-    // passe en cours au moment de l'arrêt, qui a pu joindre les nœuds
-    // arrêtés, est comptée en plus. Le numéro est celui de la première
-    // passe d'envoi après l'arrêt, noté par la passe elle-même.
+    // Replication within the 3 passes following the shutdown, at at least one of
+    // the remaining holders: each unanswered pass requests a liveness
+    // check (one per peer and per `TICK` here), 3 unanswered checks
+    // remove the node, and the mailbox goes to the next one in the same pass. The
+    // pass in progress at the time of the shutdown, which may have reached the
+    // stopped nodes, is counted on top. The number is that of the first
+    // sending pass after the shutdown, noted by the pass itself.
     let fastest = holders
         .iter()
         .zip(&passes_at_stop)
@@ -948,20 +960,20 @@ async fn stopping_two_responsibles_recopies_to_next() {
             Some(first - before)
         })
         .min()
-        .expect("aucun gardien n'a recopié");
+        .expect("no holder replicated");
     assert!(
         fastest <= 3 + 1,
-        "recopie à la passe {fastest} après l'arrêt"
+        "replication at pass {fastest} after the shutdown"
     );
     stop_all(slots.into_iter().flatten().collect()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn not_responsible_is_skipped_quietly() {
-    // Dix nœuds aux limites locales et un nœud A aux limites de la spec :
-    // A ne garde que 2 pairs du /24 local, se croit responsable de toute
-    // boîte (moins de 10 nœuds dans sa table), alors que les autres, qui
-    // voient 10 nœuds, le savent le plus loin de la clé.
+    // Ten nodes at local limits and a node A at the spec's limits:
+    // A keeps only 2 peers of the local /24, believes itself responsible for any
+    // mailbox (fewer than 10 nodes in its table), whereas the others, who
+    // see 10 nodes, know it to be the farthest from the key.
     let mut nodes = network(0..10, |_| DEFAULT_REPLICATION_BYTES_PER_HOUR).await;
     let a = start_dht(
         10,
@@ -974,11 +986,11 @@ async fn not_responsible_is_skipped_quietly() {
     let deadline = tokio::time::Instant::now() + LONG;
     for n in &refs {
         while known_by(n).await.len() < 10 {
-            assert!(tokio::time::Instant::now() < deadline, "tables incomplètes");
+            assert!(tokio::time::Instant::now() < deadline, "incomplete tables");
             tokio::time::sleep(TICK).await;
         }
     }
-    // Boîte dont A est le plus loin des 11 nœuds.
+    // Mailbox for which A is the farthest of the 11 nodes.
     let all = ids(&nodes);
     let mailbox = (0..=255u8)
         .map(|b| MailboxId([b; 16]))
@@ -993,14 +1005,11 @@ async fn not_responsible_is_skipped_quietly() {
         if let Some(last) = r.last.filter(|l| l.not_responsible > 0) {
             break last;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "aucun NotResponsible"
-        );
+        assert!(tokio::time::Instant::now() < deadline, "no NotResponsible");
         tokio::time::sleep(TICK).await;
     };
-    // Une seule tentative par pair et par passe (A a 2 pairs au plus), rien
-    // de recopié, aucun pair sauté.
+    // A single attempt per peer and per pass (A has at most 2 peers), nothing
+    // replicated, no peer skipped.
     assert!(report.not_responsible <= 2, "{report:?}");
     assert_eq!((report.sent, report.skipped_peers), (0, 0), "{report:?}");
     for n in &refs {
@@ -1011,15 +1020,15 @@ async fn not_responsible_is_skipped_quietly() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ack_copied_before_packet_is_tolerated() {
-    // A, seul, reçoit un message puis son accusé : il ne garde que l'accusé.
+    // A, alone, receives a message then its ack: it keeps only the ack.
     let a = start_dht(0, vec![], LOCAL, DEFAULT_REPLICATION_BYTES_PER_HOUR);
     let mailbox = MailboxId([0x55; 16]);
     let (msg, ack) = message_and_ack(mailbox, [0x55; 16]);
     deposit(&a, &msg).await;
     deposit(&a, &ack).await;
     assert_eq!(held(&a, mailbox).await, vec![ack.clone()]);
-    // Les autres arrivent ensuite : l'accusé leur est recopié, sans le
-    // paquet qu'aucun d'eux n'a.
+    // The others arrive afterwards: the ack is replicated to them, without the
+    // packet that none of them has.
     let entry = a.entry();
     let mut nodes = vec![a];
     for n in 1..8 {
@@ -1043,7 +1052,7 @@ async fn ack_copied_before_packet_is_tolerated() {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "accusé jamais recopié"
+            "ack never replicated"
         );
         tokio::time::sleep(TICK).await;
     };
@@ -1060,7 +1069,7 @@ async fn replication_budget_stops_pass() {
     let mailbox = MailboxId([0x56; 16]);
     let all: Vec<NodeId> = (0..8).map(|n| id_of(&key(n))).collect();
     let r = by_distance(&all, &mailbox)[0];
-    // R n'a droit qu'à 1 octet par heure.
+    // R is entitled to only 1 byte per hour.
     let nodes = network(0..8, |n| {
         if n == r {
             1
@@ -1075,25 +1084,25 @@ async fn replication_budget_stops_pass() {
     deposit(&nodes[r], &second).await;
     let deadline = tokio::time::Instant::now() + REPLICATION_WAIT;
     while nodes[r].stats.replication().passes < 3 {
-        assert!(tokio::time::Instant::now() < deadline, "passes trop lentes");
+        assert!(tokio::time::Instant::now() < deadline, "passes too slow");
         tokio::time::sleep(TICK).await;
     }
     let rep = nodes[r].stats.replication();
-    // Un élément envoyé, puis plus rien de l'heure.
+    // One item sent, then nothing more for the hour.
     assert!(rep.total.bytes <= first.len() as u64, "{rep:?}");
     assert!(rep.total.sent <= 1, "{rep:?}");
     assert!(rep.last.as_ref().unwrap().budget_exhausted, "{rep:?}");
     for (i, n) in nodes.iter().enumerate() {
         if i != r {
-            assert!(!held(n, mailbox).await.contains(&second), "nœud {i}");
+            assert!(!held(n, mailbox).await.contains(&second), "node {i}");
         }
     }
     stop_all(nodes).await;
 }
 
-/// Nœud `n` sur sa propre adresse 127.0.0.(10 + n) (son propre groupe chez
-/// les autres), aux seaux de débit de la spec ; `None` si l'adresse ne se
-/// lie pas (macOS sans alias de 127.0.0.x).
+/// Node `n` on its own address 127.0.0.(10 + n) (its own group at
+/// the others), at the spec's rate buckets; `None` if the address does not
+/// bind (macOS without 127.0.0.x aliases).
 fn start_own_ip(n: usize, bootstrap: Vec<BootstrapEntry>) -> Option<Node> {
     let ip = std::net::Ipv4Addr::new(127, 0, 0, 10 + u8::try_from(n).unwrap());
     let socket = UdpSocket::bind((ip, 0)).ok()?;
@@ -1118,8 +1127,8 @@ fn start_own_ip(n: usize, bootstrap: Vec<BootstrapEntry>) -> Option<Node> {
     ))
 }
 
-/// Dépose en réessayant après un `RateLimited` (le client de test a aussi
-/// son seau chez le nœud).
+/// Deposits, retrying after a `RateLimited` (the test client also has
+/// its bucket at the node).
 async fn deposit_paced(node: &Node, packet: &[u8]) {
     let deadline = tokio::time::Instant::now() + LONG;
     loop {
@@ -1129,15 +1138,15 @@ async fn deposit_paced(node: &Node, packet: &[u8]) {
         match r {
             Ok(()) => return,
             Err(ErrorReason::RateLimited) => {
-                assert!(tokio::time::Instant::now() < deadline, "dépôt refusé");
+                assert!(tokio::time::Instant::now() < deadline, "deposit refused");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            Err(e) => panic!("dépôt refusé : {e:?}"),
+            Err(e) => panic!("deposit refused: {e:?}"),
         }
     }
 }
 
-/// Nombre de `msgs` que `node` sert, ou `None` si la relève est refusée.
+/// Number of `msgs` that `node` serves, or `None` if the fetch is refused.
 async fn count_held(node: &Node, mailbox: MailboxId, msgs: &[Vec<u8>]) -> Option<usize> {
     let mut s = timeout(LONG, Client::connect(node.addr, node.id))
         .await
@@ -1150,17 +1159,17 @@ async fn count_held(node: &Node, mailbox: MailboxId, msgs: &[Vec<u8>]) -> Option
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replication_paces_under_default_rate_limits() {
-    // Chaque nœud a sa propre IP : ses appels passent par le seau de son
-    // groupe chez l'appelé (20 requêtes/s, rafale ×5), non levé ici.
+    // Each node has its own IP: its calls go through its group's bucket
+    // at the callee (20 requests/s, burst x5), not lifted here.
     let Some(first) = start_own_ip(0, vec![]) else {
-        eprintln!("127.0.0.x indisponible (pas d'alias) : test ignoré");
+        eprintln!("127.0.0.x unavailable (no alias): test skipped");
         return;
     };
     let entry = first.entry();
     let mut nodes = vec![first];
     for n in 1..8 {
         let Some(node) = start_own_ip(n, vec![entry]) else {
-            eprintln!("127.0.0.x indisponible (pas d'alias) : test ignoré");
+            eprintln!("127.0.0.x unavailable (no alias): test skipped");
             stop_all(nodes).await;
             return;
         };
@@ -1169,8 +1178,8 @@ async fn replication_paces_under_default_rate_limits() {
     wait_full_tables(&nodes.iter().collect::<Vec<_>>()).await;
     let mailbox = MailboxId([0x58; 16]);
     let order = by_distance(&ids(&nodes), &mailbox);
-    // Plus d'éléments que la rafale du seau d'un groupe : sans rythme, la
-    // recopie serait refusée (`RateLimited`) en cours de route.
+    // More items than a group bucket's burst: without pacing, the
+    // replication would be refused (`RateLimited`) along the way.
     let msgs: Vec<Vec<u8>> = (0..60u8)
         .map(|i| {
             let mut id = [0x58; 16];
@@ -1188,13 +1197,13 @@ async fn replication_paces_under_default_rate_limits() {
         while count_held(&nodes[i], mailbox, &msgs).await != Some(msgs.len()) {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "copies incomplètes chez le nœud {i}"
+                "incomplete copies at node {i}"
             );
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
-    // La recopie s'est tenue sous le seau : aucun refus de débit, aucun
-    // responsable sauté.
+    // Replication stayed under the bucket: no rate refusal, no
+    // responsible node skipped.
     let rep = nodes[r].stats.replication();
     assert_eq!(
         (rep.total.rate_limited, rep.total.skipped_peers),
@@ -1206,9 +1215,9 @@ async fn replication_paces_under_default_rate_limits() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn message_too_weak_for_peer_is_not_sent() {
-    // P annonce 12 bits de plus que R dans `Hello`. La preuve d'un message
-    // déposé chez R vise la difficulté de R : elle n'atteint celle de P
-    // qu'avec une chance de 2^-12. R ne lui envoie donc rien.
+    // P announces 12 bits more than R in `Hello`. The proof of a message
+    // deposited at R targets R's difficulty: it reaches P's only with a
+    // 2^-12 chance. R therefore sends it nothing.
     let r = start_dht(0, vec![], LOCAL, DEFAULT_REPLICATION_BYTES_PER_HOUR);
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let SocketAddr::V4(v4) = socket.local_addr().unwrap() else {
@@ -1243,7 +1252,7 @@ async fn message_too_weak_for_peer_is_not_sent() {
         assert!(tokio::time::Instant::now() < deadline, "{rep:?}");
         tokio::time::sleep(TICK).await;
     };
-    // Rien n'est parti vers P (aucun octet envoyé), qui ne garde rien.
+    // Nothing went to P (no byte sent), which keeps nothing.
     assert_eq!((rep.total.bytes, rep.total.sent), (0, 0), "{rep:?}");
     assert!(held(&p, mailbox).await.is_empty());
     stop_all(vec![r, p]).await;

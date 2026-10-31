@@ -1,24 +1,24 @@
-//! Limites anti-abus (spec §5), tenues en mémoire seulement.
+//! Anti-abuse limits (spec §5), kept in memory only.
 //!
-//! - Connexions simultanées, par niveaux : par adresse (IPv4 /32, IPv6 /64),
-//!   par IPv6 /56 et /48, par IPv4 /24, et au total. IPv4 encapsulée dans
-//!   IPv6 ramenée à IPv4. Table pleine : la connexion la plus longtemps
-//!   inactive du /48 (ou /24) le plus représenté est évincée, si ce groupe
-//!   pèse plus que celui du nouveau venu ; sinon refus.
-//! - Par groupe d'adresses (/32 ou /64), partagés par ses connexions : seau
-//!   de jetons (requêtes et octets, rafale ×`burst`, à moitié plein au
-//!   départ), octets de réponses réservés, opérations de base en cours. L'état
-//!   d'un groupe survit à ses connexions tant que son seau n'est pas revenu à
-//!   son niveau de départ : se reconnecter ne le remplit pas.
+//! - Concurrent connections, by tier: per address (IPv4 /32, IPv6 /64),
+//!   per IPv6 /56 and /48, per IPv4 /24, and in total. IPv4 encapsulated in
+//!   IPv6 is mapped back to IPv4. Full table: the longest-idle connection
+//!   of the most represented /48 (or /24) is evicted, if that group weighs
+//!   more than the newcomer's; otherwise refusal.
+//! - Per address group (/32 or /64), shared by its connections: token
+//!   bucket (requests and bytes, burst ×`burst`, half full at the start),
+//!   reserved response bytes, database operations in progress. A group's
+//!   state outlives its connections as long as its bucket has not returned
+//!   to its starting level: reconnecting does not refill it.
 //!
-//! - Par identifiant de nœud authentifié (`PeerLimiter`, spec §5.2) : seau
-//!   de 50 requêtes/s et 1 Mio/s, rafale ×5, plein au départ, et part de la
-//!   file de base. S'ajoute à celui du groupe d'adresses.
+//! - Per authenticated node identifier (`PeerLimiter`, spec §5.2): bucket
+//!   of 50 requests/s and 1 MiB/s, burst ×5, full at the start, and a share
+//!   of the database queue. Adds to that of the address group.
 //!
-//! Les adresses ne vivent que dans ces tables, le temps des connexions (et du
-//! retour du seau à son niveau de départ, quelques secondes) ; elles ne sont
-//! ni écrites, ni journalisées, ni affichables (les clés n'implémentent pas
-//! `Debug`).
+//! Addresses live only in these tables, for the duration of the connections
+//! (and of the bucket's return to its starting level, a few seconds); they
+//! are neither written, nor logged, nor displayable (the keys do not
+//! implement `Debug`).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -31,14 +31,14 @@ use tokio::sync::Notify;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LimitConfig {
     pub max_connections: u32,
-    /// Par adresse IPv4 (/32) ou préfixe IPv6 /64.
+    /// Per IPv4 address (/32) or IPv6 /64 prefix.
     pub max_connections_per_ip: u32,
     pub max_connections_per_ipv6_56: u32,
     pub max_connections_per_ipv6_48: u32,
     pub max_connections_per_ipv4_24: u32,
     pub requests_per_sec: u32,
     pub bytes_per_sec: u64,
-    /// Capacité des seaux, en secondes de débit.
+    /// Bucket capacity, in seconds of throughput.
     pub burst: u32,
 }
 
@@ -57,14 +57,14 @@ impl Default for LimitConfig {
     }
 }
 
-/// Groupe d'une adresse : IPv4 entière, ou préfixe /64 IPv6.
+/// Group of an address: whole IPv4, or IPv6 /64 prefix.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum IpKey {
     V4([u8; 4]),
     V6([u8; 8]),
 }
 
-/// Préfixes englobants, comptés pour les plafonds par niveau.
+/// Enclosing prefixes, counted for the per-tier caps.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum PrefixKey {
     V6_56([u8; 7]),
@@ -72,8 +72,8 @@ enum PrefixKey {
     V4_24([u8; 3]),
 }
 
-/// Groupe et préfixes (du plus étroit au plus large ; le dernier est le
-/// groupe d'éviction : /48 ou /24).
+/// Group and prefixes (from narrowest to widest; the last one is the
+/// eviction group: /48 or /24).
 fn keys(ip: IpAddr) -> (IpKey, Vec<PrefixKey>) {
     let ip = match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
@@ -100,8 +100,8 @@ fn keys(ip: IpAddr) -> (IpKey, Vec<PrefixKey>) {
     }
 }
 
-/// Un groupe d'adresses : connexions ouvertes, débit, octets de réponses
-/// réservés, opérations de base en cours.
+/// An address group: open connections, throughput, reserved response
+/// bytes, database operations in progress.
 struct Group {
     conns: u32,
     bytes: usize,
@@ -110,14 +110,14 @@ struct Group {
 }
 
 impl Group {
-    /// Sans connexion ni travail en cours, et seau revenu à son niveau de
-    /// départ : équivalent à un groupe neuf, peut être oublié.
+    /// No connection nor work in progress, and bucket back at its starting
+    /// level: equivalent to a fresh group, can be forgotten.
     fn forgettable(&mut self, now: Instant) -> bool {
         self.conns == 0 && self.bytes == 0 && self.db_jobs == 0 && self.budget.settled(now)
     }
 }
 
-/// Une connexion ouverte (pour l'éviction).
+/// An open connection (for eviction).
 struct ConnEntry {
     group: IpKey,
     prefixes: Vec<PrefixKey>,
@@ -130,14 +130,14 @@ struct Table {
     groups: HashMap<IpKey, Group>,
     prefixes: HashMap<PrefixKey, u32>,
     conns: HashMap<u64, ConnEntry>,
-    /// Opérations de base en cours par /48 ou /24.
+    /// Database operations in progress per /48 or /24.
     prefix_db: HashMap<PrefixKey, u32>,
     next_id: u64,
     total: u32,
 }
 
 impl Table {
-    /// Retire une connexion des compteurs (fermeture ou éviction).
+    /// Removes a connection from the counters (closing or eviction).
     fn remove_conn(&mut self, id: u64, now: Instant) -> Option<ConnEntry> {
         let e = self.conns.remove(&id)?;
         self.total = self.total.saturating_sub(1);
@@ -166,8 +166,8 @@ impl Table {
         }
     }
 
-    /// Oublie les groupes inactifs revenus à leur niveau de départ, quand
-    /// ils sont nombreux (coût amorti).
+    /// Forgets idle groups that returned to their starting level, when
+    /// there are many of them (amortized cost).
     fn sweep(&mut self, now: Instant) {
         let live = self.total as usize;
         if self.groups.len() > 2 * live + 256 {
@@ -176,7 +176,7 @@ impl Table {
     }
 }
 
-/// Compteur de connexions ouvertes et état par groupe d'adresses.
+/// Counter of open connections and state per address group.
 pub struct Limiter {
     cfg: LimitConfig,
     table: Mutex<Table>,
@@ -206,11 +206,11 @@ impl Limiter {
         }
     }
 
-    /// Réserve une place pour une connexion depuis `ip`, ou `None` si une
-    /// limite est atteinte. Table pleine : évince la connexion la plus
-    /// longtemps inactive du groupe d'éviction (/48 ou /24) le plus
-    /// représenté, s'il compte au moins deux connexions de plus que celui du
-    /// nouveau venu. La place est rendue quand la garde est lâchée.
+    /// Reserves a slot for a connection from `ip`, or `None` if a limit is
+    /// reached. Full table: evicts the longest-idle connection of the most
+    /// represented eviction group (/48 or /24), if it has at least two more
+    /// connections than the newcomer's. The slot is returned when the guard
+    /// is dropped.
     pub fn try_acquire(self: &Arc<Self>, ip: IpAddr, now: Instant) -> Option<ConnectionSlot> {
         let (key, prefixes) = keys(ip);
         let mut t = self.table();
@@ -226,7 +226,7 @@ impl Limiter {
         if t.total >= self.cfg.max_connections {
             let top = *prefixes.last()?;
             let mine = t.prefixes.get(&top).copied().unwrap_or(0);
-            // Groupe d'éviction le plus représenté (même niveau : /48 ou /24).
+            // Most represented eviction group (same tier: /48 or /24).
             let (victim_group, count) = t
                 .prefixes
                 .iter()
@@ -280,39 +280,39 @@ impl Limiter {
         })
     }
 
-    /// Nombre total de connexions ouvertes.
+    /// Total number of open connections.
     pub fn connections(&self) -> u32 {
         self.table().total
     }
 }
 
-/// Place réservée pour une connexion.
+/// Slot reserved for a connection.
 pub struct ConnectionSlot {
     limiter: Arc<Limiter>,
     id: u64,
     key: IpKey,
-    /// /48 ou /24 englobant.
+    /// Enclosing /48 or /24.
     top: PrefixKey,
     evict: Arc<Notify>,
 }
 
 impl ConnectionSlot {
-    /// Notifié quand la connexion est évincée (table pleine) : elle doit
-    /// être fermée. Sa place est déjà rendue.
+    /// Notified when the connection is evicted (full table): it must be
+    /// closed. Its slot is already returned.
     pub fn evicted(&self) -> &Notify {
         &self.evict
     }
 
-    /// Note une activité de la connexion (requête reçue).
+    /// Records activity on the connection (request received).
     pub fn touch(&self, now: Instant) {
         if let Some(e) = self.limiter.table().conns.get_mut(&self.id) {
             e.last_active = now;
         }
     }
 
-    /// Admet une requête de coût `cost` (en requêtes) et de `bytes` octets
-    /// si le seau du groupe le permet, et la débite. Faux si le groupe n'est
-    /// plus suivi (connexion évincée).
+    /// Admits a request of cost `cost` (in requests) and `bytes` bytes if the
+    /// group's bucket allows it, and debits it. False if the group is no
+    /// longer tracked (evicted connection).
     pub fn admit(&self, cost: u32, bytes: usize, now: Instant) -> bool {
         let mut t = self.limiter.table();
         t.groups
@@ -320,15 +320,15 @@ impl ConnectionSlot {
             .is_some_and(|g| g.budget.admit(cost, bytes, now))
     }
 
-    /// Débite les octets d'une réponse au seau du groupe.
+    /// Debits the bytes of a response from the group's bucket.
     pub fn charge_bytes(&self, bytes: usize, now: Instant) {
         if let Some(g) = self.limiter.table().groups.get_mut(&self.key) {
             g.budget.charge_bytes(bytes, now);
         }
     }
 
-    /// Réserve `n` octets de réponse pour le groupe d'adresses de cette
-    /// connexion, sans dépasser `cap`.
+    /// Reserves `n` response bytes for this connection's address group,
+    /// without exceeding `cap`.
     pub fn try_reserve_bytes(&self, n: usize, cap: usize) -> bool {
         let mut t = self.limiter.table();
         let Some(g) = t.groups.get_mut(&self.key) else {
@@ -343,7 +343,7 @@ impl ConnectionSlot {
         }
     }
 
-    /// Rend `n` octets réservés par `try_reserve_bytes`.
+    /// Returns `n` bytes reserved by `try_reserve_bytes`.
     pub fn release_bytes(&self, n: usize) {
         let mut t = self.limiter.table();
         if let Some(g) = t.groups.get_mut(&self.key) {
@@ -352,7 +352,7 @@ impl ConnectionSlot {
         t.forget_if_idle(self.key, Instant::now());
     }
 
-    /// Octets réservés par le groupe d'adresses de cette connexion.
+    /// Bytes reserved by this connection's address group.
     pub fn group_bytes(&self) -> usize {
         self.limiter
             .table()
@@ -361,9 +361,9 @@ impl ConnectionSlot {
             .map_or(0, |g| g.bytes)
     }
 
-    /// Réserve une opération de base : au plus `group_cap` en cours pour le
-    /// groupe (/64 ou /32) et `prefix_cap` pour le /48 ou /24 englobant ;
-    /// rendue quand la garde est lâchée.
+    /// Reserves a database operation: at most `group_cap` in progress for the
+    /// group (/64 or /32) and `prefix_cap` for the enclosing /48 or /24;
+    /// returned when the guard is dropped.
     pub fn try_db_job(&self, group_cap: u32, prefix_cap: u32) -> Option<GroupDbJob> {
         let mut t = self.limiter.table();
         if t.prefix_db.get(&self.top).copied().unwrap_or(0) >= prefix_cap {
@@ -385,12 +385,12 @@ impl ConnectionSlot {
 
 impl Drop for ConnectionSlot {
     fn drop(&mut self) {
-        // Déjà retirée si elle a été évincée.
+        // Already removed if it was evicted.
         self.limiter.table().remove_conn(self.id, Instant::now());
     }
 }
 
-/// Opération de base comptée pour un groupe d'adresses.
+/// Database operation counted for an address group.
 pub struct GroupDbJob {
     limiter: Arc<Limiter>,
     key: IpKey,
@@ -413,17 +413,17 @@ impl Drop for GroupDbJob {
     }
 }
 
-/// Requêtes par seconde d'un identifiant de nœud.
+/// Requests per second of a node identifier.
 pub const PEER_REQUESTS_PER_SEC: f64 = 50.0;
-/// Octets par seconde d'un identifiant de nœud.
+/// Bytes per second of a node identifier.
 pub const PEER_BYTES_PER_SEC: f64 = (1 << 20) as f64;
-/// Rafale des seaux par identifiant, en secondes de débit.
+/// Burst of the per-identifier buckets, in seconds of throughput.
 pub const PEER_BURST: f64 = 5.0;
-/// Identifiants suivis au-delà desquels les seaux revenus pleins sont
-/// oubliés (coût amorti).
+/// Number of tracked identifiers beyond which buckets that returned to
+/// full are forgotten (amortized cost).
 const PEER_SWEEP_AT: usize = 4096;
 
-/// État d'un identifiant de nœud appelant.
+/// State of a calling node identifier.
 struct PeerState {
     requests: TokenBucket,
     bytes: TokenBucket,
@@ -441,7 +441,7 @@ impl PeerState {
         }
     }
 
-    /// Sans travail en cours, seaux pleins : équivalent à un état neuf.
+    /// No work in progress, buckets full: equivalent to a fresh state.
     fn forgettable(&mut self, now: Instant) -> bool {
         self.db_jobs == 0
             && self.requests.level(now) >= self.requests.capacity
@@ -449,9 +449,9 @@ impl PeerState {
     }
 }
 
-/// Débit et file de base par identifiant de nœud authentifié (spec §5.2,
-/// points 2 et 7). En mémoire seulement ; les identifiants revenus à l'état
-/// neuf sont oubliés quand ils deviennent nombreux.
+/// Throughput and database queue per authenticated node identifier (spec
+/// §5.2, points 2 and 7). In memory only; identifiers that returned to the
+/// fresh state are forgotten when they become numerous.
 #[derive(Clone, Default)]
 pub struct PeerLimiter {
     peers: Arc<Mutex<HashMap<NodeId, PeerState>>>,
@@ -466,8 +466,8 @@ impl PeerLimiter {
         self.peers.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Admet une requête de `bytes` octets de `id` si ses seaux le
-    /// permettent, et la débite. Sinon rien n'est débité.
+    /// Admits a request of `bytes` bytes from `id` if its buckets allow it,
+    /// and debits it. Otherwise nothing is debited.
     pub fn admit(&self, id: &NodeId, bytes: usize, now: Instant) -> bool {
         let mut peers = self.peers();
         if peers.len() >= PEER_SWEEP_AT {
@@ -484,8 +484,8 @@ impl PeerLimiter {
         }
     }
 
-    /// Réserve une opération de base pour `id` : au plus `cap` en cours ;
-    /// rendue quand la garde est lâchée.
+    /// Reserves a database operation for `id`: at most `cap` in progress;
+    /// returned when the guard is dropped.
     pub fn try_db_job(&self, id: &NodeId, cap: u32) -> Option<PeerDbJob> {
         let mut peers = self.peers();
         let p = peers
@@ -502,7 +502,7 @@ impl PeerLimiter {
     }
 }
 
-/// Opération de base comptée pour un identifiant de nœud.
+/// Database operation counted for a node identifier.
 pub struct PeerDbJob {
     limiter: PeerLimiter,
     id: NodeId,
@@ -516,7 +516,7 @@ impl Drop for PeerDbJob {
     }
 }
 
-/// Seau de jetons : `rate` jetons par seconde, `capacity` au plus.
+/// Token bucket: `rate` tokens per second, `capacity` at most.
 #[derive(Debug, Clone)]
 pub struct TokenBucket {
     rate: f64,
@@ -526,7 +526,7 @@ pub struct TokenBucket {
 }
 
 impl TokenBucket {
-    /// Seau contenant `tokens` jetons au départ.
+    /// Bucket holding `tokens` tokens at the start.
     pub fn new(rate: f64, capacity: f64, tokens: f64, now: Instant) -> TokenBucket {
         TokenBucket {
             rate,
@@ -547,8 +547,8 @@ impl TokenBucket {
         self.tokens >= n
     }
 
-    /// Prend `n` jetons sans condition ; le seau peut s'endetter jusqu'à
-    /// `-capacity` (une réponse volumineuse freine les requêtes suivantes).
+    /// Takes `n` tokens unconditionally; the bucket can go into debt down to
+    /// `-capacity` (a large response slows down the following requests).
     fn charge(&mut self, n: f64, now: Instant) {
         self.refill(now);
         self.tokens = (self.tokens - n).max(-self.capacity);
@@ -560,8 +560,8 @@ impl TokenBucket {
     }
 }
 
-/// Budget de débit d'un groupe d'adresses : requêtes et octets. Les seaux
-/// sont à moitié pleins au départ.
+/// Throughput budget of an address group: requests and bytes. The buckets
+/// are half full at the start.
 #[derive(Debug, Clone)]
 pub struct ConnBudget {
     requests: TokenBucket,
@@ -579,8 +579,8 @@ impl ConnBudget {
         }
     }
 
-    /// Admet une requête de coût `cost` et de `bytes` octets si les deux
-    /// seaux le permettent, et la débite. Sinon rien n'est débité.
+    /// Admits a request of cost `cost` and `bytes` bytes if both buckets
+    /// allow it, and debits it. Otherwise nothing is debited.
     pub fn admit(&mut self, cost: u32, bytes: usize, now: Instant) -> bool {
         let c = f64::from(cost.max(1));
         let b = bytes as f64;
@@ -593,12 +593,12 @@ impl ConnBudget {
         }
     }
 
-    /// Débite les octets d'une réponse.
+    /// Debits the bytes of a response.
     pub fn charge_bytes(&mut self, bytes: usize, now: Instant) {
         self.bytes.charge(bytes as f64, now);
     }
 
-    /// Seaux revenus (au moins) à leur niveau de départ.
+    /// Buckets back at (at least) their starting level.
     fn settled(&mut self, now: Instant) -> bool {
         let r = self.requests.capacity / 2.0;
         let b = self.bytes.capacity / 2.0;
@@ -639,20 +639,20 @@ mod tests {
         let l = PeerLimiter::new();
         let (a, b) = (NodeId([1; 32]), NodeId([2; 32]));
         let now = Instant::now();
-        // Rafale ×5 de 50 req/s, pleine au départ : 250 requêtes.
+        // Burst ×5 of 50 req/s, full at the start: 250 requests.
         for i in 0..250 {
-            assert!(l.admit(&a, 100, now), "requête {i}");
+            assert!(l.admit(&a, 100, now), "request {i}");
         }
-        assert!(!l.admit(&a, 100, now), "251ᵉ requête de la même seconde");
-        // Un autre identifiant n'est pas touché.
+        assert!(!l.admit(&a, 100, now), "251st request of the same second");
+        // Another identifier is not affected.
         assert!(l.admit(&b, 100, now));
-        // Une seconde plus tard : 50 requêtes de plus.
+        // One second later: 50 more requests.
         let later = now + Duration::from_secs(1);
         for _ in 0..50 {
             assert!(l.admit(&a, 100, later));
         }
         assert!(!l.admit(&a, 100, later));
-        // Octets : 1 Mio/s, rafale de 5 Mio.
+        // Bytes: 1 MiB/s, burst of 5 MiB.
         let c = NodeId([3; 32]);
         assert!(l.admit(&c, 5 << 20, now));
         assert!(!l.admit(&c, 1, now));
@@ -676,7 +676,7 @@ mod tests {
         let a = acq(&l, "192.0.2.1").unwrap();
         let _b = acq(&l, "192.0.2.1").unwrap();
         assert!(acq(&l, "192.0.2.1").is_none());
-        // Autre adresse : acceptée.
+        // Another address: accepted.
         let _c = acq(&l, "192.0.2.2").unwrap();
         drop(a);
         assert!(acq(&l, "192.0.2.1").is_some());
@@ -687,11 +687,11 @@ mod tests {
         let l = Limiter::new(cfg());
         let _a = acq(&l, "2001:db8:1:2::1").unwrap();
         let _b = acq(&l, "2001:db8:1:2:ffff:ffff:ffff:ffff").unwrap();
-        // Même /64 : refusée.
+        // Same /64: refused.
         assert!(acq(&l, "2001:db8:1:2::99").is_none());
-        // Autre /64 : acceptée.
+        // Another /64: accepted.
         let _c = acq(&l, "2001:db8:1:3::1").unwrap();
-        // IPv4 encapsulée = même clé que l'IPv4.
+        // Encapsulated IPv4 = same key as the IPv4.
         let _d = acq(&l, "198.51.100.7").unwrap();
         let _e = acq(&l, "::ffff:198.51.100.7").unwrap();
         assert!(acq(&l, "198.51.100.7").is_none());
@@ -701,19 +701,19 @@ mod tests {
     fn ipv6_hierarchical_caps() {
         let l = wide();
         let mut held = Vec::new();
-        // Un /56 : 32 connexions au plus, réparties sur 32 /64.
+        // One /56: at most 32 connections, spread over 32 /64s.
         for i in 0..32u32 {
             held.push(acq(&l, &format!("2001:db8:1:{i:x}::1")).unwrap());
         }
         assert!(acq(&l, "2001:db8:1:ff::1").is_none());
-        // Un autre /56 du même /48 : 32 de plus, puis le /48 est plein (64).
+        // Another /56 of the same /48: 32 more, then the /48 is full (64).
         for i in 0..32u32 {
             held.push(acq(&l, &format!("2001:db8:1:1{i:02x}::1")).unwrap());
         }
         assert!(acq(&l, "2001:db8:1:200::1").is_none());
-        // Un autre /48 : accepté.
+        // Another /48: accepted.
         held.push(acq(&l, "2001:db8:2::1").unwrap());
-        // Une place rendue dans le premier /56 : de nouveau acceptée là.
+        // A slot returned in the first /56: accepted there again.
         held.remove(0);
         assert!(acq(&l, "2001:db8:1:ff::1").is_some());
     }
@@ -728,7 +728,7 @@ mod tests {
                     .unwrap(),
             );
         }
-        // Le /24 est plein (32).
+        // The /24 is full (32).
         assert!(acq(&l, "10.0.0.200").is_none());
         held.push(acq(&l, "10.0.1.1").unwrap());
     }
@@ -759,13 +759,13 @@ mod tests {
         });
         let t0 = Instant::now();
         let at = |s| t0 + Duration::from_secs(s);
-        // Groupe A (10.0.0.0/24) : 4 connexions ; B et C : une chacune.
+        // Group A (10.0.0.0/24): 4 connections; B and C: one each.
         let a: Vec<_> = (1..=4u8)
             .map(|i| l.try_acquire(IpAddr::from([10, 0, 0, i]), at(0)).unwrap())
             .collect();
         let _b = l.try_acquire(ip("10.1.0.1"), at(0)).unwrap();
         let _c = l.try_acquire(ip("2001:db8::1"), at(0)).unwrap();
-        // A[2] est la plus longtemps inactive de A.
+        // A[2] is the longest-idle of A.
         for (i, s) in a.iter().enumerate() {
             if i != 2 {
                 s.touch(at(10));
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(l.connections(), 6);
         let d = l.try_acquire(ip("10.2.0.1"), at(20)).unwrap();
         assert_eq!(l.connections(), 6);
-        // A[2] est évincée : notifiée, sa place déjà rendue.
+        // A[2] is evicted: notified, its slot already returned.
         let evicted: Vec<bool> = a
             .iter()
             .map(|s| {
@@ -784,7 +784,7 @@ mod tests {
             })
             .collect();
         assert_eq!(evicted, [false, false, true, false]);
-        // La garde évincée lâchée ne rend pas une seconde fois sa place.
+        // Dropping the evicted guard does not return its slot a second time.
         drop(a);
         assert_eq!(l.connections(), 3);
         drop(d);
@@ -800,11 +800,11 @@ mod tests {
         let _a = acq(&l, "10.0.0.1").unwrap();
         let _b = acq(&l, "10.0.0.2").unwrap();
         let _c = acq(&l, "10.1.0.1").unwrap();
-        // Nouveau venu du groupe le plus représenté : refus, pas d'éviction.
+        // Newcomer of the most represented group: refusal, no eviction.
         assert!(acq(&l, "10.0.0.3").is_none());
-        // Groupe A (2) contre nouveau groupe (0) : éviction.
+        // Group A (2) against a new group (0): eviction.
         let _d = acq(&l, "10.2.0.1").unwrap();
-        // Puis A (1), B (1), D (1) : personne ne domine, refus.
+        // Then A (1), B (1), D (1): nobody dominates, refusal.
         assert!(acq(&l, "10.3.0.1").is_none());
     }
 
@@ -815,11 +815,11 @@ mod tests {
         let b = acq(&l, "2001:db8::2").unwrap();
         let c = acq(&l, "2001:db9::1").unwrap();
         assert!(a.try_reserve_bytes(600, 1000));
-        // Même /64 : part commune.
+        // Same /64: shared allowance.
         assert!(!b.try_reserve_bytes(500, 1000));
         assert!(b.try_reserve_bytes(400, 1000));
         assert_eq!(a.group_bytes(), 1000);
-        // Autre groupe : indépendant.
+        // Another group: independent.
         assert!(c.try_reserve_bytes(1000, 1000));
         a.release_bytes(600);
         assert!(b.try_reserve_bytes(600, 1000));
@@ -836,7 +836,7 @@ mod tests {
             })
             .collect();
         assert_eq!(l.connections(), 5);
-        // Aucun groupe ne domine : refus.
+        // No group dominates: refusal.
         assert!(
             l.try_acquire(IpAddr::from([10, 9, 0, 1]), Instant::now())
                 .is_none()
@@ -852,24 +852,24 @@ mod tests {
         let l = Limiter::new(LimitConfig::default());
         let t0 = Instant::now();
         let a = l.try_acquire(ip("192.0.2.1"), t0).unwrap();
-        // Départ à moitié plein : 50 requêtes.
+        // Half full at the start: 50 requests.
         let mut n = 0;
         while a.admit(1, 10, t0) {
             n += 1;
         }
         assert_eq!(n, 50);
         drop(a);
-        // Reconnexion immédiate, ou par une autre connexion du groupe : vide.
+        // Immediate reconnection, or by another connection of the group: empty.
         let b = l.try_acquire(ip("192.0.2.1"), t0).unwrap();
         let c = l.try_acquire(ip("192.0.2.1"), t0).unwrap();
         assert!(!b.admit(1, 10, t0));
         assert!(!c.admit(1, 10, t0));
         drop((b, c));
-        // Une autre adresse a son propre seau.
+        // Another address has its own bucket.
         let d = l.try_acquire(ip("192.0.2.2"), t0).unwrap();
         assert!(d.admit(1, 10, t0));
         drop(d);
-        // Une fois le seau revenu à son niveau de départ, le groupe est oublié.
+        // Once the bucket is back at its starting level, the group is forgotten.
         let later = t0 + Duration::from_secs(10);
         let e = l.try_acquire(ip("192.0.2.9"), later).unwrap();
         drop(e);
@@ -886,10 +886,10 @@ mod tests {
         let other = acq(&l, "192.0.2.2").unwrap();
         let j1 = a.try_db_job(2, 100).unwrap();
         let _j2 = b.try_db_job(2, 100).unwrap();
-        // Le groupe a ses deux places, quelle que soit la connexion.
+        // The group has its two slots, whichever the connection.
         assert!(a.try_db_job(2, 100).is_none());
         assert!(b.try_db_job(2, 100).is_none());
-        // Un autre groupe n'est pas touché.
+        // Another group is not affected.
         assert!(other.try_db_job(2, 100).is_some());
         drop(j1);
         assert!(a.try_db_job(2, 100).is_some());
@@ -898,8 +898,8 @@ mod tests {
     #[test]
     fn prefix_db_jobs_capped_across_its_groups() {
         let l = wide();
-        // Quatre /64 d'un même /56 (donc d'un même /48), part de 4 chacun,
-        // part de 8 pour le /48.
+        // Four /64s of the same /56 (hence of the same /48), allowance of 4 each,
+        // allowance of 8 for the /48.
         let slots: Vec<_> = (0..4u32)
             .map(|i| acq(&l, &format!("2001:db8:1:{i:x}::1")).unwrap())
             .collect();
@@ -910,7 +910,7 @@ mod tests {
             }
         }
         assert_eq!(jobs.len(), 8);
-        // Un autre /48 n'est pas touché ; IPv4 : part par /24.
+        // Another /48 is not affected; IPv4: allowance per /24.
         let other = acq(&l, "2001:db8:2::1").unwrap();
         assert!(other.try_db_job(4, 8).is_some());
         let v4: Vec<_> = (1..=3u8)
@@ -926,7 +926,7 @@ mod tests {
             }
         }
         assert_eq!(v4jobs.len(), 5);
-        // Une place rendue dans le /48 : reprise possible.
+        // A slot returned in the /48: can be taken again.
         jobs.pop();
         assert!(slots[0].try_db_job(4, 8).is_none());
         assert!(slots[1].try_db_job(4, 8).is_some());
@@ -939,12 +939,12 @@ mod tests {
         let t0 = Instant::now();
         let c = LimitConfig::default();
         let mut b = ConnBudget::new(&c, t0);
-        // Départ à moitié plein (rafale ×5) : 50 requêtes, puis refus.
+        // Half full at the start (burst ×5): 50 requests, then refusal.
         for _ in 0..50 {
             assert!(b.admit(1, 10, t0));
         }
         assert!(!b.admit(1, 10, t0));
-        // 1 s plus tard : 20 de plus, ou deux requêtes de coût 9.
+        // 1 s later: 20 more, or two requests of cost 9.
         let t1 = t0 + Duration::from_secs(1);
         assert!(b.admit(9, 10, t1));
         assert!(b.admit(9, 10, t1));
@@ -952,7 +952,7 @@ mod tests {
         assert!(b.admit(1, 10, t1));
         assert!(b.admit(1, 10, t1));
         assert!(!b.admit(1, 10, t1));
-        // Plein après 10 s : 100 requêtes.
+        // Full after 10 s: 100 requests.
         let t2 = t1 + Duration::from_secs(10);
         for _ in 0..100 {
             assert!(b.admit(1, 10, t2));
@@ -968,7 +968,7 @@ mod tests {
         assert!(!b.admit(1, 5 << 19 | 1, t0));
         assert!(b.admit(1, 5 << 19, t0));
         assert!(!b.admit(1, 1, t0));
-        // Une réponse endette le seau : il faut attendre plus longtemps.
+        // A response puts the bucket into debt: one has to wait longer.
         b.charge_bytes(1 << 20, t0);
         assert!(!b.admit(1, 1, t0 + Duration::from_millis(900)));
         assert!(b.admit(1, 1, t0 + Duration::from_millis(1100)));

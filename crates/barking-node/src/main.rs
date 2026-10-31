@@ -1,4 +1,4 @@
-//! `barking-node` : `init`, `run`, `status`, `peers`.
+//! `barking-node`: `init`, `run`, `status`, `peers`.
 
 use std::collections::HashSet;
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -25,7 +25,7 @@ const DB_FILE: &str = "node.db";
 #[command(
     name = "barking-node",
     version,
-    about = "Nœud Barking : garde des paquets chiffrés en attente"
+    about = "Barking node: keeps pending encrypted packets"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -34,29 +34,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Génère l'identité du nœud et crée la base ; affiche l'identifiant et
-    /// l'adresse à publier.
+    /// Generates the node identity and creates the database; prints the
+    /// identifier and the address to publish.
     Init {
-        /// Dossier de données (défaut : `data_dir` de la configuration).
+        /// Data directory (default: `data_dir` from the configuration).
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Fichier de configuration (pour l'adresse d'écoute affichée).
+        /// Configuration file (for the printed listen address).
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Fait tourner le nœud.
+    /// Runs the node.
     Run {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Identifiant, version, paquets, accusés et octets gardés ; table de
-    /// hachage et recopie.
+    /// Identifier, version, packets, acks and bytes held; hash table and
+    /// replication.
     Status {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
-    /// Pairs actifs de la table (identifiant, ancienneté, dernier contact),
-    /// d'après la dernière sauvegarde de `peers`, sans adresse.
+    /// Active peers of the table (identifier, age, last contact), from the
+    /// last save of `peers`, without addresses.
     Peers {
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -74,40 +74,40 @@ fn load_config(path: Option<&Path>) -> Result<Config> {
     }
 }
 
-/// Avertit (stderr) si le dossier de données est accessible à d'autres
-/// utilisateurs que le propriétaire.
+/// Warns (stderr) if the data directory is accessible to users other than
+/// the owner.
 fn warn_dir_perms(dir: &Path) {
     if let Ok(m) = fs::metadata(dir)
         && m.permissions().mode() & 0o077 != 0
     {
         eprintln!(
-            "avertissement : le dossier {} est accessible au groupe ou aux autres \
-             (mode {:04o}) ; `chmod 700` est recommandé.",
+            "warning: directory {} is accessible to the group or others \
+             (mode {:04o}); `chmod 700` is recommended.",
             dir.display(),
             m.permissions().mode() & 0o7777
         );
     }
 }
 
-/// Lit la clé du nœud ; refuse un lien symbolique, un fichier irrégulier ou
-/// un fichier lisible par d'autres utilisateurs.
+/// Reads the node key; refuses a symbolic link, an irregular file or a
+/// file readable by other users.
 fn load_key(dir: &Path) -> Result<SigningKey> {
     let path = dir.join(KEY_FILE);
     let meta = fs::symlink_metadata(&path).map_err(|_| {
         fail(format!(
-            "{} n'est pas initialisé (`barking-node init`)",
+            "{} is not initialized (`barking-node init`)",
             dir.display()
         ))
     })?;
     if !meta.file_type().is_file() {
         return Err(fail(format!(
-            "{} doit être un fichier ordinaire (ni lien symbolique ni autre type)",
+            "{} must be a regular file (neither a symbolic link nor another type)",
             path.display()
         )));
     }
     if meta.permissions().mode() & 0o077 != 0 {
         return Err(fail(format!(
-            "{} doit être en mode 0600 (lisible par d'autres utilisateurs)",
+            "{} must have mode 0600 (readable by other users)",
             path.display()
         )));
     }
@@ -115,18 +115,19 @@ fn load_key(dir: &Path) -> Result<SigningKey> {
     let bytes = Zeroizing::new(
         data_encoding::BASE32_NOPAD
             .decode(text.trim().as_bytes())
-            .map_err(|_| fail("clé du nœud illisible"))?,
+            .map_err(|_| fail("node key unreadable"))?,
     );
     let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
         bytes
             .as_slice()
             .try_into()
-            .map_err(|_| fail("clé du nœud de mauvaise taille"))?,
+            .map_err(|_| fail("node key has the wrong size"))?,
     );
     Ok(SigningKey::from_bytes(&seed))
 }
 
-/// Écrit la clé dans `node.key.tmp` (0600) puis la range d'un `rename`.
+/// Writes the key to `node.key.tmp` (0600) then moves it into place with a
+/// `rename`.
 fn write_key(dir: &Path, key: &SigningKey) -> Result<()> {
     let tmp = dir.join(format!("{KEY_FILE}.tmp"));
     let _ = fs::remove_file(&tmp);
@@ -156,20 +157,20 @@ fn init(data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Result<()> {
     let dir = data_dir.unwrap_or_else(|| cfg.data_dir.clone());
     let (key_path, db_path) = (dir.join(KEY_FILE), dir.join(DB_FILE));
     if key_path.exists() || db_path.exists() {
-        return Err(fail(format!("{} est déjà initialisé", dir.display())));
+        return Err(fail(format!("{} is already initialized", dir.display())));
     }
-    eprintln!("Recherche d'une identité (puzzle de 20 bits, quelques secondes)…");
+    eprintln!("Searching for an identity (20-bit puzzle, a few seconds)…");
     let key = generate_node_key(&mut rand::rng());
     let id = NodeId::from_public_key(&key.verifying_key());
 
-    // Dossier créé en 0700 ; les droits d'un dossier déjà là (par exemple
-    // créé par systemd) ne sont pas modifiés.
+    // Directory created as 0700; the permissions of a directory already there
+    // (for example created by systemd) are not modified.
     let created = !dir.exists();
     DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
     warn_dir_perms(&dir);
-    // Clé rangée d'abord (dernier geste atomique de l'identité), puis la base
-    // en 0600 dès sa création. En cas d'échec, tout ce qui a été créé est
-    // retiré : `init` peut être relancé.
+    // Key stored first (last atomic step of the identity), then the database
+    // as 0600 from its creation. On failure, everything that was created is
+    // removed: `init` can be rerun.
     let res = write_key(&dir, &key).and_then(|()| {
         OpenOptions::new()
             .write(true)
@@ -193,27 +194,27 @@ fn init(data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Result<()> {
     }
 
     let listen = cfg.listen.first().cloned().unwrap_or_default();
-    println!("identifiant : {id}");
-    println!("adresse     : {listen}");
+    println!("identifier  : {id}");
+    println!("address     : {listen}");
     println!();
     println!(
-        "À publier : l'identifiant ci-dessus et l'adresse publique (hôte ou IP) du \
-         serveur avec le port d'écoute ({listen} est l'adresse locale configurée)."
+        "To publish: the identifier above and the public address (host or IP) of \
+         the server with the listen port ({listen} is the configured local address)."
     );
     Ok(())
 }
 
-/// Identifiant du nœud et base ouverte en lecture seule : `status` et
-/// `peers` ne modifient rien, même pendant `run`.
+/// Node identifier and database opened read-only: `status` and `peers`
+/// modify nothing, even during `run`.
 fn open_for_reading(data_dir: Option<PathBuf>) -> Result<(NodeId, NodeStore)> {
     let dir = data_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
     let key = load_key(&dir)?;
     let id = NodeId::from_public_key(&key.verifying_key());
     let db = dir.join(DB_FILE);
     if !db.exists() {
-        return Err(fail(format!("base absente de {}", dir.display())));
+        return Err(fail(format!("no database in {}", dir.display())));
     }
-    // Une base v2 donne `SchemaVersion(2)`, affiché par `main`.
+    // A v2 database yields `SchemaVersion(2)`, reported by `main`.
     Ok((id, NodeStore::open_read_only(&db)?))
 }
 
@@ -224,7 +225,7 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Heures entières écoulées entre `t` et `now`.
+/// Whole hours elapsed between `t` and `now`.
 fn hours_since(now: u64, t: u64) -> u64 {
     now.saturating_sub(t) / 3600
 }
@@ -245,40 +246,40 @@ fn status(data_dir: Option<PathBuf>) -> Result<()> {
     } else {
         0
     };
-    println!("identifiant : {id}");
+    println!("identifier  : {id}");
     println!(
-        "version     : {} (protocole {PROTOCOL_VERSION})",
+        "version     : {} (protocol {PROTOCOL_VERSION})",
         env!("CARGO_PKG_VERSION")
     );
-    println!("paquets     : {}", stats.packets);
-    println!("accusés     : {}", stats.acks);
-    println!("octets      : {}", stats.bytes);
-    println!("pairs       : {}", table.len());
-    println!("compartiments : {} non vides", table.non_empty_buckets());
+    println!("packets     : {}", stats.packets);
+    println!("acks        : {}", stats.acks);
+    println!("bytes       : {}", stats.bytes);
+    println!("peers       : {}", table.len());
+    println!("buckets     : {} non-empty", table.non_empty_buckets());
     if table.is_empty() {
-        // Sans pair connu, toute boîte gardée paraîtrait « responsable ».
-        println!("responsable : table vide ou désactivée");
+        // With no known peer, every held mailbox would look "responsible".
+        println!("responsible : table empty or disabled");
     } else {
-        println!("responsable : {responsible} boîtes");
+        println!("responsible : {responsible} mailboxes");
     }
-    println!("recopié     : {recent} octets dans l'heure");
+    println!("replicated  : {recent} bytes in the last hour");
     Ok(())
 }
 
 fn peers(data_dir: Option<PathBuf>) -> Result<()> {
     let (id, store) = open_for_reading(data_dir)?;
     let rows = store.load_peers()?;
-    // Nœuds actifs de la table (la réserve est écartée).
+    // Active nodes of the table (the reserve is excluded).
     let active: HashSet<NodeId> = table_from_rows(id, &rows)
         .closest(&id.0, usize::MAX)
         .into_iter()
         .map(|p| p.id)
         .collect();
     let now = unix_now();
-    // Dans l'ordre de `load_peers` : les plus récemment vus d'abord.
+    // In `load_peers` order: most recently seen first.
     for row in rows.iter().filter(|r| active.contains(&NodeId(r.node_id))) {
         println!(
-            "{}  ancienneté {} h  vu il y a {} h",
+            "{}  age {} h  seen {} h ago",
             NodeId(row.node_id),
             hours_since(now, row.first_seen),
             hours_since(now, row.last_seen)
@@ -305,14 +306,14 @@ fn run(config: Option<PathBuf>) -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async move {
-        tracing::info!("nœud {id} démarré");
+        tracing::info!("node {id} started");
         if dht_off {
-            tracing::warn!("[dht] sans public_addr : table désactivée, simple relais");
+            tracing::warn!("[dht] without public_addr: table disabled, plain relay");
         }
         let reporter = tokio::spawn(server::report_loop(stats, every));
         let r = server::run(server_cfg, store, policy, shutdown_signal()).await;
         reporter.abort();
-        tracing::info!("nœud arrêté");
+        tracing::info!("node stopped");
         r
     })
 }
@@ -325,16 +326,16 @@ async fn shutdown_signal() {
         (Ok(mut t), Ok(mut i)) => {
             tokio::select! { _ = t.recv() => {}, _ = i.recv() => {} }
         }
-        // Pas de gestion de signaux possible : on tourne jusqu'à être tué.
+        // No signal handling possible: run until killed.
         _ => std::future::pending::<()>().await,
     }
 }
 
 fn main() -> ExitCode {
-    // Message fixe : la charge d'une panique pourrait contenir une adresse.
-    // Une panique dans une tâche de connexion ne termine que cette tâche.
+    // Fixed message: a panic payload could contain an address.
+    // A panic in a connection task only ends that task.
     std::panic::set_hook(Box::new(|_| {
-        eprintln!("erreur interne : panique (détails omis)");
+        eprintln!("internal error: panic (details omitted)");
     }));
     let cli = Cli::parse();
     let r = match cli.cmd {
@@ -345,13 +346,13 @@ fn main() -> ExitCode {
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
-        // Base du schéma précédent (`status`, `peers` en lecture seule).
+        // Database of the previous schema (`status`, `peers` read-only).
         Err(Error::SchemaVersion(2)) => {
-            eprintln!("erreur : base en version 2, lancez le nœud une fois pour migrer la base");
+            eprintln!("error: database is version 2, run the node once to migrate it");
             ExitCode::FAILURE
         }
         Err(e) => {
-            eprintln!("erreur : {e}");
+            eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }

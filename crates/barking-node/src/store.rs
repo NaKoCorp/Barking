@@ -1,9 +1,9 @@
-//! Stockage SQLite du nœud (spec §6).
+//! SQLite storage of the node (spec §6).
 //!
-//! Le total d'octets stockés (paquets + accusés, somme des longueurs de
-//! `bytes`) est tenu à jour dans `meta('stored_bytes')`, dans les mêmes
-//! transactions que les écritures : le quota `storage_max_bytes` se vérifie
-//! sans balayer la table.
+//! The total of stored bytes (packets + acks, sum of the lengths of
+//! `bytes`) is kept up to date in `meta('stored_bytes')`, in the same
+//! transactions as the writes: the `storage_max_bytes` quota is checked
+//! without scanning the table.
 
 use std::path::Path;
 use std::time::Duration;
@@ -14,14 +14,14 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use crate::{Error, Result};
 
 pub const SCHEMA_VERSION: i64 = 3;
-/// Schéma précédent, migré au démarrage par `NodeStore::open`.
+/// Previous schema, migrated at startup by `NodeStore::open`.
 const PREVIOUS_SCHEMA_VERSION: i64 = 2;
-/// Nombre maximal de lignes gardées dans `peers` (spec §7).
+/// Maximum number of rows kept in `peers` (spec §7).
 pub const MAX_PEER_ROWS: usize = 1024;
-/// Attente d'un verrou tenu par un autre processus (`status` pendant `run`).
+/// Wait for a lock held by another process (`status` during `run`).
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Compteurs du nœud.
+/// Node counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
     pub packets: u64,
@@ -33,10 +33,10 @@ pub struct NodeStore {
     conn: Connection,
 }
 
-/// Un pair de la table de routage, tel que gardé dans `peers`. `first_seen`
-/// et `last_seen` sont arrondis à l'heure par l'appelant ; `record` est la
-/// fiche signée encodée (la seule adresse écrite sur disque est celle que le
-/// pair publie lui-même).
+/// A peer of the routing table, as kept in `peers`. `first_seen` and
+/// `last_seen` are rounded to the hour by the caller; `record` is the
+/// encoded signed record (the only address written to disk is the one the
+/// peer publishes itself).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerRow {
     pub node_id: [u8; 32],
@@ -74,9 +74,10 @@ impl NodeStore {
         Self::init(Connection::open(path)?)
     }
 
-    /// Ouverture en lecture seule (`status`) : aucune écriture, ni schéma ni
-    /// pragma persistant. La base doit exister et être au bon schéma : une
-    /// base en version 2, qu'il faut d'abord migrer, donne `SchemaVersion(2)`.
+    /// Read-only opening (`status`): no write, neither schema nor persistent
+    /// pragma. The database must exist and have the right schema: a
+    /// version 2 database, which must be migrated first, yields
+    /// `SchemaVersion(2)`.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<NodeStore> {
         let conn = Connection::open_with_flags(
             path,
@@ -97,26 +98,26 @@ impl NodeStore {
         Ok(NodeStore { conn })
     }
 
-    /// Base en mémoire (tests).
+    /// In-memory database (tests).
     pub fn open_in_memory() -> Result<NodeStore> {
         Self::init(Connection::open_in_memory()?)
     }
 
     fn init(conn: Connection) -> Result<NodeStore> {
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        // La version est lue AVANT toute écriture (pragmas persistants, schéma) :
-        // une base d'un autre schéma est refusée sans être modifiée.
+        // The version is read BEFORE any write (persistent pragmas, schema):
+        // a database of another schema is refused without being modified.
         let migrate = check_version(&conn)?;
-        // `journal_mode` renvoie une ligne : on la lit pour ne pas la laisser pendre.
+        // `journal_mode` returns a row: we read it so as not to leave it dangling.
         let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "secure_delete", "ON")?;
-        // Un dépôt confirmé au client survit à une coupure de courant.
+        // A deposit confirmed to the client survives a power cut.
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.set_prepared_statement_cache_capacity(crate::rules::STATEMENT_CACHE);
-        // Création ou migration, en une seule transaction. Les lignes d'une
-        // base migrée gardent `pow = 0` ; `SCHEMA` crée `peers` et ne touche
-        // pas aux tables existantes. La colonne `pow` est la dernière de
-        // `packets`, comme dans une base neuve.
+        // Creation or migration, in a single transaction. The rows of a
+        // migrated database keep `pow = 0`; `SCHEMA` creates `peers` and does
+        // not touch existing tables. The `pow` column is the last one of
+        // `packets`, as in a fresh database.
         let alter = if migrate {
             "ALTER TABLE packets ADD COLUMN pow INTEGER NOT NULL DEFAULT 0;"
         } else {
@@ -153,7 +154,7 @@ impl NodeStore {
         })
     }
 
-    /// Boîtes qui tiennent au moins un paquet ou un accusé, sans doublon.
+    /// Mailboxes holding at least one packet or ack, without duplicates.
     pub fn held_mailboxes(&self) -> Result<Vec<MailboxId>> {
         let mut st = self
             .conn
@@ -161,7 +162,7 @@ impl NodeStore {
         let rows = st.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
         let mut out = Vec::new();
         for row in rows {
-            // Une boîte de longueur inattendue (base abîmée) est ignorée.
+            // A mailbox of unexpected length (damaged database) is ignored.
             if let Ok(id) = <[u8; 16]>::try_from(row?.as_slice()) {
                 out.push(MailboxId(id));
             }
@@ -169,8 +170,8 @@ impl NodeStore {
         Ok(out)
     }
 
-    /// Enregistre le volume recopié dans la fenêtre horaire commencée à
-    /// `window_start` (lu par `status`).
+    /// Records the replicated volume in the hourly window started at
+    /// `window_start` (read by `status`).
     pub fn set_replicated(&mut self, window_start: u64, bytes: u64) -> Result<()> {
         let mut st = self
             .conn
@@ -186,7 +187,7 @@ impl NodeStore {
         Ok(())
     }
 
-    /// Fenêtre horaire et volume recopié enregistrés, `(0, 0)` si aucun.
+    /// Recorded hourly window and replicated volume, `(0, 0)` if none.
     pub fn replicated(&self) -> Result<(u64, u64)> {
         let get = |k: &str| -> Result<u64> {
             let v: Option<i64> = self
@@ -198,8 +199,9 @@ impl NodeStore {
         Ok((get("replicated_window")?, get("replicated_bytes")?))
     }
 
-    /// Remplace tout le contenu de `peers` par `rows` (au plus `MAX_PEER_ROWS`
-    /// lignes, les premières : l'appelant met les nœuds actifs d'abord).
+    /// Replaces the whole content of `peers` with `rows` (at most
+    /// `MAX_PEER_ROWS` rows, the first ones: the caller puts active nodes
+    /// first).
     pub fn save_peers(&mut self, rows: &[PeerRow]) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM peers", [])?;
@@ -220,7 +222,7 @@ impl NodeStore {
         Ok(())
     }
 
-    /// Pairs enregistrés, les plus récemment vus d'abord.
+    /// Recorded peers, most recently seen first.
     pub fn load_peers(&self) -> Result<Vec<PeerRow>> {
         let mut st = self.conn.prepare_cached(
             "SELECT node_id,record,first_seen,last_seen FROM peers ORDER BY last_seen DESC, node_id",
@@ -249,8 +251,8 @@ impl NodeStore {
         Ok(out)
     }
 
-    /// Supprime paquets et accusés expirés (`expires_at <= now`). Renvoie le
-    /// nombre de lignes supprimées.
+    /// Deletes expired packets and acks (`expires_at <= now`). Returns the
+    /// number of deleted rows.
     pub fn purge_expired(&mut self, now: u64) -> Result<usize> {
         let now = i64::try_from(now).unwrap_or(i64::MAX);
         let tx = self.conn.transaction()?;
@@ -274,9 +276,9 @@ impl NodeStore {
     }
 }
 
-/// Base vide : acceptée. Base avec `meta` : `schema_version` doit valoir
-/// `SCHEMA_VERSION`, ou la version précédente (renvoie alors `true` : il
-/// faut migrer). Base avec d'autres tables mais sans `meta` : refusée.
+/// Empty database: accepted. Database with `meta`: `schema_version` must be
+/// `SCHEMA_VERSION`, or the previous version (then returns `true`: it must
+/// be migrated). Database with other tables but without `meta`: refused.
 fn check_version(conn: &Connection) -> Result<bool> {
     let table_exists = |name: &str| -> Result<bool> {
         Ok(conn.query_row(
@@ -331,14 +333,14 @@ mod tests {
     fn read_only_open_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.db");
-        // Base absente : refus, rien n'est créé.
+        // Missing database: refused, nothing is created.
         assert!(NodeStore::open_read_only(&path).is_err());
         assert!(!path.exists());
         drop(NodeStore::open(&path).unwrap());
         let before = std::fs::read(&path).unwrap();
         let ro = NodeStore::open_read_only(&path).unwrap();
         assert_eq!(ro.stats().unwrap().packets, 0);
-        // Une écriture est refusée par SQLite.
+        // A write is refused by SQLite.
         assert!(ro.conn().execute("DELETE FROM packets", []).is_err());
         drop(ro);
         assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -359,7 +361,7 @@ mod tests {
         assert_eq!(busy, 5_000);
     }
 
-    /// Schéma 2 tel qu'il était avant la migration.
+    /// Schema 2 as it was before the migration.
     const SCHEMA_V2: &str = "
         CREATE TABLE packets(
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -395,7 +397,7 @@ mod tests {
         }
     }
 
-    /// (colonnes de `packets`, définition des index) : la forme du schéma.
+    /// (columns of `packets`, index definitions): the shape of the schema.
     fn shape(s: &NodeStore) -> (Vec<String>, Vec<(String, String)>) {
         let cols = s
             .conn()
@@ -451,7 +453,7 @@ mod tests {
             )
             .unwrap();
         }
-        // `status` refuse la version 2 sans la modifier.
+        // `status` refuses version 2 without modifying it.
         assert!(matches!(
             NodeStore::open_read_only(&path),
             Err(Error::SchemaVersion(2))
@@ -475,9 +477,9 @@ mod tests {
         assert_eq!(items[0].pow, 0);
         assert!(s.load_peers().unwrap().is_empty());
         assert_eq!(s.stats().unwrap().bytes, bytes.len() as u64);
-        // Même forme qu'une base neuve (colonnes et index).
+        // Same shape as a fresh database (columns and indexes).
         assert_eq!(shape(&s), shape(&NodeStore::open_in_memory().unwrap()));
-        // Réouverture : sans effet, et `status` accepte la base.
+        // Reopening: no effect, and `status` accepts the database.
         drop(s);
         drop(NodeStore::open(&path).unwrap());
         assert!(NodeStore::open_read_only(&path).is_ok());
@@ -514,7 +516,7 @@ mod tests {
             pow_bits: 0,
             ..Policy::default()
         };
-        // Deux paquets dans la boîte 9, un dans la boîte 3.
+        // Two packets in mailbox 9, one in mailbox 3.
         for (n, mb) in [(1u8, 9u8), (2, 9), (3, 3)] {
             let mut p = v2_packet();
             p.id = barking_packet::PacketId([n; 16]);
@@ -530,7 +532,7 @@ mod tests {
                 Ok(())
             );
         }
-        // Une boîte qui ne tient qu'un accusé compte aussi.
+        // A mailbox holding only an ack counts too.
         s.conn()
             .execute(
                 "INSERT INTO acks(packet_id,mailbox,expires_at,bytes) VALUES(?1,?2,?3,?4)",
@@ -567,14 +569,14 @@ mod tests {
         let mut got = s.load_peers().unwrap();
         got.sort_by_key(|r| r.node_id);
         assert_eq!(got, vec![peer(1), peer(2)]);
-        // `save_peers` remplace tout, et plafonne à 1 024 lignes.
+        // `save_peers` replaces everything, and caps at 1,024 rows.
         let rows: Vec<PeerRow> = (10..1_110).map(peer).collect();
         assert_eq!(rows.len(), 1_100);
         s.save_peers(&rows).unwrap();
         let got = s.load_peers().unwrap();
         assert_eq!(got.len(), 1_024);
         assert!(!got.contains(&peer(1)));
-        // Les lignes gardées sont les premières données.
+        // The rows kept are the first ones given.
         assert!(got.contains(&peer(10)));
         assert!(!got.contains(&peer(1_109)));
     }

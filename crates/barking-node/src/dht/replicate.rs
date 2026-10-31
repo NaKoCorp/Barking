@@ -1,41 +1,42 @@
-//! Entretien des copies (spec §5.3) : chaque boîte gardée dont le nœud est
-//! responsable est recopiée vers ses autres responsables, calculés dans sa
-//! propre table.
+//! Copy maintenance (spec §5.3): each held mailbox for which the node is
+//! responsible is replicated to its other responsible nodes, computed in its
+//! own table.
 //!
-//! - **Ordre** : les boîtes mises en file (un nœud est entré parmi leurs 5
-//!   plus proches) d'abord, puis celles jamais tentées, puis les moins
-//!   récemment tentées. Une boîte tentée passe en fin d'ordre, même si un
-//!   responsable l'a refusée : un pair qui refuse toujours ne la garde pas
-//!   en tête. Tout cela n'est gardé qu'en mémoire.
-//! - **Par responsable** : `FindValue` sur toutes les pages, puis `Store`
-//!   de ce qui manque, accusés d'abord. Un message sans preuve gardée (ligne
-//!   d'une base migrée, `pow = 0`) n'est pas envoyé : il serait refusé.
-//! - **Bornes** : `MAX_MAILBOXES_PER_PEER` boîtes et `PEER_TIME_PER_PASS`
-//!   par responsable et par passe ; `replication_bytes_per_hour` octets
-//!   envoyés par heure (au-delà la passe s'arrête et reprend à la suivante),
-//!   dont au plus un cinquième vers un même responsable.
-//! - **Rythme** : au plus 10 requêtes par seconde vers un même responsable
-//!   (`PEER_CALL_SPACING`), sous le seau de son groupe d'adresses (spec §5.2
-//!   point 2) ; après un `RateLimited`, pause de `RATE_LIMIT_BACKOFF` puis
-//!   reprise, dans le temps de la passe.
-//! - **Preuve** : un message dont la preuve n'atteint pas la difficulté
-//!   annoncée par le responsable (`Hello`) plus le palier ne lui est pas
-//!   envoyé (compté `PowTooWeak`).
-//! - **Refus et pannes** : la recopie ne compte jamais d'échec dans la
-//!   table. Une réponse lisible marque le pair vivant (`mark_alive`).
-//!   - Pas de réponse : pair sauté pour la passe, et contrôle de vie
-//!     (`Dht::liveness_check`, au plus un par pair et par 10 min) ; c'est ce
-//!     contrôle qui compte l'échec. S'il retire le pair, la boîte est
-//!     recopiée au suivant dans la même passe.
-//!   - Temps de la passe ou part horaire épuisés : pair sauté.
-//!   - Réponse hors bornes ou inattendue, flux coupé, `MailboxFull`,
-//!     `NodeFull`, `NotResponsible` : la boîte est sautée pour ce pair.
-//!   - `PowTooWeak`, `UnknownAckTarget` : comptés, l'élément suivant part.
-//! - **Cadence** : toutes les heures ; une boîte mise en file déclenche une
-//!   passe 1 min plus tard au plus tôt, limitée aux boîtes en file. Avec
-//!   `ServerConfig::dht_tick`, ces délais valent `dht_tick`.
+//! - **Order**: queued mailboxes (a node entered among their 5 closest)
+//!   first, then those never attempted, then the least recently attempted.
+//!   An attempted mailbox goes to the end of the order, even if a
+//!   responsible node refused it: a peer that always refuses does not keep
+//!   it at the head. All this is kept in memory only.
+//! - **Per responsible node**: `FindValue` on all pages, then `Store` of
+//!   what is missing, acknowledgements first. A message without a kept proof
+//!   (row of a migrated database, `pow = 0`) is not sent: it would be
+//!   refused.
+//! - **Bounds**: `MAX_MAILBOXES_PER_PEER` mailboxes and `PEER_TIME_PER_PASS`
+//!   per responsible node and per pass; `replication_bytes_per_hour` bytes
+//!   sent per hour (beyond that the pass stops and resumes at the next one),
+//!   of which at most a fifth to the same responsible node.
+//! - **Pacing**: at most 10 requests per second to the same responsible node
+//!   (`PEER_CALL_SPACING`), under the bucket of its address group (spec
+//!   §5.2 point 2); after a `RateLimited`, a pause of `RATE_LIMIT_BACKOFF`
+//!   then resumption, within the pass time.
+//! - **Proof**: a message whose proof does not reach the difficulty
+//!   announced by the responsible node (`Hello`) plus the tier is not sent
+//!   to it (counted as `PowTooWeak`).
+//! - **Refusals and outages**: replication never counts a failure in the
+//!   table. A readable answer marks the peer alive (`mark_alive`).
+//!   - No answer: peer skipped for the pass, and liveness check
+//!     (`Dht::liveness_check`, at most one per peer per 10 min); that check
+//!     is what counts the failure. If it removes the peer, the mailbox is
+//!     replicated to the next one in the same pass.
+//!   - Pass time or hourly share exhausted: peer skipped.
+//!   - Out-of-bounds or unexpected answer, broken stream, `MailboxFull`,
+//!     `NodeFull`, `NotResponsible`: the mailbox is skipped for this peer.
+//!   - `PowTooWeak`, `UnknownAckTarget`: counted, the next item is sent.
+//! - **Cadence**: every hour; a queued mailbox triggers a pass 1 min later
+//!   at the earliest, limited to queued mailboxes. With
+//!   `ServerConfig::dht_tick`, these delays equal `dht_tick`.
 //!
-//! Les journaux ne donnent que des compteurs : ni adresse, ni boîte.
+//! Logs give only counters: no address, no mailbox.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -53,52 +54,52 @@ use super::{CALL_TIMEOUT, Dht};
 use crate::rules::{self, CopyItem};
 use crate::server::{Shared, Stored, unix_now};
 
-/// Passe complète.
+/// Full pass.
 pub const PASS_EVERY: Duration = Duration::from_secs(3600);
-/// Délai minimal entre une mise en file et la passe qu'elle déclenche.
+/// Minimum delay between queueing and the pass it triggers.
 pub const QUEUE_DELAY: Duration = Duration::from_secs(60);
-/// Boîtes recopiées au plus par responsable et par passe (spec §5.3).
+/// At most this many mailboxes replicated per responsible node and per pass (spec §5.3).
 pub const MAX_MAILBOXES_PER_PEER: usize = 64;
-/// Pages `Holdings` lues au plus par boîte et par responsable : au-delà, la
-/// boîte est sautée pour ce pair.
+/// At most this many `Holdings` pages read per mailbox and per responsible
+/// node: beyond that, the mailbox is skipped for this peer.
 pub const MAX_HOLDINGS_PAGES: usize = 16;
-/// Temps passé au plus avec un même responsable dans une passe : au-delà,
-/// il est sauté jusqu'à la passe suivante.
+/// At most this much time spent with the same responsible node in a pass:
+/// beyond that, it is skipped until the next pass.
 pub const PEER_TIME_PER_PASS: Duration = Duration::from_secs(60);
-/// Écart minimal entre deux requêtes de recopie vers un même responsable
-/// (10 par seconde) : sous le seau du groupe d'adresses de l'appelé (20
-/// requêtes/s, spec §5.2 point 2), que partagent aussi l'entretien de la
-/// table et un éventuel client sur la même IP.
+/// Minimum gap between two replication requests to the same responsible
+/// node (10 per second): under the callee's address group bucket (20
+/// requests/s, spec §5.2 point 2), which table maintenance and a possible
+/// client on the same IP also share.
 pub const PEER_CALL_SPACING: Duration = Duration::from_millis(100);
-/// Attente après un `RateLimited` avant de reprendre le même responsable.
+/// Wait after a `RateLimited` before resuming with the same responsible node.
 pub const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(2);
-/// Fenêtre du plafond de recopie.
+/// Window of the replication cap.
 const BUDGET_WINDOW_SECS: u64 = 3600;
 
-/// Bilan d'une passe (ou somme de passes), sans donnée par pair.
+/// Summary of a pass (or sum of passes), without per-peer data.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PassReport {
-    /// Boîtes recopiées (le nœud en est responsable et a de quoi envoyer).
+    /// Mailboxes replicated (the node is responsible and has something to send).
     pub mailboxes: usize,
-    /// Éléments acceptés par un responsable.
+    /// Items accepted by a responsible node.
     pub sent: usize,
-    /// Octets envoyés par `Store`, acceptés ou non.
+    /// Bytes sent by `Store`, accepted or not.
     pub bytes: u64,
-    /// Pairs sautés jusqu'à la passe suivante.
+    /// Peers skipped until the next pass.
     pub skipped_peers: usize,
     pub not_responsible: usize,
     pub pow_too_weak: usize,
     pub unknown_ack: usize,
-    /// Autres refus d'un `Store`.
+    /// Other `Store` refusals.
     pub refused: usize,
-    /// `RateLimited` reçus (chacun suivi d'une pause).
+    /// `RateLimited` received (each followed by a pause).
     pub rate_limited: usize,
-    /// La passe s'est arrêtée au plafond horaire.
+    /// The pass stopped at the hourly cap.
     pub budget_exhausted: bool,
 }
 
 impl PassReport {
-    /// Ajoute `other` à ce bilan.
+    /// Adds `other` to this summary.
     pub fn add(&mut self, other: &PassReport) {
         self.mailboxes += other.mailboxes;
         self.sent += other.sent;
@@ -117,8 +118,8 @@ impl fmt::Display for PassReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} boîtes, {} envois acceptés, {} octets, {} pairs sautés, refus : \
-             NotResponsible={} PowTooWeak={} UnknownAckTarget={} autres={} RateLimited={}{}",
+            "{} mailboxes, {} sends accepted, {} bytes, {} peers skipped, refusals: \
+             NotResponsible={} PowTooWeak={} UnknownAckTarget={} other={} RateLimited={}{}",
             self.mailboxes,
             self.sent,
             self.bytes,
@@ -129,7 +130,7 @@ impl fmt::Display for PassReport {
             self.refused,
             self.rate_limited,
             if self.budget_exhausted {
-                ", plafond horaire atteint"
+                ", hourly cap reached"
             } else {
                 ""
             }
@@ -137,16 +138,16 @@ impl fmt::Display for PassReport {
     }
 }
 
-/// Plafond d'octets recopiés par fenêtre d'une heure, et part de chaque
-/// responsable : `limit / REPLICAS` (au moins 1 octet). Un responsable qui
-/// prend tout (`Holdings` vides, `Ok` à chaque `Store`) n'épuise pas le
-/// plafond des autres.
+/// Cap on bytes replicated per one-hour window, and share of each
+/// responsible node: `limit / REPLICAS` (at least 1 byte). A responsible
+/// node that takes everything (empty `Holdings`, `Ok` to every `Store`) does
+/// not exhaust the others' cap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ByteBudget {
     limit: u64,
     window_start: u64,
     used: u64,
-    /// Octets envoyés à chaque responsable dans la fenêtre (mémoire seule).
+    /// Bytes sent to each responsible node in the window (memory only).
     per_peer: HashMap<NodeId, u64>,
 }
 
@@ -155,7 +156,7 @@ impl ByteBudget {
         ByteBudget::resume(limit, 0, 0)
     }
 
-    /// Reprend une fenêtre enregistrée (redémarrage dans l'heure).
+    /// Resumes a saved window (restart within the hour).
     pub fn resume(limit: u64, window_start: u64, used: u64) -> ByteBudget {
         ByteBudget {
             limit,
@@ -173,24 +174,24 @@ impl ByteBudget {
         }
     }
 
-    /// Part horaire d'un responsable.
+    /// Hourly share of a responsible node.
     pub fn peer_share(&self) -> u64 {
         (self.limit / REPLICAS as u64).max(1)
     }
 
-    /// Vrai si le plafond de la fenêtre courante est atteint.
+    /// True if the cap of the current window is reached.
     pub fn exhausted(&mut self, now: u64) -> bool {
         self.roll(now);
         self.used >= self.limit
     }
 
-    /// Vrai si la part de `peer` dans la fenêtre courante est atteinte.
+    /// True if `peer`'s share in the current window is reached.
     pub fn peer_exhausted(&mut self, now: u64, peer: &NodeId) -> bool {
         self.roll(now);
         self.per_peer.get(peer).copied().unwrap_or(0) >= self.peer_share()
     }
 
-    /// Compte `n` octets envoyés à `peer`.
+    /// Counts `n` bytes sent to `peer`.
     pub fn spend(&mut self, now: u64, peer: NodeId, n: u64) {
         self.roll(now);
         self.used = self.used.saturating_add(n);
@@ -198,42 +199,42 @@ impl ByteBudget {
         *p = p.saturating_add(n);
     }
 
-    /// (début de la fenêtre, octets envoyés dans la fenêtre).
+    /// (window start, bytes sent in the window).
     pub fn window(&self) -> (u64, u64) {
         (self.window_start, self.used)
     }
 }
 
-/// Distance « infinie » : moins de `REPLICAS` responsables connus, tout
-/// nouveau venu en devient un.
+/// "Infinite" distance: fewer than `REPLICAS` known responsible nodes, any
+/// newcomer becomes one.
 const FAR: [u8; 32] = [0xff; 32];
 
-/// Une boîte gardée, en mémoire.
+/// A held mailbox, in memory.
 struct Entry {
     key: [u8; 32],
-    /// Numéro de la dernière tentative, 0 si jamais tentée.
+    /// Number of the last attempt, 0 if never attempted.
     seq: u64,
-    /// Distance à la clé du plus loin de ses responsables (nous compris) à
-    /// la dernière passe ; `None` si nous n'en sommes pas responsables. Un
-    /// nouveau venu plus proche entre parmi eux.
+    /// Distance to the key of the farthest of its responsible nodes (us
+    /// included) at the last pass; `None` if we are not responsible for it.
+    /// A closer newcomer enters among them.
     bound: Option<[u8; 32]>,
 }
 
-/// Ordre et file des boîtes, en mémoire seulement.
+/// Order and queue of mailboxes, in memory only.
 #[derive(Default)]
 pub(crate) struct Queue {
-    /// Numéro croissant de tentative.
+    /// Increasing attempt number.
     seq: u64,
     boxes: HashMap<MailboxId, Entry>,
-    /// Boîtes à traiter en premier.
+    /// Mailboxes to handle first.
     queued: HashSet<MailboxId>,
 }
 
 impl Queue {
-    /// Boîtes à traiter, avec leur clé, dans l'ordre : en file, puis jamais
-    /// tentées, puis les moins récemment tentées. `queued_only` : seulement
-    /// celles en file. Oublie les boîtes qui ne sont plus gardées et vide la
-    /// file.
+    /// Mailboxes to handle, with their key, in order: queued, then never
+    /// attempted, then the least recently attempted. `queued_only`: only the
+    /// queued ones. Forgets mailboxes that are no longer held and empties
+    /// the queue.
     fn order(&mut self, held: Vec<MailboxId>, queued_only: bool) -> Vec<(MailboxId, [u8; 32])> {
         let keep: HashSet<MailboxId> = held.iter().copied().collect();
         self.boxes.retain(|m, _| keep.contains(m));
@@ -254,7 +255,7 @@ impl Queue {
         order.into_iter().map(|(_, _, m, k)| (m, k)).collect()
     }
 
-    /// La boîte a été tentée : elle passe en fin d'ordre.
+    /// The mailbox has been attempted: it goes to the end of the order.
     fn attempted(&mut self, m: &MailboxId) {
         self.seq += 1;
         if let Some(e) = self.boxes.get_mut(m) {
@@ -268,8 +269,8 @@ impl Queue {
         }
     }
 
-    /// Met en file les boîtes dont `id` entre parmi les responsables, sans
-    /// consulter la table ; vrai si la file en a gagné.
+    /// Queues the mailboxes among whose responsible nodes `id` enters,
+    /// without consulting the table; true if the queue gained any.
     pub(crate) fn enqueue_near(&mut self, id: &NodeId) -> bool {
         let before = self.queued.len();
         for (m, e) in &self.boxes {
@@ -281,8 +282,8 @@ impl Queue {
     }
 }
 
-/// Distance à `key` du plus loin des responsables `targets` (nous compris
-/// si nous en sommes) ; `FAR` s'il y en a moins de `REPLICAS`.
+/// Distance to `key` of the farthest of the responsible nodes `targets` (us
+/// included if we are one); `FAR` if there are fewer than `REPLICAS`.
 fn replica_bound(own: &NodeId, key: &[u8; 32], targets: &[NodeId]) -> [u8; 32] {
     let far = targets.iter().map(|t| distance(&t.0, key)).max();
     match targets.len() {
@@ -292,30 +293,29 @@ fn replica_bound(own: &NodeId, key: &[u8; 32], targets: &[NodeId]) -> [u8; 32] {
     }
 }
 
-/// Issue de la recopie d'une boîte vers un responsable.
+/// Outcome of replicating a mailbox to a responsible node.
 enum Outcome {
     Done,
-    /// Pas de réponse (délai, connexion impossible ou perdue) : pair sauté
-    /// pour la passe, contrôle de vie demandé.
+    /// No answer (timeout, connection impossible or lost): peer skipped for
+    /// the pass, liveness check requested.
     NoAnswer,
-    /// Temps de la passe ou part horaire d'octets épuisés pour ce pair :
-    /// sauté.
+    /// Pass time or hourly byte share exhausted for this peer: skipped.
     Skip,
-    /// Plafond horaire atteint : fin de la passe.
+    /// Hourly cap reached: end of the pass.
     Budget,
 }
 
-/// Réponse d'un appel.
+/// Answer to a call.
 enum Call {
     Answer(Response),
-    /// Délai dépassé, connexion impossible ou perdue.
+    /// Timeout, connection impossible or lost.
     NoAnswer,
-    /// Réponse illisible ou flux coupé par le pair : il répond, mais pas à
-    /// cette requête.
+    /// Unreadable answer or stream cut by the peer: it answers, but not to
+    /// this request.
     Broken,
 }
 
-/// Bilan par pair dans une passe.
+/// Per-peer summary in a pass.
 #[derive(Default)]
 struct PeerPass {
     mailboxes: usize,
@@ -323,7 +323,7 @@ struct PeerPass {
     skipped: bool,
 }
 
-/// Fait tourner les passes jusqu'à `stop`.
+/// Runs passes until `stop`.
 pub(crate) async fn run(dht: Arc<Dht>, shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let every = dht.tick().unwrap_or(PASS_EVERY);
     let delay = dht.tick().unwrap_or(QUEUE_DELAY);
@@ -335,8 +335,8 @@ pub(crate) async fn run(dht: Arc<Dht>, shared: Arc<Shared>, mut stop: watch::Rec
     let work = async {
         let mut next = Instant::now() + every;
         loop {
-            // Passe complète à l'échéance ; une mise en file ne fait traiter
-            // que les boîtes en file.
+            // Full pass when due; a queueing makes only the queued
+            // mailboxes be handled.
             let queued_only = tokio::select! {
                 () = sleep_until(next) => false,
                 () = dht.replication_wake().notified() => {
@@ -350,7 +350,7 @@ pub(crate) async fn run(dht: Arc<Dht>, shared: Arc<Shared>, mut stop: watch::Rec
                 .with_store(true, None, move |s, _| s.set_replicated(start, used))
                 .await;
             shared.stats().replicated(&report);
-            tracing::debug!("recopie : {report}");
+            tracing::debug!("replication: {report}");
             if !queued_only {
                 next = Instant::now() + every;
             }
@@ -362,8 +362,8 @@ pub(crate) async fn run(dht: Arc<Dht>, shared: Arc<Shared>, mut stop: watch::Rec
     }
 }
 
-/// Une passe de recopie sur les boîtes gardées (`queued_only` : celles en
-/// file seulement).
+/// A replication pass over the held mailboxes (`queued_only`: only the
+/// queued ones).
 pub(crate) async fn pass(
     dht: &Arc<Dht>,
     shared: &Arc<Shared>,
@@ -383,8 +383,8 @@ pub(crate) async fn pass(
     let own = dht.id();
     let mut peers: HashMap<NodeId, PeerPass> = HashMap::new();
     for (mailbox, key) in order {
-        // Hors de la fenêtre de responsabilité : plus de recopie, rien
-        // n'est effacé (spec §5.3, point 2).
+        // Outside the responsibility window: no more replication, nothing
+        // is erased (spec §5.3, point 2).
         let Some(mut targets) = dht.table().replica_targets(&key) else {
             let mut q = dht.replication_queue();
             q.set_bound(&mailbox, None);
@@ -400,7 +400,7 @@ pub(crate) async fn pass(
             Stored::Done(Ok(items)) => items,
             Stored::Done(Err(_)) | Stored::Busy | Stored::Failed => continue,
         };
-        // Un message sans preuve gardée serait refusé (`PowTooWeak`).
+        // A message without a kept proof would be refused (`PowTooWeak`).
         let items: Vec<CopyItem> = items
             .into_iter()
             .filter(|i| i.is_ack || i.pow != 0)
@@ -412,8 +412,8 @@ pub(crate) async fn pass(
         report.mailboxes += 1;
         let mut tried: HashSet<NodeId> = HashSet::new();
         let mut attempted = false;
-        // Un responsable retiré de la table par son contrôle de vie laisse
-        // sa place au suivant, servi dans la même passe.
+        // A responsible node removed from the table by its liveness check
+        // leaves its place to the next one, served in the same pass.
         for _ in 0..2 {
             let mut evicted = false;
             for peer in targets {
@@ -476,10 +476,10 @@ pub(crate) async fn pass(
     report
 }
 
-/// Envoie `req` au pair `peer` (adresses de sa fiche dans la table), au
-/// rythme de `PEER_CALL_SPACING`. Après un `RateLimited`, attend
-/// `RATE_LIMIT_BACKOFF` et réessaie : seul le temps de la passe pour ce
-/// pair borne l'attente. Une réponse lisible le marque vivant dans la table.
+/// Sends `req` to peer `peer` (addresses of its record in the table), at the
+/// pace of `PEER_CALL_SPACING`. After a `RateLimited`, waits
+/// `RATE_LIMIT_BACKOFF` and retries: only the pass time for this peer bounds
+/// the wait. A readable answer marks it alive in the table.
 async fn call(dht: &Dht, peer: NodeId, req: &Request, report: &mut PassReport) -> Call {
     loop {
         sleep_until(dht.replication_slot(peer, PEER_CALL_SPACING)).await;
@@ -508,17 +508,18 @@ async fn call_once(dht: &Dht, peer: NodeId, req: &Request) -> Call {
     }
 }
 
-/// Difficulté de base annoncée par `peer` dans `Hello`, si une connexion
-/// vers lui est gardée.
+/// Base difficulty announced by `peer` in `Hello`, if a connection to it is
+/// kept.
 fn peer_pow_bits(dht: &Dht, peer: NodeId) -> Option<u8> {
     let addrs = dht.table().get(&peer).map(|p| p.record.addrs())?;
     dht.pool().pow_bits(peer, &addrs)
 }
 
-/// Empreintes que `peer` tient pour `mailbox`, toutes pages lues. Une
-/// réponse hors bornes (page trop longue, curseur qui n'avance pas, plus
-/// de `MAX_HOLDINGS_PAGES` pages) ou inattendue fait sauter la boîte pour
-/// ce pair (`Err(Outcome::Done)`), sans rien compter contre lui.
+/// Hashes that `peer` holds for `mailbox`, all pages read. An out-of-bounds
+/// answer (page too long, cursor that does not advance, more than
+/// `MAX_HOLDINGS_PAGES` pages) or an unexpected one makes the mailbox be
+/// skipped for this peer (`Err(Outcome::Done)`), counting nothing against
+/// it.
 async fn holdings_of(
     dht: &Dht,
     peer: NodeId,
@@ -548,7 +549,7 @@ async fn holdings_of(
     Err(Outcome::Done)
 }
 
-/// Recopie vers `peer` ce qui lui manque de `items` (accusés d'abord).
+/// Replicates to `peer` what it lacks of `items` (acknowledgements first).
 async fn copy_to(
     dht: &Dht,
     peer: NodeId,
@@ -562,8 +563,8 @@ async fn copy_to(
         Ok(h) => h,
         Err(o) => return o,
     };
-    // Difficulté du pair (`Hello`) : un message dont la preuve ne l'atteint
-    // pas serait refusé (`PowTooWeak`) à chaque passe, il n'est pas envoyé.
+    // Peer's difficulty (`Hello`): a message whose proof does not reach it
+    // would be refused (`PowTooWeak`) at every pass, so it is not sent.
     let peer_bits = peer_pow_bits(dht, peer);
     for item in items.iter().filter(|i| !have.contains(&i.hash)) {
         if let Some(bits) = peer_bits
@@ -594,8 +595,8 @@ async fn copy_to(
         match call(dht, peer, &req, report).await {
             Call::Answer(Response::Ok) => report.sent += 1,
             Call::Answer(Response::Error(r)) => match r {
-                // Tables divergentes : rien d'autre pour ce pair avant la
-                // passe suivante.
+                // Diverging tables: nothing else for this peer before the
+                // next pass.
                 ErrorReason::NotResponsible => {
                     report.not_responsible += 1;
                     return Outcome::Done;
@@ -608,7 +609,7 @@ async fn copy_to(
                 }
             },
             Call::NoAnswer => return Outcome::NoAnswer,
-            // Réponse inattendue ou flux coupé : la boîte est sautée.
+            // Unexpected answer or broken stream: the mailbox is skipped.
             Call::Answer(_) | Call::Broken => {
                 report.refused += 1;
                 return Outcome::Done;
@@ -633,11 +634,11 @@ mod tests {
         bud.spend(T + 1, b, 7);
         assert!(bud.exhausted(T + 2));
         assert_eq!(bud.window(), (T, 14));
-        // Une heure après le début de la fenêtre : nouvelle fenêtre.
+        // One hour after the window start: new window.
         assert!(!bud.exhausted(T + 3600));
         assert_eq!(bud.window(), (T + 3600, 0));
         assert!(!bud.peer_exhausted(T + 3600, &a));
-        // Reprise d'une fenêtre enregistrée.
+        // Resumption of a saved window.
         let mut r = ByteBudget::resume(10, T, 10);
         assert!(r.exhausted(T + 100));
         assert!(!r.exhausted(T + 3600));
@@ -652,11 +653,11 @@ mod tests {
         bud.spend(T, a, 150);
         assert!(!bud.peer_exhausted(T, &a));
         bud.spend(T, a, 50);
-        // `a` a pris sa part ; `b` et le plafond global restent ouverts.
+        // `a` has taken its share; `b` and the global cap stay open.
         assert!(bud.peer_exhausted(T, &a));
         assert!(!bud.peer_exhausted(T, &b));
         assert!(!bud.exhausted(T));
-        // Plafond minuscule : au moins un octet par responsable.
+        // Tiny cap: at least one byte per responsible node.
         assert_eq!(ByteBudget::new(1).peer_share(), 1);
     }
 
@@ -669,20 +670,20 @@ mod tests {
         q.attempted(&m(1));
         q.attempted(&m(2));
         q.attempted(&m(3));
-        // Jamais tentée d'abord, puis les moins récemment tentées ; la clé
-        // de chaque boîte est jointe.
+        // Never attempted first, then the least recently attempted; each
+        // mailbox's key is attached.
         let order = q.order(vec![m(3), m(2), m(4), m(1)], false);
         assert_eq!(order[0].1, mailbox_key(&m(4)));
         assert_eq!(ids(order), [m(4), m(1), m(2), m(3)]);
-        // Une boîte tentée, même refusée, passe en fin d'ordre.
+        // An attempted mailbox, even if refused, goes to the end of the order.
         q.attempted(&m(4));
         q.attempted(&m(1));
         assert_eq!(
             ids(q.order(vec![m(1), m(2), m(3), m(4)], false)),
             [m(2), m(3), m(4), m(1)]
         );
-        // Mise en file d'après la borne : seul un nœud plus proche de la clé
-        // que le plus loin des responsables la fait entrer.
+        // Queueing based on the bound: only a node closer to the key than
+        // the farthest responsible node makes it enter.
         let key = mailbox_key(&m(2));
         let mut bound = key;
         bound[0] ^= 0x10;
@@ -695,13 +696,13 @@ mod tests {
         near[31] ^= 1;
         assert!(q.enqueue_near(&NodeId(near)));
         assert!(!q.enqueue_near(&NodeId(near)));
-        // Sans borne (pas responsable) : jamais en file.
+        // Without a bound (not responsible): never queued.
         q.set_bound(&m(3), None);
         assert!(!q.enqueue_near(&NodeId(mailbox_key(&m(3)))));
-        // Passe limitée à la file, qui est ensuite vidée.
+        // Pass limited to the queue, which is then emptied.
         assert_eq!(ids(q.order(vec![m(1), m(2), m(3)], true)), [m(2)]);
         assert!(q.order(vec![m(1), m(2), m(3)], true).is_empty());
-        // Une boîte qui n'est plus gardée est oubliée.
+        // A mailbox that is no longer held is forgotten.
         assert_eq!(ids(q.order(vec![m(2)], false)), [m(2)]);
         assert_eq!(q.boxes.len(), 1);
     }
@@ -716,12 +717,12 @@ mod tests {
         };
         let d = |n: &NodeId| distance(&n.0, &key);
         let targets: Vec<NodeId> = (1..=5).map(id).collect();
-        // Cinq responsables autres que nous : le plus loin d'entre eux.
+        // Five responsible nodes other than us: the farthest of them.
         assert_eq!(replica_bound(&id(9), &key, &targets), d(&id(5)));
-        // Quatre : nous en sommes, le plus loin des cinq.
+        // Four: we are one, the farthest of the five.
         assert_eq!(replica_bound(&id(9), &key, &targets[..4]), d(&id(9)));
         assert_eq!(replica_bound(&id(0), &key, &targets[..4]), d(&id(4)));
-        // Moins : tout nouveau venu entre.
+        // Fewer: any newcomer enters.
         assert_eq!(replica_bound(&id(9), &key, &targets[..2]), FAR);
     }
 
@@ -744,7 +745,7 @@ mod tests {
         assert!(total.budget_exhausted);
         let line = total.to_string();
         assert!(
-            line.contains("NotResponsible=2") && line.contains("plafond"),
+            line.contains("NotResponsible=2") && line.contains("hourly cap"),
             "{line}"
         );
     }

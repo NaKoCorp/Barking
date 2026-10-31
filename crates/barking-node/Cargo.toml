@@ -24,13 +24,13 @@ quinn.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros", "signal"] }
 tracing.workspace = true
-# SQLite en clair : les paquets sont chiffrés de bout en bout, la base ne
-# contient aucun secret. Spécification distincte de celle du cœur (SQLCipher).
+# Plain SQLite: packets are end-to-end encrypted, the database holds no
+# secret. Specification distinct from the core's (SQLCipher).
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 
 [dev-dependencies]
-# Le cœur (et donc SQLCipher) n'entre que dans les tests : le binaire du nœud
-# n'en dépend pas (résolveur 3, pas d'unification des dépendances de dev).
+# The core (and therefore SQLCipher) only enters the tests: the node binary
+# does not depend on it (resolver 3, no unification of dev dependencies).
 barking-core.workspace = true
 rustls.workspace = true
 tempfile.workspace = true

@@ -38,13 +38,13 @@ fn msg(n: u8, mailbox: u8, tier: Tier, expires_at: u64) -> Packet {
     }
 }
 
-/// Preuve à la difficulté de base plus le palier (boîte et nœud peu remplis).
+/// Proof at the base difficulty plus the tier (lightly filled mailbox and node).
 fn nonce(p: &Packet) -> u64 {
     let bits = BITS + pow::tier_surcharge(p.tier);
     pow::solve(&pow::content_hash(&p.encode()), &p.mailbox, bits).unwrap()
 }
 
-/// Preuve à la difficulté exigée maintenant par `s`.
+/// Proof at the difficulty currently required by `s`.
 fn nonce_for(s: &NodeStore, pol: &Policy, p: &Packet) -> u64 {
     let bits = required_pow_bits(s, pol, &p.mailbox, p.tier).unwrap();
     pow::solve(&pow::content_hash(&p.encode()), &p.mailbox, bits).unwrap()
@@ -58,7 +58,7 @@ fn ok_msg(n: u8, mailbox: u8) -> Packet {
     msg(n, mailbox, Tier::S, NOW + 86_400)
 }
 
-/// Un message et son accusé (secret fixe) dans la boîte du message.
+/// A message and its ack (fixed secret) in the message's mailbox.
 fn msg_and_ack(n: u8, mailbox: u8) -> (Packet, [u8; 16], Packet) {
     let secret = [n; 16];
     let mut m = ok_msg(n, mailbox);
@@ -115,7 +115,7 @@ fn rejects_wrong_tier() {
     let (_d, mut s) = store();
     let p = ok_msg(1, 1);
     let mut bytes = p.encode();
-    bytes.push(0); // 246 octets pour le palier S
+    bytes.push(0); // 246 bytes for tier S
     assert_eq!(
         deposit(&mut s, &policy(), &bytes, nonce(&p), NOW).unwrap(),
         Err(ErrorReason::WrongTier)
@@ -160,7 +160,7 @@ fn rejects_full_mailbox() {
         deposit(&mut s, &pol, &p.encode(), nonce(&p), NOW).unwrap(),
         Err(ErrorReason::MailboxFull)
     );
-    // Une autre boîte reste ouverte.
+    // Another mailbox stays open.
     let q = ok_msg(4, 2);
     assert_eq!(
         deposit(&mut s, &pol, &q.encode(), nonce(&q), NOW).unwrap(),
@@ -219,11 +219,11 @@ fn ack_deletes_packet_and_is_kept() {
     let (items, next) = fetch(&s, &[mb(1)], None, 1 << 20).unwrap().unwrap();
     assert_eq!(items, vec![a.encode()]);
     assert_eq!(next, None);
-    // Second accusé identique (même cible) : accepté sans effet.
+    // Second identical ack (same target): accepted with no effect.
     assert_eq!(put_ack(&mut s, &a), Ok(()));
     let st = s.stats().unwrap();
     assert_eq!((st.packets, st.acks, st.bytes), (0, 1, 245));
-    // Le message accusé ne ressuscite pas s'il est redéposé.
+    // The acknowledged message does not come back if redeposited.
     assert_eq!(put(&mut s, &m), Ok(()));
     assert_eq!(s.stats().unwrap().packets, 0);
 }
@@ -251,7 +251,7 @@ fn ack_needs_no_pow() {
     let (_d, mut s) = store();
     let (m, _secret, a) = msg_and_ack(1, 1);
     put(&mut s, &m).unwrap();
-    // nonce 0 avec une exigence de 20 bits : un message serait refusé.
+    // nonce 0 with a 20-bit requirement: a message would be refused.
     let strict = Policy {
         pow_bits: 20,
         ..policy()
@@ -265,13 +265,13 @@ fn ack_needs_no_pow() {
 #[test]
 fn deposit_window_tolerates_one_hour_skew() {
     let (_d, mut s) = store();
-    // Horloge du client en avance d'une heure : expire à now + 7 j + 1 h.
+    // Client clock one hour ahead: expires at now + 7 d + 1 h.
     let p = msg(1, 1, Tier::S, NOW + MAX_EXPIRY_SECS);
     assert_eq!(put(&mut s, &p), Ok(()));
-    // Horloge du client en retard d'une heure : expire dans 7 j - 1 h.
+    // Client clock one hour behind: expires in 7 d - 1 h.
     let q = msg(2, 1, Tier::S, NOW + 7 * 86_400 - 3_600);
     assert_eq!(put(&mut s, &q), Ok(()));
-    // Paquet qui expire dans une seconde : encore valide.
+    // Packet expiring in one second: still valid.
     let r = msg(3, 1, Tier::S, NOW + 1);
     assert_eq!(put(&mut s, &r), Ok(()));
 }
@@ -291,7 +291,7 @@ fn fetch_too_many_mailboxes() {
 fn fetch_pagination_is_complete_and_unique() {
     let (_d, mut s) = store();
     let mut expected: Vec<Vec<u8>> = Vec::new();
-    // Mélange de paliers S, M, L sur 3 boîtes, plus un accusé.
+    // Mix of tiers S, M, L over 3 mailboxes, plus an ack.
     let tiers = [Tier::S, Tier::M, Tier::L, Tier::S, Tier::M];
     for n in 1..=10u8 {
         let p = msg(
@@ -308,7 +308,7 @@ fn fetch_pagination_is_complete_and_unique() {
     put_ack(&mut s, &a).unwrap();
     expected.push(a.encode());
     let boxes = [mb(1), mb(2), mb(3)];
-    // Pages de 1 Kio (L = 16 Kio part seul), 2 Kio, et énorme.
+    // Pages of 1 KiB (L = 16 KiB goes alone), 2 KiB, and huge.
     for max in [1_024usize, 2_048, 40_000, 1 << 20] {
         let mut got: Vec<Vec<u8>> = Vec::new();
         let mut cursor = None;
@@ -316,7 +316,7 @@ fn fetch_pagination_is_complete_and_unique() {
         loop {
             let (items, next) = fetch(&s, &boxes, cursor, max).unwrap().unwrap();
             let total: usize = items.iter().map(Vec::len).sum();
-            assert!(items.len() == 1 || total <= max, "page trop grosse");
+            assert!(items.len() == 1 || total <= max, "page too large");
             assert!(!items.is_empty());
             got.extend(items);
             pages += 1;
@@ -332,7 +332,7 @@ fn fetch_pagination_is_complete_and_unique() {
         a2.sort();
         assert_eq!(a1, a2, "max={max}");
         a1.dedup();
-        assert_eq!(a1.len(), got.len(), "doublon, max={max}");
+        assert_eq!(a1.len(), got.len(), "duplicate, max={max}");
     }
 }
 
@@ -346,7 +346,7 @@ fn fetch_does_not_delete() {
         assert_eq!(items, vec![p.encode()]);
     }
     assert_eq!(s.stats().unwrap().packets, 1);
-    // Boîte vide ou inconnue.
+    // Empty or unknown mailbox.
     let (items, next) = fetch(&s, &[mb(9)], None, 1 << 20).unwrap().unwrap();
     assert!(items.is_empty() && next.is_none());
 }
@@ -356,16 +356,16 @@ fn purge_removes_expired_only() {
     let (_d, mut s) = store();
     put(&mut s, &msg(1, 1, Tier::S, NOW + 100)).unwrap();
     put(&mut s, &msg(2, 1, Tier::S, NOW + 10_000)).unwrap();
-    // Message expirant à NOW + 200 accusé : l'accusé vit jusqu'à NOW + 86 400.
+    // Message expiring at NOW + 200 acknowledged: the ack lives until NOW + 86 400.
     let (mut m, _sec, a) = msg_and_ack(3, 1);
     m.expires_at = u32::try_from(NOW + 200).unwrap();
     put(&mut s, &m).unwrap();
     put_ack(&mut s, &a).unwrap();
     assert_eq!(s.purge_expired(NOW + 50).unwrap(), 0);
-    assert_eq!(s.purge_expired(NOW + 100).unwrap(), 1); // paquet 1
+    assert_eq!(s.purge_expired(NOW + 100).unwrap(), 1); // packet 1
     let st = s.stats().unwrap();
     assert_eq!((st.packets, st.acks, st.bytes), (1, 1, 490));
-    assert_eq!(s.purge_expired(NOW + 86_400).unwrap(), 2); // paquet 2 et accusé
+    assert_eq!(s.purge_expired(NOW + 86_400).unwrap(), 2); // packet 2 and ack
     let st = s.stats().unwrap();
     assert_eq!((st.packets, st.acks, st.bytes), (0, 0, 0));
 }
@@ -388,12 +388,12 @@ fn short_expiry_ack_cannot_resurrect_message() {
     put(&mut s, &m).unwrap();
     a.expires_at = u32::try_from(NOW + 10).unwrap();
     assert_eq!(put_ack(&mut s, &a), Ok(()));
-    // L'accusé survit à sa propre expiration, jusqu'à celle du message.
+    // The ack outlives its own expiry, until the message's.
     s.purge_expired(NOW + 20).unwrap();
     assert_eq!(s.stats().unwrap().acks, 1);
     assert_eq!(put(&mut s, &m), Ok(()));
     assert_eq!(s.stats().unwrap().packets, 0);
-    // Après l'expiration du message : purge, puis redépôt refusé (Expired).
+    // After the message's expiry: purge, then redeposit refused (Expired).
     let later = u64::from(m.expires_at);
     s.purge_expired(later).unwrap();
     assert_eq!(s.stats().unwrap().acks, 0);
@@ -419,9 +419,9 @@ fn ack_must_be_tier_s_with_32_byte_payload() {
 #[test]
 fn ack_respects_node_full() {
     let (_d, mut s) = store();
-    // Message M (1 Kio) accusé par un ack S (245) : delta négatif, accepté
-    // même au plafond. Message S accusé alors que le nœud est plein de
-    // lui-même : delta nul, accepté.
+    // Message M (1 KiB) acknowledged by an S ack (245): negative delta,
+    // accepted even at the cap. S message acknowledged while the node is
+    // full of itself: zero delta, accepted.
     let pol = Policy {
         storage_max_bytes: 245,
         ..policy()
@@ -430,9 +430,9 @@ fn ack_respects_node_full() {
     let r = deposit(&mut s, &pol, &m.encode(), nonce(&m), NOW).unwrap();
     assert_eq!(r, Ok(()));
     assert_eq!(deposit(&mut s, &pol, &a.encode(), 0, NOW).unwrap(), Ok(()));
-    // Delta positif : plafond abaissé sous la taille d'un accusé, mais le
-    // paquet accusé est plus petit que l'accusé (charge vide en palier S
-    // = 245 octets aussi, donc on simule via un plafond réduit après dépôt).
+    // Positive delta: cap lowered below an ack's size, but the acknowledged
+    // packet is smaller than the ack (empty payload in tier S = 245 bytes
+    // too, so we simulate via a reduced cap after deposit).
     let (_d2, mut s2) = store();
     let (m2, _s2, a2) = msg_and_ack(2, 1);
     put(&mut s2, &m2).unwrap();
@@ -461,16 +461,16 @@ fn squatted_id_does_not_block_real_message() {
     junk.payload = vec![0xEE; 8];
     assert_eq!(put(&mut s, &junk), Ok(()));
     assert_eq!(put(&mut s, &real), Ok(()));
-    assert_eq!(put(&mut s, &real), Ok(())); // même contenu : sans effet
+    assert_eq!(put(&mut s, &real), Ok(())); // same content: no effect
     assert_eq!(s.stats().unwrap().packets, 2);
     let (items, _) = fetch(&s, &[mb(1)], None, 1 << 20).unwrap().unwrap();
     assert!(items.contains(&junk.encode()) && items.contains(&real.encode()));
-    // `hops` ne compte pas dans la déduplication.
+    // `hops` does not count in deduplication.
     let mut relayed = real.clone();
     relayed.hops = 3;
     assert_eq!(put(&mut s, &relayed), Ok(()));
     assert_eq!(s.stats().unwrap().packets, 2);
-    // L'accusé supprime les deux.
+    // The ack deletes both.
     assert_eq!(put_ack(&mut s, &a), Ok(()));
     let st = s.stats().unwrap();
     assert_eq!((st.packets, st.acks, st.bytes), (0, 1, 245));
@@ -515,9 +515,9 @@ fn pow_is_progressive_per_mailbox() {
     assert_eq!(req(&s), BITS + 2);
     fill(&s, 1, 744); // 1 000 : n / 64 = 15
     assert_eq!(req(&s), BITS + 3);
-    // Une autre boîte n'est pas touchée.
+    // Another mailbox is untouched.
     assert_eq!(required_pow_bits(&s, &pol, &mb(2), Tier::S).unwrap(), BITS);
-    // Plafonné à MAX_POW_BITS.
+    // Capped at MAX_POW_BITS.
     let high = Policy {
         pow_bits: pow::MAX_POW_BITS,
         ..pol
@@ -526,7 +526,7 @@ fn pow_is_progressive_per_mailbox() {
         required_pow_bits(&s, &high, &mb(1), Tier::S).unwrap(),
         pow::MAX_POW_BITS
     );
-    // Dépôt : une preuve à BITS bits ne suffit plus à 128 paquets.
+    // Deposit: a BITS-bit proof no longer suffices at 128 packets.
     let (_d2, mut s2) = store();
     fill(&s2, 1, 128);
     let p = ok_msg(1, 1);
@@ -550,7 +550,7 @@ fn pow_is_progressive_per_mailbox() {
 fn received_at_rounded_to_minute() {
     let (_d, mut s) = store();
     let p = ok_msg(1, 1);
-    let now = NOW + 37; // NOW est un multiple de 60
+    let now = NOW + 37; // NOW is a multiple of 60
     deposit(&mut s, &policy(), &p.encode(), nonce(&p), now)
         .unwrap()
         .unwrap();
@@ -589,8 +589,8 @@ fn pow_is_bound_to_content() {
     let real = ok_msg(1, 1);
     let mut other = real.clone();
     other.payload = vec![0xEE; 8];
-    // La preuve de `real` ne vaut pas pour un autre contenu du même identifiant,
-    // sauf rencontre fortuite (2^-4) : on cherche un nonce qui ne passe pas.
+    // `real`'s proof is not valid for other content under the same identifier,
+    // barring a chance hit (2^-4): we look for a nonce that does not pass.
     let h1 = pow::content_hash(&real.encode());
     let h2 = pow::content_hash(&other.encode());
     let n = (0..)
@@ -617,16 +617,16 @@ fn ack_is_filed_in_every_mailbox_of_the_id() {
     squat.mailbox = mb(2);
     assert_eq!(put(&mut s, &squat), Ok(()));
     assert_eq!(put(&mut s, &real), Ok(()));
-    // Ack ré-adressé vers B (où se trouve la ligne squat).
+    // Ack re-addressed to B (where the squat row is).
     a.mailbox = mb(2);
     assert_eq!(put_ack(&mut s, &a), Ok(()));
     let st = s.stats().unwrap();
     assert_eq!((st.packets, st.acks, st.bytes), (0, 2, 490));
     for m in [1, 2] {
         let (items, _) = fetch(&s, &[mb(m)], None, 1 << 20).unwrap().unwrap();
-        assert_eq!(items, vec![a.encode()], "boîte {m}");
+        assert_eq!(items, vec![a.encode()], "mailbox {m}");
     }
-    // Le message ne ressuscite pas.
+    // The message does not come back.
     assert_eq!(put(&mut s, &real), Ok(()));
     assert_eq!(s.stats().unwrap().packets, 0);
 }
@@ -647,8 +647,8 @@ fn old_schema_is_refused() {
     }
 }
 
-/// Schéma v1 réel (avant la déduplication par contenu) : refusé, et la base
-/// n'est pas modifiée (ni index, ni mode WAL).
+/// Real v1 schema (before content deduplication): refused, and the database
+/// is not modified (no index, no WAL mode).
 #[test]
 fn v1_layout_refused_without_modification() {
     let dir = tempfile::tempdir().unwrap();
@@ -734,9 +734,9 @@ fn policy_validation() {
     assert!(p.validate().is_ok());
 }
 
-/// Grande table : la lecture de chaque boîte suit l'index (pas de tri
-/// temporaire sur les charges), une page reste bornée en éléments, et la
-/// pagination complète ne perd ni ne duplique rien.
+/// Large table: the read of each mailbox follows the index (no temporary
+/// sort on payloads), a page stays bounded in items, and full pagination
+/// neither loses nor duplicates anything.
 #[test]
 fn fetch_large_table_index_ordered_and_bounded() {
     let (_d, mut s) = store();
@@ -785,7 +785,7 @@ fn fetch_large_table_index_ordered_and_bounded() {
         assert!(!plan.contains("TEMP B-TREE"), "{table}: {plan}");
         assert!(plan.contains("INDEX"), "{table}: {plan}");
     }
-    // Boîtes en double dans la requête : pas de doublon.
+    // Duplicate mailboxes in the request: no duplicate.
     let (dup, next) = fetch(&s, &[mb(3), mb(3)], None, 1 << 20).unwrap().unwrap();
     assert_eq!((dup.len(), next), (PER_BOX as usize, None));
     let boxes: Vec<MailboxId> = (0..BOXES).map(mb).collect();
@@ -806,13 +806,13 @@ fn fetch_large_table_index_ordered_and_bounded() {
     let total = usize::from(BOXES) * PER_BOX as usize;
     assert_eq!(all.len(), total);
     assert_eq!(pages, total.div_ceil(super::MAX_PAGE_ITEMS));
-    // Ordre d'insertion (seq) respecté.
+    // Insertion order (seq) respected.
     for (k, it) in all.iter().enumerate() {
         assert_eq!(it[0], (k % usize::from(BOXES)) as u8);
     }
 }
 
-/// Nonce qui passe exactement `bits` bits, pas `bits + 1`.
+/// Nonce that passes exactly `bits` bits, not `bits + 1`.
 fn exact_nonce(p: &Packet, bits: u8) -> u64 {
     let h = pow::content_hash(&p.encode());
     (0..)
@@ -845,7 +845,7 @@ fn pow_surcharge_by_tier() {
 
 #[test]
 fn pow_surcharge_by_global_fill() {
-    // Plafond 8 000 octets : 1/8 = 1 000. Au-delà, +1 bit par doublement.
+    // Cap 8 000 bytes: 1/8 = 1 000. Beyond, +1 bit per doubling.
     let pol = Policy {
         storage_max_bytes: 8_000,
         ..policy()
@@ -881,11 +881,11 @@ fn pow_surcharge_by_global_fill() {
 }
 
 // ---------------------------------------------------------------------
-// Recopie entre nœuds (spec §5.2, points 3, 5, 6, 7) et stockage v3.
+// Replication between nodes (spec §5.2, points 3, 5, 6, 7) and v3 storage.
 // ---------------------------------------------------------------------
 
-/// Nonce qui satisfait `BITS + palier` mais pas un bit de plus : une preuve
-/// « de base », trop faible pour un dépôt progressif.
+/// Nonce that satisfies `BITS + tier` but not one bit more: a "base" proof,
+/// too weak for a progressive deposit.
 fn base_only_nonce(p: &Packet) -> u64 {
     let hash = pow::content_hash(&p.encode());
     let bits = BITS + pow::tier_surcharge(p.tier);
@@ -917,14 +917,14 @@ fn deposit_records_pow() {
 #[test]
 fn store_copy_requires_only_base_pow() {
     let (_d, mut s) = store();
-    // 128 paquets : un bit progressif de plus (steps = 2, ilog2 = 1).
+    // 128 packets: one more progressive bit (steps = 2, ilog2 = 1).
     for n in 0..128u8 {
-        assert_eq!(put(&mut s, &ok_msg(n, 1)), Ok(()), "dépôt {n}");
+        assert_eq!(put(&mut s, &ok_msg(n, 1)), Ok(()), "deposit {n}");
     }
     let p = ok_msg(200, 1);
     let weak = base_only_nonce(&p);
     assert!(required_pow_bits(&s, &policy(), &p.mailbox, p.tier).unwrap() > BITS);
-    // Le dépôt exige le progressif, la recopie seulement la base.
+    // The deposit requires the progressive proof, replication only the base.
     assert_eq!(
         deposit(&mut s, &policy(), &p.encode(), weak, NOW).unwrap(),
         Err(ErrorReason::PowTooWeak)
@@ -950,7 +950,7 @@ fn copy_pow_too_weak() {
         store_copy(&mut s, &strict, &p.encode(), nonce(&p), NOW).unwrap(),
         Err(ErrorReason::PowTooWeak)
     );
-    // Un accusé n'exige aucune preuve ; des octets illisibles sont refusés.
+    // An ack requires no proof; unreadable bytes are refused.
     let (_m, _sec, a) = msg_and_ack(1, 1);
     assert_eq!(copy_pow_ok(&strict, &a.encode(), 0), Ok(()));
     assert_eq!(
@@ -980,7 +980,7 @@ fn store_copy_ack_unknown_target() {
     let (_d, mut s) = store();
     let (_m, _sec, a) = msg_and_ack(1, 1);
     assert_eq!(copy(&mut s, &a, 0), Err(ErrorReason::UnknownAckTarget));
-    // Avec le paquet visé, l'accusé est accepté et supprime le paquet.
+    // With the targeted packet, the ack is accepted and deletes the packet.
     let (m, _sec, a) = msg_and_ack(2, 1);
     assert_eq!(copy(&mut s, &m, nonce(&m)), Ok(()));
     assert_eq!(copy(&mut s, &a, 0), Ok(()));
@@ -1033,8 +1033,8 @@ fn holdings_pages_and_hashes() {
         max_per_mailbox: 2_000,
         ..policy()
     };
-    // 1 500 messages, dont 500 accusés : 1 000 paquets et 500 accusés, soit
-    // 1 500 éléments. La première page passe des paquets aux accusés.
+    // 1 500 messages, 500 of them acks: 1 000 packets and 500 acks, i.e.
+    // 1 500 items. The first page goes from packets to acks.
     let mut all = Vec::new();
     for n in 0..1_500u16 {
         let mut secret = [0u8; 16];
@@ -1070,15 +1070,15 @@ fn holdings_pages_and_hashes() {
 
     let (page1, c1) = holdings(&s, &mb(1), None).unwrap().unwrap();
     assert_eq!(page1.len(), 1024);
-    let c1 = c1.expect("une seconde page");
+    let c1 = c1.expect("a second page");
     assert!(
         c1 >= barking_proto::ACK_CURSOR_BASE,
-        "curseur dans les accusés"
+        "cursor within the acks"
     );
     let (page2, c2) = holdings(&s, &mb(1), Some(c1)).unwrap().unwrap();
     assert_eq!(page2.len(), 1_500 - 1024);
     assert_eq!(c2, None);
-    // Les empreintes sont celles des octets : mêmes que `copy_items`.
+    // The hashes are those of the bytes: same as `copy_items`.
     let mut want: Vec<[u8; 32]> = copy_items(&s, &mb(1), NOW)
         .unwrap()
         .unwrap()
@@ -1090,7 +1090,7 @@ fn holdings_pages_and_hashes() {
     got.sort_unstable();
     assert_eq!(got, want);
     assert_eq!(got.len(), 1_500);
-    // Une boîte vide n'a rien.
+    // An empty mailbox has nothing.
     assert_eq!(holdings(&s, &mb(2), None).unwrap().unwrap(), (vec![], None));
 }
 
@@ -1109,7 +1109,7 @@ fn copy_items_acks_first() {
     assert_eq!(items[0].hash, pow::content_hash(&a.encode()));
     assert!(!items[1].is_ack);
     assert_eq!(items[1].hash, pow::content_hash(&other.encode()));
-    // Rien d'expiré, et rien dans une autre boîte.
+    // Nothing expired, and nothing in another mailbox.
     assert!(
         copy_items(&s, &mb(1), NOW + 2 * 86_400)
             .unwrap()
