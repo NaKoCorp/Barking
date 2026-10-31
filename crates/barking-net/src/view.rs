@@ -10,45 +10,19 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use barking_core::transparency::AvoidReason;
 use barking_dht::{Prefix, distance, mailbox_key, prefixes};
 use barking_packet::MailboxId;
 use barking_proto::{NodeId, NodeRecord, RecordPolicy};
 use serde::{Deserialize, Serialize};
 
-use crate::{MAX_PER_PREFIX, MAX_VIEW, RESPONSIBLES, SMALL_VIEW, VIEW_TTL_SECS};
-
-/// Longest avoidance of a node, from the current time.
-const MAX_AVOID_SECS: u64 = 7 * 86_400;
+use crate::score::{self, Score, ScoreEvent};
+use crate::{AVOID_SECS, MAX_PER_PREFIX, MAX_VIEW, RESPONSIBLES, SMALL_VIEW, VIEW_TTL_SECS};
 
 /// Date rounded down to the hour: the only precision stored, so the
 /// persisted view does not leak fine-grained contact times.
-fn hour(t: u64) -> u64 {
+pub(crate) fn hour(t: u64) -> u64 {
     t - t % 3600
-}
-
-/// Reputation of a node in `[0, 1]`, starting at 0.5.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Score(f32);
-
-impl Default for Score {
-    fn default() -> Self {
-        Score(0.5)
-    }
-}
-
-impl Score {
-    /// A score clamped to `[0, 1]`; NaN gives the default.
-    pub(crate) fn new(value: f32) -> Score {
-        if value.is_nan() {
-            Score::default()
-        } else {
-            Score(value.clamp(0.0, 1.0))
-        }
-    }
-
-    pub fn value(self) -> f32 {
-        self.0
-    }
 }
 
 /// A node of the view. Nodes added by hand or migrated from the old state
@@ -67,6 +41,8 @@ pub struct NodeEntry {
     pub last_seen: u64,
     pub score: Score,
     pub avoided_until: Option<u64>,
+    /// Date (hour) the score recovery counts from.
+    pub decayed_at: u64,
 }
 
 impl NodeEntry {
@@ -80,10 +56,11 @@ impl NodeEntry {
             last_seen: hour(now),
             score: Score::default(),
             avoided_until: None,
+            decayed_at: hour(now),
         }
     }
 
-    fn new(record: NodeRecord, now: u64) -> NodeEntry {
+    pub(crate) fn new(record: NodeRecord, now: u64) -> NodeEntry {
         NodeEntry {
             record: Some(record),
             manual_addr: None,
@@ -93,6 +70,7 @@ impl NodeEntry {
             last_seen: hour(now),
             score: Score::default(),
             avoided_until: None,
+            decayed_at: hour(now),
         }
     }
 
@@ -107,9 +85,10 @@ impl NodeEntry {
         out
     }
 
-    fn avoided(&self, now: u64) -> bool {
+    /// True while the node is avoided.
+    pub fn avoided(&self, now: u64) -> bool {
         self.avoided_until
-            .is_some_and(|t| t.min(now.saturating_add(MAX_AVOID_SECS)) > now)
+            .is_some_and(|t| t.min(now.saturating_add(AVOID_SECS)) > now)
     }
 }
 
@@ -236,14 +215,26 @@ impl View {
     /// Avoids a node until `until`, at most 7 days from `now`.
     pub fn avoid(&mut self, id: &NodeId, until: u64, now: u64) {
         if let Some(e) = self.entries.get_mut(id) {
-            e.avoided_until = Some(hour(until.min(now.saturating_add(MAX_AVOID_SECS))));
+            e.avoided_until = Some(hour(until.min(now.saturating_add(AVOID_SECS))));
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_score(&mut self, id: &NodeId, value: f32) {
-        if let Some(e) = self.entries.get_mut(id) {
-            e.score = Score::new(value);
+    /// Applies a score event to a node (see `score::apply`).
+    pub fn apply_score(
+        &mut self,
+        id: &NodeId,
+        event: ScoreEvent,
+        now: u64,
+        network_up: bool,
+    ) -> Option<AvoidReason> {
+        let e = self.entries.get_mut(id)?;
+        score::apply(e, event, now, network_up)
+    }
+
+    /// Score recovery and end of elapsed avoidances (see `score::decay`).
+    pub fn decay_scores(&mut self, now: u64) {
+        for e in self.entries.values_mut() {
+            score::decay(e, now);
         }
     }
 
@@ -258,7 +249,7 @@ impl View {
             e.first_seen = e.first_seen.min(now_hour);
             e.last_seen = e.last_seen.min(now_hour);
             if let Some(t) = &mut e.avoided_until {
-                *t = (*t).min(now.saturating_add(MAX_AVOID_SECS));
+                *t = (*t).min(now.saturating_add(AVOID_SECS));
             }
         }
         let mut stale: Vec<(u64, NodeId)> = self
@@ -304,9 +295,10 @@ impl View {
             e.score = Score::new(e.score.0);
             e.first_seen = hour(e.first_seen).min(now_hour);
             e.last_seen = hour(e.last_seen).min(now_hour);
+            e.decayed_at = hour(e.decayed_at).min(now_hour);
             e.avoided_until = e
                 .avoided_until
-                .map(|t| hour(t).min(hour(now.saturating_add(MAX_AVOID_SECS))));
+                .map(|t| hour(t).min(hour(now.saturating_add(AVOID_SECS))));
             true
         });
         self.evict_to_capacity();
@@ -371,6 +363,18 @@ impl View {
             }
         }
         out
+    }
+
+    /// `responsibles` ordered for deposits and fetches: nodes not avoided
+    /// first, then best score first, ties kept in distance order.
+    pub fn responsibles_by_score(&self, mailbox: &MailboxId, now: u64) -> Vec<NodeId> {
+        let mut ids = self.responsibles(mailbox, now);
+        let rank = |id: &NodeId| self.entries.get(id).map(|e| (e.avoided(now), e.score.0));
+        ids.sort_by(|a, b| match (rank(a), rank(b)) {
+            (Some((av_a, sa)), Some((av_b, sb))) => av_a.cmp(&av_b).then(sb.total_cmp(&sa)),
+            _ => Ordering::Equal,
+        });
+        ids
     }
 
     /// True if the view is too small to trust: a fallback lookup is due.
@@ -525,8 +529,8 @@ mod tests {
         v.insert(record(3, NOW), NOW);
         v.confirm(&id_of(0), NOW);
         v.confirm(&id_of(3), NOW);
-        v.set_score(&id_of(3), 0.1);
-        v.set_score(&id_of(0), 0.9);
+        v.entries.get_mut(&id_of(3)).unwrap().score = Score::new(0.1);
+        v.entries.get_mut(&id_of(0)).unwrap().score = Score::new(0.9);
         v.add_manual(id_of(4), addr(9, 9, 9).into(), NOW);
         assert_eq!(v.len(), 5);
         v.evict_to(4);
@@ -641,6 +645,33 @@ mod tests {
         assert_eq!(v.responsibles(&mb, NOW), expected);
         // Once the avoidance is over they count normally again.
         assert_eq!(v.responsibles(&mb, NOW + DAY), ids[..5].to_vec());
+    }
+
+    #[test]
+    fn responsibles_by_score_best_first_avoided_last() {
+        let mb = mailbox(9);
+        let mut ids: Vec<NodeId> = (0..6).map(id_of).collect();
+        sorted_by_distance(&mut ids, &mb);
+        let mut v = view();
+        for n in 0..6 {
+            v.insert(record(n, NOW), NOW);
+        }
+        // Ties keep the distance order.
+        assert_eq!(v.responsibles_by_score(&mb, NOW), ids[..5].to_vec());
+        v.entries.get_mut(&ids[3]).unwrap().score = Score::new(0.9);
+        // ids[0] avoided after two losses; ids[5] then completes the list.
+        assert_eq!(v.apply_score(&ids[0], ScoreEvent::Lost, NOW, true), None);
+        assert_eq!(
+            v.apply_score(&ids[0], ScoreEvent::Lost, NOW, true),
+            Some(AvoidReason::MessageLost)
+        );
+        assert_eq!(
+            v.responsibles_by_score(&mb, NOW),
+            vec![ids[3], ids[1], ids[2], ids[4], ids[5]]
+        );
+        // The avoidance ends with the recovery pass.
+        v.decay_scores(NOW + 7 * DAY);
+        assert!(v.get(&ids[0]).unwrap().avoided_until.is_none());
     }
 
     #[test]

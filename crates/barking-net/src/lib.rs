@@ -1,15 +1,22 @@
-//! Client-side view of the Barking network: the local node view and the
-//! selection of the nodes responsible for a mailbox. Pure logic, no I/O.
+//! Client-side view of the Barking network: the local node view, the
+//! selection of the nodes responsible for a mailbox, node reliability scores
+//! and the deposit plan. Pure logic, no I/O.
 
+pub mod plan;
+pub mod score;
 pub mod view;
 
 #[cfg(test)]
 mod test_support;
 
-pub use view::{NodeEntry, Score, View};
+pub use plan::{Ledger, PlannedDeposit};
+pub use score::{Score, ScoreEvent};
+pub use view::{NodeEntry, View};
 
 /// Maximum number of node entries kept in the view.
 pub const MAX_VIEW: usize = 2048;
+/// Longest avoidance of a node, from the current time.
+pub const AVOID_SECS: u64 = 7 * 86_400;
 /// Entries not seen for this long are dropped (manual nodes excepted).
 pub const VIEW_TTL_SECS: u64 = 7 * 86_400;
 /// Number of responsible nodes selected for a mailbox.
