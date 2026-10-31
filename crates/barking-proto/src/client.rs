@@ -72,6 +72,12 @@ pub const MIN_CARRIED_PAGE_BYTES: u32 = 64 << 10;
 /// Index of `MIN_CARRIED_PAGE_BYTES` in `FETCH_PAGE_SIZES`.
 const CARRIED_FLOOR: usize = 2;
 const _: () = assert!(FETCH_PAGE_SIZES[CARRIED_FLOOR] == MIN_CARRIED_PAGE_BYTES);
+/// A failed page counts as slow (like a timeout) from this fraction of its
+/// timeout on (64 KiB: 8 s): well below a node's write deadline for it
+/// (10 s + 2 s by default, less if its operator tightens it), well above
+/// an instant reset. The measured throughput (`fits_timeout`) remains the
+/// guard before a size below `MIN_CARRIED_PAGE_BYTES` is carried.
+const SLOW_FAILURE_DIVISOR: u32 = 3;
 /// Lowest throughput a page's timeout allows for (`page_timeout`).
 pub const PAGE_TIMEOUT_RATE: u64 = 16 * 1024;
 /// Part of a page's timeout that does not depend on its size.
@@ -170,7 +176,8 @@ struct PageLearn {
     /// set by the caller, or a shrink, at most down to `CARRIED_FLOOR`.
     kept: usize,
     /// Largest index of a page that failed slowly: a timeout, or a reset
-    /// or garbage after half the page's timeout or more.
+    /// or garbage after a third of the page's timeout or more
+    /// (`SLOW_FAILURE_DIVISOR`).
     timed_out: Option<usize>,
     /// Last throughput measured (bytes per second).
     rate: Option<f64>,
@@ -214,7 +221,9 @@ impl PageLearn {
             .min(self.kept.max(self.timeout_floor().unwrap_or(0)))
     }
 
-    /// True if a timeout justifies the carried size.
+    /// True if a slow failure (a timeout or a late reset, at a measured
+    /// low throughput below `MIN_CARRIED_PAGE_BYTES`) justifies the carried
+    /// size.
     fn confirmed(&self) -> bool {
         self.timeout_floor().is_some_and(|t| t >= self.carried())
     }
@@ -552,7 +561,7 @@ impl Session {
     /// `FETCH_PAGE_SIZES`): the size reached on this link (smaller after
     /// pages cut off in transit, larger after full pages that came fast),
     /// but never below `MIN_CARRIED_PAGE_BYTES` (or the size set) unless a
-    /// page failed slowly (timeout, or reset after half its timeout) at a
+    /// page failed slowly (timeout, or reset after a third of its timeout) at a
     /// measured throughput too low for it. A fast reset or garbage costs a
     /// node nothing: it may shrink this session's pages, not the ones of
     /// the sessions to come.
@@ -729,12 +738,13 @@ impl Session {
                     Ok(Err(e @ (ClientError::Frame(_) | ClientError::Timeout)))
                         if size + 1 < FETCH_PAGE_SIZES.len() =>
                     {
-                        // A failure after half the page's timeout or more
-                        // says as much of the link as a timeout (the node's
-                        // write deadline often cuts a slow page first); a
+                        // A failure after a third of the page's timeout or
+                        // more says as much of the link as a timeout (the
+                        // node's write deadline cuts a slow page first); a
                         // fast one, nothing.
                         let slow = matches!(e, ClientError::Timeout)
-                            || sent.elapsed() >= page_timeout(FETCH_PAGE_SIZES[size]) / 2;
+                            || sent.elapsed()
+                                >= page_timeout(FETCH_PAGE_SIZES[size]) / SLOW_FAILURE_DIVISOR;
                         self.learn.shrink(size, slow);
                         rate = None;
                         continue;

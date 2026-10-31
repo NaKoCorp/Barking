@@ -1063,9 +1063,10 @@ async fn honest_node_at_16_kib_is_never_paced() {
     node.stop().await;
 }
 
-/// Delay before a slow node cuts a 64 KiB page: past half its timeout,
-/// as the node's write deadline (10 s + 64 KiB at 32 KiB/s) does.
-const LATE_CUT: Duration = Duration::from_millis(12_500);
+/// Delay before a slow node cuts a 64 KiB page: below a default node's
+/// write deadline (10 s + 64 KiB at 32 KiB/s), as a node with a tighter
+/// one would.
+const LATE_CUT: Duration = Duration::from_secs(9);
 /// Delay of each 16 KiB page of a slow node: 10 KiB in it, about 4 KiB/s.
 const SLOW_PAGE: Duration = Duration::from_millis(2_500);
 
@@ -1126,6 +1127,43 @@ async fn late_cut_at_a_slow_rate_carries_16_kib() {
     assert_eq!(s.page_bytes(), client::MIN_CARRIED_PAGE_BYTES);
     assert!(!s.page_confirmed());
     srv.abort();
+}
+
+/// A real node on a slow link (4 KiB/s) whose operator tightened its
+/// request timeout: its write deadline cuts a 64 KiB page at about 9 s, below
+/// a default node's 12 s. The client still learns the link is slow and
+/// carries 16 KiB, confirmed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tight_write_deadline_cut_still_carries_16_kib() {
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 10_000;
+    });
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    for n in 0..48u32 {
+        assert_eq!(
+            s.deposit(&message_tier(n, 45, Tier::M)).await.unwrap(),
+            Ok(())
+        );
+    }
+    s.close().await;
+    node.stop().await;
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 10_000;
+        c.request_timeout = Duration::from_secs(7);
+        c.test_send_rate = Some(4 * 1024);
+    });
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    s.set_page_bytes(64 << 10);
+    // Room for a 64 KiB page first (twice its 24 s timeout).
+    s.set_fetch_deadline(Duration::from_secs(60));
+    let started = tokio::time::Instant::now();
+    let items = s.fetch(&[MailboxId([45; 16])]).await.unwrap();
+    assert_eq!(items.len(), 48);
+    assert!(started.elapsed() >= Duration::from_secs(8));
+    assert_eq!(s.page_bytes(), barking_proto::MIN_PAGE_BYTES);
+    assert!(s.page_confirmed());
+    node.stop().await;
 }
 
 /// As `QuicDialer` does: the stored size set before each fetch on the same
