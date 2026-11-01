@@ -1030,7 +1030,11 @@ mod node {
     /// following syncs finish without redepositing.
     #[test]
     fn outbox_backlog_does_not_block_fetch() {
-        let node = TestNode::start(0);
+        let node = TestNode::start_with(0, |cfg| {
+            // A full default bucket holds all 100 messages; a slower runner
+            // can refill it during the sync and never exercise RateLimited.
+            cfg.limits.burst = 1;
+        });
         let ((da, a), (db, b)) = pair();
         node_add(&a, node.addr, &node.id);
         node_add(&b, node.addr, &node.id);

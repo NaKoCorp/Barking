@@ -988,7 +988,7 @@ impl Reservation {
     fn try_new(shared: &Shared, state: &Arc<ConnState>, n: usize) -> Option<Reservation> {
         state
             .reserved
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 v.checked_add(n).filter(|t| *t <= MAX_RESPONSE_BYTES)
             })
             .ok()?;

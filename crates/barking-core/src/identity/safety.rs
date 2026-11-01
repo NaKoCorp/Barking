@@ -13,7 +13,9 @@ pub fn safety_number(a: &Fingerprint, b: &Fingerprint) -> String {
     let mut digest = [0u8; 60]; // 12 groups x 5 bytes
     hasher.finalize_xof().fill(&mut digest);
     digest
-        .chunks_exact(5)
+        .as_chunks::<5>()
+        .0
+        .iter()
         .map(|c| {
             let mut buf = [0u8; 8];
             buf[3..].copy_from_slice(c);
