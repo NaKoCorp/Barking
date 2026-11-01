@@ -31,6 +31,10 @@ Dans cet ordre, une seule fois :
 8. Créer le dépôt `barking-rebuilds` (format des entrées dans `docs/VERIFYING.md`).
 9. Tagger `v0.1.0`, en suivant les étapes ci-dessous.
 
+## Conserver l’environnement Alpine
+
+Les builds Linux utilisent l’image Rust/Alpine épinglée et les versions APK de `docker/apk/build.txt`. Avant une publication, conserver les APK signés et les index correspondants dans un miroir immuable, ou conserver l’image de build par son empreinte : les dépôts publics Alpine peuvent retirer les anciennes révisions. Pour changer l’image (digest) ou un paquet, régénérer la liste complète (lignes `paquet=version` triées, le format que compare `docker/apk/install.sh`) et vérifier qu’elle est la même sur x86-64 et ARM64, puis refaire passer `repro-check` : `docker/apk/install.sh` refuse toute différence. `docker/apk/release.txt` joue le même rôle pour l’image de test des scripts de signature. Le fuzzing garde son image Debian (glibc) : AddressSanitizer ne prend pas en charge les cibles musl.
+
 ## Changer l'Xcode de la CI
 
 `.xcode-version` fixe le runner macOS (`runner=`), la version de Xcode (`xcode=`) et celle du SDK (`sdk=`). Les workflows sélectionnent cet Xcode et échouent si le SDK diffère. Quand GitHub retire cet Xcode ou ce runner de ses images, choisissez une version listée dans le README de l'image (dépôt `actions/runner-images`, `images/macos/macos-<n>-arm64-Readme.md`, sections « Xcode » et « Installed SDKs »), mettez à jour `.xcode-version` et le `runner` des matrices dans les deux workflows, et faites passer `repro-check`. Chaque tag enregistre son `.xcode-version` : une ancienne version se recompile avec l'Xcode de son tag.

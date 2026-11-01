@@ -15,7 +15,10 @@ if [ -z "${BARKING_TEST_DANS_CONTENEUR:-}" ]; then
   image="barking-release-test:${empreinte:0:16}"
   docker build -q -f "$df" -t "$image" "$racine/docker" >/dev/null \
     || { echo "error: building the test image failed" >&2; exit 1; }
-  exec docker run --rm -v "$racine:/repo:ro" -e BARKING_TEST_DANS_CONTENEUR=1 \
+  exec docker run --rm --read-only --network=none --cap-drop=ALL \
+    --security-opt=no-new-privileges --user "$(id -u):$(id -g)" \
+    --tmpfs /tmp:rw,nosuid,nodev,exec -e HOME=/tmp \
+    -v "$racine:/repo:ro" -e BARKING_TEST_DANS_CONTENEUR=1 \
     -w /repo "$image" bash /repo/scripts/tests/release-scripts.sh
 fi
 

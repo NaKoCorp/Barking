@@ -74,7 +74,7 @@ Le binaire contient la date du commit (`SOURCE_DATE_EPOCH` est l'horodatage du c
 
 ### Limites
 
-- **Linux** : le build tourne dans une image Docker épinglée par son empreinte, avec un compilateur Rust 1.94.1 et des paquets pris dans un snapshot Debian daté. Docker est requis.
+- **Linux** : le build tourne dans une image Docker épinglée par son empreinte, avec Rust 1.99.1 sur Alpine et un ensemble complet de versions APK épinglées dans `docker/apk/build.txt`. Les anciens paquets Alpine peuvent disparaître des dépôts publics : il faut en conserver une archive immuable ou l’image de build pour les reconstructions à long terme (voir [RELEASING.md](RELEASING.md)). Docker est requis.
 - **macOS** : le build est natif, dans le répertoire fixe `/private/tmp/barking-repro-darwin`. Si ce répertoire existe déjà, le script refuse de démarrer : supprimez-le après un build interrompu. La cible de déploiement est fixée à macOS 11.0. **La reproductibilité n'est garantie qu'avec la même version de Xcode et du SDK macOS que la CI.** Ils sont épinglés dans `.xcode-version` (runner GitHub, version de Xcode, version du SDK) ; les workflows sélectionnent cet Xcode et vérifient le SDK. `repro-build.sh` refuse de compiler cette cible si `xcodebuild -version` ou `xcrun --show-sdk-version` diffèrent (« SDK/Xcode différent de celui de la CI ») : installez cet Xcode et sélectionnez-le avec `sudo xcode-select -s /Applications/Xcode_<version>.app`. `rustup` est aussi requis : le `rustc` de Homebrew, même en 1.94.1, n'est pas la chaîne officielle et ne reproduit pas le binaire. Le script affiche les versions de Xcode, du SDK, de clang et de rustc utilisées.
 
 ## Devenir reconstructeur indépendant

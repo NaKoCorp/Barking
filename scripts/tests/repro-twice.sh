@@ -9,7 +9,7 @@ trap 'rm -rf "$tmp"' EXIT
 echec() { echo "FAILURE: $*" >&2; exit 1; }
 
 a="$tmp/a"
-b="$tmp/a/much/longer/path"
+b="$tmp/much/longer/path"
 mkdir -p "$(dirname "$b")"
 git clone -q --no-hardlinks "$racine" "$a"
 git clone -q --no-hardlinks "$racine" "$b"
@@ -47,7 +47,7 @@ for b in barking-cli barking-node; do
     *-linux-musl)
       arch="amd64"; case "$bin" in *aarch64*) arch="arm64" ;; esac
       docker run --rm --platform "linux/$arch" -v "$bin:/$b:ro" \
-        debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 "/$b" --help >/dev/null \
+        alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a "/$b" --help >/dev/null \
         || echec "$b --help failed" ;;
     *) "$bin" --help >/dev/null || echec "$b --help failed" ;;
   esac

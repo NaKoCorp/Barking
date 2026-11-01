@@ -132,20 +132,34 @@ else
     -t "$image" "$racine/docker" >/dev/null || erreur "building the build image failed"
   # The cargo registry cache is just an accelerator: the binary does not depend on it
   # (--locked and Cargo.lock checksums).
-  volume="barking-repro-cargo-${plateforme#linux/}"
+  volume="barking-repro-cargo-${plateforme#linux/}-$(id -u)"
+  # Only initialize ownership of this user's cache; no source or socket is mounted.
+  docker run --rm --platform "$plateforme" --network=none --read-only \
+    --cap-drop=ALL --cap-add=CHOWN --security-opt=no-new-privileges \
+    -v "$volume:/cargo" "$image" chown "$(id -u):$(id -g)" /cargo \
+    || erreur "initializing the Cargo cache failed"
   mkdir -p "$tmp/out"
-  docker run --rm --platform "$plateforme" \
-    -v "$src:/build" -v "$volume:/cargo" -v "$tmp/out:/out" \
+  docker run --rm --platform "$plateforme" --read-only \
+    --cap-drop=ALL --security-opt=no-new-privileges --user "$(id -u):$(id -g)" \
+    --tmpfs /tmp:rw,nosuid,nodev,exec \
+    -v "$src:/build:ro" -v "$volume:/cargo" -v "$tmp/out:/out" \
     -e SOURCE_DATE_EPOCH -e "TARGET=$cible" -e "NOM=$nom" -e "NOM_NODE=$nom_node" \
     -e "CONTROLE_NODE=$controle_node" \
-    -e CARGO_HOME=/cargo \
+    -e CARGO_HOME=/cargo -e HOME=/tmp \
     -w /build "$image" bash -ec '
-      export RUSTFLAGS="--remap-path-prefix=/build=/build --remap-path-prefix=$CARGO_HOME=/cargo"
+      export RUSTFLAGS="--remap-path-prefix=/build=/build --remap-path-prefix=$CARGO_HOME=/cargo -C target-feature=+crt-static"
       export CFLAGS="-ffile-prefix-map=/build=/build -ffile-prefix-map=$CARGO_HOME=/cargo"
       export CARGO_TARGET_DIR=/tmp/target
       cargo build --release --locked -p barking-cli --target "$TARGET"
       bash -ec "$CONTROLE_NODE"
       cargo build --release --locked -p barking-node --target "$TARGET"
+      for bin in barking barking-node; do
+        file="/tmp/target/$TARGET/release/$bin"
+        if readelf -l "$file" | grep -q INTERP || readelf -d "$file" | grep -q NEEDED; then
+          echo "error: $bin is not a static executable" >&2
+          exit 1
+        fi
+      done
       cp "/tmp/target/$TARGET/release/barking" "/out/$NOM"
       cp "/tmp/target/$TARGET/release/barking-node" "/out/$NOM_NODE"
     ' || erreur "build failed in the container"
