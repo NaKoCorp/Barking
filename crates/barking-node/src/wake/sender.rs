@@ -1,8 +1,11 @@
 //! Bounded wake sender: hands sealed push tokens to the relays named in the
 //! subscriptions. The queue is bounded (excess wake-ups are dropped and
 //! counted), batches are grouped per relay, a relay receives at most
-//! `WAKES_PER_SEC_PER_RELAY` tokens per second, and a failed batch gets a
-//! single retry. Nothing here logs a relay host, an address or a token.
+//! `WAKES_PER_SEC_PER_RELAY` tokens per second, a batch the relay did not
+//! accept gets a single retry, and a relay that could not be reached is
+//! skipped for `RELAY_FAILURE_BACKOFF`. One host holds at most
+//! `MAX_SENDS_PER_HOST` of the send permits. Nothing here logs a relay host,
+//! an address or a token.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -64,6 +67,59 @@ pub const SESSION_IDLE: Duration = Duration::from_secs(20);
 pub const MAX_CONCURRENT_RELAY_SENDS: usize = 32;
 /// Addresses tried per relay.
 const MAX_ADDRS: usize = 4;
+/// A relay that could not be reached (resolution, no usable address,
+/// connection) is skipped this long: its orders are dropped, counted as
+/// failed, without taking a permit.
+pub const RELAY_FAILURE_BACKOFF: Duration = Duration::from_secs(300);
+/// Permits one relay host may hold at once (out of
+/// `MAX_CONCURRENT_RELAY_SENDS`). A worker sends one batch at a time, so the
+/// share is counted per host: many relays named on one host (distinct ids or
+/// ports) cannot take every permit.
+pub const MAX_SENDS_PER_HOST: usize = 4;
+/// Relays remembered in backoff at most (oldest forgotten first).
+const MAX_BACKOFF_ENTRIES: usize = WAKE_QUEUE;
+
+/// True if a resolved relay address may be dialled. An IPv6 carrying an
+/// IPv4 (mapped, compatible, NAT64, 6to4, Teredo) is refused even when
+/// private addresses are allowed (spec §3.4): it would hide the IPv4 it
+/// reaches from the routable filter.
+pub(crate) fn wake_address_ok(a: &SocketAddr, allow_private: bool) -> bool {
+    if let std::net::IpAddr::V6(v6) = a.ip() {
+        let s = v6.segments();
+        if barking_proto::embeds_ipv4(&v6)
+            // 64:ff9b::/96 NAT64 and 64:ff9b:1::/48 local-use NAT64.
+            || (s[0] == 0x64 && s[1] == 0xff9b && (s[2..6] == [0; 4] || s[2] == 1))
+            // 2002::/16 6to4.
+            || s[0] == 0x2002
+            // 2001::/32 Teredo.
+            || (s[0] == 0x2001 && s[1] == 0)
+        {
+            return false;
+        }
+    }
+    allow_private || routable(a)
+}
+
+/// Tries `addrs` in turn until one gives a session; each address gets an
+/// equal share of the time left before `deadline`, so that one that never
+/// answers does not starve the next ones.
+async fn connect_any(
+    addrs: &[SocketAddr],
+    id: barking_proto::NodeId,
+    deadline: Instant,
+) -> Result<Session, WakeError> {
+    for (i, addr) in addrs.iter().enumerate() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let share = left / u32::try_from(addrs.len() - i).unwrap_or(1);
+        if let Ok(Ok(s)) = timeout(share, Client::connect(*addr, id)).await {
+            return Ok(s);
+        }
+    }
+    Err(WakeError::Connect)
+}
 
 /// Bounded map of kept values, least recently used evicted.
 struct Kept<V> {
@@ -153,7 +209,7 @@ impl QuicWakeTransport {
             .await
             .map_err(|_| WakeError::Resolve)?;
         let addrs: Vec<SocketAddr> = found
-            .filter(|a| self.allow_private || routable(a))
+            .filter(|a| wake_address_ok(a, self.allow_private))
             .take(MAX_ADDRS)
             .collect();
         if addrs.is_empty() {
@@ -163,19 +219,14 @@ impl QuicWakeTransport {
         }
     }
 
-    /// Name resolution and connection, together bounded by `CONNECT_TIMEOUT`.
+    /// Name resolution and connection, together bounded by `CONNECT_TIMEOUT`;
+    /// the time left after resolution is shared between the addresses.
     async fn connect(&self, relay: &RelayRef) -> Result<Arc<Session>, WakeError> {
-        let attempt = async {
-            for addr in self.addresses(relay).await? {
-                if let Ok(session) = Client::connect(addr, relay.id).await {
-                    return Ok(Arc::new(session));
-                }
-            }
-            Err(WakeError::Connect)
-        };
-        let session = timeout(CONNECT_TIMEOUT, attempt)
+        let deadline = Instant::now() + CONNECT_TIMEOUT;
+        let addrs = tokio::time::timeout_at(deadline, self.addresses(relay))
             .await
-            .map_err(|_| WakeError::Connect)??;
+            .map_err(|_| WakeError::Resolve)??;
+        let session = Arc::new(connect_any(&addrs, relay.id, deadline).await?);
         self.sessions().insert(relay.clone(), session.clone());
         Ok(session)
     }
@@ -225,6 +276,57 @@ struct Inner<T> {
     queues: Mutex<Queues>,
     /// Bounds the sends in progress (`MAX_CONCURRENT_RELAY_SENDS`).
     sends: Semaphore,
+    /// Per-host share of the sends (`MAX_SENDS_PER_HOST`); an entry lives
+    /// while a send to that host waits or runs.
+    hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
+    /// Relays that could not be reached, and until when they are skipped.
+    backoff: Mutex<HashMap<RelayRef, Instant>>,
+}
+
+impl<T> Inner<T> {
+    fn in_backoff(&self, relay: &RelayRef) -> bool {
+        let mut b = self.backoff.lock().unwrap_or_else(PoisonError::into_inner);
+        match b.get(relay) {
+            Some(until) if Instant::now() < *until => true,
+            Some(_) => {
+                b.remove(relay);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn start_backoff(&self, relay: &RelayRef) {
+        let now = Instant::now();
+        let mut b = self.backoff.lock().unwrap_or_else(PoisonError::into_inner);
+        b.retain(|_, until| now < *until);
+        if !b.contains_key(relay) && b.len() >= MAX_BACKOFF_ENTRIES {
+            let first = b.iter().min_by_key(|(_, u)| **u).map(|(k, _)| k.clone());
+            if let Some(k) = first {
+                b.remove(&k);
+            }
+        }
+        b.insert(relay.clone(), now + RELAY_FAILURE_BACKOFF);
+    }
+
+    fn host_share(&self, relay: &RelayRef) -> Arc<Semaphore> {
+        self.hosts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(relay.host.to_ascii_lowercase())
+            .or_insert_with(|| Arc::new(Semaphore::new(MAX_SENDS_PER_HOST)))
+            .clone()
+    }
+
+    /// Forgets the host entry once nobody waits on or holds it.
+    fn release_host(&self, relay: &RelayRef, share: Arc<Semaphore>) {
+        let host = relay.host.to_ascii_lowercase();
+        let mut h = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
+        drop(share);
+        if h.get(&host).is_some_and(|s| Arc::strong_count(s) == 1) {
+            h.remove(&host);
+        }
+    }
 }
 
 /// Handle to the sender: enqueueing never blocks.
@@ -242,6 +344,8 @@ impl<T: WakeTransport> WakeSender<T> {
                 stats,
                 queues: Mutex::new(Queues::default()),
                 sends: Semaphore::new(MAX_CONCURRENT_RELAY_SENDS),
+                hosts: Mutex::default(),
+                backoff: Mutex::default(),
             }),
         }
     }
@@ -281,19 +385,27 @@ impl<T: WakeTransport> WakeSender<T> {
     }
 }
 
-/// One send attempt, holding a concurrency permit only while it runs.
+/// One send attempt, holding a permit of its host's share, then a global
+/// permit, only while it runs.
 async fn send_bounded<T: WakeTransport>(
     inner: &Inner<T>,
     relay: &RelayRef,
     batch: Vec<Vec<u8>>,
 ) -> Result<(), WakeError> {
-    // The semaphore is never closed.
-    let _permit = inner
-        .sends
-        .acquire()
-        .await
-        .map_err(|_| WakeError::Connect)?;
-    inner.transport.send(relay, batch).await
+    let share = inner.host_share(relay);
+    let result = async {
+        // The semaphores are never closed.
+        let _host = share.acquire().await.map_err(|_| WakeError::Connect)?;
+        let _permit = inner
+            .sends
+            .acquire()
+            .await
+            .map_err(|_| WakeError::Connect)?;
+        inner.transport.send(relay, batch).await
+    }
+    .await;
+    inner.release_host(relay, share);
+    result
 }
 
 /// Sends the batches of one relay until its queue is empty.
@@ -315,14 +427,27 @@ async fn relay_worker<T: WakeTransport>(inner: Arc<Inner<T>>, relay: RelayRef) {
             batch
         };
         let n = batch.len();
+        if inner.in_backoff(&relay) {
+            // Unreachable a moment ago: dropped without taking a permit.
+            inner.stats.add_wake_failed(n as u64);
+            let mut q = inner.queues.lock().unwrap_or_else(PoisonError::into_inner);
+            q.total = q.total.saturating_sub(n);
+            continue;
+        }
         let mut result = send_bounded(&inner, &relay, batch.clone()).await;
-        if result.is_err() {
+        if matches!(result, Err(WakeError::Request)) {
+            // The relay was reached: worth a single retry.
             tokio::time::sleep(WAKE_RETRY_DELAY).await;
             result = send_bounded(&inner, &relay, batch).await;
         }
         match result {
             Ok(()) => inner.stats.add_wake_sent(n as u64),
-            Err(_) => inner.stats.add_wake_failed(n as u64),
+            Err(e) => {
+                if !matches!(e, WakeError::Request) {
+                    inner.start_backoff(&relay);
+                }
+                inner.stats.add_wake_failed(n as u64);
+            }
         }
         {
             let mut q = inner.queues.lock().unwrap_or_else(PoisonError::into_inner);
@@ -586,6 +711,134 @@ mod tests {
         let peak = slow.peak.load(Ordering::SeqCst);
         assert!(peak <= MAX_CONCURRENT_RELAY_SENDS, "{peak}");
         assert!(peak > 1);
+    }
+
+    /// Hosts starting with `dead` behave as blackholed relays: each attempt
+    /// hangs for `CONNECT_TIMEOUT`, then fails to connect. Others answer.
+    #[derive(Clone)]
+    struct Blackholes {
+        t0: Instant,
+        calls: Calls,
+    }
+
+    impl Blackholes {
+        fn new() -> Blackholes {
+            Blackholes {
+                t0: Instant::now(),
+                calls: Arc::default(),
+            }
+        }
+
+        fn calls_to(&self, host: &str) -> Vec<Duration> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.1.host == host)
+                .map(|c| c.0)
+                .collect()
+        }
+    }
+
+    impl WakeTransport for Blackholes {
+        async fn send(&self, relay: &RelayRef, items: Vec<Vec<u8>>) -> Result<(), WakeError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((self.t0.elapsed(), relay.clone(), items.len()));
+            if relay.host.starts_with("dead") {
+                tokio::time::sleep(CONNECT_TIMEOUT).await;
+                return Err(WakeError::Connect);
+            }
+            Ok(())
+        }
+    }
+
+    fn relay_with_id(host: &str, id: u8) -> RelayRef {
+        RelayRef {
+            id: NodeId([id; 32]),
+            ..relay(host)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blackholed_relays_do_not_delay_a_healthy_one() {
+        let fake = Blackholes::new();
+        let stats = Arc::new(ServerStats::default());
+        let sender = WakeSender::spawn(fake.clone(), stats.clone());
+        // 100 relays on one blackholed host (distinct ids), queued first.
+        for i in 0..100u8 {
+            sender.enqueue(orders(&relay_with_id("dead.example", i), 1));
+        }
+        sender.enqueue(orders(&relay("a.example"), 1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(fake.calls_to("a.example"), vec![Duration::ZERO]);
+        assert_eq!(stats.wake_sent(), 1);
+        // A host never holds more than its share of the permits.
+        let dead_now = fake.calls_to("dead.example").len();
+        assert!(dead_now <= MAX_SENDS_PER_HOST, "{dead_now}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_connect_backs_off_without_retry() {
+        let fake = Blackholes::new();
+        let stats = Arc::new(ServerStats::default());
+        let sender = WakeSender::spawn(fake.clone(), stats.clone());
+        let dead = relay("dead.example");
+        sender.enqueue(orders(&dead, 1));
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        // No retry after a connection failure.
+        assert_eq!(fake.calls_to("dead.example").len(), 1);
+        assert_eq!(stats.wake_failed(), 1);
+        // During the backoff, orders are dropped without an attempt.
+        sender.enqueue(orders(&dead, 3));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(fake.calls_to("dead.example").len(), 1);
+        assert_eq!(stats.wake_failed(), 4);
+        // Once the backoff has expired, the relay is tried again.
+        tokio::time::sleep(RELAY_FAILURE_BACKOFF).await;
+        sender.enqueue(orders(&dead, 1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(fake.calls_to("dead.example").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn blackholed_first_address_does_not_block_the_next() {
+        let relay = FakeRelay::start().await;
+        // A UDP socket that never answers.
+        let hole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let r = relay.relay_ref();
+        let addrs = vec![
+            hole.local_addr().unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], r.port)),
+        ];
+        let t0 = std::time::Instant::now();
+        let budget = Duration::from_secs(4);
+        let session = connect_any(&addrs, r.id, tokio::time::Instant::now() + budget).await;
+        assert!(session.is_ok(), "the second address was not tried");
+        assert!(t0.elapsed() < budget);
+        relay.stop();
+    }
+
+    #[test]
+    fn ipv4_in_ipv6_relay_addresses_are_refused() {
+        let ok = |s: &str, allow_private: bool| wake_address_ok(&s.parse().unwrap(), allow_private);
+        for a in [
+            "[::ffff:8.8.8.8]:4433",
+            "[::8.8.8.8]:4433",
+            "[64:ff9b::808:808]:4433",
+            "[2002:808:808::1]:4433",
+            "[2001:0:808:808::1]:4433",
+        ] {
+            assert!(!ok(a, false), "{a}");
+            // Refused even when private addresses are allowed (tests).
+            assert!(!ok(a, true), "{a}");
+        }
+        assert!(ok("8.8.8.8:4433", false));
+        assert!(ok("[2606:4700::1111]:4433", false));
+        assert!(!ok("127.0.0.1:4433", false));
+        assert!(ok("127.0.0.1:4433", true));
+        assert!(ok("[::1]:4433", true));
     }
 
     #[test]
