@@ -205,6 +205,33 @@ async fn run_and_status() {
     assert!(out.status.success(), "clean shutdown: {:?}", out.status);
 }
 
+#[tokio::test]
+async fn run_recreates_missing_db_private() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let out = init(&data);
+    assert!(out.status.success());
+    let id: NodeId = field(&text(&out.stdout), "identifier").parse().unwrap();
+    for f in ["node.db", "node.db-wal", "node.db-shm"] {
+        let _ = fs::remove_file(data.join(f));
+    }
+
+    let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    let cfg = write_config(tmp.path(), &data, &[addr]);
+    let running = Running::start(&cfg);
+    connect_when_ready(addr, id).await.close().await;
+    let out = running.stop();
+    assert!(out.status.success(), "clean shutdown: {:?}", out.status);
+    assert_eq!(
+        fs::metadata(data.join("node.db"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
 fn message(n: u8, mailbox: [u8; 16]) -> Vec<u8> {
     let expires = SystemTime::now()
         .duration_since(UNIX_EPOCH)

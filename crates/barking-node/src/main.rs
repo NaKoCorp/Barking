@@ -152,6 +152,17 @@ fn write_key(dir: &Path, key: &SigningKey) -> Result<()> {
     res
 }
 
+/// Creates an empty database file as 0600, before SQLite opens it (which
+/// would create it with the umask's permissions). Fails if it exists.
+fn create_private_db(path: &Path) -> std::io::Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    Ok(())
+}
+
 fn init(data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Result<()> {
     let cfg = load_config(config.as_deref())?;
     let dir = data_dir.unwrap_or_else(|| cfg.data_dir.clone());
@@ -172,11 +183,7 @@ fn init(data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Result<()> {
     // as 0600 from its creation. On failure, everything that was created is
     // removed: `init` can be rerun.
     let res = write_key(&dir, &key).and_then(|()| {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&db_path)?;
+        create_private_db(&db_path)?;
         NodeStore::open(&db_path)?;
         Ok(())
     });
@@ -293,7 +300,15 @@ fn run(config: Option<PathBuf>) -> Result<()> {
     warn_dir_perms(&cfg.data_dir);
     let key = load_key(&cfg.data_dir)?;
     let id = NodeId::from_public_key(&key.verifying_key());
-    let store = NodeStore::open(cfg.data_dir.join(DB_FILE))?;
+    let db_path = cfg.data_dir.join(DB_FILE);
+    if !db_path.exists() {
+        // A missing database is recreated private, like at `init`.
+        match create_private_db(&db_path) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
+            _ => {}
+        }
+    }
+    let store = NodeStore::open(&db_path)?;
     let sockets = cfg.bind()?;
     let server_cfg = cfg.server_config(sockets, key);
     let stats: std::sync::Arc<ServerStats> = std::sync::Arc::clone(&server_cfg.stats);

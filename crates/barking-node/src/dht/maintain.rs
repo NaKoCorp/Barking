@@ -19,7 +19,7 @@ use std::time::Duration;
 use barking_dht::builtin_bootstrap;
 use barking_proto::{NodeId, NodeRecord};
 use tokio::sync::watch;
-use tokio::time::{Instant, interval_at};
+use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 
 use super::Dht;
 use crate::server::{Shared, Stored, unix_now};
@@ -41,7 +41,12 @@ pub(crate) async fn run(dht: Arc<Dht>, shared: Arc<Shared>, mut stop: watch::Rec
         startup(&dht, &shared).await;
         let every = |d: Duration| dht.tick().unwrap_or(d);
         let start = Instant::now();
-        let tick = |d: Duration| interval_at(start + every(d), every(d));
+        // After a slow cycle, the next ticks are delayed instead of bursting.
+        let tick = |d: Duration| -> Interval {
+            let mut i = interval_at(start + every(d), every(d));
+            i.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            i
+        };
         let (mut maintain, mut refresh, mut republish) = (
             tick(MAINTAIN_EVERY),
             tick(REFRESH_EVERY),

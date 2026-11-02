@@ -987,7 +987,7 @@ async fn replication_paces_under_default_rate_limits() {
 async fn message_too_weak_for_peer_is_not_sent() {
     // P announces 12 bits more than R in `Hello`. The proof of a message
     // deposited at R targets R's difficulty: it reaches P's only with a
-    // 2^-12 chance. R therefore sends it nothing.
+    // 2^-12 chance, ruled out below. R therefore sends it nothing.
     let r = start_dht(0, vec![], LOCAL, DEFAULT_REPLICATION_BYTES_PER_HOUR);
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let SocketAddr::V4(v4) = socket.local_addr().unwrap() else {
@@ -1011,7 +1011,20 @@ async fn message_too_weak_for_peer_is_not_sent() {
     );
     wait_full_tables(&[&r, &p]).await;
     let mailbox = MailboxId([0x59; 16]);
-    let msg = message_in(mailbox, PacketId([0x59; 16]));
+    // The client solves from nonce 0: a message whose proof at R's
+    // difficulty does not also meet P's, so the precondition always holds.
+    let msg = (0..=u8::MAX)
+        .map(|i| {
+            let mut id = [0x59; 16];
+            id[0] = i;
+            message_in(mailbox, PacketId(id))
+        })
+        .find(|m| {
+            let content = pow::content_hash(m);
+            let nonce = pow::solve(&content, &mailbox, TEST_BITS).unwrap();
+            !pow::check(&content, &mailbox, nonce, TEST_BITS + 12)
+        })
+        .unwrap();
     deposit(&r, &msg).await;
     let deadline = tokio::time::Instant::now() + REPLICATION_WAIT;
     let rep = loop {

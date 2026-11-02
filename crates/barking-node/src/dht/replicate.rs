@@ -167,7 +167,8 @@ impl ByteBudget {
     }
 
     fn roll(&mut self, now: u64) {
-        if now.saturating_sub(self.window_start) >= BUDGET_WINDOW_SECS {
+        // A window starting in the future (clock moved back) rolls over too.
+        if self.window_start > now || now - self.window_start >= BUDGET_WINDOW_SECS {
             self.window_start = now;
             self.used = 0;
             self.per_peer.clear();
@@ -642,6 +643,14 @@ mod tests {
         let mut r = ByteBudget::resume(10, T, 10);
         assert!(r.exhausted(T + 100));
         assert!(!r.exhausted(T + 3600));
+    }
+
+    #[test]
+    fn budget_window_from_the_future_rolls_over() {
+        const T: u64 = 1_800_000_000;
+        let mut r = ByteBudget::resume(10, T + 7200, 10);
+        assert!(!r.exhausted(T));
+        assert_eq!(r.window(), (T, 0));
     }
 
     #[test]
