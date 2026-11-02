@@ -83,11 +83,12 @@ controle_node='
   fi'
 # barking-push is likewise built on its own (cargo build -p barking-push) and must stay OpenSSL-free: it
 # talks to APNs with rustls only. openssl-probe (pulled by rustls-native-certs) only locates the system
-# certificate directories and links no OpenSSL code, so it is excluded from the match.
+# certificate directories and links no OpenSSL code, so it is excluded from the match: only that exact
+# crate name (followed by a space or the end of the line), never a crate whose name merely starts with it.
 # shellcheck disable=SC2016  # the script is interpreted by the bash of the container or the host, not here
 controle_push='
   arbre="$(cargo tree --locked -p barking-push -e normal,features --target "$TARGET")" || exit 1
-  arbre="$(printf "%s\n" "$arbre" | grep -v "openssl-probe" || true)"
+  arbre="$(printf "%s\n" "$arbre" | grep -vE "openssl-probe( |$)" || true)"
   if printf "%s\n" "$arbre" | grep -qiE "openssl|sqlcipher"; then
     echo "error: barking-push depends on OpenSSL or SQLCipher:" >&2
     printf "%s\n" "$arbre" | grep -iE "openssl|sqlcipher" >&2

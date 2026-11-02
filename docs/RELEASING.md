@@ -27,7 +27,7 @@ Dans cet ordre, une seule fois :
 4. Pousser `main`, puis ouvrir une première pull request et attendre que `repro-check` soit vert : contrôle Rust, scripts de signature, et double build `x86_64-unknown-linux-musl`, qui n'a jamais été compilé sur la machine de développement (Mac arm64). `repro-check` ne se lance pas sur un simple push.
 5. Lancer `repro-check` à la main (`workflow_dispatch`) pour obtenir le double build complet des trois cibles, et vérifier que les copies sont identiques, macOS compris (Xcode de `.xcode-version`).
 6. Générer la clé hors ligne (`keys/README.md`), committer `keys/maintainer.pub` avec relecture par une seconde personne, et publier la ligne `RW…` par un canal indépendant du dépôt.
-7. Faire une répétition complète sur un tag de pré-version, par exemple `0.1.0-rc.1` (version de `crates/barking-cli/Cargo.toml` et de `crates/barking-node/Cargo.toml` mise à jour en conséquence) : tag, CI, `sign-release.sh`, puis `verify-release.sh --rebuild`.
+7. Faire une répétition complète sur un tag de pré-version, par exemple `0.1.0-rc.1` (version de `crates/barking-cli/Cargo.toml`, de `crates/barking-node/Cargo.toml` et de `crates/barking-push/Cargo.toml` mise à jour en conséquence) : tag, CI, `sign-release.sh`, puis `verify-release.sh --rebuild`.
 8. Créer le dépôt `barking-rebuilds` (format des entrées dans `docs/VERIFYING.md`).
 9. Tagger `v0.1.0`, en suivant les étapes ci-dessous.
 
@@ -43,7 +43,7 @@ Les builds Linux utilisent l’image Rust/Alpine épinglée et les versions APK 
 
 ### 1. Préparer
 
-1. Mettre à jour `version` dans `crates/barking-cli/Cargo.toml` **et** dans `crates/barking-node/Cargo.toml` (les deux doivent être identiques), ainsi que `Cargo.lock`, committer, fusionner dans `main`, et attendre que `repro-check` soit vert.
+1. Mettre à jour `version` dans `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` **et** `crates/barking-push/Cargo.toml` (les trois doivent être identiques), ainsi que `Cargo.lock`, committer, fusionner dans `main`, et attendre que `repro-check` soit vert.
 2. Se placer sur le commit à publier, avec un arbre de travail propre.
 
 ### 2. Tagger
@@ -51,7 +51,7 @@ Les builds Linux utilisent l’image Rust/Alpine épinglée et les versions APK 
     git tag v<version>
     git push origin v<version>
 
-Le tag doit être `v` suivi de la version de `crates/barking-cli/Cargo.toml`, qui doit être celle de `crates/barking-node/Cargo.toml` : sinon le premier job du workflow `release.yml` échoue.
+Le tag doit être `v` suivi de la version de `crates/barking-cli/Cargo.toml`, qui doit être celle de `crates/barking-node/Cargo.toml` et de `crates/barking-push/Cargo.toml` : sinon le premier job du workflow `release.yml` échoue.
 
 Ne recréez jamais un tag sur un commit réécrit ou amendé : le binaire contient la date du commit, donc un autre commit donne d'autres empreintes (voir `docs/VERIFYING.md`).
 
@@ -60,10 +60,10 @@ Ne recréez jamais un tag sur un commit réécrit ou amendé : le binaire contie
 Le workflow `release.yml` :
 
 1. vérifie que le commit du tag est un ancêtre de `main` et que le tag correspond à la version ;
-2. compile chaque cible deux fois (`barking-cli` puis `barking-node`, en deux invocations `cargo build -p` distinctes : `repro-build.sh` refuse le build si l'arbre de dépendances du nœud contient OpenSSL ou SQLCipher), en deux exécutions indépendantes (deux runners neufs) ;
+2. compile chaque cible deux fois (`barking-cli`, `barking-node` puis `barking-push`, en trois invocations `cargo build -p` distinctes : `repro-build.sh` refuse le build si l'arbre de dépendances du nœud ou du relais de notifications contient OpenSSL ou SQLCipher), en deux exécutions indépendantes (deux runners neufs) ;
 3. compare les copies octet par octet (`cmp`) : une différence bloque tout ;
 4. produit les attestations de provenance ;
-5. crée la version GitHub **en brouillon**, avec les binaires `barking-cli` et `barking-node` de chaque cible et `SHA256SUMS`.
+5. crée la version GitHub **en brouillon**, avec les trois binaires `barking-cli`, `barking-node` et `barking-push` de chaque cible et `SHA256SUMS`.
 
 À ce stade, aucune version n'est publiée (le tag et les attestations, eux, sont déjà publics). Si une version `v<version>` existe déjà (brouillon d'un run précédent), la dernière étape échoue et le dit : supprimez-la (`gh release delete v<version> -R <owner>/barking`), puis relancez le workflow.
 

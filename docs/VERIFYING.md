@@ -1,10 +1,10 @@
 # Vérifier une version de Barking
 
-Cette page explique comment vérifier qu'un binaire `barking-cli` ou `barking-node` publié correspond exactement au code source public, et qu'il a été approuvé par le mainteneur. Elle décrit aussi comment devenir reconstructeur indépendant. Le cadre complet est dans la spec, §15.
+Cette page explique comment vérifier qu'un binaire `barking-cli`, `barking-node` ou `barking-push` (relais de notifications iOS) publié correspond exactement au code source public, et qu'il a été approuvé par le mainteneur. Elle décrit aussi comment devenir reconstructeur indépendant. Le cadre complet est dans la spec, §15.
 
 ## Ce qui est vérifié
 
-Chaque version `vX.Y.Z` publiée sur GitHub contient, par cible, deux binaires, `barking-cli-<version>-<cible>` et `barking-node-<version>-<cible>` (même version pour les deux), plus `SHA256SUMS` et `SHA256SUMS.minisig`. Les cibles sont `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` et `aarch64-apple-darwin` (macOS, sans notarisation).
+Chaque version `vX.Y.Z` publiée sur GitHub contient, par cible, trois binaires, `barking-cli-<version>-<cible>`, `barking-node-<version>-<cible>` et `barking-push-<version>-<cible>` (même version pour les trois), plus `SHA256SUMS` et `SHA256SUMS.minisig`. Les cibles sont `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` et `aarch64-apple-darwin` (macOS, sans notarisation).
 
 Trois contrôles se complètent :
 
@@ -64,7 +64,7 @@ Pour comparer avec des compilations déjà faites, utilisez `--rebuilt-dir <dir>
     scripts/repro-build.sh --target <cible> --ref v<version> --out <dir>
     scripts/verify-release.sh <version> --rebuilt-dir <dir> --repo <owner>/barking
 
-`repro-build.sh` écrit les binaires `barking-cli-<version>-<cible>` et `barking-node-<version>-<cible>` et `SHA256SUMS` dans `<dir>` (par défaut `dist/`) et affiche l'empreinte.
+`repro-build.sh` écrit les binaires `barking-cli-<version>-<cible>`, `barking-node-<version>-<cible>` et `barking-push-<version>-<cible>` et `SHA256SUMS` dans `<dir>` (par défaut `dist/`) et affiche l'empreinte.
 
 Si vous ne compilez qu'une seule cible, comparez à la main : compilez avec `scripts/repro-build.sh --target <cible> --ref v<version> --out <dir>`, puis comparez les empreintes affichées (une par binaire, ou celles de `<dir>/SHA256SUMS`) aux lignes correspondantes du `SHA256SUMS` de la version.
 
@@ -107,4 +107,4 @@ Quand les mises à jour automatiques existeront (le code vient plus tard, le for
 - **Android** : l'APK sera reproductible à l'étape 3 de la feuille de route (spec). On comparera son contenu hors bloc de signature, comme le fait F-Droid.
 - **iOS** : une app installée depuis l'App Store **n'est pas vérifiable**. Apple chiffre chaque binaire puis le re-signe avec ses propres clés, donc l'empreinte de ce que vous installez ne peut pas être comparée à celle du code source. Ce que le projet fait à la place : documenter cette limite ici, et publier, pour les auditeurs, un build iOS construit depuis le code public. Il permettra d'auditer ce code, mais pas de prouver que la version de l'App Store en est issue.
 
-Ces deux applications ne sont pas encore livrées. Aujourd'hui, les versions contiennent `barking-cli` et `barking-node`.
+Ces deux applications ne sont pas encore livrées. Aujourd'hui, les versions contiennent `barking-cli`, `barking-node` et `barking-push`.

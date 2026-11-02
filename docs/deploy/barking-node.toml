@@ -68,3 +68,14 @@ pow_bits = 18
 # Cap on outgoing replication to the other responsible nodes, in bytes per
 # hour. Default: 512 MiB. Small device (Raspberry Pi): 128 MiB.
 # replication_bytes_per_hour = 134217728
+
+# Wake-ups for iOS background reception (spec iOS push, §3). The node keeps
+# wake subscriptions (at most 4 per mailbox) and, when a message arrives for a
+# subscribed mailbox, hands the sealed token to the push relay it names
+# (barking-push). Tokens are sealed for the relay: the node learns no device.
+# [wake]
+# Accept subscriptions and send wake-ups. Default: true.
+# enabled = true
+# Global cap on stored subscriptions. Default: 1,000,000.
+# Small device: max_subscriptions = 100000
+# max_subscriptions = 1000000

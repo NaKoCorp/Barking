@@ -11,6 +11,7 @@ The implementation includes:
 - **Multiple devices:** link up to eight devices to an identity through a file exchange, optionally transfer encrypted history, and synchronize contacts and messages.
 - **Two ways to exchange packets:** manually transfer `.pkt` files, or run `barking sync` to send and receive through internet relays. Network synchronization is invoked manually.
 - **Self-hosted relays:** `barking-node` stores encrypted packets for later retrieval over QUIC. Configuration examples and a systemd unit are available in [docs/deploy](docs/deploy).
+- **Wake-ups for iOS background reception (server side):** nodes accept wake subscriptions and notify `barking-push`, a stateless relay that forwards sealed wake tokens to Apple Push Notification service. The iOS app itself is not implemented yet.
 - **Distributed routing and replication:** S/Kademlia node discovery and replication between responsible nodes, with client-side reliability scores and retries.
 - **Support for unreliable connections:** resumable fetches, adaptive page sizes and saved synchronization progress.
 
@@ -23,9 +24,10 @@ Android and iOS apps, Bluetooth/Wi-Fi/LoRa mesh transports, groups and media att
 Install Rust through rustup; the repository pins its toolchain in [rust-toolchain.toml](rust-toolchain.toml).
 
 ```sh
-cargo build --release -p barking-cli -p barking-node
+cargo build --release -p barking-cli -p barking-node -p barking-push
 ./target/release/barking --help
 ./target/release/barking-node --help
+./target/release/barking-push --help
 ```
 
 Create an identity and export a contact card:
@@ -61,6 +63,6 @@ Linux release builds run in a pinned Rust/Alpine Docker image and produce static
 
 ## Verify a binary
 
-The release tooling covers `barking-cli` and `barking-node`: reproducible builds, GitHub CI attestations, an offline maintainer signature, and verification and rebuild scripts. The complete publication process still needs an end-to-end release rehearsal; the maintainer public key has not yet been published in the repository.
+The release tooling covers `barking-cli`, `barking-node` and `barking-push`: reproducible builds, GitHub CI attestations, an offline maintainer signature, and verification and rebuild scripts. The complete publication process still needs an end-to-end release rehearsal; the maintainer public key has not yet been published in the repository.
 
 See [docs/VERIFYING.md](docs/VERIFYING.md) for verification instructions and limitations, and [docs/RELEASING.md](docs/RELEASING.md) for the maintainer's release procedure.
