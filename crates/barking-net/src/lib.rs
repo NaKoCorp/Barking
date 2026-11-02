@@ -23,7 +23,7 @@ pub use score::{Score, ScoreEvent};
 pub use state::NetState;
 pub use sync::{
     Connector, DepositOutcome, DepositReply, Depositor, FetchReply, FetchStop, Fetcher, LinkPage,
-    SyncOptions, SyncReport, sync,
+    SubscribeReply, Subscriber, SyncOptions, SyncReport, sync,
 };
 pub use view::{NodeEntry, View};
 

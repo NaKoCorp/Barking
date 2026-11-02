@@ -4,11 +4,13 @@ use std::sync::Mutex;
 
 use barking_packet::Kind;
 use barking_proto::client::FetchResume;
+use barking_proto::push::{ApnsEnv, RelayRef, Subscription};
 
 use barking_core::Core;
 use tempfile::TempDir;
 
 use super::*;
+use crate::push::{PushConfig, PushState};
 use crate::score::Score;
 use crate::test_support::{id_of, record, subject};
 
@@ -24,6 +26,8 @@ enum Call {
     /// Node, mailboxes, and those of them that had a position at the call.
     Fetch(NodeId, Vec<MailboxId>, Vec<MailboxId>),
     Deposit(NodeId, [u8; 32]),
+    Subscribe(NodeId, MailboxId),
+    Unsubscribe(NodeId, MailboxId),
     Close(NodeId),
 }
 
@@ -92,6 +96,10 @@ struct Net {
     page_confirmed: HashSet<NodeId>,
     /// Page size each fetch started from.
     pages: Mutex<Vec<(NodeId, u32)>>,
+    /// Nodes that do not announce wake support in their `Hello`.
+    no_wake: HashSet<NodeId>,
+    /// Subscriptions on that node are refused with this reason.
+    refuse_subscribe: HashMap<NodeId, ErrorReason>,
     calls: Mutex<Vec<Call>>,
 }
 
@@ -304,6 +312,54 @@ impl Depositor for Net {
     }
 }
 
+impl Subscriber for Net {
+    fn wake_supported(&self, conn: &Conn) -> bool {
+        !self.no_wake.contains(&conn.id)
+    }
+
+    async fn subscribe(
+        &self,
+        conn: &mut Conn,
+        sub: &Subscription,
+        pow_left: u64,
+    ) -> SubscribeReply {
+        self.log(Call::Subscribe(conn.id, sub.mailbox));
+        if self.dead(conn) {
+            return SubscribeReply {
+                outcome: Err(DialError::Unreachable),
+                pow_spent: 0,
+            };
+        }
+        if self.pow_cost > pow_left {
+            return SubscribeReply {
+                outcome: Ok(DepositOutcome::PowBudget),
+                pow_spent: 0,
+            };
+        }
+        let result = match self.refuse_subscribe.get(&conn.id) {
+            Some(reason) => Err(*reason),
+            None => Ok(()),
+        };
+        SubscribeReply {
+            outcome: Ok(DepositOutcome::Answered(result)),
+            pow_spent: self.pow_cost,
+        }
+    }
+
+    async fn unsubscribe(
+        &self,
+        conn: &mut Conn,
+        mailbox: MailboxId,
+        _cancel_secret: [u8; 32],
+    ) -> Result<(), DialError> {
+        self.log(Call::Unsubscribe(conn.id, mailbox));
+        if self.dead(conn) {
+            return Err(DialError::Unreachable);
+        }
+        Ok(())
+    }
+}
+
 /// Bob's core, whose saved view holds the 11 test nodes, all confirmed,
 /// and the network that serves them.
 fn setup() -> (TempDir, Core, Net) {
@@ -339,6 +395,7 @@ fn opts() -> SyncOptions {
         builtin: Vec::new(),
         allow_private: true,
         now: Some(NOW),
+        push: None,
     }
 }
 
@@ -1788,4 +1845,318 @@ async fn unreadable_state_is_reported() {
     // Read again, the empty state saved since is fine.
     let report = sync(&mut core, &net, opts()).await;
     assert!(!report.state_reset);
+}
+
+// --- Wake subscriptions (push stage) -----------------------------------------
+
+fn push_config() -> PushConfig {
+    PushConfig {
+        relay: RelayRef {
+            host: "relay.example".to_string(),
+            port: 4433,
+            id: id_of(10),
+        },
+        seal_public: [9; 32],
+        seal_key_id: 1,
+        apns_token: vec![0xAB; 32],
+        env: ApnsEnv::Sandbox,
+    }
+}
+
+fn push_opts() -> SyncOptions {
+    SyncOptions {
+        push: Some(push_config()),
+        ..opts()
+    }
+}
+
+/// Adds nodes known by hand only (no record: never responsible, never
+/// asked by lookups) until the view reaches `SMALL_VIEW`: the push stage
+/// does not run on a smaller view.
+fn pad_view(core: &mut Core) {
+    let mut state = load(core);
+    let mut i = 0u8;
+    while state.view.len() < crate::SMALL_VIEW {
+        let addr = crate::test_support::addr(9, 9, i);
+        state
+            .view
+            .add_manual(NodeId([0xF0 ^ i; 32]), addr.into(), NOW);
+        i += 1;
+    }
+    state.save(core).unwrap();
+}
+
+fn push_setup() -> (TempDir, Core, Net) {
+    let (dir, mut core, net) = setup();
+    pad_view(&mut core);
+    (dir, core, net)
+}
+
+fn push_state(core: &Core) -> PushState {
+    PushState::load(core).unwrap()
+}
+
+fn subscribes(calls: &[Call]) -> Vec<(NodeId, MailboxId)> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Subscribe(n, m) => Some((*n, *m)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn unsubscribes(calls: &[Call]) -> Vec<(NodeId, MailboxId)> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Unsubscribe(n, m) => Some((*n, *m)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// My mailboxes over the push horizon, nearest day first.
+fn horizon(core: &Core) -> Vec<(MailboxId, u32)> {
+    let today = barking_core::mailbox::day_of(NOW);
+    let days: Vec<u32> = (today..=today + crate::push::HORIZON_DAYS).collect();
+    core.own_mailboxes(&days).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn push_stage_runs_after_maintenance_and_saves_state() {
+    let (_dir, mut core, net) = push_setup();
+    let report = sync(&mut core, &net, push_opts()).await;
+    let calls = net.calls();
+    let subs = subscribes(&calls);
+    let wanted = horizon(&core);
+    assert!(!wanted.is_empty());
+    assert_eq!(
+        subs.len(),
+        wanted.len() * crate::push::WAKE_NODES,
+        "{subs:?}"
+    );
+    assert_eq!(report.subscribed, subs.len());
+    assert_eq!(report.unsubscribed, 0);
+    // After the lookups of the maintenance, before the closings.
+    let finds = positions_of(&calls, |c| matches!(c, Call::Find(..)));
+    let firsts = positions_of(&calls, |c| matches!(c, Call::Subscribe(..)));
+    let closes = positions_of(&calls, |c| matches!(c, Call::Close(..)));
+    assert!(report.maintenance_done);
+    assert!(finds.last().unwrap() < &firsts[0]);
+    assert!(firsts.last().unwrap() < &closes[0]);
+    // Nearest day first: the first subscriptions are for today's mailboxes.
+    assert_eq!(subs[0].1, wanted[0].0);
+    // Each one went to a responsible of its mailbox, and is kept.
+    let st = push_state(&core);
+    assert_eq!(
+        st.config_hash,
+        Some(PushState::config_hash_of(&push_config()))
+    );
+    let view = load(&mut core).view;
+    for (mailbox, day) in &wanted {
+        let b = &st.subs[mailbox];
+        assert_eq!(b.day, *day);
+        assert_eq!(b.nodes.len(), crate::push::WAKE_NODES);
+        let responsibles = view.responsibles(mailbox, NOW);
+        assert!(b.nodes.iter().all(|(n, _)| responsibles.contains(n)));
+    }
+    // A second sync has nothing left to do.
+    net.calls.lock().unwrap().clear();
+    let report = sync(&mut core, &net, push_opts()).await;
+    assert!(subscribes(&net.calls()).is_empty());
+    assert_eq!((report.subscribed, report.unsubscribed), (0, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_push_config_sends_nothing_when_state_empty() {
+    let (_dir, mut core, net) = push_setup();
+    let report = sync(&mut core, &net, opts()).await;
+    let calls = net.calls();
+    assert!(subscribes(&calls).is_empty() && unsubscribes(&calls).is_empty());
+    assert_eq!((report.subscribed, report.unsubscribed), (0, 0));
+    assert_eq!(
+        core.transport_state(crate::push::PUSH_STATE_KEY).unwrap(),
+        None
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn push_off_unsubscribes_everything() {
+    let (_dir, mut core, net) = push_setup();
+    let first = sync(&mut core, &net, push_opts()).await;
+    net.calls.lock().unwrap().clear();
+    let report = sync(&mut core, &net, opts()).await;
+    assert_eq!(unsubscribes(&net.calls()).len(), first.subscribed);
+    assert_eq!(report.unsubscribed, first.subscribed);
+    assert!(subscribes(&net.calls()).is_empty());
+    let st = push_state(&core);
+    assert!(st.subs.is_empty() && st.config_hash.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn unsupported_node_is_noted_and_skipped() {
+    // No node announces wake support: nothing is sent, every node the plan
+    // picked is left out.
+    let (_dir, mut core, mut net) = push_setup();
+    net.no_wake = net.records.keys().copied().collect();
+    let report = sync(&mut core, &net, push_opts()).await;
+    assert!(subscribes(&net.calls()).is_empty());
+    assert_eq!(report.subscribed, 0);
+    let st = push_state(&core);
+    assert!(!st.no_wake.is_empty());
+    assert!(st.subs.values().all(|b| b.nodes.is_empty()));
+
+    // Every node refuses with `Unsupported`: each is asked once, then left
+    // out for the rest of the stage.
+    let (_dir, mut core, mut net) = push_setup();
+    for n in 0..NODES {
+        net.refuse_subscribe
+            .insert(id_of(n), ErrorReason::Unsupported);
+    }
+    let report = sync(&mut core, &net, push_opts()).await;
+    let subs = subscribes(&net.calls());
+    let asked: HashSet<NodeId> = subs.iter().map(|(n, _)| *n).collect();
+    assert!(!asked.is_empty());
+    assert_eq!(subs.len(), asked.len(), "{subs:?}");
+    assert_eq!(report.subscribed, 0);
+    let st = push_state(&core);
+    assert!(asked.iter().all(|n| st.no_wake.contains_key(n)));
+
+    // The next sync leaves them out of the plan altogether.
+    net.calls.lock().unwrap().clear();
+    sync(&mut core, &net, push_opts()).await;
+    assert!(
+        subscribes(&net.calls())
+            .iter()
+            .all(|(n, _)| !asked.contains(n))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn rate_limited_stops_the_stage() {
+    let (_dir, mut core, mut net) = push_setup();
+    for n in 0..NODES {
+        net.refuse_subscribe
+            .insert(id_of(n), ErrorReason::RateLimited);
+    }
+    let report = sync(&mut core, &net, push_opts()).await;
+    assert_eq!(subscribes(&net.calls()).len(), 1);
+    assert_eq!(report.subscribed, 0);
+    // No node is left out for a rate limit.
+    assert!(push_state(&core).no_wake.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn pow_budget_exhausted_stops_the_stage() {
+    let (_dir, mut core, mut net) = push_setup();
+    // Enough for the first copy and two subscriptions, not more.
+    net.pow_cost = 10;
+    let report = sync(
+        &mut core,
+        &net,
+        SyncOptions {
+            pow_budget: 50,
+            ..push_opts()
+        },
+    )
+    .await;
+    let spent_on_deposits = 10 * (report.first_copies + report.extra_copies) as u64;
+    let expected = ((50 - spent_on_deposits) / 10) as usize;
+    assert_eq!(report.subscribed, expected);
+    assert_eq!(subscribes(&net.calls()).len(), expected + 1);
+    assert_eq!(
+        push_state(&core)
+            .subs
+            .values()
+            .map(|b| b.nodes.len())
+            .sum::<usize>(),
+        expected
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn over_deadline_skips_the_stage() {
+    let (_dir, mut core, mut net) = push_setup();
+    net.deposit_delay = Duration::from_secs(1);
+    let report = sync(
+        &mut core,
+        &net,
+        SyncOptions {
+            deadline: Duration::from_millis(2500),
+            ..push_opts()
+        },
+    )
+    .await;
+    assert!(subscribes(&net.calls()).is_empty());
+    assert_eq!(report.subscribed, 0);
+    assert_eq!(
+        core.transport_state(crate::push::PUSH_STATE_KEY).unwrap(),
+        None
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn small_view_skips_the_stage_but_still_cancels() {
+    let (_dir, mut core, net) = push_setup();
+    let first = sync(&mut core, &net, push_opts()).await;
+    assert!(first.subscribed > 0);
+    let before = push_state(&core);
+    let holders: HashSet<NodeId> = before
+        .subs
+        .values()
+        .flat_map(|b| b.nodes.iter().map(|(n, _)| *n))
+        .collect();
+    let full = core
+        .transport_state(crate::state::STATE_KEY)
+        .unwrap()
+        .unwrap();
+    // Cold start: the view holds 3 nodes, none of which holds a
+    // subscription. Planned on it, every subscription would be cancelled:
+    // with push on, nothing is sent and the state stays.
+    let mut state = load(&mut core);
+    let mut kept = 0;
+    state.view.entries.retain(|id, e| {
+        let keep = e.record.is_some() && !holders.contains(id) && kept < MIN_REACHABLE;
+        kept += usize::from(keep);
+        keep
+    });
+    state.save(&mut core).unwrap();
+    assert_eq!(load(&mut core).view.len(), MIN_REACHABLE);
+    net.calls.lock().unwrap().clear();
+    let report = sync(&mut core, &net, push_opts()).await;
+    let calls = net.calls();
+    assert!(subscribes(&calls).is_empty() && unsubscribes(&calls).is_empty());
+    assert_eq!((report.subscribed, report.unsubscribed), (0, 0));
+    assert_eq!(push_state(&core), before);
+    // Push off on a small view (the 11 nodes, no padding): the
+    // subscriptions are cancelled all the same.
+    core.set_transport_state(crate::state::STATE_KEY, &full)
+        .unwrap();
+    let mut state = load(&mut core);
+    state.view.entries.retain(|_, e| e.record.is_some());
+    state.save(&mut core).unwrap();
+    assert!(load(&mut core).view.len() < crate::SMALL_VIEW);
+    net.calls.lock().unwrap().clear();
+    let report = sync(&mut core, &net, opts()).await;
+    assert_eq!(unsubscribes(&net.calls()).len(), first.subscribed);
+    assert_eq!(report.unsubscribed, first.subscribed);
+    assert!(push_state(&core).subs.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_node_is_skipped_for_the_rest_of_the_stage() {
+    let (_dir, mut core, mut net) = push_setup();
+    let wanted = horizon(&core);
+    let view = load(&mut core).view;
+    let x = view.responsibles_by_score(&wanted[0].0, NOW)[0];
+    // Its connections are refused: dialled at most once in the whole sync.
+    net.refuse_connect.insert(x);
+    let report = sync(&mut core, &net, push_opts()).await;
+    let calls = net.calls();
+    assert!(!subscribes(&calls).iter().any(|(n, _)| *n == x));
+    assert!(calls.iter().filter(|c| **c == Call::Connect(x)).count() <= 1);
+    assert!(report.subscribed > 0);
+    // Not left out: a node that cannot be reached is tried again next sync.
+    assert!(!push_state(&core).no_wake.contains_key(&x));
 }

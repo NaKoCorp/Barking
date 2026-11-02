@@ -23,7 +23,18 @@
 //!    hints of my contact card. Skipped when nodes were tried and none
 //!    answered (the client's own connection is down). Lookups never ask a
 //!    node that failed, rate-limited or was cut short during this sync.
-//! 6. `mark_polled` only if every session mailbox was fetched in full.
+//! 6. **Wake subscriptions** (spec §5.2), with the time left: my mailboxes
+//!    from today to `HORIZON_DAYS` ahead, planned by `plan_push` on the
+//!    responsibles by score; unsubscribes first, then subscriptions, nearest
+//!    day first, on the connections of the sync. A node that does not take
+//!    wake-ups is left out (`PushState::note_no_wake`); a rate limit or the
+//!    end of the proof budget ends the stage. Skipped while the view is
+//!    below `SMALL_VIEW` (a cold start would cancel every subscription),
+//!    except to cancel them when push is off, and, like maintenance, when
+//!    nodes were tried and none answered. The push state is saved after
+//!    each response. Neither scores nor the transparency log are touched,
+//!    and nothing about it is logged but local errors.
+//! 7. `mark_polled` only if every session mailbox was fetched in full.
 //!
 //! **Score.** Successful requests +0.02, a failure −0.1 only once a node
 //! other than the failed one answered during this sync (until then failures
@@ -56,6 +67,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use barking_core::mailbox::day_of;
 use barking_core::transparency::{AvoidReason, TransparencyEvent};
 use barking_core::{Core, CoreError, ReceiveOutcome};
 use barking_dht::{BootstrapEntry, builtin_bootstrap};
@@ -66,15 +78,19 @@ use tokio::time::Instant;
 
 use crate::discover::{self, DialError, Dialer};
 use crate::plan::{self, plan_deposits, record_outcome};
+use crate::push::{HORIZON_DAYS, PushConfig, PushState, build_subscription, plan_push};
 use crate::score::ScoreEvent;
 use crate::state::NetState;
-use crate::{BOOTSTRAP_VIEW, CandidateBudget};
+use crate::{BOOTSTRAP_VIEW, CandidateBudget, SMALL_VIEW};
 
 mod fetch;
 mod io;
 
 pub use barking_proto::client::FetchStop;
-pub use io::{Connector, DepositOutcome, DepositReply, Depositor, FetchReply, Fetcher, LinkPage};
+pub use io::{
+    Connector, DepositOutcome, DepositReply, Depositor, FetchReply, Fetcher, LinkPage,
+    SubscribeReply, Subscriber,
+};
 use io::{Observation, Observed};
 
 /// Longest synchronization.
@@ -190,6 +206,8 @@ pub struct SyncOptions {
     pub allow_private: bool,
     /// Date of the sync (tests); `None`: the system clock.
     pub now: Option<u64>,
+    /// Wake-up settings; `None`: push off (subscriptions held are cancelled).
+    pub push: Option<PushConfig>,
 }
 
 impl Default for SyncOptions {
@@ -201,6 +219,7 @@ impl Default for SyncOptions {
             builtin: builtin_bootstrap(),
             allow_private: false,
             now: None,
+            push: None,
         }
     }
 }
@@ -246,12 +265,16 @@ pub struct SyncReport {
     pub state_reset: bool,
     /// The network state could not be saved at least once during the sync.
     pub state_unsaved: bool,
+    /// Wake subscriptions accepted by a node.
+    pub subscribed: usize,
+    /// Wake subscriptions cancelled.
+    pub unsubscribed: usize,
 }
 
 /// Synchronizes with the network (see the module documentation).
 pub async fn sync<D>(core: &mut Core, dialer: &D, opts: SyncOptions) -> SyncReport
 where
-    D: Dialer + Depositor + Fetcher + Sync,
+    D: Dialer + Depositor + Fetcher + Subscriber + Sync,
 {
     let now = opts.now.unwrap_or_else(|| {
         SystemTime::now()
@@ -380,7 +403,7 @@ struct Run<'a, D: Connector> {
 
 impl<D> Run<'_, D>
 where
-    D: Dialer + Depositor + Fetcher + Sync,
+    D: Dialer + Depositor + Fetcher + Subscriber + Sync,
 {
     async fn run(&mut self, opts: &SyncOptions) {
         let now = self.now;
@@ -460,6 +483,10 @@ where
         // Nodes tried and none answered: lookups would only dial dead ends.
         if !self.over() && (self.network_up() || !self.tried) {
             self.maintenance(&sessions, &intro).await;
+        }
+
+        if !self.over() && (self.network_up() || !self.tried) {
+            self.push_stage(opts.push.as_ref()).await;
         }
 
         // With no session mailbox, "all polled" also needs a node that
@@ -1027,6 +1054,249 @@ where
         }
         self.apply_observed(observed);
         self.save();
+    }
+}
+
+impl<D> Run<'_, D>
+where
+    D: Dialer + Depositor + Fetcher + Subscriber + Sync,
+{
+    /// Wake subscriptions (stage 6 of the module documentation).
+    async fn push_stage(&mut self, cfg: Option<&PushConfig>) {
+        let now = self.now;
+        // On a cold start the ranking is unreliable, and a mailbox with no
+        // responsible would have all its subscriptions cancelled.
+        if cfg.is_some() && self.state.view.len() < SMALL_VIEW {
+            return;
+        }
+        let mut push = match PushState::load(self.core) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("push state not read, wake subscriptions left as they are: {e}");
+                return;
+            }
+        };
+        let loaded = push.clone();
+        let wanted = match cfg {
+            Some(_) => {
+                let today = day_of(now);
+                let days: Vec<u32> = (today..=today.saturating_add(HORIZON_DAYS)).collect();
+                match self.core.own_mailboxes(&days) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::warn!("own mailboxes not read, wake subscriptions skipped: {e}");
+                        return;
+                    }
+                }
+            }
+            None => Vec::new(),
+        };
+        let view = &self.state.view;
+        let plan = plan_push(
+            &push,
+            cfg,
+            &wanted,
+            |m| view.responsibles_by_score(m, now),
+            now,
+        );
+        // Push off or a new configuration: every stored subscription is
+        // cancelled, then the state starts afresh.
+        let reset = push.config_hash != cfg.map(PushState::config_hash_of);
+        let mut skipped: HashSet<NodeId> = HashSet::new();
+        let Some(all_sent) = self
+            .push_unsubscribes(&mut push, &plan.unsubscribe, &mut skipped)
+            .await
+        else {
+            return;
+        };
+        // Stopped half-way: the next sync plans the rest from what is left.
+        if all_sent {
+            if reset {
+                push.apply_config(cfg);
+            } else {
+                for m in &plan.forget {
+                    push.subs.remove(m);
+                }
+            }
+        }
+        if push != loaded && !self.save_push(&push) {
+            return;
+        }
+        let (Some(cfg), true) = (cfg, all_sent) else {
+            return;
+        };
+        let days: HashMap<MailboxId, u32> = wanted.iter().copied().collect();
+        'stage: for (mailbox, node) in plan.subscribe {
+            if self.over() {
+                break;
+            }
+            let left_out = push.no_wake.get(&node).is_some_and(|until| *until > now);
+            let Some(&day) = days.get(&mailbox) else {
+                continue;
+            };
+            if left_out || skipped.contains(&node) {
+                continue;
+            }
+            let mut redialled = false;
+            let outcome = loop {
+                let Some((mut conn, fresh)) = self.push_conn(node, &skipped).await else {
+                    if !self.over() {
+                        skipped.insert(node);
+                    }
+                    continue 'stage;
+                };
+                if !self.dialer.wake_supported(&conn) {
+                    self.conns.insert(node, conn);
+                    break None;
+                }
+                let collapse = push.collapse_for(mailbox, day, &mut rand::rng());
+                let (sub, secret) =
+                    build_subscription(cfg, mailbox, day, collapse, &mut rand::rng());
+                let request = self.dialer.subscribe(&mut conn, &sub, self.pow_left);
+                let Ok(reply) = tokio::time::timeout_at(self.deadline, request).await else {
+                    break 'stage;
+                };
+                self.pow_left = self.pow_left.saturating_sub(reply.pow_spent);
+                match reply.outcome {
+                    Err(e) if !fresh && !redialled && dead_session(&e) => redialled = true,
+                    Err(_) => {
+                        skipped.insert(node);
+                        continue 'stage;
+                    }
+                    Ok(outcome) => {
+                        self.conns.insert(node, conn);
+                        break Some((outcome, secret));
+                    }
+                }
+            };
+            let mut stop = false;
+            match outcome {
+                // No wake support announced.
+                None => push.note_no_wake(node, now),
+                Some((DepositOutcome::Answered(Ok(())), secret)) => {
+                    push.note_subscribed(mailbox, day, node, secret, &mut rand::rng());
+                    self.report.subscribed += 1;
+                }
+                Some((DepositOutcome::Answered(Err(ErrorReason::Unsupported)), _)) => {
+                    push.note_no_wake(node, now);
+                }
+                Some((DepositOutcome::Answered(Err(ErrorReason::RateLimited)), _))
+                | Some((DepositOutcome::PowBudget, _)) => stop = true,
+                // Any other refusal: this mailbox on this node waits for the
+                // next sync.
+                Some((DepositOutcome::Answered(Err(_)), _)) => {}
+            }
+            if !self.save_push(&push) || stop {
+                break;
+            }
+        }
+    }
+
+    /// Sends the unsubscribes of the plan, saving the push state after each
+    /// response. `Some(true)`: every one was sent (or its node could not be
+    /// reached); `Some(false)`: stopped by a rate limit or the deadline;
+    /// `None`: the state could not be saved.
+    async fn push_unsubscribes(
+        &mut self,
+        push: &mut PushState,
+        list: &[(MailboxId, NodeId, [u8; 32])],
+        skipped: &mut HashSet<NodeId>,
+    ) -> Option<bool> {
+        'list: for &(mailbox, node, secret) in list {
+            if self.over() {
+                return Some(false);
+            }
+            if skipped.contains(&node) {
+                continue;
+            }
+            let mut redialled = false;
+            let result = loop {
+                let Some((mut conn, fresh)) = self.push_conn(node, skipped).await else {
+                    if self.over() {
+                        return Some(false);
+                    }
+                    skipped.insert(node);
+                    continue 'list;
+                };
+                let request = self.dialer.unsubscribe(&mut conn, mailbox, secret);
+                let Ok(result) = tokio::time::timeout_at(self.deadline, request).await else {
+                    return Some(false);
+                };
+                match result {
+                    Err(e) if !fresh && !redialled && dead_session(&e) => redialled = true,
+                    Ok(()) | Err(DialError::Refused(_)) => {
+                        self.conns.insert(node, conn);
+                        break result;
+                    }
+                    Err(_) => {
+                        skipped.insert(node);
+                        continue 'list;
+                    }
+                }
+            };
+            match result {
+                Err(DialError::Refused(ErrorReason::RateLimited)) => {
+                    return Some(false);
+                }
+                Ok(()) => {
+                    push.note_unsubscribed(&mailbox, &node);
+                    self.report.unsubscribed += 1;
+                }
+                // Any other refusal: nothing left to cancel there.
+                Err(_) => push.note_unsubscribed(&mailbox, &node),
+            }
+            if !self.save_push(push) {
+                return None;
+            }
+        }
+        Some(true)
+    }
+
+    /// The kept connection to `id`, or a new one, and whether it was just
+    /// opened. Unlike `take_conn`, nothing here touches the scores: `None`
+    /// when the node failed or was rate-limited this sync, is in `skipped`,
+    /// cannot be dialled, or the deadline is over.
+    async fn push_conn(
+        &mut self,
+        id: NodeId,
+        skipped: &HashSet<NodeId>,
+    ) -> Option<(D::Conn, bool)> {
+        if self.over()
+            || skipped.contains(&id)
+            || self.failed.contains(&id)
+            || self.limited.contains(&id)
+        {
+            return None;
+        }
+        if let Some(c) = self.conns.remove(&id) {
+            return Some((c, self.unused.remove(&id)));
+        }
+        let addrs = self
+            .state
+            .view
+            .get(&id)
+            .map(|e| e.addrs())
+            .unwrap_or_default();
+        if addrs.is_empty() {
+            return None;
+        }
+        match tokio::time::timeout_at(self.deadline, self.dialer.connect(id, &addrs)).await {
+            Ok(Ok(conn)) => Some((conn, true)),
+            _ => None,
+        }
+    }
+
+    /// Saves the push state; false (and a warning) on failure: the stage
+    /// must then stop, a subscription whose secret is not kept could never
+    /// be cancelled.
+    fn save_push(&mut self, push: &PushState) -> bool {
+        match push.save(self.core) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("push state not saved, wake subscriptions stopped: {e}");
+                false
+            }
+        }
     }
 }
 

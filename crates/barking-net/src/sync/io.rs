@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use barking_packet::MailboxId;
 use barking_proto::client::{Client, ClientError, FetchResume, FetchStop, Session};
+use barking_proto::push::Subscription;
 use barking_proto::{ErrorReason, NodeId, NodeRecord};
 
 use crate::discover::{DIAL_TIMEOUT, DialError, Dialer, QuicDialer, dial_error};
@@ -110,6 +111,37 @@ pub trait Depositor: Connector {
     ) -> impl Future<Output = DepositReply> + Send;
 }
 
+/// Answer to a subscription, with the proof work it spent (even on
+/// failure). `DepositOutcome::Answered` carries the node's answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscribeReply {
+    pub outcome: Result<DepositOutcome, DialError>,
+    pub pow_spent: u64,
+}
+
+/// Wake subscriptions on a kept connection (see `Session::subscribe`).
+pub trait Subscriber: Connector {
+    /// The node announced that it accepts wake subscriptions.
+    fn wake_supported(&self, conn: &Self::Conn) -> bool;
+
+    /// Registers `sub`, spending at most `pow_left` proof work.
+    fn subscribe(
+        &self,
+        conn: &mut Self::Conn,
+        sub: &Subscription,
+        pow_left: u64,
+    ) -> impl Future<Output = SubscribeReply> + Send;
+
+    /// Cancels the subscriptions of `mailbox` made with `cancel_secret`; a
+    /// refusal is `DialError::Refused`.
+    fn unsubscribe(
+        &self,
+        conn: &mut Self::Conn,
+        mailbox: MailboxId,
+        cancel_secret: [u8; 32],
+    ) -> impl Future<Output = Result<(), DialError>> + Send;
+}
+
 impl Connector for QuicDialer {
     type Conn = Session;
 
@@ -175,6 +207,42 @@ impl Depositor for QuicDialer {
             outcome,
             pow_spent: conn.pow_spent().saturating_sub(before),
         }
+    }
+}
+
+impl Subscriber for QuicDialer {
+    fn wake_supported(&self, conn: &Session) -> bool {
+        conn.wake_supported()
+    }
+
+    async fn subscribe(
+        &self,
+        conn: &mut Session,
+        sub: &Subscription,
+        pow_left: u64,
+    ) -> SubscribeReply {
+        let before = conn.pow_spent();
+        conn.set_pow_budget(Some(before.saturating_add(pow_left)));
+        let outcome = match conn.subscribe(sub).await {
+            Ok(result) => Ok(DepositOutcome::Answered(result)),
+            Err(ClientError::PowBudget) => Ok(DepositOutcome::PowBudget),
+            Err(e) => Err(dial_error(e)),
+        };
+        SubscribeReply {
+            outcome,
+            pow_spent: conn.pow_spent().saturating_sub(before),
+        }
+    }
+
+    async fn unsubscribe(
+        &self,
+        conn: &mut Session,
+        mailbox: MailboxId,
+        cancel_secret: [u8; 32],
+    ) -> Result<(), DialError> {
+        conn.unsubscribe(mailbox, cancel_secret)
+            .await
+            .map_err(dial_error)
     }
 }
 

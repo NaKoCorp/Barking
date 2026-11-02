@@ -16,17 +16,20 @@ use barking_core::identity::Fingerprint;
 use barking_core::transparency::{AvoidReason, TransparencyEvent};
 use barking_core::{Core, ReceiveOutcome};
 use barking_dht::{distance, mailbox_key};
+use barking_net::push::PushConfig;
 use barking_net::score::{START_SCORE, ScoreEvent};
 use barking_net::sync::short_id;
 use barking_net::{NetState, QuicDialer, SyncOptions, SyncReport, sync};
-use barking_node::testing::{StoppedNode, TestNode, id_of, key, network, network_with};
+use barking_node::testing::{FakeRelay, StoppedNode, TestNode, id_of, key, network, network_with};
 use barking_packet::{Kind, MailboxId, Packet};
 use barking_proto::NodeId;
 use barking_proto::pow::content_hash;
+use barking_proto::push::{ApnsEnv, open};
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 /// Nodes of the test network.
 const NODES: usize = 8;
@@ -822,5 +825,100 @@ async fn slow_link_backlog_and_intro_progress() {
     want.extend(from_carol[..SLOW_BATCH].iter().cloned());
     want.sort();
     assert_eq!(got, want);
+    stop_all(nodes).await;
+}
+
+// --- Wake-ups ---
+
+/// Adds nodes known by hand only, without a record (never responsible,
+/// never asked by lookups), until `c`'s view reaches `SMALL_VIEW`: the
+/// wake subscription stage does not run on a smaller view, and the test
+/// network has 8 nodes.
+fn pad_view(c: &mut Client) {
+    let mut st = state(c);
+    let mut i = 0u8;
+    while st.view.len() < barking_net::SMALL_VIEW {
+        let addr = SocketAddr::from(([10, 9, 9, i], 4000));
+        st.view.add_manual(NodeId([0xF0 ^ i; 32]), addr, now());
+        i += 1;
+    }
+    st.save(&mut c.core).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscribed_device_gets_a_wake_for_a_new_message() {
+    let _timing = TIMING.lock().await;
+    capture_logs();
+    const SEAL_KEY_ID: u8 = 1;
+    const APNS_TOKEN: [u8; 32] = [0xB0; 32];
+    let relay = FakeRelay::start().await;
+    // The fake relay listens on 127.0.0.1: the nodes are allowed to reach it.
+    let nodes = network_with(0..NODES, |spec| spec.wake_allow_private = true).await;
+    let boot = seed(&nodes[0]);
+    let (mut alice, mut bob, fb, _) = acquainted();
+    warm_up(&mut alice, boot).await;
+    warm_up(&mut bob, boot).await;
+    pad_view(&mut bob);
+
+    // Bob's device subscribes for wake-ups. Nodes refuse a literal private
+    // address for the relay: it is named, and resolves to 127.0.0.1.
+    let seal_secret = StaticSecret::from([0x5E; 32]);
+    let mut relay_ref = relay.relay_ref();
+    relay_ref.host = "localhost".to_string();
+    let cfg = PushConfig {
+        relay: relay_ref,
+        seal_public: PublicKey::from(&seal_secret).to_bytes(),
+        seal_key_id: SEAL_KEY_ID,
+        apns_token: APNS_TOKEN.to_vec(),
+        env: ApnsEnv::Sandbox,
+    };
+    let r = sync(
+        &mut bob.core,
+        &QuicDialer,
+        SyncOptions {
+            push: Some(cfg),
+            ..options(boot)
+        },
+    )
+    .await;
+    assert_eq!(r.error, None);
+    assert!(r.subscribed > 0, "{r:?}");
+    assert!(relay.received().is_empty());
+
+    // Alice writes, and her sync deposits the message (short deadline: the
+    // deposits come early, maintenance is cut).
+    alice
+        .core
+        .send_text(&fb, "wake up", now(), &mut rand::rng())
+        .unwrap();
+    let t0 = tokio::time::Instant::now();
+    let r = sync(
+        &mut alice.core,
+        &QuicDialer,
+        SyncOptions {
+            deadline: Duration::from_secs(4),
+            ..options(boot)
+        },
+    )
+    .await;
+    assert!(r.first_copies >= 1, "{r:?}");
+    // The deposit happened after `t0`: the wake reached the relay less
+    // than 5 s after it.
+    while relay.received().is_empty() {
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "no wake-up 5 s after the deposit"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    eprintln!(
+        "wake-up {:?} after the start of the sender's sync",
+        t0.elapsed()
+    );
+    let token = open(&[(SEAL_KEY_ID, seal_secret)], &relay.received()[0])
+        .expect("a token sealed for the device's key");
+    assert_eq!(token.apns_token, APNS_TOKEN.to_vec());
+    assert_eq!(token.env, ApnsEnv::Sandbox);
+    relay.stop();
     stop_all(nodes).await;
 }

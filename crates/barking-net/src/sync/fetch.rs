@@ -10,7 +10,7 @@ use barking_proto::{ErrorReason, NodeId};
 use tokio::time::Instant;
 
 use super::FetchStop;
-use super::io::{Depositor, FetchReply, Fetcher, LinkPage};
+use super::io::{Depositor, FetchReply, Fetcher, LinkPage, Subscriber};
 use super::{
     AUDIT_EVERY_SECS, CROSSCHECK_EVERY_SECS, INTRO_FETCH_BYTES, REREAD_BYTES, REREAD_TIME, Run,
     SESSION_FETCH_SLICE, UNAUDITED_SYNCS, dead_session, intro_slice, receive_all,
@@ -43,7 +43,7 @@ pub(super) enum GroupEnd {
 
 impl<D> Run<'_, D>
 where
-    D: Dialer + Depositor + Fetcher + Sync,
+    D: Dialer + Depositor + Fetcher + Subscriber + Sync,
 {
     /// Fetches `mailboxes`, grouped by best responsible, moving the
     /// mailboxes of a failed or truncated group to their next responsible
