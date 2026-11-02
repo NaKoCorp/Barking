@@ -39,7 +39,7 @@ jobs:
           fi
           echo "tag $TAG: commit $commit, ancestor of origin/main"
 
-      - name: The tag matches the version of barking-cli and barking-node
+      - name: The tag matches the version of barking-cli, barking-node and barking-push
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -47,12 +47,14 @@ jobs:
           [ -n "$version" ] || { echo "version not found in crates/barking-cli/Cargo.toml" >&2; exit 1; }
           version_node="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-node/Cargo.toml | head -n1)"
           [ -n "$version_node" ] || { echo "version not found in crates/barking-node/Cargo.toml" >&2; exit 1; }
-          if [ "$version" != "$version_node" ]; then
-            echo "barking-cli ($version) and barking-node ($version_node) must have the same version" >&2
+          version_push="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-push/Cargo.toml | head -n1)"
+          [ -n "$version_push" ] || { echo "version not found in crates/barking-push/Cargo.toml" >&2; exit 1; }
+          if [ "$version" != "$version_node" ] || [ "$version" != "$version_push" ]; then
+            echo "barking-cli ($version), barking-node ($version_node) and barking-push ($version_push) must have the same version" >&2
             exit 1
           fi
           if [ "$TAG" != "v$version" ]; then
-            echo "tag $TAG does not match version v$version of crates/barking-cli/Cargo.toml and crates/barking-node/Cargo.toml" >&2
+            echo "tag $TAG does not match version v$version of crates/barking-cli/Cargo.toml, crates/barking-node/Cargo.toml and crates/barking-push/Cargo.toml" >&2
             exit 1
           fi
 
@@ -143,7 +145,7 @@ jobs:
           for t in $targets; do
             a="copies/build-$t-a"; b="copies/build-$t-b"
             [ -d "$a" ] && [ -d "$b" ] || { echo "missing copies for $t" >&2; exit 1; }
-            for prog in barking-cli barking-node; do
+            for prog in barking-cli barking-node barking-push; do
               bins_a="$(cd "$a" && ls "$prog"-* 2>/dev/null || true)"
               bins_b="$(cd "$b" && ls "$prog"-* 2>/dev/null || true)"
               [ -n "$bins_a" ] && [ "$(printf '%s\n' "$bins_a" | wc -l)" -eq 1 ] \
@@ -159,10 +161,11 @@ jobs:
               || { echo "the SHA256SUMS of the copies of $t differ" >&2; exit 1; }
             (cd "$a" && sha256sum -c SHA256SUMS)
           done
-          chmod 755 release/barking-cli-* release/barking-node-*
+          chmod 755 release/barking-cli-* release/barking-node-* release/barking-push-*
           [ "$(find release -maxdepth 1 -type f -name 'barking-cli-*' | wc -l)" -eq 3 ] || { echo "3 barking-cli binaries expected" >&2; exit 1; }
           [ "$(find release -maxdepth 1 -type f -name 'barking-node-*' | wc -l)" -eq 3 ] || { echo "3 barking-node binaries expected" >&2; exit 1; }
-          (cd release && sha256sum barking-cli-* barking-node-* | LC_ALL=C sort -k2 > SHA256SUMS && sha256sum -c SHA256SUMS)
+          [ "$(find release -maxdepth 1 -type f -name 'barking-push-*' | wc -l)" -eq 3 ] || { echo "3 barking-push binaries expected" >&2; exit 1; }
+          (cd release && sha256sum barking-cli-* barking-node-* barking-push-* | LC_ALL=C sort -k2 > SHA256SUMS && sha256sum -c SHA256SUMS)
           cat release/SHA256SUMS
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -197,8 +200,8 @@ jobs:
 
       - name: The binaries carry the tag's version
         run: |
-          for f in release/barking-cli-* release/barking-node-*; do
-            case "$f" in "release/barking-cli-${VERSION}-"*|"release/barking-node-${VERSION}-"*) ;; *) echo "unexpected binary: $f" >&2; exit 1 ;; esac
+          for f in release/barking-cli-* release/barking-node-* release/barking-push-*; do
+            case "$f" in "release/barking-cli-${VERSION}-"*|"release/barking-node-${VERSION}-"*|"release/barking-push-${VERSION}-"*) ;; *) echo "unexpected binary: $f" >&2; exit 1 ;; esac
           done
           (cd release && sha256sum -c SHA256SUMS)
 
@@ -207,6 +210,7 @@ jobs:
           subject-path: |
             release/barking-cli-*
             release/barking-node-*
+            release/barking-push-*
 
       - name: Create the draft release
         env:
@@ -225,4 +229,4 @@ jobs:
           notes="Draft: awaiting the maintainer's signature (\`scripts/sign-release.sh\`)."
           gh release create "$TAG" --draft --verify-tag -R "$GITHUB_REPOSITORY" \
             --title "$TAG" --notes "$notes" \
-            release/barking-cli-* release/barking-node-* release/SHA256SUMS
+            release/barking-cli-* release/barking-node-* release/barking-push-* release/SHA256SUMS

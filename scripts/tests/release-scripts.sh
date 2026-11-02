@@ -58,7 +58,7 @@ compteur=0
 faire_dist() {
   mkdir -p "$1"
   for t in "$t_x86" "$t_arm" "$t_mac"; do
-    for b in barking-cli barking-node; do
+    for b in barking-cli barking-node barking-push; do
       printf 'dummy binary %s %s\n%s\n' "$b" "$t" "$$-$compteur" > "$1/$b-$version-$t"
       chmod 755 "$1/$b-$version-$t"
     done
@@ -66,7 +66,7 @@ faire_dist() {
   regenerer_sommes "$1"
 }
 regenerer_sommes() {
-  (cd "$1" && for f in barking-cli-* barking-node-*; do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done \
+  (cd "$1" && for f in barking-cli-* barking-node-* barking-push-*; do [ -e "$f" ] || continue; printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done \
     | LC_ALL=C sort -k2 > SHA256SUMS)
 }
 # New workspace: $D (release to publish), $R (identical rebuild output).
@@ -161,11 +161,51 @@ cas_node_binary_checked_like_cli() {
   rm "$D/barking-node-$version-extra" "$D/barking-node-$version-$t_arm"
   verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "missing file"
 }
+cas_push_binary_checked_like_cli() {
+  # Complete set accepted: barking-cli, barking-node and barking-push for each published target.
+  nouveau; signer_ok || return 1
+  verifier "$tmp/cles/bonne.pub" --rebuilt-dir "$R"; attendre_code 0 || return 1
+  # A set without barking-push for one target (file and line removed) is refused, at signing and at verification.
+  nouveau
+  rm "$D/barking-push-$version-$t_mac"
+  regenerer_sommes "$D"
+  signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "incomplete set" && sans_minisig || return 1
+  nouveau
+  rm "$D/barking-push-$version-$t_x86" "$D/barking-push-$version-$t_arm" "$D/barking-push-$version-$t_mac"
+  regenerer_sommes "$D"
+  signer_avec_commentaire "barking v$version commit $commit_tag"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "incomplete set: barking-push-" || return 1
+  # A barking-push binary of another version is refused even with consistent checksums and a valid signature.
+  nouveau
+  printf 'intruder\n' > "$D/barking-push-9.9.9-$t_x86"
+  regenerer_sommes "$D"
+  signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "unexpected entry" && sans_minisig || return 1
+  nouveau
+  printf 'intruder\n' > "$D/barking-push-9.9.9-$t_x86"
+  regenerer_sommes "$D"
+  signer_avec_commentaire "barking v$version commit $commit_tag"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "unexpected entry" || return 1
+  # Checked like the others: checksum, rebuild, extra file.
+  nouveau; signer_ok || return 1
+  printf 'X' >> "$D/barking-push-$version-$t_x86"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "incorrect checksum for barking-push-" || return 1
+  nouveau; signer_ok || return 1
+  printf 'other\n' > "$R/barking-push-$version-$t_x86"
+  verifier "$tmp/cles/bonne.pub" --rebuilt-dir "$R"; attendre_code 1 && attendre_texte "differs from the published binary for barking-push-" || return 1
+  nouveau; signer_ok || return 1
+  cp "$D/barking-push-$version-$t_x86" "$D/barking-push-$version-extra"
+  verifier "$tmp/cles/bonne.pub"; attendre_code 1 && attendre_texte "extra file" || return 1
+  # Signing refuses a rebuild directory lacking barking-push for the host target.
+  nouveau
+  case "$(uname -m)" in x86_64|amd64) hote="$t_x86" ;; *) hote="$t_arm" ;; esac
+  rm "$R/barking-push-$version-$hote"
+  signer "$tmp/cles/bonne.key"; attendre_code 1 && attendre_texte "without a corresponding rebuild" && sans_minisig
+}
 cas_mixed_version_or_unknown_name_refused() {
   # A node binary of another version, or an unknown name, listed in SHA256SUMS: refused at
   # signing as at verification, even if the checksums and the file are consistent.
   local autre
-  for autre in "barking-node-9.9.9-$t_x86" "barking-cli-9.9.9-$t_x86" "barking-relay-$version-$t_x86" "barking-node-$version-"; do
+  for autre in "barking-node-9.9.9-$t_x86" "barking-cli-9.9.9-$t_x86" "barking-push-9.9.9-$t_x86" "barking-relay-$version-$t_x86" "barking-node-$version-" "barking-push-$version-"; do
     nouveau
     printf 'intruder\n' > "$D/$autre"
     regenerer_sommes "$D"
@@ -345,7 +385,7 @@ cas_empty_pubkey_rejected() {
 echecs=0
 for cas in sign_then_verify_ok sign_then_verify_rebuild_ok forged_signature_rejected other_key_rejected \
            tampered_binary_rejected tampered_sums_rejected extra_or_missing_binary_rejected \
-           node_binary_checked_like_cli mixed_version_or_unknown_name_refused incomplete_or_unknown_target_set_refused \
+           node_binary_checked_like_cli push_binary_checked_like_cli mixed_version_or_unknown_name_refused incomplete_or_unknown_target_set_refused \
            sign_refuses_on_mismatch sign_refuses_missing_or_unlisted sign_refuses_without_rebuilt_counterpart \
            verify_rebuilt_mismatch_rejected trusted_comment_other_version_rejected \
            trusted_comment_without_commit_rejected signed_commit_differs_from_local_tag_rejected \

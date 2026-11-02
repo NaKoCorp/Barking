@@ -111,7 +111,8 @@ cible_compilable_ici() {
   return 1
 }
 
-# Target of a binary of version $2: « barking-cli-<version>-<target> » or « barking-node-<version>-<target> ».
+# Target of a binary of version $2: « barking-cli-<version>-<target> », « barking-node-<version>-<target> » or
+# « barking-push-<version>-<target> ».
 # Prints the target; returns 1 for any other name (other binary, other version).
 # The published targets are exactly CIBLES_PUBLIEES: any other target is refused.
 CIBLES_PUBLIEES="x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
@@ -120,12 +121,13 @@ cible_du_nom() { # $1 = nom, $2 = version
   case "$1" in
     "barking-cli-$2-"?*)  c="${1#"barking-cli-$2-"}" ;;
     "barking-node-$2-"?*) c="${1#"barking-node-$2-"}" ;;
+    "barking-push-$2-"?*) c="${1#"barking-push-$2-"}" ;;
     *) return 1 ;;
   esac
   case " $CIBLES_PUBLIEES " in *" $c "*) printf '%s\n' "$c" ;; *) return 1 ;; esac
 }
 
-# Checks SHA256SUMS and the barking-cli-<version>-* and barking-node-<version>-* binaries of a directory.
+# Checks SHA256SUMS and the barking-cli-<version>-*, barking-node-<version>-* and barking-push-<version>-* binaries of a directory.
 # Computes and compares the checksums itself. Exits with an error (exit 1) at the first problem.
 # Sets NOMS_LISTES (names separated by spaces).
 controler_somme_dir() { # $1 = directory, $2 = version
@@ -138,7 +140,7 @@ controler_somme_dir() { # $1 = directory, $2 = version
   while IFS= read -r ligne || [ -n "$ligne" ]; do
     [[ $ligne =~ $motif ]] || erreur "unreadable line in SHA256SUMS: $ligne"
     somme="${BASH_REMATCH[1]}"; nom="${BASH_REMATCH[2]}"
-    cible_du_nom "$nom" "$version" >/dev/null || erreur "unexpected entry in SHA256SUMS (not a barking-cli or barking-node binary of version $version for a published target: $CIBLES_PUBLIEES): $nom"
+    cible_du_nom "$nom" "$version" >/dev/null || erreur "unexpected entry in SHA256SUMS (not a barking-cli, barking-node or barking-push binary of version $version for a published target: $CIBLES_PUBLIEES): $nom"
     case "$vus" in *"|$nom|"*) erreur "duplicate entry in SHA256SUMS: $nom" ;; esac
     vus="$vus$nom|"
     [ -f "$dir/$nom" ] || erreur "missing file: $nom is listed in SHA256SUMS but absent from $dir"
@@ -147,15 +149,15 @@ controler_somme_dir() { # $1 = directory, $2 = version
     [ "$reel" = "$somme" ] || erreur "incorrect checksum for $nom (SHA256SUMS: $somme, file: $reel)"
     NOMS_LISTES="$NOMS_LISTES $nom"
   done < "$sums"
-  for f in "$dir"/barking-cli-* "$dir"/barking-node-*; do
+  for f in "$dir"/barking-cli-* "$dir"/barking-node-* "$dir"/barking-push-*; do
     [ -e "$f" ] || continue
     n="$(basename "$f")"
     case "$vus" in *"|$n|"*) ;; *) erreur "extra file: $n is present in $dir but absent from SHA256SUMS" ;; esac
   done
-  # Complete set required: barking-cli and barking-node for each published target, no more, no less.
+  # Complete set required: barking-cli, barking-node and barking-push for each published target, no more, no less.
   for c in $CIBLES_PUBLIEES; do
-    for p in barking-cli barking-node; do
-      case "$vus" in *"|$p-$version-$c|"*) ;; *) erreur "incomplete set: $p-$version-$c is absent from SHA256SUMS (barking-cli and barking-node are required for each published target)" ;; esac
+    for p in barking-cli barking-node barking-push; do
+      case "$vus" in *"|$p-$version-$c|"*) ;; *) erreur "incomplete set: $p-$version-$c is absent from SHA256SUMS (barking-cli, barking-node and barking-push are required for each published target)" ;; esac
     done
   done
   NOMS_LISTES="${NOMS_LISTES# }"

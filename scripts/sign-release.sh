@@ -69,14 +69,14 @@ if [ -n "$from_dir" ]; then
   [ -d "$from_dir" ] || erreur "directory not found: $from_dir"
   [ -f "$from_dir/SHA256SUMS" ] || erreur "SHA256SUMS missing from $from_dir"
   cp "$from_dir/SHA256SUMS" "$dir/"
-  for f in "$from_dir"/barking-cli-* "$from_dir"/barking-node-*; do
+  for f in "$from_dir"/barking-cli-* "$from_dir"/barking-node-* "$from_dir"/barking-push-*; do
     [ -e "$f" ] || continue
     cp "$f" "$dir/"
   done
 else
   command -v gh >/dev/null 2>&1 || erreur "gh is required to fetch the draft's assets"
   resoudre_repo "$repo_arg" "$racine"; exiger_repo
-  gh release download "v$version" -R "$REPO" --dir "$dir" --pattern 'SHA256SUMS' --pattern 'barking-cli-*' --pattern 'barking-node-*' \
+  gh release download "v$version" -R "$REPO" --dir "$dir" --pattern 'SHA256SUMS' --pattern 'barking-cli-*' --pattern 'barking-node-*' --pattern 'barking-push-*' \
     || erreur "downloading the assets of v$version failed"
 fi
 

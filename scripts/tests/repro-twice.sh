@@ -30,17 +30,17 @@ diff "$tmp/out-a/SHA256SUMS" "$tmp/out-b/SHA256SUMS" \
   || echec "the SHA256SUMS differ between the two builds"
 
 # Both binaries are produced and listed in SHA256SUMS (sorted).
-for b in barking-cli barking-node; do
+for b in barking-cli barking-node barking-push; do
   [ "$(grep -c "  $b-" "$tmp/out-a/SHA256SUMS")" -eq 1 ] || echec "SHA256SUMS must list exactly one $b"
   [ "$(find "$tmp/out-a" -type f -name "$b-*" | wc -l | tr -d ' ')" -eq 1 ] || echec "there must be exactly one $b binary"
   cmp "$(find "$tmp/out-a" -type f -name "$b-*")" "$(find "$tmp/out-b" -type f -name "$b-*")" \
     || echec "the two builds of $b differ"
 done
-[ "$(wc -l < "$tmp/out-a/SHA256SUMS" | tr -d ' ')" -eq 2 ] || echec "SHA256SUMS must contain exactly two lines"
+[ "$(wc -l < "$tmp/out-a/SHA256SUMS" | tr -d ' ')" -eq 3 ] || echec "SHA256SUMS must contain exactly three lines"
 LC_ALL=C sort -c -k2 "$tmp/out-a/SHA256SUMS" || echec "SHA256SUMS is not sorted"
 
 # The produced binaries run (in a container if they are Linux binaries).
-for b in barking-cli barking-node; do
+for b in barking-cli barking-node barking-push; do
   bin="$(find "$tmp/out-a" -type f -name "$b-*" | head -n1)"
   [ -n "$bin" ] || echec "no $b artifact produced"
   case "$bin" in

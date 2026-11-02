@@ -50,7 +50,7 @@ dir="$tmp/assets"; mkdir -p "$dir"
 resoudre_repo "$repo_arg" "$racine"
 if [ -n "$from_dir" ]; then
   [ -d "$from_dir" ] || erreur "directory not found: $from_dir"
-  for f in "$from_dir"/SHA256SUMS "$from_dir"/SHA256SUMS.minisig "$from_dir"/barking-cli-* "$from_dir"/barking-node-*; do
+  for f in "$from_dir"/SHA256SUMS "$from_dir"/SHA256SUMS.minisig "$from_dir"/barking-cli-* "$from_dir"/barking-node-* "$from_dir"/barking-push-*; do
     [ -e "$f" ] || continue
     cp "$f" "$dir/"
   done
@@ -58,7 +58,7 @@ else
   command -v gh >/dev/null 2>&1 || erreur "gh is required to download release v$version"
   exiger_repo
   gh release download "v$version" -R "$REPO" --dir "$dir" \
-    --pattern 'SHA256SUMS' --pattern 'SHA256SUMS.minisig' --pattern 'barking-cli-*' --pattern 'barking-node-*' \
+    --pattern 'SHA256SUMS' --pattern 'SHA256SUMS.minisig' --pattern 'barking-cli-*' --pattern 'barking-node-*' --pattern 'barking-push-*' \
     || erreur "downloading the assets of v$version failed"
 fi
 

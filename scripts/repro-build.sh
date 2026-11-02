@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible build of barking-cli and barking-node (spec §15).
+# Reproducible build of barking-cli, barking-node and barking-push (spec §15).
 # Usage: scripts/repro-build.sh [--target <triple>] [--ref <git-ref>] [--out <dir>] [--git-dir <repo>]
 #
 # The build environment (this script, docker/repro.Dockerfile, .xcode-version) is always the one from the
@@ -59,13 +59,16 @@ version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-cli/Cargo.
 [ -n "$version" ] || erreur "version not found in crates/barking-cli/Cargo.toml"
 version_node="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-node/Cargo.toml" | head -n1)"
 [ -n "$version_node" ] || erreur "version not found in crates/barking-node/Cargo.toml"
-[ "$version" = "$version_node" ] \
-  || erreur "barking-cli ($version) and barking-node ($version_node) must have the same version: a published release carries both binaries"
+version_push="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-push/Cargo.toml" | head -n1)"
+[ -n "$version_push" ] || erreur "version not found in crates/barking-push/Cargo.toml"
+[ "$version" = "$version_node" ] && [ "$version" = "$version_push" ] \
+  || erreur "barking-cli ($version), barking-node ($version_node) and barking-push ($version_push) must have the same version: a published release carries all three binaries"
 SOURCE_DATE_EPOCH="$(git -C "$depot" log -1 --format=%ct "$ref")"
 export SOURCE_DATE_EPOCH
 
 nom="barking-cli-${version}-${cible}"
 nom_node="barking-node-${version}-${cible}"
+nom_push="barking-push-${version}-${cible}"
 # The node is built on its own (cargo build -p barking-node, a separate invocation from barking-cli's):
 # libsqlite3-sys features are unified within a single build, and those of barking-cli (SQLCipher,
 # OpenSSL) must not enter the node. This check fails if a SQLCipher or OpenSSL feature
@@ -75,6 +78,18 @@ controle_node='
   arbre="$(cargo tree --locked -p barking-node -e normal,features --target "$TARGET")" || exit 1
   if printf "%s\n" "$arbre" | grep -qiE "openssl|sqlcipher"; then
     echo "error: barking-node depends on OpenSSL or SQLCipher:" >&2
+    printf "%s\n" "$arbre" | grep -iE "openssl|sqlcipher" >&2
+    exit 1
+  fi'
+# barking-push is likewise built on its own (cargo build -p barking-push) and must stay OpenSSL-free: it
+# talks to APNs with rustls only. openssl-probe (pulled by rustls-native-certs) only locates the system
+# certificate directories and links no OpenSSL code, so it is excluded from the match.
+# shellcheck disable=SC2016  # the script is interpreted by the bash of the container or the host, not here
+controle_push='
+  arbre="$(cargo tree --locked -p barking-push -e normal,features --target "$TARGET")" || exit 1
+  arbre="$(printf "%s\n" "$arbre" | grep -v "openssl-probe" || true)"
+  if printf "%s\n" "$arbre" | grep -qiE "openssl|sqlcipher"; then
+    echo "error: barking-push depends on OpenSSL or SQLCipher:" >&2
     printf "%s\n" "$arbre" | grep -iE "openssl|sqlcipher" >&2
     exit 1
   fi'
@@ -121,9 +136,12 @@ if [ "$cible" = "aarch64-apple-darwin" ]; then
     cargo build --release --locked -p barking-cli --target "$cible" || exit 1
     TARGET="$cible" bash -ec "$controle_node" || exit 1
     cargo build --release --locked -p barking-node --target "$cible" || exit 1
+    TARGET="$cible" bash -ec "$controle_push" || exit 1
+    cargo build --release --locked -p barking-push --target "$cible" || exit 1
   ) || erreur "build failed"
   cp "$CARGO_TARGET_DIR/$cible/release/barking" "$sortie/$nom"
   cp "$CARGO_TARGET_DIR/$cible/release/barking-node" "$sortie/$nom_node"
+  cp "$CARGO_TARGET_DIR/$cible/release/barking-push" "$sortie/$nom_push"
 else
   command -v docker >/dev/null 2>&1 || erreur "docker is required for target $cible"
   empreinte_df="$(sha256_de "$racine/docker/repro.Dockerfile")"
@@ -143,8 +161,8 @@ else
     --cap-drop=ALL --security-opt=no-new-privileges --user "$(id -u):$(id -g)" \
     --tmpfs /tmp:rw,nosuid,nodev,exec \
     -v "$src:/build:ro" -v "$volume:/cargo" -v "$tmp/out:/out" \
-    -e SOURCE_DATE_EPOCH -e "TARGET=$cible" -e "NOM=$nom" -e "NOM_NODE=$nom_node" \
-    -e "CONTROLE_NODE=$controle_node" \
+    -e SOURCE_DATE_EPOCH -e "TARGET=$cible" -e "NOM=$nom" -e "NOM_NODE=$nom_node" -e "NOM_PUSH=$nom_push" \
+    -e "CONTROLE_NODE=$controle_node" -e "CONTROLE_PUSH=$controle_push" \
     -e CARGO_HOME=/cargo -e HOME=/tmp \
     -w /build "$image" bash -ec '
       export RUSTFLAGS="--remap-path-prefix=/build=/build --remap-path-prefix=$CARGO_HOME=/cargo -C target-feature=+crt-static"
@@ -153,7 +171,9 @@ else
       cargo build --release --locked -p barking-cli --target "$TARGET"
       bash -ec "$CONTROLE_NODE"
       cargo build --release --locked -p barking-node --target "$TARGET"
-      for bin in barking barking-node; do
+      bash -ec "$CONTROLE_PUSH"
+      cargo build --release --locked -p barking-push --target "$TARGET"
+      for bin in barking barking-node barking-push; do
         file="/tmp/target/$TARGET/release/$bin"
         if readelf -l "$file" | grep -q INTERP || readelf -d "$file" | grep -q NEEDED; then
           echo "error: $bin is not a static executable" >&2
@@ -162,23 +182,28 @@ else
       done
       cp "/tmp/target/$TARGET/release/barking" "/out/$NOM"
       cp "/tmp/target/$TARGET/release/barking-node" "/out/$NOM_NODE"
+      cp "/tmp/target/$TARGET/release/barking-push" "/out/$NOM_PUSH"
     ' || erreur "build failed in the container"
   cp "$tmp/out/$nom" "$sortie/$nom"
   cp "$tmp/out/$nom_node" "$sortie/$nom_node"
+  cp "$tmp/out/$nom_push" "$sortie/$nom_push"
 fi
 
-chmod 755 "$sortie/$nom" "$sortie/$nom_node"
+chmod 755 "$sortie/$nom" "$sortie/$nom_node" "$sortie/$nom_push"
 somme="$(sha256_de "$sortie/$nom")"
 somme_node="$(sha256_de "$sortie/$nom_node")"
+somme_push="$(sha256_de "$sortie/$nom_push")"
 
 # SHA256SUMS: one line per file, sha256sum format, sorted by name; the lines of these files are replaced.
 sums="$sortie/SHA256SUMS"
 {
-  if [ -f "$sums" ]; then grep -v -F -e "  $nom" -e "  $nom_node" "$sums" || true; fi
+  if [ -f "$sums" ]; then grep -v -F -e "  $nom" -e "  $nom_node" -e "  $nom_push" "$sums" || true; fi
   printf '%s  %s\n' "$somme" "$nom"
   printf '%s  %s\n' "$somme_node" "$nom_node"
+  printf '%s  %s\n' "$somme_push" "$nom_push"
 } | LC_ALL=C sort -k2 > "$tmp/SHA256SUMS"
 cp "$tmp/SHA256SUMS" "$sums"
 
 echo "$somme  $nom"
 echo "$somme_node  $nom_node"
+echo "$somme_push  $nom_push"
