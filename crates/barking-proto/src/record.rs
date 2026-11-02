@@ -131,6 +131,11 @@ impl NodeRecord {
         if addrs.is_empty() {
             return Err(RecordError::NoAddress);
         }
+        // Port 0 cannot be reached on any network: rejected whatever the
+        // policy.
+        if addrs.iter().any(|a| a.port() == 0) {
+            return Err(RecordError::Unroutable);
+        }
         if !policy.allow_private && !addrs.iter().all(routable) {
             return Err(RecordError::Unroutable);
         }
@@ -299,6 +304,11 @@ mod tests {
             "[fc00::1]:1",
             "[ff02::1]:1",
             "[2001:db8::1]:1",
+            "0.1.2.3:1",
+            "240.0.0.1:1",
+            "255.255.255.255:1",
+            "[fec0::1]:1",
+            "100.127.255.255:1",
         ] {
             assert!(!routable(&s.parse().unwrap()), "{s}");
         }
@@ -313,6 +323,18 @@ mod tests {
             puzzle_bits: 0,
         };
         assert!(rec.verify(NOW, &private_ok).is_ok());
+    }
+
+    #[test]
+    fn port_zero_is_refused_even_when_private_allowed() {
+        let private_ok = RecordPolicy {
+            allow_private: true,
+            puzzle_bits: 0,
+        };
+        let rec = NodeRecord::sign(&any_key(), v4("127.0.0.1:0"), None, NOW);
+        assert_eq!(rec.verify(NOW, &private_ok), Err(RecordError::Unroutable));
+        let rec = NodeRecord::sign(&any_key(), None, Some("[::1]:0".parse().unwrap()), NOW);
+        assert_eq!(rec.verify(NOW, &private_ok), Err(RecordError::Unroutable));
     }
 
     #[test]

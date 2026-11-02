@@ -173,6 +173,18 @@ impl RoutingTable {
             && blocks != prefixes(&old.record)
             && !self.diversity_ok(b, &id, &blocks, was_active)
         {
+            // The old record stays, but the node did answer: it is
+            // refreshed so that it is not evicted as stale.
+            let bucket = &mut self.buckets[b];
+            let peers = if was_active {
+                &mut bucket.active
+            } else {
+                &mut bucket.reserve
+            };
+            let mut peer = peers.remove(i);
+            peer.last_seen = now;
+            peer.fails = 0;
+            peers.push(peer);
             return Insert::Rejected(Reject::Diversity);
         }
         let room = bucket.active.len() < K;
@@ -756,6 +768,144 @@ mod tests {
         );
         assert_eq!(table.get(&id).unwrap().record, new);
         assert_eq!(table.get(&id).unwrap().first_seen, NOW);
+    }
+
+    #[test]
+    fn update_into_full_block_keeps_peer_alive() {
+        let mut rng = StdRng::seed_from_u64(14);
+        let (key, old, id) = loop {
+            let mut seed = [0; 32];
+            rng.fill_bytes(&mut seed);
+            let key = SigningKey::from_bytes(&seed);
+            let old = NodeRecord::sign(&key, Some("11.0.0.1:4433".parse().unwrap()), None, NOW);
+            let id = old.verify(NOW, &POLICY).unwrap();
+            if bucket_index(&OWN, &id) == Some(0) {
+                break (key, old, id);
+            }
+        };
+        let mut table = RoutingTable::new(OWN);
+        assert_eq!(table.on_contact(id, old.clone(), NOW), Insert::Added);
+        // Two other nodes of the bucket fill the 10.9.8.0/24 block.
+        for j in 0..2 {
+            let (other, rec) = node_in(&mut rng, 0, &shared(j));
+            assert_eq!(table.on_contact(other, rec, NOW + 1), Insert::Added);
+        }
+        // The node moves into that block: refused, but still alive.
+        let later = NOW + STALE_AFTER_SECS;
+        let new = NodeRecord::sign(&key, Some("10.9.8.200:4433".parse().unwrap()), None, later);
+        assert!(new.issued_at > old.issued_at);
+        assert_eq!(
+            table.on_contact(id, new, later),
+            Insert::Rejected(Reject::Diversity)
+        );
+        let peer = table.get(&id).unwrap();
+        assert_eq!((peer.last_seen, peer.fails, &peer.record), (later, 0, &old));
+        assert!(!table.stale_heads(later).contains(&id));
+    }
+
+    #[test]
+    fn dual_stack_peer_counts_in_both_blocks() {
+        let mut rng = StdRng::seed_from_u64(15);
+        let mut table = RoutingTable::new(OWN);
+        let (dual, rec) = loop {
+            let mut seed = [0; 32];
+            rng.fill_bytes(&mut seed);
+            let rec = NodeRecord::sign(
+                &SigningKey::from_bytes(&seed),
+                Some("10.9.8.1:4433".parse().unwrap()),
+                Some("[2001:db8:1::1]:4433".parse().unwrap()),
+                NOW,
+            );
+            let id = rec.verify(NOW, &POLICY).unwrap();
+            if bucket_index(&OWN, &id) == Some(0) {
+                break (id, rec);
+            }
+        };
+        assert_eq!(table.on_contact(dual, rec, NOW), Insert::Added);
+        // One more node per block fits, a third one does not.
+        let (v4, rec) = node_in(&mut rng, 0, "10.9.8.2:4433");
+        assert_eq!(table.on_contact(v4, rec, NOW), Insert::Added);
+        let (v6, rec) = node_v6_in(&mut rng, 0, "[2001:db8:1::2]:4433");
+        assert_eq!(table.on_contact(v6, rec, NOW), Insert::Added);
+        let (id, rec) = node_in(&mut rng, 0, "10.9.8.3:4433");
+        assert_eq!(
+            table.on_contact(id, rec, NOW),
+            Insert::Rejected(Reject::Diversity)
+        );
+        let (id, rec) = node_v6_in(&mut rng, 0, "[2001:db8:1::3]:4433");
+        assert_eq!(
+            table.on_contact(id, rec, NOW),
+            Insert::Rejected(Reject::Diversity)
+        );
+    }
+
+    /// Like `node_in`, with an IPv6 address only.
+    fn node_v6_in(rng: &mut StdRng, b: usize, addr: &str) -> (NodeId, NodeRecord) {
+        loop {
+            let mut seed = [0; 32];
+            rng.fill_bytes(&mut seed);
+            let rec = NodeRecord::sign(
+                &SigningKey::from_bytes(&seed),
+                None,
+                Some(addr.parse().unwrap()),
+                NOW,
+            );
+            let id = rec.verify(NOW, &POLICY).unwrap();
+            if bucket_index(&OWN, &id) == Some(b) {
+                return (id, rec);
+            }
+        }
+    }
+
+    #[test]
+    fn reserve_promotion_blocked_by_share() {
+        let mut rng = StdRng::seed_from_u64(16);
+        let mut table = RoutingTable::new(OWN);
+        let mut ids = Vec::new();
+        for i in 0..K {
+            let (id, rec) = node_in(&mut rng, 0, &distinct(i));
+            assert_eq!(table.on_contact(id, rec, NOW + i as u64), Insert::Added);
+            ids.push(id);
+        }
+        let (candidate, crec) = node_in(&mut rng, 0, &shared(0));
+        assert_eq!(
+            table.on_contact(candidate, crec.clone(), NOW + 100),
+            Insert::Pending { ping: ids[0] }
+        );
+        // Two active nodes of the same block elsewhere reach its share.
+        for b in 1..3 {
+            let (id, rec) = node_in(&mut rng, b, &shared(b));
+            assert_eq!(table.on_contact(id, rec, NOW + 100), Insert::Added);
+        }
+        for _ in 0..FAILS_BEFORE_EVICT {
+            table.on_failure(&ids[0]);
+        }
+        assert!(table.get(&ids[0]).is_none());
+        // Room in the bucket, but promoting would exceed the share.
+        assert_eq!(
+            table.on_contact(candidate, crec, NOW + 200),
+            Insert::Rejected(Reject::Diversity)
+        );
+        assert!(table.get(&candidate).is_some());
+        assert!(!active_ids(&table).contains(&candidate));
+        assert_eq!(table.len(), K - 1 + 2);
+    }
+
+    #[test]
+    fn share_lower_bound_admits_min_allowed() {
+        let mut rng = StdRng::seed_from_u64(17);
+        // 5 active nodes: 10% of the table rounds to 0, the floor applies.
+        let mut table = table_of(&mut rng, 5);
+        for b in 0..MIN_PREFIX_ALLOWED {
+            let (id, rec) = node_in(&mut rng, b + 3, &shared(b));
+            assert_eq!(table.on_contact(id, rec, NOW), Insert::Added);
+        }
+        // Another bucket, so only the table share refuses it.
+        let (id, rec) = node_in(&mut rng, 3 + MIN_PREFIX_ALLOWED, &shared(9));
+        assert_eq!(
+            table.on_contact(id, rec, NOW),
+            Insert::Rejected(Reject::Diversity)
+        );
     }
 
     #[test]

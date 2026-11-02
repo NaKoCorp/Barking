@@ -604,6 +604,86 @@ mod tests {
     }
 
     #[test]
+    fn suspect_offered_by_another_path_is_never_queried() {
+        let mut rng = StdRng::seed_from_u64(12);
+        let seeds = nodes(&mut rng, 3);
+        let (mut lookup, sent) = lookup_with(&seeds);
+        let liar = sent[0];
+        let liar_rec = seeds.iter().find(|(id, _)| *id == liar).unwrap().1.clone();
+        let (_, mut bad) = node(&mut rng, 3);
+        bad.issued_at -= 3600;
+        lookup.on_response(&liar, vec![bad], NOW_SECS);
+        // The other paths learn the suspect's valid record.
+        for id in &sent[1..] {
+            lookup.on_response(id, vec![liar_rec.clone()], NOW_SECS);
+        }
+        assert!(lookup.next_requests(0).is_empty());
+        assert!(lookup.is_done(0));
+        assert!(!ids(&lookup.result()).contains(&liar));
+        assert!(lookup.paths[1..].iter().flatten().all(|e| e.id != liar));
+    }
+
+    #[test]
+    fn flooded_path_lets_other_paths_finish() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let seeds = nodes(&mut rng, 3);
+        let fakes = nodes(&mut rng, MAX_NODES_PER_RESPONSE);
+        let honest: Vec<_> = (0..6).map(|i| node(&mut rng, 100 + i)).collect();
+        let fake_ids: HashSet<NodeId> = fakes.iter().map(|(id, _)| *id).collect();
+        let (mut lookup, sent) = lookup_with(&seeds);
+        // Path 0 is flooded with nodes that never answer.
+        lookup.on_response(
+            &sent[0],
+            fakes.into_iter().map(|(_, r)| r).collect(),
+            NOW_SECS,
+        );
+        lookup.on_response(
+            &sent[1],
+            honest[..3].iter().map(|(_, r)| r.clone()).collect(),
+            NOW_SECS,
+        );
+        lookup.on_response(
+            &sent[2],
+            honest[3..].iter().map(|(_, r)| r.clone()).collect(),
+            NOW_SECS,
+        );
+        loop {
+            let reqs = lookup.next_requests(0);
+            if reqs.is_empty() {
+                break;
+            }
+            for (id, _) in reqs {
+                if !fake_ids.contains(&id) {
+                    lookup.on_response(&id, vec![], NOW_SECS);
+                }
+            }
+        }
+        let responders = ids(&lookup.responders());
+        for (id, _) in &honest {
+            assert!(responders.contains(id));
+        }
+        assert!(responders.iter().all(|id| !fake_ids.contains(id)));
+        // The three seeds (the flooding one did answer) and the honest nodes.
+        assert_eq!(lookup.result().len(), sent.len() + honest.len());
+        // The flooded path keeps the lookup open until its overall timeout.
+        assert!(lookup.is_done(LOOKUP_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn node_owned_by_one_path_is_refused_by_another() {
+        let mut rng = StdRng::seed_from_u64(14);
+        let seeds = nodes(&mut rng, 3);
+        let (x, x_rec) = node(&mut rng, 3);
+        let (mut lookup, sent) = lookup_with(&seeds);
+        lookup.on_response(&sent[0], vec![x_rec.clone()], NOW_SECS);
+        lookup.on_response(&sent[1], vec![x_rec], NOW_SECS);
+        assert_eq!(lookup.owner.get(&x), Some(&0));
+        assert!(lookup.paths[0].iter().any(|e| e.id == x));
+        assert!(lookup.paths[1].iter().all(|e| e.id != x));
+        assert_eq!(ids(&lookup.next_requests(0)), vec![x]);
+    }
+
+    #[test]
     fn trimmed_unqueried_node_is_released() {
         let mut rng = StdRng::seed_from_u64(9);
         let target = [0; 32];

@@ -336,6 +336,43 @@ mod tests {
         assert!(check(NodeId([0; 32])).is_err());
     }
 
+    /// Key whose identifier solves the puzzle (computed once).
+    fn puzzle_key() -> SigningKey {
+        use rand::SeedableRng;
+        static KEY: std::sync::OnceLock<SigningKey> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| crate::generate_node_key(&mut rand::rngs::StdRng::seed_from_u64(78)))
+            .clone()
+    }
+
+    #[test]
+    fn client_cert_with_intermediates_is_refused() {
+        let cert = self_signed_cert(&puzzle_key());
+        let check = |chain: &[CertificateDer<'_>]| {
+            PeerNode.verify_client_cert(&cert, chain, UnixTime::now())
+        };
+        assert!(check(&[]).is_ok());
+        let other = self_signed_cert(&SigningKey::from_bytes(&[7; 32]));
+        assert!(check(&[other]).is_err());
+        assert!(check(std::slice::from_ref(&cert)).is_err());
+    }
+
+    #[test]
+    fn non_ed25519_client_cert_is_refused() {
+        let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rcgen::CertificateParams::new(vec![CERT_NAME.to_string()])
+            .unwrap()
+            .self_signed(&kp)
+            .unwrap()
+            .der()
+            .clone();
+        assert_eq!(node_key_from_cert(&cert), None);
+        assert!(
+            PeerNode
+                .verify_client_cert(&cert, &[], UnixTime::now())
+                .is_err()
+        );
+    }
+
     #[test]
     fn configs_build() {
         let k = SigningKey::from_bytes(&[6; 32]);

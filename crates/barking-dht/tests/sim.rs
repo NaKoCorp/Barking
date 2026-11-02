@@ -444,8 +444,9 @@ impl Mailbox {
 
 /// Share of lookups that find at least `need` of the 5 true
 /// honest responsible nodes, launched from random honest nodes;
-/// also prints their simulated duration.
-fn success_rate(net: &mut Net, need: usize) -> f64 {
+/// also prints their simulated duration and the stricter rate where those
+/// nodes are among the `REPLICAS` closest of the result, returned second.
+fn success_rate(net: &mut Net, need: usize) -> (f64, f64) {
     let jobs: Vec<([u8; 32], usize)> = (0..LOOKUPS)
         .map(|_| (net.key(), net.random_honest()))
         .collect();
@@ -455,15 +456,26 @@ fn success_rate(net: &mut Net, need: usize) -> f64 {
         let (mut found, elapsed_ms) = net.probe(*from, key);
         // The searching node knows itself.
         found.push(net.nodes[*from].id);
-        let hit = truth
-            .iter()
-            .filter(|&&t| found.contains(&net.nodes[t].id))
-            .count()
-            >= need;
-        (hit, elapsed_ms)
+        let hits_in = |ids: &[NodeId]| {
+            truth
+                .iter()
+                .filter(|&&t| ids.contains(&net.nodes[t].id))
+                .count()
+                >= need
+        };
+        let hit = hits_in(&found);
+        found.sort_by_key(|id| distance(&id.0, key));
+        found.truncate(REPLICAS);
+        (hit, hits_in(&found), elapsed_ms)
     });
-    let hits = outcomes.iter().filter(|(hit, _)| *hit).count();
-    let mut durations: Vec<u64> = outcomes.iter().map(|&(_, ms)| ms).collect();
+    let hits = outcomes.iter().filter(|(hit, _, _)| *hit).count();
+    let top_hits = outcomes.iter().filter(|(_, top, _)| *top).count();
+    let top_rate = top_hits as f64 / LOOKUPS as f64;
+    eprintln!(
+        "{need} of 5 among the top {REPLICAS} of the result: {:.1} %",
+        top_rate * 100.0
+    );
+    let mut durations: Vec<u64> = outcomes.iter().map(|&(_, _, ms)| ms).collect();
     durations.sort_unstable();
     let timed_out = durations
         .iter()
@@ -474,7 +486,7 @@ fn success_rate(net: &mut Net, need: usize) -> f64 {
         durations[durations.len() / 2],
         durations[durations.len() - 1],
     );
-    hits as f64 / LOOKUPS as f64
+    (hits as f64 / LOOKUPS as f64, top_rate)
 }
 
 /// `f` applied to each element on all cores, results in the order
@@ -497,16 +509,18 @@ fn par_map<I: Sync, T: Send>(items: &[I], f: impl Fn(&I) -> T + Sync) -> Vec<T> 
 #[test]
 fn honest_lookup_finds_all_five() {
     let mut net = Net::build(1, NODES, &[]);
-    let rate = success_rate(&mut net, REPLICAS);
+    let (rate, top_rate) = success_rate(&mut net, REPLICAS);
     eprintln!("honest network: {:.1} % find all 5", rate * 100.0);
     assert!(rate > 0.99, "rate {rate}");
+    // Stricter: the 5 are also the 5 closest of the result.
+    assert!(top_rate > 0.99, "top-5 rate {top_rate}");
 }
 
 #[test]
 fn twenty_percent_liars_still_find_three() {
     let liars = NODES / 5;
     let mut net = Net::build(2, NODES - liars, &[(Behaviour::OnlyColluders, liars)]);
-    let rate = success_rate(&mut net, 3);
+    let (rate, _) = success_rate(&mut net, 3);
     eprintln!("20 % liars: {:.1} % find 3 of 5", rate * 100.0);
     assert!(rate > 0.95, "rate {rate}");
 }
@@ -518,7 +532,7 @@ fn liars_garbage_and_silent_do_not_break_lookups() {
     let mut net = Net::build(5, NODES, &[]);
     net.turn(Behaviour::Garbage, NODES / 10);
     net.turn(Behaviour::Silent, NODES / 10);
-    let rate = success_rate(&mut net, 3);
+    let (rate, _) = success_rate(&mut net, 3);
     eprintln!(
         "10 % invalid records, 10 % mute: {:.1} % find 3 of 5",
         rate * 100.0

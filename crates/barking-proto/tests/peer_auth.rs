@@ -182,3 +182,53 @@ async fn connect_peer_reports_version_refusal_not_connect() {
         assert!(matches!(r, Err(ClientError::Version)), "{:?}", r.err());
     }
 }
+
+/// Presents the certificate of one key but signs the handshake with another.
+#[derive(Debug)]
+struct BorrowedCert(std::sync::Arc<rustls::sign::CertifiedKey>);
+
+impl rustls::client::ResolvesClientCert for BorrowedCert {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[rustls::SignatureScheme],
+    ) -> Option<std::sync::Arc<rustls::sign::CertifiedKey>> {
+        Some(std::sync::Arc::clone(&self.0))
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn node_client_without_key_possession_is_refused() {
+    let (server, caller) = (key(0), key(1));
+    let (addr, mut seen, _ep) = spawn_server(&server);
+    // Certificate of `caller` (valid puzzle), handshake signed by another key.
+    let thief = SigningKey::from_bytes(&[11; 32]);
+    let der = tls::pkcs8_der(&thief);
+    let signer = rustls::crypto::ring::sign::any_eddsa_type(
+        &rustls::pki_types::PrivatePkcs8KeyDer::from(&der[..]),
+    )
+    .unwrap();
+    let certified = rustls::sign::CertifiedKey::new(vec![tls::self_signed_cert(&caller)], signer);
+    let mut tls_cfg = tls::node_client_config(id_of(&server), &caller);
+    tls_cfg.client_auth_cert_resolver = std::sync::Arc::new(BorrowedCert(certified.into()));
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls_cfg).unwrap();
+    let cfg = quinn::ClientConfig::new(std::sync::Arc::new(crypto));
+    let ep = client_endpoint();
+    let hello = Request::Hello {
+        version: PROTOCOL_VERSION,
+        min_version: 0,
+    };
+    // The server judges the certificate after the client handshake: the
+    // refusal shows on the first request.
+    let refused = match ep.connect_with(cfg, addr, tls::CERT_NAME).unwrap().await {
+        Err(_) => true,
+        Ok(conn) => client::request(&conn, &hello).await.is_err(),
+    };
+    assert!(refused);
+    // The server never accepted the connection.
+    assert!(seen.try_recv().is_err());
+}
