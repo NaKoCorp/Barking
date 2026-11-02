@@ -4,7 +4,7 @@
 use barking_packet::MailboxId;
 use serde::{Deserialize, Serialize};
 
-use crate::{node_id::NodeId, record::NodeRecord};
+use crate::{node_id::NodeId, push::Subscription, record::NodeRecord};
 
 /// Pickup cursors: packets first (cursor = their sequence number,
 /// below this base), then acknowledgements (`ACK_CURSOR_BASE + number`).
@@ -18,6 +18,9 @@ pub const MAX_PAGE_ITEMS: usize = 1024;
 
 /// At most this many records in a `Nodes` response.
 pub const MAX_NODES_PER_RESPONSE: usize = 20;
+
+/// At most this many sealed tokens in a `Wake` request.
+pub const MAX_WAKE_ITEMS: usize = 100;
 
 /// At most this many fingerprints in a `Holdings` page.
 pub const MAX_HOLDINGS_PER_PAGE: usize = 1024;
@@ -59,6 +62,22 @@ pub enum Request {
         mailbox: MailboxId,
         cursor: Option<u64>,
     },
+    /// Registers a wake subscription for a mailbox; `pow` is the proof of
+    /// work over `push::subscription_hash(&sub)`.
+    Subscribe {
+        sub: Subscription,
+        pow: u64,
+    },
+    /// Cancels the subscriptions of a mailbox whose `cancel_hash` is the
+    /// hash of `cancel_secret`.
+    Unsubscribe {
+        mailbox: MailboxId,
+        cancel_secret: [u8; 32],
+    },
+    /// Node to relay: sealed wake tokens to push (at most `MAX_WAKE_ITEMS`).
+    Wake {
+        items: Vec<Vec<u8>>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +85,8 @@ pub struct Limits {
     pub max_mailboxes_per_fetch: u16,
     pub max_request_bytes: u32,
     pub max_response_bytes: u32,
+    /// True if the node accepts wake subscriptions.
+    pub wake: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +218,27 @@ mod tests {
             mailbox: MailboxId([4; 16]),
             cursor: Some(9),
         });
+        rt(Request::Subscribe {
+            sub: crate::push::Subscription {
+                mailbox: MailboxId([6; 16]),
+                relay: crate::push::RelayRef {
+                    host: "relay.example.org".into(),
+                    port: 443,
+                    id: NodeId([2; 32]),
+                },
+                sealed: vec![7; 100],
+                cancel_hash: [8; 32],
+                expires_day: 20_000,
+            },
+            pow: 99,
+        });
+        rt(Request::Unsubscribe {
+            mailbox: MailboxId([6; 16]),
+            cancel_secret: [5; 32],
+        });
+        rt(Request::Wake {
+            items: vec![vec![1, 2], vec![]],
+        });
     }
 
     #[test]
@@ -210,6 +252,7 @@ mod tests {
                 max_mailboxes_per_fetch: 64,
                 max_request_bytes: 65536,
                 max_response_bytes: 1 << 20,
+                wake: true,
             },
         });
         rt(Response::Ok);
@@ -261,6 +304,35 @@ mod tests {
             postcard::to_allocvec(&Response::Error(ErrorReason::Unsupported)).unwrap(),
             [3, 11]
         );
+    }
+
+    #[test]
+    fn push_variants_are_appended() {
+        let first = |r: &Request| postcard::to_allocvec(r).unwrap()[0];
+        let find_value = first(&Request::FindValue {
+            mailbox: MailboxId([0; 16]),
+            cursor: None,
+        });
+        let sub = crate::push::Subscription {
+            mailbox: MailboxId([0; 16]),
+            relay: crate::push::RelayRef {
+                host: "r".into(),
+                port: 1,
+                id: NodeId([0; 32]),
+            },
+            sealed: vec![],
+            cancel_hash: [0; 32],
+            expires_day: 0,
+        };
+        assert_eq!(first(&Request::Subscribe { sub, pow: 0 }), find_value + 1);
+        assert_eq!(
+            first(&Request::Unsubscribe {
+                mailbox: MailboxId([0; 16]),
+                cancel_secret: [0; 32]
+            }),
+            find_value + 2
+        );
+        assert_eq!(first(&Request::Wake { items: vec![] }), find_value + 3);
     }
 
     #[test]

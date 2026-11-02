@@ -275,10 +275,10 @@ async fn stolen_certificate_without_key_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn old_version_refused() {
     let (_d, path) = db();
-    // Node of a future version that no longer accepts version 0.
+    // Node of a future version that no longer accepts version 1.
     let node = start_with(&path, key(0), policy(), |c| {
-        c.version = 1;
-        c.min_version = 1;
+        c.version = 2;
+        c.min_version = 2;
     });
     let r = Client::connect(node.addr, node.id).await;
     assert!(matches!(r, Err(ClientError::Version)), "{:?}", r.err());
@@ -287,8 +287,8 @@ async fn old_version_refused() {
     let resp = client::request(
         &conn,
         &Request::Hello {
-            version: 0,
-            min_version: 0,
+            version: 1,
+            min_version: 1,
         },
     )
     .await
@@ -593,14 +593,15 @@ fn slow_fake_node(
 
 fn hello(k: &SigningKey, pow_bits: u8) -> Response {
     Response::Hello {
-        version: 0,
-        min_version: 0,
+        version: 1,
+        min_version: 1,
         node_id: id_of(k),
         pow_bits,
         limits: barking_proto::Limits {
             max_mailboxes_per_fetch: 64,
             max_request_bytes: MAX_REQUEST_BYTES as u32,
             max_response_bytes: frame::MAX_RESPONSE_BYTES as u32,
+            wake: false,
         },
     }
 }
@@ -702,8 +703,8 @@ async fn stuck_connection(addr: SocketAddr, id: NodeId) -> (quinn::Endpoint, qui
     let r = client::request(
         &conn,
         &Request::Hello {
-            version: 0,
-            min_version: 0,
+            version: 1,
+            min_version: 1,
         },
     )
     .await

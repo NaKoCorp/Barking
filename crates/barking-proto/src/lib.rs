@@ -12,13 +12,13 @@ pub mod tls;
 
 pub use msg::{
     ACK_CURSOR_BASE, ErrorReason, Limits, MAX_HOLDINGS_PER_PAGE, MAX_NODES_PER_RESPONSE,
-    MAX_PAGE_ITEMS, MIN_PAGE_BYTES, Request, Response,
+    MAX_PAGE_ITEMS, MAX_WAKE_ITEMS, MIN_PAGE_BYTES, Request, Response,
 };
 pub use node_id::{NodeId, generate_node_key};
 pub use record::{NodeRecord, RecordError, RecordPolicy, embeds_ipv4, routable};
 
 /// Protocol version.
-pub const PROTOCOL_VERSION: u16 = 0;
+pub const PROTOCOL_VERSION: u16 = 1;
 /// ALPN identifier of the QUIC layer.
 pub const ALPN: &[u8] = b"barking/0";
 

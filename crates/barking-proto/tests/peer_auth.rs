@@ -84,6 +84,7 @@ fn spawn_server_with(
                             max_mailboxes_per_fetch: 8,
                             max_request_bytes: MAX_REQUEST_BYTES as u32,
                             max_response_bytes: MAX_RESPONSE_BYTES as u32,
+                            wake: false,
                         },
                     };
                     let _ = frame::write(&mut send, &resp, MAX_RESPONSE_BYTES).await;

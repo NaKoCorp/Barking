@@ -342,9 +342,12 @@ impl Dht {
                     Stored::Failed => Stored::Failed,
                 }
             }
-            Request::Hello { .. } | Request::Deposit { .. } | Request::Fetch { .. } => {
-                err(ErrorReason::Malformed)
-            }
+            Request::Hello { .. }
+            | Request::Deposit { .. }
+            | Request::Fetch { .. }
+            | Request::Subscribe { .. }
+            | Request::Unsubscribe { .. }
+            | Request::Wake { .. } => err(ErrorReason::Malformed),
         }
     }
 

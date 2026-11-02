@@ -48,10 +48,11 @@ use tokio::time::timeout;
 
 use crate::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use crate::msg::{ACK_CURSOR_BASE, ErrorReason, Limits, MAX_PAGE_ITEMS, Request, Response};
+use crate::push::{Subscription, subscription_hash};
 use crate::{NodeId, PROTOCOL_VERSION, pow, tls};
 
 /// Oldest protocol version this client can speak.
-pub const MIN_PROTOCOL_VERSION: u16 = 0;
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
 /// Maximum number of items accepted per `fetch` call.
 pub const MAX_FETCH_ITEMS: usize = 10_000;
 /// Maximum number of bytes accepted per `fetch` call.
@@ -622,27 +623,89 @@ impl Session {
             return self.deposit_once(packet, 0).await;
         };
         let content = pow::content_hash(packet);
-        let mut bits = self
+        let bits = self
             .pow_bits
             .saturating_add(pow::tier_surcharge(tier))
             .min(pow::MAX_POW_BITS);
+        let mut bits = bits;
         loop {
-            let work = pow::expected_work(bits);
-            if self
-                .pow_budget
-                .is_some_and(|b| self.pow_spent.saturating_add(work) > b)
-            {
-                return Err(ClientError::PowBudget);
-            }
-            self.pow_spent = self.pow_spent.saturating_add(work);
-            let nonce = solve(content, mailbox, bits).await?;
+            let nonce = self.prove(content, mailbox, bits).await?;
             match self.deposit_once(packet, nonce).await? {
                 Err(ErrorReason::PowTooWeak) if bits < pow::MAX_POW_BITS => {
-                    bits = bits.saturating_add(POW_RETRY_STEP).min(pow::MAX_POW_BITS);
+                    bits = retry_bits(bits);
                 }
                 other => return Ok(other),
             }
         }
+    }
+
+    /// Checks the work budget, then solves a proof over `content`/`mailbox`
+    /// at `bits` (shared by `deposit` and `subscribe`).
+    async fn prove(&mut self, content: [u8; 32], mailbox: MailboxId, bits: u8) -> Result<u64> {
+        let work = pow::expected_work(bits);
+        if self
+            .pow_budget
+            .is_some_and(|b| self.pow_spent.saturating_add(work) > b)
+        {
+            return Err(ClientError::PowBudget);
+        }
+        self.pow_spent = self.pow_spent.saturating_add(work);
+        solve(content, mailbox, bits).await
+    }
+
+    /// Registers a wake subscription with this node. The proof of work is
+    /// computed at the session's base difficulty (no tier supplement); on
+    /// `PowTooWeak`, retries with 2 more bits up to `MAX_POW_BITS`.
+    /// `Ok(Err(reason))`: refusal by the node.
+    pub async fn subscribe(
+        &mut self,
+        sub: &Subscription,
+    ) -> Result<core::result::Result<(), ErrorReason>> {
+        let content = subscription_hash(sub);
+        let mut bits = self.pow_bits;
+        loop {
+            let nonce = self.prove(content, sub.mailbox, bits).await?;
+            let req = Request::Subscribe {
+                sub: sub.clone(),
+                pow: nonce,
+            };
+            match self.request(&req).await? {
+                Response::Ok => return Ok(Ok(())),
+                Response::Error(ErrorReason::PowTooWeak) if bits < pow::MAX_POW_BITS => {
+                    bits = retry_bits(bits);
+                }
+                Response::Error(r) => return Ok(Err(r)),
+                _ => return Err(ClientError::Protocol("unexpected response to Subscribe")),
+            }
+        }
+    }
+
+    /// Cancels the wake subscriptions of `mailbox` made with the secret whose
+    /// hash they carry.
+    pub async fn unsubscribe(&self, mailbox: MailboxId, cancel_secret: [u8; 32]) -> Result<()> {
+        let req = Request::Unsubscribe {
+            mailbox,
+            cancel_secret,
+        };
+        match self.request(&req).await? {
+            Response::Ok => Ok(()),
+            Response::Error(r) => Err(ClientError::Refused(r)),
+            _ => Err(ClientError::Protocol("unexpected response to Unsubscribe")),
+        }
+    }
+
+    /// Asks a relay to push the sealed wake tokens `items`.
+    pub async fn wake(&self, items: Vec<Vec<u8>>) -> Result<()> {
+        match self.request(&Request::Wake { items }).await? {
+            Response::Ok => Ok(()),
+            Response::Error(r) => Err(ClientError::Refused(r)),
+            _ => Err(ClientError::Protocol("unexpected response to Wake")),
+        }
+    }
+
+    /// True if the node announced that it accepts wake subscriptions.
+    pub fn wake_supported(&self) -> bool {
+        self.limits.wake
     }
 
     async fn deposit_once(
@@ -848,6 +911,11 @@ impl Session {
         self.conn.close(0u32.into(), b"fin");
         let _ = timeout(Duration::from_secs(2), self.endpoint.wait_idle()).await;
     }
+}
+
+/// Difficulty of the next attempt after a `PowTooWeak`.
+fn retry_bits(bits: u8) -> u8 {
+    bits.saturating_add(POW_RETRY_STEP).min(pow::MAX_POW_BITS)
 }
 
 /// Proof nonce search outside the async loop (pure computation).

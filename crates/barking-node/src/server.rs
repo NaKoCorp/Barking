@@ -1163,6 +1163,8 @@ async fn hello(conn: &Connection, shared: &Arc<Shared>) -> bool {
                             max_mailboxes_per_fetch: MAX_MAILBOXES_PER_FETCH as u16,
                             max_request_bytes: MAX_REQUEST_BYTES as u32,
                             max_response_bytes: MAX_RESPONSE_BYTES as u32,
+                            // Temporary: wake subscriptions arrive with the node-side push work.
+                            wake: false,
                         },
                     },
                     true,
@@ -1332,6 +1334,10 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
                 Stored::Busy => Stored::Busy,
                 Stored::Failed => Stored::Failed,
             }
+        }
+        // Temporary: replaced when the node handles wake subscriptions.
+        Request::Subscribe { .. } | Request::Unsubscribe { .. } | Request::Wake { .. } => {
+            Stored::Done(Response::Error(ErrorReason::Unsupported))
         }
         Request::Ping { .. }
         | Request::FindNode { .. }
