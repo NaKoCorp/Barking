@@ -830,21 +830,6 @@ async fn slow_link_backlog_and_intro_progress() {
 
 // --- Wake-ups ---
 
-/// Adds nodes known by hand only, without a record (never responsible,
-/// never asked by lookups), until `c`'s view reaches `SMALL_VIEW`: the
-/// wake subscription stage does not run on a smaller view, and the test
-/// network has 8 nodes.
-fn pad_view(c: &mut Client) {
-    let mut st = state(c);
-    let mut i = 0u8;
-    while st.view.len() < barking_net::SMALL_VIEW {
-        let addr = SocketAddr::from(([10, 9, 9, i], 4000));
-        st.view.add_manual(NodeId([0xF0 ^ i; 32]), addr, now());
-        i += 1;
-    }
-    st.save(&mut c.core).unwrap();
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn subscribed_device_gets_a_wake_for_a_new_message() {
     let _timing = TIMING.lock().await;
@@ -858,7 +843,6 @@ async fn subscribed_device_gets_a_wake_for_a_new_message() {
     let (mut alice, mut bob, fb, _) = acquainted();
     warm_up(&mut alice, boot).await;
     warm_up(&mut bob, boot).await;
-    pad_view(&mut bob);
 
     // Bob's device subscribes for wake-ups. Nodes refuse a literal private
     // address for the relay: it is named, and resolves to 127.0.0.1.

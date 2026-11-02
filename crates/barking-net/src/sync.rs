@@ -27,10 +27,12 @@
 //!    from today to `HORIZON_DAYS` ahead, planned by `plan_push` on the
 //!    responsibles by score; unsubscribes first, then subscriptions, nearest
 //!    day first, on the connections of the sync. A node that does not take
-//!    wake-ups is left out (`PushState::note_no_wake`); a rate limit or the
-//!    end of the proof budget ends the stage. Skipped while the view is
-//!    below `SMALL_VIEW` (a cold start would cancel every subscription),
-//!    except to cancel them when push is off, and, like maintenance, when
+//!    wake-ups is left out (`PushState::note_no_wake`) and not replaced
+//!    before the next sync; a rate limit or the end of the proof budget ends
+//!    the stage. With push on, skipped while no view entry has a record (a
+//!    cold start: no ranking to go by); with push off, the subscriptions are
+//!    cancelled all the same, and those whose node could not be reached are
+//!    kept, to be cancelled by a later sync. Skipped, like maintenance, when
 //!    nodes were tried and none answered. The push state is saved after
 //!    each response. Neither scores nor the transparency log are touched,
 //!    and nothing about it is logged but local errors.
@@ -81,7 +83,7 @@ use crate::plan::{self, plan_deposits, record_outcome};
 use crate::push::{HORIZON_DAYS, PushConfig, PushState, build_subscription, plan_push};
 use crate::score::ScoreEvent;
 use crate::state::NetState;
-use crate::{BOOTSTRAP_VIEW, CandidateBudget, SMALL_VIEW};
+use crate::{BOOTSTRAP_VIEW, CandidateBudget};
 
 mod fetch;
 mod io;
@@ -1064,9 +1066,9 @@ where
     /// Wake subscriptions (stage 6 of the module documentation).
     async fn push_stage(&mut self, cfg: Option<&PushConfig>) {
         let now = self.now;
-        // On a cold start the ranking is unreliable, and a mailbox with no
-        // responsible would have all its subscriptions cancelled.
-        if cfg.is_some() && self.state.view.len() < SMALL_VIEW {
+        // Cold start: without a single record there is no responsible to
+        // rank, and a new configuration would cancel everything for nothing.
+        if cfg.is_some() && !self.state.view.entries().any(|(_, e)| e.record.is_some()) {
             return;
         }
         let mut push = match PushState::load(self.core) {
@@ -1111,7 +1113,14 @@ where
         };
         // Stopped half-way: the next sync plans the rest from what is left.
         if all_sent {
-            if reset {
+            if cfg.is_none() {
+                // Push off: what is left could not be cancelled (node not
+                // reached); kept for a later sync unless already expired.
+                let today = day_of(now);
+                push.config_hash = None;
+                push.subs
+                    .retain(|_, b| !b.nodes.is_empty() && b.day.saturating_add(1) >= today);
+            } else if reset {
                 push.apply_config(cfg);
             } else {
                 for m in &plan.forget {

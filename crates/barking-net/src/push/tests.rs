@@ -311,3 +311,25 @@ fn push_state_golden_bytes() {
         .expect("format 1 still reads");
     assert_eq!(back, golden_state());
 }
+
+#[test]
+fn mailbox_without_responsibles_keeps_its_subscriptions() {
+    let c = cfg(1);
+    let mut s = state_for(&c);
+    subbed(&mut s, mb(1), today(), &[0, 1]);
+    // No responsible known for the mailbox (a view without records): its
+    // stored nodes are neither cancelled nor replaced, nor forgotten.
+    let plan = plan_push(&s, Some(&c), &[(mb(1), today())], |_| Vec::new(), NOW);
+    assert_eq!(plan, PushPlan::default());
+    // Wanted but without responsibles, next to a mailbox that has some.
+    let wanted = [(mb(1), today()), (mb(2), today())];
+    let plan = plan_push(
+        &s,
+        Some(&c),
+        &wanted,
+        |m| if *m == mb(1) { Vec::new() } else { ranked(m) },
+        NOW,
+    );
+    assert_eq!(plan.subscribe, vec![(mb(2), id_of(0)), (mb(2), id_of(1))]);
+    assert!(plan.unsubscribe.is_empty() && plan.forget.is_empty());
+}

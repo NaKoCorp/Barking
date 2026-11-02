@@ -232,8 +232,10 @@ impl PushState {
 /// their stored order, and the best-ranked missing ones complete them.
 /// Without `cfg`, everything is cancelled and forgotten. When the
 /// configuration changed, every stored subscription is cancelled and every
-/// wanted mailbox subscribed afresh (the caller then calls `apply_config`). A mailbox of a past day is forgotten without
-/// unsubscribing.
+/// wanted mailbox subscribed afresh (the caller then calls `apply_config`).
+/// A mailbox of a past day is forgotten without unsubscribing. A wanted
+/// mailbox whose `ranked` list is empty keeps its stored nodes untouched
+/// (no cancel, no new subscription).
 pub fn plan_push(
     state: &PushState,
     cfg: Option<&PushConfig>,
@@ -274,6 +276,11 @@ pub fn plan_push(
             _ => &[],
         };
         let ranked = ranked(mailbox);
+        // No responsible known (a view without records): the ranking says
+        // nothing, the stored nodes stay as they are.
+        if ranked.is_empty() {
+            continue;
+        }
         let mut kept: Vec<NodeId> = Vec::new();
         for (node, secret) in stored {
             if kept.len() < WAKE_NODES && ranked.contains(node) && !state.left_out(node, now) {

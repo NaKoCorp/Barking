@@ -1870,28 +1870,6 @@ fn push_opts() -> SyncOptions {
     }
 }
 
-/// Adds nodes known by hand only (no record: never responsible, never
-/// asked by lookups) until the view reaches `SMALL_VIEW`: the push stage
-/// does not run on a smaller view.
-fn pad_view(core: &mut Core) {
-    let mut state = load(core);
-    let mut i = 0u8;
-    while state.view.len() < crate::SMALL_VIEW {
-        let addr = crate::test_support::addr(9, 9, i);
-        state
-            .view
-            .add_manual(NodeId([0xF0 ^ i; 32]), addr.into(), NOW);
-        i += 1;
-    }
-    state.save(core).unwrap();
-}
-
-fn push_setup() -> (TempDir, Core, Net) {
-    let (dir, mut core, net) = setup();
-    pad_view(&mut core);
-    (dir, core, net)
-}
-
 fn push_state(core: &Core) -> PushState {
     PushState::load(core).unwrap()
 }
@@ -1925,7 +1903,7 @@ fn horizon(core: &Core) -> Vec<(MailboxId, u32)> {
 
 #[tokio::test(start_paused = true)]
 async fn push_stage_runs_after_maintenance_and_saves_state() {
-    let (_dir, mut core, net) = push_setup();
+    let (_dir, mut core, net) = setup();
     let report = sync(&mut core, &net, push_opts()).await;
     let calls = net.calls();
     let subs = subscribes(&calls);
@@ -1970,7 +1948,7 @@ async fn push_stage_runs_after_maintenance_and_saves_state() {
 
 #[tokio::test(start_paused = true)]
 async fn no_push_config_sends_nothing_when_state_empty() {
-    let (_dir, mut core, net) = push_setup();
+    let (_dir, mut core, net) = setup();
     let report = sync(&mut core, &net, opts()).await;
     let calls = net.calls();
     assert!(subscribes(&calls).is_empty() && unsubscribes(&calls).is_empty());
@@ -1983,7 +1961,7 @@ async fn no_push_config_sends_nothing_when_state_empty() {
 
 #[tokio::test(start_paused = true)]
 async fn push_off_unsubscribes_everything() {
-    let (_dir, mut core, net) = push_setup();
+    let (_dir, mut core, net) = setup();
     let first = sync(&mut core, &net, push_opts()).await;
     net.calls.lock().unwrap().clear();
     let report = sync(&mut core, &net, opts()).await;
@@ -1998,7 +1976,7 @@ async fn push_off_unsubscribes_everything() {
 async fn unsupported_node_is_noted_and_skipped() {
     // No node announces wake support: nothing is sent, every node the plan
     // picked is left out.
-    let (_dir, mut core, mut net) = push_setup();
+    let (_dir, mut core, mut net) = setup();
     net.no_wake = net.records.keys().copied().collect();
     let report = sync(&mut core, &net, push_opts()).await;
     assert!(subscribes(&net.calls()).is_empty());
@@ -2009,7 +1987,7 @@ async fn unsupported_node_is_noted_and_skipped() {
 
     // Every node refuses with `Unsupported`: each is asked once, then left
     // out for the rest of the stage.
-    let (_dir, mut core, mut net) = push_setup();
+    let (_dir, mut core, mut net) = setup();
     for n in 0..NODES {
         net.refuse_subscribe
             .insert(id_of(n), ErrorReason::Unsupported);
@@ -2035,7 +2013,7 @@ async fn unsupported_node_is_noted_and_skipped() {
 
 #[tokio::test(start_paused = true)]
 async fn rate_limited_stops_the_stage() {
-    let (_dir, mut core, mut net) = push_setup();
+    let (_dir, mut core, mut net) = setup();
     for n in 0..NODES {
         net.refuse_subscribe
             .insert(id_of(n), ErrorReason::RateLimited);
@@ -2049,7 +2027,7 @@ async fn rate_limited_stops_the_stage() {
 
 #[tokio::test(start_paused = true)]
 async fn pow_budget_exhausted_stops_the_stage() {
-    let (_dir, mut core, mut net) = push_setup();
+    let (_dir, mut core, mut net) = setup();
     // Enough for the first copy and two subscriptions, not more.
     net.pow_cost = 10;
     let report = sync(
@@ -2077,7 +2055,7 @@ async fn pow_budget_exhausted_stops_the_stage() {
 
 #[tokio::test(start_paused = true)]
 async fn over_deadline_skips_the_stage() {
-    let (_dir, mut core, mut net) = push_setup();
+    let (_dir, mut core, mut net) = setup();
     net.deposit_delay = Duration::from_secs(1);
     let report = sync(
         &mut core,
@@ -2096,57 +2074,207 @@ async fn over_deadline_skips_the_stage() {
     );
 }
 
+/// Replaces `core`'s view by entries without any record: the 11 test
+/// nodes known by hand at their address, plus `extra` more, all confirmed.
+fn recordless_view(core: &mut Core, net: &Net, extra: u8) {
+    let mut state = NetState::new(true);
+    for (id, r) in &net.records {
+        state.view.add_manual(*id, r.addrs()[0], NOW);
+        state.view.confirm(id, NOW);
+    }
+    for i in 0..extra {
+        let id = NodeId([0xF0 ^ i; 32]);
+        state
+            .view
+            .add_manual(id, crate::test_support::addr(9, 9, i).into(), NOW);
+        state.view.confirm(&id, NOW);
+    }
+    state.save(core).unwrap();
+}
+
 #[tokio::test(start_paused = true)]
-async fn small_view_skips_the_stage_but_still_cancels() {
-    let (_dir, mut core, net) = push_setup();
+async fn cold_start_view_without_records_skips_the_stage_but_push_off_cancels() {
+    let (_dir, mut core, net) = setup();
     let first = sync(&mut core, &net, push_opts()).await;
     assert!(first.subscribed > 0);
     let before = push_state(&core);
-    let holders: HashSet<NodeId> = before
-        .subs
-        .values()
-        .flat_map(|b| b.nodes.iter().map(|(n, _)| *n))
-        .collect();
-    let full = core
-        .transport_state(crate::state::STATE_KEY)
-        .unwrap()
-        .unwrap();
-    // Cold start: the view holds 3 nodes, none of which holds a
-    // subscription. Planned on it, every subscription would be cancelled:
-    // with push on, nothing is sent and the state stays.
-    let mut state = load(&mut core);
-    let mut kept = 0;
-    state.view.entries.retain(|id, e| {
-        let keep = e.record.is_some() && !holders.contains(id) && kept < MIN_REACHABLE;
-        kept += usize::from(keep);
-        keep
-    });
-    state.save(&mut core).unwrap();
-    assert_eq!(load(&mut core).view.len(), MIN_REACHABLE);
-    net.calls.lock().unwrap().clear();
-    let report = sync(&mut core, &net, push_opts()).await;
-    let calls = net.calls();
-    assert!(subscribes(&calls).is_empty() && unsubscribes(&calls).is_empty());
-    assert_eq!((report.subscribed, report.unsubscribed), (0, 0));
-    assert_eq!(push_state(&core), before);
-    // Push off on a small view (the 11 nodes, no padding): the
-    // subscriptions are cancelled all the same.
-    core.set_transport_state(crate::state::STATE_KEY, &full)
-        .unwrap();
-    let mut state = load(&mut core);
-    state.view.entries.retain(|_, e| e.record.is_some());
-    state.save(&mut core).unwrap();
-    assert!(load(&mut core).view.len() < crate::SMALL_VIEW);
+    // Cold start: 23 entries, none with a record (more than `SMALL_VIEW`:
+    // the size of the view is no proof of a ranking).
+    recordless_view(&mut core, &net, 12);
+    assert!(load(&mut core).view.len() > crate::SMALL_VIEW);
+    // Push on, same configuration or a new token: nothing is sent, the
+    // state stays.
+    let new_token = SyncOptions {
+        push: Some(PushConfig {
+            apns_token: vec![0xCD; 32],
+            ..push_config()
+        }),
+        ..opts()
+    };
+    for o in [push_opts(), new_token] {
+        net.calls.lock().unwrap().clear();
+        let report = sync(&mut core, &net, o).await;
+        let calls = net.calls();
+        assert!(subscribes(&calls).is_empty() && unsubscribes(&calls).is_empty());
+        assert_eq!((report.subscribed, report.unsubscribed), (0, 0));
+        assert_eq!(push_state(&core), before);
+        assert!(
+            !load(&mut core)
+                .view
+                .entries()
+                .any(|(_, e)| e.record.is_some())
+        );
+    }
+    // Push off on the same view: the subscriptions are cancelled all the same.
     net.calls.lock().unwrap().clear();
     let report = sync(&mut core, &net, opts()).await;
     assert_eq!(unsubscribes(&net.calls()).len(), first.subscribed);
     assert_eq!(report.unsubscribed, first.subscribed);
+    let st = push_state(&core);
+    assert!(st.subs.is_empty() && st.config_hash.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn token_change_unsubscribes_then_resubscribes_in_one_sync() {
+    let (_dir, mut core, net) = setup();
+    let first = sync(&mut core, &net, push_opts()).await;
+    let old = push_state(&core);
+    let cfg = PushConfig {
+        apns_token: vec![0xCD; 32],
+        ..push_config()
+    };
+    net.calls.lock().unwrap().clear();
+    let report = sync(
+        &mut core,
+        &net,
+        SyncOptions {
+            push: Some(cfg.clone()),
+            ..opts()
+        },
+    )
+    .await;
+    let calls = net.calls();
+    let unsubs = positions_of(&calls, |c| matches!(c, Call::Unsubscribe(..)));
+    let subs = positions_of(&calls, |c| matches!(c, Call::Subscribe(..)));
+    assert_eq!(unsubs.len(), first.subscribed);
+    assert_eq!(subs.len(), first.subscribed);
+    assert!(unsubs.last().unwrap() < &subs[0]);
+    assert_eq!(
+        (report.unsubscribed, report.subscribed),
+        (first.subscribed, first.subscribed)
+    );
+    // `apply_config` ran: the new hash, fresh collapse labels and secrets.
+    let st = push_state(&core);
+    assert_eq!(st.config_hash, Some(PushState::config_hash_of(&cfg)));
+    assert_eq!(st.subs.len(), old.subs.len());
+    for (m, b) in &st.subs {
+        assert_eq!(b.nodes.len(), crate::push::WAKE_NODES);
+        assert_ne!(b.collapse, old.subs[m].collapse);
+        assert!(b.nodes.iter().all(|n| !old.subs[m].nodes.contains(n)));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unreached_unsubscribe_is_kept_and_retried() {
+    let (_dir, mut core, mut net) = setup();
+    let first = sync(&mut core, &net, push_opts()).await;
+    let before = push_state(&core);
+    let holder = before.subs.values().next().unwrap().nodes[0].0;
+    let held = |st: &PushState| -> usize {
+        st.subs
+            .values()
+            .filter(|b| b.nodes.iter().any(|(n, _)| *n == holder))
+            .count()
+    };
+    let holder_subs = held(&before);
+    assert!(holder_subs > 0);
+    // An expired subscription on the same node: never worth keeping.
+    let mut st = before.clone();
+    let today = barking_core::mailbox::day_of(NOW);
+    st.subs.insert(
+        MailboxId([0xEE; 16]),
+        crate::push::BoxSubs {
+            day: today - 2,
+            collapse: [1; 16],
+            nodes: vec![(holder, [3; 32])],
+        },
+    );
+    st.save(&mut core).unwrap();
+    // Push off while the node is unreachable: everything else is
+    // cancelled, its subscriptions are kept, the configuration is cleared.
+    net.down.insert(holder);
+    net.calls.lock().unwrap().clear();
+    let report = sync(&mut core, &net, opts()).await;
+    assert_eq!(report.unsubscribed, first.subscribed - holder_subs);
+    let st = push_state(&core);
+    assert_eq!(st.config_hash, None);
+    assert_eq!(held(&st), holder_subs);
+    assert!(
+        st.subs
+            .values()
+            .all(|b| b.nodes == vec![(holder, b.nodes[0].1)])
+    );
+    assert!(!st.subs.contains_key(&MailboxId([0xEE; 16])));
+    let kept = core
+        .transport_state(crate::push::PUSH_STATE_KEY)
+        .unwrap()
+        .unwrap();
+
+    // The node is back, push still off: the next sync cancels them.
+    net.down.clear();
+    net.calls.lock().unwrap().clear();
+    let report = sync(&mut core, &net, opts()).await;
+    assert_eq!(report.unsubscribed, holder_subs);
+    assert!(unsubscribes(&net.calls()).iter().all(|(n, _)| *n == holder));
     assert!(push_state(&core).subs.is_empty());
+
+    // Or push comes back on: they are cancelled first, then the mailboxes
+    // subscribed afresh.
+    core.set_transport_state(crate::push::PUSH_STATE_KEY, &kept)
+        .unwrap();
+    net.calls.lock().unwrap().clear();
+    let report = sync(&mut core, &net, push_opts()).await;
+    let calls = net.calls();
+    let unsubs = positions_of(&calls, |c| matches!(c, Call::Unsubscribe(..)));
+    let subs = positions_of(&calls, |c| matches!(c, Call::Subscribe(..)));
+    assert_eq!(
+        (unsubs.len(), report.unsubscribed),
+        (holder_subs, holder_subs)
+    );
+    assert!(unsubs.last().unwrap() < &subs[0]);
+    assert_eq!(report.subscribed, first.subscribed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn push_stage_leaves_scores_and_log_alone() {
+    let (_dir, mut core, mut net) = setup();
+    // Some nodes unreachable, others refusing: nothing of it is scored.
+    net.down.insert(id_of(0));
+    net.refuse_connect.insert(id_of(1));
+    net.refuse_subscribe
+        .insert(id_of(2), ErrorReason::MailboxFull);
+    net.refuse_subscribe
+        .insert(id_of(3), ErrorReason::Unsupported);
+    let scores =
+        |core: &mut Core| -> Vec<f32> { (0..NODES).map(|n| score_of(core, &id_of(n))).collect() };
+    let before = scores(&mut core);
+    let log_before = core.transparency_log(10_000).unwrap().len();
+    let cfg = push_config();
+    let mut run = run_on(&mut core, &net);
+    run.push_stage(Some(&cfg)).await;
+    assert!(run.report.subscribed > 0);
+    run.push_stage(None).await;
+    assert!(run.report.unsubscribed > 0);
+    run.save();
+    drop(run);
+    assert!(subscribes(&net.calls()).iter().any(|(n, _)| *n == id_of(2)));
+    assert_eq!(scores(&mut core), before);
+    assert_eq!(core.transparency_log(10_000).unwrap().len(), log_before);
 }
 
 #[tokio::test(start_paused = true)]
 async fn failed_node_is_skipped_for_the_rest_of_the_stage() {
-    let (_dir, mut core, mut net) = push_setup();
+    let (_dir, mut core, mut net) = setup();
     let wanted = horizon(&core);
     let view = load(&mut core).view;
     let x = view.responsibles_by_score(&wanted[0].0, NOW)[0];
