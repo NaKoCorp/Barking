@@ -311,7 +311,10 @@ impl Dht {
                     })
                     .await
                 {
-                    Stored::Done(Ok(())) => Stored::Done(Response::Ok),
+                    Stored::Done(Ok(())) => {
+                        shared.wake_notify.notify_one();
+                        Stored::Done(Response::Ok)
+                    }
                     Stored::Done(Err(r)) => err(r),
                     Stored::Busy => Stored::Busy,
                     Stored::Failed => Stored::Failed,

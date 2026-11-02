@@ -71,7 +71,7 @@ use barking_proto::{
 };
 use ed25519_dalek::SigningKey;
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
@@ -81,6 +81,8 @@ use crate::dht::{Dht, maintain};
 use crate::limits::{ConnectionSlot, GroupDbJob, LimitConfig, Limiter};
 use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
 use crate::store::NodeStore;
+use crate::wake::sender::{QuicWakeTransport, WakeSender};
+use crate::wake::{self, WakeConfig};
 use crate::{Error, Result};
 
 /// Interval between purges of expired items.
@@ -158,6 +160,11 @@ pub struct ServerConfig {
     /// table's addresses. Default: those of the spec. The network tests lift
     /// them, all their nodes sharing the /24 of 127.0.0.1.
     pub dht_diversity: DiversityLimits,
+    /// Wake subscriptions and wake-ups (`[wake]`).
+    pub wake: WakeConfig,
+    /// Allow wake-ups to relays on private addresses. Tests only, never read
+    /// from the configuration; default: false.
+    pub wake_allow_private: bool,
     /// Tests only (feature `test-harness`, never in a production build),
     /// never read from the configuration: answers `Ok` to `Deposit` and
     /// `Store` without keeping anything, as a node that loses messages
@@ -554,6 +561,8 @@ impl ServerConfig {
             dht: None,
             dht_tick: None,
             dht_diversity: DiversityLimits::SPEC,
+            wake: WakeConfig::default(),
+            wake_allow_private: false,
             #[cfg(feature = "test-harness")]
             test_swallow_deposits: false,
             #[cfg(feature = "test-harness")]
@@ -588,6 +597,11 @@ pub(crate) struct Shared {
     stats: Arc<ServerStats>,
     /// Hash table, if `[dht]` is configured.
     dht: Option<Arc<Dht>>,
+    wake: WakeConfig,
+    /// Signals the wake loop that a message arrived.
+    pub(crate) wake_notify: Notify,
+    /// `None` when wake-ups are disabled.
+    wake_sender: Option<WakeSender>,
     /// Tests only: see `ServerConfig::test_swallow_deposits`.
     #[cfg(feature = "test-harness")]
     swallow_deposits: bool,
@@ -839,6 +853,14 @@ pub async fn run(
         min_send_rate: config.min_send_rate,
         stats: Arc::clone(&config.stats),
         dht: dht.clone(),
+        wake: config.wake.clone(),
+        wake_notify: Notify::new(),
+        wake_sender: config.wake.enabled.then(|| {
+            WakeSender::spawn(
+                QuicWakeTransport::new(config.wake_allow_private),
+                Arc::clone(&config.stats),
+            )
+        }),
         #[cfg(feature = "test-harness")]
         swallow_deposits: config.test_swallow_deposits,
         #[cfg(feature = "test-harness")]
@@ -866,6 +888,9 @@ pub async fn run(
         ));
     }
     tasks.spawn(purge_loop(Arc::clone(&shared), stop_rx.clone()));
+    if shared.wake_sender.is_some() {
+        tasks.spawn(wake_loop(Arc::clone(&shared), stop_rx.clone()));
+    }
     if let Some(d) = &dht {
         tasks.spawn(replicate::run(
             Arc::clone(d),
@@ -907,6 +932,49 @@ async fn purge_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
                 }
             }
             _ = stop.changed() => return,
+        }
+    }
+}
+
+/// Sends the wake-ups of subscriptions marked by new messages: wakes on a
+/// notification, at the next due time, or every 30 s.
+/// Longest wait of the wake loop with nothing due.
+const WAKE_IDLE_POLL: Duration = Duration::from_secs(30);
+/// Wake-ups taken from the database per round.
+const WAKE_TAKE_BATCH: usize = 1000;
+
+async fn wake_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
+    let Some(sender) = shared.wake_sender.as_ref() else {
+        return;
+    };
+    loop {
+        // Rows already due have a due time in the past: clamp to now.
+        let sleep_for = match shared
+            .with_store(true, None, |s, _| wake::next_due(s))
+            .await
+        {
+            Stored::Done(Some(t)) => Duration::from_secs(t.saturating_sub(unix_now())),
+            _ => WAKE_IDLE_POLL,
+        };
+        tokio::select! {
+            () = shared.wake_notify.notified() => {}
+            () = tokio::time::sleep(sleep_for.min(WAKE_IDLE_POLL)) => {}
+            _ = stop.changed() => return,
+        }
+        loop {
+            let orders = match shared
+                .with_store(true, None, |s, _| {
+                    wake::take_due(s, unix_now(), WAKE_TAKE_BATCH)
+                })
+                .await
+            {
+                Stored::Done(o) => o,
+                _ => break,
+            };
+            if orders.is_empty() {
+                break;
+            }
+            sender.enqueue(orders);
         }
     }
 }
@@ -1210,8 +1278,7 @@ async fn hello(conn: &Connection, shared: &Arc<Shared>) -> bool {
                             max_mailboxes_per_fetch: MAX_MAILBOXES_PER_FETCH as u16,
                             max_request_bytes: MAX_REQUEST_BYTES as u32,
                             max_response_bytes: MAX_RESPONSE_BYTES as u32,
-                            // Temporary: wake subscriptions arrive with the node-side push work.
-                            wake: false,
+                            wake: shared.wake.enabled,
                         },
                     },
                     true,
@@ -1356,6 +1423,7 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
             {
                 Stored::Done(r) => Stored::Done(to_resp(r.map(|()| {
                     shared.stats.deposit_ok();
+                    shared.wake_notify.notify_one();
                     Response::Ok
                 }))),
                 Stored::Busy => Stored::Busy,
@@ -1382,10 +1450,35 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
                 Stored::Failed => Stored::Failed,
             }
         }
-        // Temporary: replaced when the node handles wake subscriptions.
-        Request::Subscribe { .. } | Request::Unsubscribe { .. } | Request::Wake { .. } => {
-            Stored::Done(Response::Error(ErrorReason::Unsupported))
+        Request::Subscribe { sub, pow } => {
+            let cfg = shared.wake.clone();
+            let bits = shared.policy.pow_bits;
+            match shared
+                .with_store(false, Some(group), move |s, _| {
+                    wake::subscribe(s, &cfg, bits, &sub, pow, unix_now())
+                })
+                .await
+            {
+                Stored::Done(r) => Stored::Done(to_resp(r.map(|()| Response::Ok))),
+                Stored::Busy => Stored::Busy,
+                Stored::Failed => Stored::Failed,
+            }
         }
+        Request::Unsubscribe {
+            mailbox,
+            cancel_secret,
+        } => match shared
+            .with_store(false, Some(group), move |s, _| {
+                wake::unsubscribe(s, &mailbox, &cancel_secret)
+            })
+            .await
+        {
+            Stored::Done(()) => Stored::Done(Response::Ok),
+            Stored::Busy => Stored::Busy,
+            Stored::Failed => Stored::Failed,
+        },
+        // A node is not a relay.
+        Request::Wake { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
         Request::Ping { .. }
         | Request::FindNode { .. }
         | Request::Store { .. }

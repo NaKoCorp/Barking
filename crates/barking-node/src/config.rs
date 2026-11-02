@@ -306,6 +306,7 @@ impl Config {
             max_connections_per_ipv4_24: self.max_connections_per_ipv4_24,
             ..LimitConfig::default()
         };
+        cfg.wake = self.wake.clone();
         cfg.max_response_bytes_in_flight = self.max_response_bytes_in_flight;
         cfg.max_response_bytes_per_ip = self.max_response_bytes_per_ip;
         cfg.max_db_jobs = self.max_db_jobs;

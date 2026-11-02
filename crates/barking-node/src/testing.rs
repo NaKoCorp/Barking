@@ -24,6 +24,7 @@ use tokio::time::timeout;
 
 use crate::config::{DEFAULT_REPLICATION_BYTES_PER_HOUR, DhtConfig};
 use crate::server::{self, ServerConfig, ServerStats};
+use crate::wake::WakeConfig;
 use crate::{NodeStore, Policy};
 
 /// Generous timeout for any test wait.
@@ -122,6 +123,10 @@ pub struct NodeSpec {
     pub response_delay: Option<Duration>,
     /// `ServerConfig::test_send_rate`.
     pub send_rate: Option<u64>,
+    /// `ServerConfig::wake`.
+    pub wake: WakeConfig,
+    /// `ServerConfig::wake_allow_private`: the fake relay is on 127.0.0.1.
+    pub wake_allow_private: bool,
 }
 
 impl NodeSpec {
@@ -137,6 +142,8 @@ impl NodeSpec {
             swallow_deposits: false,
             response_delay: None,
             send_rate: None,
+            wake: WakeConfig::default(),
+            wake_allow_private: false,
         }
     }
 }
@@ -241,6 +248,8 @@ fn launch(
     cfg.test_swallow_deposits = spec.swallow_deposits;
     cfg.test_response_delay = spec.response_delay;
     cfg.test_send_rate = spec.send_rate;
+    cfg.wake = spec.wake.clone();
+    cfg.wake_allow_private = spec.wake_allow_private;
     let stats = Arc::clone(&cfg.stats);
     let store = NodeStore::open(dir.path().join("node.db")).expect("node database");
     let (tx, rx) = oneshot::channel::<()>();
@@ -415,11 +424,19 @@ impl FakeRelay {
         // `SEEDS` works (the last one; `key(900)` does not exist).
         let k = key(SEEDS.len() - 1);
         let id = id_of(&k);
-        let ep = quinn::Endpoint::server(
-            barking_proto::tls::quinn_server_config(&k),
-            "127.0.0.1:0".parse().unwrap(),
-        )
-        .unwrap();
+        // Dual-stack when possible: a name such as `localhost` may resolve to
+        // `::1` before `127.0.0.1`, and a v4-only relay would then stall the
+        // sender until its connect timeout.
+        let ep = ["[::]:0", "127.0.0.1:0"]
+            .iter()
+            .find_map(|bind| {
+                quinn::Endpoint::server(
+                    barking_proto::tls::quinn_server_config(&k),
+                    bind.parse().unwrap(),
+                )
+                .ok()
+            })
+            .expect("binds a local UDP socket");
         let addr = ep.local_addr().unwrap();
         let received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::default();
         let log = received.clone();
