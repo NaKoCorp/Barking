@@ -1,5 +1,7 @@
 //! Wake subscriptions and wake-ups, end to end: real nodes, a fake relay.
 
+use std::io::Write;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_dht::{distance, mailbox_key};
@@ -12,6 +14,10 @@ use barking_packet::{DEFAULT_HOPS, Kind, MailboxId, Packet, PacketId, Tier, ack}
 use barking_proto::push::{ApnsEnv, Subscription, WakeToken, cancel_hash, open, seal};
 use barking_proto::{ErrorReason, Request, Response};
 use tokio::time::timeout;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const SEAL_KEY_ID: u8 = 1;
@@ -284,4 +290,97 @@ async fn wake_request_is_unsupported_on_a_node() {
         Response::Error(ErrorReason::Unsupported)
     );
     node.stop().await;
+}
+
+static LOGS: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+
+struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+impl Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Installs (once) a subscriber keeping every event of the node (wake loop
+/// and sender included) and of the protocol crate, at every level.
+fn capture_logs() -> Arc<Mutex<Vec<u8>>> {
+    Arc::clone(LOGS.get_or_init(|| {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buf);
+        let targets = Targets::new()
+            .with_target("barking_node", tracing::Level::TRACE)
+            .with_target("barking_proto", tracing::Level::TRACE);
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(move || LogSink(Arc::clone(&sink)))
+            .with_filter(targets);
+        tracing_subscriber::registry().with(layer).init();
+        buf
+    }))
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Spec §1, "Fuites": after a wake-up, no APNs token on the node's disk or in
+/// its logs, no mailbox id in the logs nor at the relay, no address in the
+/// logs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wake_leaks_no_token_mailbox_or_address() {
+    let logs = capture_logs();
+    let relay = FakeRelay::start().await;
+    let node = single(WakeConfig::default());
+    let mailbox = MailboxId([0x6A; 16]);
+    subscribe(&node, &subscription(&relay, mailbox, 1)).await;
+    let (msg, _) = message_and_ack(mailbox, [0x6A; 16]);
+    deposit(&node, &msg).await;
+    wait_received(&relay, 1, Duration::from_secs(5)).await;
+
+    let apns = token().apns_token;
+    let token_forms: Vec<Vec<u8>> = vec![
+        apns.clone(),
+        hex(&apns).into_bytes(),
+        hex(&apns).to_uppercase().into_bytes(),
+    ];
+    // The node's data directory: database and its journals.
+    let files = node.data_files();
+    assert!(!files.is_empty());
+    for (path, bytes) in &files {
+        for t in &token_forms {
+            assert!(!contains(bytes, t), "APNs token in {}", path.display());
+        }
+    }
+    // What the relay received: sealed tokens only.
+    for item in relay.received() {
+        assert!(!contains(&item, &mailbox.0), "mailbox id sent to the relay");
+        assert!(!contains(&item, &apns), "APNs token in clear to the relay");
+    }
+    node.stop().await;
+    relay.stop();
+    let text = String::from_utf8_lossy(&logs.lock().unwrap()).into_owned();
+    assert!(!text.is_empty(), "no log captured");
+    let mailbox_debug = format!("{:?}", mailbox.0);
+    for needle in [
+        hex(&apns),
+        hex(&apns).to_uppercase(),
+        hex(&mailbox.0),
+        hex(&mailbox.0).to_uppercase(),
+        mailbox_debug[1..mailbox_debug.len() - 1].to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+        "localhost".to_string(),
+    ] {
+        assert!(!text.contains(&needle), "{needle} in the logs:\n{text}");
+    }
+    assert!(!contains(text.as_bytes(), &apns));
 }

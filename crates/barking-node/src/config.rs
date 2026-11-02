@@ -430,6 +430,24 @@ mod tests {
     }
 
     #[test]
+    fn deploy_example_parses_with_wake_section() {
+        let text = include_str!("../../../docs/deploy/barking-node.toml");
+        assert_eq!(Config::parse(text).unwrap().wake, WakeConfig::default());
+        let on: String = text
+            .lines()
+            .map(|l| match l.strip_prefix("# ") {
+                Some(r) if r == "[wake]" || r.starts_with("enabled") => r,
+                Some(r) if r == "max_subscriptions = 1000000" => r,
+                _ => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let w = Config::parse(&on).unwrap().wake;
+        assert!(w.enabled);
+        assert_eq!(w.max_subscriptions, 1_000_000);
+    }
+
+    #[test]
     fn bounds_are_enforced() {
         for bad in [
             "pow_bits = 0",

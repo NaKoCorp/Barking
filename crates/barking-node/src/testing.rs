@@ -179,6 +179,19 @@ impl TestNode {
         crate::wake::next_due(&store).expect("next_due reads")
     }
 
+    /// Path and contents of every file of the node's data directory (the
+    /// database and its journals).
+    pub fn data_files(&self) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        std::fs::read_dir(self.dir.path())
+            .expect("data directory lists")
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                let bytes = std::fs::read(&path).ok()?;
+                Some((path, bytes))
+            })
+            .collect()
+    }
+
     pub fn entry(&self) -> BootstrapEntry {
         BootstrapEntry {
             id: self.id,

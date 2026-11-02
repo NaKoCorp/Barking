@@ -941,24 +941,35 @@ const WAKE_IDLE_POLL: Duration = Duration::from_secs(30);
 /// Wait after a failed database read or write, whatever is due: no hot loop
 /// on a full or read-only database.
 const WAKE_ERROR_BACKOFF: Duration = Duration::from_secs(5);
+/// Wait after the database queue was full: the queue empties quickly.
+const WAKE_BUSY_RETRY: Duration = Duration::from_millis(200);
 /// Wake-ups taken from the database per round.
 const WAKE_TAKE_BATCH: usize = 1000;
 
+/// Wait before the wake loop reads the database again after `take_due` did
+/// not complete: a full queue is retried soon, a failure after a backoff.
+fn wake_retry_after<T>(stored: &Stored<T>) -> Duration {
+    match stored {
+        Stored::Busy => WAKE_BUSY_RETRY,
+        Stored::Done(_) | Stored::Failed => WAKE_ERROR_BACKOFF,
+    }
+}
+
 /// Sends the wake-ups of subscriptions marked by new messages: wakes on a
-/// notification, at the next due time, or every 30 s; after a database
-/// failure, retries only after `WAKE_ERROR_BACKOFF`.
+/// notification, at the next due time, or every 30 s; after a full database
+/// queue, retries after `WAKE_BUSY_RETRY`, after a database failure only
+/// after `WAKE_ERROR_BACKOFF`.
 async fn wake_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let Some(sender) = shared.wake_sender.as_ref() else {
         return;
     };
-    let mut failed = false;
+    let mut retry: Option<Duration> = None;
     loop {
-        if failed {
+        if let Some(wait) = retry.take() {
             tokio::select! {
-                () = tokio::time::sleep(WAKE_ERROR_BACKOFF) => {}
+                () = tokio::time::sleep(wait) => {}
                 _ = stop.changed() => return,
             }
-            failed = false;
         } else {
             // Rows already due have a due time in the past: clamp to now.
             let sleep_for = match shared
@@ -982,8 +993,8 @@ async fn wake_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
                 .await
             {
                 Stored::Done(o) => o,
-                _ => {
-                    failed = true;
+                other => {
+                    retry = Some(wake_retry_after(&other));
                     break;
                 }
             };
@@ -1516,6 +1527,13 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_loop_retries_busy_quickly_and_backs_off_on_failure() {
+        assert_eq!(wake_retry_after(&Stored::<()>::Busy), WAKE_BUSY_RETRY);
+        assert_eq!(WAKE_BUSY_RETRY, Duration::from_millis(200));
+        assert_eq!(wake_retry_after(&Stored::<()>::Failed), WAKE_ERROR_BACKOFF);
+    }
 
     #[test]
     fn report_drains_counters_and_peaks() {
