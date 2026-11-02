@@ -61,6 +61,34 @@ fn int(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
+/// Checks a subscription without touching the database: enabled, shape, day
+/// bounds and proof of work. `subscribe` runs it again, authoritatively.
+pub(crate) fn precheck(
+    cfg: &WakeConfig,
+    base_bits: u8,
+    sub: &Subscription,
+    pow_nonce: u64,
+    now: u64,
+) -> core::result::Result<(), ErrorReason> {
+    if !cfg.enabled {
+        return Err(ErrorReason::Unsupported);
+    }
+    if sub.sealed.is_empty() || sub.sealed.len() > MAX_SEALED || !sub.relay.well_formed() {
+        return Err(ErrorReason::Malformed);
+    }
+    let today = day_of(now);
+    if sub.expires_day < today {
+        return Err(ErrorReason::Expired);
+    }
+    if sub.expires_day > today.saturating_add(MAX_EXPIRY_DAYS) {
+        return Err(ErrorReason::TooFarInFuture);
+    }
+    if !pow::check(&subscription_hash(sub), &sub.mailbox, pow_nonce, base_bits) {
+        return Err(ErrorReason::PowTooWeak);
+    }
+    Ok(())
+}
+
 /// Stores (or replaces) a subscription. `Ok(Err(reason))`: refusal.
 pub fn subscribe(
     store: &mut NodeStore,
@@ -70,21 +98,8 @@ pub fn subscribe(
     pow_nonce: u64,
     now: u64,
 ) -> Result<core::result::Result<(), ErrorReason>> {
-    if !cfg.enabled {
-        return Ok(Err(ErrorReason::Unsupported));
-    }
-    if sub.sealed.is_empty() || sub.sealed.len() > MAX_SEALED || !sub.relay.well_formed() {
-        return Ok(Err(ErrorReason::Malformed));
-    }
-    let today = day_of(now);
-    if sub.expires_day < today {
-        return Ok(Err(ErrorReason::Expired));
-    }
-    if sub.expires_day > today.saturating_add(MAX_EXPIRY_DAYS) {
-        return Ok(Err(ErrorReason::TooFarInFuture));
-    }
-    if !pow::check(&subscription_hash(sub), &sub.mailbox, pow_nonce, base_bits) {
-        return Ok(Err(ErrorReason::PowTooWeak));
+    if let Err(r) = precheck(cfg, base_bits, sub, pow_nonce, now) {
+        return Ok(Err(r));
     }
     let relay = postcard::to_allocvec(&sub.relay).expect("a relay reference always encodes");
     let tx = store.conn_mut().transaction()?;

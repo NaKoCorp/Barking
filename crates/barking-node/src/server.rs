@@ -936,30 +936,43 @@ async fn purge_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     }
 }
 
-/// Sends the wake-ups of subscriptions marked by new messages: wakes on a
-/// notification, at the next due time, or every 30 s.
 /// Longest wait of the wake loop with nothing due.
 const WAKE_IDLE_POLL: Duration = Duration::from_secs(30);
+/// Wait after a failed database read or write, whatever is due: no hot loop
+/// on a full or read-only database.
+const WAKE_ERROR_BACKOFF: Duration = Duration::from_secs(5);
 /// Wake-ups taken from the database per round.
 const WAKE_TAKE_BATCH: usize = 1000;
 
+/// Sends the wake-ups of subscriptions marked by new messages: wakes on a
+/// notification, at the next due time, or every 30 s; after a database
+/// failure, retries only after `WAKE_ERROR_BACKOFF`.
 async fn wake_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let Some(sender) = shared.wake_sender.as_ref() else {
         return;
     };
+    let mut failed = false;
     loop {
-        // Rows already due have a due time in the past: clamp to now.
-        let sleep_for = match shared
-            .with_store(true, None, |s, _| wake::next_due(s))
-            .await
-        {
-            Stored::Done(Some(t)) => Duration::from_secs(t.saturating_sub(unix_now())),
-            _ => WAKE_IDLE_POLL,
-        };
-        tokio::select! {
-            () = shared.wake_notify.notified() => {}
-            () = tokio::time::sleep(sleep_for.min(WAKE_IDLE_POLL)) => {}
-            _ = stop.changed() => return,
+        if failed {
+            tokio::select! {
+                () = tokio::time::sleep(WAKE_ERROR_BACKOFF) => {}
+                _ = stop.changed() => return,
+            }
+            failed = false;
+        } else {
+            // Rows already due have a due time in the past: clamp to now.
+            let sleep_for = match shared
+                .with_store(true, None, |s, _| wake::next_due(s))
+                .await
+            {
+                Stored::Done(Some(t)) => Duration::from_secs(t.saturating_sub(unix_now())),
+                _ => WAKE_IDLE_POLL,
+            };
+            tokio::select! {
+                () = shared.wake_notify.notified() => {}
+                () = tokio::time::sleep(sleep_for.min(WAKE_IDLE_POLL)) => {}
+                _ = stop.changed() => return,
+            }
         }
         loop {
             let orders = match shared
@@ -969,7 +982,10 @@ async fn wake_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
                 .await
             {
                 Stored::Done(o) => o,
-                _ => break,
+                _ => {
+                    failed = true;
+                    break;
+                }
             };
             if orders.is_empty() {
                 break;
@@ -1453,6 +1469,11 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
         Request::Subscribe { sub, pow } => {
             let cfg = shared.wake.clone();
             let bits = shared.policy.pow_bits;
+            // Refused before taking a slot in the database queue;
+            // `wake::subscribe` stays the authoritative check.
+            if let Err(r) = wake::precheck(&cfg, bits, &sub, pow, unix_now()) {
+                return Stored::Done(Response::Error(r));
+            }
             match shared
                 .with_store(false, Some(group), move |s, _| {
                     wake::subscribe(s, &cfg, bits, &sub, pow, unix_now())

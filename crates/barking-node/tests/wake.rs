@@ -174,6 +174,9 @@ async fn replicated_copy_wakes_once() {
     tokio::time::sleep(Duration::from_secs(4)).await;
     let got = relay.received();
     assert_eq!(got.len(), 2, "one wake-up per subscription, no more");
+    // Nothing is left pending on A or B (a late extra mark would show here).
+    assert_eq!(nodes[a].wake_next_due(), None);
+    assert_eq!(nodes[b].wake_next_due(), None);
     for sealed in &got {
         assert_eq!(opened(sealed).unwrap().collapse, COLLAPSE);
     }
@@ -186,13 +189,43 @@ async fn ack_never_wakes() {
     let relay = FakeRelay::start().await;
     let node = single(WakeConfig::default());
     let mailbox = MailboxId([0x63; 16]);
-    subscribe(&node, &subscription(&relay, mailbox, 1)).await;
+    // The message arrives before the subscription: it marks nothing, and the
+    // subscription has never been woken, so a wrongly marked ack would be due
+    // at once (no rate-limit shadow).
     let (msg, ack) = message_and_ack(mailbox, [0x63; 16]);
     deposit(&node, &msg).await;
-    wait_received(&relay, 1, Duration::from_secs(5)).await;
+    subscribe(&node, &subscription(&relay, mailbox, 1)).await;
+    assert_eq!(node.wake_next_due(), None, "nothing pending before the ack");
     deposit(&node, &ack).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert_eq!(relay.received().len(), 1);
+    assert_eq!(relay.received().len(), 0);
+    assert_eq!(
+        node.wake_next_due(),
+        None,
+        "an ack must not mark a subscription"
+    );
+    relay.stop();
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscribe_refusals_through_client() {
+    let relay = FakeRelay::start().await;
+    let node = single(WakeConfig::default());
+    let mut s = anon(&node).await;
+    let mut sub = subscription(&relay, MailboxId([0x66; 16]), 1);
+    sub.relay.host = "127.0.0.1".to_string();
+    assert_eq!(
+        s.subscribe(&sub).await.unwrap(),
+        Err(ErrorReason::Malformed)
+    );
+    let mut sub = subscription(&relay, MailboxId([0x66; 16]), 1);
+    sub.expires_day = today() + 30;
+    assert_eq!(
+        s.subscribe(&sub).await.unwrap(),
+        Err(ErrorReason::TooFarInFuture)
+    );
+    s.close().await;
     relay.stop();
     node.stop().await;
 }

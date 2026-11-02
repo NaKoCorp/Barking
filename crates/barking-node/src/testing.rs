@@ -171,6 +171,14 @@ pub struct StoppedNode {
 }
 
 impl TestNode {
+    /// Earliest time a pending wake-up becomes due, read from the node's
+    /// database (`None`: no subscription is pending).
+    pub fn wake_next_due(&self) -> Option<u64> {
+        let store = NodeStore::open_read_only(self.dir.path().join("node.db"))
+            .expect("node database opens read-only");
+        crate::wake::next_due(&store).expect("next_due reads")
+    }
+
     pub fn entry(&self) -> BootstrapEntry {
         BootstrapEntry {
             id: self.id,
@@ -414,7 +422,7 @@ pub struct FakeRelay {
     id: NodeId,
     received: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
     conns: Arc<std::sync::Mutex<Vec<quinn::Connection>>>,
-    task: JoinHandle<()>,
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl FakeRelay {
@@ -424,71 +432,79 @@ impl FakeRelay {
         // `SEEDS` works (the last one; `key(900)` does not exist).
         let k = key(SEEDS.len() - 1);
         let id = id_of(&k);
-        // Dual-stack when possible: a name such as `localhost` may resolve to
-        // `::1` before `127.0.0.1`, and a v4-only relay would then stall the
-        // sender until its connect timeout.
-        let ep = ["[::]:0", "127.0.0.1:0"]
-            .iter()
-            .find_map(|bind| {
-                quinn::Endpoint::server(
-                    barking_proto::tls::quinn_server_config(&k),
-                    bind.parse().unwrap(),
-                )
-                .ok()
-            })
-            .expect("binds a local UDP socket");
+        // One endpoint per family on the same port (no reliance on the
+        // dual-stack default of the host): a name such as `localhost` may
+        // resolve to `::1` before `127.0.0.1`, and a relay serving only one of
+        // them would stall the sender until its connect timeout.
+        let ep = quinn::Endpoint::server(
+            barking_proto::tls::quinn_server_config(&k),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .expect("binds a local UDP socket");
         let addr = ep.local_addr().unwrap();
         let received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::default();
         let log = received.clone();
         let conns: Arc<std::sync::Mutex<Vec<quinn::Connection>>> = Arc::default();
         let kept = conns.clone();
-        let task = tokio::spawn(async move {
-            while let Some(incoming) = ep.accept().await {
-                let log = log.clone();
-                let kept = kept.clone();
-                tokio::spawn(async move {
-                    let Ok(conn) = incoming.await else { return };
-                    kept.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(conn.clone());
-                    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                        let Ok(req) = frame::read::<Request>(&mut recv, MAX_REQUEST_BYTES).await
-                        else {
-                            return;
-                        };
-                        let resp = match req {
-                            Request::Hello { .. } => Response::Hello {
-                                version: 1,
-                                min_version: 1,
-                                node_id: id,
-                                pow_bits: TEST_BITS,
-                                limits: barking_proto::Limits {
-                                    max_mailboxes_per_fetch: 1,
-                                    max_request_bytes: MAX_REQUEST_BYTES as u32,
-                                    max_response_bytes: MAX_RESPONSE_BYTES as u32,
-                                    wake: false,
+        let port = addr.port();
+        let ep6 = quinn::Endpoint::server(
+            barking_proto::tls::quinn_server_config(&k),
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)),
+        )
+        .ok();
+        let mut tasks = Vec::new();
+        for ep in std::iter::once(ep).chain(ep6) {
+            let log = log.clone();
+            let kept = kept.clone();
+            tasks.push(tokio::spawn(async move {
+                while let Some(incoming) = ep.accept().await {
+                    let log = log.clone();
+                    let kept = kept.clone();
+                    tokio::spawn(async move {
+                        let Ok(conn) = incoming.await else { return };
+                        kept.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(conn.clone());
+                        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                            let Ok(req) =
+                                frame::read::<Request>(&mut recv, MAX_REQUEST_BYTES).await
+                            else {
+                                return;
+                            };
+                            let resp = match req {
+                                Request::Hello { .. } => Response::Hello {
+                                    version: 1,
+                                    min_version: 1,
+                                    node_id: id,
+                                    pow_bits: TEST_BITS,
+                                    limits: barking_proto::Limits {
+                                        max_mailboxes_per_fetch: 1,
+                                        max_request_bytes: MAX_REQUEST_BYTES as u32,
+                                        max_response_bytes: MAX_RESPONSE_BYTES as u32,
+                                        wake: false,
+                                    },
                                 },
-                            },
-                            Request::Wake { items } => {
-                                log.lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .extend(items);
-                                Response::Ok
-                            }
-                            _ => Response::Error(barking_proto::ErrorReason::Unsupported),
-                        };
-                        let _ = frame::write(&mut send, &resp, MAX_RESPONSE_BYTES).await;
-                        let _ = send.finish();
-                    }
-                });
-            }
-        });
+                                Request::Wake { items } => {
+                                    log.lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .extend(items);
+                                    Response::Ok
+                                }
+                                _ => Response::Error(barking_proto::ErrorReason::Unsupported),
+                            };
+                            let _ = frame::write(&mut send, &resp, MAX_RESPONSE_BYTES).await;
+                            let _ = send.finish();
+                        }
+                    });
+                }
+            }));
+        }
         FakeRelay {
             addr,
             id,
             received,
             conns,
-            task,
+            tasks,
         }
     }
 
@@ -523,7 +539,9 @@ impl FakeRelay {
     }
 
     pub fn stop(self) {
-        self.task.abort();
+        for t in &self.tasks {
+            t.abort();
+        }
     }
 }
 
