@@ -1,0 +1,24 @@
+[package]
+name = "barking-push"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+barking-proto.workspace = true
+blake3.workspace = true
+data-encoding.workspace = true
+ed25519-dalek.workspace = true
+quinn.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+
+[dev-dependencies]
+rand.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
