@@ -77,6 +77,26 @@ test = false
 doc = false
 bench = false
 
+# Decoding arbitrary link files (offer, request, bundle, history archive)
+# must never panic.
+# Run: cd crates/barking-core/fuzz && cargo fuzz run link_files
+[[bin]]
+name = "link_files"
+path = "fuzz_targets/link_files.rs"
+test = false
+doc = false
+bench = false
+
+# Decoding an arbitrary contact card (text form or stored bytes) must never
+# panic.
+# Run: cd crates/barking-core/fuzz && cargo fuzz run card_text
+[[bin]]
+name = "card_text"
+path = "fuzz_targets/card_text.rs"
+test = false
+doc = false
+bench = false
+
 # Not a fuzzing target: writes the initial corpus.
 [[bin]]
 name = "seed"

@@ -371,7 +371,7 @@ fn positions_of(calls: &[Call], pred: impl Fn(&Call) -> bool) -> Vec<usize> {
 #[tokio::test(start_paused = true)]
 async fn sync_order_sessions_then_deposits_then_intro_then_maintenance() {
     let (_dir, mut core, net) = setup();
-    let groups = core.watched_mailbox_groups(NOW);
+    let groups = core.watched_mailbox_groups(NOW).unwrap();
     assert!(!groups.sessions.is_empty() && !groups.intro.is_empty());
     let report = sync(&mut core, &net, opts()).await;
     let calls = net.calls();
@@ -400,7 +400,7 @@ async fn sync_order_sessions_then_deposits_then_intro_then_maintenance() {
 async fn first_copy_before_any_maintenance_under_tight_deadline() {
     let (_dir, mut core, mut net) = setup();
     net.deposit_delay = Duration::from_secs(1);
-    let groups = core.watched_mailbox_groups(NOW);
+    let groups = core.watched_mailbox_groups(NOW).unwrap();
     let report = sync(
         &mut core,
         &net,
@@ -434,7 +434,7 @@ fn no_crosschecks(core: &mut Core, mailboxes: &[MailboxId]) {
 #[tokio::test(start_paused = true)]
 async fn fetch_groups_mailboxes_by_best_responsible() {
     let (_dir, mut core, net) = setup();
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     // The second closest node of the first mailbox scores higher than the
     // closest: it becomes the best responsible.
     let mut state = load(&mut core);
@@ -463,7 +463,7 @@ async fn fetch_groups_mailboxes_by_best_responsible() {
 #[tokio::test(start_paused = true)]
 async fn second_responsible_on_failure_or_truncation() {
     let (_dir, mut core, mut net) = setup();
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let m = sessions[0];
     let r = load(&mut core).view.responsibles_by_score(&m, NOW);
     // Best responsible unreachable, the second truncates: the third serves.
@@ -488,7 +488,7 @@ async fn second_responsible_on_failure_or_truncation() {
 #[tokio::test(start_paused = true)]
 async fn crosscheck_reads_another_responsible_every_six_hours() {
     let (_dir, mut core, mut net) = setup();
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let m = sessions[0];
     let mut state = load(&mut core);
     let r = state.view.responsibles_by_score(&m, NOW);
@@ -643,7 +643,7 @@ async fn state_saved_after_each_response() {
     let (_dir, mut core, mut net) = setup();
     net.position = 7;
     net.stall_deposit_from = Some(1);
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let cut = tokio::time::timeout(Duration::from_secs(60), sync(&mut core, &net, opts())).await;
     assert!(
         cut.is_err(),
@@ -674,17 +674,38 @@ async fn state_saved_after_each_response() {
 async fn mark_polled_only_when_all_sessions_polled() {
     let (_dir, mut core, mut net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).intro.len();
+    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
     // Every node truncates: no session mailbox is fetched in full.
     net.truncate = all_nodes(&net, FetchStop::Connection);
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.network_up && !report.polled_all_sessions);
-    assert_eq!(core.watched_mailbox_groups(NOW).intro.len(), wide);
+    assert_eq!(core.watched_mailbox_groups(NOW).unwrap().intro.len(), wide);
 
     net.truncate.clear();
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.polled_all_sessions);
-    assert!(core.watched_mailbox_groups(NOW).intro.len() < wide);
+    assert!(core.watched_mailbox_groups(NOW).unwrap().intro.len() < wide);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unreadable_watch_list_aborts_without_mark_polled() {
+    use barking_core::store::{Queries, Store};
+    let (dir, mut core, net) = setup();
+    core.mark_polled(NOW - 5 * DAY).unwrap();
+    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
+    let raw = Store::open(&dir.path().join("bob.db"), &[2; 32]).unwrap();
+    raw.conn()
+        .execute_batch("ALTER TABLE sessions RENAME TO sessions_gone;")
+        .unwrap();
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.error.is_some());
+    assert!(!report.polled_all_sessions);
+    assert!(!net.calls().iter().any(|c| matches!(c, Call::Fetch(..))));
+    // The poll date did not move: restored, the window is as wide as before.
+    raw.conn()
+        .execute_batch("ALTER TABLE sessions_gone RENAME TO sessions;")
+        .unwrap();
+    assert_eq!(core.watched_mailbox_groups(NOW).unwrap().intro.len(), wide);
 }
 
 #[tokio::test(start_paused = true)]
@@ -713,7 +734,7 @@ async fn never_completing_node_fails_after_three_syncs() {
     let (_dir, mut core, mut net) = setup();
     net.refuse_finds = true;
     net.truncate = all_nodes(&net, FetchStop::Connection);
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let node = load(&mut core)
         .view
         .responsibles_by_score(&sessions[0], NOW)[0];
@@ -874,7 +895,7 @@ async fn receipt_in_the_fetch_prevents_a_loss() {
 /// and second (after `y`, scored 0.9) for another session mailbox `m2`.
 fn two_groups(core: &mut Core) -> (NodeId, NodeId, MailboxId) {
     let (_, m) = message(core);
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let mut state = load(core);
     let rm = state.view.responsibles(&m, NOW);
     for m2 in sessions.iter().filter(|s| **s != m) {
@@ -1052,7 +1073,7 @@ async fn first_contact_receipt_leaves_in_the_same_sync() {
     let fb = carol
         .add_contact(&card_b, Some("bob"), NOW, &mut rng)
         .unwrap();
-    let intro = core.watched_mailbox_groups(NOW).intro;
+    let intro = core.watched_mailbox_groups(NOW).unwrap().intro;
     for p in carol.send_text(&fb, "first", NOW, &mut rng).unwrap() {
         assert!(intro.contains(&p.mailbox));
         net.mailbox_items
@@ -1171,7 +1192,7 @@ async fn client_cap_truncation_does_not_count_as_never_completing() {
 #[tokio::test(start_paused = true)]
 async fn large_reread_neither_starves_group_mates_nor_counts() {
     let (_dir, mut core, mut net) = setup();
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let (bytes, m) = message(&mut core);
     let x = load(&mut core).view.responsibles_by_score(&m, NOW)[0];
     accepted_by(&mut core, x, &bytes);
@@ -1271,7 +1292,7 @@ fn rereads_of(calls: &[Call], node: NodeId, m: MailboxId) -> Vec<usize> {
 /// Bob's core with the message accepted by its best responsible `x`, and
 /// every session mailbox positioned on `x`.
 fn due_reread(core: &mut Core) -> (NodeId, MailboxId, Vec<u8>) {
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let (bytes, m) = message(core);
     let x = load(core).view.responsibles_by_score(&m, NOW)[0];
     accepted_by(core, x, &bytes);
@@ -1290,8 +1311,8 @@ fn due_reread(core: &mut Core) -> (NodeId, MailboxId, Vec<u8>) {
 async fn slow_reread_waits_for_every_regular_fetch_and_mark_polled() {
     let (_dir, mut core, mut net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).intro.len();
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let (x, m, _) = due_reread(&mut core);
     // The re-read would take longer than the whole session slice.
     net.reread_delay.insert(m, Duration::from_secs(200));
@@ -1311,7 +1332,7 @@ async fn slow_reread_waits_for_every_regular_fetch_and_mark_polled() {
     );
     assert!(regular.iter().all(|(i, _)| *i < reread[0]));
     assert!(report.polled_all_sessions);
-    assert!(core.watched_mailbox_groups(NOW).intro.len() < wide);
+    assert!(core.watched_mailbox_groups(NOW).unwrap().intro.len() < wide);
     // The re-read was cut by its own cap, and dated.
     let state = load(&mut core);
     assert!(state.reread_at.contains_key(&(x, m)));
@@ -1447,7 +1468,7 @@ async fn slow_builtin_seed_joins_on_a_slow_link() {
 /// on, in the same sync.
 fn fetched_then_deposited(core: &mut Core) -> (NodeId, Vec<u8>) {
     let (bytes, m) = message(core);
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let mut state = load(core);
     let x = state
         .view
@@ -1501,7 +1522,7 @@ async fn request_on_a_dead_kept_session_redials_once() {
 #[tokio::test(start_paused = true)]
 async fn page_size_reached_is_carried_to_the_next_sync() {
     let (_dir, mut core, mut net) = setup();
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let x = load(&mut core)
         .view
         .responsibles_by_score(&sessions[0], NOW)[0];
@@ -1542,7 +1563,7 @@ fn first_pages_to(net: &Net, x: NodeId) -> Option<u32> {
 async fn forced_page_shrink_recovers_across_syncs() {
     use barking_proto::client::FETCH_PAGE_SIZES;
     let (_dir, mut core, mut net) = setup();
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let x = load(&mut core)
         .view
         .responsibles_by_score(&sessions[0], NOW)[0];
@@ -1569,7 +1590,7 @@ async fn forced_page_shrink_recovers_across_syncs() {
 #[tokio::test(start_paused = true)]
 async fn page_size_confirmed_by_timeouts_stays() {
     let (_dir, mut core, mut net) = setup();
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let x = load(&mut core)
         .view
         .responsibles_by_score(&sessions[0], NOW)[0];
@@ -1602,7 +1623,7 @@ async fn paced_fetch_counts_as_never_completing() {
     for _ in 0..UNAUDITED_SYNCS {
         sync(&mut core, &net, opts()).await;
     }
-    let sessions = core.watched_mailbox_groups(NOW).sessions;
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let node = load(&mut core)
         .view
         .responsibles_by_score(&sessions[0], NOW)[0];

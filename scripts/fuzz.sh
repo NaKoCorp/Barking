@@ -2,14 +2,15 @@
 # Fuzzing of barking-core and of barking-proto frames, entirely in Docker (nothing is installed on the host).
 # Usage: scripts/fuzz.sh [target|all] [seconds]      (default: all 300)
 # Targets: packet_decode, reassemble, receive, receive_frame, proto_frame (node protocol frames),
-# dht_response (filtering of `Nodes` responses of the hash table).
+# dht_response (filtering of `Nodes` responses of the hash table), link_files (offer, request,
+# bundle and history archive files), card_text (contact cards, text form and stored bytes).
 # The versioned corpus (crates/barking-core/fuzz/corpus/<target>/) only contains seeds; discovered
 # inputs live in a Docker volume, without dirtying the repository. A crash leaves its
 # artifact in crates/barking-core/fuzz/artifacts/<target>/ and makes the script exit with an error.
 set -euo pipefail
 
 racine="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cibles_connues=(packet_decode reassemble receive receive_frame proto_frame dht_response)
+cibles_connues=(packet_decode reassemble receive receive_frame proto_frame dht_response link_files card_text)
 
 erreur() { echo "error: $*" >&2; exit 1; }
 usage() { echo "Usage: $0 [target|all] [seconds]   (targets: ${cibles_connues[*]})"; }

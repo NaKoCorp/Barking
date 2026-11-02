@@ -113,6 +113,13 @@ pub enum TransparencyEvent {
         node: String,
         reason: AvoidReason,
     },
+    /// A packet was not sealed for one device of a contact (or of mine):
+    /// its published keys are unusable. The other devices still get
+    /// theirs. Added last.
+    SealSkipped {
+        contact: Fingerprint,
+        device: DeviceId,
+    },
 }
 
 /// Why a node was set aside.
@@ -357,6 +364,11 @@ impl TransparencyEvent {
                 };
                 format!("Node {node} is set aside for 7 days: {why}.")
             }
+            Self::SealSkipped { contact, device } => format!(
+                "Nothing was encrypted for device {} of {contact}: its published keys \
+                 are unusable. Its other devices still receive the packet.",
+                hex(&device.0[..4])
+            ),
         }
     }
 }
@@ -515,6 +527,10 @@ mod tests {
             TransparencyEvent::NodeAvoided {
                 node: "ABCDEFGH".into(),
                 reason: AvoidReason::Unreachable,
+            },
+            TransparencyEvent::SealSkipped {
+                contact: fp(8),
+                device: DeviceId([9; 16]),
             },
         ]
     }

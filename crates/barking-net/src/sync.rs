@@ -238,7 +238,8 @@ pub struct SyncReport {
     pub pow_exhausted: bool,
     /// Maintenance of the view ran.
     pub maintenance_done: bool,
-    /// Local error that stopped the sync (the state could not be read).
+    /// Local error that stopped the sync (the network state or the watch
+    /// list could not be read).
     pub error: Option<String>,
     /// The stored network state was unreadable and replaced by an empty one
     /// (nodes added by hand included): worth telling the user.
@@ -424,7 +425,15 @@ where
             self.save();
         }
 
-        let groups = self.core.watched_mailbox_groups(now);
+        // A store read error aborts the sync: polling a partial list, then
+        // `mark_polled`, would skip unread session mailboxes for good.
+        let groups = match self.core.watched_mailbox_groups(now) {
+            Ok(g) => g,
+            Err(e) => {
+                self.report.error = Some(e.to_string());
+                return;
+            }
+        };
         let mut sessions = groups.sessions;
         sessions.sort_unstable_by_key(|m| m.0);
         sessions.dedup();

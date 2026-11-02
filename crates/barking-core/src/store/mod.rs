@@ -894,9 +894,10 @@ pub trait Queries {
     }
 
     /// Deletes a contact, all its sessions and its packets in the send
-    /// queue: my messages for it and my acknowledgements of its messages
-    /// (the history is kept). The `SyncSent` copies of my messages for
-    /// my other devices stay in the queue.
+    /// queue: my messages for it, my card updates for its devices and my
+    /// acknowledgements of its messages (the history is kept). The
+    /// `SyncSent` copies of my messages for my other devices stay in the
+    /// queue.
     fn delete_contact(&self, fp: Fingerprint) -> Result<()> {
         self.conn()
             .execute(
@@ -907,6 +908,35 @@ pub trait Queries {
                 params![fp.0.as_slice(), Direction::Out as i64],
             )
             .map_err(map_err)?;
+        // Card updates have no message row: found by the contact's devices,
+        // those of its stored card and those it has a session with (devices
+        // it has since dropped).
+        const CARD_UPDATES: &str = "DELETE FROM outbox WHERE packet_id IN \
+             (SELECT d.packet_id FROM deliveries d \
+              WHERE d.own = 0 AND d.device IN ({devices}) AND NOT EXISTS \
+              (SELECT 1 FROM messages m WHERE m.message_id = d.message_id))";
+        self.conn()
+            .execute(
+                &CARD_UPDATES.replace(
+                    "{devices}",
+                    "SELECT contact_device FROM sessions WHERE contact_fp = ?1",
+                ),
+                params![fp.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        let card_devices: Vec<DeviceId> = self
+            .get_contact(fp)?
+            .and_then(|c| crate::contact::ContactCard::decode(&c.card).ok())
+            .map(|card| card.devices.certs.iter().map(|c| c.device.id()).collect())
+            .unwrap_or_default();
+        for device in card_devices {
+            self.conn()
+                .execute(
+                    &CARD_UPDATES.replace("{devices}", "?1"),
+                    params![device.0.as_slice()],
+                )
+                .map_err(map_err)?;
+        }
         // An acknowledgement carries the identifier of the received message it confirms.
         let acks = {
             let mut stmt = self

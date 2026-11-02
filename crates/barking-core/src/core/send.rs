@@ -54,6 +54,22 @@ fn new_message_id(rng: &mut impl CryptoRng) -> MessageId {
     MessageId(id)
 }
 
+/// Logs a device skipped by `seal_for` because of its keys (routine
+/// class: capped with the other routine entries).
+fn log_seal_skipped(
+    q: &impl Queries,
+    now: u64,
+    contact: Fingerprint,
+    device: DeviceId,
+) -> Result<()> {
+    log(
+        q,
+        now,
+        None,
+        &TransparencyEvent::SealSkipped { contact, device },
+    )
+}
+
 /// Encrypts `body` for each reachable device of `target`: one packet per
 /// device, all carrying `message_id`. Sessions (new or advanced),
 /// send queue and log are written to `q`; it is up to the caller
@@ -127,7 +143,10 @@ pub(super) fn seal_for(
                 let (secrets, init, ratchet) = match opened {
                     Ok(v) => v,
                     Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => return Err(e),
-                    Err(_) => continue,
+                    Err(_) => {
+                        log_seal_skipped(q, now, fp, peer_id)?;
+                        continue;
+                    }
                 };
                 let row = SessionRow {
                     contact_device: peer_id,
@@ -167,7 +186,10 @@ pub(super) fn seal_for(
             Ok(p) => p,
             Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => return Err(e),
             // Nothing was written for this device.
-            Err(_) => continue,
+            Err(_) => {
+                log_seal_skipped(q, now, fp, peer_id)?;
+                continue;
+            }
         };
         // Session opened by this sealing: logged once sealed.
         if opened_here {

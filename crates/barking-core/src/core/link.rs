@@ -872,6 +872,16 @@ mod tests {
         assert_eq!(LinkBundle::from_bytes(&huge).map(|_| ()), too_large);
     }
 
+    proptest::proptest! {
+        #[test]
+        fn link_files_garbage_never_panics(bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..2048)) {
+            let _ = LinkOffer::from_bytes(&bytes);
+            let _ = LinkRequest::from_bytes(&bytes);
+            let _ = LinkBundle::from_bytes(&bytes);
+            let _ = HistoryArchive::from_bytes(&bytes);
+        }
+    }
+
     use super::*;
     use rand::SeedableRng;
     use rand::rngs::StdRng;

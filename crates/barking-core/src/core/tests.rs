@@ -454,7 +454,12 @@ fn session_to_mixed_device_fails_at_its_real_owner() {
     let p = carol
         .send_text(&mallory, "for Mallory", NOW, &mut rng)
         .unwrap();
-    assert!(alice.watched_mailboxes(NOW).contains(&p[0].mailbox));
+    assert!(
+        alice
+            .watched_mailboxes(NOW)
+            .unwrap()
+            .contains(&p[0].mailbox)
+    );
     assert_eq!(
         reason(alice.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap()),
         "decryption impossible"
@@ -952,7 +957,11 @@ fn own_devices_open_sessions() {
     assert_eq!(sessions[0].contact_fp, me);
     // T opens it and recognizes the sender (me): a text coming from me is
     // unexpected, but it was indeed authenticated and attributed.
-    assert!(t.watched_mailboxes(NOW).contains(&out[0].0.mailbox));
+    assert!(
+        t.watched_mailboxes(NOW)
+            .unwrap()
+            .contains(&out[0].0.mailbox)
+    );
     let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
     assert_eq!(reason(r), "unexpected content for this mailbox");
     // T → A, in the other direction.
@@ -1612,6 +1621,93 @@ fn card_update(from: &mut Core, to: Fingerprint, card: ContactCard, rng: &mut St
         .0
 }
 
+/// Unusable keys of a booby-trapped device in a contact's card.
+#[derive(Clone, Copy, Debug)]
+enum Trap {
+    /// Low-order signed prekey ([0; 32]).
+    LowOrderSpk,
+    /// Low-order device identity key ([0; 32]), certified by the root.
+    LowOrderIdentity,
+    /// ML-KEM key of the right size that does not decode.
+    BadPqKey,
+}
+
+/// Bob's new card: his device plus a device with `trap` keys, every
+/// signature valid. Returns the card and the trapped device's id.
+fn trapped_card(b: &mut Core, trap: Trap, rng: &mut StdRng) -> (ContactCard, DeviceId) {
+    use crate::crypto::labels;
+    let bob_root = b.root.take().unwrap();
+    let keys = DeviceKeys::generate(rng);
+    let mut bundle = PrekeySecrets::generate(rng, 0).bundle(&keys, false);
+    let cert = match trap {
+        Trap::LowOrderSpk => {
+            bundle.spk = [0; 32];
+            DeviceCertificate::issue(&bob_root, &keys, "trap", NOW).unwrap()
+        }
+        Trap::LowOrderIdentity => {
+            let mut device = keys.public();
+            device.dh = [0; 32];
+            bundle.device = device;
+            let bytes = postcard::to_allocvec(&(bob_root.public(), device, "trap", NOW)).unwrap();
+            let proof = keys.sign(labels::DEVICE_POSSESSION, &bytes);
+            DeviceCertificate::issue_with_proof(&bob_root, device, "trap", NOW, proof).unwrap()
+        }
+        Trap::BadPqKey => {
+            bundle.pq_ek = vec![0xff; bundle.pq_ek.len()];
+            DeviceCertificate::issue(&bob_root, &keys, "trap", NOW).unwrap()
+        }
+    };
+    let trap_id = cert.device.id();
+    bundle.sig = keys.sign(labels::PREKEYS, &bundle.signed_bytes());
+    let mut certs = b.devices.certs.clone();
+    certs.push(cert);
+    let list = DeviceList::sign(&bob_root, b.devices.version + 1, certs).unwrap();
+    let bundles = vec![b.prekeys.bundle(&b.device, false), bundle];
+    let card = ContactCard::sign(&bob_root, "Bob", list, bundles, Vec::new()).unwrap();
+    b.root = Some(bob_root);
+    (card, trap_id)
+}
+
+/// Bob sends `card` to Alice, who applies it.
+fn apply_card(a: &mut Core, b: &mut Core, card: ContactCard, rng: &mut StdRng) {
+    let a_id = a.device.public().id();
+    let body = Body::CardUpdate(Box::new(card));
+    let p = seal_body(
+        b,
+        &send::Target::Contact(a.fingerprint()),
+        &body,
+        MessageId([91; 16]),
+        rng,
+    )
+    .into_iter()
+    .find(|(_, d)| *d == a_id)
+    .unwrap()
+    .0;
+    let r = a.receive(&p.encode(), "t", NOW, rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::CardUpdated { .. }), "{r:?}");
+}
+
+/// `SealSkipped` entries of `c`'s log for `device`.
+fn seal_skipped(c: &Core, contact: Fingerprint, device: DeviceId) -> usize {
+    c.transparency_log(1000)
+        .unwrap()
+        .into_iter()
+        .filter(|(_, e)| *e == TransparencyEvent::SealSkipped { contact, device })
+        .count()
+}
+
+/// Packets among `pkts` that Bob opens as `text`.
+fn opened_text(b: &mut Core, pkts: &[Packet], text: &str, rng: &mut StdRng) -> usize {
+    pkts.iter()
+        .filter(|p| {
+            matches!(
+                b.receive(&p.encode(), "t", NOW, rng).unwrap(),
+                ReceiveOutcome::Message { text: ref t, .. } if t == text
+            )
+        })
+        .count()
+}
+
 #[test]
 fn trapped_card_does_not_block_receive() {
     // Bob signs a card that adds a device whose signed prekey is
@@ -1620,17 +1716,7 @@ fn trapped_card_does_not_block_receive() {
     let (_dir, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
     let alice = a.fingerprint();
     let bob = b.fingerprint();
-    let bob_root = b.root.take().unwrap();
-    let trap = DeviceKeys::generate(&mut rng);
-    let mut bundle = PrekeySecrets::generate(&mut rng, 0).bundle(&trap, false);
-    bundle.spk = [0; 32];
-    bundle.sig = trap.sign(crate::crypto::labels::PREKEYS, &bundle.signed_bytes());
-    let mut certs = b.devices.certs.clone();
-    certs.push(DeviceCertificate::issue(&bob_root, &trap, "trap", NOW).unwrap());
-    let list = DeviceList::sign(&bob_root, b.devices.version + 1, certs).unwrap();
-    let bundles = vec![b.prekeys.bundle(&b.device, false), bundle];
-    let card = ContactCard::sign(&bob_root, "Bob", list, bundles, Vec::new()).unwrap();
-    b.root = Some(bob_root);
+    let (card, trap_id) = trapped_card(&mut b, Trap::LowOrderSpk, &mut rng);
     let a_id = a.device.public().id();
     let body = Body::CardUpdate(Box::new(card));
     let p = seal_body(
@@ -1654,16 +1740,67 @@ fn trapped_card_does_not_block_receive() {
     // booby-trapped device is skipped), plus the copy for T.
     let pkts = a.send_text(&bob, "still here", NOW, &mut rng).unwrap();
     assert_eq!(pkts.len(), 2);
-    let opened = pkts
+    assert_eq!(opened_text(&mut b, &pkts, "still here", &mut rng), 1);
+    // The skipped device is in the transparency log, described.
+    assert!(seal_skipped(&a, bob, trap_id) >= 1);
+    let skipped = TransparencyEvent::SealSkipped {
+        contact: bob,
+        device: trap_id,
+    };
+    assert!(!skipped.is_security());
+    assert!(skipped.describe().contains(&bob.to_string()));
+}
+
+#[test]
+fn bad_device_keys_are_skipped_when_sealing() {
+    for trap in [Trap::LowOrderIdentity, Trap::BadPqKey] {
+        let (_dir, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
+        let bob = b.fingerprint();
+        let (card, trap_id) = trapped_card(&mut b, trap, &mut rng);
+        apply_card(&mut a, &mut b, card, &mut rng);
+        assert_eq!(stored_card(&a, bob).devices.certs.len(), 2, "{trap:?}");
+        // Bob's valid device and the copy for T; nothing for the trap.
+        let before = seal_skipped(&a, bob, trap_id);
+        let pkts = a.send_text(&bob, "hi", NOW, &mut rng).unwrap();
+        assert_eq!(pkts.len(), 2, "{trap:?}");
+        assert_eq!(opened_text(&mut b, &pkts, "hi", &mut rng), 1, "{trap:?}");
+        assert_eq!(seal_skipped(&a, bob, trap_id), before + 1, "{trap:?}");
+    }
+}
+
+#[test]
+fn link_skips_trapped_contact_device() {
+    let (dir, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let (card, trap_id) = trapped_card(&mut b, Trap::BadPqKey, &mut rng);
+    apply_card(&mut a, &mut b, card, &mut rng);
+    // Linking a second tablet sends the new card to Bob's devices: the
+    // link succeeds and only his valid device gets it.
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut t2, req) = Core::begin_link(
+        &dir.path().join("t2"),
+        &[3; 32],
+        &offer,
+        "t2",
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    let before = seal_skipped(&a, bob, trap_id);
+    let out = a.link_device(&req, false, NOW, &mut rng).unwrap();
+    t2.finish_link(&out.bundle, None, NOW).unwrap();
+    let updated = out
+        .packets
         .iter()
         .filter(|p| {
             matches!(
                 b.receive(&p.encode(), "t", NOW, &mut rng).unwrap(),
-                ReceiveOutcome::Message { ref text, .. } if text == "still here"
+                ReceiveOutcome::CardUpdated { .. }
             )
         })
         .count();
-    assert_eq!(opened, 1);
+    assert_eq!(updated, 1);
+    assert_eq!(seal_skipped(&a, bob, trap_id), before + 1);
 }
 
 #[test]
@@ -1942,7 +2079,7 @@ fn watched_mailboxes_split_by_class() {
     .unwrap();
     // First contact: toward Bob's introduction mailbox, ack expected there.
     let p = a.send_text(&b.fingerprint(), "x", NOW, &mut rng).unwrap();
-    let g = a.watched_mailbox_groups(NOW);
+    let g = a.watched_mailbox_groups(NOW).unwrap();
     let my_intro = intro_mailbox(&a.device.public(), day_of(NOW));
     assert!(g.intro.contains(&my_intro));
     assert!(g.intro.contains(&p[0].mailbox));
@@ -1954,14 +2091,26 @@ fn watched_mailboxes_split_by_class() {
     let q = b.send_text(&a.fingerprint(), "y", NOW, &mut rng).unwrap();
     a.receive(&q[0].encode(), "t", NOW, &mut rng).unwrap();
     let r = a.send_text(&b.fingerprint(), "z", NOW, &mut rng).unwrap();
-    let g = a.watched_mailbox_groups(NOW);
+    let g = a.watched_mailbox_groups(NOW).unwrap();
     assert!(g.sessions.contains(&q[0].mailbox));
     assert!(g.sessions.contains(&r[0].mailbox));
     assert!(!g.intro.contains(&r[0].mailbox));
     // Union, without duplicates.
-    let all = a.watched_mailboxes(NOW);
+    let all = a.watched_mailboxes(NOW).unwrap();
     assert_eq!(all.len(), g.intro.len() + g.sessions.len());
     assert!(g.intro.iter().chain(&g.sessions).all(|m| all.contains(m)));
+}
+
+#[test]
+fn watched_mailboxes_surface_store_errors() {
+    let (_d, a) = party("a", 1);
+    a.store
+        .conn()
+        .execute_batch("ALTER TABLE sessions RENAME TO sessions_gone;")
+        .unwrap();
+    // A partial list would let a poll move the window past unread days.
+    assert!(a.watched_mailbox_groups(NOW).is_err());
+    assert!(a.watched_mailboxes(NOW).is_err());
 }
 
 #[test]

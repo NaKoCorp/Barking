@@ -168,7 +168,7 @@ async fn deposit_then_fetch_roundtrip() {
     }
 
     let mut sb = Client::connect(node.addr, node.id).await.unwrap();
-    let items = sb.fetch(&bob.watched_mailboxes(t)).await.unwrap();
+    let items = sb.fetch(&bob.watched_mailboxes(t).unwrap()).await.unwrap();
     assert!(!items.is_empty());
     let mut acks = Vec::new();
     let mut text = None;
@@ -186,7 +186,10 @@ async fn deposit_then_fetch_roundtrip() {
     }
 
     // The ack deleted the copy: Alice now fetches only the ack.
-    let items = sa.fetch(&alice.watched_mailboxes(t)).await.unwrap();
+    let items = sa
+        .fetch(&alice.watched_mailboxes(t).unwrap())
+        .await
+        .unwrap();
     let got_ack = items.iter().any(|it| {
         matches!(
             alice.receive(it, "node", t, &mut rng).unwrap(),
@@ -194,7 +197,7 @@ async fn deposit_then_fetch_roundtrip() {
         )
     });
     assert!(got_ack);
-    let again = sb.fetch(&bob.watched_mailboxes(t)).await.unwrap();
+    let again = sb.fetch(&bob.watched_mailboxes(t).unwrap()).await.unwrap();
     assert!(packets.iter().all(|p| !again.contains(&p.encode())));
     node.stop().await;
 }

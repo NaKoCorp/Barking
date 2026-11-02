@@ -520,5 +520,10 @@ mod tests {
         fn from_text_prefixed_garbage_never_panics(s in "[A-Za-z0-9_=-]{0,400}") {
             let _ = ContactCard::from_text(&format!("barking1:{s}"));
         }
+
+        #[test]
+        fn decode_garbage_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            let _ = ContactCard::decode(&bytes);
+        }
     }
 }

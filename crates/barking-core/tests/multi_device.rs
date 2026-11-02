@@ -234,7 +234,7 @@ fn pending_device_cannot_send_or_receive() {
         t.core.link_offer(NOW, &mut rng),
         Err(CoreError::LinkPending)
     ));
-    assert!(t.core.watched_mailboxes(NOW).is_empty());
+    assert!(t.core.watched_mailboxes(NOW).unwrap().is_empty());
 
     // Still pending after reopening.
     drop(t.core);
@@ -1114,6 +1114,61 @@ fn bob_reaches_new_tablet() {
 }
 
 #[test]
+fn removing_contact_drops_its_card_updates() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(41);
+    let mut alice = create(d.path(), "alice", 1, &mut rng);
+    let bob = create(d.path(), "bob", 3, &mut rng);
+    let mut carol = create(d.path(), "carol", 5, &mut rng);
+    let bob_fp = alice
+        .core
+        .add_contact(
+            &bob.core.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    alice
+        .core
+        .add_contact(
+            &carol.core.contact_card("Carol").unwrap(),
+            Some("carol"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    carol
+        .core
+        .add_contact(
+            &alice.core.contact_card("Alice").unwrap(),
+            Some("alice"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    let offer = alice.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
+    let out = alice.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    t.core.finish_link(&out.bundle, None, NOW).unwrap();
+    // One card update per contact (one device each).
+    assert_eq!(out.packets.len(), 2);
+    let updates: Vec<Vec<u8>> = out.packets.iter().map(Packet::encode).collect();
+    let queued = alice.core.pending_outbox(NOW).unwrap();
+    assert!(updates.iter().all(|u| queued.contains(u)));
+
+    alice.core.remove_contact(&bob_fp, NOW, &mut rng).unwrap();
+    let queued = alice.core.pending_outbox(NOW).unwrap();
+    let left: Vec<&Vec<u8>> = updates.iter().filter(|u| queued.contains(u)).collect();
+    // Only Carol's update remains.
+    assert_eq!(left.len(), 1);
+    assert!(matches!(
+        carol.core.receive(left[0], T, NOW, &mut rng).unwrap(),
+        ReceiveOutcome::CardUpdated { .. }
+    ));
+}
+
+#[test]
 fn second_link_sends_devices_to_first_tablet() {
     let d = dir();
     let mut rng = StdRng::seed_from_u64(41);
@@ -1441,6 +1496,7 @@ fn history_empty_and_without_history() {
 /// rounds, until a round produces nothing new (messages,
 /// cards, syncs, first acks). Refused packets
 /// (sender still unknown) stay queued and are replayed next round.
+/// A quarantine panics: none is expected, and it must never go unseen.
 fn deliver_all(devs: &mut [&mut Dev], rng: &mut StdRng) {
     for _ in 0..12 {
         let mut progress = false;
@@ -1455,9 +1511,10 @@ fn deliver_all(devs: &mut [&mut Dev], rng: &mut StdRng) {
                         continue;
                     }
                     match dev.core.receive(bytes, T, NOW, rng).unwrap() {
-                        ReceiveOutcome::Duplicate
-                        | ReceiveOutcome::NotForUs
-                        | ReceiveOutcome::Quarantined { .. } => {}
+                        ReceiveOutcome::Quarantined { reason } => {
+                            panic!("unexpected quarantine: {reason}")
+                        }
+                        ReceiveOutcome::Duplicate | ReceiveOutcome::NotForUs => {}
                         _ => progress = true,
                     }
                 }

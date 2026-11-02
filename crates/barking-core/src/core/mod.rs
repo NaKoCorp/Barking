@@ -442,28 +442,29 @@ impl Core {
     /// Union of the two groups of `watched_mailbox_groups`, introduction
     /// first.
     ///
-    /// On a storage read error, only the introduction mailboxes
-    /// are returned (`receive` redoes the computation itself).
-    pub fn watched_mailboxes(&self, now: u64) -> Vec<MailboxId> {
-        let g = self.watched_mailbox_groups(now);
+    /// A storage read error is returned: a partial list would let the
+    /// caller poll, then `mark_polled`, past unread session mailboxes.
+    pub fn watched_mailboxes(&self, now: u64) -> Result<Vec<MailboxId>> {
+        let g = self.watched_mailbox_groups(now)?;
         let mut out = g.intro;
         for m in g.sessions {
             if !out.contains(&m) {
                 out.push(m);
             }
         }
-        out
+        Ok(out)
     }
 
     /// Mailboxes to poll, by class (see `WatchedMailboxes`). An expected-ack
     /// mailbox is a session mailbox if it is the send mailbox of one of
     /// my sessions (over the receive window), otherwise an introduction mailbox
-    /// (first contact).
-    pub fn watched_mailbox_groups(&self, now: u64) -> WatchedMailboxes {
+    /// (first contact). A storage read error is returned (see
+    /// `watched_mailboxes`).
+    pub fn watched_mailbox_groups(&self, now: u64) -> Result<WatchedMailboxes> {
         let mut g = WatchedMailboxes::default();
         // Awaiting link: nothing to poll (`receive` would refuse).
         if self.pending {
-            return g;
+            return Ok(g);
         }
         let me = self.device.public();
         let my_id = me.id();
@@ -476,7 +477,7 @@ impl Core {
         for &d in &days {
             push(&mut g.intro, intro_mailbox(&me, d));
         }
-        let sessions = self.store.all_sessions().unwrap_or_default();
+        let sessions = self.store.all_sessions()?;
         for s in &sessions {
             for &d in &days {
                 push(
@@ -485,38 +486,37 @@ impl Core {
                 );
             }
         }
-        if let Ok(pending) = self.store.outbox_pending(now) {
-            // Send mailboxes of my sessions, over the whole window in which a
-            // queued packet may have been sealed.
-            let first = day_of(now.saturating_sub(MAX_AGE_SECS));
-            let last = day_of(now).saturating_add(1);
-            let mut sent: Vec<MailboxId> = Vec::new();
-            let mut sent_ready = false;
-            for (_, bytes) in pending {
-                let Ok(p) = Packet::decode(&bytes) else {
-                    continue;
-                };
-                if p.kind != Kind::Message {
-                    continue;
-                }
-                if !sent_ready {
-                    for s in &sessions {
-                        for d in first..=last {
-                            sent.push(session_mailbox(&s.mailbox_secret, &s.contact_device, d));
-                        }
+        let pending = self.store.outbox_pending(now)?;
+        // Send mailboxes of my sessions, over the whole window in which a
+        // queued packet may have been sealed.
+        let first = day_of(now.saturating_sub(MAX_AGE_SECS));
+        let last = day_of(now).saturating_add(1);
+        let mut sent: Vec<MailboxId> = Vec::new();
+        let mut sent_ready = false;
+        for (_, bytes) in pending {
+            let Ok(p) = Packet::decode(&bytes) else {
+                continue;
+            };
+            if p.kind != Kind::Message {
+                continue;
+            }
+            if !sent_ready {
+                for s in &sessions {
+                    for d in first..=last {
+                        sent.push(session_mailbox(&s.mailbox_secret, &s.contact_device, d));
                     }
-                    sent_ready = true;
                 }
-                if sent.contains(&p.mailbox) {
-                    push(&mut g.sessions, p.mailbox);
-                } else {
-                    push(&mut g.intro, p.mailbox);
-                }
+                sent_ready = true;
+            }
+            if sent.contains(&p.mailbox) {
+                push(&mut g.sessions, p.mailbox);
+            } else {
+                push(&mut g.intro, p.mailbox);
             }
         }
         // A mailbox is in one group only: the sessions group takes precedence.
         g.intro.retain(|m| !g.sessions.contains(m));
-        g
+        Ok(g)
     }
 
     /// Records that the mailboxes were polled at `now`. To be called after

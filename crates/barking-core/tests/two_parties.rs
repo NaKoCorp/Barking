@@ -464,7 +464,7 @@ fn stale_initial_replayed_into_today_mailbox_quarantined() {
         other => panic!("Quarantined expected, got {other:?}"),
     }
     // The session that this old Initial would have opened is not created.
-    assert_eq!(b.core.watched_mailboxes(later).len(), 3);
+    assert_eq!(b.core.watched_mailboxes(later).unwrap().len(), 3);
     assert!(b.core.messages_with(&a.fp()).unwrap().is_empty());
 }
 
@@ -819,14 +819,24 @@ fn open_wrong_key_and_double_create() {
 fn watched_mailboxes_cover_three_days() {
     let (mut a, mut b, mut rng) = pair();
     // Without a session: 3 intro mailboxes.
-    assert_eq!(b.core.watched_mailboxes(NOW).len(), 3);
+    assert_eq!(b.core.watched_mailboxes(NOW).unwrap().len(), 3);
     let p = one(a.send(&b.fp(), "x", NOW, &mut rng));
-    assert!(b.core.watched_mailboxes(NOW).contains(&p.mailbox));
-    assert!(b.core.watched_mailboxes(NOW + DAY).contains(&p.mailbox));
-    assert!(!b.core.watched_mailboxes(NOW + 2 * DAY).contains(&p.mailbox));
+    assert!(b.core.watched_mailboxes(NOW).unwrap().contains(&p.mailbox));
+    assert!(
+        b.core
+            .watched_mailboxes(NOW + DAY)
+            .unwrap()
+            .contains(&p.mailbox)
+    );
+    assert!(
+        !b.core
+            .watched_mailboxes(NOW + 2 * DAY)
+            .unwrap()
+            .contains(&p.mailbox)
+    );
     expect_msg(b.recv(&p, NOW, &mut rng));
     // With a session: 3 more mailboxes.
-    assert_eq!(b.core.watched_mailboxes(NOW).len(), 6);
+    assert_eq!(b.core.watched_mailboxes(NOW).unwrap().len(), 6);
 }
 
 #[test]
@@ -836,7 +846,7 @@ fn offline_five_days_still_watches_missed_days() {
     expect_msg(b.recv(&p, NOW, &mut rng));
     b.core.mark_polled(NOW).unwrap();
     let later = NOW + 5 * DAY;
-    let watched = b.core.watched_mailboxes(later);
+    let watched = b.core.watched_mailboxes(later).unwrap();
     // Alice writes every day: the packet's mailbox is Bob's for that day.
     for d in day_of(NOW)..=day_of(later) + 1 {
         let t = u64::from(d) * DAY;
@@ -851,7 +861,7 @@ fn polling_window_capped_at_nine_days() {
     let bob_dev = b.card("Bob").devices.certs[0].device;
     b.core.mark_polled(NOW).unwrap();
     let later = NOW + 20 * DAY;
-    let watched = b.core.watched_mailboxes(later);
+    let watched = b.core.watched_mailboxes(later).unwrap();
     // 7 days back, the same day and the next day.
     assert_eq!(watched.len(), 9);
     let last = day_of(later) + 1;
@@ -863,9 +873,9 @@ fn polling_window_capped_at_nine_days() {
 #[test]
 fn polled_in_future_falls_back() {
     let (_a, mut b, _rng) = pair();
-    let reference = b.core.watched_mailboxes(NOW);
+    let reference = b.core.watched_mailboxes(NOW).unwrap();
     b.core.mark_polled(NOW + 10 * DAY).unwrap();
-    assert_eq!(b.core.watched_mailboxes(NOW), reference);
+    assert_eq!(b.core.watched_mailboxes(NOW).unwrap(), reference);
 }
 
 fn arb_packet_bytes(watched: Vec<MailboxId>) -> impl Strategy<Value = Vec<u8>> {
@@ -903,7 +913,7 @@ fn receive_arbitrary_bytes_always_ok() {
     // A session exists, so that session mailboxes are reached too.
     let p = one(a.send(&b.fp(), "x", NOW, &mut rng));
     expect_msg(b.recv(&p, NOW, &mut rng));
-    let watched = b.core.watched_mailboxes(NOW);
+    let watched = b.core.watched_mailboxes(NOW).unwrap();
     let state = RefCell::new((b, rng));
     let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(256));
     runner
@@ -1239,14 +1249,19 @@ fn ack_goes_to_the_original_mailbox_which_the_sender_watches_until_acked() {
     // Ack of an Initial: same mailbox as the message, watched by A as long as
     // the message awaits its ack.
     let p = one(a.send(&b.fp(), "opening", NOW, &mut rng));
-    assert!(a.core.watched_mailboxes(NOW).contains(&p.mailbox));
+    assert!(a.core.watched_mailboxes(NOW).unwrap().contains(&p.mailbox));
     let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
     assert_eq!(ack.mailbox, p.mailbox);
     // Ack of a normal message, in the other direction.
     let r = one(b.send(&a.fp(), "reply", NOW + 1, &mut rng));
     let (_, _, _, ack_r) = expect_msg(a.recv(&r, NOW + 1, &mut rng));
     assert_eq!(ack_r.mailbox, r.mailbox);
-    assert!(b.core.watched_mailboxes(NOW + 1).contains(&ack_r.mailbox));
+    assert!(
+        b.core
+            .watched_mailboxes(NOW + 1)
+            .unwrap()
+            .contains(&ack_r.mailbox)
+    );
     // Message delivered three days later: its mailbox falls out of the
     // three-day window, but A still watches it as long as it awaits the ack.
     let q = one(a.send(&b.fp(), "late", NOW + 2, &mut rng));
@@ -1254,7 +1269,12 @@ fn ack_goes_to_the_original_mailbox_which_the_sender_watches_until_acked() {
     let late = NOW + 3 * DAY;
     let (_, _, _, ack_q) = expect_msg(b.recv(&q, late, &mut rng));
     assert_eq!(ack_q.mailbox, q.mailbox);
-    assert!(a.core.watched_mailboxes(late).contains(&ack_q.mailbox));
+    assert!(
+        a.core
+            .watched_mailboxes(late)
+            .unwrap()
+            .contains(&ack_q.mailbox)
+    );
     // Acks are still verified by identifier and secret.
     for (ack, at, id) in [(ack, late, p.id), (ack_q, late, q.id)] {
         match a.recv(&ack, at, &mut rng) {
@@ -1263,7 +1283,7 @@ fn ack_goes_to_the_original_mailbox_which_the_sender_watches_until_acked() {
         }
     }
     // Ack received: A no longer watches the late message's mailbox.
-    assert!(!a.core.watched_mailboxes(late).contains(&q.mailbox));
+    assert!(!a.core.watched_mailboxes(late).unwrap().contains(&q.mailbox));
     assert!(matches!(
         b.recv(&ack_r, NOW + 2, &mut rng),
         ReceiveOutcome::AckReceived { .. }

@@ -704,7 +704,7 @@ async fn no_ip_or_mailbox_in_logs_or_plaintext_state() {
     let t = now();
     let mut mailboxes = Vec::new();
     for c in [&mut alice, &mut bob] {
-        mailboxes.extend(c.core.watched_mailboxes(t));
+        mailboxes.extend(c.core.watched_mailboxes(t).unwrap());
         mailboxes.extend(outbox_mailboxes(c));
     }
     let mut addrs: Vec<String> = vec!["127.0.0.1".into(), "7f000001".into()];
@@ -712,7 +712,7 @@ async fn no_ip_or_mailbox_in_logs_or_plaintext_state() {
 
     // Failures while other nodes answer: both responsibles of one of
     // Alice's session mailboxes are down.
-    let m = alice.core.watched_mailbox_groups(t).sessions[0];
+    let m = alice.core.watched_mailbox_groups(t).unwrap().sessions[0];
     let dead: Vec<NodeId> = closest(&m)[..2].iter().map(|&n| id_of(&key(n))).collect();
     let (gone, alive): (Vec<TestNode>, Vec<TestNode>) =
         nodes.into_iter().partition(|n| dead.contains(&n.id));
