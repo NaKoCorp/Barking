@@ -1,0 +1,70 @@
+# systemd unit for barking-push (APNs relay).
+#
+# Installation (example):
+#   useradd --system --home-dir /var/lib/barking-push --shell /usr/sbin/nologin barking-push
+#   install -m 0755 barking-push /usr/local/bin/barking-push
+#   install -d -m 0750 -o root -g barking-push /etc/barking-push
+#   barking-push keygen-node --out /etc/barking-push/node.key
+#   barking-push keygen-seal --out /etc/barking-push/seal1.key --id 1
+#   install -m 0600 AuthKey_XXXXXXXXXX.p8 /etc/barking-push/apns.p8
+#   chown barking-push /etc/barking-push/*.key /etc/barking-push/apns.p8
+#   install -m 0644 barking-push.toml /etc/barking-push/barking-push.toml
+#   install -m 0644 barking-push.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now barking-push
+#
+# First deployment on a host:
+#   systemd-analyze verify /etc/systemd/system/barking-push.service
+#     -> no output (no unknown directive, ExecStart found).
+#   systemd-analyze security barking-push.service
+#     -> overall exposure well below 5.0 (MEDIUM).
+#   systemctl start barking-push && journalctl -u barking-push -n 20
+#     -> "relay <identifier> started", then the periodic counters.
+#   stat -c '%a %U' /etc/barking-push/*.key /etc/barking-push/apns.p8
+#     -> 600, owned by barking-push.
+[Unit]
+Description=Barking push relay (APNs wake-ups, QUIC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=barking-push
+Group=barking-push
+ExecStart=/usr/local/bin/barking-push run --config /etc/barking-push/barking-push.toml
+Restart=on-failure
+RestartSec=5
+# The relay is stateless: it writes nothing. Keys are read from /etc.
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+# AF_UNIX: tokio's signal driver creates a pair of Unix sockets at
+# startup (tokio signal/unix.rs, `UnixStream::pair().expect(..)`).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+# Test on a real machine before enabling it (a missing system call
+# kills the process):
+# SystemCallFilter=@system-service
+# Small device: memory cap for the service.
+# MemoryMax=512M
+UMask=0077
+# UDP port > 1024: no capability is needed.
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

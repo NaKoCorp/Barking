@@ -1,0 +1,41 @@
+# barking-push configuration. An unknown key is an error at startup.
+# Copy to /etc/barking-push/barking-push.toml and adapt.
+
+# UDP listen addresses (QUIC), `host:port` (no name resolution). `[::]` also
+# accepts IPv4 on Linux when net.ipv6.bindv6only=0 (the usual setting);
+# otherwise list both families. Default: ["[::]:4433"].
+listen = ["[::]:4433"]
+
+# Relay identity (Ed25519, node key format, mode 0600). Created by
+# `barking-push keygen-node --out <file>`, which prints the NodeId to publish.
+node_key_file = "/etc/barking-push/node.key"
+
+# X25519 keys clients seal device tokens to: one key, or two during a
+# rotation (the new one and the previous one). Each file holds the raw 32-byte
+# secret (mode 0600). Created by
+# `barking-push keygen-seal --out <file> --id <n>`, which prints the id and the
+# public key (hex) to publish. Ids must be distinct.
+seal_keys = [
+  { id = 1, file = "/etc/barking-push/seal1.key" },
+]
+
+[apns]
+# Apple developer team identifier (JWT `iss`).
+team_id = "ABCDE12345"
+# Identifier of the APNs authentication key (JWT `kid`).
+key_id = "FGHIJ67890"
+# App bundle identifier (`apns-topic`).
+topic = "fr.example.barking"
+# APNs authentication key downloaded from Apple (.p8, PKCS#8 PEM), mode 0600.
+key_file = "/etc/barking-push/apns.p8"
+# APNs endpoints (HTTPS only). Defaults shown; override for tests only.
+# production_url = "https://api.push.apple.com"
+# sandbox_url = "https://api.sandbox.push.apple.com"
+
+# Simultaneous QUIC connections, in total (default 10000) and per IP address,
+# per /64 prefix for IPv6 (default 16).
+# max_connections = 10000
+# max_connections_per_ip = 16
+
+# Seconds between two counter reports in the log (default 60).
+# log_interval_secs = 60

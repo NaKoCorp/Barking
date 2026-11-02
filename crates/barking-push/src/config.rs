@@ -157,6 +157,15 @@ pub fn load_node_key(path: &Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&seed))
 }
 
+/// Loads the APNs authentication key (`.p8`, PKCS#8 PEM, ES256).
+pub fn load_apns_key(path: &Path) -> Result<p256::ecdsa::SigningKey> {
+    use p256::pkcs8::DecodePrivateKey;
+    let bytes = read_secret(path)?;
+    let pem = std::str::from_utf8(&bytes).map_err(|_| Error::Key("APNs key unreadable".into()))?;
+    p256::ecdsa::SigningKey::from_pkcs8_pem(pem)
+        .map_err(|_| Error::Key("APNs key unreadable".into()))
+}
+
 /// Loads the seal keys; ids must be distinct.
 pub fn load_seal_keys(files: &[SealKeyFile]) -> Result<Vec<(u8, StaticSecret)>> {
     let mut out: Vec<(u8, StaticSecret)> = Vec::with_capacity(files.len());
