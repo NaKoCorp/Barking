@@ -308,16 +308,36 @@ fn unsubscribe_needs_the_secret() {
 #[test]
 fn purge_drops_expired_subscriptions() {
     let mut s = store();
-    let sb = Subscription {
+    let cfg = WakeConfig::default();
+    let expiring = Subscription {
         expires_day: today(),
         ..raw_sub(1, 1)
     };
-    assert_eq!(try_subscribe(&mut s, &WakeConfig::default(), &sb), Ok(()));
-    s.purge_expired(NOW + 86_400).unwrap();
-    let mut p = message(1, 1);
-    p.expires_at = u32::try_from(NOW + 2 * 86_400).unwrap();
-    deposit_at(&mut s, &p, NOW + 86_400);
-    assert!(take_due(&mut s, NOW + 86_400, 100).unwrap().is_empty());
+    assert_eq!(try_subscribe(&mut s, &cfg, &expiring), Ok(()));
+    // A later expiry must survive the purge.
+    let keeper = Subscription {
+        expires_day: today() + 2,
+        ..raw_sub(1, 2)
+    };
+    assert_eq!(try_subscribe(&mut s, &cfg, &keeper), Ok(()));
+    let count = |s: &NodeStore| -> i64 {
+        s.conn()
+            .query_row("SELECT COUNT(*) FROM subscriptions", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(count(&s), 2);
+    // Purging on the same day removes nothing.
+    s.purge_expired(NOW).unwrap();
+    assert_eq!(count(&s), 2);
+    // The next day, the expired row is deleted and the other one kept.
+    let removed = s.purge_expired(NOW + 86_400).unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(count(&s), 1);
+    let left: Vec<u8> = s
+        .conn()
+        .query_row("SELECT sealed FROM subscriptions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, keeper.sealed);
 }
 
 #[test]
