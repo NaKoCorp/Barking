@@ -215,6 +215,49 @@ pub fn take_due(store: &mut NodeStore, now: u64, max: usize) -> Result<Vec<WakeO
     Ok(orders)
 }
 
+/// True if the node holds at least one subscription (expired ones included).
+pub fn has_subscriptions(store: &NodeStore) -> Result<bool> {
+    Ok(store
+        .conn()
+        .query_row("SELECT EXISTS(SELECT 1 FROM subscriptions)", [], |r| {
+            r.get::<_, bool>(0)
+        })?)
+}
+
+/// Tells the wake loop that a message arrived, only once the node holds (or
+/// is taking) a subscription: a node without any skips the loop's database
+/// round on every stored packet. Armed at startup if the database holds
+/// subscriptions, and by each `Subscribe` before its write, so that a row
+/// marked pending always finds the signal armed. Never disarmed.
+pub(crate) struct WakeSignal {
+    armed: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl WakeSignal {
+    pub(crate) fn new(armed: bool) -> WakeSignal {
+        WakeSignal {
+            armed: std::sync::atomic::AtomicBool::new(armed),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// A new message was stored (`Deposit` or `Store`).
+    pub(crate) fn message_arrived(&self) {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            self.notify.notify_one();
+        }
+    }
+
+    pub(crate) async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
 /// Earliest time a pending subscription becomes due.
 pub fn next_due(store: &NodeStore) -> Result<Option<u64>> {
     let t: Option<i64> = store

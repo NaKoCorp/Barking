@@ -400,3 +400,39 @@ fn config_wake_section() {
     assert!(d.wake.enabled);
     assert_eq!(d.wake.max_subscriptions, 1_000_000);
 }
+
+#[tokio::test(start_paused = true)]
+async fn wake_signal_is_silent_until_armed() {
+    use std::time::Duration;
+    let s = WakeSignal::new(false);
+    // No subscription on the node: a new message wakes nobody.
+    s.message_arrived();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), s.notified())
+            .await
+            .is_err()
+    );
+    s.arm();
+    s.message_arrived();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), s.notified())
+            .await
+            .is_ok()
+    );
+    // Armed at startup when the database already holds subscriptions.
+    let s = WakeSignal::new(true);
+    s.message_arrived();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), s.notified())
+            .await
+            .is_ok()
+    );
+}
+
+#[test]
+fn has_subscriptions_reads_the_table() {
+    let mut store = NodeStore::open_in_memory().unwrap();
+    assert!(!has_subscriptions(&store).unwrap());
+    subscribe_ok(&mut store, 1, 1);
+    assert!(has_subscriptions(&store).unwrap());
+}

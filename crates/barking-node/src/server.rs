@@ -71,7 +71,7 @@ use barking_proto::{
 };
 use ed25519_dalek::SigningKey;
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
@@ -599,7 +599,7 @@ pub(crate) struct Shared {
     dht: Option<Arc<Dht>>,
     wake: WakeConfig,
     /// Signals the wake loop that a message arrived.
-    pub(crate) wake_notify: Notify,
+    pub(crate) wake_signal: wake::WakeSignal,
     /// `None` when wake-ups are disabled.
     wake_sender: Option<WakeSender>,
     /// Tests only: see `ServerConfig::test_swallow_deposits`.
@@ -826,6 +826,8 @@ pub async fn run(
         ))
     });
 
+    // A database read failure arms the signal: at worst, needless rounds.
+    let subscriptions_held = wake::has_subscriptions(&store).unwrap_or(true);
     let shared = Arc::new(Shared {
         store: Mutex::new(store),
         policy,
@@ -854,7 +856,7 @@ pub async fn run(
         stats: Arc::clone(&config.stats),
         dht: dht.clone(),
         wake: config.wake.clone(),
-        wake_notify: Notify::new(),
+        wake_signal: wake::WakeSignal::new(subscriptions_held),
         wake_sender: config.wake.enabled.then(|| {
             WakeSender::spawn(
                 QuicWakeTransport::new(config.wake_allow_private),
@@ -980,7 +982,7 @@ async fn wake_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
                 _ => WAKE_IDLE_POLL,
             };
             tokio::select! {
-                () = shared.wake_notify.notified() => {}
+                () = shared.wake_signal.notified() => {}
                 () = tokio::time::sleep(sleep_for.min(WAKE_IDLE_POLL)) => {}
                 _ = stop.changed() => return,
             }
@@ -1450,7 +1452,7 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
             {
                 Stored::Done(r) => Stored::Done(to_resp(r.map(|()| {
                     shared.stats.deposit_ok();
-                    shared.wake_notify.notify_one();
+                    shared.wake_signal.message_arrived();
                     Response::Ok
                 }))),
                 Stored::Busy => Stored::Busy,
@@ -1485,6 +1487,8 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
             if let Err(r) = wake::precheck(&cfg, bits, &sub, pow, unix_now()) {
                 return Stored::Done(Response::Error(r));
             }
+            // Before the write: a message marking this row will notify.
+            shared.wake_signal.arm();
             match shared
                 .with_store(false, Some(group), move |s, _| {
                     wake::subscribe(s, &cfg, bits, &sub, pow, unix_now())

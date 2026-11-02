@@ -312,7 +312,7 @@ impl Dht {
                     .await
                 {
                     Stored::Done(Ok(())) => {
-                        shared.wake_notify.notify_one();
+                        shared.wake_signal.message_arrived();
                         Stored::Done(Response::Ok)
                     }
                     Stored::Done(Err(r)) => err(r),
