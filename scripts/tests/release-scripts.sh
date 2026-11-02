@@ -310,6 +310,14 @@ cas_sign_origin_unreachable_needs_from_dir() {
     --seckey "$tmp/cles/bonne.key" --pubkey "$tmp/cles/bonne.pub"
   attendre_code 0 && attendre_texte "warning: origin unreachable"
 }
+cas_sign_without_origin_needs_from_dir() {
+  # The throwaway repository has no remote: refused without --from-dir, before any download.
+  lancer "$sign" "$version" --seckey "$tmp/cles/bonne.key" --pubkey "$tmp/cles/bonne.pub"
+  attendre_code 1 && attendre_texte "no remote 'origin' configured" || return 1
+  # With --from-dir: allowed, with a warning.
+  nouveau; signer_ok || return 1
+  attendre_texte "warning: no remote 'origin' configured"
+}
 cas_comment_only_pubkey_rejected() {
   nouveau; signer_ok || return 1
   printf 'untrusted comment: minisign public key AAAA\n' > "$tmp/commentaire.pub"
@@ -343,7 +351,7 @@ for cas in sign_then_verify_ok sign_then_verify_rebuild_ok forged_signature_reje
            trusted_comment_without_commit_rejected signed_commit_differs_from_local_tag_rejected \
            signed_commit_unchecked_without_local_tag sign_refuses_without_local_tag \
            rebuild_refuses_tag_without_build_env sign_refuses_tag_differing_from_origin \
-           sign_origin_unreachable_needs_from_dir \
+           sign_origin_unreachable_needs_from_dir sign_without_origin_needs_from_dir \
            comment_only_pubkey_rejected sign_wrong_seckey_refused empty_pubkey_rejected; do
   if "cas_$cas"; then echo "PASS $cas"; else echo "FAIL $cas"; echecs=$((echecs + 1)); fi
 done

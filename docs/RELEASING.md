@@ -76,7 +76,7 @@ Sur la machine de signature, depuis un clone à jour qui contient le tag. `<vers
 
 Le script :
 
-1. affiche le commit du tag local `v<version>` (il refuse de signer si ce tag n'existe pas dans le clone) : vérifiez que c'est le commit attendu. Il le compare au tag de `origin` (`git ls-remote`) et refuse si le tag y manque ou désigne un autre commit ; si `origin` est injoignable, il refuse aussi, sauf avec `--from-dir` (simple avertissement) ;
+1. affiche le commit du tag local `v<version>` (il refuse de signer si ce tag n'existe pas dans le clone) : vérifiez que c'est le commit attendu. Il le compare au tag de `origin` (`git ls-remote`) et refuse si le tag y manque ou désigne un autre commit ; si `origin` n'est pas configuré ou est injoignable, il refuse aussi, sauf avec `--from-dir` (simple avertissement) ;
 2. télécharge les fichiers du brouillon et contrôle `SHA256SUMS` et les empreintes ;
 3. **recompile localement** chaque cible possible sur cette machine et compare. La recompilation utilise l'environnement de build enregistré dans le tag (`scripts/`, `docker/`, `.xcode-version`, `rust-toolchain.toml`, extraits avec `git archive`), pas celui de l'arbre de travail ;
 4. ne signe **que si tout est identique** et qu'aucun fichier listé ne manque ;

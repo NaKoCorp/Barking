@@ -41,7 +41,12 @@ echo "commit of tag v$version: $commit" >&2
 
 # The local tag must be the published one: a tag moved or recreated in this clone would bind
 # another commit than the one the release was built from.
-if distant="$(GIT_TERMINAL_PROMPT=0 git -C "$racine" ls-remote --tags origin 2>/dev/null)"; then
+if ! git -C "$racine" remote get-url origin >/dev/null 2>&1; then
+  msg="no remote 'origin' configured: add it (git remote add origin <url>) so the tag can be compared with the published one"
+  [ -n "$from_dir" ] || erreur "$msg"
+  echo "warning: $msg" >&2
+elif distant="$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" \
+                git -C "$racine" ls-remote --tags origin 2>/dev/null)"; then
   commit_distant="$(printf '%s\n' "$distant" | awk -v r="refs/tags/v$version^{}" '$2 == r { print $1; exit }')"
   [ -n "$commit_distant" ] \
     || commit_distant="$(printf '%s\n' "$distant" | awk -v r="refs/tags/v$version" '$2 == r { print $1; exit }')"
