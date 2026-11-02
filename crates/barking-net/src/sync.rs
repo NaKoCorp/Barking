@@ -62,6 +62,20 @@
 //! lowered, no `mark_polled`. The nodes that failed then rank last for
 //! `DOWN_FAILED_SECS`, so the next sync dials other nodes first.
 //!
+//! **Quick sync** (`quick_sync`, spec §6.2): the short fetch of the iOS
+//! notification extension, within `QUICK_DEADLINE`, on the same executor in
+//! `Mode::Quick`. Stage 1 runs, bootstrapping only when the view is empty;
+//! then my own mailboxes of yesterday and today (`Core::own_mailboxes`) are
+//! fetched from their best responsible, the next one only when the best
+//! failed, refused or rate-limited (a truncated fetch is kept as it is),
+//! resumed from the positions of the network state; then, with time left,
+//! receipts only are deposited (no proof of work, no fallback lookup). No
+//! loss audit, cross-check or re-read, no introduction stage, no
+//! maintenance, no wake subscriptions, no `mark_polled`, and the positions
+//! of mailboxes not fetched are kept. Scores take the same events as in a
+//! full sync (requests that succeed or fail), but no `Found` nor `Lost`.
+//! Page sizes grow back in full syncs only. The state is saved as usual.
+//!
 //! Nothing here logs an address or a mailbox: the transparency log gets the
 //! short node id only.
 
@@ -97,6 +111,8 @@ use io::{Observation, Observed};
 
 /// Longest synchronization.
 pub const SYNC_DEADLINE: Duration = Duration::from_secs(180);
+/// Longest quick sync (the notification extension's).
+pub const QUICK_DEADLINE: Duration = Duration::from_secs(25);
 /// Proof-of-work allowed per sync (expected attempts): about 1,000
 /// deposits at 18 bits, 16 at 24 bits.
 pub const SYNC_POW_BUDGET: u64 = 1 << 28;
@@ -226,6 +242,40 @@ impl Default for SyncOptions {
     }
 }
 
+/// Settings of a quick sync.
+#[derive(Clone, Debug)]
+pub struct QuickOptions {
+    /// Longest quick sync (`QUICK_DEADLINE`).
+    pub deadline: Duration,
+    /// Built-in bootstrap list (`builtin_bootstrap()`), used only when the
+    /// view is empty.
+    pub builtin: Vec<BootstrapEntry>,
+    /// Accept non-routable addresses (tests, private networks).
+    pub allow_private: bool,
+    /// Date of the sync (tests); `None`: the system clock.
+    pub now: Option<u64>,
+}
+
+impl Default for QuickOptions {
+    fn default() -> Self {
+        QuickOptions {
+            deadline: QUICK_DEADLINE,
+            builtin: builtin_bootstrap(),
+            allow_private: false,
+            now: None,
+        }
+    }
+}
+
+/// Which sync the executor runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// `sync`: every stage.
+    Full,
+    /// `quick_sync`: see the module documentation.
+    Quick,
+}
+
 /// What a sync did.
 #[derive(Debug, Default)]
 pub struct SyncReport {
@@ -278,11 +328,7 @@ pub async fn sync<D>(core: &mut Core, dialer: &D, opts: SyncOptions) -> SyncRepo
 where
     D: Dialer + Depositor + Fetcher + Subscriber + Sync,
 {
-    let now = opts.now.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-    });
+    let now = clock(opts.now);
     let deadline = Instant::now() + opts.deadline;
     let (state, state_reset) = match NetState::load_checked(core, now, opts.allow_private) {
         Ok(s) => s,
@@ -299,6 +345,41 @@ where
     run.finish().await
 }
 
+/// Quick sync for the notification extension (see the module
+/// documentation). `polled_all_sessions` stays false: nothing is recorded
+/// as polled.
+pub async fn quick_sync<D>(core: &mut Core, dialer: &D, opts: QuickOptions) -> SyncReport
+where
+    D: Dialer + Depositor + Fetcher + Sync,
+{
+    let now = clock(opts.now);
+    let deadline = Instant::now() + opts.deadline;
+    let (state, state_reset) = match NetState::load_checked(core, now, opts.allow_private) {
+        Ok(s) => s,
+        Err(e) => {
+            return SyncReport {
+                error: Some(e.to_string()),
+                ..SyncReport::default()
+            };
+        }
+    };
+    // No proof of work: receipts only.
+    let mut run = Run::new(core, dialer, state, now, deadline, 0);
+    run.mode = Mode::Quick;
+    run.report.state_reset = state_reset;
+    run.run_quick(&opts.builtin).await;
+    run.finish().await
+}
+
+/// `now`, or the system clock.
+fn clock(now: Option<u64>) -> u64 {
+    now.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    })
+}
+
 impl<'a, D: Connector> Run<'a, D> {
     fn new(
         core: &'a mut Core,
@@ -309,6 +390,7 @@ impl<'a, D: Connector> Run<'a, D> {
         pow_budget: u64,
     ) -> Self {
         Run {
+            mode: Mode::Full,
             core,
             dialer,
             state,
@@ -351,6 +433,7 @@ struct NodeStats {
 }
 
 struct Run<'a, D: Connector> {
+    mode: Mode,
     core: &'a mut Core,
     dialer: &'a D,
     state: NetState,
@@ -405,11 +488,13 @@ struct Run<'a, D: Connector> {
 
 impl<D> Run<'_, D>
 where
-    D: Dialer + Depositor + Fetcher + Subscriber + Sync,
+    D: Dialer + Depositor + Fetcher + Sync,
 {
-    async fn run(&mut self, opts: &SyncOptions) {
+    /// Stage 1 (view), shared by both modes: a quick sync bootstraps only
+    /// from an empty view.
+    async fn prepare(&mut self, manual_nodes: &[(NodeId, SocketAddr)], builtin: &[BootstrapEntry]) {
         let now = self.now;
-        for &(id, addr) in &opts.manual_nodes {
+        for &(id, addr) in manual_nodes {
             self.state.view.add_manual(id, addr, now);
         }
         self.state.view.expire(now);
@@ -425,21 +510,25 @@ where
             .map(|(id, e)| (*id, e.addrs()))
             .collect();
         seeds.sort_unstable_by_key(|(id, _)| id.0);
-        for b in &opts.builtin {
+        for b in builtin {
             if !seeds.iter().any(|(id, _)| *id == b.id) {
                 seeds.push((b.id, vec![b.addr]));
             }
         }
         self.seeds = seeds;
 
-        if self.reachable() < MIN_REACHABLE && !self.over() {
+        let bootstrap = match self.mode {
+            Mode::Full => self.reachable() < MIN_REACHABLE,
+            Mode::Quick => self.state.view.is_empty(),
+        };
+        if bootstrap && !self.over() {
             let hints = self.core.contact_node_hints().unwrap_or_default();
             let observed = Observed::new(self.dialer);
             let mut rng = rand::rng();
             let boot = discover::bootstrap(
                 &mut self.state.view,
                 hints,
-                &opts.builtin,
+                builtin,
                 &observed,
                 &mut rng,
                 &mut self.budget,
@@ -449,56 +538,25 @@ where
             self.apply_observed(observed);
             self.save();
         }
+    }
 
-        // A store read error aborts the sync: polling a partial list, then
-        // `mark_polled`, would skip unread session mailboxes for good.
-        let groups = match self.core.watched_mailbox_groups(now) {
-            Ok(g) => g,
+    /// Quick sync: my mailboxes of yesterday and today, then receipts.
+    async fn run_quick(&mut self, builtin: &[BootstrapEntry]) {
+        self.prepare(&[], builtin).await;
+        let today = day_of(self.now);
+        let days = [today.saturating_sub(1), today];
+        let mut mailboxes: Vec<MailboxId> = match self.core.own_mailboxes(&days) {
+            Ok(m) => m.into_iter().map(|(m, _)| m).collect(),
             Err(e) => {
                 self.report.error = Some(e.to_string());
                 return;
             }
         };
-        let mut sessions = groups.sessions;
-        sessions.sort_unstable_by_key(|m| m.0);
-        sessions.dedup();
-        let mut intro = groups.intro;
-        intro.sort_unstable_by_key(|m| m.0);
-        intro.dedup();
-        let watched: HashSet<MailboxId> = sessions.iter().chain(&intro).copied().collect();
-        self.state.retain_positions(&watched);
-
-        let polled_sessions = self.fetch_stage(&sessions, false).await;
-        self.report.polled_all_sessions = polled_sessions;
-
-        self.deposit_stage(false).await;
-
-        if !intro.is_empty() {
-            let polled_intro = self.fetch_stage(&intro, true).await;
-            self.report.intro_partial = !polled_intro;
-            // Receipts of what the introductions brought.
-            if !self.over() {
-                self.deposit_stage(true).await;
-            }
-        }
-
-        // Nodes tried and none answered: lookups would only dial dead ends.
-        if !self.over() && (self.network_up() || !self.tried) {
-            self.maintenance(&sessions, &intro).await;
-        }
-
-        if !self.over() && (self.network_up() || !self.tried) {
-            self.push_stage(opts.push.as_ref()).await;
-        }
-
-        // With no session mailbox, "all polled" also needs a node that
-        // answered: otherwise the window would move past unread days.
-        self.report.polled_all_sessions &= self.network_up();
-        if self.report.polled_all_sessions
-            && let Err(e) = self.core.mark_polled(now)
-        {
-            tracing::warn!("poll date not recorded: {e}");
-            self.report.polled_all_sessions = false;
+        mailboxes.sort_unstable_by_key(|m| m.0);
+        mailboxes.dedup();
+        self.fetch_stage(&mailboxes, false).await;
+        if !self.over() {
+            self.deposit_stage(true).await;
         }
     }
 
@@ -515,7 +573,11 @@ where
             let failed: Vec<NodeId> = self.dial_failed.iter().copied().collect();
             self.state.note_down_failures(failed, self.now);
         }
-        self.state.recover_page_bytes(&self.page_confirmed);
+        // Page sizes grow back once per full sync: quick syncs, one per
+        // wake-up, would undo a slow link's back-off within the hour.
+        if self.mode == Mode::Full {
+            self.state.recover_page_bytes(&self.page_confirmed);
+        }
         self.save();
         for (_, (id, s)) in std::mem::take(&mut self.stats) {
             let node = short_id(&id);
@@ -897,7 +959,8 @@ where
                         };
                         let nodes = not_responsible.entry(p.mailbox).or_default();
                         nodes.insert(d.node);
-                        if nodes.len() >= NOT_RESPONSIBLE_FALLBACK
+                        if self.mode == Mode::Full
+                            && nodes.len() >= NOT_RESPONSIBLE_FALLBACK
                             && fallback_tried.insert(p.mailbox)
                             && self.fallback(&p.mailbox).await
                         {
@@ -1063,6 +1126,63 @@ impl<D> Run<'_, D>
 where
     D: Dialer + Depositor + Fetcher + Subscriber + Sync,
 {
+    /// Full sync: stages 2 to 7 after the view (see the module documentation).
+    async fn run(&mut self, opts: &SyncOptions) {
+        let now = self.now;
+        self.prepare(&opts.manual_nodes, &opts.builtin).await;
+
+        // A store read error aborts the sync: polling a partial list, then
+        // `mark_polled`, would skip unread session mailboxes for good.
+        let groups = match self.core.watched_mailbox_groups(now) {
+            Ok(g) => g,
+            Err(e) => {
+                self.report.error = Some(e.to_string());
+                return;
+            }
+        };
+        let mut sessions = groups.sessions;
+        sessions.sort_unstable_by_key(|m| m.0);
+        sessions.dedup();
+        let mut intro = groups.intro;
+        intro.sort_unstable_by_key(|m| m.0);
+        intro.dedup();
+        let watched: HashSet<MailboxId> = sessions.iter().chain(&intro).copied().collect();
+        self.state.retain_positions(&watched);
+
+        let polled_sessions = self.fetch_stage(&sessions, false).await;
+        self.report.polled_all_sessions = polled_sessions;
+
+        self.deposit_stage(false).await;
+
+        if !intro.is_empty() {
+            let polled_intro = self.fetch_stage(&intro, true).await;
+            self.report.intro_partial = !polled_intro;
+            // Receipts of what the introductions brought.
+            if !self.over() {
+                self.deposit_stage(true).await;
+            }
+        }
+
+        // Nodes tried and none answered: lookups would only dial dead ends.
+        if !self.over() && (self.network_up() || !self.tried) {
+            self.maintenance(&sessions, &intro).await;
+        }
+
+        if !self.over() && (self.network_up() || !self.tried) {
+            self.push_stage(opts.push.as_ref()).await;
+        }
+
+        // With no session mailbox, "all polled" also needs a node that
+        // answered: otherwise the window would move past unread days.
+        self.report.polled_all_sessions &= self.network_up();
+        if self.report.polled_all_sessions
+            && let Err(e) = self.core.mark_polled(now)
+        {
+            tracing::warn!("poll date not recorded: {e}");
+            self.report.polled_all_sessions = false;
+        }
+    }
+
     /// Wake subscriptions (stage 6 of the module documentation).
     async fn push_stage(&mut self, cfg: Option<&PushConfig>) {
         let now = self.now;

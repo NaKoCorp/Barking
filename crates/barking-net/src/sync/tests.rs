@@ -2288,3 +2288,224 @@ async fn failed_node_is_skipped_for_the_rest_of_the_stage() {
     // Not left out: a node that cannot be reached is tried again next sync.
     assert!(!push_state(&core).no_wake.contains_key(&x));
 }
+
+// ---- Quick sync (notification extension) ----
+
+fn quick_opts() -> QuickOptions {
+    QuickOptions {
+        deadline: QUICK_DEADLINE,
+        builtin: Vec::new(),
+        allow_private: true,
+        now: Some(NOW),
+    }
+}
+
+/// My own mailboxes of yesterday and today, sorted.
+fn quick_mailboxes(core: &Core) -> Vec<MailboxId> {
+    let today = barking_core::mailbox::day_of(NOW);
+    let mut out: Vec<MailboxId> = core
+        .own_mailboxes(&[today - 1, today])
+        .unwrap()
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect();
+    out.sort_unstable_by_key(|m| m.0);
+    out
+}
+
+/// Every (node, mailbox) pair fetched, in call order.
+fn fetched_pairs(calls: &[Call]) -> Vec<(NodeId, MailboxId)> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Fetch(n, mbs, _) => Some(mbs.iter().map(|m| (*n, *m)).collect::<Vec<_>>()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn best_responsible(state: &NetState, m: &MailboxId) -> NodeId {
+    state.order_responsibles(state.view.responsibles_by_score(m, NOW))[0]
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_fetches_today_and_yesterday_only() {
+    let (_dir, mut core, mut net) = setup();
+    let wanted = quick_mailboxes(&core);
+    assert!(!wanted.is_empty());
+    let groups = core.watched_mailbox_groups(NOW).unwrap();
+    let watched: HashSet<MailboxId> = groups
+        .sessions
+        .iter()
+        .chain(&groups.intro)
+        .copied()
+        .collect();
+    assert!(watched.len() > wanted.len(), "the full sync watches more");
+    let state = load(&mut core);
+    // The best responsible of the first mailbox truncates: no second
+    // responsible for it. The best one of another mailbox is down: its
+    // mailboxes move to the next responsible.
+    let truncating = best_responsible(&state, &wanted[0]);
+    net.truncate.insert(truncating, FetchStop::Connection);
+    let down = wanted
+        .iter()
+        .map(|m| best_responsible(&state, m))
+        .find(|n| *n != truncating)
+        .expect("two distinct best responsibles");
+    net.down.insert(down);
+
+    let report = quick_sync(&mut core, &net, quick_opts()).await;
+    let calls = net.calls();
+    let pairs = fetched_pairs(&calls);
+    let fetched: BTreeSet<[u8; 16]> = pairs.iter().map(|(_, m)| m.0).collect();
+    let expected: BTreeSet<[u8; 16]> = wanted.iter().map(|m| m.0).collect();
+    assert_eq!(fetched, expected);
+    for m in &wanted {
+        let ranked = state.order_responsibles(state.view.responsibles_by_score(m, NOW));
+        let from: Vec<NodeId> = pairs
+            .iter()
+            .filter(|(_, x)| x == m)
+            .map(|(n, _)| *n)
+            .collect();
+        if ranked[0] == down {
+            // Failure of the best: the next one only.
+            assert!(calls.contains(&Call::Connect(down)));
+            assert_eq!(from, vec![ranked[1]], "{m:?}");
+        } else {
+            // Served (truncated or not) by the best: nobody else.
+            assert_eq!(from, vec![ranked[0]], "{m:?}");
+        }
+    }
+    assert!(report.network_up);
+    assert!(report.error.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_deposits_receipts_but_no_messages() {
+    let (_dir, mut core, mut net) = setup();
+    net.pow_cost = 0;
+    let messages: Vec<[u8; 32]> = core
+        .pending_outbox(NOW)
+        .unwrap()
+        .iter()
+        .filter(|b| Packet::decode(b).is_ok_and(|p| p.kind == Kind::Message))
+        .map(|b| content_hash(b))
+        .collect();
+    assert!(!messages.is_empty());
+    let report = quick_sync(&mut core, &net, quick_opts()).await;
+    let calls = net.calls();
+    let deposited: Vec<[u8; 32]> = calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Deposit(_, h) => Some(*h),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(report.acks_deposited, 1);
+    assert_eq!((report.first_copies, report.extra_copies), (0, 0));
+    assert!(!deposited.is_empty());
+    assert!(deposited.iter().all(|h| !messages.contains(h)));
+    // After the fetches.
+    let last_fetch = positions_of(&calls, |c| matches!(c, Call::Fetch(..)));
+    let deposits = positions_of(&calls, |c| matches!(c, Call::Deposit(..)));
+    assert!(last_fetch.last().unwrap() < &deposits[0]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_skips_audit_maintenance_and_push() {
+    let (_dir, mut core, mut net) = setup();
+    let wanted = quick_mailboxes(&core);
+    let mut state = load(&mut core);
+    // A node one sync away from its unaudited failure, and best responsible
+    // of a mailbox; it cuts every fetch.
+    let node = best_responsible(&state, &wanted[0]);
+    state.unaudited.insert(node, UNAUDITED_SYNCS - 1);
+    state.save(&mut core).unwrap();
+    net.truncate.insert(node, FetchStop::Connection);
+
+    let report = quick_sync(&mut core, &net, quick_opts()).await;
+    let calls = net.calls();
+    // No lookup, no ping, no subscription.
+    assert!(!calls.iter().any(|c| matches!(
+        c,
+        Call::Find(..) | Call::Ping(..) | Call::Subscribe(..) | Call::Unsubscribe(..)
+    )));
+    assert!(!report.maintenance_done);
+    assert_eq!((report.subscribed, report.unsubscribed), (0, 0));
+    assert_eq!(
+        core.transport_state(crate::push::PUSH_STATE_KEY).unwrap(),
+        None
+    );
+    // No cross-check nor audit re-read: each mailbox fetched once.
+    let pairs = fetched_pairs(&calls);
+    let mut seen = HashSet::new();
+    assert!(pairs.iter().all(|(_, m)| seen.insert(m.0)), "{pairs:?}");
+    // No loss audit: neither the unaudited count nor the audit dates move.
+    let after = load(&mut core);
+    assert_eq!(after.unaudited.get(&node), Some(&(UNAUDITED_SYNCS - 1)));
+    for (n, m) in &pairs {
+        assert!(after.audit_due(n, m, NOW, AUDIT_EVERY_SECS));
+        assert!(after.crosscheck_due(n, m, NOW, CROSSCHECK_EVERY_SECS));
+    }
+    assert!(report.network_up);
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_never_marks_polled() {
+    let (_dir, mut core, net) = setup();
+    core.mark_polled(NOW - 5 * DAY).unwrap();
+    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
+    let report = quick_sync(&mut core, &net, quick_opts()).await;
+    assert!(report.network_up && report.mailboxes_polled > 0);
+    assert!(!report.polled_all_sessions);
+    assert_eq!(core.watched_mailbox_groups(NOW).unwrap().intro.len(), wide);
+    // A full sync afterwards does mark it.
+    sync(&mut core, &net, opts()).await;
+    assert!(core.watched_mailbox_groups(NOW).unwrap().intro.len() < wide);
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_respects_its_deadline() {
+    let (_dir, mut core, mut net) = setup();
+    let wanted = quick_mailboxes(&core);
+    net.fetch_delay = Duration::from_secs(10);
+    net.deposit_delay = Duration::from_secs(10);
+    net.position = 7;
+    let start = Instant::now();
+    let report = quick_sync(&mut core, &net, quick_opts()).await;
+    assert!(start.elapsed() <= QUICK_DEADLINE, "{:?}", start.elapsed());
+    // Some fetches went through, not all of them, and their positions are
+    // saved.
+    assert!(report.mailboxes_polled > 0, "{report:?}");
+    assert!(report.mailboxes_polled < wanted.len(), "{report:?}");
+    let state = load(&mut core);
+    let saved = fetched_pairs(&net.calls())
+        .iter()
+        .any(|(n, m)| state.resume(n, &[*m]).seen.get(&m.0) == Some(&7));
+    assert!(saved);
+}
+
+#[test]
+fn quick_options_default() {
+    let o = QuickOptions::default();
+    assert_eq!(o.deadline, QUICK_DEADLINE);
+    assert_eq!(QUICK_DEADLINE, Duration::from_secs(25));
+    assert_eq!(o.builtin, builtin_bootstrap());
+    assert!(!o.allow_private);
+    assert_eq!(o.now, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_leaves_page_sizes_to_grow_back_in_full_syncs() {
+    let (_dir, mut core, net) = setup();
+    let mut state = load(&mut core);
+    let slow = id_of(0);
+    state.set_page_bytes(&slow, 64 << 10);
+    state.save(&mut core).unwrap();
+    quick_sync(&mut core, &net, quick_opts()).await;
+    let after = load(&mut core).page_bytes(&slow);
+    assert_eq!(after, 64 << 10);
+    sync(&mut core, &net, opts()).await;
+    assert!(load(&mut core).page_bytes(&slow) > 64 << 10);
+}

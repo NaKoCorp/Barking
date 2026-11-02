@@ -10,10 +10,10 @@ use barking_proto::{ErrorReason, NodeId};
 use tokio::time::Instant;
 
 use super::FetchStop;
-use super::io::{Depositor, FetchReply, Fetcher, LinkPage, Subscriber};
+use super::io::{Depositor, FetchReply, Fetcher, LinkPage};
 use super::{
-    AUDIT_EVERY_SECS, CROSSCHECK_EVERY_SECS, INTRO_FETCH_BYTES, REREAD_BYTES, REREAD_TIME, Run,
-    SESSION_FETCH_SLICE, UNAUDITED_SYNCS, dead_session, intro_slice, receive_all,
+    AUDIT_EVERY_SECS, CROSSCHECK_EVERY_SECS, INTRO_FETCH_BYTES, Mode, REREAD_BYTES, REREAD_TIME,
+    Run, SESSION_FETCH_SLICE, UNAUDITED_SYNCS, dead_session, intro_slice, receive_all,
 };
 use crate::discover::{DialError, Dialer};
 use crate::plan::{detect_losses, found_messages};
@@ -43,11 +43,12 @@ pub(super) enum GroupEnd {
 
 impl<D> Run<'_, D>
 where
-    D: Dialer + Depositor + Fetcher + Subscriber + Sync,
+    D: Dialer + Depositor + Fetcher + Sync,
 {
     /// Fetches `mailboxes`, grouped by best responsible, moving the
     /// mailboxes of a failed or truncated group to their next responsible
-    /// (introductions: on failure only). Returns true if every mailbox was
+    /// (introductions and quick syncs: on failure only, a rate limit
+    /// included for a quick sync). Returns true if every mailbox was
     /// fetched in full and processed.
     pub(super) async fn fetch_stage(&mut self, mailboxes: &[MailboxId], intro: bool) -> bool {
         let now = self.now;
@@ -129,8 +130,13 @@ where
                         if counts {
                             complete_by_node.entry(node).or_insert(false);
                         }
+                        // Quick sync: what the best responsible served is
+                        // enough; the next one only if it served nothing.
+                        let give_up = truncated
+                            && (intro
+                                || (self.mode == Mode::Quick && !self.limited.contains(&node)));
                         for m in &group {
-                            let step = if intro && truncated {
+                            let step = if give_up {
                                 // A flooded introduction mailbox is not
                                 // worth fetching twice.
                                 None
@@ -146,7 +152,7 @@ where
                 }
             }
         }
-        if !intro {
+        if !intro && self.mode == Mode::Full {
             self.crosschecks(&ranked, &served, slice_end).await;
             self.note_audits(complete_by_node);
             let queue = std::mem::take(&mut self.reread_queue);
@@ -341,7 +347,7 @@ where
         if processed {
             self.state.set_positions(&node, group, &resume);
         }
-        if !intro {
+        if !intro && self.mode == Mode::Full {
             // A truncated fetch audits nothing.
             let audited: &[MailboxId] = if complete { &from_start } else { &[] };
             self.audit(node, &items, audited);
@@ -359,7 +365,7 @@ where
             .saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
         self.save();
         // A cut connection leaves no session worth re-reading on.
-        if !intro && stop != FetchStop::Connection {
+        if !intro && self.mode == Mode::Full && stop != FetchStop::Connection {
             self.reread_queue.push((node, group.to_vec()));
         }
         let end = if complete {
