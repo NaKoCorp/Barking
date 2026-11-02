@@ -279,6 +279,37 @@ cas_sign_refuses_without_local_tag() {
     --seckey "$tmp/cles/bonne.key" --pubkey "$tmp/cles/bonne.pub"
   attendre_code 1 && attendre_texte "tag v$version not found" && sans_minisig
 }
+cas_sign_refuses_tag_differing_from_origin() {
+  # Clone whose origin is the throwaway repository: same tag, signing is allowed.
+  local clone="$tmp/clone-origine"
+  rm -rf "$clone"
+  git clone -q "$depot" "$clone"
+  nouveau
+  lancer "$clone/scripts/sign-release.sh" "$version" --from-dir "$D" --rebuilt-dir "$R" \
+    --seckey "$tmp/cles/bonne.key" --pubkey "$tmp/cles/bonne.pub"
+  attendre_code 0 || return 1
+  # Tag moved in this clone only: refused, nothing is signed.
+  git_test -C "$clone" commit -q --allow-empty -m "other commit"
+  git_test -C "$clone" tag -f "v$version" >/dev/null
+  nouveau
+  lancer "$clone/scripts/sign-release.sh" "$version" --from-dir "$D" --rebuilt-dir "$R" \
+    --seckey "$tmp/cles/bonne.key" --pubkey "$tmp/cles/bonne.pub"
+  attendre_code 1 && attendre_texte "differs between this clone" && sans_minisig
+}
+cas_sign_origin_unreachable_needs_from_dir() {
+  local clone="$tmp/clone-injoignable"
+  rm -rf "$clone"
+  git clone -q "$depot" "$clone"
+  git -C "$clone" remote set-url origin "$tmp/absent.git"
+  # Without --from-dir (assets fetched from the draft): refused before any download.
+  lancer "$clone/scripts/sign-release.sh" "$version" --seckey "$tmp/cles/bonne.key" --pubkey "$tmp/cles/bonne.pub"
+  attendre_code 1 && attendre_texte "origin unreachable" || return 1
+  # With --from-dir: allowed, with a warning.
+  nouveau
+  lancer "$clone/scripts/sign-release.sh" "$version" --from-dir "$D" --rebuilt-dir "$R" \
+    --seckey "$tmp/cles/bonne.key" --pubkey "$tmp/cles/bonne.pub"
+  attendre_code 0 && attendre_texte "warning: origin unreachable"
+}
 cas_comment_only_pubkey_rejected() {
   nouveau; signer_ok || return 1
   printf 'untrusted comment: minisign public key AAAA\n' > "$tmp/commentaire.pub"
@@ -311,7 +342,8 @@ for cas in sign_then_verify_ok sign_then_verify_rebuild_ok forged_signature_reje
            verify_rebuilt_mismatch_rejected trusted_comment_other_version_rejected \
            trusted_comment_without_commit_rejected signed_commit_differs_from_local_tag_rejected \
            signed_commit_unchecked_without_local_tag sign_refuses_without_local_tag \
-           rebuild_refuses_tag_without_build_env \
+           rebuild_refuses_tag_without_build_env sign_refuses_tag_differing_from_origin \
+           sign_origin_unreachable_needs_from_dir \
            comment_only_pubkey_rejected sign_wrong_seckey_refused empty_pubkey_rejected; do
   if "cas_$cas"; then echo "PASS $cas"; else echo "FAIL $cas"; echecs=$((echecs + 1)); fi
 done

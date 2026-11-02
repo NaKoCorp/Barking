@@ -8,6 +8,17 @@
 #   sudo -u barking-node barking-node init --data-dir /var/lib/barking-node
 #   install -m 0644 barking-node.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now barking-node
+#
+# First deployment on a host (before announcing the node):
+#   systemd-analyze verify /etc/systemd/system/barking-node.service
+#     -> no output (no unknown directive, ExecStart found).
+#   systemd-analyze security barking-node.service
+#     -> overall exposure well below 5.0 (MEDIUM); review any directive
+#        reported as weaker than in this file.
+#   systemctl start barking-node && journalctl -u barking-node -n 20
+#     -> "node <identifier> started", then the periodic counters; no restart loop.
+#   stat -c '%a %U' /var/lib/barking-node /var/lib/barking-node/node.key /var/lib/barking-node/node.db
+#     -> 700, 600 and 600, all owned by barking-node.
 [Unit]
 Description=Barking node (pending encrypted packets, QUIC)
 After=network-online.target

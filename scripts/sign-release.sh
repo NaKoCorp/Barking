@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Signing a release (maintainer): rebuilds, compares, then signs SHA256SUMS with minisign.
 # The signed comment is « barking v<version> commit <commit of the local tag> ».
+# The local tag must match origin's; origin unreachable is refused, except with --from-dir (warning).
 # Usage: scripts/sign-release.sh <version> --seckey <file> [--from-dir <dir>] [--rebuilt-dir <dir>]
 #           [--pubkey <file>] [--repo <owner/repo>]
 set -euo pipefail
@@ -37,6 +38,21 @@ commit="$(git -C "$racine" rev-parse --verify --quiet "v$version^{commit}" 2>/de
 [[ $commit =~ ^[0-9a-f]{40}$ ]] \
   || erreur "tag v$version not found in this clone: fetch it (git fetch --tags) before signing"
 echo "commit of tag v$version: $commit" >&2
+
+# The local tag must be the published one: a tag moved or recreated in this clone would bind
+# another commit than the one the release was built from.
+if distant="$(GIT_TERMINAL_PROMPT=0 git -C "$racine" ls-remote --tags origin 2>/dev/null)"; then
+  commit_distant="$(printf '%s\n' "$distant" | awk -v r="refs/tags/v$version^{}" '$2 == r { print $1; exit }')"
+  [ -n "$commit_distant" ] \
+    || commit_distant="$(printf '%s\n' "$distant" | awk -v r="refs/tags/v$version" '$2 == r { print $1; exit }')"
+  [ -n "$commit_distant" ] || erreur "tag v$version not found on origin: push it before signing"
+  [ "$commit_distant" = "$commit" ] \
+    || erreur "tag v$version differs between this clone ($commit) and origin ($commit_distant): nothing is signed"
+elif [ -n "$from_dir" ]; then
+  echo "warning: origin unreachable, tag v$version not compared with the published one" >&2
+else
+  erreur "origin unreachable: tag v$version cannot be compared with the published one"
+fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/barking-sign.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
