@@ -228,6 +228,12 @@ pub struct ServerStats {
     fetches: AtomicU64,
     /// Expired rows purged.
     purged: AtomicU64,
+    /// Wake-up orders handed to a relay (one per order, not per batch).
+    wake_sent: AtomicU64,
+    /// Wake-up orders abandoned after the single retry failed.
+    wake_failed: AtomicU64,
+    /// Wake-up orders lost because the sender queue was full.
+    wake_dropped: AtomicU64,
     /// Refusals per reason (index: `reason_index`).
     refusals: [AtomicU64; REASONS.len()],
     /// Replication: since startup, and since the last `drain`.
@@ -317,6 +323,33 @@ impl ServerStats {
         self.purged.fetch_add(n as u64, Ordering::Relaxed);
     }
 
+    pub fn add_wake_sent(&self, n: u64) {
+        self.wake_sent.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn add_wake_failed(&self, n: u64) {
+        self.wake_failed.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn add_wake_dropped(&self, n: u64) {
+        self.wake_dropped.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Wake-up orders sent since the last `drain`.
+    pub fn wake_sent(&self) -> u64 {
+        self.wake_sent.load(Ordering::Relaxed)
+    }
+
+    /// Wake-up orders abandoned since the last `drain`.
+    pub fn wake_failed(&self) -> u64 {
+        self.wake_failed.load(Ordering::Relaxed)
+    }
+
+    /// Wake-up orders dropped (full queue) since the last `drain`.
+    pub fn wake_dropped(&self) -> u64 {
+        self.wake_dropped.load(Ordering::Relaxed)
+    }
+
     /// Counts a replication pass.
     pub fn replicated(&self, r: &PassReport) {
         for m in [&self.replication, &self.replication_period] {
@@ -340,6 +373,9 @@ impl ServerStats {
             deposits_ok: take(&self.deposits_ok),
             fetches: take(&self.fetches),
             purged: take(&self.purged),
+            wake_sent: take(&self.wake_sent),
+            wake_failed: take(&self.wake_failed),
+            wake_dropped: take(&self.wake_dropped),
             refusals: REASONS
                 .iter()
                 .map(|r| (*r, take(&self.refusals[reason_index(*r)])))
@@ -365,6 +401,10 @@ pub struct Report {
     pub deposits_ok: u64,
     pub fetches: u64,
     pub purged: u64,
+    /// Wake-up orders sent, abandoned after the retry, dropped (full queue).
+    pub wake_sent: u64,
+    pub wake_failed: u64,
+    pub wake_dropped: u64,
     /// Refusals per reason (zero reasons omitted).
     pub refusals: Vec<(ErrorReason, u64)>,
     pub connections: usize,
@@ -393,6 +433,13 @@ impl fmt::Display for Report {
             ", open connections: {} (peak {}), database operations peak: {}, response bytes peak: {}",
             self.connections, self.connections_peak, self.db_jobs_peak, self.response_bytes_peak
         )?;
+        if self.wake_sent + self.wake_failed + self.wake_dropped > 0 {
+            write!(
+                f,
+                ", wake-ups: {} sent, {} failed, {} dropped",
+                self.wake_sent, self.wake_failed, self.wake_dropped
+            )?;
+        }
         if self.replication.passes > 0 {
             write!(
                 f,

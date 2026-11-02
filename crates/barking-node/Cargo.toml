@@ -29,7 +29,7 @@ ed25519-dalek.workspace = true
 postcard.workspace = true
 quinn.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros", "signal", "net"] }
 tracing.workspace = true
 # Plain SQLite: packets are end-to-end encrypted, the database holds no
 # secret. Specification distinct from the core's (SQLCipher).
@@ -44,4 +44,4 @@ barking-core.workspace = true
 barking-node = { workspace = true, features = ["test-harness"] }
 rustls.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros", "test-util"] }

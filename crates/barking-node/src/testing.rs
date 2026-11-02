@@ -398,6 +398,97 @@ pub async fn stop_all(nodes: Vec<TestNode>) {
     }
 }
 
+/// Minimal push relay for tests: QUIC server that answers `Hello`,
+/// records the items of every `Wake` and answers `Ok`. Key: the last of `SEEDS`.
+pub struct FakeRelay {
+    addr: SocketAddr,
+    id: NodeId,
+    received: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    task: JoinHandle<()>,
+}
+
+impl FakeRelay {
+    pub async fn start() -> FakeRelay {
+        use barking_proto::frame::{self, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
+        // Clients check the node puzzle on the TLS identity: only a key of
+        // `SEEDS` works (the last one; `key(900)` does not exist).
+        let k = key(SEEDS.len() - 1);
+        let id = id_of(&k);
+        let ep = quinn::Endpoint::server(
+            barking_proto::tls::quinn_server_config(&k),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let addr = ep.local_addr().unwrap();
+        let received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let log = received.clone();
+        let task = tokio::spawn(async move {
+            while let Some(incoming) = ep.accept().await {
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let Ok(conn) = incoming.await else { return };
+                    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                        let Ok(req) = frame::read::<Request>(&mut recv, MAX_REQUEST_BYTES).await
+                        else {
+                            return;
+                        };
+                        let resp = match req {
+                            Request::Hello { .. } => Response::Hello {
+                                version: 1,
+                                min_version: 1,
+                                node_id: id,
+                                pow_bits: TEST_BITS,
+                                limits: barking_proto::Limits {
+                                    max_mailboxes_per_fetch: 1,
+                                    max_request_bytes: MAX_REQUEST_BYTES as u32,
+                                    max_response_bytes: MAX_RESPONSE_BYTES as u32,
+                                    wake: false,
+                                },
+                            },
+                            Request::Wake { items } => {
+                                log.lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .extend(items);
+                                Response::Ok
+                            }
+                            _ => Response::Error(barking_proto::ErrorReason::Unsupported),
+                        };
+                        let _ = frame::write(&mut send, &resp, MAX_RESPONSE_BYTES).await;
+                        let _ = send.finish();
+                    }
+                });
+            }
+        });
+        FakeRelay {
+            addr,
+            id,
+            received,
+            task,
+        }
+    }
+
+    /// Where the relay is reached (host `127.0.0.1`).
+    pub fn relay_ref(&self) -> barking_proto::push::RelayRef {
+        barking_proto::push::RelayRef {
+            host: "127.0.0.1".to_string(),
+            port: self.addr.port(),
+            id: self.id,
+        }
+    }
+
+    /// Sealed tokens received so far, in order.
+    pub fn received(&self) -> Vec<Vec<u8>> {
+        self.received
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn stop(self) {
+        self.task.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

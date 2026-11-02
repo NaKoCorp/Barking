@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::{NodeStore, Result};
 
+pub mod sender;
 #[cfg(test)]
 mod tests;
 
