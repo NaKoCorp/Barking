@@ -143,7 +143,19 @@ async fn push_sends_exact_headers_and_body() {
     let s = &seen[0];
     assert_eq!(s.path, format!("/3/device/{}", "ab".repeat(32)));
     assert_eq!(s.body, BODY);
-    assert!(s.header("authorization").unwrap().starts_with("bearer "));
+    let jwt = s
+        .header("authorization")
+        .unwrap()
+        .strip_prefix("bearer ")
+        .unwrap();
+    let part = |i: usize| {
+        let raw = data_encoding::BASE64URL_NOPAD
+            .decode(jwt.split('.').nth(i).unwrap().as_bytes())
+            .unwrap();
+        String::from_utf8(raw).unwrap()
+    };
+    assert!(part(0).contains(r#""kid":"KEY1234567""#));
+    assert!(part(1).contains(r#""iss":"TEAM123456""#));
     assert_eq!(s.header("apns-topic"), Some("fr.example.barking"));
     assert_eq!(s.header("apns-push-type"), Some("alert"));
     assert_eq!(s.header("apns-priority"), Some("10"));
@@ -247,4 +259,56 @@ async fn unreachable_apns_is_failed_zero() {
         p.push(token(ApnsEnv::Production)).await,
         PushOutcome::Failed(0)
     );
+}
+
+#[tokio::test]
+async fn jwt_renewed_at_exactly_fifty_minutes() {
+    let f = fake().await;
+    let now = Arc::new(AtomicU64::new(1_700_000_000));
+    let c = now.clone();
+    let p = ApnsPusher::new_insecure_for_tests(&cfg(&f.url, &f.url), key(), move || {
+        c.load(Ordering::SeqCst)
+    })
+    .unwrap();
+    p.push(token(ApnsEnv::Production)).await;
+    now.store(1_700_000_000 + 2999, Ordering::SeqCst);
+    p.push(token(ApnsEnv::Production)).await;
+    now.store(1_700_000_000 + 3000, Ordering::SeqCst);
+    p.push(token(ApnsEnv::Production)).await;
+    let seen = f.seen.lock().unwrap();
+    let auth = |i: usize| seen[i].header("authorization").unwrap().to_string();
+    assert_eq!(auth(0), auth(1), "reused at +2999 s");
+    assert_ne!(auth(1), auth(2), "renewed at +3000 s");
+}
+
+#[tokio::test]
+async fn concurrent_expired_tokens_renew_once() {
+    const N: usize = 8;
+    let f = fake().await;
+    let p = Arc::new(pusher(&f.url, &f.url));
+    p.push(token(ApnsEnv::Production)).await; // caches the first token
+    {
+        let mut r = f.replies.lock().unwrap();
+        for _ in 0..N {
+            r.push_back((403, r#"{"reason":"ExpiredProviderToken"}"#));
+        }
+    }
+    let mut tasks = Vec::new();
+    for _ in 0..N {
+        let p = p.clone();
+        tasks.push(tokio::spawn(async move {
+            p.push(token(ApnsEnv::Production)).await
+        }));
+    }
+    for t in tasks {
+        assert_eq!(t.await.unwrap(), PushOutcome::Sent);
+    }
+    let seen = f.seen.lock().unwrap();
+    let mut bearers: Vec<&str> = seen
+        .iter()
+        .map(|s| s.header("authorization").unwrap())
+        .collect();
+    bearers.sort_unstable();
+    bearers.dedup();
+    assert_eq!(bearers.len(), 2, "the old token and a single renewal");
 }

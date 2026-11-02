@@ -104,39 +104,43 @@ impl ApnsPusher {
         }
     }
 
-    /// Cached provider token, renewed after 50 min or when `force` is set.
-    fn bearer(&self, force: bool) -> String {
+    /// Cached provider token with its `iat`, renewed after 50 min, or when
+    /// it is the one APNs just rejected (`rejected_iat`). A token already
+    /// replaced by a concurrent push is reused: one renewal per rejection.
+    fn bearer(&self, rejected_iat: Option<u64>) -> (String, u64) {
         let now = (self.clock)();
         let mut slot = self.jwt.lock().unwrap_or_else(PoisonError::into_inner);
-        if !force
-            && let Some(c) = slot.as_ref()
+        if let Some(c) = slot.as_ref()
+            && rejected_iat != Some(c.iat)
             && now.saturating_sub(c.iat) < JWT_LIFETIME_SECS
         {
-            return c.jwt.clone();
+            return (c.jwt.clone(), c.iat);
         }
         let jwt = apns_jwt(&self.team_id, &self.key_id, &self.key, now);
         *slot = Some(CachedJwt {
             jwt: jwt.clone(),
             iat: now,
         });
-        jwt
+        (jwt, now)
     }
 
-    /// One request; the second value tells whether APNs rejected the
-    /// provider token as expired.
-    async fn send(&self, token: &WakeToken, force_jwt: bool) -> (PushOutcome, bool) {
+    /// One request; the second value is the `iat` of the provider token if
+    /// APNs rejected it as expired.
+    async fn send(
+        &self,
+        token: &WakeToken,
+        rejected_iat: Option<u64>,
+    ) -> (PushOutcome, Option<u64>) {
         let base = match token.env {
             ApnsEnv::Production => &self.production_url,
             ApnsEnv::Sandbox => &self.sandbox_url,
         };
         let url = format!("{base}/3/device/{}", HEXLOWER.encode(&token.apns_token));
+        let (jwt, iat) = self.bearer(rejected_iat);
         let resp = self
             .client
             .post(url)
-            .header(
-                "authorization",
-                format!("bearer {}", self.bearer(force_jwt)),
-            )
+            .header("authorization", format!("bearer {jwt}"))
             .header("apns-topic", &self.topic)
             .header("apns-push-type", "alert")
             .header("apns-priority", "10")
@@ -151,22 +155,39 @@ impl ApnsPusher {
             .await;
         let resp = match resp {
             Ok(r) => r,
-            Err(_) => return (PushOutcome::Failed(0), false),
+            Err(_) => return (PushOutcome::Failed(0), None),
         };
         let code = resp.status().as_u16();
         match code {
-            200 => (PushOutcome::Sent, false),
-            410 => (PushOutcome::Unregistered, false),
+            200 => (PushOutcome::Sent, None),
+            410 => (PushOutcome::Unregistered, None),
             403 => {
                 let expired = resp
                     .bytes()
                     .await
                     .is_ok_and(|b| b.len() < 4096 && contains(&b, b"ExpiredProviderToken"));
-                (PushOutcome::Failed(403), expired)
+                (PushOutcome::Failed(403), expired.then_some(iat))
             }
-            other => (PushOutcome::Failed(other), false),
+            other => (PushOutcome::Failed(other), None),
         }
     }
+}
+
+/// Fails if the host trust store holds no root certificate: reqwest verifies
+/// Apple's certificate through it, and every push would fail otherwise.
+pub fn verify_trust_store() -> Result<()> {
+    check_root_count(rustls_native_certs::load_native_certs().certs.len())
+}
+
+fn check_root_count(count: usize) -> Result<()> {
+    if count == 0 {
+        return Err(Error::Config(
+            "the host trust store has no root certificates, APNs TLS cannot be verified \
+             (install ca-certificates, or set SSL_CERT_FILE / SSL_CERT_DIR)"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -192,11 +213,22 @@ fn base_client() -> reqwest::ClientBuilder {
 
 impl Pusher for ApnsPusher {
     async fn push(&self, token: WakeToken) -> PushOutcome {
-        let (outcome, expired) = self.send(&token, false).await;
-        if expired {
+        let (outcome, rejected) = self.send(&token, None).await;
+        if rejected.is_some() {
             // Renew the provider token and retry once.
-            return self.send(&token, true).await.0;
+            return self.send(&token, rejected).await.0;
         }
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_trust_store_is_refused() {
+        assert!(check_root_count(0).is_err());
+        assert!(check_root_count(1).is_ok());
     }
 }

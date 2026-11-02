@@ -44,6 +44,7 @@ rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
 rpassword = "7.5.4"
 rusqlite = { version = "0.41.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8.5"
 rustls-webpki = { version = "0.103.14", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.1"

@@ -95,13 +95,15 @@ fn keygen_node(out: &Path) -> Result<(), BoxError> {
     if fs::symlink_metadata(out).is_ok() {
         return Err(format!("{} already exists", out.display()).into());
     }
-    eprintln!("Searching for an identity (20-bit puzzle, a few seconds)...");
-    let key = generate_node_key(&mut rand::rng());
-    let id = NodeId::from_public_key(&key.verifying_key());
     let mut tmp = out.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    let _ = fs::remove_file(&tmp);
+    if fs::symlink_metadata(&tmp).is_ok() {
+        return Err(format!("{} already exists", tmp.display()).into());
+    }
+    eprintln!("Searching for an identity (20-bit puzzle, a few seconds)...");
+    let key = generate_node_key(&mut rand::rng());
+    let id = NodeId::from_public_key(&key.verifying_key());
     let text = Zeroizing::new(format!(
         "{}\n",
         data_encoding::BASE32_NOPAD.encode(&key.to_bytes())
@@ -150,7 +152,7 @@ fn run(config_path: &Path) -> Result<(), BoxError> {
     let node_key = config::load_node_key(&cfg.node_key_file)?;
     let keys = config::load_seal_keys(&cfg.seal_keys)?;
     let apns_key = config::load_apns_key(&cfg.apns.key_file)?;
-    barking_push::apns::install_crypto_provider();
+    barking_push::apns::verify_trust_store()?;
     let pusher = Arc::new(ApnsPusher::new(&cfg.apns, apns_key)?);
     let id = NodeId::from_public_key(&node_key.verifying_key());
     let limits = ConnLimits {

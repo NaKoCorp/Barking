@@ -337,6 +337,7 @@ dependencies = [
  "rand",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "tempfile",
  "thiserror",

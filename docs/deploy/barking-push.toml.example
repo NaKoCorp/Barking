@@ -20,6 +20,8 @@ seal_keys = [
 ]
 
 [apns]
+# The host root certificate store (ca-certificates) must be installed: APNs
+# TLS is verified against it and the relay refuses to start without roots.
 # Apple developer team identifier (JWT `iss`).
 team_id = "ABCDE12345"
 # Identifier of the APNs authentication key (JWT `kid`).

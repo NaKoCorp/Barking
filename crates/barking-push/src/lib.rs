@@ -1,6 +1,6 @@
 //! `barking-push`: stateless push relay. It opens the sealed wake tokens that
 //! nodes forward, rate-limits them per device token and hands them to a
-//! `Pusher` (the APNs client lives in the binary). Nothing is stored and no
+//! `Pusher` (`apns::ApnsPusher` is the APNs client). Nothing is stored and no
 //! address, mailbox or token is ever logged.
 
 pub mod apns;

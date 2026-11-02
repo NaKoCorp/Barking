@@ -12,6 +12,11 @@
 #   install -m 0644 barking-push.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now barking-push
 #
+# The host must have a root certificate store (Debian/Ubuntu:
+# `apt install ca-certificates`; or point SSL_CERT_FILE / SSL_CERT_DIR at one
+# with Environment= below): APNs TLS is verified against it, and the relay
+# refuses to start without it.
+#
 # First deployment on a host:
 #   systemd-analyze verify /etc/systemd/system/barking-push.service
 #     -> no output (no unknown directive, ExecStart found).
