@@ -546,6 +546,24 @@ impl Core {
         Ok(out)
     }
 
+    /// My introduction mailboxes for each of `days`, in that order: the
+    /// part of `own_mailboxes` anyone can write to. Empty while awaiting
+    /// the link.
+    pub fn own_intro_mailboxes(&self, days: &[u32]) -> Vec<MailboxId> {
+        if self.pending {
+            return Vec::new();
+        }
+        let me = self.device.public();
+        let mut out: Vec<MailboxId> = Vec::new();
+        for &d in days {
+            let m = intro_mailbox(&me, d);
+            if !out.contains(&m) {
+                out.push(m);
+            }
+        }
+        out
+    }
+
     /// Records that the mailboxes were polled at `now`. To be called after
     /// polling all mailboxes successfully; deliberately overwrites the
     /// previous value (an earlier value only widens the window).

@@ -2317,6 +2317,11 @@ fn own_mailboxes_cover_sessions_and_intro_per_day() {
             assert!(!own.iter().any(|(m, _)| *m == sent));
         }
     }
+    // The introduction part, in the order of the days.
+    assert_eq!(
+        p.a.own_intro_mailboxes(&[d, d + 1, d]),
+        vec![intro_mailbox(&me, d), intro_mailbox(&me, d + 1)]
+    );
 }
 
 #[test]

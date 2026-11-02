@@ -12,8 +12,9 @@ use tokio::time::Instant;
 use super::FetchStop;
 use super::io::{Depositor, FetchReply, Fetcher, LinkPage};
 use super::{
-    AUDIT_EVERY_SECS, CROSSCHECK_EVERY_SECS, INTRO_FETCH_BYTES, Mode, REREAD_BYTES, REREAD_TIME,
-    Run, SESSION_FETCH_SLICE, UNAUDITED_SYNCS, dead_session, intro_slice, receive_all,
+    AUDIT_EVERY_SECS, CROSSCHECK_EVERY_SECS, INTRO_FETCH_BYTES, Mode, QUICK_INTRO_BYTES,
+    REREAD_BYTES, REREAD_TIME, Run, SESSION_FETCH_SLICE, UNAUDITED_SYNCS, dead_session,
+    intro_slice, receive_all,
 };
 use crate::discover::{DialError, Dialer};
 use crate::plan::{detect_losses, found_messages};
@@ -33,7 +34,9 @@ fn served_well(stop: FetchStop) -> bool {
 pub(super) enum GroupEnd {
     /// Fetched in full.
     Complete,
-    /// Failed, refused, rate limited or truncated: try the next responsible.
+    /// Failed, refused, rate limited or truncated: try the next responsible,
+    /// except after a truncated fetch of an introduction mailbox, or of any
+    /// mailbox in a quick sync unless the node rate-limited (given up).
     /// `counts`: the node answered and did not complete for a reason of its
     /// own (not a rate limit, not the client's slice or deadline running out).
     Incomplete { truncated: bool, counts: bool },
@@ -70,11 +73,17 @@ where
             mailboxes.iter().map(|m| (*m, Some(0))).collect();
         let mut done: HashSet<MailboxId> = HashSet::new();
         let mut all_processed = true;
-        let mut bytes_left = if intro {
-            INTRO_FETCH_BYTES
-        } else {
-            MAX_FETCH_BYTES
+        // Byte budget of the stage: introductions always have one; in a
+        // quick sync every stage draws on `quick_bytes`, introductions on
+        // `QUICK_INTRO_BYTES` at most.
+        let capped = intro || self.mode == Mode::Quick;
+        let budget = match (self.mode, intro) {
+            (Mode::Full, true) => INTRO_FETCH_BYTES,
+            (Mode::Full, false) => MAX_FETCH_BYTES,
+            (Mode::Quick, true) => QUICK_INTRO_BYTES.min(self.quick_bytes),
+            (Mode::Quick, false) => self.quick_bytes,
         };
+        let mut bytes_left = budget;
         // Per node: did any of its session fetches complete this sync?
         // Only raised; a node enters only once it completed, or answered
         // without completing for a reason of its own.
@@ -106,10 +115,10 @@ where
                 break;
             }
             for (_, (node, group)) in groups {
-                if Instant::now() >= slice_end || (intro && bytes_left == 0) {
+                if Instant::now() >= slice_end || (capped && bytes_left == 0) {
                     break 'rounds;
                 }
-                let max_bytes = if intro { bytes_left } else { MAX_FETCH_BYTES };
+                let max_bytes = if capped { bytes_left } else { MAX_FETCH_BYTES };
                 let (end, bytes, processed) = self
                     .fetch_group(node, &group, intro, max_bytes, slice_end)
                     .await;
@@ -151,6 +160,11 @@ where
                     }
                 }
             }
+        }
+        if self.mode == Mode::Quick {
+            self.quick_bytes = self
+                .quick_bytes
+                .saturating_sub(budget.saturating_sub(bytes_left));
         }
         if !intro && self.mode == Mode::Full {
             self.crosschecks(&ranked, &served, slice_end).await;

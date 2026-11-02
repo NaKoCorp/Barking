@@ -63,18 +63,23 @@
 //! `DOWN_FAILED_SECS`, so the next sync dials other nodes first.
 //!
 //! **Quick sync** (`quick_sync`, spec §6.2): the short fetch of the iOS
-//! notification extension, within `QUICK_DEADLINE`, on the same executor in
-//! `Mode::Quick`. Stage 1 runs, bootstrapping only when the view is empty;
-//! then my own mailboxes of yesterday and today (`Core::own_mailboxes`) are
-//! fetched from their best responsible, the next one only when the best
-//! failed, refused or rate-limited (a truncated fetch is kept as it is),
-//! resumed from the positions of the network state; then, with time left,
+//! notification extension, on the same executor in `Mode::Quick`, within
+//! `QUICK_DEADLINE` closing included (the work stops `CLOSE_TIMEOUT`
+//! earlier). Stage 1 runs, bootstrapping only when the view is empty; then
+//! my own session mailboxes of yesterday and today (`Core::own_mailboxes`),
+//! then my introduction mailboxes of those days, are fetched from their
+//! best responsible, the next one only when the best failed, refused or
+//! rate-limited (a truncated fetch is kept as it is), resumed from the
+//! positions of the network state. Every fetch draws on
+//! `QUICK_FETCH_BYTES` in all, the introductions on `QUICK_INTRO_BYTES` at
+//! most: a fetch cut by that cap is processed and its positions saved, so
+//! each wake-up makes bounded, lasting progress. Then, with time left,
 //! receipts only are deposited (no proof of work, no fallback lookup). No
-//! loss audit, cross-check or re-read, no introduction stage, no
-//! maintenance, no wake subscriptions, no `mark_polled`, and the positions
-//! of mailboxes not fetched are kept. Scores take the same events as in a
-//! full sync (requests that succeed or fail), but no `Found` nor `Lost`.
-//! Page sizes grow back in full syncs only. The state is saved as usual.
+//! loss audit, cross-check or re-read, no maintenance, no wake
+//! subscriptions, no `mark_polled`, and the positions of mailboxes not
+//! fetched are kept. Scores take the same events as in a full sync
+//! (requests that succeed or fail), but no `Found` nor `Lost`. Page sizes
+//! grow back in full syncs only. The state is saved as usual.
 //!
 //! Nothing here logs an address or a mailbox: the transparency log gets the
 //! short node id only.
@@ -111,8 +116,14 @@ use io::{Observation, Observed};
 
 /// Longest synchronization.
 pub const SYNC_DEADLINE: Duration = Duration::from_secs(180);
-/// Longest quick sync (the notification extension's).
+/// Longest quick sync (the notification extension's), closing included.
 pub const QUICK_DEADLINE: Duration = Duration::from_secs(25);
+/// Bytes a quick sync may fetch in all: the extension's memory is small,
+/// and a fetch is held whole before it is processed.
+pub const QUICK_FETCH_BYTES: usize = 2 << 20;
+/// Bytes a quick sync may fetch from my introduction mailboxes (within
+/// `QUICK_FETCH_BYTES`): anyone can fill them, and fill them to wake me.
+pub const QUICK_INTRO_BYTES: usize = 512 << 10;
 /// Proof-of-work allowed per sync (expected attempts): about 1,000
 /// deposits at 18 bits, 16 at 24 bits.
 pub const SYNC_POW_BUDGET: u64 = 1 << 28;
@@ -353,7 +364,8 @@ where
     D: Dialer + Depositor + Fetcher + Sync,
 {
     let now = clock(opts.now);
-    let deadline = Instant::now() + opts.deadline;
+    // The closing comes out of the quick sync's own time.
+    let deadline = Instant::now() + opts.deadline.saturating_sub(CLOSE_TIMEOUT);
     let (state, state_reset) = match NetState::load_checked(core, now, opts.allow_private) {
         Ok(s) => s,
         Err(e) => {
@@ -391,6 +403,7 @@ impl<'a, D: Connector> Run<'a, D> {
     ) -> Self {
         Run {
             mode: Mode::Full,
+            quick_bytes: QUICK_FETCH_BYTES,
             core,
             dialer,
             state,
@@ -434,6 +447,8 @@ struct NodeStats {
 
 struct Run<'a, D: Connector> {
     mode: Mode,
+    /// Quick sync: bytes left to fetch (`QUICK_FETCH_BYTES` at first).
+    quick_bytes: usize,
     core: &'a mut Core,
     dialer: &'a D,
     state: NetState,
@@ -545,16 +560,30 @@ where
         self.prepare(&[], builtin).await;
         let today = day_of(self.now);
         let days = [today.saturating_sub(1), today];
-        let mut mailboxes: Vec<MailboxId> = match self.core.own_mailboxes(&days) {
-            Ok(m) => m.into_iter().map(|(m, _)| m).collect(),
+        let own = match self.core.own_mailboxes(&days) {
+            Ok(m) => m,
             Err(e) => {
                 self.report.error = Some(e.to_string());
                 return;
             }
         };
-        mailboxes.sort_unstable_by_key(|m| m.0);
-        mailboxes.dedup();
-        self.fetch_stage(&mailboxes, false).await;
+        // Introductions apart, with their own small budget, after the
+        // sessions: a flood there cannot take the sessions' bytes.
+        let intro_set: HashSet<MailboxId> =
+            self.core.own_intro_mailboxes(&days).into_iter().collect();
+        let (mut intro, mut sessions): (Vec<MailboxId>, Vec<MailboxId>) = own
+            .into_iter()
+            .map(|(m, _)| m)
+            .partition(|m| intro_set.contains(m));
+        for list in [&mut sessions, &mut intro] {
+            list.sort_unstable_by_key(|m| m.0);
+            list.dedup();
+        }
+        self.fetch_stage(&sessions, false).await;
+        if !intro.is_empty() && !self.over() {
+            let polled_intro = self.fetch_stage(&intro, true).await;
+            self.report.intro_partial = !polled_intro;
+        }
         if !self.over() {
             self.deposit_stage(true).await;
         }

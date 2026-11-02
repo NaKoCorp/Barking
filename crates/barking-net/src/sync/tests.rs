@@ -100,6 +100,13 @@ struct Net {
     no_wake: HashSet<NodeId>,
     /// Subscriptions on that node are refused with this reason.
     refuse_subscribe: HashMap<NodeId, ErrorReason>,
+    /// Fetches honour `max_bytes`: the items beyond it are left out and the
+    /// fetch stops with `FetchStop::ClientLimit`.
+    honor_max_bytes: bool,
+    /// Every fetch: node, `max_bytes` asked, bytes returned.
+    fetch_bytes: Mutex<Vec<(NodeId, usize, usize)>>,
+    /// Time each closing takes.
+    close_delay: Duration,
     calls: Mutex<Vec<Call>>,
 }
 
@@ -195,6 +202,7 @@ impl Connector for Net {
     }
 
     async fn close(&self, conn: Conn) {
+        tokio::time::sleep(self.close_delay).await;
         self.log(Call::Close(conn.id));
     }
 }
@@ -268,6 +276,23 @@ impl Fetcher for Net {
         for m in mailboxes {
             items.extend(self.mailbox_items.get(m).cloned().unwrap_or_default());
         }
+        let mut stop = stop;
+        if self.honor_max_bytes {
+            let mut total = 0usize;
+            let all = items.len();
+            items.retain(|i| {
+                total += i.len();
+                total <= _max_bytes
+            });
+            if items.len() < all && stop == FetchStop::Complete {
+                stop = FetchStop::ClientLimit;
+            }
+        }
+        let bytes = items.iter().map(Vec::len).sum();
+        self.fetch_bytes
+            .lock()
+            .unwrap()
+            .push((*conn, _max_bytes, bytes));
         Ok(FetchReply::Items { items, stop })
     }
 }
@@ -2471,6 +2496,8 @@ async fn quick_sync_respects_its_deadline() {
     let wanted = quick_mailboxes(&core);
     net.fetch_delay = Duration::from_secs(10);
     net.deposit_delay = Duration::from_secs(10);
+    // The closing comes out of the 25 s too.
+    net.close_delay = CLOSE_TIMEOUT;
     net.position = 7;
     let start = Instant::now();
     let report = quick_sync(&mut core, &net, quick_opts()).await;
@@ -2508,4 +2535,226 @@ async fn quick_sync_leaves_page_sizes_to_grow_back_in_full_syncs() {
     assert_eq!(after, 64 << 10);
     sync(&mut core, &net, opts()).await;
     assert!(load(&mut core).page_bytes(&slow) > 64 << 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_caps_the_bytes_of_a_flooded_intro() {
+    let (_dir, mut core, mut net) = setup();
+    net.honor_max_bytes = true;
+    let today = barking_core::mailbox::day_of(NOW);
+    let days = [today - 1, today];
+    let intro = core.own_intro_mailboxes(&days);
+    assert_eq!(intro.len(), 2);
+    let sessions: Vec<MailboxId> = quick_mailboxes(&core)
+        .into_iter()
+        .filter(|m| !intro.contains(m))
+        .collect();
+    assert!(!sessions.is_empty());
+    // 16 MiB of junk in each introduction mailbox, served by every node.
+    for m in &intro {
+        net.mailbox_items
+            .insert(*m, vec![vec![0xEE; 64 << 10]; 256]);
+    }
+    let report = quick_sync(&mut core, &net, quick_opts()).await;
+    let fetches = net.fetch_bytes.lock().unwrap().clone();
+    let calls = net.calls();
+    let total: usize = fetches.iter().map(|(_, _, b)| b).sum();
+    assert!(total <= QUICK_FETCH_BYTES, "{total}");
+    assert!(fetches.iter().all(|(_, max, _)| *max <= QUICK_FETCH_BYTES));
+    // Every fetch of an introduction mailbox asked for its small budget at
+    // most, and they got no more than it together.
+    let mut intro_bytes = 0;
+    let mut n = 0;
+    for c in &calls {
+        if let Call::Fetch(_, mbs, _) = c {
+            let (_, max, bytes) = fetches[n];
+            n += 1;
+            if mbs.iter().any(|m| intro.contains(m)) {
+                assert!(mbs.iter().all(|m| intro.contains(m)), "intro apart");
+                assert!(max <= QUICK_INTRO_BYTES);
+                intro_bytes += bytes;
+            }
+        }
+    }
+    assert!(intro_bytes > 0 && intro_bytes <= QUICK_INTRO_BYTES);
+    assert!(report.intro_partial);
+    // The session mailboxes were fetched first, and in full.
+    let pairs = fetched_pairs(&calls);
+    let first_intro = pairs.iter().position(|(_, m)| intro.contains(m)).unwrap();
+    for m in &sessions {
+        let at = pairs
+            .iter()
+            .position(|(_, x)| x == m)
+            .expect("session fetched");
+        assert!(at < first_intro);
+    }
+    assert!(report.mailboxes_polled >= sessions.len());
+    // A truncated introduction mailbox is not fetched again elsewhere (and
+    // once the budget is spent, not at all).
+    for m in &intro {
+        assert!(pairs.iter().filter(|(_, x)| x == m).count() <= 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_caps_the_bytes_of_a_flooded_session() {
+    let (_dir, mut core, mut net) = setup();
+    net.honor_max_bytes = true;
+    let today = barking_core::mailbox::day_of(NOW);
+    let intro = core.own_intro_mailboxes(&[today - 1, today]);
+    for m in quick_mailboxes(&core) {
+        if !intro.contains(&m) {
+            net.mailbox_items.insert(m, vec![vec![0xEE; 64 << 10]; 64]);
+        }
+    }
+    quick_sync(&mut core, &net, quick_opts()).await;
+    let fetches = net.fetch_bytes.lock().unwrap().clone();
+    let total: usize = fetches.iter().map(|(_, _, b)| b).sum();
+    assert!(total > 0 && total <= QUICK_FETCH_BYTES, "{total}");
+    // Spent: nothing left for the introductions.
+    assert!(fetches.iter().all(|(_, max, _)| *max <= QUICK_FETCH_BYTES));
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_bootstraps_only_from_an_empty_view() {
+    // Not empty, but no node confirmed (below MIN_REACHABLE): no bootstrap.
+    let (_dir, mut core) = subject(NOW);
+    let mut state = NetState::new(true);
+    let mut net = Net::default();
+    for n in 0..NODES {
+        let r = record(n, NOW);
+        state.view.insert(r.clone(), NOW);
+        net.records.insert(id_of(n), r);
+    }
+    state.save(&mut core).unwrap();
+    let seed = id_of(0);
+    let builtin = vec![BootstrapEntry {
+        id: seed,
+        addr: net.records[&seed].addrs()[0],
+    }];
+    quick_sync(
+        &mut core,
+        &net,
+        QuickOptions {
+            builtin: builtin.clone(),
+            ..quick_opts()
+        },
+    )
+    .await;
+    assert!(
+        !net.calls()
+            .iter()
+            .any(|c| matches!(c, Call::Ping(..) | Call::Find(..))),
+        "{:?}",
+        net.calls()
+    );
+
+    // Empty: bootstrap from the built-in list.
+    let (_dir2, mut core) = subject(NOW);
+    let mut net = Net::default();
+    for n in 0..NODES {
+        net.records.insert(id_of(n), record(n, NOW));
+    }
+    let report = quick_sync(
+        &mut core,
+        &net,
+        QuickOptions {
+            builtin,
+            ..quick_opts()
+        },
+    )
+    .await;
+    assert!(
+        net.calls()
+            .iter()
+            .any(|c| matches!(c, Call::Ping(id) | Call::Find(id, _) if *id == seed))
+    );
+    assert!(report.view_size > 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_moves_on_from_a_rate_limited_best_responsible() {
+    let (_dir, mut core, mut net) = setup();
+    let wanted = quick_mailboxes(&core);
+    let state = load(&mut core);
+    let ranked = state.order_responsibles(state.view.responsibles_by_score(&wanted[0], NOW));
+    net.rate_limit_fetch.insert(ranked[0]);
+    quick_sync(&mut core, &net, quick_opts()).await;
+    let from: Vec<NodeId> = fetched_pairs(&net.calls())
+        .into_iter()
+        .filter(|(_, m)| *m == wanted[0])
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(from, vec![ranked[0], ranked[1]]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_makes_no_fallback_lookup_after_not_responsible() {
+    use rand::SeedableRng;
+    let (dir, mut core, mut net) = setup();
+    // A second receipt, for Carol.
+    let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+    let (mut carol, _) = Core::create(
+        &dir.path().join("carol.db"),
+        &[3; 32],
+        "carol",
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    let card_c = carol.contact_card("Carol").unwrap();
+    let card_b = core.contact_card("Bob").unwrap();
+    core.add_contact(&card_c, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    let fb = carol
+        .add_contact(&card_b, Some("bob"), NOW, &mut rng)
+        .unwrap();
+    // The next day: another receipt mailbox.
+    for p in carol.send_text(&fb, "first", NOW + DAY, &mut rng).unwrap() {
+        core.receive(&p.encode(), "test", NOW + DAY, &mut rng)
+            .unwrap();
+    }
+    let acks: Vec<(MailboxId, [u8; 32])> = core
+        .pending_outbox(NOW)
+        .unwrap()
+        .iter()
+        .filter_map(|b| Some((Packet::decode(b).ok()?, content_hash(b))))
+        .filter(|(p, _)| p.kind == Kind::Ack)
+        .map(|(p, h)| (p.mailbox, h))
+        .collect();
+    assert_eq!(acks.len(), 2);
+    assert_ne!(acks[0].0, acks[1].0);
+    // Receipts are planned in the order of the send queue, once per plan.
+    // The first one's two best responsibles answer `NotResponsible`; the
+    // second one's best rate-limits in between, so that the plan is redone
+    // and the first receipt tries its second responsible.
+    // A responsible of the second mailbox only, raised to be its best.
+    let mut state = load(&mut core);
+    let (ma, mc) = (acks[0].0, acks[1].0);
+    let only_c = state
+        .view
+        .responsibles(&mc, NOW)
+        .into_iter()
+        .find(|n| !state.view.responsibles(&ma, NOW).contains(n))
+        .expect("a responsible of the second mailbox only");
+    state.view.entries.get_mut(&only_c).unwrap().score = Score::new(0.9);
+    state.save(&mut core).unwrap();
+    let ranked = |m: &MailboxId| state.order_responsibles(state.view.responsibles_by_score(m, NOW));
+    let ha = acks[0].1;
+    let refusing = [ranked(&acks[0].0)[0], ranked(&acks[0].0)[1]];
+    let limiting = ranked(&acks[1].0)[0];
+    assert!(!refusing.contains(&limiting));
+    net.refuse_acks = true;
+    for n in refusing {
+        net.refuse_deposit.insert(n, ErrorReason::NotResponsible);
+    }
+    net.refuse_deposit
+        .insert(limiting, ErrorReason::RateLimited);
+    quick_sync(&mut core, &net, quick_opts()).await;
+    let calls = net.calls();
+    // Refused by both: a full sync would look the mailbox up here.
+    for n in refusing {
+        assert!(calls.contains(&Call::Deposit(n, ha)), "{calls:?}");
+    }
+    assert!(!calls.iter().any(|c| matches!(c, Call::Find(..))));
 }
