@@ -67,6 +67,13 @@ CREATE TABLE IF NOT EXISTS peers(
     node_id BLOB PRIMARY KEY, record BLOB NOT NULL,
     first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS subscriptions(
+    mailbox BLOB NOT NULL, relay BLOB NOT NULL, sealed BLOB NOT NULL,
+    cancel_hash BLOB NOT NULL, expires_day INTEGER NOT NULL,
+    last_wake INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(mailbox, cancel_hash));
+CREATE INDEX IF NOT EXISTS subscriptions_mailbox ON subscriptions(mailbox);
+CREATE INDEX IF NOT EXISTS subscriptions_pending ON subscriptions(pending, last_wake);
 ";
 
 impl NodeStore {
@@ -254,6 +261,7 @@ impl NodeStore {
     /// Deletes expired packets and acks (`expires_at <= now`). Returns the
     /// number of deleted rows.
     pub fn purge_expired(&mut self, now: u64) -> Result<usize> {
+        let today = i64::from(crate::wake::day_of(now));
         let now = i64::try_from(now).unwrap_or(i64::MAX);
         let tx = self.conn.transaction()?;
         let mut freed: i64 = 0;
@@ -271,6 +279,10 @@ impl NodeStore {
             )?;
         }
         add_stored_bytes(&tx, -freed)?;
+        removed += tx.execute(
+            "DELETE FROM subscriptions WHERE expires_day < ?1",
+            params![today],
+        )?;
         tx.commit()?;
         Ok(removed)
     }

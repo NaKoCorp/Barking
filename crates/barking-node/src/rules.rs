@@ -277,6 +277,7 @@ fn deposit_message(
         ],
     )?;
     add_stored_bytes(&tx, i(len))?;
+    crate::wake::mark_new_message(&tx, &p.mailbox, now)?;
     tx.commit()?;
     Ok(Ok(()))
 }

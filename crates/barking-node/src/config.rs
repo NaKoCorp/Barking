@@ -16,6 +16,7 @@ use crate::server::{
     self, DEFAULT_MAX_DB_JOBS, DEFAULT_MAX_RESPONSE_BYTES_IN_FLIGHT,
     DEFAULT_MAX_RESPONSE_BYTES_PER_IP, DEFAULT_MIN_SEND_RATE, ServerConfig,
 };
+use crate::wake::WakeConfig;
 use crate::{Error, Result};
 
 /// Default data directory (provided systemd unit).
@@ -143,6 +144,8 @@ pub struct Config {
     pub log_interval_secs: u64,
     /// Hash table between nodes; absent: disabled.
     pub dht: Option<DhtConfig>,
+    /// Wake subscriptions for the iOS push relay.
+    pub wake: WakeConfig,
     /// `[dht]` present without `public_addr`: table disabled, to be reported
     /// in the logs at startup.
     #[serde(skip)]
@@ -170,6 +173,7 @@ impl Default for Config {
             min_send_rate: DEFAULT_MIN_SEND_RATE,
             log_interval_secs: 60,
             dht: None,
+            wake: WakeConfig::default(),
             dht_without_public_addr: false,
         }
     }
