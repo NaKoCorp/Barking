@@ -24,6 +24,8 @@ fn apns_slot(code: u16) -> usize {
 pub struct RelayStats {
     /// Sealed items received in `Wake` requests.
     pub wakes_in: AtomicU64,
+    /// Items dropped unopened: the sending peer exceeded its intake budget.
+    pub over_budget: AtomicU64,
     /// Items that did not open (garbage, unknown key, wrong key).
     pub invalid: AtomicU64,
     /// Opened items whose expiry day is past.
@@ -43,6 +45,7 @@ pub struct RelayStats {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StatsSnapshot {
     pub wakes_in: u64,
+    pub over_budget: u64,
     pub invalid: u64,
     pub expired: u64,
     pub limited: u64,
@@ -64,6 +67,7 @@ impl RelayStats {
     pub fn snapshot(&self) -> StatsSnapshot {
         StatsSnapshot {
             wakes_in: self.wakes_in.load(Relaxed),
+            over_budget: self.over_budget.load(Relaxed),
             invalid: self.invalid.load(Relaxed),
             expired: self.expired.load(Relaxed),
             limited: self.limited.load(Relaxed),
@@ -79,6 +83,7 @@ impl RelayStats {
     pub fn take(&self) -> StatsSnapshot {
         StatsSnapshot {
             wakes_in: self.wakes_in.swap(0, Relaxed),
+            over_budget: self.over_budget.swap(0, Relaxed),
             invalid: self.invalid.swap(0, Relaxed),
             expired: self.expired.swap(0, Relaxed),
             limited: self.limited.swap(0, Relaxed),
@@ -113,6 +118,7 @@ pub async fn report_loop(stats: Arc<RelayStats>, every: Duration, mut stop: watc
 fn log(s: &StatsSnapshot) {
     tracing::info!(
         wakes_in = s.wakes_in,
+        over_budget = s.over_budget,
         invalid = s.invalid,
         expired = s.expired,
         limited = s.limited,

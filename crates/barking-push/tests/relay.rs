@@ -333,3 +333,23 @@ async fn per_ip_connection_cap_refuses_extra_connections() {
     drop(first);
     let _ = relay.stop.send(true);
 }
+
+#[tokio::test]
+async fn one_peer_cannot_exceed_its_intake_budget() {
+    let relay = start(ConnLimits::default()).await;
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    // Junk is opened (and fails) only within the peer's budget: 400 in a
+    // burst, 200 more per second.
+    let junk = vec![0xAB; 50];
+    for _ in 0..10 {
+        session
+            .wake(vec![junk.clone(); MAX_WAKE_ITEMS])
+            .await
+            .unwrap();
+    }
+    let s = relay.stats.snapshot();
+    assert_eq!(s.wakes_in, 1000);
+    assert!(s.over_budget > 0, "{s:?}");
+    assert_eq!(s.invalid + s.over_budget, 1000, "{s:?}");
+    let _ = relay.stop.send(true);
+}

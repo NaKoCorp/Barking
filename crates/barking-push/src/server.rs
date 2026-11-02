@@ -21,7 +21,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::time::timeout;
 use x25519_dalek::StaticSecret;
 
-use crate::limit::TokenLimiter;
+use crate::limit::{IntakeBudget, TokenLimiter};
 use crate::stats::RelayStats;
 
 /// Idle connections are closed after this long.
@@ -169,6 +169,7 @@ struct Shared<P> {
     pusher: Arc<P>,
     stats: Arc<RelayStats>,
     limiter: Mutex<TokenLimiter>,
+    intake: Mutex<IntakeBudget>,
     inflight: Arc<Semaphore>,
 }
 
@@ -203,6 +204,7 @@ pub async fn serve<P: Pusher>(
         pusher,
         stats,
         limiter: Mutex::new(TokenLimiter::new()),
+        intake: Mutex::new(IntakeBudget::new()),
         inflight: Arc::new(Semaphore::new(MAX_INFLIGHT_PUSHES)),
     });
     let conns = Arc::new(Conns {
@@ -265,21 +267,27 @@ async fn connection<P: Pusher>(incoming: Incoming, shared: Arc<Shared<P>>, _slot
     let Ok(Ok(conn)) = timeout(HANDSHAKE_TIMEOUT, async { incoming.accept()?.await }).await else {
         return;
     };
+    let peer = group(conn.remote_address().ip());
     // The transport limits the open streams to MAX_STREAMS; the idle timeout
     // ends a silent connection.
     while let Ok((send, recv)) = conn.accept_bi().await {
-        tokio::spawn(stream(send, recv, shared.clone()));
+        tokio::spawn(stream(send, recv, peer, shared.clone()));
     }
 }
 
-async fn stream<P: Pusher>(mut send: SendStream, mut recv: RecvStream, shared: Arc<Shared<P>>) {
+async fn stream<P: Pusher>(
+    mut send: SendStream,
+    mut recv: RecvStream,
+    peer: IpAddr,
+    shared: Arc<Shared<P>>,
+) {
     let req = timeout(
         STREAM_TIMEOUT,
         frame::read::<Request>(&mut recv, MAX_REQUEST_BYTES),
     )
     .await;
     let resp = match req {
-        Ok(Ok(req)) => handle(req, &shared),
+        Ok(Ok(req)) => handle(req, peer, &shared).await,
         Ok(Err(FrameError::Malformed)) => Response::Error(ErrorReason::Malformed),
         Ok(Err(_)) | Err(_) => {
             let _ = recv.stop(STREAM_REFUSED.into());
@@ -300,7 +308,7 @@ async fn stream<P: Pusher>(mut send: SendStream, mut recv: RecvStream, shared: A
     }
 }
 
-fn handle<P: Pusher>(req: Request, shared: &Arc<Shared<P>>) -> Response {
+async fn handle<P: Pusher>(req: Request, peer: IpAddr, shared: &Arc<Shared<P>>) -> Response {
     match req {
         Request::Hello {
             version,
@@ -328,10 +336,7 @@ fn handle<P: Pusher>(req: Request, shared: &Arc<Shared<P>>) -> Response {
             if items.len() > MAX_WAKE_ITEMS {
                 return Response::Error(ErrorReason::Malformed);
             }
-            let day = today();
-            for item in &items {
-                wake_item(item, day, shared);
-            }
+            wake(items, peer, shared).await;
             // Always `Ok`: nothing about a device is revealed to the node.
             Response::Ok
         }
@@ -339,12 +344,46 @@ fn handle<P: Pusher>(req: Request, shared: &Arc<Shared<P>>) -> Response {
     }
 }
 
-/// Opens, checks and limits one item, then spawns its push (not awaited: the
-/// response to `Wake` does not wait for APNs).
-fn wake_item<P: Pusher>(item: &[u8], day: u64, shared: &Arc<Shared<P>>) {
+/// Takes the peer's intake budget before any decryption, opens the granted
+/// items off the async workers, then checks and limits each one.
+async fn wake<P: Pusher>(mut items: Vec<Vec<u8>>, peer: IpAddr, shared: &Arc<Shared<P>>) {
     let stats = &shared.stats;
-    stats.wakes_in.fetch_add(1, Relaxed);
-    let Some(token) = open(&shared.keys, item) else {
+    let n = items.len();
+    stats.wakes_in.fetch_add(n as u64, Relaxed);
+    let granted = shared
+        .intake
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take(peer, u32::try_from(n).unwrap_or(u32::MAX), Instant::now());
+    let granted = usize::try_from(granted).map_or(n, |g| g.min(n));
+    stats.over_budget.fetch_add((n - granted) as u64, Relaxed);
+    items.truncate(granted);
+    if items.is_empty() {
+        return;
+    }
+    let opener = shared.clone();
+    let Ok(opened) = tokio::task::spawn_blocking(move || {
+        items
+            .iter()
+            .map(|item| open(&opener.keys, item))
+            .collect::<Vec<_>>()
+    })
+    .await
+    else {
+        stats.invalid.fetch_add(granted as u64, Relaxed);
+        return;
+    };
+    let day = today();
+    for token in opened {
+        wake_item(token, day, shared);
+    }
+}
+
+/// Checks and limits one opened item, then spawns its push (not awaited: the
+/// response to `Wake` does not wait for APNs).
+fn wake_item<P: Pusher>(token: Option<WakeToken>, day: u64, shared: &Arc<Shared<P>>) {
+    let stats = &shared.stats;
+    let Some(token) = token else {
         stats.invalid.fetch_add(1, Relaxed);
         return;
     };
