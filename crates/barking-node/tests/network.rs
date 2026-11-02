@@ -1565,3 +1565,90 @@ async fn deposit_pow_budget_and_tier_surcharge() {
     ));
     node.stop().await;
 }
+
+/// A node that drops the connection after a page: the pickup keeps the
+/// page taken, reports a lost connection, and the next call resumes after
+/// it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetch_cut_by_the_node_keeps_taken_pages() {
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 10_000;
+        c.limits.bytes_per_sec = 1 << 30;
+        c.test_close_after_fetches = Some(1);
+    });
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    let want: Vec<Vec<u8>> = (0..100).map(|n| message_tier(n, 9, Tier::L)).collect();
+    for p in &want {
+        assert_eq!(s.deposit(p).await.unwrap(), Ok(()));
+    }
+    let nine = [MailboxId([9; 16])];
+    let mut resume = client::FetchResume::default();
+    let mut all = s
+        .fetch_resumable(&nine, &mut resume, 1 << 30)
+        .await
+        .unwrap();
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::Connection);
+    assert!(!all.is_empty() && all.len() < want.len(), "{}", all.len());
+    // Each new connection takes one more page, from where the last stopped.
+    for _ in 0..want.len() {
+        let mut s = Client::connect(node.addr, node.id).await.unwrap();
+        all.extend(
+            s.fetch_resumable(&nine, &mut resume, 1 << 30)
+                .await
+                .unwrap(),
+        );
+        if s.last_fetch_stop() == client::FetchStop::Complete {
+            break;
+        }
+        assert_eq!(s.last_fetch_stop(), client::FetchStop::Connection);
+    }
+    assert_eq!(all, want);
+    node.stop().await;
+}
+
+/// The node's rate limit after pages already taken: a partial pickup
+/// stopped at `RateLimited`; with no page taken, a refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetch_rate_limited_after_pages() {
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 10_000;
+        c.limits.bytes_per_sec = 1 << 30;
+    });
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    let want: Vec<Vec<u8>> = (0..200).map(|n| message_tier(n, 9, Tier::L)).collect();
+    for p in &want {
+        assert_eq!(s.deposit(p).await.unwrap(), Ok(()));
+    }
+    s.close().await;
+    node.stop().await;
+    // Same store, tight bucket: 1 request/s, 4 tokens at the start, 2 per
+    // page of a single mailbox.
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.limits.requests_per_sec = 1;
+        c.limits.burst = 8;
+        c.limits.bytes_per_sec = 1 << 30;
+    });
+    assert_eq!(barking_node::server::fetch_cost(1), 2);
+    let mut s = Client::connect(node.addr, node.id).await.unwrap();
+    let nine = [MailboxId([9; 16])];
+    let mut resume = client::FetchResume::default();
+    let taken = s
+        .fetch_resumable(&nine, &mut resume, 1 << 30)
+        .await
+        .unwrap();
+    assert_eq!(s.last_fetch_stop(), client::FetchStop::RateLimited);
+    assert!(
+        !taken.is_empty() && taken.len() < want.len(),
+        "{}",
+        taken.len()
+    );
+    assert_eq!(taken[..], want[..taken.len()]);
+    // Bucket empty: no page taken, the refusal comes back as an error.
+    assert!(matches!(
+        s.fetch_resumable(&nine, &mut resume, 1 << 30).await,
+        Err(ClientError::Refused(ErrorReason::RateLimited))
+    ));
+    node.stop().await;
+}

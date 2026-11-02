@@ -263,7 +263,7 @@ impl View {
             e.first_seen = e.first_seen.min(now_hour);
             e.last_seen = e.last_seen.min(now_hour);
             if let Some(t) = &mut e.avoided_until {
-                *t = (*t).min(now.saturating_add(AVOID_SECS));
+                *t = hour((*t).min(now.saturating_add(AVOID_SECS)));
             }
         }
         let mut stale: Vec<(u64, NodeId)> = self
@@ -507,6 +507,18 @@ mod tests {
         v.insert(record(1, NOW), NOW);
         assert!(!v.insert(record(1, NOW), NOW));
         assert!(!v.get(&id_of(1)).unwrap().confirmed);
+    }
+
+    #[test]
+    fn expire_rounds_clamped_avoidance_to_the_hour() {
+        let mut v = view();
+        v.insert(record(0, NOW), NOW);
+        v.entries.get_mut(&id_of(0)).unwrap().avoided_until = Some(u64::MAX);
+        let now = NOW + 1234;
+        assert_ne!(now % 3600, 0);
+        v.expire(now);
+        let until = v.get(&id_of(0)).unwrap().avoided_until;
+        assert_eq!(until, Some(hour(now + AVOID_SECS)));
     }
 
     #[test]

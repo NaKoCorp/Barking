@@ -173,6 +173,11 @@ pub struct ServerConfig {
     /// (the write deadline still applies). Default: `None`.
     #[cfg(feature = "test-harness")]
     pub test_send_rate: Option<u64>,
+    /// Tests only (feature `test-harness`): closes a connection once it has
+    /// answered this many `Fetch` requests, as a lost link would.
+    /// Default: `None`.
+    #[cfg(feature = "test-harness")]
+    pub test_close_after_fetches: Option<u32>,
 }
 
 /// Gauge: current value and maximum reached.
@@ -508,6 +513,8 @@ impl ServerConfig {
             test_response_delay: None,
             #[cfg(feature = "test-harness")]
             test_send_rate: None,
+            #[cfg(feature = "test-harness")]
+            test_close_after_fetches: None,
         }
     }
 }
@@ -543,6 +550,9 @@ pub(crate) struct Shared {
     /// Tests only: see `ServerConfig::test_send_rate`.
     #[cfg(feature = "test-harness")]
     send_rate: Option<u64>,
+    /// Tests only: see `ServerConfig::test_close_after_fetches`.
+    #[cfg(feature = "test-harness")]
+    close_after_fetches: Option<u32>,
 }
 
 impl Shared {
@@ -564,6 +574,19 @@ impl Shared {
         return self.swallow_deposits;
         #[cfg(not(feature = "test-harness"))]
         false
+    }
+
+    /// Tests only: closes the connection of `state` once it has answered
+    /// the configured number of `Fetch` requests.
+    fn test_count_fetch(&self, state: &ConnState) {
+        #[cfg(feature = "test-harness")]
+        if let Some(n) = self.close_after_fetches
+            && state.fetches.fetch_add(1, Ordering::Relaxed) + 1 >= n
+        {
+            state.conn.close(CLOSE_NORMAL.into(), b"test");
+        }
+        #[cfg(not(feature = "test-harness"))]
+        let _ = state;
     }
 
     /// Sends a response (see `respond`), paced in tests if configured.
@@ -775,6 +798,8 @@ pub async fn run(
         response_delay: config.test_response_delay,
         #[cfg(feature = "test-harness")]
         send_rate: config.test_send_rate,
+        #[cfg(feature = "test-harness")]
+        close_after_fetches: config.test_close_after_fetches,
     });
 
     if let Stored::Done(n) = shared
@@ -922,6 +947,8 @@ async fn serve_connection(
         conn: conn.clone(),
         reserved: AtomicUsize::new(0),
         slot,
+        #[cfg(feature = "test-harness")]
+        fetches: AtomicU32::new(0),
     });
     // Streams of this connection: bounded by QUIC (`max_streams`), awaited or
     // abandoned before returning the limiter slot.
@@ -974,6 +1001,9 @@ struct ConnState {
     /// Limiter slot (and address-group state: rate bucket, reservations):
     /// returned when the connection and its streams are finished.
     slot: ConnectionSlot,
+    /// Tests only: `Fetch` requests answered.
+    #[cfg(feature = "test-harness")]
+    fetches: AtomicU32,
 }
 
 /// Response reservation counted at three levels: connection, address
@@ -1161,6 +1191,7 @@ async fn serve_stream(
     };
     let now = Instant::now();
     state.slot.touch(now);
+    let is_fetch = matches!(req, Ok(Request::Fetch { .. }));
     let cost = match &req {
         Ok(Request::Fetch { mailboxes, .. }) => fetch_cost(mailboxes.len()),
         _ => 1,
@@ -1222,6 +1253,9 @@ async fn serve_stream(
     shared.send_response(&mut send, &bytes).await;
     drop(held);
     state.charge(bytes.len());
+    if is_fetch {
+        shared.test_count_fetch(&state);
+    }
 }
 
 impl ConnState {
