@@ -31,8 +31,9 @@
 //!    before the next sync. `Full` (spec §7) hands the place to the next
 //!    responsible in the same run: `NodeFull` leaves the node out as a
 //!    whole, `MailboxFull` only that mailbox on that node, for the run. A
-//!    rate limit or the end of the proof budget ends the stage. With push on, skipped while no view entry has a record (a
-//!    cold start: no ranking to go by); with push off, the subscriptions are
+//!    rate limit or the end of the proof budget ends the stage. With push
+//!    on, skipped while no view entry has a record (a cold start: no
+//!    ranking to go by); with push off, the subscriptions are
 //!    cancelled all the same, and those whose node could not be reached are
 //!    kept, to be cancelled by a later sync. Skipped, like maintenance, when
 //!    nodes were tried and none answered. The push state is saved after
