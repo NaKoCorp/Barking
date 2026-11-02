@@ -254,19 +254,33 @@ fn read_salt(home: &Path) -> CliResult<[u8; 16]> {
     <[u8; 16]>::try_from(bytes.as_slice()).or_else(|_| fail("Salt file corrupted"))
 }
 
-/// Prepares the directory and the salt of a new identity; refuses if the database exists.
-fn prepare_new_home(home: &Path) -> CliResult<[u8; 16]> {
+/// Refuses if the database exists; checked before any input is read.
+fn ensure_no_identity(home: &Path) -> CliResult<()> {
     if home.join(DB_FILE).exists() {
         return fail(format!(
             "An identity already exists in {}: nothing was modified",
             home.display()
         ));
     }
+    Ok(())
+}
+
+/// Prepares the directory and the salt of a new identity; refuses if the database exists.
+/// Only a directory created here has its permissions set: an existing one is left as is.
+fn prepare_new_home(home: &Path) -> CliResult<[u8; 16]> {
+    ensure_no_identity(home)?;
+    let created = !home.exists();
     fs::create_dir_all(home)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(home, fs::Permissions::from_mode(0o700))?;
+        if created {
+            fs::set_permissions(home, fs::Permissions::from_mode(0o700))?;
+        } else if fs::metadata(home)?.permissions().mode() & 0o077 != 0 {
+            eprintln!(
+                "Warning: the data directory is accessible to other users: restrict it (chmod 700)"
+            );
+        }
     }
     let mut salt = [0u8; 16];
     rand::fill(&mut salt);
@@ -292,6 +306,7 @@ fn run(cli: Cli) -> CliResult<()> {
     };
     match cli.command {
         Command::Init { name } => {
+            ensure_no_identity(&home)?;
             let pass = read_passphrase(true)?;
             let salt = prepare_new_home(&home)?;
             let key = passphrase::derive_key(&pass, &salt);
@@ -306,6 +321,7 @@ fn run(cli: Cli) -> CliResult<()> {
             println!("Write it down offline: it alone lets you recover your identity.");
         }
         Command::Recover { name } => {
+            ensure_no_identity(&home)?;
             let mut phrase = Zeroizing::new(String::new());
             io::stdin().read_to_string(&mut phrase)?;
             let pass = read_passphrase(true)?;
@@ -337,8 +353,10 @@ fn run(cli: Cli) -> CliResult<()> {
             let fp = core
                 .add_contact(&card, alias.as_deref(), now(), &mut rand::rng())
                 .map_err(|e| match e {
-                    CoreError::StoreLocked => CliError::from(e),
-                    other => CliError(format!("Invalid contact card: {other}")),
+                    CoreError::InvalidSignature | CoreError::Malformed(_) | CoreError::TooLarge => {
+                        CliError(format!("Invalid contact card: {e}"))
+                    }
+                    other => CliError::from(other),
                 })?;
             println!("Contact added: {fp}");
         }
@@ -510,6 +528,7 @@ fn link(home: &Path, cmd: LinkCommand) -> CliResult<()> {
         }
         LinkCommand::Request { offer, name, out } => {
             // Everything is read and checked before the directory is created.
+            ensure_no_identity(home)?;
             let bytes = read_limited(&offer, MAX_LINK_FILE_BYTES)?;
             let parsed = LinkOffer::from_bytes(&bytes)?;
             drop(bytes);

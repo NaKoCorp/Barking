@@ -120,6 +120,81 @@ fn init_twice_refused() {
 }
 
 #[test]
+fn init_twice_refused_before_any_prompt() {
+    let (_d, home) = party("tel");
+    // No passphrase in the environment: the refusal comes before any prompt.
+    barking(&home)
+        .env_remove("BARKING_PASSPHRASE")
+        .args(["init", "--name", "autre"])
+        .write_stdin("")
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+    barking(&home)
+        .env_remove("BARKING_PASSPHRASE")
+        .arg("recover")
+        .args(["--name", "autre"])
+        .write_stdin("")
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+#[cfg(unix)]
+#[test]
+fn init_keeps_permissions_of_existing_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    // A pre-existing directory is not modified, but a warning is shown.
+    let existing = d.path().join("existing");
+    fs::create_dir(&existing).unwrap();
+    fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
+    barking(&existing)
+        .args(["init", "--name", "tel"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Warning"));
+    let mode = fs::metadata(&existing).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755);
+    // A directory created by `init` is private.
+    let fresh = d.path().join("fresh");
+    ok(&fresh, &["init", "--name", "tel"]);
+    let mode = fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+}
+
+#[test]
+fn add_on_pending_link_is_not_an_invalid_card() {
+    let (d, alice) = party("tel-a");
+    let (_db, bob) = party("tel-b");
+    let offer = d.path().join("offer.bin");
+    let request = d.path().join("request.bin");
+    let tablet = d.path().join("tablet");
+    ok(&alice, &["link", "offer", "--out", path_arg(&offer)]);
+    ok(
+        &tablet,
+        &[
+            "link",
+            "request",
+            "--offer",
+            path_arg(&offer),
+            "--name",
+            "t",
+            "--out",
+            path_arg(&request),
+        ],
+    );
+    barking(&tablet)
+        .args(["add", &card(&bob, "Bob")])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("waiting for its link"))
+        .stderr(predicate::str::contains("Invalid contact card").not());
+}
+
+#[test]
 fn init_shows_fingerprint_and_recovery_phrase() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
