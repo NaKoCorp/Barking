@@ -126,6 +126,7 @@ pub const CONTACT_CLOCK_ADD_WRITER: &str = "ALTER TABLE contact_clock ADD COLUMN
 pub const LEGACY_MESSAGE_ID_CONTEXT: &str = "barking/v0/legacy-message-id";
 
 /// Persisted statuses (see `MessageStatus`) used by the migration.
+const STATUS_SENT: i64 = 1;
 const STATUS_DELIVERED: i64 = 3;
 const DIRECTION_OUT: i64 = 0;
 
@@ -199,7 +200,7 @@ fn delivery_status(message_status: i64) -> i64 {
     if message_status == STATUS_DELIVERED {
         STATUS_DELIVERED
     } else {
-        1
+        STATUS_SENT
     }
 }
 

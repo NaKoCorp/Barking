@@ -36,8 +36,8 @@ impl fmt::Debug for RootIdentity {
     }
 }
 
-/// `label || msg`, the message actually signed.
-fn labelled(label: &[u8], msg: &[u8]) -> Vec<u8> {
+/// `label || msg`, the message actually signed (root and device keys).
+pub(crate) fn labelled(label: &[u8], msg: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(label.len() + msg.len());
     data.extend_from_slice(label);
     data.extend_from_slice(msg);
@@ -160,6 +160,12 @@ mod tests {
 
     fn rng() -> StdRng {
         StdRng::seed_from_u64(7)
+    }
+
+    #[test]
+    fn mnemonic_is_zeroized_on_drop() {
+        fn assert_zod<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zod::<Mnemonic>();
     }
 
     #[test]

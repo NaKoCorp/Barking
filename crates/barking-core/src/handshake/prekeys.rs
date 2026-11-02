@@ -1,7 +1,7 @@
 //! Key bundles (prekeys): signed X25519 key, ML-KEM-768 key and one-time keys.
 
+use crate::crypto::bytes64;
 use crate::crypto::labels;
-use crate::identity::device::sig_bytes;
 use crate::identity::{DeviceKeys, DevicePublic};
 use crate::{CoreError, Result};
 use core::fmt;
@@ -136,7 +136,7 @@ struct StoredPrekeys {
     spk: [u8; 32],
     pq_id: u32,
     /// 64-byte seed (d || z) of the ML-KEM key.
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     pq_seed: [u8; 64],
     opks: Vec<(u32, [u8; 32])>,
 }
@@ -193,7 +193,7 @@ pub struct PrekeyBundle {
     /// ML-KEM-768 encapsulation key (1184 bytes).
     pub pq_ek: Vec<u8>,
     pub opk: Option<(u32, [u8; 32])>,
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     pub sig: [u8; 64],
 }
 
@@ -242,6 +242,16 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+
+    /// The manual `ZeroizeOnDrop` of `PrekeySecrets` relies on its field
+    /// types.
+    #[test]
+    fn prekey_secret_fields_are_zeroized_on_drop() {
+        fn assert_zod<T: ZeroizeOnDrop>() {}
+        assert_zod::<StaticSecret>();
+        assert_zod::<PqDecapsulationKey>();
+        assert_zod::<PrekeySecrets>();
+    }
 
     fn setup() -> (DeviceKeys, PrekeySecrets) {
         let mut rng = StdRng::seed_from_u64(41);

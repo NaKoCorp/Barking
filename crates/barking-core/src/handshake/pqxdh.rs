@@ -279,14 +279,16 @@ mod tests {
         let alice = DeviceKeys::generate(&mut rng);
         let mut b = bob(&mut rng);
         let (_, mut init) = initiate(&alice, &b.pre.bundle(&b.dev, true), &mut rng).unwrap();
-        init.opk_id = init.opk_id.map(|id| id.wrapping_add(1));
-        // An unknown identifier (barring an unlikely collision with the second key).
-        if b.pre.bundle(&b.dev, true).opk.map(|(id, _)| id) != init.opk_id {
-            assert_eq!(
-                respond(&b.dev, &mut b.pre, &init).err(),
-                Some(CoreError::NoSession)
-            );
+        // The first identifier after the offered one that Bob does not hold.
+        let mut id = init.opk_id.unwrap().wrapping_add(1);
+        while b.pre.opk(id).is_some() {
+            id = id.wrapping_add(1);
         }
+        init.opk_id = Some(id);
+        assert_eq!(
+            respond(&b.dev, &mut b.pre, &init).err(),
+            Some(CoreError::NoSession)
+        );
     }
 
     #[test]

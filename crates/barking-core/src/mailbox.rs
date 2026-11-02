@@ -87,6 +87,27 @@ mod tests {
         assert_ne!(intro_mailbox(&p, 5), intro_mailbox(&q, 5));
     }
 
+    /// Mailbox ids are on the wire: any change to their derivation breaks
+    /// interoperability. Pinned outputs guard against silent drift.
+    #[test]
+    fn pinned_vectors() {
+        let hex = |m: MailboxId| data_encoding::HEXLOWER.encode(&m.0);
+        let p = DevicePublic {
+            sig: [3; 32],
+            dh: [4; 32],
+        };
+        assert_eq!(
+            hex(session_mailbox(&[1; 32], &B, 20000)),
+            "d5466435d9e45ee4c773e3468cf8b1dd"
+        );
+        assert_eq!(
+            hex(intro_mailbox(&p, 20000)),
+            "a2aebce66c3e516036b2c46710b96b57"
+        );
+        assert_eq!(day_of(20000 * 86400 + 86399), 20000);
+        assert_eq!(day_of(1_800_000_000), 20833);
+    }
+
     #[test]
     fn candidates_cover_skew() {
         assert_eq!(candidate_days(86400 * 10 + 5), [9, 10, 11]);

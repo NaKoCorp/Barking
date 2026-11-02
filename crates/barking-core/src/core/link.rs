@@ -55,11 +55,11 @@ use super::{
 };
 use crate::contact::ContactCard;
 use crate::crypto::aead::{xopen, xseal};
+use crate::crypto::bytes64;
 use crate::crypto::kdf::{hmac_sha256, hmac_sha256_verify};
 use crate::crypto::labels;
 use crate::envelope::Body;
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
-use crate::identity::device::sig_bytes;
 use crate::identity::device_list::MAX_DEVICES;
 use crate::identity::root::{Fingerprint, RootIdentity, RootPublic};
 use crate::identity::{DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic};
@@ -185,7 +185,7 @@ pub struct LinkRequest {
     pub issued_at: u64,
     /// Proof of possession (`DeviceKeys::possession_proof`), bound to the
     /// offer's root.
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     pub device_sig: [u8; 64],
     /// `HMAC-SHA256(derive_key(LINK_MAC, secret), postcard(fields without mac))`.
     pub mac: [u8; 32],
@@ -198,7 +198,7 @@ struct MacInput<'a> {
     bundle: &'a PrekeyBundle,
     name: &'a str,
     issued_at: u64,
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     device_sig: [u8; 64],
 }
 
@@ -351,7 +351,7 @@ fn bundle_key(secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
 #[derive(Serialize, Deserialize)]
 struct SignedPlain {
     plain: Vec<u8>,
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     sig: [u8; 64],
 }
 

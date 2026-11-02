@@ -11,7 +11,7 @@ barking-net = { path = "crates/barking-net" }
 barking-node = { path = "crates/barking-node" }
 barking-packet = { path = "crates/barking-packet" }
 barking-proto = { path = "crates/barking-proto" }
-bip39 = "3.0.0"
+bip39 = { version = "3.0.0", features = ["zeroize"] }
 blake3 = "1.8.7"
 chacha20 = { version = "0.10.2", features = ["rng"] }
 chacha20poly1305 = "0.11.0"

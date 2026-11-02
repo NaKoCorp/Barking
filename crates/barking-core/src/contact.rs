@@ -1,8 +1,9 @@
 //! Signed contact card: device list and key bundles, shareable as text.
 
+use crate::crypto::bytes64;
 use crate::crypto::labels;
 use crate::handshake::PrekeyBundle;
-use crate::identity::device::{MAX_NAME_LEN, sig_bytes};
+use crate::identity::device::MAX_NAME_LEN;
 use crate::identity::device_list::MAX_DEVICES;
 use crate::identity::{DeviceList, Fingerprint, RootIdentity};
 use crate::{CoreError, Result};
@@ -50,7 +51,7 @@ struct CardV1 {
     display_name: String,
     devices: DeviceList,
     bundles: Vec<PrekeyBundle>,
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     sig: [u8; 64],
 }
 
@@ -60,7 +61,7 @@ struct CardV2 {
     display_name: String,
     devices: DeviceList,
     bundles: Vec<PrekeyBundle>,
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     sig: [u8; 64],
     nodes: Vec<Vec<u8>>,
 }
@@ -344,6 +345,19 @@ mod tests {
         let mut c = card(&f);
         c.display_name = "Mallory".into();
         assert_eq!(c.verify(), Err(CoreError::InvalidSignature));
+    }
+
+    #[test]
+    fn tampered_bundle_or_device_list_rejected() {
+        let f = fixture();
+        let mut c = card(&f);
+        c.bundles[0].spk[0] ^= 1;
+        assert!(c.verify().is_err());
+        // Another list validly signed by the same root, swapped in after
+        // the card was signed.
+        let mut c = card(&f);
+        c.devices = DeviceList::sign(&f.root, 2, f.list.certs.clone()).unwrap();
+        assert!(c.verify().is_err());
     }
 
     #[test]

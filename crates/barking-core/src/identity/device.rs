@@ -1,7 +1,7 @@
 //! Device keys (Ed25519 signature + X25519 exchange) and certificate signed by the root.
 
-use super::root::{RootIdentity, RootPublic};
-use crate::crypto::labels;
+use super::root::{RootIdentity, RootPublic, labelled};
+use crate::crypto::{bytes64, labels};
 use crate::{CoreError, Result};
 use core::fmt;
 use ed25519_dalek::{Signer, SigningKey};
@@ -11,43 +11,6 @@ use zeroize::{Zeroize, Zeroizing};
 
 /// Maximum size of a device name, in bytes.
 pub const MAX_NAME_LEN: usize = 64;
-
-/// Serde serialization of a `[u8; 64]` (serde does not handle it natively):
-/// 64-byte tuple, i.e. 64 bytes in postcard.
-pub(crate) mod sig_bytes {
-    use core::fmt;
-    use serde::de::{Error, SeqAccess, Visitor};
-    use serde::ser::SerializeTuple;
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
-        let mut t = s.serialize_tuple(64)?;
-        for b in v {
-            t.serialize_element(b)?;
-        }
-        t.end()
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = [u8; 64];
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("64 bytes")
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[u8; 64], A::Error> {
-                let mut out = [0u8; 64];
-                for (i, slot) in out.iter_mut().enumerate() {
-                    *slot = seq
-                        .next_element()?
-                        .ok_or_else(|| A::Error::invalid_length(i, &self))?;
-                }
-                Ok(out)
-            }
-        }
-        d.deserialize_tuple(64, V)
-    }
-}
 
 /// Device identifier: 16 bytes derived from the public keys.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
@@ -132,10 +95,7 @@ impl DeviceKeys {
 
     /// Signs `label || msg`.
     pub fn sign(&self, label: &[u8], msg: &[u8]) -> [u8; 64] {
-        let mut data = Vec::with_capacity(label.len() + msg.len());
-        data.extend_from_slice(label);
-        data.extend_from_slice(msg);
-        self.signing.sign(&data).to_bytes()
+        self.signing.sign(&labelled(label, msg)).to_bytes()
     }
 
     /// X25519 shared secret with a remote public key.
@@ -155,10 +115,10 @@ pub struct DeviceCertificate {
     pub name: String,
     pub issued_at: u64,
     /// Root signature (label `DEVICE_CERT`).
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     pub sig: [u8; 64],
     /// Device signature (label `DEVICE_POSSESSION`).
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     pub device_sig: [u8; 64],
 }
 
@@ -196,9 +156,7 @@ impl DeviceKeys {
 fn verify_possession(device: &DevicePublic, bytes: &[u8], sig: &[u8; 64]) -> Result<()> {
     let key = ed25519_dalek::VerifyingKey::from_bytes(&device.sig)
         .map_err(|_| CoreError::InvalidSignature)?;
-    let mut data = Vec::with_capacity(labels::DEVICE_POSSESSION.len() + bytes.len());
-    data.extend_from_slice(labels::DEVICE_POSSESSION);
-    data.extend_from_slice(bytes);
+    let data = labelled(labels::DEVICE_POSSESSION, bytes);
     key.verify_strict(&data, &ed25519_dalek::Signature::from_bytes(sig))
         .map_err(|_| CoreError::InvalidSignature)
 }
@@ -246,6 +204,14 @@ mod tests {
     use crate::identity::RootIdentity;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+
+    /// `DeviceKeys` erases itself only through its field types.
+    #[test]
+    fn device_key_fields_are_zeroized_on_drop() {
+        fn assert_zod<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zod::<SigningKey>();
+        assert_zod::<x25519_dalek::StaticSecret>();
+    }
 
     fn rng() -> StdRng {
         StdRng::seed_from_u64(11)

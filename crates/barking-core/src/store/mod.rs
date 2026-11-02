@@ -209,9 +209,13 @@ fn ser<T: Serialize>(v: &T) -> Result<Vec<u8>> {
     postcard::to_allocvec(v).map_err(|_| CoreError::Store("serialization".into()))
 }
 
+/// Fixed-size field. On a length error the bytes (possibly key material)
+/// are wiped before being dropped.
 fn arr<const N: usize>(b: Vec<u8>) -> Result<[u8; N]> {
-    b.try_into()
-        .map_err(|_| CoreError::Store("invalid field length".into()))
+    b.try_into().map_err(|mut v: Vec<u8>| {
+        v.zeroize();
+        CoreError::Store("invalid field length".into())
+    })
 }
 
 /// Maximum age of transparency log entries (30 days).

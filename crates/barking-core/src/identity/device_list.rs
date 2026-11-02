@@ -1,8 +1,9 @@
 //! Signed list of an identity's devices. A more recent list without a
 //! device amounts to revoking that device.
 
-use super::device::{DeviceCertificate, DeviceId, sig_bytes};
+use super::device::{DeviceCertificate, DeviceId};
 use super::root::{RootIdentity, RootPublic};
+use crate::crypto::bytes64;
 use crate::crypto::labels;
 use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ pub struct DeviceList {
     pub root: RootPublic,
     pub version: u64,
     pub certs: Vec<DeviceCertificate>,
-    #[serde(with = "sig_bytes")]
+    #[serde(with = "bytes64")]
     pub sig: [u8; 64],
 }
 

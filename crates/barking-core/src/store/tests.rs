@@ -628,7 +628,7 @@ fn migration_v1_keeps_history_and_acks() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("v1.sqlite");
     let fp = Fingerprint([4; 32]);
-    let (pin, pout, pnull) = ([1u8; 16], [2u8; 16], [3u8; 16]);
+    let (pin, pout) = ([1u8; 16], [2u8; 16]);
     {
         let raw = raw_conn(&path);
         raw.execute_batch(schema::SCHEMA_V1_LEGACY).unwrap();
@@ -654,7 +654,6 @@ fn migration_v1_keeps_history_and_acks() {
             params![pout.as_slice()],
         )
         .unwrap();
-        let _ = pnull;
     }
     let store = Store::open(&path, &KEY).unwrap();
     assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(2));
@@ -891,4 +890,13 @@ fn contact_clock_order_breaks_ties() {
     assert!(!c(2, false, 4).newer_than(Some(&c(2, false, 5))));
     // The same operation is not more recent than itself.
     assert!(!c(2, false, 4).newer_than(Some(&c(2, false, 4))));
+}
+
+#[test]
+fn arr_refuses_wrong_length() {
+    assert_eq!(arr::<4>(vec![1, 2, 3, 4]).unwrap(), [1, 2, 3, 4]);
+    assert_eq!(
+        arr::<32>(vec![7; 31]),
+        Err(CoreError::Store("invalid field length".into()))
+    );
 }

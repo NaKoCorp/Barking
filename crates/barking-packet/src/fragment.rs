@@ -49,18 +49,24 @@ pub fn fragment(packet: &[u8], mtu: usize) -> Result<Vec<Vec<u8>>> {
     let count = packet.len().div_ceil(chunk).max(1);
     let count_u8 = u8::try_from(count).map_err(|_| PacketError::TooLarge)?;
     let key = frame_key(packet);
-    let mut frames = Vec::with_capacity(count);
-    for index in 0..count {
-        let part = packet.chunks(chunk).nth(index).unwrap_or(&[]);
+    let frame = |index: usize, part: &[u8]| {
         let mut f = Vec::with_capacity(FRAG_HEADER_LEN + part.len());
         f.extend_from_slice(&key);
         // `index < count <= 255`: the conversion cannot fail.
         f.push(index as u8);
         f.push(count_u8);
         f.extend_from_slice(part);
-        frames.push(f);
+        f
+    };
+    // An empty packet has no chunk but still yields one frame.
+    if packet.is_empty() {
+        return Ok(vec![frame(0, &[])]);
     }
-    Ok(frames)
+    Ok(packet
+        .chunks(chunk)
+        .enumerate()
+        .map(|(index, part)| frame(index, part))
+        .collect())
 }
 
 type Key = [u8; 8];
@@ -102,6 +108,14 @@ impl Reassembler {
         self.entries.len()
     }
 
+    /// Adds a received frame. Returns the whole packet once its last
+    /// missing frame arrives (its hash checked against the frame key),
+    /// `None` while frames are missing or for a repeated frame. Entries
+    /// older than the TTL are dropped first; a new packet beyond
+    /// `max_pending` evicts the oldest one (none is kept when it is 0). A
+    /// malformed or inconsistent frame is an error (`Malformed`); two
+    /// contents for the same index drop the whole packet. Never panics on
+    /// arbitrary bytes.
     pub fn push(&mut self, frame: &[u8], now: u64) -> Result<Option<Vec<u8>>> {
         let ttl = self.ttl_secs;
         self.entries

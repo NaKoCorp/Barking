@@ -328,7 +328,7 @@ fn clock_skew_one_day_ok() {
         expect_msg(b.recv(&p1, NOW + DAY, &mut rng)).2,
         "one day off"
     );
-    // Bob's clock is one day behind: next-day mailbox for Alice.
+    // Bob's clock is one day ahead: Alice reads the next-day mailbox.
     let p3 = one(b.send(&a.fp(), "back", NOW + DAY, &mut rng));
     assert_eq!(expect_msg(a.recv(&p3, NOW, &mut rng)).2, "back");
     // Sender two days ahead: mailbox outside the window.
