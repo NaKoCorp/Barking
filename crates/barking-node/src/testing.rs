@@ -404,6 +404,7 @@ pub struct FakeRelay {
     addr: SocketAddr,
     id: NodeId,
     received: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    conns: Arc<std::sync::Mutex<Vec<quinn::Connection>>>,
     task: JoinHandle<()>,
 }
 
@@ -422,11 +423,17 @@ impl FakeRelay {
         let addr = ep.local_addr().unwrap();
         let received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::default();
         let log = received.clone();
+        let conns: Arc<std::sync::Mutex<Vec<quinn::Connection>>> = Arc::default();
+        let kept = conns.clone();
         let task = tokio::spawn(async move {
             while let Some(incoming) = ep.accept().await {
                 let log = log.clone();
+                let kept = kept.clone();
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
+                    kept.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(conn.clone());
                     while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                         let Ok(req) = frame::read::<Request>(&mut recv, MAX_REQUEST_BYTES).await
                         else {
@@ -463,7 +470,21 @@ impl FakeRelay {
             addr,
             id,
             received,
+            conns,
             task,
+        }
+    }
+
+    /// Closes every open connection (as an idle timeout would); the relay
+    /// keeps accepting new ones.
+    pub fn close_connections(&self) {
+        for c in self
+            .conns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+        {
+            c.close(1u32.into(), b"test");
         }
     }
 

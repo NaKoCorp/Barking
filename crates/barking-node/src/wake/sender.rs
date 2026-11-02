@@ -14,7 +14,8 @@ use barking_proto::MAX_WAKE_ITEMS;
 use barking_proto::client::{Client, Session};
 use barking_proto::push::RelayRef;
 use barking_proto::routable;
-use tokio::time::timeout;
+use tokio::sync::Semaphore;
+use tokio::time::{Instant, timeout};
 
 use super::WakeOrder;
 use crate::server::ServerStats;
@@ -53,34 +54,91 @@ pub trait WakeTransport: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), WakeError>> + Send;
 }
 
-/// QUIC transport: one kept `Session` per relay, reopened after a failure.
+/// Sessions kept at most (least recently used evicted).
+pub const MAX_KEPT_SESSIONS: usize = 64;
+/// A kept session unused for this long is dropped (the idle timeouts of both
+/// ends would have killed it anyway).
+pub const SESSION_IDLE: Duration = Duration::from_secs(20);
+/// Sends in progress at once, all relays together (bounds sockets and
+/// blocking resolver threads).
+pub const MAX_CONCURRENT_RELAY_SENDS: usize = 32;
+/// Addresses tried per relay.
+const MAX_ADDRS: usize = 4;
+
+/// Bounded map of kept values, least recently used evicted.
+struct Kept<V> {
+    max: usize,
+    map: HashMap<RelayRef, (V, Instant)>,
+}
+
+impl<V: Clone> Kept<V> {
+    fn new(max: usize) -> Kept<V> {
+        Kept {
+            max,
+            map: HashMap::new(),
+        }
+    }
+
+    /// The value, refreshed; an entry idle longer than `SESSION_IDLE` is dropped.
+    fn get(&mut self, relay: &RelayRef) -> Option<V> {
+        let now = Instant::now();
+        match self.map.get_mut(relay) {
+            Some((v, used)) if now.duration_since(*used) <= SESSION_IDLE => {
+                *used = now;
+                Some(v.clone())
+            }
+            Some(_) => {
+                self.map.remove(relay);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn insert(&mut self, relay: RelayRef, v: V) {
+        let now = Instant::now();
+        self.map
+            .retain(|_, (_, used)| now.duration_since(*used) <= SESSION_IDLE);
+        if !self.map.contains_key(&relay) && self.map.len() >= self.max {
+            let oldest = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, u))| *u)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                self.map.remove(&k);
+            }
+        }
+        self.map.insert(relay, (v, now));
+    }
+
+    fn remove(&mut self, relay: &RelayRef) {
+        self.map.remove(relay);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+/// QUIC transport: one kept `Session` per relay (bounded), reopened when dead.
 pub struct QuicWakeTransport {
     /// Tests only: skip the routable-address filter (local fake relay).
     allow_private: bool,
-    sessions: Mutex<HashMap<RelayRef, Arc<Session>>>,
+    sessions: Mutex<Kept<Arc<Session>>>,
 }
 
 impl QuicWakeTransport {
     pub fn new(allow_private: bool) -> QuicWakeTransport {
         QuicWakeTransport {
             allow_private,
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(Kept::new(MAX_KEPT_SESSIONS)),
         }
     }
 
-    fn kept(&self, relay: &RelayRef) -> Option<Arc<Session>> {
-        self.sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(relay)
-            .cloned()
-    }
-
-    fn forget(&self, relay: &RelayRef) {
-        self.sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(relay);
+    fn sessions(&self) -> std::sync::MutexGuard<'_, Kept<Arc<Session>>> {
+        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Resolves the relay and keeps only addresses worth connecting to.
@@ -96,6 +154,7 @@ impl QuicWakeTransport {
             .map_err(|_| WakeError::Resolve)?;
         let addrs: Vec<SocketAddr> = found
             .filter(|a| self.allow_private || routable(a))
+            .take(MAX_ADDRS)
             .collect();
         if addrs.is_empty() {
             Err(WakeError::NoRoutableAddress)
@@ -104,37 +163,51 @@ impl QuicWakeTransport {
         }
     }
 
+    /// Name resolution and connection, together bounded by `CONNECT_TIMEOUT`.
     async fn connect(&self, relay: &RelayRef) -> Result<Arc<Session>, WakeError> {
-        let addrs = self.addresses(relay).await?;
-        for addr in addrs {
-            if let Ok(Ok(session)) = timeout(CONNECT_TIMEOUT, Client::connect(addr, relay.id)).await
-            {
-                let session = Arc::new(session);
-                self.sessions
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(relay.clone(), session.clone());
-                return Ok(session);
+        let attempt = async {
+            for addr in self.addresses(relay).await? {
+                if let Ok(session) = Client::connect(addr, relay.id).await {
+                    return Ok(Arc::new(session));
+                }
             }
+            Err(WakeError::Connect)
+        };
+        let session = timeout(CONNECT_TIMEOUT, attempt)
+            .await
+            .map_err(|_| WakeError::Connect)??;
+        self.sessions().insert(relay.clone(), session.clone());
+        Ok(session)
+    }
+
+    async fn request(session: &Session, items: Vec<Vec<u8>>) -> Result<(), WakeError> {
+        match timeout(REQUEST_TIMEOUT, session.wake(items)).await {
+            Ok(Ok(())) => Ok(()),
+            _ => Err(WakeError::Request),
         }
-        Err(WakeError::Connect)
     }
 }
 
 impl WakeTransport for QuicWakeTransport {
     async fn send(&self, relay: &RelayRef, items: Vec<Vec<u8>>) -> Result<(), WakeError> {
-        let session = match self.kept(relay) {
-            Some(s) => s,
-            None => self.connect(relay).await?,
-        };
-        match timeout(REQUEST_TIMEOUT, session.wake(items)).await {
-            Ok(Ok(())) => Ok(()),
-            _ => {
-                // The retry reconnects.
-                self.forget(relay);
-                Err(WakeError::Request)
+        let kept = self.sessions().get(relay);
+        if let Some(session) = kept {
+            // A session idle for a while is usually dead: when a kept session
+            // fails, reconnect at once, so that the worker's single retry
+            // is not spent on staleness.
+            if session.connection().close_reason().is_none()
+                && Self::request(&session, items.clone()).await.is_ok()
+            {
+                return Ok(());
             }
+            self.sessions().remove(relay);
         }
+        let session = self.connect(relay).await?;
+        let r = Self::request(&session, items).await;
+        if r.is_err() {
+            self.sessions().remove(relay);
+        }
+        r
     }
 }
 
@@ -150,6 +223,8 @@ struct Inner<T> {
     transport: T,
     stats: Arc<ServerStats>,
     queues: Mutex<Queues>,
+    /// Bounds the sends in progress (`MAX_CONCURRENT_RELAY_SENDS`).
+    sends: Semaphore,
 }
 
 /// Handle to the sender: enqueueing never blocks.
@@ -166,6 +241,7 @@ impl<T: WakeTransport> WakeSender<T> {
                 transport,
                 stats,
                 queues: Mutex::new(Queues::default()),
+                sends: Semaphore::new(MAX_CONCURRENT_RELAY_SENDS),
             }),
         }
     }
@@ -205,6 +281,21 @@ impl<T: WakeTransport> WakeSender<T> {
     }
 }
 
+/// One send attempt, holding a concurrency permit only while it runs.
+async fn send_bounded<T: WakeTransport>(
+    inner: &Inner<T>,
+    relay: &RelayRef,
+    batch: Vec<Vec<u8>>,
+) -> Result<(), WakeError> {
+    // The semaphore is never closed.
+    let _permit = inner
+        .sends
+        .acquire()
+        .await
+        .map_err(|_| WakeError::Connect)?;
+    inner.transport.send(relay, batch).await
+}
+
 /// Sends the batches of one relay until its queue is empty.
 async fn relay_worker<T: WakeTransport>(inner: Arc<Inner<T>>, relay: RelayRef) {
     loop {
@@ -224,10 +315,10 @@ async fn relay_worker<T: WakeTransport>(inner: Arc<Inner<T>>, relay: RelayRef) {
             batch
         };
         let n = batch.len();
-        let mut result = inner.transport.send(&relay, batch.clone()).await;
+        let mut result = send_bounded(&inner, &relay, batch.clone()).await;
         if result.is_err() {
             tokio::time::sleep(WAKE_RETRY_DELAY).await;
-            result = inner.transport.send(&relay, batch).await;
+            result = send_bounded(&inner, &relay, batch).await;
         }
         match result {
             Ok(()) => inner.stats.add_wake_sent(n as u64),
@@ -427,5 +518,94 @@ mod tests {
         let got = relay.received();
         assert_eq!(got, vec![vec![1u8; 8], vec![2u8; 8], vec![3u8; 8]]);
         relay.stop();
+    }
+
+    #[tokio::test]
+    async fn dead_kept_session_reconnects_without_retry() {
+        let relay = FakeRelay::start().await;
+        let t = QuicWakeTransport::new(true);
+        t.send(&relay.relay_ref(), vec![vec![1u8; 8]])
+            .await
+            .unwrap();
+        relay.close_connections();
+        let t0 = std::time::Instant::now();
+        // First attempt (no worker retry involved) must succeed at once.
+        t.send(&relay.relay_ref(), vec![vec![2u8; 8]])
+            .await
+            .unwrap();
+        assert!(t0.elapsed() < WAKE_RETRY_DELAY);
+        assert_eq!(relay.received(), vec![vec![1u8; 8], vec![2u8; 8]]);
+        relay.stop();
+    }
+
+    #[tokio::test]
+    async fn dead_session_through_sender_counts_no_failure() {
+        let relay = FakeRelay::start().await;
+        let stats = Arc::new(ServerStats::default());
+        let sender = WakeSender::spawn(QuicWakeTransport::new(true), stats.clone());
+        let r = relay.relay_ref();
+        sender.enqueue(orders(&r, 1));
+        while stats.wake_sent() < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        relay.close_connections();
+        sender.enqueue(orders(&r, 1));
+        let t0 = std::time::Instant::now();
+        while stats.wake_sent() < 2 {
+            assert!(t0.elapsed() < WAKE_RETRY_DELAY, "delayed like a retry");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(stats.wake_failed(), 0);
+        relay.stop();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_sends_are_capped() {
+        #[derive(Clone, Default)]
+        struct Slow {
+            now: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+        impl WakeTransport for Slow {
+            async fn send(&self, _: &RelayRef, _: Vec<Vec<u8>>) -> Result<(), WakeError> {
+                let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(n, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                self.now.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let slow = Slow::default();
+        let stats = Arc::new(ServerStats::default());
+        let sender = WakeSender::spawn(slow.clone(), stats.clone());
+        for i in 0..200 {
+            sender.enqueue(orders(&relay(&format!("r{i}.example")), 1));
+        }
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(stats.wake_sent(), 200);
+        let peak = slow.peak.load(Ordering::SeqCst);
+        assert!(peak <= MAX_CONCURRENT_RELAY_SENDS, "{peak}");
+        assert!(peak > 1);
+    }
+
+    #[test]
+    fn kept_sessions_are_bounded_and_lru() {
+        let mut k: Kept<usize> = Kept::new(MAX_KEPT_SESSIONS);
+        for i in 0..(MAX_KEPT_SESSIONS * 3) {
+            k.insert(relay(&format!("r{i}.example")), i);
+            assert!(k.len() <= MAX_KEPT_SESSIONS);
+        }
+        // Oldest evicted, newest kept.
+        assert_eq!(k.get(&relay("r0.example")), None);
+        let last = MAX_KEPT_SESSIONS * 3 - 1;
+        assert_eq!(k.get(&relay(&format!("r{last}.example"))), Some(last));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_kept_session_is_dropped() {
+        let mut k: Kept<u8> = Kept::new(4);
+        k.insert(relay("a.example"), 1);
+        tokio::time::sleep(SESSION_IDLE + Duration::from_secs(1)).await;
+        assert_eq!(k.get(&relay("a.example")), None);
     }
 }
