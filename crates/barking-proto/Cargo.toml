@@ -7,8 +7,10 @@ license.workspace = true
 [dependencies]
 barking-packet.workspace = true
 blake3.workspace = true
+chacha20poly1305.workspace = true
 data-encoding.workspace = true
 ed25519-dalek.workspace = true
+hkdf.workspace = true
 postcard.workspace = true
 quinn.workspace = true
 rand_core.workspace = true
@@ -16,10 +18,13 @@ rcgen.workspace = true
 rustls.workspace = true
 rustls-webpki.workspace = true
 serde.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+x25519-dalek.workspace = true
 zeroize.workspace = true
 tokio = { workspace = true, features = ["io-util", "time", "rt"] }
 
 [dev-dependencies]
+hex-literal.workspace = true
 rand.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
