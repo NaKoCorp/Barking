@@ -623,11 +623,10 @@ impl Session {
             return self.deposit_once(packet, 0).await;
         };
         let content = pow::content_hash(packet);
-        let bits = self
+        let mut bits = self
             .pow_bits
             .saturating_add(pow::tier_surcharge(tier))
             .min(pow::MAX_POW_BITS);
-        let mut bits = bits;
         loop {
             let nonce = self.prove(content, mailbox, bits).await?;
             match self.deposit_once(packet, nonce).await? {
