@@ -87,15 +87,18 @@ pub struct PushPlan {
 }
 
 impl PushState {
-    /// Reads the state; a missing or unreadable one gives an empty state.
-    pub fn load(core: &Core) -> PushState {
-        match core.transport_state(PUSH_STATE_KEY) {
-            Ok(Some(bytes)) => PushState::decode(&bytes).unwrap_or_else(|| {
+    /// Reads the state. A missing or undecodable one gives an empty state; a
+    /// storage read error is returned, so that the caller never plans from an
+    /// empty state over real subscriptions (it would lose their cancel
+    /// secrets).
+    pub fn load(core: &Core) -> Result<PushState, CoreError> {
+        Ok(match core.transport_state(PUSH_STATE_KEY)? {
+            Some(bytes) => PushState::decode(&bytes).unwrap_or_else(|| {
                 tracing::warn!("unreadable push state: starting from an empty one");
                 PushState::default()
             }),
-            _ => PushState::default(),
-        }
+            None => PushState::default(),
+        })
     }
 
     /// Writes the state to the core's encrypted database.
@@ -150,11 +153,12 @@ impl PushState {
         *blake3::hash(&bytes).as_bytes()
     }
 
-    /// Records the configuration the subscriptions are made with. When it
-    /// changes, `plan_push` asks to cancel everything first: the caller then
-    /// clears `subs` and stores the new hash here.
-    pub fn set_config(&mut self, cfg: Option<&PushConfig>) {
+    /// Switches to `cfg` (`None`: push off): stores its hash and clears
+    /// `subs`. Call it after sending the unsubscribes `plan_push` asked for on
+    /// a configuration change, before recording the new subscriptions.
+    pub fn apply_config(&mut self, cfg: Option<&PushConfig>) {
         self.config_hash = cfg.map(PushState::config_hash_of);
+        self.subs.clear();
     }
 
     /// Collapse label of `mailbox`, created (with an entry that holds no node
@@ -228,8 +232,7 @@ impl PushState {
 /// their stored order, and the best-ranked missing ones complete them.
 /// Without `cfg`, everything is cancelled and forgotten. When the
 /// configuration changed, every stored subscription is cancelled and every
-/// wanted mailbox subscribed afresh (the caller then clears the stored ones,
-/// see `set_config`). A mailbox of a past day is forgotten without
+/// wanted mailbox subscribed afresh (the caller then calls `apply_config`). A mailbox of a past day is forgotten without
 /// unsubscribing.
 pub fn plan_push(
     state: &PushState,
@@ -306,7 +309,8 @@ pub fn plan_push(
 }
 
 /// Builds the subscription of `mailbox` (of `day`) to send to a node, and the
-/// secret that cancels it. It expires the day after the mailbox's day, so
+/// secret that cancels it. `collapse` comes from `PushState::collapse_for`,
+/// called first. It expires the day after the mailbox's day, so
 /// that a node a day ahead still takes it.
 pub fn build_subscription(
     cfg: &PushConfig,

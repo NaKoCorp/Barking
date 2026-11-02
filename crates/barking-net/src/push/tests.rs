@@ -35,7 +35,7 @@ fn ranked(_: &MailboxId) -> Vec<NodeId> {
 
 fn state_for(c: &PushConfig) -> PushState {
     let mut s = PushState::default();
-    s.set_config(Some(c));
+    s.apply_config(Some(c));
     s
 }
 
@@ -98,9 +98,9 @@ fn no_wake_node_is_skipped_for_a_day() {
     let plan = plan_push(&s, Some(&c), &wanted, ranked, NOW);
     assert_eq!(plan.subscribe, vec![(mb(1), id_of(1)), (mb(1), id_of(2))]);
     // Still left out just before the end, back after it.
-    let plan = plan_push(&s, Some(&c), &wanted, ranked, NOW + NO_WAKE_SECS - 1);
-    assert!(!plan.subscribe.contains(&(mb(1), id_of(0))));
     let wanted = [(mb(1), today() + 1)];
+    let plan = plan_push(&s, Some(&c), &wanted, ranked, NOW + NO_WAKE_SECS - 1);
+    assert_eq!(plan.subscribe, vec![(mb(1), id_of(1)), (mb(1), id_of(2))]);
     let plan = plan_push(&s, Some(&c), &wanted, ranked, NOW + NO_WAKE_SECS);
     assert_eq!(plan.subscribe, vec![(mb(1), id_of(0)), (mb(1), id_of(1))]);
 }
@@ -131,7 +131,14 @@ fn disabled_unsubscribes_all() {
     subbed(&mut s, mb(1), today(), &[0, 1]);
     subbed(&mut s, mb(2), today() + 1, &[2]);
     let plan = plan_push(&s, None, &[(mb(1), today())], ranked, NOW);
-    assert_eq!(plan.unsubscribe.len(), 3);
+    assert_eq!(
+        plan.unsubscribe,
+        vec![
+            (mb(1), id_of(0), [0; 32]),
+            (mb(1), id_of(1), [1; 32]),
+            (mb(2), id_of(2), [2; 32]),
+        ]
+    );
     assert!(plan.subscribe.is_empty());
     assert_eq!(plan.forget, vec![mb(1), mb(2)]);
 }
@@ -190,18 +197,80 @@ fn expires_day_is_day_plus_one() {
 }
 
 #[test]
+fn sealed_token_carries_expiry_and_collapse() {
+    let secret = x25519_dalek::StaticSecret::from([5u8; 32]);
+    let mut c = cfg(1);
+    c.seal_public = x25519_dalek::PublicKey::from(&secret).to_bytes();
+    let mut rng = StdRng::seed_from_u64(4);
+    let (sub, _) = build_subscription(&c, mb(1), 100, [8; 16], &mut rng);
+    let token = barking_proto::push::open(&[(1, secret)], &sub.sealed).unwrap();
+    assert_eq!(token.expires_day, 101);
+    assert_eq!(token.collapse, [8; 16]);
+    assert_eq!(token.apns_token, c.apns_token);
+    assert_eq!(token.env, ApnsEnv::Sandbox);
+}
+
+#[test]
+fn stored_node_in_no_wake_is_unsubscribed() {
+    let c = cfg(1);
+    let mut s = state_for(&c);
+    subbed(&mut s, mb(1), today(), &[0, 1]);
+    s.note_no_wake(id_of(0), NOW);
+    let plan = plan_push(&s, Some(&c), &[(mb(1), today())], ranked, NOW);
+    assert_eq!(plan.unsubscribe, vec![(mb(1), id_of(0), [0; 32])]);
+    assert_eq!(plan.subscribe, vec![(mb(1), id_of(2))]);
+}
+
+#[test]
+fn surplus_stored_nodes_are_unsubscribed() {
+    let c = cfg(1);
+    let mut s = state_for(&c);
+    subbed(&mut s, mb(1), today(), &[0, 1, 2]);
+    let plan = plan_push(&s, Some(&c), &[(mb(1), today())], ranked, NOW);
+    assert_eq!(plan.unsubscribe, vec![(mb(1), id_of(2), [2; 32])]);
+    assert!(plan.subscribe.is_empty());
+}
+
+#[test]
+fn future_mailbox_no_longer_wanted_is_unsubscribed_and_forgotten() {
+    let c = cfg(1);
+    let mut s = state_for(&c);
+    subbed(&mut s, mb(1), today() + 2, &[0, 1]);
+    subbed(&mut s, mb(2), today(), &[0, 1]);
+    let plan = plan_push(&s, Some(&c), &[(mb(2), today())], ranked, NOW);
+    assert_eq!(
+        plan.unsubscribe,
+        vec![(mb(1), id_of(0), [0; 32]), (mb(1), id_of(1), [1; 32])]
+    );
+    assert_eq!(plan.forget, vec![mb(1)]);
+    assert!(plan.subscribe.is_empty());
+}
+
+#[test]
+fn apply_config_sets_hash_and_clears_subs() {
+    let c = cfg(1);
+    let mut s = state_for(&c);
+    subbed(&mut s, mb(1), today(), &[0]);
+    s.apply_config(Some(&cfg(2)));
+    assert!(s.subs.is_empty());
+    assert_eq!(s.config_hash, Some(PushState::config_hash_of(&cfg(2))));
+    s.apply_config(None);
+    assert_eq!(s.config_hash, None);
+}
+
+#[test]
 fn load_save_roundtrip_and_unreadable_state() {
     let (_dir, mut core) = subject(NOW);
-    assert_eq!(PushState::load(&core), PushState::default());
+    assert_eq!(PushState::load(&core).unwrap(), PushState::default());
     let c = cfg(1);
     let mut s = state_for(&c);
     subbed(&mut s, mb(1), today(), &[0, 1]);
     s.note_no_wake(id_of(3), NOW);
     s.save(&mut core).unwrap();
-    assert_eq!(PushState::load(&core), s);
+    assert_eq!(PushState::load(&core).unwrap(), s);
     core.set_transport_state(PUSH_STATE_KEY, b"\xff\xfe garbage")
         .unwrap();
-    assert_eq!(PushState::load(&core), PushState::default());
+    assert_eq!(PushState::load(&core).unwrap(), PushState::default());
     let mut bytes = s.encode();
     bytes[0] = FORMAT + 1;
     assert!(PushState::decode(&bytes).is_none());
