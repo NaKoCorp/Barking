@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub use error::{PacketError, Result};
 
 /// Mailbox identifier (16 bytes).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct MailboxId(pub [u8; 16]);
 
 /// Size of the cleartext header (excluding the 2 length bytes).

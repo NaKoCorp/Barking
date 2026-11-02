@@ -2268,3 +2268,65 @@ fn own_card_meta_in_old_form_is_still_read() {
     write(&[0xff; 9]);
     assert_eq!(sync::own_card(&a.store).unwrap(), None);
 }
+
+// --- Push: own mailboxes.
+
+#[test]
+fn own_mailboxes_cover_sessions_and_intro_per_day() {
+    let mut p = pair();
+    let (_dc, mut c) = party("c", 3);
+    p.a.add_contact(
+        &c.contact_card("Carol").unwrap(),
+        Some("carol"),
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
+    c.add_contact(
+        &p.a.contact_card("Alice").unwrap(),
+        Some("alice"),
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
+    // A message to Carol queues a packet awaiting its ack.
+    p.a.send_text(&c.fingerprint(), "hi", NOW, &mut p.rng)
+        .unwrap();
+    let d = day_of(NOW);
+    let own = p.a.own_mailboxes(&[d, d + 1]).unwrap();
+    assert_eq!(own.len(), 6);
+    assert_eq!(own.iter().filter(|(_, x)| *x == d).count(), 3);
+    assert_eq!(own.iter().filter(|(_, x)| *x == d + 1).count(), 3);
+    // The ack mailboxes (send mailboxes of my sessions) are not mine.
+    let me = p.a.device.public();
+    let my_id = me.id();
+    let expected: Vec<MailboxId> = [d, d + 1]
+        .iter()
+        .flat_map(|&day| {
+            let mut v = vec![intro_mailbox(&me, day)];
+            for s in p.a.store.all_sessions().unwrap() {
+                v.push(session_mailbox(&s.mailbox_secret, &my_id, day));
+            }
+            v
+        })
+        .collect();
+    assert_eq!(own.iter().map(|(m, _)| *m).collect::<Vec<_>>(), expected);
+    for s in p.a.store.all_sessions().unwrap() {
+        for day in [d, d + 1] {
+            let sent = session_mailbox(&s.mailbox_secret, &s.contact_device, day);
+            assert!(!own.iter().any(|(m, _)| *m == sent));
+        }
+    }
+}
+
+#[test]
+fn own_mailboxes_empty_while_awaiting_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(5);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (t, _req) =
+        Core::begin_link(&dir.path().join("t"), &[2; 32], &offer, "t", NOW, &mut rng).unwrap();
+    assert!(t.own_mailboxes(&[day_of(NOW)]).unwrap().is_empty());
+    assert_eq!(a.own_mailboxes(&[day_of(NOW)]).unwrap().len(), 1);
+}

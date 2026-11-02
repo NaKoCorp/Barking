@@ -14,7 +14,7 @@ pub const NODE_ID_CONTEXT: &str = "barking/v0/node-id";
 pub const NODE_PUZZLE_CONTEXT: &str = "barking/v0/node-puzzle";
 pub const NODE_PUZZLE_BITS: u32 = 20;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub [u8; 32]);
 
 impl NodeId {

@@ -5,6 +5,7 @@
 
 pub mod discover;
 pub mod plan;
+pub mod push;
 pub mod score;
 pub mod state;
 pub mod sync;

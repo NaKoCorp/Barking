@@ -9,6 +9,7 @@ barking-core.workspace = true
 barking-dht.workspace = true
 barking-packet.workspace = true
 barking-proto.workspace = true
+blake3.workspace = true
 data-encoding.workspace = true
 postcard.workspace = true
 rand.workspace = true

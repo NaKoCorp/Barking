@@ -519,6 +519,33 @@ impl Core {
         Ok(g)
     }
 
+    /// My own mailboxes (introduction and one per session, me as recipient)
+    /// for each of `days`, as `(mailbox, day)` in the order of `days`, without
+    /// duplicates. Unlike `watched_mailbox_groups` it leaves out the
+    /// mailboxes where I await an ack. Empty while awaiting the link. A
+    /// storage read error is returned.
+    pub fn own_mailboxes(&self, days: &[u32]) -> Result<Vec<(MailboxId, u32)>> {
+        if self.pending {
+            return Ok(Vec::new());
+        }
+        let me = self.device.public();
+        let my_id = me.id();
+        let sessions = self.store.all_sessions()?;
+        let mut out: Vec<(MailboxId, u32)> = Vec::new();
+        let mut push = |m: MailboxId, d: u32| {
+            if !out.iter().any(|(x, _)| *x == m) {
+                out.push((m, d));
+            }
+        };
+        for &d in days {
+            push(intro_mailbox(&me, d), d);
+            for s in &sessions {
+                push(session_mailbox(&s.mailbox_secret, &my_id, d), d);
+            }
+        }
+        Ok(out)
+    }
+
     /// Records that the mailboxes were polled at `now`. To be called after
     /// polling all mailboxes successfully; deliberately overwrites the
     /// previous value (an earlier value only widens the window).
