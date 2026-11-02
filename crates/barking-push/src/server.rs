@@ -32,6 +32,8 @@ pub const MAX_STREAMS: u32 = 4;
 pub const MAX_INFLIGHT_PUSHES: usize = 256;
 /// QUIC and TLS handshake budget.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A push that takes longer is abandoned and counted as failed.
+pub const PUSH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Time to read a request, then to deliver the response.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 /// Application close code of a stopped endpoint.
@@ -231,6 +233,17 @@ async fn accept_loop<P: Pusher>(
         tokio::select! {
             incoming = ep.accept() => {
                 let Some(incoming) = incoming else { return };
+                // The source address of an Initial can be spoofed: before
+                // counting anything against it, the client must prove it
+                // (stateless Retry token), as barking-node does.
+                if !incoming.remote_address_validated() {
+                    if incoming.may_retry() {
+                        let _ = incoming.retry();
+                    } else {
+                        incoming.ignore();
+                    }
+                    continue;
+                }
                 // Refused before any handshake work if a cap is reached.
                 let Some(slot) = conns.try_acquire(incoming.remote_address().ip()) else {
                     incoming.refuse();
@@ -339,26 +352,34 @@ fn wake_item<P: Pusher>(item: &[u8], day: u64, shared: &Arc<Shared<P>>) {
         stats.expired.fetch_add(1, Relaxed);
         return;
     }
+    // Permit first: an item shed for lack of one does not spend the
+    // device's quota.
+    let Ok(permit) = shared.inflight.clone().try_acquire_owned() else {
+        stats.shed.fetch_add(1, Relaxed);
+        return;
+    };
     let allowed = shared
         .limiter
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .allow(&token.apns_token, Instant::now());
-    // No permit: pushes are piling up (slow APNs); the item is shed.
-    let permit = shared.inflight.clone().try_acquire_owned().ok();
-    let Some(permit) = permit.filter(|_| allowed) else {
+    if !allowed {
         stats.limited.fetch_add(1, Relaxed);
         return;
-    };
+    }
     let shared = shared.clone();
     tokio::spawn(async move {
-        let outcome = shared.pusher.push(token).await;
+        let outcome = timeout(PUSH_TIMEOUT, shared.pusher.push(token))
+            .await
+            .unwrap_or(PushOutcome::Failed(0));
         drop(permit);
-        let counter = match outcome {
-            PushOutcome::Sent => &shared.stats.sent,
-            PushOutcome::Unregistered => &shared.stats.unregistered,
-            PushOutcome::Failed(_) => &shared.stats.failed,
+        match outcome {
+            PushOutcome::Sent => shared.stats.sent.fetch_add(1, Relaxed),
+            PushOutcome::Unregistered => shared.stats.unregistered.fetch_add(1, Relaxed),
+            PushOutcome::Failed(code) => {
+                shared.stats.record_failure(code);
+                0
+            }
         };
-        counter.fetch_add(1, Relaxed);
     });
 }

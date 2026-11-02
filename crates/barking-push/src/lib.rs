@@ -11,4 +11,4 @@ pub mod stats;
 pub use config::{ApnsConfig, RelayConfig, SealKeyFile};
 pub use limit::TokenLimiter;
 pub use server::{ConnLimits, PushOutcome, Pusher, bind, serve};
-pub use stats::{RelayStats, report_loop};
+pub use stats::{RelayStats, StatsSnapshot, report_loop};

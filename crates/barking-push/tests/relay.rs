@@ -58,19 +58,29 @@ fn token(byte: u8, expires_day: u32) -> WakeToken {
 }
 
 async fn start(limits: ConnLimits) -> Relay {
+    let pusher = Arc::new(Recorder::default());
+    start_with(limits, pusher.clone(), pusher).await
+}
+
+/// Relay served by `served`; `recorder` is what `Relay::pusher` exposes.
+async fn start_with<P: Pusher>(
+    limits: ConnLimits,
+    served: Arc<P>,
+    recorder: Arc<Recorder>,
+) -> Relay {
     let key = SigningKey::from_bytes(&SEED);
     let id = NodeId::from_public_key(&key.verifying_key());
     let endpoints = bind(&["127.0.0.1:0".to_string()], &key).unwrap();
     let addr = endpoints[0].local_addr().unwrap();
     let secret = StaticSecret::from([7u8; 32]);
-    let pusher = Arc::new(Recorder::default());
+    let pusher = recorder;
     let stats = Arc::new(RelayStats::default());
     let (stop, rx) = watch::channel(false);
     tokio::spawn(serve(
         endpoints,
         id,
         vec![(3, secret.clone())],
-        pusher.clone(),
+        served,
         stats.clone(),
         limits,
         rx,
@@ -159,8 +169,126 @@ async fn more_than_100_items_is_malformed() {
         matches!(err, ClientError::Refused(ErrorReason::Malformed)),
         "{err:?}"
     );
-    // Exactly the maximum is accepted (all but the first hit the token limit).
+    let _ = relay.stop.send(true);
+}
+
+#[tokio::test]
+async fn exactly_100_items_is_accepted() {
+    let relay = start(ConnLimits::default()).await;
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    let item = relay.sealed(&token(5, today() + 1));
+    assert_eq!(MAX_WAKE_ITEMS, 100);
     session.wake(vec![item; MAX_WAKE_ITEMS]).await.unwrap();
+    relay.wait_pushed(6).await; // the bucket of 6; the rest is limited
+    let s = relay.stats.snapshot();
+    assert_eq!((s.wakes_in, s.limited), (100, 94));
+    let _ = relay.stop.send(true);
+}
+
+/// A pusher that never completes.
+struct Hung;
+impl Pusher for Hung {
+    async fn push(&self, _token: WakeToken) -> PushOutcome {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn ok_returns_while_push_is_pending() {
+    let relay = start_with(ConnLimits::default(), Arc::new(Hung), Arc::default()).await;
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    let item = relay.sealed(&token(7, today() + 1));
+    tokio::time::timeout(Duration::from_secs(5), session.wake(vec![item]))
+        .await
+        .expect("response does not wait for the push")
+        .unwrap();
+    let s = relay.stats.snapshot();
+    assert_eq!((s.wakes_in, s.sent, s.failed), (1, 0, 0));
+    let _ = relay.stop.send(true);
+}
+
+/// Answers by the first byte of the device token.
+struct Scripted;
+impl Pusher for Scripted {
+    async fn push(&self, token: WakeToken) -> PushOutcome {
+        match token.apns_token[0] {
+            1 => PushOutcome::Sent,
+            2 => PushOutcome::Unregistered,
+            3 | 4 => PushOutcome::Failed(429),
+            5 => PushOutcome::Failed(503),
+            _ => PushOutcome::Failed(418),
+        }
+    }
+}
+
+#[tokio::test]
+async fn apns_errors_are_counted_by_code() {
+    let relay = start_with(ConnLimits::default(), Arc::new(Scripted), Arc::default()).await;
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    let items: Vec<_> = (1..=6u8)
+        .map(|b| relay.sealed(&token(b, today() + 1)))
+        .collect();
+    session.wake(items).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while {
+        let s = relay.stats.snapshot();
+        s.sent + s.unregistered + s.failed < 6
+    } {
+        assert!(tokio::time::Instant::now() < deadline, "pushes not done");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let s = relay.stats.snapshot();
+    assert_eq!((s.sent, s.unregistered, s.failed), (1, 1, 4));
+    let slot = |code: u16| {
+        barking_push::stats::APNS_CODES
+            .iter()
+            .position(|c| *c == code)
+            .unwrap()
+    };
+    assert_eq!(s.apns_errors[slot(429)], 2);
+    assert_eq!(s.apns_errors[slot(503)], 1);
+    assert_eq!(s.apns_errors[barking_push::stats::APNS_SLOTS - 1], 1); // 418: other
+    assert_eq!(s.apns_errors.iter().sum::<u64>(), 4);
+    // `take` resets everything.
+    assert_eq!(relay.stats.take().failed, 4);
+    assert_eq!(relay.stats.snapshot(), Default::default());
+    let _ = relay.stop.send(true);
+}
+
+#[tokio::test]
+async fn hello_announces_relay_limits() {
+    let relay = start(ConnLimits::default()).await;
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    assert_eq!(session.pow_bits(), 0);
+    let l = session.limits();
+    assert_eq!(l.max_mailboxes_per_fetch, 1);
+    assert_eq!(
+        l.max_request_bytes as usize,
+        barking_proto::frame::MAX_REQUEST_BYTES
+    );
+    assert_eq!(
+        l.max_response_bytes as usize,
+        barking_proto::frame::MAX_RESPONSE_BYTES
+    );
+    assert!(!l.wake);
+    assert!(!session.wake_supported());
+    let _ = relay.stop.send(true);
+}
+
+#[tokio::test]
+async fn clients_connect_through_retry() {
+    // The first Initial of every client carries an unvalidated source
+    // address and is answered with a Retry; connecting and waking still work.
+    let relay = start(ConnLimits {
+        max_connections: 100,
+        max_connections_per_ip: 1,
+    })
+    .await;
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    session
+        .wake(vec![relay.sealed(&token(8, today() + 1))])
+        .await
+        .unwrap();
     relay.wait_pushed(1).await;
     let _ = relay.stop.send(true);
 }

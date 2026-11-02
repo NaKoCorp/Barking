@@ -3,7 +3,7 @@
 //! Key files follow the conventions of `barking-node`: a regular file (no
 //! symbolic link, no other type) with no permission for group or others.
 //! The node key is the Ed25519 secret, in the node's text format (unpadded
-//! base32 of the 32 bytes, one line); the raw 32 bytes are accepted too.
+//! base32 of the 32 bytes, one line).
 //! Seal keys are raw 32-byte X25519 secrets.
 
 use std::fs;
@@ -39,7 +39,6 @@ pub struct RelayConfig {
     /// Ed25519 identity of the relay (satisfies the node puzzle).
     pub node_key_file: PathBuf,
     /// X25519 keys clients seal tokens to; several allow rotation.
-    #[serde(default)]
     pub seal_keys: Vec<SealKeyFile>,
     pub apns: ApnsConfig,
     #[serde(default = "default_max_connections")]
@@ -97,6 +96,13 @@ impl RelayConfig {
         if cfg.listen.is_empty() {
             return Err(Error::Config("listen is empty".into()));
         }
+        // Current key plus, during a rotation, the previous one.
+        if cfg.seal_keys.is_empty() || cfg.seal_keys.len() > 2 {
+            return Err(Error::Config("seal_keys must hold 1 or 2 keys".into()));
+        }
+        if cfg.seal_keys.len() == 2 && cfg.seal_keys[0].id == cfg.seal_keys[1].id {
+            return Err(Error::Config("duplicate seal key id".into()));
+        }
         if cfg.max_connections == 0 || cfg.max_connections_per_ip == 0 {
             return Err(Error::Config("connection limits must be positive".into()));
         }
@@ -136,23 +142,18 @@ fn read_secret(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
 /// Loads the node identity key.
 pub fn load_node_key(path: &Path) -> Result<SigningKey> {
     let bytes = read_secret(path)?;
-    let seed: Zeroizing<[u8; 32]> = if bytes.len() == 32 {
-        Zeroizing::new(bytes.as_slice().try_into().expect("length checked"))
-    } else {
-        let text =
-            std::str::from_utf8(&bytes).map_err(|_| Error::Key("node key unreadable".into()))?;
-        let decoded = Zeroizing::new(
-            data_encoding::BASE32_NOPAD
-                .decode(text.trim().as_bytes())
-                .map_err(|_| Error::Key("node key unreadable".into()))?,
-        );
-        Zeroizing::new(
-            decoded
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::Key("node key has the wrong size".into()))?,
-        )
-    };
+    let text = std::str::from_utf8(&bytes).map_err(|_| Error::Key("node key unreadable".into()))?;
+    let decoded = Zeroizing::new(
+        data_encoding::BASE32_NOPAD
+            .decode(text.trim().as_bytes())
+            .map_err(|_| Error::Key("node key unreadable".into()))?,
+    );
+    let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
+        decoded
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Key("node key has the wrong size".into()))?,
+    );
     Ok(SigningKey::from_bytes(&seed))
 }
 
@@ -215,6 +216,20 @@ key_file = "/etc/barking-push/apns.p8"
         let seal = MINIMAL.replace("id = 1,", "id = 1, mode = 2,");
         assert!(RelayConfig::parse(&seal).is_err());
         assert!(RelayConfig::parse("listen = []\n").is_err());
+        let none = MINIMAL.replace(
+            "seal_keys = [{ id = 1, file = \"/etc/barking-push/seal1.key\" }]",
+            "seal_keys = []",
+        );
+        assert!(RelayConfig::parse(&none).is_err());
+        let two = MINIMAL.replace("}]", "}, { id = 2, file = \"/b\" }]");
+        assert!(RelayConfig::parse(&two).is_ok());
+        let dup = MINIMAL.replace("}]", "}, { id = 1, file = \"/b\" }]");
+        assert!(RelayConfig::parse(&dup).is_err());
+        let three = MINIMAL.replace(
+            "}]",
+            "}, { id = 2, file = \"/b\" }, { id = 3, file = \"/c\" }]",
+        );
+        assert!(RelayConfig::parse(&three).is_err());
     }
 
     fn write(path: &Path, bytes: &[u8], mode: u32) {
@@ -242,9 +257,10 @@ key_file = "/etc/barking-push/apns.p8"
         );
         assert_eq!(load_node_key(&b32).unwrap().to_bytes(), expected);
 
+        // Raw bytes are not the node format.
         let raw = dir.path().join("raw.key");
         write(&raw, &seed, 0o600);
-        assert_eq!(load_node_key(&raw).unwrap().to_bytes(), expected);
+        assert!(load_node_key(&raw).is_err());
 
         let open = dir.path().join("open.key");
         write(&open, &seed, 0o644);
