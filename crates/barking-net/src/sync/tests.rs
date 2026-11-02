@@ -2314,6 +2314,47 @@ async fn failed_node_is_skipped_for_the_rest_of_the_stage() {
     assert!(!push_state(&core).no_wake.contains_key(&x));
 }
 
+#[tokio::test(start_paused = true)]
+async fn full_refusals_fall_through_to_the_next_responsible() {
+    let (_dir, mut core, mut net) = setup();
+    let wanted = horizon(&core);
+    let ranked = load(&mut core)
+        .view
+        .responsibles_by_score(&wanted[0].0, NOW);
+    let (node_full, mailbox_full) = (ranked[0], ranked[1]);
+    net.refuse_subscribe
+        .insert(node_full, ErrorReason::NodeFull);
+    net.refuse_subscribe
+        .insert(mailbox_full, ErrorReason::MailboxFull);
+    sync(&mut core, &net, push_opts()).await;
+    let st = push_state(&core);
+    // Each mailbox is completed, in the same run, by the next responsibles.
+    let view = load(&mut core).view;
+    for (mailbox, _) in &wanted {
+        let expected: BTreeSet<NodeId> = view
+            .responsibles_by_score(mailbox, NOW)
+            .into_iter()
+            .filter(|n| *n != node_full && *n != mailbox_full)
+            .take(crate::push::WAKE_NODES)
+            .collect();
+        let got: BTreeSet<NodeId> = st.subs[mailbox].nodes.iter().map(|(n, _)| *n).collect();
+        assert_eq!(got, expected, "{mailbox:?}");
+    }
+    // A full node is left out as a whole; a full mailbox only for that
+    // mailbox, in that run.
+    assert!(st.no_wake.contains_key(&node_full));
+    assert!(!st.no_wake.contains_key(&mailbox_full));
+    let calls = net.calls();
+    let to = |node: NodeId| {
+        subscribes(&calls)
+            .iter()
+            .filter(|(n, _)| *n == node)
+            .count()
+    };
+    assert_eq!(to(node_full), 1, "left out after its first NodeFull");
+    assert!(to(mailbox_full) > 1, "tried again for the other mailboxes");
+}
+
 // ---- Quick sync (notification extension) ----
 
 fn quick_opts() -> QuickOptions {

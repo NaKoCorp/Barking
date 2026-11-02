@@ -20,8 +20,11 @@ use serde::{Deserialize, Serialize};
 
 /// Days ahead of today whose mailboxes are subscribed.
 pub const HORIZON_DAYS: u32 = 7;
-/// Nodes subscribed per mailbox.
-pub const WAKE_NODES: usize = 2;
+/// Nodes subscribed per mailbox: with `CLIENT_COPIES` (3) first copies on the
+/// five responsibles, 3 + 3 > 5 guarantees that a sender and a recipient who
+/// agree on the responsibles share a node, so the first wake-up does not wait
+/// for replication between nodes (spec §1, §5.2).
+pub const WAKE_NODES: usize = 3;
 /// Key of the state in the core's database.
 pub const PUSH_STATE_KEY: &str = "push";
 /// How long a node that did not wake is left out of the plan.

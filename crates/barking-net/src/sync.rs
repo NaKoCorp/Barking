@@ -28,8 +28,10 @@
 //!    responsibles by score; unsubscribes first, then subscriptions, nearest
 //!    day first, on the connections of the sync. A node that does not take
 //!    wake-ups is left out (`PushState::note_no_wake`) and not replaced
-//!    before the next sync; a rate limit or the end of the proof budget ends
-//!    the stage. With push on, skipped while no view entry has a record (a
+//!    before the next sync. `Full` (spec §7) hands the place to the next
+//!    responsible in the same run: `NodeFull` leaves the node out as a
+//!    whole, `MailboxFull` only that mailbox on that node, for the run. A
+//!    rate limit or the end of the proof budget ends the stage. With push on, skipped while no view entry has a record (a
 //!    cold start: no ranking to go by); with push off, the subscriptions are
 //!    cancelled all the same, and those whose node could not be reached are
 //!    kept, to be cancelled by a later sync. Skipped, like maintenance, when
@@ -84,7 +86,7 @@
 //! Nothing here logs an address or a mailbox: the transparency log gets the
 //! short node id only.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1284,7 +1286,12 @@ where
             return;
         };
         let days: HashMap<MailboxId, u32> = wanted.iter().copied().collect();
-        'stage: for (mailbox, node) in plan.subscribe {
+        let mut queue: VecDeque<(MailboxId, NodeId)> = plan.subscribe.into_iter().collect();
+        // (mailbox, node) pairs refused with `MailboxFull`, and nodes that
+        // answered `NodeFull`, during this run.
+        let mut full_boxes: HashSet<(MailboxId, NodeId)> = HashSet::new();
+        let mut full_nodes: HashSet<NodeId> = HashSet::new();
+        'stage: while let Some((mailbox, node)) = queue.pop_front() {
             if self.over() {
                 break;
             }
@@ -1292,6 +1299,11 @@ where
             let Some(&day) = days.get(&mailbox) else {
                 continue;
             };
+            if full_nodes.contains(&node) {
+                // Found full on an earlier mailbox: its place goes on.
+                self.queue_next_responsible(&push, &mut queue, &full_boxes, &skipped, mailbox, now);
+                continue;
+            }
             if left_out || skipped.contains(&node) {
                 continue;
             }
@@ -1338,6 +1350,32 @@ where
                 Some((DepositOutcome::Answered(Err(ErrorReason::Unsupported)), _)) => {
                     push.note_no_wake(node, now);
                 }
+                // Full (spec §7): the next responsible takes the place, in
+                // this run. A full node is left out as a whole; a full
+                // mailbox only for that mailbox.
+                Some((DepositOutcome::Answered(Err(ErrorReason::NodeFull)), _)) => {
+                    push.note_no_wake(node, now);
+                    full_nodes.insert(node);
+                    self.queue_next_responsible(
+                        &push,
+                        &mut queue,
+                        &full_boxes,
+                        &skipped,
+                        mailbox,
+                        now,
+                    );
+                }
+                Some((DepositOutcome::Answered(Err(ErrorReason::MailboxFull)), _)) => {
+                    full_boxes.insert((mailbox, node));
+                    self.queue_next_responsible(
+                        &push,
+                        &mut queue,
+                        &full_boxes,
+                        &skipped,
+                        mailbox,
+                        now,
+                    );
+                }
                 Some((DepositOutcome::Answered(Err(ErrorReason::RateLimited)), _))
                 | Some((DepositOutcome::PowBudget, _)) => stop = true,
                 // Any other refusal: this mailbox on this node waits for the
@@ -1347,6 +1385,40 @@ where
             if !self.save_push(&push) || stop {
                 break;
             }
+        }
+    }
+
+    /// Puts first in `queue` the best-ranked responsible of `mailbox` that
+    /// neither holds nor is about to receive its subscription, is not left
+    /// out, was not skipped and did not refuse it as full during this run.
+    fn queue_next_responsible(
+        &self,
+        push: &PushState,
+        queue: &mut VecDeque<(MailboxId, NodeId)>,
+        full_boxes: &HashSet<(MailboxId, NodeId)>,
+        skipped: &HashSet<NodeId>,
+        mailbox: MailboxId,
+        now: u64,
+    ) {
+        let holds = |n: &NodeId| {
+            push.subs
+                .get(&mailbox)
+                .is_some_and(|b| b.nodes.iter().any(|(h, _)| h == n))
+        };
+        let next = self
+            .state
+            .view
+            .responsibles_by_score(&mailbox, now)
+            .into_iter()
+            .find(|n| {
+                !holds(n)
+                    && !queue.contains(&(mailbox, *n))
+                    && !full_boxes.contains(&(mailbox, *n))
+                    && !skipped.contains(n)
+                    && !push.no_wake.get(n).is_some_and(|until| *until > now)
+            });
+        if let Some(n) = next {
+            queue.push_front((mailbox, n));
         }
     }
 

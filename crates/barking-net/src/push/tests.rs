@@ -28,9 +28,9 @@ fn cfg(token: u8) -> PushConfig {
     }
 }
 
-/// Every mailbox is served by nodes 0..4, best first.
+/// Every mailbox is served by nodes 0..5 (its five responsibles), best first.
 fn ranked(_: &MailboxId) -> Vec<NodeId> {
-    (0..4).map(id_of).collect()
+    (0..5).map(id_of).collect()
 }
 
 fn state_for(c: &PushConfig) -> PushState {
@@ -47,8 +47,9 @@ fn subbed(s: &mut PushState, m: MailboxId, day: u32, nodes: &[usize]) {
 }
 
 #[test]
-fn fresh_state_subscribes_two_nodes_per_mailbox() {
+fn fresh_state_subscribes_three_nodes_per_mailbox() {
     let c = cfg(1);
+    assert_eq!(WAKE_NODES, 3);
     let wanted = [(mb(1), today()), (mb(2), today() + 1)];
     let plan = plan_push(&state_for(&c), Some(&c), &wanted, ranked, NOW);
     assert_eq!(
@@ -56,8 +57,10 @@ fn fresh_state_subscribes_two_nodes_per_mailbox() {
         vec![
             (mb(1), id_of(0)),
             (mb(1), id_of(1)),
+            (mb(1), id_of(2)),
             (mb(2), id_of(0)),
             (mb(2), id_of(1)),
+            (mb(2), id_of(2)),
         ]
     );
     assert!(plan.unsubscribe.is_empty());
@@ -68,13 +71,14 @@ fn fresh_state_subscribes_two_nodes_per_mailbox() {
 fn kept_nodes_stay_and_missing_are_completed() {
     let c = cfg(1);
     let mut s = state_for(&c);
-    // Node 2 is subscribed (not the best): it stays, node 0 completes it.
-    subbed(&mut s, mb(1), today(), &[2]);
+    // Node 3 is subscribed (not among the best): it stays, nodes 0 and 1
+    // complete it.
+    subbed(&mut s, mb(1), today(), &[3]);
     let plan = plan_push(&s, Some(&c), &[(mb(1), today())], ranked, NOW);
-    assert_eq!(plan.subscribe, vec![(mb(1), id_of(0))]);
+    assert_eq!(plan.subscribe, vec![(mb(1), id_of(0)), (mb(1), id_of(1))]);
     assert!(plan.unsubscribe.is_empty());
     // Complete: nothing to do.
-    subbed(&mut s, mb(1), today(), &[0]);
+    subbed(&mut s, mb(1), today(), &[0, 1]);
     let plan = plan_push(&s, Some(&c), &[(mb(1), today())], ranked, NOW);
     assert_eq!(plan, PushPlan::default());
 }
@@ -86,7 +90,7 @@ fn node_leaving_responsibles_is_unsubscribed() {
     subbed(&mut s, mb(1), today(), &[0, 5]);
     let plan = plan_push(&s, Some(&c), &[(mb(1), today())], ranked, NOW);
     assert_eq!(plan.unsubscribe, vec![(mb(1), id_of(5), [5; 32])]);
-    assert_eq!(plan.subscribe, vec![(mb(1), id_of(1))]);
+    assert_eq!(plan.subscribe, vec![(mb(1), id_of(1)), (mb(1), id_of(2))]);
 }
 
 #[test]
@@ -96,13 +100,17 @@ fn no_wake_node_is_skipped_for_a_day() {
     s.note_no_wake(id_of(0), NOW);
     let wanted = [(mb(1), today())];
     let plan = plan_push(&s, Some(&c), &wanted, ranked, NOW);
-    assert_eq!(plan.subscribe, vec![(mb(1), id_of(1)), (mb(1), id_of(2))]);
+    let without_0 = vec![(mb(1), id_of(1)), (mb(1), id_of(2)), (mb(1), id_of(3))];
+    assert_eq!(plan.subscribe, without_0);
     // Still left out just before the end, back after it.
     let wanted = [(mb(1), today() + 1)];
     let plan = plan_push(&s, Some(&c), &wanted, ranked, NOW + NO_WAKE_SECS - 1);
-    assert_eq!(plan.subscribe, vec![(mb(1), id_of(1)), (mb(1), id_of(2))]);
+    assert_eq!(plan.subscribe, without_0);
     let plan = plan_push(&s, Some(&c), &wanted, ranked, NOW + NO_WAKE_SECS);
-    assert_eq!(plan.subscribe, vec![(mb(1), id_of(0)), (mb(1), id_of(1))]);
+    assert_eq!(
+        plan.subscribe,
+        vec![(mb(1), id_of(0)), (mb(1), id_of(1)), (mb(1), id_of(2))]
+    );
 }
 
 #[test]
@@ -116,7 +124,7 @@ fn token_change_resubscribes_all() {
     let plan = plan_push(&s, Some(&new), &wanted, ranked, NOW);
     assert_eq!(plan.unsubscribe.len(), 4);
     assert!(plan.unsubscribe.contains(&(mb(2), id_of(1), [1; 32])));
-    assert_eq!(plan.subscribe.len(), 4);
+    assert_eq!(plan.subscribe.len(), 2 * WAKE_NODES);
     assert!(plan.forget.is_empty());
     assert_ne!(
         PushState::config_hash_of(&old),
@@ -148,7 +156,7 @@ fn past_days_are_forgotten_without_unsubscribe() {
     let c = cfg(1);
     let mut s = state_for(&c);
     subbed(&mut s, mb(1), today() - 1, &[0, 1]);
-    subbed(&mut s, mb(2), today(), &[0, 1]);
+    subbed(&mut s, mb(2), today(), &[0, 1, 2]);
     let plan = plan_push(&s, Some(&c), &[(mb(2), today())], ranked, NOW);
     assert_eq!(plan.forget, vec![mb(1)]);
     assert!(plan.unsubscribe.is_empty());
@@ -161,7 +169,7 @@ fn past_days_are_forgotten_without_unsubscribe() {
     ];
     let plan = plan_push(&state_for(&c), Some(&c), &wanted, ranked, NOW);
     assert!(plan.subscribe.iter().all(|(m, _)| *m == mb(4)));
-    assert_eq!(plan.subscribe.len(), 2);
+    assert_eq!(plan.subscribe.len(), WAKE_NODES);
 }
 
 #[test]
@@ -214,20 +222,20 @@ fn sealed_token_carries_expiry_and_collapse() {
 fn stored_node_in_no_wake_is_unsubscribed() {
     let c = cfg(1);
     let mut s = state_for(&c);
-    subbed(&mut s, mb(1), today(), &[0, 1]);
+    subbed(&mut s, mb(1), today(), &[0, 1, 2]);
     s.note_no_wake(id_of(0), NOW);
     let plan = plan_push(&s, Some(&c), &[(mb(1), today())], ranked, NOW);
     assert_eq!(plan.unsubscribe, vec![(mb(1), id_of(0), [0; 32])]);
-    assert_eq!(plan.subscribe, vec![(mb(1), id_of(2))]);
+    assert_eq!(plan.subscribe, vec![(mb(1), id_of(3))]);
 }
 
 #[test]
 fn surplus_stored_nodes_are_unsubscribed() {
     let c = cfg(1);
     let mut s = state_for(&c);
-    subbed(&mut s, mb(1), today(), &[0, 1, 2]);
+    subbed(&mut s, mb(1), today(), &[0, 1, 2, 3]);
     let plan = plan_push(&s, Some(&c), &[(mb(1), today())], ranked, NOW);
-    assert_eq!(plan.unsubscribe, vec![(mb(1), id_of(2), [2; 32])]);
+    assert_eq!(plan.unsubscribe, vec![(mb(1), id_of(3), [3; 32])]);
     assert!(plan.subscribe.is_empty());
 }
 
@@ -236,7 +244,7 @@ fn future_mailbox_no_longer_wanted_is_unsubscribed_and_forgotten() {
     let c = cfg(1);
     let mut s = state_for(&c);
     subbed(&mut s, mb(1), today() + 2, &[0, 1]);
-    subbed(&mut s, mb(2), today(), &[0, 1]);
+    subbed(&mut s, mb(2), today(), &[0, 1, 2]);
     let plan = plan_push(&s, Some(&c), &[(mb(2), today())], ranked, NOW);
     assert_eq!(
         plan.unsubscribe,
@@ -330,6 +338,20 @@ fn mailbox_without_responsibles_keeps_its_subscriptions() {
         |m| if *m == mb(1) { Vec::new() } else { ranked(m) },
         NOW,
     );
-    assert_eq!(plan.subscribe, vec![(mb(2), id_of(0)), (mb(2), id_of(1))]);
+    assert_eq!(
+        plan.subscribe,
+        vec![(mb(2), id_of(0)), (mb(2), id_of(1)), (mb(2), id_of(2))]
+    );
     assert!(plan.unsubscribe.is_empty() && plan.forget.is_empty());
+}
+
+#[test]
+fn wake_nodes_always_meet_the_first_copies() {
+    // A sender puts its first copies on CLIENT_COPIES of the RESPONSIBLES;
+    // the recipient subscribes on WAKE_NODES of them. With agreeing views,
+    // the two sets always share a node, so the first wake-up does not wait
+    // for replication (spec §1).
+    const { assert!(WAKE_NODES + crate::plan::CLIENT_COPIES > crate::RESPONSIBLES) };
+    // The node keeps at most 4 subscriptions per mailbox.
+    const { assert!(WAKE_NODES <= 4) };
 }
