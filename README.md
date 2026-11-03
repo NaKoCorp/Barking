@@ -51,6 +51,18 @@ After exchanging contact cards and adding a reachable relay:
 
 `send` writes packet files and queues the message for network delivery. Each participant runs `sync` to send pending packets, receive messages and exchange delivery receipts.
 
+### Run a node in Docker
+
+[docker/node.Dockerfile](docker/node.Dockerfile) packages the static `barking-node` binary of a release alone on an empty base (about 5 MB). The build context is the release directory; the binary is checked against its `SHA256SUMS`:
+
+```sh
+docker build -f docker/node.Dockerfile --build-arg VERSION=0.1.0 -t barking-node dist
+docker run --rm -v barking-node:/var/lib/barking-node barking-node init
+docker run -d --name barking-node -v barking-node:/var/lib/barking-node -p 4433:4433/udp barking-node
+```
+
+To use a configuration, mount it read-only and pass it to `run`: `-v ./barking-node.toml:/etc/barking-node.toml:ro barking-node run --config /etc/barking-node.toml`. `docker exec barking-node /barking-node status` shows what the node holds.
+
 ## Development checks
 
 ```sh
