@@ -102,7 +102,7 @@ pub fn subscribe(
         return Ok(Err(r));
     }
     let relay = postcard::to_allocvec(&sub.relay).expect("a relay reference always encodes");
-    let tx = store.conn_mut().transaction()?;
+    let tx = store.conn_mut().savepoint()?;
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE mailbox=?1 AND cancel_hash=?2)",
         params![&sub.mailbox.0[..], &sub.cancel_hash[..]],
@@ -169,7 +169,7 @@ pub fn unsubscribe(
 /// `deposit_message` right after the packet insert, in the same transaction:
 /// never for a known packet nor for an ack.
 pub(crate) fn mark_new_message(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     mailbox: &MailboxId,
     now: u64,
 ) -> rusqlite::Result<()> {
@@ -185,7 +185,7 @@ pub(crate) fn mark_new_message(
 /// whose relay no longer decodes is deleted.
 pub fn take_due(store: &mut NodeStore, now: u64, max: usize) -> Result<Vec<WakeOrder>> {
     let limit = int(now.saturating_sub(WAKE_INTERVAL_SECS));
-    let tx = store.conn_mut().transaction()?;
+    let tx = store.conn_mut().savepoint()?;
     let rows: Vec<(i64, Vec<u8>, Vec<u8>)> = {
         let mut st = tx.prepare(
             "SELECT rowid, relay, sealed FROM subscriptions

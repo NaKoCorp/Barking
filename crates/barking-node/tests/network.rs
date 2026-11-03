@@ -473,6 +473,21 @@ async fn dht_requests_unsupported() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reader_sees_committed_deposit() {
+    let (_d, path) = db();
+    let node = start(&path);
+    let mut writer = Client::connect(node.addr, node.id).await.unwrap();
+    let mut reader = Client::connect(node.addr, node.id).await.unwrap();
+    for n in 0..5 {
+        assert_eq!(writer.deposit(&message(n, 4)).await.unwrap(), Ok(()));
+        // Fetched by another connection right after the `Ok`.
+        let items = reader.fetch(&[MailboxId([4; 16])]).await.unwrap();
+        assert_eq!(items, (0..=n).map(|k| message(k, 4)).collect::<Vec<_>>());
+    }
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_keeps_confirmed_deposits() {
     let (_d, path) = db();
     let node = start(&path);

@@ -331,7 +331,7 @@ impl Dht {
                     return Stored::Busy;
                 };
                 match shared
-                    .with_store(false, Some(group), move |s, _| {
+                    .with_reader(Some(group), move |s| {
                         let _job = job;
                         rules::holdings(s, &mailbox, cursor)
                     })

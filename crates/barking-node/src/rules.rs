@@ -231,7 +231,7 @@ fn deposit_message(
     difficulty: Difficulty,
 ) -> Result<core::result::Result<(), ErrorReason>> {
     let hash = pow::content_hash(bytes);
-    let tx = store.conn_mut().transaction()?;
+    let tx = store.conn_mut().savepoint()?;
     // Already acknowledged, or same content already kept: no effect.
     let known: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM packets WHERE id=?1 AND hash=?2) OR EXISTS(SELECT 1 FROM acks WHERE packet_id=?1)",
@@ -297,7 +297,7 @@ fn deposit_ack(
     t.copy_from_slice(&p.payload[..16]);
     sec.copy_from_slice(&p.payload[16..]);
     let target = PacketId(t);
-    let tx = store.conn_mut().transaction()?;
+    let tx = store.conn_mut().savepoint()?;
     let known: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM acks WHERE packet_id=?1)",
         params![&target.0[..]],

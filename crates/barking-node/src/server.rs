@@ -2,16 +2,18 @@
 //! rules of `rules`.
 //!
 //! Documented choices:
-//! - **Database**: a single `NodeStore` behind a `Mutex`, each operation in
-//!   `spawn_blocking`. Writes (and reads) are serialized on a single SQLite
-//!   connection: no race between the quota check and the insertion. The
-//!   queue is bounded: at most `max_db_jobs` (64) operations in progress or
-//!   pending, `max(1, max_db_jobs / 16)` per address group (/64, /32) and
+//! - **Database**: a single writer thread owns the write connection
+//!   (`writer`): operations are serialized, so there is no race between the
+//!   quota check and the insertion, and the operations waiting together are
+//!   committed in one transaction (one fsync, at most `MAX_BATCH`); a result
+//!   is handed back only after its commit. The queue is bounded: at most
+//!   `max_db_jobs` (64) operations in progress or pending,
+//!   `max(1, max_db_jobs / 16)` per address group (/64, /32) and
 //!   `max(1, max_db_jobs / 8)` per /48 or /24; beyond that `RateLimited`. A
 //!   deposit first goes through `rules::precheck` (shape, expiry, minimal
-//!   proof) without taking a slot. The token is held by the blocking task
-//!   itself: abandoning the request only frees the slot once the work is
-//!   finished.
+//!   proof) without taking a slot. The token is held until the result is
+//!   handed back: abandoning the request only frees the slot once the work
+//!   is committed.
 //! - **Response memory**: each request reserves in advance the maximum size
 //!   of its response (for `Fetch`: the page requested by the client,
 //!   between 16 KiB and ~1 MiB, plus the encoding margin), then brought down
@@ -80,9 +82,10 @@ use crate::dht::replicate::{self, PassReport};
 use crate::dht::{Dht, maintain};
 use crate::limits::{ConnectionSlot, GroupDbJob, LimitConfig, Limiter};
 use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
-use crate::store::NodeStore;
+use crate::store::{NodeStore, PURGE_BATCH, READERS};
 use crate::wake::sender::{QuicWakeTransport, WakeSender};
 use crate::wake::{self, WakeConfig};
+use crate::writer::{MAX_BATCH, Writer};
 use crate::{Error, Result};
 
 /// Interval between purges of expired items.
@@ -577,7 +580,12 @@ impl ServerConfig {
 
 /// State shared by all connections.
 pub(crate) struct Shared {
-    store: Mutex<NodeStore>,
+    /// Single writer of the database (group commit).
+    writer: Writer,
+    /// Read connections (`READERS`); empty for a database in memory.
+    readers: Vec<Mutex<NodeStore>>,
+    /// Reader tried first by the next read.
+    next_reader: AtomicUsize,
     pub(crate) policy: Policy,
     node_id: NodeId,
     version: u16,
@@ -712,29 +720,43 @@ impl Shared {
         group: Option<&ConnectionSlot>,
         f: impl FnOnce(&mut NodeStore, &Policy) -> Result<T> + Send + 'static,
     ) -> Stored<T> {
-        let group_job: Option<GroupDbJob> = match group {
-            Some(g) => match g.try_db_job(self.db_jobs_per_group, self.db_jobs_per_prefix) {
-                Some(j) => Some(j),
-                None => return Stored::Busy,
-            },
-            None => None,
+        let Some(slots) = self.db_slots(wait, group).await else {
+            return Stored::Busy;
         };
-        let slot = if wait {
-            self.db.take(1).await
-        } else {
-            self.db.try_take(1)
-        };
-        let Some(slot) = slot else {
+        // The slots are returned when the result is handed back, after the
+        // commit, even if the request was abandoned in the meantime.
+        match self.writer.run(f, slots).await {
+            Some(Ok(v)) => Stored::Done(v),
+            Some(Err(e)) => {
+                tracing::error!("internal storage error: {e}");
+                Stored::Failed
+            }
+            None => {
+                tracing::error!("storage operation not completed");
+                Stored::Failed
+            }
+        }
+    }
+
+    /// Runs the read `f` on a read connection, outside the async loop and
+    /// beside the writer, with the same queue as `with_store` (without
+    /// waiting). It sees committed data only, so the effect of any `Ok`
+    /// already sent. Database in memory: through the writer.
+    pub(crate) async fn with_reader<T: Send + 'static>(
+        self: &Arc<Self>,
+        group: Option<&ConnectionSlot>,
+        f: impl FnOnce(&NodeStore) -> Result<T> + Send + 'static,
+    ) -> Stored<T> {
+        if self.readers.is_empty() {
+            return self.with_store(false, group, move |s, _| f(s)).await;
+        }
+        let Some(slots) = self.db_slots(false, group).await else {
             return Stored::Busy;
         };
         let me = Arc::clone(self);
         let r = tokio::task::spawn_blocking(move || {
-            // The slots are returned at the end of the work, even if the request
-            // was abandoned in the meantime.
-            let _slot = slot;
-            let _group_job = group_job;
-            let mut store = me.store.lock().unwrap_or_else(PoisonError::into_inner);
-            f(&mut store, &me.policy)
+            let _slots = slots;
+            f(&me.reader())
         })
         .await;
         match r {
@@ -748,6 +770,38 @@ impl Shared {
                 Stored::Failed
             }
         }
+    }
+
+    /// A slot of the database queue and, for a request of `group`, one of its
+    /// share; `None`: queue or share full.
+    async fn db_slots(
+        &self,
+        wait: bool,
+        group: Option<&ConnectionSlot>,
+    ) -> Option<(Held, Option<GroupDbJob>)> {
+        let group_job = match group {
+            Some(g) => Some(g.try_db_job(self.db_jobs_per_group, self.db_jobs_per_prefix)?),
+            None => None,
+        };
+        let slot = if wait {
+            self.db.take(1).await
+        } else {
+            self.db.try_take(1)
+        }?;
+        Some((slot, group_job))
+    }
+
+    /// A free read connection, else the next one in turn (waiting for it).
+    fn reader(&self) -> std::sync::MutexGuard<'_, NodeStore> {
+        let n = self.readers.len();
+        let first = self.next_reader.fetch_add(1, Ordering::Relaxed) % n;
+        (0..n)
+            .find_map(|i| self.readers[(first + i) % n].try_lock().ok())
+            .unwrap_or_else(|| {
+                self.readers[first]
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+            })
     }
 }
 
@@ -828,8 +882,17 @@ pub async fn run(
 
     // A database read failure arms the signal: at worst, needless rounds.
     let subscriptions_held = wake::has_subscriptions(&store).unwrap_or(true);
+    let readers = match store.file_path() {
+        Some(path) => (0..READERS)
+            .map(|_| NodeStore::open_reader(&path).map(Mutex::new))
+            .collect::<Result<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    let writer = Writer::spawn(store, policy, MAX_BATCH)?;
     let shared = Arc::new(Shared {
-        store: Mutex::new(store),
+        writer,
+        readers,
+        next_reader: AtomicUsize::new(0),
         policy,
         node_id: NodeId::from_public_key(&config.key.verifying_key()),
         version: config.version,
@@ -873,12 +936,7 @@ pub async fn run(
         close_after_fetches: config.test_close_after_fetches,
     });
 
-    if let Stored::Done(n) = shared
-        .with_store(true, None, |s, _| s.purge_expired(unix_now()))
-        .await
-    {
-        shared.stats.purged(n);
-    }
+    purge_all(&shared).await;
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut tasks = JoinSet::new();
@@ -921,18 +979,34 @@ pub async fn run(
     Ok(())
 }
 
+/// Purges all expired rows, one database operation per batch of
+/// `PURGE_BATCH`: deposits run between two batches.
+async fn purge_all(shared: &Arc<Shared>) {
+    loop {
+        let now = unix_now();
+        match shared
+            .with_store(true, None, move |s, _| {
+                s.purge_expired_batch(now, PURGE_BATCH)
+            })
+            .await
+        {
+            Stored::Done((n, more)) => {
+                shared.stats.purged(n);
+                if !more {
+                    return;
+                }
+            }
+            Stored::Busy | Stored::Failed => return,
+        }
+    }
+}
+
 async fn purge_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let mut tick = tokio::time::interval(PURGE_INTERVAL);
     tick.tick().await; // first tick is immediate: the startup purge is done.
     loop {
         tokio::select! {
-            _ = tick.tick() => {
-                if let Stored::Done(n) =
-                    shared.with_store(true, None, |s, _| s.purge_expired(unix_now())).await
-                {
-                    shared.stats.purged(n);
-                }
-            }
+            _ = tick.tick() => purge_all(&shared).await,
             _ = stop.changed() => return,
         }
     }
@@ -1466,7 +1540,7 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
         } => {
             let page = fetch_page_bytes(max_bytes);
             match shared
-                .with_store(false, Some(group), move |s, _| {
+                .with_reader(Some(group), move |s| {
                     rules::fetch(s, &mailboxes, cursor, page)
                 })
                 .await

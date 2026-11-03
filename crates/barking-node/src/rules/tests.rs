@@ -82,6 +82,15 @@ fn put_ack(s: &mut NodeStore, a: &Packet) -> core::result::Result<(), ErrorReaso
 }
 
 #[test]
+fn deposit_inside_open_transaction() {
+    let (_d, mut s) = store();
+    s.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(put(&mut s, &ok_msg(1, 1)), Ok(()));
+    s.conn().execute_batch("ROLLBACK").unwrap();
+    assert_eq!(s.stats().unwrap().packets, 0);
+}
+
+#[test]
 fn rejects_malformed() {
     let (_d, mut s) = store();
     let r = deposit(&mut s, &policy(), &[1, 2, 3], 0, NOW).unwrap();
@@ -349,6 +358,20 @@ fn fetch_does_not_delete() {
     // Empty or unknown mailbox.
     let (items, next) = fetch(&s, &[mb(9)], None, 1 << 20).unwrap().unwrap();
     assert!(items.is_empty() && next.is_none());
+}
+
+#[test]
+fn batched_purge_keeps_stored_bytes() {
+    let (_d, mut s) = store();
+    for n in 1..=5 {
+        put(&mut s, &msg(n, 1, Tier::S, NOW + 100)).unwrap();
+    }
+    put(&mut s, &msg(6, 1, Tier::S, NOW + 10_000)).unwrap();
+    assert_eq!(s.purge_expired_batch(NOW + 100, 2).unwrap(), (2, true));
+    assert_eq!(s.purge_expired_batch(NOW + 100, 2).unwrap(), (2, true));
+    assert_eq!(s.purge_expired_batch(NOW + 100, 2).unwrap(), (1, false));
+    let st = s.stats().unwrap();
+    assert_eq!((st.packets, st.bytes), (1, 245));
 }
 
 #[test]

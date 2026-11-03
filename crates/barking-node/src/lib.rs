@@ -11,6 +11,7 @@ pub mod store;
 #[cfg(feature = "test-harness")]
 pub mod testing;
 pub mod wake;
+mod writer;
 
 pub use rules::{Policy, deposit, fetch};
 pub use store::{NodeStore, Stats};

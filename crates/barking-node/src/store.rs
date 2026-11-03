@@ -5,7 +5,7 @@
 //! transactions as the writes: the `storage_max_bytes` quota is checked
 //! without scanning the table.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use barking_packet::MailboxId;
@@ -20,6 +20,19 @@ const PREVIOUS_SCHEMA_VERSION: i64 = 2;
 pub const MAX_PEER_ROWS: usize = 1024;
 /// Wait for a lock held by another process (`status` during `run`).
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Rows deleted per table and per purge batch: one batch holds the writer
+/// briefly, deposits run between two batches.
+pub const PURGE_BATCH: usize = 2_000;
+/// Page cache of the write connection (negative: KiB), 64 MiB.
+const WRITER_CACHE_KIB: i64 = -65_536;
+/// Read connections of a running node, beside the writer.
+pub const READERS: usize = 4;
+/// Page cache of each read connection (negative: KiB), 16 MiB.
+const READER_CACHE_KIB: i64 = -16_384;
+/// Memory-mapped reads: the system page cache, not process memory.
+const MMAP_BYTES: i64 = 256 << 20;
+/// Size the WAL file is brought back to after a checkpoint.
+const JOURNAL_SIZE_LIMIT: i64 = 64 << 20;
 
 /// Node counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +118,30 @@ impl NodeStore {
         Ok(NodeStore { conn })
     }
 
+    /// Read connection of a running node (`READERS` of them, beside the
+    /// writer): the database must exist; neither schema nor migration, and
+    /// `query_only` refuses any write.
+    pub fn open_reader(path: impl AsRef<Path>) -> Result<NodeStore> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        conn.pragma_update(None, "query_only", "ON")?;
+        conn.pragma_update(None, "cache_size", READER_CACHE_KIB)?;
+        conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
+        conn.set_prepared_statement_cache_capacity(crate::rules::STATEMENT_CACHE);
+        Ok(NodeStore { conn })
+    }
+
+    /// File of the database; `None` in memory.
+    pub fn file_path(&self) -> Option<PathBuf> {
+        self.conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+    }
+
     /// In-memory database (tests).
     pub fn open_in_memory() -> Result<NodeStore> {
         Self::init(Connection::open_in_memory()?)
@@ -120,6 +157,11 @@ impl NodeStore {
         conn.pragma_update(None, "secure_delete", "ON")?;
         // A deposit confirmed to the client survives a power cut.
         conn.pragma_update(None, "synchronous", "FULL")?;
+        // Cache sized for databases of several GiB; the WAL file is
+        // truncated back to this size after a checkpoint.
+        conn.pragma_update(None, "cache_size", WRITER_CACHE_KIB)?;
+        conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
+        conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
         conn.set_prepared_statement_cache_capacity(crate::rules::STATEMENT_CACHE);
         // Creation or migration, in a single transaction. The rows of a
         // migrated database keep `pow = 0`; `SCHEMA` creates `peers` and does
@@ -210,7 +252,7 @@ impl NodeStore {
     /// `MAX_PEER_ROWS` rows, the first ones: the caller puts active nodes
     /// first).
     pub fn save_peers(&mut self, rows: &[PeerRow]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         tx.execute("DELETE FROM peers", [])?;
         {
             let mut st = tx.prepare_cached(
@@ -258,33 +300,55 @@ impl NodeStore {
         Ok(out)
     }
 
-    /// Deletes expired packets and acks (`expires_at <= now`). Returns the
-    /// number of deleted rows.
+    /// Deletes all expired packets, acks (`expires_at <= now`) and
+    /// subscriptions, batch after batch. Returns the number of deleted rows.
     pub fn purge_expired(&mut self, now: u64) -> Result<usize> {
+        let mut removed = 0;
+        loop {
+            let (n, more) = self.purge_expired_batch(now, PURGE_BATCH)?;
+            removed += n;
+            if !more {
+                return Ok(removed);
+            }
+        }
+    }
+
+    /// Deletes at most `limit` expired packets, `limit` acks and `limit`
+    /// subscriptions, oldest expiry first. Returns the number of deleted rows
+    /// and whether expired rows may remain (a table reached `limit`).
+    pub fn purge_expired_batch(&mut self, now: u64, limit: usize) -> Result<(usize, bool)> {
         let today = i64::from(crate::wake::day_of(now));
         let now = i64::try_from(now).unwrap_or(i64::MAX);
-        let tx = self.conn.transaction()?;
+        let limit_sql = i64::try_from(limit).unwrap_or(i64::MAX);
+        let tx = self.conn.savepoint()?;
         let mut freed: i64 = 0;
         let mut removed = 0;
-        for (table, wh) in [("packets", "expires_at"), ("acks", "expires_at")] {
-            let sum: i64 = tx.query_row(
-                &format!("SELECT COALESCE(SUM(length(bytes)),0) FROM {table} WHERE {wh} <= ?1"),
-                params![now],
-                |r| r.get(0),
-            )?;
-            freed += sum;
-            removed += tx.execute(
-                &format!("DELETE FROM {table} WHERE {wh} <= ?1"),
-                params![now],
-            )?;
+        let mut more = false;
+        for table in ["packets", "acks"] {
+            let mut st = tx.prepare_cached(&format!(
+                "DELETE FROM {table} WHERE seq IN (SELECT seq FROM {table} \
+                 WHERE expires_at <= ?1 ORDER BY expires_at, seq LIMIT ?2) \
+                 RETURNING length(bytes)"
+            ))?;
+            let lens = st.query_map(params![now, limit_sql], |r| r.get::<_, i64>(0))?;
+            let mut n = 0;
+            for len in lens {
+                freed += len?;
+                n += 1;
+            }
+            removed += n;
+            more |= n >= limit;
         }
         add_stored_bytes(&tx, -freed)?;
-        removed += tx.execute(
-            "DELETE FROM subscriptions WHERE expires_day < ?1",
-            params![today],
+        let subs = tx.execute(
+            "DELETE FROM subscriptions WHERE rowid IN (SELECT rowid FROM subscriptions \
+             WHERE expires_day < ?1 LIMIT ?2)",
+            params![today, limit_sql],
         )?;
+        removed += subs;
+        more |= subs >= limit;
         tx.commit()?;
-        Ok(removed)
+        Ok((removed, more))
     }
 }
 
@@ -571,6 +635,28 @@ mod tests {
             first_seen: 3_600 * u64::from(n),
             last_seen: 3_600 * u64::from(n) + 7_200,
         }
+    }
+
+    #[test]
+    fn reader_refuses_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.db");
+        let s = NodeStore::open(&path).unwrap();
+        // SQLite gives the canonical path.
+        assert_eq!(
+            s.file_path().map(|p| p.canonicalize().unwrap()),
+            Some(path.canonicalize().unwrap())
+        );
+        assert_eq!(NodeStore::open_in_memory().unwrap().file_path(), None);
+        let r = NodeStore::open_reader(&path).unwrap();
+        assert_eq!(r.stats().unwrap().packets, 0);
+        assert!(
+            r.conn()
+                .execute("INSERT INTO meta(k,v) VALUES('x', 0)", [])
+                .is_err()
+        );
+        // A reader never creates a database.
+        assert!(NodeStore::open_reader(dir.path().join("missing.db")).is_err());
     }
 
     #[test]
