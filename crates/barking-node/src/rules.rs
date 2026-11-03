@@ -561,7 +561,8 @@ pub fn holdings(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyItem {
     pub bytes: Vec<u8>,
-    /// Proof nonce kept at deposit (0 for an ack or a migrated row).
+    /// Proof nonce kept at deposit (0 for an ack or a migrated row, but
+    /// also a valid nonce).
     pub pow: u64,
     pub hash: [u8; 32],
     pub is_ack: bool,

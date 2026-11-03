@@ -9,8 +9,8 @@
 //!   it at the head. All this is kept in memory only.
 //! - **Per responsible node**: `FindValue` on all pages, then `Store` of
 //!   what is missing, acknowledgements first. A message without a kept proof
-//!   (row of a migrated database, `pow = 0`) is not sent: it would be
-//!   refused.
+//!   (row of a migrated database, `pow = 0` that does not pass the node's
+//!   base difficulty) is not sent: it would be refused.
 //! - **Bounds**: `MAX_MAILBOXES_PER_PEER` mailboxes and `PEER_TIME_PER_PASS`
 //!   per responsible node and per pass; `replication_bytes_per_hour` bytes
 //!   sent per hour (beyond that the pass stops and resumes at the next one),
@@ -404,7 +404,7 @@ pub(crate) async fn pass(
         // A message without a kept proof would be refused (`PowTooWeak`).
         let items: Vec<CopyItem> = items
             .into_iter()
-            .filter(|i| i.is_ack || i.pow != 0)
+            .filter(|i| sendable(i, &mailbox, shared.policy.pow_bits))
             .collect();
         if items.is_empty() {
             dht.replication_queue().attempted(&mailbox);
@@ -475,6 +475,21 @@ pub(crate) async fn pass(
         }
     }
     report
+}
+
+/// True if `item` has a proof to send: an ack, or a message with a kept
+/// proof. `pow = 0` marks a migrated row without one, but 0 is also the
+/// first nonce `pow::solve` tries (a valid proof once in `2^bits`): such a
+/// row is sent if 0 passes the node's own base difficulty (`pow_bits`).
+fn sendable(item: &CopyItem, mailbox: &MailboxId, pow_bits: u8) -> bool {
+    item.is_ack
+        || item.pow != 0
+        || pow::check(
+            &item.hash,
+            mailbox,
+            0,
+            rules::copy_pow_bits(pow_bits, item.tier),
+        )
 }
 
 /// Sends `req` to peer `peer` (addresses of its record in the table), at the
@@ -643,6 +658,46 @@ mod tests {
         let mut r = ByteBudget::resume(10, T, 10);
         assert!(r.exhausted(T + 100));
         assert!(!r.exhausted(T + 3600));
+    }
+
+    /// A message item of tier S, without bytes, with proof `pow`.
+    fn item(hash: [u8; 32], pow: u64) -> CopyItem {
+        CopyItem {
+            bytes: Vec::new(),
+            pow,
+            hash,
+            is_ack: false,
+            tier: barking_packet::Tier::S,
+        }
+    }
+
+    #[test]
+    fn nonce_zero_is_sent_only_when_it_is_a_proof() {
+        const BITS: u8 = 8;
+        let mb = MailboxId([7; 16]);
+        // Fingerprints for which nonce 0 is (resp. is not) a valid proof at
+        // `BITS`: `pow::solve` returns 0 for the first, once in 2^BITS.
+        let hashes = (0..=u16::MAX).map(|n| {
+            let mut h = [0; 32];
+            h[..2].copy_from_slice(&n.to_le_bytes());
+            h
+        });
+        let proof =
+            |h: &[u8; 32]| pow::check(h, &mb, 0, rules::copy_pow_bits(BITS, item(*h, 0).tier));
+        let zero_proof = hashes.clone().find(|h| proof(h)).unwrap();
+        let no_proof = hashes.clone().find(|h| !proof(h)).unwrap();
+        assert_eq!(pow::solve(&zero_proof, &mb, BITS), Some(0));
+        // A proof found at nonce 0 is replicated like any other.
+        assert!(sendable(&item(zero_proof, 0), &mb, BITS));
+        // A migrated row (`pow = 0`, no kept proof) is not.
+        assert!(!sendable(&item(no_proof, 0), &mb, BITS));
+        // Any other nonce, and an ack, are left to the peer's check.
+        assert!(sendable(&item(no_proof, 1), &mb, BITS));
+        let ack = CopyItem {
+            is_ack: true,
+            ..item(no_proof, 0)
+        };
+        assert!(sendable(&ack, &mb, BITS));
     }
 
     #[test]
