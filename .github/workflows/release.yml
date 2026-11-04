@@ -179,6 +179,8 @@ jobs:
     name: attestation and draft
     needs: compare
     runs-on: ubuntu-26.04
+    # Only v* tags may deploy to this environment (repository settings).
+    environment: release
     permissions:
       contents: write
       id-token: write
