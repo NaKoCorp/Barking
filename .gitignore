@@ -1,4 +1,31 @@
+# Rust build output
 target/
+**/*.rs.bk
+
+# Release artifacts (scripts/repro-build.sh, scripts/sign-release.sh)
 dist/
-crates/barking-core/fuzz/artifacts/
+
+# Fuzzing: build output and crash artifacts; the corpus stays tracked
 crates/barking-core/fuzz/target/
+crates/barking-core/fuzz/artifacts/
+crates/barking-core/fuzz/coverage/
+
+# Coverage and profiling
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+
+# Secrets: only public keys belong in keys/
+*.key
+*.sec
+.env
+.env.*
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
