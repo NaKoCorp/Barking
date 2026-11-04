@@ -1159,8 +1159,10 @@ mod node {
         assert!(node.stats().packets < N as u64);
         // The three receipts went out before the messages.
         assert!(node.stats().acks >= acks_before + 3);
+        // About 17 deposits per sync locally; a loaded runner deposits
+        // fewer, so the bound leaves room (the loop stops once done).
         let mut done = false;
-        for _ in 0..8 {
+        for _ in 0..20 {
             std::thread::sleep(std::time::Duration::from_secs(3));
             let s = ok(&a, &["sync"]);
             assert!(s.contains("Poll recorded"), "{s}");
