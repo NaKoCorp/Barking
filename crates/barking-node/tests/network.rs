@@ -13,7 +13,7 @@ use barking_node::{NodeStore, Policy};
 use barking_packet::{DEFAULT_HOPS, Kind, MailboxId, Packet, PacketId, Tier};
 use barking_proto::client::{self, Client, ClientError};
 use barking_proto::frame::{self, MAX_REQUEST_BYTES};
-use barking_proto::{ErrorReason, NodeId, Request, Response, generate_node_key, tls};
+use barking_proto::{ErrorReason, NodeId, Request, Response, tls};
 use ed25519_dalek::SigningKey;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -26,13 +26,10 @@ const LONG: Duration = Duration::from_secs(20);
 /// Reduced difficulty for fast tests.
 const TEST_BITS: u8 = 8;
 
+/// Precomputed puzzle-solving keys: each test runs in its own process
+/// under cargo-nextest, so a key drawn at run time would cost every test.
 fn key(n: usize) -> SigningKey {
-    static KEYS: OnceLock<Vec<SigningKey>> = OnceLock::new();
-    KEYS.get_or_init(|| {
-        let mut rng = StdRng::seed_from_u64(4242);
-        (0..2).map(|_| generate_node_key(&mut rng)).collect()
-    })[n]
-        .clone()
+    barking_node::testing::key(n)
 }
 
 fn id_of(k: &SigningKey) -> NodeId {

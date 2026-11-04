@@ -336,12 +336,13 @@ mod tests {
         assert!(check(NodeId([0; 32])).is_err());
     }
 
-    /// Key whose identifier solves the puzzle (computed once).
+    /// Key whose identifier solves the puzzle (seed drawn once with
+    /// `generate_node_key` in optimized mode).
     fn puzzle_key() -> SigningKey {
-        use rand::SeedableRng;
-        static KEY: std::sync::OnceLock<SigningKey> = std::sync::OnceLock::new();
-        KEY.get_or_init(|| crate::generate_node_key(&mut rand::rngs::StdRng::seed_from_u64(78)))
-            .clone()
+        SigningKey::from_bytes(&[
+            2, 175, 79, 102, 56, 164, 4, 76, 174, 101, 223, 131, 29, 124, 100, 133, 164, 220, 15,
+            194, 250, 40, 224, 152, 37, 232, 123, 107, 239, 175, 170, 96,
+        ])
     }
 
     #[test]
