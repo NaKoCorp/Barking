@@ -1,0 +1,50 @@
+name: ci
+
+# Pull request checks. Build reproducibility is checked at release time only
+# (release.yml: double build per target, byte-by-byte comparison).
+on:
+  pull_request:
+  # Runs on main fill the Cargo cache that pull requests start from.
+  push:
+    branches: [main]
+
+# A new push to a pull request replaces the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  rust:
+    name: Rust checks (fmt, clippy, tests)
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Toolchain pinned by rust-toolchain.toml, installed explicitly (rustup is on the Ubuntu runners).
+      - name: Install the pinned Rust toolchain
+        run: |
+          canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
+          rustup toolchain install "$canal" --profile minimal --component rustfmt --component clippy
+          rustup default "$canal"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-nextest@0.9.149
+      - run: scripts/check.sh
+
+  release-scripts:
+    name: signing and verification scripts
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/tests/release-scripts.sh

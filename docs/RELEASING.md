@@ -14,7 +14,7 @@ Procédure du mainteneur. La conception est dans la spec, §15. Le modèle : la 
 Pousser un tag `v*` est la seule porte vers le workflow de publication. Il faut donc la verrouiller :
 
 - **Ruleset de tags** : restreindre qui peut créer, modifier ou supprimer les tags `v*` (par exemple le seul mainteneur), et interdire de les déplacer ;
-- **Protection de la branche `main`** : pas de push forcé, relecture obligatoire, vérifications `repro-check` exigées ;
+- **Protection de la branche `main`** : pas de push forcé, relecture obligatoire, vérifications de `ci` exigées (contrôle Rust, scripts de signature) ;
 - garder les actions des workflows épinglées par SHA de commit, comme aujourd'hui.
 
 ## Avant la première version
@@ -22,10 +22,10 @@ Pousser un tag `v*` est la seule porte vers le workflow de publication. Il faut 
 Dans cet ordre, une seule fois :
 
 1. Rendre le dépôt GitHub public (les attestations et les reconstructions indépendantes en dépendent).
-2. Créer le ruleset de tags `v*` et la protection de `main` décrits ci-dessus, avec les vérifications de `repro-check` exigées (contrôle Rust, scripts de signature, double build).
+2. Créer le ruleset de tags `v*` et la protection de `main` décrits ci-dessus, avec les vérifications de `ci` exigées (contrôle Rust, scripts de signature).
 3. Dans les réglages Actions du dépôt, autoriser les workflows à créer des versions (`GITHUB_TOKEN` en écriture pour `release.yml`, qui ne demande `contents: write` que dans son dernier job).
-4. Pousser `main`, puis ouvrir une première pull request et attendre que `repro-check` soit vert : contrôle Rust, scripts de signature, et double build `x86_64-unknown-linux-musl`, qui n'a jamais été compilé sur la machine de développement (Mac arm64). `repro-check` ne se lance pas sur un simple push.
-5. Lancer `repro-check` à la main (`workflow_dispatch`) pour obtenir le double build complet des trois cibles, et vérifier que les copies sont identiques, macOS compris (Xcode de `.xcode-version`).
+4. Pousser `main`, puis ouvrir une première pull request et attendre que `ci` soit vert : contrôle Rust et scripts de signature.
+5. Lancer `scripts/tests/repro-twice.sh` sur une machine Linux x86-64 et sur un Mac arm64 : la reproductibilité n'est vérifiée en CI qu'à la publication (`release.yml`), et la répétition de l'étape 7 vérifie les trois cibles, macOS compris (Xcode de `.xcode-version`).
 6. Générer la clé hors ligne (`keys/README.md`), committer `keys/maintainer.pub` avec relecture par une seconde personne, et publier la ligne `RW…` par un canal indépendant du dépôt.
 7. Faire une répétition complète sur un tag de pré-version, par exemple `0.1.0-rc.1` (version de `crates/barking-cli/Cargo.toml`, de `crates/barking-node/Cargo.toml` et de `crates/barking-push/Cargo.toml` mise à jour en conséquence) : tag, CI, `sign-release.sh`, puis `verify-release.sh --rebuild`.
 8. Créer le dépôt `barking-rebuilds` (format des entrées dans `docs/VERIFYING.md`).
@@ -33,18 +33,19 @@ Dans cet ordre, une seule fois :
 
 ## Conserver l’environnement Alpine
 
-Les builds Linux utilisent l’image Rust/Alpine épinglée et les versions APK de `docker/apk/build.txt`. Avant une publication, conserver les APK signés et les index correspondants dans un miroir immuable, ou conserver l’image de build par son empreinte : les dépôts publics Alpine peuvent retirer les anciennes révisions. Pour changer l’image (digest) ou un paquet, régénérer la liste complète (lignes `paquet=version` triées, le format que compare `docker/apk/install.sh`) et vérifier qu’elle est la même sur x86-64 et ARM64, puis refaire passer `repro-check` : `docker/apk/install.sh` refuse toute différence. `docker/apk/release.txt` joue le même rôle pour l’image de test des scripts de signature. Le fuzzing garde son image Debian (glibc) : AddressSanitizer ne prend pas en charge les cibles musl.
+Les builds Linux utilisent l’image Rust/Alpine épinglée et les versions APK de `docker/apk/build.txt`. Avant une publication, conserver les APK signés et les index correspondants dans un miroir immuable, ou conserver l’image de build par son empreinte : les dépôts publics Alpine peuvent retirer les anciennes révisions. Pour changer l’image (digest) ou un paquet, régénérer la liste complète (lignes `paquet=version` triées, le format que compare `docker/apk/install.sh`) et vérifier qu’elle est la même sur x86-64 et ARM64, puis relancer `scripts/tests/repro-twice.sh` et faire passer `ci` : `docker/apk/install.sh` refuse toute différence. `docker/apk/release.txt` joue le même rôle pour l’image de test des scripts de signature. Le fuzzing garde son image Debian (glibc) : AddressSanitizer ne prend pas en charge les cibles musl.
 
 ## Changer l'Xcode de la CI
 
-`.xcode-version` fixe le runner macOS (`runner=`), la version de Xcode (`xcode=`) et celle du SDK (`sdk=`). Les workflows sélectionnent cet Xcode et échouent si le SDK diffère. Quand GitHub retire cet Xcode ou ce runner de ses images, choisissez une version listée dans le README de l'image (dépôt `actions/runner-images`, `images/macos/macos-<n>-arm64-Readme.md`, sections « Xcode » et « Installed SDKs »), mettez à jour `.xcode-version` et le `runner` des matrices dans les deux workflows, et faites passer `repro-check`. Chaque tag enregistre son `.xcode-version` : une ancienne version se recompile avec l'Xcode de son tag.
+`.xcode-version` fixe le runner macOS (`runner=`), la version de Xcode (`xcode=`) et celle du SDK (`sdk=`). Les workflows sélectionnent cet Xcode et échouent si le SDK diffère. Quand GitHub retire cet Xcode ou ce runner de ses images, choisissez une version listée dans le README de l'image (dépôt `actions/runner-images`, `images/macos/macos-<n>-arm64-Readme.md`, sections « Xcode » et « Installed SDKs »), mettez à jour `.xcode-version` et le `runner` des matrices de `release.yml`, puis faites une répétition sur un tag de pré-version. Chaque tag enregistre son `.xcode-version` : une ancienne version se recompile avec l'Xcode de son tag.
 
 ## Étapes
 
 ### 1. Préparer
 
-1. Mettre à jour `version` dans `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` **et** `crates/barking-push/Cargo.toml` (les trois doivent être identiques), ainsi que `Cargo.lock`, committer, fusionner dans `main`, et attendre que `repro-check` soit vert.
-2. Se placer sur le commit à publier, avec un arbre de travail propre.
+1. Mettre à jour `version` dans `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` **et** `crates/barking-push/Cargo.toml` (les trois doivent être identiques), ainsi que `Cargo.lock`, committer, fusionner dans `main`, et attendre que `ci` soit vert.
+2. Lancer `scripts/tests/repro-twice.sh` sur le commit à publier : la CI ne vérifie la reproductibilité qu'au tag, et un tag poussé ne se déplace pas (un échec à ce stade coûte une nouvelle version).
+3. Se placer sur le commit à publier, avec un arbre de travail propre.
 
 ### 2. Tagger
 
@@ -123,4 +124,4 @@ Voir `keys/README.md` : l'ancienne clé signe la nouvelle (`keys/rotation-<date>
     scripts/tests/repro-twice.sh        # deux builds depuis deux chemins, mêmes empreintes (Docker)
     scripts/tests/release-scripts.sh    # signature et falsifications détectées (Docker, clés jetables)
 
-Dans `repro-check.yml`, `release-scripts.sh` et `scripts/check.sh` (format, clippy, tests Rust, avec la chaîne épinglée) tournent sur chaque pull request et chaque semaine. `repro-twice.sh` ne tourne que sur les pull requests ; le run hebdomadaire fait à la place le double build complet sur toutes les cibles, avec comparaison des copies.
+Dans `ci.yml`, `release-scripts.sh` et `scripts/check.sh` (format, clippy, tests Rust en parallèle avec `cargo-nextest`, avec la chaîne épinglée) tournent sur chaque pull request et sur `main`. `repro-twice.sh` se lance à la main avant une publication ; en CI, la reproductibilité n'est vérifiée que par `release.yml` (double build de chaque cible et comparaison des copies).
