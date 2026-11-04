@@ -1,127 +1,127 @@
-# Publier une version
+# Publishing a release
 
-Procédure du mainteneur. La conception est dans la spec, §15. Le modèle : la CI construit deux fois et atteste, puis le mainteneur recompile chez lui et signe hors ligne.
+Maintainer procedure. The design is in the spec, §15. The model: CI builds twice and attests, then the maintainer rebuilds at home and signs offline.
 
-## Prérequis
+## Prerequisites
 
-- Docker (cibles Linux) ; pour recompiler aussi la cible macOS, un Mac Apple Silicon avec `rustup` et exactement l'Xcode et le SDK de la CI, indiqués dans `.xcode-version` (sinon cette cible est sautée, voir l'étape 4) ;
-- `minisign` et `gh` 2.68.0 ou plus récent (connecté avec un compte qui peut modifier les versions du dépôt) ;
-- la **clé secrète minisign du mainteneur**, hors ligne : voir `keys/README.md` pour la génération, le rangement et la rotation. Cette clé ne va jamais dans le dépôt, dans la CI ni dans un outil automatique ;
-- `keys/maintainer.pub` renseigné avec la clé publique. Tant qu'il est vide, `sign-release.sh` refuse de signer, sauf si vous passez `--pubkey <fichier>`.
+- Docker (Linux targets); to also rebuild the macOS target, an Apple Silicon Mac with `rustup` and exactly the Xcode and SDK used by CI, given in `.xcode-version` (otherwise that target is skipped, see step 4);
+- `minisign` and `gh` 2.68.0 or newer (logged in with an account that can edit the repository's releases);
+- the **maintainer's minisign secret key**, offline: see `keys/README.md` for generation, storage and rotation. This key never goes into the repository, into CI or into an automated tool;
+- `keys/maintainer.pub` filled in with the public key. While it is empty, `sign-release.sh` refuses to sign, unless you pass `--pubkey <file>`.
 
-## Réglages GitHub à faire une fois
+## GitHub settings to configure once
 
-Pousser un tag `v*` est la seule porte vers le workflow de publication. Il faut donc la verrouiller :
+Pushing a `v*` tag is the only gate into the release workflow. It must therefore be locked down:
 
-- **Ruleset de tags** : restreindre qui peut créer, modifier ou supprimer les tags `v*` (par exemple le seul mainteneur), et interdire de les déplacer ;
-- **Protection de la branche `main`** : pas de push forcé, relecture obligatoire, vérifications de `ci` exigées (contrôle Rust, scripts de signature) ;
-- garder les actions des workflows épinglées par SHA de commit, comme aujourd'hui.
+- **Tag ruleset**: restrict who can create, modify or delete `v*` tags (for example the maintainer alone), and forbid moving them;
+- **Protection of the `main` branch**: no force pushes, required review, required `ci` checks (Rust check, signing scripts);
+- keep the workflow actions pinned by commit SHA, as they are today.
 
-## Avant la première version
+## Before the first release
 
-Dans cet ordre, une seule fois :
+In this order, once:
 
-1. Rendre le dépôt GitHub public (les attestations et les reconstructions indépendantes en dépendent).
-2. Créer le ruleset de tags `v*` et la protection de `main` décrits ci-dessus, avec les vérifications de `ci` exigées (contrôle Rust, scripts de signature).
-3. Dans les réglages Actions du dépôt, autoriser les workflows à créer des versions (`GITHUB_TOKEN` en écriture pour `release.yml`, qui ne demande `contents: write` que dans son dernier job).
-4. Pousser `main`, puis ouvrir une première pull request et attendre que `ci` soit vert : contrôle Rust et scripts de signature.
-5. Lancer `scripts/tests/repro-twice.sh` sur une machine Linux x86-64 et sur un Mac arm64 : la reproductibilité n'est vérifiée en CI qu'à la publication (`release.yml`), et la répétition de l'étape 7 vérifie les trois cibles, macOS compris (Xcode de `.xcode-version`).
-6. Générer la clé hors ligne (`keys/README.md`), committer `keys/maintainer.pub` avec relecture par une seconde personne, et publier la ligne `RW…` par un canal indépendant du dépôt.
-7. Faire une répétition complète sur un tag de pré-version, par exemple `0.1.0-rc.1` (version de `crates/barking-cli/Cargo.toml`, de `crates/barking-node/Cargo.toml` et de `crates/barking-push/Cargo.toml` mise à jour en conséquence) : tag, CI, `sign-release.sh`, puis `verify-release.sh --rebuild`.
-8. Créer le dépôt `barking-rebuilds` (format des entrées dans `docs/VERIFYING.md`).
-9. Tagger `v0.1.0`, en suivant les étapes ci-dessous.
+1. Make the GitHub repository public (attestations and independent rebuilds depend on it).
+2. Create the `v*` tag ruleset and the `main` protection described above, with the required `ci` checks (Rust check, signing scripts).
+3. In the repository's Actions settings, allow workflows to create releases (`GITHUB_TOKEN` with write access for `release.yml`, which requests `contents: write` only in its last job).
+4. Push `main`, then open a first pull request and wait for `ci` to be green: Rust check and signing scripts.
+5. Run `scripts/tests/repro-twice.sh` on a Linux x86-64 machine and on an arm64 Mac: reproducibility is only checked in CI at release time (`release.yml`), and the rehearsal in step 7 checks all three targets, macOS included (Xcode from `.xcode-version`).
+6. Generate the offline key (`keys/README.md`), commit `keys/maintainer.pub` with review by a second person, and publish the `RW…` line through a channel independent of the repository.
+7. Do a full rehearsal on a pre-release tag, for example `0.1.0-rc.1` (with the version in `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` and `crates/barking-push/Cargo.toml` updated accordingly): tag, CI, `sign-release.sh`, then `verify-release.sh --rebuild`.
+8. Create the `barking-rebuilds` repository (entry format in `docs/VERIFYING.md`).
+9. Tag `v0.1.0`, following the steps below.
 
-## Conserver l’environnement Alpine
+## Preserving the Alpine environment
 
-Les builds Linux utilisent l’image Rust/Alpine épinglée et les versions APK de `docker/apk/build.txt`. Avant une publication, conserver les APK signés et les index correspondants dans un miroir immuable, ou conserver l’image de build par son empreinte : les dépôts publics Alpine peuvent retirer les anciennes révisions. Pour changer l’image (digest) ou un paquet, régénérer la liste complète (lignes `paquet=version` triées, le format que compare `docker/apk/install.sh`) et vérifier qu’elle est la même sur x86-64 et ARM64, puis relancer `scripts/tests/repro-twice.sh` et faire passer `ci` : `docker/apk/install.sh` refuse toute différence. `docker/apk/release.txt` joue le même rôle pour l’image de test des scripts de signature. Le fuzzing garde son image Debian (glibc) : AddressSanitizer ne prend pas en charge les cibles musl.
+Linux builds use the pinned Rust/Alpine image and the APK versions in `docker/apk/build.txt`. Before a release, keep the signed APKs and the matching indexes in an immutable mirror, or keep the build image by its digest: the public Alpine repositories may remove old revisions. To change the image (digest) or a package, regenerate the full list (sorted `package=version` lines, the format that `docker/apk/install.sh` compares) and check that it is the same on x86-64 and ARM64, then rerun `scripts/tests/repro-twice.sh` and get `ci` to pass: `docker/apk/install.sh` rejects any difference. `docker/apk/release.txt` plays the same role for the test image of the signing scripts. Fuzzing keeps its Debian (glibc) image: AddressSanitizer does not support musl targets.
 
-## Changer l'Xcode de la CI
+## Changing the CI's Xcode
 
-`.xcode-version` fixe le runner macOS (`runner=`), la version de Xcode (`xcode=`) et celle du SDK (`sdk=`). Les workflows sélectionnent cet Xcode et échouent si le SDK diffère. Quand GitHub retire cet Xcode ou ce runner de ses images, choisissez une version listée dans le README de l'image (dépôt `actions/runner-images`, `images/macos/macos-<n>-arm64-Readme.md`, sections « Xcode » et « Installed SDKs »), mettez à jour `.xcode-version` et le `runner` des matrices de `release.yml`, puis faites une répétition sur un tag de pré-version. Chaque tag enregistre son `.xcode-version` : une ancienne version se recompile avec l'Xcode de son tag.
+`.xcode-version` fixes the macOS runner (`runner=`), the Xcode version (`xcode=`) and the SDK version (`sdk=`). The workflows select that Xcode and fail if the SDK differs. When GitHub removes that Xcode or runner from its images, choose a version listed in the image's README (`actions/runner-images` repository, `images/macos/macos-<n>-arm64-Readme.md`, sections "Xcode" and "Installed SDKs"), update `.xcode-version` and the `runner` of the `release.yml` matrices, then do a rehearsal on a pre-release tag. Each tag records its `.xcode-version`: an old version is rebuilt with the Xcode of its tag.
 
-## Étapes
+## Steps
 
-### 1. Préparer
+### 1. Prepare
 
-1. Mettre à jour `version` dans `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` **et** `crates/barking-push/Cargo.toml` (les trois doivent être identiques), ainsi que `Cargo.lock`, committer, fusionner dans `main`, et attendre que `ci` soit vert.
-2. Lancer `scripts/tests/repro-twice.sh` sur le commit à publier : la CI ne vérifie la reproductibilité qu'au tag, et un tag poussé ne se déplace pas (un échec à ce stade coûte une nouvelle version).
-3. Se placer sur le commit à publier, avec un arbre de travail propre.
+1. Update `version` in `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` **and** `crates/barking-push/Cargo.toml` (all three must be identical), as well as `Cargo.lock`, commit, merge into `main`, and wait for `ci` to be green.
+2. Run `scripts/tests/repro-twice.sh` on the commit to release: CI only checks reproducibility at the tag, and a pushed tag does not move (a failure at that stage costs a new version).
+3. Check out the commit to release, with a clean working tree.
 
-### 2. Tagger
+### 2. Tag
 
     git tag v<version>
     git push origin v<version>
 
-Le tag doit être `v` suivi de la version de `crates/barking-cli/Cargo.toml`, qui doit être celle de `crates/barking-node/Cargo.toml` et de `crates/barking-push/Cargo.toml` : sinon le premier job du workflow `release.yml` échoue.
+The tag must be `v` followed by the version in `crates/barking-cli/Cargo.toml`, which must match that of `crates/barking-node/Cargo.toml` and of `crates/barking-push/Cargo.toml`: otherwise the first job of the `release.yml` workflow fails.
 
-Ne recréez jamais un tag sur un commit réécrit ou amendé : le binaire contient la date du commit, donc un autre commit donne d'autres empreintes (voir `docs/VERIFYING.md`).
+Never recreate a tag on a rewritten or amended commit: the binary contains the commit date, so a different commit gives different hashes (see `docs/VERIFYING.md`).
 
-### 3. Laisser la CI travailler
+### 3. Let CI work
 
-Le workflow `release.yml` :
+The `release.yml` workflow:
 
-1. vérifie que le commit du tag est un ancêtre de `main` et que le tag correspond à la version ;
-2. compile chaque cible deux fois (`barking-cli`, `barking-node` puis `barking-push`, en trois invocations `cargo build -p` distinctes : `repro-build.sh` refuse le build si l'arbre de dépendances du nœud ou du relais de notifications contient OpenSSL ou SQLCipher), en deux exécutions indépendantes (deux runners neufs) ;
-3. compare les copies octet par octet (`cmp`) : une différence bloque tout ;
-4. produit les attestations de provenance ;
-5. crée la version GitHub **en brouillon**, avec les trois binaires `barking-cli`, `barking-node` et `barking-push` de chaque cible et `SHA256SUMS`.
+1. checks that the tag's commit is an ancestor of `main` and that the tag matches the version;
+2. builds each target twice (`barking-cli`, `barking-node` then `barking-push`, in three separate `cargo build -p` invocations: `repro-build.sh` refuses the build if the dependency tree of the node or of the notification relay contains OpenSSL or SQLCipher), in two independent runs (two fresh runners);
+3. compares the copies byte by byte (`cmp`): any difference blocks everything;
+4. produces the provenance attestations;
+5. creates the GitHub release **as a draft**, with the three binaries `barking-cli`, `barking-node` and `barking-push` for each target and `SHA256SUMS`.
 
-À ce stade, aucune version n'est publiée (le tag et les attestations, eux, sont déjà publics). Si une version `v<version>` existe déjà (brouillon d'un run précédent), la dernière étape échoue et le dit : supprimez-la (`gh release delete v<version> -R <owner>/barking`), puis relancez le workflow.
+At this point, no release is published (the tag and the attestations, however, are already public). If a release `v<version>` already exists (a draft from a previous run), the last step fails and says so: delete it (`gh release delete v<version> -R <owner>/barking`), then rerun the workflow.
 
-### 4. Signer
+### 4. Sign
 
-Sur la machine de signature, depuis un clone à jour qui contient le tag. `<version>` s'écrit sans le préfixe `v` (par exemple `0.1.0`) :
+On the signing machine, from an up-to-date clone that contains the tag. `<version>` is written without the `v` prefix (for example `0.1.0`):
 
     git fetch --tags
-    scripts/sign-release.sh <version> --seckey <chemin/maintainer.key> --repo <owner>/barking
+    scripts/sign-release.sh <version> --seckey <path/maintainer.key> --repo <owner>/barking
 
-Le script :
+The script:
 
-1. affiche le commit du tag local `v<version>` (il refuse de signer si ce tag n'existe pas dans le clone) : vérifiez que c'est le commit attendu. Il le compare au tag de `origin` (`git ls-remote`) et refuse si le tag y manque ou désigne un autre commit ; si `origin` n'est pas configuré ou est injoignable, il refuse aussi, sauf avec `--from-dir` (simple avertissement) ;
-2. télécharge les fichiers du brouillon et contrôle `SHA256SUMS` et les empreintes ;
-3. **recompile localement** chaque cible possible sur cette machine et compare. La recompilation utilise l'environnement de build enregistré dans le tag (`scripts/`, `docker/`, `.xcode-version`, `rust-toolchain.toml`, extraits avec `git archive`), pas celui de l'arbre de travail ;
-4. ne signe **que si tout est identique** et qu'aucun fichier listé ne manque ;
-5. signe `SHA256SUMS` avec le commentaire signé `barking v<version> commit <commit du tag>`, et contrôle la signature produite avec la clé publique ;
-6. dépose `SHA256SUMS.minisig` et **publie** le brouillon.
+1. prints the commit of the local tag `v<version>` (it refuses to sign if that tag does not exist in the clone): check that it is the expected commit. It compares it with the tag on `origin` (`git ls-remote`) and refuses if the tag is missing there or points to another commit; if `origin` is not configured or is unreachable, it also refuses, except with `--from-dir` (a simple warning);
+2. downloads the draft's files and checks `SHA256SUMS` and the hashes;
+3. **rebuilds locally** every target possible on this machine and compares. The rebuild uses the build environment recorded in the tag (`scripts/`, `docker/`, `.xcode-version`, `rust-toolchain.toml`, extracted with `git archive`), not that of the working tree;
+4. signs **only if everything is identical** and no listed file is missing;
+5. signs `SHA256SUMS` with the signed comment `barking v<version> commit <tag commit>`, and checks the resulting signature with the public key;
+6. uploads `SHA256SUMS.minisig` and **publishes** the draft.
 
-Options : `--pubkey <fichier>` pour une autre clé publique (obligatoire tant que `keys/maintainer.pub` est vide), `--from-dir <dir>` pour travailler sur des fichiers locaux au lieu du brouillon (la signature est alors écrite dans ce répertoire, rien n'est publié), `--rebuilt-dir <dir>` pour comparer avec une recompilation déjà faite par `repro-build.sh`.
+Options: `--pubkey <file>` for another public key (required while `keys/maintainer.pub` is empty), `--from-dir <dir>` to work on local files instead of the draft (the signature is then written to that directory, nothing is published), `--rebuilt-dir <dir>` to compare with a rebuild already done by `repro-build.sh`.
 
-Une seule machine ne compile pas toutes les cibles : une machine Linux x86_64 recompile `x86_64-unknown-linux-musl` ; un Mac arm64 recompile `aarch64-unknown-linux-musl`, et **Docker y est requis** (sans lui, le script échoue). Il ne recompile `aarch64-apple-darwin` que s'il a `rustup` et l'Xcode/SDK de `.xcode-version` : sinon le script le dit (avis « aarch64-apple-darwin n'est pas recompilé sur cette machine ») et signe avec la seule cible Linux recompilée. Les cibles qui ne sont pas recompilées ici sont signées sur la foi du double build de la CI et des attestations : la signature ne les couvre pas autrement (voir `docs/VERIFYING.md`).
+A single machine does not build every target: a Linux x86_64 machine rebuilds `x86_64-unknown-linux-musl`; an arm64 Mac rebuilds `aarch64-unknown-linux-musl`, and **Docker is required there** (without it, the script fails). It rebuilds `aarch64-apple-darwin` only if it has `rustup` and the Xcode/SDK of `.xcode-version`: otherwise the script says so (notice "aarch64-apple-darwin is not rebuilt on this machine") and signs with only the rebuilt Linux target. Targets that are not rebuilt here are signed on the strength of the CI's double build and the attestations: the signature does not otherwise cover them (see `docs/VERIFYING.md`).
 
-Pour tout recompiler, compilez les autres cibles sur d'autres machines, puis rassemblez toutes les sorties de `repro-build.sh` dans **un seul répertoire** et passez-le avec `--rebuilt-dir`. Ce répertoire doit contenir toutes les cibles compilables sur la machine de signature. Le script ne contrôle pas comment ce répertoire a été produit : en l'utilisant, vous faites confiance à ces machines et à ce que vous y avez copié.
+To rebuild everything, build the other targets on other machines, then gather all the outputs of `repro-build.sh` into **a single directory** and pass it with `--rebuilt-dir`. This directory must contain all the targets that can be built on the signing machine. The script does not check how this directory was produced: by using it, you trust those machines and whatever you copied there.
 
-### 5. Contrôle final
+### 5. Final check
 
-Comme n'importe quel utilisateur (c'est la même commande que celle de `docs/VERIFYING.md`) :
+As any user would (it is the same command as in `docs/VERIFYING.md`):
 
     scripts/verify-release.sh <version> --rebuild --repo <owner>/barking
 
-Il doit finir par `Version <version> vérifiée ✓`.
+It must end with `Version <version> verified ✓`.
 
-## Si la CI ou la recompilation diffère
+## If CI or the rebuild differs
 
-**Ne signez pas.** Une différence veut dire un build non reproductible, une source de non-déterminisme nouvelle, ou une compromission.
+**Do not sign.** A difference means a non-reproducible build, a new source of non-determinism, or a compromise.
 
-- Si la CI échoue à la comparaison (`compare`) : rien n'est publié. Ouvrez un ticket avec le journal du workflow.
-- Si `sign-release.sh` annonce que la recompilation locale diffère : il s'arrête sans rien signer ni publier. Pour obtenir les deux empreintes à comparer :
+- If CI fails at the comparison (`compare`): nothing is published. Open an issue with the workflow log.
+- If `sign-release.sh` reports that the local rebuild differs: it stops without signing or publishing anything. To get the two hashes to compare:
 
         gh release download v<version> -R <owner>/barking --dir <d1>
-        scripts/repro-build.sh --target <cible> --ref v<version> --out <d2>
-        cmp <d1>/barking-<cli|node>-<version>-<cible> <d2>/barking-<cli|node>-<version>-<cible>
+        scripts/repro-build.sh --target <target> --ref v<version> --out <d2>
+        cmp <d1>/barking-<cli|node>-<version>-<target> <d2>/barking-<cli|node>-<version>-<target>
 
-  (ou comparez les lignes de `<d1>/SHA256SUMS` et `<d2>/SHA256SUMS`). Ouvrez un ticket avec ces deux empreintes, le commit du tag, la machine et la version de Docker, ou de Xcode pour macOS.
-- Cherchez d'abord les causes bénignes : mauvais commit (`git rev-parse v<version>^{commit}`), SDK macOS différent de celui de la CI (normalement refusé par `repro-build.sh`, qui compare à `.xcode-version`), image du runner macOS mise à jour par GitHub avec un autre clang pour le même Xcode.
-- Dépannage : si un build macOS échoue sans compiler, c'est que `/private/tmp/barking-repro-darwin` existe, laissé par un build interrompu. Supprimez-le et relancez ; cela n'a aucun effet sur les empreintes.
-- Ne publiez la version qu'une fois la cause comprise et corrigée, avec un nouveau tag et une nouvelle version : ne déplacez pas un tag déjà poussé.
-- Si la version est déjà publiée et qu'un binaire est contesté, retirez-la (`gh release edit v<version> --draft=true -R <owner>/barking`) et annoncez-le.
+  (or compare the lines of `<d1>/SHA256SUMS` and `<d2>/SHA256SUMS`). Open an issue with these two hashes, the tag's commit, the machine and the Docker version, or the Xcode version for macOS.
+- Look first for benign causes: wrong commit (`git rev-parse v<version>^{commit}`), a macOS SDK different from the CI's (normally rejected by `repro-build.sh`, which compares against `.xcode-version`), a macOS runner image updated by GitHub with a different clang for the same Xcode.
+- Troubleshooting: if a macOS build fails without compiling, `/private/tmp/barking-repro-darwin` exists, left by an interrupted build. Delete it and rerun; this has no effect on the hashes.
+- Only publish the release once the cause is understood and fixed, with a new tag and a new version: do not move a tag that has already been pushed.
+- If the release is already published and a binary is disputed, withdraw it (`gh release edit v<version> --draft=true -R <owner>/barking`) and announce it.
 
-## Rotation de la clé
+## Key rotation
 
-Voir `keys/README.md` : l'ancienne clé signe la nouvelle (`keys/rotation-<date>.minisig`), puis `keys/maintainer.pub` est remplacé dans le même commit, relu par une seconde personne. Publiez la nouvelle empreinte par un canal indépendant du dépôt. Signez ensuite les versions suivantes avec la nouvelle clé.
+See `keys/README.md`: the old key signs the new one (`keys/rotation-<date>.minisig`), then `keys/maintainer.pub` is replaced in the same commit, reviewed by a second person. Publish the new fingerprint through a channel independent of the repository. Then sign subsequent releases with the new key.
 
-## Tests des scripts
+## Script tests
 
-    scripts/tests/repro-twice.sh        # deux builds depuis deux chemins, mêmes empreintes (Docker)
-    scripts/tests/release-scripts.sh    # signature et falsifications détectées (Docker, clés jetables)
+    scripts/tests/repro-twice.sh        # two builds from two paths, same hashes (Docker)
+    scripts/tests/release-scripts.sh    # signing and detected tampering (Docker, throwaway keys)
 
-Dans `ci.yml`, `release-scripts.sh` et `scripts/check.sh` (format, clippy, tests Rust en parallèle avec `cargo-nextest`, avec la chaîne épinglée) tournent sur chaque pull request et sur `main`. `repro-twice.sh` se lance à la main avant une publication ; en CI, la reproductibilité n'est vérifiée que par `release.yml` (double build de chaque cible et comparaison des copies).
+In `ci.yml`, `release-scripts.sh` and `scripts/check.sh` (format, clippy, Rust tests in parallel with `cargo-nextest`, with the pinned toolchain) run on every pull request and on `main`. `repro-twice.sh` is run by hand before a release; in CI, reproducibility is only checked by `release.yml` (double build of each target and comparison of the copies).
