@@ -18,6 +18,7 @@ final class LinkModel {
     private let inspect: (Data) throws -> String
     private(set) var state: State = .idle
     private var request: Data?
+    private var accepting = false
 
     init(core: CoreService, inspect: @escaping (Data) throws -> String = { try inspectLinkRequest(request: $0) }) {
         self.core = core
@@ -52,32 +53,85 @@ final class LinkModel {
         } catch { fail(error) }
     }
 
+    /// Accepts once: a second tap would find the offer used.
     func accept(history: Bool) async {
-        guard let request, case .confirm(let name) = state else { return }
+        guard !accepting, let request, case .confirm(let name) = state else { return }
+        accepting = true
+        defer { accepting = false }
         do {
             let package = try await core.linkDevice(request: request, history: history)
-            let url = FileManager.default.temporaryDirectory.appending(path: "\(name).barkinglink")
+            let url = FileManager.default.temporaryDirectory.appending(path: Self.fileName(for: name))
             try package.write(to: url, options: .completeFileProtection)
             state = .share(url)
         } catch { fail(error) }
     }
+
+    /// The remote device's name never decides a path: letters, digits, `-`
+    /// and `_` only, `device` when nothing is left.
+    static func fileName(for name: String) -> String {
+        var out = ""
+        var dash = false
+        for ch in name.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(ch) || ch == "_" {
+                out.unicodeScalars.append(ch)
+                dash = false
+            } else if !dash, !out.isEmpty {
+                out.append("-")
+                dash = true
+            }
+        }
+        while out.hasSuffix("-") { out.removeLast() }
+        return (out.isEmpty ? "device" : String(out.prefix(48))) + ".barkinglink"
+    }
+
+    /// Deletes the shared package (it holds the history, encrypted with the
+    /// offer's secret).
+    func cleanup() {
+        if case .share(let url) = state { try? FileManager.default.removeItem(at: url) }
+    }
 }
 
-/// Linking this device to an existing identity (onboarding).
+/// Linking this device to an existing identity (onboarding, or resumed at
+/// launch when a link is pending).
 @MainActor @Observable
 final class NewDeviceLinkModel {
     enum State: Equatable { case scanOffer, request(Data), waiting, done, refused(String) }
 
-    private(set) var state: State = .scanOffer
+    typealias Begin = (Data, String) async throws -> (CoreService, Data)
+
+    private(set) var state: State
     private(set) var core: CoreService?
+    private let begin: Begin
+    private let reset: () -> Void
+    private let defaults: UserDefaults
+    private var busy = false
     var deviceName = UIDevice.current.model
 
+    init(resume: CoreService? = nil,
+         begin: @escaping Begin = NewDeviceLinkModel.beginWithFactory,
+         reset: @escaping () -> Void = DeviceFactory.resetIdentity,
+         defaults: UserDefaults = .standard) {
+        self.core = resume
+        self.state = resume == nil ? .scanOffer : .waiting
+        self.begin = begin
+        self.reset = reset
+        self.defaults = defaults
+    }
+
+    static func beginWithFactory(offer: Data, name: String) async throws -> (CoreService, Data) {
+        let pending = try await DeviceCall.run("begin") { try DeviceFactory.beginLink(offer: offer, deviceName: name) }
+        return (CoreService(device: pending.device, runner: AppCallRunner()), pending.request)
+    }
+
+    /// Begins once: the scanner may fire again while it runs.
     func scannedOffer(_ offer: Data) async {
-        let name = deviceName
+        guard !busy, state == .scanOffer else { return }
+        busy = true
+        defer { busy = false }
         do {
-            let pending = try await DeviceCall.run("begin") { try DeviceFactory.beginLink(offer: offer, deviceName: name) }
-            core = CoreService(device: pending.device, runner: AppCallRunner())
-            state = .request(pending.request)
+            let (c, request) = try await begin(offer, deviceName)
+            core = c
+            state = .request(request)
         } catch BarkingError.LinkRefused(let reason) {
             state = .refused(LinkModel.text(for: reason))
         } catch {
@@ -86,14 +140,25 @@ final class NewDeviceLinkModel {
     }
 
     func received(package: Data) async {
-        guard let core else { return }
+        guard let core, !busy else { return }
+        busy = true
+        defer { busy = false }
         do {
             try await core.finishLink(package)
+            // A linked device has no phrase of its own to write down.
+            defaults.set(true, forKey: OnboardingModel.confirmedKey)
             state = .done
         } catch BarkingError.LinkRefused(let reason) {
             state = .refused(LinkModel.text(for: reason))
         } catch {
             state = .refused(String(localized: "Something went wrong. Your data is safe."))
         }
+    }
+
+    /// Drops the pending link (it holds nothing yet) and starts over.
+    func startAgain() {
+        reset()
+        core = nil
+        state = .scanOffer
     }
 }

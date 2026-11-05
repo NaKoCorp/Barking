@@ -9,6 +9,10 @@ final class AppRouter {
     enum State {
         case onboarding
         case ready(CoreService)
+        /// This device started linking and waits for its file.
+        case linking(CoreService)
+        /// The identity exists but could not be opened (lock, keychain).
+        case failed
     }
 
     private(set) var state: State
@@ -23,7 +27,7 @@ final class AppRouter {
         #if BARKING_DEV
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-BarkingUITestReset") {
-            DeviceFactory.resetForUITests()
+            DeviceFactory.resetIdentity()
             for key in [OnboardingModel.confirmedKey, "barking.language", "barking.appearance"] {
                 UserDefaults.standard.removeObject(forKey: key)
             }
@@ -34,15 +38,36 @@ final class AppRouter {
             return router
         }
         #endif
-        if let device = try? DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs) {
-            return AppRouter(start: .ready(CoreService(device: device, runner: AppCallRunner())))
-        }
-        return AppRouter(start: .onboarding)
+        return AppRouter(start: initialState(
+            opening: { try DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs) },
+            runner: AppCallRunner()))
     }
 
+    /// No identity: onboarding; a pending link: the waiting screen; an error
+    /// opening: a retry screen, never onboarding (spec, review I6).
+    static func initialState(opening: () throws -> (any DeviceHandle)?, runner: any CallRunner) -> State {
+        do {
+            guard let device = try opening() else { return .onboarding }
+            let core = CoreService(device: device, runner: runner)
+            return (try? device.isPendingLink()) == true ? .linking(core) : .ready(core)
+        } catch {
+            return .failed
+        }
+    }
+
+    func retry() {
+        state = Self.initialState(
+            opening: { try DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs) },
+            runner: AppCallRunner())
+    }
+
+    func restartOnboarding() { state = .onboarding }
+
     var core: CoreService? {
-        if case .ready(let c) = state { return c }
-        return nil
+        switch state {
+        case .ready(let c), .linking(let c): c
+        default: nil
+        }
     }
 
     func becomeReady(core: CoreService) { state = .ready(core) }

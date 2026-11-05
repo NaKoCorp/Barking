@@ -87,6 +87,7 @@ final class OnboardingModel {
     }
 
     func create() async -> CoreService? {
+        guard !busy else { return nil }
         busy = true
         defer { busy = false }
         let name = deviceName.trimmingCharacters(in: .whitespaces)
@@ -105,6 +106,7 @@ final class OnboardingModel {
     }
 
     func recover() async -> CoreService? {
+        guard !busy else { return nil }
         busy = true
         defer { busy = false }
         let phrase = recoveryWords.map(normalized).joined(separator: " ")

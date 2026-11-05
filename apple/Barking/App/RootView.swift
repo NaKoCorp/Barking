@@ -9,6 +9,8 @@ struct RootView: View {
         switch router.state {
         case .onboarding: OnboardingFlow()
         case .ready(let core): MainTabView(core: core)
+        case .linking(let core): NavigationStack { LinkFromExistingView(resume: core) }
+        case .failed: OpenFailedView()
         }
     }
 }
@@ -24,5 +26,21 @@ struct MainTabView: View {
             Tab("Settings", systemImage: "gearshape") { SettingsView(core: core) }
         }
         .tint(Color.accent)
+    }
+}
+
+/// The identity could not be opened: retry, never onboarding over it.
+struct OpenFailedView: View {
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ScreenTitle("Barking could not open your data", size: 22)
+            Text("Your data is safe. Unlock the phone and try again.").foregroundStyle(Color.fgMuted)
+            PrimaryButton("Try again") { router.retry() }
+        }
+        .padding(24)
+        .frame(maxHeight: .infinity)
+        .background(Color.surface)
     }
 }

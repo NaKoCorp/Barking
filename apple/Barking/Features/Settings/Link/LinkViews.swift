@@ -55,6 +55,7 @@ struct LinkNewDeviceView: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close", action: onDone) } }
         }
         .task { await model.start() }
+        .onDisappear { model.cleanup() }
     }
 }
 
@@ -62,8 +63,12 @@ struct LinkNewDeviceView: View {
 /// for the `.barkinglink` file.
 struct LinkFromExistingView: View {
     @Environment(AppRouter.self) private var router
-    @State private var model = NewDeviceLinkModel()
+    @State private var model: NewDeviceLinkModel
     @State private var importing = false
+
+    init(resume: CoreService? = nil) {
+        _model = State(initialValue: NewDeviceLinkModel(resume: resume))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -83,11 +88,16 @@ struct LinkFromExistingView: View {
                     .foregroundStyle(Color.fgSoft)
                 SecondaryButton("Open the link file") { importing = true }
             case .waiting:
-                ProgressView()
+                Text("Waiting for your other device").font(BarkingFont.mono(.footnote, size: 13))
+                    .foregroundStyle(Color.fgSoft)
+                SecondaryButton("Open the link file") { importing = true }
+                Button("Start again") { model.startAgain(); router.restartOnboarding() }
+                    .foregroundStyle(Color.accent).frame(minHeight: 44)
             case .done:
                 ProgressView()
             case .refused(let text):
                 Banner(kind: .danger, title: LocalizedStringKey(text))
+                PrimaryButton("Start again") { model.startAgain() }
             }
             Spacer(minLength: 0)
         }
@@ -97,7 +107,7 @@ struct LinkFromExistingView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.barkingLink, .data]) { result in
             if case .success(let url) = result { Task { await receive(url) } }
         }
-        .onChange(of: router.pendingLinkFile) { _, url in
+        .onChange(of: router.pendingLinkFile, initial: true) { _, url in
             if let url = router.takePendingLinkFile() { Task { await receive(url) } }
         }
         .onChange(of: model.state) { _, s in
@@ -108,7 +118,9 @@ struct LinkFromExistingView: View {
     private func receive(_ url: URL) async {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url) else { return }
+        // A link file is at most the core's bundle limit plus the history.
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size <= 8 * 1024 * 1024, let data = try? Data(contentsOf: url) else { return }
         await model.received(package: data)
     }
 }

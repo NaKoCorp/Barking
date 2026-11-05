@@ -15,6 +15,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var unread: [UnreadCount] = []
     var keyChangeList: [KeyChange] = []
     var devicesList: [MyDeviceInfo] = []
+    var pending = false
+    var sendError: Error?
+    private var _linkCalls = 0
+    var linkCalls: Int { lock.withLock { _linkCalls } }
 
     var syncCalls: Int { lock.withLock { _syncCalls } }
     var sent: [(String, String)] { lock.withLock { _sent } }
@@ -25,6 +29,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func contacts() throws -> [Contact] { contactList }
     func messagesWith(contact: String) throws -> [Message] { messageList[contact] ?? [] }
     func sendText(contact: String, text: String) throws {
+        if let sendError { throw sendError }
         Thread.sleep(forTimeInterval: syncDelay)
         lock.withLock { _sent.append((contact, text)) }
     }
@@ -50,8 +55,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func outboxCount() throws -> UInt32 { 0 }
     func myDevices() throws -> [MyDeviceInfo] { devicesList }
     func linkOffer() throws -> Data { Data([0xAA]) }
-    func linkDevice(request: Data, withHistory: Bool) throws -> Data { Data([0xBB]) }
-    func isPendingLink() throws -> Bool { false }
+    func linkDevice(request: Data, withHistory: Bool) throws -> Data {
+        lock.withLock { _linkCalls += 1 }
+        Thread.sleep(forTimeInterval: syncDelay)
+        return Data([0xBB])
+    }
+    func isPendingLink() throws -> Bool { pending }
     func finishLink(package: Data) throws {}
 }
 

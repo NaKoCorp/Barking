@@ -6,8 +6,10 @@ import Foundation
 public enum Budget {
     /// Lock wait in the app (spec §3.3).
     public static let appLockMs: UInt64 = 10_000
-    /// Full sync in the app: lock wait + sync + shutdown stay under 26 s.
-    public static let appSyncMs: UInt64 = 15_000
+    /// Full sync in the app. It holds the database lock for its whole run, so
+    /// it stays under the lock wait of the other calls (sync + shutdown <
+    /// `appLockMs`): a send during a sync waits for it instead of failing.
+    public static let appSyncMs: UInt64 = 8_000
     /// Lock wait in the extension (spec iOS push §6.1).
     public static let extensionLockMs: UInt64 = 2_000
     /// The extension's work from its start; 5 s of margin on the 25 s.

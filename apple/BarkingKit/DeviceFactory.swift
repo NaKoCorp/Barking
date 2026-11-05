@@ -83,13 +83,12 @@ public enum DeviceFactory {
         return pending
     }
 
-    #if BARKING_DEV
-    /// UI tests: back to a fresh install (database, lock, key).
-    public static func resetForUITests() {
+    /// Removes this device's identity (database, lock, key): only to start a
+    /// pending link again, which holds nothing yet, and for the UI tests.
+    public static func resetIdentity() {
         for url in [try? SharedPaths.database, try? SharedPaths.lock].compactMap({ $0 }) {
             try? FileManager.default.removeItem(at: url)
         }
         try? keyStore.delete()
     }
-    #endif
 }

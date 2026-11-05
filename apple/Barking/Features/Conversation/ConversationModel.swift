@@ -24,6 +24,9 @@ final class ConversationModel {
     private(set) var keyChanged = false
     private var hidden: Set<Int64> = []
     private var sending = false
+    private var retrying = false
+    private var visible = false
+    private(set) var sendError: String?
     var draft = ""
 
     init(contact: String, core: CoreService) {
@@ -39,13 +42,13 @@ final class ConversationModel {
     }
 
     func onAppear() async {
+        visible = true
         await reload()
-        if let last = items.last(where: { !$0.outgoing }) {
-            try? await core.markRead(contact, upTo: last.id)
-        }
         let changes = (try? await core.keyChanges(since: 0)) ?? []
-        keyChanged = changes.contains { $0.contact == contact }
+        keyChanged = !verified && changes.contains { $0.contact == contact }
     }
+
+    func onDisappear() { visible = false }
 
     func reload() async {
         if let c = try? await core.contacts().first(where: { $0.fingerprint == contact }) {
@@ -58,6 +61,10 @@ final class ConversationModel {
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)),
                  status: MessageStatusKind(status: $0.status, failed: $0.failed, outgoing: $0.outgoing))
         }
+        // What arrives while the conversation is on screen is read.
+        if visible, let last = items.last(where: { !$0.outgoing }) {
+            try? await core.markRead(contact, upTo: last.id)
+        }
     }
 
     /// Sends the draft; a second call while one runs does nothing.
@@ -67,13 +74,21 @@ final class ConversationModel {
         defer { sending = false }
         let text = draft
         draft = ""
-        do { try await core.send(text, to: contact) } catch { draft = text }
+        sendError = nil
+        do {
+            try await core.send(text, to: contact)
+        } catch {
+            draft = text
+            sendError = String(localized: "Not sent. Try again in a moment.")
+        }
         await reload()
     }
 
     /// Sends a failed message's text again and hides the failed one.
     func retry(_ id: Int64) async {
-        guard let item = items.first(where: { $0.id == id }) else { return }
+        guard !retrying, !hidden.contains(id), let item = items.first(where: { $0.id == id }) else { return }
+        retrying = true
+        defer { retrying = false }
         hidden.insert(id)
         try? await core.send(item.text, to: contact)
         await reload()

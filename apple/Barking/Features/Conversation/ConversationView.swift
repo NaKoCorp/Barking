@@ -33,6 +33,9 @@ struct ConversationView: View {
                 }
                 .onChange(of: model.items.last?.id) { _, id in if let id { proxy.scrollTo(id, anchor: .bottom) } }
             }
+            if let e = model.sendError {
+                Text(e).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)
+            }
             ComposerView(model: model)
         }
         .background(Color.surface)
@@ -55,6 +58,7 @@ struct ConversationView: View {
                 }
             }
         }
+        .onDisappear { model.onDisappear() }
         .task {
             await model.onAppear()
             for await change in await core.changes {

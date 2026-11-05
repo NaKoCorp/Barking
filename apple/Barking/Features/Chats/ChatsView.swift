@@ -18,7 +18,7 @@ struct ChatsView: View {
     var body: some View {
         NavigationStack {
             List {
-                if PhraseBanner.visible {
+                if PhraseBanner.current != .hidden {
                     PhraseBanner().listRowSeparator(.hidden).listRowBackground(Color.surface)
                 }
                 if model.offline {
@@ -126,15 +126,36 @@ struct ChatRowView: View {
     }
 }
 
-/// Recovery phrase reminder (spec §5.2).
+/// Recovery phrase reminder (spec §5.2): opens the 3-word check while the
+/// phrase is still in memory; after a relaunch it can only say to write it down.
 struct PhraseBanner: View {
-    static var visible: Bool { !UserDefaults.standard.bool(forKey: OnboardingModel.confirmedKey) }
+    enum Kind: Equatable { case hidden, confirmable, lost }
+
+    static func state(confirmed: Bool, inMemory: Bool) -> Kind {
+        confirmed ? .hidden : (inMemory ? .confirmable : .lost)
+    }
+
+    static var current: Kind {
+        state(confirmed: UserDefaults.standard.bool(forKey: OnboardingModel.confirmedKey),
+              inMemory: PhraseMemory.shared.phrase != nil)
+    }
+
+    @State private var checking = false
+    @State private var model = OnboardingModel(identityExists: { true })
 
     var body: some View {
-        if PhraseMemory.shared.phrase != nil {
-            Banner(kind: .warning, title: "Recovery phrase not confirmed",
-                   message: "Check three words before you close the app.")
-        } else {
+        switch Self.current {
+        case .hidden: EmptyView()
+        case .confirmable:
+            Button { model.phrase = PhraseMemory.shared.phrase; model.startQuiz(); checking = true } label: {
+                Banner(kind: .warning, title: "Recovery phrase not confirmed",
+                       message: "Check three words before you close the app.")
+            }
+            .buttonStyle(.plain)
+            .sheet(isPresented: $checking) {
+                PhraseConfirmView(model: model) { checking = false }
+            }
+        case .lost:
             Banner(kind: .warning, title: "Write your phrase down now: it cannot be shown again",
                    message: "If you lose this phone without it, your identity is lost.")
         }
