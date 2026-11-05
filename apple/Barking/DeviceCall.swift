@@ -1,3 +1,4 @@
+import BarkingKit
 import UIKit
 
 /// Every device call of the app goes through here: off the main thread,
@@ -29,5 +30,12 @@ private final class BackgroundTask {
         guard id != .invalid else { return }
         UIApplication.shared.endBackgroundTask(id)
         id = .invalid
+    }
+}
+
+/// The app's runner for `CoreService`: every call through `DeviceCall`.
+struct AppCallRunner: CallRunner {
+    func run<T: Sendable>(_ name: String, _ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await DeviceCall.run(name, body)
     }
 }

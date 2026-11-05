@@ -1,0 +1,155 @@
+import Foundation
+
+/// The only holder of the `Device` (spec iOS messaging §4.1). Calls go one at
+/// a time through the runner, syncs are never concurrent, and every
+/// mutation publishes a `CoreChange`.
+public actor CoreService {
+    private let device: any DeviceHandle
+    private let runner: any CallRunner
+    private var inFlight: Task<SyncOutcome, Never>?
+    private var subscribers: [UUID: AsyncStream<CoreChange>.Continuation] = [:]
+    public private(set) var lastSync: SyncOutcome?
+    public private(set) var lastSyncAt: Date?
+
+    public init(device: any DeviceHandle, runner: any CallRunner) {
+        self.device = device
+        self.runner = runner
+    }
+
+    /// A new stream of changes; ends when the consumer stops iterating.
+    public var changes: AsyncStream<CoreChange> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<CoreChange>.makeStream()
+        subscribers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.unsubscribe(id) }
+        }
+        return stream
+    }
+
+    private func unsubscribe(_ id: UUID) { subscribers[id] = nil }
+
+    private func publish(_ change: CoreChange) {
+        for c in subscribers.values { c.yield(change) }
+    }
+
+    private func call<T: Sendable>(_ name: String, _ body: @escaping @Sendable (any DeviceHandle) throws -> T) async throws -> T {
+        let device = self.device
+        return try await runner.run(name) { try body(device) }
+    }
+
+    // MARK: Identity
+
+    public func fingerprint() async throws -> String { try await call("fingerprint") { try $0.fingerprint() } }
+    public func displayName() async throws -> String { try await call("name") { try $0.displayName() } }
+    public func setDisplayName(_ name: String) async throws {
+        try await call("name") { try $0.setDisplayName(name: name) }
+        publish(.identity)
+    }
+    public func myCard() async throws -> (bytes: Data, text: String) {
+        try await call("card") { d in
+            (try d.contactCardBytes(), try d.contactCard(displayName: try d.displayName()))
+        }
+    }
+    public func myDevices() async throws -> [MyDeviceInfo] { try await call("devices") { try $0.myDevices() } }
+
+    // MARK: Contacts
+
+    public func contacts() async throws -> [Contact] { try await call("contacts") { try $0.contacts() } }
+    public func addContact(card: Data, alias: String?) async throws -> String {
+        let fp = try await call("add") { try $0.addContactBytes(card: card, alias: alias) }
+        publish(.contacts)
+        return fp
+    }
+    public func addContact(text: String, alias: String?) async throws -> String {
+        let fp = try await call("add") { try $0.addContact(card: text, alias: alias) }
+        publish(.contacts)
+        return fp
+    }
+    public func setAlias(_ contact: String, alias: String) async throws {
+        try await call("alias") { try $0.setAlias(contact: contact, alias: alias) }
+        publish(.contacts)
+    }
+    public func removeContact(_ contact: String) async throws {
+        try await call("remove") { try $0.removeContact(contact: contact) }
+        publish(.contacts)
+    }
+    public func markVerified(_ contact: String) async throws {
+        try await call("verify") { try $0.markVerified(contact: contact) }
+        publish(.contacts)
+    }
+    public func unmarkVerified(_ contact: String) async throws {
+        try await call("unverify") { try $0.unmarkVerified(contact: contact) }
+        publish(.contacts)
+    }
+    public func safetyNumber(for contact: String) async throws -> [String] {
+        try await call("safety") { try $0.safetyNumber(contact: contact) }
+    }
+    public func keyChanges(since: UInt64) async throws -> [KeyChange] {
+        try await call("keys") { try $0.keyChanges(since: since) }
+    }
+
+    // MARK: Messages
+
+    public func messages(with contact: String) async throws -> [Message] {
+        try await call("messages") { try $0.messagesWith(contact: contact) }
+    }
+    public func send(_ text: String, to contact: String) async throws {
+        try await call("send") { try $0.sendText(contact: contact, text: text) }
+        publish(.messages(contact: contact))
+        Task { _ = await self.sync(reason: .afterSend) }
+    }
+    public func unreadCounts() async throws -> [String: Int] {
+        let counts = try await call("unread") { try $0.unreadCounts() }
+        return Dictionary(counts.map { ($0.contact, Int($0.count)) }, uniquingKeysWith: { a, _ in a })
+    }
+    public func markRead(_ contact: String, upTo: Int64) async throws {
+        try await call("read") { try $0.markRead(contact: contact, upTo: upTo) }
+        publish(.contacts)
+    }
+
+    // MARK: Network
+
+    /// One sync at a time: a request during a sync gets that sync's outcome.
+    public func sync(reason: SyncReason) async -> SyncOutcome {
+        if let inFlight { return await inFlight.value }
+        let task = Task { () -> SyncOutcome in
+            do {
+                let summary = try await call("sync") { try $0.sync(deadlineMs: Budget.appSyncMs) }
+                return SyncOutcome.from(summary)
+            } catch {
+                return SyncOutcome(networkUp: false, received: 0, sent: 0,
+                                   lines: ["$ barking sync", "internet: network unreachable, nothing is lost"])
+            }
+        }
+        inFlight = task
+        let outcome = await task.value
+        inFlight = nil
+        lastSync = outcome
+        lastSyncAt = Date()
+        publish(.network)
+        if outcome.received > 0 || outcome.sent > 0 { publish(.contacts) }
+        return outcome
+    }
+    public func nodes() async throws -> [NodeInfo] { try await call("nodes") { try $0.nodes() } }
+    public func addNode(id: String, addr: String) async throws {
+        try await call("node") { try $0.addNode(id: id, addr: addr) }
+        publish(.network)
+    }
+    public func outboxCount() async throws -> Int { Int(try await call("outbox") { try $0.outboxCount() }) }
+
+    // MARK: Linking
+
+    public func linkOffer() async throws -> Data { try await call("offer") { try $0.linkOffer() } }
+    public func linkDevice(request: Data, history: Bool) async throws -> Data {
+        let package = try await call("link") { try $0.linkDevice(request: request, withHistory: history) }
+        publish(.devices)
+        return package
+    }
+    public func isPendingLink() async throws -> Bool { try await call("pending") { try $0.isPendingLink() } }
+    public func finishLink(_ package: Data) async throws {
+        try await call("finish") { try $0.finishLink(package: package) }
+        publish(.contacts)
+        publish(.devices)
+    }
+}
