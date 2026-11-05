@@ -36,7 +36,7 @@ final class ReviewFixTests: XCTestCase {
         async let b: Void = m.scannedOffer(Data([9]))
         _ = await (a, b)
         XCTAssertEqual(begins, 1)
-        m.startAgain()
+        await m.startAgain()
         XCTAssertEqual(resets, 1)
         XCTAssertEqual(m.state, .scanOffer)
         let resumed = NewDeviceLinkModel(resume: CoreService(device: FakeDevice(), runner: DirectRunner()),

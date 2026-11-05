@@ -74,8 +74,32 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     }
     func isPendingLink() throws -> Bool { pending }
     func transferAdmin(deviceId: String) throws { lock.withLock { _transferredTo.append(deviceId) } }
-    func adminTransferPending() throws -> String? { lock.withLock { _transferredTo.last } }
+    func adminTransferPending() throws -> String? {
+        lock.withLock { transferExpired ? nil : _transferredTo.last }
+    }
     func removed() throws -> RemovedInfo? { removedInfo }
+    private var _removedIds: [String] = []
+    var removedIds: [String] { lock.withLock { _removedIds } }
+    func removeDevice(deviceId: String) throws { lock.withLock { _removedIds.append(deviceId) } }
+    private var _leaveCalls = 0
+    var leaveCalls: Int { lock.withLock { _leaveCalls } }
+    func leave() throws { lock.withLock { _leaveCalls += 1; _leaveReady = true } }
+    private var _leavingTo: [String] = []
+    var leavingTo: [String] { lock.withLock { _leavingTo } }
+    func transferAndLeave(deviceId: String) throws {
+        lock.withLock {
+            _leavingTo.append(deviceId)
+            _transferredTo.append(deviceId)
+        }
+    }
+    private var _leaveReady = false
+    var leaveReadyValue: Bool {
+        get { lock.withLock { _leaveReady } }
+        set { lock.withLock { _leaveReady = newValue } }
+    }
+    func leaveReady() throws -> Bool { leaveReadyValue }
+    /// The root key transfer expired without its ack.
+    var transferExpired = false
     func finishLink(package: Data) throws {}
 }
 

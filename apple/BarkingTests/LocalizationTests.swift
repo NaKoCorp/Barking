@@ -14,7 +14,10 @@ final class LocalizationTests: XCTestCase {
         }
         for key in ["Create my identity", "Chats", "The numbers match", "Link a new device", "Sync now",
                     "This is not a Barking card", "✓ verified · safety code matched", "Make admin",
-                    "Transfer pending", "This device was removed from your account", "Reset this device"] {
+                    "Transfer pending", "This device was removed from your account", "Reset this device",
+                    "Disconnect this device", "Remove %@", "Handing over to %@…",
+                    "Everything on this iPhone will be erased. Your contacts will not be told. To get your identity back, you will need the 24-word phrase.",
+                    "The handover to %@ did not finish. Nothing was erased: this device is still your admin."] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
     }

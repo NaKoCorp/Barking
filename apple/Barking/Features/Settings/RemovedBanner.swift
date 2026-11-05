@@ -35,10 +35,9 @@ struct RemovedBanner: View {
     private func load() async { removed = ((try? await core.removed()) ?? nil) != nil }
 
     /// The core stops first: no sync may write to the files being erased.
+    /// A step that fails is finished at the next launch.
     private func reset() async {
-        await core.close()
-        DeviceFactory.resetIdentity()
-        UserDefaults.standard.removeObject(forKey: OnboardingModel.confirmedKey)
+        try? await Wipe.run(closing: core)
         router.restartOnboarding()
     }
 }

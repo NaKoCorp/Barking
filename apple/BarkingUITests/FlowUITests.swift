@@ -109,6 +109,38 @@ final class AccessibilityUITests: XCTestCase {
 }
 
 @MainActor
+final class DevicesUITests: XCTestCase {
+    override func setUp() { continueAfterFailure = false }
+
+    /// The administrator alone: "Disconnect this device" is the wipe, with
+    /// its warning, and leads back to the welcome screen.
+    func testDisconnectingTheOnlyDeviceErasesIt() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        try onboard(app)
+        app.tabBars.buttons["Settings"].tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Linked devices")).firstMatch.tap()
+        let disconnect = app.buttons["devices.disconnect"]
+        XCTAssertTrue(disconnect.waitForExistence(timeout: 5))
+        disconnect.tap()
+        let warning = app.staticTexts.matching(NSPredicate(
+            format: "label BEGINSWITH %@ AND label ENDSWITH %@",
+            "Everything on this iPhone will be erased. Your contacts will not be told.",
+            "you will need the 24-word phrase.")).firstMatch
+        XCTAssertTrue(warning.waitForExistence(timeout: 5))
+        app.buttons["Erase"].tap()
+        XCTAssertTrue(app.buttons["Create my identity"].waitForExistence(timeout: 10))
+
+        // Nothing is left: a relaunch (without the test reset) is a fresh install.
+        app.terminate()
+        let again = XCUIApplication()
+        again.launchArguments = ["-AppleLanguages", "(en)"]
+        again.launch()
+        XCTAssertTrue(again.buttons["Create my identity"].waitForExistence(timeout: 10))
+    }
+}
+
+@MainActor
 final class PhraseExportUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 

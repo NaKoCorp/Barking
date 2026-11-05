@@ -78,6 +78,26 @@ public actor CoreService {
     }
     /// Set once a newer device list removed this device from the account.
     public func removed() async throws -> RemovedInfo? { try await call("removed") { try $0.removed() } }
+    /// Removes my device `id` (administrator only); a sync sends the new list.
+    public func removeDevice(_ id: String) async throws {
+        try await call("remove-device") { try $0.removeDevice(deviceId: id) }
+        publish(.devices)
+        Task { _ = await self.sync(reason: .afterSend) }
+    }
+    /// This linked device asks my other devices to remove it (`leaveReady`
+    /// is then true; a sync sends the request).
+    public func leave() async throws {
+        try await call("leave") { try $0.leave() }
+        publish(.devices)
+    }
+    /// The administrator hands the root key to `id`, which removes this
+    /// device at the ack (`leaveReady`).
+    public func transferAndLeave(to id: String) async throws {
+        try await call("transfer") { try $0.transferAndLeave(deviceId: id) }
+        publish(.devices)
+    }
+    /// The request to be removed is queued: once sent, this device may be wiped.
+    public func leaveReady() async throws -> Bool { try await call("leave-ready") { try $0.leaveReady() } }
 
     // MARK: Contacts
 

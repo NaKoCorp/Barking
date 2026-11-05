@@ -91,13 +91,13 @@ struct LinkFromExistingView: View {
                 Text("Waiting for your other device").font(BarkingFont.mono(.footnote, size: 13))
                     .foregroundStyle(Color.fgSoft)
                 SecondaryButton("Open the link file") { importing = true }
-                Button("Start again") { model.startAgain(); router.restartOnboarding() }
+                Button("Start again") { Task { await model.startAgain(); router.restartOnboarding() } }
                     .foregroundStyle(Color.accent).frame(minHeight: 44)
             case .done:
                 ProgressView()
             case .refused(let text):
                 Banner(kind: .danger, title: LocalizedStringKey(text))
-                PrimaryButton("Start again") { model.startAgain() }
+                PrimaryButton("Start again") { Task { await model.startAgain() } }
             }
             Spacer(minLength: 0)
         }

@@ -22,8 +22,10 @@ final class AppRouter {
 
     init(start: State) { state = start }
 
-    /// The state at launch: the existing identity, else onboarding.
+    /// The state at launch: the existing identity, else onboarding. A wipe
+    /// cut short (app killed) finishes first, before the database opens.
     static func boot() -> AppRouter {
+        Wipe.resumeIfNeeded()
         #if BARKING_DEV
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-BarkingUITestReset") {

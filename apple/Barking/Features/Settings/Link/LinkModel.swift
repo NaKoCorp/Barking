@@ -155,8 +155,10 @@ final class NewDeviceLinkModel {
         }
     }
 
-    /// Drops the pending link (it holds nothing yet) and starts over.
-    func startAgain() {
+    /// Drops the pending link (it holds nothing yet) and starts over. Its
+    /// service stops first: no call may hold the files being erased.
+    func startAgain() async {
+        await core?.close()
         reset()
         core = nil
         state = .scanOffer

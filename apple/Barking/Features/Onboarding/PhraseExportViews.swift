@@ -1,5 +1,4 @@
 import BarkingKit
-import LocalAuthentication
 import SwiftUI
 import UIKit
 
@@ -33,19 +32,9 @@ struct PhraseExportButtons: View {
         }
     }
 
-    /// Face ID, Touch ID or the passcode. A phone with no passcode has
-    /// nothing to check: the phrase is already on screen.
+    /// The phrase is already on screen: the check only guards its copies.
     static func owner() async -> Bool {
-        #if BARKING_DEV
-        if ProcessInfo.processInfo.arguments.contains("-BarkingUITestReset") { return true }
-        #endif
-        let ctx = LAContext()
-        var error: NSError?
-        guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
-            return (error as? LAError)?.code == .passcodeNotSet
-        }
-        return (try? await ctx.evaluatePolicy(.deviceOwnerAuthentication,
-                                              localizedReason: String(localized: "Export your recovery phrase"))) ?? false
+        await Owner.check(reason: String(localized: "Export your recovery phrase"))
     }
 
     /// Straight to the printer: the page stays in memory.

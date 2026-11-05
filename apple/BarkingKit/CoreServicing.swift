@@ -34,6 +34,10 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func transferAdmin(deviceId: String) throws
     func adminTransferPending() throws -> String?
     func removed() throws -> RemovedInfo?
+    func removeDevice(deviceId: String) throws
+    func leave() throws
+    func transferAndLeave(deviceId: String) throws
+    func leaveReady() throws -> Bool
 }
 
 extension Device: DeviceHandle {}

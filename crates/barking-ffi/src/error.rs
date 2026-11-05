@@ -29,6 +29,10 @@ pub enum BarkingError {
     /// can only receive and read.
     #[error("device removed from the account")]
     DeviceRemoved,
+    /// The administrator cannot leave on its own: it hands the root key to
+    /// another device first (`transfer_and_leave`).
+    #[error("this device is the administrator")]
+    IsAdmin,
 }
 
 /// Why a link step was refused (spec iOS messaging §5.8).
@@ -100,6 +104,7 @@ impl From<CoreError> for BarkingError {
             CoreError::StoreLocked | CoreError::Store(_) => BarkingError::Storage { detail },
             CoreError::AdminTransferPending => BarkingError::AdminTransferPending,
             CoreError::DeviceRemoved => BarkingError::DeviceRemoved,
+            CoreError::IsAdmin => BarkingError::IsAdmin,
             _ => BarkingError::Internal { detail },
         }
     }

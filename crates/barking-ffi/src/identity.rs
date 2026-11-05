@@ -103,6 +103,48 @@ impl Device {
         })
     }
 
+    /// Removes my device `device_id` (hex, from `my_devices`) from my account
+    /// (administrator only). The new list goes out at the next sync. This
+    /// device is refused (`InvalidInput`: use `transfer_and_leave`).
+    pub fn remove_device(&self, device_id: String) -> Result<(), BarkingError> {
+        guard(|| {
+            let id = device_id_from_hex(&device_id)?;
+            // The packets are in the outbox: the next sync sends them.
+            self.with_core(|core| {
+                core.remove_device(id, now(), &mut rand::rng())?;
+                Ok(())
+            })
+        })
+    }
+
+    /// A linked device leaves the account: asks my other devices to remove
+    /// it. Refused on the administrator (`IsAdmin`). `leave_ready` is then
+    /// true: once a sync has sent the request, the app may wipe.
+    pub fn leave(&self) -> Result<(), BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                core.leave(now(), &mut rand::rng())?;
+                Ok(())
+            })
+        })
+    }
+
+    /// The administrator leaves: hands the root key to `device_id`, then, at
+    /// its ack, asks it to remove this device (`leave_ready`). If the
+    /// transfer expires, nothing is sent and the root stays here.
+    pub fn transfer_and_leave(&self, device_id: String) -> Result<(), BarkingError> {
+        guard(|| {
+            let id = device_id_from_hex(&device_id)?;
+            self.with_core(|core| Ok(core.transfer_and_leave(id, now(), &mut rand::rng())?))
+        })
+    }
+
+    /// The request to be removed is queued (`leave`, or `transfer_and_leave`
+    /// after the ack): the app may wipe once a sync has sent it.
+    pub fn leave_ready(&self) -> Result<bool, BarkingError> {
+        guard(|| self.with_core(|core| Ok(core.leave_ready()?)))
+    }
+
     /// Set once a newer device list has removed this device from the account.
     pub fn removed(&self) -> Result<Option<RemovedInfo>, BarkingError> {
         guard(|| {

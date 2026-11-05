@@ -128,3 +128,168 @@ final class LinkModelTests: XCTestCase {
         XCTAssertFalse(m.canSend)
     }
 }
+
+/// Counts the wipes a model asked for.
+@MainActor
+final class WipeRecorder {
+    var count = 0
+    func wipe(_ core: CoreService) async { count += 1 }
+}
+
+@MainActor
+final class DevicesModelTests: XCTestCase {
+    private let me = MyDeviceInfo(id: "a", name: "iPhone", issuedAt: 1, thisDevice: true, admin: true)
+    private let tablet = MyDeviceInfo(id: "t", name: "iPad", issuedAt: 2, thisDevice: false, admin: false)
+
+    private func model(_ d: FakeDevice, owner: Bool = true, wipes: WipeRecorder = WipeRecorder()) -> DevicesModel {
+        DevicesModel(core: CoreService(device: d, runner: DirectRunner()),
+                     owner: { owner }, wipe: { await wipes.wipe($0) })
+    }
+
+    func testAdminSeesRemoveOnOthersAndDisconnectOnSelf() async {
+        let d = FakeDevice()
+        d.devicesList = [me, tablet]
+        let admin = model(d)
+        await admin.load()
+        XCTAssertTrue(admin.canRemove(tablet))
+        XCTAssertFalse(admin.canRemove(me))
+        XCTAssertTrue(admin.canDisconnect(me))
+        XCTAssertFalse(admin.canDisconnect(tablet))
+
+        let linkedMe = MyDeviceInfo(id: "t", name: "iPad", issuedAt: 2, thisDevice: true, admin: false)
+        let adminOther = MyDeviceInfo(id: "a", name: "iPhone", issuedAt: 1, thisDevice: false, admin: true)
+        d.devicesList = [adminOther, linkedMe]
+        let linked = model(d)
+        await linked.load()
+        XCTAssertFalse(linked.canRemove(adminOther))
+        XCTAssertTrue(linked.canDisconnect(linkedMe))
+    }
+
+    func testDisconnectPlans() async {
+        let d = FakeDevice()
+        d.devicesList = [me]
+        let m = model(d)
+        await m.load()
+        XCTAssertEqual(m.disconnectPlan, .erase)
+        d.devicesList = [me, tablet]
+        await m.load()
+        XCTAssertEqual(m.disconnectPlan, .handOver(candidates: [tablet]))
+        d.devicesList = [MyDeviceInfo(id: "t", name: "iPad", issuedAt: 2, thisDevice: true, admin: false),
+                         MyDeviceInfo(id: "a", name: "iPhone", issuedAt: 1, thisDevice: false, admin: true)]
+        await m.load()
+        XCTAssertEqual(m.disconnectPlan, .leave)
+    }
+
+    func testRemoveNeedsTheOwner() async {
+        let d = FakeDevice()
+        d.devicesList = [me, tablet]
+        let refused = model(d, owner: false)
+        await refused.load()
+        await refused.remove(tablet)
+        XCTAssertEqual(d.removedIds, [])
+
+        let m = model(d)
+        await m.load()
+        await m.remove(tablet)
+        XCTAssertEqual(d.removedIds, ["t"])
+        XCTAssertFalse(m.removeFailed)
+    }
+
+    func testLinkedLeaveWipesOnceSent() async {
+        let d = FakeDevice()
+        d.devicesList = [MyDeviceInfo(id: "t", name: "iPad", issuedAt: 2, thisDevice: true, admin: false)]
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        await m.disconnect()
+        XCTAssertEqual(d.leaveCalls, 1)
+        XCTAssertGreaterThanOrEqual(d.syncCalls, 1)
+        XCTAssertEqual(wipes.count, 1)
+        XCTAssertEqual(m.departure, .wiped)
+    }
+
+    func testLeaveOfflineErasesNothing() async {
+        let d = FakeDevice()
+        d.devicesList = [MyDeviceInfo(id: "t", name: "iPad", issuedAt: 2, thisDevice: true, admin: false)]
+        d.summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: false, error: nil)
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        await m.disconnect()
+        XCTAssertEqual(m.departure, .offline)
+        XCTAssertEqual(wipes.count, 0)
+        // Back online: the retry sends the request, then wipes.
+        d.summary = SyncSummary(itemsReceived: 0, sent: 1, newMessages: [], networkUp: true, error: nil)
+        await m.finishLeaving()
+        XCTAssertEqual(wipes.count, 1)
+        XCTAssertEqual(d.leaveCalls, 1)
+    }
+
+    func testDeclinedOwnerErasesNothing() async {
+        let d = FakeDevice()
+        d.devicesList = [me]
+        let wipes = WipeRecorder()
+        let m = model(d, owner: false, wipes: wipes)
+        await m.load()
+        await m.disconnect()
+        XCTAssertEqual(wipes.count, 0)
+        XCTAssertEqual(m.departure, .idle)
+    }
+
+    func testAdminAloneErases() async {
+        let d = FakeDevice()
+        d.devicesList = [me]
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        await m.disconnect()
+        XCTAssertEqual(d.leaveCalls, 0)
+        XCTAssertEqual(wipes.count, 1)
+        XCTAssertEqual(m.departure, .wiped)
+    }
+
+    func testHandOverWipesWhenReady() async {
+        let d = FakeDevice()
+        d.devicesList = [me, tablet]
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        await m.handOver(to: tablet)
+        XCTAssertEqual(d.leavingTo, ["t"])
+        XCTAssertEqual(m.departure, .handingOver(name: "iPad"))
+        await m.pollHandover()
+        XCTAssertEqual(m.departure, .handingOver(name: "iPad"))
+        XCTAssertEqual(wipes.count, 0)
+        d.leaveReadyValue = true
+        await m.pollHandover()
+        XCTAssertEqual(m.departure, .wiped)
+        XCTAssertEqual(wipes.count, 1)
+    }
+
+    /// Known core limit: an expired transfer never makes `leave_ready` true.
+    func testHandOverFailsWhenTheTransferExpires() async {
+        let d = FakeDevice()
+        d.devicesList = [me, tablet]
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        await m.handOver(to: tablet)
+        d.transferExpired = true
+        await m.pollHandover()
+        XCTAssertEqual(m.departure, .handoverFailed(name: "iPad"))
+        XCTAssertEqual(wipes.count, 0)
+        m.dismissDeparture()
+        XCTAssertEqual(m.departure, .idle)
+    }
+
+    /// Killed after `leave`: the request is queued, the screen finishes it.
+    func testLoadResumesAQueuedLeave() async {
+        let d = FakeDevice()
+        d.devicesList = [MyDeviceInfo(id: "t", name: "iPad", issuedAt: 2, thisDevice: true, admin: false)]
+        d.leaveReadyValue = true
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        XCTAssertEqual(wipes.count, 1)
+    }
+}

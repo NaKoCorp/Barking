@@ -98,30 +98,87 @@ final class SettingsModel {
     }
 }
 
-/// Linked devices (screen 9).
+/// Linked devices (screen 9): linking, the admin transfer, removing a
+/// device, and leaving the account (spec §8.2).
 @MainActor @Observable
 final class DevicesModel {
+    /// What "Disconnect this device" does here.
+    enum DisconnectPlan: Equatable {
+        /// A linked device: my other devices remove it, then the wipe.
+        case leave
+        /// The administrator with other devices: one of them takes the root
+        /// key, removes this one at its ack, then the wipe.
+        case handOver(candidates: [MyDeviceInfo])
+        /// The administrator alone: the wipe, nobody is told.
+        case erase
+    }
+
+    /// Where a departure stands.
+    enum Departure: Equatable {
+        case idle
+        /// The root key is on its way to `name`; the wipe follows its ack.
+        case handingOver(name: String)
+        /// The transfer expired: nothing erased, this device keeps the root.
+        case handoverFailed(name: String)
+        /// The request to be removed is queued; a sync sends it.
+        case sending
+        /// The sync could not reach the network: nothing erased yet.
+        case offline
+        case failed
+        /// Erased: back to the welcome screen.
+        case wiped
+    }
+
     private let core: CoreService
+    private let owner: () async -> Bool
+    private let wipe: (CoreService) async -> Void
     private(set) var devices: [MyDeviceInfo] = []
     /// The device a root key transfer awaits the ack of.
     private(set) var pendingTarget: String?
     /// Removed from the account by a newer device list.
     private(set) var removed = false
     private(set) var transferFailed = false
+    private(set) var removeFailed = false
+    private(set) var departure: Departure = .idle
 
-    init(core: CoreService) { self.core = core }
+    init(core: CoreService,
+         owner: @escaping () async -> Bool = { await Owner.check() },
+         wipe: @escaping (CoreService) async -> Void = { try? await Wipe.run(closing: $0) }) {
+        self.core = core
+        self.owner = owner
+        self.wipe = wipe
+    }
 
     private var isAdmin: Bool { devices.contains { $0.thisDevice && $0.admin } }
-    var canLink: Bool { isAdmin && pendingTarget == nil && !removed }
+    var canLink: Bool { isAdmin && pendingTarget == nil && !removed && departure == .idle }
     var count: Int { devices.count }
 
     /// Only the administrator, to another device, one transfer at a time.
     func canTransfer(to device: MyDeviceInfo) -> Bool { canLink && !device.thisDevice }
+    /// Only the administrator removes, and never itself (it disconnects).
+    func canRemove(_ device: MyDeviceInfo) -> Bool { canLink && !device.thisDevice }
+    /// This device, while it still belongs to the account (a removed device
+    /// resets from its banner) and no transfer is under way.
+    func canDisconnect(_ device: MyDeviceInfo) -> Bool {
+        device.thisDevice && !removed && pendingTarget == nil && departure == .idle
+    }
+
+    var disconnectPlan: DisconnectPlan {
+        guard isAdmin else { return .leave }
+        let others = devices.filter { !$0.thisDevice }
+        return others.isEmpty ? .erase : .handOver(candidates: others)
+    }
 
     func load() async {
         devices = (try? await core.myDevices()) ?? []
         pendingTarget = try? await core.adminTransferPending()
         removed = ((try? await core.removed()) ?? nil) != nil
+        // Killed after `leave` or after the handover's ack: the request is
+        // queued, the departure finishes here.
+        if departure == .idle, (try? await core.leaveReady()) == true {
+            departure = .sending
+            await finishLeaving()
+        }
     }
 
     func transfer(to device: MyDeviceInfo) async {
@@ -132,5 +189,86 @@ final class DevicesModel {
             transferFailed = true
         }
         await load()
+    }
+
+    func remove(_ device: MyDeviceInfo) async {
+        guard await owner() else { return }
+        removeFailed = false
+        do {
+            try await core.removeDevice(device.id)
+        } catch {
+            removeFailed = true
+        }
+        await load()
+    }
+
+    /// "Disconnect this device", once confirmed, for `.leave` and `.erase`
+    /// (`.handOver` goes through `handOver(to:)`).
+    func disconnect() async {
+        guard departure == .idle, await owner() else { return }
+        switch disconnectPlan {
+        case .erase:
+            await finish()
+        case .leave:
+            do {
+                try await core.leave()
+                departure = .sending
+                await finishLeaving()
+            } catch {
+                departure = .failed
+            }
+        case .handOver:
+            break
+        }
+    }
+
+    /// The administrator leaves through `device`.
+    func handOver(to device: MyDeviceInfo) async {
+        guard departure == .idle, await owner() else { return }
+        transferFailed = false
+        do {
+            try await core.transferAndLeave(to: device.id)
+            departure = .handingOver(name: device.name)
+        } catch {
+            transferFailed = true
+        }
+        await load()
+    }
+
+    /// One step of the handover: a sync, then the wipe once the request to
+    /// be removed is queued. A transfer that expired leaves `leave_ready`
+    /// false forever (known core limit): the handover failed, nothing erased.
+    func pollHandover() async {
+        guard case .handingOver(let name) = departure else { return }
+        _ = await core.sync(reason: .timer)
+        if (try? await core.leaveReady()) == true {
+            departure = .sending
+            await finishLeaving()
+        } else if (try? await core.adminTransferPending()) == nil {
+            departure = .handoverFailed(name: name)
+            await load()
+        }
+    }
+
+    /// Sends the queued request to be removed, then wipes. Offline: nothing
+    /// is erased, the user tries again.
+    func finishLeaving() async {
+        guard departure == .sending || departure == .offline else { return }
+        let outcome = await core.sync(reason: .afterSend)
+        guard outcome.networkUp, (try? await core.leaveReady()) == true else {
+            departure = .offline
+            return
+        }
+        await finish()
+    }
+
+    func dismissDeparture() {
+        if case .handoverFailed = departure { departure = .idle }
+        if departure == .failed { departure = .idle }
+    }
+
+    private func finish() async {
+        await wipe(core)
+        departure = .wiped
     }
 }
