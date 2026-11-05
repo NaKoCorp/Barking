@@ -1682,3 +1682,58 @@ fn my_devices_lists_certificates() {
     assert!(on_t.iter().all(|x| !x.admin));
     assert!(on_t.iter().any(|x| x.this_device && x.name == "t"));
 }
+
+/// A device that has not synced yet renames a contact after the other one
+/// verified it: the verification survives (its own register, review I1).
+#[test]
+fn stale_device_does_not_erase_verification() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(25);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let carol = create(d.path(), "carol", 6, &mut rng);
+    let card = carol.core.contact_card("Carol").unwrap();
+    let carol_fp = a
+        .core
+        .add_contact(&card, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+    // A verifies; T does not know yet and renames later.
+    a.core.mark_verified(&carol_fp, NOW + 10, &mut rng).unwrap();
+    t.core
+        .set_alias(&carol_fp, "caro", NOW + 20, &mut rng)
+        .unwrap();
+    sync_round(&mut t, &mut a, &mut rng);
+    sync_round(&mut a, &mut t, &mut rng);
+    assert_eq!(
+        contact_state(&a.core),
+        vec![(carol_fp, Some("caro".to_owned()), true)]
+    );
+    assert_eq!(contact_state(&t.core), contact_state(&a.core));
+}
+
+/// A verification made on a device behind on the contact's other changes
+/// is still applied everywhere.
+#[test]
+fn verification_from_a_stale_device_is_kept() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(26);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let carol = create(d.path(), "carol", 6, &mut rng);
+    let card = carol.core.contact_card("Carol").unwrap();
+    let carol_fp = a
+        .core
+        .add_contact(&card, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+    a.core
+        .set_alias(&carol_fp, "caro", NOW + 20, &mut rng)
+        .unwrap();
+    t.core.mark_verified(&carol_fp, NOW + 10, &mut rng).unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+    sync_round(&mut t, &mut a, &mut rng);
+    assert_eq!(
+        contact_state(&a.core),
+        vec![(carol_fp, Some("caro".to_owned()), true)]
+    );
+    assert_eq!(contact_state(&t.core), contact_state(&a.core));
+}

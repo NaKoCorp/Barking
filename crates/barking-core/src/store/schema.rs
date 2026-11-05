@@ -216,3 +216,8 @@ pub const TRANSPARENCY_INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS transparency_at ON transparency(at);
 CREATE INDEX IF NOT EXISTS transparency_class_id ON transparency(class, id);
 ";
+
+/// Date of the last verification change of a contact (`SyncOp::UpsertV2`),
+/// added to existing databases at open (idempotent); 0: unknown.
+pub const CONTACTS_ADD_VERIFIED_AT: &str =
+    "ALTER TABLE contacts ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0;";

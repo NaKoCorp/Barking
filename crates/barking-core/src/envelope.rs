@@ -58,7 +58,8 @@ pub enum Body {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncOp {
     /// Contact present with this card, this alias (empty: none) and this
-    /// verified status (merged by "or"). Boxed card (size of
+    /// verified status (merged by "or"). Sent by older versions only (see
+    /// `UpsertV2`). Boxed card (size of
     /// the enum); same postcard format.
     Upsert {
         card: Box<ContactCard>,
@@ -67,6 +68,17 @@ pub enum SyncOp {
     },
     /// Contact removed (no effect if unknown).
     Remove(Fingerprint),
+    /// `Upsert` with the date of the last verification change: the verified
+    /// status is its own register, the most recent change wins whatever the
+    /// contact's other operations (a device behind on them neither erases
+    /// nor loses a mark). Appended last: older devices still read `Upsert`,
+    /// whose status counts as unknown (date 0, merged by "or").
+    UpsertV2 {
+        card: Box<ContactCard>,
+        alias: String,
+        verified: bool,
+        verified_at: u64,
+    },
 }
 
 /// Encrypted content of a packet. No sender identity.
@@ -102,6 +114,7 @@ impl fmt::Debug for SyncOp {
         f.write_str(match self {
             SyncOp::Upsert { .. } => "Upsert",
             SyncOp::Remove(_) => "Remove",
+            SyncOp::UpsertV2 { .. } => "UpsertV2",
         })
     }
 }

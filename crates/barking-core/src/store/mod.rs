@@ -342,6 +342,19 @@ impl Store {
         if stored.is_none_or(|v| v < 2) {
             schema::migrate_v1_to_v2(&self.conn).map_err(map_err)?;
         }
+        let has_verified_at: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('contacts') WHERE name = 'verified_at'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_verified_at {
+            self.conn
+                .execute_batch(schema::CONTACTS_ADD_VERIFIED_AT)
+                .map_err(map_err)?;
+        }
         self.conn
             .execute_batch(schema::SCHEMA_V2_INBOUND)
             .map_err(map_err)?;
@@ -460,6 +473,35 @@ pub trait Queries {
                  ON CONFLICT(fp) DO UPDATE SET card = excluded.card, \
                  alias = excluded.alias, verified = excluded.verified",
                 params![fp.0.as_slice(), card, alias, verified],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Date of the contact's last verification change (0: unknown).
+    fn verified_at(&self, fp: Fingerprint) -> Result<u64> {
+        let at: Option<i64> = self
+            .conn()
+            .query_row(
+                "SELECT verified_at FROM contacts WHERE fp = ?1",
+                params![fp.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(map_err)?;
+        Ok(at.map_or(0, |a| u64::try_from(a).unwrap_or(0)))
+    }
+
+    /// Sets the verified register of a known contact.
+    fn set_verified(&self, fp: Fingerprint, verified: bool, at: u64) -> Result<()> {
+        self.conn()
+            .execute(
+                "UPDATE contacts SET verified = ?2, verified_at = ?3 WHERE fp = ?1",
+                params![
+                    fp.0.as_slice(),
+                    verified,
+                    i64::try_from(at).unwrap_or(i64::MAX)
+                ],
             )
             .map_err(map_err)?;
         Ok(())

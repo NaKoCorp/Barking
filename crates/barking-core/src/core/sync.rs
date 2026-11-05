@@ -194,10 +194,11 @@ pub(super) fn send_state(
     rng: &mut impl CryptoRng,
 ) -> Result<()> {
     let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
-    let op = SyncOp::Upsert {
+    let op = SyncOp::UpsertV2 {
         card: Box::new(load_card(&row.card)?),
         alias: row.alias.clone(),
         verified: row.verified,
+        verified_at: q.verified_at(fp)?,
     };
     send_op(q, device, op, time, rng)
 }
@@ -325,9 +326,23 @@ fn content<T>(r: Result<T>) -> Result<core::result::Result<T, &'static str>> {
 /// more recent state clears it.
 fn apply_op(q: &impl Queries, op: &SyncOp, at: u64, sender: DeviceId) -> Result<()> {
     let (fp, removing) = match op {
-        SyncOp::Upsert { card, .. } => (card.fingerprint(), false),
+        SyncOp::Upsert { card, .. } | SyncOp::UpsertV2 { card, .. } => (card.fingerprint(), false),
         SyncOp::Remove(fp) => (*fp, true),
     };
+    // The verified status is its own register: merged whatever the clock of
+    // the contact's other operations.
+    let register = match op {
+        SyncOp::Upsert { verified, .. } => Some((*verified, 0)),
+        SyncOp::UpsertV2 {
+            verified,
+            verified_at,
+            ..
+        } => Some((*verified, *verified_at)),
+        SyncOp::Remove(_) => None,
+    };
+    if let Some((verified, at)) = register {
+        contacts::merge_verified(q, fp, verified, at)?;
+    }
     let clock = ContactClock {
         at,
         removed: removing,
@@ -342,6 +357,18 @@ fn apply_op(q: &impl Queries, op: &SyncOp, at: u64, sender: DeviceId) -> Result<
             alias,
             verified,
         } => contacts::upsert_in(q, card, alias, *verified, &clock)?,
+        SyncOp::UpsertV2 {
+            card,
+            alias,
+            verified,
+            verified_at,
+        } => {
+            let new = q.get_contact(fp)?.is_none();
+            contacts::upsert_in(q, card, alias, *verified, &clock)?;
+            if new {
+                q.set_verified(fp, *verified, *verified_at)?;
+            }
+        }
         SyncOp::Remove(fp) => {
             if q.get_contact(*fp)?.is_some() {
                 q.delete_contact(*fp)?;

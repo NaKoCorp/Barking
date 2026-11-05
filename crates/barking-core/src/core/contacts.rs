@@ -99,7 +99,7 @@ impl Core {
         self.ensure_linked()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
-            verify_in(tx, *contact)?;
+            set_verified_in(tx, *contact, true, now)?;
             let time = sync::touch(tx, *contact, now, false, device.public().id())?;
             sync::send_state(tx, device, *contact, time, rng)
         })
@@ -116,7 +116,7 @@ impl Core {
         self.ensure_linked()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
-            set_verified_in(tx, *contact, false)?;
+            set_verified_in(tx, *contact, false, now)?;
             let time = sync::touch(tx, *contact, now, false, device.public().id())?;
             sync::send_state(tx, device, *contact, time, rng)
         })
@@ -315,11 +315,10 @@ pub(super) fn add_in(
 }
 
 /// State of a contact received from one of my devices (`SyncOp::Upsert`): card
-/// (kept if the known card is newer), exact alias (empty: none), exact
-/// verified status. The caller applies only operations newer than the last
-/// known one (`ContactClock`): the most recent operation wins, so removing
-/// the mark syncs too. Two simultaneous operations on two devices can drop a
-/// mark, never add one. Every check precedes the first write.
+/// (kept if the known card is newer), exact alias (empty: none). The verified
+/// status of a known contact is its own register (`merge_verified`, applied
+/// by the caller); `verified` only seeds a contact this device did not know.
+/// Every check precedes the first write.
 ///
 /// Alias held by another contact: if the operation (`clock`) beats
 /// the last known operation on that other contact, it loses it; otherwise
@@ -379,6 +378,10 @@ pub(super) fn upsert_in(
     if let Some(other) = strip {
         q.upsert_contact(other.fp, &other.card, "", other.verified)?;
     }
+    let verified = match q.get_contact(fp)? {
+        Some(known) => known.verified,
+        None => verified,
+    };
     q.upsert_contact(fp, &bytes, alias, verified)
 }
 
@@ -475,13 +478,33 @@ pub(super) fn remove_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
 }
 
 /// Marks a known contact of `q` as verified.
-pub(super) fn verify_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
-    set_verified_in(q, fp, true)
+/// A local verification change: its date strictly follows the last known
+/// one, so that it wins over every change this device has seen.
+fn set_verified_in(q: &impl Queries, fp: Fingerprint, verified: bool, now: u64) -> Result<()> {
+    q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
+    let at = now.max(q.verified_at(fp)?.saturating_add(1));
+    q.set_verified(fp, verified, at)
 }
 
-fn set_verified_in(q: &impl Queries, fp: Fingerprint, verified: bool) -> Result<()> {
-    let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
-    q.upsert_contact(row.fp, &row.card, &row.alias, verified)
+/// Merges a received verified register: the most recent change wins; an
+/// unknown date (an older device's `Upsert`, 0) can only add the mark.
+pub(super) fn merge_verified(
+    q: &impl Queries,
+    fp: Fingerprint,
+    verified: bool,
+    at: u64,
+) -> Result<()> {
+    let Some(row) = q.get_contact(fp)? else {
+        return Ok(());
+    };
+    let known = q.verified_at(fp)?;
+    if at > known {
+        q.set_verified(fp, verified, at)
+    } else if at == 0 && verified && !row.verified {
+        q.set_verified(fp, true, known)
+    } else {
+        Ok(())
+    }
 }
 
 /// Changes the alias of a known contact of `q`; returns the stored alias.
