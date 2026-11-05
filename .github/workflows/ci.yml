@@ -91,6 +91,89 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$archive" -C "$HOME/.cargo/bin"
       - run: scripts/check.sh
 
+  # iOS app (spec iOS foundations §7): XCFramework, app and extension build,
+  # XCTest on a simulator. Skipped steps (green job) when the pull request
+  # touches neither the app nor the Rust code it wraps.
+  apple:
+    name: iOS app (build, XCTest)
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Does the change touch the iOS app?
+        id: paths
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ] || ! git diff --quiet "$BASE" HEAD -- \
+            apple/ crates/ Cargo.lock Cargo.toml scripts/build-xcframework.sh .github/workflows/ci.yml
+          then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "iOS app untouched: build skipped"
+          fi
+      - name: Select the pinned Xcode
+        if: steps.paths.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          xcode="$(sed -n 's/^xcode=//p' .xcode-version | head -n1)"
+          [ -n "$xcode" ] || { echo ".xcode-version incomplete" >&2; exit 1; }
+          sudo xcode-select -s "/Applications/Xcode_${xcode}.app"
+          xcodebuild -version
+      - name: Install the pinned Rust toolchain
+        if: steps.paths.outputs.changed == 'true'
+        run: |
+          canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
+          rustup toolchain install "$canal" --profile minimal --target aarch64-apple-ios-sim
+          rustup default "$canal"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.paths.outputs.changed == 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-ios-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-ios-${{ hashFiles('rust-toolchain.toml') }}-
+      # Official XcodeGen release, pinned by version and checksum.
+      - name: Install XcodeGen
+        if: steps.paths.outputs.changed == 'true'
+        env:
+          VERSION: 2.46.0
+          SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$VERSION/xcodegen.zip"
+          echo "$SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Build the XCFramework (simulator slice)
+        if: steps.paths.outputs.changed == 'true'
+        run: scripts/build-xcframework.sh --sim-only
+      - name: Build and test the app
+        if: steps.paths.outputs.changed == 'true'
+        working-directory: apple
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          # Ad-hoc signing (no team): the keychain tests need the entitlements
+          # an unsigned build lacks. First available iPhone simulator.
+          udid="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)["devices"]
+          print(next(x["udid"] for r, xs in d.items() if "iOS" in r for x in xs if x["name"].startswith("iPhone")))')"
+          xcodebuild test -project Barking.xcodeproj -scheme Barking -configuration Debug \
+            -destination "platform=iOS Simulator,id=$udid"
+
   release-scripts:
     name: signing and verification scripts
     runs-on: ubuntu-26.04
