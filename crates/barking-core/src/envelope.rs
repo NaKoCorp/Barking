@@ -58,6 +58,9 @@ pub enum Body {
         seed: [u8; 32],
         version: u64,
     },
+    /// Request of one of my devices to leave my account, handled by the
+    /// administrator (`core/remove.rs`), ignored elsewhere. Added last.
+    RemoveMe,
 }
 
 /// State of a contact, replayed on my other devices. Idempotent: the same
@@ -112,6 +115,7 @@ impl fmt::Debug for Body {
                 write!(f, "CardUpdate(version {})", card.devices.version)
             }
             Body::AdminTransfer { .. } => f.write_str("AdminTransfer(<secret>)"),
+            Body::RemoveMe => f.write_str("RemoveMe"),
         }
     }
 }

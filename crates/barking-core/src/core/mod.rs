@@ -19,6 +19,7 @@ mod history;
 mod link;
 mod log_limit;
 mod receive;
+mod remove;
 mod removed;
 mod send;
 mod sync;

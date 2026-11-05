@@ -7,6 +7,10 @@
 //! linking and no second transfer (`AdminTransferPending`). On the ack the
 //! root is erased here and the target remembered as the holder; on expiry
 //! the transfer is cancelled and the root stays.
+//!
+//! `transfer_and_leave` marks the transfer: at its ack, this device asks the
+//! new holder to remove it (`Body::RemoveMe`, `core/remove.rs`). The mark
+//! dies with the transfer (expiry, removal).
 
 use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
@@ -14,9 +18,9 @@ use zeroize::Zeroize;
 
 use super::send::{SealTime, Target, seal_for};
 use super::sync::R_SYNC_REFUSED;
-use super::{Core, META_ROOT, OwnDevices, log};
+use super::{Core, META_ROOT, OwnDevices, log, remove};
 use crate::envelope::Body;
-use crate::identity::{DeviceId, RootIdentity};
+use crate::identity::{DeviceId, DeviceKeys, RootIdentity};
 use crate::packet::PacketId;
 use crate::store::{MessageId, Queries};
 use crate::transparency::{SyncKind, TransparencyEvent};
@@ -26,6 +30,9 @@ use crate::{CoreError, Result};
 const META_ADMIN_TRANSFER: &str = "admin_transfer";
 /// On a former administrator: the device it handed the root key to.
 pub(super) const META_ROOT_HOLDER: &str = "root_holder";
+/// The pending transfer was started by `transfer_and_leave`: its target, to
+/// which `RemoveMe` goes at the ack.
+const META_LEAVE_AFTER_TRANSFER: &str = "leave_after_transfer";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct PendingTransfer {
@@ -46,14 +53,16 @@ pub(super) fn purge_expired(q: &impl Queries, now: u64) -> Result<()> {
     if let Some(p) = q.get_meta::<PendingTransfer>(META_ADMIN_TRANSFER)?
         && now > p.expires_at
     {
-        q.delete_meta(META_ADMIN_TRANSFER)?;
+        forget(q)?;
     }
     Ok(())
 }
 
-/// Erases a pending transfer whatever its state (device removed).
+/// Erases a pending transfer whatever its state (device removed), with its
+/// leave mark.
 pub(super) fn forget(q: &impl Queries) -> Result<()> {
     q.delete_meta(META_ADMIN_TRANSFER)?;
+    q.delete_meta(META_LEAVE_AFTER_TRANSFER)?;
     Ok(())
 }
 
@@ -66,17 +75,25 @@ pub(super) fn ensure_none_pending(q: &impl Queries, now: u64) -> Result<()> {
 }
 
 /// Ack of `acked`: if it is the pending transfer's packet, the root is
-/// erased and the target recorded as the holder. Returns `true` then. To be
-/// called in the ack's transaction.
-pub(super) fn on_ack(q: &impl Queries, acked: PacketId, now: u64) -> Result<bool> {
+/// erased and the target recorded as the holder; a transfer started by
+/// `transfer_and_leave` then seals `RemoveMe` to the target. Returns `true`
+/// then. To be called in the ack's transaction.
+pub(super) fn on_ack(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    acked: PacketId,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<bool> {
     let Some(p) = q.get_meta::<PendingTransfer>(META_ADMIN_TRANSFER)? else {
         return Ok(false);
     };
     if p.packet != acked {
         return Ok(false);
     }
+    let leave = q.get_meta::<DeviceId>(META_LEAVE_AFTER_TRANSFER)? == Some(p.target);
     q.delete_meta(META_ROOT)?;
-    q.delete_meta(META_ADMIN_TRANSFER)?;
+    forget(q)?;
     q.put_meta(META_ROOT_HOLDER, &p.target)?;
     log(
         q,
@@ -84,6 +101,9 @@ pub(super) fn on_ack(q: &impl Queries, acked: PacketId, now: u64) -> Result<bool
         Some(acked),
         &TransparencyEvent::AdminTransferred { device: p.target },
     )?;
+    if leave {
+        remove::send_remove_me(q, device, &Target::OwnDevice(p.target), now, rng)?;
+    }
     Ok(true)
 }
 
@@ -120,6 +140,31 @@ impl Core {
     pub fn transfer_admin(
         &mut self,
         target: DeviceId,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<()> {
+        self.start_transfer(target, false, now, rng)
+    }
+
+    /// `transfer_admin` to `to`, then, at its ack, `RemoveMe` sent to `to`
+    /// (become administrator) so that it removes this device; `leave_ready`
+    /// says when the app may wipe. If the transfer expires, nothing is sent
+    /// and the root stays here. Same refusals as `transfer_admin`.
+    pub fn transfer_and_leave(
+        &mut self,
+        to: DeviceId,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<()> {
+        self.start_transfer(to, true, now, rng)
+    }
+
+    /// The transfer itself; with `leave`, marked for `transfer_and_leave` in
+    /// the same transaction.
+    fn start_transfer(
+        &mut self,
+        target: DeviceId,
+        leave: bool,
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<()> {
@@ -171,6 +216,11 @@ impl Core {
                     expires_at: u64::from(packet.expires_at),
                 },
             )?;
+            if leave {
+                tx.put_meta(META_LEAVE_AFTER_TRANSFER, &target)?;
+            } else {
+                tx.delete_meta(META_LEAVE_AFTER_TRANSFER)?;
+            }
             log(
                 tx,
                 now,

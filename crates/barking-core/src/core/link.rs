@@ -419,6 +419,22 @@ pub(super) fn pending_root(q: &impl Queries) -> Result<Option<RootPublic>> {
         .map(|p| p.root))
 }
 
+/// My card for a new device list (`link_device`, `remove_device`):
+/// `devices` and `bundles` signed by `root`, with my recorded display name
+/// (`contact_card`, `set_display_name`) and node hints.
+pub(super) fn rebuild_card(
+    q: &impl Queries,
+    root: &RootIdentity,
+    devices: &DeviceList,
+    bundles: Vec<PrekeyBundle>,
+) -> Result<ContactCard> {
+    let display_name = q.get_meta::<String>(META_DISPLAY_NAME)?.unwrap_or_default();
+    let nodes = q
+        .get_meta::<Vec<Vec<u8>>>(super::META_CARD_NODES)?
+        .unwrap_or_default();
+    ContactCard::sign(root, &display_name, devices.clone(), bundles, nodes)
+}
+
 impl Core {
     /// Refuses the operation while this device awaits the end of its link.
     pub(super) fn ensure_linked(&self) -> Result<()> {
@@ -617,20 +633,7 @@ impl Core {
             .filter(|b| b.device != device)
             .cloned()
             .collect();
-        // My recorded display name (`contact_card`, `set_display_name`).
-        let display_name = self
-            .store
-            .get_meta::<String>(META_DISPLAY_NAME)?
-            .unwrap_or_default();
-        let card = ContactCard::sign(
-            root,
-            &display_name,
-            devices.clone(),
-            bundles,
-            self.store
-                .get_meta::<Vec<Vec<u8>>>(super::META_CARD_NODES)?
-                .unwrap_or_default(),
-        )?;
+        let card = rebuild_card(&self.store, root, &devices, bundles)?;
         let contacts = self
             .store
             .list_contacts()?

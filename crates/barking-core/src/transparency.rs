@@ -133,8 +133,20 @@ pub enum TransparencyEvent {
     AdminReceived,
     /// A newer device list signed by my root no longer contains this device:
     /// it is removed from my account, its root key (if any) erased. Added last.
-    DeviceRemoved {
+    ThisDeviceRemoved {
         version: u64,
+    },
+    /// Administrator side: my device `device` (`name`) was removed from my
+    /// list, which went to my devices and contacts. Added last.
+    DeviceRemoved {
+        device: DeviceId,
+        name: String,
+    },
+    /// Administrator side: my device `device` (`name`) asked to leave my
+    /// account (`RemoveMe`) and was removed. Added last.
+    RemoveRequested {
+        device: DeviceId,
+        name: String,
     },
 }
 
@@ -211,7 +223,9 @@ impl TransparencyEvent {
                 | Self::OwnDevicesUpdated { .. }
                 | Self::AdminTransferred { .. }
                 | Self::AdminReceived
+                | Self::ThisDeviceRemoved { .. }
                 | Self::DeviceRemoved { .. }
+                | Self::RemoveRequested { .. }
         )
     }
 
@@ -404,10 +418,21 @@ impl TransparencyEvent {
             Self::AdminReceived => "This device is now the administrator: it received the \
                  root key from another of your devices."
                 .to_owned(),
-            Self::DeviceRemoved { version } => format!(
+            Self::ThisDeviceRemoved { version } => format!(
                 "This device was removed from your account by a newer device list \
                  (version {version}), for example after a recovery from the 24 words. \
                  It can no longer send; its root key, if it had one, was erased."
+            ),
+            Self::DeviceRemoved { device, name } => format!(
+                "Your device \"{name}\" ({}) was removed from your account: your other \
+                 devices and your contacts received the new device list and no \
+                 longer encrypt anything for it.",
+                hex(&device.0[..4])
+            ),
+            Self::RemoveRequested { device, name } => format!(
+                "Your device \"{name}\" ({}) asked to leave your account; it was \
+                 removed from your device list.",
+                hex(&device.0[..4])
             ),
         }
     }
@@ -582,7 +607,15 @@ mod tests {
                 device: DeviceId([10; 16]),
             },
             TransparencyEvent::AdminReceived,
-            TransparencyEvent::DeviceRemoved { version: 7 },
+            TransparencyEvent::ThisDeviceRemoved { version: 7 },
+            TransparencyEvent::DeviceRemoved {
+                device: DeviceId([11; 16]),
+                name: "iPad".to_owned(),
+            },
+            TransparencyEvent::RemoveRequested {
+                device: DeviceId([12; 16]),
+                name: "iPad".to_owned(),
+            },
         ]
     }
 
@@ -725,7 +758,7 @@ mod tests {
     #[test]
     fn security_class_is_session_key_change_and_link_only() {
         let security: Vec<_> = all().into_iter().filter(|e| e.is_security()).collect();
-        assert_eq!(security.len(), 9);
+        assert_eq!(security.len(), 11);
         assert!(security.iter().all(|e| matches!(
             e,
             TransparencyEvent::SessionEstablished { .. }
@@ -735,7 +768,9 @@ mod tests {
                 | TransparencyEvent::ContactCardUpdated { .. }
                 | TransparencyEvent::AdminTransferred { .. }
                 | TransparencyEvent::AdminReceived
+                | TransparencyEvent::ThisDeviceRemoved { .. }
                 | TransparencyEvent::DeviceRemoved { .. }
+                | TransparencyEvent::RemoveRequested { .. }
                 | TransparencyEvent::OwnDevicesUpdated { .. }
         )));
     }

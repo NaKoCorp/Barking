@@ -1952,7 +1952,7 @@ fn recovery_removes_old_devices() {
         let removed = dev.core.removed().unwrap().unwrap();
         assert_eq!(removed.version, recovered_at);
         assert!(
-            events(&dev.core).contains(&TransparencyEvent::DeviceRemoved {
+            events(&dev.core).contains(&TransparencyEvent::ThisDeviceRemoved {
                 version: recovered_at
             })
         );
@@ -2083,4 +2083,214 @@ fn contacts_other_device_relays_the_removal() {
         "{outcomes:?}"
     );
     assert_eq!(a.core.removed().unwrap().map(|r| r.version), Some(NOW + 10));
+}
+
+/// A (administrator) linked to T, and a contact C that knows A's card
+/// listing both devices.
+fn admin_tablet_contact(d: &Path, rng: &mut StdRng) -> (Dev, Dev, Dev) {
+    let (mut a, mut t) = admin_and_tablet(d, rng);
+    let mut c = create(d, "c", 3, rng);
+    a.core
+        .add_contact(&c.core.contact_card("C").unwrap(), None, NOW, rng)
+        .unwrap();
+    sync_round(&mut a, &mut t, rng);
+    c.core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, rng)
+        .unwrap();
+    (a, t, c)
+}
+
+/// `ContactCardUpdated` events of `core` that removed `n` devices.
+fn card_updates_removing(core: &Core, n: u32) -> usize {
+    events(core)
+        .iter()
+        .filter(
+            |e| matches!(e, TransparencyEvent::ContactCardUpdated { removed, .. } if *removed == n),
+        )
+        .count()
+}
+
+#[test]
+fn admin_removes_linked_device() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(60);
+    let (mut a, mut t, mut c) = admin_tablet_contact(d.path(), &mut rng);
+    let a_fp = a.core.fingerprint();
+    let c_fp = c.core.fingerprint();
+    // Before: C seals for both of my devices.
+    assert_eq!(
+        c.core
+            .send_text(&a_fp, "before", NOW, &mut rng)
+            .unwrap()
+            .len(),
+        2
+    );
+    let t_id = device_id(&a.core, "t");
+
+    let packets = a.core.remove_device(t_id, NOW, &mut rng).unwrap();
+    // `SyncDevices` for T, `CardUpdate` for C.
+    assert_eq!(packets.len(), 2);
+    for p in &packets {
+        c.core.receive(&p.encode(), T, NOW, &mut rng).unwrap();
+        t.core.receive(&p.encode(), T, NOW, &mut rng).unwrap();
+    }
+
+    // C: A's card lists only A, nothing is sealed for T any more.
+    assert_eq!(card_updates_removing(&c.core, 1), 1);
+    assert_eq!(
+        c.core
+            .send_text(&a_fp, "after", NOW, &mut rng)
+            .unwrap()
+            .len(),
+        1
+    );
+    // T learned it at once.
+    assert!(t.core.removed().unwrap().is_some());
+    assert!(matches!(
+        t.core.send_text(&c_fp, "x", NOW, &mut rng),
+        Err(CoreError::DeviceRemoved)
+    ));
+    // A: one device left, the removal logged as a security event.
+    assert_eq!(a.core.my_devices().len(), 1);
+    let removed = TransparencyEvent::DeviceRemoved {
+        device: t_id,
+        name: "t".to_owned(),
+    };
+    assert!(removed.is_security());
+    assert!(events(&a.core).contains(&removed));
+    // Still true after reopening.
+    drop(a.core);
+    a.core = Core::open(&a.path, &a.key, NOW).unwrap();
+    assert_eq!(a.core.my_devices().len(), 1);
+}
+
+#[test]
+fn remove_device_refuses_self_unknown_and_non_admin() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(61);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let a_id = device_id(&a.core, "a");
+    assert!(matches!(
+        a.core.remove_device(a_id, NOW, &mut rng),
+        Err(CoreError::Malformed(_))
+    ));
+    let unknown = barking_core::identity::DeviceId([7; 16]);
+    assert!(matches!(
+        a.core.remove_device(unknown, NOW, &mut rng),
+        Err(CoreError::Malformed(_))
+    ));
+    assert!(matches!(
+        t.core.remove_device(a_id, NOW, &mut rng),
+        Err(CoreError::NotAdmin)
+    ));
+    assert_eq!(a.core.my_devices().len(), 2);
+    assert_eq!(t.core.my_devices().len(), 2);
+}
+
+#[test]
+fn linked_device_leaves() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(62);
+    let (mut a, mut t, mut c) = admin_tablet_contact(d.path(), &mut rng);
+    let t_id = device_id(&a.core, "t");
+    assert!(!t.core.leave_ready().unwrap());
+
+    let packets = t.core.leave(NOW, &mut rng).unwrap();
+    assert_eq!(packets.len(), 1);
+    assert!(t.core.leave_ready().unwrap());
+
+    let outcome = a
+        .core
+        .receive(&packets[0].encode(), T, NOW, &mut rng)
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ReceiveOutcome::Synced {
+            kind: SyncKind::Devices
+        }
+    ));
+    assert_eq!(a.core.my_devices().len(), 1);
+    assert!(
+        events(&a.core).contains(&TransparencyEvent::RemoveRequested {
+            device: t_id,
+            name: "t".to_owned(),
+        })
+    );
+    // A replayed request changes nothing (T's session is gone).
+    assert!(matches!(
+        a.core
+            .receive(&packets[0].encode(), T, NOW, &mut rng)
+            .unwrap(),
+        ReceiveOutcome::Duplicate | ReceiveOutcome::NotForUs
+    ));
+    assert_eq!(a.core.my_devices().len(), 1);
+    // C then gets the new card; T learns its removal.
+    drain(&mut a, &mut c, &mut rng);
+    assert_eq!(card_updates_removing(&c.core, 1), 1);
+    drain(&mut a, &mut t, &mut rng);
+    assert!(t.core.removed().unwrap().is_some());
+
+    assert!(matches!(
+        a.core.leave(NOW, &mut rng),
+        Err(CoreError::IsAdmin)
+    ));
+}
+
+#[test]
+fn admin_transfer_and_leave() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(63);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let a_id = device_id(&a.core, "a");
+    let t_id = device_id(&a.core, "t");
+
+    a.core.transfer_and_leave(t_id, NOW, &mut rng).unwrap();
+    assert!(!a.core.leave_ready().unwrap());
+    // T receives the root and acks: A sends `RemoveMe` at the ack.
+    assert_eq!(sync_round(&mut a, &mut t, &mut rng), vec![SyncKind::Admin]);
+    assert!(admins(&a.core).iter().all(|n| n == "t"));
+    assert!(a.core.leave_ready().unwrap());
+    // T, now administrator, removes A.
+    assert_eq!(
+        sync_round(&mut a, &mut t, &mut rng),
+        vec![SyncKind::Devices]
+    );
+    let names: Vec<String> = t.core.my_devices().into_iter().map(|d| d.name).collect();
+    assert_eq!(names, vec!["t".to_owned()]);
+    assert!(
+        events(&t.core).contains(&TransparencyEvent::RemoveRequested {
+            device: a_id,
+            name: "a".to_owned(),
+        })
+    );
+    drain(&mut t, &mut a, &mut rng);
+    assert!(a.core.removed().unwrap().is_some());
+    assert!(a.core.leave_ready().unwrap());
+}
+
+#[test]
+fn transfer_and_leave_keeps_root_when_transfer_expires() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(64);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let t_id = device_id(&a.core, "t");
+    a.core.transfer_and_leave(t_id, NOW, &mut rng).unwrap();
+    // Never delivered; purged after expiry.
+    let later = NOW + 8 * 86_400;
+    assert!(a.core.pending_outbox(later).unwrap().is_empty());
+    assert_eq!(admins(&a.core), vec!["a".to_owned()]);
+    assert!(!a.core.leave_ready().unwrap());
+    assert_eq!(a.core.my_devices().len(), 2);
+
+    // The leave died with the transfer: a later plain transfer stays one.
+    a.core.transfer_admin(t_id, later, &mut rng).unwrap();
+    for bytes in a.core.pending_outbox(later).unwrap() {
+        t.core.receive(&bytes, T, later, &mut rng).unwrap();
+    }
+    for bytes in t.core.pending_outbox(later).unwrap() {
+        a.core.receive(&bytes, T, later, &mut rng).unwrap();
+    }
+    assert_eq!(admins(&t.core), vec!["t".to_owned()]);
+    assert!(!a.core.leave_ready().unwrap());
+    assert!(a.core.pending_outbox(later).unwrap().is_empty());
 }

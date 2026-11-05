@@ -1,6 +1,6 @@
 //! Removal of this device from my account: a newer device list, signed by
 //! my root, that no longer contains it (a recovery from the 24 words on
-//! another device, or a future revocation).
+//! another device, or a removal by the administrator, `remove.rs`).
 //!
 //! It arrives through one of my devices (`SyncDevices`) or relayed by a
 //! contact that dropped this device (`CardUpdate` carrying my own root).
@@ -83,7 +83,7 @@ pub(super) fn enter(
         q,
         now,
         None,
-        &TransparencyEvent::DeviceRemoved {
+        &TransparencyEvent::ThisDeviceRemoved {
             version: card.devices.version,
         },
     )?;

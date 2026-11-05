@@ -41,6 +41,10 @@ pub enum CoreError {
     /// device: it can only receive and read.
     #[error("this device was removed from the account")]
     DeviceRemoved,
+    /// The administrator cannot leave on its own: it hands the root key to
+    /// another device first (`transfer_and_leave`).
+    #[error("this device is the administrator")]
+    IsAdmin,
 }
 
 impl From<barking_packet::PacketError> for CoreError {

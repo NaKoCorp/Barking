@@ -7,14 +7,14 @@ use zeroize::Zeroizing;
 use super::log_limit::{LogLimiter, log_limited};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
-    SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, removed, ser_state, session_ad,
-    session_id, sync,
+    SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, remove, removed, ser_state,
+    session_ad, session_id, sync,
 };
 use crate::contact::ContactCard;
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
-use crate::identity::{DeviceKeys, DeviceList, DevicePublic, Fingerprint};
+use crate::identity::{DeviceKeys, DeviceList, DevicePublic, Fingerprint, RootIdentity};
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{Kind, Packet, PacketId, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
@@ -71,7 +71,7 @@ impl Core {
             return Ok(ReceiveOutcome::Expired);
         }
         match packet.kind {
-            Kind::Ack => self.receive_ack(&packet, now),
+            Kind::Ack => self.receive_ack(&packet, now, rng),
             Kind::Message => {
                 let outcome = self.receive_message(&packet, transport, now, rng)?;
                 match outcome {
@@ -93,7 +93,12 @@ impl Core {
         }
     }
 
-    fn receive_ack(&mut self, packet: &Packet, now: u64) -> Result<ReceiveOutcome> {
+    fn receive_ack(
+        &mut self,
+        packet: &Packet,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<ReceiveOutcome> {
         // Ack payload: exactly `acked.id(16) || secret(16)`.
         let Ok(payload) = <&[u8; 32]>::try_from(packet.payload.as_slice()) else {
             return Ok(ReceiveOutcome::NotForUs);
@@ -107,7 +112,10 @@ impl Core {
             return Ok(ReceiveOutcome::NotForUs);
         }
         let Core {
-            store, log_limiter, ..
+            store,
+            device,
+            log_limiter,
+            ..
         } = self;
         let (outcome, transferred) = store.transaction(|tx| {
             // A delivery is always one of my sent packets: a
@@ -141,8 +149,9 @@ impl Core {
                 Some(acked),
                 &TransparencyEvent::AckVerified { for_packet: acked },
             )?;
-            // Ack of an admin transfer: the root leaves this device.
-            let transferred = admin::on_ack(tx, acked, now)?;
+            // Ack of an admin transfer: the root leaves this device (and
+            // `RemoveMe` follows after `transfer_and_leave`).
+            let transferred = admin::on_ack(tx, device, acked, now, rng)?;
             Ok((
                 ReceiveOutcome::AckReceived { packet_id: acked },
                 transferred,
@@ -166,6 +175,7 @@ impl Core {
             store,
             device,
             prekeys,
+            root,
             log_limiter,
             ..
         } = self;
@@ -226,6 +236,7 @@ impl Core {
                     packet,
                     o,
                     device,
+                    root.as_ref().map(|r| (r, &*prekeys)),
                     &my_fp,
                     transport,
                     now,
@@ -461,6 +472,7 @@ fn accept(
     packet: &Packet,
     o: Opened,
     device: &DeviceKeys,
+    admin: Option<(&RootIdentity, &PrekeySecrets)>,
     my_fp: &Fingerprint,
     transport: &str,
     now: u64,
@@ -502,7 +514,9 @@ fn accept(
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
         }
-        (_, true) => return accept_sync(q, limiter, packet, o, &env, device, my_fp, now, rng),
+        (_, true) => {
+            return accept_sync(q, limiter, packet, o, &env, device, admin, my_fp, now, rng);
+        }
     };
     let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
     // Before `insert_message` (unique packet identifier).
@@ -674,7 +688,9 @@ fn accept_own_card(
 /// Authenticated synchronization coming from one of my devices: applied with
 /// the checks of the local operation (refusal: quarantine, ratchet kept),
 /// only once per envelope identifier (`inbound` table, identifier
-/// derived from my fingerprint). Acked like a message.
+/// derived from my fingerprint). Acked like a message. `RemoveMe` is
+/// handled once the session is written, so that the removed sender's
+/// `SyncDevices` is sealed on its current state (`remove.rs`).
 #[allow(clippy::too_many_arguments)]
 fn accept_sync(
     q: &impl Queries,
@@ -683,6 +699,7 @@ fn accept_sync(
     o: Opened,
     env: &Envelope,
     device: &DeviceKeys,
+    admin: Option<(&RootIdentity, &PrekeySecrets)>,
     my_fp: &Fingerprint,
     now: u64,
     rng: &mut impl CryptoRng,
@@ -702,7 +719,8 @@ fn accept_sync(
     let sync_id = MessageId::incoming(my_fp, &env.message_id);
     // My list before applying, to log its change.
     let before = OwnDevices::read(q)?.map(|own| own.list);
-    let kind = if q.inbound_has_message(sync_id)? {
+    let already = q.inbound_has_message(sync_id)?;
+    let mut kind = if already {
         None
     } else {
         match sync::apply(q, device, o.row.contact_device, env, now, rng)? {
@@ -713,7 +731,14 @@ fn accept_sync(
             }
         }
     };
+    let sender = o.row.contact_device;
     let (_, new_prekeys, _) = commit_session(q, o, now)?;
+    if !already
+        && env.body == Body::RemoveMe
+        && remove::on_remove_me(q, device, admin, sender, Some(packet.id), now, rng)?
+    {
+        kind = Some(SyncKind::Devices);
+    }
     let mut devices_change = None;
     if kind == Some(SyncKind::Devices) {
         // The new list may remove the sending device: its session,

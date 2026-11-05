@@ -293,6 +293,8 @@ pub(super) fn apply(
     match &env.body {
         Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
         Body::AdminTransfer { seed, version } => super::admin::apply(q, seed, *version),
+        // Handled by the receiver once the session is written (`remove.rs`).
+        Body::RemoveMe => Ok(Ok(None)),
         Body::SyncSent { to, text } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
             if *to == own.list.root.fingerprint() {
