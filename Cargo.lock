@@ -297,6 +297,7 @@ dependencies = [
  "barking-net",
  "barking-node",
  "barking-proto",
+ "bip39",
  "libc",
  "rand",
  "tempfile",

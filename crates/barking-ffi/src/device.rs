@@ -45,12 +45,16 @@ pub struct Contact {
 
 #[derive(Debug, uniffi::Record)]
 pub struct Message {
+    /// Stable, increasing: retries and unread marks refer to it.
+    pub id: i64,
     pub outgoing: bool,
     pub body: String,
     /// `queued`, `sent`, `delivered` or `failed`.
     pub status: String,
     /// Unix time, in seconds.
     pub at: u64,
+    /// Expired before its ack: can be sent again.
+    pub failed: bool,
 }
 
 #[derive(uniffi::Object)]
@@ -106,29 +110,41 @@ impl Device {
         device_name: String,
     ) -> Result<CreatedDevice, BarkingError> {
         guard(move || {
-            let device = Device::new(config)?;
-            let lock = device.lock()?;
-            // Checked under the lock: two creations cannot both pass.
-            if device_exists(device.config.clone()) {
-                return Err(BarkingError::invalid("database already exists"));
-            }
-            let path = PathBuf::from(&device.config.db_path);
-            let created = Core::create(&path, &device.key, &device_name, now(), &mut rand::rng());
-            let (core, phrase) = match created {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&path);
-                    return Err(e.into());
-                }
-            };
-            drop(core);
-            let recovery_phrase = phrase.as_str().to_owned();
-            drop(lock);
+            let mut phrase = String::new();
+            let device = Device::init(config, |path, key| {
+                let (core, p) = Core::create(path, key, &device_name, now(), &mut rand::rng())?;
+                phrase = p.as_str().to_owned();
+                Ok(core)
+            })?;
             Ok(CreatedDevice {
                 device: Arc::new(device),
-                recovery_phrase,
+                recovery_phrase: phrase,
             })
         })
+    }
+
+    /// Creates the database with `make`, under the lock, never over an
+    /// existing one; removes the file if `make` fails.
+    pub(crate) fn init(
+        config: DeviceConfig,
+        make: impl FnOnce(&Path, &[u8; 32]) -> Result<Core, CoreError>,
+    ) -> Result<Device, BarkingError> {
+        let device = Device::new(config)?;
+        let lock = device.lock()?;
+        // Checked under the lock: two creations cannot both pass.
+        if device_exists(device.config.clone()) {
+            return Err(BarkingError::invalid("database already exists"));
+        }
+        let path = PathBuf::from(&device.config.db_path);
+        match make(&path, &device.key) {
+            Ok(core) => drop(core),
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(e.into());
+            }
+        }
+        drop(lock);
+        Ok(device)
     }
 
     pub(crate) fn allow_private(&self) -> bool {
@@ -237,6 +253,8 @@ impl Device {
                     .messages_with(&fp)?
                     .into_iter()
                     .map(|m| Message {
+                        id: m.id,
+                        failed: m.status == MessageStatus::Failed,
                         outgoing: m.direction == Direction::Out,
                         body: m.body,
                         status: status_name(m.status).to_owned(),

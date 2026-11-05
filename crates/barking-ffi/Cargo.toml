@@ -21,6 +21,7 @@ required-features = ["bindgen"]
 barking-core.workspace = true
 barking-net.workspace = true
 barking-proto.workspace = true
+bip39.workspace = true
 libc.workspace = true
 rand.workspace = true
 thiserror.workspace = true

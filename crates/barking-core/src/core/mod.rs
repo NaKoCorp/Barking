@@ -454,6 +454,14 @@ impl Core {
         Ok(out)
     }
 
+    /// My display name: the last one recorded, empty if none.
+    pub fn display_name(&self) -> Result<String> {
+        Ok(self
+            .store
+            .get_meta::<String>(META_DISPLAY_NAME)?
+            .unwrap_or_default())
+    }
+
     /// Changes my display name, carried by the cards the core signs
     /// itself (link packet, card update sent to
     /// contacts). More than 64 bytes: `TooLarge`.
