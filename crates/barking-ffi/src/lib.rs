@@ -6,11 +6,13 @@
 mod device;
 mod error;
 mod lock;
+mod net;
 
 use std::panic::{UnwindSafe, catch_unwind};
 
 pub use device::{Contact, CreatedDevice, Device, DeviceConfig, Message, device_exists};
 pub use error::BarkingError;
+pub use net::{NewMessage, SyncSummary};
 
 uniffi::setup_scaffolding!();
 

@@ -88,6 +88,10 @@ impl Device {
         )
     }
 
+    pub(crate) fn allow_private(&self) -> bool {
+        self.config.allow_private
+    }
+
     /// Runs `f` on the opened core, under the lock. The core is closed before
     /// the lock is released.
     pub(crate) fn with_core<T>(
