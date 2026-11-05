@@ -46,6 +46,9 @@ public enum BenchRun {
                     outcome = "no-key"
                 }
             }
+        } catch is KeyStore.Locked {
+            // Before the first unlock: nothing opened, as without a key.
+            outcome = "no-key"
         } catch BarkingError.Locked {
             outcome = "locked"
         } catch {

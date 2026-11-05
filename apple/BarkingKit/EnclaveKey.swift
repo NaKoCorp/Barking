@@ -5,8 +5,8 @@ import Security
 /// Wraps the database key (spec §7.1): only the wrapped key is stored.
 public protocol KeyWrapper: Sendable {
     func wrap(_ key: Data) throws -> Data
-    /// Throws `KeyStore.WrappingKeyGone` only when the wrapping key is gone
-    /// or does not open `blob`: the data is then unreadable for good.
+    /// Throws `KeyStore.WrappingKeyGone` only when the wrapping key is gone:
+    /// the data is then unreadable for good.
     func unwrap(_ blob: Data) throws -> Data
     /// Deletes the wrapping key; deleting a missing one is not an error.
     func delete() throws
@@ -53,6 +53,7 @@ public struct EnclaveKey: KeyWrapper {
         switch status {
         case errSecSuccess: return (items as? [SecKey]) ?? []
         case errSecItemNotFound: return []
+        case errSecInteractionNotAllowed: throw KeyStore.Locked()
         default: throw KeyStore.Failure(status: status)
         }
     }
@@ -91,9 +92,9 @@ public struct EnclaveKey: KeyWrapper {
         return blob as Data
     }
 
-    /// `KeyStore.WrappingKeyGone` when no key is under the tag or every key
-    /// refuses the blob; any other keychain or enclave error (locked,
-    /// unavailable) as it came: the data may be readable once it passes.
+    /// `KeyStore.WrappingKeyGone` only when no key is under the tag (backup
+    /// restored on another iPhone). With a key there, any error is thrown as
+    /// it came, recognised or not: it may pass, so it never offers an erase.
     public func unwrap(_ blob: Data) throws -> Data {
         try Self.firstOpening(try privateKeys()) { priv in
             var error: Unmanaged<CFError>?
@@ -104,40 +105,16 @@ public struct EnclaveKey: KeyWrapper {
         }
     }
 
-    /// The blob opened by one of `keys`. Throws `WrappingKeyGone` only if
-    /// there is no key, or if every key was tried and refused the blob; a
-    /// key that could not be tried (`isAccessError`) throws its error.
+    /// The blob opened by the first of `keys` that opens it (a concurrent
+    /// migration may have left two). No key: `WrappingKeyGone`; keys that
+    /// all fail: the first error.
     static func firstOpening<K>(_ keys: [K], _ decrypt: (K) throws -> Data) throws -> Data {
-        var access: (any Error)?
+        guard !keys.isEmpty else { throw KeyStore.WrappingKeyGone() }
+        var first: (any Error)?
         for k in keys {
-            do {
-                return try decrypt(k)
-            } catch where isAccessError(error) {
-                access = access ?? error
-            } catch {
-                // This key does not open the blob: try the next one.
-            }
+            do { return try decrypt(k) } catch { first = first ?? error }
         }
-        if let access { throw access }
-        throw KeyStore.WrappingKeyGone()
-    }
-
-    /// The key could not be used now (device locked, enclave or keychain
-    /// unavailable, authentication), as opposed to a blob it does not open.
-    static func isAccessError(_ error: any Error) -> Bool {
-        if let f = error as? KeyStore.Failure { return f.status != errSecDecode }
-        let e = error as NSError
-        switch e.domain {
-        case NSOSStatusErrorDomain:
-            return [errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled, errSecNotAvailable,
-                    errSecMissingEntitlement, errSecNoAccessForItem, errSecIO]
-                .contains(OSStatus(e.code))
-        case "CryptoTokenKit", "com.apple.LocalAuthentication":
-            // Token or authentication trouble: never proof the data is unreadable.
-            return true
-        default:
-            return false
-        }
+        throw first!
     }
 
     public func delete() throws {
@@ -178,11 +155,10 @@ struct SoftwareKey: KeyWrapper {
         return blob
     }
 
+    /// `WrappingKeyGone` without a key, as the enclave; any other error as it came.
     func unwrap(_ blob: Data) throws -> Data {
-        guard let k = box.lock.withLock({ box.key }),
-              let key = try? AES.GCM.open(AES.GCM.SealedBox(combined: blob), using: k)
-        else { throw KeyStore.WrappingKeyGone() }
-        return key
+        guard let k = box.lock.withLock({ box.key }) else { throw KeyStore.WrappingKeyGone() }
+        return try AES.GCM.open(AES.GCM.SealedBox(combined: blob), using: k)
     }
 
     func delete() throws { box.lock.withLock { box.key = nil } }

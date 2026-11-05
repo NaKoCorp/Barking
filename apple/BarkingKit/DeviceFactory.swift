@@ -60,7 +60,7 @@ public enum DeviceFactory {
 
     /// The existing identity without opening it (no lock, nothing read): the
     /// extension spends its lock wait on the quick sync only. `nil` without a
-    /// key (before the first unlock) or a database. Creates nothing.
+    /// key or a database; `KeyStore.Locked` before the first unlock. Creates nothing.
     /// `keyRead` runs once the key is read and unwrapped (the bench times it).
     public static func existing(lockTimeoutMs: UInt64, paths: WipePaths = .live,
                                 keyRead: () -> Void = {}) throws -> Device? {

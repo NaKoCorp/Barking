@@ -3,7 +3,7 @@ import Security
 
 /// Keychain items by account: the `KeyStore`'s storage.
 public protocol KeyEntries: Sendable {
-    /// `nil` if missing or not readable yet (before the first unlock).
+    /// `nil` if missing; `KeyStore.Locked` before the first unlock.
     func get(_ account: String) throws -> Data?
     /// Fails with `errSecDuplicateItem` if the item exists.
     func add(_ account: String, _ value: Data) throws
@@ -34,9 +34,14 @@ struct KeychainEntries: KeyEntries {
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         let status = SecItemCopyMatching(q as CFDictionary, &item)
+        return try Self.result(status: status, item: item)
+    }
+
+    static func result(status: OSStatus, item: CFTypeRef?) throws -> Data? {
         switch status {
         case errSecSuccess: return item as? Data
-        case errSecItemNotFound, errSecInteractionNotAllowed: return nil
+        case errSecItemNotFound: return nil
+        case errSecInteractionNotAllowed: throw KeyStore.Locked()
         default: throw KeyStore.Failure(status: status)
         }
     }
@@ -66,9 +71,12 @@ public struct KeyStore: Sendable {
     /// `db-key-wrapped` exists but does not unwrap (enclave key missing:
     /// backup restored on another iPhone). Nothing is overwritten.
     public struct Unavailable: Error {}
-    /// From a `KeyWrapper`: no wrapping key, or none opens the blob. The
-    /// only unwrap failure that makes the data unreadable for good.
+    /// From a `KeyWrapper`: no wrapping key at all. The only unwrap failure
+    /// that makes the data unreadable for good.
     public struct WrappingKeyGone: Error {}
+    /// The keychain refuses reads before the first unlock after a reboot:
+    /// not "no key". The app retries once unlocked; nothing is opened.
+    public struct Locked: Error {}
 
     static let legacyAccount = "db-key"
     static let wrappedAccount = "db-key-wrapped"
@@ -92,12 +100,11 @@ public struct KeyStore: Sendable {
         return "secure-enclave"
     }
 
-    /// The key in clear; `nil` if it is missing or the keychain is not
-    /// available yet (before the first unlock after a reboot). Creates
-    /// nothing but the wrapped copy of a clear key. `Unavailable` only when
-    /// the wrapping key is gone or opens nothing (`WrappingKeyGone`): that
-    /// offers to erase. Any other unwrap error (locked, keychain, enclave)
-    /// is thrown as it came, for the retry screen.
+    /// The key in clear; `nil` only when there is no key at all. `Locked`
+    /// before the first unlock after a reboot. Creates nothing but the
+    /// wrapped copy of a clear key. `Unavailable` only when the wrapping key
+    /// is gone (`WrappingKeyGone`): that offers to erase. Any other unwrap
+    /// error is thrown as it came, for the retry screen.
     public func read() throws -> Data? {
         // Clear key first: a migration writes the wrapped key before deleting
         // the clear one, so a reader in between still finds one of them.

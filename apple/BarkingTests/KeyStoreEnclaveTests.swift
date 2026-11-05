@@ -11,7 +11,13 @@ final class MemoryEntries: KeyEntries, @unchecked Sendable {
         set { lock.withLock { items[account] = newValue } }
     }
 
-    func get(_ account: String) throws -> Data? { self[account] }
+    /// Before the first unlock: every read refuses.
+    var locked = false
+
+    func get(_ account: String) throws -> Data? {
+        if lock.withLock({ locked }) { throw KeyStore.Locked() }
+        return self[account]
+    }
 
     func add(_ account: String, _ value: Data) throws {
         try lock.withLock {
@@ -213,26 +219,52 @@ final class UnwrapFailureTests: XCTestCase {
         XCTAssertThrowsError(try s.read()) { XCTAssertTrue($0 is KeyStore.Unavailable) }
     }
 
-    /// The enclave's decision over its keys: none, some that cannot be
-    /// tried right now, or all tried and none opens the blob.
-    func testEnclaveTellsGoneFromInaccessible() {
-        let decryptFailed = NSError(domain: NSOSStatusErrorDomain, code: Int(errSecDecode))
-        let locked = NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed))
-        let tokenAuth = NSError(domain: "CryptoTokenKit", code: -9)
+    /// Fix round 3 ruling: with a key under the tag, no error is proof the
+    /// data is unreadable, however it looks.
+    func testUnknownEnclaveErrorIsNotUnavailable() throws {
+        let s = try store(throwing: NSError(domain: NSOSStatusErrorDomain, code: -2070))
+        XCTAssertThrowsError(try s.read()) { XCTAssertFalse($0 is KeyStore.Unavailable) }
+    }
 
+    func testDecryptLookingErrorIsNotUnavailable() throws {
+        let s = try store(throwing: NSError(domain: NSOSStatusErrorDomain, code: Int(errSecDecode)))
+        XCTAssertThrowsError(try s.read()) { XCTAssertFalse($0 is KeyStore.Unavailable) }
+    }
+
+    /// The enclave says "gone" only without any key under the tag.
+    func testEnclaveGoneOnlyWithoutKeys() {
+        let decryptFailed = NSError(domain: NSOSStatusErrorDomain, code: Int(errSecDecode))
         XCTAssertThrowsError(try EnclaveKey.firstOpening([Int](), { _ in Data() })) {
             XCTAssertTrue($0 is KeyStore.WrappingKeyGone)
         }
-        XCTAssertThrowsError(try EnclaveKey.firstOpening([1, 2], { _ in throw decryptFailed })) {
+        XCTAssertThrowsError(try EnclaveKey.firstOpening([1, 2], { _ in try self.fail(decryptFailed) })) {
+            XCTAssertFalse($0 is KeyStore.WrappingKeyGone)
+        }
+        XCTAssertEqual(try EnclaveKey.firstOpening([1, 2], { $0 == 1 ? try self.fail(decryptFailed) : Data([9]) }),
+                       Data([9]))
+    }
+
+    /// A software key that is there but refuses the blob is not "gone" either.
+    func testSoftwareKeyRefusingTheBlobIsNotGone() throws {
+        let key = SoftwareKey()
+        _ = try key.wrap(Data([1]))
+        XCTAssertThrowsError(try key.unwrap(Data(repeating: 0, count: 40))) {
+            XCTAssertFalse($0 is KeyStore.WrappingKeyGone)
+        }
+        try key.delete()
+        XCTAssertThrowsError(try key.unwrap(Data(repeating: 0, count: 40))) {
             XCTAssertTrue($0 is KeyStore.WrappingKeyGone)
         }
-        XCTAssertThrowsError(try EnclaveKey.firstOpening([1, 2], { try fail($0 == 1 ? locked : decryptFailed) })) {
-            XCTAssertFalse($0 is KeyStore.WrappingKeyGone)
+    }
+
+    /// Before the first unlock the keychain answers "interaction not
+    /// allowed": that is not "no key" (item 2).
+    func testKeychainLockedIsNotMissing() {
+        XCTAssertThrowsError(try KeychainEntries.result(status: errSecInteractionNotAllowed, item: nil)) {
+            XCTAssertTrue($0 is KeyStore.Locked)
         }
-        XCTAssertThrowsError(try EnclaveKey.firstOpening([1], { _ in throw tokenAuth })) {
-            XCTAssertFalse($0 is KeyStore.WrappingKeyGone)
-        }
-        XCTAssertEqual(try EnclaveKey.firstOpening([1, 2], { $0 == 1 ? try fail(decryptFailed) : Data([9]) }), Data([9]))
+        XCTAssertNil(try KeychainEntries.result(status: errSecItemNotFound, item: nil))
+        XCTAssertEqual(try KeychainEntries.result(status: errSecSuccess, item: Data([1]) as CFData), Data([1]))
     }
 }
 
