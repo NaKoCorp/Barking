@@ -1,0 +1,32 @@
+[package]
+name = "barking-ffi"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib", "lib"]
+
+[features]
+# Bindings generator (`uniffi-bindgen` binary), used by
+# scripts/build-xcframework.sh only.
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+required-features = ["bindgen"]
+
+[dependencies]
+barking-core.workspace = true
+barking-net.workspace = true
+barking-proto.workspace = true
+libc.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "net"] }
+uniffi.workspace = true
+
+[dev-dependencies]
+barking-node = { workspace = true, features = ["test-harness"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
