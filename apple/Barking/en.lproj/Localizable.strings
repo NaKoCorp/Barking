@@ -1,0 +1,2 @@
+/* Text of every push (spec iOS push §4); the extension replaces it when it can. */
+"NEW_MESSAGE" = "New message";

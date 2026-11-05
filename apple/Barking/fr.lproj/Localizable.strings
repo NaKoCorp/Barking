@@ -1,0 +1,2 @@
+/* Texte de chaque push (spec push iOS §4) ; l’extension le remplace quand elle peut. */
+"NEW_MESSAGE" = "Nouveau message";

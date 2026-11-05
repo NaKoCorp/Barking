@@ -20,8 +20,27 @@ final class DevModel {
         await attempt("open") {
             guard let d = try DeviceFactory.openExisting(lockTimeoutMs: 10_000) else { return }
             self.device = d
+            try await self.scriptedSetup(d)
             try await self.refresh()
         }
+    }
+
+    /// Scripted end-to-end checks in the simulator (keyboard input is
+    /// unreliable there): `simctl launch … -BarkingDevNode <id>@<ip:port>
+    /// -BarkingDevContact <alias>=<card>`. Writes this device's card to
+    /// `dev-card.txt` in the shared container for the other side.
+    private func scriptedSetup(_ d: Device) async throws {
+        let defaults = UserDefaults.standard
+        if let node = defaults.string(forKey: "BarkingDevNode"), let at = node.firstIndex(of: "@") {
+            let id = String(node[..<at]), addr = String(node[node.index(after: at)...])
+            try await DeviceCall.run("node") { try d.addNode(id: id, addr: addr) }
+        }
+        if let contact = defaults.string(forKey: "BarkingDevContact"), let eq = contact.firstIndex(of: "=") {
+            let alias = String(contact[..<eq]), card = String(contact[contact.index(after: eq)...])
+            _ = try await DeviceCall.run("add") { try d.addContact(card: card, alias: alias) }
+        }
+        let card = try await DeviceCall.run("card") { try d.contactCard(displayName: "iPhone") }
+        try Data(card.utf8).write(to: SharedPaths.container.appending(path: "dev-card.txt"))
     }
 
     func create(name: String) async {
@@ -55,15 +74,31 @@ final class DevModel {
     }
 
     func importCard(from url: URL, alias: String) async {
-        guard let d = device else { return }
         await attempt("import") {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let card = try String(contentsOf: url, encoding: .utf8)
-            let a = alias.isEmpty ? nil : alias
-            _ = try await DeviceCall.run("add") { try d.addContact(card: card, alias: a) }
-            try await self.refresh()
+            try await self.addCard(String(contentsOf: url, encoding: .utf8), alias: alias)
         }
+    }
+
+    /// Cards through the clipboard (simulator: `xcrun simctl pbcopy`).
+    func importCardFromClipboard(alias: String) async {
+        await attempt("paste") { try await self.addCard(UIPasteboard.general.string ?? "", alias: alias) }
+    }
+
+    func copyCard(displayName: String) async {
+        guard let d = device else { return }
+        await attempt("copy") {
+            UIPasteboard.general.string = try await DeviceCall.run("card") { try d.contactCard(displayName: displayName) }
+            self.status = "card copied"
+        }
+    }
+
+    private func addCard(_ card: String, alias: String) async throws {
+        guard let d = device else { return }
+        let a = alias.isEmpty ? nil : alias
+        _ = try await DeviceCall.run("add") { try d.addContact(card: card, alias: a) }
+        try await refresh()
     }
 
     func addNode(id: String, addr: String) async {
@@ -124,6 +159,8 @@ struct DevView: View {
                         else { Button("Prepare my card") { Task { card = await model.cardFile(displayName: name) } } }
                         TextField("Alias for the imported contact", text: $alias)
                         Button("Import a card") { importing = true }
+                        Button("Copy my card") { Task { await model.copyCard(displayName: name) } }
+                        Button("Import a card from the clipboard") { Task { await model.importCardFromClipboard(alias: alias) } }
                     }
                     Section("Node") {
                         TextField("Identifier", text: $nodeId).autocorrectionDisabled()
@@ -165,9 +202,36 @@ struct DevView: View {
     }
 }
 
-/// Filled by the bench work (spec §6.2).
+/// The extension's work run on demand in the app (spec §6.2), and the
+/// records the extension left.
 struct BenchSection: View {
     let device: Device?
-    var body: some View { Text("Bench: not available yet") }
+    @State private var records: [BenchRecord] = []
+    @State private var running = false
+
+    var body: some View {
+        Button(running ? "Running…" : "Run bench") {
+            running = true
+            Task {
+                _ = try? await DeviceCall.run("bench") {
+                    let (r, _) = BenchRun.run(source: "app", deadlineMs: 20_000, lockTimeoutMs: 10_000)
+                    var record = r
+                    if record.outcome.isEmpty { record.outcome = "fetched" }
+                    try BenchStore.shared().append(record)
+                }
+                reload()
+                running = false
+            }
+        }
+        .disabled(running)
+        Button("Reload records") { reload() }
+        ForEach(Array(records.reversed().enumerated()), id: \.offset) { _, r in
+            Text("\(r.source) \(r.outcome): peak \(String(format: "%.1f", Double(r.peakBytes) / 1_048_576)) MB, \(r.totalMs) ms")
+                .font(.caption.monospaced())
+        }
+        .onAppear { reload() }
+    }
+
+    private func reload() { records = (try? BenchStore.shared().all()) ?? [] }
 }
 #endif

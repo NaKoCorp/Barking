@@ -1,0 +1,4 @@
+{
+  "Simulator Target Bundle": "com.nakocorp.barking",
+  "aps": {"alert": {"loc-key": "NEW_MESSAGE"}, "mutable-content": 1, "sound": "default"}
+}
