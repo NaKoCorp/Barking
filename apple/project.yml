@@ -42,6 +42,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         # The generated bindings predate strict concurrency checks.
         SWIFT_STRICT_CONCURRENCY: minimal
+        # Linked into the notification extension.
+        APPLICATION_EXTENSION_API_ONLY: YES
 
   Barking:
     type: application
