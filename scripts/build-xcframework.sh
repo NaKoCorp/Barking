@@ -24,6 +24,10 @@ done
 # Cargo puts the dev profile in target/<triple>/debug.
 outdir="$profile"; [ "$profile" = "dev" ] && outdir="debug"
 
+# Same floor as apple/project.yml, for rustc and for the C code (SQLCipher,
+# OpenSSL) built by the cc crate: otherwise the SDK default applies.
+export IPHONEOS_DEPLOYMENT_TARGET=26.0
+
 cd "$root"
 out="$root/target/apple"
 rustup target add "${targets[@]}" >/dev/null

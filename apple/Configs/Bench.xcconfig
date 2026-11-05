@@ -1,0 +1,4 @@
+// Bench: optimized like Release (Rust release-apple), with the development
+// screen and private node addresses. Measurements run here (spec §6).
+#include? "../Local.xcconfig"
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) BARKING_DEV
