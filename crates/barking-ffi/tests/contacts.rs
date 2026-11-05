@@ -104,3 +104,21 @@ fn messages_have_ids() {
     assert!(m[0].id < m[1].id);
     assert!(!m[0].failed);
 }
+
+#[test]
+fn chat_summaries_in_one_call() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let alice = device(&da, 1, "Alice");
+    let bob = device(&db, 2, "Bob");
+    let fb = alice
+        .add_contact_bytes(bob.contact_card_bytes().unwrap(), Some("bob".into()))
+        .unwrap();
+    alice.send_text(fb.clone(), "first".into()).unwrap();
+    alice.send_text(fb.clone(), "last".into()).unwrap();
+    let s = alice.chat_summaries().unwrap();
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].contact.fingerprint, fb);
+    let last = s[0].last.as_ref().unwrap();
+    assert_eq!((last.body.as_str(), last.outgoing), ("last", true));
+    assert_eq!(s[0].unread, 0);
+}

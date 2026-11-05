@@ -51,7 +51,7 @@ final class NetworkModel {
 
     func addRelay(id: String, addr: String) async -> Bool {
         guard let r = Self.validRelay(id: id, addr: addr) else {
-            addError = String(localized: "Check the identifier (52 characters) and the address (ip:port).")
+            addError = "Check the identifier (52 characters) and the address (ip:port)."
             return false
         }
         do {
@@ -60,7 +60,7 @@ final class NetworkModel {
             await load()
             return true
         } catch {
-            addError = String(localized: "This relay could not be added.")
+            addError = "This relay could not be added."
             return false
         }
     }

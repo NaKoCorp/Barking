@@ -169,3 +169,7 @@
 "⚠︎ not sent — tap to retry" = "⚠︎ non envoyé — touchez pour réessayer";
 "✓ Contact marked as verified" = "✓ Contact marqué comme vérifié";
 "✓ verified · safety code matched" = "✓ vérifié · code identique";
+"Barking could not open your data" = "Barking n’a pas pu ouvrir vos données";
+"Your data is safe. Unlock the phone and try again." = "Vos données sont intactes. Déverrouillez le téléphone et réessayez.";
+"Try again" = "Réessayer";
+"Not sent. Try again in a moment." = "Non envoyé. Réessayez dans un instant.";

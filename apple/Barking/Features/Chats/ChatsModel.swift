@@ -32,11 +32,11 @@ final class ChatsModel {
 
     func reload() async {
         offline = await core.lastSync.map { !$0.networkUp } ?? false
-        guard let contacts = try? await core.contacts() else { return }
-        let unread = (try? await core.unreadCounts()) ?? [:]
+        guard let summaries = try? await core.chatSummaries() else { return }
         var out: [ChatRow] = []
-        for c in contacts {
-            let last = (try? await core.messages(with: c.fingerprint))?.last
+        for s in summaries {
+            let c = s.contact
+            let last = s.last
             out.append(ChatRow(
                 contact: c.fingerprint,
                 name: c.alias ?? c.displayName,
@@ -44,7 +44,7 @@ final class ChatsModel {
                 lastText: last?.body,
                 lastAt: last.map { Date(timeIntervalSince1970: TimeInterval($0.at)) },
                 lastStatus: last.map { MessageStatusKind(status: $0.status, failed: $0.failed, outgoing: $0.outgoing) },
-                unread: unread[c.fingerprint] ?? 0))
+                unread: Int(s.unread)))
         }
         rows = out.sorted { ($0.lastAt ?? .distantPast) > ($1.lastAt ?? .distantPast) }
     }
@@ -69,9 +69,23 @@ final class AddContactModel {
 
     init(core: CoreService) { self.core = core }
 
+    /// A QR code's bytes: a binary card, else a card link in text.
     func scanned(_ data: Data) async {
-        await show(try? inspectCard(bytes: data))
-        if preview != nil { bytes = data; text = nil }
+        if let p = try? inspectCard(bytes: data) {
+            await show(p)
+            if preview != nil { bytes = data; text = nil }
+        } else if let s = String(data: data, encoding: .utf8) {
+            await scannedText(s)
+        } else {
+            await show(nil)
+        }
+    }
+
+    /// A QR code's text (any mode): only a `barking://card#…` link is a card.
+    func scannedText(_ s: String) async {
+        let prefix = "barking://card#"
+        guard s.hasPrefix(prefix) else { await show(nil); return }
+        await opened(link: String(s.dropFirst(prefix.count)))
     }
 
     func opened(link: String) async {

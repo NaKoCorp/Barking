@@ -141,7 +141,7 @@ struct PhraseBanner: View {
     }
 
     @State private var checking = false
-    @State private var model = OnboardingModel(identityExists: { true })
+    @State private var model = OnboardingModel()
 
     var body: some View {
         switch Self.current {

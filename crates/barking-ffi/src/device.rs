@@ -252,14 +252,7 @@ impl Device {
                 Ok(core
                     .messages_with(&fp)?
                     .into_iter()
-                    .map(|m| Message {
-                        id: m.id,
-                        failed: m.status == MessageStatus::Failed,
-                        outgoing: m.direction == Direction::Out,
-                        body: m.body,
-                        status: status_name(m.status).to_owned(),
-                        at: m.at,
-                    })
+                    .map(message_of)
                     .collect())
             })
         })
@@ -273,6 +266,17 @@ fn card_error(e: CoreError) -> BarkingError {
             BarkingError::invalid(format!("invalid contact card: {e}"))
         }
         other => other.into(),
+    }
+}
+
+pub(crate) fn message_of(m: barking_core::store::MessageRow) -> Message {
+    Message {
+        id: m.id,
+        failed: m.status == MessageStatus::Failed,
+        outgoing: m.direction == Direction::Out,
+        body: m.body,
+        status: status_name(m.status).to_owned(),
+        at: m.at,
     }
 }
 

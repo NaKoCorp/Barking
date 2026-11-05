@@ -12,7 +12,6 @@ final class OnboardingModel {
     static let confirmedKey = "barking.phraseConfirmed"
 
     private let defaults: UserDefaults
-    private let identityExists: () -> Bool
     private let wordSet: Set<String>
 
     var path: [Step] = []
@@ -25,17 +24,15 @@ final class OnboardingModel {
     var recoveryWords = Array(repeating: "", count: 24)
     var busy = false
     var errorText: String?
+    /// The identity just created, handed to the router once the phrase is done.
+    private(set) var createdCore: CoreService?
 
-    init(defaults: UserDefaults = .standard, identityExists: @escaping () -> Bool) {
+    init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.identityExists = identityExists
         self.wordSet = Set(bip39Words())
     }
 
     var phraseConfirmed: Bool { defaults.bool(forKey: Self.confirmedKey) }
-
-    /// Identity created, phrase never confirmed and no longer in memory.
-    var phraseLost: Bool { identityExists() && !phraseConfirmed && phrase == nil }
 
     var canContinue: Bool { phrase != nil && wroteItDown }
 
@@ -98,9 +95,10 @@ final class OnboardingModel {
             try await core.setDisplayName(display)
             phrase = created.recoveryPhrase.split(separator: " ").map(String.init)
             defaults.set(false, forKey: Self.confirmedKey)
+            createdCore = core
             return core
         } catch {
-            errorText = String(localized: "Something went wrong. Your data is safe.")
+            errorText = "Something went wrong. Your data is safe."
             return nil
         }
     }
@@ -118,10 +116,10 @@ final class OnboardingModel {
             markPhraseConfirmed()
             return CoreService(device: device, runner: AppCallRunner())
         } catch BarkingError.InvalidInput {
-            errorText = String(localized: "These 24 words do not match an identity.")
+            errorText = "These 24 words do not match an identity."
             return nil
         } catch {
-            errorText = String(localized: "Something went wrong. Your data is safe.")
+            errorText = "Something went wrong. Your data is safe."
             return nil
         }
     }

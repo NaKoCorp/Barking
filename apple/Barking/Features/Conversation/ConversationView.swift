@@ -34,7 +34,7 @@ struct ConversationView: View {
                 .onChange(of: model.items.last?.id) { _, id in if let id { proxy.scrollTo(id, anchor: .bottom) } }
             }
             if let e = model.sendError {
-                Text(e).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)
+                Text(LocalizedStringKey(e)).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)
             }
             ComposerView(model: model)
         }
@@ -117,7 +117,7 @@ struct ComposerView: View {
                     .background(Color.surfaceAlt, in: .capsule)
                 Button { Task { await model.send() } } label: {
                     Image(systemName: "arrow.up").font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.white).frame(width: 40, height: 40)
+                        .foregroundStyle(.white).frame(width: 44, height: 44)
                         .background(Color.accentFill.opacity(model.canSend ? 1 : 0.4), in: .circle)
                 }
                 .disabled(!model.canSend)

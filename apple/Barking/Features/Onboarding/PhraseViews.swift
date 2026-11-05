@@ -15,7 +15,7 @@ struct CreateIdentityView: View {
             } footer: {
                 Text("Your name travels in your contact card. No phone number, no email.")
             }
-            if let e = model.errorText { Text(e).foregroundStyle(Color.danger) }
+            if let e = model.errorText { Text(LocalizedStringKey(e)).foregroundStyle(Color.danger) }
             PrimaryButton("Create my identity", enabled: model.canCreate && !model.busy) {
                 Task {
                     if await model.create() != nil { onCreated() }
@@ -194,7 +194,7 @@ struct RecoverView: View {
             Section {
                 TextField("This device's name", text: $model.deviceName)
             }
-            if let e = model.errorText { Text(e).foregroundStyle(Color.danger) }
+            if let e = model.errorText { Text(LocalizedStringKey(e)).foregroundStyle(Color.danger) }
             PrimaryButton("Recover", enabled: model.canRecover && !model.busy) {
                 Task { if let core = await model.recover() { onRecovered(core) } }
             }

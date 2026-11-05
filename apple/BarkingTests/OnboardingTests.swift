@@ -45,23 +45,23 @@ final class OnboardingModelTests: XCTestCase {
     }
 
     func testContinueDisabledUntilChecked() {
-        let m = OnboardingModel(defaults: freshDefaults(), identityExists: { false })
+        let m = OnboardingModel(defaults: freshDefaults())
         m.phrase = (0..<24).map { "w\($0)" }
         XCTAssertFalse(m.canContinue)
         m.wroteItDown = true
         XCTAssertTrue(m.canContinue)
     }
 
-    func testPhraseLostAfterRelaunch() {
-        let m = OnboardingModel(defaults: freshDefaults(), identityExists: { true })
-        XCTAssertNil(m.phrase)
-        XCTAssertTrue(m.phraseLost)
+    func testConfirmationIsRemembered() {
+        let d = freshDefaults()
+        let m = OnboardingModel(defaults: d)
+        XCTAssertFalse(m.phraseConfirmed)
         m.markPhraseConfirmed()
-        XCTAssertFalse(m.phraseLost)
+        XCTAssertTrue(OnboardingModel(defaults: d).phraseConfirmed)
     }
 
     func testRecoverRejectsUnknownWord() {
-        let m = OnboardingModel(defaults: freshDefaults(), identityExists: { false })
+        let m = OnboardingModel(defaults: freshDefaults())
         var words = Array(bip39Words().prefix(24))
         words[5] = "notaword"
         m.recoveryWords = words

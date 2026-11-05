@@ -15,15 +15,21 @@ struct Eyebrow: View {
 
 /// Screen title in Fira Code 600.
 struct ScreenTitle: View {
-    let text: LocalizedStringKey
+    private let text: Text
     var size: CGFloat = 30
     init(_ text: LocalizedStringKey, size: CGFloat = 30) {
-        self.text = text
+        self.text = Text(text)
+        self.size = size
+    }
+
+    /// Text from data (a contact's name): never a localization key.
+    init(verbatim: String, size: CGFloat = 30) {
+        self.text = Text(verbatim: verbatim)
         self.size = size
     }
 
     var body: some View {
-        Text(text)
+        text
             .font(BarkingFont.mono(.largeTitle, size: size, weight: .semibold))
             .tracking(-0.5)
             .foregroundStyle(Color.fg)

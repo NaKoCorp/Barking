@@ -19,6 +19,7 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func unmarkVerified(contact: String) throws
     func safetyNumber(contact: String) throws -> [String]
     func unreadCounts() throws -> [UnreadCount]
+    func chatSummaries() throws -> [ChatSummary]
     func markRead(contact: String, upTo: Int64) throws
     func keyChanges(since: UInt64) throws -> [KeyChange]
     func sync(deadlineMs: UInt64) throws -> SyncSummary

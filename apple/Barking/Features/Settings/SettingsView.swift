@@ -34,10 +34,10 @@ struct SettingsView: View {
                 }
                 Section {
                     NavigationLink { DevicesView(core: core) } label: {
-                        row("Linked devices", "receive, write, send", "iphone")
+                        row("Linked devices", Text("receive, write, send"), "iphone")
                     }
                     NavigationLink { MyIdentityView(core: core, model: model) } label: {
-                        row("My identity", LocalizedStringKey(model.fingerprintShort), "person.text.rectangle")
+                        row("My identity", Text(verbatim: model.fingerprintShort), "person.text.rectangle")
                     }
                 }
                 #if BARKING_DEV
@@ -56,13 +56,13 @@ struct SettingsView: View {
         .task { await model.load() }
     }
 
-    private func row(_ title: LocalizedStringKey, _ sub: LocalizedStringKey, _ icon: String) -> some View {
+    private func row(_ title: LocalizedStringKey, _ sub: Text, _ icon: String) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon).foregroundStyle(Color.accent).frame(width: 32, height: 32)
                 .background(Color.wash, in: .rect(cornerRadius: Radius.tile))
             VStack(alignment: .leading) {
                 Text(title).foregroundStyle(Color.fg)
-                Text(sub).font(.caption).foregroundStyle(Color.fgSoft)
+                sub.font(.caption).foregroundStyle(Color.fgSoft)
             }
         }
         .frame(minHeight: 56)

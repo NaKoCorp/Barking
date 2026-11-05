@@ -6,8 +6,7 @@ import UserNotifications
 /// recover, or link (Task 11).
 struct OnboardingFlow: View {
     @Environment(AppRouter.self) private var router
-    @State private var model = OnboardingModel(identityExists: { false })
-    @State private var created: CoreService?
+    @State private var model = OnboardingModel()
 
     var body: some View {
         NavigationStack(path: $model.path) {
@@ -30,20 +29,10 @@ struct OnboardingFlow: View {
                     }
                 }
         }
-        .task { model = OnboardingModel(identityExists: { DeviceFactory.hasIdentity }) }
-        .onChange(of: model.phrase) { _, _ in }
     }
 
     private func finish() {
-        Task {
-            if let core = await coreAfterCreate() { ready(core) }
-        }
-    }
-
-    private func coreAfterCreate() async -> CoreService? {
-        if let created { return created }
-        return try? DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs)
-            .map { CoreService(device: $0, runner: AppCallRunner()) }
+        if let core = model.createdCore { ready(core) }
     }
 
     private func ready(_ core: CoreService) {

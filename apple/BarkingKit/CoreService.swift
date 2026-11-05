@@ -99,6 +99,9 @@ public actor CoreService {
         publish(.messages(contact: contact))
         Task { _ = await self.sync(reason: .afterSend) }
     }
+    public func chatSummaries() async throws -> [ChatSummary] {
+        try await call("chats") { try $0.chatSummaries() }
+    }
     public func unreadCounts() async throws -> [String: Int] {
         let counts = try await call("unread") { try $0.unreadCounts() }
         return Dictionary(counts.map { ($0.contact, Int($0.count)) }, uniquingKeysWith: { a, _ in a })

@@ -6,7 +6,7 @@ use barking_core::identity::root::Fingerprint;
 use barking_core::store::Direction;
 use barking_core::transparency::TransparencyEvent;
 
-use crate::device::Device;
+use crate::device::{Contact, Device, Message, message_of};
 use crate::{BarkingError, guard};
 
 /// Key of the unread marks in the core's state store.
@@ -20,6 +20,14 @@ const LOG_LIMIT: usize = 10_000;
 pub struct UnreadCount {
     pub contact: String,
     pub count: u32,
+}
+
+/// One line of the chats list, in one call under one lock.
+#[derive(Debug, uniffi::Record)]
+pub struct ChatSummary {
+    pub contact: Contact,
+    pub last: Option<Message>,
+    pub unread: u32,
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -91,6 +99,35 @@ impl Device {
                             count: u32::try_from(count).unwrap_or(u32::MAX),
                         });
                     }
+                }
+                Ok(out)
+            })
+        })
+    }
+
+    /// Every contact with its last message and unread count.
+    pub fn chat_summaries(&self) -> Result<Vec<ChatSummary>, BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                let marks = load_marks(core)?;
+                let mut out = Vec::new();
+                for c in core.contacts()? {
+                    let mark = mark_of(&marks, &c.fingerprint);
+                    let messages = core.messages_with(&c.fingerprint)?;
+                    let unread = messages
+                        .iter()
+                        .filter(|m| m.direction == Direction::In && m.id > mark)
+                        .count();
+                    out.push(ChatSummary {
+                        contact: Contact {
+                            fingerprint: c.fingerprint.to_string(),
+                            alias: c.alias,
+                            display_name: c.display_name,
+                            verified: c.verified,
+                        },
+                        last: messages.into_iter().last().map(message_of),
+                        unread: u32::try_from(unread).unwrap_or(u32::MAX),
+                    });
                 }
                 Ok(out)
             })

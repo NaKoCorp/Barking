@@ -56,7 +56,13 @@ final class ConversationModel {
             verified = c.verified
         }
         let messages = (try? await core.messages(with: contact)) ?? []
-        items = messages.filter { !hidden.contains($0.id) }.map {
+        // A failed message with a later sent copy was retried: hide it, even
+        // after the conversation is reopened.
+        let resent = messages.filter { $0.failed && $0.outgoing }.filter { f in
+            messages.contains { $0.outgoing && !$0.failed && $0.id > f.id && $0.body == f.body }
+        }.map(\.id)
+        let hide = hidden.union(resent)
+        items = messages.filter { !hide.contains($0.id) }.map {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)),
                  status: MessageStatusKind(status: $0.status, failed: $0.failed, outgoing: $0.outgoing))
@@ -79,7 +85,7 @@ final class ConversationModel {
             try await core.send(text, to: contact)
         } catch {
             draft = text
-            sendError = String(localized: "Not sent. Try again in a moment.")
+            sendError = "Not sent. Try again in a moment."
         }
         await reload()
     }

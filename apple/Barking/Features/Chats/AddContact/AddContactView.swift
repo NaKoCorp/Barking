@@ -31,7 +31,10 @@ struct AddContactView: View {
                     } label: { EmptyView() }
                     .pickerStyle(.segmented)
                     if let e = model.error { errorText(e) }
-                    if tab == 0 { ScannerView { data in Task { await model.scanned(data) } } }
+                    if tab == 0 {
+                        ScannerView(onBytes: { data in Task { await model.scanned(data) } },
+                                    onText: { s in Task { await model.scannedText(s) } })
+                    }
                     else { MyCodeView(core: core) }
                 }
                 Spacer(minLength: 0)
@@ -57,7 +60,7 @@ struct AddContactView: View {
     private func confirmation(_ p: CardPreview) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             Avatar(name: p.displayName, fingerprint: p.fingerprint, size: 64)
-            ScreenTitle(LocalizedStringKey(p.displayName), size: 22)
+            ScreenTitle(verbatim: p.displayName, size: 22)
             Text(verbatim: String(p.fingerprint.prefix(19))).font(BarkingFont.mono(.footnote, size: 12.5))
                 .foregroundStyle(Color.fgSoft)
             TextField("Alias (optional)", text: $alias).textFieldStyle(.roundedBorder)
@@ -70,10 +73,11 @@ struct AddContactView: View {
 /// VisionKit scanner; each QR code's raw symbol is decoded as bytes.
 struct ScannerView: View {
     let onBytes: (Data) -> Void
+    var onText: (String) -> Void = { _ in }
 
     var body: some View {
         if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
-            Representable(onBytes: onBytes)
+            Representable(onBytes: onBytes, onText: onText)
                 .clipShape(.rect(cornerRadius: Radius.card))
                 .frame(maxHeight: 420)
         } else {
@@ -84,6 +88,7 @@ struct ScannerView: View {
 
     private struct Representable: UIViewControllerRepresentable {
         let onBytes: (Data) -> Void
+        let onText: (String) -> Void
 
         func makeUIViewController(context: Context) -> DataScannerViewController {
             let vc = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])],
@@ -94,11 +99,15 @@ struct ScannerView: View {
         }
 
         func updateUIViewController(_ vc: DataScannerViewController, context: Context) {}
-        func makeCoordinator() -> Coordinator { Coordinator(onBytes: onBytes) }
+        func makeCoordinator() -> Coordinator { Coordinator(onBytes: onBytes, onText: onText) }
 
         final class Coordinator: NSObject, DataScannerViewControllerDelegate {
             let onBytes: (Data) -> Void
-            init(onBytes: @escaping (Data) -> Void) { self.onBytes = onBytes }
+            let onText: (String) -> Void
+            init(onBytes: @escaping (Data) -> Void, onText: @escaping (String) -> Void) {
+                self.onBytes = onBytes
+                self.onText = onText
+            }
 
             func dataScanner(_ s: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
                 for case .barcode(let b) in items {
@@ -106,6 +115,8 @@ struct ScannerView: View {
                         onBytes(d)
                         return
                     }
+                    // Not byte mode (numeric, alphanumeric…): its text decides.
+                    if let s = b.payloadStringValue { onText(s); return }
                 }
             }
         }
@@ -117,6 +128,7 @@ struct MyCodeView: View {
     let core: CoreService
     @State private var card: (bytes: Data, text: String)?
     @State private var notAdmin = false
+    @State private var failed = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -131,12 +143,24 @@ struct MyCodeView: View {
                 .buttonStyle(.borderedProminent).tint(Color.accentFill)
             } else if notAdmin {
                 Text("Show your code from your first device").foregroundStyle(Color.fgMuted)
+            } else if failed {
+                Text("Something went wrong. Your data is safe.").foregroundStyle(Color.fgMuted)
+                SecondaryButton("Try again") { Task { await load() } }
             } else {
                 ProgressView()
             }
         }
-        .task {
-            do { card = try await core.myCard() } catch { notAdmin = true }
+        .task { await load() }
+    }
+
+    /// Only the device holding the root signs a card: tell that apart from an error.
+    private func load() async {
+        failed = false
+        do {
+            card = try await core.myCard()
+        } catch {
+            let devices = (try? await core.myDevices()) ?? []
+            if devices.contains(where: { $0.thisDevice && !$0.admin }) { notAdmin = true } else { failed = true }
         }
     }
 }

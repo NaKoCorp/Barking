@@ -113,7 +113,7 @@ struct NetworkView: View {
                         relayId = r.id; relayAddr = r.addr
                     }
                 }
-                if let e = model.addError { Text(e).foregroundStyle(Color.danger) }
+                if let e = model.addError { Text(LocalizedStringKey(e)).foregroundStyle(Color.danger) }
             }
             .navigationTitle(Text("Add a relay"))
             .toolbar {

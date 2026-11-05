@@ -27,18 +27,18 @@ final class LinkModel {
 
     static func text(for reason: LinkReason) -> String {
         switch reason {
-        case .expired: String(localized: "This offer has expired. Start again.")
-        case .used: String(localized: "This offer was already used. Start again.")
-        case .mismatch: String(localized: "These codes do not belong together. Start again.")
-        case .unreadable: String(localized: "This is not a Barking link file.")
-        case .noPending: String(localized: "This device is not waiting for a link.")
-        case .notAdmin: String(localized: "Only your first device can link new ones")
+        case .expired: "This offer has expired. Start again."
+        case .used: "This offer was already used. Start again."
+        case .mismatch: "These codes do not belong together. Start again."
+        case .unreadable: "This is not a Barking link file."
+        case .noPending: "This device is not waiting for a link."
+        case .notAdmin: "Only your first device can link new ones"
         }
     }
 
     private func fail(_ error: Error) {
         if case BarkingError.LinkRefused(let reason) = error { state = .refused(Self.text(for: reason)) }
-        else { state = .refused(String(localized: "Something went wrong. Your data is safe.")) }
+        else { state = .refused("Something went wrong. Your data is safe.") }
     }
 
     func start() async {
@@ -135,7 +135,7 @@ final class NewDeviceLinkModel {
         } catch BarkingError.LinkRefused(let reason) {
             state = .refused(LinkModel.text(for: reason))
         } catch {
-            state = .refused(String(localized: "Something went wrong. Your data is safe."))
+            state = .refused("Something went wrong. Your data is safe.")
         }
     }
 
@@ -151,7 +151,7 @@ final class NewDeviceLinkModel {
         } catch BarkingError.LinkRefused(let reason) {
             state = .refused(LinkModel.text(for: reason))
         } catch {
-            state = .refused(String(localized: "Something went wrong. Your data is safe."))
+            state = .refused("Something went wrong. Your data is safe.")
         }
     }
 

@@ -18,6 +18,8 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var pending = false
     var sendError: Error?
     private var _linkCalls = 0
+    private var _summaryCalls = 0
+    var summaryCalls: Int { lock.withLock { _summaryCalls } }
     var linkCalls: Int { lock.withLock { _linkCalls } }
 
     var syncCalls: Int { lock.withLock { _syncCalls } }
@@ -43,6 +45,13 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func unmarkVerified(contact: String) throws { verified.remove(contact) }
     func safetyNumber(contact: String) throws -> [String] { Array(repeating: "12345", count: 12) }
     func unreadCounts() throws -> [UnreadCount] { unread }
+    func chatSummaries() throws -> [ChatSummary] {
+        lock.withLock { _summaryCalls += 1 }
+        return contactList.map { c in
+            ChatSummary(contact: c, last: messageList[c.fingerprint]?.last,
+                        unread: unread.first { $0.contact == c.fingerprint }?.count ?? 0)
+        }
+    }
     func markRead(contact: String, upTo: Int64) throws { reads.append((contact, upTo)) }
     func keyChanges(since: UInt64) throws -> [KeyChange] { keyChangeList }
     func sync(deadlineMs: UInt64) throws -> SyncSummary {
