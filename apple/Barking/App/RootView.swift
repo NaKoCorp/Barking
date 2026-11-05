@@ -20,14 +20,8 @@ struct MainTabView: View {
     var body: some View {
         TabView {
             Tab("Chats", systemImage: "bubble.left.and.bubble.right") { ChatsView(core: core) }
-            Tab("Network", systemImage: "point.3.connected.trianglepath.dotted") { Text("Network") }
-            Tab("Settings", systemImage: "gearshape") {
-                #if BARKING_DEV
-                DevView()
-                #else
-                Text("Settings")
-                #endif
-            }
+            Tab("Network", systemImage: "point.3.connected.trianglepath.dotted") { NetworkView(core: core) }
+            Tab("Settings", systemImage: "gearshape") { SettingsView(core: core) }
         }
         .tint(Color.accent)
     }

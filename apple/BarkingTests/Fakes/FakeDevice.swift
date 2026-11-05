@@ -14,6 +14,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var reads: [(String, Int64)] = []
     var unread: [UnreadCount] = []
     var keyChangeList: [KeyChange] = []
+    var devicesList: [MyDeviceInfo] = []
 
     var syncCalls: Int { lock.withLock { _syncCalls } }
     var sent: [(String, String)] { lock.withLock { _sent } }
@@ -47,9 +48,9 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func nodes() throws -> [NodeInfo] { [] }
     func addNode(id: String, addr: String) throws {}
     func outboxCount() throws -> UInt32 { 0 }
-    func myDevices() throws -> [MyDeviceInfo] { [] }
-    func linkOffer() throws -> Data { Data() }
-    func linkDevice(request: Data, withHistory: Bool) throws -> Data { Data() }
+    func myDevices() throws -> [MyDeviceInfo] { devicesList }
+    func linkOffer() throws -> Data { Data([0xAA]) }
+    func linkDevice(request: Data, withHistory: Bool) throws -> Data { Data([0xBB]) }
     func isPendingLink() throws -> Bool { false }
     func finishLink(package: Data) throws {}
 }

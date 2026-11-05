@@ -26,7 +26,7 @@ struct OnboardingFlow: View {
                     case .recover:
                         RecoverView(model: model) { core in ready(core) }
                     case .link:
-                        LinkFromExistingPlaceholder()
+                        LinkFromExistingView()
                     }
                 }
         }
@@ -59,9 +59,4 @@ struct OnboardingFlow: View {
 final class PhraseMemory {
     static let shared = PhraseMemory()
     var phrase: [String]?
-}
-
-/// Replaced by the linking flow (Task 11).
-struct LinkFromExistingPlaceholder: View {
-    var body: some View { Text("Link to an existing device") }
 }

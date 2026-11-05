@@ -72,4 +72,14 @@ public enum DeviceFactory {
         for url in [try SharedPaths.database, try SharedPaths.lock] { try SharedPaths.protect(url) }
         return device
     }
+
+    /// Starts linking this device to an existing identity.
+    public static func beginLink(offer: Data, deviceName: String) throws -> PendingLink {
+        let probe = try config(key: Data(count: 32), lockTimeoutMs: Budget.appLockMs)
+        let key = deviceExists(config: probe) ? try keyStore.create() : try keyStore.replace()
+        let pending = try BarkingKit.beginLink(config: config(key: key, lockTimeoutMs: Budget.appLockMs),
+                                               offer: offer, deviceName: deviceName)
+        for url in [try SharedPaths.database, try SharedPaths.lock] { try SharedPaths.protect(url) }
+        return pending
+    }
 }

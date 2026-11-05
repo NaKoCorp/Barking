@@ -13,6 +13,8 @@ final class AppRouter {
 
     private(set) var state: State
     private(set) var pendingCardLink: String?
+    /// A `.barkinglink` file opened from AirDrop or Files.
+    private(set) var pendingLinkFile: URL?
 
     init(start: State) { state = start }
 
@@ -31,11 +33,21 @@ final class AppRouter {
 
     func becomeReady(core: CoreService) { state = .ready(core) }
 
-    /// `barking://card#<card text>` keeps the card for the add-contact sheet.
+    /// `barking://card#<card text>` keeps the card for the add-contact sheet;
+    /// a `.barkinglink` file waits for the linking screen.
     func open(url: URL) {
+        if url.isFileURL, url.pathExtension == "barkinglink" {
+            pendingLinkFile = url
+            return
+        }
         guard url.scheme == "barking", url.host() == "card",
               let card = url.fragment(percentEncoded: false), !card.isEmpty else { return }
         pendingCardLink = card
+    }
+
+    func takePendingLinkFile() -> URL? {
+        defer { pendingLinkFile = nil }
+        return pendingLinkFile
     }
 
     func takePendingCardLink() -> String? {
