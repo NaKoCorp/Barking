@@ -71,8 +71,11 @@ struct NetworkView: View {
                 Text(verbatim: "Internet").font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))
                     .foregroundStyle(Color.fg)
             }
-            Text(model.internetReachable == false ? "Unreachable" : "Reachable")
-                .foregroundStyle(model.internetReachable == false ? Color.danger : Color.ok)
+            switch model.internetReachable {
+            case true?: Text("Reachable").foregroundStyle(Color.ok)
+            case false?: Text("Unreachable").foregroundStyle(Color.danger)
+            case nil: Text("Not synced yet").foregroundStyle(Color.fgSoft)
+            }
             if let at = model.lastSync {
                 Text("last sync \(at.formatted(date: .omitted, time: .shortened))")
                     .font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.fgSoft)

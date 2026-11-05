@@ -70,7 +70,15 @@ final class AppRouter {
         }
     }
 
-    func becomeReady(core: CoreService) { state = .ready(core) }
+    func becomeReady(core: CoreService) {
+        state = .ready(core)
+        #if BARKING_DEV
+        // End-to-end tests read this device's card from the shared container.
+        if ProcessInfo.processInfo.arguments.contains("-BarkingUITestOpenCard") {
+            Task { if let card = try? await core.myCard() { SharedPaths.devExport("dev-card.txt", card.text) } }
+        }
+        #endif
+    }
 
     /// `barking://card#<card text>` keeps the card for the add-contact sheet;
     /// a `.barkinglink` file waits for the linking screen.
