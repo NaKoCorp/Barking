@@ -5,6 +5,8 @@ import Security
 /// Wraps the database key (spec §7.1): only the wrapped key is stored.
 public protocol KeyWrapper: Sendable {
     func wrap(_ key: Data) throws -> Data
+    /// Throws `KeyStore.WrappingKeyGone` only when the wrapping key is gone
+    /// or does not open `blob`: the data is then unreadable for good.
     func unwrap(_ blob: Data) throws -> Data
     /// Deletes the wrapping key; deleting a missing one is not an error.
     func delete() throws
@@ -89,19 +91,53 @@ public struct EnclaveKey: KeyWrapper {
         return blob as Data
     }
 
-    /// Throws `KeyStore.Failure(errSecInteractionNotAllowed)` before the
-    /// first unlock, `errSecItemNotFound` without a key.
+    /// `KeyStore.WrappingKeyGone` when no key is under the tag or every key
+    /// refuses the blob; any other keychain or enclave error (locked,
+    /// unavailable) as it came: the data may be readable once it passes.
     public func unwrap(_ blob: Data) throws -> Data {
-        let keys = try privateKeys()
-        var last: any Error = KeyStore.Failure(status: errSecItemNotFound)
-        for priv in keys {
+        try Self.firstOpening(try privateKeys()) { priv in
             var error: Unmanaged<CFError>?
-            if let key = SecKeyCreateDecryptedData(priv, Self.algorithm, blob as CFData, &error) {
-                return key as Data
+            guard let key = SecKeyCreateDecryptedData(priv, Self.algorithm, blob as CFData, &error) else {
+                throw error.map { $0.takeRetainedValue() as Error } ?? KeyStore.Failure(status: errSecDecode)
             }
-            if let error { last = error.takeRetainedValue() as Error }
+            return key as Data
         }
-        throw last
+    }
+
+    /// The blob opened by one of `keys`. Throws `WrappingKeyGone` only if
+    /// there is no key, or if every key was tried and refused the blob; a
+    /// key that could not be tried (`isAccessError`) throws its error.
+    static func firstOpening<K>(_ keys: [K], _ decrypt: (K) throws -> Data) throws -> Data {
+        var access: (any Error)?
+        for k in keys {
+            do {
+                return try decrypt(k)
+            } catch where isAccessError(error) {
+                access = access ?? error
+            } catch {
+                // This key does not open the blob: try the next one.
+            }
+        }
+        if let access { throw access }
+        throw KeyStore.WrappingKeyGone()
+    }
+
+    /// The key could not be used now (device locked, enclave or keychain
+    /// unavailable, authentication), as opposed to a blob it does not open.
+    static func isAccessError(_ error: any Error) -> Bool {
+        if let f = error as? KeyStore.Failure { return f.status != errSecDecode }
+        let e = error as NSError
+        switch e.domain {
+        case NSOSStatusErrorDomain:
+            return [errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled, errSecNotAvailable,
+                    errSecMissingEntitlement, errSecNoAccessForItem, errSecIO]
+                .contains(OSStatus(e.code))
+        case "CryptoTokenKit", "com.apple.LocalAuthentication":
+            // Token or authentication trouble: never proof the data is unreadable.
+            return true
+        default:
+            return false
+        }
     }
 
     public func delete() throws {
@@ -143,8 +179,10 @@ struct SoftwareKey: KeyWrapper {
     }
 
     func unwrap(_ blob: Data) throws -> Data {
-        guard let k = box.lock.withLock({ box.key }) else { throw Missing() }
-        return try AES.GCM.open(AES.GCM.SealedBox(combined: blob), using: k)
+        guard let k = box.lock.withLock({ box.key }),
+              let key = try? AES.GCM.open(AES.GCM.SealedBox(combined: blob), using: k)
+        else { throw KeyStore.WrappingKeyGone() }
+        return key
     }
 
     func delete() throws { box.lock.withLock { box.key = nil } }

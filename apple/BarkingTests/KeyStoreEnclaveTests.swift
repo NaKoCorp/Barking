@@ -174,6 +174,68 @@ final class KeyStoreEnclaveTests: XCTestCase {
     }
 }
 
+/// Unwraps by throwing `error`: the enclave answering something other than "here is the key".
+private struct FailingUnwrap: KeyWrapper {
+    let error: any Error
+    var hardware: Bool { true }
+    func wrap(_ key: Data) throws -> Data { Data(key.reversed()) }
+    func unwrap(_ blob: Data) throws -> Data { throw error }
+    func delete() throws {}
+}
+
+/// Only a key that is gone, or that no longer opens the blob, makes the data
+/// unreadable; a keychain or enclave error that may pass must not offer to
+/// erase a readable database (fix round 2).
+final class UnwrapFailureTests: XCTestCase {
+    private let blob = Data([1, 2, 3])
+
+    private func fail(_ error: any Error) throws -> Data { throw error }
+
+    private func store(throwing error: any Error) throws -> KeyStore {
+        let entries = MemoryEntries()
+        entries["db-key-wrapped"] = blob
+        return KeyStore(entries: entries, wrapper: FailingUnwrap(error: error))
+    }
+
+    func testKeychainErrorIsNotUnavailable() throws {
+        let s = try store(throwing: KeyStore.Failure(status: errSecIO))
+        XCTAssertThrowsError(try s.read()) { XCTAssertFalse($0 is KeyStore.Unavailable) }
+    }
+
+    func testLockedCFErrorIsNotUnavailable() throws {
+        let locked = NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed))
+        let s = try store(throwing: locked)
+        XCTAssertThrowsError(try s.read()) { XCTAssertFalse($0 is KeyStore.Unavailable) }
+    }
+
+    func testGoneKeyIsUnavailable() throws {
+        let s = try store(throwing: KeyStore.WrappingKeyGone())
+        XCTAssertThrowsError(try s.read()) { XCTAssertTrue($0 is KeyStore.Unavailable) }
+    }
+
+    /// The enclave's decision over its keys: none, some that cannot be
+    /// tried right now, or all tried and none opens the blob.
+    func testEnclaveTellsGoneFromInaccessible() {
+        let decryptFailed = NSError(domain: NSOSStatusErrorDomain, code: Int(errSecDecode))
+        let locked = NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed))
+        let tokenAuth = NSError(domain: "CryptoTokenKit", code: -9)
+
+        XCTAssertThrowsError(try EnclaveKey.firstOpening([Int](), { _ in Data() })) {
+            XCTAssertTrue($0 is KeyStore.WrappingKeyGone)
+        }
+        XCTAssertThrowsError(try EnclaveKey.firstOpening([1, 2], { _ in throw decryptFailed })) {
+            XCTAssertTrue($0 is KeyStore.WrappingKeyGone)
+        }
+        XCTAssertThrowsError(try EnclaveKey.firstOpening([1, 2], { try fail($0 == 1 ? locked : decryptFailed) })) {
+            XCTAssertFalse($0 is KeyStore.WrappingKeyGone)
+        }
+        XCTAssertThrowsError(try EnclaveKey.firstOpening([1], { _ in throw tokenAuth })) {
+            XCTAssertFalse($0 is KeyStore.WrappingKeyGone)
+        }
+        XCTAssertEqual(try EnclaveKey.firstOpening([1, 2], { $0 == 1 ? try fail(decryptFailed) : Data([9]) }), Data([9]))
+    }
+}
+
 /// `SoftwareKey` presented as the Secure Enclave.
 private struct HardwareStub: KeyWrapper {
     let inner: SoftwareKey

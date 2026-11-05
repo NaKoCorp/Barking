@@ -66,6 +66,9 @@ public struct KeyStore: Sendable {
     /// `db-key-wrapped` exists but does not unwrap (enclave key missing:
     /// backup restored on another iPhone). Nothing is overwritten.
     public struct Unavailable: Error {}
+    /// From a `KeyWrapper`: no wrapping key, or none opens the blob. The
+    /// only unwrap failure that makes the data unreadable for good.
+    public struct WrappingKeyGone: Error {}
 
     static let legacyAccount = "db-key"
     static let wrappedAccount = "db-key-wrapped"
@@ -91,7 +94,10 @@ public struct KeyStore: Sendable {
 
     /// The key in clear; `nil` if it is missing or the keychain is not
     /// available yet (before the first unlock after a reboot). Creates
-    /// nothing but the wrapped copy of a clear key.
+    /// nothing but the wrapped copy of a clear key. `Unavailable` only when
+    /// the wrapping key is gone or opens nothing (`WrappingKeyGone`): that
+    /// offers to erase. Any other unwrap error (locked, keychain, enclave)
+    /// is thrown as it came, for the retry screen.
     public func read() throws -> Data? {
         // Clear key first: a migration writes the wrapped key before deleting
         // the clear one, so a reader in between still finds one of them.
@@ -99,14 +105,13 @@ public struct KeyStore: Sendable {
         if let wrapped = try entries.get(Self.wrappedAccount) {
             let key: Data
             do {
-                guard let wrapper else { throw Unavailable() }
+                guard let wrapper else { throw WrappingKeyGone() }
                 key = try wrapper.unwrap(wrapped)
-            } catch let f as Failure where f.status == errSecInteractionNotAllowed {
-                return nil
             } catch {
                 // An interrupted migration left the clear key: it still opens.
                 if let legacy { return legacy }
-                throw Unavailable()
+                if error is WrappingKeyGone { throw Unavailable() }
+                throw error
             }
             // Finishes a migration cut between its two writes.
             if legacy != nil { try? entries.delete(Self.legacyAccount) }

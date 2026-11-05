@@ -16,6 +16,17 @@ final class UnreadableDataTests: XCTestCase {
         }
     }
 
+    /// A keychain error while unwrapping keeps the retry screen (fix round 2).
+    func testKeychainErrorWhileUnwrappingKeepsTheRetryScreen() {
+        let entries = MemoryEntries()
+        entries["db-key-wrapped"] = Data([1])
+        let store = KeyStore(entries: entries, wrapper: ThrowingUnwrap())
+        guard case .failed = AppRouter.initialState(opening: { _ = try store.read(); return nil },
+                                                    runner: DirectRunner()) else {
+            return XCTFail("a passing keychain error must not offer to erase")
+        }
+    }
+
     func testEraseThenLink() {
         let router = AppRouter(start: .unreadable)
         var wiped = false
@@ -51,4 +62,11 @@ final class UnreadableDataTests: XCTestCase {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
     }
+}
+
+private struct ThrowingUnwrap: KeyWrapper {
+    var hardware: Bool { true }
+    func wrap(_ key: Data) throws -> Data { key }
+    func unwrap(_ blob: Data) throws -> Data { throw KeyStore.Failure(status: errSecIO) }
+    func delete() throws {}
 }
