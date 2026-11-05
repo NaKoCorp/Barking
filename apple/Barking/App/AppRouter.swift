@@ -28,6 +28,9 @@ final class AppRouter {
     /// Erasing the unreadable data failed; the screen offers it again.
     private(set) var eraseFailed = false
 
+    /// Reloaded whenever the data is erased: the lock goes with it.
+    weak var lock: LockController?
+
     init(start: State) { state = start }
 
     /// The state at launch: the existing identity, else onboarding. A wipe
@@ -88,6 +91,7 @@ final class AppRouter {
             return
         }
         eraseFailed = false
+        lock?.reload()
         pendingOnboardingStep = step
         state = .onboarding
     }
@@ -104,7 +108,19 @@ final class AppRouter {
             runner: AppCallRunner())
     }
 
-    func restartOnboarding() { state = .onboarding }
+    /// Back to the welcome screen after a wipe: the lock settings went with
+    /// the rest, so the screens must not keep showing them.
+    func restartOnboarding() {
+        lock?.reload()
+        state = .onboarding
+    }
+
+    /// The one erase: the core stops, the wipe runs, then the welcome
+    /// screen. Throws if the wipe could not finish (the caller stays put).
+    func eraseAndRestart(wipe: (CoreService?) async throws -> Void = { try await Wipe.run(closing: $0) }) async throws {
+        try await wipe(core)
+        restartOnboarding()
+    }
 
     var core: CoreService? {
         switch state {

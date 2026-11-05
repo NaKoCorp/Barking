@@ -8,7 +8,7 @@ public enum NotificationContent {
     /// While the app is locked (`locked`), nothing but "New message" shows:
     /// no name, no text, no thread (spec §6.1).
     public static func apply(_ summary: SyncSummary?, to content: UNMutableNotificationContent,
-                             locked: Bool = AppLock.isLockedForExtension) -> String {
+                             locked: Bool) -> String {
         guard let messages = summary?.newMessages, let first = messages.first else { return "original" }
         if locked {
             content.title = ""

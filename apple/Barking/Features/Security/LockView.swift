@@ -15,9 +15,7 @@ struct LockView: View {
                 .accessibilityHidden(true)
             if lock.locked {
                 ScreenTitle("Barking is locked", size: 22)
-                PrimaryButton("Unlock") {
-                    Task { if await Owner.check(reason: String(localized: "Unlock Barking")) { lock.unlock() } }
-                }
+                PrimaryButton("Unlock") { Task { await lock.promptIfLocked() } }
                 .padding(.horizontal, 24)
                 .accessibilityIdentifier("lock.unlock")
             }
@@ -29,5 +27,11 @@ struct LockView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.surface.ignoresSafeArea())
+        .task(id: lock.locked) {
+            #if BARKING_DEV
+            if ProcessInfo.processInfo.arguments.contains("-BarkingUITestNoAutoUnlock") { return }
+            #endif
+            await lock.promptIfLocked()
+        }
     }
 }

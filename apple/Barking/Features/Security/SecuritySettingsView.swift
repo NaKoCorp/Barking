@@ -55,7 +55,6 @@ struct SecuritySettingsView: View {
 struct EraseBarkingControl: View {
     let identifier: String
     @Environment(AppRouter.self) private var router
-    @Environment(LockController.self) private var lock
     @State private var confirming = false
     @State private var failed = false
     @State private var erasing = false
@@ -91,10 +90,8 @@ struct EraseBarkingControl: View {
         erasing = true
         defer { erasing = false }
         do {
-            try await Wipe.run(closing: router.core)
+            try await router.eraseAndRestart()
             failed = false
-            lock.reload()
-            router.restartOnboarding()
         } catch {
             failed = true
         }

@@ -111,4 +111,29 @@ final class AppLockTests: XCTestCase {
     func testDelaysAreTheOffered() {
         XCTAssertEqual(AppLock.delays, [0, 60, 300, 3600])
     }
+
+    /// Fix round 1: the app died while open; no background event, no lease.
+    func testExpiredLeaseWithoutBackgroundEventIsLockedForTheExtension() {
+        let lock = AppLock(defaults: defaults)
+        lock.enabled = true
+        lock.unlocked()
+        lock.refreshLease(at: t)
+        XCTAssertFalse(AppLock.isLocked(defaults: defaults, at: t.addingTimeInterval(AppLock.leaseDuration - 1)))
+        XCTAssertTrue(AppLock.isLocked(defaults: defaults, at: t.addingTimeInterval(AppLock.leaseDuration + 1)))
+    }
+
+    func testNoLeaseAtAllIsLocked() {
+        defaults.set(true, forKey: "barking.lock.enabled")
+        defaults.removeObject(forKey: "barking.lock.openUntil")
+        defaults.set(false, forKey: "barking.lock.locked")
+        XCTAssertTrue(AppLock.isLocked(defaults: defaults, at: t))
+    }
+
+    func testRefreshingTheLeaseKeepsItOpen() {
+        let lock = AppLock(defaults: defaults)
+        lock.enabled = true
+        lock.refreshLease(at: t)
+        lock.refreshLease(at: t.addingTimeInterval(50))
+        XCTAssertFalse(AppLock.isLocked(defaults: defaults, at: t.addingTimeInterval(100)))
+    }
 }

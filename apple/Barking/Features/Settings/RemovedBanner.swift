@@ -45,8 +45,7 @@ struct RemovedBanner: View {
     /// new identity the leftover marker could erase.
     private func reset() async {
         do {
-            try await Wipe.run(closing: core)
-            router.restartOnboarding()
+            try await router.eraseAndRestart()
         } catch {
             wipeFailed = true
         }

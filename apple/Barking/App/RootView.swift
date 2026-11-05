@@ -7,15 +7,13 @@ struct RootView: View {
     @Environment(LockController.self) private var lock
     @Environment(\.scenePhase) private var phase
 
-    /// The cover goes up whenever the lock is on and the app is not active
-    /// (the app switcher shows it), whatever the delay, and stays while locked.
-    private var covered: Bool { lock.locked || (lock.enabled && phase != .active) }
-
     var body: some View {
         content
-            .accessibilityHidden(covered)
-            .overlay { if covered { LockView() } }
+            .accessibilityHidden(lock.covered)
             .onChange(of: phase) { _, now in lock.phaseChanged(to: now) }
+            .task(id: phase) { if phase == .active { await lock.keepOpen() } }
+            // The cover is a window above everything, sheets and alerts included.
+            .onAppear { router.lock = lock; LockWindow.shared.install(lock: lock, router: router) }
     }
 
     @ViewBuilder private var content: some View {

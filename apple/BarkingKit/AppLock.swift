@@ -14,6 +14,10 @@ public final class AppLock: @unchecked Sendable {
         static let delay = "barking.lock.delay"
         static let backgroundAt = "barking.lock.backgroundAt"
         static let locked = "barking.lock.locked"
+        /// The app is open (in the foreground, or in the background within
+        /// its delay) until this instant; the extension reads nothing else
+        /// but this and `locked`, so a crash cannot leave it open for good.
+        static let openUntil = "barking.lock.openUntil"
     }
 
     private let defaults: UserDefaults
@@ -29,11 +33,17 @@ public final class AppLock: @unchecked Sendable {
         }
     }
 
-    /// The lock of the App Group.
-    public static var shared: AppLock { AppLock(defaults: groupDefaults) }
+    /// How long the app's word that it is open holds without a refresh.
+    public static let leaseDuration: TimeInterval = 60
+    /// How often the app in the foreground renews it.
+    public static let leaseRefresh: TimeInterval = 20
 
-    private static var groupDefaults: UserDefaults {
-        UserDefaults(suiteName: SharedPaths.appGroup) ?? .standard
+    /// The one lock of the app, on the App Group's defaults (the app's own
+    /// when the group is missing: only the extension must fail safe).
+    public static let live = AppLock(defaults: groupDefaults ?? .standard)
+
+    private static var groupDefaults: UserDefaults? {
+        UserDefaults(suiteName: SharedPaths.appGroup)
     }
 
     public var enabled: Bool {
@@ -43,6 +53,7 @@ public final class AppLock: @unchecked Sendable {
             // Turned on from inside the app: the app stays open.
             state.withLock { open = true }
             clear()
+            refreshLease(at: Date())
         }
     }
 
@@ -54,6 +65,13 @@ public final class AppLock: @unchecked Sendable {
 
     public func didEnterBackground(at date: Date) {
         defaults.set(date.timeIntervalSince1970, forKey: Key.backgroundAt)
+        // Open for the delay only: past it, the extension says "New message".
+        defaults.set(date.addingTimeInterval(delay).timeIntervalSince1970, forKey: Key.openUntil)
+    }
+
+    /// The app is open and says so for `leaseDuration` more.
+    public func refreshLease(at date: Date) {
+        defaults.set(date.addingTimeInterval(Self.leaseDuration).timeIntervalSince1970, forKey: Key.openUntil)
     }
 
     public func needsUnlock(at date: Date) -> Bool {
@@ -72,12 +90,14 @@ public final class AppLock: @unchecked Sendable {
             return true
         }
         defaults.removeObject(forKey: Key.backgroundAt)
+        refreshLease(at: date)
         return false
     }
 
     public func unlocked() {
         state.withLock { open = true }
         clear()
+        refreshLease(at: Date())
     }
 
     private func clear() {
@@ -91,14 +111,21 @@ public final class AppLock: @unchecked Sendable {
         return date >= left.addingTimeInterval(defaults.double(forKey: Key.delay))
     }
 
-    /// What the extension asks: the lock is on and the app is locked, by a
-    /// cold start or because it has been away for the whole delay.
+    /// What the extension asks: the lock is on and the app is not known to
+    /// be open: it is locked, or its lease has run out (the delay passed in
+    /// the background, or the app died while open).
     public static func isLocked(defaults: UserDefaults, at date: Date = Date()) -> Bool {
         guard defaults.bool(forKey: Key.enabled) else { return false }
-        return defaults.bool(forKey: Key.locked) || elapsed(defaults: defaults, at: date)
+        if defaults.bool(forKey: Key.locked) { return true }
+        let until = defaults.object(forKey: Key.openUntil) as? Double ?? 0
+        return date.timeIntervalSince1970 >= until
     }
 
-    public static var isLockedForExtension: Bool { isLocked(defaults: groupDefaults) }
+    /// Without the group's defaults the lock cannot be read: locked.
+    public static var isLockedForExtension: Bool {
+        guard let defaults = groupDefaults else { return true }
+        return isLocked(defaults: defaults)
+    }
 
     /// A phone with no passcode cannot lock the app: nothing would unlock it.
     public static func canEnable() -> Bool {

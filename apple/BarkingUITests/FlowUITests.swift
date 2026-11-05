@@ -192,7 +192,7 @@ final class SecurityUITests: XCTestCase {
     }
 
     func testEmergencyWipeReturnsToWelcome() throws {
-        let app = XCUIApplication.fresh()
+        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
         app.launch()
         try onboard(app)
         openSecurity(app)
@@ -210,7 +210,7 @@ final class SecurityUITests: XCTestCase {
     }
 
     func testLockCoversTheAppAndUnlocks() throws {
-        let app = XCUIApplication.fresh()
+        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
         app.launch()
         try onboard(app)
         openSecurity(app)
@@ -227,7 +227,7 @@ final class SecurityUITests: XCTestCase {
 
     /// No Face ID on the way: the lock screen erases on its own.
     func testEmergencyWipeFromTheLockScreen() throws {
-        let app = XCUIApplication.fresh()
+        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
         app.launch()
         try onboard(app)
         openSecurity(app)
@@ -240,5 +240,41 @@ final class SecurityUITests: XCTestCase {
         app.buttons["lock.erase"].press(forDuration: 2.5)
         app.buttons["Erase"].tap()
         XCTAssertTrue(app.buttons["Create my identity"].waitForExistence(timeout: 10))
+    }
+
+    /// A sheet open above the root stays under the cover, out of reach.
+    func testLockCoversASheetOpenAboveTheRoot() throws {
+        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
+        app.launch()
+        try onboard(app)
+        openSecurity(app)
+        let toggle = app.switches["security.lock"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        turnOn(toggle)
+        app.tabBars.buttons["Chats"].tap()
+        app.buttons["New message"].tap()
+        let sheetButton = app.buttons["Close"].firstMatch
+        XCTAssertTrue(sheetButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(sheetButton.isHittable)
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(app.staticTexts["Barking is locked"].waitForExistence(timeout: 10))
+        XCTAssertFalse(sheetButton.isHittable, "the sheet must be under the cover")
+        XCTAssertTrue(app.buttons["Unlock"].isHittable)
+    }
+
+    /// The lock screen asks for the owner by itself; "Unlock" is the retry.
+    func testLockScreenAsksForTheOwnerOnItsOwn() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        try onboard(app)
+        openSecurity(app)
+        let toggle = app.switches["security.lock"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        turnOn(toggle)
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(app.switches["security.lock"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Barking is locked"].exists)
     }
 }
