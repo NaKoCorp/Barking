@@ -77,6 +77,9 @@ targets:
         BarkingKeychainGroup: $(BARKING_KEYCHAIN_GROUP)
         UIBackgroundModes: [remote-notification]
         UIAppFonts: [FiraCode-Regular.ttf, FiraCode-Medium.ttf, FiraCode-SemiBold.ttf]
+        CFBundleURLTypes:
+          - CFBundleURLName: org.nakocorp.barking
+            CFBundleURLSchemes: [barking]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking

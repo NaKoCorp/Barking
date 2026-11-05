@@ -19,6 +19,10 @@ struct StatusGlyph: View {
     let status: MessageStatusKind
 
     var body: some View {
+        glyph.font(.system(size: 11, weight: .semibold)) // Fira Code draws ✓ like a √.
+    }
+
+    @ViewBuilder private var glyph: some View {
         switch status {
         case .queued: Text(verbatim: "⏳").accessibilityLabel(Text("queued"))
         case .sent: Text(verbatim: "✓").accessibilityLabel(Text("sent"))

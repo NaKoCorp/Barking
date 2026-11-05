@@ -21,6 +21,12 @@ public enum DeviceFactory {
         #endif
     }
 
+    /// A database exists in the shared container.
+    public static var hasIdentity: Bool {
+        guard let path = try? SharedPaths.database.path else { return false }
+        return FileManager.default.fileExists(atPath: path)
+    }
+
     public static func config(key: Data, lockTimeoutMs: UInt64) throws -> DeviceConfig {
         DeviceConfig(
             dbPath: try SharedPaths.database.path, lockPath: try SharedPaths.lock.path,
@@ -54,5 +60,16 @@ public enum DeviceFactory {
         let created = try createDevice(config: config(key: key, lockTimeoutMs: Budget.appLockMs), deviceName: deviceName)
         for url in [try SharedPaths.database, try SharedPaths.lock] { try SharedPaths.protect(url) }
         return created
+    }
+
+    /// Recovers an identity from its 24 words (a key left without its
+    /// database is replaced, as for `createNew`).
+    public static func recover(phrase: String, deviceName: String) throws -> Device {
+        let probe = try config(key: Data(count: 32), lockTimeoutMs: Budget.appLockMs)
+        let key = deviceExists(config: probe) ? try keyStore.create() : try keyStore.replace()
+        let device = try recoverDevice(config: config(key: key, lockTimeoutMs: Budget.appLockMs),
+                                       phrase: phrase, deviceName: deviceName)
+        for url in [try SharedPaths.database, try SharedPaths.lock] { try SharedPaths.protect(url) }
+        return device
     }
 }
