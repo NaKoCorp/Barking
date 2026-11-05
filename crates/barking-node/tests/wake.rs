@@ -365,10 +365,24 @@ async fn wake_leaks_no_token_mailbox_or_address() {
         assert!(!contains(&item, &mailbox.0), "mailbox id sent to the relay");
         assert!(!contains(&item, &apns), "APNs token in clear to the relay");
     }
+    // This node's own aggregated report: the checks below must not rely on
+    // what other tests of the binary happen to log.
+    let report = tokio::spawn(barking_node::server::report_loop(
+        Arc::clone(&node.stats),
+        Duration::from_millis(50),
+    ));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !contains(&logs.lock().unwrap(), b"wake-ups: 1 sent") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no report of the wake-up logged"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    report.abort();
     node.stop().await;
     relay.stop();
     let text = String::from_utf8_lossy(&logs.lock().unwrap()).into_owned();
-    assert!(!text.is_empty(), "no log captured");
     let mailbox_debug = format!("{:?}", mailbox.0);
     for needle in [
         hex(&apns),

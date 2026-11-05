@@ -1,42 +1,42 @@
-# Clé de signature du mainteneur
+# Maintainer signing key
 
-`keys/maintainer.pub` contient la clé publique minisign avec laquelle `scripts/verify-release.sh`
-vérifie `SHA256SUMS.minisig`. Elle est **vide** tant que le mainteneur n'a pas publié sa clé :
-la vérification échoue alors avec un message explicite.
+`keys/maintainer.pub` contains the minisign public key with which `scripts/verify-release.sh`
+verifies `SHA256SUMS.minisig`. It is **empty** until the maintainer has published their key:
+verification then fails with an explicit message.
 
-Personne d'autre que le mainteneur ne génère ni ne manipule la clé secrète.
+Nobody other than the maintainer generates or handles the secret key.
 
-## Génération (hors ligne)
+## Generation (offline)
 
-Sur une machine déconnectée, avec un mot de passe fort :
+On a disconnected machine, with a strong password:
 
     minisign -G -p maintainer.pub -s maintainer.key
 
-## Rangement de la clé secrète
+## Storing the secret key
 
-- `maintainer.key` ne quitte jamais la machine de signature ; elle n'est ni dans le dépôt ni dans la CI.
-- Faire une sauvegarde chiffrée (par exemple `age -p maintainer.key > maintainer.key.age`)
-  sur un support hors ligne, rangé à un autre endroit que la clé elle-même.
+- `maintainer.key` never leaves the signing machine; it is neither in the repository nor in the CI.
+- Make an encrypted backup (for example `age -p maintainer.key > maintainer.key.age`)
+  on offline media, stored in a different place from the key itself.
 
-## Publication de la clé publique
+## Publishing the public key
 
-Copier `maintainer.pub` dans `keys/maintainer.pub`, puis faire valider le commit par une seconde
-personne. Publier aussi la ligne de clé complète (la deuxième ligne du fichier, qui commence par `RW`) par
-un canal indépendant du dépôt (site, annonce de version).
+Copy `maintainer.pub` to `keys/maintainer.pub`, then have the commit validated by a second
+person. Also publish the full key line (the second line of the file, which starts with `RW`) through
+a channel independent of the repository (website, release announcement).
 
 ## Rotation
 
-1. Générer la nouvelle paire comme ci-dessus.
-2. L'ancienne clé signe la nouvelle clé publique :
+1. Generate the new pair as above.
+2. The old key signs the new public key:
 
        minisign -S -m new-maintainer.pub -s old-maintainer.key -x keys/rotation-<date>.minisig
 
-3. Remplacer `keys/maintainer.pub` par la nouvelle clé et ajouter `keys/rotation-<date>.minisig`
-   dans le même commit. Les vérificateurs qui ont l'ancienne clé contrôlent la chaîne avec
+3. Replace `keys/maintainer.pub` with the new key and add `keys/rotation-<date>.minisig`
+   in the same commit. Verifiers who have the old key check the chain with
    `minisign -V -m keys/maintainer.pub -p old-maintainer.pub -x keys/rotation-<date>.minisig`.
 
-## Seuil k sur n (à venir)
+## k-of-n threshold (upcoming)
 
-À terme, une version devra porter les signatures de k mainteneurs parmi n
-(`SHA256SUMS.<id>.minisig`), la vérification exigeant k signatures valides de clés distinctes.
-Ce n'est pas encore en place : une seule clé signe aujourd'hui.
+Eventually, a release will have to carry the signatures of k maintainers out of n
+(`SHA256SUMS.<id>.minisig`), with verification requiring k valid signatures from distinct keys.
+This is not in place yet: a single key signs today.

@@ -203,10 +203,6 @@ pub fn routable(addr: &SocketAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
-
-    use crate::node_id::generate_node_key;
-
     const NOW: u64 = 1_000_000;
 
     fn v4(s: &str) -> Option<SocketAddrV4> {
@@ -226,8 +222,12 @@ mod tests {
 
     #[test]
     fn signed_record_verifies() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
-        let key = generate_node_key(&mut rng);
+        // Solves the puzzle (seed drawn once with `generate_node_key` in
+        // optimized mode).
+        let key = SigningKey::from_bytes(&[
+            150, 151, 201, 8, 34, 150, 13, 226, 60, 195, 190, 11, 19, 13, 22, 132, 240, 68, 139,
+            241, 74, 28, 92, 145, 5, 25, 223, 169, 17, 160, 107, 234,
+        ]);
         let rec = NodeRecord::sign(&key, v4("1.2.3.4:4433"), None, NOW);
         let id = rec.verify(NOW, &RecordPolicy::network(false)).unwrap();
         assert_eq!(id, NodeId::from_public_key(&key.verifying_key()));

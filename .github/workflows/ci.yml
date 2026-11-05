@@ -1,14 +1,25 @@
-name: repro-check
+name: ci
 
+# Pull request checks. Build reproducibility: double build on pull requests
+# that change the build environment, full double build of every target on
+# demand (workflow_dispatch), and at release time (release.yml).
 on:
   pull_request:
-  schedule:
-    - cron: '17 4 * * 1'
+  # Runs on main fill the Cargo cache that pull requests start from.
+  push:
+    branches: [main]
   workflow_dispatch:
+
+# A new push to a pull request replaces the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
 
 jobs:
+  # Always reports (a required check): skipped steps when the pull request
+  # leaves the build environment untouched.
   repro-twice:
     name: double build (PR)
     if: github.event_name == 'pull_request'
@@ -20,7 +31,23 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Does the pull request change the build environment?
+        id: env
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --quiet "$BASE" HEAD -- \
+            Cargo.lock ':(glob)**/Cargo.toml' ':(glob)**/build.rs' rust-toolchain.toml \
+            .cargo/ docker/ .xcode-version scripts/repro-build.sh scripts/release-lib.sh \
+            scripts/tests/repro-twice.sh .github/workflows/ci.yml .github/workflows/release.yml
+          then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "build environment unchanged: double build skipped"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Two builds, two paths, same checksums
+        if: steps.env.outputs.changed == 'true'
         run: scripts/tests/repro-twice.sh
 
   rust:
@@ -39,6 +66,29 @@ jobs:
           [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
           rustup toolchain install "$canal" --profile minimal --component rustfmt --component clippy
           rustup default "$canal"
+      # Only GitHub-owned actions are allowed in this repository: the Cargo
+      # cache uses actions/cache, keyed by toolchain and lockfile.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+      # Official cargo-nextest release, pinned by version and checksum.
+      - name: Install cargo-nextest
+        env:
+          VERSION: 0.9.149
+          SHA256: 32d1d8c0567b7a80bee2bad8bb09125c846da96bc009b2de11ec08557290c770
+        run: |
+          set -euo pipefail
+          archive="cargo-nextest-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$VERSION/$archive"
+          echo "$SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$HOME/.cargo/bin"
       - run: scripts/check.sh
 
   release-scripts:
@@ -54,7 +104,7 @@ jobs:
 
   build:
     name: build ${{ matrix.target }} (${{ matrix.copie }})
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read

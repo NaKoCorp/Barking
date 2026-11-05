@@ -1,110 +1,110 @@
-# Vérifier une version de Barking
+# Verifying a Barking release
 
-Cette page explique comment vérifier qu'un binaire `barking-cli`, `barking-node` ou `barking-push` (relais de notifications iOS) publié correspond exactement au code source public, et qu'il a été approuvé par le mainteneur. Elle décrit aussi comment devenir reconstructeur indépendant. Le cadre complet est dans la spec, §15.
+This page explains how to check that a published `barking-cli`, `barking-node` or `barking-push` (iOS notification relay) binary matches the public source code exactly, and that the maintainer approved it. It also describes how to become an independent rebuilder. The full framework is in the spec, §15.
 
-## Ce qui est vérifié
+## What is verified
 
-Chaque version `vX.Y.Z` publiée sur GitHub contient, par cible, trois binaires, `barking-cli-<version>-<cible>`, `barking-node-<version>-<cible>` et `barking-push-<version>-<cible>` (même version pour les trois), plus `SHA256SUMS` et `SHA256SUMS.minisig`. Les cibles sont `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` et `aarch64-apple-darwin` (macOS, sans notarisation).
+Each `vX.Y.Z` release published on GitHub contains, for each target, three binaries, `barking-cli-<version>-<target>`, `barking-node-<version>-<target>` and `barking-push-<version>-<target>` (same version for all three), plus `SHA256SUMS` and `SHA256SUMS.minisig`. The targets are `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and `aarch64-apple-darwin` (macOS, not notarized).
 
-Trois contrôles se complètent :
+Three checks complement each other:
 
-1. **Signature du mainteneur** : `SHA256SUMS.minisig` est une signature minisign de `SHA256SUMS`, vérifiée avec `keys/maintainer.pub`. Le commentaire signé doit être exactement `barking v<version> commit <commit>`, où `<commit>` est l'identifiant complet (40 caractères hexadécimaux) du commit du tag `v<version>` chez le mainteneur au moment de signer. Le script affiche ce commit ; si le tag `v<version>` existe dans votre clone, il exige qu'il désigne le même commit, et refuse la version sinon (tag déplacé). Si le tag est absent de votre clone, il le signale seulement : le commit n'a pas pu être contrôlé localement.
-2. **Empreintes** : chaque binaire a l'empreinte SHA-256 listée dans `SHA256SUMS`, et aucun fichier n'est en trop ni manquant.
-3. **Attestations de provenance** : GitHub certifie que chaque binaire a été produit par le workflow `.github/workflows/release.yml`, depuis le tag `refs/tags/v<version>` du dépôt. L'attestation est liée au workflow et au nom du tag, pas à l'empreinte d'un commit : un tag déplacé serait accepté par cette étape seule, d'où l'importance du ruleset de tags décrit dans `docs/RELEASING.md` et du commit lié par la signature (contrôle 1). Les attestations produites sur un runner auto-hébergé sont refusées (`--deny-self-hosted-runners`).
+1. **Maintainer signature**: `SHA256SUMS.minisig` is a minisign signature of `SHA256SUMS`, verified with `keys/maintainer.pub`. The signed comment must be exactly `barking v<version> commit <commit>`, where `<commit>` is the full identifier (40 hexadecimal characters) of the commit of tag `v<version>` in the maintainer's repository at signing time. The script prints this commit; if tag `v<version>` exists in your clone, it requires the tag to point to the same commit, and otherwise rejects the release (moved tag). If the tag is absent from your clone, it only reports it: the commit could not be checked locally.
+2. **Checksums**: each binary has the SHA-256 checksum listed in `SHA256SUMS`, and no file is extra or missing.
+3. **Provenance attestations**: GitHub certifies that each binary was produced by the `.github/workflows/release.yml` workflow, from the repository's `refs/tags/v<version>` tag. The attestation is bound to the workflow and the tag name, not to a commit hash: a moved tag would be accepted by this step alone, which is why the tag ruleset described in `docs/RELEASING.md` and the commit bound by the signature (check 1) matter. Attestations produced on a self-hosted runner are rejected (`--deny-self-hosted-runners`).
 
-**Ce que la signature atteste vraiment.** Le mainteneur ne signe qu'après avoir recompilé lui-même, sur sa machine, les cibles que celle-ci sait compiler : une machine Linux x86_64 recompile `x86_64-unknown-linux-musl` ; un Mac arm64 recompile `aarch64-unknown-linux-musl` (Docker est alors requis), et `aarch64-apple-darwin` seulement s'il a `rustup` et exactement l'Xcode et le SDK de la CI (fichier `.xcode-version`) : sinon cette cible est sautée, avec un avis explicite. Pour ces cibles, publier un faux binaire exige de compromettre à la fois la CI et la clé hors ligne. Pour les autres cibles, la signature couvre quand même tout `SHA256SUMS`, mais elle repose sur le double build de la CI, l'attestation et l'approbation du mainteneur : une CI compromise suffirait à faire signer un binaire, sauf si quelqu'un recompile cette cible. Les reconstructions indépendantes (voir plus bas) comblent cet écart.
+**What the signature really attests.** The maintainer signs only after rebuilding, on their own machine, the targets that machine can build: a Linux x86_64 machine rebuilds `x86_64-unknown-linux-musl`; an arm64 Mac rebuilds `aarch64-unknown-linux-musl` (Docker is then required), and `aarch64-apple-darwin` only if it has `rustup` and exactly the CI's Xcode and SDK (`.xcode-version` file): otherwise that target is skipped, with an explicit notice. For these targets, publishing a fake binary requires compromising both the CI and the offline key. For the other targets, the signature still covers all of `SHA256SUMS`, but it relies on the CI's double build, the attestation and the maintainer's approval: a compromised CI would be enough to get a binary signed, unless someone rebuilds that target. Independent rebuilds (see below) close this gap.
 
-## Prérequis
+## Prerequisites
 
-- `git`, `minisign` et `gh` (GitHub CLI, connecté avec `gh auth login`), en version 2.68.0 ou plus récente : c'est la première qui accepte `gh attestation verify --source-ref` (`--signer-workflow` et `--deny-self-hosted-runners` sont plus anciens) ;
-- pour la vérification complète : Docker pour les cibles Linux, et Docker aussi sur un Mac Apple Silicon. Pour `aarch64-apple-darwin`, il faut en plus `rustup` et l'Xcode indiqué dans `.xcode-version` (voir « Limites »).
+- `git`, `minisign` and `gh` (GitHub CLI, logged in with `gh auth login`), version 2.68.0 or newer: it is the first version that accepts `gh attestation verify --source-ref` (`--signer-workflow` and `--deny-self-hosted-runners` are older);
+- for full verification: Docker for the Linux targets, and Docker as well on an Apple Silicon Mac. For `aarch64-apple-darwin`, you also need `rustup` and the Xcode given in `.xcode-version` (see "Limits").
 
-Clonez le dépôt et placez-vous à la racine :
+Clone the repository and go to its root:
 
     git clone https://github.com/<owner>/barking.git
     cd barking
 
-La clé publique du mainteneur est `keys/maintainer.pub`. Contrôlez la ligne de clé complète (la deuxième ligne du fichier, qui commence par `RW`) auprès d'un canal indépendant du dépôt, comme le site du projet ou l'annonce de version. Tant que le fichier est vide, la vérification s'arrête avec un message explicite : le mainteneur n'a pas encore publié sa clé.
+The maintainer's public key is `keys/maintainer.pub`. Check the full key line (the second line of the file, which starts with `RW`) against a channel independent of the repository, such as the project website or the release announcement. While the file is empty, verification stops with an explicit message: the maintainer has not published their key yet.
 
-## Vérification rapide
+## Quick verification
 
     scripts/verify-release.sh <version> --repo <owner>/barking
 
-`<version>` s'écrit sans le préfixe `v`, par exemple `scripts/verify-release.sh 0.1.0 --repo <owner>/barking`. Sans `--repo`, le script utilise la variable `BARKING_REPO`, puis l'URL du remote `origin` du dépôt. Il télécharge les fichiers de la version `v<version>` avec `gh`, puis exécute les étapes dans l'ordre :
+`<version>` is written without the `v` prefix, for example `scripts/verify-release.sh 0.1.0 --repo <owner>/barking`. Without `--repo`, the script uses the `BARKING_REPO` variable, then the URL of the repository's `origin` remote. It downloads the files of release `v<version>` with `gh`, then runs the steps in order:
 
-1. signature de `SHA256SUMS` ;
-2. empreintes des binaires ;
-3. attestations (`gh attestation verify` pour chaque binaire, liées au workflow `release.yml` et au tag `v<version>`) ;
-4. recompilation : non demandée.
+1. signature of `SHA256SUMS`;
+2. binary checksums;
+3. attestations (`gh attestation verify` for each binary, bound to the `release.yml` workflow and the `v<version>` tag);
+4. rebuild: not requested.
 
-Il se termine par `Version <version> vérifiée ✓` et un code de sortie 0. En cas de problème, il affiche « ÉCHEC à l'étape … » et sort avec le code 1 : n'utilisez alors pas le binaire.
+It ends with `Version <version> verified ✓` and exit code 0. If anything goes wrong, it prints "FAILURE at step …" and exits with code 1: do not use the binary in that case.
 
-Options utiles :
+Useful options:
 
-- `--from-dir <dir>` : vérifie des fichiers déjà téléchargés au lieu de passer par `gh release download`. Le répertoire doit contenir `SHA256SUMS`, `SHA256SUMS.minisig` et **tous** les binaires de la version : un binaire listé dans `SHA256SUMS` mais absent fait échouer la vérification ;
-- `--pubkey <fichier>` : utilise une autre clé publique que `keys/maintainer.pub` ;
-- `--skip-attestation` : saute l'étape 3 (par exemple hors ligne, avec `--from-dir`). Ce contrôle est alors perdu : n'en tirez pas la même confiance.
+- `--from-dir <dir>`: verifies files that were already downloaded instead of going through `gh release download`. The directory must contain `SHA256SUMS`, `SHA256SUMS.minisig` and **all** the binaries of the release: a binary listed in `SHA256SUMS` but missing makes verification fail;
+- `--pubkey <file>`: uses a public key other than `keys/maintainer.pub`;
+- `--skip-attestation`: skips step 3 (for example offline, with `--from-dir`). This check is then lost: do not place the same trust in the result.
 
-## Vérification complète : recompiler
+## Full verification: rebuilding
 
     scripts/verify-release.sh <version> --rebuild --repo <owner>/barking
 
-En plus des trois contrôles, le script recompile depuis le tag `v<version>`, puis compare les binaires obtenus à ceux de la version. La recompilation utilise **l'environnement de build enregistré dans le tag** (`scripts/repro-build.sh`, `docker/repro.Dockerfile`, `.xcode-version`, `rust-toolchain.toml`, extraits du tag avec `git archive`), jamais celui de votre arbre de travail. Si le tag ne contient pas ces fichiers (version antérieure à cette procédure), le script s'arrête et le dit : recompilez alors à la main. Il recompile chaque cible qu'il sait compiler sur votre machine :
+In addition to the three checks, the script rebuilds from tag `v<version>`, then compares the resulting binaries with those of the release. The rebuild uses **the build environment recorded in the tag** (`scripts/repro-build.sh`, `docker/repro.Dockerfile`, `.xcode-version`, `rust-toolchain.toml`, extracted from the tag with `git archive`), never the one in your working tree. If the tag does not contain these files (a release that predates this procedure), the script stops and says so: rebuild by hand in that case. It rebuilds every target it can build on your machine:
 
-- Linux x86_64 : la cible `x86_64-unknown-linux-musl`, via Docker ;
-- Linux arm64 : la cible `aarch64-unknown-linux-musl`, via Docker ;
-- macOS arm64 : la cible `aarch64-unknown-linux-musl`, qui exige Docker (sans Docker, le script échoue sur un Mac arm64) ; et la cible `aarch64-apple-darwin`, en natif, seulement avec `rustup` et l'Xcode/SDK de `.xcode-version`. Sinon, le script annonce que cette cible n'est pas recompilée ici : pour elle, la confiance repose sur le double build de la CI, l'attestation et les reconstructions indépendantes.
+- Linux x86_64: the `x86_64-unknown-linux-musl` target, via Docker;
+- Linux arm64: the `aarch64-unknown-linux-musl` target, via Docker;
+- macOS arm64: the `aarch64-unknown-linux-musl` target, which requires Docker (without Docker, the script fails on an arm64 Mac); and the `aarch64-apple-darwin` target, natively, only with `rustup` and the Xcode/SDK from `.xcode-version`. Otherwise, the script announces that this target is not rebuilt here: for it, trust relies on the CI's double build, the attestation and independent rebuilds.
 
-Chaque cible Linux est compilée nativement sur son architecture, jamais en émulation. Les autres cibles ne sont pas comparées. Si aucune cible n'est compilable sur votre machine, le script échoue : il n'y a rien eu de recompilé.
+Each Linux target is built natively on its own architecture, never under emulation. The other targets are not compared. If no target can be built on your machine, the script fails: nothing was rebuilt.
 
-Le tag `v<version>` doit exister dans votre clone (`git fetch --tags`).
+Tag `v<version>` must exist in your clone (`git fetch --tags`).
 
-Pour comparer avec des compilations déjà faites, utilisez `--rebuilt-dir <dir>` (il implique `--rebuild`). Le répertoire doit contenir **toutes** les cibles que votre machine sait compiler, produites par `repro-build.sh` (même `--out`) : une cible compilable ici mais absente du répertoire fait échouer le script.
+To compare against builds you have already made, use `--rebuilt-dir <dir>` (it implies `--rebuild`). The directory must contain **all** the targets your machine can build, produced by `repro-build.sh` (same `--out`): a target that can be built here but is missing from the directory makes the script fail.
 
-    scripts/repro-build.sh --target <cible> --ref v<version> --out <dir>
+    scripts/repro-build.sh --target <target> --ref v<version> --out <dir>
     scripts/verify-release.sh <version> --rebuilt-dir <dir> --repo <owner>/barking
 
-`repro-build.sh` écrit les binaires `barking-cli-<version>-<cible>`, `barking-node-<version>-<cible>` et `barking-push-<version>-<cible>` et `SHA256SUMS` dans `<dir>` (par défaut `dist/`) et affiche l'empreinte.
+`repro-build.sh` writes the binaries `barking-cli-<version>-<target>`, `barking-node-<version>-<target>` and `barking-push-<version>-<target>` and `SHA256SUMS` to `<dir>` (`dist/` by default) and prints the checksum.
 
-Si vous ne compilez qu'une seule cible, comparez à la main : compilez avec `scripts/repro-build.sh --target <cible> --ref v<version> --out <dir>`, puis comparez les empreintes affichées (une par binaire, ou celles de `<dir>/SHA256SUMS`) aux lignes correspondantes du `SHA256SUMS` de la version.
+If you only build a single target, compare by hand: build with `scripts/repro-build.sh --target <target> --ref v<version> --out <dir>`, then compare the printed checksums (one per binary, or those in `<dir>/SHA256SUMS`) with the matching lines of the release's `SHA256SUMS`.
 
-### Compiler avec la bonne référence
+### Building with the right reference
 
-Le binaire contient la date du commit (`SOURCE_DATE_EPOCH` est l'horodatage du commit construit : seul cet horodatage change le binaire, pas l'identifiant du commit). Il faut donc compiler **exactement le commit du tag**. Un commit recréé ou amendé, même avec un contenu identique, a un autre horodatage, et donne un binaire différent. Si vos empreintes diffèrent, vérifiez d'abord que `git rev-parse v<version>^{commit}` est bien le commit attendu.
+The binary embeds the commit date (`SOURCE_DATE_EPOCH` is the timestamp of the commit being built: only this timestamp changes the binary, not the commit identifier). You must therefore build **exactly the tag's commit**. A recreated or amended commit, even with identical content, has a different timestamp and produces a different binary. If your checksums differ, first check that `git rev-parse v<version>^{commit}` is the expected commit.
 
-### Limites
+### Limits
 
-- **Linux** : le build tourne dans une image Docker épinglée par son empreinte, avec Rust 1.99.1 sur Alpine et un ensemble complet de versions APK épinglées dans `docker/apk/build.txt`. Les anciens paquets Alpine peuvent disparaître des dépôts publics : il faut en conserver une archive immuable ou l’image de build pour les reconstructions à long terme (voir [RELEASING.md](RELEASING.md)). Docker est requis.
-- **macOS** : le build est natif, dans le répertoire fixe `/private/tmp/barking-repro-darwin`. Si ce répertoire existe déjà, le script refuse de démarrer : supprimez-le après un build interrompu. La cible de déploiement est fixée à macOS 11.0. **La reproductibilité n'est garantie qu'avec la même version de Xcode et du SDK macOS que la CI.** Ils sont épinglés dans `.xcode-version` (runner GitHub, version de Xcode, version du SDK) ; les workflows sélectionnent cet Xcode et vérifient le SDK. `repro-build.sh` refuse de compiler cette cible si `xcodebuild -version` ou `xcrun --show-sdk-version` diffèrent (« SDK/Xcode différent de celui de la CI ») : installez cet Xcode et sélectionnez-le avec `sudo xcode-select -s /Applications/Xcode_<version>.app`. `rustup` est aussi requis : le `rustc` de Homebrew, même en 1.94.1, n'est pas la chaîne officielle et ne reproduit pas le binaire. Le script affiche les versions de Xcode, du SDK, de clang et de rustc utilisées.
+- **Linux**: the build runs in a Docker image pinned by its digest, with Rust 1.99.1 on Alpine and a full set of pinned APK versions in `docker/apk/build.txt`. Old Alpine packages can disappear from public repositories: keep an immutable archive of them, or the build image, for long-term rebuilds (see [RELEASING.md](RELEASING.md)). Docker is required.
+- **macOS**: the build is native, in the fixed directory `/private/tmp/barking-repro-darwin`. If this directory already exists, the script refuses to start: delete it after an interrupted build. The deployment target is fixed at macOS 11.0. **Reproducibility is only guaranteed with the same Xcode and macOS SDK versions as the CI.** They are pinned in `.xcode-version` (GitHub runner, Xcode version, SDK version); the workflows select that Xcode and check the SDK. `repro-build.sh` refuses to build this target if `xcodebuild -version` or `xcrun --show-sdk-version` differ ("Xcode/SDK differs from the CI's"): install that Xcode and select it with `sudo xcode-select -s /Applications/Xcode_<version>.app`. `rustup` is also required: Homebrew's `rustc`, even at 1.94.1, is not the official toolchain and does not reproduce the binary. The script prints the Xcode, SDK, clang and rustc versions used.
 
-## Devenir reconstructeur indépendant
+## Becoming an independent rebuilder
 
-Plusieurs reconstructions identiques, faites par des personnes différentes, attestent publiquement que le binaire correspond au code (spec §15.5). Elles sont aussi ce qui comble l'écart décrit plus haut : pour les cibles que le mainteneur ne recompile pas lui-même, seules des reconstructions indépendantes les couvrent. Pour y participer :
+Several identical rebuilds, made by different people, publicly attest that the binary matches the code (spec §15.5). They are also what closes the gap described above: for the targets the maintainer does not rebuild themselves, only independent rebuilds cover them. To take part:
 
-1. Recompilez une cible depuis le tag, comme ci-dessus, sur une machine que vous maîtrisez.
-2. Comparez l'empreinte obtenue à celle de `SHA256SUMS`, à la main ou avec `verify-release.sh --rebuilt-dir` si votre répertoire contient toutes les cibles compilables chez vous.
-3. Publiez votre résultat dans le dépôt `barking-rebuilds`, sous la forme d'une entrée signée avec **votre propre clé minisign** :
+1. Rebuild a target from the tag, as above, on a machine you control.
+2. Compare the resulting checksum with the one in `SHA256SUMS`, by hand or with `verify-release.sh --rebuilt-dir` if your directory contains all the targets that can be built on your machine.
+3. Publish your result in the `barking-rebuilds` repository, as an entry signed with **your own minisign key**:
 
         version: <version>
-        cible: <cible>
-        sha256: <empreinte du binaire que vous avez compilé>
-        identique: oui|non
-        date: <date de la reconstruction, AAAA-MM-JJ>
+        target: <target>
+        sha256: <checksum of the binary you built>
+        identical: yes|no
+        date: <date of the rebuild, YYYY-MM-DD>
 
-   Le format ci-dessus est fixé ; la façon de signer est une suggestion : `minisign -S -m <entrée> -s <votre clé>`. Déposez l'entrée avec son `.minisig`. Ajoutez votre clé publique au dépôt, ou publiez-la ailleurs, pour qu'on puisse la contrôler.
+   The format above is fixed; how to sign is a suggestion: `minisign -S -m <entry> -s <your key>`. Submit the entry with its `.minisig`. Add your public key to the repository, or publish it elsewhere, so that it can be checked.
 
-Publiez aussi vos résultats `identique: non` : c'est précisément ce qui alerte. Le dépôt `barking-rebuilds` est à créer ; ce format est celui fixé par le projet.
+Also publish your `identical: no` results: that is precisely what raises the alarm. The `barking-rebuilds` repository is yet to be created; this format is the one fixed by the project.
 
-## Règle des mises à jour
+## Update rule
 
-Quand les mises à jour automatiques existeront (le code vient plus tard, le format est fixé maintenant, spec §15.6), un nœud ou une app n'installera une mise à jour que si :
+When automatic updates exist (the code comes later, the format is fixed now, spec §15.6), a node or an app will only install an update if:
 
-- la signature du mainteneur (ou le seuil k sur n, quand l'équipe grandira) est valide ;
-- la version est **strictement plus récente** que celle installée, ce qui empêche de forcer un retour à une version vulnérable.
+- the maintainer's signature (or the k-of-n threshold, once the team grows) is valid;
+- the version is **strictly newer** than the installed one, which prevents forcing a rollback to a vulnerable version.
 
-## Android et iOS
+## Android and iOS
 
-- **Android** : l'APK sera reproductible à l'étape 3 de la feuille de route (spec). On comparera son contenu hors bloc de signature, comme le fait F-Droid.
-- **iOS** : une app installée depuis l'App Store **n'est pas vérifiable**. Apple chiffre chaque binaire puis le re-signe avec ses propres clés, donc l'empreinte de ce que vous installez ne peut pas être comparée à celle du code source. Ce que le projet fait à la place : documenter cette limite ici, et publier, pour les auditeurs, un build iOS construit depuis le code public. Il permettra d'auditer ce code, mais pas de prouver que la version de l'App Store en est issue.
+- **Android**: the APK will be reproducible at step 3 of the roadmap (spec). Its contents will be compared excluding the signing block, as F-Droid does.
+- **iOS**: an app installed from the App Store **cannot be verified**. Apple encrypts each binary and then re-signs it with its own keys, so the checksum of what you install cannot be compared with that of the source code. What the project does instead: document this limit here, and publish, for auditors, an iOS build built from the public code. It will make it possible to audit that code, but not to prove that the App Store version comes from it.
 
-Ces deux applications ne sont pas encore livrées. Aujourd'hui, les versions contiennent `barking-cli`, `barking-node` et `barking-push`.
+Neither of these apps has shipped yet. Today, releases contain `barking-cli`, `barking-node` and `barking-push`.

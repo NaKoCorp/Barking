@@ -2,25 +2,31 @@
 //! answers `Hello` and publishes what `peer_node_id` sees.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::OnceLock;
 
 use barking_proto::client::{self, Client, ClientError};
 use barking_proto::frame::{self, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use barking_proto::msg::{Limits, Request, Response};
-use barking_proto::{NodeId, PROTOCOL_VERSION, generate_node_key, tls};
+use barking_proto::{NodeId, PROTOCOL_VERSION, tls};
 use ed25519_dalek::SigningKey;
 use quinn::Endpoint;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
 use tokio::sync::mpsc;
 
+/// Seeds of two keys solving the 20-bit puzzle, drawn once with
+/// `generate_node_key` in optimized mode: each test runs in its own process
+/// under cargo-nextest, and a key costs tens of seconds unoptimized.
+const SEEDS: [[u8; 32]; 2] = [
+    [
+        109, 33, 207, 142, 255, 118, 3, 197, 255, 37, 245, 98, 29, 38, 206, 73, 204, 227, 116, 134,
+        207, 149, 45, 186, 178, 63, 22, 1, 91, 51, 3, 154,
+    ],
+    [
+        243, 154, 19, 251, 40, 36, 222, 253, 186, 211, 198, 229, 16, 112, 17, 100, 218, 105, 77,
+        123, 198, 68, 9, 130, 186, 31, 156, 55, 147, 92, 205, 85,
+    ],
+];
+
 fn key(n: usize) -> SigningKey {
-    static KEYS: OnceLock<Vec<SigningKey>> = OnceLock::new();
-    KEYS.get_or_init(|| {
-        let mut rng = StdRng::seed_from_u64(77);
-        (0..2).map(|_| generate_node_key(&mut rng)).collect()
-    })[n]
-        .clone()
+    SigningKey::from_bytes(&SEEDS[n])
 }
 
 fn id_of(k: &SigningKey) -> NodeId {
