@@ -34,7 +34,7 @@ final class DesignSystemTests: XCTestCase {
         for text in ["fg", "fgMuted", "fgSoft", "accent"] {
             for ground in ["surface", "surfaceCard", "surfaceAlt"] { pairs.append((text, ground)) }
         }
-        pairs += [("bannerFg", "bannerBg"), ("warnFg", "warnBg"), ("ok", "okBg"), ("danger", "surfaceCard")]
+        pairs += [("fgMuted", "field"), ("fg", "segment"), ("bannerFg", "bannerBg"), ("warnFg", "warnBg"), ("ok", "okBg"), ("danger", "surfaceCard")]
         for style in styles {
             for (t, g) in pairs {
                 let r = Self.ratio(color(t, style), color(g, style))
@@ -60,5 +60,15 @@ final class DesignSystemTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(r, 4.5, "\(pair.text) on \(pair.fill)")
             }
         }
+    }
+}
+
+final class RoosterTests: XCTestCase {
+    /// Commands are glued to their first number in the mockup's paths.
+    func testPathParsesGluedCommands() {
+        let p = Rooster.path("M38 33 C38 20 46 9 57 6 L45 35 Z")
+        XCTAssertEqual(p.boundingRect.minX, 38, accuracy: 0.5)
+        XCTAssertEqual(p.boundingRect.maxX, 57, accuracy: 0.5)
+        XCTAssertEqual(p.boundingRect.minY, 6, accuracy: 0.5)
     }
 }

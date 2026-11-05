@@ -28,7 +28,7 @@ final class AppRouter {
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-BarkingUITestReset") {
             DeviceFactory.resetIdentity()
-            for key in [OnboardingModel.confirmedKey, "barking.language", "barking.appearance"] {
+            for key in [OnboardingModel.confirmedKey, "barking.appearance"] {
                 UserDefaults.standard.removeObject(forKey: key)
             }
         }

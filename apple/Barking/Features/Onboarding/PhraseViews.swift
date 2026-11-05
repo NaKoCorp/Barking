@@ -35,6 +35,11 @@ struct PhraseView: View {
     @Bindable var model: OnboardingModel
     let onContinue: () -> Void
     @State private var screenshotWarning = false
+    @Environment(\.scenePhase) private var phase
+    @Environment(\.isSceneCaptured) private var captured
+
+    /// Hidden in the app switcher and while the screen is recorded or mirrored.
+    private var hidden: Bool { phase != .active || captured }
 
     var body: some View {
         ScrollView {
@@ -44,7 +49,12 @@ struct PhraseView: View {
                 Text("24 words. They alone let you recover your identity on a new phone.")
                     .font(BarkingFont.sans(.body, size: 15))
                     .foregroundStyle(Color.fgMuted)
-                if let words = model.phrase {
+                if hidden {
+                    Text("Hidden while the screen is recorded or the app is in the background.")
+                        .font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
+                        .frame(maxWidth: .infinity, minHeight: 200)
+                        .background(Color.surfaceCard, in: .rect(cornerRadius: Radius.card))
+                } else if let words = model.phrase {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
                         ForEach(Array(words.enumerated()), id: \.offset) { i, w in
                             HStack(spacing: 4) {
@@ -65,6 +75,11 @@ struct PhraseView: View {
                 }
                 Banner(kind: .warning, title: "Write it down offline.",
                        message: "Never in a screenshot or a notes app. Recovering does not restore contacts or message history.")
+                if let words = model.phrase, !hidden {
+                    PhraseExportButtons(words: words)
+                    Text("Shown only once: Barking does not keep the words.")
+                        .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgMuted)
+                }
                 Toggle(isOn: $model.wroteItDown) {
                     Text("I wrote the 24 words down").foregroundStyle(Color.fg)
                 }

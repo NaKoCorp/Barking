@@ -23,7 +23,7 @@ struct ConversationView: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         ForEach(groupedByDay, id: \.day) { group in
-                            Text(group.day, format: .dateTime.weekday(.wide).day().month())
+                            Text(verbatim: DayLabel.text(for: group.day))
                                 .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
                                 .padding(.top, 8)
                             ForEach(group.items) { item in bubble(item).id(item.id) }
@@ -127,5 +127,17 @@ struct ComposerView: View {
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(Color.surfaceCard)
         .overlay(alignment: .top) { Rectangle().fill(Color.border).frame(height: 1) }
+    }
+}
+
+/// "Today", "Yesterday", then the date, above each day of messages.
+enum DayLabel {
+    static func text(for day: Date, now: Date = .now) -> String {
+        let cal = Calendar.current
+        if cal.isDate(day, inSameDayAs: now) { return String(localized: "Today") }
+        if let y = cal.date(byAdding: .day, value: -1, to: now), cal.isDate(day, inSameDayAs: y) {
+            return String(localized: "Yesterday")
+        }
+        return day.formatted(.dateTime.weekday(.wide).day().month())
     }
 }

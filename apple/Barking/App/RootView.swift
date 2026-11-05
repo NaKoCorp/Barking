@@ -17,13 +17,17 @@ struct RootView: View {
 
 /// Chats, Network, Settings (screens 3, 7, 8). Filled by Tasks 8 to 11.
 struct MainTabView: View {
+    enum Tabs { case chats, network, settings }
     let core: CoreService
+    @State private var tab = Tabs.chats
 
     var body: some View {
-        TabView {
-            Tab("Chats", systemImage: "bubble.left.and.bubble.right") { ChatsView(core: core) }
-            Tab("Network", systemImage: "point.3.connected.trianglepath.dotted") { NetworkView(core: core) }
-            Tab("Settings", systemImage: "gearshape") { SettingsView(core: core) }
+        TabView(selection: $tab) {
+            Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: .chats) { ChatsView(core: core) }
+            Tab("Network", systemImage: "point.3.connected.trianglepath.dotted", value: .network) { NetworkView(core: core) }
+            Tab("Settings", systemImage: "gearshape", value: .settings) {
+                SettingsView(core: core) { tab = .network }
+            }
         }
         .tint(Color.accent)
     }

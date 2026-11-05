@@ -46,17 +46,30 @@ final class ChatUITests: XCTestCase {
 final class SettingsUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
-    /// Review Focus 4: switching language mid-flow keeps the state.
-    func testLanguageSwitchKeepsState() throws {
+    /// The phone's language, with no in-app picker.
+    func testFollowsThePhoneLanguage() throws {
+        let app = XCUIApplication.fresh(language: "fr")
+        app.launch()
+        XCTAssertTrue(app.buttons["Créer mon identité"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Français"].exists)
+        XCTAssertFalse(app.buttons["English"].exists)
+    }
+
+    /// The theme picked on the welcome screen survives a relaunch.
+    func testAppearanceChosenOnWelcomeIsKept() throws {
         let app = XCUIApplication.fresh()
         app.launch()
-        app.buttons["Français"].tap()
-        XCTAssertTrue(app.buttons["Créer mon identité"].waitForExistence(timeout: 5))
-        app.buttons["Créer mon identité"].tap()
-        XCTAssertTrue(app.textFields["Votre nom, tel que vos contacts le voient"].waitForExistence(timeout: 5))
-        app.navigationBars.buttons.firstMatch.tap()
-        app.buttons["English"].tap()
-        XCTAssertTrue(app.buttons["Create my identity"].waitForExistence(timeout: 5))
+        let dark = app.buttons["appearance.dark"]
+        XCTAssertTrue(dark.waitForExistence(timeout: 5))
+        dark.tap()
+        XCTAssertTrue(dark.isSelected)
+        app.terminate()
+        let again = XCUIApplication()
+        again.launchArguments = ["-AppleLanguages", "(en)"]
+        again.launch()
+        XCTAssertTrue(again.buttons["appearance.dark"].waitForExistence(timeout: 5))
+        XCTAssertTrue(again.buttons["appearance.dark"].isSelected)
+        again.buttons["appearance.system"].tap()
     }
 }
 
@@ -92,5 +105,40 @@ final class AccessibilityUITests: XCTestCase {
         let labelled = app.descendants(matching: .any).matching(
             NSPredicate(format: "label IN %@", ["queued", "sent", "delivered", "not sent"]))
         XCTAssertTrue(labelled.firstMatch.waitForExistence(timeout: 5))
+    }
+}
+
+@MainActor
+final class PhraseExportUITests: XCTestCase {
+    override func setUp() { continueAfterFailure = false }
+
+    /// The PDF needs a strong password; the suggestion unlocks the button.
+    func testEncryptedPDFNeedsAStrongPassword() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        app.buttons["Create my identity"].firstMatch.tap()
+        let name = app.textFields["Your name, as contacts see it"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap()
+        name.typeText("Alice")
+        app.buttons["Create my identity"].firstMatch.tap()
+        let pdf = app.buttons["Encrypted PDF"]
+        XCTAssertTrue(pdf.waitForExistence(timeout: 10))
+        pdf.tap()
+        let field = app.secureTextFields["pdf.password"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("password1234")
+        let confirm = app.secureTextFields["pdf.confirm"]
+        confirm.tap()
+        confirm.typeText("password1234")
+        XCTAssertTrue(app.staticTexts["Too easy to guess: use the suggestion or several random words."].exists)
+        XCTAssertFalse(app.buttons["pdf.create"].isEnabled)
+        app.buttons["pdf.suggest"].tap()
+        XCTAssertTrue(app.buttons["pdf.create"].isEnabled)
+        app.buttons["pdf.create"].tap()
+        // The system share sheet opens on the file.
+        XCTAssertTrue(app.otherElements["ActivityListView"].waitForExistence(timeout: 10)
+                      || app.navigationBars["UIActivityContentView"].waitForExistence(timeout: 2))
     }
 }

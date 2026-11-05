@@ -50,3 +50,15 @@ final class MinorFixTests: XCTestCase {
         XCTAssertEqual(m.rows.first?.lastText, "hi")
     }
 }
+
+final class DayLabelTests: XCTestCase {
+    func testTodayAndYesterdayAreNamed() {
+        let cal = Calendar.current
+        let now = Date()
+        XCTAssertEqual(DayLabel.text(for: now, now: now), String(localized: "Today"))
+        XCTAssertEqual(DayLabel.text(for: cal.date(byAdding: .day, value: -1, to: now)!, now: now),
+                       String(localized: "Yesterday"))
+        let old = cal.date(byAdding: .day, value: -10, to: now)!
+        XCTAssertEqual(DayLabel.text(for: old, now: now), old.formatted(.dateTime.weekday(.wide).day().month()))
+    }
+}

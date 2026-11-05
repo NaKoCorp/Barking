@@ -40,5 +40,5 @@ func onboard(_ app: XCUIApplication, confirm: Bool = true) throws {
     } else {
         app.buttons["Later"].tap()
     }
-    XCTAssertTrue(app.navigationBars["Chats"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.buttons["New message"].waitForExistence(timeout: 10))
 }

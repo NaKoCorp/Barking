@@ -1,2 +1,3 @@
 "NSCameraUsageDescription" = "Scannez le code Barking d’un contact.";
 "Barking device link" = "Liaison d’appareil Barking";
+"NSFaceIDUsageDescription" = "Confirmez que c’est bien vous avant d’exporter votre phrase de récupération.";

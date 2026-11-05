@@ -11,7 +11,6 @@ struct BarkingApp: App {
             RootView()
                 .environment(router)
                 .environment(settings)
-                .environment(\.locale, settings.locale)
                 .preferredColorScheme(settings.colorScheme)
                 .onOpenURL { router.open(url: $0) }
         }

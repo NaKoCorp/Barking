@@ -24,15 +24,24 @@ final class NetworkModelTests: XCTestCase {
 
 @MainActor
 final class SettingsModelTests: XCTestCase {
-    func testAppearanceAndLanguagePersist() {
+    func testAppearancePersists() {
         let defaults = UserDefaults(suiteName: "test.\(UUID())")!
         let s = AppSettings(defaults: defaults)
-        s.language = .french
+        XCTAssertEqual(s.appearance, .system)
+        XCTAssertNil(s.colorScheme)
         s.appearance = .dark
         let again = AppSettings(defaults: defaults)
-        XCTAssertEqual(again.language, .french)
         XCTAssertEqual(again.appearance, .dark)
         XCTAssertEqual(again.colorScheme, .dark)
+    }
+
+    /// The language now comes from the phone: a choice saved by the old
+    /// in-app picker would hide it, so it is dropped.
+    func testOldLanguageChoiceIsDropped() {
+        let defaults = UserDefaults(suiteName: "test.\(UUID())")!
+        defaults.set("french", forKey: "barking.language")
+        _ = AppSettings(defaults: defaults)
+        XCTAssertNil(defaults.object(forKey: "barking.language"))
     }
 
     func testDisplayNameIsTrimmedAndBounded() {

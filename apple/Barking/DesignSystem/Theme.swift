@@ -25,6 +25,8 @@ extension Color {
     static let danger = Color("danger")
     static let switchOff = Color("switchOff")
     static let transportNet = Color("transportNet")
+    static let field = Color("field")
+    static let segment = Color("segment")
 }
 
 /// Corner radii of the design system.

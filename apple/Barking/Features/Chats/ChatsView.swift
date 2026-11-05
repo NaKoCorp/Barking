@@ -38,6 +38,7 @@ struct ChatsView: View {
                 ForEach(model.visibleRows) { row in
                     NavigationLink(value: row.contact) { ChatRowView(row: row) }
                         .listRowBackground(Color.surface)
+                        .listRowSeparator(.hidden)
                         .swipeActions {
                             Button(role: .destructive) { confirmDelete = row } label: {
                                 Label("Delete", systemImage: "trash")
@@ -48,18 +49,13 @@ struct ChatsView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(Color.surface)
-            .searchable(text: $model.query, prompt: Text("Search"))
             .refreshable {
                 _ = await core.sync(reason: .pull)
                 await model.reload()
             }
+            .safeAreaInset(edge: .top, spacing: 0) { header }
             .navigationTitle(Text("Chats"))
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { adding = true } label: { Image(systemName: "square.and.pencil") }
-                        .accessibilityLabel(Text("New message"))
-                }
-            }
+            .toolbarVisibility(.hidden, for: .navigationBar)
             .navigationDestination(for: String.self) { contact in
                 ConversationView(core: core, contact: contact)
             }
@@ -85,6 +81,42 @@ struct ChatsView: View {
         .onChange(of: router.pendingCardLink, initial: true) { _, link in
             if link != nil { pendingLink = router.takePendingCardLink(); adding = true }
         }
+    }
+}
+
+extension ChatsView {
+    /// The mockup's header: title, compose button, search field.
+    private var header: some View {
+        @Bindable var model = model
+        return VStack(spacing: 12) {
+            HStack {
+                Text("Chats").font(BarkingFont.mono(.largeTitle, size: 30, weight: .semibold))
+                    .tracking(-0.5).foregroundStyle(Color.fg)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button { adding = true } label: {
+                    Image(systemName: "square.and.pencil").font(.system(size: 18))
+                        .foregroundStyle(Color.accent)
+                        .frame(width: 44, height: 44)
+                        .background(Color.wash, in: .circle)
+                }
+                .accessibilityLabel(Text("New message"))
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(Color.fgSoft).accessibilityHidden(true)
+                TextField(text: $model.query, prompt: Text("Search").foregroundStyle(Color.fgSoft)) { Text("Search") }
+                    .font(.system(size: 15)).foregroundStyle(Color.fg)
+                    .submitLabel(.search)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+            .background(Color.field, in: .rect(cornerRadius: 10))
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
+        .background(Color.surfaceCard)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.border).frame(height: 1) }
     }
 }
 

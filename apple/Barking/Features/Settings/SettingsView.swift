@@ -1,71 +1,109 @@
 import BarkingKit
 import SwiftUI
 
-/// Screen 8 of the mockup.
+/// Screen 8 of the mockup. The language is the phone's: the row opens
+/// the iPhone's Settings › Barking, where iOS offers a per-app language.
 struct SettingsView: View {
     let core: CoreService
-    @Environment(AppSettings.self) private var settings
+    let openNetwork: () -> Void
+    @Environment(\.openURL) private var openURL
     @State private var model: SettingsModel
 
-    init(core: CoreService) {
+    init(core: CoreService, openNetwork: @escaping () -> Void = {}) {
         self.core = core
+        self.openNetwork = openNetwork
         _model = State(initialValue: SettingsModel(core: core))
     }
 
     var body: some View {
-        @Bindable var settings = settings
         NavigationStack {
-            Form {
-                Section("Language") {
-                    Picker(selection: $settings.language) {
-                        Text("System").tag(AppLanguage.system)
-                        Text(verbatim: "English").tag(AppLanguage.english)
-                        Text(verbatim: "Français").tag(AppLanguage.french)
-                    } label: { EmptyView() }
-                    .pickerStyle(.segmented)
-                }
-                Section("Appearance") {
-                    Picker(selection: $settings.appearance) {
-                        Text("System").tag(AppAppearance.system)
-                        Text("Light").tag(AppAppearance.light)
-                        Text("Dark").tag(AppAppearance.dark)
-                    } label: { EmptyView() }
-                    .pickerStyle(.segmented)
-                }
-                Section {
-                    NavigationLink { DevicesView(core: core) } label: {
-                        row("Linked devices", Text("receive, write, send"), "iphone")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    section("Appearance")
+                    AppearanceSegments()
+                    card {
+                        NavigationLink { DevicesView(core: core) } label: {
+                            row("Linked devices", Text("receive, write, send"), "laptopcomputer.and.iphone")
+                        }
+                        divider
+                        NavigationLink { MyIdentityView(core: core, model: model) } label: {
+                            row("My identity", Text(verbatim: model.fingerprintShort)
+                                .font(BarkingFont.mono(.caption, size: 11.5)), "key")
+                        }
+                        divider
+                        Button(action: openNetwork) {
+                            row("Network and relays", Text("Internet"), "dot.radiowaves.left.and.right")
+                        }
                     }
-                    NavigationLink { MyIdentityView(core: core, model: model) } label: {
-                        row("My identity", Text(verbatim: model.fingerprintShort), "person.text.rectangle")
+                    .padding(.top, 10)
+                    card {
+                        Button {
+                            if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                        } label: {
+                            row("Language", Text("\(Self.languageName) · change it in the iPhone's Settings"),
+                                "globe", trailing: "arrow.up.forward")
+                        }
+                        .accessibilityIdentifier("settings.language")
                     }
+                    #if BARKING_DEV
+                    card {
+                        NavigationLink { DevView() } label: { row("Development", Text(verbatim: "BARKING_DEV"), "hammer") }
+                    }
+                    #endif
+                    VStack(spacing: 8) {
+                        MadeInFranceChip()
+                        Text(verbatim: "Barking \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · NakoCorp · AGPL-3.0")
+                            .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgMuted)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 24)
                 }
-                #if BARKING_DEV
-                Section { NavigationLink("Development") { DevView() } }
-                #endif
-                Section {
-                    Text(verbatim: "Barking \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · NakoCorp · AGPL-3.0")
-                        .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
-                    Text("Made in France").font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
-                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
             }
-            .scrollContentBackground(.hidden)
             .background(Color.surface)
             .navigationTitle(Text("Settings"))
         }
         .task { await model.load() }
     }
 
-    private func row(_ title: LocalizedStringKey, _ sub: Text, _ icon: String) -> some View {
+    /// The language the app shows, in that language ("Français", "English").
+    static var languageName: String {
+        let code = Bundle.main.preferredLocalizations.first ?? "en"
+        return Locale(identifier: code).localizedString(forLanguageCode: code)?.localizedCapitalized ?? code
+    }
+
+    private func section(_ title: LocalizedStringKey) -> some View {
+        Text(title).textCase(.uppercase)
+            .font(.system(size: 12, weight: .semibold)).tracking(0.6)
+            .foregroundStyle(Color.fgMuted)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private var divider: some View { Rectangle().fill(Color.border).frame(height: 1) }
+
+    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(spacing: 0, content: content)
+            .background(Color.surfaceCard, in: .rect(cornerRadius: Radius.card))
+            .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
+    }
+
+    private func row(_ title: LocalizedStringKey, _ sub: Text, _ icon: String,
+                     trailing: String = "chevron.right") -> some View {
         HStack(spacing: 12) {
-            Image(systemName: icon).foregroundStyle(Color.accent).frame(width: 32, height: 32)
+            Image(systemName: icon).font(.system(size: 15)).foregroundStyle(Color.accent)
+                .frame(width: 32, height: 32)
                 .background(Color.wash, in: .rect(cornerRadius: Radius.tile))
-            VStack(alignment: .leading) {
-                Text(title).foregroundStyle(Color.fg)
-                sub.font(.caption).foregroundStyle(Color.fgSoft)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fg)
+                sub.font(.system(size: 12.5)).foregroundStyle(Color.fgMuted)
             }
+            Spacer(minLength: 0)
+            Image(systemName: trailing).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.fgMuted)
         }
+        .padding(.horizontal, 14)
         .frame(minHeight: 56)
+        .contentShape(.rect)
     }
 }
 
