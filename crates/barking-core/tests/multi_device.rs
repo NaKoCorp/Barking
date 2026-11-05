@@ -1621,3 +1621,64 @@ fn crossing_links_converge_to_full_mesh() {
         assert_eq!(unacked(dev), 0);
     }
 }
+
+#[test]
+fn unmark_verified_syncs() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(22);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let carol = create(d.path(), "carol", 6, &mut rng);
+    let card = carol.core.contact_card("Carol").unwrap();
+    let carol_fp = a
+        .core
+        .add_contact(&card, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    a.core.mark_verified(&carol_fp, NOW, &mut rng).unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+    assert_eq!(
+        contact_state(&t.core),
+        vec![(carol_fp, Some("carol".to_owned()), true)]
+    );
+    a.core
+        .unmark_verified(&carol_fp, NOW + 1, &mut rng)
+        .unwrap();
+    assert_eq!(
+        contact_state(&a.core),
+        vec![(carol_fp, Some("carol".to_owned()), false)]
+    );
+    assert_eq!(
+        sync_round(&mut a, &mut t, &mut rng),
+        vec![SyncKind::Contact]
+    );
+    assert_eq!(
+        contact_state(&t.core),
+        vec![(carol_fp, Some("carol".to_owned()), false)]
+    );
+}
+
+#[test]
+fn unmark_unknown_contact_is_unknown() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(23);
+    let mut a = create(d.path(), "a", 1, &mut rng);
+    assert!(matches!(
+        a.core.unmark_verified(&Fingerprint([9; 32]), NOW, &mut rng),
+        Err(CoreError::UnknownContact)
+    ));
+}
+
+#[test]
+fn my_devices_lists_certificates() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(24);
+    let (a, t) = admin_and_tablet(d.path(), &mut rng);
+    let on_a = a.core.my_devices();
+    assert_eq!(on_a.len(), 2);
+    assert_eq!(on_a.iter().filter(|x| x.this_device).count(), 1);
+    assert!(on_a.iter().all(|x| x.admin == x.this_device));
+    let on_t = t.core.my_devices();
+    assert_eq!(on_t.len(), 2);
+    assert_eq!(on_t.iter().filter(|x| x.this_device).count(), 1);
+    assert!(on_t.iter().all(|x| !x.admin));
+    assert!(on_t.iter().any(|x| x.this_device && x.name == "t"));
+}

@@ -105,6 +105,23 @@ impl Core {
         })
     }
 
+    /// Removes the verified mark (codes compared by mistake, or a doubt).
+    /// Synchronized with my other devices.
+    pub fn unmark_verified(
+        &mut self,
+        contact: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<()> {
+        self.ensure_linked()?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            set_verified_in(tx, *contact, false)?;
+            let time = sync::touch(tx, *contact, now, false, device.public().id())?;
+            sync::send_state(tx, device, *contact, time, rng)
+        })
+    }
+
     /// Changes the alias of a known contact; an empty alias removes it. Alias
     /// too long: `TooLarge`; already taken by another contact: refused.
     /// Synchronized with my other devices.
@@ -298,9 +315,11 @@ pub(super) fn add_in(
 }
 
 /// State of a contact received from one of my devices (`SyncOp::Upsert`): card
-/// (kept if the known card is newer), exact alias (empty: none),
-/// verified status merged by "or". Every check precedes the
-/// first write.
+/// (kept if the known card is newer), exact alias (empty: none), exact
+/// verified status. The caller applies only operations newer than the last
+/// known one (`ContactClock`): the most recent operation wins, so removing
+/// the mark syncs too. Two simultaneous operations on two devices can drop a
+/// mark, never add one. Every check precedes the first write.
 ///
 /// Alias held by another contact: if the operation (`clock`) beats
 /// the last known operation on that other contact, it loses it; otherwise
@@ -324,12 +343,12 @@ pub(super) fn upsert_in(
         }
         None => false,
     };
-    let (bytes, revoked, old) = if keep_known {
+    let (bytes, revoked) = if keep_known {
         let old = known.ok_or(CoreError::UnknownContact)?;
-        (old.card.clone(), Vec::new(), Some(old))
+        (old.card, Vec::new())
     } else {
         let c = check_card(q, card)?;
-        (c.bytes, c.revoked, c.old)
+        (c.bytes, c.revoked)
     };
     let mut strip = None;
     if !alias.is_empty()
@@ -360,7 +379,6 @@ pub(super) fn upsert_in(
     if let Some(other) = strip {
         q.upsert_contact(other.fp, &other.card, "", other.verified)?;
     }
-    let verified = verified || old.is_some_and(|o| o.verified);
     q.upsert_contact(fp, &bytes, alias, verified)
 }
 
@@ -458,8 +476,12 @@ pub(super) fn remove_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
 
 /// Marks a known contact of `q` as verified.
 pub(super) fn verify_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
+    set_verified_in(q, fp, true)
+}
+
+fn set_verified_in(q: &impl Queries, fp: Fingerprint, verified: bool) -> Result<()> {
     let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
-    q.upsert_contact(row.fp, &row.card, &row.alias, true)
+    q.upsert_contact(row.fp, &row.card, &row.alias, verified)
 }
 
 /// Changes the alias of a known contact of `q`; returns the stored alias.

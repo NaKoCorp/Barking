@@ -216,6 +216,16 @@ impl fmt::Debug for Core {
     }
 }
 
+/// One of my devices (`Core::my_devices`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MyDevice {
+    pub name: String,
+    /// Certificate date (Unix seconds).
+    pub issued_at: u64,
+    pub this_device: bool,
+    pub admin: bool,
+}
+
 impl Core {
     /// New identity: root, recovery phrase, device, initial list
     /// (version `max(1, now)`).
@@ -374,6 +384,25 @@ impl Core {
     /// Fingerprint of my identity (root).
     pub fn fingerprint(&self) -> Fingerprint {
         self.devices.root.fingerprint()
+    }
+
+    /// My devices, from the signed device list. Only this device is known to
+    /// hold the root (`admin`): other devices may, without the list saying so.
+    pub fn my_devices(&self) -> Vec<MyDevice> {
+        let me = self.device.public().id();
+        self.devices
+            .certs
+            .iter()
+            .map(|c| {
+                let this_device = c.device.id() == me;
+                MyDevice {
+                    name: c.name.clone(),
+                    issued_at: c.issued_at,
+                    this_device,
+                    admin: this_device && self.root.is_some(),
+                }
+            })
+            .collect()
     }
 
     /// My signed contact card: device list and one key packet per
