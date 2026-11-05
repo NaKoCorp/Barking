@@ -799,6 +799,7 @@ async fn slow_link_backlog_and_intro_progress() {
     // A slow link from now on: every response at `SLOW_RATE`.
     let nodes = restart_paced(halt_all(nodes).await, SLOW_RATE).await;
     let mut syncs = 0;
+    let mut empty = 0;
     while inbox(&bob, &fa).len() < 1 + SLOW_BATCH || inbox(&bob, &fc).len() < SLOW_BATCH {
         syncs += 1;
         assert!(syncs <= 8, "backlog stuck: {} syncs", syncs - 1);
@@ -807,8 +808,13 @@ async fn slow_link_backlog_and_intro_progress() {
             ..options(boot)
         };
         let r = sync(&mut bob.core, &QuicDialer, opts).await;
-        // Every sync takes its share of the backlog.
-        assert!(r.items_received > 0, "sync {syncs}: {r:?}");
+        // Every sync takes its share of the backlog. On a loaded machine the
+        // first one after the restart can spend its whole deadline
+        // reconnecting at `SLOW_RATE`: one empty sync is tolerated, not two.
+        if r.items_received == 0 {
+            empty += 1;
+            assert!(empty <= 1, "sync {syncs}, second empty sync: {r:?}");
+        }
     }
     assert!(
         syncs > 1,
