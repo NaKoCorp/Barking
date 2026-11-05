@@ -1,0 +1,12 @@
+# Accepted trivy findings, each with its reason. Keep this list short.
+misconfigurations:
+  # Root in build-only images: the reproducible build (spec §15.2), the fuzz
+  # runs and the release script tests. Nothing is deployed from them, and
+  # adding a user to repro.Dockerfile would change the reproducible build
+  # environment. The deployed image, docker/node.Dockerfile, runs as non-root.
+  - id: DS-0002
+    paths:
+      - docker/repro.Dockerfile
+      - docker/fuzz.Dockerfile
+      - docker/release-test.Dockerfile
+    statement: build-only images, not deployed

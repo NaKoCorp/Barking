@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Before each commit: no credential file, no secret, scripts pass shellcheck,
+# Rust is formatted. Installed by scripts/install-hooks.sh. Bypass (then the
+# CI checks it): git commit --no-verify
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+"$root/scripts/security-check.sh" --staged
+if git diff --cached --name-only --diff-filter=ACMR | grep -q '\.rs$'; then
+  echo "── cargo fmt --check"
+  (cd "$root" && cargo fmt --check) || { echo "error: run cargo fmt" >&2; exit 1; }
+fi
