@@ -35,6 +35,8 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan a contact's Barking code.</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>FiraCode-Regular.ttf</string>

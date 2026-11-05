@@ -19,7 +19,7 @@ struct MainTabView: View {
 
     var body: some View {
         TabView {
-            Tab("Chats", systemImage: "bubble.left.and.bubble.right") { Text("Chats") }
+            Tab("Chats", systemImage: "bubble.left.and.bubble.right") { ChatsView(core: core) }
             Tab("Network", systemImage: "point.3.connected.trianglepath.dotted") { Text("Network") }
             Tab("Settings", systemImage: "gearshape") {
                 #if BARKING_DEV

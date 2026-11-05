@@ -1,0 +1,142 @@
+import BarkingKit
+import SwiftUI
+
+/// Screen 3 of the mockup.
+struct ChatsView: View {
+    let core: CoreService
+    @Environment(AppRouter.self) private var router
+    @State private var model: ChatsModel
+    @State private var adding = false
+    @State private var pendingLink: String?
+    @State private var confirmDelete: ChatRow?
+
+    init(core: CoreService) {
+        self.core = core
+        _model = State(initialValue: ChatsModel(core: core))
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if PhraseBanner.visible {
+                    PhraseBanner().listRowSeparator(.hidden).listRowBackground(Color.surface)
+                }
+                if model.offline {
+                    Banner(kind: .info, title: "No relay reachable.",
+                           message: "Messages wait and leave as soon as one is.")
+                        .listRowSeparator(.hidden).listRowBackground(Color.surface)
+                }
+                if model.rows.isEmpty {
+                    VStack(spacing: 16) {
+                        Text("No chats yet").font(BarkingFont.mono(.headline, size: 16, weight: .semibold))
+                            .foregroundStyle(Color.fg)
+                        PrimaryButton("Add a contact") { adding = true }
+                    }
+                    .padding(.vertical, 40)
+                    .listRowSeparator(.hidden).listRowBackground(Color.surface)
+                }
+                ForEach(model.visibleRows) { row in
+                    NavigationLink(value: row.contact) { ChatRowView(row: row) }
+                        .listRowBackground(Color.surface)
+                        .swipeActions {
+                            Button(role: .destructive) { confirmDelete = row } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Color.surface)
+            .searchable(text: $model.query, prompt: Text("Search"))
+            .refreshable {
+                _ = await core.sync(reason: .pull)
+                await model.reload()
+            }
+            .navigationTitle(Text("Chats"))
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { adding = true } label: { Image(systemName: "square.and.pencil") }
+                        .accessibilityLabel(Text("New message"))
+                }
+            }
+            .navigationDestination(for: String.self) { contact in
+                ConversationView(core: core, contact: contact)
+            }
+            .sheet(isPresented: $adding, onDismiss: { pendingLink = nil }) {
+                AddContactView(core: core, link: pendingLink) { adding = false }
+            }
+            .confirmationDialog(Text("Delete this contact? The history is kept."),
+                                isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } }),
+                                titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    if let row = confirmDelete { Task { await model.delete(row.contact) } }
+                }
+            }
+        }
+        .task {
+            await model.reload()
+            for await change in await core.changes {
+                if change == .contacts || change == .network || { if case .messages = change { true } else { false } }() {
+                    await model.reload()
+                }
+            }
+        }
+        .onChange(of: router.pendingCardLink, initial: true) { _, link in
+            if link != nil { pendingLink = router.takePendingCardLink(); adding = true }
+        }
+    }
+}
+
+struct ChatRowView: View {
+    let row: ChatRow
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Avatar(name: row.name, fingerprint: row.contact)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(row.name).font(BarkingFont.sans(.headline, size: 16, weight: .semibold))
+                        .foregroundStyle(Color.fg).lineLimit(1)
+                    if row.verified {
+                        Text(verbatim: "✓").font(.system(size: 13, weight: .bold)).foregroundStyle(Color.ok)
+                            .accessibilityLabel(Text("verified"))
+                    }
+                    Spacer()
+                    if let at = row.lastAt {
+                        Text(at, format: .dateTime.hour().minute())
+                            .font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.fgSoft)
+                    }
+                }
+                HStack {
+                    if let s = row.lastStatus, s != .received { StatusGlyph(status: s).foregroundStyle(Color.fgSoft) }
+                    Text(row.lastText ?? "").font(BarkingFont.sans(.subheadline, size: 14))
+                        .foregroundStyle(Color.fgMuted).lineLimit(1)
+                    Spacer()
+                    if row.unread > 0 {
+                        Text(verbatim: "\(row.unread)").font(BarkingFont.mono(.caption, size: 12, weight: .semibold))
+                            .foregroundStyle(.white).padding(.horizontal, 7).frame(minHeight: 22)
+                            .background(Color.accentFill, in: .capsule)
+                            .accessibilityLabel(Text("\(row.unread) unread"))
+                    }
+                }
+            }
+        }
+        .frame(minHeight: 72)
+    }
+}
+
+/// Recovery phrase reminder (spec §5.2).
+struct PhraseBanner: View {
+    static var visible: Bool { !UserDefaults.standard.bool(forKey: OnboardingModel.confirmedKey) }
+
+    var body: some View {
+        if PhraseMemory.shared.phrase != nil {
+            Banner(kind: .warning, title: "Recovery phrase not confirmed",
+                   message: "Check three words before you close the app.")
+        } else {
+            Banner(kind: .warning, title: "Write your phrase down now: it cannot be shown again",
+                   message: "If you lose this phone without it, your identity is lost.")
+        }
+    }
+}

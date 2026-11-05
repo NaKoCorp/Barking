@@ -77,6 +77,7 @@ targets:
         BarkingKeychainGroup: $(BARKING_KEYCHAIN_GROUP)
         UIBackgroundModes: [remote-notification]
         UIAppFonts: [FiraCode-Regular.ttf, FiraCode-Medium.ttf, FiraCode-SemiBold.ttf]
+        NSCameraUsageDescription: Scan a contact's Barking code.
         CFBundleURLTypes:
           - CFBundleURLName: org.nakocorp.barking
             CFBundleURLSchemes: [barking]
