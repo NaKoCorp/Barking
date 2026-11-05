@@ -1,3 +1,4 @@
+import BarkingKit
 import UIKit
 
 /// The APNs token, shown by the development screen (the subscriptions of
@@ -18,7 +19,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        PushToken.shared.hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        PushToken.shared.hex = hex
+        #if BARKING_DEV
+        // Scripted measurements read it from the shared container
+        // (scripts/apns-send.sh needs it).
+        SharedPaths.devExport("dev-apns-token.txt", hex)
+        #endif
     }
 
     func application(_ application: UIApplication,

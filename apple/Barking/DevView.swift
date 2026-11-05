@@ -40,7 +40,8 @@ final class DevModel {
             _ = try await DeviceCall.run("add") { try d.addContact(card: card, alias: alias) }
         }
         let card = try await DeviceCall.run("card") { try d.contactCard(displayName: "iPhone") }
-        try Data(card.utf8).write(to: try SharedPaths.container.appending(path: "dev-card.txt"))
+        SharedPaths.devExport("dev-card.txt", card)
+        SharedPaths.devExportBench()
     }
 
     func create(name: String) async {
