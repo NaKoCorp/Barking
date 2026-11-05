@@ -1,45 +1,66 @@
-# Barking
+<div align="center">
 
-Barking is an open-source, end-to-end encrypted messaging project. The current prototype provides a command-line client and decentralized internet relay nodes. Mobile apps and mesh transports (Bluetooth LE, Wi-Fi and LoRa) are planned.
+# 🐕 Barking
 
-## Current status
+**Open-source, end-to-end encrypted messaging that does not depend on a central server.**
 
-The implementation includes:
+Post-quantum key agreement · Double Ratchet · self-hosted relays · built for unreliable networks
 
-- **Encrypted one-to-one text messaging:** identities with 24-word recovery phrases, contact cards, safety codes, delivery receipts, message history and persistent outgoing queues. Text messages can contain up to 4,000 UTF-8 bytes.
-- **Encrypted local storage:** SQLCipher, with a passphrase-derived key in the CLI.
-- **Multiple devices:** link up to eight devices to an identity through a file exchange, optionally transfer encrypted history, and synchronize contacts and messages.
-- **Two ways to exchange packets:** manually transfer `.pkt` files, or run `barking sync` to send and receive through internet relays. Network synchronization is invoked manually.
-- **Self-hosted relays:** `barking-node` stores encrypted packets for later retrieval over QUIC. Configuration examples and a systemd unit are available in [docs/deploy](docs/deploy).
-- **Wake-ups for iOS background reception (server side):** nodes accept wake subscriptions and notify `barking-push`, a stateless relay that forwards sealed wake tokens to Apple Push Notification service. The iOS app itself is not implemented yet.
-- **Distributed routing and replication:** S/Kademlia node discovery and replication between responsible nodes, with client-side reliability scores and retries.
-- **Support for unreliable connections:** resumable fetches, adaptive page sizes and saved synchronization progress.
+[![CI](https://github.com/NaKoCorp/Barking/actions/workflows/ci.yml/badge.svg)](https://github.com/NaKoCorp/Barking/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+![Rust](https://img.shields.io/badge/rust-pinned%20toolchain-orange?logo=rust)
+![Status](https://img.shields.io/badge/status-prototype-yellow)
 
-The built-in [bootstrap list](crates/barking-dht/bootstrap.toml) is currently empty. To use the network, you need a reachable relay, supplied manually with `barking node add <IP:port> <node-id>` or discovered through a contact card containing valid node records.
+[Quick start](#-quick-start) ·
+[Features](#-features) ·
+[Run a relay](#-run-a-relay) ·
+[Verify a binary](#-verify-a-binary) ·
+[Roadmap](#-roadmap)
 
-Android and iOS apps, Bluetooth/Wi-Fi/LoRa mesh transports, groups and media attachments are not implemented yet. Relays can observe client IP addresses; Tor and mixnet integration are not implemented. An external security audit remains planned.
+</div>
 
-## Build and run
+---
 
-Install Rust through rustup; the repository pins its toolchain in [rust-toolchain.toml](rust-toolchain.toml).
+> [!WARNING]
+> Barking is a **prototype**. It has not been externally audited, relays can observe client IP addresses, and there is no public relay network yet. Do not rely on it for sensitive communications.
+
+## ✨ Features
+
+The current prototype ships a command-line client and decentralized internet relay nodes.
+
+| | |
+|---|---|
+| 🔐 **Encrypted 1:1 messaging** | Identities with 24-word recovery phrases, contact cards, safety codes, delivery receipts, message history and persistent outgoing queues. Messages up to 4,000 UTF-8 bytes. |
+| 🛡️ **Post-quantum session setup** | PQXDH (X25519 + ML-KEM) followed by a Double Ratchet. |
+| 💾 **Encrypted local storage** | SQLCipher database, keyed from a passphrase in the CLI. |
+| 📱 **Multiple devices** | Link up to eight devices to one identity through a file exchange, optionally transfer encrypted history, and synchronize contacts and messages. |
+| 📦 **Two transports** | Move `.pkt` files by hand (USB key, email, anything), or run `barking sync` to send and receive through internet relays. |
+| 🖧 **Self-hosted relays** | `barking-node` stores encrypted packets over QUIC until recipients fetch them. Config examples and systemd units in [`docs/deploy`](docs/deploy). |
+| 🕸️ **Distributed routing** | S/Kademlia node discovery, replication between responsible nodes, client-side reliability scores and retries. |
+| 📶 **Built for bad connections** | Resumable fetches, adaptive page sizes and saved synchronization progress. |
+| 🔔 **iOS wake-ups (server side)** | Nodes accept wake subscriptions and notify `barking-push`, a stateless relay that forwards sealed tokens to APNs. |
+
+## 🚀 Quick start
+
+Install Rust with [rustup](https://rustup.rs); the toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ```sh
 cargo build --release -p barking-cli -p barking-node -p barking-push
-./target/release/barking --help
-./target/release/barking-node --help
-./target/release/barking-push --help
 ```
 
-Create an identity and export a contact card:
+**1. Create an identity and export your contact card**
 
 ```sh
 ./target/release/barking init --name laptop
 ./target/release/barking card --display-name Alice
 ```
 
-The CLI prompts for a passphrase and stores its data in `~/.barking` by default. Use `--home <directory>` to keep separate identities. Keep the recovery phrase offline; recovering an identity does not restore its contacts or message history.
+The CLI asks for a passphrase and stores its data in `~/.barking` (use `--home <dir>` for separate identities).
 
-After exchanging contact cards and adding a reachable relay:
+> [!IMPORTANT]
+> Keep the recovery phrase offline. Recovering an identity does **not** restore its contacts or message history.
+
+**2. Add a contact and a relay, then talk**
 
 ```sh
 ./target/release/barking add '<contact-card>' --alias bob
@@ -49,11 +70,17 @@ After exchanging contact cards and adding a reachable relay:
 ./target/release/barking messages bob
 ```
 
-`send` writes packet files and queues the message for network delivery. Each participant runs `sync` to send pending packets, receive messages and exchange delivery receipts.
+`send` writes packet files **and** queues the message for network delivery. Each participant runs `sync` to push pending packets, receive messages and exchange delivery receipts. Synchronization is manual for now.
 
-### Run a node in Docker
+> [!NOTE]
+> The built-in [bootstrap list](crates/barking-dht/bootstrap.toml) is empty. Add a reachable relay with `barking node add`, or get one from a contact card that carries valid node records.
 
-[docker/node.Dockerfile](docker/node.Dockerfile) packages the static `barking-node` binary of a release alone on an empty base (about 5 MB). The build context is the release directory; the binary is checked against its `SHA256SUMS`:
+## 🖧 Run a relay
+
+<details open>
+<summary><b>With Docker</b> (~5 MB image)</summary>
+
+[`docker/node.Dockerfile`](docker/node.Dockerfile) packages the static `barking-node` binary of a release alone on an empty base. The build context is the release directory, and the binary is checked against its `SHA256SUMS`.
 
 ```sh
 docker build -f docker/node.Dockerfile --build-arg VERSION=0.1.0 -t barking-node dist
@@ -61,20 +88,68 @@ docker run --rm -v barking-node:/var/lib/barking-node barking-node init
 docker run -d --name barking-node -v barking-node:/var/lib/barking-node -p 4433:4433/udp barking-node
 ```
 
-To use a configuration, mount it read-only and pass it to `run`: `-v ./barking-node.toml:/etc/barking-node.toml:ro barking-node run --config /etc/barking-node.toml`. `docker exec barking-node /barking-node status` shows what the node holds.
+To use a configuration file, mount it read-only and pass it to `run`:
 
-## Development checks
+```sh
+-v ./barking-node.toml:/etc/barking-node.toml:ro barking-node run --config /etc/barking-node.toml
+```
+
+`docker exec barking-node /barking-node status` shows what the node holds.
+
+</details>
+
+<details>
+<summary><b>With systemd</b></summary>
+
+See [`docs/deploy`](docs/deploy) for `barking-node.toml`, `barking-push.toml.example` and their systemd units.
+
+</details>
+
+## 🧱 Repository layout
+
+| Crate | Role |
+|---|---|
+| [`barking-cli`](crates/barking-cli) | `barking` command-line client |
+| [`barking-core`](crates/barking-core) | Messenger core: identities, PQXDH, Double Ratchet, storage (no network) |
+| [`barking-packet`](crates/barking-packet) | Universal packet format |
+| [`barking-proto`](crates/barking-proto) | Client-to-node protocol and QUIC client |
+| [`barking-net`](crates/barking-net) | Client-side network view: node selection, reliability scores, sync state |
+| [`barking-dht`](crates/barking-dht) | S/Kademlia discovery and replication |
+| [`barking-node`](crates/barking-node) | Relay node |
+| [`barking-push`](crates/barking-push) | Stateless APNs wake-up relay |
+
+## 🛠️ Development
 
 ```sh
 scripts/check.sh
 ```
 
-This runs formatting checks, Clippy and the workspace tests. Network integration tests open local UDP sockets.
+Runs formatting checks, Clippy and the workspace tests. Network integration tests open local UDP sockets.
 
 Linux release builds run in a pinned Rust/Alpine Docker image and produce static musl binaries; Apple binaries are built natively on macOS.
 
-## Verify a binary
+## ✅ Verify a binary
 
-The release tooling covers `barking-cli`, `barking-node` and `barking-push`: reproducible builds, GitHub CI attestations, an offline maintainer signature, and verification and rebuild scripts. The complete publication process still needs an end-to-end release rehearsal; the maintainer public key has not yet been published in the repository.
+Release tooling for `barking-cli`, `barking-node` and `barking-push` provides reproducible builds, GitHub CI attestations, an offline maintainer signature, and verification and rebuild scripts.
 
-See [docs/VERIFYING.md](docs/VERIFYING.md) for verification instructions and limitations, and [docs/RELEASING.md](docs/RELEASING.md) for the maintainer's release procedure.
+- 📖 [docs/VERIFYING.md](docs/VERIFYING.md): how to verify a release, and its limitations
+- 🏷️ [docs/RELEASING.md](docs/RELEASING.md): the maintainer's release procedure
+
+> [!NOTE]
+> The full publication process still needs an end-to-end rehearsal, and the maintainer public key is not yet published in the repository.
+
+## 🗺️ Roadmap
+
+- [x] Encrypted one-to-one messaging (CLI)
+- [x] Multi-device identities
+- [x] Self-hosted QUIC relays with DHT routing and replication
+- [x] Server side of iOS background wake-ups
+- [ ] Android and iOS apps
+- [ ] Mesh transports: Bluetooth LE, Wi-Fi, LoRa
+- [ ] Groups and media attachments
+- [ ] Tor / mixnet integration to hide client IPs from relays
+- [ ] External security audit
+
+## 📄 License
+
+[AGPL-3.0-only](LICENSE)
