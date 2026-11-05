@@ -1,0 +1,3 @@
+// Debug: unoptimized Swift, Rust dev profile, development screen.
+#include? "../Local.xcconfig"
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEBUG BARKING_DEV

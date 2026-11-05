@@ -91,6 +91,153 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$archive" -C "$HOME/.cargo/bin"
       - run: scripts/check.sh
 
+  # Security checks of a public repository (scripts/security-check.sh, the
+  # same ones as the git hooks): credential files, gitleaks, shellcheck, trivy
+  # (HIGH and CRITICAL fail), cargo-deny, zizmor and actionlint.
+  security:
+    name: security (secrets, vulnerabilities, licenses, workflows)
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # cargo-deny reads the dependency graph with cargo.
+      - name: Install the pinned Rust toolchain
+        run: |
+          canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
+          rustup toolchain install "$canal" --profile minimal
+          rustup default "$canal"
+      # Official releases, pinned by version and checksum (GitHub's asset
+      # digest, equal to the project's own checksum file where it has one).
+      - name: Install the scanners
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          fetch() { # repo tag asset sha256
+            curl -fsSL -o "$RUNNER_TEMP/$3" "https://github.com/$1/releases/download/$2/$3"
+            echo "$4  $RUNNER_TEMP/$3" | sha256sum -c -
+          }
+          fetch gitleaks/gitleaks v8.30.1 gitleaks_8.30.1_linux_x64.tar.gz \
+            551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          tar -xzf "$RUNNER_TEMP/gitleaks_8.30.1_linux_x64.tar.gz" -C "$bin" gitleaks
+          fetch aquasecurity/trivy v0.76.1 trivy_0.76.1_Linux-64bit.tar.gz \
+            c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+          tar -xzf "$RUNNER_TEMP/trivy_0.76.1_Linux-64bit.tar.gz" -C "$bin" trivy
+          fetch EmbarkStudios/cargo-deny 0.20.2 cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz \
+            9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+          tar -xzf "$RUNNER_TEMP/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz" -C "$bin" \
+            --strip-components=1 cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny
+          fetch zizmorcore/zizmor v1.31.1 zizmor-x86_64-unknown-linux-gnu.tar.gz \
+            d185f726bdaf92df78273217dfdd24ebcd6b0ef48cf3ce776ff5762b6e138c99
+          tar -xzf "$RUNNER_TEMP/zizmor-x86_64-unknown-linux-gnu.tar.gz" -C "$bin" zizmor
+          fetch rhysd/actionlint v1.7.12 actionlint_1.7.12_linux_amd64.tar.gz \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          tar -xzf "$RUNNER_TEMP/actionlint_1.7.12_linux_amd64.tar.gz" -C "$bin" actionlint
+          fetch koalaman/shellcheck v0.11.0 shellcheck-v0.11.0.linux.x86_64.tar.xz \
+            8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          tar -xJf "$RUNNER_TEMP/shellcheck-v0.11.0.linux.x86_64.tar.xz" -C "$bin" \
+            --strip-components=1 shellcheck-v0.11.0/shellcheck
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: Security checks
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            scripts/security-check.sh --range "$BASE..HEAD"
+          else
+            scripts/security-check.sh --all
+          fi
+
+  # iOS app (spec iOS foundations §7): XCFramework, app and extension build,
+  # XCTest on a simulator. Skipped steps (green job) when the pull request
+  # touches neither the app nor the Rust code it wraps.
+  apple:
+    name: iOS app (build, XCTest)
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Does the change touch the iOS app?
+        id: paths
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ] || ! git diff --quiet "$BASE" HEAD -- \
+            apple/ crates/ Cargo.lock Cargo.toml rust-toolchain.toml .xcode-version \
+            scripts/build-xcframework.sh .github/workflows/ci.yml
+          then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "iOS app untouched: build skipped"
+          fi
+      - name: Select the pinned Xcode
+        if: steps.paths.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          xcode="$(sed -n 's/^xcode=//p' .xcode-version | head -n1)"
+          [ -n "$xcode" ] || { echo ".xcode-version incomplete" >&2; exit 1; }
+          sudo xcode-select -s "/Applications/Xcode_${xcode}.app"
+          xcodebuild -version
+      - name: Install the pinned Rust toolchain
+        if: steps.paths.outputs.changed == 'true'
+        run: |
+          canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
+          rustup toolchain install "$canal" --profile minimal --target aarch64-apple-ios-sim
+          rustup default "$canal"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.paths.outputs.changed == 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-ios-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-ios-${{ hashFiles('rust-toolchain.toml') }}-
+      # Official XcodeGen release, pinned by version and checksum.
+      - name: Install XcodeGen
+        if: steps.paths.outputs.changed == 'true'
+        env:
+          VERSION: 2.46.0
+          SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$VERSION/xcodegen.zip"
+          echo "$SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Build the XCFramework (simulator slice)
+        if: steps.paths.outputs.changed == 'true'
+        run: scripts/build-xcframework.sh --sim-only
+      - name: Build and test the app
+        if: steps.paths.outputs.changed == 'true'
+        working-directory: apple
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          # Ad-hoc signing (no team): the keychain tests need the entitlements
+          # an unsigned build lacks. First available iPhone simulator.
+          udid="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)["devices"]
+          print(next(x["udid"] for r, xs in d.items() if "iOS" in r for x in xs if x["name"].startswith("iPhone")))')"
+          xcodebuild test -project Barking.xcodeproj -scheme Barking -configuration Debug \
+            -destination "platform=iOS Simulator,id=$udid"
+
   release-scripts:
     name: signing and verification scripts
     runs-on: ubuntu-26.04

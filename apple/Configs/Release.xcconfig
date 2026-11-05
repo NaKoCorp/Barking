@@ -1,0 +1,2 @@
+// Release: no development screen, no private node addresses.
+#include? "../Local.xcconfig"

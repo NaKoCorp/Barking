@@ -1,0 +1,58 @@
+import Foundation
+
+/// Opens or creates the identity of this device. The only place that builds
+/// a `DeviceConfig`.
+public enum DeviceFactory {
+    /// Shared keychain group from the Info.plist; `nil` when the build has
+    /// no team prefix (unsigned simulator builds use the default group).
+    static var keychainGroup: String? {
+        guard let g = Bundle.main.object(forInfoDictionaryKey: "BarkingKeychainGroup") as? String,
+              !g.hasPrefix("com.") else { return nil }
+        return g
+    }
+
+    static var keyStore: KeyStore { KeyStore(accessGroup: keychainGroup) }
+
+    static var allowPrivate: Bool {
+        #if BARKING_DEV
+        true
+        #else
+        false
+        #endif
+    }
+
+    public static func config(key: Data, lockTimeoutMs: UInt64) throws -> DeviceConfig {
+        DeviceConfig(
+            dbPath: try SharedPaths.database.path, lockPath: try SharedPaths.lock.path,
+            dbKey: key, lockTimeoutMs: lockTimeoutMs, allowPrivate: allowPrivate)
+    }
+
+    /// The existing identity; `nil` without a key or a database. Creates nothing.
+    public static func openExisting(lockTimeoutMs: UInt64) throws -> Device? {
+        guard let key = try keyStore.read() else { return nil }
+        let cfg = try config(key: key, lockTimeoutMs: lockTimeoutMs)
+        guard deviceExists(config: cfg) else { return nil }
+        return try Device.open(config: cfg)
+    }
+
+    /// The existing identity without opening it (no lock, nothing read): the
+    /// extension spends its lock wait on the quick sync only. `nil` without a
+    /// key (before the first unlock) or a database. Creates nothing.
+    public static func existing(lockTimeoutMs: UInt64) throws -> Device? {
+        guard let key = try keyStore.read() else { return nil }
+        let cfg = try config(key: key, lockTimeoutMs: lockTimeoutMs)
+        guard deviceExists(config: cfg) else { return nil }
+        return try Device.at(config: cfg)
+    }
+
+    /// A new identity: new key, new database, files protected. A key left
+    /// without its database (reinstall, failed creation) is replaced; a key
+    /// whose database exists is never touched (`create` fails).
+    public static func createNew(deviceName: String) throws -> CreatedDevice {
+        let probe = try config(key: Data(count: 32), lockTimeoutMs: Budget.appLockMs)
+        let key = deviceExists(config: probe) ? try keyStore.create() : try keyStore.replace()
+        let created = try createDevice(config: config(key: key, lockTimeoutMs: Budget.appLockMs), deviceName: deviceName)
+        for url in [try SharedPaths.database, try SharedPaths.lock] { try SharedPaths.protect(url) }
+        return created
+    }
+}

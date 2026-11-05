@@ -1,0 +1,8 @@
+# trivy fs (scripts/security-check.sh, CI job `security`): vulnerable
+# dependencies, secrets and misconfigurations; HIGH and CRITICAL fail.
+scan:
+  scanners: [vuln, secret, misconfig]
+  skip-dirs: [target, graphify-out, dist, .superpowers]
+severity: [HIGH, CRITICAL]
+exit-code: 1
+ignorefile: .trivyignore.yaml

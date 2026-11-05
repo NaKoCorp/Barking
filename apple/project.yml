@@ -1,0 +1,130 @@
+# XcodeGen source of the iOS project (spec iOS foundations §5). The
+# generated Barking.xcodeproj is not versioned: run `xcodegen generate` here.
+# Prerequisite: scripts/build-xcframework.sh (target/apple/).
+name: Barking
+options:
+  bundleIdPrefix: com.nakocorp
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+configs:
+  Debug: debug
+  Bench: release
+  Release: release
+configFiles:
+  Debug: Configs/Debug.xcconfig
+  Bench: Configs/Bench.xcconfig
+  Release: Configs/Release.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1"
+    # The XCFramework has an arm64 simulator slice only (Apple Silicon Macs).
+    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+    BARKING_APP_GROUP: group.com.nakocorp.barking
+    BARKING_KEYCHAIN_GROUP: $(AppIdentifierPrefix)com.nakocorp.barking.shared
+
+targets:
+  BarkingKit:
+    type: framework
+    platform: iOS
+    sources:
+      - BarkingKit
+      - path: ../target/apple/swift/barking_ffi.swift
+        group: BarkingKit/Generated
+    dependencies:
+      - framework: ../target/apple/BarkingFFI.xcframework
+        embed: false
+    preBuildScripts:
+      - name: Check the Rust profile
+        basedOnDependencyAnalysis: false
+        script: |
+          profile="$(cat "$SRCROOT/../target/apple/PROFILE" 2>/dev/null || echo unknown)"
+          if [ "$CONFIGURATION" != "Debug" ] && [ "$profile" != "release-apple" ]; then
+            echo "error: $CONFIGURATION needs scripts/build-xcframework.sh --release (library built with: $profile)"
+            exit 1
+          fi
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking.kit
+        GENERATE_INFOPLIST_FILE: YES
+        # The generated bindings predate strict concurrency checks.
+        SWIFT_STRICT_CONCURRENCY: minimal
+        # Linked into the notification extension.
+        APPLICATION_EXTENSION_API_ONLY: YES
+
+  Barking:
+    type: application
+    platform: iOS
+    sources:
+      - Barking
+    dependencies:
+      - target: BarkingKit
+      - target: NotificationService
+    entitlements:
+      path: Barking/Barking.entitlements
+      properties:
+        com.apple.security.application-groups: [$(BARKING_APP_GROUP)]
+        keychain-access-groups: [$(BARKING_KEYCHAIN_GROUP)]
+        aps-environment: development
+    info:
+      path: Barking/Info.plist
+      properties:
+        CFBundleDisplayName: Barking
+        UILaunchScreen: {}
+        BarkingAppGroup: $(BARKING_APP_GROUP)
+        BarkingKeychainGroup: $(BARKING_KEYCHAIN_GROUP)
+        UIBackgroundModes: [remote-notification]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking
+
+  NotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - NotificationService
+    dependencies:
+      - target: BarkingKit
+        embed: false
+    entitlements:
+      path: NotificationService/NotificationService.entitlements
+      properties:
+        com.apple.security.application-groups: [$(BARKING_APP_GROUP)]
+        keychain-access-groups: [$(BARKING_KEYCHAIN_GROUP)]
+    info:
+      path: NotificationService/Info.plist
+      properties:
+        CFBundleDisplayName: NotificationService
+        BarkingAppGroup: $(BARKING_APP_GROUP)
+        BarkingKeychainGroup: $(BARKING_KEYCHAIN_GROUP)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking.NotificationService
+
+  BarkingTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - BarkingTests
+    dependencies:
+      - target: Barking
+      - target: BarkingKit
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking.tests
+
+schemes:
+  Barking:
+    build:
+      targets:
+        Barking: all
+    test:
+      config: Debug
+      targets:
+        - BarkingTests

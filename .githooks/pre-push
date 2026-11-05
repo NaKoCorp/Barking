@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Before each push: the security checks on the commits being pushed (secrets,
+# credential files) and on the tree (trivy, cargo-deny, workflows).
+# Installed by scripts/install-hooks.sh. Bypass (then the CI checks it):
+# git push --no-verify
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+zero="0000000000000000000000000000000000000000"
+checked=false
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue # branch deletion
+  if [ "$remote_sha" = "$zero" ]; then
+    # New branch: the commits that are not on the remote's main yet.
+    base="$(git merge-base origin/main "$local_sha" 2>/dev/null || git rev-list --max-parents=0 "$local_sha" | tail -n1)"
+  else
+    base="$remote_sha"
+  fi
+  echo "pre-push: $local_ref → $remote_ref ($base..$local_sha)"
+  "$root/scripts/security-check.sh" --range "$base..$local_sha"
+  checked=true
+done
+$checked || echo "pre-push: nothing to check"

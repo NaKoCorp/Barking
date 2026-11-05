@@ -29,3 +29,7 @@ tarpaulin-report.html
 *~
 .DS_Store
 Thumbs.db
+
+# iOS app: local team settings and the generated Xcode project.
+/apple/Local.xcconfig
+/apple/*.xcodeproj/

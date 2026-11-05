@@ -1,0 +1,2 @@
+// Copy to apple/Local.xcconfig (ignored by git) and set your Apple team.
+DEVELOPMENT_TEAM = ABCDE12345
