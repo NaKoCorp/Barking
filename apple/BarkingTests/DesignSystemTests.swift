@@ -1,0 +1,64 @@
+import UIKit
+import XCTest
+@testable import Barking
+
+final class DesignSystemTests: XCTestCase {
+    private let styles: [UIUserInterfaceStyle] = [.light, .dark]
+
+    private func color(_ name: String, _ style: UIUserInterfaceStyle) -> UIColor {
+        let traits = UITraitCollection(userInterfaceStyle: style)
+        guard let c = UIColor(named: name, in: Bundle.main, compatibleWith: traits) else {
+            XCTFail("missing color \(name)")
+            return .clear
+        }
+        return c.resolvedColor(with: traits)
+    }
+
+    /// WCAG relative luminance contrast ratio.
+    static func ratio(_ a: UIColor, _ b: UIColor) -> Double {
+        func lum(_ c: UIColor) -> Double {
+            var r: CGFloat = 0, g: CGFloat = 0, bl: CGFloat = 0, al: CGFloat = 0
+            c.getRed(&r, green: &g, blue: &bl, alpha: &al)
+            func ch(_ v: CGFloat) -> Double {
+                let v = Double(v)
+                return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(bl)
+        }
+        let (l1, l2) = (lum(a), lum(b))
+        return (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
+    }
+
+    func testEveryTextPairPassesContrast() {
+        var pairs: [(String, String)] = []
+        for text in ["fg", "fgMuted", "fgSoft", "accent"] {
+            for ground in ["surface", "surfaceCard", "surfaceAlt"] { pairs.append((text, ground)) }
+        }
+        pairs += [("bannerFg", "bannerBg"), ("warnFg", "warnBg"), ("ok", "okBg"), ("danger", "surfaceCard")]
+        for style in styles {
+            for (t, g) in pairs {
+                let r = Self.ratio(color(t, style), color(g, style))
+                XCTAssertGreaterThanOrEqual(r, 4.5, "\(t) on \(g) in \(style == .dark ? "dark" : "light"): \(r)")
+            }
+            let white = Self.ratio(.white, color("accentFill", style))
+            XCTAssertGreaterThanOrEqual(white, 4.5, "white on accentFill")
+        }
+    }
+
+    func testFiraCodeIsRegistered() {
+        for name in ["FiraCode-Regular", "FiraCode-Medium", "FiraCode-SemiBold"] {
+            XCTAssertNotNil(UIFont(name: name, size: 15), name)
+        }
+    }
+
+    func testAvatarPaletteIsStableAndReadable() {
+        let fp = "zab2-2ccf-kzfa-fsms"
+        XCTAssertEqual(AvatarPalette.index(for: fp), AvatarPalette.index(for: fp))
+        for style in styles {
+            for pair in AvatarPalette.pairs {
+                let r = Self.ratio(color(pair.text, style), color(pair.fill, style))
+                XCTAssertGreaterThanOrEqual(r, 4.5, "\(pair.text) on \(pair.fill)")
+            }
+        }
+    }
+}

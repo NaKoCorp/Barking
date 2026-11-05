@@ -5,7 +5,7 @@ import XCTest
 final class NotificationContentTests: XCTestCase {
     func msg(_ c: String, _ n: String, _ t: String) -> NewMessage { NewMessage(contact: c, name: n, text: t) }
     func summary(_ m: [NewMessage]) -> SyncSummary {
-        SyncSummary(itemsReceived: UInt32(m.count), newMessages: m, networkUp: true, error: nil)
+        SyncSummary(itemsReceived: UInt32(m.count), sent: 0, newMessages: m, networkUp: true, error: nil)
     }
     func original() -> UNMutableNotificationContent {
         let c = UNMutableNotificationContent()
