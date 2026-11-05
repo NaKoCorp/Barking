@@ -54,4 +54,27 @@ public enum SharedPaths {
             [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
             ofItemAtPath: url.path)
     }
+
+    #if BARKING_DEV
+    /// Development files for scripted checks (card, APNs token). Written to
+    /// the shared container and to the app's Documents, which
+    /// `xcrun devicectl device copy from --domain-type appDataContainer` can
+    /// read on a real device (the App Group container is not listed there).
+    public static func devExport(_ name: String, _ text: String) {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        for dir in [try? container, docs].compactMap({ $0 }) {
+            try? Data(text.utf8).write(to: dir.appending(path: name))
+        }
+    }
+
+    /// Copies the measurement records to the app's Documents/bench, for
+    /// `devicectl` (see `devExport`).
+    public static func devExportBench() {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let source = try? bench else { return }
+        let target = docs.appending(path: "bench", directoryHint: .isDirectory)
+        try? FileManager.default.removeItem(at: target)
+        try? FileManager.default.copyItem(at: source, to: target)
+    }
+    #endif
 }
