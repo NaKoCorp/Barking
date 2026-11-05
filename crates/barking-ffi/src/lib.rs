@@ -3,11 +3,13 @@
 //! is blocking, takes the database lock for the duration of the call and
 //! never lets a panic cross into Swift or Kotlin.
 
+mod device;
 mod error;
 mod lock;
 
 use std::panic::{UnwindSafe, catch_unwind};
 
+pub use device::{Contact, CreatedDevice, Device, DeviceConfig, Message, device_exists};
 pub use error::BarkingError;
 
 uniffi::setup_scaffolding!();

@@ -28,5 +28,6 @@ uniffi.workspace = true
 
 [dev-dependencies]
 barking-node = { workspace = true, features = ["test-harness"] }
+libc.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
