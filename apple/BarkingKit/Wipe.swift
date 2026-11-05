@@ -1,13 +1,13 @@
 import Foundation
 
 /// The secrets that open this device's database. `KeyStore.deleteAll`
-/// deletes the keychain entry; the Secure Enclave key (spec §7) joins it.
+/// deletes the wrapped key, a clear one and the Secure Enclave key (spec §6.2, §7).
 public protocol KeyWiping: Sendable {
     func deleteAll() throws
 }
 
 extension KeyStore: KeyWiping {
-    /// The keychain entry the app and the extension share.
+    /// The keys the app and the extension share.
     public static var live: KeyStore { DeviceFactory.keyStore }
 
     /// Every key of this identity. Deleting a missing one is not an error.

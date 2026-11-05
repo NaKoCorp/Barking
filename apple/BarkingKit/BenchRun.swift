@@ -6,8 +6,9 @@ public enum BenchRun {
     /// `record.outcome` is empty when the sync reached the network: the
     /// caller sets it from what the notification shows.
     /// The extension's budget (`Budget`): one lock wait, the quick sync
-    /// gets what is left of the work time.
-    public static func run(source: String, paths: WipePaths = .live) -> (BenchRecord, SyncSummary?) {
+    /// gets what is left of the work time. `sync: false` stops once the
+    /// device is opened (outcome `opened`): key and open timings only.
+    public static func run(source: String, paths: WipePaths = .live, sync: Bool = true) -> (BenchRecord, SyncSummary?) {
         let start = DispatchTime.now()
         let startedAt = Date()
         let sampler = FootprintSampler()
@@ -19,19 +20,31 @@ public enum BenchRun {
         mark("start")
         var outcome = ""
         var summary: SyncSummary?
+        var unwrapMs: UInt64?
         do {
             if Wipe.isPending(paths: paths) {
                 // A wipe is under way: the push goes out as it came.
                 outcome = wipePending
-            } else if let device = try DeviceFactory.existing(lockTimeoutMs: Budget.extensionLockMs, paths: paths) {
-                mark("opened")
-                let left = Budget.quickSyncDeadline(elapsedMs: elapsedMs(since: start) + Budget.extensionLockMs)
-                let s = try device.quickSync(deadlineMs: left)
-                mark("fetched")
-                summary = s
-                if !s.networkUp { outcome = "network-down" }
             } else {
-                outcome = "no-key"
+                let before = elapsedMs(since: start)
+                let device = try DeviceFactory.existing(lockTimeoutMs: Budget.extensionLockMs, paths: paths) {
+                    unwrapMs = elapsedMs(since: start) - before
+                    mark("key")
+                }
+                if let device {
+                    mark("opened")
+                    if sync {
+                        let left = Budget.quickSyncDeadline(elapsedMs: elapsedMs(since: start) + Budget.extensionLockMs)
+                        let s = try device.quickSync(deadlineMs: left)
+                        mark("fetched")
+                        summary = s
+                        if !s.networkUp { outcome = "network-down" }
+                    } else {
+                        outcome = "opened"
+                    }
+                } else {
+                    outcome = "no-key"
+                }
             }
         } catch BarkingError.Locked {
             outcome = "locked"
@@ -41,7 +54,8 @@ public enum BenchRun {
         mark("ready")
         let record = BenchRecord(
             source: source, device: model(), startedAt: startedAt, steps: steps,
-            peakBytes: sampler.stop(), totalMs: elapsedMs(since: start), outcome: outcome)
+            peakBytes: sampler.stop(), totalMs: elapsedMs(since: start), outcome: outcome,
+            unwrapMs: unwrapMs)
         return (record, summary)
     }
 

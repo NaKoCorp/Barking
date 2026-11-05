@@ -39,16 +39,22 @@ public enum DeviceFactory {
         guard let key = try keyStore.read() else { return nil }
         let cfg = try config(key: key, lockTimeoutMs: lockTimeoutMs)
         guard deviceExists(config: cfg) else { return nil }
-        return try Device.open(config: cfg)
+        let device = try Device.open(config: cfg)
+        try? SharedPaths.excludeFromBackup()
+        return device
     }
 
     /// The existing identity without opening it (no lock, nothing read): the
     /// extension spends its lock wait on the quick sync only. `nil` without a
     /// key (before the first unlock) or a database. Creates nothing.
-    public static func existing(lockTimeoutMs: UInt64, paths: WipePaths = .live) throws -> Device? {
+    /// `keyRead` runs once the key is read and unwrapped (the bench times it).
+    public static func existing(lockTimeoutMs: UInt64, paths: WipePaths = .live,
+                                keyRead: () -> Void = {}) throws -> Device? {
         // A wipe in progress: the database is on its way out, never opened.
         guard !Wipe.isPending(paths: paths) else { return nil }
-        guard let key = try keyStore.read() else { return nil }
+        let read = try keyStore.read()
+        keyRead()
+        guard let key = read else { return nil }
         let cfg = try config(key: key, lockTimeoutMs: lockTimeoutMs)
         guard deviceExists(config: cfg) else { return nil }
         return try Device.at(config: cfg)
@@ -63,6 +69,7 @@ public enum DeviceFactory {
         let key = deviceExists(config: probe) ? try keyStore.create() : try keyStore.replace()
         let created = try createDevice(config: config(key: key, lockTimeoutMs: Budget.appLockMs), deviceName: deviceName)
         for url in [try SharedPaths.database, try SharedPaths.lock] { try SharedPaths.protect(url) }
+        try? SharedPaths.excludeFromBackup()
         return created
     }
 
@@ -75,6 +82,7 @@ public enum DeviceFactory {
         let device = try recoverDevice(config: config(key: key, lockTimeoutMs: Budget.appLockMs),
                                        phrase: phrase, deviceName: deviceName)
         for url in [try SharedPaths.database, try SharedPaths.lock] { try SharedPaths.protect(url) }
+        try? SharedPaths.excludeFromBackup()
         return device
     }
 
@@ -86,6 +94,7 @@ public enum DeviceFactory {
         let pending = try BarkingKit.beginLink(config: config(key: key, lockTimeoutMs: Budget.appLockMs),
                                                offer: offer, deviceName: deviceName)
         for url in [try SharedPaths.database, try SharedPaths.lock] { try SharedPaths.protect(url) }
+        try? SharedPaths.excludeFromBackup()
         return pending
     }
 

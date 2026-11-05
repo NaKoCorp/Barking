@@ -36,6 +36,13 @@ final class AppRouter {
                 UserDefaults.standard.removeObject(forKey: key)
             }
         }
+        if args.contains("-BarkingDevBench") {
+            // Device measurement without a push (spec §7.4): key and open
+            // only, before the app opens the database; read with devicectl.
+            let (record, _) = BenchRun.run(source: "launch", sync: false)
+            try? BenchStore.shared().append(record)
+            SharedPaths.devExportBench()
+        }
         if let i = args.firstIndex(of: "-BarkingUITestOpenCard"), i + 1 < args.count {
             let router = AppRouter(start: .onboarding)
             router.pendingCardLink = args[i + 1]

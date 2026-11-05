@@ -227,7 +227,7 @@ struct BenchSection: View {
         .disabled(running)
         Button("Reload records") { reload() }
         ForEach(Array(records.reversed().enumerated()), id: \.offset) { _, r in
-            Text("\(r.source) \(r.outcome): peak \(String(format: "%.1f", Double(r.peakBytes) / 1_048_576)) MB, \(r.totalMs) ms")
+            Text("\(r.source) \(r.outcome): peak \(String(format: "%.1f", Double(r.peakBytes) / 1_048_576)) MB, \(r.totalMs) ms, key \(r.unwrapMs.map(String.init) ?? "-") ms")
                 .font(.caption.monospaced())
         }
         .onAppear { reload() }
