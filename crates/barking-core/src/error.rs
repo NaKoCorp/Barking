@@ -33,6 +33,14 @@ pub enum CoreError {
     /// Linking refused; the reason is a fixed text. No state modified.
     #[error("linking refused: {0}")]
     Link(&'static str),
+    /// The root key was sent to another of my devices and its receipt is
+    /// not yet acknowledged: no linking and no second transfer meanwhile.
+    #[error("admin transfer pending")]
+    AdminTransferPending,
+    /// A newer device list signed by my root no longer contains this
+    /// device: it can only receive and read.
+    #[error("this device was removed from the account")]
+    DeviceRemoved,
 }
 
 impl From<barking_packet::PacketError> for CoreError {

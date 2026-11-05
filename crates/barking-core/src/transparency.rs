@@ -120,6 +120,22 @@ pub enum TransparencyEvent {
         contact: Fingerprint,
         device: DeviceId,
     },
+    /// The root key was sent to another of my devices; it stays here until
+    /// that device acknowledges it. Added last.
+    AdminTransferStarted {
+        device: DeviceId,
+    },
+    /// The root key was received by `device` and erased here. Added last.
+    AdminTransferred {
+        device: DeviceId,
+    },
+    /// The root key arrived from another of my devices. Added last.
+    AdminReceived,
+    /// A newer device list signed by my root no longer contains this device:
+    /// it is removed from my account, its root key (if any) erased. Added last.
+    DeviceRemoved {
+        version: u64,
+    },
 }
 
 /// Why a node was set aside.
@@ -137,6 +153,8 @@ pub enum SyncKind {
     Sent,
     Contact,
     Devices,
+    /// The root key (admin transfer). Added last.
+    Admin,
 }
 
 impl SyncKind {
@@ -146,6 +164,7 @@ impl SyncKind {
             SyncKind::Sent => "sent message",
             SyncKind::Contact => "contact",
             SyncKind::Devices => "device list",
+            SyncKind::Admin => "admin key",
         }
     }
 }
@@ -190,6 +209,9 @@ impl TransparencyEvent {
                 | Self::LinkFinished { .. }
                 | Self::ContactCardUpdated { .. }
                 | Self::OwnDevicesUpdated { .. }
+                | Self::AdminTransferred { .. }
+                | Self::AdminReceived
+                | Self::DeviceRemoved { .. }
         )
     }
 
@@ -369,6 +391,24 @@ impl TransparencyEvent {
                  are unusable. Its other devices still receive the packet.",
                 hex(&device.0[..4])
             ),
+            Self::AdminTransferStarted { device } => format!(
+                "The root key was sent, encrypted, to your device {}. This device keeps \
+                 it until that device confirms receipt, then erases it.",
+                hex(&device.0[..4])
+            ),
+            Self::AdminTransferred { device } => format!(
+                "Your device {} is now the administrator: it holds the root key. \
+                 This device erased its copy.",
+                hex(&device.0[..4])
+            ),
+            Self::AdminReceived => "This device is now the administrator: it received the \
+                 root key from another of your devices."
+                .to_owned(),
+            Self::DeviceRemoved { version } => format!(
+                "This device was removed from your account by a newer device list \
+                 (version {version}), for example after a recovery from the 24 words. \
+                 It can no longer send; its root key, if it had one, was erased."
+            ),
         }
     }
 }
@@ -532,6 +572,17 @@ mod tests {
                 contact: fp(8),
                 device: DeviceId([9; 16]),
             },
+            TransparencyEvent::SyncApplied {
+                kind: SyncKind::Admin,
+            },
+            TransparencyEvent::AdminTransferStarted {
+                device: DeviceId([10; 16]),
+            },
+            TransparencyEvent::AdminTransferred {
+                device: DeviceId([10; 16]),
+            },
+            TransparencyEvent::AdminReceived,
+            TransparencyEvent::DeviceRemoved { version: 7 },
         ]
     }
 
@@ -674,7 +725,7 @@ mod tests {
     #[test]
     fn security_class_is_session_key_change_and_link_only() {
         let security: Vec<_> = all().into_iter().filter(|e| e.is_security()).collect();
-        assert_eq!(security.len(), 6);
+        assert_eq!(security.len(), 9);
         assert!(security.iter().all(|e| matches!(
             e,
             TransparencyEvent::SessionEstablished { .. }
@@ -682,6 +733,9 @@ mod tests {
                 | TransparencyEvent::DeviceLinked { .. }
                 | TransparencyEvent::LinkFinished { .. }
                 | TransparencyEvent::ContactCardUpdated { .. }
+                | TransparencyEvent::AdminTransferred { .. }
+                | TransparencyEvent::AdminReceived
+                | TransparencyEvent::DeviceRemoved { .. }
                 | TransparencyEvent::OwnDevicesUpdated { .. }
         )));
     }

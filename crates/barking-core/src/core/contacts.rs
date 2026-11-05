@@ -7,7 +7,7 @@ use rand_core::CryptoRng;
 use super::{Core, OwnDevices, load_card, log, sync};
 use crate::contact::ContactCard;
 use crate::envelope::SyncOp;
-use crate::identity::{DeviceId, DevicePublic, Fingerprint};
+use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::store::{ContactClock, ContactRow, Queries};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
@@ -48,11 +48,11 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<Fingerprint> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             let me = device.public().id();
-            let (fp, replaced) = add_in(tx, card, alias)?;
+            let (fp, replaced) = add_in(tx, device, card, alias, now, rng)?;
             // The new state goes out before the deletion of the replaced contact:
             // received in that order, the alias moves from one fingerprint to the other
             // on my other devices, which log the same
@@ -79,7 +79,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<()> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             remove_in(tx, *contact)?;
@@ -96,7 +96,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<()> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             set_verified_in(tx, *contact, true, now)?;
@@ -113,7 +113,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<()> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             set_verified_in(tx, *contact, false, now)?;
@@ -132,7 +132,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<()> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             set_alias_in(tx, *contact, alias)?;
@@ -272,8 +272,11 @@ fn clean_alias(alias: &str) -> Result<&str> {
 /// fingerprint), if there is one.
 pub(super) fn add_in(
     q: &impl Queries,
+    device: &DeviceKeys,
     card: &ContactCard,
     alias: Option<&str>,
+    now: u64,
+    rng: &mut impl CryptoRng,
 ) -> Result<(Fingerprint, Option<Fingerprint>)> {
     let alias = alias
         .map(clean_alias)
@@ -287,8 +290,9 @@ pub(super) fn add_in(
         (None, Some(old)) => old.alias.clone(),
         (None, None) => String::new(),
     };
+    // Revoked devices: told (they may not know), then no more sessions.
+    sync::notify_revoked(q, device, card, &c.revoked, now, rng)?;
     for id in &c.revoked {
-        // Revoked device: no more sessions with it.
         q.delete_sessions_for_device(fp, *id)?;
     }
     let mut replaced = None;
@@ -325,12 +329,16 @@ pub(super) fn add_in(
 /// the received alias is dropped (the contact no longer has one). Thus the alias goes to
 /// the most recent operation on all my devices, whatever the
 /// arrival order.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn upsert_in(
     q: &impl Queries,
+    device: &DeviceKeys,
     card: &ContactCard,
     alias: &str,
     verified: bool,
     clock: &ContactClock,
+    now: u64,
+    rng: &mut impl CryptoRng,
 ) -> Result<()> {
     let mut alias = clean_alias(alias)?;
     let fp = card.fingerprint();
@@ -372,6 +380,9 @@ pub(super) fn upsert_in(
             alias = "";
         }
     }
+    // Revoked devices: told (this device may be the only one of the contact
+    // with a session with them), then no more sessions.
+    sync::notify_revoked(q, device, card, &revoked, now, rng)?;
     for id in &revoked {
         q.delete_sessions_for_device(fp, *id)?;
     }
@@ -459,10 +470,15 @@ pub(super) fn verify_card_update(
 /// transaction, after the session is written. No error due to the content.
 pub(super) fn apply_card_update(
     q: &impl Queries,
+    device: &DeviceKeys,
     current: &ContactRow,
+    card: &ContactCard,
     verified: VerifiedCard,
+    now: u64,
+    rng: &mut impl CryptoRng,
 ) -> Result<(Vec<DeviceId>, u32)> {
     let c = verified.checked;
+    sync::notify_revoked(q, device, card, &c.revoked, now, rng)?;
     for id in &c.revoked {
         q.delete_sessions_for_device(c.fp, *id)?;
     }

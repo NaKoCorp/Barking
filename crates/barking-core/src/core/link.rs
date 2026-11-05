@@ -428,6 +428,13 @@ impl Core {
         Ok(())
     }
 
+    /// Refuses an outgoing operation on a device awaiting its link or
+    /// removed from my account (`DeviceRemoved`).
+    pub(super) fn ensure_active(&self) -> Result<()> {
+        self.ensure_linked()?;
+        self.ensure_not_removed()
+    }
+
     /// This device waits for its link bundle (`begin_link` done,
     /// `finish_link` not yet).
     pub fn is_pending_link(&self) -> bool {
@@ -437,8 +444,9 @@ impl Core {
     /// Step 1 (A): new link offer, valid for 10 minutes. It
     /// replaces the previous offer. Admin only.
     pub fn link_offer(&mut self, now: u64, rng: &mut impl CryptoRng) -> Result<LinkOffer> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?.public();
+        super::admin::ensure_none_pending(&self.store, now)?;
         let mut stored = StoredOffer {
             secret: [0u8; 32],
             expires_at: now.saturating_add(LINK_OFFER_TTL_SECS),
@@ -531,8 +539,9 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<LinkOutcome> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
+        super::admin::ensure_none_pending(&self.store, now)?;
         let root_pub = root.public();
         let offer = self
             .store

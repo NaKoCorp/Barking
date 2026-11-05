@@ -859,6 +859,9 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
             let who = alias.unwrap_or_else(|| from.to_string());
             println!("{label}: {} updated their device list", printable(&who));
         }
+        ReceiveOutcome::Removed => {
+            println!("{label}: this device was removed from your account");
+        }
     }
     Ok(())
 }

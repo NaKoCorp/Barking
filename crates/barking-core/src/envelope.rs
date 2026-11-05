@@ -51,6 +51,13 @@ pub enum Body {
     /// each of its contacts after a linking. Boxed card (size of
     /// the enum); same postcard format as `CardUpdate(ContactCard)`.
     CardUpdate(Box<ContactCard>),
+    /// The root key (32-byte seed), sent to one of my devices only: admin
+    /// transfer (`core/admin.rs`), with the version of the sender's device
+    /// list (the target refuses it while its own list is older). Added last.
+    AdminTransfer {
+        seed: [u8; 32],
+        version: u64,
+    },
 }
 
 /// State of a contact, replayed on my other devices. Idempotent: the same
@@ -104,6 +111,7 @@ impl fmt::Debug for Body {
             Body::CardUpdate(card) => {
                 write!(f, "CardUpdate(version {})", card.devices.version)
             }
+            Body::AdminTransfer { .. } => f.write_str("AdminTransfer(<secret>)"),
         }
     }
 }

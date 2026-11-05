@@ -7,8 +7,8 @@ use zeroize::Zeroizing;
 use super::log_limit::{LogLimiter, log_limited};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
-    SEEN_RETENTION_SECS, contacts, de_state, load_card, log, ser_state, session_ad, session_id,
-    sync,
+    SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, removed, ser_state, session_ad,
+    session_id, sync,
 };
 use crate::contact::ContactCard;
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
@@ -74,13 +74,19 @@ impl Core {
             Kind::Ack => self.receive_ack(&packet, now),
             Kind::Message => {
                 let outcome = self.receive_message(&packet, transport, now, rng)?;
-                if matches!(
-                    outcome,
+                match outcome {
+                    // A list may also remove this device: its root goes.
                     ReceiveOutcome::Synced {
-                        kind: SyncKind::Devices
+                        kind: SyncKind::Devices,
+                    } => {
+                        self.reload_own_devices()?;
+                        self.reload_root()?;
                     }
-                ) {
-                    self.reload_own_devices()?;
+                    ReceiveOutcome::Synced {
+                        kind: SyncKind::Admin,
+                    }
+                    | ReceiveOutcome::Removed => self.reload_root()?,
+                    _ => {}
                 }
                 Ok(outcome)
             }
@@ -103,12 +109,12 @@ impl Core {
         let Core {
             store, log_limiter, ..
         } = self;
-        store.transaction(|tx| {
+        let (outcome, transferred) = store.transaction(|tx| {
             // A delivery is always one of my sent packets: a
             // message for a contact, or a sync for one of my
             // devices (without a message row for `SyncContact`/`SyncDevices`).
             if !tx.is_my_packet(acked)? {
-                return Ok(ReceiveOutcome::NotForUs);
+                return Ok((ReceiveOutcome::NotForUs, false));
             }
             if tx.delivery_acked(acked)? {
                 // A replayed ack (identifier and expiry rewritten at
@@ -122,7 +128,7 @@ impl Core {
                         packet_id: packet.id,
                     },
                 )?;
-                return Ok(ReceiveOutcome::Duplicate);
+                return Ok((ReceiveOutcome::Duplicate, false));
             }
             // The ack of one of my devices (`SyncSent` copy, `own`
             // delivery) does not make the message delivered: only that of a
@@ -135,8 +141,17 @@ impl Core {
                 Some(acked),
                 &TransparencyEvent::AckVerified { for_packet: acked },
             )?;
-            Ok(ReceiveOutcome::AckReceived { packet_id: acked })
-        })
+            // Ack of an admin transfer: the root leaves this device.
+            let transferred = admin::on_ack(tx, acked, now)?;
+            Ok((
+                ReceiveOutcome::AckReceived { packet_id: acked },
+                transferred,
+            ))
+        })?;
+        if transferred {
+            self.reload_root()?;
+        }
+        Ok(outcome)
     }
 
     fn receive_message(
@@ -451,7 +466,6 @@ fn accept(
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
-    let me = &device.public();
     let env = match envelope::decode(&o.pt) {
         // No authenticated ack secret: nothing to mark as seen.
         Err(_) => return reject_authenticated(q, limiter, packet, o, now, R_BAD_CONTENT, None),
@@ -465,6 +479,10 @@ fn accept(
     }
     let from_me = o.row.contact_fp == *my_fp;
     let text = match (&env.body, from_me) {
+        // My own card relayed by a contact that dropped this device.
+        (Body::CardUpdate(card), false) if card.devices.root.fingerprint() == *my_fp => {
+            return accept_own_card(q, limiter, packet, o, &env, card, device, now, rng);
+        }
         (Body::CardUpdate(card), false) => {
             return accept_card_update(q, limiter, packet, o, &env, card, device, now, rng);
         }
@@ -484,7 +502,7 @@ fn accept(
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
         }
-        (_, true) => return accept_sync(q, limiter, packet, o, &env, me, my_fp, now, rng),
+        (_, true) => return accept_sync(q, limiter, packet, o, &env, device, my_fp, now, rng),
     };
     let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
     // Before `insert_message` (unique packet identifier).
@@ -591,7 +609,8 @@ fn accept_card_update(
         emit_ack(q, packet, env.ack_secret, now, rng)?;
         return Ok((ReceiveOutcome::Duplicate, new_prekeys));
     };
-    let (added, removed) = contacts::apply_card_update(q, &current, verified)?;
+    let (added, removed) =
+        contacts::apply_card_update(q, device, &current, card, verified, now, rng)?;
     log(
         q,
         now,
@@ -609,6 +628,49 @@ fn accept_card_update(
     Ok((ReceiveOutcome::CardUpdated { from: fp, alias }, new_prekeys))
 }
 
+/// A card of my own identity relayed by a contact (`sync::notify_revoked` on
+/// its side): a valid card whose newer list no longer contains this device
+/// removes it (`removed.rs`); any other valid card (older, already known,
+/// containing me) is acked without effect; an invalid one is quarantined.
+#[allow(clippy::too_many_arguments)]
+fn accept_own_card(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    card: &ContactCard,
+    device: &DeviceKeys,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let fp = o.row.contact_fp;
+    if card.verify().is_err() {
+        let id = Some(ack::packet_id_for(&env.ack_secret));
+        return reject_authenticated(q, limiter, packet, o, now, contacts::R_CARD_REFUSED, id);
+    }
+    let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
+    let removal = removed::is_removal(&own.list, &device.public(), card);
+    let (_, new_prekeys, _) = commit_session(q, o, now)?;
+    q.mark_seen(packet.id, now)?;
+    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id))?;
+    if removal && removed::enter(q, device, card, now, rng)? {
+        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        return Ok((ReceiveOutcome::Removed, new_prekeys));
+    }
+    log_limited(
+        q,
+        limiter,
+        now,
+        Some(packet.id),
+        &TransparencyEvent::DuplicateIgnored {
+            packet_id: packet.id,
+        },
+    )?;
+    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    Ok((ReceiveOutcome::Duplicate, new_prekeys))
+}
+
 /// Authenticated synchronization coming from one of my devices: applied with
 /// the checks of the local operation (refusal: quarantine, ratchet kept),
 /// only once per envelope identifier (`inbound` table, identifier
@@ -620,7 +682,7 @@ fn accept_sync(
     packet: &Packet,
     o: Opened,
     env: &Envelope,
-    me: &DevicePublic,
+    device: &DeviceKeys,
     my_fp: &Fingerprint,
     now: u64,
     rng: &mut impl CryptoRng,
@@ -643,7 +705,7 @@ fn accept_sync(
     let kind = if q.inbound_has_message(sync_id)? {
         None
     } else {
-        match sync::apply(q, me, o.row.contact_device, env)? {
+        match sync::apply(q, device, o.row.contact_device, env, now, rng)? {
             Ok(kind) => kind,
             Err(reason) => {
                 let id = Some(ack::packet_id_for(&env.ack_secret));
@@ -680,7 +742,10 @@ fn accept_sync(
             },
         )?,
     }
-    if let Some((added, removed)) = devices_change {
+    if kind == Some(SyncKind::Admin) {
+        log(q, now, Some(packet.id), &TransparencyEvent::AdminReceived)?;
+    }
+    if let Some((added, removed)) = devices_change.filter(|c| *c != (0, 0)) {
         // Security proof, like a link seen from the admin.
         log(
             q,

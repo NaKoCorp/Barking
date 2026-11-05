@@ -12,12 +12,14 @@
 //! `history.rs` (history archive transferred at link time), `sync.rs`
 //! (synchronization between my devices).
 
+mod admin;
 mod contacts;
 mod frames;
 mod history;
 mod link;
 mod log_limit;
 mod receive;
+mod removed;
 mod send;
 mod sync;
 
@@ -54,6 +56,7 @@ pub use link::{
     MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES,
 };
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
+pub use removed::Removed;
 
 use log_limit::LogLimiter;
 
@@ -147,6 +150,9 @@ pub enum ReceiveOutcome {
         from: Fingerprint,
         alias: Option<String>,
     },
+    /// A newer list signed by my root no longer contains this device: it is
+    /// removed from my account (see `Core::removed`); the ack is queued.
+    Removed,
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -178,6 +184,7 @@ impl fmt::Debug for ReceiveOutcome {
                 .field("from", from)
                 .field("alias", alias)
                 .finish(),
+            Self::Removed => f.write_str("Removed"),
         }
     }
 }
@@ -219,6 +226,7 @@ impl fmt::Debug for Core {
 /// One of my devices (`Core::my_devices`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MyDevice {
+    pub id: DeviceId,
     pub name: String,
     /// Certificate date (Unix seconds).
     pub issued_at: u64,
@@ -357,6 +365,7 @@ impl Core {
             .unwrap_or_default();
         store.transaction(|tx| {
             link::purge_expired_offer(tx, now)?;
+            admin::purge_expired(tx, now)?;
             sweep_skipped(tx, now)
         })?;
         Ok(Core::assemble(
@@ -386,20 +395,30 @@ impl Core {
         self.devices.root.fingerprint()
     }
 
-    /// My devices, from the signed device list. Only this device is known to
-    /// hold the root (`admin`): other devices may, without the list saying so.
+    /// My devices, from the signed device list. `admin`: this device if it
+    /// holds the root, or the device this one handed it to (admin transfer).
+    /// Other devices may hold it without the list saying so.
     pub fn my_devices(&self) -> Vec<MyDevice> {
         let me = self.device.public().id();
+        // A failed read only hides the hint.
+        let holder = self
+            .store
+            .get_meta::<DeviceId>(admin::META_ROOT_HOLDER)
+            .ok()
+            .flatten();
         self.devices
             .certs
             .iter()
             .map(|c| {
-                let this_device = c.device.id() == me;
+                let id = c.device.id();
+                let this_device = id == me;
                 MyDevice {
+                    id,
                     name: c.name.clone(),
                     issued_at: c.issued_at,
                     this_device,
-                    admin: this_device && self.root.is_some(),
+                    admin: (this_device && self.root.is_some())
+                        || (self.root.is_none() && holder == Some(id)),
                 }
             })
             .collect()
@@ -409,7 +428,7 @@ impl Core {
     /// device. `display_name` is recorded as my display name (reused
     /// by the cards the core signs itself, see `set_display_name`).
     pub fn contact_card(&self, display_name: &str) -> Result<ContactCard> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
         let mut bundles = vec![self.prekeys.bundle(&self.device, false)];
         bundles.extend(
@@ -650,6 +669,7 @@ impl Core {
     pub fn pending_outbox(&mut self, now: u64) -> Result<Vec<Vec<u8>>> {
         self.store.transaction(|tx| {
             tx.outbox_purge_expired(now)?;
+            admin::purge_expired(tx, now)?;
             sweep_skipped(tx, now)?;
             Ok(tx
                 .outbox_pending(now)?

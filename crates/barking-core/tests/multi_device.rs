@@ -1737,3 +1737,350 @@ fn verification_from_a_stale_device_is_kept() {
     );
     assert_eq!(contact_state(&t.core), contact_state(&a.core));
 }
+
+fn device_id(core: &Core, name: &str) -> barking_core::identity::DeviceId {
+    core.my_devices()
+        .into_iter()
+        .find(|d| d.name == name)
+        .unwrap()
+        .id
+}
+
+fn admins(core: &Core) -> Vec<String> {
+    core.my_devices()
+        .into_iter()
+        .filter(|d| d.admin)
+        .map(|d| d.name)
+        .collect()
+}
+
+#[test]
+fn admin_transfer_moves_root() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(40);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let t_id = device_id(&a.core, "t");
+
+    a.core.transfer_admin(t_id, NOW, &mut rng).unwrap();
+    // Root kept until T acknowledges, but no linking meanwhile.
+    assert_eq!(a.core.admin_transfer_pending(NOW).unwrap(), Some(t_id));
+    assert!(matches!(
+        a.core.link_offer(NOW, &mut rng),
+        Err(CoreError::AdminTransferPending)
+    ));
+    assert_eq!(admins(&a.core), vec!["a".to_owned()]);
+
+    assert_eq!(sync_round(&mut a, &mut t, &mut rng), vec![SyncKind::Admin]);
+    assert_eq!(a.core.admin_transfer_pending(NOW).unwrap(), None);
+    assert!(matches!(
+        a.core.link_offer(NOW, &mut rng),
+        Err(CoreError::NotAdmin)
+    ));
+    assert_eq!(admins(&a.core), vec!["t".to_owned()]);
+    assert_eq!(admins(&t.core), vec!["t".to_owned()]);
+    assert!(
+        events(&a.core).iter().any(
+            |e| matches!(e, TransparencyEvent::AdminTransferred { device } if *device == t_id)
+        )
+    );
+    assert!(events(&t.core).contains(&TransparencyEvent::AdminReceived));
+
+    // Erased for good: still not admin after reopening.
+    drop(a.core);
+    a.core = Core::open(&a.path, &a.key, NOW).unwrap();
+    assert!(matches!(
+        a.core.link_offer(NOW, &mut rng),
+        Err(CoreError::NotAdmin)
+    ));
+
+    // T links a third device; A learns the new list.
+    let offer = t.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut u, req) = begin(d.path(), "u", 11, &offer, &mut rng);
+    let out = t.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    u.core.finish_link(&out.bundle, None, NOW).unwrap();
+    assert_eq!(
+        sync_round(&mut t, &mut a, &mut rng),
+        vec![SyncKind::Devices]
+    );
+    assert_eq!(a.core.my_devices().len(), 3);
+    assert_eq!(u.core.my_devices().len(), 3);
+}
+
+#[test]
+fn admin_transfer_expires_keeps_root() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(41);
+    let (mut a, _t) = admin_and_tablet(d.path(), &mut rng);
+    let t_id = device_id(&a.core, "t");
+    a.core.transfer_admin(t_id, NOW, &mut rng).unwrap();
+    let later = NOW + 8 * 86_400;
+    assert!(a.core.pending_outbox(later).unwrap().is_empty());
+    assert_eq!(a.core.admin_transfer_pending(later).unwrap(), None);
+    a.core.link_offer(later, &mut rng).unwrap();
+    assert_eq!(admins(&a.core), vec!["a".to_owned()]);
+    // Also after reopening.
+    drop(a.core);
+    a.core = Core::open(&a.path, &a.key, later).unwrap();
+    assert_eq!(a.core.admin_transfer_pending(later).unwrap(), None);
+}
+
+#[test]
+fn admin_transfer_refusals() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(42);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let a_id = device_id(&a.core, "a");
+    let t_id = device_id(&a.core, "t");
+    assert!(matches!(
+        a.core.transfer_admin(a_id, NOW, &mut rng),
+        Err(CoreError::Malformed(_))
+    ));
+    let unknown = barking_core::identity::DeviceId([7; 16]);
+    assert!(matches!(
+        a.core.transfer_admin(unknown, NOW, &mut rng),
+        Err(CoreError::Malformed(_))
+    ));
+    assert!(matches!(
+        t.core.transfer_admin(a_id, NOW, &mut rng),
+        Err(CoreError::NotAdmin)
+    ));
+    a.core.transfer_admin(t_id, NOW, &mut rng).unwrap();
+    assert!(matches!(
+        a.core.transfer_admin(t_id, NOW, &mut rng),
+        Err(CoreError::AdminTransferPending)
+    ));
+}
+
+#[test]
+fn admin_transfer_ack_twice() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(43);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let t_id = device_id(&a.core, "t");
+    a.core.transfer_admin(t_id, NOW, &mut rng).unwrap();
+    for bytes in a.core.pending_outbox(NOW).unwrap() {
+        t.core.receive(&bytes, T, NOW, &mut rng).unwrap();
+    }
+    let acks = t.core.pending_outbox(NOW).unwrap();
+    assert_eq!(acks.len(), 1);
+    assert!(matches!(
+        a.core.receive(&acks[0], T, NOW, &mut rng).unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    assert!(matches!(
+        a.core.receive(&acks[0], T, NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Duplicate
+    ));
+    assert_eq!(admins(&a.core), vec!["t".to_owned()]);
+}
+
+/// Delivers every queued packet of `from` to `to`, ignoring the outcomes.
+fn drain(from: &mut Dev, to: &mut Dev, rng: &mut StdRng) {
+    for bytes in from.core.pending_outbox(NOW).unwrap() {
+        to.core.receive(&bytes, T, NOW, rng).unwrap();
+    }
+}
+
+#[test]
+fn recovery_removes_old_devices() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(50);
+    let a_path = d.path().join("a");
+    let (a_core, phrase) = Core::create(&a_path, &[1; 32], "a", NOW, &mut rng).unwrap();
+    let mut a = Dev {
+        core: a_core,
+        path: a_path,
+        key: [1; 32],
+    };
+    let offer = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
+    let out = a.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    t.core.finish_link(&out.bundle, None, NOW).unwrap();
+    let mut c = create(d.path(), "c", 3, &mut rng);
+    let c_fp = c.core.contact_card("C").unwrap().fingerprint();
+    a.core
+        .add_contact(&c.core.contact_card("C").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+    c.core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, &mut rng)
+        .unwrap();
+    // Sessions between C and both of my old devices.
+    a.core.send_text(&c_fp, "hi", NOW, &mut rng).unwrap();
+    drain(&mut a, &mut c, &mut rng);
+    c.core
+        .send_text(&a.core.fingerprint(), "hello", NOW, &mut rng)
+        .unwrap();
+    drain(&mut c, &mut t, &mut rng);
+    drain(&mut c, &mut a, &mut rng);
+    drain(&mut t, &mut c, &mut rng);
+    drain(&mut a, &mut c, &mut rng);
+    // A message of C sealed before it learns the recovery, delivered late.
+    let late = produced(&mut c, |core| {
+        core.send_text(&a_fp(core), "late", NOW, &mut StdRng::seed_from_u64(7))
+            .unwrap();
+    });
+
+    // Recovery on N; C re-adds me with N's card.
+    let recovered_at = NOW + 10;
+    let n_core = Core::recover(
+        &d.path().join("n"),
+        &[4; 32],
+        phrase.as_str(),
+        "n",
+        recovered_at,
+        &mut rng,
+    )
+    .unwrap();
+    let n_card = n_core.contact_card("A").unwrap();
+    c.core.add_contact(&n_card, None, NOW, &mut rng).unwrap();
+
+    // Only A gets C's relay; T learns it from A.
+    let queued = c.core.pending_outbox(NOW).unwrap();
+    let outcomes: Vec<_> = queued
+        .iter()
+        .filter(|b| !late.contains(b))
+        .map(|b| a.core.receive(b, T, NOW, &mut rng).unwrap())
+        .collect();
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::Removed))
+    );
+    sync_round(&mut a, &mut t, &mut rng);
+    for dev in [&a, &t] {
+        let removed = dev.core.removed().unwrap().unwrap();
+        assert_eq!(removed.version, recovered_at);
+        assert!(
+            events(&dev.core).contains(&TransparencyEvent::DeviceRemoved {
+                version: recovered_at
+            })
+        );
+    }
+    assert!(matches!(
+        a.core.link_offer(NOW, &mut rng),
+        Err(CoreError::DeviceRemoved)
+    ));
+    assert!(matches!(
+        t.core.send_text(&c_fp, "x", NOW, &mut rng),
+        Err(CoreError::DeviceRemoved)
+    ));
+    // The late message is still shown on the removed device.
+    let shown = late
+        .iter()
+        .map(|b| a.core.receive(b, T, NOW, &mut rng).unwrap())
+        .any(|o| matches!(o, ReceiveOutcome::Message { text, .. } if text == "late"));
+    assert!(shown);
+    // Root erased for good.
+    drop(a.core);
+    a.core = Core::open(&a.path, &a.key, NOW).unwrap();
+    assert!(admins(&a.core).is_empty());
+    assert!(matches!(
+        a.core.contact_card("A"),
+        Err(CoreError::DeviceRemoved)
+    ));
+}
+
+/// Fingerprint of the only contact of `core`.
+fn a_fp(core: &Core) -> Fingerprint {
+    core.contacts().unwrap()[0].fingerprint
+}
+
+#[test]
+fn admin_transfer_refused_by_a_target_behind_on_the_list() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(44);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    // A links U; T never gets the new list.
+    let offer = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut u, req) = begin(d.path(), "u", 12, &offer, &mut rng);
+    let out = a.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    u.core.finish_link(&out.bundle, None, NOW).unwrap();
+    let t_id = device_id(&a.core, "t");
+    let transfer = produced(&mut a, |core| {
+        core.transfer_admin(t_id, NOW, &mut StdRng::seed_from_u64(8))
+            .unwrap();
+    });
+    let transfer_to_t: Vec<_> = transfer
+        .iter()
+        .map(|b| t.core.receive(b, T, NOW, &mut rng).unwrap())
+        .collect();
+    assert!(
+        transfer_to_t
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::Quarantined { .. })),
+        "{transfer_to_t:?}"
+    );
+    assert!(admins(&t.core).is_empty());
+    // No ack: A keeps the root.
+    for bytes in t.core.pending_outbox(NOW).unwrap() {
+        a.core.receive(&bytes, T, NOW, &mut rng).unwrap();
+    }
+    assert_eq!(admins(&a.core), vec!["a".to_owned()]);
+}
+
+#[test]
+fn contacts_other_device_relays_the_removal() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(51);
+    let a_path = d.path().join("a");
+    let (a_core, phrase) = Core::create(&a_path, &[1; 32], "a", NOW, &mut rng).unwrap();
+    let mut a = Dev {
+        core: a_core,
+        path: a_path,
+        key: [1; 32],
+    };
+    // Contact C on two devices, C1 and C2.
+    let mut c1 = create(d.path(), "c1", 3, &mut rng);
+    let offer = c1.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut c2, req) = begin(d.path(), "c2", 5, &offer, &mut rng);
+    let out = c1.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    c2.core.finish_link(&out.bundle, None, NOW).unwrap();
+    c1.core
+        .add_contact(&a.core.contact_card("A").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    sync_round(&mut c1, &mut c2, &mut rng);
+    a.core
+        .add_contact(&c1.core.contact_card("C").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    // Only C2 has a session with A.
+    let a_fp = a.core.fingerprint();
+    c2.core.send_text(&a_fp, "hi", NOW, &mut rng).unwrap();
+    for bytes in c2.core.pending_outbox(NOW).unwrap() {
+        a.core.receive(&bytes, T, NOW, &mut rng).unwrap();
+    }
+
+    // Recovery on N; C1 re-adds me, C2 learns it by contact sync.
+    let n_core = Core::recover(
+        &d.path().join("n"),
+        &[4; 32],
+        phrase.as_str(),
+        "n",
+        NOW + 10,
+        &mut rng,
+    )
+    .unwrap();
+    c1.core
+        .add_contact(&n_core.contact_card("A").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let before = c2.core.pending_outbox(NOW).unwrap();
+    sync_round(&mut c1, &mut c2, &mut rng);
+    let relayed: Vec<_> = c2
+        .core
+        .pending_outbox(NOW)
+        .unwrap()
+        .into_iter()
+        .filter(|b| !before.contains(b))
+        .collect();
+    let outcomes: Vec<_> = relayed
+        .iter()
+        .map(|b| a.core.receive(b, T, NOW, &mut rng).unwrap())
+        .collect();
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::Removed)),
+        "{outcomes:?}"
+    );
+    assert_eq!(a.core.removed().unwrap().map(|r| r.version), Some(NOW + 10));
+}

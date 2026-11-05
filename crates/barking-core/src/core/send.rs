@@ -28,6 +28,8 @@ pub(super) enum Target {
     /// sessions are filed under my own fingerprint. Used by the
     /// sync contents (`Sync*`, see `sync.rs`).
     OwnDevices,
+    /// Only this one of my other devices (admin transfer).
+    OwnDevice(DeviceId),
 }
 
 /// Dates of a sealing: `now` (wall clock) sets the mailbox day,
@@ -112,9 +114,13 @@ pub(super) fn seal_for(
                 .collect();
             (*fp, peers)
         }
-        Target::OwnDevices => {
+        Target::OwnDevices | Target::OwnDevice(_) => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
-            (own.list.root.fingerprint(), own.others(&me))
+            let mut others = own.others(&me);
+            if let Target::OwnDevice(only) = target {
+                others.retain(|(d, _)| d.id() == *only);
+            }
+            (own.list.root.fingerprint(), others)
         }
     };
     let day = day_of(now);
@@ -249,7 +255,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<Packet>> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         if text.len() > MAX_TEXT_LEN {
             return Err(CoreError::TooLarge);
         }

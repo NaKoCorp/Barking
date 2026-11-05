@@ -1219,14 +1219,8 @@ fn sync_devices_requires_newer_signed_list() {
     // Version equal to T1's, signed by my root.
     let same = DeviceList::sign(&root, t1_before.version, certs.clone()).unwrap();
     cases.push(card_for(&root, same, &all, None));
-    // Higher version that does not contain T1.
-    let without: Vec<_> = certs
-        .iter()
-        .filter(|c| c.device != t1_dev)
-        .cloned()
-        .collect();
-    let list = DeviceList::sign(&root, v + 1, without).unwrap();
-    cases.push(card_for(&root, list, &all, None));
+    // (A higher version that does not contain T1 removes it: see
+    // `sync_devices_without_me_removes_me`.)
     // Invalid list signature (rewritten version).
     let mut forged = a.devices.clone();
     forged.version += 10;
@@ -2334,4 +2328,244 @@ fn own_mailboxes_empty_while_awaiting_link() {
         Core::begin_link(&dir.path().join("t"), &[2; 32], &offer, "t", NOW, &mut rng).unwrap();
     assert!(t.own_mailboxes(&[day_of(NOW)]).unwrap().is_empty());
     assert_eq!(a.own_mailboxes(&[day_of(NOW)]).unwrap().len(), 1);
+}
+
+/// A card of `c`'s identity, version `version`, with only a new device.
+fn card_without(c: &Core, version: u64, rng: &mut StdRng) -> ContactCard {
+    let root = c.root.as_ref().unwrap();
+    let other = DeviceKeys::generate(rng);
+    let cert = DeviceCertificate::issue(root, &other, "n", NOW).unwrap();
+    let list = DeviceList::sign(root, version, vec![cert]).unwrap();
+    ContactCard::sign(root, "", list, Vec::new(), Vec::new()).unwrap()
+}
+
+/// `from` seals `body` for every device of contact `to` (as a relay would).
+fn seal_to_contact(from: &mut Core, to: Fingerprint, body: &Body, rng: &mut StdRng) -> Vec<u8> {
+    let Core { store, device, .. } = from;
+    store
+        .transaction(|tx| {
+            let id = MessageId([5; 16]);
+            let target = send::Target::Contact(to);
+            let time = send::SealTime::at(NOW);
+            send::seal_for(tx, device, &target, body, id, time, rng)
+        })
+        .unwrap()
+        .remove(0)
+        .0
+        .encode()
+}
+
+#[test]
+fn removed_device_blocks_outgoing() {
+    let Pair {
+        _d,
+        mut a,
+        mut b,
+        mut rng,
+    } = pair();
+    let card = card_without(&a, NOW + 10, &mut rng);
+    let body = Body::CardUpdate(Box::new(card));
+    let relayed = seal_to_contact(&mut b, a.fingerprint(), &body, &mut rng);
+    assert!(matches!(
+        a.receive(&relayed, "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Removed
+    ));
+    let gone = Some(removed::Removed {
+        version: NOW + 10,
+        at: NOW,
+    });
+    assert_eq!(a.removed().unwrap(), gone);
+    assert!(a.root.is_none());
+    let bob = b.fingerprint();
+    let removed = |r: Result<()>| assert_eq!(r, Err(CoreError::DeviceRemoved));
+    removed(a.send_text(&bob, "x", NOW, &mut rng).map(|_| ()));
+    removed(
+        a.add_contact(&b.contact_card("B").unwrap(), None, NOW, &mut rng)
+            .map(|_| ()),
+    );
+    removed(a.mark_verified(&bob, NOW, &mut rng));
+    removed(a.unmark_verified(&bob, NOW, &mut rng));
+    removed(a.set_alias(&bob, "x", NOW, &mut rng).map(|_| ()));
+    removed(a.remove_contact(&bob, NOW, &mut rng));
+    removed(a.contact_card("A").map(|_| ()));
+    removed(a.link_offer(NOW, &mut rng).map(|_| ()));
+    let me = a.device.public().id();
+    removed(a.transfer_admin(me, NOW, &mut rng));
+    // Still receives.
+    let p = b
+        .send_text(&a.fingerprint(), "still here", NOW, &mut rng)
+        .unwrap();
+    assert!(matches!(
+        a.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Message { .. }
+    ));
+    // A second relay of the same removal: duplicate.
+    let again = seal_to_contact(&mut b, a.fingerprint(), &body, &mut rng);
+    assert!(matches!(
+        a.receive(&again, "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Duplicate
+    ));
+}
+
+#[test]
+fn removed_state_survives_reopen() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("db");
+    let mut rng = StdRng::seed_from_u64(9);
+    let (mut a, _) = Core::create(&path, &[9; 32], "a", NOW, &mut rng).unwrap();
+    let card = card_without(&a, NOW + 10, &mut rng);
+    let Core { store, device, .. } = &mut a;
+    store
+        .transaction(|tx| removed::enter(tx, device, &card, NOW, &mut rng))
+        .unwrap();
+    drop(a);
+    let mut a = Core::open(&path, &[9; 32], NOW).unwrap();
+    assert!(a.root.is_none());
+    assert_eq!(a.removed().unwrap().map(|r| r.version), Some(NOW + 10));
+    assert_eq!(
+        a.link_offer(NOW, &mut rng).map(|_| ()),
+        Err(CoreError::DeviceRemoved)
+    );
+}
+
+#[test]
+fn stale_or_including_own_card_is_ignored() {
+    let Pair {
+        _d,
+        mut a,
+        mut b,
+        mut rng,
+    } = pair();
+    // Older than my list: replayed, no effect.
+    let old = card_without(&a, 1, &mut rng);
+    // Newer but still containing me: not a removal.
+    let root = a.root.as_ref().unwrap();
+    let mine = a.devices.certs.clone();
+    let list = DeviceList::sign(root, NOW + 20, mine).unwrap();
+    let with_me = ContactCard::sign(root, "", list, Vec::new(), Vec::new()).unwrap();
+    for card in [old, with_me] {
+        let body = Body::CardUpdate(Box::new(card));
+        let relayed = seal_to_contact(&mut b, a.fingerprint(), &body, &mut rng);
+        assert!(matches!(
+            a.receive(&relayed, "t", NOW, &mut rng).unwrap(),
+            ReceiveOutcome::Duplicate
+        ));
+    }
+    // Forged (version changed after signing): quarantine.
+    let mut forged = card_without(&a, NOW + 30, &mut rng);
+    forged.devices.version += 1;
+    let body = Body::CardUpdate(Box::new(forged));
+    let relayed = seal_to_contact(&mut b, a.fingerprint(), &body, &mut rng);
+    assert!(matches!(
+        a.receive(&relayed, "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Quarantined { .. }
+    ));
+    assert_eq!(a.removed().unwrap(), None);
+    assert!(a.root.is_some());
+}
+
+#[test]
+fn sync_devices_without_me_removes_me() {
+    let (_d, mut a, mut t1, t2, mut rng) = linked_twice();
+    let t1_dev = t1.device.public();
+    let root = a.root.take().unwrap();
+    let without: Vec<_> = a
+        .devices
+        .certs
+        .iter()
+        .filter(|c| c.device != t1_dev)
+        .cloned()
+        .collect();
+    let list = DeviceList::sign(&root, a.devices.version + 1, without).unwrap();
+    let card = card_for(&root, list, &all_bundles(&a), None);
+    a.root = Some(root);
+    let pkt = devices_packet(&mut a, &t1, card, 50, &mut rng);
+    assert!(matches!(
+        t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Synced {
+            kind: SyncKind::Devices
+        }
+    ));
+    let version = a.devices.version + 1;
+    assert_eq!(t1.removed().unwrap().map(|r| r.version), Some(version));
+    assert_eq!(
+        t1.send_text(&t2.fingerprint(), "x", NOW, &mut rng)
+            .map(|_| ()),
+        Err(CoreError::DeviceRemoved)
+    );
+    // T1 forwards the card to the siblings it knows (here A, which signed
+    // it but never stored it): A, still listed, adopts it.
+    let forwarded = t1.pending_outbox(NOW).unwrap();
+    assert!(!forwarded.is_empty());
+    for bytes in forwarded {
+        a.receive(&bytes, "t", NOW, &mut rng).unwrap();
+    }
+    assert_eq!(a.devices.version, version);
+    assert_eq!(a.removed().unwrap(), None);
+    assert_eq!(t2.removed().unwrap(), None);
+}
+
+#[test]
+fn card_update_relays_to_revoked() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, mut b) = party("b", 5);
+    let a_fp = a.fingerprint();
+    b.add_contact(&a.contact_card("A").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    a.add_contact(&b.contact_card("B").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    // T learns B through A's contact sync.
+    for p in a.pending_outbox(NOW).unwrap() {
+        t.receive(&p, "t", NOW, &mut rng).unwrap();
+    }
+    // B opens sessions with A and T.
+    b.send_text(&a_fp, "hi", NOW, &mut rng).unwrap();
+    let t_id = t.device.public().id();
+    assert!(!b.store.sessions_for(a_fp, t_id).unwrap().is_empty());
+    let before = b.pending_outbox(NOW).unwrap();
+
+    // A's newer card without T, sent to B as a card update.
+    let root = a.root.take().unwrap();
+    let mine = a.device.public();
+    let kept: Vec<_> = a
+        .devices
+        .certs
+        .iter()
+        .filter(|c| c.device == mine)
+        .cloned()
+        .collect();
+    let list = DeviceList::sign(&root, a.devices.version + 1, kept).unwrap();
+    let card = card_for(&root, list, &all_bundles(&a), None);
+    a.root = Some(root);
+    let update = seal_body(
+        &mut a,
+        &send::Target::Contact(b.fingerprint()),
+        &Body::CardUpdate(Box::new(card)),
+        MessageId([60; 16]),
+        &mut rng,
+    );
+    assert!(matches!(
+        b.receive(&update[0].0.encode(), "t", NOW, &mut rng)
+            .unwrap(),
+        ReceiveOutcome::CardUpdated { .. }
+    ));
+    // B told T before deleting its sessions with it.
+    assert!(b.store.sessions_for(a_fp, t_id).unwrap().is_empty());
+    let relayed: Vec<_> = b
+        .pending_outbox(NOW)
+        .unwrap()
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .collect();
+    let outcomes: Vec<_> = relayed
+        .iter()
+        .map(|p| t.receive(p, "t", NOW, &mut rng).unwrap())
+        .collect();
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::Removed)),
+        "{outcomes:?}"
+    );
+    assert!(t.removed().unwrap().is_some());
 }
