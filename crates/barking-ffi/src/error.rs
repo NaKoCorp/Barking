@@ -21,6 +21,14 @@ pub enum BarkingError {
     /// Device linking refused; the reason is a stable code, never text.
     #[error("link refused: {reason:?}")]
     LinkRefused { reason: LinkReason },
+    /// The root key was sent to another device and its receipt is not yet
+    /// acknowledged: no linking and no second transfer meanwhile.
+    #[error("admin transfer pending")]
+    AdminTransferPending,
+    /// This device was removed from the account by a newer device list: it
+    /// can only receive and read.
+    #[error("device removed from the account")]
+    DeviceRemoved,
 }
 
 /// Why a link step was refused (spec iOS messaging §5.8).
@@ -90,6 +98,8 @@ impl From<CoreError> for BarkingError {
             | CoreError::InvalidPhrase => BarkingError::InvalidInput { detail },
             CoreError::UnknownContact => BarkingError::NotFound,
             CoreError::StoreLocked | CoreError::Store(_) => BarkingError::Storage { detail },
+            CoreError::AdminTransferPending => BarkingError::AdminTransferPending,
+            CoreError::DeviceRemoved => BarkingError::DeviceRemoved,
             _ => BarkingError::Internal { detail },
         }
     }

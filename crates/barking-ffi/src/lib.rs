@@ -19,7 +19,7 @@ pub use device::{
     Contact, CreatedDevice, Device, DeviceConfig, Message, create_device, device_exists,
 };
 pub use error::{BarkingError, LinkReason};
-pub use identity::{MyDeviceInfo, bip39_words, recover_device};
+pub use identity::{MyDeviceInfo, RemovedInfo, bip39_words, recover_device};
 pub use link::{PendingLink, begin_link, inspect_link_request};
 pub use messages::{ChatSummary, KeyChange, UnreadCount};
 pub use net::{NewMessage, NodeInfo, SyncSummary};

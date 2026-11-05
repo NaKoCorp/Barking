@@ -57,3 +57,68 @@ fn my_devices_has_this_device() {
     assert!(devs[0].this_device && devs[0].admin);
     assert_eq!(devs[0].name, "Alice-phone");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_transfer_over_the_network() {
+    use barking_node::testing::{network, stop_all};
+    let nodes = network(0..3, |_| u64::MAX).await;
+    let (id, addr) = (nodes[0].id.to_string(), nodes[0].addr.to_string());
+    let (da, dt) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    tokio::task::spawn_blocking(move || {
+        let a = device(&da, 1, "a");
+        let pending =
+            barking_ffi::begin_link(config(&dt, 2), a.link_offer().unwrap(), "t".into()).unwrap();
+        pending
+            .device
+            .finish_link(a.link_device(pending.request, false).unwrap())
+            .unwrap();
+        let t = pending.device;
+        for d in [&a, &t] {
+            d.add_node(id.clone(), addr.clone()).unwrap();
+        }
+        let t_id = a
+            .my_devices()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.name == "t")
+            .unwrap()
+            .id;
+        assert_eq!(t_id.len(), 32);
+        assert!(matches!(
+            a.transfer_admin("zz".into()),
+            Err(BarkingError::InvalidInput { .. })
+        ));
+        assert_eq!(a.admin_transfer_pending().unwrap(), None);
+        a.transfer_admin(t_id.clone()).unwrap();
+        assert_eq!(a.admin_transfer_pending().unwrap(), Some(t_id.clone()));
+        assert!(matches!(
+            a.link_offer(),
+            Err(BarkingError::AdminTransferPending)
+        ));
+        // The ack may take more than one round over the test network.
+        for _ in 0..5 {
+            a.sync(30_000).unwrap();
+            t.sync(30_000).unwrap();
+            a.sync(30_000).unwrap();
+            if a.admin_transfer_pending().unwrap().is_none() {
+                break;
+            }
+        }
+        assert_eq!(a.admin_transfer_pending().unwrap(), None);
+        let admin = |d: &Device| -> Vec<String> {
+            d.my_devices()
+                .unwrap()
+                .into_iter()
+                .filter(|x| x.admin)
+                .map(|x| x.name)
+                .collect()
+        };
+        assert_eq!(admin(&a), vec!["t".to_owned()]);
+        assert_eq!(admin(&t), vec!["t".to_owned()]);
+        assert!(t.link_offer().is_ok());
+        assert_eq!(a.removed().unwrap(), None);
+    })
+    .await
+    .unwrap();
+    stop_all(nodes).await;
+}

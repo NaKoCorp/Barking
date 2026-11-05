@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use barking_core::Core;
+use barking_core::identity::DeviceId;
 
 use crate::device::{Device, DeviceConfig, now};
 use crate::{BarkingError, guard};
@@ -10,6 +11,8 @@ use crate::{BarkingError, guard};
 /// One of my devices.
 #[derive(Debug, uniffi::Record)]
 pub struct MyDeviceInfo {
+    /// Device identifier, 32 lowercase hex characters (`transfer_admin`).
+    pub id: String,
     pub name: String,
     /// Unix seconds.
     pub issued_at: u64,
@@ -73,6 +76,7 @@ impl Device {
                     .my_devices()
                     .into_iter()
                     .map(|d| MyDeviceInfo {
+                        id: to_hex(&d.id.0),
                         name: d.name,
                         issued_at: d.issued_at,
                         this_device: d.this_device,
@@ -82,4 +86,57 @@ impl Device {
             })
         })
     }
+
+    /// Hands the root key to my device `device_id` (hex, from `my_devices`).
+    /// This device keeps it until the target acknowledges it.
+    pub fn transfer_admin(&self, device_id: String) -> Result<(), BarkingError> {
+        guard(|| {
+            let id = device_id_from_hex(&device_id)?;
+            self.with_core(|core| Ok(core.transfer_admin(id, now(), &mut rand::rng())?))
+        })
+    }
+
+    /// Hex identifier of the device a root key transfer awaits the ack of.
+    pub fn admin_transfer_pending(&self) -> Result<Option<String>, BarkingError> {
+        guard(|| {
+            self.with_core(|core| Ok(core.admin_transfer_pending(now())?.map(|id| to_hex(&id.0))))
+        })
+    }
+
+    /// Set once a newer device list has removed this device from the account.
+    pub fn removed(&self) -> Result<Option<RemovedInfo>, BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                Ok(core.removed()?.map(|r| RemovedInfo {
+                    version: r.version,
+                    at: r.at,
+                }))
+            })
+        })
+    }
+}
+
+/// This device was removed from the account.
+#[derive(Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RemovedInfo {
+    /// Version of the list that no longer contains it.
+    pub version: u64,
+    /// When this device learned it (Unix seconds).
+    pub at: u64,
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn device_id_from_hex(s: &str) -> Result<DeviceId, BarkingError> {
+    let bad = || BarkingError::invalid("device identifier");
+    if s.len() != 32 || !s.is_ascii() {
+        return Err(bad());
+    }
+    let mut id = [0u8; 16];
+    for (i, byte) in id.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
+    }
+    Ok(DeviceId(id))
 }
