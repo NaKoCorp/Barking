@@ -114,8 +114,8 @@ public struct EnclaveKey: KeyWrapper {
 
 /// AES-GCM in memory, for the tests: the `KeyStore` logic without an enclave.
 /// Copies share their key, as copies of `EnclaveKey` share the enclave's.
-public struct SoftwareKey: KeyWrapper {
-    public struct Missing: Error {}
+struct SoftwareKey: KeyWrapper {
+    struct Missing: Error {}
 
     private final class Box: @unchecked Sendable {
         let lock = NSLock()
@@ -124,14 +124,14 @@ public struct SoftwareKey: KeyWrapper {
 
     private let box = Box()
 
-    public init() {}
+    init() {}
 
-    public var hardware: Bool { false }
+    var hardware: Bool { false }
 
     /// The wrapping key exists.
-    public var exists: Bool { box.lock.withLock { box.key != nil } }
+    var exists: Bool { box.lock.withLock { box.key != nil } }
 
-    public func wrap(_ key: Data) throws -> Data {
+    func wrap(_ key: Data) throws -> Data {
         let k = box.lock.withLock { () -> SymmetricKey in
             if let k = box.key { return k }
             let k = SymmetricKey(size: .bits256)
@@ -142,10 +142,10 @@ public struct SoftwareKey: KeyWrapper {
         return blob
     }
 
-    public func unwrap(_ blob: Data) throws -> Data {
+    func unwrap(_ blob: Data) throws -> Data {
         guard let k = box.lock.withLock({ box.key }) else { throw Missing() }
         return try AES.GCM.open(AES.GCM.SealedBox(combined: blob), using: k)
     }
 
-    public func delete() throws { box.lock.withLock { box.key = nil } }
+    func delete() throws { box.lock.withLock { box.key = nil } }
 }

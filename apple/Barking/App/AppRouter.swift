@@ -13,12 +13,20 @@ final class AppRouter {
         case linking(CoreService)
         /// The identity exists but could not be opened (lock, keychain).
         case failed
+        /// The database key no longer unwraps: its Secure Enclave key is
+        /// gone (backup restored on another iPhone, spec §7.2). Retrying
+        /// cannot help; linking or recovering can, after erasing.
+        case unreadable
     }
 
     private(set) var state: State
     private(set) var pendingCardLink: String?
     /// A `.barkinglink` file opened from AirDrop or Files.
     private(set) var pendingLinkFile: URL?
+    /// Where onboarding starts after erasing unreadable data.
+    private(set) var pendingOnboardingStep: OnboardingModel.Step?
+    /// Erasing the unreadable data failed; the screen offers it again.
+    private(set) var eraseFailed = false
 
     init(start: State) { state = start }
 
@@ -61,9 +69,32 @@ final class AppRouter {
             guard let device = try opening() else { return .onboarding }
             let core = CoreService(device: device, runner: runner)
             return (try? device.isPendingLink()) == true ? .linking(core) : .ready(core)
+        } catch is KeyStore.Unavailable {
+            return .unreadable
         } catch {
             return .failed
         }
+    }
+
+    /// Erases the data this iPhone can no longer read, then opens onboarding
+    /// at `step` (link or recover). A wipe that fails stays on the screen:
+    /// onboarding would offer a new identity the leftover marker could erase.
+    func eraseUnreadable(then step: OnboardingModel.Step,
+                         wipe: () throws -> Void = { try DeviceFactory.resetIdentity() }) {
+        do {
+            try wipe()
+        } catch {
+            eraseFailed = true
+            return
+        }
+        eraseFailed = false
+        pendingOnboardingStep = step
+        state = .onboarding
+    }
+
+    func takeOnboardingStep() -> OnboardingModel.Step? {
+        defer { pendingOnboardingStep = nil }
+        return pendingOnboardingStep
     }
 
     func retry() {

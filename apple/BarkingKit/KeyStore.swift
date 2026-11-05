@@ -132,7 +132,9 @@ public struct KeyStore: Sendable {
         try? entries.delete(Self.legacyAccount)
     }
 
-    /// Draws and stores a new key; fails if one exists already, clear or wrapped.
+    /// Draws and stores a new key; fails if one exists already, clear or
+    /// wrapped. A wrap that fails keeps the key in clear, as without an
+    /// enclave (`protection` says `keychain`): a new identity is never blocked.
     public func create() throws -> Data {
         guard try entries.get(Self.legacyAccount) == nil, try entries.get(Self.wrappedAccount) == nil else {
             throw Failure(status: errSecDuplicateItem)
@@ -141,8 +143,8 @@ public struct KeyStore: Sendable {
         let drawn = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         guard drawn == errSecSuccess else { throw Failure(status: drawn) }
         let key = Data(bytes)
-        if let wrapper {
-            try entries.add(Self.wrappedAccount, try wrapper.wrap(key))
+        if let blob = try? wrapper?.wrap(key) {
+            try entries.add(Self.wrappedAccount, blob)
         } else {
             try entries.add(Self.legacyAccount, key)
         }
@@ -157,14 +159,29 @@ public struct KeyStore: Sendable {
         return try create()
     }
 
-    /// The wrapped key, a clear one and the enclave key. Tries all of them,
-    /// throws the first failure.
+    /// The wrapped key, a clear one, then the enclave key: only once both
+    /// entries are gone, so that a failure never leaves `db-key-wrapped`
+    /// without the key that opens it. Throws the first failure.
     func delete() throws {
         var first: (any Error)?
         for account in [Self.wrappedAccount, Self.legacyAccount] {
             do { try entries.delete(account) } catch { first = first ?? error }
         }
-        do { try wrapper?.delete() } catch { first = first ?? error }
         if let first { throw first }
+        try wrapper?.delete()
+    }
+}
+
+extension Data {
+    /// Overwrites the bytes with zeros, in place (spec §7.1: the clear key
+    /// lives in memory only while the database opens). Best effort: Swift
+    /// may have made copies on the way (copy-on-write, bridging to the FFI)
+    /// that this cannot reach; a buffer still shared is copied, then zeroed.
+    public mutating func wipe() {
+        let count = self.count
+        withUnsafeMutableBytes { bytes in
+            guard let base = bytes.baseAddress else { return }
+            _ = memset_s(base, count, 0, count)
+        }
     }
 }

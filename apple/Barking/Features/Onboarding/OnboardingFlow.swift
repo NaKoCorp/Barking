@@ -29,6 +29,8 @@ struct OnboardingFlow: View {
                     }
                 }
         }
+        // Unreadable data was erased to link or recover (spec §7.2).
+        .onAppear { if let step = router.takeOnboardingStep() { model.path = [step] } }
     }
 
     private func finish() {

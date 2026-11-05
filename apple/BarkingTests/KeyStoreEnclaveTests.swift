@@ -20,7 +20,22 @@ final class MemoryEntries: KeyEntries, @unchecked Sendable {
         }
     }
 
-    func delete(_ account: String) throws { self[account] = nil }
+    /// Accounts whose deletion fails.
+    var failDelete: Set<String> = []
+
+    func delete(_ account: String) throws {
+        if lock.withLock({ failDelete.contains(account) }) { throw KeyStore.Failure(status: errSecIO) }
+        self[account] = nil
+    }
+}
+
+/// The enclave is there but wrapping fails (entitlement, enclave error).
+private struct BrokenWrapper: KeyWrapper {
+    struct Broken: Error {}
+    var hardware: Bool { true }
+    func wrap(_ key: Data) throws -> Data { throw Broken() }
+    func unwrap(_ blob: Data) throws -> Data { throw Broken() }
+    func delete() throws {}
 }
 
 final class KeyStoreEnclaveTests: XCTestCase {
@@ -119,6 +134,37 @@ final class KeyStoreEnclaveTests: XCTestCase {
         let (record, _) = BenchRun.run(source: "test", paths: paths, sync: false)
         XCTAssertTrue(record.steps.contains { $0.name == "key" })
         XCTAssertNotNil(record.unwrapMs)
+    }
+
+    /// A failing enclave must not block every new identity: the key is
+    /// kept in clear, as without an enclave (fix round 1, item 1).
+    func testCreateFallsBackToTheClearKeyWhenWrappingFails() throws {
+        let broken = KeyStore(entries: entries, wrapper: BrokenWrapper())
+        let key = try broken.create()
+        XCTAssertEqual(entries["db-key"], key)
+        XCTAssertNil(entries["db-key-wrapped"])
+        XCTAssertEqual(try broken.read(), key)
+        XCTAssertEqual(broken.protection, "keychain")
+    }
+
+    /// The enclave key goes last: a failed deletion never leaves
+    /// `db-key-wrapped` without the key that opens it (item 4).
+    func testEnclaveKeyDeletedOnlyAfterTheEntries() throws {
+        let key = try store.create()
+        entries.failDelete = ["db-key-wrapped"]
+        XCTAssertThrowsError(try store.deleteAll())
+        XCTAssertTrue(wrapper.exists)
+        XCTAssertEqual(try store.read(), key)
+        entries.failDelete = []
+        try store.deleteAll()
+        XCTAssertFalse(wrapper.exists)
+    }
+
+    /// The clear key is overwritten in place once used (spec §7.1, item 3).
+    func testWipeZeroesTheKeyBuffer() {
+        var key = Data((1...32).map { UInt8($0) })
+        key.wipe()
+        XCTAssertEqual(key, Data(count: 32))
     }
 
     func testDatabaseDirectoryExcludedFromBackup() throws {

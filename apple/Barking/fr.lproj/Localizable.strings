@@ -226,3 +226,6 @@
 "Sending the request to your other devices…" = "Envoi de la demande à vos autres appareils…";
 "The request has not left this iPhone yet. Nothing was erased: try again." = "La demande n’a pas encore quitté cet iPhone. Rien n’a été effacé : réessayez.";
 "Barking could not erase everything. Try again." = "Barking n’a pas pu tout effacer. Réessayez.";
+"This iPhone can no longer read your data, for example after restoring a backup from another iPhone." = "Cet iPhone ne peut plus lire vos données, par exemple après la restauration d’une sauvegarde d’un autre iPhone.";
+"The unreadable data on this iPhone will be erased." = "Les données illisibles de cet iPhone seront effacées.";
+"Erase and continue" = "Effacer et continuer";

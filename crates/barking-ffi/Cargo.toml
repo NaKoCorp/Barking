@@ -28,6 +28,7 @@ rand.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "net"] }
 uniffi.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 barking-node = { workspace = true, features = ["test-harness"] }

@@ -9,12 +9,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use barking_core::contact::ContactCard;
 use barking_core::store::{Direction, MessageStatus};
 use barking_core::{Core, CoreError};
+use zeroize::Zeroize;
 
 use crate::lock::DbLock;
 use crate::{BarkingError, guard};
 
 /// Where the database lives and how to open it.
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct DeviceConfig {
     /// SQLCipher database, in the shared container.
     pub db_path: String,
@@ -26,6 +27,19 @@ pub struct DeviceConfig {
     pub lock_timeout_ms: u64,
     /// Accept non-routable node addresses (development builds only).
     pub allow_private: bool,
+}
+
+/// Never prints the key.
+impl std::fmt::Debug for DeviceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceConfig")
+            .field("db_path", &self.db_path)
+            .field("lock_path", &self.lock_path)
+            .field("db_key", &"<redacted>")
+            .field("lock_timeout_ms", &self.lock_timeout_ms)
+            .field("allow_private", &self.allow_private)
+            .finish()
+    }
 }
 
 /// A new identity and its recovery phrase, shown once.
@@ -75,8 +89,13 @@ pub fn create_device(
 
 /// A database file is present (whether its key is right or not).
 #[uniffi::export]
-pub fn device_exists(config: DeviceConfig) -> bool {
-    Path::new(&config.db_path).exists()
+pub fn device_exists(mut config: DeviceConfig) -> bool {
+    config.db_key.zeroize();
+    db_exists(&config.db_path)
+}
+
+fn db_exists(db_path: &str) -> bool {
+    Path::new(db_path).exists()
 }
 
 pub(crate) fn now() -> u64 {
@@ -86,12 +105,14 @@ pub(crate) fn now() -> u64 {
 }
 
 impl Device {
-    fn new(config: DeviceConfig) -> Result<Device, BarkingError> {
-        let key: [u8; 32] = config
-            .db_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| BarkingError::invalid("database key must be 32 bytes"))?;
+    /// Takes the key out of `config` (spec §7.1): it lives once, in
+    /// `Device::key`, zeroized when the device goes. Each call reopens the
+    /// database, so the key stays for the device's lifetime. The copies made
+    /// on the way in (Swift, the UniFFI buffer) are outside this crate.
+    fn new(mut config: DeviceConfig) -> Result<Device, BarkingError> {
+        let key: Result<[u8; 32], _> = config.db_key.as_slice().try_into();
+        config.db_key.zeroize();
+        let key = key.map_err(|_| BarkingError::invalid("database key must be 32 bytes"))?;
         Ok(Device { config, key })
     }
 
@@ -132,7 +153,7 @@ impl Device {
         let device = Device::new(config)?;
         let lock = device.lock()?;
         // Checked under the lock: two creations cannot both pass.
-        if device_exists(device.config.clone()) {
+        if db_exists(&device.config.db_path) {
             return Err(BarkingError::invalid("database already exists"));
         }
         let path = PathBuf::from(&device.config.db_path);
@@ -172,10 +193,10 @@ impl Device {
     #[uniffi::constructor]
     pub fn open(config: DeviceConfig) -> Result<Arc<Device>, BarkingError> {
         guard(move || {
-            if !device_exists(config.clone()) {
+            let device = Device::new(config)?;
+            if !db_exists(&device.config.db_path) {
                 return Err(BarkingError::NotFound);
             }
-            let device = Device::new(config)?;
             device.with_core(|_| Ok(()))?;
             Ok(Arc::new(device))
         })
@@ -188,10 +209,11 @@ impl Device {
     #[uniffi::constructor]
     pub fn at(config: DeviceConfig) -> Result<Arc<Device>, BarkingError> {
         guard(move || {
-            if !device_exists(config.clone()) {
+            let device = Device::new(config)?;
+            if !db_exists(&device.config.db_path) {
                 return Err(BarkingError::NotFound);
             }
-            Ok(Arc::new(Device::new(config)?))
+            Ok(Arc::new(device))
         })
     }
 
@@ -286,5 +308,42 @@ fn status_name(s: MessageStatus) -> &'static str {
         MessageStatus::Sent => "sent",
         MessageStatus::Delivered => "delivered",
         MessageStatus::Failed => "failed",
+    }
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(key: Vec<u8>) -> DeviceConfig {
+        DeviceConfig {
+            db_path: "/nonexistent/barking.db".into(),
+            lock_path: "/nonexistent/barking.lock".into(),
+            db_key: key,
+            lock_timeout_ms: 0,
+            allow_private: false,
+        }
+    }
+
+    /// The key handed over by the app lives once, in `Device::key`: the
+    /// config's copy is zeroized as soon as it is taken (spec §7.1).
+    #[test]
+    fn config_key_zeroized_once_taken() {
+        let device = Device::new(config(vec![7; 32])).unwrap();
+        assert!(device.config.db_key.iter().all(|b| *b == 0));
+        assert_eq!(device.key, [7; 32]);
+    }
+
+    /// Logs and panics never carry the key.
+    #[test]
+    fn debug_never_prints_the_key() {
+        let shown = format!("{:?}", config(vec![0xAB; 32]));
+        assert!(!shown.contains("171"), "{shown}");
     }
 }
