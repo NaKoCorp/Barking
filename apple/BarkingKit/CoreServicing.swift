@@ -31,6 +31,9 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func linkDevice(request: Data, withHistory: Bool) throws -> Data
     func isPendingLink() throws -> Bool
     func finishLink(package: Data) throws
+    func transferAdmin(deviceId: String) throws
+    func adminTransferPending() throws -> String?
+    func removed() throws -> RemovedInfo?
 }
 
 extension Device: DeviceHandle {}

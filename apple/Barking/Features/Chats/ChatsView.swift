@@ -18,6 +18,7 @@ struct ChatsView: View {
     var body: some View {
         NavigationStack {
             List {
+                RemovedBanner(core: core).listRowSeparator(.hidden).listRowBackground(Color.surface)
                 if PhraseBanner.current != .hidden {
                     PhraseBanner().listRowSeparator(.hidden).listRowBackground(Color.surface)
                 }

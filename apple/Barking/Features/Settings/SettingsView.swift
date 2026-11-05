@@ -19,6 +19,7 @@ struct SettingsView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
+                    RemovedBanner(core: core)
                     section("Appearance")
                     AppearanceSegments()
                     card {
@@ -136,6 +137,7 @@ struct DevicesView: View {
     let core: CoreService
     @State private var model: DevicesModel
     @State private var linking = false
+    @State private var transferTarget: MyDeviceInfo?
 
     init(core: CoreService) {
         self.core = core
@@ -144,30 +146,53 @@ struct DevicesView: View {
 
     var body: some View {
         List {
+            RemovedBanner(core: core).listRowBackground(Color.clear)
             Text("One identity on several devices.").foregroundStyle(Color.fgMuted)
-            ForEach(Array(model.devices.enumerated()), id: \.offset) { _, d in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(verbatim: d.name).font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))
-                        if d.thisDevice { Text("this device").font(.caption2).foregroundStyle(Color.accent) }
-                        if d.admin { Text(verbatim: "admin").font(.caption2).foregroundStyle(Color.fgSoft) }
+            ForEach(model.devices, id: \.id) { d in
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(verbatim: d.name).font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))
+                            if d.thisDevice { Text("this device").font(.caption2).foregroundStyle(Color.accent) }
+                            if d.admin { Text(verbatim: "admin").font(.caption2).foregroundStyle(Color.fgSoft) }
+                            if model.pendingTarget == d.id {
+                                Text("Transfer pending").font(.caption2).foregroundStyle(Color.fgSoft)
+                            }
+                        }
+                        Text("added \(Date(timeIntervalSince1970: TimeInterval(d.issuedAt)).formatted(date: .abbreviated, time: .omitted))")
+                            .font(.caption).foregroundStyle(Color.fgSoft)
                     }
-                    Text("added \(Date(timeIntervalSince1970: TimeInterval(d.issuedAt)).formatted(date: .abbreviated, time: .omitted))")
-                        .font(.caption).foregroundStyle(Color.fgSoft)
+                    Spacer(minLength: 0)
+                    if model.canTransfer(to: d) {
+                        Button("Make admin") { transferTarget = d }
+                            .font(.caption).buttonStyle(.borderless).foregroundStyle(Color.accent)
+                    }
                 }
                 .frame(minHeight: 44)
+            }
+            if model.transferFailed {
+                Banner(kind: .danger, title: "The transfer could not start. Sync, then try again.")
             }
             if model.canLink {
                 PrimaryButton("Link a new device") { linking = true }
                     .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
-            } else {
-                Text("Only your first device can link new ones").foregroundStyle(Color.fgMuted)
+            } else if model.pendingTarget != nil {
+                Text("The admin key is on its way to your other device.").foregroundStyle(Color.fgMuted)
+            } else if !model.removed {
+                Text("Only your admin device can link new ones").foregroundStyle(Color.fgMuted)
             }
             Text("\(model.count) of 8 devices").font(.caption).foregroundStyle(Color.fgSoft)
         }
         .scrollContentBackground(.hidden)
         .background(Color.surface)
         .navigationTitle(Text("Linked devices"))
+        .confirmationDialog("Make admin", isPresented: Binding(
+            get: { transferTarget != nil }, set: { if !$0 { transferTarget = nil } }
+        ), titleVisibility: .visible, presenting: transferTarget) { d in
+            Button("Make admin") { Task { await model.transfer(to: d) } }
+        } message: { _ in
+            Text("This device will lose the admin key once the transfer is received.")
+        }
         .sheet(isPresented: $linking, onDismiss: { Task { await model.load() } }) {
             LinkNewDeviceView(core: core) { linking = false }
         }

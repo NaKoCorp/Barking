@@ -7,6 +7,10 @@ public actor CoreService {
     private let device: any DeviceHandle
     private let runner: any CallRunner
     private var inFlight: Task<SyncOutcome, Never>?
+    /// Device calls running now (`close` waits for them).
+    private var running = 0
+    /// Set by `close`: no call reaches the device any more.
+    private var closed = false
     private var subscribers: [UUID: AsyncStream<CoreChange>.Continuation] = [:]
     public private(set) var lastSync: SyncOutcome?
     public private(set) var lastSyncAt: Date?
@@ -34,8 +38,20 @@ public actor CoreService {
     }
 
     private func call<T: Sendable>(_ name: String, _ body: @escaping @Sendable (any DeviceHandle) throws -> T) async throws -> T {
+        if closed { throw CancellationError() }
         let device = self.device
+        running += 1
+        defer { running -= 1 }
         return try await runner.run(name) { try body(device) }
+    }
+
+    /// Stops using the device before its files are erased (reset of a device
+    /// removed from its account): new calls and syncs are refused, then this
+    /// waits for the sync and the calls in flight.
+    public func close() async {
+        closed = true
+        if let inFlight { _ = await inFlight.value }
+        while running > 0 { try? await Task.sleep(for: .milliseconds(10)) }
     }
 
     // MARK: Identity
@@ -52,6 +68,16 @@ public actor CoreService {
         }
     }
     public func myDevices() async throws -> [MyDeviceInfo] { try await call("devices") { try $0.myDevices() } }
+    /// Hands the root key to my device `id`; this one keeps it until the ack.
+    public func transferAdmin(to id: String) async throws {
+        try await call("transfer") { try $0.transferAdmin(deviceId: id) }
+        publish(.devices)
+    }
+    public func adminTransferPending() async throws -> String? {
+        try await call("transfer") { try $0.adminTransferPending() }
+    }
+    /// Set once a newer device list removed this device from the account.
+    public func removed() async throws -> RemovedInfo? { try await call("removed") { try $0.removed() } }
 
     // MARK: Contacts
 
@@ -116,6 +142,9 @@ public actor CoreService {
     /// One sync at a time: a request during a sync gets that sync's outcome.
     public func sync(reason: SyncReason) async -> SyncOutcome {
         if let inFlight { return await inFlight.value }
+        if closed {
+            return SyncOutcome(networkUp: false, received: 0, sent: 0, lines: ["$ barking sync"])
+        }
         let task = Task { () -> SyncOutcome in
             do {
                 let summary = try await call("sync") { try $0.sync(deadlineMs: Budget.appSyncMs) }

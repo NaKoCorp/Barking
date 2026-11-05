@@ -15,6 +15,9 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var unread: [UnreadCount] = []
     var keyChangeList: [KeyChange] = []
     var devicesList: [MyDeviceInfo] = []
+    var removedInfo: RemovedInfo?
+    private var _transferredTo: [String] = []
+    var transferredTo: [String] { lock.withLock { _transferredTo } }
     var pending = false
     var sendError: Error?
     private var _linkCalls = 0
@@ -70,6 +73,9 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         return Data([0xBB])
     }
     func isPendingLink() throws -> Bool { pending }
+    func transferAdmin(deviceId: String) throws { lock.withLock { _transferredTo.append(deviceId) } }
+    func adminTransferPending() throws -> String? { lock.withLock { _transferredTo.last } }
+    func removed() throws -> RemovedInfo? { removedInfo }
     func finishLink(package: Data) throws {}
 }
 

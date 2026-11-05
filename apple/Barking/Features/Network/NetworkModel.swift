@@ -103,11 +103,34 @@ final class SettingsModel {
 final class DevicesModel {
     private let core: CoreService
     private(set) var devices: [MyDeviceInfo] = []
+    /// The device a root key transfer awaits the ack of.
+    private(set) var pendingTarget: String?
+    /// Removed from the account by a newer device list.
+    private(set) var removed = false
+    private(set) var transferFailed = false
 
     init(core: CoreService) { self.core = core }
 
-    var canLink: Bool { devices.contains { $0.thisDevice && $0.admin } }
+    private var isAdmin: Bool { devices.contains { $0.thisDevice && $0.admin } }
+    var canLink: Bool { isAdmin && pendingTarget == nil && !removed }
     var count: Int { devices.count }
 
-    func load() async { devices = (try? await core.myDevices()) ?? [] }
+    /// Only the administrator, to another device, one transfer at a time.
+    func canTransfer(to device: MyDeviceInfo) -> Bool { canLink && !device.thisDevice }
+
+    func load() async {
+        devices = (try? await core.myDevices()) ?? []
+        pendingTarget = try? await core.adminTransferPending()
+        removed = ((try? await core.removed()) ?? nil) != nil
+    }
+
+    func transfer(to device: MyDeviceInfo) async {
+        transferFailed = false
+        do {
+            try await core.transferAdmin(to: device.id)
+        } catch {
+            transferFailed = true
+        }
+        await load()
+    }
 }

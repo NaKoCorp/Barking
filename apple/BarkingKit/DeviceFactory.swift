@@ -83,10 +83,16 @@ public enum DeviceFactory {
         return pending
     }
 
-    /// Removes this device's identity (database, lock, key): only to start a
-    /// pending link again, which holds nothing yet, and for the UI tests.
+    /// Removes this device's identity (database, lock, key): to start a
+    /// pending link again, which holds nothing yet, to reset a device removed
+    /// from its account, and for the UI tests.
     public static func resetIdentity() {
-        for url in [try? SharedPaths.database, try? SharedPaths.lock].compactMap({ $0 }) {
+        var urls = [try? SharedPaths.database, try? SharedPaths.lock].compactMap { $0 }
+        // SQLite sidecars, which a new database at the same path must not replay.
+        if let db = try? SharedPaths.database {
+            urls += ["-wal", "-shm", "-journal"].map { URL(fileURLWithPath: db.path + $0) }
+        }
+        for url in urls {
             try? FileManager.default.removeItem(at: url)
         }
         try? keyStore.delete()

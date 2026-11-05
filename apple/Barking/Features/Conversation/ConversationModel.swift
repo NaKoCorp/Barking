@@ -27,6 +27,8 @@ final class ConversationModel {
     private var retrying = false
     private var visible = false
     private(set) var sendError: String?
+    /// This device was removed from the account: it can no longer send.
+    private(set) var removed = false
     var draft = ""
 
     init(contact: String, core: CoreService) {
@@ -37,12 +39,13 @@ final class ConversationModel {
     var byteCount: Int { draft.utf8.count }
     var showsCounter: Bool { byteCount >= Self.counterFrom }
     var canSend: Bool {
-        !sending && byteCount <= Self.maxBytes
+        !sending && !removed && byteCount <= Self.maxBytes
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     func onAppear() async {
         visible = true
+        removed = ((try? await core.removed()) ?? nil) != nil
         await reload()
         let changes = (try? await core.keyChanges(since: 0)) ?? []
         keyChanged = !verified && changes.contains { $0.contact == contact }

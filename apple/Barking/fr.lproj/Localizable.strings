@@ -198,3 +198,13 @@
 "Shown only once: Barking does not keep the words." = "Affichée une seule fois : Barking ne garde pas les mots.";
 "Today" = "Aujourd’hui";
 "Yesterday" = "Hier";
+"Make admin" = "Rendre administrateur";
+"This device will lose the admin key once the transfer is received." = "Cet appareil perdra la clé d’administration une fois le transfert reçu.";
+"Transfer pending" = "Transfert en cours";
+"The transfer could not start. Sync, then try again." = "Le transfert n’a pas pu démarrer. Synchronisez, puis réessayez.";
+"The admin key is on its way to your other device." = "La clé d’administration est en route vers votre autre appareil.";
+"Only your admin device can link new ones" = "Seul votre appareil administrateur peut en lier de nouveaux";
+"This device was removed from your account" = "Cet appareil a été retiré de votre compte";
+"It can still read, but no longer send. Reset it, then link it again from your administrator device." = "Il peut encore lire, mais plus envoyer. Réinitialisez-le, puis liez-le à nouveau depuis votre appareil administrateur.";
+"Reset this device" = "Réinitialiser cet appareil";
+"Its chats and history will be erased." = "Ses discussions et son historique seront effacés.";

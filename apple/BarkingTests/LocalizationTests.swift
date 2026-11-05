@@ -13,7 +13,8 @@ final class LocalizationTests: XCTestCase {
             XCTAssertFalse((v as? String ?? "").isEmpty, "empty French value for \(k)")
         }
         for key in ["Create my identity", "Chats", "The numbers match", "Link a new device", "Sync now",
-                    "This is not a Barking card", "✓ verified · safety code matched"] {
+                    "This is not a Barking card", "✓ verified · safety code matched", "Make admin",
+                    "Transfer pending", "This device was removed from your account", "Reset this device"] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
     }

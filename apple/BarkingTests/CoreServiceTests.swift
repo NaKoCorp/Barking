@@ -9,6 +9,27 @@ final class SyncSchedulerTests: XCTestCase {
 }
 
 final class CoreServiceTests: XCTestCase {
+    /// Reset of a removed device: `close` waits for the sync in flight, then
+    /// no call reaches the device any more.
+    func testCloseWaitsForSyncThenRefusesCalls() async {
+        let d = FakeDevice()
+        d.syncDelay = 0.3
+        let core = CoreService(device: d, runner: DirectRunner())
+        let started = Date()
+        let sync = Task { await core.sync(reason: .pull) }
+        try? await Task.sleep(for: .milliseconds(50))
+        await core.close()
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.25)
+        _ = await sync.value
+        let again = await core.sync(reason: .pull)
+        XCTAssertFalse(again.networkUp)
+        XCTAssertEqual(d.syncCalls, 1)
+        do {
+            _ = try await core.myDevices()
+            XCTFail("call after close")
+        } catch {}
+    }
+
     func testConcurrentSyncsShareOne() async {
         let device = FakeDevice()
         device.syncDelay = 0.2
