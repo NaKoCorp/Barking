@@ -14,7 +14,7 @@ Maintainer procedure. The design is in the spec, §15. The model: CI builds twic
 Pushing a `v*` tag is the only gate into the release workflow. It must therefore be locked down:
 
 - **Tag ruleset**: restrict who can create, modify or delete `v*` tags (for example the maintainer alone), and forbid moving them;
-- **Protection of the `main` branch**: no force pushes, required review, required `ci` checks (Rust check, signing scripts);
+- **Protection of the `main` branch**: no force pushes, required review, required `ci` checks (Rust check, signing scripts, double build);
 - keep the workflow actions pinned by commit SHA, as they are today.
 
 ## Before the first release
@@ -22,10 +22,10 @@ Pushing a `v*` tag is the only gate into the release workflow. It must therefore
 In this order, once:
 
 1. Make the GitHub repository public (attestations and independent rebuilds depend on it).
-2. Create the `v*` tag ruleset and the `main` protection described above, with the required `ci` checks (Rust check, signing scripts).
+2. Create the `v*` tag ruleset and the `main` protection described above, with the required `ci` checks (Rust check, signing scripts, double build).
 3. In the repository's Actions settings, allow workflows to create releases (`GITHUB_TOKEN` with write access for `release.yml`, which requests `contents: write` only in its last job).
-4. Push `main`, then open a first pull request and wait for `ci` to be green: Rust check and signing scripts.
-5. Run `scripts/tests/repro-twice.sh` on a Linux x86-64 machine and on an arm64 Mac: reproducibility is only checked in CI at release time (`release.yml`), and the rehearsal in step 7 checks all three targets, macOS included (Xcode from `.xcode-version`).
+4. Push `main`, then open a first pull request and wait for `ci` to be green: Rust check, signing scripts, and the `x86_64-unknown-linux-musl` double build when the pull request changes the build environment.
+5. Run `ci` by hand (`workflow_dispatch`: `gh workflow run ci.yml --ref main`) to get the full double build of all three targets, and check that the copies are identical, macOS included (Xcode from `.xcode-version`).
 6. Generate the offline key (`keys/README.md`), commit `keys/maintainer.pub` with review by a second person, and publish the `RW…` line through a channel independent of the repository.
 7. Do a full rehearsal on a pre-release tag, for example `0.1.0-rc.1` (with the version in `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` and `crates/barking-push/Cargo.toml` updated accordingly): tag, CI, `sign-release.sh`, then `verify-release.sh --rebuild`.
 8. Create the `barking-rebuilds` repository (entry format in `docs/VERIFYING.md`).
@@ -33,18 +33,18 @@ In this order, once:
 
 ## Preserving the Alpine environment
 
-Linux builds use the pinned Rust/Alpine image and the APK versions in `docker/apk/build.txt`. Before a release, keep the signed APKs and the matching indexes in an immutable mirror, or keep the build image by its digest: the public Alpine repositories may remove old revisions. To change the image (digest) or a package, regenerate the full list (sorted `package=version` lines, the format that `docker/apk/install.sh` compares) and check that it is the same on x86-64 and ARM64, then rerun `scripts/tests/repro-twice.sh` and get `ci` to pass: `docker/apk/install.sh` rejects any difference. `docker/apk/release.txt` plays the same role for the test image of the signing scripts. Fuzzing keeps its Debian (glibc) image: AddressSanitizer does not support musl targets.
+Linux builds use the pinned Rust/Alpine image and the APK versions in `docker/apk/build.txt`. Before a release, keep the signed APKs and the matching indexes in an immutable mirror, or keep the build image by its digest: the public Alpine repositories may remove old revisions. To change the image (digest) or a package, regenerate the full list (sorted `package=version` lines, the format that `docker/apk/install.sh` compares) and check that it is the same on x86-64 and ARM64, then get `ci` to pass (the pull request runs the double build): `docker/apk/install.sh` rejects any difference. `docker/apk/release.txt` plays the same role for the test image of the signing scripts. Fuzzing keeps its Debian (glibc) image: AddressSanitizer does not support musl targets.
 
 ## Changing the CI's Xcode
 
-`.xcode-version` fixes the macOS runner (`runner=`), the Xcode version (`xcode=`) and the SDK version (`sdk=`). The workflows select that Xcode and fail if the SDK differs. When GitHub removes that Xcode or runner from its images, choose a version listed in the image's README (`actions/runner-images` repository, `images/macos/macos-<n>-arm64-Readme.md`, sections "Xcode" and "Installed SDKs"), update `.xcode-version` and the `runner` of the `release.yml` matrices, then do a rehearsal on a pre-release tag. Each tag records its `.xcode-version`: an old version is rebuilt with the Xcode of its tag.
+`.xcode-version` fixes the macOS runner (`runner=`), the Xcode version (`xcode=`) and the SDK version (`sdk=`). The workflows select that Xcode and fail if the SDK differs. When GitHub removes that Xcode or runner from its images, choose a version listed in the image's README (`actions/runner-images` repository, `images/macos/macos-<n>-arm64-Readme.md`, sections "Xcode" and "Installed SDKs"), update `.xcode-version` and the `runner` of the matrices in `ci.yml` and `release.yml`, then run `ci` by hand (`workflow_dispatch`). Each tag records its `.xcode-version`: an old version is rebuilt with the Xcode of its tag.
 
 ## Steps
 
 ### 1. Prepare
 
 1. Update `version` in `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` **and** `crates/barking-push/Cargo.toml` (all three must be identical), as well as `Cargo.lock`, commit, merge into `main`, and wait for `ci` to be green.
-2. Run `scripts/tests/repro-twice.sh` on the commit to release: CI only checks reproducibility at the tag, and a pushed tag does not move (a failure at that stage costs a new version).
+2. Run `ci` by hand on `main` (`gh workflow run ci.yml --ref main`) and wait for the full double build of all three targets: pull requests only check it when the build environment changes, and a pushed tag does not move (a failure at the release stage costs a new version).
 3. Check out the commit to release, with a clean working tree.
 
 ### 2. Tag
@@ -124,4 +124,4 @@ See `keys/README.md`: the old key signs the new one (`keys/rotation-<date>.minis
     scripts/tests/repro-twice.sh        # two builds from two paths, same hashes (Docker)
     scripts/tests/release-scripts.sh    # signing and detected tampering (Docker, throwaway keys)
 
-In `ci.yml`, `release-scripts.sh` and `scripts/check.sh` (format, clippy, Rust tests in parallel with `cargo-nextest`, with the pinned toolchain) run on every pull request and on `main`. `repro-twice.sh` is run by hand before a release; in CI, reproducibility is only checked by `release.yml` (double build of each target and comparison of the copies).
+In `ci.yml`, `release-scripts.sh` and `scripts/check.sh` (format, clippy, Rust tests in parallel with `cargo-nextest`, with the pinned toolchain) run on every pull request and on `main`. `repro-twice.sh` runs on pull requests that change the build environment (lockfile, manifests, `build.rs`, toolchain, `docker/`, `.xcode-version`, build scripts, workflows); the job still reports, with its build skipped, on the others. Run by hand (`workflow_dispatch`), `ci` does the full double build of all targets with comparison of the copies, as `release.yml` does on every tag.
