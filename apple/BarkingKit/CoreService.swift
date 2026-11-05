@@ -98,6 +98,8 @@ public actor CoreService {
     }
     /// The request to be removed is queued: once sent, this device may be wiped.
     public func leaveReady() async throws -> Bool { try await call("leave-ready") { try $0.leaveReady() } }
+    /// That request was accepted by a node: this device may be wiped now.
+    public func leaveSent() async throws -> Bool { try await call("leave-sent") { try $0.leaveSent() } }
 
     // MARK: Contacts
 

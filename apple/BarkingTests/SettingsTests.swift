@@ -132,8 +132,14 @@ final class LinkModelTests: XCTestCase {
 /// Counts the wipes a model asked for.
 @MainActor
 final class WipeRecorder {
+    struct Failure: Error {}
     var count = 0
-    func wipe(_ core: CoreService) async { count += 1 }
+    /// Wipes that fail before one succeeds.
+    var failures = 0
+    func wipe(_ core: CoreService) async throws {
+        if failures > 0 { failures -= 1; throw Failure() }
+        count += 1
+    }
 }
 
 @MainActor
@@ -143,7 +149,79 @@ final class DevicesModelTests: XCTestCase {
 
     private func model(_ d: FakeDevice, owner: Bool = true, wipes: WipeRecorder = WipeRecorder()) -> DevicesModel {
         DevicesModel(core: CoreService(device: d, runner: DirectRunner()),
-                     owner: { owner }, wipe: { await wipes.wipe($0) })
+                     owner: { owner }, wipe: { try await wipes.wipe($0) })
+    }
+
+    private var linkedMe: MyDeviceInfo { MyDeviceInfo(id: "t", name: "iPad", issuedAt: 2, thisDevice: true, admin: false) }
+
+    /// A sync already in flight when `leave` queued the request reports the
+    /// network up, yet the request has not left: no wipe.
+    func testInFlightSyncIsNotEnoughToWipe() async throws {
+        let d = FakeDevice()
+        d.devicesList = [linkedMe]
+        d.syncDelay = 0.3
+        d.depositFails = true
+        let core = CoreService(device: d, runner: DirectRunner())
+        let wipes = WipeRecorder()
+        let m = DevicesModel(core: core, owner: { true }, wipe: { try await wipes.wipe($0) })
+        await m.load()
+        let inFlight = Task { await core.sync(reason: .timer) }
+        try await Task.sleep(for: .milliseconds(50))
+        await m.disconnect()
+        _ = await inFlight.value
+        XCTAssertEqual(d.leaveCalls, 1)
+        XCTAssertEqual(wipes.count, 0)
+        XCTAssertEqual(m.departure, .notSent)
+    }
+
+    /// Same, deposits working: the wipe waits for a sync started after `leave`.
+    func testWipeWaitsForASyncAfterTheLeave() async throws {
+        let d = FakeDevice()
+        d.devicesList = [linkedMe]
+        d.syncDelay = 0.3
+        let core = CoreService(device: d, runner: DirectRunner())
+        let wipes = WipeRecorder()
+        let m = DevicesModel(core: core, owner: { true }, wipe: { try await wipes.wipe($0) })
+        await m.load()
+        let inFlight = Task { await core.sync(reason: .timer) }
+        try await Task.sleep(for: .milliseconds(50))
+        await m.disconnect()
+        _ = await inFlight.value
+        XCTAssertEqual(d.syncCalls, 2)
+        XCTAssertEqual(wipes.count, 1)
+        XCTAssertEqual(m.departure, .wiped)
+    }
+
+    /// A read that fails (lock held by the extension) is no failed handover.
+    func testHandOverKeepsWaitingWhenReadsFail() async {
+        let d = FakeDevice()
+        d.devicesList = [me, tablet]
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        await m.handOver(to: tablet)
+        d.readError = BarkingError.Locked
+        await m.pollHandover()
+        XCTAssertEqual(m.departure, .handingOver(name: "iPad"))
+        d.readError = nil
+        d.leaveReadyValue = true
+        await m.pollHandover()
+        XCTAssertEqual(m.departure, .wiped)
+    }
+
+    /// A wipe that fails is shown, never the welcome screen; retrying works.
+    func testWipeFailureIsShownAndRetried() async {
+        let d = FakeDevice()
+        d.devicesList = [me]
+        let wipes = WipeRecorder()
+        wipes.failures = 1
+        let m = model(d, wipes: wipes)
+        await m.load()
+        await m.disconnect()
+        XCTAssertEqual(m.departure, .wipeFailed)
+        await m.retryWipe()
+        XCTAssertEqual(m.departure, .wiped)
+        XCTAssertEqual(wipes.count, 1)
     }
 
     func testAdminSeesRemoveOnOthersAndDisconnectOnSelf() async {
@@ -216,7 +294,7 @@ final class DevicesModelTests: XCTestCase {
         let m = model(d, wipes: wipes)
         await m.load()
         await m.disconnect()
-        XCTAssertEqual(m.departure, .offline)
+        XCTAssertEqual(m.departure, .notSent)
         XCTAssertEqual(wipes.count, 0)
         // Back online: the retry sends the request, then wipes.
         d.summary = SyncSummary(itemsReceived: 0, sent: 1, newMessages: [], networkUp: true, error: nil)

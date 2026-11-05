@@ -25,11 +25,13 @@ final class AppRouter {
     /// The state at launch: the existing identity, else onboarding. A wipe
     /// cut short (app killed) finishes first, before the database opens.
     static func boot() -> AppRouter {
-        Wipe.resumeIfNeeded()
+        // Still unfinished: the database stays closed, the retry screen shows.
+        guard (try? Wipe.resumeIfNeeded()) != nil else { return AppRouter(start: .failed) }
         #if BARKING_DEV
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-BarkingUITestReset") {
-            DeviceFactory.resetIdentity()
+            // A failure leaves the marker: creating an identity finishes it first.
+            try? DeviceFactory.resetIdentity()
             for key in [OnboardingModel.confirmedKey, "barking.appearance"] {
                 UserDefaults.standard.removeObject(forKey: key)
             }
@@ -58,6 +60,7 @@ final class AppRouter {
     }
 
     func retry() {
+        guard (try? Wipe.resumeIfNeeded()) != nil else { state = .failed; return }
         state = Self.initialState(
             opening: { try DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs) },
             runner: AppCallRunner())

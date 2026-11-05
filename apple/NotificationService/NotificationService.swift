@@ -25,7 +25,7 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             let shown = NotificationContent.apply(summary, to: content)
             if record.outcome.isEmpty { record.outcome = shown }
             if self.deliver(content) == false { record.outcome = "expired" }
-            try? BenchStore.shared().append(record)
+            if record.outcome != BenchRun.wipePending { try? BenchStore.shared().append(record) }
         }
     }
 

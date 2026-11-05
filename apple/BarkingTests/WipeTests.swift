@@ -6,12 +6,20 @@ final class FakeKeys: KeyWiping, @unchecked Sendable {
     private let lock = NSLock()
     private var _deleted = false
     var fails = false
+    /// Calls that fail before the others succeed.
+    var failuresLeft = 0
     var deleted: Bool { lock.withLock { _deleted } }
 
     struct Failure: Error {}
 
     func deleteAll() throws {
         if fails { throw Failure() }
+        let failNow = lock.withLock { () -> Bool in
+            guard failuresLeft > 0 else { return false }
+            failuresLeft -= 1
+            return true
+        }
+        if failNow { throw Failure() }
         lock.withLock { _deleted = true }
     }
 }
@@ -89,14 +97,14 @@ final class WipeTests: XCTestCase {
         // No marker: nothing to resume, nothing touched.
         try touch(container, ["barking.db"])
         let untouched = FakeKeys()
-        XCTAssertFalse(Wipe.resumeIfNeeded(paths: paths, keys: untouched))
+        XCTAssertFalse(try Wipe.resumeIfNeeded(paths: paths, keys: untouched))
         XCTAssertTrue(exists(container, "barking.db"))
         XCTAssertFalse(untouched.deleted)
 
         // Killed after the marker: the next launch finishes the wipe.
         try touch(container, [Wipe.markerName, "barking.db-wal"])
         let keys = FakeKeys()
-        XCTAssertTrue(Wipe.resumeIfNeeded(paths: paths, keys: keys))
+        XCTAssertTrue(try Wipe.resumeIfNeeded(paths: paths, keys: keys))
         for name in ["barking.db", "barking.db-wal", Wipe.markerName] {
             XCTAssertFalse(exists(container, name), name)
         }
@@ -112,8 +120,12 @@ final class WipeTests: XCTestCase {
         XCTAssertFalse(exists(container, "barking.db"))
         XCTAssertTrue(exists(container, Wipe.markerName))
 
+        // Still failing at launch: the launch is told, the marker stays.
+        XCTAssertThrowsError(try Wipe.resumeIfNeeded(paths: paths, keys: keys))
+        XCTAssertTrue(Wipe.isPending(paths: paths))
+
         keys.fails = false
-        XCTAssertTrue(Wipe.resumeIfNeeded(paths: paths, keys: keys))
+        XCTAssertTrue(try Wipe.resumeIfNeeded(paths: paths, keys: keys))
         XCTAssertFalse(exists(container, Wipe.markerName))
         XCTAssertTrue(keys.deleted)
     }
@@ -147,5 +159,53 @@ final class WipeTests: XCTestCase {
             _ = try await core.fingerprint()
             XCTFail("the service still answers")
         } catch {}
+    }
+
+    /// One failure is retried at once; two are reported, marker kept.
+    func testRunClosingRetriesOnceThenThrows() async throws {
+        try touch(container, ["barking.db"])
+        let once = FakeKeys()
+        once.failuresLeft = 1
+        try await Wipe.run(closing: nil, paths: paths, keys: once)
+        XCTAssertFalse(Wipe.isPending(paths: paths))
+        XCTAssertTrue(once.deleted)
+
+        let twice = FakeKeys()
+        twice.failuresLeft = 2
+        do {
+            try await Wipe.run(closing: nil, paths: paths, keys: twice)
+            XCTFail("a wipe that failed twice must throw")
+        } catch {}
+        XCTAssertTrue(Wipe.isPending(paths: paths))
+    }
+
+    /// A new identity first finishes the pending wipe (or is refused), so the
+    /// marker can never erase an identity created after it.
+    func testPendingWipeFinishesBeforeANewIdentity() throws {
+        try touch(container, [Wipe.markerName, "barking.db"])
+        let failing = FakeKeys()
+        failing.fails = true
+        XCTAssertThrowsError(try Wipe.finishPending(paths: paths, keys: failing))
+        XCTAssertTrue(Wipe.isPending(paths: paths))
+
+        try Wipe.finishPending(paths: paths, keys: FakeKeys())
+        XCTAssertFalse(Wipe.isPending(paths: paths))
+        // The new identity's database: the next launch leaves it alone.
+        try touch(container, ["barking.db"])
+        XCTAssertFalse(try Wipe.resumeIfNeeded(paths: paths, keys: FakeKeys()))
+        XCTAssertTrue(exists(container, "barking.db"))
+        // Nothing pending: nothing to do.
+        try Wipe.finishPending(paths: paths, keys: failing)
+    }
+
+    /// The extension's work never opens the database while a wipe is under
+    /// way: the push goes out as it came, nothing is recorded.
+    func testExtensionSkipsTheDatabaseWhileAWipeIsPending() throws {
+        try touch(container, [Wipe.markerName, "barking.db"])
+        XCTAssertNil(try DeviceFactory.existing(lockTimeoutMs: 100, paths: paths))
+        let (record, summary) = BenchRun.run(source: "test", paths: paths)
+        XCTAssertEqual(record.outcome, BenchRun.wipePending)
+        XCTAssertNil(summary)
+        XCTAssertFalse(record.steps.contains { $0.name == "opened" })
     }
 }

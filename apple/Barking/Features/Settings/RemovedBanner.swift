@@ -9,6 +9,7 @@ struct RemovedBanner: View {
     @Environment(AppRouter.self) private var router
     @State private var removed = false
     @State private var confirming = false
+    @State private var wipeFailed = false
 
     var body: some View {
         Group {
@@ -16,8 +17,13 @@ struct RemovedBanner: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Banner(kind: .danger, title: "This device was removed from your account",
                            message: "It can still read, but no longer send. Reset it, then link it again from your administrator device.")
-                    Button("Reset this device", role: .destructive) { confirming = true }
-                        .frame(minHeight: 44)
+                    if wipeFailed {
+                        Banner(kind: .danger, title: "Barking could not erase everything. Try again.")
+                    }
+                    Button(wipeFailed ? "Try again" : "Reset this device", role: .destructive) {
+                        if wipeFailed { Task { await reset() } } else { confirming = true }
+                    }
+                    .frame(minHeight: 44)
                 }
                 .confirmationDialog("Reset this device", isPresented: $confirming, titleVisibility: .visible) {
                     Button("Reset this device", role: .destructive) { Task { await reset() } }
@@ -35,9 +41,14 @@ struct RemovedBanner: View {
     private func load() async { removed = ((try? await core.removed()) ?? nil) != nil }
 
     /// The core stops first: no sync may write to the files being erased.
-    /// A step that fails is finished at the next launch.
+    /// A wipe that still fails stays here: the welcome screen would offer a
+    /// new identity the leftover marker could erase.
     private func reset() async {
-        try? await Wipe.run(closing: core)
-        router.restartOnboarding()
+        do {
+            try await Wipe.run(closing: core)
+            router.restartOnboarding()
+        } catch {
+            wipeFailed = true
+        }
     }
 }

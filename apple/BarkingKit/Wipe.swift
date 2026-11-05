@@ -58,12 +58,35 @@ public enum Wipe {
     }
 
     /// Stops `core` first (no call in flight, none accepted after), then
-    /// wipes. The FFI holds the lock for one call only, so a closed service
-    /// leaves no open database behind.
+    /// wipes, trying a failed wipe once more. The FFI holds the lock for one
+    /// call only, so a closed service leaves no open database behind. A
+    /// throw means the marker is still there: the caller must not start a
+    /// new identity as if the device were clean.
     public static func run(closing core: CoreService?, paths: WipePaths = .live,
                            keys: any KeyWiping = KeyStore.live) async throws {
         await core?.close()
-        try run(paths: paths, keys: keys)
+        try runRetrying(paths: paths, keys: keys)
+    }
+
+    /// A wipe started and not finished: nothing may open the database.
+    public static func isPending(paths: WipePaths = .live) -> Bool {
+        guard let container = paths.container else { return false }
+        return FileManager.default.fileExists(atPath: container.appending(path: markerName).path)
+    }
+
+    /// Finishes a pending wipe before a new identity is made, so that the
+    /// marker can never erase an identity created after it. Throws (and
+    /// creates nothing) if the wipe still cannot finish.
+    public static func finishPending(paths: WipePaths = .live, keys: any KeyWiping = KeyStore.live) throws {
+        if isPending(paths: paths) { try runRetrying(paths: paths, keys: keys) }
+    }
+
+    static func runRetrying(paths: WipePaths, keys: any KeyWiping) throws {
+        do {
+            try run(paths: paths, keys: keys)
+        } catch {
+            try run(paths: paths, keys: keys)
+        }
     }
 
     /// The wipe itself. Never opens the database; call it with no
@@ -104,12 +127,12 @@ public enum Wipe {
     }
 
     /// Finishes a wipe cut short; `true` if there was one. Call it at launch,
-    /// before anything opens the database.
+    /// before anything opens the database. Throws if it still cannot finish:
+    /// the database must then stay closed.
     @discardableResult
-    public static func resumeIfNeeded(paths: WipePaths = .live, keys: any KeyWiping = KeyStore.live) -> Bool {
-        guard let container = paths.container,
-              FileManager.default.fileExists(atPath: container.appending(path: markerName).path) else { return false }
-        try? run(paths: paths, keys: keys)
+    public static func resumeIfNeeded(paths: WipePaths = .live, keys: any KeyWiping = KeyStore.live) throws -> Bool {
+        guard isPending(paths: paths) else { return false }
+        try runRetrying(paths: paths, keys: keys)
         return true
     }
 

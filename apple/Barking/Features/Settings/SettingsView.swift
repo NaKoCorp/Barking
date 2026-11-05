@@ -276,10 +276,15 @@ struct DevicesView: View {
                 Text("Sending the request to your other devices…").foregroundStyle(Color.fgMuted)
             }
             .accessibilityElement(children: .combine)
-        case .offline:
+        case .notSent:
             VStack(alignment: .leading, spacing: 8) {
-                Banner(kind: .danger, title: "Could not reach the network. Nothing was erased: try again.")
+                Banner(kind: .danger, title: "The request has not left this iPhone yet. Nothing was erased: try again.")
                 Button("Try again") { Task { await model.finishLeaving() } }.frame(minHeight: 44)
+            }
+        case .wipeFailed:
+            VStack(alignment: .leading, spacing: 8) {
+                Banner(kind: .danger, title: "Barking could not erase everything. Try again.")
+                Button("Try again") { Task { await model.retryWipe() } }.frame(minHeight: 44)
             }
         case .failed:
             VStack(alignment: .leading, spacing: 8) {

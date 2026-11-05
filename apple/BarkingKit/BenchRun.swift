@@ -7,7 +7,7 @@ public enum BenchRun {
     /// caller sets it from what the notification shows.
     /// The extension's budget (`Budget`): one lock wait, the quick sync
     /// gets what is left of the work time.
-    public static func run(source: String) -> (BenchRecord, SyncSummary?) {
+    public static func run(source: String, paths: WipePaths = .live) -> (BenchRecord, SyncSummary?) {
         let start = DispatchTime.now()
         let startedAt = Date()
         let sampler = FootprintSampler()
@@ -20,7 +20,10 @@ public enum BenchRun {
         var outcome = ""
         var summary: SyncSummary?
         do {
-            if let device = try DeviceFactory.existing(lockTimeoutMs: Budget.extensionLockMs) {
+            if Wipe.isPending(paths: paths) {
+                // A wipe is under way: the push goes out as it came.
+                outcome = wipePending
+            } else if let device = try DeviceFactory.existing(lockTimeoutMs: Budget.extensionLockMs, paths: paths) {
                 mark("opened")
                 let left = Budget.quickSyncDeadline(elapsedMs: elapsedMs(since: start) + Budget.extensionLockMs)
                 let s = try device.quickSync(deadlineMs: left)
@@ -41,6 +44,10 @@ public enum BenchRun {
             peakBytes: sampler.stop(), totalMs: elapsedMs(since: start), outcome: outcome)
         return (record, summary)
     }
+
+    /// `outcome` of a run skipped because a wipe is under way: nothing is
+    /// recorded either (no new file in a container being erased).
+    public static let wipePending = "wipe-pending"
 
     static func elapsedMs(since start: DispatchTime) -> UInt64 {
         (DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000

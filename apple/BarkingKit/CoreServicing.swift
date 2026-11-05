@@ -38,6 +38,7 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func leave() throws
     func transferAndLeave(deviceId: String) throws
     func leaveReady() throws -> Bool
+    func leaveSent() throws -> Bool
 }
 
 extension Device: DeviceHandle {}

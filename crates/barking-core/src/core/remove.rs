@@ -30,6 +30,8 @@ use crate::{CoreError, Result};
 
 /// `RemoveMe` was queued on this device: it may be wiped.
 const META_LEAVE_SENT: &str = "leave_sent";
+/// Packet identifiers of the queued `RemoveMe` (`leave_packets`).
+const META_LEAVE_PACKETS: &str = "leave_packets";
 
 /// A removal checked by [`plan`], not yet written.
 pub(super) struct Plan {
@@ -228,6 +230,9 @@ pub(super) fn send_remove_me(
     }
     if !sealed.is_empty() {
         q.put_meta(META_LEAVE_SENT, &true)?;
+        let mut ids: Vec<[u8; 16]> = q.get_meta(META_LEAVE_PACKETS)?.unwrap_or_default();
+        ids.extend(sealed.iter().map(|(p, _)| p.id.0));
+        q.put_meta(META_LEAVE_PACKETS, &ids)?;
     }
     Ok(sealed.into_iter().map(|(p, _)| p).collect())
 }
@@ -285,8 +290,23 @@ impl Core {
         })
     }
 
+    /// The queued `RemoveMe` packets still in the outbox (encoded), not yet
+    /// acknowledged nor expired: the app wipes only once the transport has
+    /// deposited them (`leave_ready` alone says they were queued).
+    pub fn leave_packets(&self, now: u64) -> Result<Vec<Vec<u8>>> {
+        let ids: Vec<[u8; 16]> = self.store.get_meta(META_LEAVE_PACKETS)?.unwrap_or_default();
+        Ok(self
+            .store
+            .outbox_pending(now)?
+            .into_iter()
+            .filter(|(id, _)| ids.contains(&id.0))
+            .map(|(_, bytes)| bytes)
+            .collect())
+    }
+
     /// `RemoveMe` is queued (`leave`, or `transfer_and_leave` after the
-    /// transfer's ack): the app may wipe this device.
+    /// transfer's ack): the app may wipe this device once it has left
+    /// (`leave_packets`).
     pub fn leave_ready(&self) -> Result<bool> {
         Ok(self
             .store

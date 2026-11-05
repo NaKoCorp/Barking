@@ -58,8 +58,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func markRead(contact: String, upTo: Int64) throws { reads.append((contact, upTo)) }
     func keyChanges(since: UInt64) throws -> [KeyChange] { keyChangeList }
     func sync(deadlineMs: UInt64) throws -> SyncSummary {
-        lock.withLock { _syncCalls += 1 }
+        // A sync deposits what was queued when it started.
+        let queued = lock.withLock { _syncCalls += 1; return _leaveReady }
         Thread.sleep(forTimeInterval: syncDelay)
+        if queued, summary.networkUp, !depositFails { lock.withLock { _leaveDeposited = true } }
         return summary
     }
     func nodes() throws -> [NodeInfo] { [] }
@@ -75,7 +77,8 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func isPendingLink() throws -> Bool { pending }
     func transferAdmin(deviceId: String) throws { lock.withLock { _transferredTo.append(deviceId) } }
     func adminTransferPending() throws -> String? {
-        lock.withLock { transferExpired ? nil : _transferredTo.last }
+        if let readError { throw readError }
+        return lock.withLock { transferExpired ? nil : _transferredTo.last }
     }
     func removed() throws -> RemovedInfo? { removedInfo }
     private var _removedIds: [String] = []
@@ -97,7 +100,16 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         get { lock.withLock { _leaveReady } }
         set { lock.withLock { _leaveReady = newValue } }
     }
-    func leaveReady() throws -> Bool { leaveReadyValue }
+    func leaveReady() throws -> Bool {
+        if let readError { throw readError }
+        return leaveReadyValue
+    }
+    private var _leaveDeposited = false
+    /// Nodes refuse the deposits (the network is up).
+    var depositFails = false
+    func leaveSent() throws -> Bool { lock.withLock { _leaveReady && _leaveDeposited } }
+    /// Thrown by `leaveReady` and `adminTransferPending` (lock held elsewhere).
+    var readError: Error?
     /// The root key transfer expired without its ack.
     var transferExpired = false
     func finishLink(package: Data) throws {}

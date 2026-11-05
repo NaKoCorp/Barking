@@ -224,4 +224,5 @@
 "Handing over to %@…" = "Transmission à %@…";
 "The handover to %@ did not finish. Nothing was erased: this device is still your admin." = "La transmission à %@ n’a pas abouti. Rien n’a été effacé : cet appareil reste votre administrateur.";
 "Sending the request to your other devices…" = "Envoi de la demande à vos autres appareils…";
-"Could not reach the network. Nothing was erased: try again." = "Réseau injoignable. Rien n’a été effacé : réessayez.";
+"The request has not left this iPhone yet. Nothing was erased: try again." = "La demande n’a pas encore quitté cet iPhone. Rien n’a été effacé : réessayez.";
+"Barking could not erase everything. Try again." = "Barking n’a pas pu tout effacer. Réessayez.";

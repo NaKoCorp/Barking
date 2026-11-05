@@ -122,16 +122,19 @@ final class DevicesModel {
         case handoverFailed(name: String)
         /// The request to be removed is queued; a sync sends it.
         case sending
-        /// The sync could not reach the network: nothing erased yet.
-        case offline
+        /// The request has not left this iPhone yet (offline, deposit
+        /// refused, or a sync started before it): nothing erased yet.
+        case notSent
         case failed
+        /// The wipe did not finish: its marker blocks a new identity.
+        case wipeFailed
         /// Erased: back to the welcome screen.
         case wiped
     }
 
     private let core: CoreService
     private let owner: () async -> Bool
-    private let wipe: (CoreService) async -> Void
+    private let wipe: (CoreService) async throws -> Void
     private(set) var devices: [MyDeviceInfo] = []
     /// The device a root key transfer awaits the ack of.
     private(set) var pendingTarget: String?
@@ -143,7 +146,7 @@ final class DevicesModel {
 
     init(core: CoreService,
          owner: @escaping () async -> Bool = { await Owner.check() },
-         wipe: @escaping (CoreService) async -> Void = { try? await Wipe.run(closing: $0) }) {
+         wipe: @escaping (CoreService) async throws -> Void = { try await Wipe.run(closing: $0) }) {
         self.core = core
         self.owner = owner
         self.wipe = wipe
@@ -238,27 +241,46 @@ final class DevicesModel {
     /// One step of the handover: a sync, then the wipe once the request to
     /// be removed is queued. A transfer that expired leaves `leave_ready`
     /// false forever (known core limit): the handover failed, nothing erased.
+    /// A read that fails (the extension holds the lock) decides nothing:
+    /// the next poll asks again.
     func pollHandover() async {
         guard case .handingOver(let name) = departure else { return }
         _ = await core.sync(reason: .timer)
-        if (try? await core.leaveReady()) == true {
-            departure = .sending
-            await finishLeaving()
-        } else if (try? await core.adminTransferPending()) == nil {
-            departure = .handoverFailed(name: name)
-            await load()
+        do {
+            if try await core.leaveReady() {
+                departure = .sending
+                await finishLeaving()
+            } else if try await core.adminTransferPending() == nil {
+                departure = .handoverFailed(name: name)
+                await load()
+            }
+        } catch {
+            // Still handing over.
         }
     }
 
-    /// Sends the queued request to be removed, then wipes. Offline: nothing
-    /// is erased, the user tries again.
+    /// Sends the queued request to be removed, then wipes once a node holds
+    /// every copy (`leaveSent`). A sync's outcome is not enough: one already
+    /// in flight may have started before the request was queued. Until then
+    /// nothing is erased and the user tries again.
     func finishLeaving() async {
-        guard departure == .sending || departure == .offline else { return }
-        let outcome = await core.sync(reason: .afterSend)
-        guard outcome.networkUp, (try? await core.leaveReady()) == true else {
-            departure = .offline
+        guard departure == .sending || departure == .notSent else { return }
+        departure = .sending
+        _ = await core.sync(reason: .afterSend)
+        if (try? await core.leaveSent()) != true {
+            // The sync answered may have been one already in flight: once more.
+            _ = await core.sync(reason: .afterSend)
+        }
+        guard (try? await core.leaveSent()) == true else {
+            departure = .notSent
             return
         }
+        await finish()
+    }
+
+    /// The wipe failed: the service is closed already, only the wipe is left.
+    func retryWipe() async {
+        guard departure == .wipeFailed else { return }
         await finish()
     }
 
@@ -268,7 +290,11 @@ final class DevicesModel {
     }
 
     private func finish() async {
-        await wipe(core)
-        departure = .wiped
+        do {
+            try await wipe(core)
+            departure = .wiped
+        } catch {
+            departure = .wipeFailed
+        }
     }
 }

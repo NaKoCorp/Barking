@@ -35,6 +35,7 @@ public enum DeviceFactory {
 
     /// The existing identity; `nil` without a key or a database. Creates nothing.
     public static func openExisting(lockTimeoutMs: UInt64) throws -> Device? {
+        guard !Wipe.isPending() else { throw Wipe.Incomplete(failures: []) }
         guard let key = try keyStore.read() else { return nil }
         let cfg = try config(key: key, lockTimeoutMs: lockTimeoutMs)
         guard deviceExists(config: cfg) else { return nil }
@@ -44,7 +45,9 @@ public enum DeviceFactory {
     /// The existing identity without opening it (no lock, nothing read): the
     /// extension spends its lock wait on the quick sync only. `nil` without a
     /// key (before the first unlock) or a database. Creates nothing.
-    public static func existing(lockTimeoutMs: UInt64) throws -> Device? {
+    public static func existing(lockTimeoutMs: UInt64, paths: WipePaths = .live) throws -> Device? {
+        // A wipe in progress: the database is on its way out, never opened.
+        guard !Wipe.isPending(paths: paths) else { return nil }
         guard let key = try keyStore.read() else { return nil }
         let cfg = try config(key: key, lockTimeoutMs: lockTimeoutMs)
         guard deviceExists(config: cfg) else { return nil }
@@ -55,6 +58,7 @@ public enum DeviceFactory {
     /// without its database (reinstall, failed creation) is replaced; a key
     /// whose database exists is never touched (`create` fails).
     public static func createNew(deviceName: String) throws -> CreatedDevice {
+        try Wipe.finishPending()
         let probe = try config(key: Data(count: 32), lockTimeoutMs: Budget.appLockMs)
         let key = deviceExists(config: probe) ? try keyStore.create() : try keyStore.replace()
         let created = try createDevice(config: config(key: key, lockTimeoutMs: Budget.appLockMs), deviceName: deviceName)
@@ -65,6 +69,7 @@ public enum DeviceFactory {
     /// Recovers an identity from its 24 words (a key left without its
     /// database is replaced, as for `createNew`).
     public static func recover(phrase: String, deviceName: String) throws -> Device {
+        try Wipe.finishPending()
         let probe = try config(key: Data(count: 32), lockTimeoutMs: Budget.appLockMs)
         let key = deviceExists(config: probe) ? try keyStore.create() : try keyStore.replace()
         let device = try recoverDevice(config: config(key: key, lockTimeoutMs: Budget.appLockMs),
@@ -75,6 +80,7 @@ public enum DeviceFactory {
 
     /// Starts linking this device to an existing identity.
     public static func beginLink(offer: Data, deviceName: String) throws -> PendingLink {
+        try Wipe.finishPending()
         let probe = try config(key: Data(count: 32), lockTimeoutMs: Budget.appLockMs)
         let key = deviceExists(config: probe) ? try keyStore.create() : try keyStore.replace()
         let pending = try BarkingKit.beginLink(config: config(key: key, lockTimeoutMs: Budget.appLockMs),
@@ -85,9 +91,9 @@ public enum DeviceFactory {
 
     /// Removes this device's identity (`Wipe.run`: database and its
     /// sidecars, lock, key, pending files, settings): to start a pending link
-    /// again, which holds nothing yet, and for the UI tests. A step that
-    /// fails is finished at the next launch (`Wipe.resumeIfNeeded`).
-    public static func resetIdentity() {
-        try? Wipe.run()
+    /// again, which holds nothing yet, and for the UI tests. A wipe that
+    /// fails throws; its marker blocks a new identity until it finishes.
+    public static func resetIdentity() throws {
+        try Wipe.runRetrying(paths: .live, keys: KeyStore.live)
     }
 }

@@ -44,6 +44,15 @@ final class ReviewFixTests: XCTestCase {
         XCTAssertEqual(resumed.state, .waiting)
     }
 
+    /// A reset that fails is shown: never a fresh scan over a pending wipe.
+    func testNewDeviceStartAgainShowsAFailedReset() async {
+        let m = NewDeviceLinkModel(
+            resume: CoreService(device: FakeDevice(), runner: DirectRunner()),
+            begin: { _, _ in throw Boom() }, reset: { throw Boom() })
+        await m.startAgain()
+        XCTAssertEqual(m.state, .refused("Something went wrong. Your data is safe."))
+    }
+
     // I2: a linked device never had a phrase to write down.
     func testLinkedDeviceHasNoPhraseAlarm() async {
         let defaults = UserDefaults(suiteName: "test.\(UUID())")!

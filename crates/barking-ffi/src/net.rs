@@ -151,6 +151,29 @@ impl Device {
         })
     }
 
+    /// The request to be removed (`leave`, `transfer_and_leave`) is queued
+    /// and every copy still in the outbox was accepted by a node: the app
+    /// may wipe now. `leave_ready` alone only says it was queued.
+    pub fn leave_sent(&self) -> Result<bool, BarkingError> {
+        guard(|| {
+            let allow_private = self.allow_private();
+            self.with_core(|core| {
+                if !core.leave_ready()? {
+                    return Ok(false);
+                }
+                let t = now();
+                let (state, _) = NetState::load_checked(core, t, allow_private)
+                    .map_err(BarkingError::storage)?;
+                Ok(core.leave_packets(t)?.iter().all(|bytes| {
+                    !state
+                        .ledger
+                        .holders(&barking_proto::pow::content_hash(bytes))
+                        .is_empty()
+                }))
+            })
+        })
+    }
+
     /// Adds a node by hand (base32 identifier, `host:port` address).
     pub fn add_node(&self, id: String, addr: String) -> Result<(), BarkingError> {
         guard(|| {

@@ -2194,10 +2194,16 @@ fn linked_device_leaves() {
     let (mut a, mut t, mut c) = admin_tablet_contact(d.path(), &mut rng);
     let t_id = device_id(&a.core, "t");
     assert!(!t.core.leave_ready().unwrap());
+    assert!(t.core.leave_packets(NOW).unwrap().is_empty());
 
     let packets = t.core.leave(NOW, &mut rng).unwrap();
     assert_eq!(packets.len(), 1);
     assert!(t.core.leave_ready().unwrap());
+    // The request still waiting in the outbox, for the app to check it left.
+    assert_eq!(
+        t.core.leave_packets(NOW).unwrap(),
+        vec![packets[0].encode()]
+    );
 
     let outcome = a
         .core
@@ -2250,6 +2256,7 @@ fn admin_transfer_and_leave() {
     assert_eq!(sync_round(&mut a, &mut t, &mut rng), vec![SyncKind::Admin]);
     assert!(admins(&a.core).iter().all(|n| n == "t"));
     assert!(a.core.leave_ready().unwrap());
+    assert_eq!(a.core.leave_packets(NOW).unwrap().len(), 1);
     // T, now administrator, removes A.
     assert_eq!(
         sync_round(&mut a, &mut t, &mut rng),
@@ -2280,6 +2287,7 @@ fn transfer_and_leave_keeps_root_when_transfer_expires() {
     assert!(a.core.pending_outbox(later).unwrap().is_empty());
     assert_eq!(admins(&a.core), vec!["a".to_owned()]);
     assert!(!a.core.leave_ready().unwrap());
+    assert!(a.core.leave_packets(later).unwrap().is_empty());
     assert_eq!(a.core.my_devices().len(), 2);
 
     // The leave died with the transfer: a later plain transfer stays one.

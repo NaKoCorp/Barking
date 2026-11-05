@@ -102,14 +102,14 @@ final class NewDeviceLinkModel {
     private(set) var state: State
     private(set) var core: CoreService?
     private let begin: Begin
-    private let reset: () -> Void
+    private let reset: () throws -> Void
     private let defaults: UserDefaults
     private var busy = false
     var deviceName = UIDevice.current.model
 
     init(resume: CoreService? = nil,
          begin: @escaping Begin = NewDeviceLinkModel.beginWithFactory,
-         reset: @escaping () -> Void = DeviceFactory.resetIdentity,
+         reset: @escaping () throws -> Void = DeviceFactory.resetIdentity,
          defaults: UserDefaults = .standard) {
         self.core = resume
         self.state = resume == nil ? .scanOffer : .waiting
@@ -159,7 +159,13 @@ final class NewDeviceLinkModel {
     /// service stops first: no call may hold the files being erased.
     func startAgain() async {
         await core?.close()
-        reset()
+        do {
+            try reset()
+        } catch {
+            // The wipe's marker stays: a new link finishes it first.
+            state = .refused("Something went wrong. Your data is safe.")
+            return
+        }
         core = nil
         state = .scanOffer
     }
