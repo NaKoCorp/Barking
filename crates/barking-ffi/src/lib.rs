@@ -7,6 +7,7 @@ mod contacts;
 mod device;
 mod error;
 mod identity;
+mod link;
 mod lock;
 mod messages;
 mod net;
@@ -17,8 +18,9 @@ pub use contacts::{CardPreview, inspect_card, inspect_card_text};
 pub use device::{
     Contact, CreatedDevice, Device, DeviceConfig, Message, create_device, device_exists,
 };
-pub use error::BarkingError;
+pub use error::{BarkingError, LinkReason};
 pub use identity::{MyDeviceInfo, bip39_words, recover_device};
+pub use link::{PendingLink, begin_link, inspect_link_request};
 pub use messages::{KeyChange, UnreadCount};
 pub use net::{NewMessage, NodeInfo, SyncSummary};
 

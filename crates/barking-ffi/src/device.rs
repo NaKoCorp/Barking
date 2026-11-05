@@ -114,7 +114,7 @@ impl Device {
             let device = Device::init(config, |path, key| {
                 let (core, p) = Core::create(path, key, &device_name, now(), &mut rand::rng())?;
                 phrase = p.as_str().to_owned();
-                Ok(core)
+                Ok::<_, CoreError>(core)
             })?;
             Ok(CreatedDevice {
                 device: Arc::new(device),
@@ -125,9 +125,9 @@ impl Device {
 
     /// Creates the database with `make`, under the lock, never over an
     /// existing one; removes the file if `make` fails.
-    pub(crate) fn init(
+    pub(crate) fn init<E: Into<BarkingError>>(
         config: DeviceConfig,
-        make: impl FnOnce(&Path, &[u8; 32]) -> Result<Core, CoreError>,
+        make: impl FnOnce(&Path, &[u8; 32]) -> Result<Core, E>,
     ) -> Result<Device, BarkingError> {
         let device = Device::new(config)?;
         let lock = device.lock()?;

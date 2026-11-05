@@ -430,6 +430,12 @@ impl Core {
 
     /// Step 1 (A): new link offer, valid for 10 minutes. It
     /// replaces the previous offer. Admin only.
+    /// This device waits for its link bundle (`begin_link` done,
+    /// `finish_link` not yet).
+    pub fn is_pending_link(&self) -> bool {
+        self.pending
+    }
+
     pub fn link_offer(&mut self, now: u64, rng: &mut impl CryptoRng) -> Result<LinkOffer> {
         self.ensure_linked()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?.public();
