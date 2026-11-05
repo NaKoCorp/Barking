@@ -4,6 +4,9 @@ members = ["crates/*"]
 
 [workspace.package]
 license = "AGPL-3.0-only"
+# Nothing goes to crates.io (and cargo-deny treats path dependencies of
+# unpublished crates as pinned).
+publish = false
 
 [workspace.dependencies]
 argon2 = "0.6.0"

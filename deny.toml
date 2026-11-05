@@ -1,0 +1,54 @@
+# cargo-deny (scripts/security-check.sh, CI job `security`): RustSec
+# advisories, licenses compatible with AGPL-3.0-only, banned crates, sources.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every advisory fails, unmaintained crates included; exceptions go in
+# `ignore` with the advisory id and the reason.
+unmaintained = "all"
+yanked = "deny"
+ignore = [
+    # Unmaintained, no fix upstream. Only through uniffi_bindgen (askama),
+    # a build-time tool of barking-ffi's `bindgen` feature: not in any binary.
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml via uniffi_bindgen, build-time only" },
+    # Unmaintained, no fix upstream. heapless 0.7 via postcard; only used on
+    # targets without atomic instructions, none of which Barking builds.
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill via postcard, unused on our targets" },
+]
+
+[licenses]
+# Licenses whose code can ship in an AGPL-3.0-only program.
+allow = [
+    "AGPL-3.0-only",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+exceptions = [
+    # SQLite is public domain ("blessing"); the bundled libtomcrypt is WTFPL.
+    { allow = ["blessing", "WTFPL"], crate = "sqlcipher-src" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace crates depend on each other by path.
+allow-wildcard-paths = true
+
+[sources]
+# crates.io only: no git dependency, no other registry.
+unknown-registry = "deny"
+unknown-git = "deny"
