@@ -4,8 +4,21 @@ import SwiftUI
 /// Onboarding until the identity exists, then the tabs.
 struct RootView: View {
     @Environment(AppRouter.self) private var router
+    @Environment(LockController.self) private var lock
+    @Environment(\.scenePhase) private var phase
+
+    /// The cover goes up whenever the lock is on and the app is not active
+    /// (the app switcher shows it), whatever the delay, and stays while locked.
+    private var covered: Bool { lock.locked || (lock.enabled && phase != .active) }
 
     var body: some View {
+        content
+            .accessibilityHidden(covered)
+            .overlay { if covered { LockView() } }
+            .onChange(of: phase) { _, now in lock.phaseChanged(to: now) }
+    }
+
+    @ViewBuilder private var content: some View {
         switch router.state {
         case .onboarding: OnboardingFlow()
         case .ready(let core): MainTabView(core: core)

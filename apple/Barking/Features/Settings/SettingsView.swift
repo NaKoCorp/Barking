@@ -32,6 +32,10 @@ struct SettingsView: View {
                                 .font(BarkingFont.mono(.caption, size: 11.5)), "key")
                         }
                         divider
+                        NavigationLink { SecuritySettingsView() } label: {
+                            row("Security", Text("Lock and erase"), "lock")
+                        }
+                        divider
                         Button(action: openNetwork) {
                             row("Network and relays", Text("Internet"), "dot.radiowaves.left.and.right")
                         }

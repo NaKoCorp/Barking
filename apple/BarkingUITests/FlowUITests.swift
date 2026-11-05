@@ -174,3 +174,71 @@ final class PhraseExportUITests: XCTestCase {
                       || app.navigationBars["UIActivityContentView"].waitForExistence(timeout: 2))
     }
 }
+
+@MainActor
+final class SecurityUITests: XCTestCase {
+    override func setUp() { continueAfterFailure = false }
+
+    private func openSecurity(_ app: XCUIApplication) {
+        app.tabBars.buttons["Settings"].tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Security")).firstMatch.tap()
+    }
+
+    /// The switch sits at the trailing edge of its row.
+    private func turnOn(_ toggle: XCUIElement) {
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        let on = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == '1'"), object: toggle)
+        XCTAssertEqual(XCTWaiter().wait(for: [on], timeout: 5), .completed)
+    }
+
+    func testEmergencyWipeReturnsToWelcome() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        try onboard(app)
+        openSecurity(app)
+        let erase = app.buttons["security.erase"]
+        XCTAssertTrue(erase.waitForExistence(timeout: 5))
+        // A tap is not enough.
+        erase.tap()
+        XCTAssertFalse(app.buttons["Erase"].waitForExistence(timeout: 1))
+        erase.press(forDuration: 2.5)
+        let warning = app.staticTexts.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "Everything on this iPhone will be erased.")).firstMatch
+        XCTAssertTrue(warning.waitForExistence(timeout: 5))
+        app.buttons["Erase"].tap()
+        XCTAssertTrue(app.buttons["Create my identity"].waitForExistence(timeout: 10))
+    }
+
+    func testLockCoversTheAppAndUnlocks() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        try onboard(app)
+        openSecurity(app)
+        let toggle = app.switches["security.lock"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        turnOn(toggle)
+        XCTAssertEqual(toggle.value as? String, "1")
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(app.staticTexts["Barking is locked"].waitForExistence(timeout: 10))
+        app.buttons["Unlock"].tap()
+        XCTAssertTrue(app.switches["security.lock"].waitForExistence(timeout: 10))
+    }
+
+    /// No Face ID on the way: the lock screen erases on its own.
+    func testEmergencyWipeFromTheLockScreen() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        try onboard(app)
+        openSecurity(app)
+        let toggle = app.switches["security.lock"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        turnOn(toggle)
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(app.staticTexts["Barking is locked"].waitForExistence(timeout: 10))
+        app.buttons["lock.erase"].press(forDuration: 2.5)
+        app.buttons["Erase"].tap()
+        XCTAssertTrue(app.buttons["Create my identity"].waitForExistence(timeout: 10))
+    }
+}
