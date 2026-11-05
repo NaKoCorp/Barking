@@ -139,3 +139,49 @@ fn call_waits_for_lock_then_fails() {
     assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
     assert!(matches!(dev.fingerprint(), Err(BarkingError::Locked)));
 }
+
+#[test]
+fn failed_create_leaves_no_database() {
+    let dir = tempfile::tempdir().unwrap();
+    // Too long a name fails after the database file is written.
+    let long = "x".repeat(10_000);
+    assert!(matches!(
+        Device::create(config(&dir, 7), long),
+        Err(BarkingError::InvalidInput { .. })
+    ));
+    assert!(!barking_ffi::device_exists(config(&dir, 7)));
+    assert!(Device::create(config(&dir, 7), "iphone".into()).is_ok());
+}
+
+#[test]
+fn at_takes_no_lock_and_opens_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = config(&dir, 1);
+    c.lock_timeout_ms = 200;
+    let fp = Device::create(c.clone(), "a".into())
+        .unwrap()
+        .device
+        .fingerprint()
+        .unwrap();
+    let held = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&c.lock_path)
+        .unwrap();
+    // SAFETY: `flock` on a descriptor owned by `held`.
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let dev = Device::at(c.clone()).unwrap();
+    assert!(matches!(dev.fingerprint(), Err(BarkingError::Locked)));
+    drop(held);
+    assert_eq!(dev.fingerprint().unwrap(), fp);
+}
+
+#[test]
+fn at_without_database_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        Device::at(config(&dir, 1)),
+        Err(BarkingError::NotFound)
+    ));
+}

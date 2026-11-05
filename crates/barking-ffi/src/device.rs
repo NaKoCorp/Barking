@@ -99,26 +99,31 @@ impl Device {
     }
 
     /// New identity. An existing database is never touched: `InvalidInput`.
+    /// A creation that fails removes the file it started, so that the next
+    /// attempt starts clean.
     pub fn create(
         config: DeviceConfig,
         device_name: String,
     ) -> Result<CreatedDevice, BarkingError> {
         guard(move || {
             let device = Device::new(config)?;
+            let lock = device.lock()?;
+            // Checked under the lock: two creations cannot both pass.
             if device_exists(device.config.clone()) {
                 return Err(BarkingError::invalid("database already exists"));
             }
-            let _lock = device.lock()?;
-            let (core, phrase) = Core::create(
-                &PathBuf::from(&device.config.db_path),
-                &device.key,
-                &device_name,
-                now(),
-                &mut rand::rng(),
-            )?;
+            let path = PathBuf::from(&device.config.db_path);
+            let created = Core::create(&path, &device.key, &device_name, now(), &mut rand::rng());
+            let (core, phrase) = match created {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e.into());
+                }
+            };
             drop(core);
             let recovery_phrase = phrase.as_str().to_owned();
-            drop(_lock);
+            drop(lock);
             Ok(CreatedDevice {
                 device: Arc::new(device),
                 recovery_phrase,
@@ -157,6 +162,20 @@ impl Device {
             let device = Device::new(config)?;
             device.with_core(|_| Ok(()))?;
             Ok(Arc::new(device))
+        })
+    }
+
+    /// The existing identity, without opening it: no lock taken, nothing
+    /// read. For the extension, whose time and lock budget go to the quick
+    /// sync alone (spec iOS foundations §5.3). A wrong key shows at the first
+    /// call (`Storage`).
+    #[uniffi::constructor]
+    pub fn at(config: DeviceConfig) -> Result<Arc<Device>, BarkingError> {
+        guard(move || {
+            if !device_exists(config.clone()) {
+                return Err(BarkingError::NotFound);
+            }
+            Ok(Arc::new(Device::new(config)?))
         })
     }
 

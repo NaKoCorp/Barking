@@ -18,7 +18,7 @@ final class DevModel {
 
     func load() async {
         await attempt("open") {
-            guard let d = try DeviceFactory.openExisting(lockTimeoutMs: 10_000) else { return }
+            guard let d = try DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs) else { return }
             self.device = d
             try await self.scriptedSetup(d)
             try await self.refresh()
@@ -40,7 +40,7 @@ final class DevModel {
             _ = try await DeviceCall.run("add") { try d.addContact(card: card, alias: alias) }
         }
         let card = try await DeviceCall.run("card") { try d.contactCard(displayName: "iPhone") }
-        try Data(card.utf8).write(to: SharedPaths.container.appending(path: "dev-card.txt"))
+        try Data(card.utf8).write(to: try SharedPaths.container.appending(path: "dev-card.txt"))
     }
 
     func create(name: String) async {
@@ -117,7 +117,7 @@ final class DevModel {
     func sync() async {
         guard let d = device else { return }
         await attempt("sync") {
-            let s = try await DeviceCall.run("sync") { try d.sync(deadlineMs: 30_000) }
+            let s = try await DeviceCall.run("sync") { try d.sync(deadlineMs: Budget.appSyncMs) }
             self.status = "sync: \(s.itemsReceived) items, \(s.newMessages.count) new, network \(s.networkUp ? "up" : "down")"
             try await self.refresh()
         }
@@ -214,7 +214,7 @@ struct BenchSection: View {
             running = true
             Task {
                 _ = try? await DeviceCall.run("bench") {
-                    let (r, _) = BenchRun.run(source: "app", deadlineMs: 20_000, lockTimeoutMs: 10_000)
+                    let (r, _) = BenchRun.run(source: "app")
                     var record = r
                     if record.outcome.isEmpty { record.outcome = "fetched" }
                     try BenchStore.shared().append(record)

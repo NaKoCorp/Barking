@@ -56,4 +56,7 @@ done
 
 rm -rf "$out/BarkingFFI.xcframework"
 xcodebuild -create-xcframework "${args[@]}" -output "$out/BarkingFFI.xcframework" >/dev/null
+# Read by the Bench and Release builds, which refuse a dev library (spec §6:
+# measurements on optimized Rust only).
+echo "$profile" > "$out/PROFILE"
 echo "$out/BarkingFFI.xcframework"

@@ -9,20 +9,38 @@ public enum SharedPaths {
             ?? "group.com.nakocorp.barking"
     }
 
-    /// The shared container; the temporary directory when the App Group is
-    /// unavailable (unsigned test builds).
+    public struct NoContainer: Error {}
+
+    /// The shared container. Without it (App Group missing from the
+    /// entitlements) only Debug builds fall back to the temporary directory:
+    /// elsewhere the identity would land where iOS purges it, and where the
+    /// extension never looks.
     public static var container: URL {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
-            ?? FileManager.default.temporaryDirectory
+        get throws {
+            #if DEBUG
+            let fallback = true
+            #else
+            let fallback = false
+            #endif
+            return try resolve(
+                FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup),
+                fallbackAllowed: fallback)
+        }
     }
 
-    public static var database: URL { container.appending(path: "barking.db") }
-    public static var lock: URL { container.appending(path: "barking.lock") }
+    static func resolve(_ group: URL?, fallbackAllowed: Bool) throws -> URL {
+        if let group { return group }
+        guard fallbackAllowed else { throw NoContainer() }
+        return FileManager.default.temporaryDirectory
+    }
+
+    public static var database: URL { get throws { try container.appending(path: "barking.db") } }
+    public static var lock: URL { get throws { try container.appending(path: "barking.lock") } }
 
     /// Measurement records (spec §6.1), created on demand.
     public static var bench: URL {
         get throws {
-            let url = container.appending(path: "bench", directoryHint: .isDirectory)
+            let url = try container.appending(path: "bench", directoryHint: .isDirectory)
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             try protect(url)
             return url

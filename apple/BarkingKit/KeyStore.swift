@@ -54,7 +54,13 @@ public struct KeyStore: Sendable {
         return key
     }
 
-    /// Test helper.
+    /// A new key in place of any existing one: only when the database it
+    /// opened is gone (reinstall: iOS keeps keychain items, not the container).
+    public func replace() throws -> Data {
+        try delete()
+        return try create()
+    }
+
     func delete() throws {
         let status = SecItemDelete(query() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {

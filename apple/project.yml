@@ -36,6 +36,15 @@ targets:
     dependencies:
       - framework: ../target/apple/BarkingFFI.xcframework
         embed: false
+    preBuildScripts:
+      - name: Check the Rust profile
+        basedOnDependencyAnalysis: false
+        script: |
+          profile="$(cat "$SRCROOT/../target/apple/PROFILE" 2>/dev/null || echo unknown)"
+          if [ "$CONFIGURATION" != "Debug" ] && [ "$profile" != "release-apple" ]; then
+            echo "error: $CONFIGURATION needs scripts/build-xcframework.sh --release (library built with: $profile)"
+            exit 1
+          fi
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking.kit

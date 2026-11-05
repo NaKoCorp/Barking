@@ -5,8 +5,11 @@ import Foundation
 public enum BenchRun {
     /// `record.outcome` is empty when the sync reached the network: the
     /// caller sets it from what the notification shows.
-    public static func run(source: String, deadlineMs: UInt64, lockTimeoutMs: UInt64) -> (BenchRecord, SyncSummary?) {
+    /// The extension's budget (`Budget`): one lock wait, the quick sync
+    /// gets what is left of the work time.
+    public static func run(source: String) -> (BenchRecord, SyncSummary?) {
         let start = DispatchTime.now()
+        let startedAt = Date()
         let sampler = FootprintSampler()
         sampler.start()
         var steps: [BenchRecord.Step] = []
@@ -17,9 +20,10 @@ public enum BenchRun {
         var outcome = ""
         var summary: SyncSummary?
         do {
-            if let device = try DeviceFactory.openExisting(lockTimeoutMs: lockTimeoutMs) {
+            if let device = try DeviceFactory.existing(lockTimeoutMs: Budget.extensionLockMs) {
                 mark("opened")
-                let s = try device.quickSync(deadlineMs: deadlineMs)
+                let left = Budget.quickSyncDeadline(elapsedMs: elapsedMs(since: start) + Budget.extensionLockMs)
+                let s = try device.quickSync(deadlineMs: left)
                 mark("fetched")
                 summary = s
                 if !s.networkUp { outcome = "network-down" }
@@ -33,7 +37,7 @@ public enum BenchRun {
         }
         mark("ready")
         let record = BenchRecord(
-            source: source, device: model(), startedAt: Date(), steps: steps,
+            source: source, device: model(), startedAt: startedAt, steps: steps,
             peakBytes: sampler.stop(), totalMs: elapsedMs(since: start), outcome: outcome)
         return (record, summary)
     }

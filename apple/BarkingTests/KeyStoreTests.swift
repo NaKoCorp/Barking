@@ -21,4 +21,13 @@ final class KeyStoreTests: XCTestCase {
         XCTAssertNil(try store.read())
         XCTAssertNil(try store.read())
     }
+
+    /// Reinstall: iOS deletes the container but keeps the keychain item. A key
+    /// without its database protects nothing and must not block a new identity.
+    func testReplaceOverwritesAnOrphanKey() throws {
+        let old = try store.create()
+        let new = try store.replace()
+        XCTAssertNotEqual(old, new)
+        XCTAssertEqual(try store.read(), new)
+    }
 }
