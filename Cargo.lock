@@ -299,6 +299,7 @@ dependencies = [
  "barking-proto",
  "bip39",
  "libc",
+ "postcard",
  "rand",
  "tempfile",
  "thiserror",

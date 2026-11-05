@@ -8,6 +8,7 @@ mod device;
 mod error;
 mod identity;
 mod lock;
+mod messages;
 mod net;
 
 use std::panic::{UnwindSafe, catch_unwind};
@@ -18,7 +19,8 @@ pub use device::{
 };
 pub use error::BarkingError;
 pub use identity::{MyDeviceInfo, bip39_words, recover_device};
-pub use net::{NewMessage, SyncSummary};
+pub use messages::{KeyChange, UnreadCount};
+pub use net::{NewMessage, NodeInfo, SyncSummary};
 
 uniffi::setup_scaffolding!();
 

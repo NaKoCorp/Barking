@@ -376,6 +376,16 @@ async fn timed_ping<D: Dialer>(
 
 /// Decodes and verifies contact card hints; returns the valid ones (one per
 /// node) and the number dropped.
+/// Identifiers of the valid node hints carried by contact cards (what the
+/// apps show as "from a contact's card").
+pub fn card_hint_ids(view: &View, hints: &[Vec<u8>], now: u64) -> Vec<NodeId> {
+    decode_hints(view, hints, now)
+        .0
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
 fn decode_hints(view: &View, hints: &[Vec<u8>], now: u64) -> (Vec<(NodeId, NodeRecord)>, usize) {
     let policy = view.policy();
     let mut seen = HashSet::new();

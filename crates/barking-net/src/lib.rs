@@ -16,7 +16,7 @@ mod test_support;
 
 pub use discover::{
     BootstrapReport, BootstrapSource, CandidateBudget, DialError, Dialer, FallbackLog, QuicDialer,
-    bootstrap, choose_card_nodes, fallback_lookup, random_lookups,
+    bootstrap, card_hint_ids, choose_card_nodes, fallback_lookup, random_lookups,
 };
 pub use plan::{Ledger, PlannedDeposit};
 pub use score::{Score, ScoreEvent};

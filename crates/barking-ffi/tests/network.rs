@@ -84,3 +84,53 @@ fn quick_sync_without_nodes_reports_network_down() {
     assert!(!s.network_up);
     assert!(s.new_messages.is_empty());
 }
+
+#[test]
+fn nodes_lists_manual_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
+    let id = id_of(&key(0)).to_string();
+    d.add_node(id.clone(), "127.0.0.1:4433".into()).unwrap();
+    let nodes = d.nodes().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].id, id);
+    assert!(nodes[0].manual && !nodes[0].from_card);
+    assert_eq!(nodes[0].addr, "127.0.0.1:4433");
+}
+
+#[test]
+fn outbox_counts_queued_packets() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (alice, _bob) = paired_devices(&da, &db);
+    assert_eq!(alice.outbox_count().unwrap(), 0);
+    alice.send_text("bob".into(), "hi".into()).unwrap();
+    assert!(alice.outbox_count().unwrap() > 0);
+}
+
+#[test]
+fn key_changes_is_empty_without_change() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (alice, _bob) = paired_devices(&da, &db);
+    assert!(alice.key_changes(0).unwrap().is_empty());
+}
+
+#[test]
+fn key_change_is_reported() {
+    let (da, db, dc) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let (alice, _bob) = paired_devices(&da, &db);
+    // A new key under the alias "bob": the core logs a key change.
+    let other = Device::create(config(&dc, 3), "c".into()).unwrap().device;
+    let new_fp = alice
+        .add_contact(
+            other.contact_card("Bob".into()).unwrap(),
+            Some("bob".into()),
+        )
+        .unwrap();
+    let changes = alice.key_changes(0).unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].contact, new_fp);
+}

@@ -23,6 +23,7 @@ barking-net.workspace = true
 barking-proto.workspace = true
 bip39.workspace = true
 libc.workspace = true
+postcard.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "net"] }

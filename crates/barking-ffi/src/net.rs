@@ -17,6 +17,8 @@ use crate::{BarkingError, guard};
 #[derive(Debug, uniffi::Record)]
 pub struct SyncSummary {
     pub items_received: u32,
+    /// Messages deposited for the first time.
+    pub sent: u32,
     /// New visible messages, in arrival order.
     pub new_messages: Vec<NewMessage>,
     /// Some node answered.
@@ -76,14 +78,79 @@ fn summary(core: &Core, mut report: SyncReport) -> SyncSummary {
         .collect();
     SyncSummary {
         items_received: u32::try_from(report.items_received).unwrap_or(u32::MAX),
+        sent: u32::try_from(report.first_copies).unwrap_or(u32::MAX),
         new_messages,
         network_up: report.network_up,
         error: report.error,
     }
 }
 
+/// A node of the local view (the Network screen's relays).
+#[derive(Debug, uniffi::Record)]
+pub struct NodeInfo {
+    pub id: String,
+    /// `ip:port`, the hand-entered one first; empty if unknown.
+    pub addr: String,
+    /// Reliability, 0 to 1.
+    pub score: f32,
+    /// Added by hand.
+    pub manual: bool,
+    /// Carried by a contact's card.
+    pub from_card: bool,
+    /// Unix seconds; 0 if never.
+    pub last_seen: u64,
+}
+
 #[uniffi::export]
 impl Device {
+    /// Nodes of the local view, best score first.
+    pub fn nodes(&self) -> Result<Vec<NodeInfo>, BarkingError> {
+        guard(|| {
+            let allow_private = self.allow_private();
+            self.with_core(|core| {
+                let t = now();
+                let (state, _) = NetState::load_checked(core, t, allow_private)
+                    .map_err(BarkingError::storage)?;
+                let hints = core.contact_node_hints().unwrap_or_default();
+                let from_cards = barking_net::card_hint_ids(&state.view, &hints, t);
+                let mut out: Vec<NodeInfo> = state
+                    .view
+                    .entries()
+                    .map(|(id, e)| {
+                        let addr = e
+                            .manual_addr
+                            .map(|a| a.to_string())
+                            .or_else(|| {
+                                e.record.as_ref().and_then(|r| {
+                                    r.v4.map(|a| a.to_string()).or(r.v6.map(|a| a.to_string()))
+                                })
+                            })
+                            .unwrap_or_default();
+                        NodeInfo {
+                            id: id.to_string(),
+                            addr,
+                            score: e.score.value(),
+                            manual: e.manual,
+                            from_card: from_cards.contains(id),
+                            last_seen: e.last_seen,
+                        }
+                    })
+                    .collect();
+                out.sort_by(|a, b| b.score.total_cmp(&a.score));
+                Ok(out)
+            })
+        })
+    }
+
+    /// Packets waiting in the send queue (until their ack or expiry).
+    pub fn outbox_count(&self) -> Result<u32, BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                Ok(u32::try_from(core.pending_outbox(now())?.len()).unwrap_or(u32::MAX))
+            })
+        })
+    }
+
     /// Adds a node by hand (base32 identifier, `host:port` address).
     pub fn add_node(&self, id: String, addr: String) -> Result<(), BarkingError> {
         guard(|| {
