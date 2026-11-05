@@ -117,6 +117,8 @@ See [`docs/deploy`](docs/deploy) for `barking-node.toml`, `barking-push.toml.exa
 | [`barking-dht`](crates/barking-dht) | S/Kademlia discovery and replication |
 | [`barking-node`](crates/barking-node) | Relay node |
 | [`barking-push`](crates/barking-push) | Stateless APNs wake-up relay |
+| [`barking-ffi`](crates/barking-ffi) | UniFFI bindings of the core for the mobile apps |
+| [`apple/`](apple) | iOS app and its notification extension (XcodeGen project) |
 
 ## 🛠️ Development
 
@@ -125,6 +127,12 @@ scripts/check.sh
 ```
 
 Runs formatting checks, Clippy and the workspace tests. Network integration tests open local UDP sockets.
+
+```sh
+scripts/install-hooks.sh
+```
+
+Installs the git hooks: before a commit, no credential file and no secret (gitleaks); before a push, also trivy (no HIGH or CRITICAL finding), cargo-deny (advisories, AGPL-compatible licenses) and the workflow linters. The CI runs the same `scripts/security-check.sh`. Tools: `brew install gitleaks trivy cargo-deny zizmor actionlint shellcheck`. Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 
 Linux release builds run in a pinned Rust/Alpine Docker image and produce static musl binaries; Apple binaries are built natively on macOS.
 
