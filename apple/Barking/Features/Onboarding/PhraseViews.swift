@@ -52,6 +52,7 @@ struct PhraseView: View {
                                     .foregroundStyle(Color.fgSoft)
                                 Text(verbatim: w).font(BarkingFont.mono(.footnote, size: 13))
                                     .foregroundStyle(Color.fg)
+                                    .accessibilityIdentifier("phrase.word.\(i + 1)")
                                 Spacer(minLength: 0)
                             }
                             .padding(8)
@@ -68,6 +69,7 @@ struct PhraseView: View {
                     Text("I wrote the 24 words down").foregroundStyle(Color.fg)
                 }
                 .toggleStyle(CheckboxStyle())
+                .accessibilityIdentifier("phrase.wroteItDown")
                 PrimaryButton("Continue", enabled: model.canContinue, action: onContinue)
             }
             .padding(24)
@@ -115,6 +117,8 @@ struct PhraseConfirmView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Word no. \(q.index + 1)").font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))
                                 .foregroundStyle(Color.fg)
+                                .accessibilityIdentifier("quiz.question.\(qi)")
+                                .accessibilityValue(Text(verbatim: "\(q.index + 1)"))
                             HStack(spacing: 8) {
                                 ForEach(q.choices, id: \.self) { c in
                                     let selected = model.answers[qi] == c
@@ -126,6 +130,7 @@ struct PhraseConfirmView: View {
                                                         in: .rect(cornerRadius: Radius.button))
                                     }
                                     .accessibilityAddTraits(selected ? .isSelected : [])
+                                    .accessibilityIdentifier("quiz.\(qi).\(c)")
                                 }
                             }
                         }

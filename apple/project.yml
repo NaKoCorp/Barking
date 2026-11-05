@@ -4,6 +4,8 @@
 name: Barking
 options:
   bundleIdPrefix: com.nakocorp
+  developmentLanguage: en
+  knownRegions: [en, fr]
   deploymentTarget:
     iOS: "26.0"
   createIntermediateGroups: true
@@ -18,6 +20,8 @@ configFiles:
 settings:
   base:
     SWIFT_VERSION: "6.0"
+    SWIFT_EMIT_LOC_STRINGS: YES
+    LOCALIZATION_PREFERS_STRING_CATALOGS: YES
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1"
     # The XCFramework has an arm64 simulator slice only (Apple Silicon Macs).
@@ -135,6 +139,19 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking.tests
 
+  BarkingUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - BarkingUITests
+    dependencies:
+      - target: Barking
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking.uitests
+        TEST_TARGET_NAME: Barking
+
 schemes:
   Barking:
     build:
@@ -144,3 +161,4 @@ schemes:
       config: Debug
       targets:
         - BarkingTests
+        - BarkingUITests

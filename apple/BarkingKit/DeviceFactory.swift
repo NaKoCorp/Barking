@@ -82,4 +82,14 @@ public enum DeviceFactory {
         for url in [try SharedPaths.database, try SharedPaths.lock] { try SharedPaths.protect(url) }
         return pending
     }
+
+    #if BARKING_DEV
+    /// UI tests: back to a fresh install (database, lock, key).
+    public static func resetForUITests() {
+        for url in [try? SharedPaths.database, try? SharedPaths.lock].compactMap({ $0 }) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        try? keyStore.delete()
+    }
+    #endif
 }

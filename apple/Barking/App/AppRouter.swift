@@ -20,6 +20,20 @@ final class AppRouter {
 
     /// The state at launch: the existing identity, else onboarding.
     static func boot() -> AppRouter {
+        #if BARKING_DEV
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("-BarkingUITestReset") {
+            DeviceFactory.resetForUITests()
+            for key in [OnboardingModel.confirmedKey, "barking.language", "barking.appearance"] {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        if let i = args.firstIndex(of: "-BarkingUITestOpenCard"), i + 1 < args.count {
+            let router = AppRouter(start: .onboarding)
+            router.pendingCardLink = args[i + 1]
+            return router
+        }
+        #endif
         if let device = try? DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs) {
             return AppRouter(start: .ready(CoreService(device: device, runner: AppCallRunner())))
         }
