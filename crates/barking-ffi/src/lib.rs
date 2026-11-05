@@ -10,7 +10,9 @@ mod net;
 
 use std::panic::{UnwindSafe, catch_unwind};
 
-pub use device::{Contact, CreatedDevice, Device, DeviceConfig, Message, device_exists};
+pub use device::{
+    Contact, CreatedDevice, Device, DeviceConfig, Message, create_device, device_exists,
+};
 pub use error::BarkingError;
 pub use net::{NewMessage, SyncSummary};
 

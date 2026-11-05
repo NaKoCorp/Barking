@@ -59,6 +59,16 @@ pub struct Device {
     key: [u8; 32],
 }
 
+/// New identity (`Device::create`). A free function: UniFFI constructors
+/// return the object itself, not a record.
+#[uniffi::export]
+pub fn create_device(
+    config: DeviceConfig,
+    device_name: String,
+) -> Result<CreatedDevice, BarkingError> {
+    Device::create(config, device_name)
+}
+
 /// A database file is present (whether its key is right or not).
 #[uniffi::export]
 pub fn device_exists(config: DeviceConfig) -> bool {
@@ -86,6 +96,34 @@ impl Device {
             Path::new(&self.config.lock_path),
             Duration::from_millis(self.config.lock_timeout_ms),
         )
+    }
+
+    /// New identity. An existing database is never touched: `InvalidInput`.
+    pub fn create(
+        config: DeviceConfig,
+        device_name: String,
+    ) -> Result<CreatedDevice, BarkingError> {
+        guard(move || {
+            let device = Device::new(config)?;
+            if device_exists(device.config.clone()) {
+                return Err(BarkingError::invalid("database already exists"));
+            }
+            let _lock = device.lock()?;
+            let (core, phrase) = Core::create(
+                &PathBuf::from(&device.config.db_path),
+                &device.key,
+                &device_name,
+                now(),
+                &mut rand::rng(),
+            )?;
+            drop(core);
+            let recovery_phrase = phrase.as_str().to_owned();
+            drop(_lock);
+            Ok(CreatedDevice {
+                device: Arc::new(device),
+                recovery_phrase,
+            })
+        })
     }
 
     pub(crate) fn allow_private(&self) -> bool {
@@ -119,35 +157,6 @@ impl Device {
             let device = Device::new(config)?;
             device.with_core(|_| Ok(()))?;
             Ok(Arc::new(device))
-        })
-    }
-
-    /// New identity. An existing database is never touched: `InvalidInput`.
-    #[uniffi::constructor]
-    pub fn create(
-        config: DeviceConfig,
-        device_name: String,
-    ) -> Result<CreatedDevice, BarkingError> {
-        guard(move || {
-            let device = Device::new(config)?;
-            if device_exists(device.config.clone()) {
-                return Err(BarkingError::invalid("database already exists"));
-            }
-            let _lock = device.lock()?;
-            let (core, phrase) = Core::create(
-                &PathBuf::from(&device.config.db_path),
-                &device.key,
-                &device_name,
-                now(),
-                &mut rand::rng(),
-            )?;
-            drop(core);
-            let recovery_phrase = phrase.as_str().to_owned();
-            drop(_lock);
-            Ok(CreatedDevice {
-                device: Arc::new(device),
-                recovery_phrase,
-            })
         })
     }
 
