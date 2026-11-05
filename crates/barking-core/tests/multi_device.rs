@@ -9,7 +9,7 @@ use barking_core::identity::device_list::MAX_DEVICES;
 use barking_core::packet::{Kind, Packet};
 use barking_core::store::{Direction, MessageStatus};
 use barking_core::transparency::{SyncKind, TransparencyEvent};
-use barking_core::{Core, CoreError, LinkRequest, ReceiveOutcome};
+use barking_core::{Core, CoreError, LeaveState, LinkRequest, ReceiveOutcome};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tempfile::TempDir;
@@ -2195,6 +2195,7 @@ fn linked_device_leaves() {
     let t_id = device_id(&a.core, "t");
     assert!(!t.core.leave_ready().unwrap());
     assert!(t.core.leave_packets(NOW).unwrap().is_empty());
+    assert_eq!(t.core.leave_state(NOW).unwrap(), LeaveState::NotQueued);
 
     let packets = t.core.leave(NOW, &mut rng).unwrap();
     assert_eq!(packets.len(), 1);
@@ -2202,8 +2203,9 @@ fn linked_device_leaves() {
     // The request still waiting in the outbox, for the app to check it left.
     assert_eq!(
         t.core.leave_packets(NOW).unwrap(),
-        vec![packets[0].encode()]
+        vec![(packets[0].id, packets[0].encode())]
     );
+    assert_eq!(t.core.leave_state(NOW).unwrap(), LeaveState::Waiting);
 
     let outcome = a
         .core
@@ -2235,11 +2237,37 @@ fn linked_device_leaves() {
     assert_eq!(card_updates_removing(&c.core, 1), 1);
     drain(&mut a, &mut t, &mut rng);
     assert!(t.core.removed().unwrap().is_some());
+    // The administrator's ack: the request has left for good.
+    assert_eq!(t.core.leave_state(NOW).unwrap(), LeaveState::Left);
 
     assert!(matches!(
         a.core.leave(NOW, &mut rng),
         Err(CoreError::IsAdmin)
     ));
+}
+
+/// A request never deposited expires with its packet: it is not "left",
+/// and leaving again queues a new one.
+#[test]
+fn expired_leave_request_is_not_left_and_can_be_queued_again() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(65);
+    let (_a, mut t, _c) = admin_tablet_contact(d.path(), &mut rng);
+    let first = t.core.leave(NOW, &mut rng).unwrap();
+    let later = NOW + 8 * 86_400;
+    // A sync purges the expired packet from the outbox.
+    assert!(t.core.pending_outbox(later).unwrap().is_empty());
+    assert!(t.core.leave_packets(later).unwrap().is_empty());
+    assert_eq!(t.core.leave_state(later).unwrap(), LeaveState::Expired);
+
+    let again = t.core.leave(later, &mut rng).unwrap();
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, first[0].id);
+    assert_eq!(t.core.leave_state(later).unwrap(), LeaveState::Waiting);
+    // A node accepted it (reported by the transport): left.
+    t.core.mark_leave_left(&[again[0].id]).unwrap();
+    assert_eq!(t.core.leave_state(later).unwrap(), LeaveState::Left);
+    assert!(t.core.leave_packets(later).unwrap().is_empty());
 }
 
 #[test]
@@ -2257,6 +2285,7 @@ fn admin_transfer_and_leave() {
     assert!(admins(&a.core).iter().all(|n| n == "t"));
     assert!(a.core.leave_ready().unwrap());
     assert_eq!(a.core.leave_packets(NOW).unwrap().len(), 1);
+    assert_eq!(a.core.leave_state(NOW).unwrap(), LeaveState::Waiting);
     // T, now administrator, removes A.
     assert_eq!(
         sync_round(&mut a, &mut t, &mut rng),
@@ -2288,6 +2317,7 @@ fn transfer_and_leave_keeps_root_when_transfer_expires() {
     assert_eq!(admins(&a.core), vec!["a".to_owned()]);
     assert!(!a.core.leave_ready().unwrap());
     assert!(a.core.leave_packets(later).unwrap().is_empty());
+    assert_eq!(a.core.leave_state(later).unwrap(), LeaveState::NotQueued);
     assert_eq!(a.core.my_devices().len(), 2);
 
     // The leave died with the transfer: a later plain transfer stays one.

@@ -2,7 +2,7 @@
 
 mod common;
 
-use barking_ffi::{BarkingError, Device, bip39_words, recover_device};
+use barking_ffi::{BarkingError, Device, LeaveState, bip39_words, recover_device};
 use common::{config, device};
 
 #[test]
@@ -215,13 +215,14 @@ async fn linked_device_leaves_via_ffi() {
     tokio::task::spawn_blocking(move || {
         let (a, t, _) = linked_pair(&da, &dt, &id, &addr);
         assert!(!t.leave_ready().unwrap());
-        assert!(!t.leave_sent().unwrap());
+        assert_eq!(t.leave_state().unwrap(), LeaveState::NotQueued);
         t.leave().unwrap();
         assert!(t.leave_ready().unwrap());
         // Queued, not yet deposited: no wipe yet.
-        assert!(!t.leave_sent().unwrap());
+        assert_eq!(t.leave_state().unwrap(), LeaveState::Waiting);
         t.sync(30_000).unwrap();
-        assert!(t.leave_sent().unwrap());
+        // The sync recorded the deposit: left, even once acked and gone.
+        assert_eq!(t.leave_state().unwrap(), LeaveState::Left);
         sync_until(&t, &a, || a.my_devices().unwrap().len() == 1);
         assert_eq!(a.my_devices().unwrap().len(), 1);
     })
@@ -245,10 +246,10 @@ async fn admin_transfers_and_leaves_via_ffi() {
         a.transfer_and_leave(t_id.clone()).unwrap();
         assert_eq!(a.admin_transfer_pending().unwrap(), Some(t_id));
         assert!(!a.leave_ready().unwrap());
-        assert!(!a.leave_sent().unwrap());
-        sync_until(&a, &t, || a.leave_sent().unwrap());
+        assert_eq!(a.leave_state().unwrap(), LeaveState::NotQueued);
+        sync_until(&a, &t, || a.leave_state().unwrap() == LeaveState::Left);
         assert!(a.leave_ready().unwrap());
-        assert!(a.leave_sent().unwrap());
+        assert_eq!(a.leave_state().unwrap(), LeaveState::Left);
         // The `RemoveMe` queued at the ack reaches the new administrator.
         sync_until(&a, &t, || t.my_devices().unwrap().len() == 1);
         let left = t.my_devices().unwrap();

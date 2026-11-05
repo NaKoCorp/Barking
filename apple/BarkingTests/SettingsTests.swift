@@ -209,6 +209,53 @@ final class DevicesModelTests: XCTestCase {
         XCTAssertEqual(m.departure, .wiped)
     }
 
+    /// The request expired before any node took it: never counted as sent,
+    /// a new one is queued, and the wipe waits for that one.
+    func testExpiredRequestIsQueuedAgainBeforeTheWipe() async {
+        let d = FakeDevice()
+        d.devicesList = [linkedMe]
+        d.leaveReadyValue = true
+        d.leaveExpired = true
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        XCTAssertEqual(d.leaveCalls, 1)
+        XCTAssertEqual(wipes.count, 1)
+        XCTAssertEqual(m.departure, .wiped)
+    }
+
+    /// Expired, and the new request cannot leave either: nothing erased.
+    func testExpiredRequestThatCannotLeaveErasesNothing() async {
+        let d = FakeDevice()
+        d.devicesList = [linkedMe]
+        d.leaveReadyValue = true
+        d.leaveExpired = true
+        d.depositFails = true
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        XCTAssertEqual(wipes.count, 0)
+        XCTAssertEqual(m.departure, .notSent)
+    }
+
+    /// The root moved at the ack but no request could be sealed then: this
+    /// device is no longer admin, so it asks to be removed itself.
+    func testHandOverWithoutRequestLeavesAsALinkedDevice() async {
+        let d = FakeDevice()
+        d.devicesList = [me, tablet]
+        let wipes = WipeRecorder()
+        let m = model(d, wipes: wipes)
+        await m.load()
+        await m.handOver(to: tablet)
+        d.transferExpired = true
+        d.devicesList = [MyDeviceInfo(id: "a", name: "iPhone", issuedAt: 1, thisDevice: true, admin: false),
+                         MyDeviceInfo(id: "t", name: "iPad", issuedAt: 2, thisDevice: false, admin: true)]
+        await m.pollHandover()
+        XCTAssertEqual(d.leaveCalls, 1)
+        XCTAssertEqual(m.departure, .wiped)
+        XCTAssertEqual(wipes.count, 1)
+    }
+
     /// A wipe that fails is shown, never the welcome screen; retrying works.
     func testWipeFailureIsShownAndRetried() async {
         let d = FakeDevice()

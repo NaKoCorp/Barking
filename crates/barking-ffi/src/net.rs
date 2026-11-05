@@ -36,6 +36,56 @@ pub struct NewMessage {
     pub text: String,
 }
 
+/// Where the request to be removed stands (`Device::leave_state`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum LeaveState {
+    /// No request queued.
+    NotQueued,
+    /// Queued, not every copy accepted by a node yet.
+    Waiting,
+    /// Every copy accepted by a node (or acked): the app may wipe.
+    Left,
+    /// A copy expired before any node accepted it: call `leave` again.
+    Expired,
+}
+
+impl From<barking_core::LeaveState> for LeaveState {
+    fn from(s: barking_core::LeaveState) -> Self {
+        match s {
+            barking_core::LeaveState::NotQueued => LeaveState::NotQueued,
+            barking_core::LeaveState::Waiting => LeaveState::Waiting,
+            barking_core::LeaveState::Left => LeaveState::Left,
+            barking_core::LeaveState::Expired => LeaveState::Expired,
+        }
+    }
+}
+
+/// Records in the core the copies of the request to be removed that a node
+/// accepted (the deposit ledger), before the ledger forgets them (ack,
+/// expiry): an expired copy is then told apart from one that left.
+fn note_leave_deposits(core: &mut Core, now: u64, allow_private: bool) -> Result<(), BarkingError> {
+    let waiting = core.leave_packets(now)?;
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let (state, _) =
+        NetState::load_checked(core, now, allow_private).map_err(BarkingError::storage)?;
+    let left: Vec<_> = waiting
+        .into_iter()
+        .filter(|(_, bytes)| {
+            !state
+                .ledger
+                .holders(&barking_proto::pow::content_hash(bytes))
+                .is_empty()
+        })
+        .map(|(id, _)| id)
+        .collect();
+    if !left.is_empty() {
+        core.mark_leave_left(&left)?;
+    }
+    Ok(())
+}
+
 /// Time a runtime is given to close once the sync has returned.
 const SHUTDOWN: Duration = Duration::from_secs(1);
 
@@ -151,25 +201,16 @@ impl Device {
         })
     }
 
-    /// The request to be removed (`leave`, `transfer_and_leave`) is queued
-    /// and every copy still in the outbox was accepted by a node: the app
-    /// may wipe now. `leave_ready` alone only says it was queued.
-    pub fn leave_sent(&self) -> Result<bool, BarkingError> {
+    /// Where the request to be removed (`leave`, `transfer_and_leave`)
+    /// stands: the app wipes on `Left` only, and calls `leave` again on
+    /// `Expired`.
+    pub fn leave_state(&self) -> Result<LeaveState, BarkingError> {
         guard(|| {
             let allow_private = self.allow_private();
             self.with_core(|core| {
-                if !core.leave_ready()? {
-                    return Ok(false);
-                }
                 let t = now();
-                let (state, _) = NetState::load_checked(core, t, allow_private)
-                    .map_err(BarkingError::storage)?;
-                Ok(core.leave_packets(t)?.iter().all(|bytes| {
-                    !state
-                        .ledger
-                        .holders(&barking_proto::pow::content_hash(bytes))
-                        .is_empty()
-                }))
+                note_leave_deposits(core, t, allow_private)?;
+                Ok(core.leave_state(t)?.into())
             })
         })
     }
@@ -203,6 +244,7 @@ impl Device {
     /// Full sync, for at most `deadline_ms`.
     pub fn sync(&self, deadline_ms: u64) -> Result<SyncSummary, BarkingError> {
         guard(|| {
+            let opts_private = self.allow_private();
             let opts = SyncOptions {
                 deadline: Duration::from_millis(deadline_ms),
                 allow_private: self.allow_private(),
@@ -210,6 +252,7 @@ impl Device {
             };
             self.with_core(|core| {
                 let report = block_on(barking_net::sync(core, &QuicDialer, opts))?;
+                note_leave_deposits(core, now(), opts_private)?;
                 Ok(summary(core, report))
             })
         })
@@ -218,6 +261,7 @@ impl Device {
     /// Quick sync of the notification extension, for at most `deadline_ms`.
     pub fn quick_sync(&self, deadline_ms: u64) -> Result<SyncSummary, BarkingError> {
         guard(|| {
+            let opts_private = self.allow_private();
             let opts = QuickOptions {
                 deadline: Duration::from_millis(deadline_ms),
                 allow_private: self.allow_private(),
@@ -225,6 +269,7 @@ impl Device {
             };
             self.with_core(|core| {
                 let report = block_on(barking_net::quick_sync(core, &QuicDialer, opts))?;
+                note_leave_deposits(core, now(), opts_private)?;
                 Ok(summary(core, report))
             })
         })

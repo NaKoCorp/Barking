@@ -246,36 +246,69 @@ final class DevicesModel {
     func pollHandover() async {
         guard case .handingOver(let name) = departure else { return }
         _ = await core.sync(reason: .timer)
+        let ready: Bool, pending: String?, stillAdmin: Bool
         do {
-            if try await core.leaveReady() {
+            ready = try await core.leaveReady()
+            pending = ready ? nil : try await core.adminTransferPending()
+            stillAdmin = ready || pending != nil
+                ? true : try await core.myDevices().contains { $0.thisDevice && $0.admin }
+        } catch {
+            return
+        }
+        if ready {
+            departure = .sending
+            await finishLeaving()
+        } else if pending != nil {
+            return
+        } else if stillAdmin {
+            // The transfer expired: the root never left this device.
+            departure = .handoverFailed(name: name)
+            await load()
+        } else {
+            // The root moved, but no request could be sealed at the ack: ask
+            // to be removed as any linked device does.
+            do {
+                try await core.leave()
                 departure = .sending
                 await finishLeaving()
-            } else if try await core.adminTransferPending() == nil {
-                departure = .handoverFailed(name: name)
-                await load()
+            } catch {
+                departure = .failed
             }
-        } catch {
-            // Still handing over.
         }
     }
 
-    /// Sends the queued request to be removed, then wipes once a node holds
-    /// every copy (`leaveSent`). A sync's outcome is not enough: one already
-    /// in flight may have started before the request was queued. Until then
-    /// nothing is erased and the user tries again.
+    /// Sends the queued request to be removed, then wipes once every copy
+    /// has left (`.left`: a node accepted it, or it was acked). A sync's
+    /// outcome is not enough: one already in flight may have started before
+    /// the request was queued. A request that expired before leaving is
+    /// queued again. Until it has left nothing is erased; the user retries.
     func finishLeaving() async {
         guard departure == .sending || departure == .notSent else { return }
         departure = .sending
-        _ = await core.sync(reason: .afterSend)
-        if (try? await core.leaveSent()) != true {
+        var state = await syncedLeaveState()
+        if state == .waiting {
             // The sync answered may have been one already in flight: once more.
-            _ = await core.sync(reason: .afterSend)
+            state = await syncedLeaveState()
         }
-        guard (try? await core.leaveSent()) == true else {
+        if state == .expired {
+            do {
+                try await core.leave()
+            } catch {
+                departure = .notSent
+                return
+            }
+            state = await syncedLeaveState()
+        }
+        guard state == .left else {
             departure = .notSent
             return
         }
         await finish()
+    }
+
+    private func syncedLeaveState() async -> LeaveState {
+        _ = await core.sync(reason: .afterSend)
+        return (try? await core.leaveState()) ?? .waiting
     }
 
     /// The wipe failed: the service is closed already, only the wipe is left.

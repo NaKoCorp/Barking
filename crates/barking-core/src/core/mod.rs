@@ -57,6 +57,7 @@ pub use link::{
     MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES,
 };
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
+pub use remove::LeaveState;
 pub use removed::Removed;
 
 use log_limit::LogLimiter;

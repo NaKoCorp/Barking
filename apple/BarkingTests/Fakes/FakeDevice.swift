@@ -59,7 +59,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func keyChanges(since: UInt64) throws -> [KeyChange] { keyChangeList }
     func sync(deadlineMs: UInt64) throws -> SyncSummary {
         // A sync deposits what was queued when it started.
-        let queued = lock.withLock { _syncCalls += 1; return _leaveReady }
+        let queued = lock.withLock { _syncCalls += 1; return _leaveReady && !_leaveExpired }
         Thread.sleep(forTimeInterval: syncDelay)
         if queued, summary.networkUp, !depositFails { lock.withLock { _leaveDeposited = true } }
         return summary
@@ -86,7 +86,14 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func removeDevice(deviceId: String) throws { lock.withLock { _removedIds.append(deviceId) } }
     private var _leaveCalls = 0
     var leaveCalls: Int { lock.withLock { _leaveCalls } }
-    func leave() throws { lock.withLock { _leaveCalls += 1; _leaveReady = true } }
+    func leave() throws {
+        lock.withLock {
+            _leaveCalls += 1
+            _leaveReady = true
+            _leaveExpired = false
+            _leaveDeposited = false
+        }
+    }
     private var _leavingTo: [String] = []
     var leavingTo: [String] { lock.withLock { _leavingTo } }
     func transferAndLeave(deviceId: String) throws {
@@ -107,7 +114,19 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _leaveDeposited = false
     /// Nodes refuse the deposits (the network is up).
     var depositFails = false
-    func leaveSent() throws -> Bool { lock.withLock { _leaveReady && _leaveDeposited } }
+    private var _leaveExpired = false
+    /// The queued request expired before any node took it.
+    var leaveExpired: Bool {
+        get { lock.withLock { _leaveExpired } }
+        set { lock.withLock { _leaveExpired = newValue } }
+    }
+    func leaveState() throws -> LeaveState {
+        lock.withLock {
+            if !_leaveReady { return .notQueued }
+            if _leaveDeposited { return .left }
+            return _leaveExpired ? .expired : .waiting
+        }
+    }
     /// Thrown by `leaveReady` and `adminTransferPending` (lock held elsewhere).
     var readError: Error?
     /// The root key transfer expired without its ack.

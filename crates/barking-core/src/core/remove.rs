@@ -30,8 +30,39 @@ use crate::{CoreError, Result};
 
 /// `RemoveMe` was queued on this device: it may be wiped.
 const META_LEAVE_SENT: &str = "leave_sent";
-/// Packet identifiers of the queued `RemoveMe` (`leave_packets`).
-const META_LEAVE_PACKETS: &str = "leave_packets";
+/// The latest request to be removed: each `RemoveMe` packet identifier,
+/// with `true` once it has left (a node accepted it, or it was acked).
+const META_LEAVE_REQUESTS: &str = "leave_requests";
+
+/// Where the request to be removed stands (`Core::leave_state`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaveState {
+    /// No request queued.
+    NotQueued,
+    /// Queued, some copy has not left yet.
+    Waiting,
+    /// Every copy left (accepted by a node, or acked): the app may wipe.
+    Left,
+    /// A copy expired before leaving: `leave` queues a new request.
+    Expired,
+}
+
+/// Records that the request copy `id` has left (accepted or acked).
+/// Unknown identifiers are ignored.
+pub(super) fn note_left(q: &impl Queries, ids: &[PacketId]) -> Result<()> {
+    let mut requests: Vec<([u8; 16], bool)> = q.get_meta(META_LEAVE_REQUESTS)?.unwrap_or_default();
+    let mut changed = false;
+    for (id, left) in &mut requests {
+        if !*left && ids.iter().any(|p| p.0 == *id) {
+            *left = true;
+            changed = true;
+        }
+    }
+    if changed {
+        q.put_meta(META_LEAVE_REQUESTS, &requests)?;
+    }
+    Ok(())
+}
 
 /// A removal checked by [`plan`], not yet written.
 pub(super) struct Plan {
@@ -230,9 +261,9 @@ pub(super) fn send_remove_me(
     }
     if !sealed.is_empty() {
         q.put_meta(META_LEAVE_SENT, &true)?;
-        let mut ids: Vec<[u8; 16]> = q.get_meta(META_LEAVE_PACKETS)?.unwrap_or_default();
-        ids.extend(sealed.iter().map(|(p, _)| p.id.0));
-        q.put_meta(META_LEAVE_PACKETS, &ids)?;
+        // A new request replaces the previous one (expired, or superseded).
+        let requests: Vec<([u8; 16], bool)> = sealed.iter().map(|(p, _)| (p.id.0, false)).collect();
+        q.put_meta(META_LEAVE_REQUESTS, &requests)?;
     }
     Ok(sealed.into_iter().map(|(p, _)| p).collect())
 }
@@ -290,23 +321,64 @@ impl Core {
         })
     }
 
-    /// The queued `RemoveMe` packets still in the outbox (encoded), not yet
-    /// acknowledged nor expired: the app wipes only once the transport has
-    /// deposited them (`leave_ready` alone says they were queued).
-    pub fn leave_packets(&self, now: u64) -> Result<Vec<Vec<u8>>> {
-        let ids: Vec<[u8; 16]> = self.store.get_meta(META_LEAVE_PACKETS)?.unwrap_or_default();
+    /// The copies of the request to be removed that have not left yet and
+    /// are still in the outbox (unexpired): the transport checks whether a
+    /// node accepted them (`mark_leave_left`).
+    pub fn leave_packets(&self, now: u64) -> Result<Vec<(PacketId, Vec<u8>)>> {
+        let waiting: Vec<[u8; 16]> = self
+            .leave_requests()?
+            .into_iter()
+            .filter(|(_, left)| !left)
+            .map(|(id, _)| id)
+            .collect();
         Ok(self
             .store
             .outbox_pending(now)?
             .into_iter()
-            .filter(|(id, _)| ids.contains(&id.0))
-            .map(|(_, bytes)| bytes)
+            .filter(|(id, _)| waiting.contains(&id.0))
             .collect())
+    }
+
+    /// A node accepted these copies of the request to be removed.
+    pub fn mark_leave_left(&mut self, ids: &[PacketId]) -> Result<()> {
+        self.store.transaction(|tx| note_left(tx, ids))
+    }
+
+    /// Where the request to be removed stands. A copy neither left nor in
+    /// the outbox expired without ever leaving: `Expired`, never `Left`.
+    pub fn leave_state(&self, now: u64) -> Result<LeaveState> {
+        let requests = self.leave_requests()?;
+        if requests.is_empty() {
+            return Ok(LeaveState::NotQueued);
+        }
+        if requests.iter().all(|(_, left)| *left) {
+            return Ok(LeaveState::Left);
+        }
+        let queued: Vec<[u8; 16]> = self
+            .store
+            .outbox_pending(now)?
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect();
+        if requests
+            .iter()
+            .any(|(id, left)| !left && !queued.contains(id))
+        {
+            return Ok(LeaveState::Expired);
+        }
+        Ok(LeaveState::Waiting)
+    }
+
+    fn leave_requests(&self) -> Result<Vec<([u8; 16], bool)>> {
+        Ok(self
+            .store
+            .get_meta(META_LEAVE_REQUESTS)?
+            .unwrap_or_default())
     }
 
     /// `RemoveMe` is queued (`leave`, or `transfer_and_leave` after the
     /// transfer's ack): the app may wipe this device once it has left
-    /// (`leave_packets`).
+    /// (`leave_state`).
     pub fn leave_ready(&self) -> Result<bool> {
         Ok(self
             .store

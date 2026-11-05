@@ -143,6 +143,8 @@ impl Core {
             // contact's device counts.
             tx.mark_delivered_by_packet(acked)?;
             tx.outbox_remove(acked)?;
+            // An acked request to be removed has left, whatever the transport saw.
+            super::remove::note_left(tx, &[acked])?;
             log(
                 tx,
                 now,

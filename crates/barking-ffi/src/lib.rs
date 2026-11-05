@@ -22,7 +22,7 @@ pub use error::{BarkingError, LinkReason};
 pub use identity::{MyDeviceInfo, RemovedInfo, bip39_words, recover_device};
 pub use link::{PendingLink, begin_link, inspect_link_request};
 pub use messages::{ChatSummary, KeyChange, UnreadCount};
-pub use net::{NewMessage, NodeInfo, SyncSummary};
+pub use net::{LeaveState, NewMessage, NodeInfo, SyncSummary};
 
 uniffi::setup_scaffolding!();
 
