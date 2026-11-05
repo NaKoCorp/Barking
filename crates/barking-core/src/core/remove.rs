@@ -19,6 +19,7 @@ use rand_core::CryptoRng;
 use super::link::{META_OWN_CARD, rebuild_card};
 use super::send::{SealTime, Target, seal_for};
 use super::{Core, META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, admin, log, sync};
+use crate::contact::ContactCard;
 use crate::envelope::{self, Body};
 use crate::handshake::{PrekeyBundle, PrekeySecrets};
 use crate::identity::{DeviceId, DeviceKeys, DeviceList, RootIdentity};
@@ -30,7 +31,17 @@ use crate::{CoreError, Result};
 /// `RemoveMe` was queued on this device: it may be wiped.
 const META_LEAVE_SENT: &str = "leave_sent";
 
-/// A removal written by [`remove_in`].
+/// A removal checked by [`plan`], not yet written.
+pub(super) struct Plan {
+    target: DeviceId,
+    /// Name of the removed device.
+    name: String,
+    devices: DeviceList,
+    linked: Vec<PrekeyBundle>,
+    card: ContactCard,
+}
+
+/// A removal written by [`write`].
 pub(super) struct Removal {
     /// `SyncDevices` for my devices (the removed one included), then
     /// `CardUpdate` for my contacts.
@@ -42,21 +53,19 @@ pub(super) struct Removal {
     pub name: String,
 }
 
-/// Removes `target` from my list, in the caller's transaction, on the
-/// administrator (`root`; `my_bundle`: this device's key packet). Every
-/// refusal precedes the first write: a pending admin transfer
+/// Validation step of removing `target` from my list, on the administrator
+/// (`root`; `my_bundle`: this device's key packet): writes nothing. Its
+/// errors other than storage ones are refusals: a pending admin transfer
 /// (`AdminTransferPending`), this device or a device not in my list
-/// (`Malformed`). Logs `DeviceRemoved`.
-pub(super) fn remove_in(
+/// (`Malformed`), a version overflow or a card too large (`TooLarge`).
+pub(super) fn plan(
     q: &impl Queries,
     me: &DeviceKeys,
     my_bundle: PrekeyBundle,
     root: &RootIdentity,
     target: DeviceId,
     now: u64,
-    rng: &mut impl CryptoRng,
-) -> Result<Removal> {
-    admin::purge_expired(q, now)?;
+) -> Result<Plan> {
     admin::ensure_none_pending(q, now)?;
     let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
     if target == me.public().id() {
@@ -90,7 +99,34 @@ pub(super) fn remove_in(
     if !envelope::fits_in_packet(&Body::CardUpdate(Box::new(card.clone()))) {
         return Err(CoreError::TooLarge);
     }
+    Ok(Plan {
+        target,
+        name,
+        devices,
+        linked,
+        card,
+    })
+}
 
+/// Write step of a removal checked by [`plan`], in the caller's
+/// transaction: `SyncDevices` to my devices (the removed one included),
+/// the new list stored, the removed device's sessions purged,
+/// `DeviceRemoved` logged, `CardUpdate` to my contacts. Any error is a
+/// failure that must abort the transaction, never a refusal.
+pub(super) fn write(
+    q: &impl Queries,
+    me: &DeviceKeys,
+    plan: Plan,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Removal> {
+    let Plan {
+        target,
+        name,
+        devices,
+        linked,
+        card,
+    } = plan;
     // Sealed before writing the new list: the stored one still lists the
     // removed device, which thus gets it too.
     let mut id = [0u8; 16];
@@ -132,8 +168,9 @@ pub(super) fn remove_in(
 /// `RemoveMe` from `sender`, one of my listed devices, received in the
 /// transaction `q`. On the administrator (`admin`: my root and key-packet
 /// secrets), removes it and logs `RemoveRequested`: `true`. Elsewhere, or
-/// when the removal is refused (a pending admin transfer), nothing: the
-/// caller acks it without effect, `false`.
+/// when [`plan`] refuses the removal (a pending admin transfer), nothing:
+/// the caller acks it without effect, `false`. Storage errors and any
+/// failure of the write step propagate, aborting the receive transaction.
 pub(super) fn on_remove_me(
     q: &impl Queries,
     device: &DeviceKeys,
@@ -146,19 +183,12 @@ pub(super) fn on_remove_me(
     let Some((root, prekeys)) = admin else {
         return Ok(false);
     };
-    let removal = match remove_in(
-        q,
-        device,
-        prekeys.bundle(device, false),
-        root,
-        sender,
-        now,
-        rng,
-    ) {
-        Ok(removal) => removal,
+    let plan = match plan(q, device, prekeys.bundle(device, false), root, sender, now) {
+        Ok(plan) => plan,
         Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => return Err(e),
         Err(_) => return Ok(false),
     };
+    let removal = write(q, device, plan, now, rng)?;
     log(
         q,
         now,
@@ -226,8 +256,10 @@ impl Core {
         } = self;
         let root = root.as_ref().ok_or(CoreError::NotAdmin)?;
         let my_bundle = prekeys.bundle(me, false);
-        let removal =
-            store.transaction(|tx| remove_in(tx, me, my_bundle, root, device, now, rng))?;
+        let removal = store.transaction(|tx| {
+            let plan = plan(tx, me, my_bundle, root, device, now)?;
+            write(tx, me, plan, now, rng)
+        })?;
         self.devices = removal.devices;
         self.linked_bundles = removal.linked;
         Ok(removal.packets)

@@ -2569,3 +2569,44 @@ fn card_update_relays_to_revoked() {
     );
     assert!(t.removed().unwrap().is_some());
 }
+
+/// A failure in the write step of a removal requested by `RemoveMe` is never
+/// swallowed: the receive fails and its transaction rolls back whole.
+#[test]
+fn remove_me_write_failure_aborts_receive() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    // A session A -> T first (the `SyncSent` copy): T's `RemoveMe` then
+    // needs no sender lookup among the contacts.
+    for p in a.send_text(&b.fingerprint(), "hi", NOW, &mut rng).unwrap() {
+        t.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    }
+    let packets = t.leave(NOW, &mut rng).unwrap();
+    assert_eq!(packets.len(), 1);
+    // B's stored card unreadable: `CardUpdate`, sealed last, fails.
+    a.store
+        .conn()
+        .execute(
+            "UPDATE contacts SET card = ?1 WHERE fp = ?2",
+            rusqlite::params![&[0xff_u8; 9][..], &b.fingerprint().0[..]],
+        )
+        .unwrap();
+    let before = a.store.get_meta::<DeviceList>(META_DEVICE_LIST).unwrap();
+    assert!(a.receive(&packets[0].encode(), "t", NOW, &mut rng).is_err());
+    assert_eq!(
+        a.store.get_meta::<DeviceList>(META_DEVICE_LIST).unwrap(),
+        before
+    );
+    assert_eq!(a.my_devices().len(), 2);
+    let removed = a
+        .transparency_log(10_000)
+        .unwrap()
+        .into_iter()
+        .any(|(_, e)| {
+            matches!(
+                e,
+                crate::transparency::TransparencyEvent::DeviceRemoved { .. }
+                    | crate::transparency::TransparencyEvent::RemoveRequested { .. }
+            )
+        });
+    assert!(!removed);
+}
