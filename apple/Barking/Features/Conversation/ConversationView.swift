@@ -125,10 +125,3 @@ struct ComposerView: View {
         .overlay(alignment: .top) { Rectangle().fill(Color.border).frame(height: 1) }
     }
 }
-
-/// Replaced by the safety code screen (Task 10).
-struct SafetyCodeView: View {
-    let core: CoreService
-    let contact: String
-    var body: some View { Text(verbatim: contact) }
-}
