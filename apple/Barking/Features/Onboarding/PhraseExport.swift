@@ -13,6 +13,17 @@ enum PhraseExport {
 
     enum ExportError: Error { case render, write }
 
+    enum PasswordField { case password, confirm }
+
+    /// Whether Return in `field` is a refusal (the error haptic, U-25). On
+    /// the password, only what the gate refuses about the password itself:
+    /// a strong one whose copy is not typed yet is not refused. On the
+    /// copy, any problem. Nothing while the password is empty.
+    static func refusesOnSubmit(_ field: PasswordField, password: String, confirm: String) -> Bool {
+        guard !password.isEmpty, let p = problem(password, confirm) else { return false }
+        return field == .confirm || p != .mismatch
+    }
+
     static func problem(_ password: String, _ confirm: String) -> PasswordProblem? {
         if password.count < minPasswordLength { return .tooShort }
         if strength(password) < 3 { return .tooWeak }

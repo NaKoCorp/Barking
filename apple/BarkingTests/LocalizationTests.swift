@@ -128,6 +128,8 @@ final class LocalizationTests: XCTestCase {
                     "The history is kept.", "Asks for confirmation first."] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
+        // Review B3 #10: a section label, not a command.
+        XCTAssertEqual(fr["Verify"] as? String, "Vérification")
         XCTAssertEqual(fr["Don't send anything sensitive yet. Compare again in person or on a call you trust."] as? String,
                        "N’envoyez encore rien de sensible. Comparez à nouveau en personne ou lors d’un appel de confiance.")
         // The mismatch is a sheet now, and the verified banner has no Undo.

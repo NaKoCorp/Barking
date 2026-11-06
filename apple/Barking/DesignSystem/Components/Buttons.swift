@@ -33,6 +33,25 @@ struct ButtonTokens: Equatable {
     }
 }
 
+/// What a press draws. Under the outlined `danger` label no tint is laid:
+/// `danger` on a `danger` tint falls below 4.5:1 on Paper, so the outline
+/// thickens instead (as the hold does).
+enum PressedLook: Equatable {
+    case darken
+    case tint(String, Double)
+    case thickerOutline(CGFloat)
+}
+
+extension ButtonTokens {
+    static func pressed(_ kind: ButtonKind) -> PressedLook {
+        switch kind {
+        case .primary: .darken
+        case .secondary: .tint("wash", 0.6)
+        case .danger: .thickerOutline(2)
+        }
+    }
+}
+
 private extension Color {
     init(token: String) { self = token == "white" ? .white : Color(token) }
 }
@@ -54,19 +73,24 @@ struct BarkingButtonStyle: ButtonStyle {
             .padding(.vertical, Space.s2)
             .frame(maxWidth: .infinity, minHeight: 52)
             .background(t.fill.map { Color(token: $0) } ?? Color.clear)
-            // Pressed: purple-d on the fill; under an outline, a tint of the
-            // outline's own colour (danger stays danger, never purple).
+            // Pressed: purple-d on the fill, `wash` under the neutral outline,
+            // a heavier `danger` outline (never a tint under its label).
             .overlay {
                 if configuration.isPressed {
-                    switch (kind, t.fill) {
-                    case (_, .some): Color.black.opacity(0.14)
-                    case (.danger, nil): Color.danger.opacity(0.10)
-                    default: Color.wash.opacity(0.6)
+                    switch ButtonTokens.pressed(kind) {
+                    case .darken: Color.black.opacity(0.14)
+                    case .tint(let token, let opacity): Color(token: token).opacity(opacity)
+                    case .thickerOutline: Color.clear
                     }
                 }
             }
             .clipShape(shape)
-            .overlay { if let b = t.border { shape.strokeBorder(Color(token: b), lineWidth: 1) } }
+            .overlay {
+                if let b = t.border {
+                    let width: CGFloat = if configuration.isPressed, case .thickerOutline(let w) = ButtonTokens.pressed(kind) { w } else { 1 }
+                    shape.strokeBorder(Color(token: b), lineWidth: width)
+                }
+            }
             .contentShape(shape)
     }
 }
@@ -227,6 +251,7 @@ struct HoldToConfirmButton: View {
     @State private var pressedAt: Date?
     @State private var completed = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
 
     init(_ title: LocalizedStringKey, duration: Duration = .seconds(2), hint: LocalizedStringKey,
          identifier: String? = nil, onConfirmed: @escaping () -> Void) {
@@ -265,6 +290,10 @@ struct HoldToConfirmButton: View {
             }
         }
         .sensoryFeedback(Haptic.holdCompleted.feedback, trigger: completed)
+        // A touch the system cancels without telling the gesture (a call, a
+        // Face ID sheet, the app leaving) must not leave a sweep drawn.
+        .onChange(of: scenePhase) { _, phase in if phase != .active { pressedAt = nil } }
+        .onDisappear { pressedAt = nil }
     }
 }
 

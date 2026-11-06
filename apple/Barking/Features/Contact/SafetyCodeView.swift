@@ -81,6 +81,8 @@ struct SafetyCodeView: View {
         .sheet(isPresented: $showsMismatch) { MismatchSheet() }
     }
 
+    private func feelFailure() { if model.saveFailed { Haptic.error.play() } }
+
     /// The numbers, the fingerprint, and what the person found.
     private var verifySection: some View {
         VStack(alignment: .leading, spacing: Space.s3) {
@@ -95,6 +97,10 @@ struct SafetyCodeView: View {
             Text("The same code shows on all your linked devices: verifying here is enough.")
                 .font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(Color.fgSoft)
                 .fixedSize(horizontal: false, vertical: true)
+            // The core did not record the mark (or its removal): never silent.
+            if model.saveFailed {
+                Banner(kind: .danger, title: "Not saved. Try again.")
+            }
             if model.justVerified {
                 HStack(spacing: Space.s2) {
                     Text(verbatim: "✓").font(.bSymbol(15, relativeTo: .subheadline, weight: .bold))
@@ -108,12 +114,14 @@ struct SafetyCodeView: View {
                 .accessibilityElement(children: .combine)
             } else if model.verified {
                 Text("✓ verified · safety code matched").font(.bBody).foregroundStyle(Color.ok)
-                SecondaryButton("Remove the verified mark") { Task { await model.undo() } }
+                SecondaryButton("Remove the verified mark") { Task { await model.undo(); feelFailure() } }
             } else {
                 if model.mismatched {
-                    Banner(kind: .danger, title: "The numbers do not match")
+                    // The advice stays once the sheet is closed.
+                    Banner(kind: .danger, title: "The numbers do not match",
+                           message: "Don't send anything sensitive yet. Compare again in person or on a call you trust.")
                 }
-                PrimaryButton("The numbers match") { Task { await model.match() } }
+                PrimaryButton("The numbers match") { Task { await model.match(); feelFailure() } }
                 SecondaryButton("They don't match") {
                     model.mismatch()
                     showsMismatch = true

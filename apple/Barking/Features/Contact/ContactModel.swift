@@ -13,6 +13,8 @@ final class ContactModel {
     private(set) var verified = false
     private(set) var justVerified = false
     private(set) var mismatched = false
+    /// The core did not record the last mark or unmark: the screen says so.
+    private(set) var saveFailed = false
     /// The contact's devices, from its card.
     private(set) var devices: [MyDeviceInfo] = []
 
@@ -35,14 +37,16 @@ final class ContactModel {
     }
 
     func match() async {
-        guard (try? await core.markVerified(contact)) != nil else { return }
+        guard (try? await core.markVerified(contact)) != nil else { saveFailed = true; return }
+        saveFailed = false
         verified = true
         justVerified = true
         mismatched = false
     }
 
     func undo() async {
-        guard (try? await core.unmarkVerified(contact)) != nil else { return }
+        guard (try? await core.unmarkVerified(contact)) != nil else { saveFailed = true; return }
+        saveFailed = false
         verified = false
         justVerified = false
     }

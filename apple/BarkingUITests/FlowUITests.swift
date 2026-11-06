@@ -260,6 +260,9 @@ final class SecurityUITests: XCTestCase {
         XCTAssertTrue(erase.waitForExistence(timeout: 5))
         erase.tap()
         XCTAssertFalse(app.buttons["Erase"].waitForExistence(timeout: 1))
+        // Half the hold is not enough either: the threshold is 2 s.
+        erase.press(forDuration: 1.0)
+        XCTAssertFalse(app.buttons["Erase"].waitForExistence(timeout: 1))
         erase.press(forDuration: 2.1)
         XCTAssertTrue(app.buttons["Erase"].waitForExistence(timeout: 3))
     }
@@ -389,7 +392,10 @@ final class SafetyCodeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Don't send anything sensitive yet. Compare again in person or on a call you trust."]
             .waitForExistence(timeout: 3))
         app.buttons["Close"].tap()
-        XCTAssertTrue(app.staticTexts["The numbers do not match"].waitForExistence(timeout: 3))
+        // The banner keeps the advice (one VoiceOver element: title, then advice).
+        let banner = app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@ AND label CONTAINS %@", "The numbers do not match", "Don't send anything sensitive yet.")).firstMatch
+        XCTAssertTrue(banner.waitForExistence(timeout: 3))
         XCTAssertFalse(app.buttons["Close"].exists)
     }
 

@@ -112,6 +112,45 @@ final class SafetyControlTests: XCTestCase {
 
     // MARK: Haptics
 
+    /// Review B3 #1: Return on the password field buzzes only for a password
+    /// the gate refuses, never for a strong one whose copy is still empty;
+    /// on the confirmation, any problem buzzes.
+    func testPDFSubmitRefusal() {
+        let strong = "correct horse battery staple"
+        XCTAssertFalse(PhraseExport.refusesOnSubmit(.password, password: strong, confirm: ""))
+        XCTAssertFalse(PhraseExport.refusesOnSubmit(.password, password: strong, confirm: "corr"))
+        XCTAssertTrue(PhraseExport.refusesOnSubmit(.password, password: "short", confirm: ""))
+        XCTAssertTrue(PhraseExport.refusesOnSubmit(.password, password: "password1234", confirm: ""))
+        XCTAssertFalse(PhraseExport.refusesOnSubmit(.password, password: "", confirm: ""))
+        XCTAssertTrue(PhraseExport.refusesOnSubmit(.confirm, password: strong, confirm: "corr"))
+        XCTAssertTrue(PhraseExport.refusesOnSubmit(.confirm, password: "short", confirm: "short"))
+        XCTAssertFalse(PhraseExport.refusesOnSubmit(.confirm, password: strong, confirm: strong))
+        XCTAssertFalse(PhraseExport.refusesOnSubmit(.confirm, password: "", confirm: ""))
+    }
+
+    /// Review B3 #5: a weak password is refused with these words (the line
+    /// is a VoiceOver hint now, which UI tests cannot read).
+    func testWeakPasswordWording() {
+        XCTAssertEqual(PhraseExport.problem("password1234", "password1234"), .tooWeak)
+        XCTAssertEqual(PhrasePDFSheet.text(for: .tooWeak),
+                       LocalizedStringKey("Too easy to guess: use the suggestion or several random words."))
+    }
+
+    /// Review B3 #4: a completed wrong set buzzes each time (not only on the
+    /// first change); success is Confirm's, so the picks never say it.
+    func testQuizPickFeedback() {
+        XCTAssertEqual(PhraseConfirmView.pickFeedback(allPicked: true, passed: false), Haptic.error.feedback)
+        XCTAssertNil(PhraseConfirmView.pickFeedback(allPicked: true, passed: true))
+        XCTAssertNil(PhraseConfirmView.pickFeedback(allPicked: false, passed: false))
+    }
+
+    /// Review B3 #7: a pressed outlined danger button never tints under its
+    /// `danger` label (4.2:1 on Paper); its outline thickens instead.
+    func testPressedDangerKeepsItsContrast() {
+        XCTAssertEqual(ButtonTokens.pressed(.danger), .thickerOutline(2))
+        XCTAssertEqual(ButtonTokens.pressed(.primary), .darken)
+    }
+
     /// U-25: one feedback per kind of moment.
     func testHapticMap() {
         XCTAssertEqual(Haptic.success.feedback, .success)

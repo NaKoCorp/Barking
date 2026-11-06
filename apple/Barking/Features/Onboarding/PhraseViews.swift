@@ -136,8 +136,11 @@ struct PhraseConfirmView: View {
     @Bindable var model: OnboardingModel
     let onDone: () -> Void
 
-    /// nil until a word is picked on every row, then whether they are right.
-    private var quizOutcome: Bool? { model.answers.allSatisfy { $0 != nil } ? model.quizPassed : nil }
+    /// The haptic of a pick: an error each time the three picks form a
+    /// wrong set (not only the first time). Success belongs to Confirm.
+    static func pickFeedback(allPicked: Bool, passed: Bool) -> SensoryFeedback? {
+        allPicked && !passed ? Haptic.error.feedback : nil
+    }
 
     var body: some View {
         ScrollView {
@@ -172,6 +175,7 @@ struct PhraseConfirmView: View {
                     Text("One of the words is wrong. Check your copy.").foregroundStyle(Color.danger)
                 }
                 PrimaryButton("Confirm", enabled: model.quizPassed) {
+                    Haptic.success.play()
                     model.markPhraseConfirmed()
                     onDone()
                 }
@@ -180,9 +184,9 @@ struct PhraseConfirmView: View {
             .padding(24)
         }
         .background(Color.surfaceWelcome)
-        // Once the three words are picked: right or wrong, felt (U-25).
-        .sensoryFeedback(trigger: quizOutcome) { _, now in
-            now.map { $0 ? Haptic.success.feedback : Haptic.error.feedback }
+        // Keyed on the picks, so every new wrong set is felt (U-25).
+        .sensoryFeedback(trigger: model.answers) { _, _ in
+            Self.pickFeedback(allPicked: model.answers.allSatisfy { $0 != nil }, passed: model.quizPassed)
         }
         .onAppear { if model.quiz == nil { model.startQuiz() } }
     }

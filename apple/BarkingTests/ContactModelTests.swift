@@ -21,6 +21,27 @@ final class ContactModelTests: XCTestCase {
         XCTAssertFalse(m.justVerified)
     }
 
+    /// Review B3 #8: a verification the core did not record is said, not
+    /// silent; the next try clears it.
+    func testFailedVerificationIsReported() async {
+        let d = FakeDevice()
+        let m = make(d)
+        await m.load()
+        d.verifyError = NSError(domain: "test", code: 1)
+        await m.match()
+        XCTAssertFalse(m.verified)
+        XCTAssertFalse(m.justVerified)
+        XCTAssertTrue(m.saveFailed)
+        d.verifyError = nil
+        await m.match()
+        XCTAssertTrue(m.verified)
+        XCTAssertFalse(m.saveFailed)
+        d.verifyError = NSError(domain: "test", code: 1)
+        await m.undo()
+        XCTAssertTrue(m.verified)
+        XCTAssertTrue(m.saveFailed)
+    }
+
     func testMismatchDoesNotVerify() async {
         let d = FakeDevice()
         let m = make(d)

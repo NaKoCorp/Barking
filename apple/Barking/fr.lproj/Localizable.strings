@@ -326,7 +326,7 @@
 "Choose a password to continue." = "Choisissez un mot de passe pour continuer.";
 
 /* UI review B3: safety code, danger zones, hold to confirm */
-"Verify" = "Vérifier";
+"Verify" = "Vérification";
 "Verified" = "Vérifié";
 "The numbers do not match" = "Les chiffres ne correspondent pas";
 "Don't send anything sensitive yet. Compare again in person or on a call you trust." = "N’envoyez encore rien de sensible. Comparez à nouveau en personne ou lors d’un appel de confiance.";

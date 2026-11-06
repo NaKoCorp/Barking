@@ -26,6 +26,8 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var transferredTo: [String] { lock.withLock { _transferredTo } }
     var pending = false
     var sendError: Error?
+    /// Thrown by markVerified / unmarkVerified when set.
+    var verifyError: Error?
     private var _linkCalls = 0
     private var _summaryCalls = 0
     var summaryCalls: Int { lock.withLock { _summaryCalls } }
@@ -51,8 +53,14 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func contactCard(displayName: String) throws -> String { "barking1:abc" }
     func setAlias(contact: String, alias: String) throws {}
     func removeContact(contact: String) throws {}
-    func markVerified(contact: String) throws { verified.insert(contact) }
-    func unmarkVerified(contact: String) throws { verified.remove(contact) }
+    func markVerified(contact: String) throws {
+        if let verifyError { throw verifyError }
+        verified.insert(contact)
+    }
+    func unmarkVerified(contact: String) throws {
+        if let verifyError { throw verifyError }
+        verified.remove(contact)
+    }
     func safetyNumber(contact: String) throws -> [String] { Array(repeating: "12345", count: 12) }
     func unreadCounts() throws -> [UnreadCount] { unread }
     func chatSummaries() throws -> [ChatSummary] {
