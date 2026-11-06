@@ -42,31 +42,15 @@ struct AppearanceIcons: View {
     }
 }
 
-/// The settings' segmented control, drawn as in the mockup.
+/// The settings' appearance choice: the app's one segmented control (a menu
+/// at accessibility text sizes).
 struct AppearanceSegments: View {
     @Environment(AppSettings.self) private var settings
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(AppAppearance.allCases, id: \.self) { a in
-                let on = settings.appearance == a
-                Button { settings.appearance = a } label: {
-                    Text(a.title)
-                        .font(BarkingFont.mono(.footnote, size: 13, weight: on ? .semibold : .regular))
-                        .foregroundStyle(on ? (scheme == .dark ? Color.white : Color.fg) : Color.fgMuted)
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(on ? Color.segment : Color.clear, in: .rect(cornerRadius: Radius.button))
-                        // The thumb is a ground, not purple: a 1 px edge sets it off the track.
-                        .overlay {
-                            if on { RoundedRectangle(cornerRadius: Radius.button).strokeBorder(Color.borderStrong, lineWidth: 1) }
-                        }
-                }
-                .accessibilityAddTraits(on ? .isSelected : [])
-                .accessibilityIdentifier("appearance.\(a.rawValue)")
-            }
-        }
-        .padding(4)
-        .background(Color.field, in: .rect(cornerRadius: Radius.field))
+        @Bindable var settings = settings
+        BarkingSegmented("Appearance", selection: $settings.appearance,
+                         options: AppAppearance.allCases.map { ($0, $0.title) },
+                         optionID: { "appearance.\($0.rawValue)" })
     }
 }

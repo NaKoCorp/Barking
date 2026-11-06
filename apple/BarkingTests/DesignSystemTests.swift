@@ -53,6 +53,8 @@ final class DesignSystemTests: XCTestCase {
             ("terminalFg", "terminalBg"), ("accent", "wash"), ("fgMuted", "field"),
             ("ok", "surface"), ("ok", "surfaceCard"), ("warnFg", "surface"), ("warnFg", "surfaceCard"),
             ("danger", "surface"), ("danger", "surfaceCard"), ("fgSoft", "surface"), ("fgSoft", "surfaceCard"),
+            // B2: text in a field, its trailing action, the segmented control.
+            ("fg", "field"), ("accent", "field"), ("fg", "segment"), ("fgMuted", "field"), ("ok", "surface"),
         ]
         for style in styles {
             for (t, g) in pairs {

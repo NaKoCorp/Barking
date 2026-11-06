@@ -56,44 +56,61 @@ struct PhrasePDFSheet: View {
     @State private var password = ""
     @State private var confirm = ""
     @State private var file: URL?
+    /// The suggested password, while it is the one in use (U-12).
+    @State private var suggestion: String?
+    @State private var revealed = true
+    @State private var copied = false
+
+    private var usingSuggestion: Bool { suggestion != nil && suggestion == password }
+    private var problem: PhraseExport.PasswordProblem? { PhraseExport.problem(password, confirm) }
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    Text("The PDF is only as safe as its password: anyone who gets the file can try passwords offline, as fast as they like.")
-                        .foregroundStyle(Color.fgMuted)
-                    Button("Suggest a strong password") {
-                        password = PhraseExport.suggestedPassword(from: bip39Words())
-                        confirm = password
+            Group {
+                Text("The PDF is only as safe as its password: anyone who gets the file can try passwords offline, as fast as they like.")
+                    .font(.bBody).foregroundStyle(Color.fgMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: Space.s3) {
+                    if usingSuggestion {
+                        suggestedRow
+                    } else {
+                        BarkingTextField("Password", text: $password, error: passwordError, secure: true,
+                                         trailing: .reveal, identifier: "pdf.password")
+                            .textContentType(.newPassword)
+                        StrengthMeter(verdict: PhraseExport.verdict(password))
+                    }
+                    TextLink("Suggest a strong password") {
+                        let p = PhraseExport.suggestedPassword(from: bip39Words())
+                        password = p
+                        confirm = p
+                        suggestion = p
+                        revealed = true
+                        copied = false
                     }
                     .accessibilityIdentifier("pdf.suggest")
                 }
-                Section {
-                    SecureField("Password", text: $password).textContentType(.newPassword)
-                        .accessibilityIdentifier("pdf.password")
-                    SecureField("Same password again", text: $confirm).textContentType(.newPassword)
-                        .accessibilityIdentifier("pdf.confirm")
-                    StrengthBar(level: PhraseExport.strength(password))
-                } footer: {
-                    if let p = PhraseExport.problem(password, confirm), !password.isEmpty {
-                        Text(Self.text(for: p)).foregroundStyle(Color.danger)
-                    } else {
-                        Text("Keep the password apart from the file, in your password manager or on paper.")
-                    }
+                // The suggestion needs no second entry: it is shown and can be copied.
+                if !usingSuggestion {
+                    BarkingTextField("Same password again", text: $confirm, error: confirmError, secure: true,
+                                     identifier: "pdf.confirm")
+                        .textContentType(.newPassword)
                 }
-                PrimaryButton("Create the PDF", enabled: PhraseExport.problem(password, confirm) == nil) {
+                Text("Keep the password apart from the file, in your password manager or on paper.")
+                    .font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(Color.fgMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .barkingScreen()
+            .ctaBar {
+                PrimaryButton("Create the PDF", enabled: problem == nil) {
                     file = try? PhraseExport.encryptedFile(words: words, password: password)
                 }
-                .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
                 .accessibilityIdentifier("pdf.create")
             }
-            .scrollContentBackground(.hidden)
-            .background(Color.surface)
             .navigationTitle(Text("Encrypted PDF"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }
+        .presentationBackground(Color.surface)
         .sheet(item: $file, onDismiss: { if let f = file { PhraseExport.discard(f) } }) { url in
             ShareSheet(url: url) {
                 PhraseExport.discard(url)
@@ -101,6 +118,68 @@ struct PhrasePDFSheet: View {
                 dismiss()
             }
         }
+    }
+
+    /// Too short or too weak, said under the password once one is typed.
+    private var passwordError: LocalizedStringKey? {
+        guard !password.isEmpty, let p = problem, p != .mismatch else { return nil }
+        return Self.text(for: p)
+    }
+
+    private var confirmError: LocalizedStringKey? {
+        guard !password.isEmpty, problem == .mismatch else { return nil }
+        return Self.text(for: .mismatch)
+    }
+
+    /// The suggestion in Fira 15, read-only, with a reveal toggle and Copy.
+    private var suggestedRow: some View {
+        VStack(alignment: .leading, spacing: Space.s2) {
+            Text("Suggested password").font(.bSectionLabel).foregroundStyle(Color.fgMuted)
+                .accessibilityHidden(true)
+            HStack(spacing: 0) {
+                Group {
+                    if revealed {
+                        Text(verbatim: password).foregroundStyle(Color.fg)
+                    } else {
+                        Text(verbatim: String(repeating: "•", count: 14)).foregroundStyle(Color.fgMuted)
+                    }
+                }
+                .font(BarkingFont.mono(.subheadline, size: 15))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Space.s3).padding(.vertical, Space.s3)
+                .privacySensitive()
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text("Suggested password"))
+                .accessibilityValue(revealed ? Text(verbatim: password) : Text("Hidden"))
+                .accessibilityIdentifier("pdf.suggested")
+                iconButton(revealed ? "eye.slash" : "eye", revealed ? "Hide" : "Show") { revealed.toggle() }
+                iconButton(copied ? "checkmark" : "doc.on.doc", copied ? "Copied" : "Copy") {
+                    SecretPasteboard.copy(password)
+                    copied = true
+                    AccessibilityNotification.Announcement(String(localized: "Copied")).post()
+                }
+            }
+            .background(Color.field, in: .rect(cornerRadius: Radius.field))
+            StrengthMeter(verdict: PhraseExport.verdict(password))
+            TextLink("Type my own password") {
+                password = ""
+                confirm = ""
+                suggestion = nil
+                revealed = false
+            }
+        }
+    }
+
+    private func iconButton(_ symbol: String, _ label: LocalizedStringKey, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.bSymbol(15, relativeTo: .body, maximum: 24))
+                .foregroundStyle(Color.accent)
+                .frame(width: 44, height: 44)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(label))
     }
 
     static func text(for p: PhraseExport.PasswordProblem) -> LocalizedStringKey {
@@ -116,29 +195,47 @@ extension URL: @retroactive Identifiable {
     public var id: String { absoluteString }
 }
 
-private struct StrengthBar: View {
-    let level: Int
+/// Three bars and a word that follow the gate (U-16): what the button
+/// refuses is "too weak" (✗ `danger`, 1 or 2 bars), what it accepts is
+/// "strong" (✓ `ok`, 3 bars). Nothing while the field is empty.
+private struct StrengthMeter: View {
+    let verdict: PhraseExport.Verdict
+    @Environment(\.dynamicTypeSize) private var size
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(1...3, id: \.self) { i in
-                Capsule().fill(i <= level ? color : Color.field).frame(height: 4)
+        if verdict != .empty {
+            // At AX sizes the word goes under the bars instead of wrapping letter by letter.
+            let layout = size.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: Space.s1))
+                : AnyLayout(HStackLayout(spacing: Space.s1))
+            layout {
+                HStack(spacing: Space.s1) {
+                    ForEach(1...3, id: \.self) { i in
+                        Capsule().fill(i <= bars ? color : Color.field).frame(height: 4)
+                    }
+                }
+                HStack(spacing: Space.s1) {
+                    Text(verbatim: verdict == .strong ? "✓" : "✗").font(.bSymbol(12, relativeTo: .caption, weight: .bold))
+                    Text(verdict == .strong ? "strong" : "too weak").font(.bMeta)
+                }
+                .fixedSize()
+                .foregroundStyle(color)
             }
-            Text(label).font(.caption).foregroundStyle(Color.fgMuted).frame(minWidth: 60, alignment: .trailing)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Password strength"))
+            .accessibilityValue(verdict == .strong ? Text("strong, accepted") : Text("too weak, not accepted"))
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(label))
     }
 
-    private var color: Color { level >= 3 ? .ok : level == 2 ? .warnFg : .danger }
-    private var label: LocalizedStringKey {
-        switch level {
-        case 0: ""
-        case 1: "weak"
-        case 2: "fair"
-        default: "strong"
+    private var bars: Int {
+        switch verdict {
+        case .empty: 0
+        case .tooWeak(let b): b
+        case .strong: 3
         }
     }
+
+    private var color: Color { verdict == .strong ? .ok : .danger }
 }
 
 /// The system share sheet; `done` runs when it closes, shared or not.

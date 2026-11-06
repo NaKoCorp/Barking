@@ -21,31 +21,38 @@ struct AddContactView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
+            Group {
                 if let p = model.preview {
                     confirmation(p)
                 } else {
-                    Picker(selection: $tab) {
-                        Text("Scan").tag(0)
-                        Text("My code").tag(1)
-                    } label: { EmptyView() }
-                    .pickerStyle(.segmented)
-                    if let e = model.error { errorText(e) }
-                    if tab == 0 {
-                        ScannerView(onBytes: { data in Task { await model.scanned(data) } },
-                                    onText: { s in Task { await model.scannedText(s) } })
+                    VStack(spacing: Space.s4) {
+                        BarkingSegmented("Add a contact", selection: $tab, options: [(0, LocalizedStringKey("Scan")), (1, LocalizedStringKey("My code"))])
+                        if let e = model.error { errorText(e) }
+                        if tab == 0 {
+                            ScannerView(onBytes: { data in Task { await model.scanned(data) } },
+                                        onText: { s in Task { await model.scannedText(s) } })
+                        } else {
+                            ScrollView { MyCodeView(core: core) }
+                        }
+                        Spacer(minLength: 0)
                     }
-                    else { MyCodeView(core: core) }
+                    .padding(.horizontal, Space.gutter)
+                    .padding(.top, Space.s2)
+                    .background(Color.surface)
                 }
-                Spacer(minLength: 0)
             }
-            .padding(16)
-            .background(Color.surface)
-            // The confirmation has its own headline (the contact's name).
-            .navigationTitle(model.preview == nil ? Text("Add a contact") : Text(verbatim: ""))
+            // A short inline title, never an empty one (iOS 26 then draws no
+            // bar behind the toolbar): the confirmation's headline is the name.
+            .navigationTitle(Text("Add a contact"))
             .toolbarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close", action: onDone) } }
+            .toolbar {
+                // One dismiss control (U-29): Cancel discards a pending add.
+                ToolbarItem(placement: .cancellationAction) {
+                    if model.preview == nil { Button("Close", action: onDone) } else { Button("Cancel", action: onDone) }
+                }
+            }
         }
+        .presentationBackground(Color.surface)
         .task { if let link { await model.opened(link: link) } }
     }
 
@@ -55,18 +62,25 @@ struct AddContactView: View {
         case .ownCard: "This is your own card"
         case .failed: "Something went wrong. Your data is safe."
         }
-        return Text(text).foregroundStyle(Color.danger).frame(maxWidth: .infinity, alignment: .leading)
+        return Text(text).font(.bBodySmall).foregroundStyle(Color.danger).frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func confirmation(_ p: CardPreview) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Avatar(name: p.displayName, fingerprint: p.fingerprint, size: 64)
-            ScreenTitle(verbatim: p.displayName, size: 22)
-            Text(verbatim: String(p.fingerprint.prefix(19))).font(BarkingFont.mono(.footnote, size: 12.5))
-                .foregroundStyle(Color.fgSoft)
-            TextField("Alias (optional)", text: $alias).textFieldStyle(.roundedBorder)
+        Group {
+            VStack(alignment: .leading, spacing: Space.s3) {
+                Avatar(name: p.displayName, fingerprint: p.fingerprint, size: 64)
+                ScreenTitle(verbatim: p.displayName, size: 22)
+                FingerprintText(p.fingerprint)
+                Text("After adding, compare the safety code with \(p.displayName) to be sure it is them.")
+                    .font(.bBody).foregroundStyle(Color.fgMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            BarkingTextField("Alias (optional)", text: $alias, identifier: "addContact.alias")
+            if let e = model.error { errorText(e) }
+        }
+        .barkingScreen()
+        .ctaBar {
             PrimaryButton("Add") { Task { if await model.add(alias: alias) { onDone() } } }
-            SecondaryButton("Cancel") { model.reset() }
         }
     }
 }
@@ -75,6 +89,9 @@ struct AddContactView: View {
 struct ScannerView: View {
     let onBytes: (Data) -> Void
     var onText: (String) -> Void = { _ in }
+    /// What to do without a camera: it differs between adding a contact and
+    /// linking a device.
+    var unavailable: LocalizedStringKey = "The camera is not available. Ask your contact for their link."
 
     var body: some View {
         if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
@@ -82,8 +99,11 @@ struct ScannerView: View {
                 .clipShape(.rect(cornerRadius: Radius.card))
                 .frame(maxHeight: 420)
         } else {
-            Text("The camera is not available. Ask your contact for their link.")
-                .foregroundStyle(Color.fgMuted).padding()
+            Text(unavailable)
+                .font(.bBody).foregroundStyle(Color.fgMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, Space.s4)
         }
     }
 
@@ -124,23 +144,33 @@ struct ScannerView: View {
     }
 }
 
-/// My card as a QR code (white ground in both themes) and a link to share.
+/// My card as a QR code (white ground in both themes) and a link to share:
+/// the link first, the QR at most 260 pt with "Show larger" (U-27).
 struct MyCodeView: View {
     let core: CoreService
+    /// Also puts "Share my link" in the navigation bar (My identity).
+    var shareInToolbar = false
     @State private var card: (bytes: Data, text: String)?
     @State private var notAdmin = false
     @State private var failed = false
+    @State private var larger = false
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: Space.s4) {
             if let card, let img = QRPayload.image(for: card.bytes, scale: 6) {
-                Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
-                    .padding(12).background(Color.white, in: .rect(cornerRadius: Radius.card))
-                    .accessibilityLabel(Text("My QR code"))
-                ShareLink(item: URL(string: "barking://card#\(card.text)")!) {
-                    Text("Share my link")
-                }
-                .buttonStyle(.barkingPrimary)
+                let link = URL(string: "barking://card#\(card.text)")!
+                ShareLink(item: link) { Text("Share my link") }
+                    .buttonStyle(.barkingPrimary)
+                qr(img).frame(maxWidth: 260)
+                TextLink("Show larger") { larger = true }
+                    .sheet(isPresented: $larger) { largerCode(img) }
+                    .toolbar {
+                        if shareInToolbar {
+                            ToolbarItem(placement: .primaryAction) {
+                                ShareLink(item: link) { Label("Share my link", systemImage: "square.and.arrow.up") }
+                            }
+                        }
+                    }
             } else if notAdmin {
                 Text("Show your code from your first device").foregroundStyle(Color.fgMuted)
             } else if failed {
@@ -150,7 +180,27 @@ struct MyCodeView: View {
                 ProgressView()
             }
         }
+        .frame(maxWidth: .infinity)
         .task { await load() }
+    }
+
+    private func qr(_ img: UIImage) -> some View {
+        Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
+            .padding(12).background(Color.white, in: .rect(cornerRadius: Radius.card))
+            .accessibilityLabel(Text("My QR code. A contact scans it to add you."))
+    }
+
+    private func largerCode(_ img: UIImage) -> some View {
+        NavigationStack {
+            qr(img)
+                .padding(Space.gutter)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.surface)
+                .navigationTitle(Text("My code"))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { larger = false } } }
+        }
+        .presentationBackground(Color.surface)
     }
 
     /// Only the device holding the root signs a card: tell that apart from an error.

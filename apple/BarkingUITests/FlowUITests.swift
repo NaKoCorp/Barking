@@ -150,7 +150,8 @@ final class DevicesUITests: XCTestCase {
         row.tap()
         XCTAssertTrue(app.staticTexts["Nothing in clear on the nodes"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Journal and paths"].exists)
-        let filter = app.segmentedControls["transparency.filter"]
+        // BarkingSegmented: a container of selectable buttons (UI review B2).
+        let filter = app.descendants(matching: .any)["transparency.filter"]
         XCTAssertTrue(filter.exists)
         XCTAssertTrue(filter.buttons["Everything"].isSelected)
         filter.buttons["Keys and devices"].tap()
@@ -195,7 +196,7 @@ final class PhraseExportUITests: XCTestCase {
         let app = XCUIApplication.fresh()
         app.launch()
         app.buttons["Create my identity"].firstMatch.tap()
-        let name = app.textFields["Your name, as contacts see it"]
+        let name = app.textFields["create.name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         name.tap()
         name.typeText("Alice")

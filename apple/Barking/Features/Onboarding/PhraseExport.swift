@@ -20,6 +20,22 @@ enum PhraseExport {
         return nil
     }
 
+    /// What the strength meter says. It follows the gate (`problem`), so it
+    /// never calls "fair" a password the button then refuses.
+    enum Verdict: Equatable {
+        case empty
+        /// Refused: 1 or 2 bars.
+        case tooWeak(bars: Int)
+        /// Accepted: 3 bars.
+        case strong
+    }
+
+    static func verdict(_ password: String) -> Verdict {
+        if password.isEmpty { return .empty }
+        if problem(password, password) == nil { return .strong }
+        return .tooWeak(bars: min(max(strength(password), 1), 2))
+    }
+
     /// 0 (empty) to 3 (strong), from a rough entropy estimate: length times
     /// the size of the character classes used.
     static func strength(_ password: String) -> Int {

@@ -8,8 +8,6 @@ struct SettingsView: View {
     let openNetwork: () -> Void
     @Environment(\.openURL) private var openURL
     @State private var model: SettingsModel
-    /// The icon tile grows with the text, up to 48 pt.
-    @ScaledMetric(relativeTo: .subheadline) private var tile: CGFloat = 32
 
     init(core: CoreService, openNetwork: @escaping () -> Void = {}) {
         self.core = core
@@ -19,62 +17,58 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    RemovedBanner(core: core)
+            Group {
+                RemovedBanner(core: core)
+                VStack(alignment: .leading, spacing: Space.s2) {
                     SectionLabel("Appearance")
                     AppearanceSegments()
-                    card {
-                        NavigationLink { DevicesView(core: core) } label: {
-                            row("Linked devices", Text("receive, write, send"), "laptopcomputer.and.iphone")
-                        }
-                        divider
-                        NavigationLink { MyIdentityView(core: core, model: model) } label: {
-                            row("My identity", Text(verbatim: model.fingerprintShort).font(.bMeta)
-                                .accessibilityLabel(Text(verbatim: FingerprintFormat.spoken(model.fingerprint, form: .short))),
-                                "key")
-                        }
-                        divider
-                        NavigationLink { SecuritySettingsView() } label: {
-                            row("Security", Text("Lock and erase"), "lock")
-                        }
-                        divider
-                        NavigationLink { TransparencyView(core: core) } label: {
-                            row("Transparency", Text("What this phone did, and who could see it"), "eye")
-                        }
-                        .accessibilityIdentifier("settings.transparency")
-                        divider
-                        Button(action: openNetwork) {
-                            row("Network and relays", Text("Internet"), "dot.radiowaves.left.and.right")
-                        }
-                    }
-                    .padding(.top, 10)
-                    card {
-                        Button {
-                            if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
-                        } label: {
-                            row("Language", Text("\(Self.languageName) · change it in the iPhone's Settings"),
-                                "globe", trailing: "arrow.up.forward")
-                        }
-                        .accessibilityIdentifier("settings.language")
-                    }
-                    #if BARKING_DEV
-                    card {
-                        NavigationLink { DevView() } label: { row("Development", Text(verbatim: "BARKING_DEV"), "hammer") }
-                    }
-                    #endif
-                    VStack(spacing: 8) {
-                        MadeInFranceChip()
-                        Text(verbatim: "Barking \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · NakoCorp · AGPL-3.0")
-                            .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgMuted)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 24)
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 16)
+                FormCard {
+                    NavigationLink { DevicesView(core: core) } label: {
+                        FormRow("Linked devices", subtitle: "receive, write, send", icon: "laptopcomputer.and.iphone") { RowGlyph() }
+                    }
+                    NavigationLink { MyIdentityView(core: core, model: model) } label: {
+                        FormRow(title: Text("My identity"),
+                                subtitle: Text(verbatim: model.fingerprintShort).font(.bMeta)
+                                    .accessibilityLabel(Text(verbatim: FingerprintFormat.spoken(model.fingerprint, form: .short))),
+                                icon: "key") { RowGlyph() }
+                    }
+                    NavigationLink { SecuritySettingsView() } label: {
+                        FormRow("Security", subtitle: "Lock and erase", icon: "lock") { RowGlyph() }
+                    }
+                    NavigationLink { TransparencyView(core: core) } label: {
+                        FormRow("Transparency", subtitle: "What this phone did, and who could see it", icon: "eye") { RowGlyph() }
+                    }
+                    .accessibilityIdentifier("settings.transparency")
+                    Button(action: openNetwork) {
+                        FormRow("Network and relays", subtitle: "Internet", icon: "dot.radiowaves.left.and.right") { RowGlyph() }
+                    }
+                }
+                FormCard {
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                    } label: {
+                        FormRow(title: Text("Language"),
+                                subtitle: Text("\(Self.languageName) · change it in the iPhone's Settings"),
+                                icon: "globe") { RowGlyph(symbol: "arrow.up.forward") }
+                    }
+                    .accessibilityIdentifier("settings.language")
+                }
+                #if BARKING_DEV
+                FormCard {
+                    NavigationLink { DevView() } label: {
+                        FormRow(title: Text("Development"), subtitle: Text(verbatim: "BARKING_DEV"), icon: "hammer") { RowGlyph() }
+                    }
+                }
+                #endif
+                VStack(spacing: Space.s2) {
+                    MadeInFranceChip()
+                    Text(verbatim: "Barking \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · NakoCorp · AGPL-3.0")
+                        .font(.bMeta).foregroundStyle(Color.fgMuted)
+                }
+                .frame(maxWidth: .infinity)
             }
-            .background(Color.surface)
+            .barkingScreen(tabRoot: true)
             .navigationTitle(Text("Settings"))
         }
         .task { await model.load() }
@@ -85,37 +79,6 @@ struct SettingsView: View {
         let code = Bundle.main.preferredLocalizations.first ?? "en"
         return Locale(identifier: code).localizedString(forLanguageCode: code)?.localizedCapitalized ?? code
     }
-
-    private var divider: some View { Rectangle().fill(Color.border).frame(height: 1) }
-
-    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        VStack(spacing: 0, content: content)
-            .background(Color.surfaceCard, in: .rect(cornerRadius: Radius.card))
-            .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
-    }
-
-    private func row(_ title: LocalizedStringKey, _ sub: Text, _ icon: String,
-                     trailing: String = "chevron.right") -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon).font(.bSymbol(15, relativeTo: .subheadline, maximum: 22)).foregroundStyle(Color.accent)
-                .frame(width: min(tile, 48), height: min(tile, 48))
-                .background(Color.wash, in: .rect(cornerRadius: Radius.tile))
-                .accessibilityHidden(true)
-            // Leading, also when a long French subtitle wraps (U-10).
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.bBody.weight(.semibold)).foregroundStyle(Color.fg)
-                sub.font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(Color.fgMuted)
-            }
-            .multilineTextAlignment(.leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Image(systemName: trailing).font(.bSymbol(13, relativeTo: .footnote, weight: .semibold))
-                .foregroundStyle(Color.fgMuted)
-                .accessibilityHidden(true)
-        }
-        .padding(.horizontal, 14)
-        .frame(minHeight: 56)
-        .contentShape(.rect)
-    }
 }
 
 /// Fingerprint, my code and link, display name.
@@ -123,22 +86,72 @@ struct MyIdentityView: View {
     let core: CoreService
     let model: SettingsModel
     @State private var name = ""
+    @State private var editing = false
+    @State private var saved = false
+    @State private var failed = false
 
     var body: some View {
-        Form {
-            Section("Display name") {
-                TextField("Your name, as contacts see it", text: $name)
-                    .onSubmit { Task { await model.rename(name) } }
+        Group {
+            VStack(alignment: .leading, spacing: Space.s2) {
+                if editing {
+                    BarkingTextField("Your name", text: $name,
+                                     footer: "Your name travels in your contact card. No phone number, no email.",
+                                     error: failed ? "Not saved. Try again." : nil,
+                                     identifier: "identity.name", onSubmit: save)
+                        .textContentType(.name)
+                        .submitLabel(.done)
+                    HStack(spacing: Space.s3) {
+                        SecondaryButton("Cancel") { editing = false }
+                        PrimaryButton("Save", enabled: SettingsModel.validName(name) != nil, action: save)
+                    }
+                } else {
+                    SectionLabel("Your name")
+                    FormCard {
+                        FormRow(title: Text(verbatim: model.displayName)) {
+                            TextLink("Edit") {
+                                name = model.displayName
+                                saved = false
+                                failed = false
+                                editing = true
+                            }
+                            .accessibilityIdentifier("identity.edit")
+                        }
+                    }
+                    if saved {
+                        HStack(spacing: Space.s1) {
+                            Text(verbatim: "✓").font(.bSymbol(12, relativeTo: .caption, weight: .bold))
+                                .accessibilityHidden(true)
+                            Text("Saved").font(.bMeta)
+                        }
+                        .foregroundStyle(Color.ok)
+                    }
+                }
             }
-            Section("Fingerprint") {
-                FingerprintText(model.fingerprint, form: .full)
+            VStack(alignment: .leading, spacing: Space.s2) {
+                SectionLabel("Fingerprint")
+                Card { FingerprintText(model.fingerprint, form: .full) }
             }
-            Section("My code") { MyCodeView(core: core) }
+            VStack(alignment: .leading, spacing: Space.s2) {
+                SectionLabel("My code")
+                MyCodeView(core: core, shareInToolbar: true)
+            }
         }
-        .scrollContentBackground(.hidden)
-        .background(Color.surface)
+        .barkingScreen()
         .navigationTitle(Text("My identity"))
-        .task { name = model.displayName }
+    }
+
+    /// "Saved" only once the core holds the new name.
+    private func save() {
+        guard let wanted = SettingsModel.validName(name) else { return }
+        Task {
+            await model.rename(wanted)
+            saved = model.displayName == wanted
+            failed = !saved
+            if saved {
+                editing = false
+                AccessibilityNotification.Announcement(String(localized: "Saved")).post()
+            }
+        }
     }
 }
 
@@ -162,35 +175,14 @@ struct DevicesView: View {
     }
 
     var body: some View {
-        List {
-            RemovedBanner(core: core).listRowBackground(Color.clear)
-            Text("One identity on several devices.").foregroundStyle(Color.fgMuted)
-            ForEach(model.devices, id: \.id) { d in
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(verbatim: d.name).font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))
-                            if d.thisDevice { Text("this device").font(.caption2).foregroundStyle(Color.accent) }
-                            if d.admin { Text(verbatim: "admin").font(.caption2).foregroundStyle(Color.fgSoft) }
-                            if model.pendingTarget == d.id {
-                                Text("Transfer pending").font(.caption2).foregroundStyle(Color.fgSoft)
-                            }
-                        }
-                        Text("added \(Date(timeIntervalSince1970: TimeInterval(d.issuedAt)).formatted(date: .abbreviated, time: .omitted))")
-                            .font(.caption).foregroundStyle(Color.fgSoft)
-                    }
-                    Spacer(minLength: 0)
-                    if model.canTransfer(to: d) {
-                        Button("Make admin") { transferTarget = d }
-                            .font(.caption).buttonStyle(.borderless).foregroundStyle(Color.accent)
-                    }
-                    if model.canRemove(d) {
-                        Button("Remove", role: .destructive) { removeTarget = d }
-                            .font(.caption).buttonStyle(.borderless)
-                            .accessibilityIdentifier("devices.remove.\(d.id)")
-                    }
+        Group {
+            RemovedBanner(core: core)
+            VStack(alignment: .leading, spacing: Space.s3) {
+                Text("One identity on several devices.").font(.bBody).foregroundStyle(Color.fgMuted)
+                FormCard {
+                    ForEach(model.devices, id: \.id) { d in deviceRow(d) }
                 }
-                .frame(minHeight: 44)
+                Text("\(model.count) of 8 devices").font(.bMeta).foregroundStyle(Color.fgSoft)
             }
             if model.transferFailed {
                 Banner(kind: .danger, title: "The transfer could not start. Sync, then try again.")
@@ -201,21 +193,19 @@ struct DevicesView: View {
             departureRow
             if model.canLink {
                 PrimaryButton("Link a new device") { linking = true }
-                    .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
             } else if model.pendingTarget != nil, model.departure == .idle {
-                Text("The admin key is on its way to your other device.").foregroundStyle(Color.fgMuted)
+                Text("The admin key is on its way to your other device.").font(.bBody).foregroundStyle(Color.fgMuted)
             } else if !model.removed, model.departure == .idle {
-                Text("Only your admin device can link new ones").foregroundStyle(Color.fgMuted)
+                Text("Only your admin device can link new ones").font(.bBody).foregroundStyle(Color.fgMuted)
             }
-            Text("\(model.count) of 8 devices").font(.caption).foregroundStyle(Color.fgSoft)
             if let me = model.devices.first(where: \.thisDevice), model.canDisconnect(me) {
+                // B3 (U-2) moves this into a danger zone.
                 Button("Disconnect this device", role: .destructive) { startDisconnect() }
-                    .frame(minHeight: 44)
+                    .frame(maxWidth: .infinity, minHeight: 44)
                     .accessibilityIdentifier("devices.disconnect")
             }
         }
-        .scrollContentBackground(.hidden)
-        .background(Color.surface)
+        .barkingScreen()
         .navigationTitle(Text("Linked devices"))
         .confirmationDialog("Make admin", isPresented: present($transferTarget),
                             titleVisibility: .visible, presenting: transferTarget) { d in
@@ -264,6 +254,44 @@ struct DevicesView: View {
         .onChange(of: model.departure) { _, now in
             if now == .wiped { router.restartOnboarding() }
         }
+    }
+
+    /// Name, tags ("this device", "admin", "Transfer pending"), the date it
+    /// was added, and what can be done with it.
+    private func deviceRow(_ d: MyDeviceInfo) -> some View {
+        HStack(alignment: .center, spacing: Space.s3) {
+            VStack(alignment: .leading, spacing: Space.s1) {
+                Text(verbatim: d.name).font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))
+                    .foregroundStyle(Color.fg)
+                if d.thisDevice || d.admin || model.pendingTarget == d.id {
+                    FlowLayout {
+                        if d.thisDevice { Tag("this device", style: .accent) }
+                        if d.admin { Tag(verbatim: "admin") }
+                        if model.pendingTarget == d.id { Tag("Transfer pending") }
+                    }
+                }
+                Text("added \(Date(timeIntervalSince1970: TimeInterval(d.issuedAt)).formatted(date: .abbreviated, time: .omitted))")
+                    .font(.bMeta).foregroundStyle(Color.fgSoft)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            if model.canTransfer(to: d) {
+                TextLink("Make admin") { transferTarget = d }
+            }
+            if model.canRemove(d) {
+                Button(role: .destructive) { removeTarget = d } label: {
+                    Text("Remove").font(BarkingFont.mono(.footnote, size: 13, weight: .medium))
+                        .foregroundStyle(Color.danger)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("devices.remove.\(d.id)")
+            }
+        }
+        .padding(.horizontal, FormRowMetrics.inset)
+        .padding(.vertical, Space.s2)
+        .frame(minHeight: FormRowMetrics.minHeight(hasSubtitle: true))
     }
 
     @ViewBuilder private var departureRow: some View {

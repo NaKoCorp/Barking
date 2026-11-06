@@ -95,7 +95,7 @@ private struct ButtonLabel: View {
 }
 
 /// Primary action: purple fill, white Fira Code 600, 52 pt. Disabled, it can
-/// say why under the button (`reason`, also the VoiceOver hint).
+/// say why under the button (`reason`, also the VoiceOver value).
 struct PrimaryButton: View {
     let title: LocalizedStringKey
     let state: ButtonState
@@ -116,8 +116,7 @@ struct PrimaryButton: View {
             Button(action: action) { ButtonLabel(title: title, kind: .primary, state: state) }
                 .buttonStyle(BarkingButtonStyle(kind: .primary, state: state))
                 .disabled(!state.isInteractive)
-                .accessibilityHint(why.map { Text($0) } ?? Text(verbatim: ""))
-                // The reason is also the value, so VoiceOver says it even with hints off.
+                // The reason is the value only: as a hint too, VoiceOver read it twice.
                 .accessibilityValue(state == .loading ? Text("In progress") : (why.map { Text($0) } ?? Text(verbatim: "")))
             if let why {
                 Text(why)

@@ -104,7 +104,8 @@ private struct PathStop: View {
                         .accessibilityHidden(true)
                 }
             }
-            .frame(width: 32)
+            // The column follows the disc, so a 48 pt disc never overhangs it.
+            .frame(width: min(disc, 48))
             VStack(alignment: .leading, spacing: 3) {
                 Text(verbatim: row.title).font(BarkingFont.sans(.subheadline, size: 15, weight: .semibold))
                     .foregroundStyle(Color.fg)

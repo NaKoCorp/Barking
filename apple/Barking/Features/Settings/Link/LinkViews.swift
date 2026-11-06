@@ -54,6 +54,7 @@ struct LinkNewDeviceView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close", action: onDone) } }
         }
+        .presentationBackground(Color.surface)
         .task { await model.start() }
         .onDisappear { model.cleanup() }
     }
@@ -74,10 +75,15 @@ struct LinkFromExistingView: View {
         VStack(alignment: .leading, spacing: 16) {
             switch model.state {
             case .scanOffer:
-                TextField("This device's name", text: $model.deviceName).textFieldStyle(.roundedBorder)
+                BarkingTextField("This device's name", text: $model.deviceName,
+                                 footer: "Shown on your other devices, and to your contacts in your card.",
+                                 identifier: "link.deviceName")
                 Text("On your other device: Settings, Linked devices, Link a new device. Scan its code.")
-                    .foregroundStyle(Color.fgMuted)
-                ScannerView { data in Task { await model.scannedOffer(data) } }
+                    .font(.bBody).foregroundStyle(Color.fgMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                // Linking needs the camera: the other device's code is only a QR (U-13).
+                ScannerView(onBytes: { data in Task { await model.scannedOffer(data) } },
+                            unavailable: "The camera is not available. Linking needs it to scan your other device's code.")
             case .request(let request):
                 Text("Scan this code with your other device.").foregroundStyle(Color.fgMuted)
                 if let img = QRPayload.image(for: request, scale: 5) {

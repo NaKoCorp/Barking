@@ -10,26 +10,26 @@ import XCTest
 @MainActor
 final class TourUITests: XCTestCase {
     private struct Labels {
-        let create, namePlaceholder, phraseTitle, cont, confirm, later, add, message, send: String
+        let create, phraseTitle, cont, confirm, later, add, message, send: String
         let chats, network, settings, linked, identity, security, recover, link, pdf, linkNew, close, cancel: String
-        let lockedTitle, deleteContact, erase: String
+        let lockedTitle, deleteContact, erase, immediately: String
 
         static let en = Labels(
-            create: "Create my identity", namePlaceholder: "Your name, as contacts see it",
+            create: "Create my identity",
             phraseTitle: "Your recovery phrase", cont: "Continue", confirm: "Confirm", later: "Later",
             add: "Add", message: "Message", send: "Send", chats: "Chats", network: "Network",
             settings: "Settings", linked: "Linked devices", identity: "My identity", security: "Security",
             recover: "Recover with 24 words", link: "Link to an existing device", pdf: "Encrypted PDF",
             linkNew: "Link a new device", close: "Close", cancel: "Cancel", lockedTitle: "Barking is locked",
-            deleteContact: "Delete this contact", erase: "Erase")
+            deleteContact: "Delete this contact", erase: "Erase", immediately: "Immediately")
         static let fr = Labels(
-            create: "Créer mon identité", namePlaceholder: "Votre nom, tel que vos contacts le voient",
+            create: "Créer mon identité",
             phraseTitle: "Votre phrase de récupération", cont: "Continuer", confirm: "Confirmer", later: "Plus tard",
             add: "Ajouter", message: "Message", send: "Envoyer", chats: "Discussions", network: "Réseau",
             settings: "Réglages", linked: "Appareils liés", identity: "Mon identité", security: "Sécurité",
             recover: "Restaurer avec 24 mots", link: "Lier à un appareil existant", pdf: "PDF chiffré",
             linkNew: "Lier un nouvel appareil", close: "Fermer", cancel: "Annuler", lockedTitle: "Barking est verrouillé",
-            deleteContact: "Supprimer ce contact", erase: "Effacer")
+            deleteContact: "Supprimer ce contact", erase: "Effacer", immediately: "Immédiatement")
     }
 
     private var step = 0
@@ -50,7 +50,8 @@ final class TourUITests: XCTestCase {
         let dismissDialog = { (outside: CGFloat) in
             let cancel = app.buttons[L.cancel].firstMatch
             if cancel.exists && cancel.isHittable { cancel.tap() }
-            else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: outside)).tap() }
+            // Near the leading edge: at AX sizes the popover covers the middle.
+            else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: outside)).tap() }
             sleep(1)
         }
         let row = { (prefix: String) in
@@ -65,7 +66,7 @@ final class TourUITests: XCTestCase {
         snap(app, "link-to-existing-device"); back()
         // Create.
         app.buttons[L.create].firstMatch.tap()
-        let name = app.textFields[L.namePlaceholder]
+        let name = app.textFields["create.name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         snap(app, "create-identity-empty")
         name.tap(); name.typeText("Alice")
@@ -86,6 +87,8 @@ final class TourUITests: XCTestCase {
             if pw.waitForExistence(timeout: 5) {
                 pw.tap(); pw.typeText("password1234")
                 let c = app.secureTextFields["pdf.confirm"]
+                // At AX sizes the second field is below the fold, under the CTA bar.
+                if !size.isEmpty { app.swipeUp(); sleep(1) }
                 c.tap(); c.typeText("password1234")
                 snap(app, "pdf-password-sheet-weak")
                 app.buttons["pdf.suggest"].tap(); sleep(1)
@@ -189,9 +192,20 @@ final class TourUITests: XCTestCase {
         }
         let toggle = app.switches["security.lock"]
         if toggle.waitForExistence(timeout: 5) {
+            // At AX sizes the erase control sits below the fold: back to the top.
+            for _ in 0..<3 where !toggle.isHittable { app.swipeDown() }
             toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
             sleep(1)
             snap(app, "security-lock-on")
+            // The delay is a menu (UI review B2): open it, snap it, keep the value.
+            let delay = app.buttons["security.delay"]
+            if delay.waitForExistence(timeout: 3) {
+                delay.tap(); sleep(1)
+                snap(app, "menu-lock-delay", numbered: false)
+                let same = app.buttons[L.immediately].firstMatch
+                if same.exists && same.isHittable { same.tap() } else { dismissDialog(0.15) }
+                sleep(1)
+            }
             XCUIDevice.shared.press(.home)
             app.activate()
             if app.buttons["lock.unlock"].waitForExistence(timeout: 10) {

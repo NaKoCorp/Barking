@@ -29,13 +29,11 @@ struct TransparencyView: View {
                 .accessibilityIdentifier("transparency.data")
 
                 heading("Journal").padding(.top, 14)
-                Picker("Journal filter", selection: Binding(get: { model.filter },
-                                                      set: { f in Task { await model.setFilter(f) } })) {
-                    Text("Everything").tag(JournalFilter.everything)
-                    Text("Keys and devices").tag(JournalFilter.keysAndDevices)
-                }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("transparency.filter")
+                BarkingSegmented("Journal filter",
+                                 selection: Binding(get: { model.filter }, set: { f in Task { await model.setFilter(f) } }),
+                                 options: [(JournalFilter.everything, LocalizedStringKey("Everything")),
+                                           (.keysAndDevices, LocalizedStringKey("Keys and devices"))],
+                                 identifier: "transparency.filter")
                 Text("Keys and devices: key changes, devices added or removed, unreadable messages — the events to watch first.")
                     .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
                 if model.isEmpty, !model.loading {

@@ -13,7 +13,7 @@ extension XCUIApplication {
 @MainActor
 func onboard(_ app: XCUIApplication, confirm: Bool = true) throws {
     app.buttons["Create my identity"].firstMatch.tap()
-    let name = app.textFields["Your name, as contacts see it"]
+    let name = app.textFields["create.name"]
     XCTAssertTrue(name.waitForExistence(timeout: 5))
     name.tap()
     name.typeText("Alice")

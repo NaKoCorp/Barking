@@ -115,17 +115,24 @@ struct NetworkView: View {
 
     private var addSheet: some View {
         NavigationStack {
-            Form {
-                TextField("Identifier", text: $relayId).textInputAutocapitalization(.characters).autocorrectionDisabled()
-                TextField("ip:port", text: $relayAddr).keyboardType(.numbersAndPunctuation).autocorrectionDisabled()
-                Button("Paste a relay link") {
+            Group {
+                BarkingTextField("Identifier", text: $relayId, identifier: "relay.id")
+                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                BarkingTextField("Address", text: $relayAddr, prompt: "ip:port", identifier: "relay.addr")
+                    .keyboardType(.numbersAndPunctuation).autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                SecondaryButton("Paste a relay link") {
                     if let s = UIPasteboard.general.string, let r = NetworkModel.parseRelay(link: s) {
                         relayId = r.id; relayAddr = r.addr
                     }
                 }
-                if let e = model.addError { Text(LocalizedStringKey(e)).foregroundStyle(Color.danger) }
+                if let e = model.addError {
+                    Text(LocalizedStringKey(e)).font(.bBodySmall).foregroundStyle(Color.danger)
+                }
             }
+            .barkingScreen()
             .navigationTitle(Text("Add a relay"))
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { adding = false } }
                 ToolbarItem(placement: .confirmationAction) {
@@ -133,5 +140,6 @@ struct NetworkView: View {
                 }
             }
         }
+        .presentationBackground(Color.surface)
     }
 }

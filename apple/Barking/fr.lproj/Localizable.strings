@@ -43,7 +43,6 @@
 "Delete this contact? The history is kept." = "Supprimer ce contact ? L’historique est conservé.";
 "Development" = "Développement";
 "Device name" = "Nom de l’appareil";
-"Display name" = "Nom affiché";
 "Do not trust this contact until you meet" = "Ne vous fiez pas à ce contact avant de vous voir";
 "End-to-end encrypted, post-quantum" = "Chiffré de bout en bout, post-quantique";
 "English" = "English";
@@ -144,7 +143,6 @@
 "Write it down offline." = "Notez-la hors ligne.";
 "Write your phrase down now: it cannot be shown again" = "Notez votre phrase : elle ne pourra plus être affichée";
 "Your name travels in your contact card. No phone number, no email." = "Votre nom voyage dans votre carte de contact. Ni numéro ni e-mail.";
-"Your name, as contacts see it" = "Votre nom, tel que vos contacts le voient";
 "Your recovery phrase" = "Votre phrase de récupération";
 "added %@" = "ajouté %@";
 "added by hand" = "ajouté à la main";
@@ -153,7 +151,6 @@
 "delivered" = "distribué";
 "fingerprint" = "empreinte";
 "from a contact's card" = "carte d’un contact";
-"how your messages travel" = "comment voyagent vos messages";
 "ip:port" = "ip:port";
 "last sync %@" = "dernière synchro %@";
 "not sent" = "non envoyé";
@@ -191,8 +188,6 @@
 "At least 12 characters." = "Au moins 12 caractères.";
 "Too easy to guess: use the suggestion or several random words." = "Trop facile à deviner : prenez la suggestion ou plusieurs mots au hasard.";
 "The two passwords differ." = "Les deux mots de passe diffèrent.";
-"weak" = "faible";
-"fair" = "moyen";
 "strong" = "solide";
 "Hidden while the screen is recorded or the app is in the background." = "Masquée pendant un enregistrement de l’écran ou quand l’app est en arrière-plan.";
 "Shown only once: Barking does not keep the words." = "Affichée une seule fois : Barking ne garde pas les mots.";
@@ -304,3 +299,30 @@
 
 /* Buttons: VoiceOver value while the action runs. */
 "In progress" = "En cours";
+
+/* UI review B2: forms and fields. */
+"Type your name to continue." = "Indiquez votre nom pour continuer.";
+"Name this device to continue." = "Nommez cet appareil pour continuer.";
+"Your name" = "Votre nom";
+"Shown on your other devices, and to your contacts in your card." = "Visible sur vos autres appareils, et par vos contacts dans votre carte.";
+"Recovery phrase" = "Phrase de récupération";
+"Suggested password" = "Mot de passe suggéré";
+"Type my own password" = "Saisir mon propre mot de passe";
+"Hidden" = "Masqué";
+"Show" = "Afficher";
+"Hide" = "Masquer";
+"Copied" = "Copié";
+"Paste" = "Coller";
+"too weak" = "trop faible";
+"Password strength" = "Solidité du mot de passe";
+"strong, accepted" = "solide, accepté";
+"too weak, not accepted" = "trop faible, refusé";
+"Edit" = "Modifier";
+"Save" = "Enregistrer";
+"Saved" = "Enregistré";
+"Not saved. Try again." = "Non enregistré. Réessayez.";
+"Show larger" = "Afficher en grand";
+"My QR code. A contact scans it to add you." = "Mon code QR. Un contact le scanne pour vous ajouter.";
+"After adding, compare the safety code with %@ to be sure it is them." = "Après l’ajout, comparez le code de sécurité avec %@ pour vérifier que c’est bien cette personne.";
+"The camera is not available. Linking needs it to scan your other device's code." = "La caméra n’est pas disponible. Elle est nécessaire pour scanner le code de votre autre appareil.";
+"Address" = "Adresse";

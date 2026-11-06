@@ -55,8 +55,9 @@ struct SectionLabel: View {
 }
 
 /// A small label on a row: "this device", "admin", "sent 12:01".
-/// Fira Code 600 11, radius 4; wraps inside a `FlowLayout`, never inside
-/// itself.
+/// Fira Code 600 11, radius 4. A `FlowLayout` moves it to the next row;
+/// only a tag wider than the whole row (French at AX sizes) wraps inside
+/// itself, up to two lines, then truncates.
 struct Tag: View {
     enum Style {
         case accent, neutral, ok, danger
@@ -90,8 +91,8 @@ struct Tag: View {
         let shape = RoundedRectangle(cornerRadius: Radius.tag)
         text
             .font(.bTag)
-            .lineLimit(1)
-            .fixedSize()
+            .lineLimit(2)
+            .multilineTextAlignment(.leading)
             .foregroundStyle(Color(t.text))
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(Color(t.fill), in: shape)
@@ -116,7 +117,7 @@ struct FlowLayout: Layout {
         for row in arrange(width: bounds.width, subviews) {
             var x = bounds.minX
             for i in row.items {
-                let size = subviews[i].sizeThatFits(.unspecified)
+                let size = Self.size(of: subviews[i], width: bounds.width)
                 subviews[i].place(at: CGPoint(x: x, y: y + (row.height - size.height) / 2),
                                   proposal: ProposedViewSize(size))
                 x += size.width + spacing
@@ -127,10 +128,18 @@ struct FlowLayout: Layout {
 
     private struct Row { var items: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
 
+    /// Its ideal size, but never wider than the row: a longer child wraps
+    /// within the row instead of running past it.
+    private static func size(of view: LayoutSubview, width: CGFloat) -> CGSize {
+        let ideal = view.sizeThatFits(.unspecified)
+        guard width.isFinite, ideal.width > width else { return ideal }
+        return view.sizeThatFits(ProposedViewSize(width: width, height: nil))
+    }
+
     private func arrange(width: CGFloat, _ subviews: Subviews) -> [Row] {
         var rows: [Row] = [Row()]
         for i in subviews.indices {
-            let size = subviews[i].sizeThatFits(.unspecified)
+            let size = Self.size(of: subviews[i], width: width)
             let extra = rows[rows.count - 1].items.isEmpty ? size.width : rows[rows.count - 1].width + spacing + size.width
             if extra > width, !rows[rows.count - 1].items.isEmpty {
                 rows.append(Row())
@@ -193,7 +202,7 @@ struct StatusDot: View {
 #if DEBUG
 #Preview("Text") {
     PreviewMatrix {
-        Eyebrow("how your messages travel")
+        Eyebrow("step 2 of 2")
         SectionLabel("Appearance")
         FlowLayout {
             Tag("this device", style: .accent)

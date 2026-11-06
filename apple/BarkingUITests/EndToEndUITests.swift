@@ -26,11 +26,11 @@ final class EndToEndUITests: XCTestCase {
         app.tabBars.buttons["Network"].tap()
         app.buttons["+ Add a relay"].tap()
         let node = env["BARKING_E2E_NODE"]!.split(separator: "@").map(String.init)
-        let id = app.textFields["Identifier"]
+        let id = app.textFields["relay.id"]
         XCTAssertTrue(id.waitForExistence(timeout: 5))
         id.tap()
         id.typeText(node[0])
-        let addr = app.textFields["ip:port"]
+        let addr = app.textFields["relay.addr"]
         addr.tap()
         addr.typeText(node[1])
         app.navigationBars.buttons["Add"].tap()

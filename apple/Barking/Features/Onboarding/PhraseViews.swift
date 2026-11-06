@@ -6,26 +6,34 @@ struct CreateIdentityView: View {
     @Bindable var model: OnboardingModel
     let onCreated: () -> Void
 
+    /// Why "Create my identity" is greyed out, said under it (U-3).
+    private var reason: LocalizedStringKey? {
+        if model.displayName.trimmingCharacters(in: .whitespaces).isEmpty { return "Type your name to continue." }
+        if model.deviceName.trimmingCharacters(in: .whitespaces).isEmpty { return "Name this device to continue." }
+        return nil
+    }
+
     var body: some View {
-        Form {
-            Section {
-                TextField("Your name, as contacts see it", text: $model.displayName)
-                    .textContentType(.name)
-                TextField("This device's name", text: $model.deviceName)
-            } footer: {
-                Text("Your name travels in your contact card. No phone number, no email.")
+        Group {
+            BarkingTextField("Your name", text: $model.displayName,
+                             footer: "Your name travels in your contact card. No phone number, no email.",
+                             identifier: "create.name")
+                .textContentType(.name)
+            BarkingTextField("This device's name", text: $model.deviceName,
+                             footer: "Shown on your other devices, and to your contacts in your card.",
+                             identifier: "create.deviceName")
+            if let e = model.errorText {
+                Text(LocalizedStringKey(e)).font(.bBodySmall).foregroundStyle(Color.danger)
             }
-            if let e = model.errorText { Text(LocalizedStringKey(e)).foregroundStyle(Color.danger) }
-            PrimaryButton("Create my identity", enabled: model.canCreate && !model.busy) {
+        }
+        .barkingScreen()
+        .ctaBar {
+            PrimaryButton("Create my identity", enabled: model.canCreate, isLoading: model.busy, reason: reason) {
                 Task {
                     if await model.create() != nil { onCreated() }
                 }
             }
-            .listRowInsets(EdgeInsets())
-            .listRowBackground(Color.clear)
         }
-        .scrollContentBackground(.hidden)
-        .background(Color.surface)
         .navigationTitle(Text("Create my identity"))
     }
 }
@@ -90,6 +98,10 @@ struct PhraseView: View {
             .padding(24)
         }
         .background(Color.surfaceWelcome)
+        // A short inline title, never an empty one: with an empty title iOS 26
+        // draws no bar behind the back button and the words scroll under it.
+        .navigationTitle(Text("Recovery phrase"))
+        .toolbarTitleDisplayMode(.inline)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
             screenshotWarning = true
         }

@@ -94,4 +94,25 @@ final class LocalizationTests: XCTestCase {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
     }
+
+    /// UI review B2: every new form text has French, and the strings the
+    /// forms dropped are gone.
+    func testFormStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        for key in ["Type your name to continue.", "Name this device to continue.", "Your name",
+                    "Shown on your other devices, and to your contacts in your card.", "Recovery phrase",
+                    "Suggested password", "Type my own password", "Hidden", "Show", "Hide", "Copied", "Paste",
+                    "too weak", "strong", "Password strength", "strong, accepted", "too weak, not accepted",
+                    "Edit", "Save", "Saved", "Not saved. Try again.", "Show larger",
+                    "My QR code. A contact scans it to add you.",
+                    "After adding, compare the safety code with %@ to be sure it is them.",
+                    "The camera is not available. Linking needs it to scan your other device's code.",
+                    "Address", "Lock after", "Immediately"] {
+            XCTAssertNotNil(fr[key], "missing French for \(key)")
+        }
+        XCTAssertEqual(fr["Type your name to continue."] as? String, "Indiquez votre nom pour continuer.")
+        for unused in ["how your messages travel", "weak", "fair", "Your name, as contacts see it"] {
+            XCTAssertNil(fr[unused], "unused French string \(unused)")
+        }
+    }
 }

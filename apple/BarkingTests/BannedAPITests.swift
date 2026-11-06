@@ -13,6 +13,11 @@ final class BannedAPITests: XCTestCase {
         (".roundedBorder", #"\.roundedBorder\b"#),
         (".textCase(.uppercase)", #"textCase\(\s*\.uppercase\b"#),
         (".system(size:)", #"\.system\(\s*size\s*:"#),
+        // B2: one segmented look (BarkingSegmented), menus for long choices.
+        (".pickerStyle(.segmented)", #"pickerStyle\(\s*\.segmented\b"#),
+        // B2: brand screens are ScrollView + FormCard, CTAs never in a row.
+        ("Form {", #"\bForm\s*\{"#),
+        (".listRowInsets", #"\.listRowInsets\("#),
     ].map { ($0.0, try! NSRegularExpression(pattern: $0.1)) }
 
     /// The banned forms `text` contains, one entry per use.
@@ -29,6 +34,7 @@ final class BannedAPITests: XCTestCase {
             "Color.red", "Color.blue", ".foregroundStyle(.red)", ".tint(.blue)", "Color(.systemRed)",
             "UIColor.systemBlue", "Font.system(size: 12)", ".font( .system(size: 12))", ".font(.system( size: 9))",
             ".textFieldStyle(.roundedBorder)", ".textCase(.uppercase)", ".textCase( .uppercase )",
+            ".pickerStyle(.segmented)", "Form {", "Form{", ".listRowInsets(EdgeInsets())",
         ]
         for line in caught {
             XCTAssertEqual(Self.violations(in: line).count, 1, "not caught: \(line)")
@@ -36,6 +42,7 @@ final class BannedAPITests: XCTestCase {
         let allowed = [
             "Color(red: 0.5, green: 0.2, blue: 1)", "BarkingFont.sans(.body, size: 15)", ".font(.bSymbol(15))",
             "Color.danger", "let reduced = 1", ".textCase(nil)", "model.redraw", "Color.blueprint",
+            "FormCard {", ".pickerStyle(.menu)", "let form = 1",
         ]
         for line in allowed {
             XCTAssertEqual(Self.violations(in: line), [], "false positive: \(line)")
@@ -45,8 +52,9 @@ final class BannedAPITests: XCTestCase {
     /// Uses that a later batch of the UI review removes, by file and count:
     /// one more use fails, and so does one less (the allowance goes with it).
     private static let pending: [String: [String: Int]] = [
-        // B2 (U-7): BarkingTextField replaces these fields.
-        ".roundedBorder": ["SafetyCodeView.swift": 1, "LinkViews.swift": 1, "AddContactView.swift": 1],
+        // B4 (U-31): the Recover grid replaces the last Form and its CTA row.
+        "Form {": ["PhraseViews.swift": 1],
+        ".listRowInsets": ["PhraseViews.swift": 1],
     ]
 
     private func sources() throws -> [(name: String, text: String)] {

@@ -6,6 +6,7 @@ struct SafetyCodeView: View {
     let core: CoreService
     @State private var model: ContactModel
     @State private var aliasDraft = ""
+    @State private var aliasSaved = false
     @State private var confirmDelete = false
     @Environment(\.dismiss) private var dismiss
 
@@ -49,9 +50,23 @@ struct SafetyCodeView: View {
                 }
                 if !model.devices.isEmpty { devicesSection }
                 Divider().padding(.vertical, 8)
-                TextField("Alias", text: $aliasDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { Task { await model.rename(aliasDraft) } }
+                BarkingTextField("Alias", text: $aliasDraft, identifier: "contact.alias") {
+                    Task {
+                        await model.rename(aliasDraft)
+                        aliasSaved = model.alias == aliasDraft.trimmingCharacters(in: .whitespaces)
+                        if aliasSaved { AccessibilityNotification.Announcement(String(localized: "Saved")).post() }
+                    }
+                }
+                .submitLabel(.done)
+                .onChange(of: aliasDraft) { aliasSaved = false }
+                if aliasSaved {
+                    HStack(spacing: Space.s1) {
+                        Text(verbatim: "✓").font(.bSymbol(12, relativeTo: .caption, weight: .bold))
+                            .accessibilityHidden(true)
+                        Text("Saved").font(.bMeta)
+                    }
+                    .foregroundStyle(Color.ok)
+                }
                 Button(role: .destructive) { confirmDelete = true } label: {
                     Text("Delete this contact").frame(maxWidth: .infinity, minHeight: 44)
                 }
