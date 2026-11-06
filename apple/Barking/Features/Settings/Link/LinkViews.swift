@@ -72,7 +72,9 @@ struct LinkFromExistingView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        // Scrolls like the other forms: at AX sizes the field, its footer, the
+        // steps and the camera are taller than the screen.
+        Group {
             switch model.state {
             case .scanOffer:
                 BarkingTextField("This device's name", text: $model.deviceName,
@@ -85,7 +87,7 @@ struct LinkFromExistingView: View {
                 ScannerView(onBytes: { data in Task { await model.scannedOffer(data) } },
                             unavailable: "The camera is not available. Linking needs it to scan your other device's code.")
             case .request(let request):
-                Text("Scan this code with your other device.").foregroundStyle(Color.fgMuted)
+                Text("Scan this code with your other device.").font(.bBody).foregroundStyle(Color.fgMuted)
                 if let img = QRPayload.image(for: request, scale: 5) {
                     Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
                         .padding(12).background(Color.white, in: .rect(cornerRadius: Radius.card))
@@ -105,10 +107,8 @@ struct LinkFromExistingView: View {
                 Banner(kind: .danger, title: LocalizedStringKey(text))
                 PrimaryButton("Start again") { Task { await model.startAgain() } }
             }
-            Spacer(minLength: 0)
         }
-        .padding(20)
-        .background(Color.surface)
+        .barkingScreen()
         .navigationTitle(Text("Link to an existing device"))
         .fileImporter(isPresented: $importing, allowedContentTypes: [.barkingLink, .data]) { result in
             if case .success(let url) = result { Task { await receive(url) } }

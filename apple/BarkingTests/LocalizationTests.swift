@@ -111,6 +111,10 @@ final class LocalizationTests: XCTestCase {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
         XCTAssertEqual(fr["Type your name to continue."] as? String, "Indiquez votre nom pour continuer.")
+        // Fix round 1: the PDF reason, the alias failure, natural French for the footer.
+        XCTAssertEqual(fr["Choose a password to continue."] as? String, "Choisissez un mot de passe pour continuer.")
+        XCTAssertEqual(fr["Shown on your other devices, and to your contacts in your card."] as? String,
+                       "Affiché sur vos autres appareils, et transmis à vos contacts dans votre carte.")
         for unused in ["how your messages travel", "weak", "fair", "Your name, as contacts see it"] {
             XCTAssertNil(fr[unused], "unused French string \(unused)")
         }

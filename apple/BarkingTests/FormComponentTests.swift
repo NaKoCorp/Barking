@@ -47,6 +47,14 @@ final class FormComponentTests: XCTestCase {
         }
     }
 
+    /// VoiceOver hears the error on the field itself (fix round 1): the
+    /// error wins over the footer as the field's hint.
+    func testFieldHintPrefersTheError() {
+        XCTAssertEqual(FieldHint.of(hasError: true, hasFooter: true), .error)
+        XCTAssertEqual(FieldHint.of(hasError: false, hasFooter: true), .footer)
+        XCTAssertEqual(FieldHint.of(hasError: false, hasFooter: false), .none)
+    }
+
     // MARK: Rows and segmented control
 
     func testFormRowHeights() {

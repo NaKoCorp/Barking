@@ -29,6 +29,24 @@ struct FieldTokens: Equatable {
     }
 }
 
+/// What VoiceOver hears as the field's hint: the error when there is one
+/// (the ring alone is colour), else the footer.
+enum FieldHint: Equatable {
+    case error, footer, none
+
+    static func of(hasError: Bool, hasFooter: Bool) -> FieldHint {
+        hasError ? .error : (hasFooter ? .footer : .none)
+    }
+}
+
+extension View {
+    /// Sets the identifier only when there is one: an empty identifier
+    /// would replace SwiftUI's own and make empty-id queries ambiguous.
+    @ViewBuilder func accessibilityIdentifier(ifPresent id: String?) -> some View {
+        if let id, !id.isEmpty { accessibilityIdentifier(id) } else { self }
+    }
+}
+
 /// A trailing button inside a field, 44 pt.
 enum FieldAction {
     /// Replaces the text with the pasteboard's.
@@ -67,7 +85,10 @@ struct BarkingTextField: View {
     var identifier: String?
     var onSubmit: () -> Void = {}
 
-    @FocusState private var focused: Bool
+    /// Which of the two inputs has the keyboard: a secure field keeps both
+    /// a hidden and a plain input, so revealing never drops the focus.
+    private enum Slot: Hashable { case secure, plain }
+    @FocusState private var focus: Slot?
     @State private var revealed = false
     @State private var copied = false
 
@@ -86,7 +107,7 @@ struct BarkingTextField: View {
     }
 
     var body: some View {
-        let t = FieldTokens.of(FieldState(focused: focused, hasError: error != nil))
+        let t = FieldTokens.of(FieldState(focused: focus != nil, hasError: error != nil))
         let shape = RoundedRectangle(cornerRadius: Radius.field)
         VStack(alignment: .leading, spacing: Space.s2) {
             Text(label)
@@ -94,21 +115,19 @@ struct BarkingTextField: View {
                 // The field itself carries the label for VoiceOver.
                 .accessibilityHidden(true)
             HStack(spacing: 0) {
-                input
+                input(t)
                     .font(.bBodyLarge)
                     .foregroundStyle(Color(t.text))
-                    .focused($focused)
                     .onSubmit(onSubmit)
                     .padding(.horizontal, Space.s3)
                     .padding(.vertical, Space.s2)
                     .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                    .accessibilityIdentifier(identifier ?? "")
                 if let trailing { action(trailing) }
             }
             .background(Color(t.fill), in: shape)
             .overlay { if let b = t.border { shape.strokeBorder(Color(b), lineWidth: t.borderWidth) } }
             .contentShape(shape)
-            .onTapGesture { focused = true }
+            .onTapGesture { focus = visibleSlot }
             if let error {
                 HStack(alignment: .firstTextBaseline, spacing: Space.s1) {
                     Text(verbatim: "✗").font(.bSymbol(13, relativeTo: .footnote)).accessibilityHidden(true)
@@ -124,13 +143,54 @@ struct BarkingTextField: View {
         }
     }
 
-    @ViewBuilder private var input: some View {
+    private var visibleSlot: Slot { secure && !revealed ? .secure : .plain }
+
+    /// The error (or the footer) is also the field's hint, so VoiceOver
+    /// says it without leaving the field.
+    private var hint: Text {
+        switch FieldHint.of(hasError: error != nil, hasFooter: footer != nil) {
+        case .error: error.map { Text($0) } ?? Text(verbatim: "")
+        case .footer: footer.map { Text($0) } ?? Text(verbatim: "")
+        case .none: Text(verbatim: "")
+        }
+    }
+
+    /// A secure field draws both inputs on top of each other and shows one,
+    /// so the eye swaps them without closing the keyboard.
+    @ViewBuilder private func input(_ t: FieldTokens) -> some View {
         // No prompt: an empty one, so the label is not repeated inside the slot.
         let promptText = prompt.map { Text($0).foregroundStyle(Color.fgSoft) } ?? Text(verbatim: "")
-        if secure && !revealed {
-            SecureField(text: $text, prompt: promptText) { Text(label) }
+        if secure {
+            ZStack(alignment: .leading) {
+                SecureField(text: $text, prompt: promptText) { Text(label) }
+                    .focused($focus, equals: .secure)
+                    .modifier(Shown(on: !revealed, identifier: identifier, hint: hint))
+                TextField(text: $text, prompt: promptText) { Text(label) }
+                    .focused($focus, equals: .plain)
+                    .modifier(Shown(on: revealed, identifier: identifier, hint: hint))
+            }
         } else {
             TextField(text: $text, prompt: promptText) { Text(label) }
+                .focused($focus, equals: .plain)
+                .accessibilityHint(hint)
+                .accessibilityIdentifier(ifPresent: identifier)
+        }
+    }
+
+    /// One of the two stacked inputs: the hidden one takes no taps and is
+    /// not read by VoiceOver.
+    private struct Shown: ViewModifier {
+        let on: Bool
+        let identifier: String?
+        let hint: Text
+
+        func body(content: Content) -> some View {
+            content
+                .opacity(on ? 1 : 0)
+                .allowsHitTesting(on)
+                .accessibilityHidden(!on)
+                .accessibilityHint(hint)
+                .accessibilityIdentifier(ifPresent: on ? identifier : nil)
         }
     }
 
@@ -141,7 +201,11 @@ struct BarkingTextField: View {
             case .copy:
                 if secure { SecretPasteboard.copy(text) } else { UIPasteboard.general.string = text }
                 copied = true
-            case .reveal: revealed.toggle()
+            case .reveal:
+                let typing = focus != nil
+                revealed.toggle()
+                // Keep the keyboard: move the focus to the input now shown.
+                if typing { focus = visibleSlot }
             }
         } label: {
             Group {
@@ -178,36 +242,34 @@ enum SegmentedMetrics {
 /// The one segmented control of the app (Appearance, the journal filter,
 /// Add a contact): a `field` track (radius 10), a `segment` thumb with a
 /// 1 px `borderStrong` edge (a ground, not purple), Fira 13, 44 pt. At AX
-/// sizes it is a `Picker(.menu)` row instead.
+/// sizes it is a menu instead.
 struct BarkingSegmented<T: Hashable>: View {
     let label: LocalizedStringKey
     @Binding var selection: T
     let options: [(value: T, title: LocalizedStringKey)]
     var identifier: String?
     var optionID: ((T) -> String)?
+    /// Shows `label` above the menu at AX sizes, where no section label of
+    /// the screen names the control (Add a contact).
+    var labelAtAXSizes = false
     @Environment(\.dynamicTypeSize) private var size
 
     init(_ label: LocalizedStringKey, selection: Binding<T>, options: [(T, LocalizedStringKey)],
-         identifier: String? = nil, optionID: ((T) -> String)? = nil) {
+         identifier: String? = nil, optionID: ((T) -> String)? = nil, labelAtAXSizes: Bool = false) {
         self.label = label
         _selection = selection
         self.options = options.map { (value: $0.0, title: $0.1) }
         self.identifier = identifier
         self.optionID = optionID
+        self.labelAtAXSizes = labelAtAXSizes
     }
 
     var body: some View {
         if SegmentedMetrics.usesMenu(size) {
-            // The screen's section label names it; the menu alone has the
-            // whole width, so its value never wraps or truncates.
-            Picker(selection: $selection) {
-                ForEach(options, id: \.value) { o in Text(o.title).tag(o.value) }
-            } label: { Text(label) }
-            .pickerStyle(.menu)
-            .tint(Color.accent)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .accessibilityIdentifier(identifier ?? "")
+            VStack(alignment: .leading, spacing: Space.s2) {
+                if labelAtAXSizes { SectionLabel(label) }
+                menu
+            }
         } else {
             HStack(spacing: Space.s1) {
                 ForEach(options, id: \.value) { o in segment(o.value, o.title) }
@@ -216,8 +278,36 @@ struct BarkingSegmented<T: Hashable>: View {
             .background(Color.field, in: .rect(cornerRadius: Radius.field))
             .accessibilityElement(children: .contain)
             .accessibilityLabel(Text(label))
-            .accessibilityIdentifier(identifier ?? "")
+            .accessibilityIdentifier(ifPresent: identifier)
         }
+    }
+
+    /// A menu with its own label, flush with the screen's leading edge (the
+    /// system menu picker adds an inset and can hyphenate its value). Each
+    /// option keeps its identifier and says which one is chosen.
+    private var menu: some View {
+        Menu {
+            ForEach(options, id: \.value) { o in
+                Button { selection = o.value } label: {
+                    if o.value == selection { Label(o.title, systemImage: "checkmark") } else { Text(o.title) }
+                }
+                .accessibilityAddTraits(o.value == selection ? .isSelected : [])
+                .accessibilityIdentifier(ifPresent: optionID?(o.value))
+            }
+        } label: {
+            HStack(spacing: Space.s1) {
+                Text(options.first { $0.value == selection }?.title ?? label).font(.bBody)
+                    .fixedSize(horizontal: false, vertical: true)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.bSymbol(12, relativeTo: .footnote, weight: .semibold, maximum: 20))
+            }
+            .foregroundStyle(Color.accent)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(.rect)
+        }
+        .accessibilityLabel(Text(label))
+        .accessibilityValue(options.first { $0.value == selection }.map { Text($0.title) } ?? Text(verbatim: ""))
+        .accessibilityIdentifier(ifPresent: identifier)
     }
 
     private func segment(_ value: T, _ title: LocalizedStringKey) -> some View {
@@ -237,7 +327,7 @@ struct BarkingSegmented<T: Hashable>: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(on ? .isSelected : [])
-        .accessibilityIdentifier(optionID?(value) ?? "")
+        .accessibilityIdentifier(ifPresent: optionID?(value))
     }
 }
 

@@ -304,7 +304,7 @@
 "Type your name to continue." = "Indiquez votre nom pour continuer.";
 "Name this device to continue." = "Nommez cet appareil pour continuer.";
 "Your name" = "Votre nom";
-"Shown on your other devices, and to your contacts in your card." = "Visible sur vos autres appareils, et par vos contacts dans votre carte.";
+"Shown on your other devices, and to your contacts in your card." = "Affiché sur vos autres appareils, et transmis à vos contacts dans votre carte.";
 "Recovery phrase" = "Phrase de récupération";
 "Suggested password" = "Mot de passe suggéré";
 "Type my own password" = "Saisir mon propre mot de passe";
@@ -326,3 +326,4 @@
 "After adding, compare the safety code with %@ to be sure it is them." = "Après l’ajout, comparez le code de sécurité avec %@ pour vérifier que c’est bien cette personne.";
 "The camera is not available. Linking needs it to scan your other device's code." = "La caméra n’est pas disponible. Elle est nécessaire pour scanner le code de votre autre appareil.";
 "Address" = "Adresse";
+"Choose a password to continue." = "Choisissez un mot de passe pour continuer.";

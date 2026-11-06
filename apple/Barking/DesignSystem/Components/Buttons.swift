@@ -100,13 +100,17 @@ struct PrimaryButton: View {
     let title: LocalizedStringKey
     let state: ButtonState
     let reason: LocalizedStringKey?
+    let identifier: String?
     let action: () -> Void
 
+    /// `identifier` goes on the button itself, not on the stack that also
+    /// holds the reason line.
     init(_ title: LocalizedStringKey, enabled: Bool = true, isLoading: Bool = false,
-         reason: LocalizedStringKey? = nil, action: @escaping () -> Void) {
+         reason: LocalizedStringKey? = nil, identifier: String? = nil, action: @escaping () -> Void) {
         self.title = title
         self.state = ButtonState(enabled: enabled, isLoading: isLoading)
         self.reason = reason
+        self.identifier = identifier
         self.action = action
     }
 
@@ -118,6 +122,7 @@ struct PrimaryButton: View {
                 .disabled(!state.isInteractive)
                 // The reason is the value only: as a hint too, VoiceOver read it twice.
                 .accessibilityValue(state == .loading ? Text("In progress") : (why.map { Text($0) } ?? Text(verbatim: "")))
+                .accessibilityIdentifier(ifPresent: identifier)
             if let why {
                 Text(why)
                     .font(.bBodySmall).foregroundStyle(Color.fgMuted)

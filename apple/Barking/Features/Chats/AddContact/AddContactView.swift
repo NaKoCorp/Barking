@@ -26,7 +26,8 @@ struct AddContactView: View {
                     confirmation(p)
                 } else {
                     VStack(spacing: Space.s4) {
-                        BarkingSegmented("Add a contact", selection: $tab, options: [(0, LocalizedStringKey("Scan")), (1, LocalizedStringKey("My code"))])
+                        BarkingSegmented("Add a contact", selection: $tab, options: [(0, LocalizedStringKey("Scan")), (1, LocalizedStringKey("My code"))],
+                                         labelAtAXSizes: true)
                         if let e = model.error { errorText(e) }
                         if tab == 0 {
                             ScannerView(onBytes: { data in Task { await model.scanned(data) } },
@@ -95,9 +96,10 @@ struct ScannerView: View {
 
     var body: some View {
         if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
+            // A bounded height: inside a ScrollView the camera has no size of its own.
             Representable(onBytes: onBytes, onText: onText)
                 .clipShape(.rect(cornerRadius: Radius.card))
-                .frame(maxHeight: 420)
+                .frame(minHeight: 280, idealHeight: 420, maxHeight: 420)
         } else {
             Text(unavailable)
                 .font(.bBody).foregroundStyle(Color.fgMuted)

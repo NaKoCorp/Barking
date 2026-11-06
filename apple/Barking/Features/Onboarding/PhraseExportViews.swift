@@ -101,10 +101,13 @@ struct PhrasePDFSheet: View {
             }
             .barkingScreen()
             .ctaBar {
-                PrimaryButton("Create the PDF", enabled: problem == nil) {
+                // Weak or different passwords are explained under the fields;
+                // an empty one only here.
+                PrimaryButton("Create the PDF", enabled: problem == nil,
+                              reason: password.isEmpty ? "Choose a password to continue." : nil,
+                              identifier: "pdf.create") {
                     file = try? PhraseExport.encryptedFile(words: words, password: password)
                 }
-                .accessibilityIdentifier("pdf.create")
             }
             .navigationTitle(Text("Encrypted PDF"))
             .navigationBarTitleDisplayMode(.inline)
