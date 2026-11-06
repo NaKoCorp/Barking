@@ -52,6 +52,9 @@ final class TourUITests: XCTestCase {
         again.navigationBars.buttons.firstMatch.tap()
         again.buttons["settings.transparency"].tap(); sleep(1)
         snap(again, "11-transparency")
+        again.navigationBars.buttons.firstMatch.tap()
+        again.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Security")).firstMatch.tap(); sleep(1)
+        snap(again, "12-security")
     }
 
     private func snap(_ app: XCUIApplication, _ name: String) {

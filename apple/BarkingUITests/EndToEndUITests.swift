@@ -51,6 +51,16 @@ final class EndToEndUITests: XCTestCase {
         app.tabBars.buttons["Chats"].tap()
         openChat(app, "Alice")
         XCTAssertTrue(app.staticTexts["hello from the Mac"].waitForExistence(timeout: 30))
+        // The route badge of the received message opens its path, which
+        // names the local node by its 8-character short id.
+        let badge = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Internet")).firstMatch
+        XCTAssertTrue(badge.waitForExistence(timeout: 10), "no route badge on the received message")
+        badge.tap()
+        let shortId = String(env["BARKING_E2E_NODE"]!.split(separator: "@")[0].prefix(8))
+        let relay = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", shortId)).firstMatch
+        XCTAssertTrue(relay.waitForExistence(timeout: 10), "the path does not show the node \(shortId)")
+        snap(app, "path-received")
+        app.navigationBars.buttons.firstMatch.tap()
         let field = app.textFields["Message"]
         field.tap()
         field.typeText("hello from iPhone")
