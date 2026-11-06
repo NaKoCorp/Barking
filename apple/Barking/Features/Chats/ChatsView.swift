@@ -153,6 +153,9 @@ struct ChatRowView: View {
                             .accessibilityLabel(Text("\(row.unread) unread"))
                     }
                 }
+                if let route = RouteBadge.text(for: row.route) {
+                    Text(verbatim: route).font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.accent)
+                }
             }
         }
         .frame(minHeight: 72)

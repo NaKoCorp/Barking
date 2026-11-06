@@ -50,6 +50,9 @@ struct Net {
     cut_reread: HashMap<MailboxId, FetchStop>,
     /// Time a re-read of this mailbox (alone, from its start) takes.
     reread_delay: HashMap<MailboxId, Duration>,
+    /// Items served only to a re-read of this mailbox (alone, from its
+    /// start).
+    reread_items: HashMap<MailboxId, Vec<Vec<u8>>>,
     /// Nodes whose fetch answers `RateLimited`.
     rate_limit_fetch: HashSet<NodeId>,
     /// Items every fetch from that node returns.
@@ -275,6 +278,11 @@ impl Fetcher for Net {
         let mut items = self.items.get(conn).cloned().unwrap_or_default();
         for m in mailboxes {
             items.extend(self.mailbox_items.get(m).cloned().unwrap_or_default());
+        }
+        if let [m] = mailboxes
+            && positioned.is_empty()
+        {
+            items.extend(self.reread_items.get(m).cloned().unwrap_or_default());
         }
         let mut stop = stop;
         if self.honor_max_bytes {
@@ -1436,6 +1444,34 @@ async fn cut_reread_backs_off_six_hours() {
     state.save(&mut core).unwrap();
     sync(&mut core, &net, opts()).await;
     assert_eq!(rereads_of(&net.calls(), x, m).len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reread_items_are_recorded_in_the_route() {
+    use barking_core::store::Direction;
+    let (_dir, mut core, hello) = crate::test_support::subject_with_hello(NOW);
+    let mut net = setup_with(&mut core);
+    let (x, m, mine) = due_reread(&mut core);
+    // The re-read serves Alice's message, and Bob's own reply (an audit of
+    // what he deposited: not a step of its route).
+    let mut items = hello;
+    items.push(mine);
+    net.reread_items.insert(m, items);
+    sync(&mut core, &net, opts()).await;
+    assert_eq!(rereads_of(&net.calls(), x, m).len(), 1);
+    let alice = core.contacts().unwrap()[0].fingerprint;
+    let rows = core.messages_with(&alice).unwrap();
+    let row = |d| rows.iter().find(|r| r.direction == d).unwrap().id;
+    let fetched = |row| -> Vec<Option<String>> {
+        core.message_route(row)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.step == RouteStep::Fetched)
+            .map(|e| e.node)
+            .collect()
+    };
+    assert_eq!(fetched(row(Direction::In)), [Some(short_id(&x))]);
+    assert!(fetched(row(Direction::Out)).is_empty());
 }
 
 #[tokio::test(start_paused = true)]

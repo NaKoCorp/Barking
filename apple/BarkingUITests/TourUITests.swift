@@ -17,7 +17,8 @@ final class TourUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Your recovery phrase"].waitForExistence(timeout: 10))
         snap(app, "02-phrase")
         app.terminate()
-        let again = XCUIApplication.fresh(extra: ["-BarkingUITestOpenCard", samCard])
+        // A fake route on the real message, for the path screen.
+        let again = XCUIApplication.fresh(extra: ["-BarkingUITestOpenCard", samCard, "-BarkingUITestFakeRoute"])
         again.launch()
         try onboard(again)
         _ = again.staticTexts["Sam"].waitForExistence(timeout: 10)
@@ -33,6 +34,14 @@ final class TourUITests: XCTestCase {
         }
         sleep(1)
         snap(again, "05-conversation")
+        let path = again.buttons["conversation.path"]
+        if path.waitForExistence(timeout: 5) {
+            path.tap()
+            _ = again.staticTexts["Internet · 1 relay"].waitForExistence(timeout: 5)
+            sleep(1)
+            snap(again, "06-path")
+            again.navigationBars.buttons.firstMatch.tap()
+        }
         again.navigationBars.buttons.firstMatch.tap()
         again.tabBars.buttons["Network"].tap(); sleep(1)
         snap(again, "07-network")

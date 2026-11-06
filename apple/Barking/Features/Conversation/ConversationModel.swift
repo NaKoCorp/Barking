@@ -11,6 +11,8 @@ final class ConversationModel {
         let text: String
         let at: Date
         let status: MessageStatusKind
+        /// Route hint from the core (`internet:N`), for the badge.
+        var route: String? = nil
     }
 
     static let maxBytes = 4000
@@ -37,6 +39,8 @@ final class ConversationModel {
     }
 
     var byteCount: Int { draft.utf8.count }
+    /// The path icon in the header opens the last message's path.
+    var lastMessageId: Int64? { items.last?.id }
     var showsCounter: Bool { byteCount >= Self.counterFrom }
     var canSend: Bool {
         !sending && !removed && byteCount <= Self.maxBytes
@@ -68,7 +72,8 @@ final class ConversationModel {
         items = messages.filter { !hide.contains($0.id) }.map {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)),
-                 status: MessageStatusKind(status: $0.status, failed: $0.failed, outgoing: $0.outgoing))
+                 status: MessageStatusKind(status: $0.status, failed: $0.failed, outgoing: $0.outgoing),
+                 route: $0.route)
         }
         // What arrives while the conversation is on screen is read.
         if visible, let last = items.last(where: { !$0.outgoing }) {

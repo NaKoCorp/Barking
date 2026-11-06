@@ -17,7 +17,9 @@ final class LocalizationTests: XCTestCase {
                     "Transfer pending", "This device was removed from your account", "Reset this device",
                     "Disconnect this device", "Remove %@", "Handing over to %@…",
                     "Everything on this iPhone will be erased. Your contacts will not be told. To get your identity back, you will need the 24-word phrase.",
-                    "The handover to %@ did not finish. Nothing was erased: this device is still your admin."] {
+                    "The handover to %@ did not finish. Nothing was erased: this device is still your admin.",
+                    "Message path", "Internet relay · %@", "%@'s phone", "Path not recorded",
+                    "a sealed packet of %@ for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it."] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
     }
@@ -25,7 +27,7 @@ final class LocalizationTests: XCTestCase {
     func testPluralsInBothLanguages() throws {
         for lang in ["en", "fr"] {
             let d = try XCTUnwrap(table(lang, "Localizable", "stringsdict"), lang)
-            for key in ["%lld packets pending", "%lld unread", "%lld of 8 devices"] {
+            for key in ["%lld packets pending", "%lld unread", "%lld of 8 devices", "Internet · %lld relays"] {
                 let rule = (d[key] as? NSDictionary)?["n"] as? NSDictionary
                 XCTAssertNotNil(rule?["one"], "\(lang) \(key)")
                 XCTAssertNotNil(rule?["other"], "\(lang) \(key)")

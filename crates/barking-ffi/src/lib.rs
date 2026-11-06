@@ -11,6 +11,7 @@ mod link;
 mod lock;
 mod messages;
 mod net;
+mod route;
 
 use std::panic::{UnwindSafe, catch_unwind};
 
@@ -23,6 +24,7 @@ pub use identity::{MyDeviceInfo, RemovedInfo, bip39_words, recover_device};
 pub use link::{PendingLink, begin_link, inspect_link_request};
 pub use messages::{ChatSummary, KeyChange, UnreadCount};
 pub use net::{LeaveState, NewMessage, NodeInfo, SyncSummary};
+pub use route::RouteStepInfo;
 
 uniffi::setup_scaffolding!();
 

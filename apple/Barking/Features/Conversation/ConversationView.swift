@@ -1,11 +1,14 @@
 import BarkingKit
 import SwiftUI
 
-/// Screen 4 of the mockup, without route chips nor the "Send from" chooser.
+/// Screen 4 of the mockup, without the "Send from" chooser. The path icon
+/// in the header and a bubble's route badge open the path screen.
 struct ConversationView: View {
     let core: CoreService
     @State private var model: ConversationModel
     @Environment(\.scenePhase) private var phase
+    /// The message whose path is shown.
+    @State private var pathOf: Int64?
 
     init(core: CoreService, contact: String) {
         self.core = core
@@ -40,7 +43,20 @@ struct ConversationView: View {
         }
         .background(Color.surface)
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(item: $pathOf) { id in
+            PathView(core: core, messageId: id, contact: model.contact, contactName: model.name)
+        }
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    pathOf = model.lastMessageId
+                } label: {
+                    Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
+                }
+                .disabled(model.lastMessageId == nil)
+                .accessibilityLabel(Text("Message path"))
+                .accessibilityIdentifier("conversation.path")
+            }
             ToolbarItem(placement: .principal) {
                 NavigationLink {
                     SafetyCodeView(core: core, contact: model.contact)
@@ -92,6 +108,11 @@ struct ConversationView: View {
                     Text("queued")
                 } else {
                     StatusGlyph(status: item.status)
+                }
+                if let route = RouteBadge.text(for: item.route) {
+                    Button { pathOf = item.id } label: { RouteChip(text: route, outgoing: item.outgoing) }
+                        .buttonStyle(.plain)
+                        .accessibilityHint(Text("Message path"))
                 }
             }
             .opacity(0.85)

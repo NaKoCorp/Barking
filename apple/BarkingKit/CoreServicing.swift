@@ -8,6 +8,7 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func setDisplayName(name: String) throws
     func contacts() throws -> [Contact]
     func messagesWith(contact: String) throws -> [Message]
+    func messageRoute(messageId: Int64) throws -> [RouteStepInfo]
     func sendText(contact: String, text: String) throws
     func addContactBytes(card: Data, alias: String?) throws -> String
     func addContact(card: String, alias: String?) throws -> String

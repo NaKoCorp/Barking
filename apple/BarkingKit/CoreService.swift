@@ -142,6 +142,10 @@ public actor CoreService {
     public func messages(with contact: String) async throws -> [Message] {
         try await call("messages") { try $0.messagesWith(contact: contact) }
     }
+    /// Recorded steps of the message `id` (`Message.id`), by date.
+    public func messageRoute(_ id: Int64) async throws -> [RouteStepInfo] {
+        try await call("route") { try $0.messageRoute(messageId: id) }
+    }
     public func send(_ text: String, to contact: String) async throws {
         try await call("send") { try $0.sendText(contact: contact, text: text) }
         publish(.messages(contact: contact))

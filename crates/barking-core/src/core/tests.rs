@@ -2781,3 +2781,58 @@ fn route_steps_purged_after_30_days() {
         .unwrap();
     assert!(p.a.message_route(row).unwrap().is_empty());
 }
+
+#[test]
+fn repeated_transport_steps_are_recorded_once_per_node() {
+    let mut p = pair();
+    let sent =
+        p.a.send_text(&p.b.fingerprint(), "z", NOW, &mut p.rng)
+            .unwrap();
+    let id = sent[0].id;
+    for pk in &sent {
+        p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    }
+    let transport =
+        |c: &Core, contact: &crate::identity::root::Fingerprint| -> Vec<(RouteStep, String, u64)> {
+            // The last message of the conversation: "z".
+            let row = c.messages_with(contact).unwrap().last().unwrap().id;
+            c.message_route(row)
+                .unwrap()
+                .into_iter()
+                .filter_map(|e| Some((e.step, e.node?, e.at)))
+                .collect()
+        };
+    // A redeposit, a refetch and a cross-check of the same packet on the
+    // same node add nothing; another node keeps its own step.
+    for t in [NOW, NOW + 60, NOW + 120] {
+        p.a.record_route(id, RouteStep::Deposited, ROUTE_NODE, t)
+            .unwrap();
+        p.b.record_route(id, RouteStep::Fetched, ROUTE_NODE, t)
+            .unwrap();
+    }
+    p.a.record_route(id, RouteStep::Deposited, "ZZZZ9999", NOW + 5)
+        .unwrap();
+    p.b.record_route(id, RouteStep::Fetched, "ZZZZ9999", NOW + 5)
+        .unwrap();
+    // The sender fetching back its own packet (an audit) and the recipient
+    // depositing a received one are not steps of the route.
+    p.a.record_route(id, RouteStep::Fetched, ROUTE_NODE, NOW + 9)
+        .unwrap();
+    p.b.record_route(id, RouteStep::Deposited, ROUTE_NODE, NOW + 9)
+        .unwrap();
+    let (fa, fb) = (p.a.fingerprint(), p.b.fingerprint());
+    assert_eq!(
+        transport(&p.a, &fb),
+        [
+            (RouteStep::Deposited, ROUTE_NODE.to_owned(), NOW),
+            (RouteStep::Deposited, "ZZZZ9999".to_owned(), NOW + 5),
+        ]
+    );
+    assert_eq!(
+        transport(&p.b, &fa),
+        [
+            (RouteStep::Fetched, ROUTE_NODE.to_owned(), NOW),
+            (RouteStep::Fetched, "ZZZZ9999".to_owned(), NOW + 5),
+        ]
+    );
+}

@@ -28,6 +28,9 @@ pub struct ChatSummary {
     pub contact: Contact,
     pub last: Option<Message>,
     pub unread: u32,
+    /// Route badge of the last message (`Message::route`).
+    #[uniffi(default = None)]
+    pub route: Option<String>,
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -118,14 +121,20 @@ impl Device {
                         .iter()
                         .filter(|m| m.direction == Direction::In && m.id > mark)
                         .count();
+                    let last = messages
+                        .into_iter()
+                        .last()
+                        .map(|m| message_of(core, m))
+                        .transpose()?;
                     out.push(ChatSummary {
+                        route: last.as_ref().and_then(|m| m.route.clone()),
                         contact: Contact {
                             fingerprint: c.fingerprint.to_string(),
                             alias: c.alias,
                             display_name: c.display_name,
                             verified: c.verified,
                         },
-                        last: messages.into_iter().last().map(message_of),
+                        last,
                         unread: u32::try_from(unread).unwrap_or(u32::MAX),
                     });
                 }

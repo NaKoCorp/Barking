@@ -12,6 +12,8 @@ struct ChatRow: Identifiable, Equatable {
     let lastAt: Date?
     let lastStatus: MessageStatusKind?
     let unread: Int
+    /// Route hint of the last message (`internet:N`), for the route line.
+    var route: String? = nil
 }
 
 @MainActor @Observable
@@ -44,7 +46,8 @@ final class ChatsModel {
                 lastText: last?.body,
                 lastAt: last.map { Date(timeIntervalSince1970: TimeInterval($0.at)) },
                 lastStatus: last.map { MessageStatusKind(status: $0.status, failed: $0.failed, outgoing: $0.outgoing) },
-                unread: Int(s.unread)))
+                unread: Int(s.unread),
+                route: s.route))
         }
         rows = out.sorted { ($0.lastAt ?? .distantPast) > ($1.lastAt ?? .distantPast) }
     }

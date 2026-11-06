@@ -69,6 +69,10 @@ pub struct Message {
     pub at: u64,
     /// Expired before its ack: can be sent again.
     pub failed: bool,
+    /// Route badge: `internet:N` (N distinct relay nodes), `None` while
+    /// none is recorded.
+    #[uniffi(default = None)]
+    pub route: Option<String>,
 }
 
 #[derive(uniffi::Object)]
@@ -271,11 +275,10 @@ impl Device {
         guard(|| {
             self.with_core(|core| {
                 let fp = core.resolve(&contact)?;
-                Ok(core
-                    .messages_with(&fp)?
+                core.messages_with(&fp)?
                     .into_iter()
-                    .map(message_of)
-                    .collect())
+                    .map(|m| message_of(core, m))
+                    .collect()
             })
         })
     }
@@ -291,15 +294,19 @@ fn card_error(e: CoreError) -> BarkingError {
     }
 }
 
-pub(crate) fn message_of(m: barking_core::store::MessageRow) -> Message {
-    Message {
+pub(crate) fn message_of(
+    core: &Core,
+    m: barking_core::store::MessageRow,
+) -> Result<Message, BarkingError> {
+    Ok(Message {
+        route: crate::route::route_hint(core, m.id)?,
         id: m.id,
         failed: m.status == MessageStatus::Failed,
         outgoing: m.direction == Direction::Out,
         body: m.body,
         status: status_name(m.status).to_owned(),
         at: m.at,
-    }
+    })
 }
 
 fn status_name(s: MessageStatus) -> &'static str {

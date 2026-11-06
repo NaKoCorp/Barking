@@ -244,3 +244,32 @@
 "Barking is locked" = "Barking est verrouillé";
 "Unlock" = "Déverrouiller";
 "Unlock Barking" = "Déverrouiller Barking";
+
+/* Message path screen and route badges (block 2b §4.2). */
+"Internet relay · %@" = "Relais internet · %@";
+"Your iPhone" = "Votre iPhone";
+"%@'s phone" = "Téléphone de %@";
+"Your other devices" = "Vos autres appareils";
+"Your other devices · %@" = "Vos autres appareils · %@";
+"wrote and encrypted" = "écrit et chiffré";
+"wrote and encrypted · %@" = "écrit et chiffré · %@";
+"deposited · %@" = "déposé · %@";
+"fetched · %@" = "relevé · %@";
+"receipt received · %@" = "accusé reçu · %@";
+"decrypted · %@ · receipt sent" = "déchiffré · %@ · accusé envoyé";
+"copy encrypted · %@" = "copie chiffrée · %@";
+"everything — it is the sender." = "tout — c’est l’expéditeur.";
+"everything — it is the recipient." = "tout — c’est le destinataire.";
+"the message, encrypted between your own devices." = "le message, chiffré entre vos propres appareils.";
+"a sealed packet of %@ for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it." = "un paquet scellé de %@ pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.";
+"a sealed packet for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it." = "un paquet scellé pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.";
+"a sealed packet for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever fetched it." = "un paquet scellé pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a relevé.";
+"sent %@" = "envoyé %@";
+"received %@" = "reçu %@";
+"Message path" = "Trajet du message";
+"How it got here" = "Comment il est arrivé";
+"Path not recorded" = "Trajet non enregistré";
+"Could see:" = "A pu voir :";
+"“%@”" = "« %@ »";
+"// only you and %@ can read it" = "// seuls %@ et vous pouvez le lire";
+"hidden sender" = "expéditeur masqué";

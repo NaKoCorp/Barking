@@ -40,6 +40,32 @@ final class ChatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["queued"].exists || app.staticTexts["sent"].exists
                       || app.otherElements["queued"].exists)
     }
+
+    /// The header icon opens the path of the last message (a real message
+    /// on a fake route: no network in UI tests).
+    func testPathScreenShowsTheRoute() throws {
+        let app = XCUIApplication.fresh(extra: ["-BarkingUITestOpenCard", samCard, "-BarkingUITestFakeRoute"])
+        app.launch()
+        try onboard(app)
+        XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
+        app.buttons["Add"].tap()
+        app.staticTexts["Sam"].firstMatch.tap()
+        let field = app.textFields["Message"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("hello Sam")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(app.staticTexts["hello Sam"].waitForExistence(timeout: 5))
+        app.buttons["conversation.path"].tap()
+        // Each stop is one VoiceOver element: name, time, what it could see.
+        let stop = { (name: String) in
+            app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
+        }
+        XCTAssertTrue(stop("Your iPhone").waitForExistence(timeout: 5))
+        XCTAssertTrue(stop("Internet relay · K7QX2M4A").exists)
+        XCTAssertTrue(stop("Sam's phone").exists)
+        XCTAssertTrue(app.staticTexts["Internet · 1 relay"].exists)
+    }
 }
 
 @MainActor

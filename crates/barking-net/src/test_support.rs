@@ -34,20 +34,32 @@ pub(crate) fn subject(now: u64) -> (tempfile::TempDir, barking_core::Core) {
     (dir, bob)
 }
 
+/// `subject`, plus Alice's first message (encoded packets), already
+/// received by Bob.
+pub(crate) fn subject_with_hello(
+    now: u64,
+) -> (tempfile::TempDir, barking_core::Core, Vec<Vec<u8>>) {
+    let (dir, bob, _, hello) = build_subject(now, false);
+    (dir, bob, hello)
+}
+
 /// `subject`, plus Alice's receipt for Bob's reply (encoded), as a node
 /// would serve it in the reply's mailbox.
 pub(crate) fn subject_with_ack(now: u64) -> (tempfile::TempDir, barking_core::Core, Vec<u8>) {
-    build_subject(now, false)
+    let (dir, bob, ack, _) = build_subject(now, false);
+    (dir, bob, ack)
 }
 
 /// `subject`, where Bob also sent a second message the next day (another
 /// session mailbox).
 pub(crate) fn subject_two_messages(now: u64) -> (tempfile::TempDir, barking_core::Core) {
-    let (dir, bob, _) = build_subject(now, true);
+    let (dir, bob, _, _) = build_subject(now, true);
     (dir, bob)
 }
 
-fn build_subject(now: u64, second: bool) -> (tempfile::TempDir, barking_core::Core, Vec<u8>) {
+type Subject = (tempfile::TempDir, barking_core::Core, Vec<u8>, Vec<Vec<u8>>);
+
+fn build_subject(now: u64, second: bool) -> Subject {
     use barking_core::{Core, ReceiveOutcome};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -72,8 +84,10 @@ fn build_subject(now: u64, second: bool) -> (tempfile::TempDir, barking_core::Co
     let fb = alice
         .add_contact(&card_b, Some("bob"), now, &mut rng)
         .unwrap();
+    let mut hello = Vec::new();
     for p in alice.send_text(&fb, "hello", now, &mut rng).unwrap() {
         bob.receive(&p.encode(), "test", now, &mut rng).unwrap();
+        hello.push(p.encode());
     }
     let mut ack = None;
     for p in bob.send_text(&fa, "hi", now, &mut rng).unwrap() {
@@ -86,5 +100,5 @@ fn build_subject(now: u64, second: bool) -> (tempfile::TempDir, barking_core::Co
     if second {
         bob.send_text(&fa, "again", now + 86_400, &mut rng).unwrap();
     }
-    (dir, bob, ack.unwrap())
+    (dir, bob, ack.unwrap(), hello)
 }

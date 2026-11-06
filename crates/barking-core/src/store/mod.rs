@@ -1168,7 +1168,9 @@ pub trait Queries {
     }
 
     /// Appends a route step of the packet `packet_id` (`step`: `RouteStep`
-    /// as stored).
+    /// as stored). A step on a node (`node` set) is kept once per packet,
+    /// step and node: a refetch or a cross-check of the same packet on the
+    /// same node adds nothing, the first date stays.
     fn add_route_step(
         &self,
         packet_id: PacketId,
@@ -1180,7 +1182,9 @@ pub trait Queries {
         self.conn()
             .execute(
                 "INSERT INTO route_steps(packet_id, at, step, node, size) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 SELECT ?1, ?2, ?3, ?4, ?5 WHERE ?4 IS NULL OR NOT EXISTS ( \
+                 SELECT 1 FROM route_steps WHERE packet_id = ?1 AND step = ?3 \
+                 AND node = ?4)",
                 params![
                     packet_id.0.as_slice(),
                     to_i64(at),
@@ -1193,19 +1197,19 @@ pub trait Queries {
         Ok(())
     }
 
-    /// `true` if `packet_id` carries a message: one of my deliveries or a
-    /// received packet recorded in `inbound`.
-    fn packet_has_message(&self, packet_id: PacketId) -> Result<bool> {
-        let n: i64 = self
+    /// Whether `packet_id` carries a message: `(sent, received)`, sent if
+    /// it is one of my deliveries, received if it is recorded in `inbound`.
+    fn packet_has_message(&self, packet_id: PacketId) -> Result<(bool, bool)> {
+        let (sent, received): (i64, i64) = self
             .conn()
             .query_row(
-                "SELECT (SELECT count(*) FROM deliveries WHERE packet_id = ?1) \
-                 + (SELECT count(*) FROM inbound WHERE packet_id = ?1)",
+                "SELECT (SELECT count(*) FROM deliveries WHERE packet_id = ?1), \
+                 (SELECT count(*) FROM inbound WHERE packet_id = ?1)",
                 params![packet_id.0.as_slice()],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(map_err)?;
-        Ok(n > 0)
+        Ok((sent > 0, received > 0))
     }
 
     /// Route steps of every packet of the message whose row is `row_id`

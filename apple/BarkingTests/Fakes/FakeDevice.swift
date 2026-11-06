@@ -10,6 +10,8 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: true, error: nil)
     var contactList: [Contact] = []
     var messageList: [String: [Message]] = [:]
+    /// Route of each message, by message id.
+    var routes: [Int64: [RouteStepInfo]] = [:]
     var verified: Set<String> = []
     var reads: [(String, Int64)] = []
     var unread: [UnreadCount] = []
@@ -33,6 +35,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func setDisplayName(name: String) throws {}
     func contacts() throws -> [Contact] { contactList }
     func messagesWith(contact: String) throws -> [Message] { messageList[contact] ?? [] }
+    func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { routes[messageId] ?? [] }
     func sendText(contact: String, text: String) throws {
         if let sendError { throw sendError }
         Thread.sleep(forTimeInterval: syncDelay)
@@ -52,7 +55,8 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         lock.withLock { _summaryCalls += 1 }
         return contactList.map { c in
             ChatSummary(contact: c, last: messageList[c.fingerprint]?.last,
-                        unread: unread.first { $0.contact == c.fingerprint }?.count ?? 0)
+                        unread: unread.first { $0.contact == c.fingerprint }?.count ?? 0,
+                        route: messageList[c.fingerprint]?.last?.route)
         }
     }
     func markRead(contact: String, upTo: Int64) throws { reads.append((contact, upTo)) }

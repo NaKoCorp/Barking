@@ -106,7 +106,10 @@ impl Core {
     /// Records a transport step of `packet` on the node `node` (its short
     /// identifier, never an address): only `Deposited` and `Fetched` are
     /// accepted, the other steps are written by the core. A packet that
-    /// carries none of my messages (a receipt, junk) is ignored.
+    /// carries none of my messages (a receipt, junk) is ignored, and so is
+    /// a step that is not part of the packet's way: `Deposited` for a
+    /// received packet, `Fetched` for one I sent (an audit reading back
+    /// what I deposited).
     pub fn record_route(
         &mut self,
         packet: PacketId,
@@ -121,7 +124,12 @@ impl Core {
             return Err(CoreError::Malformed("route node"));
         }
         self.store.transaction(|tx| {
-            if !tx.packet_has_message(packet)? {
+            let (sent, received) = tx.packet_has_message(packet)?;
+            let on_its_way = match step {
+                RouteStep::Deposited => sent,
+                _ => received,
+            };
+            if !on_its_way {
                 return Ok(());
             }
             tx.add_route_step(packet, now, step.to_u8(), Some(node), None)

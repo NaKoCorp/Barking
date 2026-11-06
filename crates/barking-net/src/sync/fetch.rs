@@ -487,6 +487,12 @@ where
                             items.iter().map(Vec::len).fold(0, usize::saturating_add),
                         );
                         let processed = self.take_items(&items);
+                        self.stats(node).fetched_ids.extend(
+                            items
+                                .iter()
+                                .filter_map(|i| Packet::decode(i).ok())
+                                .map(|p| p.id),
+                        );
                         let finished = stop == FetchStop::Complete && processed;
                         self.audit(node, &items, if finished { &one } else { &[] });
                         if finished {
