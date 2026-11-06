@@ -94,4 +94,29 @@ final class ChatsModelTests: XCTestCase {
         await m.reload()
         XCTAssertTrue(m.offline)
     }
+
+    /// UI review U-20/U-22: the second line is the last message, else the
+    /// contact's trust, as a glyph and a word.
+    func testRowSecondLine() {
+        let row = { (text: String?, verified: Bool) in
+            ChatRow(contact: "a", name: "Sam", verified: verified, lastText: text, lastAt: nil,
+                    lastStatus: nil, unread: 0)
+        }
+        XCTAssertEqual(row(nil, false).line, .trust(.notVerified))
+        XCTAssertEqual(row("", true).line, .trust(.verified))
+        XCTAssertEqual(row("hello", false).line, .preview("hello"))
+        XCTAssertEqual(Trust.verified.glyph, "✓")
+        XCTAssertEqual(Trust.verified.token, "ok")
+        XCTAssertEqual(Trust.notVerified.glyph, "○")
+        XCTAssertEqual(Trust.notVerified.token, "fgMuted")
+        XCTAssertEqual(Trust(verified: true), .verified)
+    }
+
+    /// B4 carry: the conversation title stays inside the bar at AX sizes.
+    func testChatTitleIsCappedForTheBar() {
+        let ax5 = UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge)
+        XCTAssertEqual(BarkingFont.scaledSize(16, relativeTo: .headline, maximum: ChatTitle.nameMaximum, traits: ax5), 20)
+        XCTAssertEqual(BarkingFont.scaledSize(12, relativeTo: .caption, maximum: ChatTitle.lineMaximum, traits: ax5), 14)
+        XCTAssertLessThanOrEqual(ChatTitle.nameMaximum + ChatTitle.lineMaximum * 1.3, 44)
+    }
 }

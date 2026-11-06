@@ -1,10 +1,59 @@
 import BarkingKit
 import Foundation
 import Observation
+import SwiftUI
+
+/// What the Internet card says (U-19): a glyph and a word, and amber, not
+/// red, when unreachable: nothing is lost, messages wait.
+enum NetworkStatus: Equatable {
+    case reachable, unreachable, notSynced, checking
+
+    var dot: StatusDot.State {
+        switch self {
+        case .reachable: .ok
+        case .unreachable: .waiting
+        case .notSynced, .checking: .checking
+        }
+    }
+
+    var label: LocalizedStringKey {
+        switch self {
+        case .reachable: "Reachable"
+        case .unreachable: "Unreachable · nothing is lost"
+        case .notSynced: "Not synced yet"
+        case .checking: "Checking…"
+        }
+    }
+}
 
 /// Network tab (screen 7, spec §5.7): Internet only in this block.
 @MainActor @Observable
 final class NetworkModel {
+    /// The line under "Sync now" once it ran, from the counts the core gave.
+    enum SyncResult: Equatable {
+        case unreachable(waiting: Int)
+        case done(sent: Int, received: Int)
+
+        var text: String {
+            switch self {
+            case .unreachable(let n):
+                n > 0 ? String(localized: "Still unreachable · \(n) packets wait")
+                    : String(localized: "Still unreachable · nothing waits")
+            case .done(let sent, let received):
+                if sent == 0, received == 0 { String(localized: "Up to date") }
+                else {
+                    [sent > 0 ? String(localized: "Sent \(sent) packets") : nil,
+                     received > 0 ? String(localized: "\(received) messages received") : nil]
+                        .compactMap { $0 }.joined(separator: " · ")
+                }
+            }
+        }
+
+        var dot: StatusDot.State {
+            if case .unreachable = self { .waiting } else { .ok }
+        }
+    }
+
     private let core: CoreService
     private(set) var internetReachable: Bool?
     private(set) var lastSync: Date?
@@ -12,9 +61,19 @@ final class NetworkModel {
     private(set) var relays: [NodeInfo] = []
     private(set) var terminal: [String] = []
     private(set) var syncing = false
+    private(set) var result: SyncResult?
     var addError: String?
 
     init(core: CoreService) { self.core = core }
+
+    var status: NetworkStatus {
+        if syncing { return .checking }
+        switch internetReachable {
+        case true?: return .reachable
+        case false?: return .unreachable
+        case nil: return .notSynced
+        }
+    }
 
     func load() async {
         internetReachable = await core.lastSync?.networkUp
@@ -29,6 +88,8 @@ final class NetworkModel {
         let outcome = await core.sync(reason: .pull)
         terminal = outcome.lines
         await load()
+        result = outcome.networkUp ? .done(sent: outcome.sent, received: outcome.received)
+            : .unreachable(waiting: pending)
     }
 
     /// `barking://node#<52-char id>@<ip:port>`.

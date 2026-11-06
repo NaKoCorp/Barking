@@ -14,7 +14,7 @@ final class TourUITests: XCTestCase {
     private struct Labels {
         let create, phraseTitle, cont, confirm, later, add, message, send: String
         let chats, network, settings, linked, identity, security, recover, link, pdf, linkNew, close, cancel: String
-        let lockedTitle, deleteContact, erase, immediately, match, mismatch: String
+        let lockedTitle, deleteContact, erase, immediately, match, mismatch, sync: String
 
         static let en = Labels(
             create: "Create my identity",
@@ -24,7 +24,7 @@ final class TourUITests: XCTestCase {
             recover: "Recover with 24 words", link: "Link to an existing device", pdf: "Encrypted PDF",
             linkNew: "Link a new device", close: "Close", cancel: "Cancel", lockedTitle: "Barking is locked",
             deleteContact: "Delete this contact", erase: "Erase", immediately: "Immediately",
-            match: "The numbers match", mismatch: "They don't match")
+            match: "The numbers match", mismatch: "They don't match", sync: "Sync now")
         static let fr = Labels(
             create: "Créer mon identité",
             phraseTitle: "Votre phrase de récupération", cont: "Continuer", confirm: "Confirmer", later: "Plus tard",
@@ -33,7 +33,7 @@ final class TourUITests: XCTestCase {
             recover: "Restaurer avec 24 mots", link: "Lier à un appareil existant", pdf: "PDF chiffré",
             linkNew: "Lier un nouvel appareil", close: "Fermer", cancel: "Annuler", lockedTitle: "Barking est verrouillé",
             deleteContact: "Supprimer ce contact", erase: "Effacer", immediately: "Immédiatement",
-            match: "Les chiffres sont identiques", mismatch: "Ils ne correspondent pas")
+            match: "Les chiffres sont identiques", mismatch: "Ils ne correspondent pas", sync: "Synchroniser")
     }
 
     private var step = 0
@@ -146,8 +146,9 @@ final class TourUITests: XCTestCase {
             snap(app, "message-path")
             back()
         }
-        // Safety code: header of the conversation.
-        let header = app.staticTexts["Sam"].firstMatch
+        // Safety code: header of the conversation (one button, UI review B4).
+        let header = app.buttons["conversation.header"].exists ? app.buttons["conversation.header"]
+            : app.staticTexts["Sam"].firstMatch
         var popped = false
         if header.exists {
             header.tap(); sleep(2)
@@ -184,6 +185,12 @@ final class TourUITests: XCTestCase {
         back()
         app.tabBars.buttons[L.network].tap(); sleep(1)
         snap(app, "network")
+        // UI review B4: the line Sync now leaves (unnumbered).
+        let sync = app.buttons[L.sync]
+        if sync.exists {
+            sync.tap(); sleep(3)
+            snap(app, "network-synced", numbered: false)
+        }
         app.tabBars.buttons[L.settings].tap(); sleep(1)
         snap(app, "settings")
         row(L.linked).tap(); sleep(1)

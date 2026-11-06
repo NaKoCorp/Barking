@@ -23,6 +23,8 @@ final class ConversationModel {
     private(set) var items: [Item] = []
     private(set) var name = ""
     private(set) var verified = false
+    /// What the header says (U-20).
+    var trust: Trust { Trust(verified: verified) }
     private(set) var keyChanged = false
     private var hidden: Set<Int64> = []
     private var sending = false

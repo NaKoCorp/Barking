@@ -18,48 +18,26 @@ struct NetworkView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: Space.s2) {
                     internetCard
-                    Card {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("\(model.pending) packets pending")
-                                .font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold)).foregroundStyle(Color.fg)
-                            PrimaryButton("Sync now", enabled: !model.syncing) { Task { await model.syncNow() } }
-                            if !model.terminal.isEmpty {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    ForEach(model.terminal, id: \.self) { Text(verbatim: $0) }
-                                }
-                                .font(BarkingFont.mono(.caption, size: 12))
-                                .foregroundStyle(Color.terminalFg)
-                                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.terminalBg, in: .rect(cornerRadius: Radius.card))
-                                .overlay {
-                                    // On Ink the block keeps an edge of its own.
-                                    if scheme == .dark {
-                                        RoundedRectangle(cornerRadius: Radius.card)
-                                            .strokeBorder(Color.accent.opacity(0.3), lineWidth: 1)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Text("Internet relays").font(BarkingFont.mono(.footnote, size: 12, weight: .semibold))
-                        .foregroundStyle(Color.fgSoft)
+                    syncCard.padding(.top, Space.s3)
+                    // 24 pt above a section label, 8 below (U-14).
+                    SectionLabel("Internet relays").padding(.top, Space.section - Space.s2)
                     Card {
                         VStack(alignment: .leading, spacing: 12) {
                             if model.relays.isEmpty {
                                 Text("No relay yet. Until public relays exist, add one by hand.")
-                                    .foregroundStyle(Color.fgMuted)
+                                    .font(.bBody).foregroundStyle(Color.fgMuted)
                             }
                             ForEach(model.relays, id: \.id) { r in relayRow(r) }
-                            Button("+ Add a relay") { adding = true }
-                                .font(BarkingFont.mono(.subheadline, size: 14)).foregroundStyle(Color.accent)
-                                .frame(minHeight: 44)
+                            TextLink("+ Add a relay") { adding = true }
                         }
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, Space.gutter)
+                .padding(.vertical, Space.s4)
             }
+            .contentMargins(.bottom, 96, for: .scrollContent)
             .background(Color.surface)
             .navigationTitle(Text("Network"))
             .refreshable { await model.syncNow() }
@@ -71,21 +49,20 @@ struct NetworkView: View {
         }
     }
 
+    /// The transport, then its state as a glyph and a word (U-19). The ≋
+    /// names the transport; the status dot is the only colour of state.
     private var internetCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Circle().fill(Color.transportNet).frame(width: 8, height: 8).accessibilityHidden(true)
+            HStack(spacing: 6) {
+                Text(verbatim: "≋").font(.bSymbol(13, relativeTo: .subheadline, weight: .bold))
+                    .foregroundStyle(Color.transportNet).accessibilityHidden(true)
                 Text(verbatim: "Internet").font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))
                     .foregroundStyle(Color.fg)
             }
-            switch model.internetReachable {
-            case true?: Text("Reachable").foregroundStyle(Color.ok)
-            case false?: Text("Unreachable").foregroundStyle(Color.danger)
-            case nil: Text("Not synced yet").foregroundStyle(Color.fgSoft)
-            }
+            StatusDot(model.status.dot, label: model.status.label)
             if let at = model.lastSync {
                 Text("last sync \(at.formatted(date: .omitted, time: .shortened))")
-                    .font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.fgSoft)
+                    .font(.bMeta).foregroundStyle(Color.fgSoft)
             }
         }
         .padding(16).frame(maxWidth: .infinity, alignment: .leading)
@@ -93,6 +70,41 @@ struct NetworkView: View {
         .overlay(alignment: .top) { Rectangle().fill(Color.transportNet).frame(height: 3) }
         .clipShape(.rect(cornerRadius: Radius.card))
         .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
+        // One VoiceOver element (U-36): "Internet, Reachable, last sync 11:58".
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Pending packets, "Sync now" (loading while it runs), then what the
+    /// sync did, and the CLI lines in the terminal block.
+    private var syncCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("\(model.pending) packets pending")
+                    .font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold)).foregroundStyle(Color.fg)
+                PrimaryButton("Sync now", isLoading: model.syncing) { Task { await model.syncNow() } }
+                if let result = model.result, !model.syncing {
+                    StatusDot(result.dot, verbatim: result.text)
+                        .accessibilityIdentifier("network.result")
+                }
+                if !model.terminal.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(model.terminal, id: \.self) { Text(verbatim: $0) }
+                    }
+                    .font(.bMeta)
+                    .foregroundStyle(Color.terminalFg)
+                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.terminalBg, in: .rect(cornerRadius: Radius.card))
+                    .overlay {
+                        // On Ink the block keeps an edge of its own.
+                        if scheme == .dark {
+                            RoundedRectangle(cornerRadius: Radius.card)
+                                .strokeBorder(Color.accent.opacity(0.3), lineWidth: 1)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
     }
 
     private func relayRow(_ r: NodeInfo) -> some View {
@@ -100,8 +112,8 @@ struct NetworkView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(verbatim: String(r.id.prefix(12))).font(BarkingFont.mono(.footnote, size: 13)).foregroundStyle(Color.fg)
                 Text(verbatim: r.addr).font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
-                if r.manual { Text("added by hand").font(.caption2).foregroundStyle(Color.fgSoft) }
-                else if r.fromCard { Text("from a contact's card").font(.caption2).foregroundStyle(Color.fgSoft) }
+                if r.manual { Text("added by hand").font(.bMeta).foregroundStyle(Color.fgSoft) }
+                else if r.fromCard { Text("from a contact's card").font(.bMeta).foregroundStyle(Color.fgSoft) }
             }
             Spacer()
             Text(verbatim: "\(Int(r.score * 100))%").font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.fgMuted)

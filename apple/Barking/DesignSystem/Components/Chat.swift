@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Message status, shown as a glyph and read by VoiceOver as a word.
 enum MessageStatusKind: Equatable {
@@ -30,6 +31,83 @@ struct StatusGlyph: View {
         case .failed: Text(verbatim: "⚠︎").foregroundStyle(Color.danger).accessibilityLabel(Text("not sent"))
         case .received: EmptyView()
         }
+    }
+}
+
+/// Whether a contact's safety code was compared (UI review U-20): a glyph
+/// and a word, never colour alone.
+enum Trust: Equatable {
+    case verified, notVerified
+
+    init(verified: Bool) { self = verified ? .verified : .notVerified }
+
+    var glyph: String { self == .verified ? "✓" : "○" }
+    /// Asset name of the glyph and the word.
+    var token: String { self == .verified ? "ok" : "fgMuted" }
+    var word: LocalizedStringKey { self == .verified ? "verified" : "not verified" }
+}
+
+/// "✓ verified" or "○ not verified" in Fira 12, with an optional "›" when
+/// it opens the safety code. One element for VoiceOver: the word.
+struct TrustLine: View {
+    let trust: Trust
+    var chevron = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            // The system font: Fira Code draws ✓ like a √.
+            Text(verbatim: trust.glyph).font(.bSymbol(11, relativeTo: .caption, weight: .bold))
+                .accessibilityHidden(true)
+            Text(trust.word).font(.bMeta)
+            if chevron { Text(verbatim: "›").font(.bMeta).accessibilityHidden(true) }
+        }
+        .foregroundStyle(Color(trust.token))
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The conversation's title in the navigation bar: avatar, name, trust
+/// line. A bar has a fixed height and the bar's content does not take a
+/// SwiftUI Dynamic Type cap, so the sizes here are scaled by hand and
+/// capped (name 20, line 14) and the avatar goes at accessibility sizes:
+/// at AX3 it no longer runs under the back and path buttons. The bar's
+/// item shows the large content viewer on a long press instead.
+struct ChatTitle: View {
+    let name: String
+    let fingerprint: String
+    let trust: Trust
+    /// Read so the title re-renders when the text size changes.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    static let nameMaximum: CGFloat = 20
+    static let lineMaximum: CGFloat = 14
+
+    /// The app's text size, from UIKit: the bar's content may not get the
+    /// scene's SwiftUI environment.
+    static var accessibilitySize: Bool { UIApplication.shared.preferredContentSizeCategory.isAccessibilityCategory }
+
+    var body: some View {
+        let line = BarkingFont.scaledSize(12, relativeTo: .caption, maximum: Self.lineMaximum)
+        HStack(spacing: 8) {
+            if !Self.accessibilitySize && !dynamicTypeSize.isAccessibilitySize {
+                Avatar(name: name, fingerprint: fingerprint, size: 32)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                Text(verbatim: name)
+                    .font(.system(size: BarkingFont.scaledSize(16, relativeTo: .headline, maximum: Self.nameMaximum),
+                                  weight: .semibold))
+                    .foregroundStyle(Color.fg).lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(verbatim: trust.glyph).font(.system(size: line - 1, weight: .bold)).accessibilityHidden(true)
+                    Text(trust.word).font(.custom("FiraCode-Regular", fixedSize: line))
+                    Text(verbatim: "›").font(.custom("FiraCode-Regular", fixedSize: line)).accessibilityHidden(true)
+                }
+                .foregroundStyle(Color(trust.token))
+                .lineLimit(1)
+            }
+        }
+        .frame(minHeight: 44)
     }
 }
 

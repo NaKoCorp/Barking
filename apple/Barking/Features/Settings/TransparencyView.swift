@@ -9,6 +9,7 @@ struct TransparencyView: View {
     @State private var model: TransparencyModel
     /// Entries the user opened to read in full.
     @State private var expanded: Set<Int64> = []
+    @Environment(\.dynamicTypeSize) private var size
 
     init(core: CoreService) {
         _model = State(initialValue: TransparencyModel(core: core))
@@ -16,7 +17,7 @@ struct TransparencyView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 10) {
+            LazyVStack(alignment: .leading, spacing: Space.s2) {
                 heading("Where my data is")
                 VStack(spacing: 0) {
                     ForEach(Array(model.dataRows.enumerated()), id: \.element.id) { i, row in
@@ -28,7 +29,7 @@ struct TransparencyView: View {
                 .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
                 .accessibilityIdentifier("transparency.data")
 
-                heading("Journal").padding(.top, 14)
+                heading("Journal")
                 BarkingSegmented("Journal filter",
                                  selection: Binding(get: { model.filter }, set: { f in Task { await model.setFilter(f) } }),
                                  options: [(JournalFilter.everything, LocalizedStringKey("Everything")),
@@ -41,7 +42,7 @@ struct TransparencyView: View {
                         .padding(.top, 6)
                 }
                 ForEach(model.days) { day in
-                    SectionLabel(verbatim: model.title(of: day)).padding(.top, 10)
+                    SectionLabel(verbatim: model.title(of: day)).padding(.top, Space.section - Space.s2)
                     VStack(spacing: 0) {
                         ForEach(Array(day.rows.enumerated()), id: \.element.id) { i, row in
                             if i > 0 { Rectangle().fill(Color.border).frame(height: 1) }
@@ -54,8 +55,8 @@ struct TransparencyView: View {
                     .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 16)
+            .padding(.horizontal, Space.gutter)
+            .padding(.bottom, Space.section)
         }
         .background(Color.surface)
         .navigationTitle(Text("Transparency"))
@@ -63,8 +64,9 @@ struct TransparencyView: View {
         .task { await model.load() }
     }
 
+    /// 24 pt above a section label, 8 below (U-14); the stack gives the 8.
     private func heading(_ title: LocalizedStringKey) -> some View {
-        SectionLabel(title).padding(.top, 8)
+        SectionLabel(title).padding(.top, Space.section - Space.s2)
     }
 
     private func dataRow(_ row: DataRow) -> some View {
@@ -80,25 +82,39 @@ struct TransparencyView: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// A journal row (U-30): the title (one line), a Fira meta line led by
+    /// the direction glyph, then the explanation in two lines; a tap shows
+    /// it whole. No icon tile: the glyph says which way it went.
     private func logRow(_ row: LogRow) -> some View {
         let open = expanded.contains(row.id)
         return Button {
             if open { expanded.remove(row.id) } else { expanded.insert(row.id) }
         } label: {
-            HStack(alignment: .top, spacing: 12) {
-                icon(row.icon, accent: row.security)
-                VStack(alignment: .leading, spacing: 3) {
-                    // Long entries (a packet's lesson on what relays see) show 3
-                    // lines until tapped; VoiceOver reads the whole text.
-                    Text(verbatim: row.text).font(BarkingFont.sans(.subheadline, size: 14)).foregroundStyle(Color.fg)
-                        .lineLimit(open ? nil : 3).multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(row.at, format: .dateTime.hour().minute())
-                        .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: row.title)
+                    .font(BarkingFont.sans(.subheadline, size: 15, weight: .semibold)).foregroundStyle(Color.fg)
+                    .lineLimit(size.isAccessibilitySize ? 3 : 1)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(verbatim: row.glyph.symbol)
+                        .font(row.glyph.usesSystemFont ? .bSymbol(12, relativeTo: .caption, weight: .bold) : .bMeta)
+                        .foregroundStyle(Color(row.glyph.token))
+                        .accessibilityHidden(true)
+                    Text(verbatim: row.meta).font(.bMeta).foregroundStyle(Color.fgSoft)
+                        .multilineTextAlignment(.leading)
                 }
-                Spacer(minLength: 0)
+                Text(verbatim: row.text).font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                    .lineLimit(open ? nil : 2).multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                // The disclosure, where two lines likely cut the text.
+                if row.text.count > 100 {
+                    Text(verbatim: open ? "⌃" : "⌄").font(.bMeta).foregroundStyle(Color.fgSoft)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .accessibilityHidden(true)
+                }
             }
-            .padding(12)
+            .padding(.horizontal, FormRowMetrics.inset)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)

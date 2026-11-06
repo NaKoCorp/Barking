@@ -13,6 +13,32 @@ final class NetworkModelTests: XCTestCase {
         XCTAssertEqual(m.internetReachable, false)
     }
 
+    /// UI review U-19: unreachable is amber and says nothing is lost; the
+    /// sync result uses the counts the model has.
+    func testStatusAndSyncResult() async {
+        let d = FakeDevice()
+        d.outbox = 3
+        d.summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: false, error: nil)
+        let m = NetworkModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.load()
+        XCTAssertEqual(m.status, .notSynced)
+        XCTAssertNil(m.result)
+        await m.syncNow()
+        XCTAssertEqual(m.status, .unreachable)
+        XCTAssertEqual(NetworkStatus.unreachable.dot, .waiting)
+        XCTAssertEqual(NetworkStatus.reachable.dot, .ok)
+        XCTAssertEqual(NetworkStatus.notSynced.dot, .checking)
+        XCTAssertEqual(m.result, .unreachable(waiting: 3))
+        d.summary = SyncSummary(itemsReceived: 0, sent: 3, newMessages: [], networkUp: true, error: nil)
+        d.outbox = 0
+        await m.syncNow()
+        XCTAssertEqual(m.status, .reachable)
+        XCTAssertEqual(m.result, .done(sent: 3, received: 0))
+        XCTAssertEqual(NetworkModel.SyncResult.done(sent: 3, received: 0).text, "Sent 3 packets")
+        XCTAssertEqual(NetworkModel.SyncResult.done(sent: 0, received: 0).text, "Up to date")
+        XCTAssertEqual(NetworkModel.SyncResult.unreachable(waiting: 3).text, "Still unreachable · 3 packets wait")
+    }
+
     func testAddRelayLinkParsing() {
         let id = String(repeating: "A", count: 52)
         XCTAssertEqual(NetworkModel.parseRelay(link: "barking://node#\(id)@203.0.113.7:4433")?.addr, "203.0.113.7:4433")

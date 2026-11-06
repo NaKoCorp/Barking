@@ -4,6 +4,7 @@ import SwiftUI
 /// Message path screen (screen 5 of the mockup, spec block 2b §4.2).
 struct PathView: View {
     @State private var model: PathModel
+    @Environment(\.colorScheme) private var scheme
 
     init(core: CoreService, messageId: Int64, contact: String, contactName: String) {
         _model = State(initialValue: PathModel(core: core, messageId: messageId, contact: contact,
@@ -12,9 +13,10 @@ struct PathView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: Space.s2) {
                 quoteCard
-                SectionLabel("How it got here")
+                // 24 pt above a section label, 8 below (U-14).
+                SectionLabel("How it got here").padding(.top, Space.section - Space.s2)
                 if model.notRecorded {
                     Text("Path not recorded")
                         .font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
@@ -26,13 +28,15 @@ struct PathView: View {
                         }
                     }
                 }
-                footer.padding(.top, 8)
+                footer.padding(.top, Space.s3)
             }
-            .padding(16)
+            .padding(.horizontal, Space.gutter)
+            .padding(.vertical, Space.s4)
         }
         .background(Color.surface)
         .navigationTitle(Text("Message path"))
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .tabBar)
         .task { await model.load() }
     }
 
@@ -40,19 +44,12 @@ struct PathView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("“\(model.quote)”").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fg)
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 6) {
-                if let route = model.routeBadge {
-                    Text(verbatim: route).padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(Color.wash, in: RoundedRectangle(cornerRadius: Radius.tag))
-                        .foregroundStyle(Color.accent)
-                }
-                if !model.times.isEmpty {
-                    Text(verbatim: model.times).padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(Color.field, in: RoundedRectangle(cornerRadius: Radius.tag))
-                        .foregroundStyle(Color.fgMuted)
-                }
+            // One tag per fact (U-18): a tag moves to the next row whole
+            // instead of wrapping inside itself.
+            FlowLayout {
+                if let route = model.routeBadge { Tag(verbatim: route, style: .accent) }
+                ForEach(model.times, id: \.self) { Tag(verbatim: $0) }
             }
-            .font(BarkingFont.mono(.caption2, size: 11))
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -60,27 +57,31 @@ struct PathView: View {
         .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
     }
 
-    /// Dark in both themes, as in the mockup.
+    /// The terminal block (U-38): `terminalBg` in both themes, with an
+    /// `accent` edge on Ink so it stays a block of its own.
     private var footer: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("// only you and \(model.contactName) can read it")
-                .font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color(hex: 0xB9A6E0))
-            HStack(spacing: 6) {
+                .font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.terminalFg)
+            FlowLayout {
                 ForEach(["PQXDH", "Double Ratchet"], id: \.self) { chip(Text(verbatim: $0)) }
                 chip(Text("hidden sender"))
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(hex: 0x120E19), in: RoundedRectangle(cornerRadius: Radius.card))
-        .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
+        .background(Color.terminalBg, in: RoundedRectangle(cornerRadius: Radius.card))
+        .overlay {
+            RoundedRectangle(cornerRadius: Radius.card)
+                .strokeBorder(scheme == .dark ? Color.accent.opacity(0.3) : Color.border, lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private func chip(_ text: Text) -> some View {
-        text.font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color(hex: 0xF2EFF7))
+        text.font(.bTag).foregroundStyle(Color.terminalFg)
             .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color(hex: 0x1B1524), in: RoundedRectangle(cornerRadius: 5))
-            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color(hex: 0x33293F), lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: Radius.tag).strokeBorder(Color.terminalFg.opacity(0.35), lineWidth: 1))
     }
 }
 
@@ -123,7 +124,10 @@ private struct PathStop: View {
             .padding(.top, 4)
         }
         .padding(.bottom, 12)
-        .accessibilityElement(children: .combine)
+        // One sentence (U-36): "iPhone, wrote and encrypted, 11:58. Could see: …".
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: row.spoken))
+        .accessibilityAddTraits(.isStaticText)
     }
 
     /// "Could see:" in the accent color, then what this stop saw.

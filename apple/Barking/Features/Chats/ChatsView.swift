@@ -121,31 +121,33 @@ extension ChatsView {
     }
 }
 
+/// One chat (U-22): a 44 pt avatar, the name and the time, then the last
+/// message or the contact's trust, centred in a 64 pt row.
 struct ChatRowView: View {
     let row: ChatRow
 
     var body: some View {
         HStack(spacing: 12) {
-            Avatar(name: row.name, fingerprint: row.contact)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
+            Avatar(name: row.name, fingerprint: row.contact, size: 44)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline) {
                     Text(row.name).font(BarkingFont.sans(.headline, size: 16, weight: .semibold))
                         .foregroundStyle(Color.fg).lineLimit(1)
-                    if row.verified {
-                        Text(verbatim: "✓").font(.bSymbol(13, relativeTo: .footnote, weight: .bold)).foregroundStyle(Color.ok)
-                            .accessibilityLabel(Text("verified"))
-                    }
-                    Spacer()
+                    Spacer(minLength: 8)
                     if let at = row.lastAt {
                         Text(at, format: .dateTime.hour().minute())
-                            .font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.fgSoft)
+                            .font(.bMeta).foregroundStyle(Color.fgSoft)
                     }
                 }
-                HStack {
-                    if let s = row.lastStatus, s != .received { StatusGlyph(status: s).foregroundStyle(Color.fgSoft) }
-                    Text(row.lastText ?? "").font(BarkingFont.sans(.subheadline, size: 14))
-                        .foregroundStyle(Color.fgMuted).lineLimit(1)
-                    Spacer()
+                HStack(spacing: 6) {
+                    switch row.line {
+                    case .preview(let text):
+                        if let s = row.lastStatus, s != .received { StatusGlyph(status: s).foregroundStyle(Color.fgSoft) }
+                        Text(text).font(.bBodySmall).foregroundStyle(Color.fgMuted).lineLimit(1)
+                    case .trust(let trust):
+                        TrustLine(trust: trust)
+                    }
+                    Spacer(minLength: 0)
                     if row.unread > 0 {
                         Text(verbatim: "\(row.unread)").font(BarkingFont.mono(.caption, size: 12, weight: .semibold))
                             .foregroundStyle(.white).padding(.horizontal, 7).frame(minHeight: 22)
@@ -153,12 +155,9 @@ struct ChatRowView: View {
                             .accessibilityLabel(Text("\(row.unread) unread"))
                     }
                 }
-                if let route = RouteBadge.text(for: row.route) {
-                    Text(verbatim: route).font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.accent)
-                }
             }
         }
-        .frame(minHeight: 72)
+        .frame(minHeight: 64)
     }
 }
 
@@ -183,13 +182,17 @@ struct PhraseBanner: View {
         switch Self.current {
         case .hidden: EmptyView()
         case .confirmable:
-            Button { model.phrase = PhraseMemory.shared.phrase; model.startQuiz(); checking = true } label: {
-                Banner(kind: .warning, title: "Recovery phrase not confirmed",
-                       message: "Check three words before you close the app.")
-            }
-            .buttonStyle(.plain)
+            Banner(kind: .warning, title: "Recovery phrase not confirmed",
+                   message: "Check three words while you still have your copy.",
+                   action: .init(label: "Check now", hint: "Opens the 3-word check.") {
+                       model.phrase = PhraseMemory.shared.phrase
+                       model.startQuiz()
+                       checking = true
+                   })
             .sheet(isPresented: $checking) {
-                PhraseConfirmView(model: model) { checking = false }
+                NavigationStack {
+                    PhraseConfirmView(model: model) { checking = false }
+                }
             }
         case .lost:
             Banner(kind: .warning, title: "Write your phrase down now: it cannot be shown again",

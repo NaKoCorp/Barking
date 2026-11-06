@@ -23,7 +23,6 @@
 "Chats" = "Discussions";
 "Check the identifier (52 characters) and the address (ip:port)." = "Vérifiez l’identifiant (52 caractères) et l’adresse (ip:port).";
 "Check three words" = "Vérifiez trois mots";
-"Check three words before you close the app." = "Vérifiez trois mots avant de fermer l’app.";
 "Close" = "Fermer";
 "Compare with %@" = "Comparez avec %@";
 "Compare your safety code again." = "Comparez à nouveau votre code de sécurité.";
@@ -91,7 +90,6 @@
 "Prepare my card" = "Préparer ma carte";
 "Reachable" = "Joignable";
 "Read the numbers aloud, in person or on a call you trust. If they match, nobody sits between you." = "Lisez les chiffres à voix haute, en personne ou lors d’un appel de confiance. S’ils sont identiques, personne ne s’est glissé entre vous.";
-"Recover" = "Restaurer";
 "Recover with 24 words" = "Restaurer avec 24 mots";
 "Recovery phrase not confirmed" = "Phrase de récupération non confirmée";
 "Reload records" = "Recharger les mesures";
@@ -132,12 +130,10 @@
 "This offer was already used. Start again." = "Cette offre a déjà servi. Recommencez.";
 "This relay could not be added." = "Ce relais n’a pas pu être ajouté.";
 "Transfer encrypted history" = "Transférer l’historique chiffré";
-"Unreachable" = "Injoignable";
 "Valid for 10 minutes and usable once." = "Valable 10 minutes, utilisable une seule fois.";
 "Valid for 10 minutes and usable once. Hand the file to the new device over a channel you control." = "Valable 10 minutes, utilisable une seule fois. Transmettez le fichier au nouvel appareil par un canal que vous contrôlez.";
 "Waiting for your other device" = "En attente de votre autre appareil";
 "Word %lld" = "Mot %lld";
-"Word no. %lld" = "Mot n° %lld";
 "Write it down offline." = "Notez-la hors ligne.";
 "Write your phrase down now: it cannot be shown again" = "Notez votre phrase : elle ne pourra plus être affichée";
 "Your name travels in your contact card. No phone number, no email." = "Votre nom voyage dans votre carte de contact. Ni numéro ni e-mail.";
@@ -160,7 +156,6 @@
 "this device" = "cet appareil";
 "verified" = "vérifié";
 "welcome" = "bienvenue";
-"word" = "mot";
 "⚠︎ not sent — tap to retry" = "⚠︎ non envoyé — touchez pour réessayer";
 "✓ verified · safety code matched" = "✓ vérifié · code identique";
 "Barking could not open your data" = "Barking n’a pas pu ouvrir vos données";
@@ -332,3 +327,22 @@
 "Don't send anything sensitive yet. Compare again in person or on a call you trust." = "N’envoyez encore rien de sensible. Comparez à nouveau en personne ou lors d’un appel de confiance.";
 "The history is kept." = "L’historique est conservé.";
 "Asks for confirmation first." = "Demande d’abord une confirmation.";
+
+/* UI review B4: messaging and status. */
+"Pick one word per row." = "Choisissez un mot par ligne.";
+"See the 24 words again" = "Revoir les 24 mots";
+"Word %lld" = "Mot %lld";
+"Recover (%lld/24)" = "Restaurer (%lld/24)";
+"Words left to fill in: %lld." = "Mots restant à saisir : %lld.";
+"Word %lld is not in the word list." = "Le mot %lld n’est pas dans la liste.";
+"Not in the word list" = "Pas dans la liste";
+"Check now" = "Vérifier";
+"Opens the 3-word check." = "Ouvre la vérification des 3 mots.";
+"Check three words while you still have your copy." = "Vérifiez trois mots tant que vous avez votre copie.";
+"Opens the safety code." = "Ouvre le code de sécurité.";
+"Unreachable · nothing is lost" = "Injoignable · rien n’est perdu";
+"Checking…" = "Vérification…";
+"Up to date" = "À jour";
+"Still unreachable · nothing waits" = "Toujours injoignable · rien n’attend";
+"%lld KB" = "%lld Ko";
+"expires %@" = "expire le %@";

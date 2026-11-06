@@ -55,3 +55,34 @@
 "log.arg.reason_bad_hash" = "les trames ne forment pas le paquet annoncé";
 "log.arg.reason_contradictory" = "trames contradictoires";
 "log.arg.reason_unknown" = "raison inconnue de cette version de l’app";
+
+/* Journal row titles (UI review U-30): short, one line. A sealed packet has one per mailbox kind. */
+"log.title.session_established" = "Session ouverte avec %1$@";
+"log.title.packet_sealed.intro_mailbox" = "Envoyé : premier message d’une session";
+"log.title.packet_sealed.daily_mailbox" = "Envoyé : paquet chiffré";
+"log.title.packet_opened" = "Reçu de %1$@";
+"log.title.ack_emitted" = "Accusé publié";
+"log.title.ack_verified" = "Accusé vérifié";
+"log.title.decrypt_failed" = "Paquet non déchiffré";
+"log.title.duplicate_ignored" = "Copie ignorée";
+"log.title.contact_key_changed" = "Clé changée : %1$@";
+"log.title.frame_rejected" = "Trame rejetée";
+"log.title.device_linked" = "Appareil lié : %1$@";
+"log.title.link_finished" = "Cet appareil est lié";
+"log.title.sync_applied" = "Synchronisé depuis vos appareils";
+"log.title.sync_skipped" = "Copie non synchronisée";
+"log.title.contact_card_updated" = "%1$@ a changé d’appareils";
+"log.title.history_imported" = "Historique copié";
+"log.title.own_devices_updated" = "Vos appareils ont changé";
+"log.title.node_deposit" = "Dépôt sur %1$@";
+"log.title.node_fetch" = "Relève sur %1$@";
+"log.title.node_avoided" = "Nœud mis de côté : %1$@";
+"log.title.seal_skipped" = "Un appareil de %1$@ ignoré";
+"log.title.admin_transfer_started" = "Clé racine envoyée à %1$@";
+"log.title.admin_transferred" = "%1$@ est l’administrateur";
+"log.title.admin_received" = "Cet appareil est l’administrateur";
+"log.title.this_device_removed" = "Cet appareil a été retiré";
+"log.title.device_removed" = "Appareil retiré : %1$@";
+"log.title.remove_requested" = "Appareil parti : %1$@";
+/* A sealed packet's text under its title: size, tier and expiry are on the meta line. */
+"log.body.packet_sealed" = "%1$@ Les relais voient la taille, le type, le nombre de sauts, un identifiant de paquet, la boîte et l’expiration ; pas qui vous êtes, à qui vous écrivez, ni le contenu.";

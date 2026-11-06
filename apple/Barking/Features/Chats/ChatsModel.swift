@@ -14,6 +14,15 @@ struct ChatRow: Identifiable, Equatable {
     let unread: Int
     /// Route hint of the last message (`internet:N`), for the route line.
     var route: String? = nil
+
+    /// The row's second line (U-22): the last message, or, with none, the
+    /// contact's trust (U-20).
+    enum Line: Equatable { case preview(String), trust(Trust) }
+
+    var line: Line {
+        if let lastText, !lastText.isEmpty { return .preview(lastText) }
+        return .trust(Trust(verified: verified))
+    }
 }
 
 @MainActor @Observable

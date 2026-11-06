@@ -68,12 +68,13 @@ final class ChatUITests: XCTestCase {
         app.buttons["Send"].tap()
         XCTAssertTrue(app.staticTexts["hello Sam"].waitForExistence(timeout: 5))
         app.buttons["conversation.path"].tap()
-        // Each stop is one VoiceOver element: name, time, what it could see.
+        // Each stop is one VoiceOver sentence: name, step, time, what it
+        // could see, without the "·" separators (UI review U-36).
         let stop = { (name: String) in
             app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
         }
-        XCTAssertTrue(stop("Internet relay · K7QX2M4A").waitForExistence(timeout: 5))
-        XCTAssertTrue(stop("Sam's phone").exists)
+        XCTAssertTrue(stop("Internet relay, K7QX2M4A, deposited").waitForExistence(timeout: 5))
+        XCTAssertTrue(stop("Sam's phone, receipt received").exists)
         XCTAssertTrue(app.staticTexts["Internet · 1 relay"].exists)
     }
 }

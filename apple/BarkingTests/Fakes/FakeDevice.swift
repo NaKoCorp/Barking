@@ -25,6 +25,8 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _transferredTo: [String] = []
     var transferredTo: [String] { lock.withLock { _transferredTo } }
     var pending = false
+    /// Packets waiting in the outbox (`outboxCount`).
+    var outbox: UInt32 = 0
     var sendError: Error?
     /// Thrown by markVerified / unmarkVerified when set.
     var verifyError: Error?
@@ -87,7 +89,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     }
     func nodes() throws -> [NodeInfo] { [] }
     func addNode(id: String, addr: String) throws {}
-    func outboxCount() throws -> UInt32 { 0 }
+    func outboxCount() throws -> UInt32 { outbox }
     func myDevices() throws -> [MyDeviceInfo] { devicesList }
     func linkOffer() throws -> Data { Data([0xAA]) }
     func linkDevice(request: Data, withHistory: Bool) throws -> Data {

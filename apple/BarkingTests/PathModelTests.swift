@@ -12,6 +12,10 @@ final class PathModelTests: XCTestCase {
         RouteStepInfo(at: at, step: name, node: node, size: size, deviceName: device, own: own)
     }
 
+    private func clock(_ at: UInt64) -> String {
+        Date(timeIntervalSince1970: TimeInterval(at)).formatted(.dateTime.hour().minute())
+    }
+
     private func model(outgoing: Bool, route: [RouteStepInfo], hint: String? = "internet:1",
                        devices: [MyDeviceInfo] = []) -> (PathModel, FakeDevice) {
         let d = FakeDevice()
@@ -43,8 +47,8 @@ final class PathModelTests: XCTestCase {
         XCTAssertTrue(m.rows[2].saw.contains("recipient"))
         XCTAssertTrue(m.rows[2].subtitle.contains("receipt received"), m.rows[2].subtitle)
         // The badge dates the receipt my device verified, not a delivery.
-        XCTAssertTrue(m.times.contains("receipt "), m.times)
-        XCTAssertFalse(m.times.contains("received"), m.times)
+        // One tag per time (UI review U-18): "sent 12:01", then "receipt 12:02".
+        XCTAssertEqual(m.times, ["sent \(clock(t0))", "receipt \(clock(t0 + 60))"])
         XCTAssertEqual(m.quote, "Power's out")
         XCTAssertEqual(m.routeBadge, "Internet · 1 relay")
     }
@@ -98,7 +102,7 @@ final class PathModelTests: XCTestCase {
         XCTAssertEqual(m.rows.map(\.title), ["Your other device", "Internet relay · AB12CD34", "This device"])
         XCTAssertEqual(m.rows.map(\.glyph), [.sender, .relay, .ownDevices])
         XCTAssertTrue(m.rows[1].saw.contains("whoever fetched it"))
-        XCTAssertTrue(m.times.contains("synced"), m.times)
+        XCTAssertEqual(m.times, ["synced \(clock(t0 + 1))"])
     }
 
     func testThisDeviceIsCalledByItsName() async {
@@ -154,12 +158,11 @@ final class PathModelTests: XCTestCase {
         await m.load()
         XCTAssertFalse(m.rows.contains { $0.glyph == .recipient }, "\(m.rows.map(\.title))")
         XCTAssertFalse(m.rows.contains { $0.title == "Sam's phone" })
-        XCTAssertFalse(m.times.contains("receipt"), m.times)
+        XCTAssertFalse(m.times.contains { $0.hasPrefix("receipt") }, "\(m.times)")
     }
 
     /// With both, the contact's receipt is the one dated.
     func testContactReceiptDatedEvenAfterAnOwnAck() async {
-        let clock = { (at: UInt64) in Date(timeIntervalSince1970: TimeInterval(at)).formatted(.dateTime.hour().minute()) }
         let (m, _) = model(outgoing: true, route: [
             step("sealed", at: t0, size: 2048),
             step("ack_verified", at: t0 + 30, own: true),
@@ -168,6 +171,20 @@ final class PathModelTests: XCTestCase {
         await m.load()
         let recipient = m.rows.first { $0.glyph == .recipient }
         XCTAssertEqual(recipient?.subtitle.hasSuffix(clock(t0 + 90)), true, recipient?.subtitle ?? "no row")
-        XCTAssertTrue(m.times.hasSuffix("receipt \(clock(t0 + 90))"), m.times)
+        XCTAssertEqual(m.times.last, "receipt \(clock(t0 + 90))")
+    }
+
+    /// UI review U-36: VoiceOver reads a stop as one sentence, without the
+    /// "·" separators.
+    func testStopIsReadAsOneSentence() async {
+        let (m, _) = model(outgoing: true, route: [
+            step("sealed", at: t0, size: 2048),
+            step("deposited", at: t0 + 1, node: "K7QX2M4A"),
+        ])
+        await m.load()
+        XCTAssertEqual(m.rows[0].spoken,
+                       "This device, wrote and encrypted, \(clock(t0)). Could see: everything — it is the sender.")
+        XCTAssertFalse(m.rows[1].spoken.contains("·"), m.rows[1].spoken)
+        XCTAssertTrue(m.rows[1].spoken.hasPrefix("Internet relay, K7QX2M4A, deposited, "), m.rows[1].spoken)
     }
 }

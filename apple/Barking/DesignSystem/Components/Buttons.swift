@@ -235,6 +235,11 @@ enum HoldMetrics {
     /// the pair instead.
     static let sweepFill = "danger"
     static let labelOnSweep = "surface"
+
+    /// A scene phase that ends a hold. A transient `.inactive` (Control
+    /// Center, a notification banner) keeps the finger's hold; going to the
+    /// background cancels the touch without telling the gesture.
+    static func resetsHold(on phase: ScenePhase) -> Bool { phase == .background }
 }
 
 /// A destructive action that needs a hold (Erase Barking, UI review U-8):
@@ -290,9 +295,10 @@ struct HoldToConfirmButton: View {
             }
         }
         .sensoryFeedback(Haptic.holdCompleted.feedback, trigger: completed)
-        // A touch the system cancels without telling the gesture (a call, a
-        // Face ID sheet, the app leaving) must not leave a sweep drawn.
-        .onChange(of: scenePhase) { _, phase in if phase != .active { pressedAt = nil } }
+        // A touch the system cancels without telling the gesture (the app
+        // leaving) must not leave a sweep drawn; a pull of Control Center
+        // (`.inactive`) is not that.
+        .onChange(of: scenePhase) { _, phase in if HoldMetrics.resetsHold(on: phase) { pressedAt = nil } }
         .onDisappear { pressedAt = nil }
     }
 }

@@ -13,6 +13,15 @@ enum RouteBadge {
     }
 }
 
+/// Sizes in the UI (UI review §6 units): whole kilobytes of 1024 bytes, no
+/// decimals, at least 1 KB. Raw bytes belong to exports only.
+enum ByteSize {
+    static func kilobytes(_ bytes: UInt64) -> String {
+        let kb = max(1, Int((Double(bytes) / 1024).rounded()))
+        return String(localized: "\(kb) KB")
+    }
+}
+
 /// One stop of a message's way on the path screen.
 struct PathRow: Identifiable, Equatable {
     enum Glyph: Equatable { case sender, relay, recipient, ownDevices }
@@ -23,6 +32,13 @@ struct PathRow: Identifiable, Equatable {
     /// What this stop could see, after "Could see:".
     let saw: String
     let glyph: Glyph
+
+    /// One sentence for VoiceOver (U-36): "iPhone, wrote and encrypted,
+    /// 11:58. Could see: everything…", without the "·" separators.
+    var spoken: String {
+        let plain = { (s: String) in s.replacingOccurrences(of: " · ", with: ", ") }
+        return "\(plain(title)), \(plain(subtitle)). \(String(localized: "Could see:")) \(saw)"
+    }
 }
 
 /// Message path screen (spec block 2b §4.2): only the recorded steps show.
@@ -36,7 +52,9 @@ final class PathModel {
     private(set) var notRecorded = false
     private(set) var quote = ""
     private(set) var routeBadge: String?
-    private(set) var times = ""
+    /// "sent 18:01", "receipt 18:02": one tag each (U-18), so a tag never
+    /// wraps inside itself in French.
+    private(set) var times: [String] = []
 
     init(core: CoreService, messageId: Int64, contact: String, contactName: String) {
         self.core = core
@@ -156,7 +174,7 @@ final class PathModel {
             if !deposited {
                 saw = String(localized: "a sealed packet for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever fetched it.")
             } else if let size {
-                let bytes = byteCount(size)
+                let bytes = ByteSize.kilobytes(UInt64(size))
                 saw = String(localized: "a sealed packet of \(bytes) for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it.")
             } else {
                 saw = String(localized: "a sealed packet for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it.")
@@ -171,9 +189,9 @@ final class PathModel {
         }
     }
 
-    /// "sent 18:01 · receipt 18:02", from the recorded steps: the receipt
-    /// time is when my device verified it.
-    static func times(for steps: [RouteStepInfo], outgoing: Bool) -> String {
+    /// ["sent 18:01", "receipt 18:02"], from the recorded steps: the
+    /// receipt time is when my device verified it.
+    static func times(for steps: [RouteStepInfo], outgoing: Bool) -> [String] {
         var parts: [String] = []
         let sealed = steps.first(where: { $0.step == "sealed" })
         let opened = steps.first(where: { $0.step == "opened" })
@@ -187,19 +205,11 @@ final class PathModel {
         } else if let o = opened {
             parts.append(String(localized: "received \(clock(o.at))"))
         }
-        return parts.joined(separator: " · ")
+        return parts
     }
 
     private static func clock(_ at: UInt64) -> String {
         Date(timeIntervalSince1970: TimeInterval(at)).formatted(.dateTime.hour().minute())
-    }
-
-    /// "2 KB": packet sizes are powers of two, counted in binary units.
-    private static func byteCount(_ size: UInt32) -> String {
-        let f = ByteCountFormatter()
-        f.countStyle = .memory
-        f.allowedUnits = [.useKB, .useMB]
-        return f.string(fromByteCount: Int64(size))
     }
 
     #if BARKING_DEV

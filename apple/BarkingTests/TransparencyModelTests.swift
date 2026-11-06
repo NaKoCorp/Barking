@@ -169,4 +169,61 @@ final class TransparencyModelTests: XCTestCase {
         await m.load()
         XCTAssertEqual(m.devices.map(\.name), ["Maya's iPhone"])
     }
+
+    /// UI review U-30: a short title, a meta line with the size in KB (no
+    /// decimals, no raw bytes), and the explanation without the numbers.
+    func testPacketRowIsStructured() async {
+        let d = FakeDevice()
+        d.logEntries = [entry(noon, key: "log.packet_sealed",
+                              args: ["16384", "@tier_large", "\(noon + 7 * 86_400)", "@intro_mailbox"])]
+        let m = model(d)
+        await m.load()
+        let row = try? XCTUnwrap(m.days.first?.rows.first)
+        XCTAssertEqual(row?.title, "Sent: first message of a session")
+        XCTAssertEqual(row?.glyph, .sent)
+        let meta = row?.meta ?? ""
+        XCTAssertTrue(meta.contains("16 KB"), meta)
+        XCTAssertTrue(meta.contains("large"), meta)
+        XCTAssertTrue(meta.contains("expires"), meta)
+        XCTAssertFalse(meta.contains("16384"), meta)
+        let text = row?.text ?? ""
+        XCTAssertFalse(text.contains("16384"), text)
+        XCTAssertTrue(text.hasPrefix("First message of a session"), text)
+        XCTAssertTrue(text.contains("Relays see the size"), text)
+    }
+
+    func testDailyPacketTitle() {
+        let e = LogEntry(id: 1, at: 0, family: "packet", key: "log.packet_sealed",
+                         args: ["2048", "@tier_small", "0", "@daily_mailbox"], security: false)
+        XCTAssertEqual(LogText.title(e), "Sent: encrypted packet")
+    }
+
+    func testKilobytesHaveNoDecimals() {
+        XCTAssertEqual(ByteSize.kilobytes(16_384), "16 KB")
+        XCTAssertEqual(ByteSize.kilobytes(2_048), "2 KB")
+        XCTAssertEqual(ByteSize.kilobytes(1_536), "2 KB")
+        XCTAssertEqual(ByteSize.kilobytes(100), "1 KB")
+    }
+
+    /// Every key the core can log has a short title, in both languages.
+    func testEveryCoreKeyHasATitle() {
+        for key in logKeys() {
+            let e = LogEntry(id: 1, at: 0, family: "node", key: key, args: ["a", "b", "c", "d"], security: false)
+            let title = LogText.title(e)
+            XCTAssertFalse(title.isEmpty, key)
+            XCTAssertFalse(title.hasPrefix("log."), "\(key): \(title)")
+            XCTAssertFalse(title.contains("%"), "\(key): \(title)")
+            XCTAssertLessThan(title.count, 48, "\(key): \(title)")
+        }
+    }
+
+    func testDirectionGlyphs() {
+        XCTAssertEqual(LogGlyph.of(key: "log.packet_opened"), .received)
+        XCTAssertEqual(LogGlyph.of(key: "log.ack_verified"), .verified)
+        XCTAssertEqual(LogGlyph.of(key: "log.contact_key_changed"), .warning)
+        XCTAssertEqual(LogGlyph.of(key: "log.device_linked"), .devices)
+        XCTAssertEqual(LogGlyph.sent.symbol, "↑")
+        XCTAssertEqual(LogGlyph.received.symbol, "↓")
+        XCTAssertEqual(LogGlyph.warning.token, "danger")
+    }
 }

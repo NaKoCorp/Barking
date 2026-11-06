@@ -58,22 +58,10 @@ struct ConversationView: View {
                 .accessibilityIdentifier("conversation.path")
             }
             ToolbarItem(placement: .principal) {
-                NavigationLink {
-                    SafetyCodeView(core: core, contact: model.contact)
-                } label: {
-                    HStack(spacing: 8) {
-                        Avatar(name: model.name, fingerprint: model.contact, size: 38)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(verbatim: model.name).font(BarkingFont.sans(.headline, size: 16, weight: .semibold))
-                                .foregroundStyle(Color.fg)
-                            Text(model.verified ? "✓ verified · safety code matched" : "not verified")
-                                .font(BarkingFont.mono(.caption2, size: 11))
-                                .foregroundStyle(model.verified ? Color.ok : Color.fgSoft)
-                        }
-                    }
-                }
+                ChatHeader(core: core, model: model)
             }
         }
+        .toolbar(.hidden, for: .tabBar)
         .onDisappear { model.onDisappear() }
         .task {
             await model.onAppear()
@@ -117,6 +105,29 @@ struct ConversationView: View {
             }
             .opacity(0.85)
         }
+    }
+}
+
+/// The conversation's title (U-20): one 44 pt button to the safety code,
+/// the name over "○ not verified ›" or "✓ verified ›". `ChatTitle` keeps it
+/// inside the bar at AX3; a long press shows it larger, as system bars do.
+private struct ChatHeader: View {
+    let core: CoreService
+    let model: ConversationModel
+
+    var body: some View {
+        NavigationLink {
+            SafetyCodeView(core: core, contact: model.contact)
+        } label: {
+            ChatTitle(name: model.name, fingerprint: model.contact, trust: model.trust)
+                .contentShape(.rect)
+        }
+        .accessibilityShowsLargeContentViewer {
+            Text(verbatim: model.name)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(Text("Opens the safety code."))
+        .accessibilityIdentifier("conversation.header")
     }
 }
 

@@ -66,5 +66,53 @@
 			<string>Internet · %lld relais</string>
 		</dict>
 	</dict>
+	<key>Still unreachable · %lld packets wait</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Toujours injoignable · %lld paquet attend</string>
+			<key>other</key>
+			<string>Toujours injoignable · %lld paquets attendent</string>
+		</dict>
+	</dict>
+	<key>Sent %lld packets</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld paquet envoyé</string>
+			<key>other</key>
+			<string>%lld paquets envoyés</string>
+		</dict>
+	</dict>
+	<key>%lld messages received</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld message reçu</string>
+			<key>other</key>
+			<string>%lld messages reçus</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

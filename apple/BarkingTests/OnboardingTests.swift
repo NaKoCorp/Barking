@@ -60,6 +60,57 @@ final class OnboardingModelTests: XCTestCase {
         XCTAssertTrue(OnboardingModel(defaults: d).phraseConfirmed)
     }
 
+    /// UI review U-24: a wrong set keeps the picks, Confirm stays usable,
+    /// and changing a pick clears the error until the next Confirm.
+    func testQuizKeepsThePicksAfterAWrongConfirm() throws {
+        let words = (0..<24).map { "w\($0)" }
+        let m = OnboardingModel(defaults: freshDefaults())
+        m.phrase = words
+        m.startQuiz()
+        let quiz = try XCTUnwrap(m.quiz)
+        let right = quiz.questions.map { words[$0.index] }
+        let wrong0 = try XCTUnwrap(quiz.questions[0].choices.first { $0 != right[0] })
+        XCTAssertFalse(m.canConfirmQuiz)
+        XCTAssertEqual(m.picksLeft, 3)
+        m.pick(wrong0, for: 0)
+        m.pick(right[1], for: 1)
+        XCTAssertFalse(m.canConfirmQuiz)
+        XCTAssertEqual(m.picksLeft, 1)
+        m.pick(right[2], for: 2)
+        XCTAssertTrue(m.canConfirmQuiz)
+        XCTAssertFalse(m.quizWrong, "no verdict before Confirm")
+        XCTAssertFalse(m.confirmQuiz())
+        XCTAssertTrue(m.quizWrong)
+        XCTAssertEqual(m.answers, [wrong0, right[1], right[2]])
+        XCTAssertTrue(m.canConfirmQuiz)
+        XCTAssertFalse(m.phraseConfirmed)
+        m.pick(right[0], for: 0)
+        XCTAssertFalse(m.quizWrong)
+        XCTAssertTrue(m.confirmQuiz())
+        XCTAssertTrue(m.phraseConfirmed)
+    }
+
+    /// UI review U-31: the Recover button counts the words and says what
+    /// is missing.
+    func testRecoverSaysWhatIsMissing() {
+        let m = OnboardingModel(defaults: freshDefaults())
+        XCTAssertEqual(m.filledRecoveryWords, 0)
+        XCTAssertEqual(m.recoverBlocker, .missing(24))
+        var words = Array(bip39Words().prefix(24))
+        words[3] = ""
+        words[5] = "notaword"
+        m.recoveryWords = words
+        XCTAssertEqual(m.filledRecoveryWords, 23)
+        XCTAssertEqual(m.recoverBlocker, .unknownWord(6))
+        words[5] = "zoo"
+        m.recoveryWords = words
+        XCTAssertEqual(m.recoverBlocker, .missing(1))
+        words[3] = "zoo"
+        m.recoveryWords = words
+        XCTAssertNil(m.recoverBlocker)
+        XCTAssertEqual(m.filledRecoveryWords, 24)
+    }
+
     func testRecoverRejectsUnknownWord() {
         let m = OnboardingModel(defaults: freshDefaults())
         var words = Array(bip39Words().prefix(24))

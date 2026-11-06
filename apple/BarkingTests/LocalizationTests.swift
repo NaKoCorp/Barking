@@ -137,4 +137,40 @@ final class LocalizationTests: XCTestCase {
             XCTAssertNil(fr[unused], "unused French string \(unused)")
         }
     }
+
+    /// UI review B4: messaging and status strings land in both languages.
+    func testMessagingStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let frPlurals = try XCTUnwrap(table("fr", "Localizable", "stringsdict"))
+        let enPlurals = try XCTUnwrap(table("en", "Localizable", "stringsdict"))
+        for key in ["Pick one word per row.", "See the 24 words again", "Word %lld", "Recover (%lld/24)",
+                    "Words left to fill in: %lld.", "Word %lld is not in the word list.", "Check now",
+                    "Opens the 3-word check.", "Check three words while you still have your copy.",
+                    "Opens the safety code.", "verified", "not verified", "Unreachable · nothing is lost",
+                    "Checking…", "Up to date", "Still unreachable · nothing waits", "%lld KB", "expires %@"] where fr[key] == nil {
+            XCTFail("missing French for \(key)")
+        }
+        for key in ["Still unreachable · %lld packets wait", "Sent %lld packets", "%lld messages received"] {
+            XCTAssertNotNil(frPlurals[key], "missing French plural for \(key)")
+            XCTAssertNotNil(enPlurals[key], "missing English plural for \(key)")
+        }
+        XCTAssertEqual(fr["%lld KB"] as? String, "%lld Ko")
+        for unused in ["Word no. %lld", "Check three words before you close the app.", "Unreachable", "word", "Recover"] {
+            XCTAssertNil(fr[unused], "unused French string \(unused)")
+        }
+    }
+
+    /// Every journal title exists in English and French (Log.strings).
+    func testEveryLogTitleHasBothLanguages() throws {
+        for lang in ["en", "fr"] {
+            let strings = try XCTUnwrap(table(lang, "Log"))
+            for key in logKeys() where key != "log.packet_sealed" {
+                XCTAssertNotNil(strings["log.title.\(key.dropFirst(4))"], "\(lang) title of \(key)")
+            }
+            for variant in ["intro_mailbox", "daily_mailbox"] {
+                XCTAssertNotNil(strings["log.title.packet_sealed.\(variant)"], "\(lang) packet title \(variant)")
+            }
+            XCTAssertNotNil(strings["log.body.packet_sealed"], "\(lang) packet body")
+        }
+    }
 }

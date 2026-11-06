@@ -58,6 +58,8 @@ struct SafetyCodeView: View {
         // and the scrolled content runs under the status bar unblurred.
         .navigationTitle(Text("Safety code"))
         .toolbarTitleDisplayMode(.inline)
+        // Pushed from the conversation, which hides the tab bar (U-26).
+        .toolbar(.hidden, for: .tabBar)
         .task { await model.load(); aliasDraft = model.alias }
         // A match is said (banner, haptic, VoiceOver), then the screen goes
         // back to the conversation; the mark can be removed from here later.

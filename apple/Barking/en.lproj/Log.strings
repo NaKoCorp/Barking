@@ -55,3 +55,34 @@
 "log.arg.reason_bad_hash" = "the frames do not add up to the announced packet";
 "log.arg.reason_contradictory" = "contradictory frames";
 "log.arg.reason_unknown" = "reason not known to this version of the app";
+
+/* Journal row titles (UI review U-30): short, one line. A sealed packet has one per mailbox kind. */
+"log.title.session_established" = "Session opened with %1$@";
+"log.title.packet_sealed.intro_mailbox" = "Sent: first message of a session";
+"log.title.packet_sealed.daily_mailbox" = "Sent: encrypted packet";
+"log.title.packet_opened" = "Received from %1$@";
+"log.title.ack_emitted" = "Receipt published";
+"log.title.ack_verified" = "Receipt verified";
+"log.title.decrypt_failed" = "Packet not decrypted";
+"log.title.duplicate_ignored" = "Copy ignored";
+"log.title.contact_key_changed" = "Key changed: %1$@";
+"log.title.frame_rejected" = "Frame rejected";
+"log.title.device_linked" = "Device linked: %1$@";
+"log.title.link_finished" = "This device is linked";
+"log.title.sync_applied" = "Synced from your devices";
+"log.title.sync_skipped" = "Copy not synced";
+"log.title.contact_card_updated" = "%1$@ changed devices";
+"log.title.history_imported" = "History copied";
+"log.title.own_devices_updated" = "Your devices changed";
+"log.title.node_deposit" = "Deposit on %1$@";
+"log.title.node_fetch" = "Fetch on %1$@";
+"log.title.node_avoided" = "Node set aside: %1$@";
+"log.title.seal_skipped" = "A device of %1$@ skipped";
+"log.title.admin_transfer_started" = "Root key sent to %1$@";
+"log.title.admin_transferred" = "Admin is now %1$@";
+"log.title.admin_received" = "This device is the admin";
+"log.title.this_device_removed" = "This device was removed";
+"log.title.device_removed" = "Device removed: %1$@";
+"log.title.remove_requested" = "Device left: %1$@";
+/* A sealed packet's text under its title: size, tier and expiry are on the meta line. */
+"log.body.packet_sealed" = "%1$@ Relays see the size, the type, the hop count, a packet identifier, the mailbox and the expiry; not who you are, whom you write to, or the content.";

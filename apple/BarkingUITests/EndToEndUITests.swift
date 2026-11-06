@@ -35,9 +35,9 @@ final class EndToEndUITests: XCTestCase {
         addr.typeText(node[1])
         app.navigationBars.buttons["Add"].tap()
         XCTAssertTrue(app.staticTexts["added by hand"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Not synced yet"].exists)
+        XCTAssertTrue(says(app, "Not synced yet").exists)
         app.buttons["Sync now"].tap()
-        XCTAssertTrue(app.staticTexts["Reachable"].waitForExistence(timeout: 20))
+        XCTAssertTrue(says(app, "Reachable").waitForExistence(timeout: 20))
         snap(app, "network-reachable")
     }
 
@@ -47,7 +47,7 @@ final class EndToEndUITests: XCTestCase {
         app.launch()
         app.tabBars.buttons["Network"].tap()
         app.buttons["Sync now"].tap()
-        XCTAssertTrue(app.staticTexts["Reachable"].waitForExistence(timeout: 20))
+        XCTAssertTrue(says(app, "Reachable").waitForExistence(timeout: 20))
         app.tabBars.buttons["Chats"].tap()
         openChat(app, "Alice")
         XCTAssertTrue(app.staticTexts["hello from the Mac"].waitForExistence(timeout: 30))
@@ -86,4 +86,11 @@ func openChat(_ app: XCUIApplication, _ name: String) {
     if !row.waitForExistence(timeout: 10) { print("TREE>>>\n\(app.debugDescription)\n<<<TREE") }
     XCTAssertTrue(row.exists, "no chat row for \(name)")
     row.tap()
+}
+
+/// The Internet card is one VoiceOver element (UI review B4): its status is
+/// part of a longer label ("Internet, Reachable, last sync …").
+@MainActor
+private func says(_ app: XCUIApplication, _ status: String) -> XCUIElement {
+    app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", status)).firstMatch
 }

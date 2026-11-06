@@ -21,6 +21,8 @@ final class OnboardingModel {
     var wroteItDown = false
     var quiz: PhraseQuiz?
     var answers: [String?] = [nil, nil, nil]
+    /// The last Confirm found a wrong word; a new pick clears it (U-24).
+    private(set) var quizWrong = false
     var recoveryWords = Array(repeating: "", count: 24)
     var busy = false
     var errorText: String?
@@ -47,6 +49,35 @@ final class OnboardingModel {
         guard let phrase else { return }
         quiz = PhraseQuiz(words: phrase)
         answers = [nil, nil, nil]
+        quizWrong = false
+    }
+
+    /// Picks a word for a question. The other picks stay as they are, even
+    /// after a wrong Confirm (U-24): clearing them would throw work away.
+    func pick(_ word: String, for question: Int) {
+        guard answers.indices.contains(question) else { return }
+        answers[question] = word
+        quizWrong = false
+    }
+
+    /// Questions still without a pick.
+    var picksLeft: Int { answers.filter { $0 == nil }.count }
+
+    /// Confirm is usable once every row has a pick, right or wrong.
+    var canConfirmQuiz: Bool { quiz != nil && picksLeft == 0 }
+
+    /// Checks the picks: right marks the phrase confirmed; wrong keeps the
+    /// picks and says so.
+    @discardableResult
+    func confirmQuiz() -> Bool {
+        guard canConfirmQuiz else { return false }
+        if quizPassed {
+            quizWrong = false
+            markPhraseConfirmed()
+            return true
+        }
+        quizWrong = true
+        return false
     }
 
     /// Answers complete and right.
@@ -60,6 +91,19 @@ final class OnboardingModel {
             let w = normalized(recoveryWords[$0])
             return !w.isEmpty && !wordSet.contains(w)
         }
+    }
+
+    /// Why Recover cannot run yet: words missing, or one not in the list
+    /// (its 1-based number).
+    enum RecoverBlocker: Equatable { case missing(Int), unknownWord(Int) }
+
+    /// Fields with a word in them.
+    var filledRecoveryWords: Int { recoveryWords.filter { !normalized($0).isEmpty }.count }
+
+    var recoverBlocker: RecoverBlocker? {
+        if let i = invalidRecoveryIndexes.first { return .unknownWord(i + 1) }
+        let left = recoveryWords.count - filledRecoveryWords
+        return left > 0 ? .missing(left) : nil
     }
 
     var canRecover: Bool {

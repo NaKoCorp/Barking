@@ -17,9 +17,19 @@ struct Card<Content: View>: View {
 /// in words to VoiceOver: color is never the only signal.
 struct Banner: View {
     enum Kind { case info, warning, danger }
+
+    /// A trailing action (UI review U-23): "Check now ›", 44 pt, with a hint
+    /// that says where it goes.
+    struct Action {
+        let label: LocalizedStringKey
+        let hint: LocalizedStringKey
+        let perform: () -> Void
+    }
+
     let kind: Kind
     let title: LocalizedStringKey
     var message: LocalizedStringKey?
+    var action: Action?
 
     private var colors: (bg: Color, fg: Color, border: Color) {
         switch kind {
@@ -30,21 +40,47 @@ struct Banner: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: kind == .info ? "info.circle" : "exclamationmark.triangle")
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).fontWeight(.semibold)
-                if let message { Text(message) }
+        let content = VStack(alignment: .leading, spacing: Space.s1) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: kind == .info ? "info.circle" : "exclamationmark.triangle")
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).fontWeight(.semibold)
+                    if let message { Text(message) }
+                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            if let action {
+                // The banner's own colour: `warnFg` is 4.5:1 or more on its ground,
+                // where `accent` is not on every banner.
+                Button(action: action.perform) {
+                    HStack(spacing: Space.s1) {
+                        Text(action.label)
+                        Text(verbatim: "›").accessibilityHidden(true)
+                    }
+                    .font(BarkingFont.mono(.footnote, size: 13, weight: .semibold))
+                    .frame(minHeight: 44)
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(Text(action.hint))
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
         }
         .font(.bBodySmall)
         .foregroundStyle(colors.fg)
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+        .padding(.bottom, action == nil ? 12 : 0)
         .background(colors.bg, in: .rect(cornerRadius: Radius.chip))
         .overlay(RoundedRectangle(cornerRadius: Radius.chip).stroke(colors.border, lineWidth: 1))
-        .accessibilityElement(children: .combine)
+        if action == nil {
+            content.accessibilityElement(children: .combine)
+        } else {
+            // The text and the action stay two elements: a combined banner
+            // would hide its button.
+            content.accessibilityElement(children: .contain)
+        }
     }
 }
 

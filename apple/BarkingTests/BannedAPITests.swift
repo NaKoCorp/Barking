@@ -51,11 +51,8 @@ final class BannedAPITests: XCTestCase {
 
     /// Uses that a later batch of the UI review removes, by file and count:
     /// one more use fails, and so does one less (the allowance goes with it).
-    private static let pending: [String: [String: Int]] = [
-        // B4 (U-31): the Recover grid replaces the last Form and its CTA row.
-        "Form {": ["PhraseViews.swift": 1],
-        ".listRowInsets": ["PhraseViews.swift": 1],
-    ]
+    /// Empty since B4: the Recover grid replaced the last `Form`.
+    private static let pending: [String: [String: Int]] = [:]
 
     private func sources() throws -> [(name: String, text: String)] {
         let app = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

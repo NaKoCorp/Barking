@@ -67,4 +67,15 @@ final class ConversationModelTests: XCTestCase {
         await m.onAppear()
         XCTAssertTrue(m.keyChanged)
     }
+
+    /// UI review U-20: the header says the trust, read from the contact.
+    func testHeaderTrust() async {
+        let d = FakeDevice()
+        let m = make(d)
+        await m.onAppear()
+        XCTAssertEqual(m.trust, .notVerified)
+        d.contactList = [Contact(fingerprint: "b", alias: "bob", displayName: "Bob", verified: true)]
+        await m.reload()
+        XCTAssertEqual(m.trust, .verified)
+    }
 }

@@ -180,11 +180,17 @@ struct StatusDot: View {
     }
 
     let state: State
-    let label: LocalizedStringKey
+    private let label: Text
 
     init(_ state: State, label: LocalizedStringKey) {
         self.state = state
-        self.label = label
+        self.label = Text(label)
+    }
+
+    /// A word already localized (a sync result with its counts).
+    init(_ state: State, verbatim label: String) {
+        self.state = state
+        self.label = Text(verbatim: label)
     }
 
     var body: some View {
@@ -192,7 +198,7 @@ struct StatusDot: View {
             // The system font: Fira Code draws ✗ and ● at another weight.
             Text(verbatim: state.glyph).font(.bSymbol(11, relativeTo: .caption, weight: .bold))
                 .accessibilityHidden(true)
-            Text(label).font(.bMeta)
+            label.font(.bMeta)
         }
         .foregroundStyle(Color(state.token))
         .accessibilityElement(children: .combine)
@@ -211,7 +217,7 @@ struct StatusDot: View {
             Tag("Remove", style: .danger)
         }
         StatusDot(.ok, label: "Reachable")
-        StatusDot(.waiting, label: "Unreachable")
+        StatusDot(.waiting, label: "Unreachable · nothing is lost")
         StatusDot(.checking, label: "Not synced yet")
         StatusDot(.down, label: "Do not trust this contact until you meet")
     }

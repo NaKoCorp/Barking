@@ -138,10 +138,19 @@ final class SafetyControlTests: XCTestCase {
 
     /// Review B3 #4: a completed wrong set buzzes each time (not only on the
     /// first change); success is Confirm's, so the picks never say it.
-    func testQuizPickFeedback() {
-        XCTAssertEqual(PhraseConfirmView.pickFeedback(allPicked: true, passed: false), Haptic.error.feedback)
-        XCTAssertNil(PhraseConfirmView.pickFeedback(allPicked: true, passed: true))
-        XCTAssertNil(PhraseConfirmView.pickFeedback(allPicked: false, passed: false))
+    /// UI review U-24: the verdict, and its haptic, come with Confirm: an
+    /// error for each wrong set confirmed, success when right.
+    func testQuizConfirmFeedback() {
+        XCTAssertEqual(PhraseConfirmView.confirmFeedback(passed: false), .error)
+        XCTAssertEqual(PhraseConfirmView.confirmFeedback(passed: true), .success)
+    }
+
+    /// B4 carry: a transient `.inactive` (Control Center, a banner) keeps
+    /// the hold; only `.background` resets it.
+    func testHoldResetsOnlyInTheBackground() {
+        XCTAssertFalse(HoldMetrics.resetsHold(on: .active))
+        XCTAssertFalse(HoldMetrics.resetsHold(on: .inactive))
+        XCTAssertTrue(HoldMetrics.resetsHold(on: .background))
     }
 
     /// Review B3 #7: a pressed outlined danger button never tints under its
