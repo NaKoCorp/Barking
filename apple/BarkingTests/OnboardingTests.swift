@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 @testable import Barking
 @testable import BarkingKit
@@ -86,6 +87,8 @@ final class OnboardingModelTests: XCTestCase {
         XCTAssertFalse(m.phraseConfirmed)
         m.pick(right[0], for: 0)
         XCTAssertFalse(m.quizWrong)
+        // Review B4 #4: "See the 24 words again" stays once a set was wrong.
+        XCTAssertTrue(m.hadWrongConfirm)
         XCTAssertTrue(m.confirmQuiz())
         XCTAssertTrue(m.phraseConfirmed)
     }
@@ -109,6 +112,60 @@ final class OnboardingModelTests: XCTestCase {
         m.recoveryWords = words
         XCTAssertNil(m.recoverBlocker)
         XCTAssertEqual(m.filledRecoveryWords, 24)
+    }
+
+    func testRestartingTheQuizForgetsTheWrongSet() throws {
+        let words = (0..<24).map { "w\($0)" }
+        let m = OnboardingModel(defaults: freshDefaults())
+        m.phrase = words
+        m.startQuiz()
+        let q = try XCTUnwrap(m.quiz)
+        for (i, question) in q.questions.enumerated() {
+            m.pick(try XCTUnwrap(question.choices.first { $0 != words[question.index] }), for: i)
+        }
+        m.confirmQuiz()
+        XCTAssertTrue(m.hadWrongConfirm)
+        m.startQuiz()
+        XCTAssertFalse(m.hadWrongConfirm)
+    }
+
+    /// Review B4 #3: four chips per row only while an 8-letter word fits.
+    func testQuizColumns() {
+        XCTAssertEqual(PhraseConfirmView.columns(for: .large), 4)
+        XCTAssertEqual(PhraseConfirmView.columns(for: .xLarge), 4)
+        XCTAssertEqual(PhraseConfirmView.columns(for: .xxLarge), 2)
+        XCTAssertEqual(PhraseConfirmView.columns(for: .xxxLarge), 2)
+        XCTAssertEqual(PhraseConfirmView.columns(for: .accessibility3), 2)
+    }
+
+    /// Review B4 #2: a paste says what it found, and a numbered list works.
+    func testPasteSaysWhatItFound() {
+        let words = Array(bip39Words().prefix(24))
+        let m = OnboardingModel(defaults: freshDefaults())
+        XCTAssertEqual(m.paste(words.prefix(12).joined(separator: " ")), .wrongCount(12))
+        XCTAssertEqual(m.recoveryWords.filter { !$0.isEmpty }.count, 0, "a wrong paste fills nothing")
+        XCTAssertEqual(m.paste("  \n "), .empty)
+        let numbered = words.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+        XCTAssertEqual(m.paste(numbered), .filled)
+        XCTAssertEqual(m.recoveryWords, words)
+        let m2 = OnboardingModel(defaults: freshDefaults())
+        XCTAssertEqual(m2.paste(words.enumerated().map { "\($0.offset + 1)) \($0.element)" }.joined(separator: " ")), .filled)
+    }
+
+    /// Review B4 #2: the phrase never stays on the clipboard after a paste,
+    /// whether it filled the grid or not.
+    func testPasteClearsTheClipboard() throws {
+        let board = try XCTUnwrap(UIPasteboard(name: UIPasteboard.Name("test.\(UUID())"), create: true))
+        defer { UIPasteboard.remove(withName: board.name) }
+        let words = Array(bip39Words().prefix(24))
+        let m = OnboardingModel(defaults: freshDefaults())
+        board.string = words.prefix(23).joined(separator: " ")
+        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .wrongCount(23))
+        XCTAssertFalse(board.hasStrings, "a failed paste left the words on the clipboard")
+        board.string = words.joined(separator: " ")
+        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .filled)
+        XCTAssertFalse(board.hasStrings)
+        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .empty)
     }
 
     func testRecoverRejectsUnknownWord() {

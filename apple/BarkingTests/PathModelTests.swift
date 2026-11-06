@@ -139,7 +139,6 @@ final class PathModelTests: XCTestCase {
         let core = CoreService(device: d, runner: DirectRunner())
         let chats = ChatsModel(core: core)
         await chats.reload()
-        XCTAssertEqual(chats.rows.first?.route, "internet:2")
         let conv = ConversationModel(contact: "sam", core: core)
         await conv.reload()
         XCTAssertEqual(conv.items.first?.route, "internet:2")

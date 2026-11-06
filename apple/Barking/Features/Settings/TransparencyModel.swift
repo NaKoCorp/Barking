@@ -83,8 +83,13 @@ enum LogGlyph: Equatable {
         case "log.ack_verified": .verified
         case "log.contact_key_changed", "log.decrypt_failed": .warning
         case "log.node_avoided": .node
-        case "log.session_established", "log.frame_rejected": .other
-        default: .devices
+        case "log.device_linked", "log.link_finished", "log.sync_applied", "log.sync_skipped",
+             "log.contact_card_updated", "log.history_imported", "log.own_devices_updated", "log.seal_skipped",
+             "log.admin_transfer_started", "log.admin_transferred", "log.admin_received",
+             "log.this_device_removed", "log.device_removed", "log.remove_requested": .devices
+        // Session, rejected frame, and any key a newer core adds: a glyph
+        // that claims nothing.
+        default: .other
         }
     }
 

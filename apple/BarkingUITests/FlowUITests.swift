@@ -22,6 +22,23 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Shown on your other devices, and to your contacts in your card."].exists)
     }
 
+    /// Review B4 #1: VoiceOver hears the word typed in a Recover tile.
+    func testRecoverTileSaysItsWord() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        app.buttons["Recover with 24 words"].firstMatch.tap()
+        let tile = app.textFields["recover.word.1"]
+        XCTAssertTrue(tile.waitForExistence(timeout: 5))
+        tile.tap()
+        tile.typeText("abandon")
+        XCTAssertTrue((tile.value as? String ?? "").contains("abandon"), "value: \(tile.value ?? "nil")")
+        let second = app.textFields["recover.word.2"]
+        second.tap()
+        second.typeText("zzzz")
+        let value = second.value as? String ?? ""
+        XCTAssertTrue(value.contains("zzzz") && value.contains("Not in the word list"), "value: \(value)")
+    }
+
     func testLaterKeepsTheBanner() throws {
         let app = XCUIApplication.fresh()
         app.launch()

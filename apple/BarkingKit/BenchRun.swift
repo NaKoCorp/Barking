@@ -8,7 +8,9 @@ public enum BenchRun {
     /// The extension's budget (`Budget`): one lock wait, the quick sync
     /// gets what is left of the work time. `sync: false` stops once the
     /// device is opened (outcome `opened`): key and open timings only.
-    public static func run(source: String, paths: WipePaths = .live, sync: Bool = true) -> (BenchRecord, SyncSummary?) {
+    /// `keyStore` is the app's keychain; a test passes its own.
+    public static func run(source: String, paths: WipePaths = .live, sync: Bool = true,
+                           keyStore: KeyStore = DeviceFactory.keyStore) -> (BenchRecord, SyncSummary?) {
         let start = DispatchTime.now()
         let startedAt = Date()
         let sampler = FootprintSampler()
@@ -27,7 +29,8 @@ public enum BenchRun {
                 outcome = wipePending
             } else {
                 let before = elapsedMs(since: start)
-                let device = try DeviceFactory.existing(lockTimeoutMs: Budget.extensionLockMs, paths: paths) {
+                let device = try DeviceFactory.existing(lockTimeoutMs: Budget.extensionLockMs, paths: paths,
+                                                       keyStore: keyStore) {
                     unwrapMs = elapsedMs(since: start) - before
                     mark("key")
                 }

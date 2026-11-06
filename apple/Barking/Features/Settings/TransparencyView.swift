@@ -86,14 +86,44 @@ struct TransparencyView: View {
     /// the direction glyph, then the explanation in two lines; a tap shows
     /// it whole. No icon tile: the glyph says which way it went.
     private func logRow(_ row: LogRow) -> some View {
-        let open = expanded.contains(row.id)
-        return Button {
-            if open { expanded.remove(row.id) } else { expanded.insert(row.id) }
-        } label: {
+        JournalRowView(row: row, open: expanded.contains(row.id), titleLines: size.isAccessibilitySize ? 3 : 1) {
+            if expanded.contains(row.id) { expanded.remove(row.id) } else { expanded.insert(row.id) }
+        }
+    }
+
+    private func icon(_ name: String, accent: Bool) -> some View {
+        Image(systemName: name).font(.bSymbol(14, relativeTo: .subheadline, maximum: 21))
+            .foregroundStyle(accent ? Color.accent : Color.fgMuted)
+            .frame(width: min(tile, 48), height: min(tile, 48))
+            .background(accent ? Color.wash : Color.field, in: .rect(cornerRadius: Radius.tile))
+            .accessibilityHidden(true)
+    }
+}
+
+/// Whether two lines cut a journal text: its full height against its
+/// two-line height, both measured at the row's width (review B4 #6).
+enum JournalText {
+    static func isCut(full: CGFloat, clamped: CGFloat) -> Bool { full > clamped + 1 }
+}
+
+/// One journal row. The disclosure (⌄ / ⌃) and the VoiceOver hint show only
+/// when two lines really cut the text, at this width, size and language.
+private struct JournalRowView: View {
+    let row: LogRow
+    let open: Bool
+    let titleLines: Int
+    let toggle: () -> Void
+    @State private var fullHeight: CGFloat = 0
+    @State private var clampedHeight: CGFloat = 0
+
+    private var cut: Bool { JournalText.isCut(full: fullHeight, clamped: clampedHeight) }
+
+    var body: some View {
+        Button(action: toggle) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(verbatim: row.title)
                     .font(BarkingFont.sans(.subheadline, size: 15, weight: .semibold)).foregroundStyle(Color.fg)
-                    .lineLimit(size.isAccessibilitySize ? 3 : 1)
+                    .lineLimit(titleLines)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(verbatim: row.glyph.symbol)
                         .font(row.glyph.usesSystemFont ? .bSymbol(12, relativeTo: .caption, weight: .bold) : .bMeta)
@@ -102,11 +132,9 @@ struct TransparencyView: View {
                     Text(verbatim: row.meta).font(.bMeta).foregroundStyle(Color.fgSoft)
                         .multilineTextAlignment(.leading)
                 }
-                Text(verbatim: row.text).font(.bBodySmall).foregroundStyle(Color.fgMuted)
-                    .lineLimit(open ? nil : 2).multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                // The disclosure, where two lines likely cut the text.
-                if row.text.count > 100 {
+                text(lines: open ? nil : 2)
+                    .background(alignment: .topLeading) { measures }
+                if cut {
                     Text(verbatim: open ? "⌃" : "⌄").font(.bMeta).foregroundStyle(Color.fgSoft)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                         .accessibilityHidden(true)
@@ -119,14 +147,24 @@ struct TransparencyView: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
-        .accessibilityHint(open ? "" : String(localized: "Tap to show the whole text"))
+        .accessibilityHint(cut && !open ? String(localized: "Tap to show the whole text") : "")
     }
 
-    private func icon(_ name: String, accent: Bool) -> some View {
-        Image(systemName: name).font(.bSymbol(14, relativeTo: .subheadline, maximum: 21))
-            .foregroundStyle(accent ? Color.accent : Color.fgMuted)
-            .frame(width: min(tile, 48), height: min(tile, 48))
-            .background(accent ? Color.wash : Color.field, in: .rect(cornerRadius: Radius.tile))
-            .accessibilityHidden(true)
+    private func text(lines: Int?) -> some View {
+        Text(verbatim: row.text).font(.bBodySmall).foregroundStyle(Color.fgMuted)
+            .lineLimit(lines).multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Two hidden copies at the same width: the whole text and two lines.
+    private var measures: some View {
+        ZStack(alignment: .topLeading) {
+            text(lines: nil)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+            text(lines: 2)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { clampedHeight = $0 }
+        }
+        .hidden()
+        .accessibilityHidden(true)
     }
 }

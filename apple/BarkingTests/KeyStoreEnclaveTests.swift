@@ -147,9 +147,17 @@ final class KeyStoreEnclaveTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appending(path: "bench-\(UUID())")
         defer { try? FileManager.default.removeItem(at: dir) }
         let paths = WipePaths(container: dir, temporary: dir, defaults: [], lockTimeoutMs: 100)
-        let (record, _) = BenchRun.run(source: "test", paths: paths, sync: false)
+        // Hermetic (review B4 #13): the key comes from this test's store,
+        // never from whatever the simulator keychain holds.
+        _ = try store.create()
+        let (record, _) = BenchRun.run(source: "test", paths: paths, sync: false, keyStore: store)
         XCTAssertTrue(record.steps.contains { $0.name == "key" })
         XCTAssertNotNil(record.unwrapMs)
+        // A locked keychain reads as no key, without a key step.
+        entries.locked = true
+        let (locked, _) = BenchRun.run(source: "test", paths: paths, sync: false, keyStore: store)
+        XCTAssertEqual(locked.outcome, "no-key")
+        XCTAssertNil(locked.unwrapMs)
     }
 
     /// A failing enclave must not block every new identity: the key is

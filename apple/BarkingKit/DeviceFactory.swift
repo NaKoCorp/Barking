@@ -11,7 +11,7 @@ public enum DeviceFactory {
         return g
     }
 
-    static var keyStore: KeyStore { KeyStore(accessGroup: keychainGroup) }
+    public static var keyStore: KeyStore { KeyStore(accessGroup: keychainGroup) }
 
     static var allowPrivate: Bool {
         #if BARKING_DEV
@@ -63,6 +63,7 @@ public enum DeviceFactory {
     /// key or a database; `KeyStore.Locked` before the first unlock. Creates nothing.
     /// `keyRead` runs once the key is read and unwrapped (the bench times it).
     public static func existing(lockTimeoutMs: UInt64, paths: WipePaths = .live,
+                                keyStore: KeyStore = DeviceFactory.keyStore,
                                 keyRead: () -> Void = {}) throws -> Device? {
         // A wipe in progress: the database is on its way out, never opened.
         guard !Wipe.isPending(paths: paths) else { return nil }

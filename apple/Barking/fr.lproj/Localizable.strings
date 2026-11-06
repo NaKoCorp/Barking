@@ -331,7 +331,6 @@
 /* UI review B4: messaging and status. */
 "Pick one word per row." = "Choisissez un mot par ligne.";
 "See the 24 words again" = "Revoir les 24 mots";
-"Word %lld" = "Mot %lld";
 "Recover (%lld/24)" = "Restaurer (%lld/24)";
 "Words left to fill in: %lld." = "Mots restant à saisir : %lld.";
 "Word %lld is not in the word list." = "Le mot %lld n’est pas dans la liste.";
@@ -343,6 +342,8 @@
 "Unreachable · nothing is lost" = "Injoignable · rien n’est perdu";
 "Checking…" = "Vérification…";
 "Up to date" = "À jour";
-"Still unreachable · nothing waits" = "Toujours injoignable · rien n’attend";
+"Still unreachable · nothing waits" = "Toujours injoignable · rien en attente";
 "%lld KB" = "%lld Ko";
 "expires %@" = "expire le %@";
+"Pasted. The clipboard was cleared." = "Collé. Le presse-papiers a été vidé.";
+"The clipboard holds no text." = "Le presse-papiers ne contient pas de texte.";

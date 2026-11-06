@@ -61,7 +61,12 @@ final class NetworkModel {
     private(set) var relays: [NodeInfo] = []
     private(set) var terminal: [String] = []
     private(set) var syncing = false
-    private(set) var result: SyncResult?
+    /// The line of the last "Sync now", while no other sync came after it.
+    var result: SyncResult? { resultSync == lastSync ? lastResult : nil }
+    private var lastResult: SyncResult?
+    /// The sync time the result belongs to: a later (background) sync
+    /// moves `lastSync` and retires the line (review B4 #7).
+    private var resultSync: Date?
     var addError: String?
 
     init(core: CoreService) { self.core = core }
@@ -88,8 +93,9 @@ final class NetworkModel {
         let outcome = await core.sync(reason: .pull)
         terminal = outcome.lines
         await load()
-        result = outcome.networkUp ? .done(sent: outcome.sent, received: outcome.received)
+        lastResult = outcome.networkUp ? .done(sent: outcome.sent, received: outcome.received)
             : .unreachable(waiting: pending)
+        resultSync = lastSync
     }
 
     /// `barking://node#<52-char id>@<ip:port>`.

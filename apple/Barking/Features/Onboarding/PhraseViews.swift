@@ -182,6 +182,10 @@ struct PhraseConfirmView: View {
     @State private var showingWords = false
     @Environment(\.dynamicTypeSize) private var size
 
+    /// Chips per row: four while an 8-letter word and its ✓ fit, two from
+    /// xxLarge up.
+    static func columns(for size: DynamicTypeSize) -> Int { size >= .xxLarge ? 2 : 4 }
+
     /// The haptic of a Confirm: success, or an error for each wrong set.
     static func confirmFeedback(passed: Bool) -> Haptic { passed ? .success : .error }
 
@@ -199,9 +203,9 @@ struct PhraseConfirmView: View {
                             SectionLabel("Word \(q.index + 1)")
                                 .accessibilityIdentifier("quiz.question.\(qi)")
                                 .accessibilityValue(Text(verbatim: "\(q.index + 1)"))
-                            // Four in a row; two at accessibility sizes, so a word never truncates.
+                            // Four in a row; two at large sizes, so a word never truncates.
                             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Space.s2),
-                                                     count: size.isAccessibilitySize ? 2 : 4),
+                                                     count: Self.columns(for: size)),
                                       spacing: Space.s2) {
                                 ForEach(q.choices, id: \.self) { c in choice(c, question: qi) }
                             }
@@ -219,7 +223,8 @@ struct PhraseConfirmView: View {
                     .accessibilityIdentifier("quiz.error")
                 }
                 PrimaryButton("Confirm", enabled: model.canConfirmQuiz, reason: reason) { confirm() }
-                if model.quizWrong, model.phrase != nil {
+                // Stays after a new pick: the person may check the other words.
+                if model.hadWrongConfirm, model.phrase != nil {
                     SecondaryButton("See the 24 words again") { showingWords = true }
                 }
                 SecondaryButton("Later", action: onDone)
@@ -276,6 +281,7 @@ struct RecoverView: View {
     @Bindable var model: OnboardingModel
     let onRecovered: (CoreService) -> Void
     @FocusState private var focused: Int?
+    @State private var pasted: OnboardingModel.PasteResult?
     @Environment(\.dynamicTypeSize) private var size
 
     /// Why Recover is greyed out (U-3).
@@ -290,8 +296,9 @@ struct RecoverView: View {
     var body: some View {
         Group {
             Banner(kind: .info, title: "Contacts and history are not restored")
-            SecondaryButton("Paste the 24 words") {
-                if let s = UIPasteboard.general.string { model.paste(s) }
+            VStack(alignment: .leading, spacing: Space.s2) {
+                SecondaryButton("Paste the 24 words") { pasted = RecoverPaste.take(from: .general, into: model) }
+                if let pasted { pasteLine(pasted) }
             }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Space.s2),
                                      count: size.isAccessibilitySize ? 1 : 3),
@@ -319,6 +326,19 @@ struct RecoverView: View {
         .navigationTitle(Text("Recover with 24 words"))
     }
 
+    /// What the paste did, under its button: the clipboard is always said.
+    @ViewBuilder private func pasteLine(_ result: OnboardingModel.PasteResult) -> some View {
+        switch result {
+        case .filled:
+            Text("Pasted. The clipboard was cleared.").font(.bBodySmall).foregroundStyle(Color.fgMuted)
+        case .wrongCount(let n):
+            Text("Found \(n) words; 24 are needed. The clipboard was cleared.")
+                .font(.bBodySmall).foregroundStyle(Color.danger)
+        case .empty:
+            Text("The clipboard holds no text.").font(.bBodySmall).foregroundStyle(Color.danger)
+        }
+    }
+
     /// One word: its number in a fixed 24 pt slot (Fira 11), the word in
     /// Fira 14, on the field slot with the field's focus and error rings.
     private func tile(_ i: Int) -> some View {
@@ -340,7 +360,10 @@ struct RecoverView: View {
                 .onSubmit { focused = i < 23 ? i + 1 : nil }
                 .focused($focused, equals: i)
                 .accessibilityLabel(Text("Word \(i + 1)"))
-                .accessibilityValue(invalid ? Text("Not in the word list") : Text(verbatim: ""))
+                // The word itself stays the value: VoiceOver must let the
+                // person check what they typed; an unknown word adds why.
+                .accessibilityValue(Text(verbatim: model.recoveryWords[i])
+                    + (invalid ? Text(verbatim: ", ") + Text("Not in the word list") : Text(verbatim: "")))
                 .accessibilityIdentifier("recover.word.\(i + 1)")
         }
         .padding(.trailing, Space.s2)
@@ -363,5 +386,19 @@ struct RecoverView: View {
             }
             Spacer()
         }
+    }
+}
+
+/// "Paste the 24 words" (review B4 #2): reads the clipboard once, then
+/// clears it when it still holds what was read, filled or not. A recovery
+/// phrase must not stay where Universal Clipboard can carry it to other
+/// devices, nor linger after a paste that failed.
+enum RecoverPaste {
+    @MainActor
+    static func take(from board: UIPasteboard, into model: OnboardingModel) -> OnboardingModel.PasteResult {
+        guard let text = board.string else { return .empty }
+        let result = model.paste(text)
+        if board.string == text { board.items = [] }
+        return result
     }
 }

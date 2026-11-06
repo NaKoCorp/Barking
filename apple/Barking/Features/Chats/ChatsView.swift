@@ -133,6 +133,12 @@ struct ChatRowView: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(row.name).font(BarkingFont.sans(.headline, size: 16, weight: .semibold))
                         .foregroundStyle(Color.fg).lineLimit(1)
+                    // Verified stays visible when the second line is a message.
+                    if row.verified, case .preview = row.line {
+                        Text(verbatim: "✓").font(.bSymbol(13, relativeTo: .footnote, weight: .bold))
+                            .foregroundStyle(Color.ok)
+                            .accessibilityLabel(Text("verified"))
+                    }
                     Spacer(minLength: 8)
                     if let at = row.lastAt {
                         Text(at, format: .dateTime.hour().minute())

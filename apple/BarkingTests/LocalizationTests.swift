@@ -173,4 +173,35 @@ final class LocalizationTests: XCTestCase {
             XCTAssertNotNil(strings["log.body.packet_sealed"], "\(lang) packet body")
         }
     }
+
+    /// Review B4 fix round: the paste lines, the wording nits, and no key
+    /// written twice in the French table (a later edit to one copy would
+    /// be shadowed by the other).
+    func testFixRoundStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let frPlurals = try XCTUnwrap(table("fr", "Localizable", "stringsdict"))
+        let enPlurals = try XCTUnwrap(table("en", "Localizable", "stringsdict"))
+        for key in ["The clipboard holds no text.", "Pasted. The clipboard was cleared."] {
+            XCTAssertNotNil(fr[key], "missing French for \(key)")
+        }
+        let found = "Found %lld words; 24 are needed. The clipboard was cleared."
+        XCTAssertNotNil(frPlurals[found])
+        XCTAssertNotNil(enPlurals[found])
+        XCTAssertEqual(fr["Still unreachable · nothing waits"] as? String, "Toujours injoignable · rien en attente")
+        for lang in ["en", "fr"] {
+            let log = try XCTUnwrap(table(lang, "Log"))
+            XCTAssertEqual(log["log.title.seal_skipped"] as? String,
+                           lang == "en" ? "Not encrypted for a device of %1$@" : "Non chiffré pour un appareil de %1$@")
+        }
+        // The bundle's copy is compiled; read the keys from the source.
+        let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Barking/fr.lproj/Localizable.strings")
+        let text = try String(contentsOf: source, encoding: .utf8)
+        let keys = text.split(separator: "\n").compactMap { line -> String? in
+            guard line.hasPrefix("\""), let end = line.dropFirst().firstIndex(of: "\"") else { return nil }
+            return String(line[line.index(after: line.startIndex)..<end])
+        }
+        let dupes = Dictionary(grouping: keys, by: { $0 }).filter { $0.value.count > 1 }.keys
+        XCTAssertTrue(dupes.isEmpty, "French keys written twice: \(dupes.sorted())")
+    }
 }

@@ -225,5 +225,20 @@ final class TransparencyModelTests: XCTestCase {
         XCTAssertEqual(LogGlyph.sent.symbol, "↑")
         XCTAssertEqual(LogGlyph.received.symbol, "↓")
         XCTAssertEqual(LogGlyph.warning.token, "danger")
+        // Review B4 #5: a key this app does not know claims nothing.
+        XCTAssertEqual(LogGlyph.of(key: "log.something_new"), .other)
+        for key in ["log.link_finished", "log.sync_applied", "log.sync_skipped", "log.contact_card_updated",
+                    "log.history_imported", "log.own_devices_updated", "log.seal_skipped", "log.admin_transfer_started",
+                    "log.admin_transferred", "log.admin_received", "log.this_device_removed", "log.device_removed",
+                    "log.remove_requested"] {
+            XCTAssertEqual(LogGlyph.of(key: key), .devices, key)
+        }
+    }
+
+    /// Review B4 #6: the disclosure shows only when two lines cut the text.
+    func testDisclosureFollowsTheCut() {
+        XCTAssertTrue(JournalText.isCut(full: 60, clamped: 40))
+        XCTAssertFalse(JournalText.isCut(full: 40, clamped: 40))
+        XCTAssertFalse(JournalText.isCut(full: 40.4, clamped: 40), "rounding is not a cut")
     }
 }

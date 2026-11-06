@@ -114,5 +114,21 @@
 			<string>%lld messages received</string>
 		</dict>
 	</dict>
+	<key>Found %lld words; 24 are needed. The clipboard was cleared.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Found %lld word; 24 are needed. The clipboard was cleared.</string>
+			<key>other</key>
+			<string>Found %lld words; 24 are needed. The clipboard was cleared.</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

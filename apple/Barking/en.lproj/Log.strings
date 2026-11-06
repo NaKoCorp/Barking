@@ -77,7 +77,7 @@
 "log.title.node_deposit" = "Deposit on %1$@";
 "log.title.node_fetch" = "Fetch on %1$@";
 "log.title.node_avoided" = "Node set aside: %1$@";
-"log.title.seal_skipped" = "A device of %1$@ skipped";
+"log.title.seal_skipped" = "Not encrypted for a device of %1$@";
 "log.title.admin_transfer_started" = "Root key sent to %1$@";
 "log.title.admin_transferred" = "Admin is now %1$@";
 "log.title.admin_received" = "This device is the admin";

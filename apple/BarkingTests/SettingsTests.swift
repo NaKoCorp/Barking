@@ -39,6 +39,24 @@ final class NetworkModelTests: XCTestCase {
         XCTAssertEqual(NetworkModel.SyncResult.unreachable(waiting: 3).text, "Still unreachable · 3 packets wait")
     }
 
+    /// Review B4 #7: a later sync (in the background) retires the line of
+    /// the last "Sync now"; the change that sync itself sends does not.
+    func testSyncResultGoesWithItsSync() async throws {
+        let d = FakeDevice()
+        d.summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: false, error: nil)
+        let core = CoreService(device: d, runner: DirectRunner())
+        let m = NetworkModel(core: core)
+        await m.syncNow()
+        await m.load()
+        XCTAssertEqual(m.result, .unreachable(waiting: 0))
+        try await Task.sleep(for: .milliseconds(20))
+        d.summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: true, error: nil)
+        _ = await core.sync(reason: .pull)
+        await m.load()
+        XCTAssertNil(m.result)
+        XCTAssertEqual(m.status, .reachable)
+    }
+
     func testAddRelayLinkParsing() {
         let id = String(repeating: "A", count: 52)
         XCTAssertEqual(NetworkModel.parseRelay(link: "barking://node#\(id)@203.0.113.7:4433")?.addr, "203.0.113.7:4433")

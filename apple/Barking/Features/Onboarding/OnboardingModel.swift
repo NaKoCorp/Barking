@@ -23,6 +23,9 @@ final class OnboardingModel {
     var answers: [String?] = [nil, nil, nil]
     /// The last Confirm found a wrong word; a new pick clears it (U-24).
     private(set) var quizWrong = false
+    /// A wrong set was confirmed since the quiz started: "See the 24 words
+    /// again" stays, even once a new pick clears the error line.
+    private(set) var hadWrongConfirm = false
     var recoveryWords = Array(repeating: "", count: 24)
     var busy = false
     var errorText: String?
@@ -50,6 +53,7 @@ final class OnboardingModel {
         quiz = PhraseQuiz(words: phrase)
         answers = [nil, nil, nil]
         quizWrong = false
+        hadWrongConfirm = false
     }
 
     /// Picks a word for a question. The other picks stay as they are, even
@@ -77,6 +81,7 @@ final class OnboardingModel {
             return true
         }
         quizWrong = true
+        hadWrongConfirm = true
         return false
     }
 
@@ -110,11 +115,21 @@ final class OnboardingModel {
         recoveryWords.allSatisfy { !normalized($0).isEmpty } && invalidRecoveryIndexes.isEmpty
     }
 
-    /// Fills the 24 fields from a pasted phrase.
-    func paste(_ text: String) {
-        let words = text.split(whereSeparator: \.isWhitespace).map { normalized(String($0)) }
-        guard words.count == 24 else { return }
+    /// What a paste did: filled the 24 fields, found another count of
+    /// words (nothing is filled), or found no text.
+    enum PasteResult: Equatable { case filled, wrongCount(Int), empty }
+
+    /// Fills the 24 fields from a pasted phrase. List numbers ("1.", "2)",
+    /// "3") are dropped first, so a numbered copy works too.
+    @discardableResult
+    func paste(_ text: String) -> PasteResult {
+        let words = text.split(whereSeparator: \.isWhitespace)
+            .map { normalized(String($0)) }
+            .filter { !$0.isEmpty && !$0.allSatisfy { $0.isNumber || $0 == "." || $0 == ")" } }
+        guard !words.isEmpty else { return .empty }
+        guard words.count == 24 else { return .wrongCount(words.count) }
         recoveryWords = words
+        return .filled
     }
 
     func suggestions(for prefix: String) -> [String] {

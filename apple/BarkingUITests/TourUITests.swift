@@ -91,8 +91,9 @@ final class TourUITests: XCTestCase {
             if pw.waitForExistence(timeout: 5) {
                 pw.tap(); pw.typeText("password1234")
                 let c = app.secureTextFields["pdf.confirm"]
-                // At AX sizes the second field is below the fold, under the CTA bar.
-                if !size.isEmpty { app.swipeUp(); sleep(1) }
+                // At large sizes the second field can be below the fold, under the CTA bar.
+                // (At xxxLarge it is still in view, and a swipe would hide it.)
+                if size.contains(where: { $0.contains("Accessibility") }) || !c.isHittable { app.swipeUp(); sleep(1) }
                 c.tap(); c.typeText("password1234")
                 snap(app, "pdf-password-sheet-weak")
                 app.buttons["pdf.suggest"].tap(); sleep(1)
@@ -182,7 +183,9 @@ final class TourUITests: XCTestCase {
             }
             if !popped { back() }
         }
-        back()
+        // Back to the chats: the conversation hides the tab bar (UI review
+        // B4), so go back until it shows, whatever the safety code left.
+        for _ in 0..<3 where !app.tabBars.buttons[L.network].exists { back(); sleep(1) }
         app.tabBars.buttons[L.network].tap(); sleep(1)
         snap(app, "network")
         // UI review B4: the line Sync now leaves (unnumbered).
