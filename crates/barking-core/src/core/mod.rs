@@ -21,6 +21,7 @@ mod log_limit;
 mod receive;
 mod remove;
 mod removed;
+mod route;
 mod send;
 mod sync;
 
@@ -59,6 +60,7 @@ pub use link::{
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
 pub use remove::LeaveState;
 pub use removed::Removed;
+pub use route::{RouteEntry, RouteStep};
 
 use log_limit::LogLimiter;
 

@@ -91,11 +91,12 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use barking_core::RouteStep;
 use barking_core::mailbox::day_of;
 use barking_core::transparency::{AvoidReason, TransparencyEvent};
 use barking_core::{Core, CoreError, ReceiveOutcome};
 use barking_dht::{BootstrapEntry, builtin_bootstrap};
-use barking_packet::{MailboxId, Packet};
+use barking_packet::{MailboxId, Packet, PacketId};
 use barking_proto::pow::content_hash;
 use barking_proto::{ErrorReason, NodeId, NodeRecord};
 use tokio::time::Instant;
@@ -438,7 +439,8 @@ impl<'a, D: Connector> Run<'a, D> {
     }
 }
 
-/// Per-node counts for the transparency log.
+/// Per-node counts for the transparency log, and the packets for the
+/// route of each message.
 #[derive(Default)]
 struct NodeStats {
     mailboxes: u32,
@@ -446,6 +448,10 @@ struct NodeStats {
     deposited: u32,
     refused: u32,
     fetched: bool,
+    /// Messages (not receipts) the node accepted.
+    deposited_ids: Vec<PacketId>,
+    /// Items fetched from the node.
+    fetched_ids: Vec<PacketId>,
 }
 
 struct Run<'a, D: Connector> {
@@ -613,6 +619,15 @@ where
         self.save();
         for (_, (id, s)) in std::mem::take(&mut self.stats) {
             let node = short_id(&id);
+            // The core keeps only the packets that carry a message.
+            let steps = s
+                .deposited_ids
+                .iter()
+                .map(|p| (p, RouteStep::Deposited))
+                .chain(s.fetched_ids.iter().map(|p| (p, RouteStep::Fetched)));
+            for (packet, step) in steps {
+                let _ = self.core.record_route(*packet, step, &node, self.now);
+            }
             if s.fetched {
                 let _ = self.core.log_transport_event(
                     TransparencyEvent::NodeFetch {
@@ -1011,6 +1026,11 @@ where
         match result {
             Ok(()) => {
                 s.deposited = s.deposited.saturating_add(1);
+                if !d.is_ack
+                    && let Ok(p) = Packet::decode(&d.bytes)
+                {
+                    s.deposited_ids.push(p.id);
+                }
                 if d.is_ack {
                     self.report.acks_deposited += 1;
                 } else if d.first_copy {

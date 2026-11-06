@@ -221,3 +221,19 @@ CREATE INDEX IF NOT EXISTS transparency_class_id ON transparency(class, id);
 /// added to existing databases at open (idempotent); 0: unknown.
 pub const CONTACTS_ADD_VERIFIED_AT: &str =
     "ALTER TABLE contacts ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0;";
+
+/// Route of each packet (spec block 2b §4.1), created at open
+/// (idempotent). `step`: `RouteStep` as stored, fixed order, additions at
+/// the end. `node`: a node's short identifier, never an address. `size`:
+/// packet bytes, for `Sealed`. Never synchronized, purged with the log.
+pub const ROUTE_STEPS: &str = "
+CREATE TABLE IF NOT EXISTS route_steps (
+    packet_id BLOB NOT NULL,
+    at INTEGER NOT NULL,
+    step INTEGER NOT NULL,
+    node TEXT,
+    size INTEGER
+);
+CREATE INDEX IF NOT EXISTS route_steps_packet ON route_steps(packet_id);
+CREATE INDEX IF NOT EXISTS route_steps_at ON route_steps(at);
+";

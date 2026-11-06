@@ -22,7 +22,7 @@ pub mod transparency;
 
 pub use self::core::{
     ContactSummary, Core, HistoryArchive, LeaveState, LinkBundle, LinkOffer, LinkOutcome,
-    LinkRequest, MyDevice, ReceiveOutcome, SyncKind, WatchedMailboxes,
+    LinkRequest, MyDevice, ReceiveOutcome, RouteEntry, RouteStep, SyncKind, WatchedMailboxes,
 };
 pub use self::core::{MAX_ARCHIVE_BYTES, MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES};
 pub use error::{CoreError, Result};

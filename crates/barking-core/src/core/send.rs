@@ -4,7 +4,7 @@
 use rand_core::CryptoRng;
 
 use super::{
-    Core, OwnDevices, de_init, de_state, load_card, log, ser_init, ser_state, session_ad,
+    Core, OwnDevices, de_init, de_state, load_card, log, route, ser_init, ser_state, session_ad,
     session_id, sync,
 };
 use crate::envelope::{self, Body, Envelope, MAX_TEXT_LEN};
@@ -288,6 +288,7 @@ impl Core {
             }
             for (packet, peer_id) in &sealed {
                 tx.add_delivery(message_id, packet.id, *peer_id, false)?;
+                route::record_sealed(tx, packet, now)?;
             }
             let copy = Body::SyncSent {
                 to: *to,

@@ -377,6 +377,12 @@ where
         s.received = s
             .received
             .saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
+        s.fetched_ids.extend(
+            items
+                .iter()
+                .filter_map(|i| Packet::decode(i).ok())
+                .map(|p| p.id),
+        );
         self.save();
         // A cut connection leaves no session worth re-reading on.
         if !intro && self.mode == Mode::Full && stop != FetchStop::Connection {

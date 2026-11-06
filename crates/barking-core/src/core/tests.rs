@@ -2610,3 +2610,174 @@ fn remove_me_write_failure_aborts_receive() {
         });
     assert!(!removed);
 }
+
+// --- Block 2b, task 5: route of a message.
+
+const ROUTE_NODE: &str = "K7QX2M4A";
+
+fn this_device(c: &Core) -> DeviceId {
+    c.my_devices()
+        .into_iter()
+        .find(|d| d.this_device)
+        .unwrap()
+        .id
+}
+
+#[test]
+fn route_of_sent_and_received_message() {
+    // B (admin) with B2 linked; A knows B's card listing both devices.
+    let (_dir, mut b, b2, mut rng) = linked();
+    let (_da, mut a) = party("a", 9);
+    a.add_contact(&b.contact_card("Bob").unwrap(), Some("bob"), NOW, &mut rng)
+        .unwrap();
+    b.add_contact(
+        &a.contact_card("Alice").unwrap(),
+        Some("alice"),
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    let (b_id, b2_id, a_id) = (this_device(&b), this_device(&b2), this_device(&a));
+
+    let packets = a.send_text(&b.fingerprint(), "hi", NOW, &mut rng).unwrap();
+    assert_eq!(packets.len(), 2);
+    for p in &packets {
+        a.record_route(p.id, RouteStep::Deposited, ROUTE_NODE, NOW + 1)
+            .unwrap();
+    }
+    let mut acks = Vec::new();
+    for p in &packets {
+        if let ReceiveOutcome::Message { ack, .. } =
+            b.receive(&p.encode(), "t", NOW + 2, &mut rng).unwrap()
+        {
+            acks.push(ack);
+        }
+    }
+    assert_eq!(acks.len(), 1);
+    assert!(matches!(
+        a.receive(&acks[0].encode(), "t", NOW + 3, &mut rng)
+            .unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+
+    // Sender: Sealed towards B and B2, Deposited on the node, AckVerified.
+    let row = a.messages_with(&b.fingerprint()).unwrap()[0].id;
+    let route = a.message_route(row).unwrap();
+    let steps: Vec<RouteStep> = route.iter().map(|e| e.step).collect();
+    assert_eq!(
+        steps,
+        [
+            RouteStep::Sealed,
+            RouteStep::Sealed,
+            RouteStep::Deposited,
+            RouteStep::Deposited,
+            RouteStep::AckVerified
+        ]
+    );
+    let sealed_to: std::collections::HashSet<DeviceId> =
+        route[..2].iter().map(|e| e.device.unwrap()).collect();
+    assert_eq!(sealed_to, std::collections::HashSet::from([b_id, b2_id]));
+    for e in &route[..2] {
+        assert!(e.size.unwrap() > 0);
+        assert_eq!(e.node, None);
+        assert!(!e.own);
+        assert_eq!(e.at, NOW);
+    }
+    for e in &route[2..4] {
+        assert_eq!(e.node.as_deref(), Some(ROUTE_NODE));
+        assert_eq!(e.at, NOW + 1);
+    }
+    assert_eq!(route[4].device, Some(b_id));
+    assert_eq!(route[4].at, NOW + 3);
+
+    // Recipient: Opened.
+    let row = b.messages_with(&a.fingerprint()).unwrap()[0].id;
+    let route = b.message_route(row).unwrap();
+    assert_eq!(route.len(), 1);
+    assert_eq!(route[0].step, RouteStep::Opened);
+    assert_eq!(route[0].at, NOW + 2);
+    assert_eq!(route[0].device, None);
+
+    // B's reply: Sealed towards A, and its OwnCopy towards B2.
+    b.send_text(&a.fingerprint(), "re", NOW + 4, &mut rng)
+        .unwrap();
+    let reply = b
+        .messages_with(&a.fingerprint())
+        .unwrap()
+        .into_iter()
+        .find(|m| m.direction == Direction::Out)
+        .unwrap();
+    let route = b.message_route(reply.id).unwrap();
+    assert_eq!(route.len(), 2);
+    assert_eq!(route[0].step, RouteStep::Sealed);
+    assert_eq!(route[0].device, Some(a_id));
+    assert!(!route[0].own);
+    assert_eq!(route[1].step, RouteStep::OwnCopy);
+    assert_eq!(route[1].device, Some(b2_id));
+    assert!(route[1].own);
+
+    // An unknown message has no route.
+    assert!(a.message_route(i64::MAX).unwrap().is_empty());
+}
+
+#[test]
+fn record_route_rejects_internal_steps() {
+    let mut p = pair();
+    let sent =
+        p.a.send_text(&p.b.fingerprint(), "z", NOW, &mut p.rng)
+            .unwrap();
+    let id = sent[0].id;
+    for step in [
+        RouteStep::Sealed,
+        RouteStep::Opened,
+        RouteStep::AckVerified,
+        RouteStep::OwnCopy,
+    ] {
+        assert!(matches!(
+            p.a.record_route(id, step, ROUTE_NODE, NOW),
+            Err(CoreError::Malformed(_))
+        ));
+    }
+    // A node is its short identifier, never an address.
+    for node in ["", "127.0.0.1:4433", "K7QX2M4AK7QX2M4A"] {
+        assert!(matches!(
+            p.a.record_route(id, RouteStep::Deposited, node, NOW),
+            Err(CoreError::Malformed(_))
+        ));
+    }
+    p.a.record_route(id, RouteStep::Fetched, ROUTE_NODE, NOW)
+        .unwrap();
+}
+
+#[test]
+fn route_steps_purged_after_30_days() {
+    let mut p = pair();
+    let sent =
+        p.a.send_text(&p.b.fingerprint(), "z", NOW, &mut p.rng)
+            .unwrap();
+    let row =
+        p.a.messages_with(&p.b.fingerprint())
+            .unwrap()
+            .into_iter()
+            .rfind(|m| m.direction == Direction::Out)
+            .unwrap()
+            .id;
+    let id = sent[0].id;
+    p.a.record_route(id, RouteStep::Deposited, ROUTE_NODE, NOW)
+        .unwrap();
+    assert_eq!(p.a.message_route(row).unwrap().len(), 2);
+    let fetch = |t: u64| TransparencyEvent::NodeFetch {
+        node: format!("{t}"),
+        mailboxes: 1,
+        received: 0,
+    };
+    // The log's purge clock advances by at most two days per write.
+    for day in 1..=30 {
+        p.a.log_transport_event(fetch(day), NOW + day * 86_400)
+            .unwrap();
+    }
+    assert_eq!(p.a.message_route(row).unwrap().len(), 2);
+    p.a.log_transport_event(fetch(31), NOW + 30 * 86_400 + 1)
+        .unwrap();
+    assert!(p.a.message_route(row).unwrap().is_empty());
+}

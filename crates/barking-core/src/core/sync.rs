@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use rand_core::CryptoRng;
 
 use super::link::META_OWN_CARD;
+use super::route::{self, RouteStep};
 use super::send::{SealTime, Target, seal_for};
 use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts, load_card, log};
 use crate::contact::ContactCard;
@@ -56,6 +57,7 @@ pub(super) fn seal_to_own(
     let sealed = seal_for(q, device, &Target::OwnDevices, body, message_id, time, rng)?;
     for (packet, peer) in &sealed {
         q.add_delivery(message_id, packet.id, *peer, true)?;
+        route::record(q, packet.id, RouteStep::OwnCopy, time.now, None)?;
     }
     Ok(sealed.into_iter().map(|(p, _)| p).collect())
 }

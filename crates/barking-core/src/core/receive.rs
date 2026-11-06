@@ -5,6 +5,7 @@ use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 use super::log_limit::{LogLimiter, log_limited};
+use super::route::{self, RouteStep};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
     SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, remove, removed, ser_state,
@@ -142,6 +143,7 @@ impl Core {
             // delivery) does not make the message delivered: only that of a
             // contact's device counts.
             tx.mark_delivered_by_packet(acked)?;
+            route::record(tx, acked, RouteStep::AckVerified, now, None)?;
             tx.outbox_remove(acked)?;
             // An acked request to be removed has left, whatever the transport saw.
             super::remove::note_left(tx, &[acked])?;
@@ -534,6 +536,7 @@ fn accept(
     )?;
     // Packet → message: found again through the emitted ack (`delete_contact`).
     q.record_inbound(packet.id, message_id)?;
+    route::record(q, packet.id, RouteStep::Opened, now, None)?;
     if inserted {
         log(
             q,
@@ -752,6 +755,7 @@ fn accept_sync(
     }
     q.mark_seen(packet.id, now)?;
     q.record_inbound(packet.id, sync_id)?;
+    route::record(q, packet.id, RouteStep::Opened, now, None)?;
     match kind {
         Some(kind) => log(
             q,

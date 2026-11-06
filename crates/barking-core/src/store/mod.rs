@@ -253,6 +253,18 @@ fn to_u64(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
 }
 
+/// A stored route step, joined to its packet's delivery (see
+/// `Queries::route_of_message`). `step`: `RouteStep` as stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteRow {
+    pub at: u64,
+    pub step: u8,
+    pub node: Option<String>,
+    pub size: Option<u32>,
+    pub device: Option<DeviceId>,
+    pub own: bool,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -387,6 +399,9 @@ impl Store {
         }
         self.conn
             .execute_batch(schema::TRANSPARENCY_INDEXES)
+            .map_err(map_err)?;
+        self.conn
+            .execute_batch(schema::ROUTE_STEPS)
             .map_err(map_err)?;
         Ok(())
     }
@@ -1128,12 +1143,13 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         // Bounded purge, on the same connection (hence in the same transaction).
-        // The age applies to all classes.
+        // The age applies to all classes, and to the route steps.
+        let oldest = to_i64(purge_at.saturating_sub(LOG_MAX_AGE_SECS));
         self.conn()
-            .execute(
-                "DELETE FROM transparency WHERE at < ?1",
-                params![to_i64(purge_at.saturating_sub(LOG_MAX_AGE_SECS))],
-            )
+            .execute("DELETE FROM transparency WHERE at < ?1", params![oldest])
+            .map_err(map_err)?;
+        self.conn()
+            .execute("DELETE FROM route_steps WHERE at < ?1", params![oldest])
             .map_err(map_err)?;
         // Per-class cap: only the class of the added entry has grown.
         let cap = match class {
@@ -1149,6 +1165,93 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         Ok(())
+    }
+
+    /// Appends a route step of the packet `packet_id` (`step`: `RouteStep`
+    /// as stored).
+    fn add_route_step(
+        &self,
+        packet_id: PacketId,
+        at: u64,
+        step: u8,
+        node: Option<&str>,
+        size: Option<u32>,
+    ) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO route_steps(packet_id, at, step, node, size) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    packet_id.0.as_slice(),
+                    to_i64(at),
+                    i64::from(step),
+                    node,
+                    size.map(i64::from)
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// `true` if `packet_id` carries a message: one of my deliveries or a
+    /// received packet recorded in `inbound`.
+    fn packet_has_message(&self, packet_id: PacketId) -> Result<bool> {
+        let n: i64 = self
+            .conn()
+            .query_row(
+                "SELECT (SELECT count(*) FROM deliveries WHERE packet_id = ?1) \
+                 + (SELECT count(*) FROM inbound WHERE packet_id = ?1)",
+                params![packet_id.0.as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        Ok(n > 0)
+    }
+
+    /// Route steps of every packet of the message whose row is `row_id`
+    /// (sent: through `deliveries`, with the recipient device and `own`;
+    /// received: through `inbound`), by date then insertion order.
+    fn route_of_message(&self, row_id: i64) -> Result<Vec<RouteRow>> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT at, step, node, size, device, own FROM ( \
+                 SELECT r.rowid AS seq, r.at, r.step, r.node, r.size, d.device, d.own \
+                 FROM messages m JOIN deliveries d ON d.message_id = m.message_id \
+                 JOIN route_steps r ON r.packet_id = d.packet_id WHERE m.id = ?1 \
+                 UNION ALL \
+                 SELECT r.rowid, r.at, r.step, r.node, r.size, NULL, 0 \
+                 FROM messages m JOIN inbound i ON i.message_id = m.message_id \
+                 JOIN route_steps r ON r.packet_id = i.packet_id WHERE m.id = ?1) \
+                 ORDER BY at, seq",
+            )
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![row_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, Option<Vec<u8>>>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        rows.into_iter()
+            .map(|(at, step, node, size, device, own)| {
+                Ok(RouteRow {
+                    at: to_u64(at),
+                    step: u8::try_from(step).unwrap_or(u8::MAX),
+                    node,
+                    size: size.map(|s| u32::try_from(s).unwrap_or(u32::MAX)),
+                    device: device.map(|d| arr(d).map(DeviceId)).transpose()?,
+                    own: own != 0,
+                })
+            })
+            .collect()
     }
 
     /// The first `limit` events, in insertion order: `(at, event)`.

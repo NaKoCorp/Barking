@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::identity::Fingerprint;
 use barking_core::transparency::{AvoidReason, TransparencyEvent};
-use barking_core::{Core, ReceiveOutcome};
+use barking_core::{Core, ReceiveOutcome, RouteStep};
 use barking_dht::{distance, mailbox_key};
 use barking_net::push::PushConfig;
 use barking_net::score::{START_SCORE, ScoreEvent};
@@ -910,5 +910,51 @@ async fn subscribed_device_gets_a_wake_for_a_new_message() {
     assert_eq!(token.apns_token, APNS_TOKEN.to_vec());
     assert_eq!(token.env, ApnsEnv::Sandbox);
     relay.stop();
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deposit_and_fetch_record_route() {
+    capture_logs();
+    let nodes = network(0..1, |_| {
+        barking_node::config::DEFAULT_REPLICATION_BYTES_PER_HOUR
+    })
+    .await;
+    let node = short_id(&nodes[0].id);
+    let (mut alice, mut bob, fb, fa) = strangers();
+    alice
+        .core
+        .send_text(&fb, "route", now(), &mut rand::rng())
+        .unwrap();
+    let mut got = Vec::new();
+    for _ in 0..4 {
+        sync_on(&mut alice, seed(&nodes[0])).await;
+        got.extend(texts(&sync_on(&mut bob, seed(&nodes[0])).await));
+        if !got.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(got, ["route"]);
+
+    let sent = alice.core.messages_with(&fb).unwrap()[0].id;
+    let route = alice.core.message_route(sent).unwrap();
+    assert!(
+        route
+            .iter()
+            .any(|e| e.step == RouteStep::Deposited && e.node.as_deref() == Some(node.as_str())),
+        "{route:?}"
+    );
+    let received = bob.core.messages_with(&fa).unwrap()[0].id;
+    let route = bob.core.message_route(received).unwrap();
+    assert!(
+        route
+            .iter()
+            .any(|e| e.step == RouteStep::Fetched && e.node.as_deref() == Some(node.as_str())),
+        "{route:?}"
+    );
+    // Fetched (recorded at the end of the sync) comes before Opened.
+    let fetched = route.iter().position(|e| e.step == RouteStep::Fetched);
+    let opened = route.iter().position(|e| e.step == RouteStep::Opened);
+    assert!(opened.is_some() && fetched < opened, "{route:?}");
     stop_all(nodes).await;
 }
