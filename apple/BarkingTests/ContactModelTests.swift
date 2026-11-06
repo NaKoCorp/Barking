@@ -34,7 +34,8 @@ final class ContactModelTests: XCTestCase {
         let m = make(FakeDevice())
         await m.load()
         XCTAssertEqual(m.groups.count, 12)
-        XCTAssertEqual(m.fingerprintShort, "zab2 2ccf · kzfa fsms")
+        // The shared format: a no-break space keeps `·` off the start of a line.
+        XCTAssertEqual(m.fingerprintShort, "zab2 2ccf\u{00A0}· kzfa fsms")
         XCTAssertEqual(m.name, "Maya")
     }
 }

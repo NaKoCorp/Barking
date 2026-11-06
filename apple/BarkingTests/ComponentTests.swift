@@ -137,6 +137,18 @@ final class ComponentTests: XCTestCase {
                        "FiraCode-SemiBold")
     }
 
+    // MARK: Symbols
+
+    /// A glyph inside a fixed or capped container stops growing at
+    /// `maximum`, so it never overflows its tile at AX sizes.
+    func testSymbolSizeClampsAtAccessibilitySizes() {
+        let ax5 = UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge)
+        let large = UITraitCollection(preferredContentSizeCategory: .large)
+        XCTAssertEqual(BarkingFont.scaledSize(15, relativeTo: .body, maximum: 24, traits: ax5), 24)
+        XCTAssertEqual(BarkingFont.scaledSize(15, relativeTo: .body, maximum: 24, traits: large), 15)
+        XCTAssertGreaterThan(BarkingFont.scaledSize(15, relativeTo: .body, maximum: nil, traits: ax5), 24)
+    }
+
     // MARK: Motion
 
     func testMotionIsNilUnderReduceMotion() {

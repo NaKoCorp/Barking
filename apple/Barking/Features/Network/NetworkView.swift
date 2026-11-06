@@ -19,7 +19,6 @@ struct NetworkView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Eyebrow("how your messages travel")
                     internetCard
                     Card {
                         VStack(alignment: .leading, spacing: 12) {

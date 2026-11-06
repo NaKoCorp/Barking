@@ -28,7 +28,7 @@ struct AppearanceIcons: View {
                 let on = settings.appearance == a
                 Button { settings.appearance = a } label: {
                     Image(systemName: a.symbol)
-                        .font(.bSymbol(15, weight: on ? .semibold : .regular))
+                        .font(.bSymbol(15, weight: on ? .semibold : .regular, maximum: 24))
                         .foregroundStyle(on ? Color.accent : Color.fgMuted)
                         .frame(width: 44, height: 44)
                 }

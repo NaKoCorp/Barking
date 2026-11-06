@@ -22,11 +22,7 @@ final class ContactModel {
     }
 
     /// The first four groups of the fingerprint: `zab2 2ccf · kzfa fsms`.
-    var fingerprintShort: String {
-        let g = contact.split(separator: "-").prefix(4).map(String.init)
-        guard g.count == 4 else { return contact }
-        return "\(g[0]) \(g[1]) · \(g[2]) \(g[3])"
-    }
+    var fingerprintShort: String { FingerprintFormat.grouped(contact, form: .short) }
 
     func load() async {
         if let c = try? await core.contacts().first(where: { $0.fingerprint == contact }) {

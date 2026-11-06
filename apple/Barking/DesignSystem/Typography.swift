@@ -24,6 +24,14 @@ enum BarkingFont {
         }
         return .system(size: UIFontMetrics(forTextStyle: style.uiKit).scaledValue(for: size), weight: weight)
     }
+
+    /// `size` scaled for `style` at the current (or given) text size, capped
+    /// at `maximum` when there is one.
+    static func scaledSize(_ size: CGFloat, relativeTo style: Font.TextStyle, maximum: CGFloat?,
+                           traits: UITraitCollection? = nil) -> CGFloat {
+        let scaled = UIFontMetrics(forTextStyle: style.uiKit).scaledValue(for: size, compatibleWith: traits)
+        return maximum.map { min(scaled, $0) } ?? scaled
+    }
 }
 
 /// Type roles of the iOS screens (UI review §6). Fira Code names, labels,
@@ -52,9 +60,12 @@ extension Font {
 
     /// SF Symbols and the ✓ glyph (Fira Code draws ✓ like a √), scaled
     /// with `style`.
+    /// Pass `maximum` when the glyph sits in a container that does not grow
+    /// as much (a 44 pt button, a capped tile).
     static func bSymbol(_ size: CGFloat, relativeTo style: Font.TextStyle = .body,
-                        weight: Font.Weight = .regular) -> Font {
-        BarkingFont.sans(style, size: size, weight: weight)
+                        weight: Font.Weight = .regular, maximum: CGFloat? = nil) -> Font {
+        guard maximum != nil else { return BarkingFont.sans(style, size: size, weight: weight) }
+        return .system(size: BarkingFont.scaledSize(size, relativeTo: style, maximum: maximum), weight: weight)
     }
 }
 

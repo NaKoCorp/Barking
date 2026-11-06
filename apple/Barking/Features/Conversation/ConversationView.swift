@@ -138,7 +138,7 @@ struct ComposerView: View {
                     .background(Color.surfaceAlt, in: .capsule)
                 Button { Task { await model.send() } } label: {
                     // Disabled is a slot, never a translucent purple (U-3).
-                    Image(systemName: "arrow.up").font(.bSymbol(17, weight: .semibold))
+                    Image(systemName: "arrow.up").font(.bSymbol(17, weight: .semibold, maximum: 26))
                         .foregroundStyle(model.canSend ? Color.white : Color.fgDisabled)
                         .frame(width: 44, height: 44)
                         .background(model.canSend ? Color.accentFill : Color.fillDisabled, in: .circle)

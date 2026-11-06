@@ -92,10 +92,7 @@ final class SettingsModel {
         await load()
     }
 
-    var fingerprintShort: String {
-        let g = fingerprint.split(separator: "-").prefix(4).map(String.init)
-        return g.count == 4 ? "\(g[0]) \(g[1]) · \(g[2]) \(g[3])" : fingerprint
-    }
+    var fingerprintShort: String { FingerprintFormat.grouped(fingerprint, form: .short) }
 }
 
 /// Linked devices (screen 9): linking, the admin transfer, removing a

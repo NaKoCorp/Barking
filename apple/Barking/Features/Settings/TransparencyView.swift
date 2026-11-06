@@ -4,6 +4,8 @@ import SwiftUI
 /// Settings › Transparency (spec block 2b §5): the journal of what the core
 /// did, and where my data is.
 struct TransparencyView: View {
+    /// Icon tiles grow with the text, up to 48 pt.
+    @ScaledMetric(relativeTo: .subheadline) private var tile: CGFloat = 32
     @State private var model: TransparencyModel
     /// Entries the user opened to read in full.
     @State private var expanded: Set<Int64> = []
@@ -107,9 +109,9 @@ struct TransparencyView: View {
     }
 
     private func icon(_ name: String, accent: Bool) -> some View {
-        Image(systemName: name).font(.bSymbol(14, relativeTo: .subheadline))
+        Image(systemName: name).font(.bSymbol(14, relativeTo: .subheadline, maximum: 21))
             .foregroundStyle(accent ? Color.accent : Color.fgMuted)
-            .frame(width: 32, height: 32)
+            .frame(width: min(tile, 48), height: min(tile, 48))
             .background(accent ? Color.wash : Color.field, in: .rect(cornerRadius: Radius.tile))
             .accessibilityHidden(true)
     }

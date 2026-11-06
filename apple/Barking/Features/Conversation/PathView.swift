@@ -87,14 +87,16 @@ struct PathView: View {
 /// One stop: a 32 pt circle, a dashed line to the next stop, its name, its
 /// time line and what it could see.
 private struct PathStop: View {
+    /// The node disc grows with the text, up to 48 pt.
+    @ScaledMetric(relativeTo: .subheadline) private var disc: CGFloat = 32
     let row: PathRow
     let more: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(spacing: 4) {
-                Text(verbatim: glyph).font(.bSymbol(14, relativeTo: .subheadline)).foregroundStyle(.white)
-                    .frame(width: 32, height: 32).background(color, in: .circle)
+                Text(verbatim: glyph).font(.bSymbol(14, relativeTo: .subheadline, maximum: 21)).foregroundStyle(.white)
+                    .frame(width: min(disc, 48), height: min(disc, 48)).background(color, in: .circle)
                     .accessibilityHidden(true)
                 if more {
                     Line().stroke(Color.borderStrong, style: StrokeStyle(lineWidth: 2, dash: [4, 3]))

@@ -96,7 +96,7 @@ extension ChatsView {
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button { adding = true } label: {
-                    Image(systemName: "square.and.pencil").font(.bSymbol(18))
+                    Image(systemName: "square.and.pencil").font(.bSymbol(18, maximum: 26))
                         .foregroundStyle(Color.accent)
                         .frame(width: 44, height: 44)
                         .background(Color.wash, in: .circle)

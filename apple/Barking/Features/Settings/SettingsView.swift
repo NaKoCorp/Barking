@@ -8,6 +8,8 @@ struct SettingsView: View {
     let openNetwork: () -> Void
     @Environment(\.openURL) private var openURL
     @State private var model: SettingsModel
+    /// The icon tile grows with the text, up to 48 pt.
+    @ScaledMetric(relativeTo: .subheadline) private var tile: CGFloat = 32
 
     init(core: CoreService, openNetwork: @escaping () -> Void = {}) {
         self.core = core
@@ -28,8 +30,9 @@ struct SettingsView: View {
                         }
                         divider
                         NavigationLink { MyIdentityView(core: core, model: model) } label: {
-                            row("My identity", Text(verbatim: FingerprintFormat.grouped(model.fingerprint, form: .short))
-                                .font(.bMeta), "key")
+                            row("My identity", Text(verbatim: model.fingerprintShort).font(.bMeta)
+                                .accessibilityLabel(Text(verbatim: FingerprintFormat.spoken(model.fingerprint, form: .short))),
+                                "key")
                         }
                         divider
                         NavigationLink { SecuritySettingsView() } label: {
@@ -94,8 +97,8 @@ struct SettingsView: View {
     private func row(_ title: LocalizedStringKey, _ sub: Text, _ icon: String,
                      trailing: String = "chevron.right") -> some View {
         HStack(spacing: 12) {
-            Image(systemName: icon).font(.bSymbol(15, relativeTo: .subheadline)).foregroundStyle(Color.accent)
-                .frame(width: 32, height: 32)
+            Image(systemName: icon).font(.bSymbol(15, relativeTo: .subheadline, maximum: 22)).foregroundStyle(Color.accent)
+                .frame(width: min(tile, 48), height: min(tile, 48))
                 .background(Color.wash, in: .rect(cornerRadius: Radius.tile))
                 .accessibilityHidden(true)
             // Leading, also when a long French subtitle wraps (U-10).

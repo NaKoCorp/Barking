@@ -2,13 +2,17 @@ import XCTest
 
 /// Screenshots of every screen, for UI review. Skipped unless
 /// TEST_RUNNER_BARKING_TOUR is set; TEST_RUNNER_BARKING_TOUR_LANG=fr runs the
-/// same tour in French (labels below, identifiers where they exist).
+/// same tour in French (labels below, identifiers where they exist), and
+/// TEST_RUNNER_BARKING_TOUR_SIZE (a UIContentSizeCategory raw value, such as
+/// UICTContentSizeCategoryAccessibilityL) at another text size. The two
+/// destructive confirmations are snapped too ("dialog-…", unnumbered, so the
+/// screen numbers stay those of shots/index.md); they are always cancelled.
 @MainActor
 final class TourUITests: XCTestCase {
     private struct Labels {
         let create, namePlaceholder, phraseTitle, cont, confirm, later, add, message, send: String
         let chats, network, settings, linked, identity, security, recover, link, pdf, linkNew, close, cancel: String
-        let lockedTitle: String
+        let lockedTitle, deleteContact, erase: String
 
         static let en = Labels(
             create: "Create my identity", namePlaceholder: "Your name, as contacts see it",
@@ -16,14 +20,16 @@ final class TourUITests: XCTestCase {
             add: "Add", message: "Message", send: "Send", chats: "Chats", network: "Network",
             settings: "Settings", linked: "Linked devices", identity: "My identity", security: "Security",
             recover: "Recover with 24 words", link: "Link to an existing device", pdf: "Encrypted PDF",
-            linkNew: "Link a new device", close: "Close", cancel: "Cancel", lockedTitle: "Barking is locked")
+            linkNew: "Link a new device", close: "Close", cancel: "Cancel", lockedTitle: "Barking is locked",
+            deleteContact: "Delete this contact", erase: "Erase")
         static let fr = Labels(
             create: "Créer mon identité", namePlaceholder: "Votre nom, tel que vos contacts le voient",
             phraseTitle: "Votre phrase de récupération", cont: "Continuer", confirm: "Confirmer", later: "Plus tard",
             add: "Ajouter", message: "Message", send: "Envoyer", chats: "Discussions", network: "Réseau",
             settings: "Réglages", linked: "Appareils liés", identity: "Mon identité", security: "Sécurité",
             recover: "Restaurer avec 24 mots", link: "Lier à un appareil existant", pdf: "PDF chiffré",
-            linkNew: "Lier un nouvel appareil", close: "Fermer", cancel: "Annuler", lockedTitle: "Barking est verrouillé")
+            linkNew: "Lier un nouvel appareil", close: "Fermer", cancel: "Annuler", lockedTitle: "Barking est verrouillé",
+            deleteContact: "Supprimer ce contact", erase: "Effacer")
     }
 
     private var step = 0
@@ -33,10 +39,20 @@ final class TourUITests: XCTestCase {
         try XCTSkipIf(env["BARKING_TOUR"] == nil)
         let lang = env["BARKING_TOUR_LANG"] ?? "en"
         let L = lang == "fr" ? Labels.fr : Labels.en
+        let size = env["BARKING_TOUR_SIZE"].flatMap { $0.isEmpty ? nil : ["-UIPreferredContentSizeCategoryName", $0] } ?? []
         let app = XCUIApplication.fresh(language: lang, extra: [
-            "-BarkingUITestOpenCard", samCard, "-BarkingUITestFakeRoute", "-BarkingUITestNoAutoUnlock"])
+            "-BarkingUITestOpenCard", samCard, "-BarkingUITestFakeRoute", "-BarkingUITestNoAutoUnlock"] + size)
         app.launch()
         let back = { app.navigationBars.buttons.firstMatch.tap() }
+        // Cancels a confirmation dialog: its Cancel button, else a tap at
+        // `outside` (a static text away from the popover), never the
+        // destructive action.
+        let dismissDialog = { (outside: CGFloat) in
+            let cancel = app.buttons[L.cancel].firstMatch
+            if cancel.exists && cancel.isHittable { cancel.tap() }
+            else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: outside)).tap() }
+            sleep(1)
+        }
         let row = { (prefix: String) in
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
         }
@@ -130,6 +146,12 @@ final class TourUITests: XCTestCase {
             snap(app, "safety-code")
             app.swipeUp(); sleep(1)
             snap(app, "safety-code-devices")
+            let delete = app.buttons[L.deleteContact].firstMatch
+            if delete.exists && delete.isHittable {
+                delete.tap(); sleep(1)
+                snap(app, "dialog-delete-contact", numbered: false)
+                dismissDialog(0.42)
+            }
             back()
         }
         back()
@@ -157,6 +179,14 @@ final class TourUITests: XCTestCase {
         back()
         row(L.security).tap(); sleep(1)
         snap(app, "security")
+        let erase = app.buttons["security.erase"]
+        if erase.waitForExistence(timeout: 3) {
+            erase.press(forDuration: 2.5)
+            if app.buttons[L.erase].waitForExistence(timeout: 3) {
+                snap(app, "dialog-erase", numbered: false)
+                dismissDialog(0.75)
+            }
+        }
         let toggle = app.switches["security.lock"]
         if toggle.waitForExistence(timeout: 5) {
             toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
@@ -171,10 +201,10 @@ final class TourUITests: XCTestCase {
         }
     }
 
-    private func snap(_ app: XCUIApplication, _ name: String) {
-        step += 1
+    private func snap(_ app: XCUIApplication, _ name: String, numbered: Bool = true) {
+        if numbered { step += 1 }
         let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = String(format: "%02d-%@", step, name)
+        shot.name = numbered ? String(format: "%02d-%@", step, name) : name
         shot.lifetime = .keepAlways
         add(shot)
     }

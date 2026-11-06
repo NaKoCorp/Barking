@@ -54,10 +54,15 @@ struct BarkingButtonStyle: ButtonStyle {
             .padding(.vertical, Space.s2)
             .frame(maxWidth: .infinity, minHeight: 52)
             .background(t.fill.map { Color(token: $0) } ?? Color.clear)
-            // Pressed: purple-d on the fill, a wash under an outline.
+            // Pressed: purple-d on the fill; under an outline, a tint of the
+            // outline's own colour (danger stays danger, never purple).
             .overlay {
                 if configuration.isPressed {
-                    t.fill == nil ? Color.wash.opacity(0.6) : Color.black.opacity(0.14)
+                    switch (kind, t.fill) {
+                    case (_, .some): Color.black.opacity(0.14)
+                    case (.danger, nil): Color.danger.opacity(0.10)
+                    default: Color.wash.opacity(0.6)
+                    }
                 }
             }
             .clipShape(shape)
@@ -112,7 +117,8 @@ struct PrimaryButton: View {
                 .buttonStyle(BarkingButtonStyle(kind: .primary, state: state))
                 .disabled(!state.isInteractive)
                 .accessibilityHint(why.map { Text($0) } ?? Text(verbatim: ""))
-                .accessibilityValue(state == .loading ? Text("In progress") : Text(verbatim: ""))
+                // The reason is also the value, so VoiceOver says it even with hints off.
+                .accessibilityValue(state == .loading ? Text("In progress") : (why.map { Text($0) } ?? Text(verbatim: "")))
             if let why {
                 Text(why)
                     .font(.bBodySmall).foregroundStyle(Color.fgMuted)
