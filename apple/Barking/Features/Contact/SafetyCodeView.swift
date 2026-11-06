@@ -48,6 +48,7 @@ struct SafetyCodeView: View {
                 if model.mismatched {
                     Banner(kind: .danger, title: "Do not trust this contact until you meet")
                 }
+                if !model.devices.isEmpty { devicesSection }
                 Divider().padding(.vertical, 8)
                 TextField("Alias", text: $aliasDraft)
                     .textFieldStyle(.roundedBorder)
@@ -66,5 +67,29 @@ struct SafetyCodeView: View {
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) { Task { await model.delete(); dismiss() } }
         }
+    }
+}
+
+extension SafetyCodeView {
+    /// The contact's devices, with the date each was added to its card.
+    fileprivate var devicesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Devices").textCase(.uppercase)
+                .font(BarkingFont.sans(.caption, size: 12, weight: .semibold)).tracking(0.6)
+                .foregroundStyle(Color.fgSoft)
+                .accessibilityAddTraits(.isHeader)
+            ForEach(model.devices, id: \.id) { d in
+                HStack {
+                    Text(verbatim: d.name).font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))
+                        .foregroundStyle(Color.fg)
+                    Spacer(minLength: 0)
+                    Text("added \(Date(timeIntervalSince1970: TimeInterval(d.issuedAt)).formatted(date: .abbreviated, time: .omitted))")
+                        .font(.caption).foregroundStyle(Color.fgSoft)
+                }
+                .frame(minHeight: 36)
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .padding(.top, 8)
     }
 }

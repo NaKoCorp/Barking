@@ -223,6 +223,34 @@ fn message_lookup_and_deletions() {
 }
 
 #[test]
+fn transparency_page_filters_and_pages() {
+    let (_d, _p, store) = open_tmp();
+    for i in 0..250u32 {
+        let class = if i % 25 == 0 {
+            EventClass::Security
+        } else {
+            EventClass::Routine
+        };
+        store
+            .append_event(u64::from(i), None, class, &i.to_be_bytes())
+            .unwrap();
+    }
+    assert_eq!(store.transparency_page(100, 0, false).unwrap().len(), 100);
+    assert_eq!(store.transparency_page(100, 200, false).unwrap().len(), 50);
+    assert!(store.transparency_page(100, 250, false).unwrap().is_empty());
+    let sec = store.transparency_page(100, 0, true).unwrap();
+    assert_eq!(sec.len(), 10);
+    // Newest first, security only.
+    assert_eq!(sec[0].0, 225);
+    assert_eq!(sec[9].0, 0);
+    let page = store.transparency_page(100, 0, false).unwrap();
+    assert_eq!(page[0].0, 249);
+    assert_eq!(page[99].0, 150);
+    // The second page continues the first one.
+    assert_eq!(store.transparency_page(100, 100, false).unwrap()[0].0, 149);
+}
+
+#[test]
 fn recent_events_newest_window_in_order() {
     let (_d, _p, store) = open_tmp();
     for i in 0..5u8 {

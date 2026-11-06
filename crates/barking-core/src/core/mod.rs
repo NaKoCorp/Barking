@@ -667,6 +667,38 @@ impl Core {
             .collect()
     }
 
+    /// A page of the log, newest first (`security_only`: security class only).
+    pub fn transparency_page(
+        &self,
+        limit: usize,
+        offset: usize,
+        security_only: bool,
+    ) -> Result<Vec<(u64, TransparencyEvent)>> {
+        self.store
+            .transparency_page(limit, offset, security_only)?
+            .into_iter()
+            .map(|(at, bytes)| {
+                postcard::from_bytes(&bytes)
+                    .map(|e| (at, e))
+                    .map_err(|_| CoreError::Store("unreadable event".into()))
+            })
+            .collect()
+    }
+
+    /// Devices of a contact as its card lists them: (id, name, issue date).
+    pub fn contact_devices(&self, contact: &Fingerprint) -> Result<Vec<(DeviceId, String, u64)>> {
+        let row = self
+            .store
+            .get_contact(*contact)?
+            .ok_or(CoreError::UnknownContact)?;
+        Ok(load_card(&row.card)?
+            .devices
+            .certs
+            .iter()
+            .map(|c| (c.device.id(), c.name.clone(), c.issued_at))
+            .collect())
+    }
+
     /// Purges expired packets from the send queue then returns the bytes to
     /// (re)transmit, from oldest to newest. A packet stays there
     /// until its receipt ack or its expiry.

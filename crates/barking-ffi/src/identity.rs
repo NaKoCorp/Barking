@@ -87,6 +87,27 @@ impl Device {
         })
     }
 
+    /// Devices of `contact` (alias or fingerprint) as its card lists them.
+    /// `this_device` and `admin` are always false: they are about my devices.
+    pub fn contact_devices(&self, contact: String) -> Result<Vec<MyDeviceInfo>, BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                let fp = core.resolve(&contact)?;
+                Ok(core
+                    .contact_devices(&fp)?
+                    .into_iter()
+                    .map(|(id, name, issued_at)| MyDeviceInfo {
+                        id: to_hex(&id.0),
+                        name,
+                        issued_at,
+                        this_device: false,
+                        admin: false,
+                    })
+                    .collect())
+            })
+        })
+    }
+
     /// Hands the root key to my device `device_id` (hex, from `my_devices`).
     /// This device keeps it until the target acknowledges it.
     pub fn transfer_admin(&self, device_id: String) -> Result<(), BarkingError> {

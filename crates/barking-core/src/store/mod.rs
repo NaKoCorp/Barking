@@ -1092,6 +1092,36 @@ pub trait Queries {
         Ok(rows.into_iter().map(|(a, e)| (to_u64(a), e)).collect())
     }
 
+    /// A page of the log, newest first: `limit` events after skipping
+    /// `offset`. `security_only` keeps the security class only.
+    fn transparency_page(
+        &self,
+        limit: usize,
+        offset: usize,
+        security_only: bool,
+    ) -> Result<Vec<(u64, Vec<u8>)>> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT at, event FROM transparency \
+                 WHERE (?1 = 0 OR class = 1) ORDER BY id DESC LIMIT ?2 OFFSET ?3",
+            )
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    i64::from(security_only),
+                    to_i64(limit as u64),
+                    to_i64(offset as u64)
+                ],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        Ok(rows.into_iter().map(|(a, e)| (to_u64(a), e)).collect())
+    }
+
     /// Appends a transparency event (postcard, opaque here).
     fn append_event(
         &self,

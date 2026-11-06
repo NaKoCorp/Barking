@@ -1,4 +1,5 @@
 import XCTest
+@testable import BarkingKit
 
 final class LocalizationTests: XCTestCase {
     private func table(_ lang: String, _ name: String = "Localizable", _ type: String = "strings") -> NSDictionary? {
@@ -20,6 +21,34 @@ final class LocalizationTests: XCTestCase {
                     "The handover to %@ did not finish. Nothing was erased: this device is still your admin.",
                     "Message path", "Internet relay · %@", "%@'s phone", "Path not recorded",
                     "a sealed packet of %@ for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it."] {
+            XCTAssertNotNil(fr[key], "missing French for \(key)")
+        }
+    }
+
+    /// Every key the core can log (`logKeys()`) and every arg token has an
+    /// English and a French text, with the same placeholders.
+    func testEveryLogKeyHasBothLanguages() throws {
+        let en = try XCTUnwrap(table("en", "Log"))
+        let fr = try XCTUnwrap(table("fr", "Log"))
+        let keys = logKeys() + logArgTokens().map { "log.arg.\($0)" }
+        XCTAssertGreaterThanOrEqual(logKeys().count, 26)
+        for key in keys {
+            let e = en[key] as? String ?? ""
+            let f = fr[key] as? String ?? ""
+            XCTAssertFalse(e.isEmpty, "no English text for \(key)")
+            XCTAssertFalse(f.isEmpty, "no French text for \(key)")
+            let placeholders = { (s: String) in
+                s.matches(of: /%(\d)\$@/).map { String($0.output.1) }.sorted()
+            }
+            XCTAssertEqual(placeholders(e), placeholders(f), "placeholders of \(key)")
+        }
+    }
+
+    func testTransparencyStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        for key in ["Transparency", "Security only", "Where my data is", "Devices",
+                    "Database key protected by the Secure Enclave", "Database key protected by the keychain only",
+                    "Nothing yet", "Today", "Yesterday"] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
     }

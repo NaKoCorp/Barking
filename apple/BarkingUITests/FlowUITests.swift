@@ -137,6 +137,28 @@ final class AccessibilityUITests: XCTestCase {
 final class DevicesUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
+    /// Settings › Transparency: where the data is, and the journal with its
+    /// security filter (a new identity has logged nothing, so the filter
+    /// only has to switch).
+    func testTransparencyShowsWhereTheDataIs() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        try onboard(app)
+        app.tabBars.buttons["Settings"].tap()
+        let row = app.buttons["settings.transparency"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        XCTAssertTrue(app.staticTexts["Nothing in clear on the nodes"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Journal and paths"].exists)
+        let filter = app.switches["transparency.securityOnly"]
+        XCTAssertTrue(filter.exists)
+        // The switch sits at the trailing edge of its row.
+        filter.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        let on = NSPredicate(format: "value == %@", "1")
+        expectation(for: on, evaluatedWith: filter)
+        waitForExpectations(timeout: 5)
+    }
+
     /// The administrator alone: "Disconnect this device" is the wipe, with
     /// its warning, and leads back to the welcome screen.
     func testDisconnectingTheOnlyDeviceErasesIt() throws {

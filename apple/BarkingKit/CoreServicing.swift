@@ -23,6 +23,8 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func chatSummaries() throws -> [ChatSummary]
     func markRead(contact: String, upTo: Int64) throws
     func keyChanges(since: UInt64) throws -> [KeyChange]
+    func transparencyLog(limit: UInt32, offset: UInt32, securityOnly: Bool) throws -> [LogEntry]
+    func contactDevices(contact: String) throws -> [MyDeviceInfo]
     func sync(deadlineMs: UInt64) throws -> SyncSummary
     func nodes() throws -> [NodeInfo]
     func addNode(id: String, addr: String) throws

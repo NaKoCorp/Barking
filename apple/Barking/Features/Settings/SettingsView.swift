@@ -36,6 +36,11 @@ struct SettingsView: View {
                             row("Security", Text("Lock and erase"), "lock")
                         }
                         divider
+                        NavigationLink { TransparencyView(core: core) } label: {
+                            row("Transparency", Text("What this phone did, and who could see it"), "eye")
+                        }
+                        .accessibilityIdentifier("settings.transparency")
+                        divider
                         Button(action: openNetwork) {
                             row("Network and relays", Text("Internet"), "dot.radiowaves.left.and.right")
                         }

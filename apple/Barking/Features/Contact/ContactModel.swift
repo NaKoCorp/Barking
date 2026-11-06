@@ -13,6 +13,8 @@ final class ContactModel {
     private(set) var verified = false
     private(set) var justVerified = false
     private(set) var mismatched = false
+    /// The contact's devices, from its card.
+    private(set) var devices: [MyDeviceInfo] = []
 
     init(contact: String, core: CoreService) {
         self.contact = contact
@@ -33,6 +35,7 @@ final class ContactModel {
             verified = c.verified
         }
         groups = (try? await core.safetyNumber(for: contact)) ?? []
+        devices = (try? await core.contactDevices(contact)) ?? []
     }
 
     func match() async {

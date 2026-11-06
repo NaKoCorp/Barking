@@ -16,6 +16,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var reads: [(String, Int64)] = []
     var unread: [UnreadCount] = []
     var keyChangeList: [KeyChange] = []
+    /// The transparency log, newest first.
+    var logEntries: [LogEntry] = []
+    /// Devices of each contact's card.
+    var contactDeviceList: [String: [MyDeviceInfo]] = [:]
     var devicesList: [MyDeviceInfo] = []
     var removedInfo: RemovedInfo?
     private var _transferredTo: [String] = []
@@ -61,6 +65,11 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     }
     func markRead(contact: String, upTo: Int64) throws { reads.append((contact, upTo)) }
     func keyChanges(since: UInt64) throws -> [KeyChange] { keyChangeList }
+    func transparencyLog(limit: UInt32, offset: UInt32, securityOnly: Bool) throws -> [LogEntry] {
+        let all = securityOnly ? logEntries.filter(\.security) : logEntries
+        return Array(all.dropFirst(Int(offset)).prefix(Int(limit)))
+    }
+    func contactDevices(contact: String) throws -> [MyDeviceInfo] { contactDeviceList[contact] ?? [] }
     func sync(deadlineMs: UInt64) throws -> SyncSummary {
         // A sync deposits what was queued when it started.
         let queued = lock.withLock { _syncCalls += 1; return _leaveReady && !_leaveExpired }

@@ -136,6 +136,14 @@ public actor CoreService {
     public func keyChanges(since: UInt64) async throws -> [KeyChange] {
         try await call("keys") { try $0.keyChanges(since: since) }
     }
+    /// A page of the transparency log, newest first.
+    public func transparencyLog(limit: UInt32, offset: UInt32, securityOnly: Bool) async throws -> [LogEntry] {
+        try await call("log") { try $0.transparencyLog(limit: limit, offset: offset, securityOnly: securityOnly) }
+    }
+    /// Devices of a contact, as its card lists them.
+    public func contactDevices(_ contact: String) async throws -> [MyDeviceInfo] {
+        try await call("contactDevices") { try $0.contactDevices(contact: contact) }
+    }
 
     // MARK: Messages
 
