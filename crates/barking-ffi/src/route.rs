@@ -38,9 +38,15 @@ fn step_name(s: RouteStep) -> &'static str {
 }
 
 /// Badge of a route: `internet:N`, N the distinct relay nodes it went
-/// through; `None` while it went through none.
+/// through; `None` while it went through none. The copies to my other
+/// devices are not part of the way to the contact: their relays are left
+/// out.
 pub(crate) fn hint_of(route: &[RouteEntry]) -> Option<String> {
-    let nodes: BTreeSet<&str> = route.iter().filter_map(|e| e.node.as_deref()).collect();
+    let nodes: BTreeSet<&str> = route
+        .iter()
+        .filter(|e| !e.own)
+        .filter_map(|e| e.node.as_deref())
+        .collect();
     (!nodes.is_empty()).then(|| format!("internet:{}", nodes.len()))
 }
 
@@ -97,6 +103,20 @@ mod tests {
             device: None,
             own: false,
         }
+    }
+
+    #[test]
+    fn hint_leaves_out_copies_to_my_devices() {
+        let mut copy = step(Some("BBBBBBBB"));
+        copy.step = RouteStep::Deposited;
+        copy.own = true;
+        let mut to_contact = step(Some("AAAAAAAA"));
+        to_contact.step = RouteStep::Deposited;
+        assert_eq!(
+            hint_of(&[to_contact, copy.clone()]),
+            Some("internet:1".into())
+        );
+        assert_eq!(hint_of(&[copy]), None);
     }
 
     #[test]

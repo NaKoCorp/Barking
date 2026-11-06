@@ -247,7 +247,6 @@
 
 /* Message path screen and route badges (block 2b §4.2). */
 "Internet relay · %@" = "Relais internet · %@";
-"Your iPhone" = "Votre iPhone";
 "%@'s phone" = "Téléphone de %@";
 "Your other devices" = "Vos autres appareils";
 "Your other devices · %@" = "Vos autres appareils · %@";
@@ -256,7 +255,6 @@
 "deposited · %@" = "déposé · %@";
 "fetched · %@" = "relevé · %@";
 "receipt received · %@" = "accusé reçu · %@";
-"decrypted · %@ · receipt sent" = "déchiffré · %@ · accusé envoyé";
 "copy encrypted · %@" = "copie chiffrée · %@";
 "everything — it is the sender." = "tout — c’est l’expéditeur.";
 "everything — it is the recipient." = "tout — c’est le destinataire.";
@@ -273,3 +271,9 @@
 "“%@”" = "« %@ »";
 "// only you and %@ can read it" = "// seuls %@ et vous pouvez le lire";
 "hidden sender" = "expéditeur masqué";
+"This device" = "Cet appareil";
+"Your other device" = "Votre autre appareil";
+"synced copy · %@" = "copie synchronisée · %@";
+"synced %@" = "synchronisé %@";
+"receipt %@" = "accusé %@";
+"decrypted · %@ · receipt queued" = "déchiffré · %@ · accusé en attente";

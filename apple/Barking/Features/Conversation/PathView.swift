@@ -15,7 +15,7 @@ struct PathView: View {
             VStack(alignment: .leading, spacing: 12) {
                 quoteCard
                 Text("How it got here")
-                    .font(.system(size: 12, weight: .semibold)).tracking(0.6).textCase(.uppercase)
+                    .font(BarkingFont.sans(.caption, size: 12, weight: .semibold)).tracking(0.6).textCase(.uppercase)
                     .foregroundStyle(Color.fgSoft)
                 if model.notRecorded {
                     Text("Path not recorded")

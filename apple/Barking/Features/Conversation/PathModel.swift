@@ -56,30 +56,52 @@ final class PathModel {
         }
         #endif
         let outgoing = message?.outgoing ?? false
+        // This device by its name (an iPad is not "your iPhone").
+        let me = (try? await core.myDevices())?.first { $0.thisDevice }?.name
         quote = message?.body ?? ""
         routeBadge = RouteBadge.text(for: hint)
-        rows = Self.rows(for: steps, outgoing: outgoing, contactName: contactName)
+        rows = Self.rows(for: steps, outgoing: outgoing, contactName: contactName,
+                         thisDevice: me ?? String(localized: "This device"))
         notRecorded = rows.isEmpty
         times = Self.times(for: steps, outgoing: outgoing)
     }
 
     // MARK: Rows
 
-    static func rows(for steps: [RouteStepInfo], outgoing: Bool, contactName: String) -> [PathRow] {
+    static func rows(for steps: [RouteStepInfo], outgoing: Bool, contactName: String,
+                     thisDevice: String) -> [PathRow] {
         guard !steps.isEmpty else { return [] }
         let first = { (name: String) in steps.first { $0.step == name } }
         var out: [PathRow] = []
-        if outgoing {
+        let syncCopy = outgoing && first("sealed") == nil && first("opened") != nil
+        if syncCopy {
+            // A message I sent from another of my devices, received here as
+            // its copy: that device wrote it, this one fetched and opened it.
+            out.append(PathRow(
+                title: String(localized: "Your other device"),
+                subtitle: String(localized: "wrote and encrypted"),
+                saw: String(localized: "everything — it is the sender."),
+                glyph: .sender))
+            out += relays(steps, step: "fetched", size: nil)
+            if let opened = first("opened") {
+                out.append(PathRow(
+                    title: thisDevice,
+                    subtitle: String(localized: "synced copy · \(clock(opened.at))"),
+                    saw: String(localized: "the message, encrypted between your own devices."),
+                    glyph: .ownDevices))
+            }
+        } else if outgoing {
             let sealed = first("sealed")
             out.append(PathRow(
-                title: String(localized: "Your iPhone"),
+                title: thisDevice,
                 subtitle: sealed.map { String(localized: "wrote and encrypted · \(clock($0.at))") }
                     ?? String(localized: "wrote and encrypted"),
                 saw: String(localized: "everything — it is the sender."),
                 glyph: .sender))
             // The packet's size: the one sealed for the contact.
             let size = steps.filter { $0.step == "sealed" && !$0.own }.compactMap(\.size).max()
-            out += relays(steps, step: "deposited", size: size)
+            // Deposits of the copies to my devices belong to their row.
+            out += relays(steps.filter { !$0.own }, step: "deposited", size: size)
             if let ack = first("ack_verified") {
                 out.append(PathRow(
                     title: String(localized: "\(contactName)'s phone"),
@@ -108,9 +130,11 @@ final class PathModel {
                 glyph: .sender))
             out += relays(steps, step: "fetched", size: nil)
             if let opened = first("opened") {
+                // The receipt leaves with the next sync: the app cannot
+                // tell when.
                 out.append(PathRow(
-                    title: String(localized: "Your iPhone"),
-                    subtitle: String(localized: "decrypted · \(clock(opened.at)) · receipt sent"),
+                    title: thisDevice,
+                    subtitle: String(localized: "decrypted · \(clock(opened.at)) · receipt queued"),
                     saw: String(localized: "everything — it is the recipient."),
                     glyph: .recipient))
             }
@@ -145,15 +169,20 @@ final class PathModel {
         }
     }
 
-    /// "sent 18:01 · received 18:02", from the recorded steps.
+    /// "sent 18:01 · receipt 18:02", from the recorded steps: the receipt
+    /// time is when my device verified it.
     static func times(for steps: [RouteStepInfo], outgoing: Bool) -> String {
         var parts: [String] = []
-        if outgoing {
-            if let s = steps.first(where: { $0.step == "sealed" }) { parts.append(String(localized: "sent \(clock(s.at))")) }
+        let sealed = steps.first(where: { $0.step == "sealed" })
+        let opened = steps.first(where: { $0.step == "opened" })
+        if outgoing, sealed == nil, let o = opened {
+            parts.append(String(localized: "synced \(clock(o.at))"))
+        } else if outgoing {
+            if let s = sealed { parts.append(String(localized: "sent \(clock(s.at))")) }
             if let a = steps.first(where: { $0.step == "ack_verified" }) {
-                parts.append(String(localized: "received \(clock(a.at))"))
+                parts.append(String(localized: "receipt \(clock(a.at))"))
             }
-        } else if let o = steps.first(where: { $0.step == "opened" }) {
+        } else if let o = opened {
             parts.append(String(localized: "received \(clock(o.at))"))
         }
         return parts.joined(separator: " · ")

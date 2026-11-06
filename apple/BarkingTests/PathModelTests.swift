@@ -12,8 +12,10 @@ final class PathModelTests: XCTestCase {
         RouteStepInfo(at: at, step: name, node: node, size: size, deviceName: device, own: own)
     }
 
-    private func model(outgoing: Bool, route: [RouteStepInfo], hint: String? = "internet:1") -> (PathModel, FakeDevice) {
+    private func model(outgoing: Bool, route: [RouteStepInfo], hint: String? = "internet:1",
+                       devices: [MyDeviceInfo] = []) -> (PathModel, FakeDevice) {
         let d = FakeDevice()
+        d.devicesList = devices
         d.contactList = [Contact(fingerprint: "sam", alias: nil, displayName: "Sam", verified: true)]
         d.messageList = ["sam": [Message(id: 4, outgoing: outgoing, body: "Power's out", status: "delivered",
                                          at: t0, failed: false, route: hint)]]
@@ -30,7 +32,7 @@ final class PathModelTests: XCTestCase {
         ])
         await m.load()
         XCTAssertFalse(m.notRecorded)
-        XCTAssertEqual(m.rows.map(\.title), ["Your iPhone", "Internet relay · K7QX2M4A", "Sam's phone"])
+        XCTAssertEqual(m.rows.map(\.title), ["This device", "Internet relay · K7QX2M4A", "Sam's phone"])
         XCTAssertEqual(m.rows.map(\.glyph), [.sender, .relay, .recipient])
         XCTAssertTrue(m.rows[0].saw.contains("everything"))
         XCTAssertTrue(m.rows[0].saw.contains("sender"))
@@ -40,6 +42,9 @@ final class PathModelTests: XCTestCase {
         XCTAssertTrue(m.rows[2].saw.contains("everything"))
         XCTAssertTrue(m.rows[2].saw.contains("recipient"))
         XCTAssertTrue(m.rows[2].subtitle.contains("receipt received"), m.rows[2].subtitle)
+        // The badge dates the receipt my device verified, not a delivery.
+        XCTAssertTrue(m.times.contains("receipt "), m.times)
+        XCTAssertFalse(m.times.contains("received"), m.times)
         XCTAssertEqual(m.quote, "Power's out")
         XCTAssertEqual(m.routeBadge, "Internet · 1 relay")
     }
@@ -52,7 +57,7 @@ final class PathModelTests: XCTestCase {
             step("deposited", at: t0 + 1, node: "M3NB8PQ2"),
         ], hint: "internet:2")
         await m.load()
-        XCTAssertEqual(m.rows.map(\.title), ["Your iPhone", "Internet relay · K7QX2M4A",
+        XCTAssertEqual(m.rows.map(\.title), ["This device", "Internet relay · K7QX2M4A",
                                              "Internet relay · M3NB8PQ2", "Your other devices · iPad"])
         XCTAssertEqual(m.rows.last?.glyph, .ownDevices)
         XCTAssertTrue(m.rows.last?.saw.contains("your own devices") ?? false)
@@ -65,11 +70,46 @@ final class PathModelTests: XCTestCase {
             step("opened", at: t0 + 1),
         ])
         await m.load()
-        XCTAssertEqual(m.rows.map(\.title), ["Sam's phone", "Internet relay · AB12CD34", "Your iPhone"])
+        XCTAssertEqual(m.rows.map(\.title), ["Sam's phone", "Internet relay · AB12CD34", "This device"])
         XCTAssertTrue(m.rows[0].saw.contains("sender"))
         XCTAssertTrue(m.rows[1].saw.contains("whoever fetched it"), m.rows[1].saw)
         XCTAssertTrue(m.rows[2].saw.contains("recipient"))
-        XCTAssertTrue(m.rows[2].subtitle.contains("receipt sent"), m.rows[2].subtitle)
+        // The app does not know when the receipt leaves.
+        XCTAssertTrue(m.rows[2].subtitle.contains("receipt queued"), m.rows[2].subtitle)
+    }
+
+    func testCopyDepositsToMyDevicesAreNotRelaysToTheContact() async {
+        let (m, _) = model(outgoing: true, route: [
+            step("sealed", at: t0, size: 2048),
+            step("own_copy", at: t0, device: "iPad", own: true),
+            step("deposited", at: t0 + 1, node: "K7QX2M4A"),
+            step("deposited", at: t0 + 1, node: "M3NB8PQ2", own: true),
+        ])
+        await m.load()
+        XCTAssertEqual(m.rows.map(\.title), ["This device", "Internet relay · K7QX2M4A", "Your other devices · iPad"])
+    }
+
+    func testSyncCopyOfAMessageISentFromAnotherDevice() async {
+        let (m, _) = model(outgoing: true, route: [
+            step("fetched", at: t0 + 1, node: "AB12CD34"),
+            step("opened", at: t0 + 1),
+        ])
+        await m.load()
+        XCTAssertEqual(m.rows.map(\.title), ["Your other device", "Internet relay · AB12CD34", "This device"])
+        XCTAssertEqual(m.rows.map(\.glyph), [.sender, .relay, .ownDevices])
+        XCTAssertTrue(m.rows[1].saw.contains("whoever fetched it"))
+        XCTAssertTrue(m.times.contains("synced"), m.times)
+    }
+
+    func testThisDeviceIsCalledByItsName() async {
+        let me = MyDeviceInfo(id: "aa", name: "Alice's iPad", issuedAt: 1, thisDevice: true, admin: true)
+        let other = MyDeviceInfo(id: "bb", name: "phone", issuedAt: 1, thisDevice: false, admin: false)
+        let (m, _) = model(outgoing: false, route: [
+            step("fetched", at: t0 + 1, node: "AB12CD34"),
+            step("opened", at: t0 + 1),
+        ], devices: [other, me])
+        await m.load()
+        XCTAssertEqual(m.rows.last?.title, "Alice's iPad")
     }
 
     func testNoStepsShowsNotRecorded() async {

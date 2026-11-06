@@ -61,8 +61,7 @@ final class ChatUITests: XCTestCase {
         let stop = { (name: String) in
             app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
         }
-        XCTAssertTrue(stop("Your iPhone").waitForExistence(timeout: 5))
-        XCTAssertTrue(stop("Internet relay · K7QX2M4A").exists)
+        XCTAssertTrue(stop("Internet relay · K7QX2M4A").waitForExistence(timeout: 5))
         XCTAssertTrue(stop("Sam's phone").exists)
         XCTAssertTrue(app.staticTexts["Internet · 1 relay"].exists)
     }
