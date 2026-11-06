@@ -154,23 +154,18 @@ struct Avatar: View {
     }
 }
 
-/// Safety code: 12 groups of 5 digits, 4 rows of 3.
+/// Safety code: 12 groups of 5 digits, 4 rows of 3. A group never wraps
+/// inside itself (review final #1: "9045" over "0" is read as other
+/// digits): at large text sizes the rows hold 2 groups, then 1.
 struct CodeGrid: View {
     let groups: [String]
 
     var body: some View {
-        Grid(horizontalSpacing: 12, verticalSpacing: 10) {
-            ForEach(0..<4, id: \.self) { row in
-                GridRow {
-                    ForEach(0..<3, id: \.self) { col in
-                        let i = row * 3 + col
-                        Text(i < groups.count ? groups[i] : "")
-                            .font(BarkingFont.mono(.title3, size: 17, weight: .medium))
-                            .tracking(1)
-                            .foregroundStyle(Color.fg)
-                    }
-                }
-            }
+        // The first layout whose one-line groups fit the width.
+        ViewThatFits(in: .horizontal) {
+            grid(columns: 3)
+            grid(columns: 2)
+            grid(columns: 1)
         }
         .padding(16)
         .frame(maxWidth: .infinity)
@@ -178,5 +173,24 @@ struct CodeGrid: View {
         .overlay(RoundedRectangle(cornerRadius: Radius.panel).stroke(Color.border, lineWidth: 1))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(groups.joined(separator: ", ")))
+        .accessibilityIdentifier("contact.safetyCode")
+    }
+
+    private func grid(columns: Int) -> some View {
+        Grid(horizontalSpacing: 12, verticalSpacing: 10) {
+            ForEach(0..<(12 / columns), id: \.self) { row in
+                GridRow {
+                    ForEach(0..<columns, id: \.self) { col in
+                        let i = row * columns + col
+                        Text(i < groups.count ? groups[i] : "")
+                            .font(BarkingFont.mono(.title3, size: 17, weight: .medium))
+                            .tracking(1)
+                            .foregroundStyle(Color.fg)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                }
+            }
+        }
     }
 }

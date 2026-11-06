@@ -172,6 +172,15 @@ struct BarkingTextField: View {
                     .focused($focus, equals: .plain)
                     .modifier(Shown(on: revealed, identifier: identifier, hint: hint))
             }
+            // A secret is typed as is (review final #6): once revealed it goes
+            // into the plain input, which must not capitalise, correct or
+            // spell-check it (spell-check follows autocorrection), nor offer
+            // Writing Tools on it. With autocorrection off, the keyboard does
+            // not learn the words either. On both inputs, so the eye changes
+            // nothing.
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .writingToolsBehavior(.disabled)
         } else {
             TextField(text: $text, prompt: promptText) { Text(label) }
                 .focused($focus, equals: .plain)

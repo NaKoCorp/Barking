@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import Barking
 @testable import BarkingKit
@@ -158,5 +159,121 @@ final class ReviewFixTests: XCTestCase {
     /// Final review 9 (spec §8.2): the confirmation names the device.
     func testDisconnectConfirmationNamesTheDevice() {
         XCTAssertEqual(DevicesView.disconnectTitle("Kitchen iPad"), "Disconnect Kitchen iPad?")
+    }
+}
+
+/// The final review of the UI overhaul (review-final.md, findings 1, 2, 6,
+/// 7 and 14).
+@MainActor
+final class UIFinalReviewTests: XCTestCase {
+    private static let groups = ["90450", "67048", "03127", "88812", "40404", "12345",
+                                 "67890", "11111", "22222", "33333", "44444", "55555"]
+
+    /// #1: a 5-digit group never wraps inside itself. At every text size the
+    /// grid is whole rows of one-line groups (3, 2 or 1 per row) and fits
+    /// the width of the smallest iPhone's safety-code screen.
+    func testSafetyCodeGroupsNeverWrapAtAnySize() {
+        let width: CGFloat = 375 - 2 * Space.gutter
+        for size in DynamicTypeSize.allCases {
+            let line = UIHostingController(rootView: Text(verbatim: "90450")
+                .font(BarkingFont.mono(.title3, size: 17, weight: .medium)).tracking(1)
+                .fixedSize().environment(\.dynamicTypeSize, size))
+                .sizeThatFits(in: CGSize(width: 2000, height: 2000))
+            let grid = UIHostingController(rootView: CodeGrid(groups: Self.groups)
+                .environment(\.dynamicTypeSize, size))
+                .sizeThatFits(in: CGSize(width: width, height: 4000))
+            let layouts = [3, 2, 1].filter { cols in
+                let rows = CGFloat(12 / cols)
+                let height = rows * line.height + (rows - 1) * 10 + 32
+                let rowWidth = CGFloat(cols) * line.width + CGFloat(cols - 1) * 12 + 32
+                return abs(grid.height - height) < 1.5 && rowWidth <= width + 0.5
+            }
+            XCTAssertFalse(layouts.isEmpty, "\(size): groups wrap (grid \(grid), one group \(line))")
+            XCTAssertLessThanOrEqual(grid.width, width + 0.5, "\(size): grid overflows")
+        }
+    }
+
+    /// #2: the 24 words typed on Recover are not drawn in the app-switcher
+    /// snapshot or while the screen is captured: the hidden card replaces
+    /// the grid, as on screen 06.
+    func testRecoverHidesTheWordsWhenInactiveOrCaptured() throws {
+        let cases: [(ScenePhase, Bool, Bool)] = [(.active, false, true), (.inactive, false, false),
+                                                 (.background, false, false), (.active, true, false)]
+        for (phase, captured, shown) in cases {
+            let model = OnboardingModel(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+            model.recoveryWords[0] = "abandon"
+            let view = RecoverView(model: model, onRecovered: { _ in })
+                .environment(\.scenePhase, phase).environment(\.isSceneCaptured, captured)
+            let word = AccessibilityProbe.element(labelled: "Word 1", in: view)
+            XCTAssertEqual(word != nil, shown, "\(phase), captured \(captured): word 1")
+            let card = AccessibilityProbe.element(
+                labelled: "Hidden while the screen is recorded or the app is in the background.", in: view)
+            XCTAssertEqual(card != nil, !shown, "\(phase), captured \(captured): hidden card")
+        }
+    }
+
+    /// #7: the suggested PDF password is masked when the scene is not
+    /// active or is captured, even while revealed.
+    func testSuggestedPasswordIsMaskedWhenInactiveOrCaptured() throws {
+        let cases: [(ScenePhase, Bool, Bool, Bool)] = [(.active, false, true, true), (.active, false, false, false),
+                                                       (.inactive, false, true, false), (.background, false, true, false),
+                                                       (.active, true, true, false)]
+        for (phase, captured, revealed, shown) in cases {
+            let view = SuggestedPasswordText(password: "lunar-orbit-cactus-violet", revealed: revealed)
+                .environment(\.scenePhase, phase).environment(\.isSceneCaptured, captured)
+            let node = try XCTUnwrap(AccessibilityProbe.element(labelled: "Suggested password", in: view))
+            XCTAssertEqual(node.accessibilityValue, shown ? "lunar-orbit-cactus-violet" : "Hidden",
+                           "\(phase), captured \(captured), revealed \(revealed)")
+        }
+    }
+
+    /// #6: a secure field's inputs (the hidden one and the revealed one)
+    /// never capitalise, autocorrect or spell-check, so the keyboard does
+    /// not change or learn the secret.
+    func testSecureFieldInputsDoNotCorrectOrLearn() {
+        let view = BarkingTextField("Password", text: .constant("secret"), secure: true, trailing: .reveal)
+        let host = UIHostingController(rootView: view)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        func fields(in v: UIView) -> [UITextField] {
+            if let f = v as? UITextField { return [f] }
+            return v.subviews.flatMap(fields)
+        }
+        let inputs = fields(in: host.view)
+        XCTAssertEqual(inputs.count, 2, "a secure field stacks two inputs")
+        for f in inputs {
+            let kind = f.isSecureTextEntry ? "secure" : "revealed"
+            XCTAssertEqual(f.autocapitalizationType, .none, "\(kind) input capitalises")
+            XCTAssertEqual(f.autocorrectionType, .no, "\(kind) input autocorrects")
+            // SwiftUI has no spell-check modifier on iOS: `.default` follows
+            // the autocorrection type, so it is off when autocorrection is.
+            XCTAssertTrue(f.spellCheckingType == .no || (f.spellCheckingType == .default && f.autocorrectionType == .no),
+                          "\(kind) input spell-checks")
+            XCTAssertEqual(f.writingToolsBehavior, UIWritingToolsBehavior.none, "\(kind) input offers Writing Tools")
+        }
+        window.isHidden = true
+    }
+
+    /// #14: Add shows its spinner while the add runs, and a second tap in
+    /// that time does nothing: the contact is added exactly once.
+    func testAddIsInFlightOnceUntilItEnds() async throws {
+        let d = FakeDevice()
+        d.addDelay = 0.3
+        let m = AddContactModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.scanned(try tempDevice("Bob").contactCardBytes())
+        XCTAssertNotNil(m.preview)
+        XCTAssertFalse(m.isAdding)
+        let first = Task { await m.add(alias: "") }
+        for _ in 0..<200 where !m.isAdding { await Task.yield() }
+        XCTAssertTrue(m.isAdding, "Add shows no in-flight state")
+        let second = await m.add(alias: "")
+        XCTAssertFalse(second)
+        let added = await first.value
+        XCTAssertTrue(added)
+        XCTAssertFalse(m.isAdding)
+        XCTAssertEqual(d.addCalls, 1)
     }
 }

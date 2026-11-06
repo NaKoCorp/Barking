@@ -74,7 +74,8 @@ final class AddContactModel {
     private(set) var error: AddError?
     private var bytes: Data?
     private var text: String?
-    private var adding = false
+    /// An add is running: Add shows its spinner and ignores taps.
+    private(set) var isAdding = false
 
     init(core: CoreService) { self.core = core }
 
@@ -115,9 +116,9 @@ final class AddContactModel {
 
     /// Adds the previewed card; a second call while one runs does nothing.
     func add(alias: String) async -> Bool {
-        guard !adding, preview != nil else { return false }
-        adding = true
-        defer { adding = false }
+        guard !isAdding, preview != nil else { return false }
+        isAdding = true
+        defer { isAdding = false }
         let a = alias.trimmingCharacters(in: .whitespaces)
         do {
             if let bytes {

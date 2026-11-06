@@ -49,7 +49,15 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         Thread.sleep(forTimeInterval: syncDelay)
         lock.withLock { _sent.append((contact, text)) }
     }
-    func addContactBytes(card: Data, alias: String?) throws -> String { "fp-new" }
+    /// How long `addContactBytes` takes, and how many times it ran.
+    var addDelay: TimeInterval = 0
+    private var _addCalls = 0
+    var addCalls: Int { lock.withLock { _addCalls } }
+    func addContactBytes(card: Data, alias: String?) throws -> String {
+        Thread.sleep(forTimeInterval: addDelay)
+        lock.withLock { _addCalls += 1 }
+        return "fp-new"
+    }
     func addContact(card: String, alias: String?) throws -> String { "fp-new" }
     func contactCardBytes() throws -> Data { Data([1, 2, 3]) }
     func contactCard(displayName: String) throws -> String { "barking1:abc" }

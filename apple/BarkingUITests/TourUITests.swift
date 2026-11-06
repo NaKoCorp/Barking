@@ -156,6 +156,16 @@ final class TourUITests: XCTestCase {
         if header.exists {
             header.tap(); sleep(2)
             snap(app, "safety-code")
+            // Review final #1: the groups never wrap, so at any text size the
+            // code stays inside the screen (it would overflow, not wrap).
+            let code = app.descendants(matching: .any)["contact.safetyCode"].firstMatch
+            if code.waitForExistence(timeout: 2) {
+                let screen = app.windows.firstMatch.frame
+                XCTAssertGreaterThanOrEqual(code.frame.minX, screen.minX, "safety code overflows")
+                XCTAssertLessThanOrEqual(code.frame.maxX, screen.maxX, "safety code overflows")
+            } else {
+                XCTFail("safety code not found")
+            }
             app.swipeUp(); sleep(1)
             snap(app, "safety-code-devices")
             // The danger zone is at the bottom: at AX sizes, several screens down.

@@ -40,6 +40,26 @@ struct CreateIdentityView: View {
     }
 }
 
+/// Screen 06's rule for a secret on screen (the 24 words, the suggested
+/// PDF password): not drawn while the scene is not active, so the
+/// app-switcher snapshot never holds it, nor while the screen is recorded
+/// or mirrored. (SwiftUI's privacy-sensitive modifier would not do it: it
+/// redacts only under a `.privacy` redaction reason, in widgets and
+/// Always-On, never in the app.)
+enum SecretCover {
+    static func hides(phase: ScenePhase, captured: Bool) -> Bool { phase != .active || captured }
+}
+
+/// What a hidden phrase leaves on screen.
+struct HiddenSecretCard: View {
+    var body: some View {
+        Text("Hidden while the screen is recorded or the app is in the background.")
+            .font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
+            .frame(maxWidth: .infinity, minHeight: 200)
+            .background(Color.surfaceCard, in: .rect(cornerRadius: Radius.card))
+    }
+}
+
 /// Screen 2 of the mockup: the 24 words, once.
 struct PhraseView: View {
     @Bindable var model: OnboardingModel
@@ -49,7 +69,7 @@ struct PhraseView: View {
     @Environment(\.isSceneCaptured) private var captured
 
     /// Hidden in the app switcher and while the screen is recorded or mirrored.
-    private var hidden: Bool { phase != .active || captured }
+    private var hidden: Bool { SecretCover.hides(phase: phase, captured: captured) }
 
     var body: some View {
         ScrollView {
@@ -60,10 +80,7 @@ struct PhraseView: View {
                     .font(BarkingFont.sans(.body, size: 15))
                     .foregroundStyle(Color.fgMuted)
                 if hidden {
-                    Text("Hidden while the screen is recorded or the app is in the background.")
-                        .font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
-                        .frame(maxWidth: .infinity, minHeight: 200)
-                        .background(Color.surfaceCard, in: .rect(cornerRadius: Radius.card))
+                    HiddenSecretCard()
                 } else if let words = model.phrase {
                     PhraseWordsGrid(words: words, identifiers: true)
                 }
@@ -140,7 +157,6 @@ struct PhraseWordsGrid: View {
         .padding(12)
         .background(Color.surfaceCard, in: .rect(cornerRadius: Radius.card))
         .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
-        .privacySensitive()
     }
 }
 
@@ -155,7 +171,7 @@ private struct PhraseWordsSheet: View {
     var body: some View {
         NavigationStack {
             Group {
-                if phase != .active || captured {
+                if SecretCover.hides(phase: phase, captured: captured) {
                     Text("Hidden while the screen is recorded or the app is in the background.")
                         .font(.bBody).foregroundStyle(Color.fgMuted)
                         .frame(maxWidth: .infinity, minHeight: 200)
@@ -283,6 +299,8 @@ struct RecoverView: View {
     @FocusState private var focused: Int?
     @State private var pasted: RecoverPaste.Outcome?
     @Environment(\.dynamicTypeSize) private var size
+    @Environment(\.scenePhase) private var phase
+    @Environment(\.isSceneCaptured) private var captured
 
     /// Why Recover is greyed out (U-3). "7 words left to fill in." is a
     /// plural ("1 word", « Encore 1 mot ») from the stringsdict.
@@ -301,12 +319,17 @@ struct RecoverView: View {
                 SecondaryButton("Paste the 24 words") { pasted = RecoverPaste.take(from: UIPasteboard.general, into: model) }
                 if let pasted { pasteLine(pasted) }
             }
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Space.s2),
-                                     count: size.isAccessibilitySize ? 1 : 3),
-                      spacing: Space.s2) {
-                ForEach(0..<24, id: \.self) { i in tile(i) }
+            // The typed words are the phrase: hidden as on screen 06. They
+            // stay in the model and come back when the app is active again.
+            if SecretCover.hides(phase: phase, captured: captured) {
+                HiddenSecretCard()
+            } else {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Space.s2),
+                                         count: size.isAccessibilitySize ? 1 : 3),
+                          spacing: Space.s2) {
+                    ForEach(0..<24, id: \.self) { i in tile(i) }
+                }
             }
-            .privacySensitive()
             BarkingTextField("This device's name", text: $model.deviceName,
                              footer: "Shown on your other devices, and to your contacts in your card.",
                              identifier: "recover.deviceName")

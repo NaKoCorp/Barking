@@ -81,7 +81,10 @@ struct AddContactView: View {
         }
         .barkingScreen()
         .ctaBar {
-            PrimaryButton("Add") {
+            // One add at a time (review final #14): the spinner shows, and a
+            // second tap while it runs is ignored.
+            PrimaryButton("Add", isLoading: model.isAdding) {
+                guard !model.isAdding else { return }
                 Task {
                     guard await model.add(alias: alias) else { return }
                     Haptic.success.play()

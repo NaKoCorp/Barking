@@ -18,6 +18,10 @@ final class BannedAPITests: XCTestCase {
         // B2: brand screens are ScrollView + FormCard, CTAs never in a row.
         ("Form {", #"\bForm\s*\{"#),
         (".listRowInsets", #"\.listRowInsets\("#),
+        // Final review #2: it redacts only under a `.privacy` redaction
+        // reason (widgets, Always-On), never in the app, so it reads as a
+        // guard it is not. Secrets use `SecretCover` instead.
+        (".privacySensitive()", #"\.privacySensitive\("#),
     ].map { ($0.0, try! NSRegularExpression(pattern: $0.1)) }
 
     /// The banned forms `text` contains, one entry per use.
@@ -35,6 +39,7 @@ final class BannedAPITests: XCTestCase {
             "UIColor.systemBlue", "Font.system(size: 12)", ".font( .system(size: 12))", ".font(.system( size: 9))",
             ".textFieldStyle(.roundedBorder)", ".textCase(.uppercase)", ".textCase( .uppercase )",
             ".pickerStyle(.segmented)", "Form {", "Form{", ".listRowInsets(EdgeInsets())",
+            ".privacySensitive()", ".privacySensitive(true)",
         ]
         for line in caught {
             XCTAssertEqual(Self.violations(in: line).count, 1, "not caught: \(line)")

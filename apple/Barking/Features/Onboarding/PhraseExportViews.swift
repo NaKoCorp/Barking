@@ -49,6 +49,37 @@ struct PhraseExportButtons: View {
     }
 }
 
+/// The suggested password in Fira 15, or dots: when hidden with the eye,
+/// and, like the phrase (`SecretCover`), while the scene is not active or
+/// the screen is captured, so the app-switcher snapshot never holds the
+/// password that opens the PDF.
+struct SuggestedPasswordText: View {
+    let password: String
+    let revealed: Bool
+    @Environment(\.scenePhase) private var phase
+    @Environment(\.isSceneCaptured) private var captured
+
+    private var shown: Bool { revealed && !SecretCover.hides(phase: phase, captured: captured) }
+
+    var body: some View {
+        Group {
+            if shown {
+                Text(verbatim: password).foregroundStyle(Color.fg)
+            } else {
+                Text(verbatim: String(repeating: "•", count: 14)).foregroundStyle(Color.fgMuted)
+            }
+        }
+        .font(BarkingFont.mono(.subheadline, size: 15))
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Space.s3).padding(.vertical, Space.s3)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Suggested password"))
+        .accessibilityValue(shown ? Text(verbatim: password) : Text("Hidden"))
+        .accessibilityIdentifier("pdf.suggested")
+    }
+}
+
 /// Chooses the password, makes the PDF, shares it, then deletes it.
 struct PhrasePDFSheet: View {
     let words: [String]
@@ -146,22 +177,7 @@ struct PhrasePDFSheet: View {
             Text("Suggested password").font(.bSectionLabel).foregroundStyle(Color.fgMuted)
                 .accessibilityHidden(true)
             HStack(spacing: 0) {
-                Group {
-                    if revealed {
-                        Text(verbatim: password).foregroundStyle(Color.fg)
-                    } else {
-                        Text(verbatim: String(repeating: "•", count: 14)).foregroundStyle(Color.fgMuted)
-                    }
-                }
-                .font(BarkingFont.mono(.subheadline, size: 15))
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Space.s3).padding(.vertical, Space.s3)
-                .privacySensitive()
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(Text("Suggested password"))
-                .accessibilityValue(revealed ? Text(verbatim: password) : Text("Hidden"))
-                .accessibilityIdentifier("pdf.suggested")
+                SuggestedPasswordText(password: password, revealed: revealed)
                 iconButton(revealed ? "eye.slash" : "eye", revealed ? "Hide" : "Show") { revealed.toggle() }
                 iconButton(copied ? "checkmark" : "doc.on.doc", copied ? "Copied" : "Copy") {
                     SecretPasteboard.copy(password)
