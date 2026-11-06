@@ -39,9 +39,9 @@ struct LinkNewDeviceView: View {
                     Text("Valid for 10 minutes and usable once. Hand the file to the new device over a channel you control.")
                         .foregroundStyle(Color.fgMuted)
                     ShareLink(item: url) {
-                        Text("Send the link file").frame(maxWidth: .infinity, minHeight: 52)
+                        Text("Send the link file")
                     }
-                    .buttonStyle(.borderedProminent).tint(Color.accentFill)
+                    .buttonStyle(.barkingPrimary)
                 case .refused(let text):
                     Banner(kind: .danger, title: LocalizedStringKey(text))
                     PrimaryButton("Start again") { Task { scanning = false; await model.start() } }

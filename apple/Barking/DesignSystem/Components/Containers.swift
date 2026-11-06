@@ -39,7 +39,7 @@ struct Banner: View {
             }
             Spacer(minLength: 0)
         }
-        .font(BarkingFont.sans(.subheadline, size: 14))
+        .font(.bBodySmall)
         .foregroundStyle(colors.fg)
         .padding(12)
         .background(colors.bg, in: .rect(cornerRadius: Radius.chip))

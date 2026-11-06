@@ -62,7 +62,7 @@ struct WelcomeView: View {
         var body: some View {
             HStack(spacing: 8) {
                 // The system font: Fira Code draws ✓ like a √.
-                Text(verbatim: "✓").font(.system(size: 13, weight: .bold))
+                Text(verbatim: "✓").font(.bSymbol(13, relativeTo: .footnote, weight: .bold))
                     .foregroundStyle(Color.ok).accessibilityHidden(true)
                 Text(text).foregroundStyle(Color.fgMuted)
             }

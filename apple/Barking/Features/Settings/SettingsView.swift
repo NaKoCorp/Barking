@@ -20,7 +20,7 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     RemovedBanner(core: core)
-                    section("Appearance")
+                    SectionLabel("Appearance")
                     AppearanceSegments()
                     card {
                         NavigationLink { DevicesView(core: core) } label: {
@@ -28,8 +28,8 @@ struct SettingsView: View {
                         }
                         divider
                         NavigationLink { MyIdentityView(core: core, model: model) } label: {
-                            row("My identity", Text(verbatim: model.fingerprintShort)
-                                .font(BarkingFont.mono(.caption, size: 11.5)), "key")
+                            row("My identity", Text(verbatim: FingerprintFormat.grouped(model.fingerprint, form: .short))
+                                .font(.bMeta), "key")
                         }
                         divider
                         NavigationLink { SecuritySettingsView() } label: {
@@ -83,13 +83,6 @@ struct SettingsView: View {
         return Locale(identifier: code).localizedString(forLanguageCode: code)?.localizedCapitalized ?? code
     }
 
-    private func section(_ title: LocalizedStringKey) -> some View {
-        Text(title).textCase(.uppercase)
-            .font(.system(size: 12, weight: .semibold)).tracking(0.6)
-            .foregroundStyle(Color.fgMuted)
-            .accessibilityAddTraits(.isHeader)
-    }
-
     private var divider: some View { Rectangle().fill(Color.border).frame(height: 1) }
 
     private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -101,15 +94,20 @@ struct SettingsView: View {
     private func row(_ title: LocalizedStringKey, _ sub: Text, _ icon: String,
                      trailing: String = "chevron.right") -> some View {
         HStack(spacing: 12) {
-            Image(systemName: icon).font(.system(size: 15)).foregroundStyle(Color.accent)
+            Image(systemName: icon).font(.bSymbol(15, relativeTo: .subheadline)).foregroundStyle(Color.accent)
                 .frame(width: 32, height: 32)
                 .background(Color.wash, in: .rect(cornerRadius: Radius.tile))
+                .accessibilityHidden(true)
+            // Leading, also when a long French subtitle wraps (U-10).
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fg)
-                sub.font(.system(size: 12.5)).foregroundStyle(Color.fgMuted)
+                Text(title).font(.bBody.weight(.semibold)).foregroundStyle(Color.fg)
+                sub.font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(Color.fgMuted)
             }
-            Spacer(minLength: 0)
-            Image(systemName: trailing).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.fgMuted)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: trailing).font(.bSymbol(13, relativeTo: .footnote, weight: .semibold))
+                .foregroundStyle(Color.fgMuted)
+                .accessibilityHidden(true)
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 56)
@@ -130,7 +128,7 @@ struct MyIdentityView: View {
                     .onSubmit { Task { await model.rename(name) } }
             }
             Section("Fingerprint") {
-                Text(verbatim: model.fingerprint).font(BarkingFont.mono(.footnote, size: 12)).textSelection(.enabled)
+                FingerprintText(model.fingerprint, form: .full)
             }
             Section("My code") { MyCodeView(core: core) }
         }

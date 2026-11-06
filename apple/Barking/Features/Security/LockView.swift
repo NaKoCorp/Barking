@@ -53,7 +53,7 @@ private struct LockedSamoyed: View {
         .clipShape(.circle)
             .overlay(alignment: .bottomLeading) {
                 Image(systemName: "lock.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.bSymbol(15, weight: .semibold))
                     .foregroundStyle(Color.accentFill)
                     .frame(width: 34, height: 34)
                     .background(Color.surface, in: .circle)

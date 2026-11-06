@@ -42,7 +42,6 @@ struct MainTabView: View {
                 SettingsView(core: core) { tab = .network }
             }
         }
-        .tint(Color.accent)
     }
 }
 

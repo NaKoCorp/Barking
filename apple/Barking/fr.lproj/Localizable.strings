@@ -301,3 +301,6 @@
 "Kept in the keychain, without the Secure Enclave." = "Gardée dans le trousseau, sans le Secure Enclave.";
 "Your contacts and messages are kept here, encrypted with SQLCipher." = "Vos contacts et vos messages sont gardés ici, chiffrés avec SQLCipher.";
 "Tap to show the whole text" = "Touchez pour afficher tout le texte";
+
+/* Buttons: VoiceOver value while the action runs. */
+"In progress" = "En cours";

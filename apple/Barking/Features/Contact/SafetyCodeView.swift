@@ -27,8 +27,7 @@ struct SafetyCodeView: View {
                     Text("fingerprint").font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
                     Rectangle().fill(Color.border).frame(height: 1)
                 }
-                Text(verbatim: model.fingerprintShort).font(BarkingFont.mono(.footnote, size: 13))
-                    .foregroundStyle(Color.fg).frame(maxWidth: .infinity)
+                FingerprintText(model.contact).frame(maxWidth: .infinity)
                 Text("The same code shows on all your linked devices: verifying here is enough.")
                     .font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(Color.fgSoft)
                 if model.justVerified {
@@ -60,8 +59,10 @@ struct SafetyCodeView: View {
             .padding(24)
         }
         .background(Color.surface)
+        // Kept: with an empty title iOS 26 draws no bar behind the back button,
+        // and the scrolled content runs under the status bar unblurred.
         .navigationTitle(Text("Safety code"))
-        .navigationBarTitleDisplayMode(.inline)
+        .toolbarTitleDisplayMode(.inline)
         .task { await model.load(); aliasDraft = model.alias }
         .confirmationDialog(Text("Delete this contact? The history is kept."), isPresented: $confirmDelete,
                             titleVisibility: .visible) {
@@ -74,10 +75,7 @@ extension SafetyCodeView {
     /// The contact's devices, with the date each was added to its card.
     fileprivate var devicesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Devices").textCase(.uppercase)
-                .font(BarkingFont.sans(.caption, size: 12, weight: .semibold)).tracking(0.6)
-                .foregroundStyle(Color.fgSoft)
-                .accessibilityAddTraits(.isHeader)
+            SectionLabel("Devices")
             ForEach(model.devices, id: \.id) { d in
                 HStack {
                     Text(verbatim: d.name).font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))

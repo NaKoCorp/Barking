@@ -30,6 +30,7 @@ struct SecuritySettingsView: View {
                             redraw += 1
                         }
                     }))
+                    .tint(Color.toggleOn)
                     .accessibilityIdentifier("security.lock")
                 if refused {
                     Banner(kind: .danger, title: "Set a passcode on the iPhone first")
@@ -73,8 +74,8 @@ struct EraseBarkingControl: View {
                 Banner(kind: .danger, title: "Barking could not erase everything. Try again.")
             }
             Text("Erase Barking")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color.red)
+                .font(.bButton)
+                .foregroundStyle(Color.danger)
                 .frame(minHeight: 44)
                 .padding(.horizontal, 16)
                 .contentShape(.rect)
@@ -83,7 +84,8 @@ struct EraseBarkingControl: View {
                 .accessibilityHint(Text("Press and hold for 2 seconds"))
                 .accessibilityIdentifier(identifier)
             Text("Press and hold for 2 seconds")
-                .font(.caption2).foregroundStyle(Color.fgSoft)
+                .font(.bMeta).foregroundStyle(Color.fgMuted)
+                .multilineTextAlignment(.center)
                 .accessibilityHidden(true)
         }
         .disabled(erasing)

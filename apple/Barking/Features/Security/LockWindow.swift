@@ -18,7 +18,7 @@ final class LockWindow {
         let window = UIWindow(windowScene: scene)
         window.windowLevel = UIWindow.Level(UIWindow.Level.alert.rawValue + 100)
         window.rootViewController = UIHostingController(
-            rootView: LockView().environment(lock).environment(router))
+            rootView: LockView().environment(lock).environment(router).tint(Color.accent))
         window.rootViewController?.view.backgroundColor = .clear
         self.window = window
         track(lock)

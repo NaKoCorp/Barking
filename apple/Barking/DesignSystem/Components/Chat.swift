@@ -19,7 +19,7 @@ struct StatusGlyph: View {
     let status: MessageStatusKind
 
     var body: some View {
-        glyph.font(.system(size: 11, weight: .semibold)) // Fira Code draws ✓ like a √.
+        glyph.font(.bSymbol(11, relativeTo: .caption2, weight: .semibold)) // Fira Code draws ✓ like a √.
     }
 
     @ViewBuilder private var glyph: some View {

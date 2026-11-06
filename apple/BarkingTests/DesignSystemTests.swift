@@ -45,6 +45,45 @@ final class DesignSystemTests: XCTestCase {
         }
     }
 
+    /// Pairs added by the UI review (B1): the third text tier on every
+    /// ground, the disabled state, status words, tags and the terminal block.
+    func testUIReviewPairsPassContrast() {
+        let pairs: [(String, String)] = [
+            ("fgSoft", "field"), ("fgDisabled", "fillDisabled"),
+            ("terminalFg", "terminalBg"), ("accent", "wash"), ("fgMuted", "field"),
+            ("ok", "surface"), ("ok", "surfaceCard"), ("warnFg", "surface"), ("warnFg", "surfaceCard"),
+            ("danger", "surface"), ("danger", "surfaceCard"), ("fgSoft", "surface"), ("fgSoft", "surfaceCard"),
+        ]
+        for style in styles {
+            for (t, g) in pairs {
+                let r = Self.ratio(color(t, style), color(g, style))
+                XCTAssertGreaterThanOrEqual(r, 4.5, "\(t) on \(g) in \(style == .dark ? "dark" : "light"): \(r)")
+            }
+            // The switch knob is white on the tint (never the light purple).
+            XCTAssertGreaterThanOrEqual(Self.ratio(.white, color("toggleOn", style)), 4.5, "white on toggleOn")
+            // Non-text: the focus ring stands out from the grounds (3:1).
+            for g in ["surface", "surfaceCard", "field"] {
+                XCTAssertGreaterThanOrEqual(Self.ratio(color("focusRing", style), color(g, style)), 3, "focusRing on \(g)")
+            }
+        }
+    }
+
+    /// §6 token values: the dark third tier, and a segmented thumb that is
+    /// no longer purple (purple stays for actions).
+    func testUIReviewTokenValues() {
+        func hex(_ c: UIColor) -> String {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            c.getRed(&r, green: &g, blue: &b, alpha: &a)
+            return String(format: "#%02X%02X%02X", Int((r * 255).rounded()), Int((g * 255).rounded()), Int((b * 255).rounded()))
+        }
+        XCTAssertEqual(hex(color("fgSoft", .dark)), "#9A90B2")
+        XCTAssertEqual(hex(color("segment", .dark)), "#1B1524")
+        XCTAssertEqual(hex(color("fillDisabled", .light)), hex(color("field", .light)))
+        XCTAssertEqual(hex(color("fillDisabled", .dark)), hex(color("field", .dark)))
+        XCTAssertEqual(hex(color("toggleOn", .dark)), "#6640AF")
+        XCTAssertEqual(hex(color("terminalBg", .light)), "#0B0910")
+    }
+
     func testFiraCodeIsRegistered() {
         for name in ["FiraCode-Regular", "FiraCode-Medium", "FiraCode-SemiBold"] {
             XCTAssertNotNil(UIFont(name: name, size: 15), name)

@@ -137,9 +137,12 @@ struct ComposerView: View {
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(Color.surfaceAlt, in: .capsule)
                 Button { Task { await model.send() } } label: {
-                    Image(systemName: "arrow.up").font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.white).frame(width: 44, height: 44)
-                        .background(Color.accentFill.opacity(model.canSend ? 1 : 0.4), in: .circle)
+                    // Disabled is a slot, never a translucent purple (U-3).
+                    Image(systemName: "arrow.up").font(.bSymbol(17, weight: .semibold))
+                        .foregroundStyle(model.canSend ? Color.white : Color.fgDisabled)
+                        .frame(width: 44, height: 44)
+                        .background(model.canSend ? Color.accentFill : Color.fillDisabled, in: .circle)
+                        .overlay { if !model.canSend { Circle().strokeBorder(Color.borderDisabled, lineWidth: 1) } }
                 }
                 .disabled(!model.canSend)
                 .accessibilityLabel(Text("Send"))

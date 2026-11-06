@@ -41,10 +41,7 @@ struct TransparencyView: View {
                         .padding(.top, 6)
                 }
                 ForEach(model.days) { day in
-                    Text(model.title(of: day)).textCase(.uppercase)
-                        .font(BarkingFont.sans(.caption, size: 12, weight: .semibold)).tracking(0.6)
-                        .foregroundStyle(Color.fgSoft).padding(.top, 10)
-                        .accessibilityAddTraits(.isHeader)
+                    SectionLabel(verbatim: model.title(of: day)).padding(.top, 10)
                     VStack(spacing: 0) {
                         ForEach(Array(day.rows.enumerated()), id: \.element.id) { i, row in
                             if i > 0 { Rectangle().fill(Color.border).frame(height: 1) }
@@ -67,10 +64,7 @@ struct TransparencyView: View {
     }
 
     private func heading(_ title: LocalizedStringKey) -> some View {
-        Text(title).textCase(.uppercase)
-            .font(BarkingFont.sans(.caption, size: 12, weight: .semibold)).tracking(0.6)
-            .foregroundStyle(Color.fgMuted).padding(.top, 8)
-            .accessibilityAddTraits(.isHeader)
+        SectionLabel(title).padding(.top, 8)
     }
 
     private func dataRow(_ row: DataRow) -> some View {
@@ -113,7 +107,7 @@ struct TransparencyView: View {
     }
 
     private func icon(_ name: String, accent: Bool) -> some View {
-        Image(systemName: name).font(.system(size: 14))
+        Image(systemName: name).font(.bSymbol(14, relativeTo: .subheadline))
             .foregroundStyle(accent ? Color.accent : Color.fgMuted)
             .frame(width: 32, height: 32)
             .background(accent ? Color.wash : Color.field, in: .rect(cornerRadius: Radius.tile))

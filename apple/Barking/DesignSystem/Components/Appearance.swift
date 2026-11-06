@@ -28,7 +28,7 @@ struct AppearanceIcons: View {
                 let on = settings.appearance == a
                 Button { settings.appearance = a } label: {
                     Image(systemName: a.symbol)
-                        .font(.system(size: 15, weight: on ? .semibold : .regular))
+                        .font(.bSymbol(15, weight: on ? .semibold : .regular))
                         .foregroundStyle(on ? Color.accent : Color.fgMuted)
                         .frame(width: 44, height: 44)
                 }
@@ -56,13 +56,17 @@ struct AppearanceSegments: View {
                         .font(BarkingFont.mono(.footnote, size: 13, weight: on ? .semibold : .regular))
                         .foregroundStyle(on ? (scheme == .dark ? Color.white : Color.fg) : Color.fgMuted)
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(on ? Color.segment : Color.clear, in: .rect(cornerRadius: 7))
+                        .background(on ? Color.segment : Color.clear, in: .rect(cornerRadius: Radius.button))
+                        // The thumb is a ground, not purple: a 1 px edge sets it off the track.
+                        .overlay {
+                            if on { RoundedRectangle(cornerRadius: Radius.button).strokeBorder(Color.borderStrong, lineWidth: 1) }
+                        }
                 }
                 .accessibilityAddTraits(on ? .isSelected : [])
                 .accessibilityIdentifier("appearance.\(a.rawValue)")
             }
         }
         .padding(4)
-        .background(Color.field, in: .rect(cornerRadius: 10))
+        .background(Color.field, in: .rect(cornerRadius: Radius.field))
     }
 }

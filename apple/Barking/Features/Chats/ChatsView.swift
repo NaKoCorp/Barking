@@ -96,7 +96,7 @@ extension ChatsView {
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button { adding = true } label: {
-                    Image(systemName: "square.and.pencil").font(.system(size: 18))
+                    Image(systemName: "square.and.pencil").font(.bSymbol(18))
                         .foregroundStyle(Color.accent)
                         .frame(width: 44, height: 44)
                         .background(Color.wash, in: .circle)
@@ -106,7 +106,7 @@ extension ChatsView {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Color.fgSoft).accessibilityHidden(true)
                 TextField(text: $model.query, prompt: Text("Search").foregroundStyle(Color.fgSoft)) { Text("Search") }
-                    .font(.system(size: 15)).foregroundStyle(Color.fg)
+                    .font(.bBody).foregroundStyle(Color.fg)
                     .submitLabel(.search)
             }
             .padding(.horizontal, 12)
@@ -132,7 +132,7 @@ struct ChatRowView: View {
                     Text(row.name).font(BarkingFont.sans(.headline, size: 16, weight: .semibold))
                         .foregroundStyle(Color.fg).lineLimit(1)
                     if row.verified {
-                        Text(verbatim: "✓").font(.system(size: 13, weight: .bold)).foregroundStyle(Color.ok)
+                        Text(verbatim: "✓").font(.bSymbol(13, relativeTo: .footnote, weight: .bold)).foregroundStyle(Color.ok)
                             .accessibilityLabel(Text("verified"))
                     }
                     Spacer()

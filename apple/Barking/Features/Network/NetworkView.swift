@@ -8,6 +8,7 @@ struct NetworkView: View {
     @State private var adding = false
     @State private var relayId = ""
     @State private var relayAddr = ""
+    @Environment(\.colorScheme) private var scheme
 
     init(core: CoreService) {
         self.core = core
@@ -19,7 +20,6 @@ struct NetworkView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Eyebrow("how your messages travel")
-                    ScreenTitle("Network")
                     internetCard
                     Card {
                         VStack(alignment: .leading, spacing: 12) {
@@ -31,9 +31,16 @@ struct NetworkView: View {
                                     ForEach(model.terminal, id: \.self) { Text(verbatim: $0) }
                                 }
                                 .font(BarkingFont.mono(.caption, size: 12))
-                                .foregroundStyle(Color(red: 0.85, green: 0.82, blue: 0.91))
+                                .foregroundStyle(Color.terminalFg)
                                 .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color(red: 0.043, green: 0.035, blue: 0.063), in: .rect(cornerRadius: Radius.card))
+                                .background(Color.terminalBg, in: .rect(cornerRadius: Radius.card))
+                                .overlay {
+                                    // On Ink the block keeps an edge of its own.
+                                    if scheme == .dark {
+                                        RoundedRectangle(cornerRadius: Radius.card)
+                                            .strokeBorder(Color.accent.opacity(0.3), lineWidth: 1)
+                                    }
+                                }
                             }
                         }
                     }
@@ -55,6 +62,7 @@ struct NetworkView: View {
                 .padding(20)
             }
             .background(Color.surface)
+            .navigationTitle(Text("Network"))
             .refreshable { await model.syncNow() }
             .sheet(isPresented: $adding) { addSheet }
         }

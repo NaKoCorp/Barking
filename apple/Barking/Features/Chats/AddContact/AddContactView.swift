@@ -41,8 +41,9 @@ struct AddContactView: View {
             }
             .padding(16)
             .background(Color.surface)
-            .navigationTitle(Text("Add a contact"))
-            .navigationBarTitleDisplayMode(.inline)
+            // The confirmation has its own headline (the contact's name).
+            .navigationTitle(model.preview == nil ? Text("Add a contact") : Text(verbatim: ""))
+            .toolbarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close", action: onDone) } }
         }
         .task { if let link { await model.opened(link: link) } }
@@ -137,10 +138,9 @@ struct MyCodeView: View {
                     .padding(12).background(Color.white, in: .rect(cornerRadius: Radius.card))
                     .accessibilityLabel(Text("My QR code"))
                 ShareLink(item: URL(string: "barking://card#\(card.text)")!) {
-                    Text("Share my link").font(BarkingFont.mono(.body, size: 15, weight: .semibold))
-                        .frame(maxWidth: .infinity, minHeight: 52)
+                    Text("Share my link")
                 }
-                .buttonStyle(.borderedProminent).tint(Color.accentFill)
+                .buttonStyle(.barkingPrimary)
             } else if notAdmin {
                 Text("Show your code from your first device").foregroundStyle(Color.fgMuted)
             } else if failed {

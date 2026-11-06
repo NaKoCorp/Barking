@@ -16,7 +16,45 @@ enum BarkingFont {
     /// The system font at the mockup's size, scaled for the text style. Views
     /// re-render when the size category changes, so the scale is read then.
     static func sans(_ style: Font.TextStyle, size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .system(size: UIFontMetrics(forTextStyle: style.uiKit).scaledValue(for: size), weight: weight)
+        // At the style's own size, the text style scales by itself, even in
+        // views that do not re-render on a size change.
+        if UIFont.preferredFont(forTextStyle: style.uiKit, compatibleWith: .init(preferredContentSizeCategory: .large))
+            .pointSize == size {
+            return .system(style, weight: weight)
+        }
+        return .system(size: UIFontMetrics(forTextStyle: style.uiKit).scaledValue(for: size), weight: weight)
+    }
+}
+
+/// Type roles of the iOS screens (UI review §6). Fira Code names, labels,
+/// commands and states; the system font is for what a person reads. Every
+/// role follows Dynamic Type. Feature code uses these, never a fixed
+/// `.system(size:)`. Computed, so a sans role is scaled when it is read.
+extension Font {
+    /// Screen title: Fira 600, 30 (apply `.tracking(-0.5)` with it).
+    static var bTitle: Font { BarkingFont.mono(.largeTitle, size: 30, weight: .semibold) }
+    /// Inline navigation title: Fira 600, 17.
+    static var bNavTitle: Font { BarkingFont.mono(.headline, size: 17, weight: .semibold) }
+    /// In-page section label: Fira 500, 13, sentence case, in `fgMuted`.
+    static var bSectionLabel: Font { BarkingFont.mono(.footnote, size: 13, weight: .medium) }
+    /// Card and row body: sans 15.
+    static var bBody: Font { BarkingFont.sans(.subheadline, size: 15) }
+    /// Chat bubbles, inputs and onboarding leads: sans 17.
+    static var bBodyLarge: Font { BarkingFont.sans(.body, size: 17) }
+    /// Secondary lines, previews, banners: sans 14.
+    static var bBodySmall: Font { BarkingFont.sans(.subheadline, size: 14) }
+    /// Times, sizes, hints: Fira 12.
+    static var bMeta: Font { BarkingFont.mono(.caption, size: 12) }
+    /// Tags: Fira 600, 11.
+    static var bTag: Font { BarkingFont.mono(.caption2, size: 11, weight: .semibold) }
+    /// Buttons: Fira 600, 15.
+    static var bButton: Font { BarkingFont.mono(.body, size: 15, weight: .semibold) }
+
+    /// SF Symbols and the ✓ glyph (Fira Code draws ✓ like a √), scaled
+    /// with `style`.
+    static func bSymbol(_ size: CGFloat, relativeTo style: Font.TextStyle = .body,
+                        weight: Font.Weight = .regular) -> Font {
+        BarkingFont.sans(style, size: size, weight: weight)
     }
 }
 

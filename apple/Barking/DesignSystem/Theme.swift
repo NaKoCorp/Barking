@@ -27,6 +27,14 @@ extension Color {
     static let transportNet = Color("transportNet")
     static let field = Color("field")
     static let segment = Color("segment")
+    // UI review B1 (§6): disabled controls, switches, focus, terminal blocks.
+    static let fillDisabled = Color("fillDisabled")
+    static let fgDisabled = Color("fgDisabled")
+    static let borderDisabled = Color("borderDisabled")
+    static let toggleOn = Color("toggleOn")
+    static let focusRing = Color("focusRing")
+    static let terminalBg = Color("terminalBg")
+    static let terminalFg = Color("terminalFg")
 }
 
 /// Corner radii of the design system.
@@ -35,8 +43,25 @@ enum Radius {
     static let button: CGFloat = 6
     static let tile: CGFloat = 8
     static let chip: CGFloat = 10
+    /// Text fields and segmented tracks (same step as `chip`).
+    static let field: CGFloat = 10
     static let card: CGFloat = 12
     static let panel: CGFloat = 16
+}
+
+/// Spacing steps of the iOS screens.
+enum Space {
+    static let s1: CGFloat = 4
+    static let s2: CGFloat = 8
+    static let s3: CGFloat = 12
+    /// Card padding and row inset.
+    static let s4: CGFloat = 16
+    /// Screen gutter.
+    static let gutter: CGFloat = 20
+    /// Between sections.
+    static let section: CGFloat = 24
+    /// Above a danger zone.
+    static let danger: CGFloat = 32
 }
 
 /// Contact avatar colors: fixed pairs that pass 4.5:1 in both themes, chosen

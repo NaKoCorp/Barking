@@ -14,9 +14,7 @@ struct PathView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 quoteCard
-                Text("How it got here")
-                    .font(BarkingFont.sans(.caption, size: 12, weight: .semibold)).tracking(0.6).textCase(.uppercase)
-                    .foregroundStyle(Color.fgSoft)
+                SectionLabel("How it got here")
                 if model.notRecorded {
                     Text("Path not recorded")
                         .font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
@@ -95,7 +93,7 @@ private struct PathStop: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(spacing: 4) {
-                Text(verbatim: glyph).font(.system(size: 14)).foregroundStyle(.white)
+                Text(verbatim: glyph).font(.bSymbol(14, relativeTo: .subheadline)).foregroundStyle(.white)
                     .frame(width: 32, height: 32).background(color, in: .circle)
                     .accessibilityHidden(true)
                 if more {
