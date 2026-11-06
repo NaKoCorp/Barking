@@ -65,9 +65,9 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     }
     func markRead(contact: String, upTo: Int64) throws { reads.append((contact, upTo)) }
     func keyChanges(since: UInt64) throws -> [KeyChange] { keyChangeList }
-    func transparencyLog(limit: UInt32, offset: UInt32, securityOnly: Bool) throws -> [LogEntry] {
+    func transparencyLog(limit: UInt32, before: Int64?, securityOnly: Bool) throws -> [LogEntry] {
         let all = securityOnly ? logEntries.filter(\.security) : logEntries
-        return Array(all.dropFirst(Int(offset)).prefix(Int(limit)))
+        return Array(all.filter { before == nil || $0.id < before! }.prefix(Int(limit)))
     }
     func contactDevices(contact: String) throws -> [MyDeviceInfo] { contactDeviceList[contact] ?? [] }
     func sync(deadlineMs: UInt64) throws -> SyncSummary {

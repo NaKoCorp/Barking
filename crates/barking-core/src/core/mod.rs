@@ -58,6 +58,10 @@ pub use link::{
     MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES,
 };
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
+pub use receive::{
+    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
+    R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
+};
 pub use remove::LeaveState;
 pub use removed::Removed;
 pub use route::{RouteEntry, RouteStep};
@@ -667,19 +671,22 @@ impl Core {
             .collect()
     }
 
-    /// A page of the log, newest first (`security_only`: security class only).
+    /// A page of the log, newest first: up to `limit` events older than the
+    /// event `before` (none: from the newest), with their ids. Paging by id
+    /// keeps a page stable while events are appended or purged.
+    /// `security_only` keeps the security class only.
     pub fn transparency_page(
         &self,
         limit: usize,
-        offset: usize,
+        before: Option<i64>,
         security_only: bool,
-    ) -> Result<Vec<(u64, TransparencyEvent)>> {
+    ) -> Result<Vec<(i64, u64, TransparencyEvent)>> {
         self.store
-            .transparency_page(limit, offset, security_only)?
+            .transparency_page(limit, before, security_only)?
             .into_iter()
-            .map(|(at, bytes)| {
+            .map(|(id, at, bytes)| {
                 postcard::from_bytes(&bytes)
-                    .map(|e| (at, e))
+                    .map(|e| (id, at, e))
                     .map_err(|_| CoreError::Store("unreadable event".into()))
             })
             .collect()

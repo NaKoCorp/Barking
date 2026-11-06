@@ -285,12 +285,13 @@
 "Nothing yet" = "Rien pour l’instant";
 "Devices" = "Appareils";
 "Encrypted database on this iPhone" = "Base chiffrée sur cet iPhone";
-"Your contacts and messages are kept here, encrypted." = "Vos contacts et vos messages sont gardés ici, chiffrés.";
 "Database key protected by the Secure Enclave" = "Clé de la base protégée par le Secure Enclave";
 "Database key protected by the keychain only" = "Clé de la base protégée par le trousseau seulement";
-"The key never leaves this iPhone's chip." = "La clé ne quitte jamais la puce de cet iPhone.";
-"This iPhone has no Secure Enclave available." = "Cet iPhone n’a pas de Secure Enclave disponible.";
 "Nothing in clear on the nodes" = "Rien en clair sur les nœuds";
 "Packets stay there at most 7 days." = "Les paquets y restent 7 jours au plus.";
 "Journal and paths" = "Journal et trajets";
 "Kept 30 days on this iPhone, never sent." = "Gardés 30 jours sur cet iPhone, jamais envoyés.";
+"Wrapped by a key that never leaves this iPhone's chip." = "Enveloppée par une clé qui ne quitte jamais la puce de cet iPhone.";
+"Kept in the keychain, without the Secure Enclave." = "Gardée dans le trousseau, sans le Secure Enclave.";
+"Your contacts and messages are kept here, encrypted with SQLCipher." = "Vos contacts et vos messages sont gardés ici, chiffrés avec SQLCipher.";
+"Tap to show the whole text" = "Touchez pour afficher tout le texte";

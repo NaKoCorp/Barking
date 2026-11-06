@@ -136,9 +136,10 @@ public actor CoreService {
     public func keyChanges(since: UInt64) async throws -> [KeyChange] {
         try await call("keys") { try $0.keyChanges(since: since) }
     }
-    /// A page of the transparency log, newest first.
-    public func transparencyLog(limit: UInt32, offset: UInt32, securityOnly: Bool) async throws -> [LogEntry] {
-        try await call("log") { try $0.transparencyLog(limit: limit, offset: offset, securityOnly: securityOnly) }
+    /// A page of the transparency log, newest first: up to `limit` entries
+    /// older than the entry `before` (`LogEntry.id`; nil: from the newest).
+    public func transparencyLog(limit: UInt32, before: Int64?, securityOnly: Bool) async throws -> [LogEntry] {
+        try await call("log") { try $0.transparencyLog(limit: limit, before: before, securityOnly: securityOnly) }
     }
     /// Devices of a contact, as its card lists them.
     public func contactDevices(_ contact: String) async throws -> [MyDeviceInfo] {

@@ -235,19 +235,62 @@ fn transparency_page_filters_and_pages() {
             .append_event(u64::from(i), None, class, &i.to_be_bytes())
             .unwrap();
     }
-    assert_eq!(store.transparency_page(100, 0, false).unwrap().len(), 100);
-    assert_eq!(store.transparency_page(100, 200, false).unwrap().len(), 50);
-    assert!(store.transparency_page(100, 250, false).unwrap().is_empty());
-    let sec = store.transparency_page(100, 0, true).unwrap();
+    let p1 = store.transparency_page(100, None, false).unwrap();
+    assert_eq!(p1.len(), 100);
+    let p2 = store.transparency_page(100, Some(p1[99].0), false).unwrap();
+    assert_eq!(p2.len(), 100);
+    let p3 = store.transparency_page(100, Some(p2[99].0), false).unwrap();
+    assert_eq!(p3.len(), 50);
+    assert!(
+        store
+            .transparency_page(100, Some(p3[49].0), false)
+            .unwrap()
+            .is_empty()
+    );
+    let sec = store.transparency_page(100, None, true).unwrap();
     assert_eq!(sec.len(), 10);
     // Newest first, security only.
-    assert_eq!(sec[0].0, 225);
-    assert_eq!(sec[9].0, 0);
-    let page = store.transparency_page(100, 0, false).unwrap();
-    assert_eq!(page[0].0, 249);
-    assert_eq!(page[99].0, 150);
-    // The second page continues the first one.
-    assert_eq!(store.transparency_page(100, 100, false).unwrap()[0].0, 149);
+    assert_eq!(sec[0].1, 225);
+    assert_eq!(sec[9].1, 0);
+    assert_eq!(p1[0].1, 249);
+    assert_eq!(p1[99].1, 150);
+    assert_eq!(p2[0].1, 149);
+}
+
+/// Events appended (or purged) between two pages neither repeat nor skip a
+/// row: the next page starts from the id of the last row seen.
+#[test]
+fn transparency_paging_is_stable_while_the_log_moves() {
+    let (_d, _p, store) = open_tmp();
+    for i in 0..30u32 {
+        store
+            .append_event(u64::from(i), None, EventClass::Routine, &i.to_be_bytes())
+            .unwrap();
+    }
+    let p1 = store.transparency_page(10, None, false).unwrap();
+    // 5 new events arrive while the user scrolls.
+    for i in 30..35u32 {
+        store
+            .append_event(u64::from(i), None, EventClass::Routine, &i.to_be_bytes())
+            .unwrap();
+    }
+    let p2 = store.transparency_page(10, Some(p1[9].0), false).unwrap();
+    let ats: Vec<u64> = p1.iter().chain(p2.iter()).map(|r| r.1).collect();
+    assert_eq!(
+        ats,
+        (10..30).rev().collect::<Vec<u64>>(),
+        "no overlap, no gap"
+    );
+    // The oldest rows go away (purge): the next page has no gap either.
+    store
+        .conn()
+        .execute("DELETE FROM transparency WHERE at < 5", [])
+        .unwrap();
+    let p3 = store.transparency_page(10, Some(p2[9].0), false).unwrap();
+    assert_eq!(
+        p3.iter().map(|r| r.1).collect::<Vec<_>>(),
+        (5..10).rev().collect::<Vec<u64>>()
+    );
 }
 
 #[test]

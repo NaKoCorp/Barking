@@ -24,16 +24,16 @@ use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
 // Quarantine reasons: fixed texts, never content nor key.
-const R_UNREADABLE: &str = "unreadable content";
-const R_UNEXPECTED: &str = "unexpected content for this mailbox";
-const R_UNDECRYPTABLE: &str = "decryption impossible";
-const R_UNKNOWN_SENDER: &str = "unknown sender";
-const R_AMBIGUOUS_SENDER: &str = "ambiguous sender";
-const R_HANDSHAKE: &str = "session opening impossible";
-const R_BAD_CONTENT: &str = "authenticated but malformed content";
-const R_ID_MISMATCH: &str = "inconsistent packet identifier";
-const R_STALE: &str = "message too old or dated in the future";
-const R_ID_REUSED: &str = "packet identifier already used";
+pub const R_UNREADABLE: &str = "unreadable content";
+pub const R_UNEXPECTED: &str = "unexpected content for this mailbox";
+pub const R_UNDECRYPTABLE: &str = "decryption impossible";
+pub const R_UNKNOWN_SENDER: &str = "unknown sender";
+pub const R_AMBIGUOUS_SENDER: &str = "ambiguous sender";
+pub const R_HANDSHAKE: &str = "session opening impossible";
+pub const R_BAD_CONTENT: &str = "authenticated but malformed content";
+pub const R_ID_MISMATCH: &str = "inconsistent packet identifier";
+pub const R_STALE: &str = "message too old or dated in the future";
+pub const R_ID_REUSED: &str = "packet identifier already used";
 
 /// Maximum number of sessions kept per remote device.
 const MAX_SESSIONS_PER_DEVICE: usize = 2;

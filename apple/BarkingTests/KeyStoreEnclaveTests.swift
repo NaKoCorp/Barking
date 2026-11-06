@@ -122,6 +122,16 @@ final class KeyStoreEnclaveTests: XCTestCase {
         XCTAssertEqual(KeyStore(entries: MemoryEntries(), wrapper: HardwareStub(inner: wrapper)).protection, "keychain")
     }
 
+    /// A clear `db-key` left beside the wrapped one (migration interrupted,
+    /// unwrap failing) is not "protected by the Secure Enclave".
+    func testProtectionNeedsTheClearKeyGone() throws {
+        _ = try store.create()
+        let hardware = KeyStore(entries: entries, wrapper: HardwareStub(inner: wrapper))
+        XCTAssertEqual(hardware.protection, "secure-enclave")
+        entries["db-key"] = legacy
+        XCTAssertEqual(hardware.protection, "keychain")
+    }
+
     /// A wipe deletes the wrapped key, a legacy one and the wrapping key (spec §6.2).
     func testDeleteAllRemovesEveryKey() throws {
         _ = try store.create()

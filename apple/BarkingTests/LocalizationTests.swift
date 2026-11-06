@@ -26,21 +26,31 @@ final class LocalizationTests: XCTestCase {
     }
 
     /// Every key the core can log (`logKeys()`) and every arg token has an
-    /// English and a French text, with the same placeholders.
+    /// English and a French text (in Log.strings, or Log.stringsdict for a
+    /// plural), with the same placeholders.
     func testEveryLogKeyHasBothLanguages() throws {
-        let en = try XCTUnwrap(table("en", "Log"))
-        let fr = try XCTUnwrap(table("fr", "Log"))
         let keys = logKeys() + logArgTokens().map { "log.arg.\($0)" }
         XCTAssertGreaterThanOrEqual(logKeys().count, 26)
-        for key in keys {
-            let e = en[key] as? String ?? ""
-            let f = fr[key] as? String ?? ""
-            XCTAssertFalse(e.isEmpty, "no English text for \(key)")
-            XCTAssertFalse(f.isEmpty, "no French text for \(key)")
-            let placeholders = { (s: String) in
-                s.matches(of: /%(\d)\$@/).map { String($0.output.1) }.sorted()
+        XCTAssertGreaterThanOrEqual(logArgTokens().count, 31)
+        let placeholders = { (s: String) in
+            s.matches(of: /%(\d)\$@/).map { String($0.output.1) }.sorted()
+        }
+        var texts: [String: [String: String]] = [:]
+        for lang in ["en", "fr"] {
+            let strings = try XCTUnwrap(table(lang, "Log"))
+            let plurals = table(lang, "Log", "stringsdict")
+            for key in keys {
+                var text = strings[key] as? String ?? ""
+                if text.isEmpty, let rule = (plurals?[key] as? NSDictionary)?["count"] as? NSDictionary {
+                    XCTAssertNotNil(rule["one"], "\(lang) \(key) one")
+                    text = rule["other"] as? String ?? ""
+                }
+                XCTAssertFalse(text.isEmpty, "no \(lang) text for \(key)")
+                texts[key, default: [:]][lang] = text
             }
-            XCTAssertEqual(placeholders(e), placeholders(f), "placeholders of \(key)")
+        }
+        for (key, t) in texts {
+            XCTAssertEqual(placeholders(t["en"] ?? ""), placeholders(t["fr"] ?? ""), "placeholders of \(key)")
         }
     }
 
@@ -48,7 +58,10 @@ final class LocalizationTests: XCTestCase {
         let fr = try XCTUnwrap(table("fr"))
         for key in ["Transparency", "Security only", "Where my data is", "Devices",
                     "Database key protected by the Secure Enclave", "Database key protected by the keychain only",
-                    "Nothing yet", "Today", "Yesterday"] {
+                    "Nothing yet", "Today", "Yesterday", "Wrapped by a key that never leaves this iPhone's chip.",
+                    "Kept in the keychain, without the Secure Enclave.",
+                    "Your contacts and messages are kept here, encrypted with SQLCipher.",
+                    "Tap to show the whole text"] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
     }

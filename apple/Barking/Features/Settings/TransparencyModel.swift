@@ -7,13 +7,16 @@ import Observation
 enum LogText {
     /// Args that are Unix seconds, by key: shown as a date.
     private static let dateArgs: [String: Int] = ["log.packet_sealed": 2]
+    /// Args that are counts, by key: the text has plural forms (stringsdict).
+    private static let countArgs: [String: Set<Int>] = ["log.history_imported": [0]]
 
     static func render(_ entry: LogEntry, locale: Locale = .current) -> String {
         let format = NSLocalizedString(entry.key, tableName: "Log", comment: "")
-        let args: [CVarArg] = entry.args.enumerated().map { i, raw in
+        let args: [any CVarArg] = entry.args.enumerated().map { i, raw -> any CVarArg in
             if raw.hasPrefix("@") {
                 return NSLocalizedString("log.arg.\(raw.dropFirst())", tableName: "Log", comment: "")
             }
+            if countArgs[entry.key]?.contains(i) == true, let n = Int(raw) { return n }
             if dateArgs[entry.key] == i, let secs = TimeInterval(raw) {
                 return Date(timeIntervalSince1970: secs).formatted(.dateTime.day().month().year().hour().minute())
             }
@@ -26,8 +29,8 @@ enum LogText {
 
 /// One line of the journal.
 struct LogRow: Identifiable, Equatable {
-    /// Position in the log, newest first.
-    let id: Int
+    /// Id of the event in the core's log (unique, grows with time).
+    let id: Int64
     let at: Date
     let family: String
     let text: String
@@ -75,6 +78,8 @@ final class TransparencyModel {
     private(set) var loading = false
     private(set) var securityOnly = false
     private var rows: [LogRow] = []
+    /// Id of the oldest row loaded: the next page starts before it.
+    private var cursor: Int64?
 
     init(core: CoreService, protection: @escaping () -> String = { KeyStore.live.protection },
          calendar: Calendar = .current) {
@@ -84,6 +89,8 @@ final class TransparencyModel {
     }
 
     var isEmpty: Bool { rows.isEmpty }
+    /// The oldest row loaded: showing it asks for the next page.
+    var oldestID: Int64? { cursor }
 
     func load() async {
         dataRows = Self.dataRows(protection: protection())
@@ -97,46 +104,44 @@ final class TransparencyModel {
 
     func loadMore() async {
         guard canLoadMore, !loading else { return }
-        await fetch(offset: rows.count)
+        await fetch(before: cursor)
     }
 
     private func reload() async {
         rows = []
         days = []
+        cursor = nil
         canLoadMore = false
-        await fetch(offset: 0)
+        await fetch(before: nil)
     }
 
-    private func fetch(offset: Int) async {
+    private func fetch(before: Int64?) async {
         loading = true
         defer { loading = false }
         let filter = securityOnly
-        guard let page = try? await core.transparencyLog(limit: Self.pageSize, offset: UInt32(offset),
-                                                          securityOnly: filter),
-              filter == securityOnly, offset == rows.count else { return }
-        rows += page.enumerated().map { i, e in
-            LogRow(id: offset + i, at: Date(timeIntervalSince1970: TimeInterval(e.at)), family: e.family,
+        guard let page = try? await core.transparencyLog(limit: Self.pageSize, before: before, securityOnly: filter),
+              filter == securityOnly, before == cursor else { return }
+        rows += page.map { e in
+            LogRow(id: e.id, at: Date(timeIntervalSince1970: TimeInterval(e.at)), family: e.family,
                    text: LogText.render(e), security: e.security)
         }
+        cursor = rows.last?.id
         canLoadMore = page.count == Int(Self.pageSize)
         days = Self.group(rows, calendar: calendar)
     }
 
-    /// Rows (newest first) by day, newest day first.
+    /// Rows (newest first) by day. Rows are ordered by id, the day groups
+    /// by first appearance; a day never shows twice, even when the phone's
+    /// clock went back and forth.
     static func group(_ rows: [LogRow], calendar: Calendar) -> [LogDay] {
-        var out: [LogDay] = []
-        var current: (date: Date, rows: [LogRow])?
+        var order: [Date] = []
+        var byDay: [Date: [LogRow]] = [:]
         for row in rows {
             let day = calendar.startOfDay(for: row.at)
-            if current?.date == day {
-                current?.rows.append(row)
-            } else {
-                if let c = current { out.append(LogDay(date: c.date, rows: c.rows)) }
-                current = (day, [row])
-            }
+            if byDay[day] == nil { order.append(day) }
+            byDay[day, default: []].append(row)
         }
-        if let c = current { out.append(LogDay(date: c.date, rows: c.rows)) }
-        return out
+        return order.map { LogDay(date: $0, rows: byDay[$0] ?? []) }
     }
 
     /// "Today", "Yesterday", otherwise the date in full.
@@ -151,12 +156,12 @@ final class TransparencyModel {
         let enclave = protection == "secure-enclave"
         return [
             DataRow(id: "database", icon: "internaldrive", title: String(localized: "Encrypted database on this iPhone"),
-                    detail: String(localized: "Your contacts and messages are kept here, encrypted.")),
+                    detail: String(localized: "Your contacts and messages are kept here, encrypted with SQLCipher.")),
             DataRow(id: "key", icon: enclave ? "cpu" : "key",
                     title: enclave ? String(localized: "Database key protected by the Secure Enclave")
                         : String(localized: "Database key protected by the keychain only"),
-                    detail: enclave ? String(localized: "The key never leaves this iPhone's chip.")
-                        : String(localized: "This iPhone has no Secure Enclave available.")),
+                    detail: enclave ? String(localized: "Wrapped by a key that never leaves this iPhone's chip.")
+                        : String(localized: "Kept in the keychain, without the Secure Enclave.")),
             DataRow(id: "nodes", icon: "point.3.connected.trianglepath.dotted",
                     title: String(localized: "Nothing in clear on the nodes"),
                     detail: String(localized: "Packets stay there at most 7 days.")),

@@ -5,6 +5,8 @@ import SwiftUI
 /// did, and where my data is.
 struct TransparencyView: View {
     @State private var model: TransparencyModel
+    /// Entries the user opened to read in full.
+    @State private var expanded: Set<Int64> = []
 
     init(core: CoreService) {
         _model = State(initialValue: TransparencyModel(core: core))
@@ -27,7 +29,7 @@ struct TransparencyView: View {
                 heading("Journal").padding(.top, 14)
                 Toggle("Security only", isOn: Binding(get: { model.securityOnly },
                                                        set: { on in Task { await model.setSecurityOnly(on) } }))
-                    .font(.system(size: 15)).tint(Color.accent)
+                    .font(BarkingFont.sans(.body, size: 15)).tint(Color.accent)
                     .accessibilityIdentifier("transparency.securityOnly")
                 if model.isEmpty, !model.loading {
                     Text("Nothing yet").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
@@ -42,7 +44,7 @@ struct TransparencyView: View {
                         ForEach(Array(day.rows.enumerated()), id: \.element.id) { i, row in
                             if i > 0 { Rectangle().fill(Color.border).frame(height: 1) }
                             logRow(row).onAppear {
-                                if row.id == model.days.last?.rows.last?.id { Task { await model.loadMore() } }
+                                if row.id == model.oldestID { Task { await model.loadMore() } }
                             }
                         }
                     }
@@ -61,7 +63,7 @@ struct TransparencyView: View {
 
     private func heading(_ title: LocalizedStringKey) -> some View {
         Text(title).textCase(.uppercase)
-            .font(.system(size: 12, weight: .semibold)).tracking(0.6)
+            .font(BarkingFont.sans(.caption, size: 12, weight: .semibold)).tracking(0.6)
             .foregroundStyle(Color.fgMuted).padding(.top, 8)
             .accessibilityAddTraits(.isHeader)
     }
@@ -70,8 +72,8 @@ struct TransparencyView: View {
         HStack(alignment: .top, spacing: 12) {
             icon(row.icon, accent: true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(verbatim: row.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.fg)
-                Text(verbatim: row.detail).font(.system(size: 12.5)).foregroundStyle(Color.fgMuted)
+                Text(verbatim: row.title).font(BarkingFont.sans(.subheadline, size: 15, weight: .semibold)).foregroundStyle(Color.fg)
+                Text(verbatim: row.detail).font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
             }
             Spacer(minLength: 0)
         }
@@ -80,18 +82,29 @@ struct TransparencyView: View {
     }
 
     private func logRow(_ row: LogRow) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            icon(row.icon, accent: row.security)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(verbatim: row.text).font(.system(size: 14)).foregroundStyle(Color.fg)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(row.at, format: .dateTime.hour().minute())
-                    .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
+        let open = expanded.contains(row.id)
+        return Button {
+            if open { expanded.remove(row.id) } else { expanded.insert(row.id) }
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                icon(row.icon, accent: row.security)
+                VStack(alignment: .leading, spacing: 3) {
+                    // Long entries (a packet's lesson on what relays see) show 3
+                    // lines until tapped; VoiceOver reads the whole text.
+                    Text(verbatim: row.text).font(BarkingFont.sans(.subheadline, size: 14)).foregroundStyle(Color.fg)
+                        .lineLimit(open ? nil : 3).multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(row.at, format: .dateTime.hour().minute())
+                        .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
+                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .padding(12)
+            .contentShape(.rect)
         }
-        .padding(12)
+        .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
+        .accessibilityHint(open ? "" : String(localized: "Tap to show the whole text"))
     }
 
     private func icon(_ name: String, accent: Bool) -> some View {

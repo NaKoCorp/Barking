@@ -15,9 +15,11 @@ final class TransparencyModelTests: XCTestCase {
     /// 2027-01-15 12:00 UTC.
     private let noon: UInt64 = 1_800_000_000 - 1_800_000_000 % 86_400 + 12 * 3_600
 
+    /// The id grows with the time, as the core's does.
     private func entry(_ at: UInt64, security: Bool = false, key: String = "log.node_fetch",
-                       args: [String] = ["K7QX2M4A", "3", "1"]) -> LogEntry {
-        LogEntry(at: at, family: security ? "security" : "node", key: key, args: args, security: security)
+                       args: [String] = ["K7QX2M4A", "3", "1"], id: Int64? = nil) -> LogEntry {
+        LogEntry(id: id ?? Int64(at) - Int64(noon) + 1_000_000, at: at, family: security ? "security" : "node", key: key,
+                 args: args, security: security)
     }
 
     private func model(_ d: FakeDevice, protection: String = "secure-enclave") -> TransparencyModel {
@@ -73,6 +75,57 @@ final class TransparencyModelTests: XCTestCase {
         XCTAssertEqual(Set(ids).count, 250)
     }
 
+    /// Events logged while the user scrolls do not shift the next page.
+    func testNextPageFollowsTheEventIdNotThePosition() async {
+        let d = FakeDevice()
+        d.logEntries = (0..<150).map { entry(noon + UInt64(150 - $0)) }
+        let m = model(d)
+        await m.load()
+        XCTAssertEqual(m.days.flatMap(\.rows).count, 100)
+        // Five events arrive at the top, then the user scrolls.
+        d.logEntries.insert(contentsOf: (0..<5).map { entry(noon + 200 + UInt64($0)) }.reversed(), at: 0)
+        await m.loadMore()
+        let ids = m.days.flatMap(\.rows).map(\.id)
+        XCTAssertEqual(ids.count, 150)
+        XCTAssertEqual(Set(ids).count, 150, "a row twice")
+        XCTAssertEqual(ids, ids.sorted(by: >), "a gap or a reordering")
+    }
+
+    /// A clock that went back and forth must not make two groups of one day.
+    func testSameDayIsOneGroupWhateverTheOrder() async {
+        let d = FakeDevice()
+        d.logEntries = [entry(noon, id: 9), entry(noon - 86_400, id: 8), entry(noon + 60, id: 7)]
+        let m = model(d)
+        await m.load()
+        XCTAssertEqual(m.days.count, 2)
+        XCTAssertEqual(Set(m.days.map(\.id)).count, 2)
+        XCTAssertEqual(m.days[0].rows.map(\.id), [9, 7])
+    }
+
+    func testKeyProtectionCopyDoesNotOverclaim() {
+        let enclave = TransparencyModel.dataRows(protection: "secure-enclave").first { $0.id == "key" }
+        XCTAssertEqual(enclave?.detail, "Wrapped by a key that never leaves this iPhone's chip.")
+        let keychain = TransparencyModel.dataRows(protection: "keychain").first { $0.id == "key" }
+        XCTAssertEqual(keychain?.detail, "Kept in the keychain, without the Secure Enclave.")
+        XCTAssertTrue(TransparencyModel.dataRows(protection: "keychain")[0].detail.contains("SQLCipher"))
+    }
+
+    func testCountsArePlural() {
+        let one = LogText.render(LogEntry(id: 1, at: 0, family: "device", key: "log.history_imported",
+                                          args: ["1"], security: false), locale: Locale(identifier: "en"))
+        let many = LogText.render(LogEntry(id: 1, at: 0, family: "device", key: "log.history_imported",
+                                           args: ["7"], security: false), locale: Locale(identifier: "en"))
+        XCTAssertTrue(one.hasPrefix("1 history message copied"), one)
+        XCTAssertTrue(many.hasPrefix("7 history messages copied"), many)
+    }
+
+    func testReasonsAndTransportAreTranslated() {
+        let text = LogText.render(LogEntry(id: 1, at: 0, family: "packet", key: "log.packet_opened",
+                                           args: ["Sam", "@transport_node", ""], security: false))
+        XCTAssertFalse(text.contains("@"), text)
+        XCTAssertTrue(text.contains("via a node") || text.contains("a node"), text)
+    }
+
     func testDataLocationReflectsProtection() async {
         let enclave = model(FakeDevice(), protection: "secure-enclave")
         await enclave.load()
@@ -95,7 +148,7 @@ final class TransparencyModelTests: XCTestCase {
 
     func testEveryCoreKeyRenders() {
         for key in logKeys() {
-            let text = LogText.render(LogEntry(at: 0, family: "node", key: key, args: ["a", "b", "c", "d"],
+            let text = LogText.render(LogEntry(id: 1, at: 0, family: "node", key: key, args: ["a", "b", "c", "d"],
                                                security: false))
             XCTAssertFalse(text.isEmpty, key)
             XCTAssertNotEqual(text, key)

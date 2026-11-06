@@ -26,7 +26,8 @@ public struct EnclaveKey: KeyWrapper {
 
     public init(accessGroup: String?) { self.accessGroup = accessGroup }
 
-    /// No enclave on the simulator and on old hardware.
+    /// No enclave on old hardware and on Intel simulators (Apple-silicon
+    /// simulators report one).
     public static var isAvailable: Bool { SecureEnclave.isAvailable }
 
     public var hardware: Bool { true }

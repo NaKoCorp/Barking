@@ -6,6 +6,11 @@
 use std::collections::HashMap;
 
 use barking_core::Core;
+use barking_core::core::{
+    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
+    R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
+};
+use barking_core::fragment::{REASON_BAD_HASH, REASON_CONTRADICTORY};
 use barking_core::identity::root::Fingerprint;
 use barking_core::packet::Tier;
 use barking_core::transparency::{AvoidReason, SyncKind, TransparencyEvent};
@@ -16,6 +21,9 @@ use crate::{BarkingError, guard};
 /// One line of the transparency log.
 #[derive(Debug, uniffi::Record)]
 pub struct LogEntry {
+    /// Id of the event in the log: the cursor of the next page
+    /// (`transparency_log`'s `before`).
+    pub id: i64,
     /// Unix seconds.
     pub at: u64,
     /// `session`, `packet`, `device`, `node` or `security`: the icon.
@@ -30,8 +38,14 @@ pub struct LogEntry {
     pub security: bool,
 }
 
-/// Every key `LogEntry::key` can take, one per `TransparencyEvent` variant.
-const KEYS: [&str; 26] = [
+/// Number of variants of `TransparencyEvent`: one more than the last
+/// position `index` gives.
+const VARIANTS: usize = 26;
+
+/// Every key `LogEntry::key` can take, one per `TransparencyEvent` variant,
+/// in the order of `index`. The key of an event is `KEYS[index(event)]`: there
+/// is no other place a key is written.
+const KEYS: [&str; VARIANTS] = [
     "log.session_established",
     "log.packet_sealed",
     "log.packet_opened",
@@ -60,9 +74,43 @@ const KEYS: [&str; 26] = [
     "log.remove_requested",
 ];
 
+/// Position of a variant in `KEYS`. No wildcard: a new variant does not
+/// compile until it has a position here (and `VARIANTS`, `KEYS` follow).
+fn index(e: &TransparencyEvent) -> usize {
+    use TransparencyEvent as E;
+    match e {
+        E::SessionEstablished { .. } => 0,
+        E::PacketSealed { .. } => 1,
+        E::PacketOpened { .. } => 2,
+        E::AckEmitted { .. } => 3,
+        E::AckVerified { .. } => 4,
+        E::DecryptFailed { .. } => 5,
+        E::DuplicateIgnored { .. } => 6,
+        E::ContactKeyChanged { .. } => 7,
+        E::FrameRejected { .. } => 8,
+        E::DeviceLinked { .. } => 9,
+        E::LinkFinished { .. } => 10,
+        E::SyncApplied { .. } => 11,
+        E::SyncSkipped { .. } => 12,
+        E::ContactCardUpdated { .. } => 13,
+        E::HistoryImported { .. } => 14,
+        E::OwnDevicesUpdated { .. } => 15,
+        E::NodeDeposit { .. } => 16,
+        E::NodeFetch { .. } => 17,
+        E::NodeAvoided { .. } => 18,
+        E::SealSkipped { .. } => 19,
+        E::AdminTransferStarted { .. } => 20,
+        E::AdminTransferred { .. } => 21,
+        E::AdminReceived => 22,
+        E::ThisDeviceRemoved { .. } => 23,
+        E::DeviceRemoved { .. } => 24,
+        E::RemoveRequested { .. } => 25,
+    }
+}
+
 /// Every token an arg can take (without its `@`); the app has a text
 /// `log.arg.<token>` for each.
-const TOKENS: [&str; 15] = [
+const TOKENS: &[&str] = &[
     "initiator",
     "responder",
     "post_quantum",
@@ -78,6 +126,22 @@ const TOKENS: [&str; 15] = [
     "node_unreachable",
     "intro_mailbox",
     "daily_mailbox",
+    "transport_node",
+    "transport_file",
+    "transport_other",
+    "reason_unreadable",
+    "reason_unexpected",
+    "reason_undecryptable",
+    "reason_unknown_sender",
+    "reason_ambiguous_sender",
+    "reason_handshake",
+    "reason_bad_content",
+    "reason_id_mismatch",
+    "reason_stale",
+    "reason_id_reused",
+    "reason_bad_hash",
+    "reason_contradictory",
+    "reason_unknown",
 ];
 
 /// Keys of the log, for the app's translation check.
@@ -100,6 +164,36 @@ fn token(t: &str) -> String {
     format!("@{t}")
 }
 
+/// Token of the transport a packet came by (fixed set; anything else is
+/// `transport_other`).
+fn transport_token(t: &str) -> String {
+    token(match t {
+        "node" => "transport_node",
+        "file" => "transport_file",
+        _ => "transport_other",
+    })
+}
+
+/// Token of a fixed reason of the core (a quarantined packet, a rejected
+/// frame). A reason the app does not know is `reason_unknown`.
+fn reason_token(r: &str) -> String {
+    token(match r {
+        R_UNREADABLE => "reason_unreadable",
+        R_UNEXPECTED => "reason_unexpected",
+        R_UNDECRYPTABLE => "reason_undecryptable",
+        R_UNKNOWN_SENDER => "reason_unknown_sender",
+        R_AMBIGUOUS_SENDER => "reason_ambiguous_sender",
+        R_HANDSHAKE => "reason_handshake",
+        R_BAD_CONTENT => "reason_bad_content",
+        R_ID_MISMATCH => "reason_id_mismatch",
+        R_STALE => "reason_stale",
+        R_ID_REUSED => "reason_id_reused",
+        REASON_BAD_HASH => "reason_bad_hash",
+        REASON_CONTRADICTORY => "reason_contradictory",
+        _ => "reason_unknown",
+    })
+}
+
 fn sync_token(k: SyncKind) -> String {
     token(match k {
         SyncKind::Sent => "sync_sent",
@@ -109,17 +203,14 @@ fn sync_token(k: SyncKind) -> String {
     })
 }
 
-/// Family, key and args of an event. `name` gives the name a contact is
+/// Family and args of an event (its key is `KEYS[index(e)]`). `name` gives the name a contact is
 /// shown under.
 ///
 /// No wildcard: a new event variant must get its key here.
-fn parts(
-    e: &TransparencyEvent,
-    name: &dyn Fn(&Fingerprint) -> String,
-) -> (String, String, Vec<String>) {
+fn parts(e: &TransparencyEvent, name: &dyn Fn(&Fingerprint) -> String) -> (String, Vec<String>) {
     use TransparencyEvent as E;
     let n = |v: u32| v.to_string();
-    let (family, key, args): (&str, &str, Vec<String>) = match e {
+    let (family, args): (&str, Vec<String>) = match e {
         E::SessionEstablished {
             contact,
             device,
@@ -127,7 +218,6 @@ fn parts(
             post_quantum,
         } => (
             "session",
-            "log.session_established",
             vec![
                 name(contact),
                 hex4(&device.0),
@@ -147,7 +237,6 @@ fn parts(
             ..
         } => (
             "packet",
-            "log.packet_sealed",
             vec![
                 size.to_string(),
                 token(match tier {
@@ -170,10 +259,9 @@ fn parts(
             ..
         } => (
             "packet",
-            "log.packet_opened",
             vec![
                 name(sender),
-                transport.clone(),
+                transport_token(transport),
                 if *first_contact {
                     token("intro_mailbox")
                 } else {
@@ -181,33 +269,24 @@ fn parts(
                 },
             ],
         ),
-        E::AckEmitted { for_packet } => ("packet", "log.ack_emitted", vec![hex4(&for_packet.0)]),
-        E::AckVerified { for_packet } => ("packet", "log.ack_verified", vec![hex4(&for_packet.0)]),
-        E::DecryptFailed { packet_id, reason } => (
-            "packet",
-            "log.decrypt_failed",
-            vec![hex4(&packet_id.0), reason.clone()],
-        ),
-        E::DuplicateIgnored { packet_id } => {
-            ("packet", "log.duplicate_ignored", vec![hex4(&packet_id.0)])
+        E::AckEmitted { for_packet } => ("packet", vec![hex4(&for_packet.0)]),
+        E::AckVerified { for_packet } => ("packet", vec![hex4(&for_packet.0)]),
+        E::DecryptFailed { packet_id, reason } => {
+            ("packet", vec![hex4(&packet_id.0), reason_token(reason)])
         }
+        E::DuplicateIgnored { packet_id } => ("packet", vec![hex4(&packet_id.0)]),
         E::ContactKeyChanged { alias, old, new } => (
             "security",
-            "log.contact_key_changed",
             vec![alias.clone(), old.to_string(), new.to_string()],
         ),
-        E::FrameRejected { reason } => ("packet", "log.frame_rejected", vec![reason.clone()]),
-        E::DeviceLinked { name, .. } => ("device", "log.device_linked", vec![name.clone()]),
+        E::FrameRejected { reason } => ("packet", vec![reason_token(reason)]),
+        E::DeviceLinked { name, .. } => ("device", vec![name.clone()]),
         E::LinkFinished {
             device_count,
             contacts,
-        } => (
-            "device",
-            "log.link_finished",
-            vec![n(*device_count), n(*contacts)],
-        ),
-        E::SyncApplied { kind } => ("device", "log.sync_applied", vec![sync_token(*kind)]),
-        E::SyncSkipped { kind } => ("device", "log.sync_skipped", vec![sync_token(*kind)]),
+        } => ("device", vec![n(*device_count), n(*contacts)]),
+        E::SyncApplied { kind } => ("device", vec![sync_token(*kind)]),
+        E::SyncSkipped { kind } => ("device", vec![sync_token(*kind)]),
         E::ContactCardUpdated {
             contact,
             alias,
@@ -215,7 +294,6 @@ fn parts(
             removed,
         } => (
             "device",
-            "log.contact_card_updated",
             vec![
                 if alias.is_empty() {
                     name(contact)
@@ -226,33 +304,20 @@ fn parts(
                 n(*removed),
             ],
         ),
-        E::HistoryImported { count } => ("device", "log.history_imported", vec![n(*count)]),
-        E::OwnDevicesUpdated { added, removed } => (
-            "device",
-            "log.own_devices_updated",
-            vec![n(*added), n(*removed)],
-        ),
+        E::HistoryImported { count } => ("device", vec![n(*count)]),
+        E::OwnDevicesUpdated { added, removed } => ("device", vec![n(*added), n(*removed)]),
         E::NodeDeposit {
             node,
             count,
             refused,
-        } => (
-            "node",
-            "log.node_deposit",
-            vec![node.clone(), n(*count), n(*refused)],
-        ),
+        } => ("node", vec![node.clone(), n(*count), n(*refused)]),
         E::NodeFetch {
             node,
             mailboxes,
             received,
-        } => (
-            "node",
-            "log.node_fetch",
-            vec![node.clone(), n(*mailboxes), n(*received)],
-        ),
+        } => ("node", vec![node.clone(), n(*mailboxes), n(*received)]),
         E::NodeAvoided { node, reason } => (
             "node",
-            "log.node_avoided",
             vec![
                 node.clone(),
                 token(match reason {
@@ -261,53 +326,33 @@ fn parts(
                 }),
             ],
         ),
-        E::SealSkipped { contact, device } => (
-            "session",
-            "log.seal_skipped",
-            vec![name(contact), hex4(&device.0)],
-        ),
-        E::AdminTransferStarted { device } => (
-            "device",
-            "log.admin_transfer_started",
-            vec![hex4(&device.0)],
-        ),
-        E::AdminTransferred { device } => {
-            ("device", "log.admin_transferred", vec![hex4(&device.0)])
-        }
-        E::AdminReceived => ("device", "log.admin_received", vec![]),
-        E::ThisDeviceRemoved { version } => (
-            "security",
-            "log.this_device_removed",
-            vec![version.to_string()],
-        ),
-        E::DeviceRemoved { device, name } => (
-            "device",
-            "log.device_removed",
-            vec![name.clone(), hex4(&device.0)],
-        ),
-        E::RemoveRequested { device, name } => (
-            "device",
-            "log.remove_requested",
-            vec![name.clone(), hex4(&device.0)],
-        ),
+        E::SealSkipped { contact, device } => ("session", vec![name(contact), hex4(&device.0)]),
+        E::AdminTransferStarted { device } => ("device", vec![hex4(&device.0)]),
+        E::AdminTransferred { device } => ("device", vec![hex4(&device.0)]),
+        E::AdminReceived => ("device", vec![]),
+        E::ThisDeviceRemoved { version } => ("security", vec![version.to_string()]),
+        E::DeviceRemoved { device, name } => ("device", vec![name.clone(), hex4(&device.0)]),
+        E::RemoveRequested { device, name } => ("device", vec![name.clone(), hex4(&device.0)]),
     };
-    (family.to_owned(), key.to_owned(), args)
+    (family.to_owned(), args)
 }
 
 /// Entry of an event, with contacts shown under their alias, otherwise their
 /// display name, otherwise their fingerprint.
 pub(crate) fn entry_of(
+    id: i64,
     at: u64,
     e: &TransparencyEvent,
     names: &HashMap<Fingerprint, String>,
 ) -> LogEntry {
-    let (family, key, args) = parts(e, &|fp| {
+    let (family, args) = parts(e, &|fp| {
         names.get(fp).cloned().unwrap_or_else(|| fp.to_string())
     });
     LogEntry {
+        id,
         at,
         family,
-        key,
+        key: KEYS[index(e)].to_owned(),
         args,
         security: e.is_security(),
     }
@@ -326,21 +371,24 @@ fn contact_names(core: &Core) -> Result<HashMap<Fingerprint, String>, BarkingErr
 
 #[uniffi::export]
 impl Device {
-    /// A page of the log, newest first: `limit` entries after the first
-    /// `offset`. `security_only` keeps the security class only.
+    /// A page of the log, newest first: up to `limit` entries older than
+    /// the entry whose id is `before` (none: from the newest). The next
+    /// page's `before` is the last entry's `id`, so events appended or purged
+    /// between two pages neither repeat nor skip an entry. `security_only`
+    /// keeps the security class only.
     pub fn transparency_log(
         &self,
         limit: u32,
-        offset: u32,
+        before: Option<i64>,
         security_only: bool,
     ) -> Result<Vec<LogEntry>, BarkingError> {
         guard(|| {
             self.with_core(|core| {
                 let names = contact_names(core)?;
                 Ok(core
-                    .transparency_page(limit as usize, offset as usize, security_only)?
+                    .transparency_page(limit as usize, before, security_only)?
                     .iter()
-                    .map(|(at, e)| entry_of(*at, e, &names))
+                    .map(|(id, at, e)| entry_of(*id, *at, e, &names))
                     .collect())
             })
         })
@@ -359,40 +407,6 @@ mod tests {
 
     fn fp(b: u8) -> Fingerprint {
         Fingerprint([b; 32])
-    }
-
-    /// Position of a variant: no wildcard, so a variant added without a
-    /// sample here stops this test from compiling.
-    fn index(e: &TransparencyEvent) -> usize {
-        use TransparencyEvent as E;
-        match e {
-            E::SessionEstablished { .. } => 0,
-            E::PacketSealed { .. } => 1,
-            E::PacketOpened { .. } => 2,
-            E::AckEmitted { .. } => 3,
-            E::AckVerified { .. } => 4,
-            E::DecryptFailed { .. } => 5,
-            E::DuplicateIgnored { .. } => 6,
-            E::ContactKeyChanged { .. } => 7,
-            E::FrameRejected { .. } => 8,
-            E::DeviceLinked { .. } => 9,
-            E::LinkFinished { .. } => 10,
-            E::SyncApplied { .. } => 11,
-            E::SyncSkipped { .. } => 12,
-            E::ContactCardUpdated { .. } => 13,
-            E::HistoryImported { .. } => 14,
-            E::OwnDevicesUpdated { .. } => 15,
-            E::NodeDeposit { .. } => 16,
-            E::NodeFetch { .. } => 17,
-            E::NodeAvoided { .. } => 18,
-            E::SealSkipped { .. } => 19,
-            E::AdminTransferStarted { .. } => 20,
-            E::AdminTransferred { .. } => 21,
-            E::AdminReceived => 22,
-            E::ThisDeviceRemoved { .. } => 23,
-            E::DeviceRemoved { .. } => 24,
-            E::RemoveRequested { .. } => 25,
-        }
     }
 
     fn samples() -> Vec<TransparencyEvent> {
@@ -500,14 +514,19 @@ mod tests {
         let keys = log_keys();
         // One sample and one key per variant, no duplicates.
         let indexes: HashSet<usize> = samples.iter().map(index).collect();
-        assert_eq!(indexes, (0..keys.len()).collect::<HashSet<_>>());
+        assert_eq!(VARIANTS, KEYS.len());
+        assert_eq!(indexes, (0..VARIANTS).collect::<HashSet<_>>());
+        // The key of an event is the one at its position.
+        for e in &samples {
+            assert_eq!(entry_of(1, 1, e, &HashMap::new()).key, KEYS[index(e)]);
+        }
         assert_eq!(samples.len(), keys.len());
         assert_eq!(keys.iter().collect::<HashSet<_>>().len(), keys.len());
         let tokens: HashSet<String> = log_arg_tokens().into_iter().map(|t| token(&t)).collect();
         let names = HashMap::from([(fp(1), "Alice".to_owned())]);
         let mut seen = HashSet::new();
         for e in &samples {
-            let entry = entry_of(10, e, &names);
+            let entry = entry_of(1, 10, e, &names);
             assert!(keys.contains(&entry.key), "{} not listed", entry.key);
             assert!(seen.insert(entry.key.clone()), "{} twice", entry.key);
             assert!(
@@ -525,11 +544,50 @@ mod tests {
     #[test]
     fn args_carry_names_and_no_addresses() {
         let names = HashMap::from([(fp(1), "Alice".to_owned())]);
-        let e = entry_of(1, &samples()[0], &names);
+        let e = entry_of(1, 1, &samples()[0], &names);
         assert_eq!(e.args[0], "Alice");
         assert_eq!(e.args[1], "02020202");
         // Unknown contact: the fingerprint it is known by.
-        let e = entry_of(1, &samples()[2], &names);
+        let e = entry_of(1, 1, &samples()[2], &names);
         assert_eq!(e.args[0], fp(3).to_string());
+    }
+
+    #[test]
+    fn fixed_reasons_and_transports_are_tokens() {
+        let tokens: HashSet<String> = log_arg_tokens().into_iter().map(|t| token(&t)).collect();
+        for r in [
+            R_UNREADABLE,
+            R_UNEXPECTED,
+            R_UNDECRYPTABLE,
+            R_UNKNOWN_SENDER,
+            R_AMBIGUOUS_SENDER,
+            R_HANDSHAKE,
+            R_BAD_CONTENT,
+            R_ID_MISMATCH,
+            R_STALE,
+            R_ID_REUSED,
+            REASON_BAD_HASH,
+            REASON_CONTRADICTORY,
+        ] {
+            let t = reason_token(r);
+            assert!(tokens.contains(&t), "{r}: {t}");
+            assert_ne!(t, "@reason_unknown", "{r} has no token");
+        }
+        assert_eq!(reason_token("something new"), "@reason_unknown");
+        assert_eq!(transport_token("node"), "@transport_node");
+        assert_eq!(transport_token("file"), "@transport_file");
+        assert_eq!(transport_token("carrier pigeon"), "@transport_other");
+        // No English text reaches the args.
+        let names = HashMap::new();
+        let failed = TransparencyEvent::DecryptFailed {
+            packet_id: PacketId([1; 16]),
+            reason: R_STALE.into(),
+        };
+        let e = entry_of(1, 1, &failed, &names);
+        assert_eq!(e.args[1], "@reason_stale");
+        let rejected = TransparencyEvent::FrameRejected {
+            reason: REASON_BAD_HASH.into(),
+        };
+        assert_eq!(entry_of(1, 1, &rejected, &names).args, ["@reason_bad_hash"]);
     }
 }

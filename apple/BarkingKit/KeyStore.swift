@@ -96,7 +96,11 @@ public struct KeyStore: Sendable {
 
     /// `secure-enclave` or `keychain`, for the transparency view.
     public var protection: String {
-        guard wrapper?.hardware == true, (try? entries.get(Self.wrappedAccount)) != nil else { return "keychain" }
+        // A clear `db-key` still beside the wrapped one (interrupted
+        // migration) means the key is not protected by the enclave yet.
+        guard wrapper?.hardware == true,
+              let wrapped = try? entries.get(Self.wrappedAccount), !wrapped.isEmpty,
+              let legacy = try? entries.get(Self.legacyAccount) ?? Data(), legacy.isEmpty else { return "keychain" }
         return "secure-enclave"
     }
 

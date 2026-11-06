@@ -15,20 +15,24 @@ fn transparency_log_pages_and_filters() {
     for i in 0..3 {
         alice.send_text(fb.clone(), format!("hello {i}")).unwrap();
     }
-    let all = alice.transparency_log(100, 0, false).unwrap();
+    let all = alice.transparency_log(100, None, false).unwrap();
     assert!(all.len() >= 4, "{all:?}");
     // Newest first.
     assert!(all.windows(2).all(|w| w[0].at >= w[1].at));
     let keys = barking_ffi::log_keys();
     assert!(all.iter().all(|e| keys.contains(&e.key)));
     // Paging continues where the page before stopped.
-    let first = alice.transparency_log(2, 0, false).unwrap();
-    let second = alice.transparency_log(2, 2, false).unwrap();
+    let first = alice.transparency_log(2, None, false).unwrap();
     assert_eq!(first.len(), 2);
-    assert_eq!(first[0].key, all[0].key);
-    assert_eq!(second[0].key, all[2].key);
+    assert_eq!(first[0].id, all[0].id);
+    // An event arrives between the pages: the next page neither repeats nor
+    // skips an entry.
+    alice.send_text(fb.clone(), "one more".into()).unwrap();
+    let second = alice.transparency_log(2, Some(first[1].id), false).unwrap();
+    assert_eq!(second[0].id, all[2].id);
+    assert!(second.iter().all(|e| e.id < first[1].id));
     // Security only: the session, named by the contact's alias or name.
-    let sec = alice.transparency_log(100, 0, true).unwrap();
+    let sec = alice.transparency_log(100, None, true).unwrap();
     assert!(!sec.is_empty() && sec.len() < all.len());
     assert!(sec.iter().all(|e| e.security));
     let session = sec
