@@ -1,0 +1,9 @@
+[profile.default]
+# Fast loop: everything except the binaries that start real nodes (QUIC) or
+# that take more than 2 s (measured, spec §4.7). `--profile slow` runs all.
+default-filter = "not (binary_id(barking-node::network) | binary_id(barking-node::dht) | binary_id(barking-node::wake) | binary_id(barking-node::cli) | binary_id(barking-net::network) | binary_id(barking-ffi::network) | binary_id(barking-ffi::route) | binary_id(barking-ffi::unread) | binary_id(barking-ffi::identity) | binary_id(barking-dht::sim) | binary_id(barking-cli::cli))"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.slow]
+default-filter = "all()"
+slow-timeout = { period = "60s", terminate-after = 4 }

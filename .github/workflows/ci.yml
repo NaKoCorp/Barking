@@ -89,7 +89,7 @@ jobs:
             "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$VERSION/$archive"
           echo "$SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$archive" -C "$HOME/.cargo/bin"
-      - run: scripts/check.sh
+      - run: scripts/check.sh --full
 
   # Security checks of a public repository (scripts/security-check.sh, the
   # same ones as the git hooks): credential files, gitleaks, shellcheck, trivy
