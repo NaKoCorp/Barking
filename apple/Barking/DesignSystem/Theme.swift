@@ -35,6 +35,9 @@ extension Color {
     static let focusRing = Color("focusRing")
     static let terminalBg = Color("terminalBg")
     static let terminalFg = Color("terminalFg")
+    // UI review B3: the logo tile's 145° gradient (lock-screen samoyed).
+    static let logoTileTop = Color("logoTileTop")
+    static let logoTileBottom = Color("logoTileBottom")
 }
 
 /// Corner radii of the design system.

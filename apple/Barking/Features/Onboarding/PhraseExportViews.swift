@@ -75,7 +75,7 @@ struct PhrasePDFSheet: View {
                         suggestedRow
                     } else {
                         BarkingTextField("Password", text: $password, error: passwordError, secure: true,
-                                         trailing: .reveal, identifier: "pdf.password")
+                                         trailing: .reveal, identifier: "pdf.password", onSubmit: refuseIfNeeded)
                             .textContentType(.newPassword)
                         StrengthMeter(verdict: PhraseExport.verdict(password))
                     }
@@ -92,7 +92,7 @@ struct PhrasePDFSheet: View {
                 // The suggestion needs no second entry: it is shown and can be copied.
                 if !usingSuggestion {
                     BarkingTextField("Same password again", text: $confirm, error: confirmError, secure: true,
-                                     identifier: "pdf.confirm")
+                                     identifier: "pdf.confirm", onSubmit: refuseIfNeeded)
                         .textContentType(.newPassword)
                 }
                 Text("Keep the password apart from the file, in your password manager or on paper.")
@@ -121,6 +121,12 @@ struct PhrasePDFSheet: View {
                 dismiss()
             }
         }
+    }
+
+    /// Return on a password the gate refuses: an error haptic (U-25), on
+    /// top of the line that says why.
+    private func refuseIfNeeded() {
+        if !password.isEmpty, problem != nil { Haptic.error.play() }
     }
 
     /// Too short or too weak, said under the password once one is typed.

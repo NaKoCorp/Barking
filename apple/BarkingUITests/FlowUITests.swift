@@ -11,6 +11,17 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Recovery phrase not confirmed"].exists)
     }
 
+    /// A field's footer is its VoiceOver hint, not a second element read
+    /// again after the field (UI review B3 carry).
+    func testFieldFooterIsReadOnce() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        app.buttons["Create my identity"].firstMatch.tap()
+        XCTAssertTrue(app.textFields["create.name"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Your name travels in your contact card. No phone number, no email."].exists)
+        XCTAssertFalse(app.staticTexts["Shown on your other devices, and to your contacts in your card."].exists)
+    }
+
     func testLaterKeepsTheBanner() throws {
         let app = XCUIApplication.fresh()
         app.launch()
@@ -211,7 +222,8 @@ final class PhraseExportUITests: XCTestCase {
         let confirm = app.secureTextFields["pdf.confirm"]
         confirm.tap()
         confirm.typeText("password1234")
-        XCTAssertTrue(app.staticTexts["Too easy to guess: use the suggestion or several random words."].exists)
+        // The error line is the field's VoiceOver hint (read once, UI review
+        // B3), which XCUITest cannot read; the gate is what this checks.
         XCTAssertFalse(app.buttons["pdf.create"].isEnabled)
         app.buttons["pdf.suggest"].tap()
         XCTAssertTrue(app.buttons["pdf.create"].isEnabled)
@@ -238,6 +250,20 @@ final class SecurityUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [on], timeout: 5), .completed)
     }
 
+    /// UI review B3: a tap does nothing, a 2 s hold opens the confirmation.
+    func testEraseNeedsATwoSecondHold() throws {
+        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
+        app.launch()
+        try onboard(app)
+        openSecurity(app)
+        let erase = app.buttons["security.erase"]
+        XCTAssertTrue(erase.waitForExistence(timeout: 5))
+        erase.tap()
+        XCTAssertFalse(app.buttons["Erase"].waitForExistence(timeout: 1))
+        erase.press(forDuration: 2.1)
+        XCTAssertTrue(app.buttons["Erase"].waitForExistence(timeout: 3))
+    }
+
     func testEmergencyWipeReturnsToWelcome() throws {
         let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
         app.launch()
@@ -248,7 +274,7 @@ final class SecurityUITests: XCTestCase {
         // A tap is not enough.
         erase.tap()
         XCTAssertFalse(app.buttons["Erase"].waitForExistence(timeout: 1))
-        erase.press(forDuration: 2.5)
+        erase.press(forDuration: 2.1)
         let warning = app.staticTexts.matching(NSPredicate(
             format: "label BEGINSWITH %@", "Everything on this iPhone will be erased.")).firstMatch
         XCTAssertTrue(warning.waitForExistence(timeout: 5))
@@ -284,7 +310,7 @@ final class SecurityUITests: XCTestCase {
         XCUIDevice.shared.press(.home)
         app.activate()
         XCTAssertTrue(app.staticTexts["Barking is locked"].waitForExistence(timeout: 10))
-        app.buttons["lock.erase"].press(forDuration: 2.5)
+        app.buttons["lock.erase"].press(forDuration: 2.1)
         app.buttons["Erase"].tap()
         XCTAssertTrue(app.buttons["Create my identity"].waitForExistence(timeout: 10))
     }
@@ -327,5 +353,53 @@ final class SecurityUITests: XCTestCase {
         app.activate()
         XCTAssertTrue(app.switches["security.lock"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.staticTexts["Barking is locked"].exists)
+    }
+}
+
+@MainActor
+final class SafetyCodeUITests: XCTestCase {
+    override func setUp() { continueAfterFailure = false }
+
+    /// Onboards, adds Sam from a link and opens Sam's safety code.
+    private func openSafetyCode() throws -> XCUIApplication {
+        let app = XCUIApplication.fresh(extra: ["-BarkingUITestOpenCard", samCard])
+        app.launch()
+        try onboard(app)
+        XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
+        app.buttons["Add"].tap()
+        app.staticTexts["Sam"].firstMatch.tap()
+        XCTAssertTrue(app.textFields["Message"].waitForExistence(timeout: 5))
+        app.staticTexts["Sam"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["The numbers match"].waitForExistence(timeout: 5))
+        return app
+    }
+
+    /// U-21: a match says "Verified", then goes back to the conversation.
+    func testMatchSaysVerifiedThenGoesBack() throws {
+        let app = try openSafetyCode()
+        app.buttons["The numbers match"].tap()
+        XCTAssertTrue(app.staticTexts["Verified"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.textFields["Message"].waitForExistence(timeout: 5))
+    }
+
+    /// U-21: a mismatch opens a sheet that says what to do, in true words.
+    func testMismatchOpensTheAdvice() throws {
+        let app = try openSafetyCode()
+        app.buttons["They don't match"].tap()
+        XCTAssertTrue(app.staticTexts["Don't send anything sensitive yet. Compare again in person or on a call you trust."]
+            .waitForExistence(timeout: 3))
+        app.buttons["Close"].tap()
+        XCTAssertTrue(app.staticTexts["The numbers do not match"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["Close"].exists)
+    }
+
+    /// U-2: Delete is an outlined danger button in its own zone, and asks first.
+    func testDeleteIsInTheDangerZone() throws {
+        let app = try openSafetyCode()
+        let delete = app.buttons["contact.delete"]
+        for _ in 0..<5 where !delete.isHittable { app.swipeUp() }
+        XCTAssertTrue(delete.isHittable)
+        delete.tap()
+        XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 3))
     }
 }

@@ -1,7 +1,8 @@
 import BarkingKit
 import SwiftUI
 
-/// Screen 6 of the mockup, plus renaming and deleting the contact.
+/// Screen 6 of the mockup, plus renaming and deleting the contact. Three
+/// parts (UI review U-21): Verify, Contact, and a danger zone.
 struct SafetyCodeView: View {
     let core: CoreService
     @State private var model: ContactModel
@@ -11,6 +12,7 @@ struct SafetyCodeView: View {
     /// Set once the contact is deleted: leaving then saves nothing.
     @State private var deleted = false
     @State private var confirmDelete = false
+    @State private var showsMismatch = false
     @Environment(\.dismiss) private var dismiss
 
     init(core: CoreService, contact: String) {
@@ -19,40 +21,17 @@ struct SafetyCodeView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+        Group {
+            VStack(alignment: .leading, spacing: Space.s3) {
                 Avatar(name: model.name, fingerprint: model.contact, size: 64)
                 ScreenTitle("Compare with \(model.name)", size: 22)
                 Text("Read the numbers aloud, in person or on a call you trust. If they match, nobody sits between you.")
-                    .font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
-                CodeGrid(groups: model.groups)
-                HStack {
-                    Rectangle().fill(Color.border).frame(height: 1)
-                    Text("fingerprint").font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
-                    Rectangle().fill(Color.border).frame(height: 1)
-                }
-                FingerprintText(model.contact).frame(maxWidth: .infinity)
-                Text("The same code shows on all your linked devices: verifying here is enough.")
-                    .font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(Color.fgSoft)
-                if model.justVerified {
-                    HStack {
-                        Text("✓ Contact marked as verified").foregroundStyle(Color.ok)
-                        Spacer()
-                        Button("Undo") { Task { await model.undo() } }.foregroundStyle(Color.accent)
-                    }
-                    .padding(12).background(Color.okBg, in: .rect(cornerRadius: Radius.chip))
-                } else if model.verified {
-                    Text("✓ verified · safety code matched").foregroundStyle(Color.ok)
-                    SecondaryButton("Remove the verified mark") { Task { await model.undo() } }
-                } else {
-                    PrimaryButton("The numbers match") { Task { await model.match() } }
-                    SecondaryButton("They don't match") { model.mismatch() }
-                }
-                if model.mismatched {
-                    Banner(kind: .danger, title: "Do not trust this contact until you meet")
-                }
-                if !model.devices.isEmpty { devicesSection }
-                Divider().padding(.vertical, 8)
+                    .font(.bBody).foregroundStyle(Color.fgMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            verifySection
+            VStack(alignment: .leading, spacing: Space.s2) {
+                SectionLabel("Contact")
                 BarkingTextField("Alias", text: $aliasDraft, error: aliasFailed ? "Not saved. Try again." : nil,
                                  identifier: "contact.alias") { Task { await saveAlias() } }
                 // SwiftUI has no "Save" key; Return saves, and so does leaving.
@@ -66,18 +45,29 @@ struct SafetyCodeView: View {
                     }
                     .foregroundStyle(Color.ok)
                 }
-                Button(role: .destructive) { confirmDelete = true } label: {
-                    Text("Delete this contact").frame(maxWidth: .infinity, minHeight: 44)
+            }
+            if !model.devices.isEmpty { devicesSection }
+            DangerZone {
+                DangerButton("Delete this contact", hint: "The history is kept.", identifier: "contact.delete") {
+                    confirmDelete = true
                 }
             }
-            .padding(24)
         }
-        .background(Color.surface)
+        .barkingScreen()
         // Kept: with an empty title iOS 26 draws no bar behind the back button,
         // and the scrolled content runs under the status bar unblurred.
         .navigationTitle(Text("Safety code"))
         .toolbarTitleDisplayMode(.inline)
         .task { await model.load(); aliasDraft = model.alias }
+        // A match is said (banner, haptic, VoiceOver), then the screen goes
+        // back to the conversation; the mark can be removed from here later.
+        .task(id: model.justVerified) {
+            guard model.justVerified else { return }
+            Haptic.success.play()
+            AccessibilityNotification.Announcement(String(localized: "Verified")).post()
+            try? await Task.sleep(for: .seconds(UIAccessibility.isVoiceOverRunning ? 3 : 1.5))
+            if !Task.isCancelled { dismiss() }
+        }
         // Back without Return still keeps a changed alias.
         .onDisappear {
             if !deleted, aliasDraft.trimmingCharacters(in: .whitespaces) != model.alias {
@@ -88,6 +78,78 @@ struct SafetyCodeView: View {
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) { deleted = true; Task { await model.delete(); dismiss() } }
         }
+        .sheet(isPresented: $showsMismatch) { MismatchSheet() }
+    }
+
+    /// The numbers, the fingerprint, and what the person found.
+    private var verifySection: some View {
+        VStack(alignment: .leading, spacing: Space.s3) {
+            SectionLabel("Verify")
+            CodeGrid(groups: model.groups)
+            HStack {
+                Rectangle().fill(Color.border).frame(height: 1)
+                Text("fingerprint").font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
+                Rectangle().fill(Color.border).frame(height: 1)
+            }
+            FingerprintText(model.contact).frame(maxWidth: .infinity)
+            Text("The same code shows on all your linked devices: verifying here is enough.")
+                .font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(Color.fgSoft)
+                .fixedSize(horizontal: false, vertical: true)
+            if model.justVerified {
+                HStack(spacing: Space.s2) {
+                    Text(verbatim: "✓").font(.bSymbol(15, relativeTo: .subheadline, weight: .bold))
+                        .accessibilityHidden(true)
+                    Text("Verified").font(.bBody.weight(.semibold))
+                }
+                .foregroundStyle(Color.ok)
+                .padding(Space.s3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.okBg, in: .rect(cornerRadius: Radius.chip))
+                .accessibilityElement(children: .combine)
+            } else if model.verified {
+                Text("✓ verified · safety code matched").font(.bBody).foregroundStyle(Color.ok)
+                SecondaryButton("Remove the verified mark") { Task { await model.undo() } }
+            } else {
+                if model.mismatched {
+                    Banner(kind: .danger, title: "The numbers do not match")
+                }
+                PrimaryButton("The numbers match") { Task { await model.match() } }
+                SecondaryButton("They don't match") {
+                    model.mismatch()
+                    showsMismatch = true
+                }
+            }
+        }
+    }
+}
+
+/// "They don't match": what to do now, in words the core backs (nothing is
+/// blocked; the person decides). One dismiss, in the toolbar.
+private struct MismatchSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var size
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                HStack(alignment: .firstTextBaseline, spacing: Space.s2) {
+                    Text(verbatim: "✗").font(.bSymbol(20, relativeTo: .title3, weight: .bold))
+                        .foregroundStyle(Color.danger)
+                        .accessibilityHidden(true)
+                    ScreenTitle("The numbers do not match", size: 22)
+                }
+                Text("Don't send anything sensitive yet. Compare again in person or on a call you trust.")
+                    .font(.bBodyLarge).foregroundStyle(Color.fg)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .barkingScreen()
+            .navigationTitle(Text("Safety code"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
+        }
+        // At AX sizes the copy needs the whole height.
+        .presentationDetents(size.isAccessibilitySize ? [.large] : [.medium, .large])
+        .presentationBackground(Color.surface)
     }
 }
 
@@ -118,6 +180,5 @@ extension SafetyCodeView {
                 .accessibilityElement(children: .combine)
             }
         }
-        .padding(.top, 8)
     }
 }

@@ -43,7 +43,6 @@
 "Delete this contact? The history is kept." = "Supprimer ce contact ? L’historique est conservé.";
 "Development" = "Développement";
 "Device name" = "Nom de l’appareil";
-"Do not trust this contact until you meet" = "Ne vous fiez pas à ce contact avant de vous voir";
 "End-to-end encrypted, post-quantum" = "Chiffré de bout en bout, post-quantique";
 "English" = "English";
 "Fingerprint" = "Empreinte";
@@ -133,7 +132,6 @@
 "This offer was already used. Start again." = "Cette offre a déjà servi. Recommencez.";
 "This relay could not be added." = "Ce relais n’a pas pu être ajouté.";
 "Transfer encrypted history" = "Transférer l’historique chiffré";
-"Undo" = "Annuler";
 "Unreachable" = "Injoignable";
 "Valid for 10 minutes and usable once." = "Valable 10 minutes, utilisable une seule fois.";
 "Valid for 10 minutes and usable once. Hand the file to the new device over a channel you control." = "Valable 10 minutes, utilisable une seule fois. Transmettez le fichier au nouvel appareil par un canal que vous contrôlez.";
@@ -164,7 +162,6 @@
 "welcome" = "bienvenue";
 "word" = "mot";
 "⚠︎ not sent — tap to retry" = "⚠︎ non envoyé — touchez pour réessayer";
-"✓ Contact marked as verified" = "✓ Contact marqué comme vérifié";
 "✓ verified · safety code matched" = "✓ vérifié · code identique";
 "Barking could not open your data" = "Barking n’a pas pu ouvrir vos données";
 "Your data is safe. Unlock the phone and try again." = "Vos données sont intactes. Déverrouillez le téléphone et réessayez.";
@@ -327,3 +324,11 @@
 "The camera is not available. Linking needs it to scan your other device's code." = "La caméra n’est pas disponible. Elle est nécessaire pour scanner le code de votre autre appareil.";
 "Address" = "Adresse";
 "Choose a password to continue." = "Choisissez un mot de passe pour continuer.";
+
+/* UI review B3: safety code, danger zones, hold to confirm */
+"Verify" = "Vérifier";
+"Verified" = "Vérifié";
+"The numbers do not match" = "Les chiffres ne correspondent pas";
+"Don't send anything sensitive yet. Compare again in person or on a call you trust." = "N’envoyez encore rien de sensible. Comparez à nouveau en personne ou lors d’un appel de confiance.";
+"The history is kept." = "L’historique est conservé.";
+"Asks for confirmation first." = "Demande d’abord une confirmation.";

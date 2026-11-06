@@ -82,19 +82,14 @@ struct SecuritySettingsView: View {
                     .font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(Color.fgMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            VStack(alignment: .leading, spacing: Space.s2) {
-                SectionLabel("Erase Barking")
-                FormCard {
-                    VStack(spacing: Space.s3) {
-                        Text("Everything on this iPhone will be erased. Your contacts will not be told. To get your identity back, you will need the 24-word phrase.")
-                            .font(.bBody).foregroundStyle(Color.fgMuted)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        EraseBarkingControl(identifier: "security.erase")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .padding(FormRowMetrics.inset)
-                }
+            // On no card, 32 pt below the lock (U-2).
+            DangerZone("Erase Barking") {
+                Text("Everything on this iPhone will be erased. Your contacts will not be told. To get your identity back, you will need the 24-word phrase.")
+                    .font(.bBody).foregroundStyle(Color.fgMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, Space.s1)
+                EraseBarkingControl(identifier: "security.erase")
             }
         }
         .barkingScreen()
@@ -102,9 +97,10 @@ struct SecuritySettingsView: View {
     }
 }
 
-/// "Erase Barking": a tap does nothing, a 2 s press then a destructive
-/// confirmation does (spec §6.2). No Face ID: the same control serves the lock
-/// screen. A wipe that fails stays here, never on the welcome screen.
+/// "Erase Barking": a tap does nothing, a 2 s hold then a destructive
+/// confirmation does (spec §6.2, UI review U-8); VoiceOver opens the same
+/// confirmation with a double-tap. No Face ID: the same control serves the
+/// lock screen. A wipe that fails stays here, never on the welcome screen.
 struct EraseBarkingControl: View {
     let identifier: String
     @Environment(AppRouter.self) private var router
@@ -113,24 +109,12 @@ struct EraseBarkingControl: View {
     @State private var erasing = false
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: Space.s2) {
             if failed {
                 Banner(kind: .danger, title: "Barking could not erase everything. Try again.")
             }
-            Text("Erase Barking")
-                .font(.bButton)
-                .foregroundStyle(Color.danger)
-                .frame(minHeight: 44)
-                .padding(.horizontal, 16)
-                .contentShape(.rect)
-                .onLongPressGesture(minimumDuration: 2) { confirming = true }
-                .accessibilityAddTraits(.isButton)
-                .accessibilityHint(Text("Press and hold for 2 seconds"))
-                .accessibilityIdentifier(identifier)
-            Text("Press and hold for 2 seconds")
-                .font(.bMeta).foregroundStyle(Color.fgMuted)
-                .multilineTextAlignment(.center)
-                .accessibilityHidden(true)
+            HoldToConfirmButton("Erase Barking", hint: "Press and hold for 2 seconds",
+                                identifier: identifier) { confirming = true }
         }
         .disabled(erasing)
         .confirmationDialog("Erase", isPresented: $confirming, titleVisibility: .visible) {

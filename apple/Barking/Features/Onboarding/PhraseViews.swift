@@ -30,7 +30,9 @@ struct CreateIdentityView: View {
         .ctaBar {
             PrimaryButton("Create my identity", enabled: model.canCreate, isLoading: model.busy, reason: reason) {
                 Task {
-                    if await model.create() != nil { onCreated() }
+                    guard await model.create() != nil else { return }
+                    Haptic.success.play()
+                    onCreated()
                 }
             }
         }
@@ -134,6 +136,9 @@ struct PhraseConfirmView: View {
     @Bindable var model: OnboardingModel
     let onDone: () -> Void
 
+    /// nil until a word is picked on every row, then whether they are right.
+    private var quizOutcome: Bool? { model.answers.allSatisfy { $0 != nil } ? model.quizPassed : nil }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -175,6 +180,10 @@ struct PhraseConfirmView: View {
             .padding(24)
         }
         .background(Color.surfaceWelcome)
+        // Once the three words are picked: right or wrong, felt (U-25).
+        .sensoryFeedback(trigger: quizOutcome) { _, now in
+            now.map { $0 ? Haptic.success.feedback : Haptic.error.feedback }
+        }
         .onAppear { if model.quiz == nil { model.startQuiz() } }
     }
 }

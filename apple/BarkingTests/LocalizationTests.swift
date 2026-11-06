@@ -119,4 +119,20 @@ final class LocalizationTests: XCTestCase {
             XCTAssertNil(fr[unused], "unused French string \(unused)")
         }
     }
+
+    /// UI review B3: the safety-code flow, the danger zones and the hold.
+    func testSafetyStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        for key in ["Verify", "Verified", "The numbers do not match",
+                    "Don't send anything sensitive yet. Compare again in person or on a call you trust.",
+                    "The history is kept.", "Asks for confirmation first."] {
+            XCTAssertNotNil(fr[key], "missing French for \(key)")
+        }
+        XCTAssertEqual(fr["Don't send anything sensitive yet. Compare again in person or on a call you trust."] as? String,
+                       "N’envoyez encore rien de sensible. Comparez à nouveau en personne ou lors d’un appel de confiance.")
+        // The mismatch is a sheet now, and the verified banner has no Undo.
+        for unused in ["Do not trust this contact until you meet", "✓ Contact marked as verified"] {
+            XCTAssertNil(fr[unused], "unused French string \(unused)")
+        }
+    }
 }

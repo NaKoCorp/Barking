@@ -20,10 +20,10 @@ struct RemovedBanner: View {
                     if wipeFailed {
                         Banner(kind: .danger, title: "Barking could not erase everything. Try again.")
                     }
-                    Button(wipeFailed ? "Try again" : "Reset this device", role: .destructive) {
+                    // Outlined in `danger`, never system red (U-2); the first tap asks.
+                    DangerButton(wipeFailed ? "Try again" : "Reset this device") {
                         if wipeFailed { Task { await reset() } } else { confirming = true }
                     }
-                    .frame(minHeight: 44)
                 }
                 .confirmationDialog("Reset this device", isPresented: $confirming, titleVisibility: .visible) {
                     Button("Reset this device", role: .destructive) { Task { await reset() } }

@@ -199,10 +199,10 @@ struct DevicesView: View {
                 Text("Only your admin device can link new ones").font(.bBody).foregroundStyle(Color.fgMuted)
             }
             if let me = model.devices.first(where: \.thisDevice), model.canDisconnect(me) {
-                // B3 (U-2) moves this into a danger zone.
-                Button("Disconnect this device", role: .destructive) { startDisconnect() }
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .accessibilityIdentifier("devices.disconnect")
+                // Its own zone, 32 pt below the rest (U-2); it always asks first.
+                DangerZone {
+                    DangerButton("Disconnect this device", identifier: "devices.disconnect") { startDisconnect() }
+                }
             }
         }
         .barkingScreen()

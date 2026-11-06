@@ -81,7 +81,13 @@ struct AddContactView: View {
         }
         .barkingScreen()
         .ctaBar {
-            PrimaryButton("Add") { Task { if await model.add(alias: alias) { onDone() } } }
+            PrimaryButton("Add") {
+                Task {
+                    guard await model.add(alias: alias) else { return }
+                    Haptic.success.play()
+                    onDone()
+                }
+            }
         }
     }
 }

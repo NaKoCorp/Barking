@@ -135,10 +135,13 @@ struct BarkingTextField: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .foregroundStyle(Color.danger)
+                // The field's hint says it: read once, on the field.
+                .accessibilityHidden(true)
             } else if let footer {
                 Text(footer)
                     .font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(Color.fgMuted)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityHidden(true)
             }
         }
     }

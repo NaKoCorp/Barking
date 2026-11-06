@@ -159,11 +159,16 @@ struct SecondaryButton: View {
 struct DangerButton: View {
     let title: LocalizedStringKey
     let hint: LocalizedStringKey?
+    let identifier: String?
     let action: () -> Void
 
-    init(_ title: LocalizedStringKey, hint: LocalizedStringKey? = nil, action: @escaping () -> Void) {
+    /// `identifier` goes on the button itself, not on the stack that also
+    /// holds the hint line.
+    init(_ title: LocalizedStringKey, hint: LocalizedStringKey? = nil, identifier: String? = nil,
+         action: @escaping () -> Void) {
         self.title = title
         self.hint = hint
+        self.identifier = identifier
         self.action = action
     }
 
@@ -172,6 +177,7 @@ struct DangerButton: View {
             Button(action: action) { ButtonLabel(title: title, kind: .danger, state: .enabled) }
                 .buttonStyle(BarkingButtonStyle(kind: .danger, state: .enabled))
                 .accessibilityHint(hint.map { Text($0) } ?? Text(verbatim: ""))
+                .accessibilityIdentifier(ifPresent: identifier)
             if let hint {
                 Text(hint)
                     .font(.bMeta).foregroundStyle(Color.fgMuted)
@@ -180,6 +186,148 @@ struct DangerButton: View {
                     .accessibilityHidden(true)
             }
         }
+    }
+}
+
+/// What a hold-to-confirm draws while the finger is down: a `danger`
+/// sweep across the button, or, under Reduce Motion, the whole seconds left
+/// ("2… 1…") and nothing that moves.
+enum HoldIndicator: Equatable {
+    case idle
+    case sweep(Double)
+    case counter(Int)
+
+    static func of(elapsed: TimeInterval?, duration: TimeInterval, reduceMotion: Bool) -> HoldIndicator {
+        guard let elapsed else { return .idle }
+        if reduceMotion { return .counter(max(1, Int((duration - elapsed).rounded(.up)))) }
+        return .sweep(min(max(elapsed / duration, 0), 1))
+    }
+}
+
+enum HoldMetrics {
+    /// The sweep is solid `danger`; where it has passed, the label turns
+    /// `surface`. A tint of `danger` under a `danger` label falls below
+    /// 4.5:1 on Paper (4.8:1 with no tint at all), so the swept part swaps
+    /// the pair instead.
+    static let sweepFill = "danger"
+    static let labelOnSweep = "surface"
+}
+
+/// A destructive action that needs a hold (Erase Barking, UI review U-8):
+/// the `DangerButton` shape, a 2 s `danger` sweep (a counter under Reduce
+/// Motion), a warning haptic when the hold completes, then `onConfirmed`,
+/// which opens the confirmation. A tap does nothing. VoiceOver cannot hold:
+/// its double-tap and a named action open the same confirmation.
+struct HoldToConfirmButton: View {
+    let title: LocalizedStringKey
+    let duration: TimeInterval
+    let hint: LocalizedStringKey
+    let identifier: String?
+    let onConfirmed: () -> Void
+    @State private var pressedAt: Date?
+    @State private var completed = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(_ title: LocalizedStringKey, duration: Duration = .seconds(2), hint: LocalizedStringKey,
+         identifier: String? = nil, onConfirmed: @escaping () -> Void) {
+        self.title = title
+        self.duration = TimeInterval(duration.components.seconds)
+            + TimeInterval(duration.components.attoseconds) / 1e18
+        self.hint = hint
+        self.identifier = identifier
+        self.onConfirmed = onConfirmed
+    }
+
+    var body: some View {
+        // Ticks only while the finger is down; a few times a second is
+        // enough for the counter.
+        TimelineView(.animation(minimumInterval: reduceMotion ? 0.1 : nil, paused: pressedAt == nil)) { context in
+            let indicator = HoldIndicator.of(elapsed: pressedAt.map { context.date.timeIntervalSince($0) },
+                                             duration: duration, reduceMotion: reduceMotion)
+            VStack(spacing: Space.s2) {
+                HoldFace(title: title, indicator: indicator)
+                    .onLongPressGesture(minimumDuration: duration, maximumDistance: 30) {
+                        pressedAt = nil
+                        completed += 1
+                        onConfirmed()
+                    } onPressingChanged: { pressing in
+                        pressedAt = pressing ? .now : nil
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Text(title))
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint(Text("Asks for confirmation first."))
+                    // VoiceOver's double-tap, and the same as a named action.
+                    .accessibilityAction { onConfirmed() }
+                    .accessibilityAction(named: Text(title)) { onConfirmed() }
+                    .accessibilityIdentifier(ifPresent: identifier)
+                HoldCaption(hint: hint, indicator: indicator)
+            }
+        }
+        .sensoryFeedback(Haptic.holdCompleted.feedback, trigger: completed)
+    }
+}
+
+/// The face of a `HoldToConfirmButton`: the `DangerButton` shape and the
+/// sweep. Under Reduce Motion nothing moves; the outline thickens and the
+/// caption counts.
+struct HoldFace: View {
+    let title: LocalizedStringKey
+    let indicator: HoldIndicator
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Radius.button)
+        let swept: CGFloat = if case .sweep(let f) = indicator { f } else { 0 }
+        label(isEnabled ? Color.danger : Color.fgDisabled)
+            .background(alignment: .leading) {
+                GeometryReader { g in Color(HoldMetrics.sweepFill).frame(width: g.size.width * swept) }
+            }
+            .overlay {
+                label(Color(HoldMetrics.labelOnSweep))
+                    .mask(alignment: .leading) {
+                        GeometryReader { g in Rectangle().frame(width: g.size.width * swept) }
+                    }
+            }
+            .clipShape(shape)
+            // Held (the sweep, or the still counter): a heavier outline.
+            .overlay {
+                shape.strokeBorder(isEnabled ? Color.danger : Color.borderDisabled,
+                                   lineWidth: indicator == .idle ? 1 : 2)
+            }
+            .contentShape(shape)
+    }
+
+    private func label(_ color: Color) -> some View {
+        Text(title)
+            .font(.bButton)
+            .multilineTextAlignment(.center)
+            .foregroundStyle(color)
+            .padding(.horizontal, Space.s4)
+            .padding(.vertical, Space.s2)
+            .frame(maxWidth: .infinity, minHeight: 52)
+    }
+}
+
+/// The line under the face: the hint, or under Reduce Motion the seconds
+/// left while held. VoiceOver has its own hint on the face.
+struct HoldCaption: View {
+    let hint: LocalizedStringKey
+    let indicator: HoldIndicator
+
+    var body: some View {
+        Group {
+            // The counter is the only feedback under Reduce Motion: it is
+            // drawn like the label, not like the hint.
+            if case .counter(let left) = indicator {
+                Text(verbatim: "\(left)…").font(.bButton).foregroundStyle(Color.danger)
+            } else {
+                Text(hint).font(.bMeta).foregroundStyle(Color.fgMuted)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .accessibilityHidden(true)
     }
 }
 
@@ -221,6 +369,10 @@ struct TextLink: View {
         SecondaryButton("They don't match") {}
         SecondaryButton("They don't match", enabled: false) {}
         DangerButton("Delete this contact", hint: "The history is kept.") {}
+        HoldToConfirmButton("Erase Barking", hint: "Press and hold for 2 seconds") {}
+        HoldFace(title: "Erase Barking", indicator: .sweep(0.5))
+        HoldFace(title: "Erase Barking", indicator: .counter(1))
+        HoldCaption(hint: "Press and hold for 2 seconds", indicator: .counter(1))
         TextLink("Check now", glyph: "›") {}
     }
 }

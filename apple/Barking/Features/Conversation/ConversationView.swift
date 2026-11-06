@@ -136,7 +136,10 @@ struct ComposerView: View {
                     .lineLimit(1...5)
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(Color.surfaceAlt, in: .capsule)
-                Button { Task { await model.send() } } label: {
+                Button {
+                    Haptic.send.play()
+                    Task { await model.send() }
+                } label: {
                     // Disabled is a slot, never a translucent purple (U-3).
                     Image(systemName: "arrow.up").font(.bSymbol(17, weight: .semibold, maximum: 26))
                         .foregroundStyle(model.canSend ? Color.white : Color.fgDisabled)

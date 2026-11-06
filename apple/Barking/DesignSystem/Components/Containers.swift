@@ -147,6 +147,32 @@ struct RowGlyph: View {
     }
 }
 
+enum DangerZoneMetrics {
+    /// Added to the screen's 24 pt section gap: 32 pt above the zone.
+    static let extraTop: CGFloat = Space.danger - Space.section
+}
+
+/// The destructive actions of a screen, at the bottom, 32 pt below the rest
+/// and on no shared card (UI review U-2). Placed in a `barkingScreen` stack.
+struct DangerZone<Content: View>: View {
+    let label: LocalizedStringKey?
+    @ViewBuilder let content: Content
+
+    init(_ label: LocalizedStringKey? = nil, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s2) {
+            if let label { SectionLabel(label) }
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, DangerZoneMetrics.extraTop)
+    }
+}
+
 extension View {
     /// A brand screen (UI review §4): `surface` ground, 20 pt gutter, 24 pt
     /// between sections, and room for the floating tab bar on a tab root.
