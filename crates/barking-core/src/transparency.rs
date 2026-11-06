@@ -425,8 +425,8 @@ impl TransparencyEvent {
             ),
             Self::DeviceRemoved { device, name } => format!(
                 "Your device \"{name}\" ({}) was removed from your account: your other \
-                 devices and your contacts received the new device list and no \
-                 longer encrypt anything for it.",
+                 devices and your contacts will no longer encrypt anything for it once \
+                 they receive the new device list.",
                 hex(&device.0[..4])
             ),
             Self::RemoveRequested { device, name } => format!(
@@ -617,6 +617,22 @@ mod tests {
                 name: "iPad".to_owned(),
             },
         ]
+    }
+
+    /// Logged before the `CardUpdate` leaves: the contacts stop encrypting
+    /// for the device only once they receive the new list.
+    #[test]
+    fn describe_device_removed_exact() {
+        let e = TransparencyEvent::DeviceRemoved {
+            device: DeviceId([0xab; 16]),
+            name: "iPad".to_owned(),
+        };
+        assert_eq!(
+            e.describe(),
+            "Your device \"iPad\" (abababab) was removed from your account: your \
+             other devices and your contacts will no longer encrypt anything for \
+             it once they receive the new device list."
+        );
     }
 
     #[test]

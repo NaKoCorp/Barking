@@ -24,6 +24,14 @@ final class FakeKeys: KeyWiping, @unchecked Sendable {
     }
 }
 
+/// Records that the wipe removed the notifications.
+final class FakeNotifications: NotificationClearing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _cleared = 0
+    var cleared: Int { lock.withLock { _cleared } }
+    func removeAll() { lock.withLock { _cleared += 1 } }
+}
+
 final class WipeTests: XCTestCase {
     private var container: URL!
     private var temporary: URL!
@@ -46,8 +54,11 @@ final class WipeTests: XCTestCase {
         defaults.removePersistentDomain(forName: suite)
     }
 
+    private let notifications = FakeNotifications()
+
     private var paths: WipePaths {
-        WipePaths(container: container, temporary: temporary, defaults: [defaults], lockTimeoutMs: 200)
+        WipePaths(container: container, temporary: temporary, defaults: [defaults], lockTimeoutMs: 200,
+                  notifications: notifications)
     }
 
     private func touch(_ dir: URL, _ names: [String]) throws {
@@ -207,5 +218,66 @@ final class WipeTests: XCTestCase {
         XCTAssertEqual(record.outcome, BenchRun.wipePending)
         XCTAssertNil(summary)
         XCTAssertFalse(record.steps.contains { $0.name == "opened" })
+    }
+
+    /// Final review 2: no readable notification survives a wipe, delivered
+    /// or pending, and the badge goes back to zero.
+    func testWipeRemovesTheNotifications() throws {
+        try touch(container, ["barking.db"])
+        try Wipe.run(paths: paths, keys: FakeKeys())
+        XCTAssertGreaterThanOrEqual(notifications.cleared, 1)
+    }
+
+    /// Final review 2: the extension shows a message only while its identity
+    /// is still there: during a wipe, or once the database is gone, the push
+    /// goes out as it came ("New message").
+    func testExtensionShowsNoContentDuringOrAfterAWipe() throws {
+        XCTAssertFalse(Wipe.allowsContent(paths: paths), "no database")
+        try touch(container, ["barking.db"])
+        XCTAssertTrue(Wipe.allowsContent(paths: paths))
+        try touch(container, [Wipe.markerName])
+        XCTAssertFalse(Wipe.allowsContent(paths: paths), "wipe under way")
+        try Wipe.run(paths: paths, keys: FakeKeys())
+        XCTAssertFalse(Wipe.allowsContent(paths: paths), "wiped")
+    }
+
+    /// Final review 3 (spec §6.2: marker first): a kill while the core is
+    /// closing (a sync in flight may take seconds) must leave the marker.
+    func testMarkerIsWrittenBeforeTheCoreCloses() async throws {
+        try touch(container, ["barking.db"])
+        let device = FakeDevice()
+        device.syncDelay = 1.5
+        let core = CoreService(device: device, runner: DirectRunner())
+        let syncing = Task { await core.sync(reason: .pull) }
+        while device.syncCalls == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        let marker = container.appending(path: Wipe.markerName).path
+        let database = container.appending(path: "barking.db").path
+        // Watches the container while the wipe waits for the core to close.
+        let watcher = Task.detached { () -> (marked: Bool, databaseThere: Bool) in
+            for _ in 0..<40 {
+                if FileManager.default.fileExists(atPath: marker) {
+                    return (true, FileManager.default.fileExists(atPath: database))
+                }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return (false, true)
+        }
+        try await Wipe.run(closing: core, paths: paths, keys: FakeKeys())
+        let seen = await watcher.value
+        XCTAssertTrue(seen.marked, "no marker while the core was closing")
+        XCTAssertTrue(seen.databaseThere, "nothing erased before the core closed")
+        _ = await syncing.value
+        XCTAssertFalse(Wipe.isPending(paths: paths))
+        XCTAssertFalse(exists(container, "barking.db"))
+    }
+
+    /// Final review 7: a recovery-phrase PDF left in tmp (app died while
+    /// sharing it) goes with the rest; other folders stay.
+    func testRemovesLeftoverPhraseExports() throws {
+        let folder = UUID().uuidString
+        try touch(temporary, ["\(folder)/\(Wipe.phraseExportName)", "other/keep.txt"])
+        try Wipe.run(paths: paths, keys: FakeKeys())
+        XCTAssertFalse(exists(temporary, folder))
+        XCTAssertTrue(exists(temporary, "other/keep.txt"))
     }
 }

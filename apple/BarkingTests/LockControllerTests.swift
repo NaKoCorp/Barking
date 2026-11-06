@@ -79,4 +79,21 @@ final class LockControllerTests: XCTestCase {
         lock.phaseChanged(to: .inactive)
         XCTAssertFalse(lock.covered)
     }
+
+    /// Final review 5: reloading after a wipe reads the settings, it never
+    /// writes one back into the emptied group defaults.
+    func testReloadAfterAWipeWritesNothingBack() {
+        defaults.set(300.0, forKey: "barking.lock.delay")
+        let lock = LockController(lock: AppLock(defaults: defaults))
+        XCTAssertEqual(lock.delay, 300)
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("barking.") {
+            defaults.removeObject(forKey: key)   // what `Wipe` does
+        }
+        lock.reload()
+        XCTAssertEqual(lock.delay, 0)
+        XCTAssertEqual(defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("barking.lock.") }, [])
+        // A change from Settings is still saved.
+        lock.delay = 60
+        XCTAssertEqual(defaults.double(forKey: "barking.lock.delay"), 60)
+    }
 }

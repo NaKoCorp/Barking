@@ -1,3 +1,4 @@
+import BarkingKit
 import Foundation
 import PDFKit
 import UIKit
@@ -76,7 +77,7 @@ enum PhraseExport {
         let dir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true,
                                attributes: [.protectionKey: FileProtectionType.complete])
-        let url = dir.appendingPathComponent("Barking-recovery-phrase.pdf")
+        let url = dir.appendingPathComponent(Wipe.phraseExportName)
         guard doc.write(to: url, withOptions: [.userPasswordOption: password, .ownerPasswordOption: password]) else {
             discard(url)
             throw ExportError.write

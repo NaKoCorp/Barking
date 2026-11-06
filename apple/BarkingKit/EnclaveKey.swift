@@ -51,8 +51,19 @@ public struct EnclaveKey: KeyWrapper {
         q[kSecMatchLimit as String] = kSecMatchLimitAll
         var items: CFTypeRef?
         let status = SecItemCopyMatching(q as CFDictionary, &items)
+        return try Self.keys(status: status, items: items)
+    }
+
+    /// A success without a list of keys is an error, not "no key": only
+    /// `errSecItemNotFound` may lead to the unreadable-data screen.
+    static func keys(status: OSStatus, items: CFTypeRef?) throws -> [SecKey] {
         switch status {
-        case errSecSuccess: return (items as? [SecKey]) ?? []
+        case errSecSuccess:
+            // `as? [SecKey]` never checks a CF type: compare the type ids.
+            guard let objects = items as? [AnyObject], !objects.isEmpty,
+                  objects.allSatisfy({ CFGetTypeID($0) == SecKeyGetTypeID() })
+            else { throw KeyStore.Failure(status: errSecInvalidKeyRef) }
+            return objects.map { $0 as! SecKey }
         case errSecItemNotFound: return []
         case errSecInteractionNotAllowed: throw KeyStore.Locked()
         default: throw KeyStore.Failure(status: status)

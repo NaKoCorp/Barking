@@ -13,15 +13,22 @@ final class LockController {
     private(set) var locked: Bool
     private(set) var enabled: Bool
     private(set) var phase: ScenePhase = .active
+    /// What Settings shows; `reload` sets it without writing it back.
+    private var storedDelay: TimeInterval
+    /// Set from Settings: saved for the extension.
     var delay: TimeInterval {
-        didSet { lock.delay = delay }
+        get { storedDelay }
+        set {
+            storedDelay = newValue
+            lock.delay = newValue
+        }
     }
 
     init(lock: AppLock = .live, now: Date = Date()) {
         self.lock = lock
         locked = lock.needsUnlock(at: now)
         enabled = lock.enabled
-        delay = lock.delay
+        storedDelay = lock.delay
     }
 
     /// Turns the lock on or off. A phone without a passcode refuses it:
@@ -68,10 +75,11 @@ final class LockController {
         locked = false
     }
 
-    /// After an erase: the settings are gone with the rest.
+    /// After an erase: the settings are gone with the rest. Reads only: a
+    /// write here would put a `barking.lock.` key back after the wipe.
     func reload() {
         enabled = lock.enabled
-        delay = lock.delay
+        storedDelay = lock.delay
         locked = lock.needsUnlock(at: Date())
     }
 }

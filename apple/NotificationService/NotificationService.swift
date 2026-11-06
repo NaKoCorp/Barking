@@ -22,6 +22,12 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
         }
         DispatchQueue.global(qos: .userInitiated).async {
             var (record, summary) = BenchRun.run(source: "extension")
+            // A wipe started (or ended) meanwhile: no content, and nothing
+            // written back into the emptied container.
+            guard Wipe.allowsContent() else {
+                self.deliver(request.content)
+                return
+            }
             let shown = NotificationContent.apply(summary, to: content, locked: AppLock.isLockedForExtension)
             if record.outcome.isEmpty { record.outcome = shown }
             if self.deliver(content) == false { record.outcome = "expired" }

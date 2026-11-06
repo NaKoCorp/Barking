@@ -141,4 +141,33 @@ final class PathModelTests: XCTestCase {
         XCTAssertEqual(conv.items.first?.route, "internet:2")
         XCTAssertEqual(conv.lastMessageId, 4)
     }
+
+    /// Final review 1: a receipt from one of my own devices (its copy) is
+    /// not the contact's: no "Sam's phone · receipt received", no receipt time.
+    func testOwnDeviceAckIsNotTheContactsReceipt() async {
+        let (m, _) = model(outgoing: true, route: [
+            step("sealed", at: t0, size: 2048),
+            step("own_copy", at: t0, device: "iPad", own: true),
+            step("deposited", at: t0 + 1, node: "K7QX2M4A"),
+            step("ack_verified", at: t0 + 30, own: true),
+        ])
+        await m.load()
+        XCTAssertFalse(m.rows.contains { $0.glyph == .recipient }, "\(m.rows.map(\.title))")
+        XCTAssertFalse(m.rows.contains { $0.title == "Sam's phone" })
+        XCTAssertFalse(m.times.contains("receipt"), m.times)
+    }
+
+    /// With both, the contact's receipt is the one dated.
+    func testContactReceiptDatedEvenAfterAnOwnAck() async {
+        let clock = { (at: UInt64) in Date(timeIntervalSince1970: TimeInterval(at)).formatted(.dateTime.hour().minute()) }
+        let (m, _) = model(outgoing: true, route: [
+            step("sealed", at: t0, size: 2048),
+            step("ack_verified", at: t0 + 30, own: true),
+            step("ack_verified", at: t0 + 90),
+        ])
+        await m.load()
+        let recipient = m.rows.first { $0.glyph == .recipient }
+        XCTAssertEqual(recipient?.subtitle.hasSuffix(clock(t0 + 90)), true, recipient?.subtitle ?? "no row")
+        XCTAssertTrue(m.times.hasSuffix("receipt \(clock(t0 + 90))"), m.times)
+    }
 }

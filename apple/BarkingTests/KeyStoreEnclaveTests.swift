@@ -267,6 +267,19 @@ final class UnwrapFailureTests: XCTestCase {
         }
     }
 
+    /// Final review 4: a keychain answer that is not a list of keys is an
+    /// error, never "no key" (which would offer to erase readable data).
+    func testUnexpectedEnclaveQueryResultIsNotGone() {
+        XCTAssertThrowsError(try EnclaveKey.keys(status: errSecSuccess, items: ["not a key"] as CFArray)) {
+            XCTAssertFalse($0 is KeyStore.WrappingKeyGone)
+        }
+        XCTAssertThrowsError(try EnclaveKey.keys(status: errSecSuccess, items: nil))
+        XCTAssertEqual(try EnclaveKey.keys(status: errSecItemNotFound, items: nil).count, 0)
+        XCTAssertThrowsError(try EnclaveKey.keys(status: errSecInteractionNotAllowed, items: nil)) {
+            XCTAssertTrue($0 is KeyStore.Locked)
+        }
+    }
+
     /// Before the first unlock the keychain answers "interaction not
     /// allowed": that is not "no key" (item 2).
     func testKeychainLockedIsNotMissing() {

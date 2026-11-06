@@ -228,7 +228,8 @@ struct DevicesView: View {
         } message: { d in
             Text("\(d.name) will no longer receive or send your messages.")
         }
-        .confirmationDialog("Disconnect this device", isPresented: $confirmingLeave, titleVisibility: .visible) {
+        .confirmationDialog(Text(verbatim: Self.disconnectTitle(myName)), isPresented: $confirmingLeave,
+                            titleVisibility: .visible) {
             Button("Disconnect this device", role: .destructive) { Task { await model.disconnect() } }
         } message: {
             Text("Your other devices will remove this one, then everything on this iPhone will be erased.")
@@ -326,6 +327,13 @@ struct DevicesView: View {
             }
         }
         .presentationDetents([.medium])
+    }
+
+    /// The confirmation names the device (spec §8.2).
+    static func disconnectTitle(_ name: String) -> String { String(localized: "Disconnect \(name)?") }
+
+    private var myName: String {
+        model.devices.first(where: \.thisDevice)?.name ?? String(localized: "This device")
     }
 
     private func startDisconnect() {

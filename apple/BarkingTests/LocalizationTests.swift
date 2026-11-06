@@ -76,4 +76,21 @@ final class LocalizationTests: XCTestCase {
             }
         }
     }
+
+    /// Final review 6: logged before the new list leaves, the removal cannot
+    /// say the contacts already stopped encrypting for the device.
+    func testDeviceRemovedSaysOnceTheyReceiveTheList() throws {
+        let en = try XCTUnwrap(table("en", "Log")?["log.device_removed"] as? String)
+        let fr = try XCTUnwrap(table("fr", "Log")?["log.device_removed"] as? String)
+        XCTAssertTrue(en.contains("will no longer encrypt anything for it once they receive the new device list"), en)
+        XCTAssertTrue(fr.contains("ne chiffreront plus rien pour lui dès qu’ils auront reçu la nouvelle liste d’appareils"), fr)
+    }
+
+    /// Final review 8, 9: new texts have French.
+    func testFinalReviewStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        for key in ["Barking could not finish erasing. Try again.", "Disconnect %@?"] {
+            XCTAssertNotNil(fr[key], "missing French for \(key)")
+        }
+    }
 }

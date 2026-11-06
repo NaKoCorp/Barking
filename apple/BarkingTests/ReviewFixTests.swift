@@ -131,4 +131,32 @@ final class ReviewFixTests: XCTestCase {
         await m.reload()
         XCTAssertEqual(d.reads.last?.1, 9)
     }
+
+    /// Final review 8: a wipe that still cannot finish at launch has its own
+    /// screen ("could not finish erasing"), not "Your data is safe".
+    func testUnfinishedWipeAtLaunchIsNotOpenFailed() {
+        guard case .wipeFailed = AppRouter.afterResume({ throw Boom() }) else {
+            return XCTFail("an unfinished wipe must say so")
+        }
+        XCTAssertNil(AppRouter.afterResume({ true }))
+        XCTAssertNil(AppRouter.afterResume({ false }))
+    }
+
+    /// Final review 8: "Try again" runs the wipe again; once it finishes,
+    /// the welcome screen.
+    func testTryAgainRerunsTheWipe() {
+        let router = AppRouter(start: .wipeFailed)
+        var runs = 0
+        router.retryWipe { runs += 1; throw Boom() }
+        XCTAssertEqual(runs, 1)
+        guard case .wipeFailed = router.state else { return XCTFail("still unfinished") }
+        router.retryWipe { runs += 1; return true }
+        XCTAssertEqual(runs, 2)
+        guard case .onboarding = router.state else { return XCTFail("finished: welcome screen") }
+    }
+
+    /// Final review 9 (spec §8.2): the confirmation names the device.
+    func testDisconnectConfirmationNamesTheDevice() {
+        XCTAssertEqual(DevicesView.disconnectTitle("Kitchen iPad"), "Disconnect Kitchen iPad?")
+    }
 }

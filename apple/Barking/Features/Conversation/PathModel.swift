@@ -102,7 +102,9 @@ final class PathModel {
             let size = steps.filter { $0.step == "sealed" && !$0.own }.compactMap(\.size).max()
             // Deposits of the copies to my devices belong to their row.
             out += relays(steps.filter { !$0.own }, step: "deposited", size: size)
-            if let ack = first("ack_verified") {
+            // Only the contact's receipt: one of my devices acknowledges
+            // its copy too, and that is not the contact getting it.
+            if let ack = steps.first(where: { $0.step == "ack_verified" && !$0.own }) {
                 out.append(PathRow(
                     title: String(localized: "\(contactName)'s phone"),
                     subtitle: String(localized: "receipt received · \(clock(ack.at))"),
@@ -179,7 +181,7 @@ final class PathModel {
             parts.append(String(localized: "synced \(clock(o.at))"))
         } else if outgoing {
             if let s = sealed { parts.append(String(localized: "sent \(clock(s.at))")) }
-            if let a = steps.first(where: { $0.step == "ack_verified" }) {
+            if let a = steps.first(where: { $0.step == "ack_verified" && !$0.own }) {
                 parts.append(String(localized: "receipt \(clock(a.at))"))
             }
         } else if let o = opened {

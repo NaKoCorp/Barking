@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 
 /// The secrets that open this device's database. `KeyStore.deleteAll`
 /// deletes the wrapped key, a clear one and the Secure Enclave key (spec §6.2, §7).
@@ -16,6 +17,24 @@ extension KeyStore: KeyWiping {
     }
 }
 
+/// The notifications Barking posted: a wipe removes them (spec §6.2).
+public protocol NotificationClearing: Sendable {
+    /// Removes the delivered and pending notifications and resets the badge.
+    func removeAll()
+}
+
+/// The system's notification center.
+public struct SystemNotifications: NotificationClearing {
+    public init() {}
+
+    public func removeAll() {
+        let center = UNUserNotificationCenter.current()
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
+        center.setBadgeCount(0) { _ in }
+    }
+}
+
 /// Where a wipe looks.
 public struct WipePaths {
     /// The shared container: its whole content goes, except the system's
@@ -29,19 +48,24 @@ public struct WipePaths {
     public var defaults: [UserDefaults]
     /// Longest wait for the database lock (the extension may hold it).
     public var lockTimeoutMs: UInt64
+    /// The notifications to remove; `nil` leaves them (tests without a center).
+    public var notifications: (any NotificationClearing)?
 
-    public init(container: URL?, temporary: URL, defaults: [UserDefaults], lockTimeoutMs: UInt64) {
+    public init(container: URL?, temporary: URL, defaults: [UserDefaults], lockTimeoutMs: UInt64,
+                notifications: (any NotificationClearing)? = nil) {
         self.container = container
         self.temporary = temporary
         self.defaults = defaults
         self.lockTimeoutMs = lockTimeoutMs
+        self.notifications = notifications
     }
 
     public static var live: WipePaths {
         WipePaths(container: try? SharedPaths.container,
                   temporary: FileManager.default.temporaryDirectory,
                   defaults: [.standard, UserDefaults(suiteName: SharedPaths.appGroup)].compactMap { $0 },
-                  lockTimeoutMs: Budget.appLockMs)
+                  lockTimeoutMs: Budget.appLockMs,
+                  notifications: SystemNotifications())
     }
 }
 
@@ -51,6 +75,8 @@ public struct WipePaths {
 /// launch, before the database is opened.
 public enum Wipe {
     public static let markerName = "wipe-pending"
+    /// The recovery-phrase PDF, alone in a folder of its own in tmp.
+    public static let phraseExportName = "Barking-recovery-phrase.pdf"
 
     /// Some steps failed; the marker stays for the next launch.
     public struct Incomplete: Error {
@@ -64,6 +90,12 @@ public enum Wipe {
     /// new identity as if the device were clean.
     public static func run(closing core: CoreService?, paths: WipePaths = .live,
                            keys: any KeyWiping = KeyStore.live) async throws {
+        // Marker first (spec §6.2): closing waits for a sync in flight, and
+        // an app killed meanwhile must still finish the wipe at next launch.
+        // A failure here is caught again by the wipe, which rewrites it.
+        if let container = paths.container {
+            try? Data().write(to: container.appending(path: markerName))
+        }
         await core?.close()
         try runRetrying(paths: paths, keys: keys)
     }
@@ -72,6 +104,14 @@ public enum Wipe {
     public static func isPending(paths: WipePaths = .live) -> Bool {
         guard let container = paths.container else { return false }
         return FileManager.default.fileExists(atPath: container.appending(path: markerName).path)
+    }
+
+    /// The extension may put a message's content in the push only while the
+    /// identity it read is still there: no wipe under way, the database in
+    /// place. Otherwise the push goes out as it came ("New message").
+    public static func allowsContent(paths: WipePaths = .live) -> Bool {
+        guard let container = paths.container, !isPending(paths: paths) else { return false }
+        return FileManager.default.fileExists(atPath: container.appending(path: "barking.db").path)
     }
 
     /// Finishes a pending wipe before a new identity is made, so that the
@@ -98,6 +138,8 @@ public enum Wipe {
         if let marker {
             do { try Data().write(to: marker) } catch { failures.append(error) }
         }
+        // Nothing readable stays on the lock screen or in Notification Center.
+        paths.notifications?.removeAll()
         // The extension may be inside a call: wait for it, but a wipe never
         // gives up for a lock (its open files go with their last close).
         let lock = paths.container.map { lockFile($0.appending(path: "barking.lock"), timeoutMs: paths.lockTimeoutMs) }
@@ -112,7 +154,9 @@ public enum Wipe {
             }
         }
         let temporary = (try? fm.contentsOfDirectory(at: paths.temporary, includingPropertiesForKeys: nil)) ?? []
-        for item in temporary where ["barkinglink", "barkingcard"].contains(item.pathExtension) {
+        for item in temporary where ["barkinglink", "barkingcard"].contains(item.pathExtension)
+            || fm.fileExists(atPath: item.appending(path: phraseExportName).path) {
+            // A recovery-phrase export left by an app that died while sharing it.
             remove(item, into: &failures)
         }
         for defaults in paths.defaults {

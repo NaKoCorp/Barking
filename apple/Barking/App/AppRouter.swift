@@ -17,6 +17,9 @@ final class AppRouter {
         /// gone (backup restored on another iPhone, spec §7.2). Retrying
         /// cannot help; linking or recovering can, after erasing.
         case unreadable
+        /// An erase was asked for and could not finish: nothing opens until
+        /// it does; "Try again" runs it again.
+        case wipeFailed
     }
 
     private(set) var state: State
@@ -36,8 +39,8 @@ final class AppRouter {
     /// The state at launch: the existing identity, else onboarding. A wipe
     /// cut short (app killed) finishes first, before the database opens.
     static func boot() -> AppRouter {
-        // Still unfinished: the database stays closed, the retry screen shows.
-        guard (try? Wipe.resumeIfNeeded()) != nil else { return AppRouter(start: .failed) }
+        // Still unfinished: the database stays closed, the erase screen shows.
+        if let unfinished = afterResume({ try Wipe.resumeIfNeeded() }) { return AppRouter(start: unfinished) }
         #if BARKING_DEV
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-BarkingUITestReset") {
@@ -96,13 +99,33 @@ final class AppRouter {
         state = .onboarding
     }
 
+    /// Before anything opens: a wipe cut short must finish. `.wipeFailed`
+    /// if it still cannot (the erase screen, not "your data is safe"); `nil`
+    /// to go on.
+    static func afterResume(_ resume: () throws -> Bool) -> State? {
+        (try? resume()) == nil ? .wipeFailed : nil
+    }
+
+    /// "Try again" on the erase screen: runs the wipe again; once it
+    /// finishes, the welcome screen.
+    func retryWipe(resume: () throws -> Bool = { try Wipe.resumeIfNeeded() }) {
+        if let unfinished = Self.afterResume(resume) {
+            state = unfinished
+            return
+        }
+        restartOnboarding()
+    }
+
     func takeOnboardingStep() -> OnboardingModel.Step? {
         defer { pendingOnboardingStep = nil }
         return pendingOnboardingStep
     }
 
     func retry() {
-        guard (try? Wipe.resumeIfNeeded()) != nil else { state = .failed; return }
+        if let unfinished = Self.afterResume({ try Wipe.resumeIfNeeded() }) {
+            state = unfinished
+            return
+        }
         state = Self.initialState(
             opening: { try DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs) },
             runner: AppCallRunner())

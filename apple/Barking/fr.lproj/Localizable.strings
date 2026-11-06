@@ -214,6 +214,7 @@
 "%@ will no longer receive or send your messages." = "%@ ne recevra plus et n’enverra plus vos messages.";
 "The removal could not start. Sync, then try again." = "Le retrait n’a pas pu démarrer. Synchronisez, puis réessayez.";
 "Disconnect this device" = "Déconnecter cet appareil";
+"Disconnect %@?" = "Déconnecter %@ ?";
 "Your other devices will remove this one, then everything on this iPhone will be erased." = "Vos autres appareils retireront celui-ci, puis tout ce qui est sur cet iPhone sera effacé.";
 "Erase" = "Effacer";
 "Everything on this iPhone will be erased. Your contacts will not be told. To get your identity back, you will need the 24-word phrase." = "Tout ce qui est sur cet iPhone sera effacé. Vos contacts ne seront pas prévenus. Pour retrouver votre identité, il faudra la phrase de 24 mots.";
@@ -226,6 +227,7 @@
 "Sending the request to your other devices…" = "Envoi de la demande à vos autres appareils…";
 "The request has not left this iPhone yet. Nothing was erased: try again." = "La demande n’a pas encore quitté cet iPhone. Rien n’a été effacé : réessayez.";
 "Barking could not erase everything. Try again." = "Barking n’a pas pu tout effacer. Réessayez.";
+"Barking could not finish erasing. Try again." = "Barking n’a pas pu terminer l’effacement. Réessayez.";
 "This iPhone can no longer read your data, for example after restoring a backup from another iPhone." = "Cet iPhone ne peut plus lire vos données, par exemple après la restauration d’une sauvegarde d’un autre iPhone.";
 "The unreadable data on this iPhone will be erased." = "Les données illisibles de cet iPhone seront effacées.";
 "Erase and continue" = "Effacer et continuer";

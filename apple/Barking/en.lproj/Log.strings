@@ -22,7 +22,7 @@
 "log.admin_transferred" = "Your device %1$@ is now the administrator. This device erased its copy of the root key.";
 "log.admin_received" = "This device is now the administrator: it received the root key from another of your devices.";
 "log.this_device_removed" = "This device was removed from your account by a newer device list (version %1$@). It can no longer send; its root key, if it had one, was erased.";
-"log.device_removed" = "Your device “%1$@” (%2$@) was removed from your account. Your other devices and your contacts no longer encrypt anything for it.";
+"log.device_removed" = "Your device “%1$@” (%2$@) was removed from your account. Your other devices and your contacts will no longer encrypt anything for it once they receive the new device list.";
 "log.remove_requested" = "Your device “%1$@” (%2$@) asked to leave your account and was removed from your device list.";
 "log.arg.initiator" = "you opened it";
 "log.arg.responder" = "your contact opened it";

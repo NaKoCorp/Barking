@@ -22,7 +22,7 @@
 "log.admin_transferred" = "Votre appareil %1$@ est maintenant l’administrateur. Cet appareil a effacé sa copie de la clé racine.";
 "log.admin_received" = "Cet appareil est maintenant l’administrateur : il a reçu la clé racine d’un autre de vos appareils.";
 "log.this_device_removed" = "Cet appareil a été retiré de votre compte par une liste d’appareils plus récente (version %1$@). Il ne peut plus envoyer ; sa clé racine, s’il en avait une, a été effacée.";
-"log.device_removed" = "Votre appareil « %1$@ » (%2$@) a été retiré de votre compte. Vos autres appareils et vos contacts ne chiffrent plus rien pour lui.";
+"log.device_removed" = "Votre appareil « %1$@ » (%2$@) a été retiré de votre compte. Vos autres appareils et vos contacts ne chiffreront plus rien pour lui dès qu’ils auront reçu la nouvelle liste d’appareils.";
 "log.remove_requested" = "Votre appareil « %1$@ » (%2$@) a demandé à quitter votre compte et a été retiré de votre liste d’appareils.";
 "log.arg.initiator" = "vous l’avez ouverte";
 "log.arg.responder" = "votre contact l’a ouverte";

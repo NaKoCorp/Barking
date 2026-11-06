@@ -23,6 +23,7 @@ struct RootView: View {
         case .linking(let core): NavigationStack { LinkFromExistingView(resume: core) }
         case .failed: OpenFailedView()
         case .unreadable: UnreadableDataView()
+        case .wipeFailed: WipeFailedView()
         }
     }
 }
@@ -54,6 +55,22 @@ struct OpenFailedView: View {
             ScreenTitle("Barking could not open your data", size: 22)
             Text("Your data is safe. Unlock the phone and try again.").foregroundStyle(Color.fgMuted)
             PrimaryButton("Try again") { router.retry() }
+        }
+        .padding(24)
+        .frame(maxHeight: .infinity)
+        .background(Color.surface)
+    }
+}
+
+/// An erase was asked for and could not finish: the data stays closed
+/// until "Try again" runs the wipe to its end.
+struct WipeFailedView: View {
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ScreenTitle("Barking could not finish erasing. Try again.", size: 22)
+            PrimaryButton("Try again") { router.retryWipe() }
         }
         .padding(24)
         .frame(maxHeight: .infinity)
