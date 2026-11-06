@@ -160,12 +160,12 @@ final class OnboardingModelTests: XCTestCase {
         let words = Array(bip39Words().prefix(24))
         let m = OnboardingModel(defaults: freshDefaults())
         board.string = words.prefix(23).joined(separator: " ")
-        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .wrongCount(23))
+        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .init(result: .wrongCount(23), cleared: true))
         XCTAssertFalse(board.hasStrings, "a failed paste left the words on the clipboard")
         board.string = words.joined(separator: " ")
-        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .filled)
+        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .init(result: .filled, cleared: true))
         XCTAssertFalse(board.hasStrings)
-        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .empty)
+        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .init(result: .empty, cleared: false))
     }
 
     func testRecoverRejectsUnknownWord() {

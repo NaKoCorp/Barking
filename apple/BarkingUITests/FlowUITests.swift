@@ -22,6 +22,19 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Shown on your other devices, and to your contacts in your card."].exists)
     }
 
+    /// UI review B5 (U-32): the galaxy's dots never show over Welcome's
+    /// header, text or buttons, at the default size and at AX3.
+    func testWelcomeDotsStayOffTheText() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        assertNoDotOverWelcomeText(app)
+        app.terminate()
+        let large = XCUIApplication.fresh(extra: ["-UIPreferredContentSizeCategoryName",
+                                                  "UICTContentSizeCategoryAccessibilityXL"])
+        large.launch()
+        assertNoDotOverWelcomeText(large, shots: 2)
+    }
+
     /// Review B4 #1: VoiceOver hears the word typed in a Recover tile.
     func testRecoverTileSaysItsWord() throws {
         let app = XCUIApplication.fresh()
@@ -132,6 +145,8 @@ final class AccessibilityUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     /// Review Focus 5: the largest text size keeps the main buttons whole.
+    /// Welcome scrolls at accessibility sizes (UI review B5), so a button
+    /// may be a swipe away, never cut.
     func testXXLargeTextKeepsButtonsReadable() throws {
         let app = XCUIApplication.fresh(extra: ["-UIPreferredContentSizeCategoryName",
                                                 "UICTContentSizeCategoryAccessibilityXXL"])
@@ -140,6 +155,7 @@ final class AccessibilityUITests: XCTestCase {
         for title in ["Create my identity", "Recover with 24 words"] {
             let b = app.buttons[title].firstMatch
             XCTAssertTrue(b.waitForExistence(timeout: 5), title)
+            for _ in 0..<4 where !window.contains(b.frame) { app.swipeUp() }
             XCTAssertTrue(window.contains(b.frame), "\(title) off screen: \(b.frame)")
         }
     }

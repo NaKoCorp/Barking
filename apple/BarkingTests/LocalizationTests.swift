@@ -57,7 +57,7 @@ final class LocalizationTests: XCTestCase {
     func testTransparencyStringsInFrench() throws {
         let fr = try XCTUnwrap(table("fr"))
         for key in ["Transparency", "Everything", "Keys and devices", "Change the lock",
-                    "Keys and devices: key changes, devices added or removed, unreadable messages — the events to watch first.", "Where my data is", "Devices",
+                    "Keys and devices: key changes, devices added or removed, unreadable messages. These are the events to watch first.", "Where my data is", "Devices",
                     "Database key protected by the Secure Enclave", "Database key protected by the keychain only",
                     "Nothing yet", "Today", "Yesterday", "Wrapped by a key that never leaves this iPhone's chip.",
                     "Kept in the keychain, without the Secure Enclave.",
@@ -144,7 +144,7 @@ final class LocalizationTests: XCTestCase {
         let frPlurals = try XCTUnwrap(table("fr", "Localizable", "stringsdict"))
         let enPlurals = try XCTUnwrap(table("en", "Localizable", "stringsdict"))
         for key in ["Pick one word per row.", "See the 24 words again", "Word %lld", "Recover (%lld/24)",
-                    "Words left to fill in: %lld.", "Word %lld is not in the word list.", "Check now",
+                    "Word %lld is not in the word list.", "Check now",
                     "Opens the 3-word check.", "Check three words while you still have your copy.",
                     "Opens the safety code.", "verified", "not verified", "Unreachable · nothing is lost",
                     "Checking…", "Up to date", "Still unreachable · nothing waits", "%lld KB", "expires %@"] where fr[key] == nil {
@@ -181,7 +181,7 @@ final class LocalizationTests: XCTestCase {
         let fr = try XCTUnwrap(table("fr"))
         let frPlurals = try XCTUnwrap(table("fr", "Localizable", "stringsdict"))
         let enPlurals = try XCTUnwrap(table("en", "Localizable", "stringsdict"))
-        for key in ["The clipboard holds no text.", "Pasted. The clipboard was cleared."] {
+        for key in ["The clipboard holds no words.", "Pasted. The clipboard was cleared.", "Pasted."] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
         let found = "Found %lld words; 24 are needed. The clipboard was cleared."
@@ -203,5 +203,52 @@ final class LocalizationTests: XCTestCase {
         }
         let dupes = Dictionary(grouping: keys, by: { $0 }).filter { $0.value.count > 1 }.keys
         XCTAssertTrue(dupes.isEmpty, "French keys written twice: \(dupes.sorted())")
+    }
+
+    /// UI review B5: no em-dash in any user-facing text (U-39), the words
+    /// left on Recover as a plural (one and other, EN and FR), and the new
+    /// link-sheet and paste lines in French.
+    func testPolishStrings() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        for lang in ["en", "fr"] {
+            for name in ["Localizable", "Log"] {
+                for type in ["strings", "stringsdict"] {
+                    guard let t = table(lang, name, type) else { continue }
+                    let text = "\(t)"
+                    XCTAssertFalse(text.contains("—"), "em-dash in \(lang) \(name).\(type)")
+                }
+            }
+        }
+        // String literals in the app's Swift code (comments may keep theirs).
+        let files = FileManager.default.enumerator(at: root.appendingPathComponent("Barking"), includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" } ?? []
+        XCTAssertGreaterThan(files.count, 40)
+        for file in files {
+            let lines = try String(contentsOf: file, encoding: .utf8).split(separator: "\n")
+            for line in lines {
+                let code = line.components(separatedBy: "//").first ?? ""
+                XCTAssertFalse(code.contains("—"), "em-dash in \(file.lastPathComponent): \(line)")
+            }
+        }
+        for lang in ["en", "fr"] {
+            let plurals = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
+            let rule = try XCTUnwrap((plurals["%lld words left to fill in."] as? NSDictionary)?["n"] as? NSDictionary, lang)
+            XCTAssertEqual(rule["one"] as? String, lang == "en" ? "%lld word left to fill in." : "Encore %lld mot à saisir.")
+            XCTAssertEqual(rule["other"] as? String, lang == "en" ? "%lld words left to fill in." : "Encore %lld mots à saisir.")
+            let found = try XCTUnwrap((plurals["Found %lld words; 24 are needed."] as? NSDictionary)?["n"] as? NSDictionary, lang)
+            XCTAssertNotNil(found["one"])
+        }
+        let fr = try XCTUnwrap(table("fr"))
+        XCTAssertNil(fr["Words left to fill in: %lld."], "the old reason is gone")
+        XCTAssertNil(fr["The clipboard holds no text."], "the old paste line is gone")
+        XCTAssertEqual(fr["Link this device"] as? String, "Lier cet appareil")
+        XCTAssertEqual(fr["The clipboard holds no words."] as? String, "Le presse-papiers ne contient aucun mot.")
+        for key in ["Pasted.", "Expires in %@ · usable once", "Valid until %@ and usable once.", "This code has expired.", "New code",
+                    "On the new device, tap Link to an existing device and scan this code.",
+                    "Then tap Scan the new device's code and scan the code it shows.",
+                    "Link code. The new device scans it.", "⚠︎ not sent, tap to retry",
+                    "everything (it is the sender).", "everything (it is the recipient)."] {
+            XCTAssertNotNil(fr[key], "missing French for \(key)")
+        }
     }
 }

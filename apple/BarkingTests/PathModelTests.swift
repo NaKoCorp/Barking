@@ -182,7 +182,7 @@ final class PathModelTests: XCTestCase {
         ])
         await m.load()
         XCTAssertEqual(m.rows[0].spoken,
-                       "This device, wrote and encrypted, \(clock(t0)). Could see: everything — it is the sender.")
+                       "This device, wrote and encrypted, \(clock(t0)). Could see: everything (it is the sender).")
         XCTAssertFalse(m.rows[1].spoken.contains("·"), m.rows[1].spoken)
         XCTAssertTrue(m.rows[1].spoken.hasPrefix("Internet relay, K7QX2M4A, deposited, "), m.rows[1].spoken)
     }

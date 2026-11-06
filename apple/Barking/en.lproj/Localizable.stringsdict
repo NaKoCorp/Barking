@@ -130,5 +130,37 @@
 			<string>Found %lld words; 24 are needed. The clipboard was cleared.</string>
 		</dict>
 	</dict>
+	<key>%lld words left to fill in.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld word left to fill in.</string>
+			<key>other</key>
+			<string>%lld words left to fill in.</string>
+		</dict>
+	</dict>
+	<key>Found %lld words; 24 are needed.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Found %lld word; 24 are needed.</string>
+			<key>other</key>
+			<string>Found %lld words; 24 are needed.</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

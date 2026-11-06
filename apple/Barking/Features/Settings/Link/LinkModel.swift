@@ -170,3 +170,45 @@ final class NewDeviceLinkModel {
         state = .scanOffer
     }
 }
+
+/// When a link offer expires, read from the offer itself (UI review B5,
+/// U-28). The offer is postcard `(root: [u8; 32], secret: [u8; 32],
+/// expires_at: u64 varint)`, in Unix seconds (barking-core `LinkOffer`).
+/// Only the date is read; anything unexpected gives nil and the sheet keeps
+/// its fixed "10 minutes" text.
+enum LinkOfferExpiry {
+    static func date(of offer: Data) -> Date? {
+        let bytes = [UInt8](offer)
+        guard bytes.count > 64 else { return nil }
+        var value: UInt64 = 0
+        var shift: UInt64 = 0
+        for (i, b) in bytes[64...].enumerated() {
+            guard shift < 64 else { return nil }
+            value |= UInt64(b & 0x7F) << shift
+            if b & 0x80 == 0 {
+                // The varint is the last field: it must end the offer.
+                guard 64 + i == bytes.count - 1 else { return nil }
+                return Date(timeIntervalSince1970: TimeInterval(value))
+            }
+            shift += 7
+        }
+        return nil
+    }
+}
+
+/// What the link sheet says about the time left (U-28): a live mm:ss, a
+/// fixed "valid until" under Reduce Motion, and "expired" once it is.
+enum LinkCountdown: Equatable {
+    case live(String)
+    case until(Date)
+    case expired
+
+    static func of(now: Date, expiry: Date, reduceMotion: Bool) -> LinkCountdown {
+        let left = expiry.timeIntervalSince(now)
+        guard left > 0 else { return .expired }
+        if reduceMotion { return .until(expiry) }
+        // Rounded up: the clock reads 00:01 until the very end.
+        let s = Int(left.rounded(.up))
+        return .live(String(format: "%02d:%02d", s / 60, s % 60))
+    }
+}

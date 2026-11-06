@@ -62,6 +62,8 @@ final class TourUITests: XCTestCase {
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
         }
 
+        // UI review B5 (U-32): no dot over the text, in every pass.
+        assertNoDotOverWelcomeText(app)
         snap(app, "welcome")
         // Onboarding side branches: first screens of recover and link.
         app.buttons[L.recover].firstMatch.tap(); sleep(1)

@@ -35,7 +35,7 @@ struct TransparencyView: View {
                                  options: [(JournalFilter.everything, LocalizedStringKey("Everything")),
                                            (.keysAndDevices, LocalizedStringKey("Keys and devices"))],
                                  identifier: "transparency.filter")
-                Text("Keys and devices: key changes, devices added or removed, unreadable messages — the events to watch first.")
+                Text("Keys and devices: key changes, devices added or removed, unreadable messages. These are the events to watch first.")
                     .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
                 if model.isEmpty, !model.loading {
                     Text("Nothing yet").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)

@@ -156,7 +156,7 @@
 "this device" = "cet appareil";
 "verified" = "vérifié";
 "welcome" = "bienvenue";
-"⚠︎ not sent — tap to retry" = "⚠︎ non envoyé — touchez pour réessayer";
+"⚠︎ not sent, tap to retry" = "⚠︎ non envoyé, touchez pour réessayer";
 "✓ verified · safety code matched" = "✓ vérifié · code identique";
 "Barking could not open your data" = "Barking n’a pas pu ouvrir vos données";
 "Your data is safe. Unlock the phone and try again." = "Vos données sont intactes. Déverrouillez le téléphone et réessayez.";
@@ -246,8 +246,8 @@
 "fetched · %@" = "relevé · %@";
 "receipt received · %@" = "accusé reçu · %@";
 "copy encrypted · %@" = "copie chiffrée · %@";
-"everything — it is the sender." = "tout — c’est l’expéditeur.";
-"everything — it is the recipient." = "tout — c’est le destinataire.";
+"everything (it is the sender)." = "tout (c’est l’expéditeur).";
+"everything (it is the recipient)." = "tout (c’est le destinataire).";
 "the message, encrypted between your own devices." = "le message, chiffré entre vos propres appareils.";
 "a sealed packet of %@ for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it." = "un paquet scellé de %@ pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.";
 "a sealed packet for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it." = "un paquet scellé pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.";
@@ -274,7 +274,7 @@
 "Journal filter" = "Filtre du journal";
 "Everything" = "Tout";
 "Keys and devices" = "Clés et appareils";
-"Keys and devices: key changes, devices added or removed, unreadable messages — the events to watch first." = "Clés et appareils : changements de clé, appareils ajoutés ou retirés, messages illisibles — les événements à surveiller en priorité.";
+"Keys and devices: key changes, devices added or removed, unreadable messages. These are the events to watch first." = "Clés et appareils : changements de clé, appareils ajoutés ou retirés, messages illisibles. Ce sont les événements à surveiller en priorité.";
 "Nothing yet" = "Rien pour l’instant";
 "Devices" = "Appareils";
 "Encrypted database on this iPhone" = "Base chiffrée sur cet iPhone";
@@ -332,7 +332,6 @@
 "Pick one word per row." = "Choisissez un mot par ligne.";
 "See the 24 words again" = "Revoir les 24 mots";
 "Recover (%lld/24)" = "Restaurer (%lld/24)";
-"Words left to fill in: %lld." = "Mots restant à saisir : %lld.";
 "Word %lld is not in the word list." = "Le mot %lld n’est pas dans la liste.";
 "Not in the word list" = "Pas dans la liste";
 "Check now" = "Vérifier";
@@ -346,4 +345,15 @@
 "%lld KB" = "%lld Ko";
 "expires %@" = "expire le %@";
 "Pasted. The clipboard was cleared." = "Collé. Le presse-papiers a été vidé.";
-"The clipboard holds no text." = "Le presse-papiers ne contient pas de texte.";
+"The clipboard holds no words." = "Le presse-papiers ne contient aucun mot.";
+
+/* UI review B5 */
+"Pasted." = "Collé.";
+"Link this device" = "Lier cet appareil";
+"On the new device, tap Link to an existing device and scan this code." = "Sur le nouvel appareil, touchez Lier à un appareil existant et scannez ce code.";
+"Then tap Scan the new device's code and scan the code it shows." = "Puis touchez Scanner le code du nouvel appareil et scannez le code qu’il affiche.";
+"Expires in %@ · usable once" = "Expire dans %@ · utilisable une seule fois";
+"Valid until %@ and usable once." = "Valable jusqu’à %@, utilisable une seule fois.";
+"This code has expired." = "Ce code a expiré.";
+"New code" = "Nouveau code";
+"Link code. The new device scans it." = "Code de liaison. Le nouvel appareil le scanne.";

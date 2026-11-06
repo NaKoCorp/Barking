@@ -98,7 +98,7 @@ final class PathModel {
             out.append(PathRow(
                 title: String(localized: "Your other device"),
                 subtitle: String(localized: "wrote and encrypted"),
-                saw: String(localized: "everything — it is the sender."),
+                saw: String(localized: "everything (it is the sender)."),
                 glyph: .sender))
             out += relays(steps, step: "fetched", size: nil)
             if let opened = first("opened") {
@@ -114,7 +114,7 @@ final class PathModel {
                 title: thisDevice,
                 subtitle: sealed.map { String(localized: "wrote and encrypted · \(clock($0.at))") }
                     ?? String(localized: "wrote and encrypted"),
-                saw: String(localized: "everything — it is the sender."),
+                saw: String(localized: "everything (it is the sender)."),
                 glyph: .sender))
             // The packet's size: the one sealed for the contact.
             let size = steps.filter { $0.step == "sealed" && !$0.own }.compactMap(\.size).max()
@@ -126,7 +126,7 @@ final class PathModel {
                 out.append(PathRow(
                     title: String(localized: "\(contactName)'s phone"),
                     subtitle: String(localized: "receipt received · \(clock(ack.at))"),
-                    saw: String(localized: "everything — it is the recipient."),
+                    saw: String(localized: "everything (it is the recipient)."),
                     glyph: .recipient))
             }
             let copies = steps.filter { $0.step == "own_copy" }
@@ -146,7 +146,7 @@ final class PathModel {
             out.append(PathRow(
                 title: String(localized: "\(contactName)'s phone"),
                 subtitle: String(localized: "wrote and encrypted"),
-                saw: String(localized: "everything — it is the sender."),
+                saw: String(localized: "everything (it is the sender)."),
                 glyph: .sender))
             out += relays(steps, step: "fetched", size: nil)
             if let opened = first("opened") {
@@ -155,7 +155,7 @@ final class PathModel {
                 out.append(PathRow(
                     title: thisDevice,
                     subtitle: String(localized: "decrypted · \(clock(opened.at)) · receipt queued"),
-                    saw: String(localized: "everything — it is the recipient."),
+                    saw: String(localized: "everything (it is the recipient)."),
                     glyph: .recipient))
             }
         }

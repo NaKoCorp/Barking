@@ -15,21 +15,19 @@ struct LinkNewDeviceView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
+            // Scrolls: at accessibility sizes the steps, the code and the
+            // button are taller than the sheet.
+            Group {
                 switch model.state {
                 case .idle:
-                    ProgressView()
+                    ProgressView().frame(maxWidth: .infinity)
                 case .offer(let offer):
                     if scanning {
-                        Text("Scan the new device's code").foregroundStyle(Color.fgMuted)
+                        Text("Scan the new device's code").font(.bBody).foregroundStyle(Color.fgMuted)
                         ScannerView { data in Task { await model.scannedRequest(data) } }
                     } else {
-                        if let img = QRPayload.image(for: offer, scale: 8) {
-                            Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
-                                .padding(12).background(Color.white, in: .rect(cornerRadius: Radius.card))
-                        }
-                        Text("Valid for 10 minutes and usable once.").foregroundStyle(Color.fgMuted)
-                        PrimaryButton("Scan the new device's code") { scanning = true }
+                        LinkOfferPanel(offer: offer, onScan: { scanning = true },
+                                       onNewCode: { Task { await model.start() } })
                     }
                 case .confirm(let name):
                     ScreenTitle("Link \(name)?", size: 22)
@@ -37,7 +35,7 @@ struct LinkNewDeviceView: View {
                     PrimaryButton("Link") { Task { await model.accept(history: history) } }
                 case .share(let url):
                     Text("Valid for 10 minutes and usable once. Hand the file to the new device over a channel you control.")
-                        .foregroundStyle(Color.fgMuted)
+                        .font(.bBody).foregroundStyle(Color.fgMuted)
                     ShareLink(item: url) {
                         Text("Send the link file")
                     }
@@ -46,10 +44,8 @@ struct LinkNewDeviceView: View {
                     Banner(kind: .danger, title: LocalizedStringKey(text))
                     PrimaryButton("Start again") { Task { scanning = false; await model.start() } }
                 }
-                Spacer(minLength: 0)
             }
-            .padding(20)
-            .background(Color.surface)
+            .barkingScreen()
             .navigationTitle(Text("Link a new device"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close", action: onDone) } }
@@ -57,6 +53,90 @@ struct LinkNewDeviceView: View {
         .presentationBackground(Color.surface)
         .task { await model.start() }
         .onDisappear { model.cleanup() }
+    }
+}
+
+/// The offer (U-28): two numbered steps, the code, the time it has left
+/// (a live mm:ss, or a fixed "valid until" under Reduce Motion) and, once it
+/// has expired, a new code instead of the scan button.
+private struct LinkOfferPanel: View {
+    let offer: Data
+    let onScan: () -> Void
+    let onNewCode: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s3) {
+            LinkStep(1, "On the new device, tap Link to an existing device and scan this code.")
+            LinkStep(2, "Then tap Scan the new device's code and scan the code it shows.")
+        }
+        if let expiry = LinkOfferExpiry.date(of: offer) {
+            if reduceMotion {
+                // Redrawn once, when the offer expires: nothing ticks.
+                TimelineView(.explicit([expiry])) { _ in
+                    content(LinkCountdown.of(now: Date(), expiry: expiry, reduceMotion: true))
+                }
+            } else {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    content(LinkCountdown.of(now: context.date, expiry: expiry, reduceMotion: false))
+                }
+            }
+        } else {
+            code
+            Text("Valid for 10 minutes and usable once.").font(.bBody).foregroundStyle(Color.fgMuted)
+            PrimaryButton("Scan the new device's code", action: onScan)
+        }
+    }
+
+    @ViewBuilder private func content(_ countdown: LinkCountdown) -> some View {
+        VStack(spacing: Space.section) {
+            switch countdown {
+            case .live(let clock):
+                code
+                line(Text("Expires in \(clock) · usable once"))
+                PrimaryButton("Scan the new device's code", action: onScan)
+            case .until(let date):
+                code
+                line(Text("Valid until \(date, format: .dateTime.hour().minute()) and usable once."))
+                PrimaryButton("Scan the new device's code", action: onScan)
+            case .expired:
+                Banner(kind: .info, title: "This code has expired.")
+                PrimaryButton("New code", action: onNewCode)
+            }
+        }
+    }
+
+    private func line(_ text: Text) -> some View {
+        text.font(BarkingFont.mono(.footnote, size: 13)).foregroundStyle(Color.fgMuted)
+            .monospacedDigit()
+            .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder private var code: some View {
+        if let img = QRPayload.image(for: offer, scale: 8) {
+            Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
+                .frame(maxWidth: 320)
+                .padding(12).background(Color.white, in: .rect(cornerRadius: Radius.card))
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel(Text("Link code. The new device scans it."))
+        }
+    }
+}
+
+/// One numbered step, read as one line by VoiceOver.
+private struct LinkStep: View {
+    let number: Int
+    let text: LocalizedStringKey
+    init(_ number: Int, _ text: LocalizedStringKey) { self.number = number; self.text = text }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s2) {
+            Text(verbatim: "\(number).").font(BarkingFont.mono(.subheadline, size: 15, weight: .semibold))
+                .foregroundStyle(Color.accent)
+            Text(text).font(.bBody).foregroundStyle(Color.fgMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -109,7 +189,9 @@ struct LinkFromExistingView: View {
             }
         }
         .barkingScreen()
-        .navigationTitle(Text("Link to an existing device"))
+        // Short: the full "Link to an existing device" truncated in the
+        // inline bar at AX3 (UI review B5 carry).
+        .navigationTitle(Text("Link this device"))
         .fileImporter(isPresented: $importing, allowedContentTypes: [.barkingLink, .data]) { result in
             if case .success(let url) = result { Task { await receive(url) } }
         }

@@ -25,6 +25,11 @@ extension Color {
     static let danger = Color("danger")
     static let switchOff = Color("switchOff")
     static let transportNet = Color("transportNet")
+    // UI review B5: the other transports, for the welcome galaxy's dots
+    // (the site's `ble`, `wifi`/`done-dot`, `lora-dot`/`lora` on each ground).
+    static let transportBle = Color("transportBle")
+    static let transportWifi = Color("transportWifi")
+    static let transportLora = Color("transportLora")
     static let field = Color("field")
     static let segment = Color("segment")
     // UI review B1 (§6): disabled controls, switches, focus, terminal blocks.

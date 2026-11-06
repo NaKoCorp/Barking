@@ -281,23 +281,28 @@ struct RecoverView: View {
     @Bindable var model: OnboardingModel
     let onRecovered: (CoreService) -> Void
     @FocusState private var focused: Int?
-    @State private var pasted: OnboardingModel.PasteResult?
+    @State private var pasted: RecoverPaste.Outcome?
     @Environment(\.dynamicTypeSize) private var size
 
     /// Why Recover is greyed out (U-3).
     private var reason: LocalizedStringKey? {
         switch model.recoverBlocker {
-        case .missing(let n)?: "Words left to fill in: \(n)."
+        case .missing(let n)?: "\(n) words left to fill in."
         case .unknownWord(let i)?: "Word \(i) is not in the word list."
         case nil: nil
         }
+    }
+
+    /// "7 words left to fill in." (a plural: "1 word", « Encore 1 mot »).
+    static func wordsLeft(_ n: Int) -> String {
+        String(localized: "\(n) words left to fill in.")
     }
 
     var body: some View {
         Group {
             Banner(kind: .info, title: "Contacts and history are not restored")
             VStack(alignment: .leading, spacing: Space.s2) {
-                SecondaryButton("Paste the 24 words") { pasted = RecoverPaste.take(from: .general, into: model) }
+                SecondaryButton("Paste the 24 words") { pasted = RecoverPaste.take(from: UIPasteboard.general, into: model) }
                 if let pasted { pasteLine(pasted) }
             }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Space.s2),
@@ -326,17 +331,11 @@ struct RecoverView: View {
         .navigationTitle(Text("Recover with 24 words"))
     }
 
-    /// What the paste did, under its button: the clipboard is always said.
-    @ViewBuilder private func pasteLine(_ result: OnboardingModel.PasteResult) -> some View {
-        switch result {
-        case .filled:
-            Text("Pasted. The clipboard was cleared.").font(.bBodySmall).foregroundStyle(Color.fgMuted)
-        case .wrongCount(let n):
-            Text("Found \(n) words; 24 are needed. The clipboard was cleared.")
-                .font(.bBodySmall).foregroundStyle(Color.danger)
-        case .empty:
-            Text("The clipboard holds no text.").font(.bBodySmall).foregroundStyle(Color.danger)
-        }
+    /// What the paste did, under its button, and whether the clipboard
+    /// was cleared.
+    private func pasteLine(_ outcome: RecoverPaste.Outcome) -> some View {
+        Text(verbatim: RecoverPaste.message(for: outcome)).font(.bBodySmall)
+            .foregroundStyle(outcome.result == .filled ? Color.fgMuted : Color.danger)
     }
 
     /// One word: its number in a fixed 24 pt slot (Fira 11), the word in
@@ -389,16 +388,49 @@ struct RecoverView: View {
     }
 }
 
-/// "Paste the 24 words" (review B4 #2): reads the clipboard once, then
-/// clears it when it still holds what was read, filled or not. A recovery
-/// phrase must not stay where Universal Clipboard can carry it to other
-/// devices, nor linger after a paste that failed.
+/// What `RecoverPaste` needs from a clipboard (the general pasteboard, or
+/// a fake in the tests).
+@MainActor
+protocol PhraseClipboard: AnyObject {
+    var changeCount: Int { get }
+    var string: String? { get }
+    func clear()
+}
+
+extension UIPasteboard: PhraseClipboard {
+    func clear() { items = [] }
+}
+
+/// "Paste the 24 words" (review B4 #2, B5): reads the clipboard once (one
+/// paste prompt on a device), then clears it if it still holds what was
+/// read, filled or not: a recovery phrase must not stay where Universal
+/// Clipboard can carry it to other devices. "Still holds" is decided with
+/// `changeCount`, not a second read (which would prompt again). Text with
+/// no word in it (blanks, digits) is not a phrase and is left alone.
 enum RecoverPaste {
+    struct Outcome: Equatable {
+        let result: OnboardingModel.PasteResult
+        let cleared: Bool
+    }
+
     @MainActor
-    static func take(from board: UIPasteboard, into model: OnboardingModel) -> OnboardingModel.PasteResult {
-        guard let text = board.string else { return .empty }
+    static func take(from board: some PhraseClipboard, into model: OnboardingModel) -> Outcome {
+        let before = board.changeCount
+        guard let text = board.string else { return Outcome(result: .empty, cleared: false) }
         let result = model.paste(text)
-        if board.string == text { board.items = [] }
-        return result
+        guard result != .empty, board.changeCount == before else { return Outcome(result: result, cleared: false) }
+        board.clear()
+        return Outcome(result: result, cleared: true)
+    }
+
+    /// The line under the button. "The clipboard was cleared." only when it was.
+    static func message(for outcome: Outcome) -> String {
+        switch (outcome.result, outcome.cleared) {
+        case (.filled, true): String(localized: "Pasted. The clipboard was cleared.")
+        case (.filled, false): String(localized: "Pasted.")
+        case (.wrongCount(let n), true): String(localized: "Found \(n) words; 24 are needed. The clipboard was cleared.")
+        case (.wrongCount(let n), false): String(localized: "Found \(n) words; 24 are needed.")
+        case (.empty, _): String(localized: "The clipboard holds no words.")
+        }
     }
 }

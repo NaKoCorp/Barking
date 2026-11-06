@@ -88,7 +88,7 @@ struct ConversationView: View {
                 Text(item.at, format: .dateTime.hour().minute())
                 if item.status == .failed {
                     Button { Task { await model.retry(item.id) } } label: {
-                        Text("⚠︎ not sent — tap to retry")
+                        Text("⚠︎ not sent, tap to retry")
                     }
                     .foregroundStyle(item.outgoing ? Color.white : Color.danger)
                 } else if item.status == .queued {
