@@ -261,6 +261,10 @@ final class SecurityUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Barking is locked"].waitForExistence(timeout: 10))
         XCTAssertFalse(sheetButton.isHittable, "the sheet must be under the cover")
         XCTAssertTrue(app.buttons["Unlock"].isHittable)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "10-lock"
+        shot.lifetime = .keepAlways
+        add(shot)
     }
 
     /// The lock screen asks for the owner by itself; "Unlock" is the retry.
