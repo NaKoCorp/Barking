@@ -5,6 +5,9 @@ import SwiftUI
 struct SecuritySettingsView: View {
     @Environment(LockController.self) private var lock
     @State private var refused = false
+    /// Bumped after a refused change so the switch is drawn again from the
+    /// controller's value (it stays where it was).
+    @State private var redraw = 0
 
     private static func title(_ delay: TimeInterval) -> LocalizedStringKey {
         switch delay {
@@ -20,8 +23,13 @@ struct SecuritySettingsView: View {
         List {
             Section {
                 Toggle("Lock Barking", isOn: Binding(
-                    get: { lock.enabled },
-                    set: { refused = !lock.setEnabled($0) }))
+                    get: { _ = redraw; return lock.enabled },
+                    set: { on in
+                        Task {
+                            refused = await lock.setEnabled(on) == .noPasscode
+                            redraw += 1
+                        }
+                    }))
                     .accessibilityIdentifier("security.lock")
                 if refused {
                     Banner(kind: .danger, title: "Set a passcode on the iPhone first")

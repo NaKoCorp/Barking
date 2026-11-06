@@ -63,6 +63,10 @@ struct DataRow: Identifiable, Equatable {
     let detail: String
 }
 
+/// Which events the journal lists. "Keys and devices" is the security class:
+/// the events to watch first.
+enum JournalFilter: Hashable { case everything, keysAndDevices }
+
 /// Settings › Transparency (spec block 2b §5): the core's journal by day,
 /// 100 entries a page, and where the data is.
 @MainActor @Observable
@@ -76,7 +80,7 @@ final class TransparencyModel {
     private(set) var dataRows: [DataRow] = []
     private(set) var canLoadMore = false
     private(set) var loading = false
-    private(set) var securityOnly = false
+    private(set) var filter: JournalFilter = .everything
     private var rows: [LogRow] = []
     /// Id of the oldest row loaded: the next page starts before it.
     private var cursor: Int64?
@@ -97,8 +101,8 @@ final class TransparencyModel {
         await reload()
     }
 
-    func setSecurityOnly(_ on: Bool) async {
-        securityOnly = on
+    func setFilter(_ filter: JournalFilter) async {
+        self.filter = filter
         await reload()
     }
 
@@ -118,9 +122,9 @@ final class TransparencyModel {
     private func fetch(before: Int64?) async {
         loading = true
         defer { loading = false }
-        let filter = securityOnly
-        guard let page = try? await core.transparencyLog(limit: Self.pageSize, before: before, securityOnly: filter),
-              filter == securityOnly, before == cursor else { return }
+        let filter = self.filter
+        guard let page = try? await core.transparencyLog(limit: Self.pageSize, before: before, securityOnly: filter == .keysAndDevices),
+              filter == self.filter, before == cursor else { return }
         rows += page.map { e in
             LogRow(id: e.id, at: Date(timeIntervalSince1970: TimeInterval(e.at)), family: e.family,
                    text: LogText.render(e), security: e.security)

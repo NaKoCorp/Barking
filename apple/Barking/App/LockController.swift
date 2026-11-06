@@ -31,15 +31,28 @@ final class LockController {
         storedDelay = lock.delay
     }
 
-    /// Turns the lock on or off. A phone without a passcode refuses it:
-    /// nothing could unlock the app.
-    @discardableResult
-    func setEnabled(_ on: Bool) -> Bool {
-        if on, !AppLock.canEnable() { return false }
+    enum Change: Equatable {
+        case changed
+        /// A phone without a passcode: nothing could unlock the app.
+        case noPasscode
+        /// Face ID, Touch ID or the passcode failed or was cancelled.
+        case denied
+    }
+
+    /// Turns the lock on or off, after the owner is checked: nobody else may
+    /// loosen it, and a stranger may not tighten it either. A refusal changes
+    /// and saves nothing.
+    func setEnabled(
+        _ on: Bool,
+        canEnable: () -> Bool = { AppLock.canEnable() },
+        owner: () async -> Bool = { await Owner.check(reason: String(localized: "Change the lock")) }
+    ) async -> Change {
+        if on, !canEnable() { return .noPasscode }
+        guard await owner() else { return .denied }
         lock.enabled = on
         enabled = on
         locked = false
-        return true
+        return .changed
     }
 
     /// The cover goes up whenever the lock is on and the app is not active

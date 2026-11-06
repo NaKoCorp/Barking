@@ -41,6 +41,10 @@ final class TransparencyModelTests: XCTestCase {
         XCTAssertEqual(utc.startOfDay(for: m.days[0].rows[0].at), m.days[0].date)
     }
 
+    func testTheJournalShowsEverythingByDefault() {
+        XCTAssertEqual(model(FakeDevice()).filter, .everything)
+    }
+
     func testSecurityFilter() async {
         let d = FakeDevice()
         d.logEntries = [entry(noon + 3), entry(noon + 2, security: true, key: "log.contact_key_changed",
@@ -50,11 +54,11 @@ final class TransparencyModelTests: XCTestCase {
         let m = model(d)
         await m.load()
         XCTAssertEqual(m.days.flatMap(\.rows).count, 4)
-        await m.setSecurityOnly(true)
+        await m.setFilter(.keysAndDevices)
         let rows = m.days.flatMap(\.rows)
         XCTAssertEqual(rows.count, 2)
         XCTAssertTrue(rows.allSatisfy(\.security))
-        await m.setSecurityOnly(false)
+        await m.setFilter(.everything)
         XCTAssertEqual(m.days.flatMap(\.rows).count, 4)
     }
 

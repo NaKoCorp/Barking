@@ -150,13 +150,12 @@ final class DevicesUITests: XCTestCase {
         row.tap()
         XCTAssertTrue(app.staticTexts["Nothing in clear on the nodes"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Journal and paths"].exists)
-        let filter = app.switches["transparency.securityOnly"]
+        let filter = app.segmentedControls["transparency.filter"]
         XCTAssertTrue(filter.exists)
-        // The switch sits at the trailing edge of its row.
-        filter.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-        let on = NSPredicate(format: "value == %@", "1")
-        expectation(for: on, evaluatedWith: filter)
-        waitForExpectations(timeout: 5)
+        XCTAssertTrue(filter.buttons["Everything"].isSelected)
+        filter.buttons["Keys and devices"].tap()
+        XCTAssertTrue(filter.buttons["Keys and devices"].isSelected)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Keys and devices: key changes")).firstMatch.exists)
     }
 
     /// The administrator alone: "Disconnect this device" is the wipe, with

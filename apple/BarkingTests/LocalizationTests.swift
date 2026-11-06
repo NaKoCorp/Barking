@@ -56,7 +56,8 @@ final class LocalizationTests: XCTestCase {
 
     func testTransparencyStringsInFrench() throws {
         let fr = try XCTUnwrap(table("fr"))
-        for key in ["Transparency", "Security only", "Where my data is", "Devices",
+        for key in ["Transparency", "Everything", "Keys and devices", "Change the lock",
+                    "Keys and devices: key changes, devices added or removed, unreadable messages — the events to watch first.", "Where my data is", "Devices",
                     "Database key protected by the Secure Enclave", "Database key protected by the keychain only",
                     "Nothing yet", "Today", "Yesterday", "Wrapped by a key that never leaves this iPhone's chip.",
                     "Kept in the keychain, without the Secure Enclave.",

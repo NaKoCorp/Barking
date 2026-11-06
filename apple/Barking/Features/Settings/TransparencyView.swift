@@ -27,10 +27,15 @@ struct TransparencyView: View {
                 .accessibilityIdentifier("transparency.data")
 
                 heading("Journal").padding(.top, 14)
-                Toggle("Security only", isOn: Binding(get: { model.securityOnly },
-                                                       set: { on in Task { await model.setSecurityOnly(on) } }))
-                    .font(BarkingFont.sans(.body, size: 15)).tint(Color.accent)
-                    .accessibilityIdentifier("transparency.securityOnly")
+                Picker("Journal filter", selection: Binding(get: { model.filter },
+                                                      set: { f in Task { await model.setFilter(f) } })) {
+                    Text("Everything").tag(JournalFilter.everything)
+                    Text("Keys and devices").tag(JournalFilter.keysAndDevices)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("transparency.filter")
+                Text("Keys and devices: key changes, devices added or removed, unreadable messages — the events to watch first.")
+                    .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
                 if model.isEmpty, !model.loading {
                     Text("Nothing yet").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
                         .padding(.top, 6)

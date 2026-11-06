@@ -233,6 +233,7 @@
 "Erase and continue" = "Effacer et continuer";
 "Security" = "Sécurité";
 "Lock and erase" = "Verrou et effacement";
+"Change the lock" = "Modifier le verrouillage";
 "Lock Barking" = "Verrouiller Barking";
 "Lock after" = "Verrouiller après";
 "Immediately" = "Immédiatement";
@@ -283,7 +284,10 @@
 "What this phone did, and who could see it" = "Ce que ce téléphone a fait, et qui a pu le voir";
 "Where my data is" = "Où sont mes données";
 "Journal" = "Journal";
-"Security only" = "Sécurité seulement";
+"Journal filter" = "Filtre du journal";
+"Everything" = "Tout";
+"Keys and devices" = "Clés et appareils";
+"Keys and devices: key changes, devices added or removed, unreadable messages — the events to watch first." = "Clés et appareils : changements de clé, appareils ajoutés ou retirés, messages illisibles — les événements à surveiller en priorité.";
 "Nothing yet" = "Rien pour l’instant";
 "Devices" = "Appareils";
 "Encrypted database on this iPhone" = "Base chiffrée sur cet iPhone";

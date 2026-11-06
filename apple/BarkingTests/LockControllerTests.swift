@@ -51,6 +51,42 @@ final class LockControllerTests: XCTestCase {
         guard case .failed = router.state else { return XCTFail() }
     }
 
+    /// Changing the lock asks for the owner first; a refusal changes and saves nothing.
+    func testTurningTheLockOffNeedsTheOwner() async {
+        let lock = LockController(lock: AppLock(defaults: defaults))
+        var r = await lock.setEnabled(false, canEnable: { true }, owner: { false })
+        XCTAssertEqual(r, .denied)
+        XCTAssertTrue(lock.enabled)
+        XCTAssertTrue(defaults.bool(forKey: "barking.lock.enabled"))
+        r = await lock.setEnabled(false, canEnable: { true }, owner: { true })
+        XCTAssertEqual(r, .changed)
+        XCTAssertFalse(lock.enabled)
+        XCTAssertFalse(defaults.bool(forKey: "barking.lock.enabled"))
+    }
+
+    func testTurningTheLockOnNeedsTheOwner() async {
+        defaults.set(false, forKey: "barking.lock.enabled")
+        let lock = LockController(lock: AppLock(defaults: defaults))
+        var r = await lock.setEnabled(true, canEnable: { true }, owner: { false })
+        XCTAssertEqual(r, .denied)
+        XCTAssertFalse(lock.enabled)
+        XCTAssertFalse(defaults.bool(forKey: "barking.lock.enabled"))
+        r = await lock.setEnabled(true, canEnable: { true }, owner: { true })
+        XCTAssertEqual(r, .changed)
+        XCTAssertTrue(lock.enabled)
+        XCTAssertTrue(defaults.bool(forKey: "barking.lock.enabled"))
+    }
+
+    func testNoPasscodeRefusesBeforeAskingTheOwner() async {
+        defaults.set(false, forKey: "barking.lock.enabled")
+        let lock = LockController(lock: AppLock(defaults: defaults))
+        var asked = false
+        let result = await lock.setEnabled(true, canEnable: { false }, owner: { asked = true; return true })
+        XCTAssertEqual(result, .noPasscode)
+        XCTAssertFalse(asked)
+        XCTAssertFalse(lock.enabled)
+    }
+
     func testPromptUnlocksOnlyWhenTheOwnerPasses() async {
         let lock = LockController(lock: AppLock(defaults: defaults))
         await lock.promptIfLocked { false }
@@ -67,7 +103,7 @@ final class LockControllerTests: XCTestCase {
         XCTAssertFalse(asked)
     }
 
-    func testCoverFollowsThePhaseOnlyWithTheLockOn() {
+    func testCoverFollowsThePhaseOnlyWithTheLockOn() async {
         let lock = LockController(lock: AppLock(defaults: defaults))
         lock.unlock()
         XCTAssertFalse(lock.covered)
@@ -75,7 +111,7 @@ final class LockControllerTests: XCTestCase {
         XCTAssertTrue(lock.covered)
         lock.phaseChanged(to: .active)
         XCTAssertFalse(lock.covered)
-        _ = lock.setEnabled(false)
+        _ = await lock.setEnabled(false, owner: { true })
         lock.phaseChanged(to: .inactive)
         XCTAssertFalse(lock.covered)
     }
