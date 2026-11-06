@@ -242,6 +242,8 @@ final class LocalizationTests: XCTestCase {
         XCTAssertNil(fr["Words left to fill in: %lld."], "the old reason is gone")
         XCTAssertNil(fr["The clipboard holds no text."], "the old paste line is gone")
         XCTAssertEqual(fr["Link this device"] as? String, "Lier cet appareil")
+        XCTAssertEqual(fr["Link a device"] as? String, "Lier un appareil")
+        XCTAssertEqual(fr["Nothing was pasted."] as? String, "Rien n’a été collé.")
         XCTAssertEqual(fr["The clipboard holds no words."] as? String, "Le presse-papiers ne contient aucun mot.")
         for key in ["Pasted.", "Expires in %@ · usable once", "Valid until %@ and usable once.", "This code has expired.", "New code",
                     "On the new device, tap Link to an existing device and scan this code.",

@@ -165,7 +165,7 @@ final class OnboardingModelTests: XCTestCase {
         board.string = words.joined(separator: " ")
         XCTAssertEqual(RecoverPaste.take(from: board, into: m), .init(result: .filled, cleared: true))
         XCTAssertFalse(board.hasStrings)
-        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .init(result: .empty, cleared: false))
+        XCTAssertEqual(RecoverPaste.take(from: board, into: m), .init(result: nil, cleared: false))
     }
 
     func testRecoverRejectsUnknownWord() {

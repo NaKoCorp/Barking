@@ -138,6 +138,10 @@ final class WelcomeTests: XCTestCase {
         XCTAssertTrue(GalaxyClock.paused(elapsed: 12, reduceMotion: false, active: false))
         XCTAssertTrue(GalaxyClock.paused(elapsed: 60, reduceMotion: false, active: true))
         XCTAssertTrue(GalaxyClock.paused(elapsed: 0, reduceMotion: true, active: true))
+        // Review B5 #4: the stop is timed from the start, so turning Reduce
+        // Motion off later still stops the redraws at the minute.
+        XCTAssertEqual(GalaxyClock.remaining(elapsed: 12), 48)
+        XCTAssertEqual(GalaxyClock.remaining(elapsed: 95), 0)
     }
 
     // MARK: Link a new device (U-28)
@@ -221,18 +225,37 @@ final class WelcomeTests: XCTestCase {
     /// "no words", not "no text".
     func testPasteOfNoWords() {
         let m = OnboardingModel(defaults: freshDefaults())
-        for text in ["  \n ", "1234 5678", nil] as [String?] {
+        for text in ["  \n ", "1234 5678"] {
             let board = FakeClipboard(text)
             let outcome = RecoverPaste.take(from: board, into: m)
-            XCTAssertEqual(outcome, .init(result: .empty, cleared: false), "\(text ?? "nil")")
+            XCTAssertEqual(outcome, .init(result: .empty, cleared: false), text)
             XCTAssertFalse(board.cleared)
             XCTAssertEqual(RecoverPaste.message(for: outcome), "The clipboard holds no words.")
         }
     }
 
-    /// Carry 4: the count of words left is a plural.
+    /// Review B5 #5: a read that gives nothing (no text, or "Don't Allow
+    /// Paste") claims nothing about the clipboard.
+    func testDeniedPasteSaysNothingWasPasted() {
+        let board = FakeClipboard(nil)
+        let outcome = RecoverPaste.take(from: board, into: OnboardingModel(defaults: freshDefaults()))
+        XCTAssertEqual(outcome, .init(result: nil, cleared: false))
+        XCTAssertFalse(board.cleared)
+        XCTAssertEqual(RecoverPaste.message(for: outcome), "Nothing was pasted.")
+        XCTAssertFalse(RecoverPaste.isProblem(outcome))
+        XCTAssertTrue(RecoverPaste.isProblem(.init(result: .empty, cleared: false)))
+    }
+
+    /// Carry 4: the count of words left is a plural, through the key the
+    /// Recover button draws (review B5 #7).
     func testWordsLeftIsAPlural() {
-        XCTAssertEqual(RecoverView.wordsLeft(1), "1 word left to fill in.")
-        XCTAssertEqual(RecoverView.wordsLeft(7), "7 words left to fill in.")
+        // LocalizedStringKey's == fails on format arguments: compare what it holds.
+        let holds = { (k: LocalizedStringKey?) in String(describing: k) }
+        XCTAssertEqual(holds(RecoverView.reason(for: .missing(7))), holds("\(7) words left to fill in."))
+        XCTAssertTrue(holds(RecoverView.reason(for: .missing(7))).contains(#"key: "%lld words left to fill in.""#))
+        XCTAssertEqual(holds(RecoverView.reason(for: .unknownWord(6))), holds("Word \(6) is not in the word list."))
+        XCTAssertNil(RecoverView.reason(for: nil))
+        XCTAssertEqual(String(localized: "\(1) words left to fill in."), "1 word left to fill in.")
+        XCTAssertEqual(String(localized: "\(7) words left to fill in."), "7 words left to fill in.")
     }
 }

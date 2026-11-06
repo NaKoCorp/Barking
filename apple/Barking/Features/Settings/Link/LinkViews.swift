@@ -46,7 +46,9 @@ struct LinkNewDeviceView: View {
                 }
             }
             .barkingScreen()
-            .navigationTitle(Text("Link a new device"))
+            // Its own short title: « Lier un nouvel appareil » truncated in the
+            // inline bar at AX3 (review B5 #3). The button keeps the long one.
+            .navigationTitle(Text("Link a device"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close", action: onDone) } }
         }

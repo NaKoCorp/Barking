@@ -284,18 +284,14 @@ struct RecoverView: View {
     @State private var pasted: RecoverPaste.Outcome?
     @Environment(\.dynamicTypeSize) private var size
 
-    /// Why Recover is greyed out (U-3).
-    private var reason: LocalizedStringKey? {
-        switch model.recoverBlocker {
+    /// Why Recover is greyed out (U-3). "7 words left to fill in." is a
+    /// plural ("1 word", « Encore 1 mot ») from the stringsdict.
+    static func reason(for blocker: OnboardingModel.RecoverBlocker?) -> LocalizedStringKey? {
+        switch blocker {
         case .missing(let n)?: "\(n) words left to fill in."
         case .unknownWord(let i)?: "Word \(i) is not in the word list."
         case nil: nil
         }
-    }
-
-    /// "7 words left to fill in." (a plural: "1 word", « Encore 1 mot »).
-    static func wordsLeft(_ n: Int) -> String {
-        String(localized: "\(n) words left to fill in.")
     }
 
     var body: some View {
@@ -321,7 +317,7 @@ struct RecoverView: View {
         .barkingScreen()
         .ctaBar {
             PrimaryButton("Recover (\(model.filledRecoveryWords)/24)", enabled: model.canRecover,
-                          isLoading: model.busy, reason: reason) {
+                          isLoading: model.busy, reason: Self.reason(for: model.recoverBlocker)) {
                 Task { if let core = await model.recover() { onRecovered(core) } }
             }
         }
@@ -335,7 +331,7 @@ struct RecoverView: View {
     /// was cleared.
     private func pasteLine(_ outcome: RecoverPaste.Outcome) -> some View {
         Text(verbatim: RecoverPaste.message(for: outcome)).font(.bBodySmall)
-            .foregroundStyle(outcome.result == .filled ? Color.fgMuted : Color.danger)
+            .foregroundStyle(RecoverPaste.isProblem(outcome) ? Color.danger : Color.fgMuted)
     }
 
     /// One word: its number in a fixed 24 pt slot (Fira 11), the word in
@@ -409,14 +405,17 @@ extension UIPasteboard: PhraseClipboard {
 /// no word in it (blanks, digits) is not a phrase and is left alone.
 enum RecoverPaste {
     struct Outcome: Equatable {
-        let result: OnboardingModel.PasteResult
+        /// nil: nothing was read (no text, or the person denied the paste).
+        let result: OnboardingModel.PasteResult?
         let cleared: Bool
     }
 
     @MainActor
     static func take(from board: some PhraseClipboard, into model: OnboardingModel) -> Outcome {
         let before = board.changeCount
-        guard let text = board.string else { return Outcome(result: .empty, cleared: false) }
+        // nil when there is no text, and when "Don't Allow Paste" is tapped:
+        // then nothing is known about the clipboard, and nothing is said.
+        guard let text = board.string else { return Outcome(result: nil, cleared: false) }
         let result = model.paste(text)
         guard result != .empty, board.changeCount == before else { return Outcome(result: result, cleared: false) }
         board.clear()
@@ -431,6 +430,15 @@ enum RecoverPaste {
         case (.wrongCount(let n), true): String(localized: "Found \(n) words; 24 are needed. The clipboard was cleared.")
         case (.wrongCount(let n), false): String(localized: "Found \(n) words; 24 are needed.")
         case (.empty, _): String(localized: "The clipboard holds no words.")
+        case (nil, _): String(localized: "Nothing was pasted.")
+        }
+    }
+
+    /// A paste that read text but could not fill the grid is said in `danger`.
+    static func isProblem(_ outcome: Outcome) -> Bool {
+        switch outcome.result {
+        case .wrongCount?, .empty?: true
+        case .filled?, nil: false
         }
     }
 }

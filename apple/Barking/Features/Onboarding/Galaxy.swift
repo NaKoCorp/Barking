@@ -95,10 +95,12 @@ struct Galaxy: View {
             }
         }
         .accessibilityHidden(true)
-        .task {
+        // Restarted when Reduce Motion changes: turned off later, the
+        // galaxy still stops a minute after it first appeared.
+        .task(id: reduceMotion) {
             guard !reduceMotion else { return }
-            try? await Task.sleep(for: .seconds(GalaxyClock.runFor))
-            settled = true
+            try? await Task.sleep(for: .seconds(GalaxyClock.remaining(elapsed: Date().timeIntervalSince(start))))
+            if !Task.isCancelled { settled = true }
         }
     }
 }
@@ -168,6 +170,11 @@ enum GalaxyClock {
     /// The time the picture shows: 0 under Reduce Motion, never past a minute.
     static func time(elapsed: TimeInterval, reduceMotion: Bool) -> TimeInterval {
         reduceMotion ? 0 : min(max(elapsed, 0), runFor)
+    }
+
+    /// How long the galaxy still moves, `elapsed` seconds after it appeared.
+    static func remaining(elapsed: TimeInterval) -> TimeInterval {
+        max(0, runFor - elapsed)
     }
 
     static func paused(elapsed: TimeInterval, reduceMotion: Bool, active: Bool) -> Bool {
