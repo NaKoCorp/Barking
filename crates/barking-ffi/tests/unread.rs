@@ -2,7 +2,7 @@
 
 mod common;
 
-use barking_node::testing::{network, stop_all};
+use barking_node::testing::{network, stop_all, wait_packets};
 use common::device;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -11,7 +11,7 @@ async fn unread_counts_and_mark_read() {
     let (id, addr) = (nodes[0].id.to_string(), nodes[0].addr.to_string());
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let db_path = db.path().join("barking.db");
-    tokio::task::spawn_blocking(move || {
+    let (da, db, alice, bob, fa) = tokio::task::spawn_blocking(move || {
         let alice = device(&da, 1, "Alice");
         let bob = device(&db, 2, "Bob");
         let fb = alice
@@ -29,6 +29,15 @@ async fn unread_counts_and_mark_read() {
         }
         let s = alice.sync(30_000).unwrap();
         assert!(s.sent >= 1, "{s:?}");
+        (da, db, alice, bob, fa)
+    })
+    .await
+    .unwrap();
+    // The deposits are copied to the other responsibles by replication: read
+    // before that, Bob would get only part of them from the node he asks.
+    wait_packets(&nodes, 3).await;
+    tokio::task::spawn_blocking(move || {
+        let _keep = (&da, &alice);
         bob.sync(30_000).unwrap();
         let counts = bob.unread_counts().unwrap();
         assert_eq!(counts.len(), 1);

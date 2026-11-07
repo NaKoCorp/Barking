@@ -160,6 +160,9 @@ pub struct TestNode {
     stop: oneshot::Sender<()>,
     task: JoinHandle<crate::Result<()>>,
     dir: tempfile::TempDir,
+    /// Duplicates of the node's sockets: the port stays bound while the
+    /// node is halted.
+    held: Vec<UdpSocket>,
 }
 
 /// A stopped node, its database kept, to start again on the same address.
@@ -168,6 +171,7 @@ pub struct StoppedNode {
     /// Settings of the next start (the previous ones by default).
     pub spec: NodeSpec,
     dir: tempfile::TempDir,
+    held: Vec<UdpSocket>,
 }
 
 impl TestNode {
@@ -190,6 +194,15 @@ impl TestNode {
                 Some((path, bytes))
             })
             .collect()
+    }
+
+    /// Number of packets the node holds, read from its database.
+    pub fn stored_packets(&self) -> u64 {
+        NodeStore::open_read_only(self.dir.path().join("node.db"))
+            .expect("node database opens read-only")
+            .stats()
+            .expect("node statistics read")
+            .packets
     }
 
     pub fn entry(&self) -> BootstrapEntry {
@@ -216,28 +229,19 @@ impl TestNode {
             addr: self.addr,
             spec: self.spec,
             dir: self.dir,
+            held: self.held,
         }
     }
 }
 
 impl StoppedNode {
     /// Starts the node again on its address, with its database.
+    ///
+    /// The sockets were kept bound since the halt: a port released and bound
+    /// again could be taken in between by a socket of another test (a client's
+    /// ephemeral port), which holds it as long as that test lasts.
     pub async fn restart(self) -> TestNode {
-        // The port was just released: retried briefly if still held.
-        let deadline = tokio::time::Instant::now() + LONG;
-        let socket = loop {
-            match UdpSocket::bind(self.addr) {
-                Ok(s) => break s,
-                Err(e) => {
-                    assert!(
-                        tokio::time::Instant::now() < deadline,
-                        "port not released: {e}"
-                    );
-                    tokio::time::sleep(TICK).await;
-                }
-            }
-        };
-        launch(self.spec, vec![socket], self.addr, self.dir)
+        launch(self.spec, self.held, self.addr, self.dir)
     }
 }
 
@@ -256,6 +260,10 @@ fn launch(
 ) -> TestNode {
     let k = key(spec.n);
     let id = id_of(&k);
+    let held = sockets
+        .iter()
+        .map(|s| s.try_clone().expect("socket duplicates"))
+        .collect();
     let mut cfg = ServerConfig::new(sockets, k);
     cfg.dht = spec.dht.clone();
     cfg.dht_tick = Some(TICK);
@@ -290,6 +298,7 @@ fn launch(
         stop: tx,
         task,
         dir,
+        held,
     }
 }
 
@@ -373,6 +382,21 @@ pub async fn wait_full_tables(nodes: &[&TestNode]) {
             );
             tokio::time::sleep(TICK).await;
         }
+    }
+}
+
+/// Waits until every node of `nodes` holds at least `packets` packets: the
+/// copies a deposit leaves on other responsibles arrive by replication, not
+/// with the deposit, and a client reading from one of them before then gets
+/// only part of what was deposited.
+pub async fn wait_packets(nodes: &[TestNode], packets: u64) {
+    let deadline = tokio::time::Instant::now() + LONG;
+    while !nodes.iter().all(|n| n.stored_packets() >= packets) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the packets were not replicated to every node"
+        );
+        tokio::time::sleep(TICK).await;
     }
 }
 
