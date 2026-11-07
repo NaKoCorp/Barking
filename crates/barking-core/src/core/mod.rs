@@ -611,6 +611,27 @@ impl Core {
         Ok(out)
     }
 
+    /// Mailbox and day of each queued packet that carries a message to a
+    /// contact's device, not yet acknowledged and not expired at `now`:
+    /// where an acknowledgement (or the node's expiry notice) is awaited.
+    /// Oldest first, without duplicates. `SyncSent` copies for my own
+    /// devices, receipts and messageless packets (card updates, syncs) are
+    /// left out. The day is that of the sealing (the mailbox's day). A
+    /// storage read error is returned.
+    pub fn awaited_ack_mailboxes(&self, now: u64) -> Result<Vec<(MailboxId, u32)>> {
+        let mut out: Vec<(MailboxId, u32)> = Vec::new();
+        for (bytes, queued_at) in self.store.outbox_awaiting_ack(now)? {
+            let Ok(p) = Packet::decode(&bytes) else {
+                continue;
+            };
+            if p.kind != Kind::Message || out.iter().any(|(m, _)| *m == p.mailbox) {
+                continue;
+            }
+            out.push((p.mailbox, day_of(queued_at)));
+        }
+        Ok(out)
+    }
+
     /// My introduction mailboxes for each of `days`, in that order: the
     /// part of `own_mailboxes` anyone can write to. Empty while awaiting
     /// the link.

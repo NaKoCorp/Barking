@@ -908,6 +908,30 @@ pub trait Queries {
             .collect()
     }
 
+    /// Queued packets (`expires_at >= now`) that carry a message (a
+    /// `messages` row) to a contact's device (`own = 0`) and still await
+    /// its acknowledgement, with the date they were queued; oldest first.
+    fn outbox_awaiting_ack(&self, now: u64) -> Result<Vec<(Vec<u8>, u64)>> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT o.bytes, o.created_at FROM outbox o \
+                 JOIN deliveries d ON d.packet_id = o.packet_id \
+                 JOIN messages m ON m.message_id = d.message_id \
+                 WHERE o.expires_at >= ?1 AND d.own = 0 AND d.status = ?2 \
+                 ORDER BY o.created_at, o.rowid",
+            )
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![to_i64(now), MessageStatus::Sent as i64], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        Ok(rows.into_iter().map(|(b, at)| (b, to_u64(at))).collect())
+    }
+
     /// Deletes expired packets; returns the number of rows deleted.
     fn outbox_purge_expired(&self, now: u64) -> Result<usize> {
         self.conn()

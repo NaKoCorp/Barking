@@ -1,5 +1,6 @@
 //! Wake subscriptions of this device: which nodes hold a subscription for
-//! which of my mailboxes, planned over a seven-day horizon (spec §5).
+//! which of my mailboxes, planned over a seven-day horizon (spec §5), and
+//! for which mailboxes where a message I sent awaits its ack (`Acks`).
 //!
 //! Everything here is pure: [`plan_push`] compares the persisted
 //! [`PushState`] with the mailboxes wanted and the nodes responsible for each
@@ -32,11 +33,14 @@ pub const PUSH_STATE_KEY: &str = "push";
 /// How long a node that did not wake is left out of the plan.
 pub const NO_WAKE_SECS: u64 = 86_400;
 
-/// Version of the encoding: any other value reads as an unreadable state.
-/// Frozen: format 1 is the layout of `Stored` as first released; any change
-/// must bump `FORMAT` and migrate the older format (`push_state_golden_bytes`
-/// holds its bytes).
-const FORMAT: u8 = 1;
+/// Version of the encoding. Format 1 (no kind: every subscription was a
+/// `Messages` one) still reads, as `Messages`; it is written back as the
+/// current format on the next save. Any other value reads as an unreadable
+/// state. Frozen: any change to `Stored` must bump `FORMAT` and migrate the
+/// older formats (`push_state_golden_bytes` holds the bytes of format 2,
+/// `push_state_format_1_reads_as_messages` those of format 1).
+const FORMAT: u8 = 2;
+const FORMAT_1: u8 = 1;
 
 /// What the relay and the sealing key are, and the device token to wake.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +52,7 @@ pub struct PushConfig {
     pub env: ApnsEnv,
 }
 
-/// Subscriptions held for one mailbox.
+/// Subscriptions held for one mailbox and one kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoxSubs {
     /// Day of the mailbox.
@@ -65,13 +69,15 @@ pub struct PushState {
     /// BLAKE3 of the encoded `PushConfig` the subscriptions were made with;
     /// `None` when push is off.
     pub config_hash: Option<[u8; 32]>,
-    pub subs: BTreeMap<MailboxId, BoxSubs>,
+    /// By mailbox and kind: the two kinds of a mailbox are distinct
+    /// subscriptions on the node, with their own secrets and labels.
+    pub subs: BTreeMap<(MailboxId, SubKind), BoxSubs>,
     /// End of the time a node is left out, by node.
     pub no_wake: BTreeMap<NodeId, u64>,
 }
 
-/// Mailbox, day, collapse label, nodes with their cancel secret.
-type StoredBox = (MailboxId, u32, [u8; 16], Vec<(NodeId, [u8; 32])>);
+/// Mailbox, kind, day, collapse label, nodes with their cancel secret.
+type StoredBox = (MailboxId, SubKind, u32, [u8; 16], Vec<(NodeId, [u8; 32])>);
 
 #[derive(Serialize, Deserialize)]
 struct Stored {
@@ -81,14 +87,26 @@ struct Stored {
     no_wake: Vec<(NodeId, u64)>,
 }
 
+/// Format 1: mailbox, day, collapse label, nodes (all `Messages`).
+type StoredBox1 = (MailboxId, u32, [u8; 16], Vec<(NodeId, [u8; 32])>);
+
+#[derive(Deserialize)]
+struct Stored1 {
+    format: u8,
+    config_hash: Option<[u8; 32]>,
+    subs: Vec<StoredBox1>,
+    no_wake: Vec<(NodeId, u64)>,
+}
+
 /// What a run has to do.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PushPlan {
-    pub subscribe: Vec<(MailboxId, NodeId)>,
-    pub unsubscribe: Vec<(MailboxId, NodeId, [u8; 32])>,
-    /// Mailboxes to drop from the state without unsubscribing (their
-    /// subscriptions expire by themselves).
-    pub forget: Vec<MailboxId>,
+    pub subscribe: Vec<(MailboxId, SubKind, NodeId)>,
+    pub unsubscribe: Vec<(MailboxId, SubKind, NodeId, [u8; 32])>,
+    /// Entries to drop from the state without unsubscribing (their
+    /// subscriptions expire by themselves), or once their unsubscribes
+    /// are sent.
+    pub forget: Vec<(MailboxId, SubKind)>,
 }
 
 impl PushState {
@@ -119,7 +137,7 @@ impl PushState {
             subs: self
                 .subs
                 .iter()
-                .map(|(m, b)| (*m, b.day, b.collapse, b.nodes.clone()))
+                .map(|((m, k), b)| (*m, *k, b.day, b.collapse, b.nodes.clone()))
                 .collect(),
             no_wake: self.no_wake.iter().map(|(n, t)| (*n, *t)).collect(),
         };
@@ -127,19 +145,33 @@ impl PushState {
     }
 
     /// Rebuilds a state from `encode` output; `None` if unreadable.
+    /// Format 1 reads with every entry as `Messages`.
     pub fn decode(bytes: &[u8]) -> Option<PushState> {
-        let stored: Stored = postcard::from_bytes(bytes).ok()?;
-        if stored.format != FORMAT {
-            return None;
-        }
+        // `format` comes first, and postcard writes a `u8` as one byte.
+        let (config_hash, subs, no_wake): (_, Vec<StoredBox>, _) = match *bytes.first()? {
+            FORMAT => {
+                let s: Stored = postcard::from_bytes(bytes).ok()?;
+                (s.config_hash, s.subs, s.no_wake)
+            }
+            FORMAT_1 => {
+                let s: Stored1 = postcard::from_bytes(bytes).ok()?;
+                debug_assert_eq!(s.format, FORMAT_1);
+                let subs = s
+                    .subs
+                    .into_iter()
+                    .map(|(m, day, collapse, nodes)| (m, SubKind::Messages, day, collapse, nodes))
+                    .collect();
+                (s.config_hash, subs, s.no_wake)
+            }
+            _ => return None,
+        };
         Some(PushState {
-            config_hash: stored.config_hash,
-            subs: stored
-                .subs
+            config_hash,
+            subs: subs
                 .into_iter()
-                .map(|(m, day, collapse, nodes)| {
+                .map(|(m, kind, day, collapse, nodes)| {
                     (
-                        m,
+                        (m, kind),
                         BoxSubs {
                             day,
                             collapse,
@@ -148,7 +180,7 @@ impl PushState {
                     )
                 })
                 .collect(),
-            no_wake: stored.no_wake.into_iter().collect(),
+            no_wake: no_wake.into_iter().collect(),
         })
     }
 
@@ -166,17 +198,18 @@ impl PushState {
         self.subs.clear();
     }
 
-    /// Collapse label of `mailbox`, created (with an entry that holds no node
-    /// yet) the first time, so that the label sealed into the first
-    /// subscription is the one `note_subscribed` keeps.
+    /// Collapse label of `mailbox` for `kind`, created (with an entry that
+    /// holds no node yet) the first time, so that the label sealed into the
+    /// first subscription is the one `note_subscribed` keeps.
     pub fn collapse_for(
         &mut self,
         mailbox: MailboxId,
+        kind: SubKind,
         day: u32,
         rng: &mut impl CryptoRng,
     ) -> [u8; 16] {
         self.subs
-            .entry(mailbox)
+            .entry((mailbox, kind))
             .or_insert_with(|| {
                 let mut collapse = [0u8; 16];
                 rng.fill_bytes(&mut collapse);
@@ -189,30 +222,37 @@ impl PushState {
             .collapse
     }
 
-    /// `node` accepted the subscription of `mailbox`; `secret` cancels it.
-    /// The collapse label is created with the first node of the mailbox.
+    /// `node` accepted the subscription of `mailbox` for `kind`; `secret`
+    /// cancels it. The collapse label is created with the first node of the
+    /// entry.
     pub fn note_subscribed(
         &mut self,
         mailbox: MailboxId,
+        kind: SubKind,
         day: u32,
         node: NodeId,
         secret: [u8; 32],
         rng: &mut impl CryptoRng,
     ) {
-        self.collapse_for(mailbox, day, rng);
-        let b = self.subs.get_mut(&mailbox).expect("entry just ensured");
+        self.collapse_for(mailbox, kind, day, rng);
+        let b = self
+            .subs
+            .get_mut(&(mailbox, kind))
+            .expect("entry just ensured");
         match b.nodes.iter_mut().find(|(n, _)| *n == node) {
             Some(entry) => entry.1 = secret,
             None => b.nodes.push((node, secret)),
         }
     }
 
-    /// The subscription of `mailbox` on `node` is cancelled (or gone).
-    pub fn note_unsubscribed(&mut self, mailbox: &MailboxId, node: &NodeId) {
-        if let Some(b) = self.subs.get_mut(mailbox) {
+    /// The subscription of `mailbox` for `kind` on `node` is cancelled (or
+    /// gone).
+    pub fn note_unsubscribed(&mut self, mailbox: &MailboxId, kind: SubKind, node: &NodeId) {
+        let key = (*mailbox, kind);
+        if let Some(b) = self.subs.get_mut(&key) {
             b.nodes.retain(|(n, _)| n != node);
             if b.nodes.is_empty() {
-                self.subs.remove(mailbox);
+                self.subs.remove(&key);
             }
         }
     }
@@ -229,33 +269,48 @@ impl PushState {
     }
 }
 
+/// First day whose mailboxes a subscription of `kind` is planned for: today
+/// for messages; yesterday too for acks, since a message sealed yesterday
+/// (in yesterday's mailbox) may still be acked or expire today, and the
+/// subscription runs until the end of the day after its mailbox's day.
+fn first_day(kind: SubKind, today: u32) -> u32 {
+    match kind {
+        SubKind::Messages => today,
+        SubKind::Acks => today.saturating_sub(1),
+    }
+}
+
 /// What to subscribe and unsubscribe so that each wanted mailbox of the
-/// horizon has `WAKE_NODES` subscriptions on its best-ranked nodes.
+/// horizon has `WAKE_NODES` subscriptions of its kind on its best-ranked
+/// nodes.
 ///
-/// `wanted` is walked in order; `ranked(mailbox)` lists the nodes responsible
-/// for it, best first. Within a mailbox the nodes already subscribed stay, in
-/// their stored order, and the best-ranked missing ones complete them.
-/// Without `cfg`, everything is cancelled and forgotten. When the
-/// configuration changed, every stored subscription is cancelled and every
-/// wanted mailbox subscribed afresh (the caller then calls `apply_config`).
-/// A mailbox of a past day is forgotten without unsubscribing. A wanted
-/// mailbox whose `ranked` list is empty keeps its stored nodes untouched
-/// (no cancel, no new subscription).
+/// `wanted` (mailbox, day, kind) is walked in order; the two kinds of a
+/// mailbox are planned apart, as distinct subscriptions. `ranked(mailbox)`
+/// lists the nodes responsible for it, best first. Within an entry the
+/// nodes already subscribed stay, in their stored order, and the
+/// best-ranked missing ones complete them. Without `cfg`, everything is
+/// cancelled and forgotten. When the configuration changed, every stored
+/// subscription is cancelled and every wanted entry subscribed afresh (the
+/// caller then calls `apply_config`). An entry of a past day (before
+/// `first_day` of its kind) is forgotten without unsubscribing. A wanted
+/// entry whose `ranked` list is empty keeps its stored nodes untouched (no
+/// cancel, no new subscription).
 pub fn plan_push(
     state: &PushState,
     cfg: Option<&PushConfig>,
-    wanted: &[(MailboxId, u32)],
+    wanted: &[(MailboxId, u32, SubKind)],
     ranked: impl Fn(&MailboxId) -> Vec<NodeId>,
     now: u64,
 ) -> PushPlan {
+    type Key = (MailboxId, SubKind);
     let mut plan = PushPlan::default();
-    let unsubscribe_all = |plan: &mut PushPlan, only: Option<&MailboxId>| {
-        for (m, b) in &state.subs {
-            if only.is_some_and(|o| o != m) {
+    let unsubscribe_all = |plan: &mut PushPlan, only: Option<&Key>| {
+        for ((m, k), b) in &state.subs {
+            if only.is_some_and(|o| *o != (*m, *k)) {
                 continue;
             }
             for (n, secret) in &b.nodes {
-                plan.unsubscribe.push((*m, *n, *secret));
+                plan.unsubscribe.push((*m, *k, *n, *secret));
             }
         }
     };
@@ -270,17 +325,18 @@ pub fn plan_push(
     }
     let today = day_of(now);
     let last = today.saturating_add(HORIZON_DAYS);
-    let mut seen: Vec<MailboxId> = Vec::new();
-    for (mailbox, day) in wanted {
-        if *day < today || *day > last || seen.contains(mailbox) {
+    let mut seen: Vec<Key> = Vec::new();
+    for &(mailbox, day, kind) in wanted {
+        let key = (mailbox, kind);
+        if day < first_day(kind, today) || day > last || seen.contains(&key) {
             continue;
         }
-        seen.push(*mailbox);
-        let stored: &[(NodeId, [u8; 32])] = match state.subs.get(mailbox) {
+        seen.push(key);
+        let stored: &[(NodeId, [u8; 32])] = match state.subs.get(&key) {
             Some(b) if !changed => &b.nodes,
             _ => &[],
         };
-        let ranked = ranked(mailbox);
+        let ranked = ranked(&mailbox);
         // No responsible known (a view without records): the ranking says
         // nothing, the stored nodes stay as they are.
         if ranked.is_empty() {
@@ -291,7 +347,7 @@ pub fn plan_push(
             if kept.len() < WAKE_NODES && ranked.contains(node) && !state.left_out(node, now) {
                 kept.push(*node);
             } else {
-                plan.unsubscribe.push((*mailbox, *node, *secret));
+                plan.unsubscribe.push((mailbox, kind, *node, *secret));
             }
         }
         for node in &ranked {
@@ -300,34 +356,37 @@ pub fn plan_push(
             }
             if !kept.contains(node) && !state.left_out(node, now) {
                 kept.push(*node);
-                plan.subscribe.push((*mailbox, *node));
+                plan.subscribe.push((mailbox, kind, *node));
             }
         }
     }
     if !changed {
-        for (m, b) in &state.subs {
-            if seen.contains(m) {
+        for (key, b) in &state.subs {
+            if seen.contains(key) {
                 continue;
             }
-            // Past days expire by themselves; a mailbox that is no longer
+            // Past days expire by themselves; an entry that is no longer
             // wanted is cancelled.
-            if b.day >= today {
-                unsubscribe_all(&mut plan, Some(m));
+            if b.day >= first_day(key.1, today) {
+                unsubscribe_all(&mut plan, Some(key));
             }
-            plan.forget.push(*m);
+            plan.forget.push(*key);
         }
     }
     plan
 }
 
-/// Builds the subscription of `mailbox` (of `day`) to send to a node, and the
-/// secret that cancels it. `collapse` comes from `PushState::collapse_for`,
-/// called first. It expires the day after the mailbox's day, so
-/// that a node a day ahead still takes it.
+/// Builds the subscription of `mailbox` (of `day`) for `kind` to send to a
+/// node, and the secret that cancels it. The sealed token carries the wake
+/// reason of the kind (`Messages` → `Message`, `Acks` → `Receipt`), so that
+/// the relay sends a receipt wake as a background push. `collapse` comes
+/// from `PushState::collapse_for`, called first. It expires the day after
+/// the mailbox's day, so that a node a day ahead still takes it.
 pub fn build_subscription(
     cfg: &PushConfig,
     mailbox: MailboxId,
     day: u32,
+    kind: SubKind,
     collapse: [u8; 16],
     rng: &mut impl CryptoRng,
 ) -> (Subscription, [u8; 32]) {
@@ -337,7 +396,10 @@ pub fn build_subscription(
         env: cfg.env,
         collapse,
         expires_day,
-        reason: WakeReason::Message,
+        reason: match kind {
+            SubKind::Messages => WakeReason::Message,
+            SubKind::Acks => WakeReason::Receipt,
+        },
     };
     let sealed = seal(&cfg.seal_public, cfg.seal_key_id, &token, rng);
     let mut secret = [0u8; 32];
@@ -348,7 +410,7 @@ pub fn build_subscription(
         sealed,
         cancel_hash: cancel_hash(&secret),
         expires_day,
-        kind: SubKind::Messages,
+        kind,
     };
     (sub, secret)
 }

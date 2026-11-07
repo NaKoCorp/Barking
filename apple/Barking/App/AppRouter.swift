@@ -26,6 +26,9 @@ final class AppRouter {
     }
 
     private(set) var state: State
+    /// The app's router, for the background wake (`AppDelegate`), which
+    /// SwiftUI gives no other way to reach.
+    static weak var current: AppRouter?
     private(set) var pendingCardLink: String?
     /// A `.barkinglink` file opened from AirDrop or Files.
     private(set) var pendingLinkFile: URL?

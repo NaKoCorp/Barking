@@ -95,6 +95,17 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if queued, summary.networkUp, !depositFails { lock.withLock { _leaveDeposited = true } }
         return summary
     }
+    private var _quickSyncDeadlines: [UInt64] = []
+    /// Deadline of each quick sync, in call order.
+    var quickSyncDeadlines: [UInt64] { lock.withLock { _quickSyncDeadlines } }
+    /// Thrown by `quickSync` when set.
+    var quickSyncError: Error?
+    func quickSync(deadlineMs: UInt64) throws -> SyncSummary {
+        lock.withLock { _quickSyncDeadlines.append(deadlineMs) }
+        if let quickSyncError { throw quickSyncError }
+        Thread.sleep(forTimeInterval: syncDelay)
+        return summary
+    }
     func nodes() throws -> [NodeInfo] { [] }
     func addNode(id: String, addr: String) throws {}
     func outboxCount() throws -> UInt32 { outbox }

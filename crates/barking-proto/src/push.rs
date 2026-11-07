@@ -85,7 +85,7 @@ pub enum WakeReason {
 }
 
 /// What a subscription wakes its mailbox for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum SubKind {
     /// Wake when a message is deposited in the mailbox.
     Messages = 0,

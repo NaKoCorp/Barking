@@ -176,13 +176,27 @@ public actor CoreService {
 
     /// One sync at a time: a request during a sync gets that sync's outcome.
     public func sync(reason: SyncReason) async -> SyncOutcome {
+        await runSync("sync") { try $0.sync(deadlineMs: Budget.appSyncMs) }
+    }
+
+    /// The short sync of a background (receipt) wake, within the
+    /// extension's time (`Budget.appQuickSyncMs`): my mailboxes of yesterday
+    /// and today, and those where a sent message awaits its receipt. Shares
+    /// the one-at-a-time rule of `sync`: during a sync, that sync's outcome
+    /// (it fetches all of these too). A failure gives `networkUp: false`.
+    public func quickSync() async -> SyncOutcome {
+        await runSync("quick-sync") { try $0.quickSync(deadlineMs: Budget.appQuickSyncMs) }
+    }
+
+    private func runSync(_ name: String,
+                         _ body: @escaping @Sendable (any DeviceHandle) throws -> SyncSummary) async -> SyncOutcome {
         if let inFlight { return await inFlight.value }
         if closed {
             return SyncOutcome(networkUp: false, received: 0, sent: 0, lines: ["$ barking sync"])
         }
         let task = Task { () -> SyncOutcome in
             do {
-                let summary = try await call("sync") { try $0.sync(deadlineMs: Budget.appSyncMs) }
+                let summary = try await call(name, body)
                 return SyncOutcome.from(summary)
             } catch {
                 return SyncOutcome(networkUp: false, received: 0, sent: 0,

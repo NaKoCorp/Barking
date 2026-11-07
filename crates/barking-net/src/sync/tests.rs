@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use barking_packet::Kind;
 use barking_proto::client::FetchResume;
-use barking_proto::push::{ApnsEnv, RelayRef, Subscription};
+use barking_proto::push::{ApnsEnv, RelayRef, SubKind, Subscription};
 
 use barking_core::Core;
 use tempfile::TempDir;
@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::push::{PushConfig, PushState};
 use crate::score::Score;
-use crate::test_support::{id_of, record, subject};
+use crate::test_support::{id_of, record, subject, subject_with_ack};
 
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 86_400;
@@ -26,7 +26,7 @@ enum Call {
     /// Node, mailboxes, and those of them that had a position at the call.
     Fetch(NodeId, Vec<MailboxId>, Vec<MailboxId>),
     Deposit(NodeId, [u8; 32]),
-    Subscribe(NodeId, MailboxId),
+    Subscribe(NodeId, MailboxId, SubKind),
     Unsubscribe(NodeId, MailboxId),
     Close(NodeId),
 }
@@ -364,7 +364,7 @@ impl Subscriber for Net {
         sub: &Subscription,
         pow_left: u64,
     ) -> SubscribeReply {
-        self.log(Call::Subscribe(conn.id, sub.mailbox));
+        self.log(Call::Subscribe(conn.id, sub.mailbox, sub.kind));
         if self.dead(conn) {
             return SubscribeReply {
                 outcome: Err(DialError::Unreachable),
@@ -2002,7 +2002,18 @@ fn subscribes(calls: &[Call]) -> Vec<(NodeId, MailboxId)> {
     calls
         .iter()
         .filter_map(|c| match c {
-            Call::Subscribe(n, m) => Some((*n, *m)),
+            Call::Subscribe(n, m, _) => Some((*n, *m)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The subscriptions of `kind` sent, in call order.
+fn subscribes_of(calls: &[Call], kind: SubKind) -> Vec<(NodeId, MailboxId)> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Subscribe(n, m, k) if *k == kind => Some((*n, *m)),
             _ => None,
         })
         .collect()
@@ -2030,7 +2041,7 @@ async fn push_stage_runs_after_maintenance_and_saves_state() {
     let (_dir, mut core, net) = setup();
     let report = sync(&mut core, &net, push_opts()).await;
     let calls = net.calls();
-    let subs = subscribes(&calls);
+    let subs = subscribes_of(&calls, SubKind::Messages);
     let wanted = horizon(&core);
     assert!(!wanted.is_empty());
     assert_eq!(
@@ -2038,7 +2049,11 @@ async fn push_stage_runs_after_maintenance_and_saves_state() {
         wanted.len() * crate::push::WAKE_NODES,
         "{subs:?}"
     );
-    assert_eq!(report.subscribed, subs.len());
+    // Plus the mailbox where Bob's reply awaits its ack.
+    let awaited = core.awaited_ack_mailboxes(NOW).unwrap();
+    let acks = subscribes_of(&calls, SubKind::Acks);
+    assert_eq!(acks.len(), awaited.len() * crate::push::WAKE_NODES);
+    assert_eq!(report.subscribed, subs.len() + acks.len());
     assert_eq!(report.unsubscribed, 0);
     // After the lookups of the maintenance, before the closings.
     let finds = positions_of(&calls, |c| matches!(c, Call::Find(..)));
@@ -2057,7 +2072,7 @@ async fn push_stage_runs_after_maintenance_and_saves_state() {
     );
     let view = load(&mut core).view;
     for (mailbox, day) in &wanted {
-        let b = &st.subs[mailbox];
+        let b = &st.subs[&(*mailbox, SubKind::Messages)];
         assert_eq!(b.day, *day);
         assert_eq!(b.nodes.len(), crate::push::WAKE_NODES);
         let responsibles = view.responsibles(mailbox, NOW);
@@ -2068,6 +2083,56 @@ async fn push_stage_runs_after_maintenance_and_saves_state() {
     let report = sync(&mut core, &net, push_opts()).await;
     assert!(subscribes(&net.calls()).is_empty());
     assert_eq!((report.subscribed, report.unsubscribed), (0, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn push_stage_subscribes_awaited_ack_mailboxes() {
+    let (_dir, mut core, ack) = subject_with_ack(NOW);
+    let mut net = setup_with(&mut core);
+    // Bob's reply awaits Alice's receipt in its mailbox.
+    let awaited = core.awaited_ack_mailboxes(NOW).unwrap();
+    assert_eq!(awaited.len(), 1);
+    let (reply, day) = awaited[0];
+    sync(&mut core, &net, push_opts()).await;
+    let calls = net.calls();
+    let acks = subscribes_of(&calls, SubKind::Acks);
+    assert_eq!(acks.len(), crate::push::WAKE_NODES, "{acks:?}");
+    assert!(acks.iter().all(|(_, m)| *m == reply));
+    // Not one of Bob's mailboxes: never subscribed for messages.
+    assert!(
+        !subscribes_of(&calls, SubKind::Messages)
+            .iter()
+            .any(|(_, m)| *m == reply)
+    );
+    let st = push_state(&core);
+    let b = &st.subs[&(reply, SubKind::Acks)];
+    assert_eq!(b.day, day);
+    let holders: BTreeSet<NodeId> = b.nodes.iter().map(|(n, _)| *n).collect();
+    assert_eq!(holders.len(), crate::push::WAKE_NODES);
+    // The receipt arrives: the next sync fetches it, then cancels the acks
+    // subscriptions of the mailbox, and only those.
+    net.mailbox_items.entry(reply).or_default().push(ack);
+    net.calls.lock().unwrap().clear();
+    let report = sync(&mut core, &net, push_opts()).await;
+    assert!(
+        report
+            .received
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::AckReceived { .. }))
+    );
+    assert!(core.awaited_ack_mailboxes(NOW).unwrap().is_empty());
+    let calls = net.calls();
+    let cancelled: BTreeSet<NodeId> = unsubscribes(&calls)
+        .iter()
+        .filter(|(_, m)| *m == reply)
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(cancelled, holders);
+    assert_eq!(report.unsubscribed, holders.len());
+    assert!(subscribes(&calls).is_empty());
+    let st = push_state(&core);
+    assert!(!st.subs.contains_key(&(reply, SubKind::Acks)));
+    assert!(st.subs.keys().all(|(_, k)| *k == SubKind::Messages));
 }
 
 #[tokio::test(start_paused = true)]
@@ -2316,7 +2381,7 @@ async fn unreached_unsubscribe_is_kept_and_retried() {
     let mut st = before.clone();
     let today = barking_core::mailbox::day_of(NOW);
     st.subs.insert(
-        MailboxId([0xEE; 16]),
+        (MailboxId([0xEE; 16]), SubKind::Messages),
         crate::push::BoxSubs {
             day: today - 2,
             collapse: [1; 16],
@@ -2338,7 +2403,10 @@ async fn unreached_unsubscribe_is_kept_and_retried() {
             .values()
             .all(|b| b.nodes == vec![(holder, b.nodes[0].1)])
     );
-    assert!(!st.subs.contains_key(&MailboxId([0xEE; 16])));
+    assert!(
+        !st.subs
+            .contains_key(&(MailboxId([0xEE; 16]), SubKind::Messages))
+    );
     let kept = core
         .transport_state(crate::push::PUSH_STATE_KEY)
         .unwrap()
@@ -2436,7 +2504,11 @@ async fn full_refusals_fall_through_to_the_next_responsible() {
             .filter(|n| *n != node_full && *n != mailbox_full)
             .take(crate::push::WAKE_NODES)
             .collect();
-        let got: BTreeSet<NodeId> = st.subs[mailbox].nodes.iter().map(|(n, _)| *n).collect();
+        let got: BTreeSet<NodeId> = st.subs[&(*mailbox, SubKind::Messages)]
+            .nodes
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
         assert_eq!(got, expected, "{mailbox:?}");
     }
     // A full node is left out as a whole; a full mailbox only for that
@@ -2524,7 +2596,13 @@ async fn quick_sync_fetches_today_and_yesterday_only() {
     let calls = net.calls();
     let pairs = fetched_pairs(&calls);
     let fetched: BTreeSet<[u8; 16]> = pairs.iter().map(|(_, m)| m.0).collect();
-    let expected: BTreeSet<[u8; 16]> = wanted.iter().map(|m| m.0).collect();
+    // Plus the mailbox where Bob's reply awaits its ack.
+    let awaited = core.awaited_ack_mailboxes(NOW).unwrap();
+    let expected: BTreeSet<[u8; 16]> = wanted
+        .iter()
+        .chain(awaited.iter().map(|(m, _)| m))
+        .map(|m| m.0)
+        .collect();
     assert_eq!(fetched, expected);
     for m in &wanted {
         let ranked = state.order_responsibles(state.view.responsibles_by_score(m, NOW));
@@ -2544,6 +2622,27 @@ async fn quick_sync_fetches_today_and_yesterday_only() {
     }
     assert!(report.network_up);
     assert!(report.error.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_fetches_awaited_ack_mailboxes() {
+    let (_dir, mut core, ack) = subject_with_ack(NOW);
+    let mut net = setup_with(&mut core);
+    let awaited = core.awaited_ack_mailboxes(NOW).unwrap();
+    assert_eq!(awaited.len(), 1);
+    let reply = awaited[0].0;
+    assert!(!quick_mailboxes(&core).contains(&reply));
+    // A receipt wake-up: Alice's receipt waits in the reply's mailbox.
+    net.mailbox_items.entry(reply).or_default().push(ack);
+    let report = quick_sync(&mut core, &net, quick_opts()).await;
+    assert!(fetched_pairs(&net.calls()).iter().any(|(_, m)| *m == reply));
+    assert!(
+        report
+            .received
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::AckReceived { .. }))
+    );
+    assert!(core.awaited_ack_mailboxes(NOW).unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

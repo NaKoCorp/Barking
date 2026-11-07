@@ -26,6 +26,7 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func transparencyLog(limit: UInt32, before: Int64?, securityOnly: Bool) throws -> [LogEntry]
     func contactDevices(contact: String) throws -> [MyDeviceInfo]
     func sync(deadlineMs: UInt64) throws -> SyncSummary
+    func quickSync(deadlineMs: UInt64) throws -> SyncSummary
     func nodes() throws -> [NodeInfo]
     func addNode(id: String, addr: String) throws
     func outboxCount() throws -> UInt32
@@ -73,6 +74,12 @@ public struct SyncOutcome: Sendable, Equatable {
     public let sent: Int
     /// CLI-style lines (`$ barking sync`, …), in English like the CLI.
     public let lines: [String]
+    /// Items fetched (messages, receipts…): a receipt changes a message's
+    /// status without adding one to `received`.
+    public var items: Int = 0
+
+    /// Something came in or went out: what a background wake reports.
+    public var changed: Bool { items > 0 || received > 0 || sent > 0 }
 
     static func from(_ s: SyncSummary) -> SyncOutcome {
         let received = s.newMessages.count
@@ -81,7 +88,7 @@ public struct SyncOutcome: Sendable, Equatable {
             ? "internet: \(received) messages received, \(sent) sent"
             : "internet: network unreachable, nothing is lost"
         return SyncOutcome(networkUp: s.networkUp, received: received, sent: sent,
-                           lines: ["$ barking sync", result])
+                           lines: ["$ barking sync", result], items: Int(s.itemsReceived))
     }
 }
 

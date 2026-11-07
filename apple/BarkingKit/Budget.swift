@@ -10,6 +10,10 @@ public enum Budget {
     /// it stays under the lock wait of the other calls (sync + shutdown <
     /// `appLockMs`): a send during a sync waits for it instead of failing.
     public static let appSyncMs: UInt64 = 8_000
+    /// Quick sync of a background (receipt) wake in the app: the
+    /// extension's work time after its lock wait, as `BenchRun` gives the
+    /// extension's own quick sync.
+    public static let appQuickSyncMs: UInt64 = quickSyncDeadline(elapsedMs: extensionLockMs)
     /// Lock wait in the extension (spec iOS push §6.1).
     public static let extensionLockMs: UInt64 = 2_000
     /// The extension's work from its start; 5 s of margin on the 25 s.

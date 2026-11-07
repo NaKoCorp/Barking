@@ -2836,3 +2836,62 @@ fn repeated_transport_steps_are_recorded_once_per_node() {
         ]
     );
 }
+
+#[test]
+fn awaited_ack_mailboxes_lists_contact_messages_only() {
+    let (_d, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
+    // The card update queued for Bob by the link is no message: not listed.
+    assert!(a.awaited_ack_mailboxes(NOW).unwrap().is_empty());
+    let at = NOW + 86_400;
+    let packets = a
+        .send_text(&b.fingerprint(), "hello", at, &mut rng)
+        .unwrap();
+    // Bob's device first, then the `SyncSent` copy for my tablet.
+    assert_eq!(packets.len(), 2);
+    assert_ne!(packets[1].mailbox, packets[0].mailbox);
+    assert_eq!(
+        a.awaited_ack_mailboxes(at).unwrap(),
+        vec![(packets[0].mailbox, day_of(at))]
+    );
+    // A second message to the same mailbox: still listed once.
+    let more = a
+        .send_text(&b.fingerprint(), "again", at, &mut rng)
+        .unwrap();
+    assert_eq!(more[0].mailbox, packets[0].mailbox);
+    assert_eq!(
+        a.awaited_ack_mailboxes(at).unwrap(),
+        vec![(packets[0].mailbox, day_of(at))]
+    );
+    // Bob's queue holds only his receipts: nothing awaited there.
+    let mut acks = Vec::new();
+    for p in [&packets[0], &more[0]] {
+        match b.receive(&p.encode(), "t", at, &mut rng).unwrap() {
+            ReceiveOutcome::Message { ack, .. } => acks.push(ack),
+            o => panic!("{o:?}"),
+        }
+    }
+    assert!(
+        b.pending_outbox(at)
+            .unwrap()
+            .iter()
+            .any(|p| Packet::decode(p).unwrap().kind == Kind::Ack)
+    );
+    assert!(b.awaited_ack_mailboxes(at).unwrap().is_empty());
+    // One receipt: the other message still awaits its own.
+    assert!(matches!(
+        a.receive(&acks[0].encode(), "t", at, &mut rng).unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    assert_eq!(a.awaited_ack_mailboxes(at).unwrap().len(), 1);
+    assert!(matches!(
+        a.receive(&acks[1].encode(), "t", at, &mut rng).unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    assert!(a.awaited_ack_mailboxes(at).unwrap().is_empty());
+    // An expired message is no longer awaited.
+    let late = a.send_text(&b.fingerprint(), "late", at, &mut rng).unwrap();
+    assert_eq!(a.awaited_ack_mailboxes(at).unwrap().len(), 1);
+    let expiry = u64::from(late[0].expires_at);
+    assert_eq!(a.awaited_ack_mailboxes(expiry).unwrap().len(), 1);
+    assert!(a.awaited_ack_mailboxes(expiry + 1).unwrap().is_empty());
+}

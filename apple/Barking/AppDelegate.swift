@@ -11,6 +11,31 @@ final class PushToken {
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// The service a background wake syncs: the app's, once its device is
+    /// open (nil before). Tests give their own.
+    var service: @MainActor () -> CoreService? = { AppRouter.current?.core }
+
+    /// A background push (`content-available`): the relay's receipt wake,
+    /// sent when an ack for one of my messages reached a node, or when the
+    /// message expired there unacked. Only a quick sync runs; the ack it
+    /// fetches then takes the usual path. iOS hears whether anything came
+    /// of it (`.failed` when no node answered or the sync failed).
+    func application(_ application: UIApplication,
+                     didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        Task { @MainActor in
+            completionHandler(await self.backgroundWake())
+        }
+    }
+
+    @MainActor
+    func backgroundWake() async -> UIBackgroundFetchResult {
+        guard let core = service() else { return .noData }
+        let outcome = await core.quickSync()
+        guard outcome.networkUp else { return .failed }
+        return outcome.changed ? .newData : .noData
+    }
+
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         application.registerForRemoteNotifications()

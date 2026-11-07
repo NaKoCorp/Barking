@@ -24,9 +24,13 @@
 //!    answered (the client's own connection is down). Lookups never ask a
 //!    node that failed, rate-limited or was cut short during this sync.
 //! 6. **Wake subscriptions** (spec §5.2), with the time left: my mailboxes
-//!    from today to `HORIZON_DAYS` ahead, planned by `plan_push` on the
-//!    responsibles by score; unsubscribes first, then subscriptions, nearest
-//!    day first, on the connections of the sync. A node that does not take
+//!    from today to `HORIZON_DAYS` ahead (`SubKind::Messages`), and the
+//!    mailboxes where a message I sent awaits its ack
+//!    (`Core::awaited_ack_mailboxes`, `SubKind::Acks`: the node wakes me
+//!    when the ack arrives or the message expires unacked), planned by
+//!    `plan_push` on the responsibles by score; an acks subscription no
+//!    longer awaited is cancelled. Unsubscribes first, then subscriptions,
+//!    nearest day first, on the connections of the sync. A node that does not take
 //!    wake-ups is left out (`PushState::note_no_wake`) and not replaced
 //!    before the next sync. `Full` (spec §7) hands the place to the next
 //!    responsible in the same run: `NodeFull` leaves the node out as a
@@ -69,7 +73,9 @@
 //! notification extension, on the same executor in `Mode::Quick`, within
 //! `QUICK_DEADLINE` closing included (the work stops `CLOSE_TIMEOUT`
 //! earlier). Stage 1 runs, bootstrapping only when the view is empty; then
-//! my own session mailboxes of yesterday and today (`Core::own_mailboxes`),
+//! my own session mailboxes of yesterday and today (`Core::own_mailboxes`)
+//! with the mailboxes where a message I sent awaits its ack
+//! (`Core::awaited_ack_mailboxes`, so that a receipt wake-up finds the ack),
 //! then my introduction mailboxes of those days, are fetched from their
 //! best responsible, the next one only when the best failed, refused or
 //! rate-limited (a truncated fetch is kept as it is), resumed from the
@@ -98,6 +104,7 @@ use barking_core::{Core, CoreError, ReceiveOutcome};
 use barking_dht::{BootstrapEntry, builtin_bootstrap};
 use barking_packet::{MailboxId, Packet, PacketId};
 use barking_proto::pow::content_hash;
+use barking_proto::push::SubKind;
 use barking_proto::{ErrorReason, NodeId, NodeRecord};
 use tokio::time::Instant;
 
@@ -117,6 +124,9 @@ pub use io::{
     SubscribeReply, Subscriber,
 };
 use io::{Observation, Observed};
+
+/// A subscription to send: mailbox, kind, node.
+type SubTask = (MailboxId, SubKind, NodeId);
 
 /// Longest synchronization.
 pub const SYNC_DEADLINE: Duration = Duration::from_secs(180);
@@ -567,12 +577,18 @@ where
         }
     }
 
-    /// Quick sync: my mailboxes of yesterday and today, then receipts.
+    /// Quick sync: my mailboxes of yesterday and today, and those where a
+    /// message I sent awaits its ack (a receipt wake-up finds it there),
+    /// then receipts.
     async fn run_quick(&mut self, builtin: &[BootstrapEntry]) {
         self.prepare(&[], builtin).await;
         let today = day_of(self.now);
         let days = [today.saturating_sub(1), today];
-        let own = match self.core.own_mailboxes(&days) {
+        let read = self.core.own_mailboxes(&days).and_then(|mut own| {
+            own.extend(self.core.awaited_ack_mailboxes(self.now)?);
+            Ok(own)
+        });
+        let own = match read {
             Ok(m) => m,
             Err(e) => {
                 self.report.error = Some(e.to_string());
@@ -1271,14 +1287,24 @@ where
             }
         };
         let loaded = push.clone();
-        let wanted = match cfg {
+        // My mailboxes for messages, then those where a message I sent
+        // awaits its ack, for acks.
+        let wanted: Vec<(MailboxId, u32, SubKind)> = match cfg {
             Some(_) => {
                 let today = day_of(now);
                 let days: Vec<u32> = (today..=today.saturating_add(HORIZON_DAYS)).collect();
-                match self.core.own_mailboxes(&days) {
+                let read = self.core.own_mailboxes(&days).and_then(|own| {
+                    let awaited = self.core.awaited_ack_mailboxes(now)?;
+                    Ok(own
+                        .into_iter()
+                        .map(|(m, d)| (m, d, SubKind::Messages))
+                        .chain(awaited.into_iter().map(|(m, d)| (m, d, SubKind::Acks)))
+                        .collect())
+                });
+                match read {
                     Ok(w) => w,
                     Err(e) => {
-                        tracing::warn!("own mailboxes not read, wake subscriptions skipped: {e}");
+                        tracing::warn!("mailboxes not read, wake subscriptions skipped: {e}");
                         return;
                     }
                 }
@@ -1326,23 +1352,34 @@ where
         let (Some(cfg), true) = (cfg, all_sent) else {
             return;
         };
-        let days: HashMap<MailboxId, u32> = wanted.iter().copied().collect();
-        let mut queue: VecDeque<(MailboxId, NodeId)> = plan.subscribe.into_iter().collect();
-        // (mailbox, node) pairs refused with `MailboxFull`, and nodes that
-        // answered `NodeFull`, during this run.
-        let mut full_boxes: HashSet<(MailboxId, NodeId)> = HashSet::new();
+        let mut days: HashMap<(MailboxId, SubKind), u32> = HashMap::new();
+        for &(m, d, k) in &wanted {
+            days.entry((m, k)).or_insert(d);
+        }
+        let mut queue: VecDeque<SubTask> = plan.subscribe.into_iter().collect();
+        // (mailbox, kind, node) refused with `MailboxFull` (the node's cap
+        // is per mailbox and kind), and nodes that answered `NodeFull`,
+        // during this run.
+        let mut full_boxes: HashSet<SubTask> = HashSet::new();
         let mut full_nodes: HashSet<NodeId> = HashSet::new();
-        'stage: while let Some((mailbox, node)) = queue.pop_front() {
+        'stage: while let Some((mailbox, kind, node)) = queue.pop_front() {
             if self.over() {
                 break;
             }
             let left_out = push.no_wake.get(&node).is_some_and(|until| *until > now);
-            let Some(&day) = days.get(&mailbox) else {
+            let Some(&day) = days.get(&(mailbox, kind)) else {
                 continue;
             };
             if full_nodes.contains(&node) {
                 // Found full on an earlier mailbox: its place goes on.
-                self.queue_next_responsible(&push, &mut queue, &full_boxes, &skipped, mailbox, now);
+                self.queue_next_responsible(
+                    &push,
+                    &mut queue,
+                    &full_boxes,
+                    &skipped,
+                    (mailbox, kind),
+                    now,
+                );
                 continue;
             }
             if left_out || skipped.contains(&node) {
@@ -1360,9 +1397,9 @@ where
                     self.conns.insert(node, conn);
                     break None;
                 }
-                let collapse = push.collapse_for(mailbox, day, &mut rand::rng());
+                let collapse = push.collapse_for(mailbox, kind, day, &mut rand::rng());
                 let (sub, secret) =
-                    build_subscription(cfg, mailbox, day, collapse, &mut rand::rng());
+                    build_subscription(cfg, mailbox, day, kind, collapse, &mut rand::rng());
                 let request = self.dialer.subscribe(&mut conn, &sub, self.pow_left);
                 let Ok(reply) = tokio::time::timeout_at(self.deadline, request).await else {
                     break 'stage;
@@ -1385,7 +1422,7 @@ where
                 // No wake support announced.
                 None => push.note_no_wake(node, now),
                 Some((DepositOutcome::Answered(Ok(())), secret)) => {
-                    push.note_subscribed(mailbox, day, node, secret, &mut rand::rng());
+                    push.note_subscribed(mailbox, kind, day, node, secret, &mut rand::rng());
                     self.report.subscribed += 1;
                 }
                 Some((DepositOutcome::Answered(Err(ErrorReason::Unsupported)), _)) => {
@@ -1402,18 +1439,18 @@ where
                         &mut queue,
                         &full_boxes,
                         &skipped,
-                        mailbox,
+                        (mailbox, kind),
                         now,
                     );
                 }
                 Some((DepositOutcome::Answered(Err(ErrorReason::MailboxFull)), _)) => {
-                    full_boxes.insert((mailbox, node));
+                    full_boxes.insert((mailbox, kind, node));
                     self.queue_next_responsible(
                         &push,
                         &mut queue,
                         &full_boxes,
                         &skipped,
-                        mailbox,
+                        (mailbox, kind),
                         now,
                     );
                 }
@@ -1430,20 +1467,21 @@ where
     }
 
     /// Puts first in `queue` the best-ranked responsible of `mailbox` that
-    /// neither holds nor is about to receive its subscription, is not left
-    /// out, was not skipped and did not refuse it as full during this run.
+    /// neither holds nor is about to receive its subscription of `kind`, is
+    /// not left out, was not skipped and did not refuse it as full during
+    /// this run.
     fn queue_next_responsible(
         &self,
         push: &PushState,
-        queue: &mut VecDeque<(MailboxId, NodeId)>,
-        full_boxes: &HashSet<(MailboxId, NodeId)>,
+        queue: &mut VecDeque<SubTask>,
+        full_boxes: &HashSet<SubTask>,
         skipped: &HashSet<NodeId>,
-        mailbox: MailboxId,
+        (mailbox, kind): (MailboxId, SubKind),
         now: u64,
     ) {
         let holds = |n: &NodeId| {
             push.subs
-                .get(&mailbox)
+                .get(&(mailbox, kind))
                 .is_some_and(|b| b.nodes.iter().any(|(h, _)| h == n))
         };
         let next = self
@@ -1453,13 +1491,13 @@ where
             .into_iter()
             .find(|n| {
                 !holds(n)
-                    && !queue.contains(&(mailbox, *n))
-                    && !full_boxes.contains(&(mailbox, *n))
+                    && !queue.contains(&(mailbox, kind, *n))
+                    && !full_boxes.contains(&(mailbox, kind, *n))
                     && !skipped.contains(n)
                     && !push.no_wake.get(n).is_some_and(|until| *until > now)
             });
         if let Some(n) = next {
-            queue.push_front((mailbox, n));
+            queue.push_front((mailbox, kind, n));
         }
     }
 
@@ -1470,10 +1508,10 @@ where
     async fn push_unsubscribes(
         &mut self,
         push: &mut PushState,
-        list: &[(MailboxId, NodeId, [u8; 32])],
+        list: &[(MailboxId, SubKind, NodeId, [u8; 32])],
         skipped: &mut HashSet<NodeId>,
     ) -> Option<bool> {
-        'list: for &(mailbox, node, secret) in list {
+        'list: for &(mailbox, kind, node, secret) in list {
             if self.over() {
                 return Some(false);
             }
@@ -1510,11 +1548,11 @@ where
                     return Some(false);
                 }
                 Ok(()) => {
-                    push.note_unsubscribed(&mailbox, &node);
+                    push.note_unsubscribed(&mailbox, kind, &node);
                     self.report.unsubscribed += 1;
                 }
                 // Any other refusal: nothing left to cancel there.
-                Err(_) => push.note_unsubscribed(&mailbox, &node),
+                Err(_) => push.note_unsubscribed(&mailbox, kind, &node),
             }
             if !self.save_push(push) {
                 return None;
