@@ -109,9 +109,11 @@ final class ChatUITests: XCTestCase {
         let delete = app.buttons["sheet.delete"]
         XCTAssertTrue(delete.waitForExistence(timeout: 3))
         delete.tap()
-        // No network in UI tests: pending, or on the network if a node answered.
-        let confirm = app.buttons.matching(NSPredicate(format: "label IN %@", ["Delete and cancel", "Delete"])).firstMatch
-        XCTAssertTrue(confirm.waitForExistence(timeout: 3), "the deletion asks first")
+        // No network in UI tests: still on this iPhone, so the pending case (§7.4).
+        let text = app.staticTexts["It hasn’t left this iPhone. Sam won’t receive it."]
+        XCTAssertTrue(text.waitForExistence(timeout: 3), "the deletion asks first, with the pending text")
+        let confirm = app.buttons["Delete and cancel"]
+        XCTAssertTrue(confirm.exists)
         confirm.tap()
         XCTAssertTrue(delete.waitUntil({ !$0.exists }), "the sheet closes")
         XCTAssertTrue(bubble.waitUntil({ !$0.exists }), "the bubble leaves")

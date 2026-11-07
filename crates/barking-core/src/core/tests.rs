@@ -3581,6 +3581,9 @@ fn delete_pending_cancels_and_drops_own_copies() {
         DeleteOutcome {
             deleted: 1,
             cancelled: 1,
+            // Bob's one device; the copy for my tablet is not counted.
+            devices_left: 0,
+            devices_total: 1,
             ..DeleteOutcome::default()
         }
     );
@@ -3610,6 +3613,8 @@ fn delete_after_deposit_reports_already_left() {
             already_left: 1,
             still_receiving: vec![bob],
             own_copies_kept: true,
+            devices_left: 1,
+            devices_total: 1,
             ..DeleteOutcome::default()
         }
     );
@@ -3681,6 +3686,8 @@ fn delete_mixed_devices_is_partly_cancelled() {
             deleted: 1,
             partly_cancelled: 1,
             still_receiving: vec![alice],
+            devices_left: 1,
+            devices_total: 2,
             ..DeleteOutcome::default()
         }
     );
@@ -3866,6 +3873,9 @@ fn delete_after_unconfirmed_deposit_reports_already_left() {
             already_left: 1,
             still_receiving: vec![bob],
             own_copies_kept: true,
+            // A tried deposit may have reached a node: it counts as left.
+            devices_left: 1,
+            devices_total: 1,
             ..DeleteOutcome::default()
         }
     );
@@ -3892,6 +3902,8 @@ fn tried_own_copy_is_kept_when_nobody_receives() {
             deleted: 1,
             cancelled: 1,
             own_copies_kept: true,
+            devices_left: 0,
+            devices_total: 1,
             ..DeleteOutcome::default()
         }
     );

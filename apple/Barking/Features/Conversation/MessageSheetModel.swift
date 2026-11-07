@@ -70,8 +70,6 @@ final class MessageSheetModel {
     private(set) var outgoing = true
     private(set) var sheet: MessageDelivery?
     private(set) var lines: [Line] = []
-    /// "Expired at 11:50. Checking with the relays at the next sync." (§6.4).
-    private(set) var verdict: String?
     private(set) var devices: [DeviceRow] = []
     /// "Received on 1 of 2 devices." above the device rows.
     private(set) var devicesSentence: String?
@@ -84,7 +82,6 @@ final class MessageSheetModel {
     private(set) var path: PathModel?
     private var retrying = false
     private var deleting = false
-    var now: () -> Date = Date.init
 
     init(core: CoreService, messageId: Int64, contact: String, contactName: String) {
         self.core = core
@@ -108,6 +105,12 @@ final class MessageSheetModel {
 
     func confirmationMessage(bundle: Bundle = .main, locale: Locale = .current) -> String {
         confirmation.message(name: contactName, keepsOwnCopies: keepsOwnCopies, bundle: bundle, locale: locale)
+    }
+
+    /// "Expired at 11:50. Checking with the relays at the next sync." at
+    /// `date` (the view asks again each minute, §6.4).
+    func verdict(at date: Date) -> String? {
+        delivery.flatMap { Self.verdictPending($0, now: date) }
     }
 
     var canRetry: Bool { content == .sent && delivery?.state == .notDelivered }
@@ -150,7 +153,10 @@ final class MessageSheetModel {
     func handle(_ change: CoreChange) async {
         guard exit == nil else { return }
         switch change {
-        case .messages(let c) where c == contact: await load()
+        // A sent message with its summary refreshes its own row (which also
+        // tells a deletion); anything else reads the message again.
+        case .messages(let c) where c == contact:
+            if content == .sent { await refresh() } else { await load() }
         case .delivery(let c, let ids) where c == contact && ids.contains(messageId): await refresh()
         default: break
         }
@@ -173,7 +179,6 @@ final class MessageSheetModel {
         self.sheet = sheet
         guard let sheet else {
             lines = []
-            verdict = nil
             devices = []
             devicesSentence = nil
             ownCopies = nil
@@ -183,7 +188,6 @@ final class MessageSheetModel {
         let size = route.filter { $0.step == "sealed" && !$0.own }.compactMap(\.size).max()
             ?? sheet.relays.map(\.size).filter { $0 > 0 }.max()
         lines = Self.lines(for: sheet, sealedSize: size, contactName: contactName)
-        verdict = Self.verdictPending(sheet.delivery, now: now())
         devices = Self.deviceRows(sheet.devices)
         devicesSentence = Self.devicesSentence(sheet.delivery)
         let copyLeft = route.first { $0.own && $0.step == "deposited" }.map { Date(timeIntervalSince1970: TimeInterval($0.at)) }
@@ -193,10 +197,9 @@ final class MessageSheetModel {
 
     #if DEBUG
     /// Previews and renders: a sent message shown as if loaded.
-    func preload(quote: String, sheet: MessageDelivery?, route: [RouteStepInfo] = [], now: Date) {
+    func preload(quote: String, sheet: MessageDelivery?, route: [RouteStepInfo] = []) {
         self.quote = quote
         outgoing = true
-        self.now = { now }
         show(sheet, route: route)
         content = sheet == nil ? .sentElsewhere : .sent
     }
@@ -232,16 +235,13 @@ final class MessageSheetModel {
         deleting = true
         defer { deleting = false }
         notice = nil
-        // How many devices it left for, read just before: a delivery shown
-        // as Pending has none, and the outcome carries no count (§6.7).
-        let fresh = outgoing ? (try? await core.deliveriesOf([messageId]).first)?.delivery : nil
         do {
             let outcome = try await core.deleteMessage(messageId)
             var banner: DeleteBanner.Message?
             if outgoing, content == .sent, let shown {
-                let counted = fresh ?? shown
+                // The device counts come from the deletion's own transaction.
                 banner = DeleteBanner.message(shown: shown.state, outcome: outcome, contactName: contactName,
-                                              devices: (left: Int(counted.devicesLeft), total: Int(counted.devices)))
+                                              devices: (left: Int(outcome.devicesLeft), total: Int(outcome.devicesTotal)))
             }
             close(.deleted(banner))
         } catch {
@@ -295,12 +295,21 @@ final class MessageSheetModel {
         if d.state == .notDelivered {
             let expiry = d.expiredAt.map(date)
             let on = expiry.map { dayAndTime($0, bundle: bundle, locale: locale, timeZone: timeZone) }
-            let reason: String? = if d.depositedAt == nil && !anyRelay {
-                on.map { String(localized: "Expired on \($0) before a relay accepted it. It never left this iPhone.",
-                                bundle: bundle, locale: locale) }
-            } else {
-                on.map { String(localized: "None of \(contactName)’s devices picked it up within 24 hours. The relay erased it on \($0).",
-                                bundle: bundle, locale: locale) }
+            // The same test as the deposit step above: a message that left
+            // never reads "It never left this iPhone" (§14.1).
+            let reason: String = switch (deposited || anyRelay, on) {
+            case (false, let on?):
+                String(localized: "Expired on \(on) before a relay accepted it. It never left this iPhone.",
+                       bundle: bundle, locale: locale)
+            case (false, nil):
+                String(localized: "Expired before a relay accepted it. It never left this iPhone.",
+                       bundle: bundle, locale: locale)
+            case (true, let on?):
+                String(localized: "None of \(contactName)’s devices picked it up within 24 hours. The relay erased it on \(on).",
+                       bundle: bundle, locale: locale)
+            case (true, nil):
+                String(localized: "None of \(contactName)’s devices picked it up within 24 hours. The relay erased it.",
+                       bundle: bundle, locale: locale)
             }
             out.append(Line(id: "stop", glyph: .notDelivered, title: d.state.wordString(bundle: bundle, locale: locale),
                             at: nil, detail: reason, phase: .stopped))

@@ -100,7 +100,7 @@ struct MessageSheetBody: View {
     var body: some View {
             VStack(alignment: .leading, spacing: 0) {
                 if let notice = model.notice {
-                    Banner(kind: .warning, title: LocalizedStringKey(stringLiteral: notice.text()))
+                    Banner(kind: .warning, verbatim: notice.text())
                         .padding(.bottom, Space.s4)
                 }
                 switch model.content {
@@ -142,10 +142,13 @@ struct MessageSheetBody: View {
         section("Delivery")
         DeliveryTimeline(steps: model.steps)
             .accessibilityIdentifier("sheet.timeline")
-        if let verdict = model.verdict {
-            Text(verbatim: verdict).font(.bBodySmall).foregroundStyle(Color.fgSoft)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, Space.s2)
+        // Asked again each minute: a sheet left open past the expiry says so.
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            if let verdict = model.verdict(at: context.date) {
+                Text(verbatim: verdict).font(.bBodySmall).foregroundStyle(Color.fgSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, Space.s2)
+            }
         }
         if model.canRetry {
             PrimaryButton("Retry", identifier: "sheet.retry", action: retry).padding(.top, Space.s4)
@@ -282,8 +285,7 @@ enum MessageSheetSamples {
     @MainActor static func model(_ sheet: MessageDelivery?, contactName: String = "Alice") -> MessageSheetModel {
         let core = CoreService(device: PreviewSheetDevice(), runner: PreviewSheetRunner())
         let model = MessageSheetModel(core: core, messageId: 1, contact: "alice", contactName: contactName)
-        model.preload(quote: "On se voit au marché à 18 h, devant la fontaine.", sheet: sheet,
-                      now: Date(timeIntervalSince1970: TimeInterval(t0 + 600)))
+        model.preload(quote: "On se voit au marché à 18 h, devant la fontaine.", sheet: sheet)
         return model
     }
 }

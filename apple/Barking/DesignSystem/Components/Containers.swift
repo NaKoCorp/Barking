@@ -27,9 +27,25 @@ struct Banner: View {
     }
 
     let kind: Kind
-    let title: LocalizedStringKey
+    let title: Text
     var message: LocalizedStringKey?
     var action: Action?
+
+    init(kind: Kind, title: LocalizedStringKey, message: LocalizedStringKey? = nil, action: Action? = nil) {
+        self.init(kind: kind, title: Text(title), message: message, action: action)
+    }
+
+    /// A title already localized (a sentence built with its arguments).
+    init(kind: Kind, verbatim title: String, message: LocalizedStringKey? = nil, action: Action? = nil) {
+        self.init(kind: kind, title: Text(verbatim: title), message: message, action: action)
+    }
+
+    private init(kind: Kind, title: Text, message: LocalizedStringKey?, action: Action?) {
+        self.kind = kind
+        self.title = title
+        self.message = message
+        self.action = action
+    }
 
     private var colors: (bg: Color, fg: Color, border: Color) {
         switch kind {
@@ -45,7 +61,7 @@ struct Banner: View {
                 Image(systemName: kind == .info ? "info.circle" : "exclamationmark.triangle")
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).fontWeight(.semibold)
+                    title.fontWeight(.semibold)
                     if let message { Text(message) }
                 }
                 Spacer(minLength: 0)

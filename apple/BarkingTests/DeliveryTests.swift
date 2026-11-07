@@ -178,7 +178,7 @@ final class DeliveryCoreTests: XCTestCase {
     func testDeleteReloadsEachConversationItTouched() async throws {
         let d = FakeDevice()
         d.deleteResult = DeleteOutcome(deleted: 3, cancelled: 3, partlyCancelled: 0, alreadyLeft: 0, stillReceiving: [],
-                                       ownCopiesKept: false,
+                                       ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0,
                                        changes: changes(("a", 1), ("b", 2), ("a", 3)))
         let core = CoreService(device: d, runner: DirectRunner())
         let seen = Seen(await core.changes)
@@ -217,7 +217,7 @@ final class DeliveryCoreTests: XCTestCase {
         d.summary = summary(deliveryChanges: changes(("b", 1), ("c", 2)))
         _ = await core.sync(reason: .pull)
         d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 1, partlyCancelled: 0, alreadyLeft: 0, stillReceiving: [],
-                                       ownCopiesKept: false, changes: changes(("b", 1)))
+                                       ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: changes(("b", 1)))
         _ = try await core.deleteMessage(1)
         await gate.open()
         let ok = await seen.eventually { !deliveries($0).isEmpty }
@@ -229,7 +229,7 @@ final class DeliveryCoreTests: XCTestCase {
     func testDeleteOneAndCancelAllReportTheOutcome() async throws {
         let d = FakeDevice()
         d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 0, partlyCancelled: 0, alreadyLeft: 1,
-                                       stillReceiving: ["Alice"], ownCopiesKept: true, changes: changes(("a", 5)))
+                                       stillReceiving: ["Alice"], ownCopiesKept: true, devicesLeft: 0, devicesTotal: 0, changes: changes(("a", 5)))
         let core = CoreService(device: d, runner: DirectRunner())
         let one = try await core.deleteMessage(5)
         XCTAssertEqual(one.alreadyLeft, 1)
@@ -358,7 +358,7 @@ final class DeleteBannerTests: XCTestCase {
     private func outcome(cancelled: UInt32 = 0, partly: UInt32 = 0, left: UInt32 = 0,
                          still: [String] = []) -> DeleteOutcome {
         DeleteOutcome(deleted: max(1, cancelled + partly + left), cancelled: cancelled, partlyCancelled: partly,
-                      alreadyLeft: left, stillReceiving: still, ownCopiesKept: false, changes: [])
+                      alreadyLeft: left, stillReceiving: still, ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: [])
     }
 
     private func bundle(_ lang: String) throws -> Bundle {

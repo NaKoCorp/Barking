@@ -214,7 +214,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var retryAllCount: UInt32 = 0
 
     static let nothingDeleted = DeleteOutcome(deleted: 0, cancelled: 0, partlyCancelled: 0, alreadyLeft: 0,
-                                              stillReceiving: [], ownCopiesKept: false, changes: [])
+                                              stillReceiving: [], ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: [])
 
     func deliveriesOf(ids: [Int64]) throws -> [DeliveryUpdate] {
         if let deliveryError { throw deliveryError }

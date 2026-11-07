@@ -146,6 +146,11 @@ pub struct DeleteOutcome {
     pub still_receiving: Vec<String>,
     /// At least one copy for my other devices left or keeps going.
     pub own_copies_kept: bool,
+    /// One sent message deleted: its contact devices already left (they
+    /// keep it). 0 for several messages or a received one.
+    pub devices_left: u32,
+    /// One sent message deleted: its contact devices left or cancelled.
+    pub devices_total: u32,
     /// Messages whose delivery changed during the call, the deleted ones
     /// included: the conversations to reload.
     pub changes: Vec<DeliveryChange>,
@@ -291,6 +296,8 @@ fn outcome_of(
             .map(|fp| contact_name(&contacts, fp))
             .collect(),
         own_copies_kept: o.own_copies_kept,
+        devices_left: o.devices_left,
+        devices_total: o.devices_total,
         changes: changes_of(core.take_delivery_changes()),
     })
 }

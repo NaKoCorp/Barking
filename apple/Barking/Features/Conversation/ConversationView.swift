@@ -126,7 +126,7 @@ struct ConversationView: View {
         switch notice {
         case .deleted(let message): Banner(kind: .info, title: message.key)
         case .deleteFailed, .noReachableDevice:
-            Banner(kind: .warning, title: LocalizedStringKey(stringLiteral: notice.text()))
+            Banner(kind: .warning, verbatim: notice.text())
         }
     }
 

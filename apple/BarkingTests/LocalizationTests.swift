@@ -303,6 +303,16 @@ final class LocalizationTests: XCTestCase {
             "Delete message": "Supprimer le message",
             "Details unavailable. The message itself is unchanged.": "Détails indisponibles. Le message lui-même n’a pas changé.",
             "everything: it is the sender.": "tout\u{00A0}: c’est l’expéditeur.",
+            "None of %@’s devices picked it up within 24 hours. The relay erased it on %@.":
+                "Aucun appareil de %1$@ ne l’a relevé en 24\u{00A0}h. Le relais l’a effacé le %2$@.",
+            "None of %@’s devices picked it up within 24 hours. The relay erased it.":
+                "Aucun appareil de %@ ne l’a relevé en 24\u{00A0}h. Le relais l’a effacé.",
+            "Expired before a relay accepted it. It never left this iPhone.":
+                "Expiré avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.",
+            "Could see: a sealed packet of %@ for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it.":
+                "A pu voir\u{00A0}: un paquet scellé de %@ pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.",
+            "Could see: a sealed packet for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it.":
+                "A pu voir\u{00A0}: un paquet scellé pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.",
         ]
         for (key, value) in expected {
             XCTAssertEqual(fr[key] as? String, value, key)

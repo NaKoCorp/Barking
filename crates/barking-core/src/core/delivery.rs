@@ -499,6 +499,12 @@ pub struct DeleteOutcome {
     pub still_receiving: Vec<Fingerprint>,
     /// At least one copy for my other devices left or keeps going.
     pub own_copies_kept: bool,
+    /// One sent message deleted: its contact devices already left (they
+    /// keep it), read in the deletion's transaction. 0 otherwise.
+    pub devices_left: u32,
+    /// One sent message deleted: its contact devices left or cancelled
+    /// (never my own copies). 0 otherwise.
+    pub devices_total: u32,
 }
 
 impl Core {
@@ -606,6 +612,12 @@ fn delete_rows(
                 out.still_receiving.push(contact);
             }
             out.own_copies_kept |= gone.own_kept;
+            if row_ids.len() == 1 {
+                // "Part of it had already left: Alice will receive it on
+                // 1 of their 2 devices" (spec §6.7), from this transaction.
+                out.devices_left = gone.left;
+                out.devices_total = gone.left + gone.cancelled;
+            }
         }
         q.conn()
             .execute("DELETE FROM messages WHERE id = ?1", params![row])

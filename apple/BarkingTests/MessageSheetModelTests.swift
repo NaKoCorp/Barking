@@ -167,6 +167,47 @@ final class MessageSheetModelTests: XCTestCase {
         XCTAssertEqual(String(localized: "not recorded", bundle: bundle, locale: locale), "non notée")
     }
 
+    /// §14.1: a message that left (a deposit step is drawn, even without a
+    /// time: migrated, or the receipt came before the trace) never reads
+    /// "It never left this iPhone".
+    func testNotDeliveredReasonAgreesWithTheDeposit() throws {
+        let expiry = t0 + 86_400
+        for d in [delivery(.notDelivered, expired: expiry, left: 1),
+                  delivery(.notDelivered, deposited: t0 + 34, expired: expiry)] {
+            let l = try lines(sheet(d))
+            XCTAssertEqual(l.map(\.title), ["Sealed and saved on this iPhone", "Deposited on a relay", "Not delivered"])
+            XCTAssertEqual(l[1].phase, .done)
+            XCTAssertNil(l[1].at)
+            XCTAssertTrue(l[2].detail?.hasPrefix("None of Alice’s devices picked it up within 24 hours.") == true,
+                          l[2].detail ?? "")
+            XCTAssertFalse(l[2].detail?.contains("never left") == true)
+        }
+    }
+
+    /// §6.4: without an expiry time, the reason is said without a date.
+    func testNotDeliveredWithoutExpiryHasNoDate() throws {
+        let never = try lines(sheet(delivery(.notDelivered)))
+        XCTAssertEqual(never.last?.detail, "Expired before a relay accepted it. It never left this iPhone.")
+        let lost = try lines(sheet(delivery(.notDelivered, deposited: t0 + 34),
+                                   relays: [RelayHop(node: "K7QX2M4A", at: t0 + 34, size: 0)]))
+        XCTAssertEqual(lost.last?.detail, "None of Alice’s devices picked it up within 24 hours. The relay erased it.")
+        let fr = try lines(sheet(delivery(.notDelivered)), size: 1024, "fr")
+        XCTAssertEqual(fr.last?.detail, "Expiré avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.")
+        let lostFr = try lines(sheet(delivery(.notDelivered, deposited: t0 + 34)), size: 1024, "fr")
+        XCTAssertEqual(lostFr.last?.detail,
+                       "Aucun appareil de Alice ne l’a relevé en 24\u{00A0}h. Le relais l’a effacé.")
+    }
+
+    /// §6.4: a sheet left open past the expiry shows the verdict line.
+    func testVerdictFollowsTheClock() async {
+        let d = FakeDevice()
+        let m = make(d)
+        d.messageDeliveries[7] = sheet(delivery(.onNetwork, deposited: t0 + 34, left: 1))
+        await m.load()
+        XCTAssertNil(m.verdict(at: Date(timeIntervalSince1970: TimeInterval(t0 + 3600))))
+        XCTAssertNotNil(m.verdict(at: Date(timeIntervalSince1970: TimeInterval(t0 + 86_400 + 60))))
+    }
+
     // MARK: Delete confirmation
 
     /// §7.4 "Choix du cas", from the delivery the sheet shows.
@@ -311,10 +352,13 @@ final class MessageSheetModelTests: XCTestCase {
         XCTAssertEqual(m.confirmation, .onNetwork)
         XCTAssertEqual(m.lines.map(\.title).dropFirst().first, "Deposited on relay K7QX2M4A")
 
-        // The full reload of the conversation refreshes it too.
+        // The full reload of the conversation refreshes it too, without
+        // reading the whole conversation again.
         d.messageDeliveries[7] = sheet(delivery(.received, deposited: t0 + 1, received: t0 + 9, devicesReceived: 1, left: 1))
+        let calls = d.messagesCalls
         await m.handle(.messages(contact: "a"))
         XCTAssertEqual(m.confirmation, .received)
+        XCTAssertEqual(d.messagesCalls, calls, "a sent message refreshes its own row only")
         XCTAssertNil(m.exit)
 
         // Deleted elsewhere: a `.delivery` that names it removed closes it.
@@ -341,13 +385,12 @@ final class MessageSheetModelTests: XCTestCase {
         let m = make(d)
         d.messageDeliveries[7] = sheet(delivery(.pending, devices: 2, pending: 2))
         await m.load()
-        d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 0, partlyCancelled: 1, alreadyLeft: 0,
-                                       stillReceiving: ["Alice"], ownCopiesKept: false, changes: [])
-        let shown = m.delivery
         // One device's packet left while the dialog was open: the pending
-        // text shown is corrected, with the number read just before.
-        d.deliveryUpdates[7] = DeliveryUpdate(
-            messageId: 7, delivery: delivery(.onNetwork, deposited: t0 + 1, devices: 2, left: 1, pending: 1), removed: false)
+        // text shown is corrected with the counts of the core's deletion.
+        d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 0, partlyCancelled: 1, alreadyLeft: 0,
+                                       stillReceiving: ["Alice"], ownCopiesKept: false, devicesLeft: 1, devicesTotal: 2,
+                                       changes: [])
+        let shown = m.delivery
         await m.delete(shown: shown)
         XCTAssertEqual(d.deleted, [[7]])
         XCTAssertEqual(m.exit, .deleted(.partlyLeft(name: "Alice", left: 1, total: 2)))
@@ -363,7 +406,7 @@ final class MessageSheetModelTests: XCTestCase {
         await m2.load()
         XCTAssertEqual(m2.confirmation, .mixed(left: 1, total: 2))
         d2.deleteResult = DeleteOutcome(deleted: 1, cancelled: 1, partlyCancelled: 0, alreadyLeft: 0,
-                                        stillReceiving: [], ownCopiesKept: false, changes: [])
+                                        stillReceiving: [], ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: [])
         await m2.delete(shown: m2.delivery)
         XCTAssertEqual(m2.exit, .deleted(nil))
 
@@ -372,7 +415,7 @@ final class MessageSheetModelTests: XCTestCase {
         d3.messageDeliveries[7] = sheet(delivery(.pending, devices: 2, pending: 2))
         await m3.load()
         d3.deleteResult = DeleteOutcome(deleted: 1, cancelled: 0, partlyCancelled: 0, alreadyLeft: 1,
-                                        stillReceiving: ["Alice"], ownCopiesKept: false, changes: [])
+                                        stillReceiving: ["Alice"], ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: [])
         await m3.delete(shown: m3.delivery)
         XCTAssertEqual(m3.exit, .deleted(.alreadyLeft(name: "Alice")))
 
@@ -399,6 +442,15 @@ final class MessageSheetModelTests: XCTestCase {
         XCTAssertEqual(d.retried, [7])
         XCTAssertEqual(m.confirmation, .pending, "refreshed at once")
         XCTAssertFalse(m.canRetry)
+
+        // It moved meanwhile: no message, the sheet shows where it is.
+        d.messageDeliveries[7] = sheet(delivery(.notDelivered, expired: t0 + 86_400))
+        await m.load()
+        d.retryError = BarkingError.NothingToRetry
+        d.messageDeliveries[7] = sheet(delivery(.onNetwork, deposited: t0 + 1, left: 1))
+        await m.retry()
+        XCTAssertNil(m.notice)
+        XCTAssertEqual(m.confirmation, .onNetwork)
 
         d.messageDeliveries[7] = sheet(delivery(.notDelivered, expired: t0 + 86_400))
         await m.load()

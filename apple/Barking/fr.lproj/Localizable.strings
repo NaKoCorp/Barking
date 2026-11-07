@@ -421,3 +421,5 @@
 "Sent from another of your devices. Its delivery is tracked there." = "Envoyé depuis un autre de vos appareils. Son acheminement est suivi là-bas.";
 "Delete message" = "Supprimer le message";
 "Details unavailable. The message itself is unchanged." = "Détails indisponibles. Le message lui-même n’a pas changé.";
+"Expired before a relay accepted it. It never left this iPhone." = "Expiré avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.";
+"None of %@’s devices picked it up within 24 hours. The relay erased it." = "Aucun appareil de %@ ne l’a relevé en 24 h. Le relais l’a effacé.";

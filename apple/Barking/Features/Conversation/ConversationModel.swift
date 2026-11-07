@@ -236,15 +236,12 @@ final class ConversationModel {
         deleting.insert(id)
         defer { deleting.remove(id) }
         notice = nil
-        // How many devices it left for, read just before: a delivery shown
-        // as Pending has none, and the outcome carries no count (§6.7).
-        let fresh = item.outgoing ? (try? await core.deliveriesOf([id]).first)?.delivery : nil
         do {
             let outcome = try await core.deleteMessage(id)
             items.removeAll { $0.id == id }
             if item.outgoing, let delivery {
-                let counted = fresh ?? delivery
-                let devices = (left: Int(counted.devicesLeft), total: Int(counted.devices))
+                // The device counts come from the deletion's own transaction.
+                let devices = (left: Int(outcome.devicesLeft), total: Int(outcome.devicesTotal))
                 notice = DeleteBanner.message(shown: delivery.state, outcome: outcome, contactName: name,
                                               devices: devices).map(Notice.deleted)
             }

@@ -173,6 +173,8 @@ fn delete_message_cancels_and_reports() {
     );
     assert!(o.still_receiving.is_empty());
     assert!(!o.own_copies_kept);
+    // One message: its contact devices, none of them left (spec §6.7).
+    assert_eq!((o.devices_left, o.devices_total), (0, 1));
     assert_eq!(o.changes.len(), 1);
     assert_eq!(
         (o.changes[0].contact.as_str(), o.changes[0].message_id),
@@ -191,6 +193,8 @@ fn delete_messages_and_cancel_all() {
     let ids = vec![id_of(&alice, &fb, "a"), id_of(&alice, &fb, "b")];
     let o = alice.delete_messages(ids).unwrap();
     assert_eq!((o.deleted, o.cancelled), (2, 2));
+    // Several messages: no per-message device count.
+    assert_eq!((o.devices_left, o.devices_total), (0, 0));
     assert_eq!(o.changes.len(), 2);
     let o = alice.cancel_all_pending().unwrap();
     assert_eq!((o.deleted, o.cancelled), (1, 1));

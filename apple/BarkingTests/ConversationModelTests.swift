@@ -142,7 +142,7 @@ final class ConversationModelTests: XCTestCase {
         let m = make(d)
         await m.onAppear()
         d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 0, partlyCancelled: 0, alreadyLeft: 1,
-                                       stillReceiving: ["bob"], ownCopiesKept: false, changes: [])
+                                       stillReceiving: ["bob"], ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: [])
         let outcome = await m.delete(7)
         XCTAssertEqual(outcome?.alreadyLeft, 1)
         XCTAssertEqual(d.deleted, [[7]])
@@ -151,27 +151,25 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(m.notice?.text(), "It had already left: bob will still receive it.")
         // Cancelled: nothing to say.
         d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 1, partlyCancelled: 0, alreadyLeft: 0,
-                                       stillReceiving: [], ownCopiesKept: false, changes: [])
+                                       stillReceiving: [], ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: [])
         _ = await m.delete(8)
         XCTAssertTrue(m.items.isEmpty)
         XCTAssertNil(m.notice)
     }
 
     /// Spec §6.7 "Une partie était déjà partie : Alice le recevra sur 1 de
-    /// ses 2 appareils": the count is read just before deleting; a bubble
-    /// shown Pending has no device left.
-    func testPartlyLeftCountsTheDevicesReadBeforeDeleting() async {
+    /// ses 2 appareils": the counts come from the core's deletion, read in
+    /// its transaction; a bubble shown Pending has no device left.
+    func testPartlyLeftCountsComeFromTheOutcome() async {
         let d = FakeDevice()
         let two = Delivery(state: .pending, sealedAt: 1, depositedAt: nil, receivedAt: nil, expiredAt: nil,
                            devices: 2, devicesReceived: 0, devicesLeft: 0, devicesPending: 2)
         d.messageList = ["b": [Message(id: 7, outgoing: true, body: "m7", at: 1, delivery: two)]]
         let m = make(d)
         await m.onAppear()
-        let moved = Delivery(state: .onNetwork, sealedAt: 1, depositedAt: 2, receivedAt: nil, expiredAt: nil,
-                             devices: 2, devicesReceived: 0, devicesLeft: 1, devicesPending: 1)
-        d.deliveryUpdates[7] = DeliveryUpdate(messageId: 7, delivery: moved, removed: false)
         d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 0, partlyCancelled: 1, alreadyLeft: 0,
-                                       stillReceiving: ["bob"], ownCopiesKept: false, changes: [])
+                                       stillReceiving: ["bob"], ownCopiesKept: false, devicesLeft: 1, devicesTotal: 2,
+                                       changes: [])
         _ = await m.delete(7)
         XCTAssertEqual(m.notice, .deleted(.partlyLeft(name: "bob", left: 1, total: 2)))
     }
