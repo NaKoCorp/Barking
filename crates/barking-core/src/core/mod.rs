@@ -52,7 +52,7 @@ use crate::{CoreError, Result};
 
 pub use crate::transparency::SyncKind;
 pub use contacts::ContactSummary;
-pub use delivery::{AwaitingVerdict, DeleteOutcome};
+pub use delivery::{AwaitingVerdict, DeleteOutcome, MAX_NOTED_CHANGES};
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
 pub use history::{HistoryArchive, MAX_ARCHIVE_BYTES};
 pub use link::{
@@ -223,10 +223,10 @@ pub struct Core {
     log_limiter: LogLimiter,
     /// Sent messages that became `NotDelivered` since the last
     /// `take_failed_notices`, as `(contact, row id)`, in memory.
-    failed_notices: Vec<(Fingerprint, i64)>,
+    failed_notices: delivery::ChangeList,
     /// Sent messages whose delivery changed since the last
     /// `take_delivery_changes`, as `(contact, row id)`, in memory.
-    delivery_changes: Vec<(Fingerprint, i64)>,
+    delivery_changes: delivery::ChangeList,
 }
 
 impl fmt::Debug for Core {
@@ -340,8 +340,8 @@ impl Core {
             pending,
             frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
             log_limiter: LogLimiter::default(),
-            failed_notices: Vec::new(),
-            delivery_changes: Vec::new(),
+            failed_notices: delivery::ChangeList::default(),
+            delivery_changes: delivery::ChangeList::default(),
         }
     }
 

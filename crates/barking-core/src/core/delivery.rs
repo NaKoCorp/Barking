@@ -10,6 +10,8 @@
 //! client: spec §15.5). A deposited delivery never fails on the local clock
 //! alone.
 
+use std::collections::{HashSet, VecDeque};
+
 use rusqlite::{OptionalExtension, params};
 
 use super::Core;
@@ -262,13 +264,15 @@ impl Core {
     /// verdict, undeliverable packet) since the last call, as
     /// `(contact, row id)`: for the failure notification. Empties the list.
     pub fn take_failed_notices(&mut self) -> Vec<(Fingerprint, i64)> {
-        std::mem::take(&mut self.failed_notices)
+        self.failed_notices.take()
     }
 
     /// Keeps what a committed `fail` found: its change and its notice.
     pub(super) fn settle(&mut self, failed: Failed) {
         self.note_changes(failed.change);
-        self.failed_notices.extend(failed.notice);
+        if let Some(notice) = failed.notice {
+            self.failed_notices.push(notice);
+        }
     }
 
     /// Notes delivery changes of sent messages for `take_delivery_changes`,
@@ -276,10 +280,46 @@ impl Core {
     /// that made them committed.
     pub(super) fn note_changes(&mut self, changes: impl IntoIterator<Item = Change>) {
         for change in changes {
-            if !self.delivery_changes.contains(&change) {
-                self.delivery_changes.push(change);
-            }
+            self.delivery_changes.push(change);
         }
+    }
+}
+
+/// Most entries kept by each in-memory list of changes
+/// (`take_delivery_changes`, `take_failed_notices`). Past it the oldest
+/// are dropped: a list taken at this length may be incomplete, and the app
+/// then reloads its screens instead of patching them.
+pub const MAX_NOTED_CHANGES: usize = 10_000;
+
+/// A list of changes in the order first noted, each once, bounded by
+/// `MAX_NOTED_CHANGES` (oldest dropped).
+#[derive(Debug, Default)]
+pub(super) struct ChangeList {
+    order: VecDeque<Change>,
+    seen: HashSet<Change>,
+}
+
+impl ChangeList {
+    pub(super) fn push(&mut self, change: Change) {
+        if !self.seen.insert(change) {
+            return;
+        }
+        self.order.push_back(change);
+        if self.order.len() > MAX_NOTED_CHANGES
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.seen.remove(&oldest);
+        }
+    }
+
+    pub(super) fn retain(&mut self, keep: impl Fn(&Change) -> bool) {
+        self.order.retain(|c| keep(c));
+        self.seen.retain(|c| keep(c));
+    }
+
+    pub(super) fn take(&mut self) -> Vec<Change> {
+        self.seen.clear();
+        self.order.drain(..).collect()
     }
 }
 
@@ -339,7 +379,7 @@ pub(super) fn on_network(q: &impl Queries, packet: PacketId) -> Result<bool> {
 /// Fails the delivery carrying `packet` if it is in state `from`:
 /// `NotDelivered`, `expired_at` = `expired_at`, its message recomputed.
 /// Returns the message's change, and its notice when the message itself
-/// just became `NotDelivered`. The caller keeps both for after its
+/// just became `NotDelivered` and its contact is still known. The caller keeps both for after its
 /// transaction commits (`Core::settle`).
 /// Every delivery state change that fails a message goes through here.
 pub(super) fn fail(
@@ -370,9 +410,12 @@ pub(super) fn fail(
     let before = outgoing_status(q, message)?;
     recompute_message_status(q, message)?;
     let after = outgoing_status(q, message)?;
+    // No notification for a contact removed since (nothing to name).
     let notice = match (before, after) {
         (Some((_, _, b)), Some((contact, row, a)))
-            if a == MessageStatus::NotDelivered as i64 && b != a =>
+            if a == MessageStatus::NotDelivered as i64
+                && b != a
+                && q.get_contact(contact)?.is_some() =>
         {
             Some((contact, row))
         }
@@ -382,6 +425,45 @@ pub(super) fn fail(
         change: after.map(|(contact, row, _)| (contact, row)),
         notice,
     })
+}
+
+/// Fails, at `now`, the contact deliveries of my messages to `fp` that
+/// are still `Pending` and that no deposit was tried for: the contact is
+/// about to be deleted with their packets, so they will never leave. A
+/// tried one may be on a node (spec §14.1): kept, its packet stays queued.
+/// The changes go to `Queries::note_change` (this runs deep in a
+/// transaction); no failure notice is given for a removed contact.
+pub(super) fn fail_stranded(q: &impl Queries, fp: Fingerprint, now: u64) -> Result<()> {
+    let packets: Vec<Vec<u8>> = {
+        let mut stmt = q
+            .conn()
+            .prepare(
+                "SELECT d.packet_id FROM deliveries d \
+                 JOIN messages m ON m.message_id = d.message_id \
+                 LEFT JOIN outbox o ON o.packet_id = d.packet_id \
+                 WHERE m.contact_fp = ?1 AND m.direction = ?2 AND d.own = 0 \
+                 AND d.status = ?3 AND o.deposit_tried_at IS NULL",
+            )
+            .map_err(map_err)?;
+        stmt.query_map(
+            params![
+                fp.0.as_slice(),
+                Direction::Out as i64,
+                MessageStatus::Pending as i64
+            ],
+            |r| r.get(0),
+        )
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(map_err)?
+    };
+    for packet in packets {
+        let failed = fail(q, PacketId(arr(packet)?), MessageStatus::Pending, now)?;
+        if let Some((contact, row)) = failed.change {
+            q.note_change(contact, row);
+        }
+    }
+    Ok(())
 }
 
 /// Contact, row id and stored status of the outgoing message `message`.
@@ -438,7 +520,7 @@ impl Core {
     /// goes; `inbound` stays and a pending ack still leaves.
     ///
     /// Each deleted message leaves a tombstone (`insert_message` refuses
-    /// its identifier for two days) and the batch one `MessagesDeleted`
+    /// its identifier for good) and the batch one `MessagesDeleted`
     /// log entry, without content nor contact.
     pub fn delete_messages(&mut self, row_ids: &[i64], now: u64) -> Result<DeleteOutcome> {
         let (outcome, changes) = self.store.transaction(|tx| delete_rows(tx, row_ids, now))?;
@@ -723,6 +805,9 @@ impl Core {
     /// A deleted message is listed too (its row no longer exists).
     /// Empties the list.
     pub fn take_delivery_changes(&mut self) -> Vec<(Fingerprint, i64)> {
-        std::mem::take(&mut self.delivery_changes)
+        // Changes noted deep in a transaction (a removed contact).
+        let noted = self.store.take_noted_changes();
+        self.note_changes(noted);
+        self.delivery_changes.take()
     }
 }

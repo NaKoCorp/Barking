@@ -82,7 +82,7 @@ impl Core {
         self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
-            remove_in(tx, *contact)?;
+            remove_in(tx, *contact, now)?;
             let time = sync::touch(tx, *contact, now, true, device.public().id())?;
             sync::send_op(tx, device, SyncOp::Remove(*contact), time, rng)
         })
@@ -310,7 +310,7 @@ pub(super) fn add_in(
                 new: fp,
             },
         )?;
-        q.delete_contact(other.fp)?;
+        delete_in(q, other.fp, now)?;
         replaced = Some(other.fp);
         verified = false;
     }
@@ -488,8 +488,19 @@ pub(super) fn apply_card_update(
 }
 
 /// Deletes a known contact from `q` (see `remove_contact`).
-pub(super) fn remove_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
+pub(super) fn remove_in(q: &impl Queries, fp: Fingerprint, now: u64) -> Result<()> {
     q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
+    delete_in(q, fp, now)
+}
+
+/// Deletes the contact `fp` (`Queries::delete_contact`) after settling the
+/// deliveries its deletion strands: the contact packets of my messages
+/// that never left this device are failed at `now` (no failure notice: the
+/// contact is gone) and leave the queue; those a node accepted, or may
+/// hold (a deposit was tried), stay queued for their verdict or redeposit.
+/// The changes are noted for `take_delivery_changes`.
+pub(super) fn delete_in(q: &impl Queries, fp: Fingerprint, now: u64) -> Result<()> {
+    super::delivery::fail_stranded(q, fp, now)?;
     q.delete_contact(fp)
 }
 

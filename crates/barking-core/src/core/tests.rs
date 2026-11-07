@@ -4434,10 +4434,113 @@ fn every_state_change_is_noted_once() {
     p.a.delivery_counts(&bob, e6).unwrap();
     assert_eq!(p.a.take_delivery_changes(), vec![(bob, r6)]);
     assert!(p.a.take_delivery_changes().is_empty());
+    // Kept packets of deleted messages settle without a change: no row.
+    let s7 = p.a.send_text(&bob, "s7", e6, &mut p.rng).unwrap();
+    let s8 = p.a.send_text(&bob, "s8", e6, &mut p.rng).unwrap();
+    for s in [&s7, &s8] {
+        p.a.record_deposit(s[0].id, NODE, e6).unwrap();
+    }
+    let rows = [row_of(&p.a, &bob, "s7"), row_of(&p.a, &bob, "s8")];
+    p.a.delete_messages(&rows, e6).unwrap();
+    assert_eq!(
+        p.a.take_delivery_changes(),
+        vec![(bob, rows[0]), (bob, rows[1])]
+    );
+    let ack = ack_at(&mut p.b, &s7[0], e6, &mut p.rng).unwrap();
+    assert!(matches!(
+        p.a.receive(&ack.encode(), "t", e6, &mut p.rng).unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    let e8 = u64::from(s8[0].expires_at) + 1;
+    assert!(p.a.confirm_expired(s8[0].id, e8).unwrap());
+    assert!(p.a.take_delivery_changes().is_empty());
 }
 
 #[test]
-#[ignore = "performance check (spec §13), run by hand"]
+fn own_copy_of_a_deleted_message_notes_nothing() {
+    let (_d, mut a, _t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "kept", NOW, &mut rng).unwrap();
+    a.record_deposit(sent[0].id, NODE, NOW).unwrap();
+    let row = row_of(&a, &bob, "kept");
+    assert!(a.delete_message(row, NOW).unwrap().own_copies_kept);
+    assert_eq!(a.take_delivery_changes(), vec![(bob, row)]);
+    // The copy for my tablet expires undeposited: no row, no change.
+    a.expire_due(u64::from(sent[1].expires_at) + 1).unwrap();
+    assert_eq!(delivery_state(&a, sent[1].id).0, 5);
+    assert!(a.take_delivery_changes().is_empty());
+}
+
+#[test]
+fn change_lists_are_bounded() {
+    let fp = Fingerprint([3; 32]);
+    let mut list = delivery::ChangeList::default();
+    let extra = 5;
+    let last = i64::try_from(MAX_NOTED_CHANGES + extra).unwrap();
+    for row in 1..=last {
+        list.push((fp, row));
+    }
+    // Already listed: neither added again nor moved.
+    list.push((fp, last - 1));
+    let taken = list.take();
+    // The oldest are dropped, each kept once.
+    assert_eq!(taken.len(), MAX_NOTED_CHANGES);
+    assert_eq!(taken[0], (fp, i64::try_from(extra).unwrap() + 1));
+    assert_eq!(taken[MAX_NOTED_CHANGES - 1], (fp, last));
+    assert!(list.take().is_empty());
+    // Taken entries may be noted again.
+    list.push((fp, 1));
+    list.retain(|(_, row)| *row != 1);
+    list.push((fp, 2));
+    assert_eq!(list.take(), vec![(fp, 2)]);
+}
+
+#[test]
+fn removed_contact_leaves_true_states() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let pend = p.a.send_text(&bob, "pend", NOW, &mut p.rng).unwrap();
+    let dep = p.a.send_text(&bob, "dep", NOW, &mut p.rng).unwrap();
+    p.a.record_deposit(dep[0].id, NODE, NOW).unwrap();
+    // A deposit was tried, its answer lost: a node may hold it.
+    let tried = p.a.send_text(&bob, "tried", NOW, &mut p.rng).unwrap();
+    p.a.record_deposit_tried(tried[0].id, NOW).unwrap();
+    let r_pend = row_of(&p.a, &bob, "pend");
+    let r_dep = row_of(&p.a, &bob, "dep");
+    p.a.take_delivery_changes();
+    p.a.remove_contact(&bob, NOW + 1, &mut p.rng).unwrap();
+    // "x" (from `pair`) was received.
+    assert_eq!(p.a.delivery_counts(&bob, NOW + 1).unwrap(), [1, 1, 1, 1]);
+    assert_eq!(status_of(&p.a, &bob, "pend"), MessageStatus::NotDelivered);
+    assert_eq!(delivery_state(&p.a, pend[0].id).3, Some(i(NOW + 1)));
+    assert_eq!(p.a.take_delivery_changes(), vec![(bob, r_pend)]);
+    assert!(p.a.take_failed_notices().is_empty());
+    assert_eq!(outbox_row(&p.a, pend[0].id), None);
+    assert_eq!(outbox_row(&p.a, dep[0].id), Some(Some(i(NOW))));
+    assert!(outbox_row(&p.a, tried[0].id).is_some());
+    let pending = p.a.pending_packets(NOW + 1).unwrap();
+    assert_eq!(p.a.pending_count(NOW + 1).unwrap(), pending.packets);
+    // The deposited one still gets its verdict.
+    let expiry = u64::from(dep[0].expires_at);
+    assert!(
+        p.a.awaiting_verdict(expiry)
+            .unwrap()
+            .contains(&(dep[0].id, dep[0].mailbox))
+    );
+    assert!(p.a.confirm_expired(dep[0].id, expiry + 1).unwrap());
+    assert_eq!(status_of(&p.a, &bob, "dep"), MessageStatus::NotDelivered);
+    assert!(p.a.take_delivery_changes().contains(&(bob, r_dep)));
+    // No notification for a removed contact.
+    assert!(p.a.take_failed_notices().is_empty());
+}
+
+/// Spec §13: under 50 ms on 10 000 messages, as the app is built
+/// (optimized). Meant for a release run:
+/// `cargo nextest run -p barking-core --cargo-profile release --run-ignored only
+/// -E 'test(summary_query_under_50ms_on_10k_messages)'`. A debug build runs
+/// SQLCipher unoptimized (about 3 times slower): the bound is scaled there.
+#[test]
+#[ignore = "performance check (spec §13), run by hand with --cargo-profile release"]
 fn summary_query_under_50ms_on_10k_messages() {
     use std::time::{Duration, Instant};
     let mut p = settled_pair();
@@ -4477,5 +4580,6 @@ fn summary_query_under_50ms_on_10k_messages() {
     }
     eprintln!("messages_with_delivery on 10 000 messages: {times:?}");
     let best = *times.iter().min().unwrap();
-    assert!(best < Duration::from_millis(50), "{best:?}");
+    let bound = if cfg!(debug_assertions) { 150 } else { 50 };
+    assert!(best < Duration::from_millis(bound), "{best:?}");
 }

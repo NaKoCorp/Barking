@@ -466,7 +466,7 @@ fn apply_op(
         }
         SyncOp::Remove(fp) => {
             if q.get_contact(*fp)?.is_some() {
-                q.delete_contact(*fp)?;
+                contacts::delete_in(q, *fp, now)?;
             }
         }
     }

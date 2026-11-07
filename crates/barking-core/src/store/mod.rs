@@ -9,6 +9,7 @@
 
 mod schema;
 
+use std::cell::RefCell;
 use std::fmt;
 use std::path::Path;
 
@@ -419,6 +420,8 @@ pub struct RouteRow {
 
 pub struct Store {
     conn: Connection,
+    /// Changes noted by `Queries::note_change` (committed ones only).
+    noted: RefCell<Vec<(Fingerprint, i64)>>,
 }
 
 impl fmt::Debug for Store {
@@ -430,6 +433,9 @@ impl fmt::Debug for Store {
 /// Transaction handle, passed to the closure of [`Store::transaction`].
 pub struct Tx<'a> {
     conn: &'a Connection,
+    /// Changes noted in this transaction: handed to the store on commit,
+    /// dropped on rollback.
+    noted: RefCell<Vec<(Fingerprint, i64)>>,
 }
 
 impl Store {
@@ -453,7 +459,10 @@ impl Store {
         // Freed pages overwritten with zeros (deleted messages, sessions).
         conn.execute_batch("PRAGMA secure_delete = ON;")
             .map_err(map_err)?;
-        let store = Store { conn };
+        let store = Store {
+            conn,
+            noted: RefCell::new(Vec::new()),
+        };
         store.apply_schema()?;
         Ok(store)
     }
@@ -581,10 +590,16 @@ impl Store {
     /// Runs `f` in a single transaction; `Err` => full rollback.
     pub fn transaction<R>(&mut self, f: impl FnOnce(&Tx) -> Result<R>) -> Result<R> {
         let txn = self.conn.transaction().map_err(map_err)?;
-        let out = f(&Tx { conn: &txn });
+        let tx = Tx {
+            conn: &txn,
+            noted: RefCell::new(Vec::new()),
+        };
+        let out = f(&tx);
+        let noted = tx.noted.into_inner();
         match out {
             Ok(v) => {
                 txn.commit().map_err(map_err)?;
+                self.noted.get_mut().extend(noted);
                 Ok(v)
             }
             Err(e) => {
@@ -593,10 +608,26 @@ impl Store {
             }
         }
     }
+
+    /// Takes the changes noted by `Queries::note_change` since the last
+    /// call (committed transactions only).
+    pub fn take_noted_changes(&mut self) -> Vec<(Fingerprint, i64)> {
+        std::mem::take(self.noted.get_mut())
+    }
 }
 
 /// Typed methods, common to [`Store`] and [`Tx`].
 pub trait Queries {
+    #[doc(hidden)]
+    fn noted(&self) -> &RefCell<Vec<(Fingerprint, i64)>>;
+
+    /// Notes that the delivery of the sent message `(contact, row id)`
+    /// changed, from code too deep in a transaction to return it: kept in
+    /// memory, handed over on commit (`Store::take_noted_changes`).
+    fn note_change(&self, contact: Fingerprint, row_id: i64) {
+        self.noted().borrow_mut().push((contact, row_id));
+    }
+
     #[doc(hidden)]
     fn conn(&self) -> &Connection;
 
@@ -1188,15 +1219,17 @@ pub trait Queries {
     }
 
     /// Deletes a contact, all its sessions and its packets in the send
-    /// queue: my messages for it, my card updates for its devices and my
-    /// acknowledgements of its messages (the history is kept). The
-    /// `SyncSent` copies of my messages for my other devices stay in the
-    /// queue.
+    /// queue: my messages for it that never left (no deposit recorded nor
+    /// tried: a deposited one stays for its verdict, `confirm_expired`), my
+    /// card updates for its devices and my acknowledgements of its
+    /// messages (the history is kept). The `SyncSent` copies of my
+    /// messages for my other devices stay in the queue. Their pending
+    /// deliveries are the caller's (`core::contacts::delete_in`).
     fn delete_contact(&self, fp: Fingerprint) -> Result<()> {
         self.conn()
             .execute(
-                "DELETE FROM outbox WHERE packet_id IN \
-                 (SELECT d.packet_id FROM deliveries d \
+                "DELETE FROM outbox WHERE deposited_at IS NULL AND deposit_tried_at IS NULL \
+                 AND packet_id IN (SELECT d.packet_id FROM deliveries d \
                   JOIN messages m ON m.message_id = d.message_id \
                   WHERE m.contact_fp = ?1 AND m.direction = ?2 AND d.own = 0)",
                 params![fp.0.as_slice(), Direction::Out as i64],
@@ -1919,11 +1952,19 @@ impl Queries for Store {
     fn conn(&self) -> &Connection {
         &self.conn
     }
+
+    fn noted(&self) -> &RefCell<Vec<(Fingerprint, i64)>> {
+        &self.noted
+    }
 }
 
 impl Queries for Tx<'_> {
     fn conn(&self) -> &Connection {
         self.conn
+    }
+
+    fn noted(&self) -> &RefCell<Vec<(Fingerprint, i64)>> {
+        &self.noted
     }
 }
 
