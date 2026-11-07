@@ -990,8 +990,12 @@ async fn purge_all(shared: &Arc<Shared>) {
             })
             .await
         {
-            Stored::Done((n, more)) => {
+            Stored::Done((n, more, marked)) => {
                 shared.stats.purged(n);
+                if marked {
+                    // An unacked message expired: same signal as a deposit.
+                    shared.wake_signal.message_arrived();
+                }
                 if !more {
                     return;
                 }

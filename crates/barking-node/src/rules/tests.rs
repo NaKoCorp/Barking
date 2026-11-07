@@ -376,9 +376,18 @@ fn batched_purge_keeps_stored_bytes() {
         put(&mut s, &msg(n, 1, Tier::S, NOW + 100)).unwrap();
     }
     put(&mut s, &msg(6, 1, Tier::S, NOW + 10_000)).unwrap();
-    assert_eq!(s.purge_expired_batch(NOW + 100, 2).unwrap(), (2, true));
-    assert_eq!(s.purge_expired_batch(NOW + 100, 2).unwrap(), (2, true));
-    assert_eq!(s.purge_expired_batch(NOW + 100, 2).unwrap(), (1, false));
+    assert_eq!(
+        s.purge_expired_batch(NOW + 100, 2).unwrap(),
+        (2, true, false)
+    );
+    assert_eq!(
+        s.purge_expired_batch(NOW + 100, 2).unwrap(),
+        (2, true, false)
+    );
+    assert_eq!(
+        s.purge_expired_batch(NOW + 100, 2).unwrap(),
+        (1, false, false)
+    );
     let st = s.stats().unwrap();
     assert_eq!((st.packets, st.bytes), (1, 245));
 }

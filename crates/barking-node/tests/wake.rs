@@ -43,16 +43,34 @@ fn seal_secret() -> StaticSecret {
 }
 
 fn token() -> WakeToken {
+    token_for(WakeReason::Message)
+}
+
+fn token_for(reason: WakeReason) -> WakeToken {
     WakeToken {
         apns_token: vec![0xAB; 32],
         env: ApnsEnv::Sandbox,
         collapse: COLLAPSE,
         expires_day: today() + 1,
-        reason: WakeReason::Message,
+        reason,
     }
 }
 
 fn subscription(relay: &FakeRelay, mailbox: MailboxId, secret_byte: u8) -> Subscription {
+    subscription_of(relay, mailbox, secret_byte, SubKind::Messages)
+}
+
+/// A subscription of `kind`; its sealed token names the reason it wakes for.
+fn subscription_of(
+    relay: &FakeRelay,
+    mailbox: MailboxId,
+    secret_byte: u8,
+    kind: SubKind,
+) -> Subscription {
+    let reason = match kind {
+        SubKind::Messages => WakeReason::Message,
+        SubKind::Acks => WakeReason::Receipt,
+    };
     let public = PublicKey::from(&seal_secret()).to_bytes();
     // Nodes refuse literal private addresses at subscription time: the fake
     // relay is reached by name, resolved to 127.0.0.1 (allowed by the harness).
@@ -61,10 +79,10 @@ fn subscription(relay: &FakeRelay, mailbox: MailboxId, secret_byte: u8) -> Subsc
     Subscription {
         mailbox,
         relay: relay_ref,
-        sealed: seal(&public, SEAL_KEY_ID, &token(), &mut rand::rng()),
+        sealed: seal(&public, SEAL_KEY_ID, &token_for(reason), &mut rand::rng()),
         cancel_hash: cancel_hash(&[secret_byte; 32]),
         expires_day: today() + 1,
-        kind: SubKind::Messages,
+        kind,
     }
 }
 
@@ -214,6 +232,66 @@ async fn ack_never_wakes() {
         None,
         "an ack must not mark a subscription"
     );
+    relay.stop();
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ack_wakes_the_ack_subscriber() {
+    let relay = FakeRelay::start().await;
+    let node = single(WakeConfig::default());
+    let mailbox = MailboxId([0x64; 16]);
+    subscribe(
+        &node,
+        &subscription_of(&relay, mailbox, 1, SubKind::Messages),
+    )
+    .await;
+    subscribe(&node, &subscription_of(&relay, mailbox, 2, SubKind::Acks)).await;
+    let (msg, ack) = message_and_ack(mailbox, [0x64; 16]);
+    // The message wakes the message subscriber only.
+    deposit(&node, &msg).await;
+    wait_received(&relay, 1, Duration::from_secs(5)).await;
+    assert_eq!(
+        opened(&relay.received()[0]),
+        Some(token_for(WakeReason::Message))
+    );
+    // The ack wakes the ack subscriber, which has never been woken.
+    deposit(&node, &ack).await;
+    wait_received(&relay, 2, Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let got = relay.received();
+    assert_eq!(got.len(), 2, "the message subscriber is not woken again");
+    assert_eq!(opened(&got[1]), Some(token_for(WakeReason::Receipt)));
+    assert_eq!(node.wake_next_due(), None);
+    relay.stop();
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expiry_wakes_the_ack_subscriber() {
+    let relay = FakeRelay::start().await;
+    let node = single(WakeConfig::default());
+    let mailbox = MailboxId([0x65; 16]);
+    subscribe(&node, &subscription_of(&relay, mailbox, 1, SubKind::Acks)).await;
+    // A message that expires a few seconds from now and is never acked.
+    let msg = Packet {
+        kind: Kind::Message,
+        hops: DEFAULT_HOPS,
+        tier: Tier::S,
+        id: PacketId([0x65; 16]),
+        expires_at: u32::try_from(now() + 3).unwrap(),
+        mailbox,
+        payload: vec![1; 16],
+    }
+    .encode();
+    deposit(&node, &msg).await;
+    // Depositing marks no ack subscriber.
+    assert_eq!(node.wake_next_due(), None);
+    // The purge runs every minute: wait for it, bounded.
+    wait_received(&relay, 1, Duration::from_secs(90)).await;
+    let got = relay.received();
+    assert_eq!(got.len(), 1);
+    assert_eq!(opened(&got[0]), Some(token_for(WakeReason::Receipt)));
     relay.stop();
     node.stop().await;
 }

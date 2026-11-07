@@ -151,7 +151,7 @@ pub fn deposit(
             now,
             Difficulty::Progressive,
         ),
-        Kind::Ack => deposit_ack(store, policy, &packet, bytes),
+        Kind::Ack => deposit_ack(store, policy, &packet, bytes, now),
     }
 }
 
@@ -287,6 +287,7 @@ fn deposit_ack(
     policy: &Policy,
     p: &Packet,
     bytes: &[u8],
+    now: u64,
 ) -> Result<core::result::Result<(), ErrorReason>> {
     // Tier S, payload: acknowledged packet id (16) || secret (16).
     if p.tier != Tier::S || p.payload.len() != 32 {
@@ -335,6 +336,11 @@ fn deposit_ack(
         )?;
     }
     add_stored_bytes(&tx, delta)?;
+    let marks: Vec<MailboxId> = boxes
+        .iter()
+        .filter_map(|m| <[u8; 16]>::try_from(&m[..]).ok().map(MailboxId))
+        .collect();
+    crate::wake::mark_new_ack(&tx, &marks, now)?;
     tx.commit()?;
     Ok(Ok(()))
 }
@@ -496,7 +502,7 @@ pub fn store_copy(
         Kind::Message => {
             deposit_message(store, policy, &p, packet, pow_nonce, now, Difficulty::Base)
         }
-        Kind::Ack => deposit_ack(store, policy, &p, packet),
+        Kind::Ack => deposit_ack(store, policy, &p, packet, now),
     }
 }
 

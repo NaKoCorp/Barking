@@ -7,7 +7,9 @@
 use barking_packet::MailboxId;
 use barking_proto::msg::ErrorReason;
 use barking_proto::pow;
-use barking_proto::push::{MAX_SEALED, RelayRef, Subscription, cancel_hash, subscription_hash};
+use barking_proto::push::{
+    MAX_SEALED, RelayRef, SubKind, Subscription, cancel_hash, subscription_hash,
+};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 
@@ -17,7 +19,7 @@ pub mod sender;
 #[cfg(test)]
 mod tests;
 
-/// Subscriptions kept per mailbox.
+/// Subscriptions kept per mailbox and per kind.
 pub const MAX_SUBS_PER_MAILBOX: i64 = 4;
 /// A subscription may expire at most this many days after the current day.
 pub const MAX_EXPIRY_DAYS: u32 = 8;
@@ -124,8 +126,8 @@ pub fn subscribe(
         )?;
     } else {
         let in_box: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM subscriptions WHERE mailbox=?1",
-            params![&sub.mailbox.0[..]],
+            "SELECT COUNT(*) FROM subscriptions WHERE mailbox=?1 AND kind=?2",
+            params![&sub.mailbox.0[..], sub.kind as u8],
             |r| r.get(0),
         )?;
         if in_box >= MAX_SUBS_PER_MAILBOX {
@@ -136,14 +138,15 @@ pub fn subscribe(
             return Ok(Err(ErrorReason::NodeFull));
         }
         tx.execute(
-            "INSERT INTO subscriptions(mailbox,relay,sealed,cancel_hash,expires_day)
-             VALUES(?1,?2,?3,?4,?5)",
+            "INSERT INTO subscriptions(mailbox,relay,sealed,cancel_hash,expires_day,kind)
+             VALUES(?1,?2,?3,?4,?5,?6)",
             params![
                 &sub.mailbox.0[..],
                 relay,
                 &sub.sealed[..],
                 &sub.cancel_hash[..],
-                i64::from(sub.expires_day)
+                i64::from(sub.expires_day),
+                sub.kind as u8
             ],
         )?;
     }
@@ -165,19 +168,62 @@ pub fn unsubscribe(
     Ok(())
 }
 
-/// Marks the unexpired subscriptions of `mailbox` as pending. Called by
-/// `deposit_message` right after the packet insert, in the same transaction:
-/// never for a known packet nor for an ack.
+/// Marks the unexpired message subscriptions of `mailbox` as pending. Called
+/// by `deposit_message` right after the packet insert, in the same
+/// transaction: never for a known packet nor for an ack.
 pub(crate) fn mark_new_message(
     tx: &rusqlite::Connection,
     mailbox: &MailboxId,
     now: u64,
 ) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE subscriptions SET pending=1 WHERE mailbox=?1 AND expires_day>=?2",
-        params![&mailbox.0[..], i64::from(day_of(now))],
+        "UPDATE subscriptions SET pending=1 WHERE mailbox=?1 AND kind=?3 AND expires_day>=?2",
+        params![
+            &mailbox.0[..],
+            i64::from(day_of(now)),
+            SubKind::Messages as u8
+        ],
     )?;
     Ok(())
+}
+
+/// Marks the unexpired ack subscriptions of `mailboxes` as pending; returns
+/// whether at least one row matched.
+fn mark_acks(
+    tx: &rusqlite::Connection,
+    mailboxes: &[MailboxId],
+    now: u64,
+) -> rusqlite::Result<bool> {
+    let mut marked = 0;
+    for mailbox in mailboxes {
+        marked += tx.execute(
+            "UPDATE subscriptions SET pending=1 WHERE mailbox=?1 AND kind=?3 AND expires_day>=?2",
+            params![&mailbox.0[..], i64::from(day_of(now)), SubKind::Acks as u8],
+        )?;
+    }
+    Ok(marked > 0)
+}
+
+/// Marks the ack subscriptions of `mailboxes` as pending. Called by
+/// `deposit_ack` for a new ack, in the same transaction, with the mailboxes
+/// that held the acknowledged message: never for a known ack.
+pub(crate) fn mark_new_ack(
+    tx: &rusqlite::Connection,
+    mailboxes: &[MailboxId],
+    now: u64,
+) -> rusqlite::Result<()> {
+    mark_acks(tx, mailboxes, now).map(|_| ())
+}
+
+/// Marks the ack subscriptions of `mailboxes` as pending: a message expired
+/// there without an ack. Called by the purge in its savepoint. Returns
+/// whether a subscription was marked (the wake loop must then be signalled).
+pub(crate) fn mark_expired(
+    tx: &rusqlite::Connection,
+    mailboxes: &[MailboxId],
+    now: u64,
+) -> rusqlite::Result<bool> {
+    mark_acks(tx, mailboxes, now)
 }
 
 /// Takes at most `max` pending subscriptions not woken during the last
