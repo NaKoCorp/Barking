@@ -7,6 +7,8 @@ public actor CoreService {
     private let device: any DeviceHandle
     private let runner: any CallRunner
     private var inFlight: Task<SyncOutcome, Never>?
+    /// The sync in flight is a quick one (`quickSync`).
+    private var inFlightQuick = false
     /// Device calls running now (`close` waits for them).
     private var running = 0
     /// Set by `close`: no call reaches the device any more.
@@ -174,21 +176,34 @@ public actor CoreService {
 
     // MARK: Network
 
-    /// One sync at a time: a request during a sync gets that sync's outcome.
+    /// One sync at a time: a request during a full sync gets that sync's
+    /// outcome. During a quick sync it waits for it, then runs its own: a
+    /// quick sync deposits no message (a send would wait for the next timer).
     public func sync(reason: SyncReason) async -> SyncOutcome {
-        await runSync("sync") { try $0.sync(deadlineMs: Budget.appSyncMs) }
+        while inFlightQuick, let task = inFlight {
+            _ = await task.value
+            if inFlight == task { finish(task) }
+        }
+        return await runSync("sync", quick: false) { try $0.sync(deadlineMs: Budget.appSyncMs) }
     }
 
-    /// The short sync of a background (receipt) wake, within the
-    /// extension's time (`Budget.appQuickSyncMs`): my mailboxes of yesterday
-    /// and today, and those where a sent message awaits its receipt. Shares
-    /// the one-at-a-time rule of `sync`: during a sync, that sync's outcome
-    /// (it fetches all of these too). A failure gives `networkUp: false`.
+    /// The short sync of a background (receipt) wake, within
+    /// `Budget.appQuickSyncMs`: my mailboxes of yesterday and today, and
+    /// those where a sent message awaits its receipt; then receipts only.
+    /// During any sync it gets that sync's outcome (a full one fetches all of
+    /// these too). A failure gives `networkUp: false`.
     public func quickSync() async -> SyncOutcome {
-        await runSync("quick-sync") { try $0.quickSync(deadlineMs: Budget.appQuickSyncMs) }
+        await runSync("quick-sync", quick: true) { try $0.quickSync(deadlineMs: Budget.appQuickSyncMs) }
     }
 
-    private func runSync(_ name: String,
+    /// Clears the sync in flight, if it is still `task`.
+    private func finish(_ task: Task<SyncOutcome, Never>) {
+        guard inFlight == task else { return }
+        inFlight = nil
+        inFlightQuick = false
+    }
+
+    private func runSync(_ name: String, quick: Bool,
                          _ body: @escaping @Sendable (any DeviceHandle) throws -> SyncSummary) async -> SyncOutcome {
         if let inFlight { return await inFlight.value }
         if closed {
@@ -204,8 +219,10 @@ public actor CoreService {
             }
         }
         inFlight = task
+        inFlightQuick = quick
         let outcome = await task.value
-        inFlight = nil
+        // A full sync waiting for this one may have cleared it and started.
+        finish(task)
         lastSync = outcome
         lastSyncAt = Date()
         publish(.network)

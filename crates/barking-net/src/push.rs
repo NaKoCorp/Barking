@@ -376,12 +376,25 @@ pub fn plan_push(
     plan
 }
 
+/// Last day of a subscription of `kind` for a mailbox of `day` (see
+/// `build_subscription`).
+pub fn expires_day(day: u32, kind: SubKind) -> u32 {
+    match kind {
+        SubKind::Messages => day.saturating_add(1),
+        SubKind::Acks => day.saturating_add(2),
+    }
+}
+
 /// Builds the subscription of `mailbox` (of `day`) for `kind` to send to a
 /// node, and the secret that cancels it. The sealed token carries the wake
 /// reason of the kind (`Messages` → `Message`, `Acks` → `Receipt`), so that
 /// the relay sends a receipt wake as a background push. `collapse` comes
-/// from `PushState::collapse_for`, called first. It expires the day after
-/// the mailbox's day, so that a node a day ahead still takes it.
+/// from `PushState::collapse_for`, called first. A `Messages` subscription
+/// expires the day after the mailbox's day, so that a node a day ahead still
+/// takes it. An `Acks` one expires two days after: a message sealed just
+/// before midnight expires 24 h later, just before the next midnight, and
+/// the node's purge that notices it may run just after; the subscriber must
+/// still be there to be woken.
 pub fn build_subscription(
     cfg: &PushConfig,
     mailbox: MailboxId,
@@ -390,7 +403,7 @@ pub fn build_subscription(
     collapse: [u8; 16],
     rng: &mut impl CryptoRng,
 ) -> (Subscription, [u8; 32]) {
-    let expires_day = day.saturating_add(1);
+    let expires_day = expires_day(day, kind);
     let token = WakeToken {
         apns_token: cfg.apns_token.clone(),
         env: cfg.env,

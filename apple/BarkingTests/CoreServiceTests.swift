@@ -40,6 +40,31 @@ final class CoreServiceTests: XCTestCase {
         XCTAssertEqual(device.syncCalls, 1)
     }
 
+    /// A send during a receipt wake's quick sync: the quick one does not
+    /// deposit messages, so the full sync runs after it instead of joining it.
+    func testFullSyncDuringAQuickOneRunsAfterIt() async {
+        let device = FakeDevice()
+        device.syncDelay = 0.2
+        let core = CoreService(device: device, runner: DirectRunner())
+        let quick = Task { await core.quickSync() }
+        try? await Task.sleep(for: .milliseconds(50))
+        _ = await core.sync(reason: .afterSend)
+        _ = await quick.value
+        XCTAssertEqual(device.syncEvents, ["quick", "quick-done", "sync", "sync-done"])
+    }
+
+    /// A quick sync asked during a full one gets the full one's outcome.
+    func testQuickSyncDuringAFullOneJoinsIt() async {
+        let device = FakeDevice()
+        device.syncDelay = 0.2
+        let core = CoreService(device: device, runner: DirectRunner())
+        let full = Task { await core.sync(reason: .timer) }
+        try? await Task.sleep(for: .milliseconds(50))
+        _ = await core.quickSync()
+        _ = await full.value
+        XCTAssertEqual(device.syncEvents, ["sync", "sync-done"])
+    }
+
     func testMutationPublishesChange() async throws {
         let core = CoreService(device: FakeDevice(), runner: DirectRunner())
         let stream = await core.changes

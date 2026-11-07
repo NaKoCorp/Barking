@@ -1336,8 +1336,9 @@ where
                 // reached); kept for a later sync unless already expired.
                 let today = day_of(now);
                 push.config_hash = None;
-                push.subs
-                    .retain(|_, b| !b.nodes.is_empty() && b.day.saturating_add(1) >= today);
+                push.subs.retain(|(_, kind), b| {
+                    !b.nodes.is_empty() && crate::push::expires_day(b.day, *kind) >= today
+                });
             } else if reset {
                 push.apply_config(cfg);
             } else {

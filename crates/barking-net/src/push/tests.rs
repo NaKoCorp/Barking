@@ -474,6 +474,11 @@ fn subscription_carries_its_kind_and_the_wake_reason() {
         assert_eq!(sub.kind, kind);
         let token = barking_proto::push::open(&[(1, secret.clone())], &sub.sealed).unwrap();
         assert_eq!(token.reason, reason);
+        // Acks outlive the day after: the expiry purge may run past the
+        // next midnight.
+        let expires = if kind == A { 102 } else { 101 };
+        assert_eq!(sub.expires_day, expires);
+        assert_eq!(token.expires_day, expires);
     }
 }
 

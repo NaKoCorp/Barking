@@ -14,6 +14,13 @@ final class BudgetTests: XCTestCase {
         XCTAssertLessThanOrEqual(Budget.extensionLockMs + Budget.extensionWorkMs + Budget.shutdownMs, 20_000)
     }
 
+    func testAppQuickSyncStaysUnderTheLockWait() {
+        // It holds the database lock for its whole run, like a full sync:
+        // the app's other calls must not time out waiting for it.
+        XCTAssertEqual(Budget.appQuickSyncMs, Budget.appSyncMs)
+        XCTAssertLessThan(Budget.appQuickSyncMs + Budget.shutdownMs, Budget.appLockMs)
+    }
+
     func testQuickSyncDeadlineShrinksWithElapsedTime() {
         XCTAssertEqual(Budget.quickSyncDeadline(elapsedMs: 0), Budget.extensionWorkMs)
         XCTAssertEqual(Budget.quickSyncDeadline(elapsedMs: 5_000), Budget.extensionWorkMs - 5_000)

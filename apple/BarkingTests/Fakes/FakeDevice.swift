@@ -90,7 +90,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func contactDevices(contact: String) throws -> [MyDeviceInfo] { contactDeviceList[contact] ?? [] }
     func sync(deadlineMs: UInt64) throws -> SyncSummary {
         // A sync deposits what was queued when it started.
-        let queued = lock.withLock { _syncCalls += 1; return _leaveReady && !_leaveExpired }
+        let queued = lock.withLock {
+            _syncCalls += 1
+            _syncEvents.append("sync")
+            return _leaveReady && !_leaveExpired
+        }
+        defer { lock.withLock { _syncEvents.append("sync-done") } }
         Thread.sleep(forTimeInterval: syncDelay)
         if queued, summary.networkUp, !depositFails { lock.withLock { _leaveDeposited = true } }
         return summary
@@ -101,11 +106,15 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     /// Thrown by `quickSync` when set.
     var quickSyncError: Error?
     func quickSync(deadlineMs: UInt64) throws -> SyncSummary {
-        lock.withLock { _quickSyncDeadlines.append(deadlineMs) }
+        lock.withLock { _quickSyncDeadlines.append(deadlineMs); _syncEvents.append("quick") }
+        defer { lock.withLock { _syncEvents.append("quick-done") } }
         if let quickSyncError { throw quickSyncError }
         Thread.sleep(forTimeInterval: syncDelay)
         return summary
     }
+    private var _syncEvents: [String] = []
+    /// Starts and ends of syncs, in order ("sync", "sync-done", "quick", "quick-done").
+    var syncEvents: [String] { lock.withLock { _syncEvents } }
     func nodes() throws -> [NodeInfo] { [] }
     func addNode(id: String, addr: String) throws {}
     func outboxCount() throws -> UInt32 { outbox }
