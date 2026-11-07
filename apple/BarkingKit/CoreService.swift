@@ -197,7 +197,17 @@ public actor CoreService {
     // MARK: Messages
 
     public func messages(with contact: String) async throws -> [Message] {
-        try await call("messages") { try $0.messagesWith(contact: contact) }
+        let messages = try await call("messages") { try $0.messagesWith(contact: contact) }
+        #if BARKING_DEV
+        // UI tests have no second device to write to this one: one received
+        // message, its route given by `-BarkingUITestFakeRoute`.
+        if ProcessInfo.processInfo.arguments.contains("-BarkingUITestFakeReceived") {
+            let at = UInt64(Date().timeIntervalSince1970)
+            return messages + [Message(id: 900_001, outgoing: false, body: "hi from Sam", at: at,
+                                       delivery: nil, route: "internet:1")]
+        }
+        #endif
+        return messages
     }
     /// Recorded steps of the message `id` (`Message.id`), by date.
     public func messageRoute(_ id: Int64) async throws -> [RouteStepInfo] {

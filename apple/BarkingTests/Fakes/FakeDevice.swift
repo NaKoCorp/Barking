@@ -214,6 +214,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var retryAllCount: UInt32 = 0
     /// Thrown by `retryAll` only, when set (before `deliveryError`).
     var retryAllError: Error?
+    /// Thrown by `deliveryPage` only, when set.
+    var pageError: Error?
+    /// Seconds `deliveryPage` takes (a page in flight while something changes).
+    var pageDelay: TimeInterval = 0
     private var _deliveryPageCalls = 0
     /// Calls of `deliveryPage`.
     var deliveryPageCalls: Int { lock.withLock { _deliveryPageCalls } }
@@ -235,7 +239,9 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     }
     func deliveryPage(contact: String, state: DeliveryState, limit: UInt32, offset: UInt32) throws -> [DeliveryRowInfo] {
         if let deliveryError { throw deliveryError }
+        if let pageError { throw pageError }
         lock.withLock { _deliveryPageCalls += 1 }
+        if pageDelay > 0 { Thread.sleep(forTimeInterval: pageDelay) }
         let all = deliveryRows[contact]?[state] ?? []
         return Array(all.dropFirst(Int(offset)).prefix(Int(limit)))
     }

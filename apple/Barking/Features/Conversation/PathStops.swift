@@ -1,54 +1,8 @@
 import BarkingKit
 import SwiftUI
 
-/// Message path screen (screen 5 of the mockup, spec block 2b §4.2).
-struct PathView: View {
-    @State private var model: PathModel
-
-    init(core: CoreService, messageId: Int64, contact: String, contactName: String) {
-        _model = State(initialValue: PathModel(core: core, messageId: messageId, contact: contact,
-                                               contactName: contactName))
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Space.s2) {
-                quoteCard
-                // 24 pt above a section label, 8 below (U-14).
-                SectionLabel("How it got here").padding(.top, Space.section - Space.s2)
-                PathStops(rows: model.rows, notRecorded: model.notRecorded)
-                PrivacyBlock(contactName: model.contactName).padding(.top, Space.s3)
-            }
-            .padding(.horizontal, Space.gutter)
-            .padding(.vertical, Space.s4)
-        }
-        .background(Color.surface)
-        .navigationTitle(Text("Message path"))
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
-        .task { await model.load() }
-    }
-
-    private var quoteCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("“\(model.quote)”").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fg)
-                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
-            // One tag per fact (U-18): a tag moves to the next row whole
-            // instead of wrapping inside itself.
-            FlowLayout {
-                if let route = model.routeBadge { Tag(verbatim: route, style: .accent) }
-                ForEach(model.times, id: \.self) { Tag(verbatim: $0) }
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.surfaceCard, in: RoundedRectangle(cornerRadius: Radius.card))
-        .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
-    }
-}
-
-/// The recorded stops of a message's way, or "Path not recorded". Shared
-/// by the path screen and the message sheet of a received message.
+/// The recorded stops of a message's way, or "Path not recorded", in the message sheet
+/// of a received message.
 struct PathStops: View {
     let rows: [PathRow]
     let notRecorded: Bool

@@ -209,6 +209,162 @@ final class DeliveriesModelTests: XCTestCase {
         XCTAssertEqual(ids(m, .pending), [1])
     }
 
+    // MARK: Paging across changes (fix round 1)
+
+    /// `n` rows of `state`, ids `n...1`, newest first.
+    private func rows(_ state: DeliveryState, _ n: Int) -> [DeliveryRowInfo] {
+        (1...n).reversed().map { row(Int64($0), state) }
+    }
+
+    private func truth(_ d: FakeDevice, _ state: DeliveryState) -> [Int64] {
+        (d.deliveryRows["b"]?[state] ?? []).map(\.messageId)
+    }
+
+    /// A sync moves most loaded rows out: the rows left were on screen
+    /// already, so the group reads its next page itself.
+    func testGroupRefillsAfterMostLoadedRowsMoveOut() async {
+        let d = FakeDevice()
+        seed(d, [.pending: rows(.pending, 120)])
+        let m = make(d)
+        await m.load()
+        XCTAssertEqual(ids(m, .pending).count, 50)
+
+        let moved = (80...120).map(Int64.init)
+        seed(d, [.pending: rows(.pending, 79), .received: moved.reversed().map { row($0, .received) }])
+        for id in moved { d.deliveryUpdates[id] = update(id, .received) }
+        await m.apply(.delivery(contact: "b", ids: moved))
+
+        XCTAssertEqual(ids(m, .pending), (21...79).reversed().map(Int64.init), "9 left, one more page, in the core's order")
+        XCTAssertEqual(count(m, .pending), 79)
+        XCTAssertEqual(ids(m, .received), moved.reversed())
+        XCTAssertEqual(Set(ids(m, .pending)).count, ids(m, .pending).count, "no duplicates")
+    }
+
+    /// A loaded row leaves a partly loaded group; the next page then carries
+    /// exactly the ids after it.
+    func testRowLeavingAPartlyLoadedGroupThenLoadMore() async {
+        let d = FakeDevice()
+        seed(d, [.pending: rows(.pending, 120)])
+        let m = make(d)
+        await m.load()
+        // 100 (loaded) is received; the core's pending list loses it.
+        seed(d, [.pending: rows(.pending, 120).filter { $0.messageId != 100 }, .received: [row(100, .received)]])
+        d.deliveryUpdates[100] = update(100, .received)
+        await m.apply(.delivery(contact: "b", ids: [100]))
+        let expected = truth(d, .pending)
+        XCTAssertEqual(ids(m, .pending), Array(expected.prefix(99)), "49 left, a page read at once")
+        await m.loadMore(.pending)
+        XCTAssertEqual(ids(m, .pending), expected, "the 119 rows, none missing, none twice")
+        XCTAssertFalse(m.groups.first { $0.state == .pending }!.hasMore)
+    }
+
+    /// A row into a partly loaded group only counts; the next page then
+    /// brings it in its place.
+    func testRowIntoAPartlyLoadedGroupThenLoadMore() async {
+        let d = FakeDevice()
+        let received = (101...160).reversed().map { row(Int64($0), .received) }
+        seed(d, [.received: received, .pending: [row(500, .pending), row(1, .pending)]])
+        let m = make(d)
+        await m.load()
+        // 1 (the oldest) and 500 (the newest) become received.
+        let all = [row(500, .received)] + received + [row(1, .received)]
+        seed(d, [.received: all])
+        d.deliveryUpdates[1] = update(1, .received)
+        d.deliveryUpdates[500] = update(500, .received)
+        await m.apply(.delivery(contact: "b", ids: [1, 500]))
+        XCTAssertEqual(ids(m, .received).first, 500)
+        XCTAssertEqual(ids(m, .received).count, 51)
+        await m.loadMore(.received)
+        XCTAssertEqual(ids(m, .received), truth(d, .received))
+        XCTAssertEqual(ids(m, .received).last, 1)
+    }
+
+    /// Rows move while a page is in flight: the page is read again from
+    /// where the rows are now.
+    func testPageReadAcrossAChangeIsReadAgain() async throws {
+        let d = FakeDevice()
+        seed(d, [.pending: rows(.pending, 120)])
+        let m = make(d)
+        await m.load()
+        d.pageDelay = 0.15
+        let task = Task { await m.loadMore(.pending) }
+        try await Task.sleep(for: .milliseconds(50))
+        // Meanwhile 120 leaves (the core already says so).
+        seed(d, [.pending: rows(.pending, 119), .received: [row(120, .received)]])
+        m.apply([update(120, .received)])
+        await task.value
+        let expected = truth(d, .pending)
+        XCTAssertEqual(ids(m, .pending), Array(expected.prefix(ids(m, .pending).count)), "exact ids, no gap")
+        XCTAssertEqual(ids(m, .pending).count, 99)
+        XCTAssertEqual(Set(ids(m, .pending)).count, 99)
+    }
+
+    /// A failed page is an error with Retry, not a silent stop.
+    func testFailedPageShowsTheErrorAndRetryClearsIt() async {
+        let d = FakeDevice()
+        seed(d, [.pending: rows(.pending, 120)])
+        let m = make(d)
+        await m.load()
+        XCTAssertFalse(m.readFailed)
+        d.pageError = BarkingError.Storage(detail: "boom")
+        await m.loadMore(.pending)
+        XCTAssertTrue(m.readFailed)
+        XCTAssertEqual(ids(m, .pending).count, 50, "what was read stays")
+        d.pageError = nil
+        await m.load()
+        XCTAssertFalse(m.readFailed)
+    }
+
+    // MARK: VoiceOver (fix round 1)
+
+    /// §6.5: focus goes back only to a row that itself moved group.
+    func testFocusRestoredOnlyForARowThatMoved() async {
+        let d = FakeDevice()
+        seed(d, [.pending: [row(2, .pending), row(1, .pending)], .onNetwork: [row(3, .onNetwork)]])
+        let m = make(d)
+        await m.load()
+        let memory = DeliveriesModel.FocusMemory(id: 2, state: .pending)
+        XCTAssertNil(DeliveriesModel.focusRestore(memory, in: m.groups), "it did not move")
+        d.deliveryUpdates[2] = update(2, .onNetwork)
+        await m.apply(.delivery(contact: "b", ids: [2]))
+        XCTAssertEqual(DeliveriesModel.focusRestore(memory, in: m.groups), 2)
+        XCTAssertNil(DeliveriesModel.focusRestore(nil, in: m.groups), "focus elsewhere: nothing to restore")
+        XCTAssertNil(DeliveriesModel.focusRestore(.init(id: 99, state: .pending), in: m.groups), "a row that left")
+        XCTAssertEqual(m.state(of: 2), .onNetwork)
+    }
+
+    // MARK: Announcements (fix round 1)
+
+    /// §8: a loaded row reaching Received or Not delivered is announced.
+    func testRowsReachingReceivedOrNotDeliveredAreAnnounced() async {
+        let d = FakeDevice()
+        seed(d, [.pending: [row(4, .pending), row(3, .pending), row(2, .pending), row(1, .pending)]])
+        let m = make(d)
+        var said: [String] = []
+        m.announce = { said.append($0) }
+        await m.load()
+        // On the network is quiet; an id never loaded is quiet.
+        d.deliveryUpdates[1] = update(1, .onNetwork)
+        d.deliveryUpdates[99] = update(99, .received)
+        await m.apply(.delivery(contact: "b", ids: [1, 99]))
+        XCTAssertEqual(said, [])
+        d.deliveryUpdates[2] = update(2, .received)
+        await m.apply(.delivery(contact: "b", ids: [2]))
+        XCTAssertEqual(said, ["Message received by Bob."])
+        // Within 3 s the next waits.
+        d.deliveryUpdates[3] = update(3, .notDelivered)
+        await m.apply(.delivery(contact: "b", ids: [3]))
+        XCTAssertEqual(said.count, 1)
+        // Both at once, later: said together.
+        var clock = Date.now
+        m.now = { clock }
+        clock += 4
+        d.deliveryUpdates[4] = update(4, .received)
+        await m.apply(.delivery(contact: "b", ids: [4]))
+        XCTAssertEqual(said.last, "Message received by Bob. Message not delivered. Retry is in the actions.")
+        XCTAssertEqual(said.count, 2)
+    }
+
     // MARK: Retry all
 
     func testRetryAllCallsTheCore() async {
@@ -239,6 +395,18 @@ final class DeliveriesModelTests: XCTestCase {
         d.retryAllError = BarkingError.NothingToRetry
         await m.retryAll()
         XCTAssertNil(m.notice, "a new attempt clears the warning")
+    }
+
+    /// Any other failure of Retry all shows the screen's warning.
+    func testRetryAllFailureShowsTheWarning() async {
+        let d = FakeDevice()
+        seed(d, [.notDelivered: [row(1, .notDelivered)]])
+        let m = make(d)
+        await m.load()
+        d.retryAllError = BarkingError.Storage(detail: "boom")
+        await m.retryAll()
+        XCTAssertTrue(m.readFailed)
+        XCTAssertNil(m.notice)
     }
 
     // MARK: Header button

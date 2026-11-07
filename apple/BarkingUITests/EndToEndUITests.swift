@@ -51,23 +51,28 @@ final class EndToEndUITests: XCTestCase {
         app.tabBars.buttons["Chats"].tap()
         openChat(app, "Alice")
         XCTAssertTrue(app.staticTexts["hello from the Mac"].waitForExistence(timeout: 30))
-        // The route badge of the received message opens its path, which
-        // names the local node by its 8-character short id.
-        let badge = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Internet")).firstMatch
-        XCTAssertTrue(badge.waitForExistence(timeout: 10), "no route badge on the received message")
-        badge.tap()
+        // A tap on the received bubble opens its sheet, whose "Delivery"
+        // section names the local node by its 8-character short id.
+        app.staticTexts["hello from the Mac"].tap()
+        XCTAssertTrue(app.staticTexts["Delivery"].waitForExistence(timeout: 10), "no path section in the sheet")
         let shortId = String(env["BARKING_E2E_NODE"]!.split(separator: "@")[0].prefix(8))
         let relay = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", shortId)).firstMatch
         XCTAssertTrue(relay.waitForExistence(timeout: 10), "the path does not show the node \(shortId)")
         snap(app, "path-received")
-        app.navigationBars.buttons.firstMatch.tap()
+        app.buttons["Close"].tap()
         let field = app.textFields["Message"]
         field.tap()
         field.typeText("hello from iPhone")
         app.buttons["Send"].tap()
         XCTAssertTrue(app.staticTexts["hello from iPhone"].waitForExistence(timeout: 5))
-        let sent = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", ["sent", "delivered"]))
-        XCTAssertTrue(sent.firstMatch.waitForExistence(timeout: 30))
+        // The state is the bubble's VoiceOver value (spec Lot M §8).
+        let bubble = app.staticTexts["hello from iPhone"]
+        let said = NSPredicate { element, _ in
+            let value = (element as? XCUIElement)?.value as? String ?? ""
+            return value.hasPrefix("On the network since") || value.hasPrefix("Received at")
+        }
+        let sent = XCTNSPredicateExpectation(predicate: said, object: bubble)
+        XCTAssertEqual(XCTWaiter().wait(for: [sent], timeout: 30), .completed, "the message left")
         snap(app, "conversation")
     }
 

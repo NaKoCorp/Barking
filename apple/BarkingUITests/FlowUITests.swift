@@ -119,6 +119,23 @@ final class ChatUITests: XCTestCase {
         XCTAssertTrue(bubble.waitUntil({ !$0.exists }), "the bubble leaves")
     }
 
+    /// A tap on a received bubble opens its sheet, with the message's way
+    /// ("Delivery" section) in place of a state (spec Lot M §6.4). The
+    /// received message and its route are faked: no second device in UI tests.
+    func testReceivedBubbleSheetShowsThePath() throws {
+        let app = XCUIApplication.seeded(extra: ["-BarkingUITestFakeReceived", "-BarkingUITestFakeRoute"])
+        app.launch()
+        _ = openSamChat(app)
+        let bubble = app.staticTexts["hi from Sam"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: 5))
+        bubble.tap()
+        XCTAssertTrue(app.staticTexts["Delivery"].waitForExistence(timeout: 5), "the path section")
+        let relay = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "K7QX2M4A")).firstMatch
+        XCTAssertTrue(relay.waitForExistence(timeout: 5), "the stop of the relay it came through")
+        XCTAssertTrue(app.buttons["sheet.delete"].exists)
+    }
+
     /// The header button ("Deliveries") opens the list of what was sent, the
     /// message in its group (no network in UI tests: it is pending); a row
     /// opens the message sheet.

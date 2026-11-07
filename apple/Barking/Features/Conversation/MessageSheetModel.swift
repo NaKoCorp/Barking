@@ -78,7 +78,7 @@ final class MessageSheetModel {
     private(set) var ownCopies: String?
     /// The confirmation adds "Your other devices keep their copy." (§5.1, §7.4).
     private(set) var keepsOwnCopies = false
-    /// The received message's path (`PathView` rows).
+    /// The received message's path (`PathStops` rows).
     private(set) var path: PathModel?
     private var retrying = false
     private var deleting = false

@@ -251,8 +251,6 @@
 "a sealed packet for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever fetched it." = "un paquet scellé pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a relevé.";
 "sent %@" = "envoyé %@";
 "received %@" = "reçu %@";
-"Message path" = "Trajet du message";
-"How it got here" = "Comment il est arrivé";
 "Path not recorded" = "Trajet non enregistré";
 "Could see:" = "A pu voir :";
 "“%@”" = "« %@ »";

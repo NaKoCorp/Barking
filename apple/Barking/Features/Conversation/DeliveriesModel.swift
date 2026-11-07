@@ -50,6 +50,10 @@ final class DeliveriesModel {
     let contactName: String
     private let core: CoreService
     private(set) var phase: Phase = .loading
+    /// A read or a page failed: the screen shows its warning with Retry.
+    private(set) var readFailed = false
+    /// The clock (tests set it).
+    var now: () -> Date = { .now }
     /// A warning above the list (a retry found no device; a deletion failed or
     /// left something to say, §6.7).
     private(set) var notice: Notice? {
@@ -66,6 +70,8 @@ final class DeliveriesModel {
     private var retrying = false
     /// Counts the changes made to the rows: a page read across one is read again.
     private var epoch = 0
+    private var announcements = DeliveryAnnouncements()
+    private var announcementFlush: Task<Void, Never>?
 
     init(core: CoreService, contact: String, contactName: String = "") {
         self.core = core
@@ -107,9 +113,11 @@ final class DeliveriesModel {
             byState = next
             epoch += 1
             phase = .loaded
+            readFailed = false
         } catch {
-            // A failed refresh keeps what the screen shows.
+            // A failed refresh keeps what the screen shows, and says so.
             if phase != .loaded { phase = .failed }
+            readFailed = true
         }
     }
 
@@ -118,7 +126,11 @@ final class DeliveriesModel {
         guard let group = byState[state], group.hasMore, paging.insert(state).inserted else { return }
         defer { paging.remove(state) }
         let start = epoch
-        guard let more = try? await page(state, limit: Self.pageSize, offset: group.rows.count) else { return }
+        guard let more = try? await page(state, limit: Self.pageSize, offset: group.rows.count) else {
+            // Not dropped: the screen's warning, with Retry.
+            readFailed = true
+            return
+        }
         // Rows moved meanwhile: this page may start in the wrong place.
         guard start == epoch, var current = byState[state] else {
             paging.remove(state)
@@ -170,7 +182,18 @@ final class DeliveriesModel {
             }
             let rest = apply(updates)
             await resolve(rest)
+            await refill()
         default: break
+        }
+    }
+
+    /// A group that lost rows to a move and holds fewer than a page while
+    /// more wait reads on: its rows are on screen already, so nothing would
+    /// ask for the next page.
+    private func refill() async {
+        for state in Self.order where !readFailed {
+            guard let g = byState[state], g.hasMore, g.rows.count < Self.pageSize else { continue }
+            await loadMore(state)
         }
     }
 
@@ -191,6 +214,7 @@ final class DeliveriesModel {
     @discardableResult
     func apply(_ updates: [DeliveryUpdate]) -> Unplaced {
         var unplaced = Unplaced()
+        var received = 0, notDelivered = 0
         for u in updates {
             let found = locate(u.messageId)
             guard !u.removed, let d = u.delivery else {
@@ -206,8 +230,17 @@ final class DeliveriesModel {
             var row = remove(found, keepingCount: found.state == d.state)
             row.delivery = d
             insert(row, into: d.state, countsIt: found.state != d.state)
+            // A row on screen reaching Received or Not delivered is announced (§8).
+            if found.state != d.state {
+                if d.state == .received { received += 1 }
+                if d.state == .notDelivered { notDelivered += 1 }
+            }
         }
         if !updates.isEmpty { epoch += 1 }
+        if received + notDelivered > 0 {
+            announcements.add(received: received, notDelivered: notDelivered)
+            flushAnnouncements()
+        }
         return unplaced
     }
 
@@ -265,6 +298,20 @@ final class DeliveriesModel {
         if byState.values.contains(where: { $0.rows.count > $0.count }) { await load() }
     }
 
+    /// Says what waits, if the last announcement is 3 s old; otherwise
+    /// comes back when it is.
+    private func flushAnnouncements() {
+        if let text = announcements.take(now: now(), name: contactName) { announce(text) }
+        guard let due = announcements.due, announcementFlush == nil else { return }
+        let wait = max(0, due.timeIntervalSince(now()))
+        announcementFlush = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard let self else { return }
+            self.announcementFlush = nil
+            self.flushAnnouncements()
+        }
+    }
+
     // MARK: Actions
 
     /// Sends every not delivered message again; the groups follow.
@@ -273,19 +320,45 @@ final class DeliveriesModel {
         retrying = true
         defer { retrying = false }
         notice = nil
+        var failed = false
         do {
             try await core.retryAll(contact: contact)
         } catch BarkingError.NoSession {
             notice = .noReachableDevice(name: contactName)
+        } catch BarkingError.NothingToRetry {
+            // They moved meanwhile; the read shows where.
         } catch {
-            // NothingToRetry: they moved meanwhile; the read shows where.
+            failed = true
         }
         await load()
+        // After the read, which clears it: the warning stays until Retry.
+        if failed { readFailed = true }
     }
 
     /// A deletion from a message sheet: what the banner says (§6.7).
     func showDeleted(_ message: DeleteBanner.Message?) {
         notice = message.map(Notice.deleted)
+    }
+
+    // MARK: VoiceOver focus
+
+    /// The row VoiceOver was on, and the group it was in.
+    struct FocusMemory: Equatable {
+        let id: Int64
+        let state: DeliveryState
+    }
+
+    /// The row to give the focus back to: only one that itself moved group.
+    static func focusRestore(_ memory: FocusMemory?, in groups: [Group]) -> Int64? {
+        guard let memory,
+              let now = groups.first(where: { $0.rows.contains { $0.id == memory.id } })?.state,
+              now != memory.state else { return nil }
+        return memory.id
+    }
+
+    /// The group a loaded row is in.
+    func state(of id: Int64) -> DeliveryState? {
+        groups.first { $0.rows.contains { $0.id == id } }?.state
     }
 
     // MARK: Texts

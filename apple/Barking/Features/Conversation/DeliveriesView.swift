@@ -49,25 +49,29 @@ struct DeliveriesContent: View {
     @Namespace private var moving
     /// VoiceOver stays on the message that moved (§6.5).
     @AccessibilityFocusState private var focused: Int64?
-    @State private var focusedBefore: Int64?
+    @State private var focusMemory: DeliveriesModel.FocusMemory?
 
     var body: some View {
         if scrolls {
-            ScrollView { list }.modifier(FocusFollowsRow(model: model, focused: $focused, before: $focusedBefore))
+            ScrollView { list }.modifier(FocusFollowsRow(model: model, focused: $focused, memory: $focusMemory))
         } else {
-            list.modifier(FocusFollowsRow(model: model, focused: $focused, before: $focusedBefore))
+            list.modifier(FocusFollowsRow(model: model, focused: $focused, memory: $focusMemory))
         }
     }
 
     private var list: some View {
         LazyVStack(alignment: .leading, spacing: 0) {
             if let notice = model.notice { noticeBanner(notice).padding(.bottom, Space.s3) }
+            if model.readFailed || model.phase == .failed {
+                Banner(kind: .warning, title: "Couldn’t read the list. Your messages are unchanged.",
+                       action: .init(label: "Retry", hint: "Reads the list again.") { Task { await model.load() } })
+                    .padding(.bottom, Space.s3)
+            }
             switch model.phase {
             case .loading:
                 ProgressView().frame(maxWidth: .infinity).padding(.top, Space.danger)
             case .failed:
-                Banner(kind: .warning, title: "Couldn’t read the list. Your messages are unchanged.",
-                       action: .init(label: "Retry", hint: "Reads the list again.") { Task { await model.load() } })
+                EmptyView()
             case .loaded:
                 if model.isEmpty { emptyState } else { groups }
             }
@@ -90,8 +94,20 @@ struct DeliveriesContent: View {
                         Rectangle().fill(Color.border).frame(height: 1)
                     }
                 }
+                if group.hasMore {
+                    // Reads the next page as the end of the group shows, also
+                    // when a move left too few rows to scroll to it.
+                    Color.clear.frame(height: 1)
+                        .task(id: "\(group.state)-\(group.rows.count)-\(group.count)") {
+                            await model.loadMore(group.state)
+                        }
+                }
                 if group.state == .notDelivered {
-                    TextLink("Retry all", tint: .warnFg) { Task { await model.retryAll() } }
+                    TextLink("Retry all", tint: .warnFg) {
+                        // The send haptic: a retry sends (§8); no new haptic.
+                        Haptic.send.play()
+                        Task { await model.retryAll() }
+                    }
                 }
             }
             .padding(.top, group.id == model.groups.first?.id ? 0 : Space.section)
@@ -155,19 +171,34 @@ struct DeliveriesContent: View {
     }
 }
 
-/// VoiceOver goes back to the message that moved: its row is another view
-/// after a move, so the focus it had is set again once the groups change.
+/// VoiceOver goes back to a message that itself moved group (its row is
+/// another view after the move). What it was on is remembered; focus that
+/// settles on anything else (a title, another row) forgets it.
 private struct FocusFollowsRow: ViewModifier {
     let model: DeliveriesModel
     var focused: AccessibilityFocusState<Int64?>.Binding
-    @Binding var before: Int64?
+    @Binding var memory: DeliveriesModel.FocusMemory?
+    @State private var forget: Task<Void, Never>?
 
     func body(content: Content) -> some View {
         content
-            .onChange(of: focused.wrappedValue) { _, now in if let now { before = now } }
+            .onChange(of: focused.wrappedValue) { _, now in
+                forget?.cancel()
+                if let now, let state = model.state(of: now) {
+                    memory = .init(id: now, state: state)
+                } else if memory != nil {
+                    // Nil is also what a moving row leaves behind: forget it
+                    // only once the groups had their say.
+                    forget = Task {
+                        try? await Task.sleep(for: .seconds(1))
+                        if !Task.isCancelled { memory = nil }
+                    }
+                }
+            }
             .onChange(of: model.groups) {
-                guard let id = before else { return }
-                before = nil
+                guard let id = DeliveriesModel.focusRestore(memory, in: model.groups) else { return }
+                memory = nil
+                forget?.cancel()
                 Task { focused.wrappedValue = id }
             }
     }

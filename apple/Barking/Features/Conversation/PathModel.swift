@@ -41,7 +41,7 @@ struct PathRow: Identifiable, Equatable {
     }
 }
 
-/// Message path screen (spec block 2b §4.2): only the recorded steps show.
+/// The path of a message (spec block 2b §4.2, shown in the message sheet): only the recorded steps show.
 @MainActor @Observable
 final class PathModel {
     private let core: CoreService
