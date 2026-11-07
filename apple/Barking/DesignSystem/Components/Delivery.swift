@@ -92,9 +92,11 @@ extension DeliveryState {
     }
 }
 
-/// Two checkmarks, the second shifted right, with the first knocked out
-/// around the second (a gap of about one stroke, no crossing). Built from
-/// the system `checkmark`, so it takes the font weight, baseline and
+/// Two checkmarks: one full check in front and the second behind it,
+/// shifted right. The back one is cut away where it would touch the front
+/// check (grown by about a stroke) and left of the front check's long arm,
+/// so only its long arm and a short stub show: no crossing, no sliver. Built
+/// from the system `checkmark`, so it takes the font weight, baseline and
 /// foreground style of its context. `size` is the font size in points.
 struct DoubleCheck: View {
     let size: CGFloat
@@ -105,22 +107,34 @@ struct DoubleCheck: View {
     var body: some View {
         let check = Image(systemName: "checkmark")
         ZStack(alignment: .leading) {
-            check.mask {
-                // Everything, minus the second check grown by `gap`.
+            check.padding(.leading, offset).mask {
                 Rectangle().overlay(alignment: .leading) {
-                    ZStack {
+                    ZStack(alignment: .leading) {
                         ForEach(0..<16, id: \.self) { i in
                             let a = Double(i) * .pi / 8
-                            check.padding(.leading, offset)
-                                .offset(x: cos(a) * gap, y: sin(a) * gap)
+                            check.offset(x: cos(a) * gap, y: sin(a) * gap)
                         }
-                        check.padding(.leading, offset)
+                        // Everything left of the front check's long arm
+                        // (in the checkmark's own frame).
+                        check.hidden().overlay {
+                            GeometryReader { g in
+                                Path { p in
+                                    let w = g.size.width, h = g.size.height
+                                    let ax = w * 0.37, ay = h * 0.92, dx = w * 0.56, dy = -h * 0.85
+                                    p.move(to: .init(x: ax + 3 * dx, y: ay + 3 * dy))
+                                    p.addLine(to: .init(x: ax - 2 * dx, y: ay - 2 * dy))
+                                    p.addLine(to: .init(x: -3 * w, y: ay - 2 * dy))
+                                    p.addLine(to: .init(x: -3 * w, y: ay + 3 * dy))
+                                    p.closeSubpath()
+                                }
+                            }
+                        }
                     }
                     .blendMode(.destinationOut)
                 }
                 .compositingGroup()
             }
-            check.padding(.leading, offset)
+            check
         }
         .fixedSize()
     }

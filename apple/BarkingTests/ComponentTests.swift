@@ -211,6 +211,38 @@ final class ComponentTests: XCTestCase {
         XCTAssertGreaterThan(double.width, single.width + 15)
     }
 
+    /// Connected components of ink of a view drawn black on clear, 8-connected.
+    private func inkComponents<V: View>(_ view: V) throws -> Int {
+        let renderer = ImageRenderer(content: view.frame(width: 240, height: 240).foregroundStyle(Color.black))
+        renderer.scale = 1
+        let cg = try XCTUnwrap(renderer.cgImage)
+        let data = try XCTUnwrap(cg.dataProvider?.data as Data?)
+        let w = cg.width, h = cg.height
+        var seen = [Bool](repeating: false, count: w * h)
+        func ink(_ x: Int, _ y: Int) -> Bool { data[y * cg.bytesPerRow + x * 4 + 3] > 40 }
+        var count = 0
+        for y in 0..<h { for x in 0..<w where ink(x, y) && !seen[y * w + x] {
+            count += 1
+            var stack = [(x, y)]; seen[y * w + x] = true
+            while let (cx, cy) = stack.popLast() {
+                for dy in -1...1 { for dx in -1...1 {
+                    let nx = cx + dx, ny = cy + dy
+                    if nx >= 0, ny >= 0, nx < w, ny < h, !seen[ny * w + nx], ink(nx, ny) { seen[ny * w + nx] = true; stack.append((nx, ny)) }
+                } }
+            }
+        } }
+        return count
+    }
+
+    /// The front check and the back piece, nothing else: no floating fragment.
+    func testDoubleCheckIsTwoPiecesOfInk() throws {
+        for weight in [Font.Weight.regular, .semibold] {
+            let n = try inkComponents(DoubleCheck(size: 60).font(.system(size: 60, weight: weight)))
+            XCTAssertEqual(n, 2, "ink pieces at \(weight)")
+        }
+        XCTAssertEqual(try inkComponents(Image(systemName: "checkmark").font(.system(size: 60, weight: .semibold))), 1)
+    }
+
     func testSentElsewhereIsSpoken() throws {
         let en = try lang("en"), fr = try lang("fr")
         XCTAssertEqual(BubbleMeta.sentElsewhere(bundle: en.bundle, locale: en.locale), "Sent from another of your devices")
