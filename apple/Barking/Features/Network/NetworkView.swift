@@ -79,8 +79,22 @@ struct NetworkView: View {
     private var syncCard: some View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
-                Text("\(model.pending) packets pending")
-                    .font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold)).foregroundStyle(Color.fg)
+                // Opens "Pending" (§6.6): a 44 pt row with a chevron, also at zero.
+                NavigationLink {
+                    PendingView(core: core)
+                } label: {
+                    HStack(spacing: Space.s2) {
+                        (model.pending == 0 ? Text("Nothing pending") : Text("\(model.pending) packets pending"))
+                            .font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold)).foregroundStyle(Color.fg)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        RowGlyph()
+                    }
+                    .frame(minHeight: 44)
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("network.pending")
                 PrimaryButton("Sync now", isLoading: model.syncing) { Task { await model.syncNow() } }
                 if let result = model.result, !model.syncing {
                     StatusDot(result.dot, verbatim: result.text)

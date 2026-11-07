@@ -184,28 +184,42 @@ struct DangerButton: View {
     let title: LocalizedStringKey
     let hint: LocalizedStringKey?
     let identifier: String?
+    let state: ButtonState
+    let reason: LocalizedStringKey?
+    let value: LocalizedStringKey?
     let action: () -> Void
 
     /// `identifier` goes on the button itself, not on the stack that also
-    /// holds the hint line.
+    /// holds the hint line. Disabled, it takes the disabled look and can say
+    /// why under the button (`reason`); `value` is what VoiceOver adds to
+    /// the label ("3 selected").
     init(_ title: LocalizedStringKey, hint: LocalizedStringKey? = nil, identifier: String? = nil,
+         enabled: Bool = true, reason: LocalizedStringKey? = nil, value: LocalizedStringKey? = nil,
          action: @escaping () -> Void) {
         self.title = title
         self.hint = hint
         self.identifier = identifier
+        self.state = ButtonState(enabled: enabled, isLoading: false)
+        self.reason = reason
+        self.value = value
         self.action = action
     }
 
     var body: some View {
+        let why = state == .disabled ? reason : nil
+        let caption = why ?? hint
         VStack(spacing: Space.s2) {
-            Button(action: action) { ButtonLabel(title: title, kind: .danger, state: .enabled) }
-                .buttonStyle(BarkingButtonStyle(kind: .danger, state: .enabled))
+            Button(action: action) { ButtonLabel(title: title, kind: .danger, state: state) }
+                .buttonStyle(BarkingButtonStyle(kind: .danger, state: state))
+                .disabled(!state.isInteractive)
                 .accessibilityHint(hint.map { Text($0) } ?? Text(verbatim: ""))
+                .accessibilityValue(why.map { Text($0) } ?? value.map { Text($0) } ?? Text(verbatim: ""))
                 .accessibilityIdentifier(ifPresent: identifier)
-            if let hint {
-                Text(hint)
+            if let caption {
+                Text(caption)
                     .font(.bMeta).foregroundStyle(Color.fgMuted)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity)
                     .accessibilityHidden(true)
             }

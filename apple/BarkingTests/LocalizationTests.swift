@@ -356,6 +356,29 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
+    func testPendingStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected: [String: String] = [
+            "Nothing pending": "Rien en attente", "Select": "Sélectionner", "Done": "OK",
+            "Select all": "Tout sélectionner", "Cancel all · %lld": "Tout annuler · %lld",
+            "Select messages to delete.": "Sélectionnez des messages à supprimer.",
+            "Nothing pending. Everything has gone out.": "Rien en attente. Tout est parti.",
+            "None of your messages are waiting.": "Aucun de vos messages n’attend.",
+            "Only your messages. Sync packets stay.": "Seulement vos messages. Les paquets de synchronisation restent.",
+        ]
+        for (key, value) in expected { XCTAssertEqual(fr[key] as? String, value, key) }
+        for lang in ["en", "fr"] {
+            let plurals = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
+            for key in ["Your messages · %lld packets", "Sync · %lld packets", "Delete %lld messages?", "Cancel %lld messages?",
+                        "Delete %lld", "Delete (%lld)", "%lld selected", "%lld haven’t left and will be cancelled.",
+                        "%lld are already on the network: %@ will still receive it.%lld",
+                        "They haven’t left this iPhone. %@ won’t receive them.%lld%lld",
+                        "already left for %lld of %lld devices"] {
+                XCTAssertNotNil(plurals[key], "\(lang) plural \(key)")
+            }
+        }
+    }
+
     /// No em dash (U+2014) in the EN and FR string tables, read from the sources.
     func testNoEmDashInStrings() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

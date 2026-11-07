@@ -427,3 +427,24 @@
 "No messages sent yet. Their delivery will show here." = "Aucun message envoyé. Leur acheminement s’affichera ici.";
 "Couldn’t read the list. Your messages are unchanged." = "Impossible de lire la liste. Vos messages n’ont pas changé.";
 "Reads the list again." = "Relit la liste.";
+
+/* Lot M §6.6, §7.3, §7.4: Pending (the plurals are in the stringsdict) */
+"Select" = "Sélectionner";
+"Done" = "OK";
+"Nothing pending" = "Rien en attente";
+"None of your messages are waiting." = "Aucun de vos messages n’attend.";
+"%lld h" = "%lld h";
+"%lld min" = "%lld min";
+"%@ ago" = "il y a %@";
+"expires in %@" = "expire dans %@";
+"Receipts for %@ · %lld" = "Accusés de réception pour %@ · %lld";
+"Receipts · %lld" = "Accusés de réception · %lld";
+"Copies of your messages for your other devices · %lld" = "Copies de vos messages pour vos autres appareils · %lld";
+"Updates for your other devices · %lld" = "Mises à jour pour vos autres appareils · %lld";
+"Your card, for your contacts · %lld" = "Votre carte, pour vos contacts · %lld";
+"Receipts tell your contacts their messages arrived. Copies and updates keep your other devices in step; copies hold your messages, encrypted. Barking sends them on its own, and they can’t be deleted here." = "Les accusés disent à vos contacts que leurs messages sont arrivés. Les copies et les mises à jour gardent vos autres appareils à jour ; les copies contiennent vos messages, chiffrés. Barking les envoie seul, ils ne se suppriment pas d’ici.";
+"Cancel all · %lld" = "Tout annuler · %lld";
+"Only your messages. Sync packets stay." = "Seulement vos messages. Les paquets de synchronisation restent.";
+"Select all" = "Tout sélectionner";
+"Select messages to delete." = "Sélectionnez des messages à supprimer.";
+"Nothing pending. Everything has gone out." = "Rien en attente. Tout est parti.";

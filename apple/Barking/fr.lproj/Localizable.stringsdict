@@ -424,5 +424,225 @@
 			<string>Reçus · %lld</string>
 		</dict>
 	</dict>
+	<key>Your messages · %lld packets</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Vos messages · %lld paquet</string>
+			<key>other</key>
+			<string>Vos messages · %lld paquets</string>
+		</dict>
+	</dict>
+	<key>Sync · %lld packets</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Synchronisation · %lld paquet</string>
+			<key>other</key>
+			<string>Synchronisation · %lld paquets</string>
+		</dict>
+	</dict>
+	<key>Delete %lld messages?</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Supprimer %lld message ?</string>
+			<key>other</key>
+			<string>Supprimer %lld messages ?</string>
+		</dict>
+	</dict>
+	<key>Cancel %lld messages?</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Annuler %lld message ?</string>
+			<key>other</key>
+			<string>Annuler %lld messages ?</string>
+		</dict>
+	</dict>
+	<key>Delete %lld</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Supprimer %lld</string>
+			<key>other</key>
+			<string>Supprimer %lld</string>
+		</dict>
+	</dict>
+	<key>Delete (%lld)</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Supprimer (%lld)</string>
+			<key>other</key>
+			<string>Supprimer (%lld)</string>
+		</dict>
+	</dict>
+	<key>%lld selected</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld sélectionné</string>
+			<key>other</key>
+			<string>%lld sélectionnés</string>
+		</dict>
+	</dict>
+	<key>%lld haven’t left and will be cancelled.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld n’est pas parti et sera annulé.</string>
+			<key>other</key>
+			<string>%lld ne sont pas partis et seront annulés.</string>
+		</dict>
+	</dict>
+	<key>%lld are already on the network: %@ will still receive it.%lld</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@m@ : %2$@ %1$#@q@ %3$#@p@ quand même.</string>
+		<key>m</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld est déjà sur le réseau</string>
+			<key>other</key>
+			<string>%lld sont déjà sur le réseau</string>
+		</dict>
+		<key>q</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>le</string>
+			<key>other</key>
+			<string>les</string>
+		</dict>
+		<key>p</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>recevra</string>
+			<key>other</key>
+			<string>recevront</string>
+		</dict>
+	</dict>
+	<key>They haven’t left this iPhone. %@ won’t receive them.%lld%lld</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%2$#@m@ %1$@ ne %2$#@q@ %3$#@p@ pas.</string>
+		<key>m</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Il n’a pas quitté cet iPhone.</string>
+			<key>other</key>
+			<string>Ils n’ont pas quitté cet iPhone.</string>
+		</dict>
+		<key>q</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>le</string>
+			<key>other</key>
+			<string>les</string>
+		</dict>
+		<key>p</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>recevra</string>
+			<key>other</key>
+			<string>recevront</string>
+		</dict>
+	</dict>
+	<key>already left for %lld of %lld devices</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>déjà parti vers %1$lld de ses %2$#@d@</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld appareil</string>
+			<key>other</key>
+			<string>%lld appareils</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

@@ -80,6 +80,12 @@ final class NetworkModel {
         }
     }
 
+    /// "Nothing pending" at zero, otherwise the packets (§7.3).
+    static func pendingLine(_ count: Int, bundle: Bundle = .main, locale: Locale = .current) -> String {
+        count == 0 ? String(localized: "Nothing pending", bundle: bundle, locale: locale)
+            : String(localized: "\(count) packets pending", bundle: bundle, locale: locale)
+    }
+
     func load() async {
         internetReachable = await core.lastSync?.networkUp
         lastSync = await core.lastSyncAt
