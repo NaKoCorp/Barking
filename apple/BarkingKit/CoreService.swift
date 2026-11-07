@@ -14,12 +14,22 @@ public actor CoreService {
     /// Set by `close`: no call reaches the device any more.
     private var closed = false
     private var subscribers: [UUID: AsyncStream<CoreChange>.Continuation] = [:]
+    /// Window over which the state changes of sent messages are gathered
+    /// into one `.delivery` per contact (spec Lot M §5.9).
+    public static let deliveryWindow: Duration = .milliseconds(250)
+    private let sleep: @Sendable (Duration) async -> Void
+    /// State changes waiting for the end of the window, by contact.
+    private var pendingDelivery: [String: Set<Int64>] = [:]
+    private var deliveryFlush: Task<Void, Never>?
     public private(set) var lastSync: SyncOutcome?
     public private(set) var lastSyncAt: Date?
 
-    public init(device: any DeviceHandle, runner: any CallRunner) {
+    /// `sleep` waits out the delivery window (tests open it by hand).
+    public init(device: any DeviceHandle, runner: any CallRunner,
+                sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }) {
         self.device = device
         self.runner = runner
+        self.sleep = sleep
     }
 
     /// A new stream of changes; ends when the consumer stops iterating.
@@ -36,7 +46,41 @@ public actor CoreService {
     private func unsubscribe(_ id: UUID) { subscribers[id] = nil }
 
     private func publish(_ change: CoreChange) {
+        // The conversation reloads whole: no state change of it follows.
+        if case .messages(let contact) = change { pendingDelivery[contact] = nil }
         for c in subscribers.values { c.yield(change) }
+    }
+
+    /// Notes state changes; the first one opens the window, the next ones
+    /// join it, and the window's end publishes one `.delivery` per contact.
+    private func noteDelivery(_ changes: [DeliveryChange]) {
+        guard !changes.isEmpty, !closed else { return }
+        for c in changes { pendingDelivery[c.contact, default: []].insert(c.messageId) }
+        guard deliveryFlush == nil else { return }
+        let window = Self.deliveryWindow, sleep = self.sleep
+        deliveryFlush = Task { [weak self] in
+            await sleep(window)
+            await self?.flushDelivery()
+        }
+    }
+
+    private func flushDelivery() {
+        let batch = pendingDelivery
+        pendingDelivery = [:]
+        deliveryFlush = nil
+        guard !closed else { return }
+        for contact in batch.keys.sorted() {
+            publish(.delivery(contact: contact, ids: batch[contact]!.sorted()))
+        }
+    }
+
+    /// Publishes what a deletion touched: the conversations to reload whole,
+    /// the chat list, and the pending count.
+    private func publishDeleted(_ outcome: DeleteOutcome) {
+        var seen: Set<String> = []
+        for c in outcome.changes where seen.insert(c.contact).inserted { publish(.messages(contact: c.contact)) }
+        publish(.contacts)
+        publish(.network)
     }
 
     private func call<T: Sendable>(_ name: String, _ body: @escaping @Sendable (any DeviceHandle) throws -> T) async throws -> T {
@@ -52,6 +96,8 @@ public actor CoreService {
     /// waits for the sync and the calls in flight.
     public func close() async {
         closed = true
+        deliveryFlush?.cancel()
+        pendingDelivery = [:]
         if let inFlight { _ = await inFlight.value }
         while running > 0 { try? await Task.sleep(for: .milliseconds(10)) }
     }
@@ -162,6 +208,64 @@ public actor CoreService {
         publish(.messages(contact: contact))
         Task { _ = await self.sync(reason: .afterSend) }
     }
+    // MARK: Delivery
+
+    /// Fresh delivery of the messages `ids`, in that order; a deleted or
+    /// unknown id comes back `removed`.
+    public func deliveriesOf(_ ids: [Int64]) async throws -> [DeliveryUpdate] {
+        try await call("deliveries") { try $0.deliveriesOf(ids: ids) }
+    }
+    /// The message sheet of a sent message (nil: received, or unknown).
+    public func messageDelivery(_ id: Int64) async throws -> MessageDelivery? {
+        try await call("delivery") { try $0.messageDelivery(messageId: id) }
+    }
+    /// Sent messages to `contact` per state (the "Sent" group titles).
+    public func deliveryCounts(contact: String) async throws -> DeliveryCounts {
+        try await call("delivery-counts") { try $0.deliveryCounts(contact: contact) }
+    }
+    /// A page of the sent messages to `contact` in `state`, newest first.
+    public func deliveryPage(contact: String, state: DeliveryState, limit: UInt32, offset: UInt32) async throws -> [DeliveryRowInfo] {
+        try await call("delivery-page") { try $0.deliveryPage(contact: contact, state: state, limit: limit, offset: offset) }
+    }
+    /// Deletes one message; the outcome says what it really did (spec §6.7).
+    public func deleteMessage(_ id: Int64) async throws -> DeleteOutcome {
+        let outcome = try await call("delete") { try $0.deleteMessage(messageId: id) }
+        publishDeleted(outcome)
+        return outcome
+    }
+    public func deleteMessages(_ ids: [Int64]) async throws -> DeleteOutcome {
+        let outcome = try await call("delete") { try $0.deleteMessages(ids: ids) }
+        publishDeleted(outcome)
+        return outcome
+    }
+    /// Deletes every sent message still pending, all contacts.
+    public func cancelAllPending() async throws -> DeleteOutcome {
+        let outcome = try await call("cancel-all") { try $0.cancelAllPending() }
+        publishDeleted(outcome)
+        return outcome
+    }
+    /// Sends a not delivered message again (same row); a sync deposits it.
+    /// The core reports no change: every screen reloads.
+    public func retryMessage(_ id: Int64) async throws {
+        try await call("retry") { try $0.retryMessage(messageId: id) }
+        publish(.contacts)
+        publish(.network)
+        Task { _ = await self.sync(reason: .afterSend) }
+    }
+    /// Sends every not delivered message to `contact` again; returns how many.
+    @discardableResult
+    public func retryAll(contact: String) async throws -> Int {
+        let n = try await call("retry-all") { try $0.retryAll(contact: contact) }
+        publish(.messages(contact: contact))
+        publish(.network)
+        if n > 0 { Task { _ = await self.sync(reason: .afterSend) } }
+        return Int(n)
+    }
+    /// The pending packets screen.
+    public func pendingPackets() async throws -> PendingPackets {
+        try await call("pending-packets") { try $0.pendingPackets() }
+    }
+
     public func chatSummaries() async throws -> [ChatSummary] {
         try await call("chats") { try $0.chatSummaries() }
     }
@@ -227,6 +331,10 @@ public actor CoreService {
         lastSyncAt = Date()
         publish(.network)
         if outcome.received > 0 || outcome.sent > 0 { publish(.contacts) }
+        // A new message reloads its conversation whole; the others, whose
+        // state alone changed, refresh their rows after the window.
+        noteDelivery(outcome.deliveryChanges)
+        for contact in Set(outcome.newMessageContacts).sorted() { publish(.messages(contact: contact)) }
         return outcome
     }
     public func nodes() async throws -> [NodeInfo] { try await call("nodes") { try $0.nodes() } }

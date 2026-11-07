@@ -74,7 +74,7 @@ struct ChatsView: View {
         .task {
             await model.reload()
             for await change in await core.changes {
-                if change == .contacts || change == .network || { if case .messages = change { true } else { false } }() {
+                if change == .contacts || change == .network || { if case .messages = change { true } else if case .delivery = change { true } else { false } }() {
                     await model.reload()
                 }
             }

@@ -43,6 +43,16 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func transferAndLeave(deviceId: String) throws
     func leaveReady() throws -> Bool
     func leaveState() throws -> LeaveState
+    func deliveriesOf(ids: [Int64]) throws -> [DeliveryUpdate]
+    func messageDelivery(messageId: Int64) throws -> MessageDelivery?
+    func deliveryCounts(contact: String) throws -> DeliveryCounts
+    func deliveryPage(contact: String, state: DeliveryState, limit: UInt32, offset: UInt32) throws -> [DeliveryRowInfo]
+    func deleteMessage(messageId: Int64) throws -> DeleteOutcome
+    func deleteMessages(ids: [Int64]) throws -> DeleteOutcome
+    func cancelAllPending() throws -> DeleteOutcome
+    func retryMessage(messageId: Int64) throws
+    func retryAll(contact: String) throws -> UInt32
+    func pendingPackets() throws -> PendingPackets
 }
 
 extension Device: DeviceHandle {}
@@ -57,7 +67,12 @@ public protocol CallRunner: Sendable {
 /// What changed, for the screen models to reload.
 public enum CoreChange: Sendable, Equatable {
     case contacts
+    /// A new message or a deletion: the conversation reloads whole.
     case messages(contact: String)
+    /// Only the delivery state of these messages changed (`Message.id`),
+    /// bursts coalesced: a screen refreshes those rows
+    /// (`CoreService.deliveriesOf`).
+    case delivery(contact: String, ids: [Int64])
     case network
     case devices
     case identity
@@ -77,6 +92,12 @@ public struct SyncOutcome: Sendable, Equatable {
     /// Items fetched (messages, receipts…): a receipt changes a message's
     /// status without adding one to `received`.
     public var items: Int = 0
+    /// Sent messages whose delivery changed during the sync.
+    public var deliveryChanges: [DeliveryChange] = []
+    /// Contacts a new message came in from.
+    public var newMessageContacts: [String] = []
+    /// Sent messages that became not delivered during the sync.
+    public var failed: [DeliveryChange] = []
 
     /// Something came in or went out: what a background wake reports.
     public var changed: Bool { items > 0 || received > 0 || sent > 0 }
@@ -88,7 +109,9 @@ public struct SyncOutcome: Sendable, Equatable {
             ? "internet: \(received) messages received, \(sent) sent"
             : "internet: network unreachable, nothing is lost"
         return SyncOutcome(networkUp: s.networkUp, received: received, sent: sent,
-                           lines: ["$ barking sync", result], items: Int(s.itemsReceived))
+                           lines: ["$ barking sync", result], items: Int(s.itemsReceived),
+                           deliveryChanges: s.deliveryChanges,
+                           newMessageContacts: s.newMessages.map(\.contact), failed: s.failed)
     }
 }
 

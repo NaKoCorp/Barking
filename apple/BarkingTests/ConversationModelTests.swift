@@ -36,15 +36,16 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertFalse(m.canSend)
     }
 
-    func testRetryResendsAndHidesFailed() async {
+    func testRetrySendsTheSameMessageAgain() async {
         let d = FakeDevice()
         d.messageList = ["b": [Message(id: 7, outgoing: true, body: "lost", at: 1, delivery: .state(.notDelivered))]]
         let m = make(d)
         await m.onAppear()
         XCTAssertEqual(m.items.map(\.id), [7])
         await m.retry(7)
-        XCTAssertEqual(d.sent.map(\.1), ["lost"])
-        XCTAssertFalse(m.items.contains { $0.id == 7 })
+        XCTAssertEqual(d.retried, [7])
+        XCTAssertTrue(d.sent.isEmpty, "a retry is not a new message")
+        XCTAssertTrue(m.items.contains { $0.id == 7 })
     }
 
     func testOpeningMarksRead() async {

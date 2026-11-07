@@ -68,6 +68,8 @@ struct ConversationView: View {
             for await change in await core.changes {
                 switch change {
                 case .messages, .contacts, .network: await model.reload()
+                // States only; the rows are patched in place later (Lot M).
+                case .delivery(let contact, _) where contact == model.contact: await model.reload()
                 default: break
                 }
             }

@@ -162,5 +162,37 @@
 			<string>%lld mots trouvés ; il en faut 24.</string>
 		</dict>
 	</dict>
+	<key>%lld had already left: %@ will still receive it.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld était déjà parti : %@ le recevra quand même.</string>
+			<key>other</key>
+			<string>%lld étaient déjà partis : %@ le recevra quand même.</string>
+		</dict>
+	</dict>
+	<key>%@, %@ and %lld others</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$@, %2$@ et %3$#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld autre personne</string>
+			<key>other</key>
+			<string>%lld autres personnes</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

@@ -26,7 +26,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var transferredTo: [String] { lock.withLock { _transferredTo } }
     var pending = false
     /// Packets no node accepted yet (`pendingCount`).
-    var pendingPackets: UInt32 = 0
+    var pendingCountValue: UInt32 = 0
     var sendError: Error?
     /// Thrown by markVerified / unmarkVerified when set.
     var verifyError: Error?
@@ -117,7 +117,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var syncEvents: [String] { lock.withLock { _syncEvents } }
     func nodes() throws -> [NodeInfo] { [] }
     func addNode(id: String, addr: String) throws {}
-    func pendingCount() throws -> UInt32 { pendingPackets }
+    func pendingCount() throws -> UInt32 { pendingCountValue }
     func myDevices() throws -> [MyDeviceInfo] { devicesList }
     func linkOffer() throws -> Data { Data([0xAA]) }
     func linkDevice(request: Data, withHistory: Bool) throws -> Data {
@@ -183,6 +183,79 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     /// The root key transfer expired without its ack.
     var transferExpired = false
     func finishLink(package: Data) throws {}
+
+    // MARK: Delivery
+
+    /// Answers of `deliveriesOf`, by message id (an unknown id comes back removed).
+    var deliveryUpdates: [Int64: DeliveryUpdate] = [:]
+    var messageDeliveries: [Int64: MessageDelivery] = [:]
+    var deliveryCountsByContact: [String: DeliveryCounts] = [:]
+    var deliveryRows: [String: [DeliveryState: [DeliveryRowInfo]]] = [:]
+    var pendingInfo = PendingPackets(messages: [], sync: [], packets: 0)
+    /// What the next deletion rates (`deleteMessage`, `deleteMessages`, `cancelAllPending`).
+    var deleteResult = FakeDevice.nothingDeleted
+    /// Thrown by the delivery reads and writes when set.
+    var deliveryError: Error?
+    private var _deleted: [[Int64]] = []
+    private var _retried: [Int64] = []
+    private var _retriedAll: [String] = []
+    private var _cancelAllCalls = 0
+    /// Ids given to each deletion call, in order.
+    var deleted: [[Int64]] { lock.withLock { _deleted } }
+    var retried: [Int64] { lock.withLock { _retried } }
+    var retriedAll: [String] { lock.withLock { _retriedAll } }
+    var cancelAllCalls: Int { lock.withLock { _cancelAllCalls } }
+    var retryAllCount: UInt32 = 0
+
+    static let nothingDeleted = DeleteOutcome(deleted: 0, cancelled: 0, partlyCancelled: 0, alreadyLeft: 0,
+                                              stillReceiving: [], ownCopiesKept: false, changes: [])
+
+    func deliveriesOf(ids: [Int64]) throws -> [DeliveryUpdate] {
+        if let deliveryError { throw deliveryError }
+        return ids.map { deliveryUpdates[$0] ?? DeliveryUpdate(messageId: $0, delivery: nil, removed: true) }
+    }
+    func messageDelivery(messageId: Int64) throws -> MessageDelivery? {
+        if let deliveryError { throw deliveryError }
+        return messageDeliveries[messageId]
+    }
+    func deliveryCounts(contact: String) throws -> DeliveryCounts {
+        if let deliveryError { throw deliveryError }
+        return deliveryCountsByContact[contact] ?? DeliveryCounts(pending: 0, onNetwork: 0, received: 0, notDelivered: 0)
+    }
+    func deliveryPage(contact: String, state: DeliveryState, limit: UInt32, offset: UInt32) throws -> [DeliveryRowInfo] {
+        if let deliveryError { throw deliveryError }
+        let all = deliveryRows[contact]?[state] ?? []
+        return Array(all.dropFirst(Int(offset)).prefix(Int(limit)))
+    }
+    func deleteMessage(messageId: Int64) throws -> DeleteOutcome {
+        if let deliveryError { throw deliveryError }
+        lock.withLock { _deleted.append([messageId]) }
+        return deleteResult
+    }
+    func deleteMessages(ids: [Int64]) throws -> DeleteOutcome {
+        if let deliveryError { throw deliveryError }
+        lock.withLock { _deleted.append(ids) }
+        return deleteResult
+    }
+    func cancelAllPending() throws -> DeleteOutcome {
+        if let deliveryError { throw deliveryError }
+        lock.withLock { _cancelAllCalls += 1 }
+        return deleteResult
+    }
+    func retryMessage(messageId: Int64) throws {
+        if let deliveryError { throw deliveryError }
+        Thread.sleep(forTimeInterval: syncDelay)
+        lock.withLock { _retried.append(messageId) }
+    }
+    func retryAll(contact: String) throws -> UInt32 {
+        if let deliveryError { throw deliveryError }
+        lock.withLock { _retriedAll.append(contact) }
+        return retryAllCount
+    }
+    func pendingPackets() throws -> PendingPackets {
+        if let deliveryError { throw deliveryError }
+        return pendingInfo
+    }
 }
 
 /// Runs device calls directly (no background task) in tests.

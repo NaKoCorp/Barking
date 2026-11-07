@@ -95,7 +95,7 @@ final class ReviewFixTests: XCTestCase {
         async let r1: Void = m.retry(7)
         async let r2: Void = m.retry(7)
         _ = await (r1, r2)
-        XCTAssertEqual(d.sent.count, 1)
+        XCTAssertEqual(d.retried, [7])
 
         let link = LinkModel(core: CoreService(device: d, runner: DirectRunner()), inspect: { _ in "tablet" })
         await link.start()

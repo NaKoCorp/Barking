@@ -100,13 +100,12 @@ final class ConversationModel {
         await reload()
     }
 
-    /// Sends a failed message's text again and hides the failed one.
+    /// Sends a not delivered message again: same row, back to pending.
     func retry(_ id: Int64) async {
-        guard !retrying, !hidden.contains(id), let item = items.first(where: { $0.id == id }) else { return }
+        guard !retrying, items.contains(where: { $0.id == id }) else { return }
         retrying = true
         defer { retrying = false }
-        hidden.insert(id)
-        try? await core.send(item.text, to: contact)
+        try? await core.retryMessage(id)
         await reload()
     }
 }
