@@ -120,7 +120,7 @@ final class NewDeviceLinkModel {
 
     static func beginWithFactory(offer: Data, name: String) async throws -> (CoreService, Data) {
         let pending = try await DeviceCall.run("begin") { try DeviceFactory.beginLink(offer: offer, deviceName: name) }
-        return (CoreService(device: pending.device, runner: AppCallRunner()), pending.request)
+        return (CoreService(device: pending.device, runner: AppCallRunner(), onFailed: AppFailureNotifications.handler), pending.request)
     }
 
     /// Begins once: the scanner may fire again while it runs.

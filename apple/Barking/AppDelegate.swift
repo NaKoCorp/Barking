@@ -1,5 +1,6 @@
 import BarkingKit
 import UIKit
+import UserNotifications
 
 /// The APNs token, shown by the development screen (the subscriptions of
 /// block 3 will use it).
@@ -10,7 +11,7 @@ final class PushToken {
     var failure: String?
 }
 
-final class AppDelegate: NSObject, UIApplicationDelegate {
+final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     /// The service a background wake syncs: the app's, once its device is
     /// open (nil before). Tests give their own.
     var service: @MainActor () -> CoreService? = { AppRouter.current?.core }
@@ -39,9 +40,25 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         application.registerForRemoteNotifications()
+        UNUserNotificationCenter.current().delegate = self
         return true
     }
 
+    /// A tap on a notification: the failure notice names its contact and
+    /// message; a new-message one only has its thread (the contact).
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            didReceive response: UNNotificationResponse) async {
+        let content = response.notification.request.content
+        let contact = (content.userInfo[FailureNotifier.contactKey] as? String)
+            ?? (content.threadIdentifier.isEmpty ? nil : content.threadIdentifier)
+        let messageId = (content.userInfo[FailureNotifier.messageIdKey] as? NSNumber)?.int64Value
+        guard let contact else { return }
+        await MainActor.run {
+            var info: [AnyHashable: Any] = [FailureNotifier.contactKey: contact]
+            if let messageId { info[FailureNotifier.messageIdKey] = messageId }
+            AppRouter.current?.open(notification: info)
+        }
+    }
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()

@@ -9,6 +9,10 @@ struct ChatsView: View {
     @State private var adding = false
     @State private var pendingLink: String?
     @State private var confirmDelete: ChatRow?
+    /// The conversation pushed, so a tapped notification can open one.
+    @State private var path: [String] = []
+    /// The message the pushed conversation scrolls to (a failure notice).
+    @State private var focus: Int64?
 
     init(core: CoreService) {
         self.core = core
@@ -16,7 +20,7 @@ struct ChatsView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 RemovedBanner(core: core).listRowSeparator(.hidden).listRowBackground(Color.surface)
                 if PhraseBanner.current != .hidden {
@@ -59,7 +63,7 @@ struct ChatsView: View {
             .navigationTitle(Text("Chats"))
             .toolbarVisibility(.hidden, for: .navigationBar)
             .navigationDestination(for: String.self) { contact in
-                ConversationView(core: core, contact: contact)
+                ConversationView(core: core, contact: contact, focus: path.last == contact ? focus : nil)
             }
             .sheet(isPresented: $adding, onDismiss: { pendingLink = nil }) {
                 AddContactView(core: core, link: pendingLink) { adding = false }
@@ -79,6 +83,11 @@ struct ChatsView: View {
                     await model.reload()
                 }
             }
+        }
+        .onChange(of: router.pendingOpen, initial: true) { _, target in
+            guard target != nil, let target = router.takePendingOpen() else { return }
+            focus = target.messageId
+            path = [target.contact]
         }
         .onChange(of: router.pendingCardLink, initial: true) { _, link in
             if link != nil { pendingLink = router.takePendingCardLink(); adding = true }

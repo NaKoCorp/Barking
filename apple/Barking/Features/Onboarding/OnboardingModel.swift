@@ -150,7 +150,7 @@ final class OnboardingModel {
         let display = displayName.trimmingCharacters(in: .whitespaces)
         do {
             let created = try await DeviceCall.run("create") { try DeviceFactory.createNew(deviceName: name) }
-            let core = CoreService(device: created.device, runner: AppCallRunner())
+            let core = CoreService(device: created.device, runner: AppCallRunner(), onFailed: AppFailureNotifications.handler)
             try await core.setDisplayName(display)
             phrase = created.recoveryPhrase.split(separator: " ").map(String.init)
             defaults.set(false, forKey: Self.confirmedKey)
@@ -173,7 +173,7 @@ final class OnboardingModel {
                 try DeviceFactory.recover(phrase: phrase, deviceName: name)
             }
             markPhraseConfirmed()
-            return CoreService(device: device, runner: AppCallRunner())
+            return CoreService(device: device, runner: AppCallRunner(), onFailed: AppFailureNotifications.handler)
         } catch BarkingError.InvalidInput {
             errorText = "These 24 words do not match an identity."
             return nil

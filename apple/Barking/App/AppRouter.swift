@@ -32,6 +32,13 @@ final class AppRouter {
     private(set) var pendingCardLink: String?
     /// A `.barkinglink` file opened from AirDrop or Files.
     private(set) var pendingLinkFile: URL?
+    /// A conversation to open (a tapped notification), on `messageId` when
+    /// it names one; taken by the chats once they show.
+    struct OpenTarget: Equatable {
+        let contact: String
+        let messageId: Int64?
+    }
+    private(set) var pendingOpen: OpenTarget?
     /// Where onboarding starts after erasing unreadable data.
     private(set) var pendingOnboardingStep: OnboardingModel.Step?
     /// Erasing the unreadable data failed; the screen offers it again.
@@ -86,7 +93,7 @@ final class AppRouter {
     static func initialState(opening: () throws -> (any DeviceHandle)?, runner: any CallRunner) -> State {
         do {
             guard let device = try opening() else { return .onboarding }
-            let core = CoreService(device: device, runner: runner)
+            let core = CoreService(device: device, runner: runner, onFailed: AppFailureNotifications.handler)
             return (try? device.isPendingLink()) == true ? .linking(core) : .ready(core)
         } catch is KeyStore.Unavailable {
             return .unreadable
@@ -185,6 +192,21 @@ final class AppRouter {
         guard url.scheme == "barking", url.host() == "card",
               let card = url.fragment(percentEncoded: false), !card.isEmpty else { return }
         pendingCardLink = card
+    }
+
+    /// A tapped notification: its `contact` (and `message_id`, for a failure)
+    /// say where to go. False when it names no contact.
+    @discardableResult
+    func open(notification userInfo: [AnyHashable: Any]) -> Bool {
+        guard let contact = userInfo[FailureNotifier.contactKey] as? String, !contact.isEmpty else { return false }
+        let id = (userInfo[FailureNotifier.messageIdKey] as? NSNumber)?.int64Value
+        pendingOpen = OpenTarget(contact: contact, messageId: id)
+        return true
+    }
+
+    func takePendingOpen() -> OpenTarget? {
+        defer { pendingOpen = nil }
+        return pendingOpen
     }
 
     func takePendingLinkFile() -> URL? {

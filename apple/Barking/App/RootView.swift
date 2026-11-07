@@ -33,6 +33,7 @@ struct MainTabView: View {
     enum Tabs { case chats, network, settings }
     let core: CoreService
     @State private var tab = Tabs.chats
+    @Environment(AppRouter.self) private var router
 
     var body: some View {
         TabView(selection: $tab) {
@@ -42,6 +43,8 @@ struct MainTabView: View {
                 SettingsView(core: core) { tab = .network }
             }
         }
+        // A tapped notification opens a conversation, which lives under Chats.
+        .onChange(of: router.pendingOpen, initial: true) { _, target in if target != nil { tab = .chats } }
     }
 }
 

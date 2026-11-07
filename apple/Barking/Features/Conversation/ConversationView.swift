@@ -19,10 +19,15 @@ struct ConversationView: View {
     /// The confirmation adds "Your other devices keep their copy." (§7.4).
     @State private var confirmingKeeps = false
 
+    /// A message to bring into view once the conversation is loaded.
+    let focus: Int64?
+    @State private var scrollTarget: Int64?
+
     private struct SheetTarget: Identifiable { let id: Int64 }
 
-    init(core: CoreService, contact: String) {
+    init(core: CoreService, contact: String, focus: Int64? = nil) {
         self.core = core
+        self.focus = focus
         _model = State(initialValue: ConversationModel(contact: contact, core: core))
     }
 
@@ -57,7 +62,10 @@ struct ConversationView: View {
                     .padding(16)
                     .animation(Motion.gated(Motion.enter, reduceMotion: reduceMotion), value: model.items.map(\.id))
                 }
-                .onChange(of: model.items.last?.id) { _, id in if let id { proxy.scrollTo(id, anchor: .bottom) } }
+                .onChange(of: model.items.last?.id) { _, id in
+                    if let id, scrollTarget == nil { proxy.scrollTo(id, anchor: .bottom) }
+                }
+                .onChange(of: scrollTarget) { _, id in if let id { proxy.scrollTo(id, anchor: .center) } }
             }
             if let e = model.sendError {
                 Text(LocalizedStringKey(e)).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)
@@ -108,6 +116,8 @@ struct ConversationView: View {
         .onDisappear { model.onDisappear() }
         .task {
             await model.onAppear()
+            // The first not delivered message, if it is still there.
+            if let focus, model.items.contains(where: { $0.id == focus }) { scrollTarget = focus }
             for await change in await core.changes { await model.handle(change) }
         }
     }

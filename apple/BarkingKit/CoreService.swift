@@ -18,6 +18,10 @@ public actor CoreService {
     /// into one `.delivery` per contact (spec Lot M §5.9).
     public static let deliveryWindow: Duration = .milliseconds(250)
     private let sleep: @Sendable (Duration) async -> Void
+    /// Told, after each sync, which sent messages it found confirmed not
+    /// delivered (the app turns them into a notification when it is not in
+    /// front, spec Lot M §15.6).
+    private let onFailed: (@Sendable ([DeliveryChange]) async -> Void)?
     /// State changes waiting for the end of the window, by contact.
     private var pendingDelivery: [String: Set<Int64>] = [:]
     private var deliveryFlush: Task<Void, Never>?
@@ -26,9 +30,11 @@ public actor CoreService {
 
     /// `sleep` waits out the delivery window (tests open it by hand).
     public init(device: any DeviceHandle, runner: any CallRunner,
+                onFailed: (@Sendable ([DeliveryChange]) async -> Void)? = nil,
                 sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }) {
         self.device = device
         self.runner = runner
+        self.onFailed = onFailed
         self.sleep = sleep
     }
 
@@ -347,6 +353,7 @@ public actor CoreService {
         // reloads its conversation whole; the others, whose state alone
         // changed, refresh their rows after the window.
         noteDelivery(outcome.deliveryChanges)
+        if !outcome.failed.isEmpty { await onFailed?(outcome.failed) }
         for contact in Set(outcome.newMessageContacts + outcome.syncedContacts).sorted() {
             publish(.messages(contact: contact))
         }
