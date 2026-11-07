@@ -73,8 +73,8 @@ final class ChatsModelTests: XCTestCase {
         let d = FakeDevice()
         d.contactList = [contact("a", "Léa"), contact("b", "Sam", alias: "sammy")]
         d.messageList = [
-            "a": [Message(id: 1, outgoing: false, body: "old", status: "delivered", at: 100, failed: false)],
-            "b": [Message(id: 2, outgoing: true, body: "new", status: "sent", at: 200, failed: false)],
+            "a": [Message(id: 1, outgoing: false, body: "old", at: 100)],
+            "b": [Message(id: 2, outgoing: true, body: "new", at: 200, delivery: .state(.onNetwork))],
         ]
         let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
         await m.reload()

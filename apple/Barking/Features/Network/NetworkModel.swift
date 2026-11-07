@@ -83,7 +83,7 @@ final class NetworkModel {
     func load() async {
         internetReachable = await core.lastSync?.networkUp
         lastSync = await core.lastSyncAt
-        pending = (try? await core.outboxCount()) ?? 0
+        pending = (try? await core.pendingCount()) ?? 0
         relays = (try? await core.nodes()) ?? []
     }
 

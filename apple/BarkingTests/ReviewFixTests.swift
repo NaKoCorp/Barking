@@ -89,7 +89,7 @@ final class ReviewFixTests: XCTestCase {
         let d = FakeDevice()
         d.syncDelay = 0.1
         d.contactList = [Contact(fingerprint: "b", alias: nil, displayName: "Bob", verified: false)]
-        d.messageList = ["b": [Message(id: 7, outgoing: true, body: "lost", status: "failed", at: 1, failed: true)]]
+        d.messageList = ["b": [Message(id: 7, outgoing: true, body: "lost", at: 1, delivery: .state(.notDelivered))]]
         let m = ConversationModel(contact: "b", core: CoreService(device: d, runner: DirectRunner()))
         await m.onAppear()
         async let r1: Void = m.retry(7)
@@ -124,11 +124,11 @@ final class ReviewFixTests: XCTestCase {
         d.contactList = [Contact(fingerprint: "b", alias: nil, displayName: "Bob", verified: false)]
         let m = ConversationModel(contact: "b", core: CoreService(device: d, runner: DirectRunner()))
         await m.onAppear()
-        d.messageList = ["b": [Message(id: 9, outgoing: false, body: "new", status: "delivered", at: 5, failed: false)]]
+        d.messageList = ["b": [Message(id: 9, outgoing: false, body: "new", at: 5)]]
         await m.reload()
         XCTAssertEqual(d.reads.last?.1, 9)
         m.onDisappear()
-        d.messageList["b"]?.append(Message(id: 10, outgoing: false, body: "later", status: "delivered", at: 6, failed: false))
+        d.messageList["b"]?.append(Message(id: 10, outgoing: false, body: "later", at: 6))
         await m.reload()
         XCTAssertEqual(d.reads.last?.1, 9)
     }

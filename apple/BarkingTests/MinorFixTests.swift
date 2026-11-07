@@ -9,8 +9,8 @@ final class MinorFixTests: XCTestCase {
         let d = FakeDevice()
         d.contactList = [Contact(fingerprint: "b", alias: nil, displayName: "Bob", verified: false)]
         d.messageList = ["b": [
-            Message(id: 1, outgoing: true, body: "hello", status: "failed", at: 1, failed: true),
-            Message(id: 2, outgoing: true, body: "hello", status: "sent", at: 2, failed: false),
+            Message(id: 1, outgoing: true, body: "hello", at: 1, delivery: .state(.notDelivered)),
+            Message(id: 2, outgoing: true, body: "hello", at: 2, delivery: .state(.onNetwork)),
         ]]
         let m = ConversationModel(contact: "b", core: CoreService(device: d, runner: DirectRunner()))
         await m.onAppear()
@@ -41,7 +41,7 @@ final class MinorFixTests: XCTestCase {
     func testChatsUseOneSummaryCall() async {
         let d = FakeDevice()
         d.contactList = [Contact(fingerprint: "a", alias: nil, displayName: "Léa", verified: true)]
-        d.messageList = ["a": [Message(id: 4, outgoing: false, body: "hi", status: "delivered", at: 9, failed: false)]]
+        d.messageList = ["a": [Message(id: 4, outgoing: false, body: "hi", at: 9)]]
         d.unread = [UnreadCount(contact: "a", count: 1)]
         let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
         await m.reload()

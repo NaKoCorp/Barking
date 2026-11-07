@@ -74,7 +74,7 @@ final class ConversationModel {
         items = messages.filter { !hide.contains($0.id) }.map {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)),
-                 status: MessageStatusKind(status: $0.status, failed: $0.failed, outgoing: $0.outgoing),
+                 status: MessageStatusKind($0),
                  route: $0.route)
         }
         // What arrives while the conversation is on screen is read.

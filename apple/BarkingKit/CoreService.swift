@@ -234,7 +234,8 @@ public actor CoreService {
         try await call("node") { try $0.addNode(id: id, addr: addr) }
         publish(.network)
     }
-    public func outboxCount() async throws -> Int { Int(try await call("outbox") { try $0.outboxCount() }) }
+    /// Packets no node accepted yet (the pending packets screen's count).
+    public func pendingCount() async throws -> Int { Int(try await call("pending") { try $0.pendingCount() }) }
 
     // MARK: Linking
 

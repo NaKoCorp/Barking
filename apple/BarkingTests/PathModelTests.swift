@@ -21,8 +21,8 @@ final class PathModelTests: XCTestCase {
         let d = FakeDevice()
         d.devicesList = devices
         d.contactList = [Contact(fingerprint: "sam", alias: nil, displayName: "Sam", verified: true)]
-        d.messageList = ["sam": [Message(id: 4, outgoing: outgoing, body: "Power's out", status: "delivered",
-                                         at: t0, failed: false, route: hint)]]
+        d.messageList = ["sam": [Message(id: 4, outgoing: outgoing, body: "Power's out",
+                                         at: t0, delivery: outgoing ? .state(.received) : nil, route: hint)]]
         d.routes = [4: route]
         let core = CoreService(device: d, runner: DirectRunner())
         return (PathModel(core: core, messageId: 4, contact: "sam", contactName: "Sam"), d)
@@ -134,8 +134,8 @@ final class PathModelTests: XCTestCase {
     func testRoutesReachTheChatsAndConversation() async {
         let d = FakeDevice()
         d.contactList = [Contact(fingerprint: "sam", alias: nil, displayName: "Sam", verified: false)]
-        d.messageList = ["sam": [Message(id: 4, outgoing: false, body: "hi", status: "delivered",
-                                         at: t0, failed: false, route: "internet:2")]]
+        d.messageList = ["sam": [Message(id: 4, outgoing: false, body: "hi",
+                                         at: t0, route: "internet:2")]]
         let core = CoreService(device: d, runner: DirectRunner())
         let chats = ChatsModel(core: core)
         await chats.reload()

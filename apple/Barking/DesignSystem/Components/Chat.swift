@@ -1,3 +1,4 @@
+import BarkingKit
 import SwiftUI
 import UIKit
 
@@ -5,15 +6,22 @@ import UIKit
 enum MessageStatusKind: Equatable {
     case queued, sent, delivered, failed, received
 
-    init(status: String, failed: Bool, outgoing: Bool) {
-        if !outgoing { self = .received; return }
-        if failed { self = .failed; return }
-        switch status {
-        case "delivered": self = .delivered
-        case "sent": self = .sent
-        default: self = .queued
+    /// From a message's delivery. A sent message without one (sent from
+    /// another of my devices) shows as sent.
+    init(_ m: Message) {
+        guard m.outgoing else { self = .received; return }
+        switch m.delivery?.state {
+        case .pending: self = .queued
+        case .onNetwork, nil: self = .sent
+        case .received: self = .delivered
+        case .notDelivered: self = .failed
         }
     }
+}
+
+extension Message {
+    /// A sent message that was not delivered: it can be sent again.
+    var failed: Bool { delivery?.state == .notDelivered }
 }
 
 struct StatusGlyph: View {

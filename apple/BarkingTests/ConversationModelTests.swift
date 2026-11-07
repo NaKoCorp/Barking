@@ -38,7 +38,7 @@ final class ConversationModelTests: XCTestCase {
 
     func testRetryResendsAndHidesFailed() async {
         let d = FakeDevice()
-        d.messageList = ["b": [Message(id: 7, outgoing: true, body: "lost", status: "failed", at: 1, failed: true)]]
+        d.messageList = ["b": [Message(id: 7, outgoing: true, body: "lost", at: 1, delivery: .state(.notDelivered))]]
         let m = make(d)
         await m.onAppear()
         XCTAssertEqual(m.items.map(\.id), [7])
@@ -50,9 +50,9 @@ final class ConversationModelTests: XCTestCase {
     func testOpeningMarksRead() async {
         let d = FakeDevice()
         d.messageList = ["b": [
-            Message(id: 3, outgoing: false, body: "a", status: "delivered", at: 1, failed: false),
-            Message(id: 5, outgoing: false, body: "b", status: "delivered", at: 2, failed: false),
-            Message(id: 6, outgoing: true, body: "c", status: "sent", at: 3, failed: false),
+            Message(id: 3, outgoing: false, body: "a", at: 1),
+            Message(id: 5, outgoing: false, body: "b", at: 2),
+            Message(id: 6, outgoing: true, body: "c", at: 3, delivery: .state(.onNetwork)),
         ]]
         let m = make(d)
         await m.onAppear()

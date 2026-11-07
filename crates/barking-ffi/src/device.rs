@@ -68,6 +68,7 @@ pub struct Message {
     pub at: u64,
     /// Delivery of a sent message; `None` for a received message, or one
     /// sent from another of my devices.
+    #[uniffi(default = None)]
     pub delivery: Option<Delivery>,
     /// Route badge: `internet:N` (N distinct relay nodes), `None` while
     /// none is recorded.

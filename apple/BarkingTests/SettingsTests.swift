@@ -17,7 +17,7 @@ final class NetworkModelTests: XCTestCase {
     /// sync result uses the counts the model has.
     func testStatusAndSyncResult() async {
         let d = FakeDevice()
-        d.outbox = 3
+        d.pendingPackets = 3
         d.summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: false, error: nil)
         let m = NetworkModel(core: CoreService(device: d, runner: DirectRunner()))
         await m.load()
@@ -30,7 +30,7 @@ final class NetworkModelTests: XCTestCase {
         XCTAssertEqual(NetworkStatus.notSynced.dot, .checking)
         XCTAssertEqual(m.result, .unreachable(waiting: 3))
         d.summary = SyncSummary(itemsReceived: 0, sent: 3, newMessages: [], networkUp: true, error: nil)
-        d.outbox = 0
+        d.pendingPackets = 0
         await m.syncNow()
         XCTAssertEqual(m.status, .reachable)
         XCTAssertEqual(m.result, .done(sent: 3, received: 0))

@@ -29,9 +29,11 @@ pub struct SyncSummary {
     /// Sent messages whose delivery changed during the sync (deposit,
     /// receipt, expiry, verdict), each once: the rows to refresh
     /// (`Device::deliveries_of`).
+    #[uniffi(default = [])]
     pub delivery_changes: Vec<DeliveryChange>,
     /// Sent messages that became `NotDelivered` during the sync (expired
     /// before any deposit, verdict): the failure notification.
+    #[uniffi(default = [])]
     pub failed: Vec<DeliveryChange>,
 }
 

@@ -25,8 +25,8 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _transferredTo: [String] = []
     var transferredTo: [String] { lock.withLock { _transferredTo } }
     var pending = false
-    /// Packets waiting in the outbox (`outboxCount`).
-    var outbox: UInt32 = 0
+    /// Packets no node accepted yet (`pendingCount`).
+    var pendingPackets: UInt32 = 0
     var sendError: Error?
     /// Thrown by markVerified / unmarkVerified when set.
     var verifyError: Error?
@@ -117,7 +117,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var syncEvents: [String] { lock.withLock { _syncEvents } }
     func nodes() throws -> [NodeInfo] { [] }
     func addNode(id: String, addr: String) throws {}
-    func outboxCount() throws -> UInt32 { outbox }
+    func pendingCount() throws -> UInt32 { pendingPackets }
     func myDevices() throws -> [MyDeviceInfo] { devicesList }
     func linkOffer() throws -> Data { Data([0xAA]) }
     func linkDevice(request: Data, withHistory: Bool) throws -> Data {
@@ -189,5 +189,15 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
 struct DirectRunner: CallRunner {
     func run<T: Sendable>(_ name: String, _ body: @escaping @Sendable () throws -> T) async throws -> T {
         try await Task.detached { try body() }.value
+    }
+}
+
+extension Delivery {
+    /// A one-device delivery in `state`, for canned messages.
+    static func state(_ state: DeliveryState) -> Delivery {
+        Delivery(state: state, sealedAt: 1, depositedAt: nil, receivedAt: nil, expiredAt: nil,
+                 devices: 1, devicesReceived: state == .received ? 1 : 0,
+                 devicesLeft: state == .onNetwork || state == .received ? 1 : 0,
+                 devicesPending: state == .pending ? 1 : 0)
     }
 }

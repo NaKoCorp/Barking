@@ -177,7 +177,7 @@ struct DevView: View {
                         }
                         .onChange(of: model.selected) { Task { try? await model.refresh() } }
                         ForEach(Array(model.messages.enumerated()), id: \.offset) { _, m in
-                            Text("\(m.outgoing ? "→" : "←") \(m.body)  [\(m.status)]")
+                            Text("\(m.outgoing ? "→" : "←") \(m.body)  [\(m.delivery.map { "\($0.state)" } ?? "-")]")
                         }
                         TextField("Text", text: $text)
                         Button("Send") { Task { await model.send(text); text = "" } }

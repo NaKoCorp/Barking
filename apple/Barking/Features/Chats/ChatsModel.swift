@@ -52,7 +52,7 @@ final class ChatsModel {
                 verified: c.verified,
                 lastText: last?.body,
                 lastAt: last.map { Date(timeIntervalSince1970: TimeInterval($0.at)) },
-                lastStatus: last.map { MessageStatusKind(status: $0.status, failed: $0.failed, outgoing: $0.outgoing) },
+                lastStatus: last.map { MessageStatusKind($0) },
                 unread: Int(s.unread)))
         }
         rows = out.sorted { ($0.lastAt ?? .distantPast) > ($1.lastAt ?? .distantPast) }
