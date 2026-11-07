@@ -154,6 +154,9 @@ pub enum ReceiveOutcome {
     /// is in the send queue.
     Synced {
         kind: SyncKind,
+        /// The contact a synced sent message went to (`SyncKind::Sent`):
+        /// its conversation gains a row.
+        contact: Option<Fingerprint>,
     },
     /// New card from a contact (new device list), applied;
     /// its ack is in the send queue.
@@ -189,7 +192,11 @@ impl fmt::Debug for ReceiveOutcome {
                 .debug_struct("Quarantined")
                 .field("reason", reason)
                 .finish(),
-            Self::Synced { kind } => f.debug_struct("Synced").field("kind", kind).finish(),
+            Self::Synced { kind, contact } => f
+                .debug_struct("Synced")
+                .field("kind", kind)
+                .field("contact", contact)
+                .finish(),
             Self::CardUpdated { from, alias } => f
                 .debug_struct("CardUpdated")
                 .field("from", from)

@@ -29,6 +29,18 @@ final class ConversationModel {
         case deleteFailed
         /// A retry found no device of the contact to seal for (§9).
         case noReachableDevice(name: String)
+
+        /// What the banner says, spoken when it appears.
+        func text(bundle: Bundle = .main, locale: Locale = .current) -> String {
+            switch self {
+            case .deleted(let message): message.string(bundle: bundle, locale: locale)
+            case .deleteFailed:
+                String(localized: "Deletion failed. Nothing has changed.", bundle: bundle, locale: locale)
+            case .noReachableDevice(let name):
+                String(localized: "\(name) has no reachable device left. The message can’t be sent again.",
+                       bundle: bundle, locale: locale)
+            }
+        }
     }
 
     static let maxBytes = 4000
@@ -43,10 +55,14 @@ final class ConversationModel {
     var trust: Trust { Trust(verified: verified) }
     private(set) var keyChanged = false
     private var sending = false
-    private var retrying = false
+    /// Rows whose retry is running: a second tap on one does nothing.
+    private var retrying: Set<Int64> = []
     private var visible = false
     private(set) var sendError: String?
-    private(set) var notice: Notice?
+    /// Said to VoiceOver when it appears: the banner itself is not focused.
+    private(set) var notice: Notice? {
+        didSet { if let notice, notice != oldValue { announce(notice.text()) } }
+    }
     /// Rows whose deletion is running (§9: dimmed, a spinner for the symbol).
     private(set) var deleting: Set<Int64> = []
     /// This device was removed from the account: it can no longer send.
@@ -194,13 +210,13 @@ final class ConversationModel {
     /// Sends a not delivered message again: same row, back to pending,
     /// patched here without a reload.
     func retry(_ id: Int64) async {
-        guard !retrying, items.contains(where: { $0.id == id }) else { return }
-        retrying = true
-        defer { retrying = false }
+        guard !retrying.contains(id), items.contains(where: { $0.id == id }) else { return }
+        retrying.insert(id)
+        defer { retrying.remove(id) }
         notice = nil
         do {
             try await core.retryMessage(id, contact: contact)
-        } catch BarkingError.Internal(let detail) where detail == "no session" {
+        } catch BarkingError.NoSession {
             // Every device of the contact left their card.
             notice = .noReachableDevice(name: name)
         } catch {

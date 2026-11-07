@@ -109,12 +109,30 @@ final class ConversationModelTests: XCTestCase {
         let d = FakeDevice()
         d.messageList = ["b": [sent(7, .notDelivered)]]
         let m = make(d)
+        var said: [String] = []
+        m.announce = { said.append($0) }
         await m.onAppear()
-        d.retryError = BarkingError.Internal(detail: "no session")
+        d.retryError = BarkingError.NoSession
         d.deliveryUpdates[7] = update(7, .notDelivered)
         await m.retry(7)
         XCTAssertEqual(m.notice, .noReachableDevice(name: "bob"))
         XCTAssertEqual(m.items.first?.state, .notDelivered)
+        // The banner is said once, without moving the focus.
+        XCTAssertEqual(said, ["bob has no reachable device left. The message can’t be sent again."])
+    }
+
+    /// A retry running on one row does not drop a retry on another.
+    func testRetriesOfTwoRowsBothRun() async {
+        let d = FakeDevice()
+        d.syncDelay = 0.1
+        d.messageList = ["b": [sent(7, .notDelivered), sent(8, .notDelivered)]]
+        let m = make(d)
+        await m.onAppear()
+        async let a: Void = m.retry(7)
+        async let b: Void = m.retry(8)
+        async let again: Void = m.retry(7)
+        _ = await (a, b, again)
+        XCTAssertEqual(d.retried.sorted(), [7, 8])
     }
 
     /// Spec §6.7: the bubble goes at once; the banner says what really happened.
@@ -130,6 +148,7 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(d.deleted, [[7]])
         XCTAssertEqual(m.items.map(\.id), [8])
         XCTAssertEqual(m.notice, .deleted(.alreadyLeft(name: "bob")))
+        XCTAssertEqual(m.notice?.text(), "It had already left: bob will still receive it.")
         // Cancelled: nothing to say.
         d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 1, partlyCancelled: 0, alreadyLeft: 0,
                                        stillReceiving: [], ownCopiesKept: false, changes: [])
@@ -229,7 +248,8 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(DeleteConfirmation(outgoing: true, delivery: d(.received, left: 2, pending: 0)), .received)
         XCTAssertEqual(DeleteConfirmation(outgoing: true, delivery: d(.notDelivered, left: 0, pending: 0)), .notDelivered)
         XCTAssertEqual(DeleteConfirmation(outgoing: false, delivery: nil), .receivedMessage)
-        XCTAssertEqual(DeleteConfirmation(outgoing: true, delivery: nil), .receivedMessage)
+        XCTAssertEqual(DeleteConfirmation(outgoing: true, delivery: nil), .sentElsewhere,
+                       "no receipt is known for a message sent from another device")
         let path = try XCTUnwrap(Bundle.main.path(forResource: "fr", ofType: "lproj"))
         let fr = (bundle: try XCTUnwrap(Bundle(path: path)), locale: Locale(identifier: "fr"))
         let enPath = try XCTUnwrap(Bundle.main.path(forResource: "en", ofType: "lproj"))
@@ -240,6 +260,10 @@ final class ConversationModelTests: XCTestCase {
                        "It already left for 2 of Alice’s 3 devices: those keep it. The rest is cancelled.")
         XCTAssertEqual(DeleteConfirmation.mixed(left: 1, total: 2).message(name: "Alice", bundle: fr.bundle, locale: fr.locale),
                        "Il est déjà parti vers 1 de ses 2 appareils\u{00A0}: Alice le garde sur celui-ci. Le reste est annulé.")
+        XCTAssertEqual(DeleteConfirmation.sentElsewhere.message(name: "Alice", bundle: en.bundle, locale: en.locale),
+                       "Your other devices keep their copy.")
+        XCTAssertEqual(DeleteConfirmation.sentElsewhere.message(name: "Alice", bundle: fr.bundle, locale: fr.locale),
+                       "Vos autres appareils gardent leur copie.")
         XCTAssertEqual(DeleteConfirmation.pending.message(name: "Alice", bundle: fr.bundle, locale: fr.locale),
                        "Il n’a pas quitté cet iPhone. Alice ne le recevra pas.")
         var a = DeliveryAnnouncements()

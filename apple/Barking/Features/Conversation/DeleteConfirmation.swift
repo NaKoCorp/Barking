@@ -8,15 +8,21 @@ enum DeleteConfirmation: Equatable {
     case pending, onNetwork, received, notDelivered
     /// Left for `left` of the contact's `total` devices, still here for the others.
     case mixed(left: Int, total: Int)
-    /// A received message, or one sent from another of my devices (no
-    /// delivery here).
+    /// A received message.
     case receivedMessage
+    /// A message I sent from another of my devices: no delivery here, so
+    /// nothing is said about the contact.
+    case sentElsewhere
 
     /// §7.4 "Choix du cas": Pending if nothing left and something waits
     /// here; Mixed if some left and some wait; otherwise the combined state.
     init(outgoing: Bool, delivery: Delivery?) {
-        guard outgoing, let d = delivery else {
+        guard outgoing else {
             self = .receivedMessage
+            return
+        }
+        guard let d = delivery else {
+            self = .sentElsewhere
             return
         }
         if d.devicesLeft == 0 && d.devicesPending > 0 {
@@ -37,7 +43,7 @@ enum DeleteConfirmation: Equatable {
         switch self {
         case .pending, .notDelivered: "Delete this message?"
         case .onNetwork, .received, .mixed: "Delete from this iPhone?"
-        case .receivedMessage: "Delete this message from this iPhone?"
+        case .receivedMessage, .sentElsewhere: "Delete this message from this iPhone?"
         }
     }
 
@@ -57,6 +63,8 @@ enum DeleteConfirmation: Equatable {
                    bundle: bundle, locale: locale)
         case .receivedMessage:
             String(localized: "\(name) keeps their copy.", bundle: bundle, locale: locale)
+        case .sentElsewhere:
+            String(localized: "Your other devices keep their copy.", bundle: bundle, locale: locale)
         }
     }
 
@@ -64,7 +72,7 @@ enum DeleteConfirmation: Equatable {
         switch self {
         case .pending: "Delete and cancel"
         case .mixed: "Delete and cancel the rest"
-        case .onNetwork, .received, .notDelivered, .receivedMessage: "Delete"
+        case .onNetwork, .received, .notDelivered, .receivedMessage, .sentElsewhere: "Delete"
         }
     }
 }

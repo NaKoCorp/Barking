@@ -83,12 +83,14 @@ impl Core {
                     // A list may also remove this device: its root goes.
                     ReceiveOutcome::Synced {
                         kind: SyncKind::Devices,
+                        ..
                     } => {
                         self.reload_own_devices()?;
                         self.reload_root()?;
                     }
                     ReceiveOutcome::Synced {
                         kind: SyncKind::Admin,
+                        ..
                     }
                     | ReceiveOutcome::Removed => self.reload_root()?,
                     _ => {}
@@ -812,7 +814,13 @@ fn accept_sync(
     }
     emit_ack(q, packet, env.ack_secret, now, rng)?;
     let outcome = match kind {
-        Some(kind) => ReceiveOutcome::Synced { kind },
+        Some(kind) => ReceiveOutcome::Synced {
+            kind,
+            contact: match &env.body {
+                Body::SyncSent { to, .. } if kind == SyncKind::Sent => Some(*to),
+                _ => None,
+            },
+        },
         None => ReceiveOutcome::Duplicate,
     };
     Ok((outcome, new_prekeys))

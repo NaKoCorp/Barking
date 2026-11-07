@@ -393,3 +393,4 @@
 "Delete and cancel the rest" = "Supprimer et annuler le reste";
 "Deletion failed. Nothing has changed." = "Suppression impossible. Rien n’a changé.";
 "%@ has no reachable device left. The message can’t be sent again." = "%@ n’a plus d’appareil joignable. Le message ne peut pas être renvoyé.";
+"Your other devices keep their copy." = "Vos autres appareils gardent leur copie.";

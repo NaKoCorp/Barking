@@ -851,7 +851,7 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
         ReceiveOutcome::Quarantined { reason } => {
             println!("{label}: quarantined: {reason}");
         }
-        ReceiveOutcome::Synced { kind } => println!(
+        ReceiveOutcome::Synced { kind, .. } => println!(
             "{label}: synced from one of your devices ({})",
             kind.label()
         ),

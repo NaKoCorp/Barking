@@ -113,9 +113,8 @@ struct ConversationView: View {
     @ViewBuilder private func noticeBanner(_ notice: ConversationModel.Notice) -> some View {
         switch notice {
         case .deleted(let message): Banner(kind: .info, title: message.key)
-        case .deleteFailed: Banner(kind: .warning, title: "Deletion failed. Nothing has changed.")
-        case .noReachableDevice(let name):
-            Banner(kind: .warning, title: "\(name) has no reachable device left. The message can’t be sent again.")
+        case .deleteFailed, .noReachableDevice:
+            Banner(kind: .warning, title: LocalizedStringKey(stringLiteral: notice.text()))
         }
     }
 

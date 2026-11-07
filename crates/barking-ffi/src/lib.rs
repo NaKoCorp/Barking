@@ -56,4 +56,17 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
     }
+
+    #[test]
+    fn retry_errors_keep_their_own_variant() {
+        use barking_core::CoreError;
+        assert!(matches!(
+            BarkingError::from(CoreError::NoSession),
+            BarkingError::NoSession
+        ));
+        assert!(matches!(
+            BarkingError::from(CoreError::NothingToRetry),
+            BarkingError::NothingToRetry
+        ));
+    }
 }

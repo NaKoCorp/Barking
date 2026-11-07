@@ -37,6 +37,10 @@ pub enum BarkingError {
     /// nothing to send again.
     #[error("nothing to retry")]
     NothingToRetry,
+    /// No session with any device of the contact (every device left their
+    /// card): the message cannot be sealed again. Added last.
+    #[error("no session")]
+    NoSession,
 }
 
 /// Why a link step was refused (spec iOS messaging §5.8).
@@ -110,6 +114,7 @@ impl From<CoreError> for BarkingError {
             CoreError::DeviceRemoved => BarkingError::DeviceRemoved,
             CoreError::IsAdmin => BarkingError::IsAdmin,
             CoreError::NothingToRetry => BarkingError::NothingToRetry,
+            CoreError::NoSession => BarkingError::NoSession,
             _ => BarkingError::Internal { detail },
         }
     }

@@ -98,6 +98,8 @@ public struct SyncOutcome: Sendable, Equatable {
     public var newMessageContacts: [String] = []
     /// Sent messages that became not delivered during the sync.
     public var failed: [DeliveryChange] = []
+    /// Contacts a copy of a message I sent from another device arrived for.
+    public var syncedContacts: [String] = []
 
     /// Something came in or went out: what a background wake reports.
     public var changed: Bool { items > 0 || received > 0 || sent > 0 }
@@ -111,7 +113,8 @@ public struct SyncOutcome: Sendable, Equatable {
         return SyncOutcome(networkUp: s.networkUp, received: received, sent: sent,
                            lines: ["$ barking sync", result], items: Int(s.itemsReceived),
                            deliveryChanges: s.deliveryChanges,
-                           newMessageContacts: s.newMessages.map(\.contact), failed: s.failed)
+                           newMessageContacts: s.newMessages.map(\.contact), failed: s.failed,
+                           syncedContacts: s.syncedContacts)
     }
 }
 

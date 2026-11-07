@@ -500,7 +500,7 @@ fn admin_and_tablet(d: &Path, rng: &mut StdRng) -> (Dev, Dev) {
 fn sync_round(from: &mut Dev, to: &mut Dev, rng: &mut StdRng) -> Vec<SyncKind> {
     let mut applied = Vec::new();
     for bytes in from.core.pending_outbox(NOW).unwrap() {
-        if let ReceiveOutcome::Synced { kind } = to.core.receive(&bytes, T, NOW, rng).unwrap() {
+        if let ReceiveOutcome::Synced { kind, .. } = to.core.receive(&bytes, T, NOW, rng).unwrap() {
             applied.push(kind);
         }
     }
@@ -550,7 +550,11 @@ fn sent_on_a_appears_on_t() {
     let mut on_t = Vec::new();
     for p in &pkts {
         match t.core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
-            ReceiveOutcome::Synced { kind } => on_t.push((kind, p.id)),
+            ReceiveOutcome::Synced { kind, contact } => {
+                // The synced copy names its conversation.
+                assert_eq!(contact, Some(bob_fp));
+                on_t.push((kind, p.id));
+            }
             ReceiveOutcome::NotForUs => {}
             other => panic!("unexpected : {other:?}"),
         }
@@ -657,7 +661,7 @@ fn sent_on_t_reaches_bob_and_a() {
             o => panic!("unexpected at Bob : {o:?}"),
         }
         match a.core.receive(&p.encode(), T, NOW, &mut rng).unwrap() {
-            ReceiveOutcome::Synced { kind } => {
+            ReceiveOutcome::Synced { kind, .. } => {
                 assert_eq!(kind, SyncKind::Sent);
                 at_a += 1;
             }
@@ -828,7 +832,8 @@ fn contact_sync_is_order_independent() {
         assert!(matches!(
             deliver(&mut t, p, &mut rng),
             ReceiveOutcome::Synced {
-                kind: SyncKind::Contact
+                kind: SyncKind::Contact,
+                ..
             }
         ));
     }
@@ -1185,7 +1190,8 @@ fn second_link_sends_devices_to_first_tablet() {
             .receive(&out.packets[0].encode(), T, NOW, &mut rng)
             .unwrap(),
         ReceiveOutcome::Synced {
-            kind: SyncKind::Devices
+            kind: SyncKind::Devices,
+            ..
         }
     ));
     t2.core.finish_link(&out.bundle, None, NOW).unwrap();
@@ -2216,7 +2222,8 @@ fn linked_device_leaves() {
     assert!(matches!(
         outcome,
         ReceiveOutcome::Synced {
-            kind: SyncKind::Devices
+            kind: SyncKind::Devices,
+            ..
         }
     ));
     assert_eq!(a.core.my_devices().len(), 1);

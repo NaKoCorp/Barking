@@ -35,6 +35,10 @@ pub struct SyncSummary {
     /// before any deposit, verdict): the failure notification.
     #[uniffi(default = [])]
     pub failed: Vec<DeliveryChange>,
+    /// Contacts a copy of a message I sent from another of my devices
+    /// arrived for, each once: their conversations gain a row.
+    #[uniffi(default = [])]
+    pub synced_contacts: Vec<String>,
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -113,7 +117,9 @@ fn block_on<F: Future>(f: F) -> Result<F::Output, BarkingError> {
 /// `core` during the sync (the same core: they live in memory only).
 fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
     let contacts = core.contacts().unwrap_or_default();
-    let new_messages = std::mem::take(&mut report.received)
+    let received = std::mem::take(&mut report.received);
+    let synced_contacts = synced_contacts(&received);
+    let new_messages = received
         .into_iter()
         .filter_map(|o| match o {
             ReceiveOutcome::Message {
@@ -146,7 +152,25 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
         error: report.error,
         delivery_changes: changes_of(core.take_delivery_changes()),
         failed: changes_of(report.failed),
+        synced_contacts,
     }
+}
+
+/// Contacts of the synced sent copies among `received`, in first-seen order.
+fn synced_contacts(received: &[ReceiveOutcome]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for o in received {
+        if let ReceiveOutcome::Synced {
+            contact: Some(c), ..
+        } = o
+        {
+            let c = c.to_string();
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 /// A node of the local view (the Network screen's relays).
@@ -278,5 +302,42 @@ impl Device {
                 Ok(summary(core, report))
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use barking_core::SyncKind;
+    use barking_core::identity::root::Fingerprint;
+
+    use super::*;
+
+    #[test]
+    fn synced_sent_copy_names_its_contact() {
+        let bob = Fingerprint([7; 32]);
+        let sam = Fingerprint([9; 32]);
+        let received = [
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Sent,
+                contact: Some(bob),
+            },
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Contact,
+                contact: None,
+            },
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Sent,
+                contact: Some(sam),
+            },
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Sent,
+                contact: Some(bob),
+            },
+            ReceiveOutcome::Duplicate,
+        ];
+        assert_eq!(
+            synced_contacts(&received),
+            vec![bob.to_string(), sam.to_string()]
+        );
     }
 }

@@ -1247,7 +1247,7 @@ fn sync_devices_requires_newer_signed_list() {
     let card = a.contact_card("").unwrap();
     let pkt = devices_packet(&mut a, &t1, card, 30, &mut rng);
     match t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap() {
-        ReceiveOutcome::Synced { kind } => assert_eq!(kind, SyncKind::Devices),
+        ReceiveOutcome::Synced { kind, .. } => assert_eq!(kind, SyncKind::Devices),
         other => panic!("Synced expected, got {other:?}"),
     }
     assert_eq!(t1.devices, a.devices);
@@ -1348,7 +1348,8 @@ fn older_valid_sync_devices_is_acked_duplicate() {
     assert!(matches!(
         t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap(),
         ReceiveOutcome::Synced {
-            kind: SyncKind::Devices
+            kind: SyncKind::Devices,
+            ..
         }
     ));
     let current = t1.devices.clone();
@@ -2484,7 +2485,8 @@ fn sync_devices_without_me_removes_me() {
     assert!(matches!(
         t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap(),
         ReceiveOutcome::Synced {
-            kind: SyncKind::Devices
+            kind: SyncKind::Devices,
+            ..
         }
     ));
     let version = a.devices.version + 1;

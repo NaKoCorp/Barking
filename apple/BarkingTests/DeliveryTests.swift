@@ -271,6 +271,20 @@ final class DeliveryCoreTests: XCTestCase {
         XCTAssertEqual(d.syncCalls, 1)
     }
 
+    /// A copy of a message I sent from another device reloads its
+    /// conversation, like a new message.
+    func testSyncedSentCopyReloadsItsConversation() async {
+        let d = FakeDevice()
+        d.summary = SyncSummary(itemsReceived: 1, sent: 0, newMessages: [], networkUp: true, error: nil,
+                                syncedContacts: ["b"])
+        let core = CoreService(device: d, runner: DirectRunner())
+        let seen = Seen(await core.changes)
+        let outcome = await core.sync(reason: .timer)
+        XCTAssertEqual(outcome.syncedContacts, ["b"])
+        let ok = await seen.eventually { $0.contains(.messages(contact: "b")) }
+        XCTAssertTrue(ok, "\(seen.all)")
+    }
+
     /// A refused retry publishes nothing.
     func testFailedRetryPublishesNothing() async {
         let d = FakeDevice()

@@ -333,10 +333,13 @@ public actor CoreService {
         lastSyncAt = Date()
         publish(.network)
         if outcome.received > 0 || outcome.sent > 0 { publish(.contacts) }
-        // A new message reloads its conversation whole; the others, whose
-        // state alone changed, refresh their rows after the window.
+        // A new message (or a copy of one I sent from another device)
+        // reloads its conversation whole; the others, whose state alone
+        // changed, refresh their rows after the window.
         noteDelivery(outcome.deliveryChanges)
-        for contact in Set(outcome.newMessageContacts).sorted() { publish(.messages(contact: contact)) }
+        for contact in Set(outcome.newMessageContacts + outcome.syncedContacts).sorted() {
+            publish(.messages(contact: contact))
+        }
         return outcome
     }
     public func nodes() async throws -> [NodeInfo] { try await call("nodes") { try $0.nodes() } }
