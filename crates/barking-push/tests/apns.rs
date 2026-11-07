@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use barking_proto::push::{ApnsEnv, WakeToken};
+use barking_proto::push::{ApnsEnv, WakeReason, WakeToken};
 use barking_push::apns::ApnsPusher;
 use barking_push::{ApnsConfig, PushOutcome, Pusher};
 use http_body_util::{BodyExt, Full};
@@ -18,6 +18,7 @@ use tokio::net::TcpListener;
 
 const BODY: &str =
     r#"{"aps":{"alert":{"loc-key":"NEW_MESSAGE"},"mutable-content":1,"sound":"default"}}"#;
+const RECEIPT_BODY: &str = r#"{"aps":{"content-available":1}}"#;
 
 #[derive(Clone, Debug)]
 struct Seen {
@@ -106,6 +107,7 @@ fn token(env: ApnsEnv) -> WakeToken {
         env,
         collapse: [0x11; 16],
         expires_day: 0,
+        reason: WakeReason::Message,
     }
 }
 
@@ -159,6 +161,25 @@ async fn push_sends_exact_headers_and_body() {
     assert_eq!(s.header("apns-topic"), Some("fr.example.barking"));
     assert_eq!(s.header("apns-push-type"), Some("alert"));
     assert_eq!(s.header("apns-priority"), Some("10"));
+    assert_eq!(s.header("apns-collapse-id"), Some("11".repeat(16).as_str()));
+    let exp: u64 = s.header("apns-expiration").unwrap().parse().unwrap();
+    assert!((1_700_000_000 + 3600..1_700_000_000 + 3700).contains(&exp));
+}
+
+#[tokio::test]
+async fn receipt_push_is_background() {
+    let f = fake().await;
+    let p = pusher(&f.url, &f.url);
+    let mut t = token(ApnsEnv::Production);
+    t.reason = WakeReason::Receipt;
+    assert_eq!(p.push(t).await, PushOutcome::Sent);
+    let seen = f.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let s = &seen[0];
+    assert_eq!(s.body, RECEIPT_BODY);
+    assert_eq!(s.header("apns-topic"), Some("fr.example.barking"));
+    assert_eq!(s.header("apns-push-type"), Some("background"));
+    assert_eq!(s.header("apns-priority"), Some("5"));
     assert_eq!(s.header("apns-collapse-id"), Some("11".repeat(16).as_str()));
     let exp: u64 = s.header("apns-expiration").unwrap().parse().unwrap();
     assert!((1_700_000_000 + 3600..1_700_000_000 + 3700).contains(&exp));

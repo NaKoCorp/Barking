@@ -51,6 +51,16 @@ pub enum Body {
     /// each of its contacts after a linking. Boxed card (size of
     /// the enum); same postcard format as `CardUpdate(ContactCard)`.
     CardUpdate(Box<ContactCard>),
+    /// The root key (32-byte seed), sent to one of my devices only: admin
+    /// transfer (`core/admin.rs`), with the version of the sender's device
+    /// list (the target refuses it while its own list is older). Added last.
+    AdminTransfer {
+        seed: [u8; 32],
+        version: u64,
+    },
+    /// Request of one of my devices to leave my account, handled by the
+    /// administrator (`core/remove.rs`), ignored elsewhere. Added last.
+    RemoveMe,
 }
 
 /// State of a contact, replayed on my other devices. Idempotent: the same
@@ -58,7 +68,8 @@ pub enum Body {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncOp {
     /// Contact present with this card, this alias (empty: none) and this
-    /// verified status (merged by "or"). Boxed card (size of
+    /// verified status (merged by "or"). Sent by older versions only (see
+    /// `UpsertV2`). Boxed card (size of
     /// the enum); same postcard format.
     Upsert {
         card: Box<ContactCard>,
@@ -67,6 +78,17 @@ pub enum SyncOp {
     },
     /// Contact removed (no effect if unknown).
     Remove(Fingerprint),
+    /// `Upsert` with the date of the last verification change: the verified
+    /// status is its own register, the most recent change wins whatever the
+    /// contact's other operations (a device behind on them neither erases
+    /// nor loses a mark). Appended last: older devices still read `Upsert`,
+    /// whose status counts as unknown (date 0, merged by "or").
+    UpsertV2 {
+        card: Box<ContactCard>,
+        alias: String,
+        verified: bool,
+        verified_at: u64,
+    },
 }
 
 /// Encrypted content of a packet. No sender identity.
@@ -92,6 +114,8 @@ impl fmt::Debug for Body {
             Body::CardUpdate(card) => {
                 write!(f, "CardUpdate(version {})", card.devices.version)
             }
+            Body::AdminTransfer { .. } => f.write_str("AdminTransfer(<secret>)"),
+            Body::RemoveMe => f.write_str("RemoveMe"),
         }
     }
 }
@@ -102,6 +126,7 @@ impl fmt::Debug for SyncOp {
         f.write_str(match self {
             SyncOp::Upsert { .. } => "Upsert",
             SyncOp::Remove(_) => "Remove",
+            SyncOp::UpsertV2 { .. } => "UpsertV2",
         })
     }
 }
@@ -257,7 +282,7 @@ pub fn seal(
 /// Granularity of the expiry of a packet sealed by the core.
 pub const EXPIRY_GRANULARITY_SECS: u64 = 600;
 
-/// Expiry of a packet sealed at `now`: `now` + 7 days, rounded down
+/// Expiry of a packet sealed at `now`: `now` + 24 hours, rounded down
 /// to 10 minutes (nodes do not see the second of sealing).
 /// Saturated at `u32::MAX`.
 pub fn sealed_expiry(now: u64) -> u32 {
@@ -604,8 +629,8 @@ mod tests {
             (base + 600, base + 600 + DEFAULT_TTL_SECS),
         ] {
             assert_eq!(u64::from(sealed_expiry(now)), want);
-            // Always accepted by a node: in the future, at 7 d + 1 h at most.
-            assert!(want > now && want <= now + 7 * 86_400 + 3_600);
+            // Always accepted by a node: in the future, at 24 h + 1 h at most.
+            assert!(want > now && want <= now + 25 * 3_600);
         }
     }
 

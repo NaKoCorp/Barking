@@ -23,7 +23,7 @@ fn reopen_persists() {
         store.get_meta::<Vec<u8>>("hello").unwrap(),
         Some(vec![1, 2, 3])
     );
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(2));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
     assert_eq!(store.get_meta::<u32>("absent").unwrap(), None);
 }
 
@@ -109,14 +109,15 @@ fn contacts_sessions_messages_events() {
     let mid = MessageId([6; 16]);
     assert!(
         store
-            .insert_message(fp, Direction::Out, "hi", MessageStatus::Queued, 5, mid)
+            .insert_message(fp, Direction::Out, "hi", MessageStatus::Pending, 5, mid)
             .unwrap()
     );
-    store.add_delivery(mid, pid, dev, false).unwrap();
-    assert_eq!(store.mark_delivered_by_packet(pid).unwrap(), Some(mid));
+    store.add_delivery(mid, pid, dev, false, 5, 1024).unwrap();
+    assert_eq!(store.mark_delivered_by_packet(pid, 9).unwrap(), Some(mid));
+    crate::core::delivery::recompute_message_status(&store, mid).unwrap();
     let m = store.messages_with(fp).unwrap();
     assert_eq!(m.len(), 1);
-    assert_eq!(m[0].status, MessageStatus::Delivered);
+    assert_eq!(m[0].status, MessageStatus::Received);
     assert_eq!(m[0].direction, Direction::Out);
 
     store
@@ -164,7 +165,7 @@ fn message_lookup_and_deletions() {
             fp,
             Direction::Out,
             "x",
-            MessageStatus::Sent,
+            MessageStatus::OnNetwork,
             5,
             MessageId([6; 16]),
         )
@@ -175,12 +176,14 @@ fn message_lookup_and_deletions() {
             pid,
             crate::identity::device::DeviceId([5; 16]),
             false,
+            5,
+            1024,
         )
         .unwrap();
     let m = store.message_by_packet(pid).unwrap().unwrap();
     assert_eq!(m.message_id, MessageId([6; 16]));
     assert_eq!(m.direction, Direction::Out);
-    assert_eq!(m.status, MessageStatus::Sent);
+    assert_eq!(m.status, MessageStatus::OnNetwork);
 
     store.upsert_contact(fp, b"c", "a", false).unwrap();
     let dev = crate::identity::device::DeviceId([5; 16]);
@@ -223,6 +226,77 @@ fn message_lookup_and_deletions() {
 }
 
 #[test]
+fn transparency_page_filters_and_pages() {
+    let (_d, _p, store) = open_tmp();
+    for i in 0..250u32 {
+        let class = if i % 25 == 0 {
+            EventClass::Security
+        } else {
+            EventClass::Routine
+        };
+        store
+            .append_event(u64::from(i), None, class, &i.to_be_bytes())
+            .unwrap();
+    }
+    let p1 = store.transparency_page(100, None, false).unwrap();
+    assert_eq!(p1.len(), 100);
+    let p2 = store.transparency_page(100, Some(p1[99].0), false).unwrap();
+    assert_eq!(p2.len(), 100);
+    let p3 = store.transparency_page(100, Some(p2[99].0), false).unwrap();
+    assert_eq!(p3.len(), 50);
+    assert!(
+        store
+            .transparency_page(100, Some(p3[49].0), false)
+            .unwrap()
+            .is_empty()
+    );
+    let sec = store.transparency_page(100, None, true).unwrap();
+    assert_eq!(sec.len(), 10);
+    // Newest first, security only.
+    assert_eq!(sec[0].1, 225);
+    assert_eq!(sec[9].1, 0);
+    assert_eq!(p1[0].1, 249);
+    assert_eq!(p1[99].1, 150);
+    assert_eq!(p2[0].1, 149);
+}
+
+/// Events appended (or purged) between two pages neither repeat nor skip a
+/// row: the next page starts from the id of the last row seen.
+#[test]
+fn transparency_paging_is_stable_while_the_log_moves() {
+    let (_d, _p, store) = open_tmp();
+    for i in 0..30u32 {
+        store
+            .append_event(u64::from(i), None, EventClass::Routine, &i.to_be_bytes())
+            .unwrap();
+    }
+    let p1 = store.transparency_page(10, None, false).unwrap();
+    // 5 new events arrive while the user scrolls.
+    for i in 30..35u32 {
+        store
+            .append_event(u64::from(i), None, EventClass::Routine, &i.to_be_bytes())
+            .unwrap();
+    }
+    let p2 = store.transparency_page(10, Some(p1[9].0), false).unwrap();
+    let ats: Vec<u64> = p1.iter().chain(p2.iter()).map(|r| r.1).collect();
+    assert_eq!(
+        ats,
+        (10..30).rev().collect::<Vec<u64>>(),
+        "no overlap, no gap"
+    );
+    // The oldest rows go away (purge): the next page has no gap either.
+    store
+        .conn()
+        .execute("DELETE FROM transparency WHERE at < 5", [])
+        .unwrap();
+    let p3 = store.transparency_page(10, Some(p2[9].0), false).unwrap();
+    assert_eq!(
+        p3.iter().map(|r| r.1).collect::<Vec<_>>(),
+        (5..10).rev().collect::<Vec<u64>>()
+    );
+}
+
+#[test]
 fn recent_events_newest_window_in_order() {
     let (_d, _p, store) = open_tmp();
     for i in 0..5u8 {
@@ -242,9 +316,15 @@ fn outbox_put_pending_remove_purge() {
     use crate::packet::Kind;
     let (_d, _p, store) = open_tmp();
     let (a, b, c) = (PacketId([1; 16]), PacketId([2; 16]), PacketId([3; 16]));
-    store.outbox_put(b, b"bb", Kind::Message, 500, 20).unwrap();
-    store.outbox_put(a, b"aa", Kind::Message, 500, 10).unwrap();
-    store.outbox_put(c, b"cc", Kind::Ack, 100, 30).unwrap();
+    store
+        .outbox_put(b, b"bb", Kind::Message, 500, 20, None)
+        .unwrap();
+    store
+        .outbox_put(a, b"aa", Kind::Message, 500, 10, None)
+        .unwrap();
+    store
+        .outbox_put(c, b"cc", Kind::Ack, 100, 30, None)
+        .unwrap();
     // From oldest to newest.
     assert_eq!(
         store.outbox_pending(50).unwrap(),
@@ -265,7 +345,9 @@ fn outbox_put_pending_remove_purge() {
         vec![(b, b"bb".to_vec())]
     );
     // Reinserting the same identifier does not duplicate the row.
-    store.outbox_put(b, b"bb", Kind::Message, 500, 20).unwrap();
+    store
+        .outbox_put(b, b"bb", Kind::Message, 500, 20, None)
+        .unwrap();
     assert_eq!(store.outbox_pending(101).unwrap().len(), 1);
 }
 
@@ -274,7 +356,7 @@ fn outbox_put_rolls_back_with_transaction() {
     use crate::packet::Kind;
     let (_d, _p, mut store) = open_tmp();
     let r: crate::Result<()> = store.transaction(|tx| {
-        tx.outbox_put(PacketId([1; 16]), b"x", Kind::Message, 500, 1)?;
+        tx.outbox_put(PacketId([1; 16]), b"x", Kind::Message, 500, 1, None)?;
         Err(CoreError::Store("boom".into()))
     });
     assert!(r.is_err());
@@ -300,7 +382,7 @@ fn message_row_debug_hides_body() {
             fp,
             Direction::In,
             "the body secret",
-            MessageStatus::Delivered,
+            MessageStatus::Received,
             5,
             MessageId([1; 16]),
         )
@@ -590,7 +672,7 @@ fn insert_message_duplicate_id_returns_false() {
     let mid = MessageId([3; 16]);
     let ins = |body: &str| {
         store
-            .insert_message(fp, Direction::In, body, MessageStatus::Delivered, 5, mid)
+            .insert_message(fp, Direction::In, body, MessageStatus::Received, 5, mid)
             .unwrap()
     };
     assert!(ins("a"));
@@ -601,7 +683,7 @@ fn insert_message_duplicate_id_returns_false() {
 #[test]
 fn newer_schema_refused() {
     let (_d, path, store) = open_tmp();
-    store.put_meta("schema_version", &3u32).unwrap();
+    store.put_meta("schema_version", &4u32).unwrap();
     drop(store);
     assert!(matches!(
         Store::open(&path, &KEY),
@@ -656,7 +738,7 @@ fn migration_v1_keeps_history_and_acks() {
         .unwrap();
     }
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(2));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
     let m = store.messages_with(fp).unwrap();
     let bodies: Vec<_> = m
         .iter()
@@ -665,9 +747,10 @@ fn migration_v1_keeps_history_and_acks() {
     assert_eq!(
         bodies,
         vec![
-            ("received", Direction::In, MessageStatus::Delivered),
-            ("en attente", Direction::Out, MessageStatus::Sent),
-            ("no packet", Direction::In, MessageStatus::Delivered),
+            ("received", Direction::In, MessageStatus::Received),
+            // Still queued without a known deposit: pending (v3 backfill).
+            ("en attente", Direction::Out, MessageStatus::Pending),
+            ("no packet", Direction::In, MessageStatus::Received),
         ]
     );
     assert_eq!(
@@ -683,12 +766,13 @@ fn migration_v1_keeps_history_and_acks() {
     );
     // The acknowledgement of the pending v1 packet marks the message as delivered.
     assert_eq!(
-        store.mark_delivered_by_packet(PacketId(pout)).unwrap(),
+        store.mark_delivered_by_packet(PacketId(pout), 50).unwrap(),
         Some(m[1].message_id)
     );
+    crate::core::delivery::recompute_message_status(&store, m[1].message_id).unwrap();
     let after = store.messages_with(fp).unwrap();
     assert_eq!(after.len(), 3);
-    assert_eq!(after[1].status, MessageStatus::Delivered);
+    assert_eq!(after[1].status, MessageStatus::Received);
     // Reopening: the migration is not replayed.
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
@@ -724,12 +808,12 @@ fn migration_from_pre_1a_database() {
         .unwrap();
     }
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(2));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
     let m = store.messages_with(fp).unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(
         (m[0].body.as_str(), m[0].direction, m[0].status, m[0].at),
-        ("old", Direction::In, MessageStatus::Delivered, 10)
+        ("old", Direction::In, MessageStatus::Received, 10)
     );
     assert_eq!(
         m[0].message_id,
@@ -766,7 +850,7 @@ fn inbound_packets_map_to_their_message() {
     // Bound to the sender: another sender, same envelope identifier, another message.
     assert_ne!(mid, MessageId::incoming(&Fingerprint([5; 32]), &[1; 16]));
     store
-        .insert_message(fp, Direction::In, "x", MessageStatus::Delivered, 5, mid)
+        .insert_message(fp, Direction::In, "x", MessageStatus::Received, 5, mid)
         .unwrap();
     // The message and its resend (two packets) lead to the same message.
     for pid in [PacketId([1; 16]), PacketId([2; 16])] {
@@ -778,7 +862,7 @@ fn inbound_packets_map_to_their_message() {
     assert!(!store.is_my_packet(PacketId([1; 16])).unwrap());
     assert!(
         store
-            .mark_delivered_by_packet(PacketId([1; 16]))
+            .mark_delivered_by_packet(PacketId([1; 16]), 5)
             .unwrap()
             .is_none()
     );
@@ -793,11 +877,11 @@ fn v2_database_without_inbound_gets_it() {
         .execute_batch("DROP TABLE inbound;")
         .unwrap();
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(2));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
     let fp = Fingerprint([4; 32]);
     let mid = MessageId::incoming(&fp, &[1; 16]);
     store
-        .insert_message(fp, Direction::In, "x", MessageStatus::Delivered, 5, mid)
+        .insert_message(fp, Direction::In, "x", MessageStatus::Received, 5, mid)
         .unwrap();
     store.record_inbound(PacketId([1; 16]), mid).unwrap();
     assert!(
@@ -817,19 +901,24 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
     let mine = crate::identity::device::DeviceId([8; 16]);
     let (to_bob, to_me) = (PacketId([1; 16]), PacketId([2; 16]));
     store
-        .insert_message(fp, Direction::Out, "x", MessageStatus::Sent, 5, mid)
+        .insert_message(fp, Direction::Out, "x", MessageStatus::Pending, 5, mid)
         .unwrap();
-    store.add_delivery(mid, to_bob, dev, false).unwrap();
-    store.add_delivery(mid, to_me, mine, true).unwrap();
+    store
+        .add_delivery(mid, to_bob, dev, false, 5, 1024)
+        .unwrap();
+    store.add_delivery(mid, to_me, mine, true, 5, 1024).unwrap();
     for id in [to_bob, to_me] {
-        store.outbox_put(id, b"p", Kind::Message, 999, 5).unwrap();
+        store
+            .outbox_put(id, b"p", Kind::Message, 999, 5, None)
+            .unwrap();
     }
-    // My device's acknowledgement: delivery recorded, message still `Sent`.
-    assert_eq!(store.mark_delivered_by_packet(to_me).unwrap(), Some(mid));
+    // My device's acknowledgement: delivery recorded, message still `Pending`.
+    assert_eq!(store.mark_delivered_by_packet(to_me, 6).unwrap(), Some(mid));
+    crate::core::delivery::recompute_message_status(&store, mid).unwrap();
     assert!(store.delivery_acked(to_me).unwrap());
     assert_eq!(
         store.messages_with(fp).unwrap()[0].status,
-        MessageStatus::Sent
+        MessageStatus::Pending
     );
     // Contact deletion: the copy for my device stays in the queue.
     store.upsert_contact(fp, b"c", "", false).unwrap();
@@ -841,11 +930,16 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
         .map(|(id, _)| id)
         .collect();
     assert_eq!(left, vec![to_me]);
-    // v2 database created before the `own` column: it is added on open.
+    // v2 database created before the `own` column: it is added on open
+    // (then the v3 migration runs, from a v2 queue).
     drop(store);
     let raw = raw_conn(&path);
     raw.execute_batch(
-        "DROP TABLE deliveries; CREATE TABLE deliveries (message_id BLOB NOT NULL, \
+        "UPDATE meta SET v = x'02' WHERE k = 'schema_version'; \
+         DROP TABLE outbox; CREATE TABLE outbox (packet_id BLOB PRIMARY KEY NOT NULL, \
+         bytes BLOB NOT NULL, kind INTEGER NOT NULL, expires_at INTEGER NOT NULL, \
+         created_at INTEGER NOT NULL); \
+         DROP TABLE deliveries; CREATE TABLE deliveries (message_id BLOB NOT NULL, \
          packet_id BLOB UNIQUE NOT NULL, device BLOB NOT NULL, status INTEGER NOT NULL); \
          DROP TABLE contact_clock; \
          CREATE TABLE contact_clock (fp BLOB PRIMARY KEY NOT NULL, at INTEGER NOT NULL, \
@@ -855,7 +949,8 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
     .unwrap();
     drop(raw);
     let store = Store::open(&path, &KEY).unwrap();
-    store.add_delivery(mid, to_me, mine, true).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    store.add_delivery(mid, to_me, mine, true, 5, 1024).unwrap();
     // Column `writer` added: unknown author (null) for the old row.
     let zero = crate::identity::device::DeviceId([0; 16]);
     assert_eq!(
@@ -899,4 +994,333 @@ fn arr_refuses_wrong_length() {
         arr::<32>(vec![7; 31]),
         Err(CoreError::Store("invalid field length".into()))
     );
+}
+
+// --- Schema v3: delivery times and honest message states.
+
+/// Reference v2 database for the v2 → v3 migration, committed under
+/// `tests/data` and regenerated by `make_v2_fixture`.
+fn v2_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/v2-deliveries.sqlite")
+}
+
+/// Contact of every fixture message.
+const FX_FP: [u8; 32] = [4; 32];
+/// Short node identifiers of the fixture's `Deposited` steps.
+const FX_NODE: &str = "K7QX2M4A";
+const FX_NODE_LATE: &str = "ZZ2Q7M4B";
+
+/// Builds an empty v2 database on `conn` with the v2 schema code only (the
+/// v1 schema, the v1 → v2 migration and the v2 additions applied at open),
+/// so that the fixture stays reproducible once the store opens v3.
+fn build_v2_schema(conn: &Connection) {
+    conn.execute_batch(schema::SCHEMA_V1_LEGACY).unwrap();
+    schema::migrate_v1_to_v2(conn).unwrap();
+    conn.execute_batch(schema::CONTACTS_ADD_VERIFIED_AT)
+        .unwrap();
+    conn.execute_batch(schema::TRANSPARENCY_INDEXES).unwrap();
+    conn.execute_batch(schema::ROUTE_STEPS).unwrap();
+}
+
+/// Writes the v2 reference database (`tests/data/v2-deliveries.sqlite`,
+/// encrypted with `KEY`). Run on demand:
+/// `cargo nextest run -p barking-core --run-ignored only make_v2_fixture`.
+///
+/// Content (contact `FX_FP`, statuses as stored by v2: deliveries 1 or 3):
+/// - message 0x11 (out, 3, at 100): delivery 0xA1 to device 0xD1, acked
+///   (steps Sealed 101 size 2048, Deposited 110 on `FX_NODE`, Deposited 115
+///   on `FX_NODE_LATE`, AckVerified 130; left the queue); delivery 0xA2 to
+///   device 0xD2 (Sealed 101 size 2048, still queued, never deposited); own
+///   copy 0xA3 to my device 0xE1 (OwnCopy 102, Deposited 112 on `FX_NODE`,
+///   still queued);
+/// - message 0x22 (out, 1, at 200): delivery 0xB1 (Sealed 200 size 1024),
+///   still queued without a deposit;
+/// - message 0x33 (out, 1, at 300): delivery 0xC1 without any route row,
+///   no longer queued;
+/// - message 0x44 (out, 3, at 400): delivery 0xC2 acked, route purged;
+/// - message 0x55 (out, 1, at 500): delivery 0xC3 (Sealed 500 size 1024,
+///   Deposited 510 on `FX_NODE`), still queued;
+/// - card update 0x66 (no message row): delivery 0xC4 still queued, no route;
+/// - message 0x77 (in, 3, at 600);
+/// - message 0x88 (out, 1, at 700) sent from another of my devices: no delivery;
+/// - a queued receipt 0xF1 (kind ack), without a delivery.
+#[test]
+#[ignore = "writes the committed v2 fixture"]
+fn make_v2_fixture() {
+    let path = v2_fixture_path();
+    let _ = std::fs::remove_file(&path);
+    let conn = raw_conn(&path);
+    build_v2_schema(&conn);
+    let fp = FX_FP.as_slice();
+    let msg = |mid: u8, dir: i64, status: i64, at: i64| {
+        conn.execute(
+            "INSERT INTO messages(message_id, contact_fp, direction, body, status, at) \
+             VALUES (?1, ?2, ?3, 'm', ?4, ?5)",
+            params![[mid; 16].as_slice(), fp, dir, status, at],
+        )
+        .unwrap();
+    };
+    let delivery = |mid: u8, pid: u8, dev: u8, status: i64, own: i64| {
+        conn.execute(
+            "INSERT INTO deliveries(message_id, packet_id, device, status, own) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                [mid; 16].as_slice(),
+                [pid; 16].as_slice(),
+                [dev; 16].as_slice(),
+                status,
+                own
+            ],
+        )
+        .unwrap();
+    };
+    let step = |pid: u8, at: i64, step: i64, node: Option<&str>, size: Option<i64>| {
+        conn.execute(
+            "INSERT INTO route_steps(packet_id, at, step, node, size) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![[pid; 16].as_slice(), at, step, node, size],
+        )
+        .unwrap();
+    };
+    let queued = |pid: u8, kind: i64, created: i64| {
+        conn.execute(
+            "INSERT INTO outbox(packet_id, bytes, kind, expires_at, created_at) \
+             VALUES (?1, x'00', ?2, 999999, ?3)",
+            params![[pid; 16].as_slice(), kind, created],
+        )
+        .unwrap();
+    };
+    // Steps as stored by `RouteStep`: Sealed 0, Deposited 1, AckVerified 4, OwnCopy 5.
+    msg(0x11, 0, 3, 100);
+    delivery(0x11, 0xA1, 0xD1, 3, 0);
+    step(0xA1, 101, 0, None, Some(2048));
+    step(0xA1, 115, 1, Some(FX_NODE_LATE), None);
+    step(0xA1, 110, 1, Some(FX_NODE), None);
+    step(0xA1, 130, 4, None, None);
+    delivery(0x11, 0xA2, 0xD2, 1, 0);
+    step(0xA2, 101, 0, None, Some(2048));
+    queued(0xA2, 0, 101);
+    delivery(0x11, 0xA3, 0xE1, 1, 1);
+    step(0xA3, 102, 5, None, None);
+    step(0xA3, 112, 1, Some(FX_NODE), None);
+    queued(0xA3, 0, 102);
+    msg(0x22, 0, 1, 200);
+    delivery(0x22, 0xB1, 0xD1, 1, 0);
+    step(0xB1, 200, 0, None, Some(1024));
+    queued(0xB1, 0, 200);
+    msg(0x33, 0, 1, 300);
+    delivery(0x33, 0xC1, 0xD1, 1, 0);
+    msg(0x44, 0, 3, 400);
+    delivery(0x44, 0xC2, 0xD1, 3, 0);
+    msg(0x55, 0, 1, 500);
+    delivery(0x55, 0xC3, 0xD1, 1, 0);
+    step(0xC3, 500, 0, None, Some(1024));
+    step(0xC3, 510, 1, Some(FX_NODE), None);
+    queued(0xC3, 0, 500);
+    delivery(0x66, 0xC4, 0xD1, 1, 0);
+    queued(0xC4, 0, 550);
+    msg(0x77, 1, 3, 600);
+    msg(0x88, 0, 1, 700);
+    queued(0xF1, 1, 650);
+    let version: Vec<u8> = conn
+        .query_row("SELECT v FROM meta WHERE k = 'schema_version'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(version, postcard::to_allocvec(&2u32).unwrap());
+}
+
+/// Copy of the v2 fixture in a fresh directory.
+fn v2_fixture_copy() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("v2.sqlite");
+    std::fs::copy(v2_fixture_path(), &path).unwrap();
+    (dir, path)
+}
+
+/// Delivery columns of packet `[pid; 16]`: status, sealed_at, deposited_at,
+/// node, size, acked_at, expired_at.
+type DeliveryCols = (
+    i64,
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+fn delivery_cols(conn: &Connection, pid: u8) -> DeliveryCols {
+    conn.query_row(
+        "SELECT status, sealed_at, deposited_at, node, size, acked_at, expired_at \
+         FROM deliveries WHERE packet_id = ?1",
+        params![[pid; 16].as_slice()],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        },
+    )
+    .unwrap()
+}
+
+fn outbox_cols(conn: &Connection, pid: u8) -> (Option<i64>, Option<Vec<u8>>) {
+    conn.query_row(
+        "SELECT deposited_at, ref FROM outbox WHERE packet_id = ?1",
+        params![[pid; 16].as_slice()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap()
+}
+
+fn message_status(conn: &Connection, mid: u8) -> i64 {
+    conn.query_row(
+        "SELECT status FROM messages WHERE message_id = ?1",
+        params![[mid; 16].as_slice()],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.query_row(
+        "SELECT count(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
+        params![table, column],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn has_object(conn: &Connection, kind: &str, name: &str) -> bool {
+    conn.query_row(
+        "SELECT count(*) > 0 FROM sqlite_master WHERE type = ?1 AND name = ?2",
+        params![kind, name],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn migrate_v2_to_v3_backfills_from_route_steps() {
+    let (_d, path) = v2_fixture_copy();
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    let c = store.conn();
+    let node = Some(FX_NODE.to_owned());
+    // Acked: first deposit (min(at)) and its node, Sealed size, AckVerified time.
+    assert_eq!(
+        delivery_cols(c, 0xA1),
+        (3, 101, Some(110), node.clone(), Some(2048), Some(130), None)
+    );
+    // Still queued without a deposit: back to Pending.
+    assert_eq!(
+        delivery_cols(c, 0xA2),
+        (0, 101, None, None, Some(2048), None, None)
+    );
+    // Own copy: sealed at its OwnCopy step, deposited, no size.
+    assert_eq!(
+        delivery_cols(c, 0xA3),
+        (1, 102, Some(112), node.clone(), None, None, None)
+    );
+    assert_eq!(
+        delivery_cols(c, 0xB1),
+        (0, 200, None, None, Some(1024), None, None)
+    );
+    // No route row, out of the queue: sealed at the message's time, status kept.
+    assert_eq!(
+        delivery_cols(c, 0xC1),
+        (1, 300, None, None, None, None, None)
+    );
+    // Acked with its route purged: acked at its sealing time.
+    assert_eq!(
+        delivery_cols(c, 0xC2),
+        (3, 400, None, None, None, Some(400), None)
+    );
+    assert_eq!(
+        delivery_cols(c, 0xC3),
+        (1, 500, Some(510), node, Some(1024), None, None)
+    );
+    // Card update: no step, no message row.
+    assert_eq!(delivery_cols(c, 0xC4), (0, 0, None, None, None, None, None));
+    // The queue takes the deposit of its packet's delivery; a receipt has none.
+    assert_eq!(outbox_cols(c, 0xA2), (None, None));
+    assert_eq!(outbox_cols(c, 0xA3), (Some(112), None));
+    assert_eq!(outbox_cols(c, 0xB1), (None, None));
+    assert_eq!(outbox_cols(c, 0xC3), (Some(510), None));
+    assert_eq!(outbox_cols(c, 0xC4), (None, None));
+    assert_eq!(outbox_cols(c, 0xF1), (None, None));
+    // Messages recomputed from their contact deliveries; the own copy of
+    // 0x11 does not count. Received and deliveryless messages untouched.
+    let statuses: Vec<i64> = [0x11, 0x22, 0x33, 0x44, 0x55, 0x77, 0x88]
+        .into_iter()
+        .map(|m| message_status(c, m))
+        .collect();
+    assert_eq!(statuses, vec![3, 0, 1, 3, 1, 3, 1]);
+    assert!(has_object(c, "table", "deleted_messages"));
+    assert!(has_column(c, "outbox", "deposit_tried_at"));
+    assert!(has_object(c, "index", "messages_delivery"));
+    assert!(has_object(c, "index", "outbox_waiting"));
+    // Reopening: the migration is not replayed.
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(delivery_cols(store.conn(), 0xA2).0, 0);
+    assert_eq!(message_status(store.conn(), 0x22), 0);
+}
+
+#[test]
+fn migration_is_one_transaction() {
+    let (_d, path) = v2_fixture_copy();
+    {
+        let conn = raw_conn(&path);
+        let failed = schema::migrate_v2_to_v3_hooked(&conn, |_| {
+            Err(rusqlite::Error::InvalidParameterName("injected".into()))
+        });
+        assert!(failed.is_err());
+        let version: Vec<u8> = conn
+            .query_row("SELECT v FROM meta WHERE k = 'schema_version'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, postcard::to_allocvec(&2u32).unwrap());
+        assert!(!has_column(&conn, "deliveries", "sealed_at"));
+        assert!(!has_column(&conn, "outbox", "ref"));
+        assert!(!has_column(&conn, "outbox", "deposit_tried_at"));
+        assert!(!has_object(&conn, "table", "deleted_messages"));
+        assert_eq!(delivery_cols_v2_status(&conn, 0xA2), 1);
+    }
+    // The untouched v2 database still migrates on the next open.
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(delivery_cols(store.conn(), 0xA2).0, 0);
+}
+
+fn delivery_cols_v2_status(conn: &Connection, pid: u8) -> i64 {
+    conn.query_row(
+        "SELECT status FROM deliveries WHERE packet_id = ?1",
+        params![[pid; 16].as_slice()],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn v3_database_without_deposit_tried_at_gets_it() {
+    let (_d, path) = v2_fixture_copy();
+    drop(Store::open(&path, &KEY).unwrap());
+    // A development database migrated to v3 before the column existed.
+    {
+        let conn = raw_conn(&path);
+        conn.execute_batch("ALTER TABLE outbox DROP COLUMN deposit_tried_at;")
+            .unwrap();
+        assert!(!has_column(&conn, "outbox", "deposit_tried_at"));
+    }
+    let store = Store::open(&path, &KEY).unwrap();
+    assert!(has_column(store.conn(), "outbox", "deposit_tried_at"));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
 }

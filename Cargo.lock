@@ -297,12 +297,15 @@ dependencies = [
  "barking-net",
  "barking-node",
  "barking-proto",
+ "bip39",
  "libc",
+ "postcard",
  "rand",
  "tempfile",
  "thiserror",
  "tokio",
  "uniffi",
+ "zeroize",
 ]
 
 [[package]]

@@ -183,6 +183,10 @@ pub struct ServerConfig {
     /// (the write deadline still applies). Default: `None`.
     #[cfg(feature = "test-harness")]
     pub test_send_rate: Option<u64>,
+    /// Tests only (feature `test-harness`): period of the purge loop, instead
+    /// of `PURGE_INTERVAL`. Default: `None`.
+    #[cfg(feature = "test-harness")]
+    pub test_purge_interval: Option<Duration>,
     /// Tests only (feature `test-harness`): closes a connection once it has
     /// answered this many `Fetch` requests, as a lost link would.
     /// Default: `None`.
@@ -573,6 +577,8 @@ impl ServerConfig {
             #[cfg(feature = "test-harness")]
             test_send_rate: None,
             #[cfg(feature = "test-harness")]
+            test_purge_interval: None,
+            #[cfg(feature = "test-harness")]
             test_close_after_fetches: None,
         }
     }
@@ -619,6 +625,9 @@ pub(crate) struct Shared {
     /// Tests only: see `ServerConfig::test_send_rate`.
     #[cfg(feature = "test-harness")]
     send_rate: Option<u64>,
+    /// Tests only: see `ServerConfig::test_purge_interval`.
+    #[cfg(feature = "test-harness")]
+    purge_interval: Option<Duration>,
     /// Tests only: see `ServerConfig::test_close_after_fetches`.
     #[cfg(feature = "test-harness")]
     close_after_fetches: Option<u32>,
@@ -702,11 +711,19 @@ pub(crate) enum Stored<T> {
     Failed,
 }
 
+/// Tests only: seconds added to the clock of every node of the process
+/// (`testing::set_clock_offset`).
+#[cfg(feature = "test-harness")]
+pub(crate) static TEST_CLOCK_OFFSET: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) fn unix_now() -> u64 {
-    SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    #[cfg(feature = "test-harness")]
+    let now = now.saturating_add(TEST_CLOCK_OFFSET.load(Ordering::Relaxed));
+    now
 }
 
 impl Shared {
@@ -933,6 +950,8 @@ pub async fn run(
         #[cfg(feature = "test-harness")]
         send_rate: config.test_send_rate,
         #[cfg(feature = "test-harness")]
+        purge_interval: config.test_purge_interval,
+        #[cfg(feature = "test-harness")]
         close_after_fetches: config.test_close_after_fetches,
     });
 
@@ -990,8 +1009,12 @@ async fn purge_all(shared: &Arc<Shared>) {
             })
             .await
         {
-            Stored::Done((n, more)) => {
+            Stored::Done((n, more, marked)) => {
                 shared.stats.purged(n);
+                if marked {
+                    // An unacked message expired: same signal as a deposit.
+                    shared.wake_signal.message_arrived();
+                }
                 if !more {
                     return;
                 }
@@ -1002,7 +1025,11 @@ async fn purge_all(shared: &Arc<Shared>) {
 }
 
 async fn purge_loop(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
-    let mut tick = tokio::time::interval(PURGE_INTERVAL);
+    #[cfg(feature = "test-harness")]
+    let period = shared.purge_interval.unwrap_or(PURGE_INTERVAL);
+    #[cfg(not(feature = "test-harness"))]
+    let period = PURGE_INTERVAL;
+    let mut tick = tokio::time::interval(period);
     tick.tick().await; // first tick is immediate: the startup purge is done.
     loop {
         tokio::select! {

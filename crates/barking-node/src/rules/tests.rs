@@ -120,6 +120,15 @@ fn rejects_too_far_in_future() {
 }
 
 #[test]
+fn expiry_beyond_25_hours_is_refused() {
+    let (_d, mut s) = store();
+    let p = msg(1, 1, Tier::S, NOW + 25 * 3_600 + 1);
+    assert_eq!(put(&mut s, &p), Err(ErrorReason::TooFarInFuture));
+    let q = msg(2, 1, Tier::S, NOW + 25 * 3_600);
+    assert_eq!(put(&mut s, &q), Ok(()));
+}
+
+#[test]
 fn rejects_wrong_tier() {
     let (_d, mut s) = store();
     let p = ok_msg(1, 1);
@@ -274,11 +283,11 @@ fn ack_needs_no_pow() {
 #[test]
 fn deposit_window_tolerates_one_hour_skew() {
     let (_d, mut s) = store();
-    // Client clock one hour ahead: expires at now + 7 d + 1 h.
+    // Client clock one hour ahead: expires at now + 24 h + 1 h.
     let p = msg(1, 1, Tier::S, NOW + MAX_EXPIRY_SECS);
     assert_eq!(put(&mut s, &p), Ok(()));
-    // Client clock one hour behind: expires in 7 d - 1 h.
-    let q = msg(2, 1, Tier::S, NOW + 7 * 86_400 - 3_600);
+    // Client clock one hour behind: expires in 24 h - 1 h.
+    let q = msg(2, 1, Tier::S, NOW + 86_400 - 3_600);
     assert_eq!(put(&mut s, &q), Ok(()));
     // Packet expiring in one second: still valid.
     let r = msg(3, 1, Tier::S, NOW + 1);
@@ -367,9 +376,18 @@ fn batched_purge_keeps_stored_bytes() {
         put(&mut s, &msg(n, 1, Tier::S, NOW + 100)).unwrap();
     }
     put(&mut s, &msg(6, 1, Tier::S, NOW + 10_000)).unwrap();
-    assert_eq!(s.purge_expired_batch(NOW + 100, 2).unwrap(), (2, true));
-    assert_eq!(s.purge_expired_batch(NOW + 100, 2).unwrap(), (2, true));
-    assert_eq!(s.purge_expired_batch(NOW + 100, 2).unwrap(), (1, false));
+    assert_eq!(
+        s.purge_expired_batch(NOW + 100, 2).unwrap(),
+        (2, true, false)
+    );
+    assert_eq!(
+        s.purge_expired_batch(NOW + 100, 2).unwrap(),
+        (2, true, false)
+    );
+    assert_eq!(
+        s.purge_expired_batch(NOW + 100, 2).unwrap(),
+        (1, false, false)
+    );
     let st = s.stats().unwrap();
     assert_eq!((st.packets, st.bytes), (1, 245));
 }
@@ -379,7 +397,8 @@ fn purge_removes_expired_only() {
     let (_d, mut s) = store();
     put(&mut s, &msg(1, 1, Tier::S, NOW + 100)).unwrap();
     put(&mut s, &msg(2, 1, Tier::S, NOW + 10_000)).unwrap();
-    // Message expiring at NOW + 200 acknowledged: the ack lives until NOW + 86 400.
+    // Message expiring at NOW + 200 acknowledged: the ack expires at
+    // NOW + 86 400 and is kept a day more.
     let (mut m, _sec, a) = msg_and_ack(3, 1);
     m.expires_at = u32::try_from(NOW + 200).unwrap();
     put(&mut s, &m).unwrap();
@@ -388,7 +407,12 @@ fn purge_removes_expired_only() {
     assert_eq!(s.purge_expired(NOW + 100).unwrap(), 1); // packet 1
     let st = s.stats().unwrap();
     assert_eq!((st.packets, st.acks, st.bytes), (1, 1, 490));
-    assert_eq!(s.purge_expired(NOW + 86_400).unwrap(), 2); // packet 2 and ack
+    assert_eq!(s.purge_expired(NOW + 86_400).unwrap(), 1); // packet 2
+    assert_eq!(
+        s.purge_expired(NOW + 86_400 + barking_packet::ACK_GRACE_SECS)
+            .unwrap(),
+        1
+    ); // the ack
     let st = s.stats().unwrap();
     assert_eq!((st.packets, st.acks, st.bytes), (0, 0, 0));
 }
@@ -416,12 +440,35 @@ fn short_expiry_ack_cannot_resurrect_message() {
     assert_eq!(s.stats().unwrap().acks, 1);
     assert_eq!(put(&mut s, &m), Ok(()));
     assert_eq!(s.stats().unwrap().packets, 0);
-    // After the message's expiry: purge, then redeposit refused (Expired).
+    // After the message's expiry the ack stays a day more, and the
+    // message's redeposit is refused (Expired).
     let later = u64::from(m.expires_at);
     s.purge_expired(later).unwrap();
-    assert_eq!(s.stats().unwrap().acks, 0);
+    assert_eq!(s.stats().unwrap().acks, 1);
     let r = deposit(&mut s, &policy(), &m.encode(), nonce(&m), later).unwrap();
     assert_eq!(r, Err(ErrorReason::Expired));
+    s.purge_expired(later + barking_packet::ACK_GRACE_SECS)
+        .unwrap();
+    assert_eq!(s.stats().unwrap().acks, 0);
+}
+
+#[test]
+fn ack_is_fetchable_a_day_past_the_message_expiry() {
+    let (_d, mut s) = store();
+    let (m, _secret, a) = msg_and_ack(1, 1);
+    put(&mut s, &m).unwrap();
+    // A receipt sent right away: it expires about with the message.
+    assert_eq!(put_ack(&mut s, &a), Ok(()));
+    let expiry = u64::from(m.expires_at).max(u64::from(a.expires_at));
+    let fetched = |s: &NodeStore| fetch(s, &[m.mailbox], None, 1 << 20).unwrap().unwrap().0;
+    // 23 hours after the message expired: still served.
+    s.purge_expired(expiry + 23 * 3_600).unwrap();
+    assert_eq!(fetched(&s), vec![a.encode()]);
+    // After the grace: gone.
+    s.purge_expired(expiry + barking_packet::ACK_GRACE_SECS)
+        .unwrap();
+    assert!(fetched(&s).is_empty());
+    assert_eq!(s.stats().unwrap().acks, 0);
 }
 
 #[test]

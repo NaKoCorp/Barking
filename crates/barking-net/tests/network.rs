@@ -13,14 +13,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::identity::Fingerprint;
+use barking_core::store::MessageStatus;
 use barking_core::transparency::{AvoidReason, TransparencyEvent};
-use barking_core::{Core, ReceiveOutcome};
+use barking_core::{Core, ReceiveOutcome, RouteStep};
 use barking_dht::{distance, mailbox_key};
 use barking_net::push::PushConfig;
 use barking_net::score::{START_SCORE, ScoreEvent};
-use barking_net::sync::short_id;
+use barking_net::sync::{REPLICATION_SLACK_SECS, short_id};
 use barking_net::{NetState, QuicDialer, SyncOptions, SyncReport, sync};
-use barking_node::testing::{FakeRelay, StoppedNode, TestNode, id_of, key, network, network_with};
+use barking_node::testing::{
+    FakeRelay, StoppedNode, TICK, TestNode, id_of, key, network, network_with, set_clock_offset,
+};
 use barking_packet::{Kind, MailboxId, Packet};
 use barking_proto::NodeId;
 use barking_proto::pow::content_hash;
@@ -260,6 +263,27 @@ fn pin_best(c: &mut Client, id: NodeId, others: &[NodeId]) {
         st.view.apply_score(&id, ScoreEvent::Found, now(), true);
     }
     st.save(&mut c.core).unwrap();
+}
+
+/// Raises `id`'s score in `c`'s view (or, at the top, lowers `other`'s)
+/// until it is strictly above `other`'s, so that `id` ranks first
+/// whatever their distance order.
+fn pin_above(c: &mut Client, id: NodeId, other: NodeId) {
+    let mut st = state(c);
+    let score = |st: &NetState, id: &NodeId| st.view.get(id).map_or(0.0, |e| e.score.value());
+    for _ in 0..1_000 {
+        if score(&st, &id) > score(&st, &other) {
+            st.save(&mut c.core).unwrap();
+            return;
+        }
+        if score(&st, &id) < 1.0 {
+            st.view.apply_score(&id, ScoreEvent::Found, now(), true);
+        } else {
+            st.view
+                .apply_score(&other, ScoreEvent::Failure, now(), true);
+        }
+    }
+    panic!("the score of {id:?} could not be raised above {other:?}'s");
 }
 
 /// Every node, stopped together (databases kept).
@@ -910,5 +934,222 @@ async fn subscribed_device_gets_a_wake_for_a_new_message() {
     assert_eq!(token.apns_token, APNS_TOKEN.to_vec());
     assert_eq!(token.env, ApnsEnv::Sandbox);
     relay.stop();
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deposit_and_fetch_record_route() {
+    capture_logs();
+    let nodes = network(0..1, |_| {
+        barking_node::config::DEFAULT_REPLICATION_BYTES_PER_HOUR
+    })
+    .await;
+    let node = short_id(&nodes[0].id);
+    let (mut alice, mut bob, fb, fa) = strangers();
+    alice
+        .core
+        .send_text(&fb, "route", now(), &mut rand::rng())
+        .unwrap();
+    let mut got = Vec::new();
+    for _ in 0..4 {
+        sync_on(&mut alice, seed(&nodes[0])).await;
+        got.extend(texts(&sync_on(&mut bob, seed(&nodes[0])).await));
+        if !got.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(got, ["route"]);
+
+    let sent = alice.core.messages_with(&fb).unwrap()[0].id;
+    let route = alice.core.message_route(sent).unwrap();
+    assert!(
+        route
+            .iter()
+            .any(|e| e.step == RouteStep::Deposited && e.node.as_deref() == Some(node.as_str())),
+        "{route:?}"
+    );
+    let received = bob.core.messages_with(&fa).unwrap()[0].id;
+    let route = bob.core.message_route(received).unwrap();
+    assert!(
+        route
+            .iter()
+            .any(|e| e.step == RouteStep::Fetched && e.node.as_deref() == Some(node.as_str())),
+        "{route:?}"
+    );
+    // Fetched (recorded at the end of the sync) comes before Opened.
+    let fetched = route.iter().position(|e| e.step == RouteStep::Fetched);
+    let opened = route.iter().position(|e| e.step == RouteStep::Opened);
+    assert!(opened.is_some() && fetched < opened, "{route:?}");
+    stop_all(nodes).await;
+}
+
+// --- Delivery verdict (spec §15.5) ---
+
+/// Puts the nodes' clock back on the system clock when dropped.
+struct ClockReset;
+
+impl Drop for ClockReset {
+    fn drop(&mut self) {
+        set_clock_offset(0);
+    }
+}
+
+/// Moves the nodes' clock to `at` (Unix seconds, ahead of now), lets
+/// their purge run, and returns the offset for the clients' syncs.
+async fn nodes_at(at: u64) -> u64 {
+    let offset = at.saturating_sub(now());
+    set_clock_offset(offset);
+    // The purge runs every `TICK` (test nodes).
+    tokio::time::sleep(TICK * 5).await;
+    offset
+}
+
+/// One sync of `c` with its clock `offset` seconds ahead.
+async fn sync_later(c: &mut Client, boot: (NodeId, SocketAddr), offset: u64) -> SyncReport {
+    let opts = SyncOptions {
+        now: Some(now() + offset),
+        ..options(boot)
+    };
+    let report = sync(&mut c.core, &QuicDialer, opts).await;
+    assert_eq!(report.error, None);
+    report
+}
+
+fn status_of(c: &Client, contact: &Fingerprint, body: &str) -> MessageStatus {
+    c.core
+        .messages_with(contact)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+        .status
+}
+
+/// Alice writes `body` to Bob and her sync deposits it; returns the
+/// message's expiry.
+async fn deposit_one(
+    alice: &mut Client,
+    fb: &Fingerprint,
+    body: &str,
+    boot: (NodeId, SocketAddr),
+) -> u64 {
+    let sent = alice
+        .core
+        .send_text(fb, body, now(), &mut rand::rng())
+        .unwrap();
+    let r = sync_on(alice, boot).await;
+    assert!(r.first_copies >= 1, "{r:?}");
+    assert_eq!(status_of(alice, fb, body), MessageStatus::OnNetwork);
+    u64::from(sent[0].expires_at)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sender_sees_not_delivered_after_relay_purge() {
+    let _timing = TIMING.lock().await;
+    capture_logs();
+    let _reset = ClockReset;
+    let nodes = network_with(0..NODES, |spec| spec.purge_interval = Some(TICK)).await;
+    let boot = seed(&nodes[0]);
+    let (mut alice, _bob, fb, _) = acquainted();
+    warm_up(&mut alice, boot).await;
+    let expiry = deposit_one(&mut alice, &fb, "lost", boot).await;
+
+    // Bob stays offline; the relays purge the message at its expiry, and
+    // the verdict comes once the replication slack passed.
+    let offset = nodes_at(expiry + REPLICATION_SLACK_SECS + 60).await;
+    let r = sync_later(&mut alice, boot, offset).await;
+    assert_eq!(status_of(&alice, &fb, "lost"), MessageStatus::NotDelivered);
+    let row = alice
+        .core
+        .messages_with(&fb)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "lost")
+        .unwrap()
+        .id;
+    assert_eq!(r.failed, vec![(fb, row)], "{r:?}");
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ack_just_before_expiry_is_received() {
+    let _timing = TIMING.lock().await;
+    capture_logs();
+    let _reset = ClockReset;
+    let nodes = network_with(0..NODES, |spec| spec.purge_interval = Some(TICK)).await;
+    let boot = seed(&nodes[0]);
+    let (mut alice, mut bob, fb, fa) = acquainted();
+    warm_up(&mut alice, boot).await;
+    warm_up(&mut bob, boot).await;
+    let expiry = deposit_one(&mut alice, &fb, "just in time", boot).await;
+
+    // Bob comes back a minute before the expiry, and acknowledges.
+    let offset = nodes_at(expiry - 60).await;
+    let r = sync_later(&mut bob, boot, offset).await;
+    assert_eq!(texts(&r), ["just in time"], "{r:?}");
+    assert!(r.acks_deposited >= 1, "{r:?}");
+    assert!(inbox(&bob, &fa).contains(&"just in time".to_string()));
+
+    // Alice syncs only after the expiry: the ack is still there.
+    let offset = nodes_at(expiry + 60).await;
+    let r = sync_later(&mut alice, boot, offset).await;
+    assert_eq!(
+        status_of(&alice, &fb, "just in time"),
+        MessageStatus::Received
+    );
+    assert!(r.failed.is_empty(), "{r:?}");
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ack_on_a_holder_other_than_the_senders_best_is_never_not_delivered() {
+    let _timing = TIMING.lock().await;
+    capture_logs();
+    let _reset = ClockReset;
+    // No replication: a receipt stays on the one node it was deposited on,
+    // as in production until the hourly pass copies it.
+    let nodes = network_with(0..NODES, |spec| {
+        spec.purge_interval = Some(TICK);
+        if let Some(d) = &mut spec.dht {
+            d.replication_bytes_per_hour = 0;
+        }
+    })
+    .await;
+    let boot = seed(&nodes[0]);
+    let (mut alice, mut bob, fb, fa) = acquainted();
+    warm_up(&mut alice, boot).await;
+    warm_up(&mut bob, boot).await;
+    let expiry = deposit_one(&mut alice, &fb, "late ack", boot).await;
+    let bytes = message_packets(&mut alice)
+        .into_iter()
+        .find(|b| u64::from(Packet::decode(b).unwrap().expires_at) == expiry)
+        .unwrap();
+    let mut holders = state(&mut alice).ledger.holders(&content_hash(&bytes));
+    assert_eq!(holders.len(), 2, "{holders:?}");
+    holders.sort_unstable_by_key(|n| n.0);
+    let (bobs, alices) = (holders[0], holders[1]);
+    // Bob deposits his receipt on one holder; Alice ranks the other first.
+    pin_above(&mut bob, bobs, alices);
+    pin_above(&mut alice, alices, bobs);
+    let stored = |id: NodeId| nodes.iter().find(|n| n.id == id).unwrap().stored_packets();
+    let before = (stored(bobs), stored(alices));
+
+    // Bob comes back a minute before the expiry, and acknowledges.
+    let offset = nodes_at(expiry - 60).await;
+    let r = sync_later(&mut bob, boot, offset).await;
+    assert_eq!(texts(&r), ["late ack"], "{r:?}");
+    assert!(r.acks_deposited >= 1, "{r:?}");
+    assert!(inbox(&bob, &fa).contains(&"late ack".to_string()));
+    // A node drops a message once it takes its receipt: the receipt is on
+    // Bob's node, and not on Alice's best, which still has the message.
+    assert!(stored(bobs) < before.0, "the receipt is on Bob's node");
+    assert_eq!(stored(alices), before.1, "and not on Alice's best");
+
+    // Alice syncs past the expiry and the replication slack: her best
+    // holder answers empty, the other one still has the receipt.
+    let offset = nodes_at(expiry + REPLICATION_SLACK_SECS + 60).await;
+    let r = sync_later(&mut alice, boot, offset).await;
+    assert_eq!(status_of(&alice, &fb, "late ack"), MessageStatus::Received);
+    assert!(r.failed.is_empty(), "{r:?}");
     stop_all(nodes).await;
 }

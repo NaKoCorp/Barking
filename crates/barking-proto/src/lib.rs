@@ -18,7 +18,7 @@ pub use node_id::{NodeId, generate_node_key};
 pub use record::{NodeRecord, RecordError, RecordPolicy, embeds_ipv4, routable};
 
 /// Protocol version.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// ALPN identifier of the QUIC layer.
 pub const ALPN: &[u8] = b"barking/0";
 

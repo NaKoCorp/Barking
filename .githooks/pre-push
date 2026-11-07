@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Before each push: the security checks on the commits being pushed (secrets,
-# credential files) and on the tree (trivy, cargo-deny, workflows).
+# credential files) and on the tree (trivy, cargo-deny, workflows), then the
+# full test suite (scripts/check.sh --full).
 # Installed by scripts/install-hooks.sh. Bypass (then the CI checks it):
 # git push --no-verify
 set -euo pipefail
@@ -20,3 +21,5 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   checked=true
 done
 $checked || echo "pre-push: nothing to check"
+# Tests: once for the whole push, not once per ref.
+"$root/scripts/check.sh" --full

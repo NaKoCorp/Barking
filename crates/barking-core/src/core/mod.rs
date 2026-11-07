@@ -12,12 +12,17 @@
 //! `history.rs` (history archive transferred at link time), `sync.rs`
 //! (synchronization between my devices).
 
+mod admin;
 mod contacts;
+pub(crate) mod delivery;
 mod frames;
 mod history;
 mod link;
 mod log_limit;
 mod receive;
+mod remove;
+mod removed;
+mod route;
 mod send;
 mod sync;
 
@@ -41,12 +46,13 @@ use crate::identity::{
 use crate::mailbox::{MailboxId, day_of, intro_mailbox, session_mailbox};
 use crate::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId};
 use crate::ratchet::RatchetState;
-use crate::store::{EventClass, MessageRow, Queries, Store};
+use crate::store::{EventClass, MessageRow, MessageStatus, Queries, Store};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
 pub use crate::transparency::SyncKind;
 pub use contacts::ContactSummary;
+pub use delivery::{AwaitingVerdict, DeleteOutcome, MAX_NOTED_CHANGES};
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
 pub use history::{HistoryArchive, MAX_ARCHIVE_BYTES};
 pub use link::{
@@ -54,6 +60,13 @@ pub use link::{
     MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES,
 };
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
+pub use receive::{
+    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
+    R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
+};
+pub use remove::LeaveState;
+pub use removed::Removed;
+pub use route::{RouteEntry, RouteStep};
 
 use log_limit::LogLimiter;
 
@@ -73,7 +86,8 @@ const META_LINKED_BUNDLES: &str = "linked_bundles";
 const META_LAST_POLLED: &str = "last_polled_day";
 /// Polling window: 7 days back, the current day and the next day =
 /// 9 days at most. Covers each day of `accepted_days` (receive) that may
-/// still hold an unexpired packet (7-day lifetime).
+/// still hold an unexpired packet (24-hour lifetime; the window is kept
+/// wider than that on purpose).
 const MAX_POLL_BACK_DAYS: u32 = 7;
 
 /// Mailboxes to poll, by class. A poll reads the sessions first: the
@@ -123,7 +137,7 @@ pub enum ReceiveOutcome {
         text: String,
         ack: Packet,
     },
-    /// Verified ack for one of my packets, now `Delivered`.
+    /// Verified ack for one of my packets, its delivery now `Received`.
     AckReceived {
         packet_id: PacketId,
     },
@@ -140,6 +154,9 @@ pub enum ReceiveOutcome {
     /// is in the send queue.
     Synced {
         kind: SyncKind,
+        /// The contact a synced sent message went to (`SyncKind::Sent`):
+        /// its conversation gains a row.
+        contact: Option<Fingerprint>,
     },
     /// New card from a contact (new device list), applied;
     /// its ack is in the send queue.
@@ -147,6 +164,9 @@ pub enum ReceiveOutcome {
         from: Fingerprint,
         alias: Option<String>,
     },
+    /// A newer list signed by my root no longer contains this device: it is
+    /// removed from my account (see `Core::removed`); the ack is queued.
+    Removed,
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -172,12 +192,17 @@ impl fmt::Debug for ReceiveOutcome {
                 .debug_struct("Quarantined")
                 .field("reason", reason)
                 .finish(),
-            Self::Synced { kind } => f.debug_struct("Synced").field("kind", kind).finish(),
+            Self::Synced { kind, contact } => f
+                .debug_struct("Synced")
+                .field("kind", kind)
+                .field("contact", contact)
+                .finish(),
             Self::CardUpdated { from, alias } => f
                 .debug_struct("CardUpdated")
                 .field("from", from)
                 .field("alias", alias)
                 .finish(),
+            Self::Removed => f.write_str("Removed"),
         }
     }
 }
@@ -203,6 +228,12 @@ pub struct Core {
     /// Grouping of noisy events in the log (rejected frames,
     /// undecryptable packets, duplicates), in memory.
     log_limiter: LogLimiter,
+    /// Sent messages that became `NotDelivered` since the last
+    /// `take_failed_notices`, as `(contact, row id)`, in memory.
+    failed_notices: delivery::ChangeList,
+    /// Sent messages whose delivery changed since the last
+    /// `take_delivery_changes`, as `(contact, row id)`, in memory.
+    delivery_changes: delivery::ChangeList,
 }
 
 impl fmt::Debug for Core {
@@ -214,6 +245,17 @@ impl fmt::Debug for Core {
             .field("pending", &self.pending)
             .finish_non_exhaustive()
     }
+}
+
+/// One of my devices (`Core::my_devices`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MyDevice {
+    pub id: DeviceId,
+    pub name: String,
+    /// Certificate date (Unix seconds).
+    pub issued_at: u64,
+    pub this_device: bool,
+    pub admin: bool,
 }
 
 impl Core {
@@ -305,6 +347,8 @@ impl Core {
             pending,
             frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
             log_limiter: LogLimiter::default(),
+            failed_notices: delivery::ChangeList::default(),
+            delivery_changes: delivery::ChangeList::default(),
         }
     }
 
@@ -347,6 +391,7 @@ impl Core {
             .unwrap_or_default();
         store.transaction(|tx| {
             link::purge_expired_offer(tx, now)?;
+            admin::purge_expired(tx, now)?;
             sweep_skipped(tx, now)
         })?;
         Ok(Core::assemble(
@@ -376,11 +421,40 @@ impl Core {
         self.devices.root.fingerprint()
     }
 
+    /// My devices, from the signed device list. `admin`: this device if it
+    /// holds the root, or the device this one handed it to (admin transfer).
+    /// Other devices may hold it without the list saying so.
+    pub fn my_devices(&self) -> Vec<MyDevice> {
+        let me = self.device.public().id();
+        // A failed read only hides the hint.
+        let holder = self
+            .store
+            .get_meta::<DeviceId>(admin::META_ROOT_HOLDER)
+            .ok()
+            .flatten();
+        self.devices
+            .certs
+            .iter()
+            .map(|c| {
+                let id = c.device.id();
+                let this_device = id == me;
+                MyDevice {
+                    id,
+                    name: c.name.clone(),
+                    issued_at: c.issued_at,
+                    this_device,
+                    admin: (this_device && self.root.is_some())
+                        || (self.root.is_none() && holder == Some(id)),
+                }
+            })
+            .collect()
+    }
+
     /// My signed contact card: device list and one key packet per
     /// device. `display_name` is recorded as my display name (reused
     /// by the cards the core signs itself, see `set_display_name`).
     pub fn contact_card(&self, display_name: &str) -> Result<ContactCard> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
         let mut bundles = vec![self.prekeys.bundle(&self.device, false)];
         bundles.extend(
@@ -423,6 +497,14 @@ impl Core {
             }
         }
         Ok(out)
+    }
+
+    /// My display name: the last one recorded, empty if none.
+    pub fn display_name(&self) -> Result<String> {
+        Ok(self
+            .store
+            .get_meta::<String>(META_DISPLAY_NAME)?
+            .unwrap_or_default())
     }
 
     /// Changes my display name, carried by the cards the core signs
@@ -546,6 +628,27 @@ impl Core {
         Ok(out)
     }
 
+    /// Mailbox and day of each queued packet that carries a message to a
+    /// contact's device, not yet acknowledged and not expired at `now`:
+    /// where an acknowledgement (or the node's expiry notice) is awaited.
+    /// Oldest first, without duplicates. `SyncSent` copies for my own
+    /// devices, receipts and messageless packets (card updates, syncs) are
+    /// left out. The day is that of the sealing (the mailbox's day). A
+    /// storage read error is returned.
+    pub fn awaited_ack_mailboxes(&self, now: u64) -> Result<Vec<(MailboxId, u32)>> {
+        let mut out: Vec<(MailboxId, u32)> = Vec::new();
+        for (bytes, queued_at) in self.store.outbox_awaiting_ack(now)? {
+            let Ok(p) = Packet::decode(&bytes) else {
+                continue;
+            };
+            if p.kind != Kind::Message || out.iter().any(|(m, _)| *m == p.mailbox) {
+                continue;
+            }
+            out.push((p.mailbox, day_of(queued_at)));
+        }
+        Ok(out)
+    }
+
     /// My introduction mailboxes for each of `days`, in that order: the
     /// part of `own_mailboxes` anyone can write to. Empty while awaiting
     /// the link.
@@ -607,12 +710,50 @@ impl Core {
             .collect()
     }
 
-    /// Purges expired packets from the send queue then returns the bytes to
-    /// (re)transmit, from oldest to newest. A packet stays there
-    /// until its receipt ack or its expiry.
+    /// A page of the log, newest first: up to `limit` events older than the
+    /// event `before` (none: from the newest), with their ids. Paging by id
+    /// keeps a page stable while events are appended or purged.
+    /// `security_only` keeps the security class only.
+    pub fn transparency_page(
+        &self,
+        limit: usize,
+        before: Option<i64>,
+        security_only: bool,
+    ) -> Result<Vec<(i64, u64, TransparencyEvent)>> {
+        self.store
+            .transparency_page(limit, before, security_only)?
+            .into_iter()
+            .map(|(id, at, bytes)| {
+                postcard::from_bytes(&bytes)
+                    .map(|e| (id, at, e))
+                    .map_err(|_| CoreError::Store("unreadable event".into()))
+            })
+            .collect()
+    }
+
+    /// Devices of a contact as its card lists them: (id, name, issue date).
+    pub fn contact_devices(&self, contact: &Fingerprint) -> Result<Vec<(DeviceId, String, u64)>> {
+        let row = self
+            .store
+            .get_contact(*contact)?
+            .ok_or(CoreError::UnknownContact)?;
+        Ok(load_card(&row.card)?
+            .devices
+            .certs
+            .iter()
+            .map(|c| (c.device.id(), c.name.clone(), c.issued_at))
+            .collect())
+    }
+
+    /// Expires the packets that no node accepted in time (`expire_due`),
+    /// purges the expired ones that await no verdict, then returns the
+    /// bytes to (re)transmit, from oldest to newest. A packet stays there
+    /// until its receipt ack or its expiry; a deposited one until its
+    /// verdict (`confirm_expired`).
     pub fn pending_outbox(&mut self, now: u64) -> Result<Vec<Vec<u8>>> {
+        self.expire_due(now)?;
         self.store.transaction(|tx| {
-            tx.outbox_purge_expired(now)?;
+            admin::purge_expired(tx, now)?;
             sweep_skipped(tx, now)?;
             Ok(tx
                 .outbox_pending(now)?
@@ -620,6 +761,27 @@ impl Core {
                 .map(|(_, bytes)| bytes)
                 .collect())
         })
+    }
+
+    /// Removes an undeliverable packet (encoded `bytes`) from the send
+    /// queue, for example one whose expiry a node refused as too far in
+    /// the future: it will never be accepted, so its pending deliveries are
+    /// `NotDelivered` from `now`. A packet a node already accepted stays
+    /// queued for its verdict (`confirm_expired`): only the network may
+    /// fail it. `true` if it left the queue.
+    pub fn drop_outbox_packet(&mut self, bytes: &[u8], now: u64) -> Result<bool> {
+        let Ok(packet) = Packet::decode(bytes) else {
+            return Ok(false);
+        };
+        let (dropped, failed) = self.store.transaction(|tx| {
+            if delivery::on_network(tx, packet.id)? {
+                return Ok((false, delivery::Failed::default()));
+            }
+            let failed = delivery::fail(tx, packet.id, MessageStatus::Pending, now)?;
+            Ok((tx.outbox_remove(packet.id)?, failed))
+        })?;
+        self.settle(failed);
+        Ok(dropped)
     }
 
     /// Opaque state of a transport (for example poll positions and deposits

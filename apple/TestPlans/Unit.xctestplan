@@ -1,0 +1,25 @@
+{
+  "configurations" : [
+    {
+      "id" : "5B2C0A1E-6C3D-4A57-9F1B-0D1E7A2B4C01",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "testTimeoutsEnabled" : false
+  },
+  "testTargets" : [
+    {
+
+      "target" : {
+        "containerPath" : "container:Barking.xcodeproj",
+        "identifier" : "294BA295879A1238BFC36A63",
+        "name" : "BarkingTests"
+      }
+    }
+  ],
+  "version" : 1
+}

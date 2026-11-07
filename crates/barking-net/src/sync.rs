@@ -13,20 +13,29 @@
 //! 3. **Deposits**, following `plan_deposits`: receipts (no proof of work),
 //!    first copies, resends, extra copies. Proof budget exhausted: messages
 //!    wait, receipts go. `NotResponsible` from 2 responsibles of a mailbox:
-//!    fallback lookup, then the plan is redone.
+//!    fallback lookup, then the plan is redone. Each request is noted in
+//!    the core before it is sent (`Core::record_deposit_tried`: its answer
+//!    may be lost while the node stores the packet), and each accepted
+//!    deposit is recorded at once (`Core::record_deposit`).
 //! 4. **Introduction fetch**, within `INTRO_FETCH_BYTES` and
 //!    `INTRO_FETCH_SLICE`; a partial one blocks nothing. Then a second
 //!    deposit pass for receipts only (no proof of work), so that the
-//!    receipts of first contacts leave in the same sync.
+//!    receipts of first contacts leave in the same sync. Then the mailboxes
+//!    of my deposited packets past their expiry, in a stage of their own,
+//!    and the failure **verdict** (see below).
 //! 5. **Maintenance**, with the time left: random lookups, candidate
 //!    confirmation, fallback lookups while the view is small, then the node
 //!    hints of my contact card. Skipped when nodes were tried and none
 //!    answered (the client's own connection is down). Lookups never ask a
 //!    node that failed, rate-limited or was cut short during this sync.
 //! 6. **Wake subscriptions** (spec §5.2), with the time left: my mailboxes
-//!    from today to `HORIZON_DAYS` ahead, planned by `plan_push` on the
-//!    responsibles by score; unsubscribes first, then subscriptions, nearest
-//!    day first, on the connections of the sync. A node that does not take
+//!    from today to `HORIZON_DAYS` ahead (`SubKind::Messages`), and the
+//!    mailboxes where a message I sent awaits its ack
+//!    (`Core::awaited_ack_mailboxes`, `SubKind::Acks`: the node wakes me
+//!    when the ack arrives or the message expires unacked), planned by
+//!    `plan_push` on the responsibles by score; an acks subscription no
+//!    longer awaited is cancelled. Unsubscribes first, then subscriptions,
+//!    nearest day first, on the connections of the sync. A node that does not take
 //!    wake-ups is left out (`PushState::note_no_wake`) and not replaced
 //!    before the next sync. `Full` (spec §7) hands the place to the next
 //!    responsible in the same run: `NodeFull` leaves the node out as a
@@ -59,6 +68,36 @@
 //! `AUDIT_EVERY_SECS`, each in a call of its own once all regular session
 //! fetches are over, within `REREAD_BYTES` and `REREAD_TIME`.
 //!
+//! **Verdict** (spec §15.5). The mailboxes of my deposited packets whose
+//! expiry passed by the start of the sync (`Core::awaiting_verdict`) are
+//! read from their start, after every other fetch, never grouped with
+//! other mailboxes, within the introductions' budget (`INTRO_FETCH_BYTES`,
+//! `QUICK_INTRO_BYTES`): every node that accepted the packet first (the
+//! full ids of the deposit ledger, responsible or not any more, as long as
+//! the view has it), then every responsible of the mailbox. A
+//! receipt is deposited on one node only and reaches the others in their
+//! hourly replication pass, so one holder answering empty proves nothing.
+//! The receipt may also land on a responsible that never held the packet,
+//! and a holder that left the responsible set never gets it by
+//! replication. Such a packet fails (`Core::confirm_expired`) only when
+//! its expiry is `REPLICATION_SLACK_SECS` past by the start of the sync,
+//! **every** node the ledger says accepted it **and every** current
+//! responsible of its mailbox (the view at the start of the sync) served
+//! the mailbox in full from its start, every item processed, and nothing
+//! fetched in the sync was the packet or a receipt for it. Any of them
+//! unreachable, rate-limited, truncated, cut by the budget or the
+//! deadline, or not processed means no verdict in this sync: the packet
+//! stays `OnNetwork` (no node to ask at all, a node still returning the
+//! packet with its clock behind: likewise). Any sighting of the packet or
+//! its receipt settles it at once. Nodes keep a
+//! receipt a day past its expiry (`ACK_GRACE_SECS`), so a sync a day late
+//! still finds it. Past that, nothing can confirm it any more: the core
+//! lets it go from its queue (`Core::expire_due`), its mailbox is no longer
+//! fetched, its ledger entry is pruned, and its delivery stays `OnNetwork`,
+//! unconfirmed, never `NotDelivered`.
+//! The messages that failed during the sync are returned in
+//! `SyncReport::failed`.
+//!
 //! **Network down.** While no node has answered, `DOWN_AFTER_FAILURES`
 //! failed dials in a row, then one node added by hand or built-in not tried
 //! yet failing too (or none left), end the sync: nothing lost, no score
@@ -69,11 +108,16 @@
 //! notification extension, on the same executor in `Mode::Quick`, within
 //! `QUICK_DEADLINE` closing included (the work stops `CLOSE_TIMEOUT`
 //! earlier). Stage 1 runs, bootstrapping only when the view is empty; then
-//! my own session mailboxes of yesterday and today (`Core::own_mailboxes`),
+//! my own session mailboxes of yesterday and today (`Core::own_mailboxes`)
+//! with the mailboxes where a message I sent awaits its ack
+//! (`Core::awaited_ack_mailboxes`, so that a receipt wake-up finds the ack)
 //! then my introduction mailboxes of those days, are fetched from their
 //! best responsible, the next one only when the best failed, refused or
 //! rate-limited (a truncated fetch is kept as it is), resumed from the
-//! positions of the network state. Every fetch draws on
+//! positions of the network state; then the mailboxes of my deposited
+//! packets past their expiry, so that an expiry wake-up finds a late
+//! receipt, and gets its verdict once `REPLICATION_SLACK_SECS` passed (as
+//! in a full sync). Every fetch draws on
 //! `QUICK_FETCH_BYTES` in all, the introductions on `QUICK_INTRO_BYTES` at
 //! most: a fetch cut by that cap is processed and its positions saved, so
 //! each wake-up makes bounded, lasting progress. Then, with time left,
@@ -91,12 +135,15 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use barking_core::RouteStep;
+use barking_core::identity::Fingerprint;
 use barking_core::mailbox::day_of;
 use barking_core::transparency::{AvoidReason, TransparencyEvent};
 use barking_core::{Core, CoreError, ReceiveOutcome};
 use barking_dht::{BootstrapEntry, builtin_bootstrap};
-use barking_packet::{MailboxId, Packet};
+use barking_packet::{Kind, MailboxId, Packet, PacketId};
 use barking_proto::pow::content_hash;
+use barking_proto::push::SubKind;
 use barking_proto::{ErrorReason, NodeId, NodeRecord};
 use tokio::time::Instant;
 
@@ -108,6 +155,7 @@ use crate::state::NetState;
 use crate::{BOOTSTRAP_VIEW, CandidateBudget};
 
 mod fetch;
+use fetch::FetchKind;
 mod io;
 
 pub use barking_proto::client::FetchStop;
@@ -117,6 +165,13 @@ pub use io::{
 };
 use io::{Observation, Observed};
 
+/// A subscription to send: mailbox, kind, node.
+type SubTask = (MailboxId, SubKind, NodeId);
+
+/// No failure verdict before a packet's expiry plus this: a receipt lands
+/// on one node only, and nodes copy receipts to each other in their hourly
+/// replication pass (nodes keep receipts `ACK_GRACE_SECS` past expiry).
+pub const REPLICATION_SLACK_SECS: u64 = 7_200;
 /// Longest synchronization.
 pub const SYNC_DEADLINE: Duration = Duration::from_secs(180);
 /// Longest quick sync (the notification extension's), closing included.
@@ -171,6 +226,9 @@ pub const REREAD_BYTES: usize = 8 << 20;
 /// Time all audit re-reads of a sync may take together (within the
 /// session fetch slice).
 pub const REREAD_TIME: Duration = Duration::from_secs(20);
+/// Furthest expiry a node accepts from now: 24 h plus one hour of clock
+/// tolerance (the node's `MAX_EXPIRY_SECS`).
+const NODE_MAX_EXPIRY_SECS: u64 = 90_000;
 /// `NotResponsible` answers from distinct responsibles of one mailbox that
 /// trigger a fallback lookup.
 pub const NOT_RESPONSIBLE_FALLBACK: usize = 2;
@@ -335,6 +393,11 @@ pub struct SyncReport {
     pub subscribed: usize,
     /// Wake subscriptions cancelled.
     pub unsubscribed: usize,
+    /// Sent messages that became `NotDelivered` during this sync (expired
+    /// before any deposit, verdict, undeliverable packet), as
+    /// `(contact, row id)`: `Core::take_failed_notices`, taken from the
+    /// same core before the sync returns.
+    pub failed: Vec<(Fingerprint, i64)>,
 }
 
 /// Synchronizes with the network (see the module documentation).
@@ -433,12 +496,18 @@ impl<'a, D: Connector> Run<'a, D> {
             deadline,
             pow_left: pow_budget,
             stats: BTreeMap::new(),
+            verdict_boxes: HashSet::new(),
+            verdict_packets: HashMap::new(),
+            verdict_responsibles: HashMap::new(),
+            answered: HashMap::new(),
+            seen_ids: HashSet::new(),
             report: SyncReport::default(),
         }
     }
 }
 
-/// Per-node counts for the transparency log.
+/// Per-node counts for the transparency log, and the fetched packets for
+/// the route of each message (deposits are recorded as they are accepted).
 #[derive(Default)]
 struct NodeStats {
     mailboxes: u32,
@@ -446,6 +515,8 @@ struct NodeStats {
     deposited: u32,
     refused: u32,
     fetched: bool,
+    /// Items fetched from the node.
+    fetched_ids: Vec<PacketId>,
 }
 
 struct Run<'a, D: Connector> {
@@ -501,6 +572,24 @@ struct Run<'a, D: Connector> {
     deadline: Instant,
     pow_left: u64,
     stats: BTreeMap<[u8; 32], (NodeId, NodeStats)>,
+    /// Mailboxes of my deposited packets past their expiry
+    /// (`Core::awaiting_verdict`): read from their start, so that a packet
+    /// a node still holds cannot hide behind a saved position.
+    verdict_boxes: HashSet<MailboxId>,
+    /// Each packet awaiting a verdict: its mailbox and the nodes the
+    /// deposit ledger says accepted it (full ids; the ledger keeps the
+    /// packets awaiting a verdict, see `deposit_stage`).
+    verdict_packets: HashMap<PacketId, (MailboxId, HashSet<NodeId>)>,
+    /// Per verdict mailbox, its responsibles in the view at the start of
+    /// the sync: each must answer too (a receipt may have landed on any of
+    /// them, and a holder outside them never gets it by replication).
+    verdict_responsibles: HashMap<MailboxId, HashSet<NodeId>>,
+    /// Per verdict mailbox, the responsibles that served it in full from
+    /// its start, every item processed.
+    answered: HashMap<MailboxId, HashSet<NodeId>>,
+    /// Packets fetched (mine included) and packets acknowledged by a
+    /// fetched receipt.
+    seen_ids: HashSet<PacketId>,
     report: SyncReport,
 }
 
@@ -558,18 +647,26 @@ where
         }
     }
 
-    /// Quick sync: my mailboxes of yesterday and today, then receipts.
+    /// Quick sync: my mailboxes of yesterday and today, those where a
+    /// message I sent awaits its ack (a receipt wake-up finds it there) and
+    /// those of my deposited packets past their expiry (an expiry wake-up
+    /// gets its verdict), then receipts.
     async fn run_quick(&mut self, builtin: &[BootstrapEntry]) {
         self.prepare(&[], builtin).await;
         let today = day_of(self.now);
         let days = [today.saturating_sub(1), today];
-        let own = match self.core.own_mailboxes(&days) {
+        let read = self.core.own_mailboxes(&days).and_then(|mut own| {
+            own.extend(self.core.awaited_ack_mailboxes(self.now)?);
+            Ok(own)
+        });
+        let own = match read {
             Ok(m) => m,
             Err(e) => {
                 self.report.error = Some(e.to_string());
                 return;
             }
         };
+        self.load_verdicts();
         // Introductions apart, with their own small budget, after the
         // sessions: a flood there cannot take the sessions' bytes.
         let intro_set: HashSet<MailboxId> =
@@ -582,13 +679,135 @@ where
             list.sort_unstable_by_key(|m| m.0);
             list.dedup();
         }
-        self.fetch_stage(&sessions, false).await;
+        self.fetch_stage(&sessions, FetchKind::Sessions).await;
         if !intro.is_empty() && !self.over() {
-            let polled_intro = self.fetch_stage(&intro, true).await;
+            let polled_intro = self.fetch_stage(&intro, FetchKind::Intro).await;
             self.report.intro_partial = !polled_intro;
         }
+        self.verdict_stage().await;
+        self.give_verdicts();
         if !self.over() {
             self.deposit_stage(true).await;
+        }
+    }
+
+    /// Reads the packets awaiting a verdict at the start of the sync
+    /// (`Core::awaiting_verdict_packets`), with the nodes the ledger says
+    /// accepted each one. A read error leaves the verdicts to a later sync.
+    fn load_verdicts(&mut self) {
+        let awaiting = match self.core.awaiting_verdict_packets(self.now) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("packets awaiting a verdict not read: {e}");
+                return;
+            }
+        };
+        for a in awaiting {
+            let holders: HashSet<NodeId> = self
+                .state
+                .ledger
+                .holders(&content_hash(&a.bytes))
+                .into_iter()
+                .collect();
+            self.verdict_boxes.insert(a.mailbox);
+            let responsibles = self.state.view.responsibles(&a.mailbox, self.now);
+            self.verdict_responsibles
+                .entry(a.mailbox)
+                .or_default()
+                .extend(responsibles);
+            self.verdict_packets.insert(a.packet, (a.mailbox, holders));
+        }
+    }
+
+    /// `node` accepted `packet`, by its full id in the deposit ledger (a
+    /// short id could be shared by another node).
+    pub(super) fn accepted_by(&self, packet: &PacketId, node: &NodeId) -> bool {
+        self.verdict_packets
+            .get(packet)
+            .is_some_and(|(_, holders)| holders.contains(node))
+    }
+
+    /// The network answered for `packet` (spec §15.5): every node that
+    /// accepted it (full ids in the deposit ledger) and every current
+    /// responsible of its mailbox (the view at the start of the sync)
+    /// served the mailbox in full from the start. A receipt lands on one
+    /// responsible only and reaches the others by replication, which never
+    /// reaches a holder that left the responsible set: any of them may be
+    /// the only one holding it. With none to ask, no answer.
+    fn answered_for(&self, packet: &PacketId) -> bool {
+        let Some((mailbox, holders)) = self.verdict_packets.get(packet) else {
+            return false;
+        };
+        let Some(nodes) = self.answered.get(mailbox) else {
+            return false;
+        };
+        let responsibles = self.verdict_responsibles.get(mailbox);
+        let required = holders
+            .iter()
+            .chain(responsibles.into_iter().flatten())
+            .collect::<HashSet<_>>();
+        !required.is_empty() && required.into_iter().all(|n| nodes.contains(n))
+    }
+
+    /// Every packet awaiting a verdict in `mailbox` has its answer.
+    pub(super) fn verdict_settled(&self, mailbox: &MailboxId) -> bool {
+        self.verdict_packets
+            .iter()
+            .filter(|(_, (m, _))| m == mailbox)
+            .all(|(p, _)| self.answered_for(p))
+    }
+
+    /// Fetches, after every other fetch, the verdict mailboxes still
+    /// without their answer, in a stage of their own with the introduction
+    /// budget (they may be a contact's introduction mailbox, which anyone
+    /// can fill): the nodes that accepted the packet first.
+    async fn verdict_stage(&mut self) {
+        let mut boxes: Vec<MailboxId> = self
+            .verdict_boxes
+            .iter()
+            .filter(|m| !self.verdict_settled(m))
+            .copied()
+            .collect();
+        if boxes.is_empty() || self.over() {
+            return;
+        }
+        boxes.sort_unstable_by_key(|m| m.0);
+        self.fetch_stage(&boxes, FetchKind::Verdict).await;
+    }
+
+    /// The failure verdict (spec §15.5), once the fetches are over and
+    /// their items processed (an ack found has made its message
+    /// `Received`): each deposited packet that expired
+    /// `REPLICATION_SLACK_SECS` before this sync started fails when the
+    /// network answered for its mailbox (`answered_for`) and nothing
+    /// fetched was the packet or an ack for it. Otherwise it waits for a
+    /// later sync.
+    fn give_verdicts(&mut self) {
+        let due = self.now.saturating_sub(REPLICATION_SLACK_SECS);
+        let Ok(awaiting) = self.core.awaiting_verdict(due) else {
+            return;
+        };
+        for (packet, _) in awaiting {
+            if self.answered_for(&packet) && !self.seen_ids.contains(&packet) {
+                let _ = self.core.confirm_expired(packet, self.now);
+            }
+        }
+    }
+
+    /// Notes the packets among fetched `items` and those their receipts
+    /// acknowledge (`seen_ids`).
+    fn note_seen(&mut self, items: &[Vec<u8>]) {
+        for item in items {
+            let Ok(p) = Packet::decode(item) else {
+                continue;
+            };
+            if p.kind == Kind::Ack
+                && let Some(target) = p.payload.get(..16)
+                && let Ok(target) = <[u8; 16]>::try_from(target)
+            {
+                self.seen_ids.insert(PacketId(target));
+            }
+            self.seen_ids.insert(p.id);
         }
     }
 
@@ -613,6 +832,12 @@ where
         self.save();
         for (_, (id, s)) in std::mem::take(&mut self.stats) {
             let node = short_id(&id);
+            // The core keeps only the packets that carry a message.
+            for packet in &s.fetched_ids {
+                let _ = self
+                    .core
+                    .record_route(*packet, RouteStep::Fetched, &node, self.now);
+            }
             if s.fetched {
                 let _ = self.core.log_transport_event(
                     TransparencyEvent::NodeFetch {
@@ -636,6 +861,9 @@ where
         }
         self.report.network_up = self.network_up();
         self.report.view_size = self.state.view.len();
+        // The FFI reopens the core on every call: the notices are taken
+        // from this core, now.
+        self.report.failed = self.core.take_failed_notices();
         self.report
     }
 
@@ -905,10 +1133,16 @@ where
     /// introduction fetch).
     async fn deposit_stage(&mut self, acks_only: bool) {
         let now = self.now;
-        let Ok(outbox) = self.core.pending_outbox(now) else {
+        let Ok(mut outbox) = self.core.pending_outbox(now) else {
             return;
         };
-        plan::prune(&mut self.state.ledger, &outbox, now);
+        // The ledger also keeps the packets awaiting a verdict: who
+        // accepted them decides whose answer counts (`answered_for`).
+        let mut live = outbox.clone();
+        if let Ok(awaiting) = self.core.awaiting_verdict_packets(now) {
+            live.extend(awaiting.into_iter().map(|a| a.bytes));
+        }
+        plan::prune(&mut self.state.ledger, &live, now);
         let mut pow_exhausted = false;
         let mut not_responsible: HashMap<MailboxId, HashSet<NodeId>> = HashMap::new();
         let mut fallback_tried: HashSet<MailboxId> = HashSet::new();
@@ -944,6 +1178,13 @@ where
                         }
                         continue 'plan;
                     };
+                    // Noted before the request: the node may store the
+                    // packet and its answer be lost (spec §14.1).
+                    if let Ok(p) = Packet::decode(&d.bytes)
+                        && let Err(e) = self.core.record_deposit_tried(p.id, now)
+                    {
+                        tracing::warn!("deposit try not recorded: {e}");
+                    }
                     let deposit = self.dialer.deposit(&mut conn, &d.bytes, self.pow_left);
                     let Ok(reply) = tokio::time::timeout_at(self.deadline, deposit).await else {
                         break 'plan;
@@ -981,6 +1222,23 @@ where
                 self.tally(&d, &result);
                 self.save();
                 match result {
+                    // An expiry beyond what any node accepts by our own
+                    // clock is never accepted: out of the queue. Otherwise
+                    // the node's clock is the likely culprit: that node
+                    // failed, the packet stays queued for the others.
+                    Err(ErrorReason::TooFarInFuture) => {
+                        let too_far = Packet::decode(&d.bytes).is_ok_and(|p| {
+                            u64::from(p.expires_at) > now.saturating_add(NODE_MAX_EXPIRY_SECS)
+                        });
+                        if too_far {
+                            let _ = self.core.drop_outbox_packet(&d.bytes, now);
+                            outbox.retain(|b| *b != d.bytes);
+                        } else {
+                            self.fail(d.node);
+                            self.save();
+                        }
+                        continue 'plan;
+                    }
                     Err(ErrorReason::RateLimited) => {
                         self.limited.insert(d.node);
                         continue 'plan;
@@ -1006,7 +1264,16 @@ where
         }
     }
 
+    /// Counts a deposit's outcome. An accepted one is recorded in the core
+    /// at once (message or receipt): an app killed later in the sync keeps
+    /// it.
     fn tally(&mut self, d: &plan::PlannedDeposit, result: &Result<(), ErrorReason>) {
+        if result.is_ok()
+            && let Ok(p) = Packet::decode(&d.bytes)
+            && let Err(e) = self.core.record_deposit(p.id, &short_id(&d.node), self.now)
+        {
+            tracing::warn!("deposit not recorded: {e}");
+        }
         let s = self.stats(d.node);
         match result {
             Ok(()) => {
@@ -1180,20 +1447,23 @@ where
         intro.dedup();
         let watched: HashSet<MailboxId> = sessions.iter().chain(&intro).copied().collect();
         self.state.retain_positions(&watched);
+        self.load_verdicts();
 
-        let polled_sessions = self.fetch_stage(&sessions, false).await;
+        let polled_sessions = self.fetch_stage(&sessions, FetchKind::Sessions).await;
         self.report.polled_all_sessions = polled_sessions;
 
         self.deposit_stage(false).await;
 
         if !intro.is_empty() {
-            let polled_intro = self.fetch_stage(&intro, true).await;
+            let polled_intro = self.fetch_stage(&intro, FetchKind::Intro).await;
             self.report.intro_partial = !polled_intro;
             // Receipts of what the introductions brought.
             if !self.over() {
                 self.deposit_stage(true).await;
             }
         }
+        self.verdict_stage().await;
+        self.give_verdicts();
 
         // Nodes tried and none answered: lookups would only dial dead ends.
         if !self.over() && (self.network_up() || !self.tried) {
@@ -1231,14 +1501,24 @@ where
             }
         };
         let loaded = push.clone();
-        let wanted = match cfg {
+        // My mailboxes for messages, then those where a message I sent
+        // awaits its ack, for acks.
+        let wanted: Vec<(MailboxId, u32, SubKind)> = match cfg {
             Some(_) => {
                 let today = day_of(now);
                 let days: Vec<u32> = (today..=today.saturating_add(HORIZON_DAYS)).collect();
-                match self.core.own_mailboxes(&days) {
+                let read = self.core.own_mailboxes(&days).and_then(|own| {
+                    let awaited = self.core.awaited_ack_mailboxes(now)?;
+                    Ok(own
+                        .into_iter()
+                        .map(|(m, d)| (m, d, SubKind::Messages))
+                        .chain(awaited.into_iter().map(|(m, d)| (m, d, SubKind::Acks)))
+                        .collect())
+                });
+                match read {
                     Ok(w) => w,
                     Err(e) => {
-                        tracing::warn!("own mailboxes not read, wake subscriptions skipped: {e}");
+                        tracing::warn!("mailboxes not read, wake subscriptions skipped: {e}");
                         return;
                     }
                 }
@@ -1270,8 +1550,9 @@ where
                 // reached); kept for a later sync unless already expired.
                 let today = day_of(now);
                 push.config_hash = None;
-                push.subs
-                    .retain(|_, b| !b.nodes.is_empty() && b.day.saturating_add(1) >= today);
+                push.subs.retain(|(_, kind), b| {
+                    !b.nodes.is_empty() && crate::push::expires_day(b.day, *kind) >= today
+                });
             } else if reset {
                 push.apply_config(cfg);
             } else {
@@ -1286,23 +1567,34 @@ where
         let (Some(cfg), true) = (cfg, all_sent) else {
             return;
         };
-        let days: HashMap<MailboxId, u32> = wanted.iter().copied().collect();
-        let mut queue: VecDeque<(MailboxId, NodeId)> = plan.subscribe.into_iter().collect();
-        // (mailbox, node) pairs refused with `MailboxFull`, and nodes that
-        // answered `NodeFull`, during this run.
-        let mut full_boxes: HashSet<(MailboxId, NodeId)> = HashSet::new();
+        let mut days: HashMap<(MailboxId, SubKind), u32> = HashMap::new();
+        for &(m, d, k) in &wanted {
+            days.entry((m, k)).or_insert(d);
+        }
+        let mut queue: VecDeque<SubTask> = plan.subscribe.into_iter().collect();
+        // (mailbox, kind, node) refused with `MailboxFull` (the node's cap
+        // is per mailbox and kind), and nodes that answered `NodeFull`,
+        // during this run.
+        let mut full_boxes: HashSet<SubTask> = HashSet::new();
         let mut full_nodes: HashSet<NodeId> = HashSet::new();
-        'stage: while let Some((mailbox, node)) = queue.pop_front() {
+        'stage: while let Some((mailbox, kind, node)) = queue.pop_front() {
             if self.over() {
                 break;
             }
             let left_out = push.no_wake.get(&node).is_some_and(|until| *until > now);
-            let Some(&day) = days.get(&mailbox) else {
+            let Some(&day) = days.get(&(mailbox, kind)) else {
                 continue;
             };
             if full_nodes.contains(&node) {
                 // Found full on an earlier mailbox: its place goes on.
-                self.queue_next_responsible(&push, &mut queue, &full_boxes, &skipped, mailbox, now);
+                self.queue_next_responsible(
+                    &push,
+                    &mut queue,
+                    &full_boxes,
+                    &skipped,
+                    (mailbox, kind),
+                    now,
+                );
                 continue;
             }
             if left_out || skipped.contains(&node) {
@@ -1320,9 +1612,9 @@ where
                     self.conns.insert(node, conn);
                     break None;
                 }
-                let collapse = push.collapse_for(mailbox, day, &mut rand::rng());
+                let collapse = push.collapse_for(mailbox, kind, day, &mut rand::rng());
                 let (sub, secret) =
-                    build_subscription(cfg, mailbox, day, collapse, &mut rand::rng());
+                    build_subscription(cfg, mailbox, day, kind, collapse, &mut rand::rng());
                 let request = self.dialer.subscribe(&mut conn, &sub, self.pow_left);
                 let Ok(reply) = tokio::time::timeout_at(self.deadline, request).await else {
                     break 'stage;
@@ -1345,7 +1637,7 @@ where
                 // No wake support announced.
                 None => push.note_no_wake(node, now),
                 Some((DepositOutcome::Answered(Ok(())), secret)) => {
-                    push.note_subscribed(mailbox, day, node, secret, &mut rand::rng());
+                    push.note_subscribed(mailbox, kind, day, node, secret, &mut rand::rng());
                     self.report.subscribed += 1;
                 }
                 Some((DepositOutcome::Answered(Err(ErrorReason::Unsupported)), _)) => {
@@ -1362,18 +1654,18 @@ where
                         &mut queue,
                         &full_boxes,
                         &skipped,
-                        mailbox,
+                        (mailbox, kind),
                         now,
                     );
                 }
                 Some((DepositOutcome::Answered(Err(ErrorReason::MailboxFull)), _)) => {
-                    full_boxes.insert((mailbox, node));
+                    full_boxes.insert((mailbox, kind, node));
                     self.queue_next_responsible(
                         &push,
                         &mut queue,
                         &full_boxes,
                         &skipped,
-                        mailbox,
+                        (mailbox, kind),
                         now,
                     );
                 }
@@ -1390,20 +1682,21 @@ where
     }
 
     /// Puts first in `queue` the best-ranked responsible of `mailbox` that
-    /// neither holds nor is about to receive its subscription, is not left
-    /// out, was not skipped and did not refuse it as full during this run.
+    /// neither holds nor is about to receive its subscription of `kind`, is
+    /// not left out, was not skipped and did not refuse it as full during
+    /// this run.
     fn queue_next_responsible(
         &self,
         push: &PushState,
-        queue: &mut VecDeque<(MailboxId, NodeId)>,
-        full_boxes: &HashSet<(MailboxId, NodeId)>,
+        queue: &mut VecDeque<SubTask>,
+        full_boxes: &HashSet<SubTask>,
         skipped: &HashSet<NodeId>,
-        mailbox: MailboxId,
+        (mailbox, kind): (MailboxId, SubKind),
         now: u64,
     ) {
         let holds = |n: &NodeId| {
             push.subs
-                .get(&mailbox)
+                .get(&(mailbox, kind))
                 .is_some_and(|b| b.nodes.iter().any(|(h, _)| h == n))
         };
         let next = self
@@ -1413,13 +1706,13 @@ where
             .into_iter()
             .find(|n| {
                 !holds(n)
-                    && !queue.contains(&(mailbox, *n))
-                    && !full_boxes.contains(&(mailbox, *n))
+                    && !queue.contains(&(mailbox, kind, *n))
+                    && !full_boxes.contains(&(mailbox, kind, *n))
                     && !skipped.contains(n)
                     && !push.no_wake.get(n).is_some_and(|until| *until > now)
             });
         if let Some(n) = next {
-            queue.push_front((mailbox, n));
+            queue.push_front((mailbox, kind, n));
         }
     }
 
@@ -1430,10 +1723,10 @@ where
     async fn push_unsubscribes(
         &mut self,
         push: &mut PushState,
-        list: &[(MailboxId, NodeId, [u8; 32])],
+        list: &[(MailboxId, SubKind, NodeId, [u8; 32])],
         skipped: &mut HashSet<NodeId>,
     ) -> Option<bool> {
-        'list: for &(mailbox, node, secret) in list {
+        'list: for &(mailbox, kind, node, secret) in list {
             if self.over() {
                 return Some(false);
             }
@@ -1470,11 +1763,11 @@ where
                     return Some(false);
                 }
                 Ok(()) => {
-                    push.note_unsubscribed(&mailbox, &node);
+                    push.note_unsubscribed(&mailbox, kind, &node);
                     self.report.unsubscribed += 1;
                 }
                 // Any other refusal: nothing left to cancel there.
-                Err(_) => push.note_unsubscribed(&mailbox, &node),
+                Err(_) => push.note_unsubscribed(&mailbox, kind, &node),
             }
             if !self.save_push(push) {
                 return None;

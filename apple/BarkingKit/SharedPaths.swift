@@ -55,6 +55,17 @@ public enum SharedPaths {
             ofItemAtPath: url.path)
     }
 
+    /// Keeps the database out of iCloud and computer backups (spec §7.2): the
+    /// container holds the database, its `-wal`/`-shm`, the lock and the
+    /// outbox. Set at every open; a key that never leaves this device could
+    /// not open a backed-up copy anyway.
+    public static func excludeFromBackup() throws {
+        var url = try container
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try url.setResourceValues(values)
+    }
+
     #if BARKING_DEV
     /// Development files for scripted checks (card, APNs token). Written to
     /// the shared container and to the app's Documents, which

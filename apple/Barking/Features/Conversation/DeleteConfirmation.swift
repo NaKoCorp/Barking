@@ -1,0 +1,104 @@
+import BarkingKit
+import SwiftUI
+
+/// The confirmation before deleting one message (spec Lot M §7.4): which
+/// case, from the delivery shown, and its texts. Always a
+/// `confirmationDialog` whose cancel button is "Keep".
+enum DeleteConfirmation: Equatable {
+    case pending, onNetwork, received, notDelivered
+    /// Left for `left` of the contact's `total` devices, still here for the others.
+    case mixed(left: Int, total: Int)
+    /// A received message.
+    case receivedMessage
+    /// A message I sent from another of my devices: no delivery here, so
+    /// nothing is said about the contact.
+    case sentElsewhere
+
+    /// §7.4 "Choix du cas": Pending if nothing left and something waits
+    /// here; Mixed if some left and some wait; otherwise the combined state.
+    init(outgoing: Bool, delivery: Delivery?) {
+        guard outgoing else {
+            self = .receivedMessage
+            return
+        }
+        guard let d = delivery else {
+            self = .sentElsewhere
+            return
+        }
+        // A pending packet whose deposit was tried may be on a node (§14.1):
+        // it counts as left, and only the untried rest can be cancelled.
+        let mayHaveLeft = d.devicesLeft + d.devicesTried
+        let cancellable = d.devicesPending > d.devicesTried ? d.devicesPending - d.devicesTried : 0
+        if d.devicesPending > 0 && mayHaveLeft == 0 {
+            self = .pending
+        } else if d.devicesPending > 0 && cancellable == 0 {
+            self = .onNetwork
+        } else if d.devicesPending > 0 {
+            self = .mixed(left: Int(mayHaveLeft), total: Int(d.devices))
+        } else {
+            switch d.state {
+            case .pending: self = .pending
+            case .onNetwork: self = .onNetwork
+            case .received: self = .received
+            case .notDelivered: self = .notDelivered
+            }
+        }
+    }
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .pending, .notDelivered: "Delete this message?"
+        case .onNetwork, .received, .mixed: "Delete from this iPhone?"
+        case .receivedMessage, .sentElsewhere: "Delete this message from this iPhone?"
+        }
+    }
+
+    /// `name`: the contact's alias, otherwise display name.
+    func message(name: String, bundle: Bundle = .main, locale: Locale = .current) -> String {
+        switch self {
+        case .pending:
+            String(localized: "It hasn’t left this iPhone. \(name) won’t receive it.", bundle: bundle, locale: locale)
+        case .onNetwork:
+            String(localized: "It’s already on the network: \(name) will still receive it.", bundle: bundle, locale: locale)
+        case .received:
+            String(localized: "\(name) already received it and keeps it.", bundle: bundle, locale: locale)
+        case .notDelivered:
+            String(localized: "No device of theirs ever received it.", bundle: bundle, locale: locale)
+        case .mixed(let left, let total):
+            String(localized: "It already left for \(left) of \(name)’s \(total) devices: that one keeps it. The rest is cancelled.",
+                   bundle: bundle, locale: locale)
+        case .receivedMessage:
+            String(localized: "\(name) keeps their copy.", bundle: bundle, locale: locale)
+        case .sentElsewhere:
+            String(localized: "Your other devices keep their copy.", bundle: bundle, locale: locale)
+        }
+    }
+
+    var button: LocalizedStringKey {
+        switch self {
+        case .pending: "Delete and cancel"
+        case .mixed: "Delete and cancel the rest"
+        case .onNetwork, .received, .notDelivered, .receivedMessage, .sentElsewhere: "Delete"
+        }
+    }
+}
+
+extension DeleteConfirmation {
+    /// §5.1: deleting keeps a copy for my other devices when one already
+    /// left this iPhone (it cannot be recalled), or when one waits here and
+    /// the contact receives the message anyway. Without a linked device
+    /// (`total` 0) there is no copy to speak of.
+    static func keepsOwnCopies(delivery: Delivery, ownCopies: OwnCopies) -> Bool {
+        guard ownCopies.total > 0 else { return false }
+        return ownCopies.left > 0 || (ownCopies.waiting > 0 && delivery.devicesLeft + delivery.devicesTried > 0)
+    }
+
+    /// The message with, on its own line, "Your other devices keep their
+    /// copy." when the deletion keeps them one (§7.4); said once for a
+    /// message sent from another device, whose message it already is.
+    func message(name: String, keepsOwnCopies: Bool, bundle: Bundle = .main, locale: Locale = .current) -> String {
+        let text = message(name: name, bundle: bundle, locale: locale)
+        guard keepsOwnCopies, self != .sentElsewhere else { return text }
+        return text + "\n" + String(localized: "Your other devices keep their copy.", bundle: bundle, locale: locale)
+    }
+}

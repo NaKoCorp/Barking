@@ -1,1 +1,4 @@
 "NEW_MESSAGES_COUNT" = "%lld nouveaux messages";
+"NEW_MESSAGE" = "Nouveau message";
+"FAILED_MESSAGE" = "Un message n’a pas pu être distribué.";
+"FAILED_MESSAGES_COUNT" = "%lld messages n’ont pas pu être distribués.";

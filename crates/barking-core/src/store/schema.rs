@@ -1,8 +1,8 @@
-//! SQL storage schema (v2) and migration from v1.
+//! SQL storage schema (v3) and migrations from v1 and v2.
 
 use rusqlite::{Connection, params};
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Schema v1 (batch 1A), kept for the migration and for its tests: a
 /// v1 database is opened with this schema, then migrated.
@@ -134,7 +134,8 @@ const DIRECTION_OUT: i64 = 0;
 /// `messages` receive a `message_id` derived from their `packet_id` (or from
 /// their `id` if it is null), outgoing messages having a packet receive
 /// the matching delivery, received messages having a packet are
-/// recorded in `inbound`, then `schema_version` is set to 2.
+/// recorded in `inbound`, then `schema_version` is set to 2 (the v2 → v3
+/// migration follows at open).
 pub fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch("ALTER TABLE messages RENAME TO messages_v1;")?;
@@ -187,13 +188,18 @@ pub fn migrate_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
     tx.execute_batch("DROP TABLE messages_v1;")?;
-    let version = postcard::to_allocvec(&SCHEMA_VERSION).unwrap_or_default();
-    tx.execute(
+    set_version(&tx, 2)?;
+    tx.commit()
+}
+
+fn set_version(conn: &Connection, version: u32) -> rusqlite::Result<()> {
+    let version = postcard::to_allocvec(&version).unwrap_or_default();
+    conn.execute(
         "INSERT INTO meta(k, v) VALUES ('schema_version', ?1) \
          ON CONFLICT(k) DO UPDATE SET v = excluded.v",
         params![version],
     )?;
-    tx.commit()
+    Ok(())
 }
 
 fn delivery_status(message_status: i64) -> i64 {
@@ -216,3 +222,123 @@ pub const TRANSPARENCY_INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS transparency_at ON transparency(at);
 CREATE INDEX IF NOT EXISTS transparency_class_id ON transparency(class, id);
 ";
+
+/// Date of the last verification change of a contact (`SyncOp::UpsertV2`),
+/// added to existing databases at open (idempotent); 0: unknown.
+pub const CONTACTS_ADD_VERIFIED_AT: &str =
+    "ALTER TABLE contacts ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0;";
+
+/// Route of each packet (spec block 2b §4.1), created at open
+/// (idempotent). `step`: `RouteStep` as stored, fixed order, additions at
+/// the end. `node`: a node's short identifier, never an address. `size`:
+/// packet bytes, for `Sealed`. Never synchronized, purged with the log.
+pub const ROUTE_STEPS: &str = "
+CREATE TABLE IF NOT EXISTS route_steps (
+    packet_id BLOB NOT NULL,
+    at INTEGER NOT NULL,
+    step INTEGER NOT NULL,
+    node TEXT,
+    size INTEGER
+);
+CREATE INDEX IF NOT EXISTS route_steps_packet ON route_steps(packet_id);
+CREATE INDEX IF NOT EXISTS route_steps_at ON route_steps(at);
+";
+
+/// Schema changes of v3 (spec 2026-11-06 §5.3): per-delivery times, the
+/// first node that accepted a packet, its size; first deposit of any queued
+/// packet and, for a receipt, the packet it acknowledges (`ref`).
+const SCHEMA_V3_CHANGES: &str = "
+ALTER TABLE deliveries ADD COLUMN sealed_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE deliveries ADD COLUMN deposited_at INTEGER;   -- first node acceptance
+ALTER TABLE deliveries ADD COLUMN node TEXT;              -- short id of that first node
+ALTER TABLE deliveries ADD COLUMN size INTEGER;           -- packet bytes
+ALTER TABLE deliveries ADD COLUMN acked_at INTEGER;
+ALTER TABLE deliveries ADD COLUMN expired_at INTEGER;     -- set when it expired before any deposit
+ALTER TABLE outbox ADD COLUMN deposited_at INTEGER;       -- first node acceptance, any kind
+ALTER TABLE outbox ADD COLUMN ref BLOB;                   -- for an ack: the acked packet id
+ALTER TABLE outbox ADD COLUMN deposit_tried_at INTEGER;   -- first deposit request sent
+CREATE TABLE IF NOT EXISTS deleted_messages (
+    message_id BLOB PRIMARY KEY NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS messages_delivery ON messages(contact_fp, direction, status, at);
+CREATE INDEX IF NOT EXISTS outbox_waiting ON outbox(deposited_at, expires_at);
+";
+
+/// `outbox.deposit_tried_at` for a database migrated to v3 before the
+/// column joined `SCHEMA_V3_CHANGES` (development builds only).
+pub const OUTBOX_ADD_DEPOSIT_TRIED_AT: &str =
+    "ALTER TABLE outbox ADD COLUMN deposit_tried_at INTEGER;";
+
+/// Backfill of v3 from the route log (`route_steps`, `RouteStep` as stored:
+/// Sealed 0, Deposited 1, AckVerified 4, OwnCopy 5), in the order of §5.3:
+/// 1. `sealed_at`: the `Sealed` or `OwnCopy` step, else the message's
+///    `at`, else 0;
+/// 2. `deposited_at`, `node`: the first `Deposited` step;
+/// 3. `size`: the `Sealed` step;
+/// 4. `acked_at`: the `AckVerified` step, else `sealed_at` for a delivery
+///    stored as delivered (3);
+/// 5. `outbox.deposited_at`: that of the packet's delivery;
+/// 6. a delivery stored as sent (1) whose packet is still queued without a
+///    known deposit goes back to pending (0); one that left the queue
+///    without a trace keeps 1;
+/// 7. every outgoing message with a delivery to the contact is recomputed
+///    (rule of `core::delivery::recompute_message_status`).
+///
+/// Messages older than the log (30 days) have no route left: their
+/// deliveries keep their status.
+const SCHEMA_V3_BACKFILL: &str = "
+UPDATE deliveries SET sealed_at = coalesce(
+    (SELECT min(r.at) FROM route_steps r
+     WHERE r.packet_id = deliveries.packet_id AND r.step IN (0, 5)),
+    (SELECT m.at FROM messages m WHERE m.message_id = deliveries.message_id),
+    0);
+UPDATE deliveries SET
+    deposited_at = (SELECT min(r.at) FROM route_steps r
+                    WHERE r.packet_id = deliveries.packet_id AND r.step = 1),
+    node = (SELECT r.node FROM route_steps r
+            WHERE r.packet_id = deliveries.packet_id AND r.step = 1
+            ORDER BY r.at, r.rowid LIMIT 1);
+UPDATE deliveries SET size = (SELECT r.size FROM route_steps r
+                              WHERE r.packet_id = deliveries.packet_id AND r.step = 0
+                              ORDER BY r.at, r.rowid LIMIT 1);
+UPDATE deliveries SET acked_at = coalesce(
+    (SELECT min(r.at) FROM route_steps r
+     WHERE r.packet_id = deliveries.packet_id AND r.step = 4),
+    CASE WHEN status = 3 THEN sealed_at END);
+UPDATE outbox SET deposited_at = (SELECT d.deposited_at FROM deliveries d
+                                  WHERE d.packet_id = outbox.packet_id);
+UPDATE deliveries SET status = 0
+WHERE status = 1 AND deposited_at IS NULL
+  AND packet_id IN (SELECT packet_id FROM outbox);
+UPDATE messages SET status = (
+    SELECT CASE
+        WHEN sum(d.status = 3) > 0 THEN 3
+        WHEN sum(d.status = 1) > 0 THEN 1
+        WHEN sum(d.status = 0) > 0 THEN 0
+        ELSE 5 END
+    FROM deliveries d WHERE d.message_id = messages.message_id AND d.own = 0)
+WHERE direction = 0
+  AND EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = messages.message_id AND d.own = 0);
+";
+
+/// Migrates a v2 database to v3 in a single transaction: schema changes,
+/// backfill, then `schema_version` set to 3. Needs the v2 additions applied
+/// at open (`deliveries.own`, `route_steps`).
+pub fn migrate_v2_to_v3(conn: &Connection) -> rusqlite::Result<()> {
+    migrate_v2_to_v3_hooked(conn, |_| Ok(()))
+}
+
+/// [`migrate_v2_to_v3`] with `mid_way` run between the schema changes and
+/// the backfill: an error there rolls everything back (tests).
+pub(crate) fn migrate_v2_to_v3_hooked(
+    conn: &Connection,
+    mid_way: impl FnOnce(&Connection) -> rusqlite::Result<()>,
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(SCHEMA_V3_CHANGES)?;
+    mid_way(&tx)?;
+    tx.execute_batch(SCHEMA_V3_BACKFILL)?;
+    set_version(&tx, 3)?;
+    tx.commit()
+}

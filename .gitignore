@@ -32,6 +32,7 @@ Thumbs.db
 
 # iOS app: local team settings and the generated Xcode project.
 /apple/Local.xcconfig
+/apple/build/
 /apple/*.xcodeproj/
 
 # Credentials: never in the repository (also refused by the pre-commit hook,

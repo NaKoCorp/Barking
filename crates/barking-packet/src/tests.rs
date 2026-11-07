@@ -164,3 +164,8 @@ proptest! {
         let _ = Packet::decode(&b);
     }
 }
+
+#[test]
+fn default_expiry_is_one_day() {
+    assert_eq!(default_expiry(1_000), 1_000 + 86_400);
+}

@@ -13,7 +13,7 @@ use barking_node::{NodeStore, Policy};
 use barking_packet::{DEFAULT_HOPS, Kind, MailboxId, Packet, PacketId, Tier};
 use barking_proto::client::{self, Client, ClientError};
 use barking_proto::frame::{self, MAX_REQUEST_BYTES};
-use barking_proto::{ErrorReason, NodeId, Request, Response, tls};
+use barking_proto::{ErrorReason, NodeId, PROTOCOL_VERSION, Request, Response, tls};
 use ed25519_dalek::SigningKey;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -272,14 +272,9 @@ async fn stolen_certificate_without_key_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn old_version_refused() {
     let (_d, path) = db();
-    // Node of a future version that no longer accepts version 1.
-    let node = start_with(&path, key(0), policy(), |c| {
-        c.version = 2;
-        c.min_version = 2;
-    });
-    let r = Client::connect(node.addr, node.id).await;
-    assert!(matches!(r, Err(ClientError::Version)), "{:?}", r.err());
-    // Raw request: `Error(VersionTooOld)`, then closing.
+    // A default node (protocol version 2) no longer accepts version 1.
+    let node = start(&path);
+    // A raw version-1 request: `Error(VersionTooOld)`, then closing.
     let (_ep, conn) = client::open_connection(node.addr, node.id).await.unwrap();
     let resp = client::request(
         &conn,
@@ -605,8 +600,8 @@ fn slow_fake_node(
 
 fn hello(k: &SigningKey, pow_bits: u8) -> Response {
     Response::Hello {
-        version: 1,
-        min_version: 1,
+        version: PROTOCOL_VERSION,
+        min_version: PROTOCOL_VERSION,
         node_id: id_of(k),
         pow_bits,
         limits: barking_proto::Limits {
@@ -715,8 +710,8 @@ async fn stuck_connection(addr: SocketAddr, id: NodeId) -> (quinn::Endpoint, qui
     let r = client::request(
         &conn,
         &Request::Hello {
-            version: 1,
-            min_version: 1,
+            version: PROTOCOL_VERSION,
+            min_version: PROTOCOL_VERSION,
         },
     )
     .await

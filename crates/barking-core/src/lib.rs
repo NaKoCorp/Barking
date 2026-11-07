@@ -21,8 +21,9 @@ pub mod store;
 pub mod transparency;
 
 pub use self::core::{
-    ContactSummary, Core, HistoryArchive, LinkBundle, LinkOffer, LinkOutcome, LinkRequest,
-    ReceiveOutcome, SyncKind, WatchedMailboxes,
+    ContactSummary, Core, DeleteOutcome, HistoryArchive, LeaveState, LinkBundle, LinkOffer,
+    LinkOutcome, LinkRequest, MyDevice, ReceiveOutcome, RouteEntry, RouteStep, SyncKind,
+    WatchedMailboxes,
 };
 pub use self::core::{MAX_ARCHIVE_BYTES, MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES};
 pub use error::{CoreError, Result};

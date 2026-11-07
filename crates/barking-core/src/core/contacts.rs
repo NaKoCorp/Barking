@@ -7,7 +7,7 @@ use rand_core::CryptoRng;
 use super::{Core, OwnDevices, load_card, log, sync};
 use crate::contact::ContactCard;
 use crate::envelope::SyncOp;
-use crate::identity::{DeviceId, DevicePublic, Fingerprint};
+use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::store::{ContactClock, ContactRow, Queries};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
@@ -48,11 +48,11 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<Fingerprint> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             let me = device.public().id();
-            let (fp, replaced) = add_in(tx, card, alias)?;
+            let (fp, replaced) = add_in(tx, device, card, alias, now, rng)?;
             // The new state goes out before the deletion of the replaced contact:
             // received in that order, the alias moves from one fingerprint to the other
             // on my other devices, which log the same
@@ -79,10 +79,10 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<()> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
-            remove_in(tx, *contact)?;
+            remove_in(tx, *contact, now)?;
             let time = sync::touch(tx, *contact, now, true, device.public().id())?;
             sync::send_op(tx, device, SyncOp::Remove(*contact), time, rng)
         })
@@ -96,10 +96,27 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<()> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
-            verify_in(tx, *contact)?;
+            set_verified_in(tx, *contact, true, now)?;
+            let time = sync::touch(tx, *contact, now, false, device.public().id())?;
+            sync::send_state(tx, device, *contact, time, rng)
+        })
+    }
+
+    /// Removes the verified mark (codes compared by mistake, or a doubt).
+    /// Synchronized with my other devices.
+    pub fn unmark_verified(
+        &mut self,
+        contact: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<()> {
+        self.ensure_active()?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            set_verified_in(tx, *contact, false, now)?;
             let time = sync::touch(tx, *contact, now, false, device.public().id())?;
             sync::send_state(tx, device, *contact, time, rng)
         })
@@ -115,7 +132,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<()> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             set_alias_in(tx, *contact, alias)?;
@@ -255,8 +272,11 @@ fn clean_alias(alias: &str) -> Result<&str> {
 /// fingerprint), if there is one.
 pub(super) fn add_in(
     q: &impl Queries,
+    device: &DeviceKeys,
     card: &ContactCard,
     alias: Option<&str>,
+    now: u64,
+    rng: &mut impl CryptoRng,
 ) -> Result<(Fingerprint, Option<Fingerprint>)> {
     let alias = alias
         .map(clean_alias)
@@ -270,8 +290,9 @@ pub(super) fn add_in(
         (None, Some(old)) => old.alias.clone(),
         (None, None) => String::new(),
     };
+    // Revoked devices: told (they may not know), then no more sessions.
+    sync::notify_revoked(q, device, card, &c.revoked, now, rng)?;
     for id in &c.revoked {
-        // Revoked device: no more sessions with it.
         q.delete_sessions_for_device(fp, *id)?;
     }
     let mut replaced = None;
@@ -289,7 +310,7 @@ pub(super) fn add_in(
                 new: fp,
             },
         )?;
-        q.delete_contact(other.fp)?;
+        delete_in(q, other.fp, now)?;
         replaced = Some(other.fp);
         verified = false;
     }
@@ -298,21 +319,26 @@ pub(super) fn add_in(
 }
 
 /// State of a contact received from one of my devices (`SyncOp::Upsert`): card
-/// (kept if the known card is newer), exact alias (empty: none),
-/// verified status merged by "or". Every check precedes the
-/// first write.
+/// (kept if the known card is newer), exact alias (empty: none). The verified
+/// status of a known contact is its own register (`merge_verified`, applied
+/// by the caller); `verified` only seeds a contact this device did not know.
+/// Every check precedes the first write.
 ///
 /// Alias held by another contact: if the operation (`clock`) beats
 /// the last known operation on that other contact, it loses it; otherwise
 /// the received alias is dropped (the contact no longer has one). Thus the alias goes to
 /// the most recent operation on all my devices, whatever the
 /// arrival order.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn upsert_in(
     q: &impl Queries,
+    device: &DeviceKeys,
     card: &ContactCard,
     alias: &str,
     verified: bool,
     clock: &ContactClock,
+    now: u64,
+    rng: &mut impl CryptoRng,
 ) -> Result<()> {
     let mut alias = clean_alias(alias)?;
     let fp = card.fingerprint();
@@ -324,12 +350,12 @@ pub(super) fn upsert_in(
         }
         None => false,
     };
-    let (bytes, revoked, old) = if keep_known {
+    let (bytes, revoked) = if keep_known {
         let old = known.ok_or(CoreError::UnknownContact)?;
-        (old.card.clone(), Vec::new(), Some(old))
+        (old.card, Vec::new())
     } else {
         let c = check_card(q, card)?;
-        (c.bytes, c.revoked, c.old)
+        (c.bytes, c.revoked)
     };
     let mut strip = None;
     if !alias.is_empty()
@@ -354,13 +380,19 @@ pub(super) fn upsert_in(
             alias = "";
         }
     }
+    // Revoked devices: told (this device may be the only one of the contact
+    // with a session with them), then no more sessions.
+    sync::notify_revoked(q, device, card, &revoked, now, rng)?;
     for id in &revoked {
         q.delete_sessions_for_device(fp, *id)?;
     }
     if let Some(other) = strip {
         q.upsert_contact(other.fp, &other.card, "", other.verified)?;
     }
-    let verified = verified || old.is_some_and(|o| o.verified);
+    let verified = match q.get_contact(fp)? {
+        Some(known) => known.verified,
+        None => verified,
+    };
     q.upsert_contact(fp, &bytes, alias, verified)
 }
 
@@ -438,10 +470,15 @@ pub(super) fn verify_card_update(
 /// transaction, after the session is written. No error due to the content.
 pub(super) fn apply_card_update(
     q: &impl Queries,
+    device: &DeviceKeys,
     current: &ContactRow,
+    card: &ContactCard,
     verified: VerifiedCard,
+    now: u64,
+    rng: &mut impl CryptoRng,
 ) -> Result<(Vec<DeviceId>, u32)> {
     let c = verified.checked;
+    sync::notify_revoked(q, device, card, &c.revoked, now, rng)?;
     for id in &c.revoked {
         q.delete_sessions_for_device(c.fp, *id)?;
     }
@@ -451,15 +488,50 @@ pub(super) fn apply_card_update(
 }
 
 /// Deletes a known contact from `q` (see `remove_contact`).
-pub(super) fn remove_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
+pub(super) fn remove_in(q: &impl Queries, fp: Fingerprint, now: u64) -> Result<()> {
     q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
+    delete_in(q, fp, now)
+}
+
+/// Deletes the contact `fp` (`Queries::delete_contact`) after settling the
+/// deliveries its deletion strands: the contact packets of my messages
+/// that never left this device are failed at `now` (no failure notice: the
+/// contact is gone) and leave the queue; those a node accepted, or may
+/// hold (a deposit was tried), stay queued for their verdict or redeposit.
+/// The changes are noted for `take_delivery_changes`.
+pub(super) fn delete_in(q: &impl Queries, fp: Fingerprint, now: u64) -> Result<()> {
+    super::delivery::fail_stranded(q, fp, now)?;
     q.delete_contact(fp)
 }
 
 /// Marks a known contact of `q` as verified.
-pub(super) fn verify_in(q: &impl Queries, fp: Fingerprint) -> Result<()> {
-    let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
-    q.upsert_contact(row.fp, &row.card, &row.alias, true)
+/// A local verification change: its date strictly follows the last known
+/// one, so that it wins over every change this device has seen.
+fn set_verified_in(q: &impl Queries, fp: Fingerprint, verified: bool, now: u64) -> Result<()> {
+    q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
+    let at = now.max(q.verified_at(fp)?.saturating_add(1));
+    q.set_verified(fp, verified, at)
+}
+
+/// Merges a received verified register: the most recent change wins; an
+/// unknown date (an older device's `Upsert`, 0) can only add the mark.
+pub(super) fn merge_verified(
+    q: &impl Queries,
+    fp: Fingerprint,
+    verified: bool,
+    at: u64,
+) -> Result<()> {
+    let Some(row) = q.get_contact(fp)? else {
+        return Ok(());
+    };
+    let known = q.verified_at(fp)?;
+    if at > known {
+        q.set_verified(fp, verified, at)
+    } else if at == 0 && verified && !row.verified {
+        q.set_verified(fp, true, known)
+    } else {
+        Ok(())
+    }
 }
 
 /// Changes the alias of a known contact of `q`; returns the stored alias.

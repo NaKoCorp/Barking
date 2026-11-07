@@ -52,7 +52,7 @@ use crate::push::{Subscription, subscription_hash};
 use crate::{NodeId, PROTOCOL_VERSION, pow, tls};
 
 /// Oldest protocol version this client can speak.
-pub const MIN_PROTOCOL_VERSION: u16 = 1;
+pub const MIN_PROTOCOL_VERSION: u16 = 2;
 /// Maximum number of items accepted per `fetch` call.
 pub const MAX_FETCH_ITEMS: usize = 10_000;
 /// Maximum number of bytes accepted per `fetch` call.

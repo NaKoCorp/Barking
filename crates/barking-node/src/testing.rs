@@ -7,16 +7,17 @@
 //! addresses allowed, diversity limits lifted, per-address caps raised,
 //! cadences brought down to `TICK`, and the test-only hooks of
 //! `ServerConfig` (`test_swallow_deposits`, `test_response_delay`,
-//! `test_send_rate`).
+//! `test_send_rate`, `test_purge_interval`), and a clock offset shared by
+//! the nodes of the process (`set_clock_offset`).
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use barking_dht::{BootstrapEntry, DiversityLimits};
 use barking_proto::client::{Client, Session};
-use barking_proto::{NodeId, RecordPolicy, Request, Response};
+use barking_proto::{NodeId, PROTOCOL_VERSION, RecordPolicy, Request, Response};
 use ed25519_dalek::SigningKey;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -97,9 +98,15 @@ pub fn id_of(k: &SigningKey) -> NodeId {
 }
 
 fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    server::unix_now()
+}
+
+/// Moves the clock of every node of this process `secs` seconds ahead of
+/// the system clock (0: back to it), for tests that need the nodes a day
+/// later (expiry, purge). Process-wide: nextest runs each test in a
+/// process of its own; under `cargo test`, hold the caller's lock.
+pub fn set_clock_offset(secs: u64) {
+    server::TEST_CLOCK_OFFSET.store(secs, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// How a test node runs; kept so that it can be restarted as it was.
@@ -123,6 +130,8 @@ pub struct NodeSpec {
     pub response_delay: Option<Duration>,
     /// `ServerConfig::test_send_rate`.
     pub send_rate: Option<u64>,
+    /// `ServerConfig::test_purge_interval`.
+    pub purge_interval: Option<Duration>,
     /// `ServerConfig::wake`.
     pub wake: WakeConfig,
     /// `ServerConfig::wake_allow_private`: the fake relay is on 127.0.0.1.
@@ -142,6 +151,7 @@ impl NodeSpec {
             swallow_deposits: false,
             response_delay: None,
             send_rate: None,
+            purge_interval: None,
             wake: WakeConfig::default(),
             wake_allow_private: false,
         }
@@ -160,6 +170,9 @@ pub struct TestNode {
     stop: oneshot::Sender<()>,
     task: JoinHandle<crate::Result<()>>,
     dir: tempfile::TempDir,
+    /// Duplicates of the node's sockets: the port stays bound while the
+    /// node is halted.
+    held: Vec<UdpSocket>,
 }
 
 /// A stopped node, its database kept, to start again on the same address.
@@ -168,6 +181,7 @@ pub struct StoppedNode {
     /// Settings of the next start (the previous ones by default).
     pub spec: NodeSpec,
     dir: tempfile::TempDir,
+    held: Vec<UdpSocket>,
 }
 
 impl TestNode {
@@ -190,6 +204,15 @@ impl TestNode {
                 Some((path, bytes))
             })
             .collect()
+    }
+
+    /// Number of packets the node holds, read from its database.
+    pub fn stored_packets(&self) -> u64 {
+        NodeStore::open_read_only(self.dir.path().join("node.db"))
+            .expect("node database opens read-only")
+            .stats()
+            .expect("node statistics read")
+            .packets
     }
 
     pub fn entry(&self) -> BootstrapEntry {
@@ -216,28 +239,19 @@ impl TestNode {
             addr: self.addr,
             spec: self.spec,
             dir: self.dir,
+            held: self.held,
         }
     }
 }
 
 impl StoppedNode {
     /// Starts the node again on its address, with its database.
+    ///
+    /// The sockets were kept bound since the halt: a port released and bound
+    /// again could be taken in between by a socket of another test (a client's
+    /// ephemeral port), which holds it as long as that test lasts.
     pub async fn restart(self) -> TestNode {
-        // The port was just released: retried briefly if still held.
-        let deadline = tokio::time::Instant::now() + LONG;
-        let socket = loop {
-            match UdpSocket::bind(self.addr) {
-                Ok(s) => break s,
-                Err(e) => {
-                    assert!(
-                        tokio::time::Instant::now() < deadline,
-                        "port not released: {e}"
-                    );
-                    tokio::time::sleep(TICK).await;
-                }
-            }
-        };
-        launch(self.spec, vec![socket], self.addr, self.dir)
+        launch(self.spec, self.held, self.addr, self.dir)
     }
 }
 
@@ -256,6 +270,10 @@ fn launch(
 ) -> TestNode {
     let k = key(spec.n);
     let id = id_of(&k);
+    let held = sockets
+        .iter()
+        .map(|s| s.try_clone().expect("socket duplicates"))
+        .collect();
     let mut cfg = ServerConfig::new(sockets, k);
     cfg.dht = spec.dht.clone();
     cfg.dht_tick = Some(TICK);
@@ -269,6 +287,7 @@ fn launch(
     cfg.test_swallow_deposits = spec.swallow_deposits;
     cfg.test_response_delay = spec.response_delay;
     cfg.test_send_rate = spec.send_rate;
+    cfg.test_purge_interval = spec.purge_interval;
     cfg.wake = spec.wake.clone();
     cfg.wake_allow_private = spec.wake_allow_private;
     let stats = Arc::clone(&cfg.stats);
@@ -290,6 +309,7 @@ fn launch(
         stop: tx,
         task,
         dir,
+        held,
     }
 }
 
@@ -373,6 +393,21 @@ pub async fn wait_full_tables(nodes: &[&TestNode]) {
             );
             tokio::time::sleep(TICK).await;
         }
+    }
+}
+
+/// Waits until every node of `nodes` holds at least `packets` packets: the
+/// copies a deposit leaves on other responsibles arrive by replication, not
+/// with the deposit, and a client reading from one of them before then gets
+/// only part of what was deposited.
+pub async fn wait_packets(nodes: &[TestNode], packets: u64) {
+    let deadline = tokio::time::Instant::now() + LONG;
+    while !nodes.iter().all(|n| n.stored_packets() >= packets) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the packets were not replicated to every node"
+        );
+        tokio::time::sleep(TICK).await;
     }
 }
 
@@ -486,8 +521,8 @@ impl FakeRelay {
                             };
                             let resp = match req {
                                 Request::Hello { .. } => Response::Hello {
-                                    version: 1,
-                                    min_version: 1,
+                                    version: PROTOCOL_VERSION,
+                                    min_version: PROTOCOL_VERSION,
                                     node_id: id,
                                     pow_bits: TEST_BITS,
                                     limits: barking_proto::Limits {

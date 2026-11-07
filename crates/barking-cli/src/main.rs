@@ -779,10 +779,10 @@ fn render_row(at: u64, direction: Direction, status: MessageStatus, body: &str) 
     };
     let status = match (direction, status) {
         (Direction::In, _) => "received",
-        (_, MessageStatus::Queued) => "pending",
-        (_, MessageStatus::Sent) => "sent",
-        (_, MessageStatus::Delivered) => "delivered",
-        (_, MessageStatus::Failed) => "failed",
+        (_, MessageStatus::Pending) => "pending",
+        (_, MessageStatus::OnNetwork) => "sent",
+        (_, MessageStatus::Received) => "delivered",
+        (_, MessageStatus::NotDelivered) => "failed",
     };
     format!(
         "{}  {arrow}  {status}  {}",
@@ -851,13 +851,16 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
         ReceiveOutcome::Quarantined { reason } => {
             println!("{label}: quarantined: {reason}");
         }
-        ReceiveOutcome::Synced { kind } => println!(
+        ReceiveOutcome::Synced { kind, .. } => println!(
             "{label}: synced from one of your devices ({})",
             kind.label()
         ),
         ReceiveOutcome::CardUpdated { from, alias } => {
             let who = alias.unwrap_or_else(|| from.to_string());
             println!("{label}: {} updated their device list", printable(&who));
+        }
+        ReceiveOutcome::Removed => {
+            println!("{label}: this device was removed from your account");
         }
     }
     Ok(())
@@ -1016,7 +1019,7 @@ mod tests {
         let line = render_row(
             0,
             Direction::Out,
-            MessageStatus::Delivered,
+            MessageStatus::Received,
             "a\n[bob] x\u{1b}[31m",
         );
         assert_eq!(

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_proto::client::{Client, ClientError};
-use barking_proto::push::{ApnsEnv, WakeToken, seal};
+use barking_proto::push::{ApnsEnv, WakeReason, WakeToken, seal};
 use barking_proto::{ErrorReason, MAX_WAKE_ITEMS, NodeId, Request, Response};
 use barking_push::{ConnLimits, PushOutcome, Pusher, RelayStats, bind, serve};
 use ed25519_dalek::SigningKey;
@@ -54,6 +54,7 @@ fn token(byte: u8, expires_day: u32) -> WakeToken {
         env: ApnsEnv::Sandbox,
         collapse: [byte; 16],
         expires_day,
+        reason: WakeReason::Message,
     }
 }
 
@@ -124,6 +125,18 @@ async fn valid_wake_reaches_pusher() {
     relay.wait_pushed(1).await;
     assert_eq!(relay.pusher.got.lock().unwrap().as_slice(), &[t]);
     assert_eq!(relay.stats.snapshot().wakes_in, 1);
+    let _ = relay.stop.send(true);
+}
+
+#[tokio::test]
+async fn receipt_reason_reaches_pusher() {
+    let relay = start(ConnLimits::default()).await;
+    let mut t = token(2, today() + 1);
+    t.reason = WakeReason::Receipt;
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    session.wake(vec![relay.sealed(&t)]).await.unwrap();
+    relay.wait_pushed(1).await;
+    assert_eq!(relay.pusher.got.lock().unwrap().as_slice(), &[t]);
     let _ = relay.stop.send(true);
 }
 

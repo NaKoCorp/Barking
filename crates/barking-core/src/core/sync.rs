@@ -12,7 +12,9 @@ use std::collections::HashSet;
 
 use rand_core::CryptoRng;
 
+use super::delivery;
 use super::link::META_OWN_CARD;
+use super::route::{self, RouteStep};
 use super::send::{SealTime, Target, seal_for};
 use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts, load_card, log};
 use crate::contact::ContactCard;
@@ -31,7 +33,7 @@ pub(super) const R_DEVICES_REFUSED: &str = "device list refused";
 
 /// Seals `body` for each of my other devices; each packet is
 /// recorded as an `own` delivery of `message_id` (its ack does not make
-/// the message "delivered"). Without another device, nothing is done.
+/// the message `Received`). Without another device, nothing is done.
 ///
 /// A content too large for a packet is not sent: the local
 /// operation succeeds anyway, and `SyncSkipped` is logged. The size is
@@ -55,7 +57,15 @@ pub(super) fn seal_to_own(
     }
     let sealed = seal_for(q, device, &Target::OwnDevices, body, message_id, time, rng)?;
     for (packet, peer) in &sealed {
-        q.add_delivery(message_id, packet.id, *peer, true)?;
+        q.add_delivery(
+            message_id,
+            packet.id,
+            *peer,
+            true,
+            time.now,
+            delivery::packet_size(packet),
+        )?;
+        route::record(q, packet.id, RouteStep::OwnCopy, time.now, None)?;
     }
     Ok(sealed.into_iter().map(|(p, _)| p).collect())
 }
@@ -92,7 +102,14 @@ pub(super) fn send_card_update(
             rng,
         )?;
         for (packet, peer) in sealed {
-            q.add_delivery(message_id, packet.id, peer, false)?;
+            q.add_delivery(
+                message_id,
+                packet.id,
+                peer,
+                false,
+                now,
+                delivery::packet_size(&packet),
+            )?;
             out.push(packet);
         }
     }
@@ -155,7 +172,65 @@ pub(super) fn send_own_card(
         rng,
     )?;
     for (packet, peer) in sealed {
-        q.add_delivery(message_id, packet.id, peer, false)?;
+        q.add_delivery(
+            message_id,
+            packet.id,
+            peer,
+            false,
+            now,
+            delivery::packet_size(&packet),
+        )?;
+    }
+    Ok(())
+}
+
+/// Queues `card`, the newer card of contact `fp`, for those of its `revoked`
+/// devices with which a session is still open, before the caller deletes
+/// those sessions: the only way a device removed by a recovery learns it
+/// (`removed.rs` on its side). Read against the stored (old) card, which
+/// still lists them. No session is opened for it; a card too large for a
+/// packet is not sent. Delivery without a message row.
+pub(super) fn notify_revoked(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    card: &ContactCard,
+    revoked: &[DeviceId],
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<()> {
+    let fp = card.fingerprint();
+    let mut reachable = Vec::new();
+    for id in revoked {
+        if !q.sessions_for(fp, *id)?.is_empty() {
+            reachable.push(*id);
+        }
+    }
+    let body = Body::CardUpdate(Box::new(card.clone()));
+    if reachable.is_empty() || !envelope::fits_in_packet(&body) {
+        return Ok(());
+    }
+    let mut id = [0u8; 16];
+    rng.fill_bytes(&mut id);
+    let message_id = MessageId(id);
+    let target = Target::ContactDevices(fp, reachable);
+    let sealed = seal_for(
+        q,
+        device,
+        &target,
+        &body,
+        message_id,
+        SealTime::at(now),
+        rng,
+    )?;
+    for (packet, peer) in sealed {
+        q.add_delivery(
+            message_id,
+            packet.id,
+            peer,
+            false,
+            now,
+            delivery::packet_size(&packet),
+        )?;
     }
     Ok(())
 }
@@ -194,10 +269,11 @@ pub(super) fn send_state(
     rng: &mut impl CryptoRng,
 ) -> Result<()> {
     let row = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
-    let op = SyncOp::Upsert {
+    let op = SyncOp::UpsertV2 {
         card: Box::new(load_card(&row.card)?),
         alias: row.alias.clone(),
         verified: row.verified,
+        verified_at: q.verified_at(fp)?,
     };
     send_op(q, device, op, time, rng)
 }
@@ -228,7 +304,7 @@ pub(super) fn touch(
 }
 
 /// Applies an authenticated sync content, coming from one of my
-/// devices. Every check precedes the first write: a refusal
+/// devices. A newer list without this device removes it (`removed.rs`). Every check precedes the first write: a refusal
 /// (`Ok(Err(reason))`) leaves nothing written. `Err`: local failure only.
 /// `Ok(Ok(None))`: valid content but already superseded (an authentic
 /// device list older than mine), nothing written, to be acked like
@@ -238,12 +314,18 @@ pub(super) fn touch(
 /// breaks the tie between two operations with the same date on a contact.
 pub(super) fn apply(
     q: &impl Queries,
-    me: &DevicePublic,
+    device: &DeviceKeys,
     sender: DeviceId,
     env: &Envelope,
+    now: u64,
+    rng: &mut impl CryptoRng,
 ) -> Result<core::result::Result<Option<SyncKind>, &'static str>> {
+    let me = &device.public();
     match &env.body {
         Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
+        Body::AdminTransfer { seed, version } => super::admin::apply(q, seed, *version),
+        // Handled by the receiver once the session is written (`remove.rs`).
+        Body::RemoveMe => Ok(Ok(None)),
         Body::SyncSent { to, text } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
             if *to == own.list.root.fingerprint() {
@@ -255,19 +337,25 @@ pub(super) fn apply(
                 *to,
                 Direction::Out,
                 text,
-                MessageStatus::Sent,
+                MessageStatus::OnNetwork,
                 env.sent_at,
                 MessageId(env.message_id),
             )?;
             Ok(Ok(Some(SyncKind::Sent)))
         }
         Body::SyncContact(op) => {
-            Ok(content(apply_op(q, op, env.sent_at, sender))?.map(|()| Some(SyncKind::Contact)))
+            let applied = apply_op(q, device, op, env.sent_at, sender, now, rng);
+            Ok(content(applied)?.map(|()| Some(SyncKind::Contact)))
         }
         Body::SyncDevices { card } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
             if card.devices.root == own.list.root && card.devices.version <= own.list.version {
                 return Ok(older_devices(&own.list, me, card));
+            }
+            // A newer list without me: removed (`removed.rs`).
+            if super::removed::is_removal(&own.list, me, card) {
+                let newly = super::removed::enter(q, device, card, now, rng)?;
+                return Ok(Ok(newly.then_some(SyncKind::Devices)));
             }
             if !devices_ok(q, &own.list, me, card)? {
                 return Ok(Err(R_DEVICES_REFUSED));
@@ -323,11 +411,33 @@ fn content<T>(r: Result<T>) -> Result<core::result::Result<T, &'static str>> {
 /// decide the same way, whatever the arrival order. The tombstone of a
 /// deletion prevents an older state from resurrecting the contact; a
 /// more recent state clears it.
-fn apply_op(q: &impl Queries, op: &SyncOp, at: u64, sender: DeviceId) -> Result<()> {
+fn apply_op(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    op: &SyncOp,
+    at: u64,
+    sender: DeviceId,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<()> {
     let (fp, removing) = match op {
-        SyncOp::Upsert { card, .. } => (card.fingerprint(), false),
+        SyncOp::Upsert { card, .. } | SyncOp::UpsertV2 { card, .. } => (card.fingerprint(), false),
         SyncOp::Remove(fp) => (*fp, true),
     };
+    // The verified status is its own register: merged whatever the clock of
+    // the contact's other operations.
+    let register = match op {
+        SyncOp::Upsert { verified, .. } => Some((*verified, 0)),
+        SyncOp::UpsertV2 {
+            verified,
+            verified_at,
+            ..
+        } => Some((*verified, *verified_at)),
+        SyncOp::Remove(_) => None,
+    };
+    if let Some((verified, at)) = register {
+        contacts::merge_verified(q, fp, verified, at)?;
+    }
     let clock = ContactClock {
         at,
         removed: removing,
@@ -341,10 +451,22 @@ fn apply_op(q: &impl Queries, op: &SyncOp, at: u64, sender: DeviceId) -> Result<
             card,
             alias,
             verified,
-        } => contacts::upsert_in(q, card, alias, *verified, &clock)?,
+        } => contacts::upsert_in(q, device, card, alias, *verified, &clock, now, rng)?,
+        SyncOp::UpsertV2 {
+            card,
+            alias,
+            verified,
+            verified_at,
+        } => {
+            let new = q.get_contact(fp)?.is_none();
+            contacts::upsert_in(q, device, card, alias, *verified, &clock, now, rng)?;
+            if new {
+                q.set_verified(fp, *verified, *verified_at)?;
+            }
+        }
         SyncOp::Remove(fp) => {
             if q.get_contact(*fp)?.is_some() {
-                q.delete_contact(*fp)?;
+                contacts::delete_in(q, *fp, now)?;
             }
         }
     }

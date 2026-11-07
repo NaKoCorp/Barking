@@ -120,6 +120,44 @@ pub enum TransparencyEvent {
         contact: Fingerprint,
         device: DeviceId,
     },
+    /// The root key was sent to another of my devices; it stays here until
+    /// that device acknowledges it. Added last.
+    AdminTransferStarted {
+        device: DeviceId,
+    },
+    /// The root key was received by `device` and erased here. Added last.
+    AdminTransferred {
+        device: DeviceId,
+    },
+    /// The root key arrived from another of my devices. Added last.
+    AdminReceived,
+    /// A newer device list signed by my root no longer contains this device:
+    /// it is removed from my account, its root key (if any) erased. Added last.
+    ThisDeviceRemoved {
+        version: u64,
+    },
+    /// Administrator side: my device `device` (`name`) was removed from my
+    /// list, which went to my devices and contacts. Added last.
+    DeviceRemoved {
+        device: DeviceId,
+        name: String,
+    },
+    /// Administrator side: my device `device` (`name`) asked to leave my
+    /// account (`RemoveMe`) and was removed. Added last.
+    RemoveRequested {
+        device: DeviceId,
+        name: String,
+    },
+    /// `count` messages deleted from this device: `cancelled` of them
+    /// before any packet to the contact left it (nobody receives them),
+    /// `already_left` with at least one packet already on the network or
+    /// received (the contact still receives them). No content, no
+    /// contact. Added last.
+    MessagesDeleted {
+        count: u32,
+        cancelled: u32,
+        already_left: u32,
+    },
 }
 
 /// Why a node was set aside.
@@ -137,6 +175,8 @@ pub enum SyncKind {
     Sent,
     Contact,
     Devices,
+    /// The root key (admin transfer). Added last.
+    Admin,
 }
 
 impl SyncKind {
@@ -146,6 +186,7 @@ impl SyncKind {
             SyncKind::Sent => "sent message",
             SyncKind::Contact => "contact",
             SyncKind::Devices => "device list",
+            SyncKind::Admin => "admin key",
         }
     }
 }
@@ -190,6 +231,11 @@ impl TransparencyEvent {
                 | Self::LinkFinished { .. }
                 | Self::ContactCardUpdated { .. }
                 | Self::OwnDevicesUpdated { .. }
+                | Self::AdminTransferred { .. }
+                | Self::AdminReceived
+                | Self::ThisDeviceRemoved { .. }
+                | Self::DeviceRemoved { .. }
+                | Self::RemoveRequested { .. }
         )
     }
 
@@ -369,6 +415,44 @@ impl TransparencyEvent {
                  are unusable. Its other devices still receive the packet.",
                 hex(&device.0[..4])
             ),
+            Self::AdminTransferStarted { device } => format!(
+                "The root key was sent, encrypted, to your device {}. This device keeps \
+                 it until that device confirms receipt, then erases it.",
+                hex(&device.0[..4])
+            ),
+            Self::AdminTransferred { device } => format!(
+                "Your device {} is now the administrator: it holds the root key. \
+                 This device erased its copy.",
+                hex(&device.0[..4])
+            ),
+            Self::AdminReceived => "This device is now the administrator: it received the \
+                 root key from another of your devices."
+                .to_owned(),
+            Self::ThisDeviceRemoved { version } => format!(
+                "This device was removed from your account by a newer device list \
+                 (version {version}), for example after a recovery from the 24 words. \
+                 It can no longer send; its root key, if it had one, was erased."
+            ),
+            Self::DeviceRemoved { device, name } => format!(
+                "Your device \"{name}\" ({}) was removed from your account: your other \
+                 devices and your contacts will no longer encrypt anything for it once \
+                 they receive the new device list.",
+                hex(&device.0[..4])
+            ),
+            Self::RemoveRequested { device, name } => format!(
+                "Your device \"{name}\" ({}) asked to leave your account; it was \
+                 removed from your device list.",
+                hex(&device.0[..4])
+            ),
+            Self::MessagesDeleted {
+                count,
+                cancelled,
+                already_left,
+            } => format!(
+                "{count} message(s) deleted from this device: {cancelled} cancelled before \
+                 leaving it, {already_left} had already left (the contact still receives \
+                 them)."
+            ),
         }
     }
 }
@@ -532,7 +616,42 @@ mod tests {
                 contact: fp(8),
                 device: DeviceId([9; 16]),
             },
+            TransparencyEvent::SyncApplied {
+                kind: SyncKind::Admin,
+            },
+            TransparencyEvent::AdminTransferStarted {
+                device: DeviceId([10; 16]),
+            },
+            TransparencyEvent::AdminTransferred {
+                device: DeviceId([10; 16]),
+            },
+            TransparencyEvent::AdminReceived,
+            TransparencyEvent::ThisDeviceRemoved { version: 7 },
+            TransparencyEvent::DeviceRemoved {
+                device: DeviceId([11; 16]),
+                name: "iPad".to_owned(),
+            },
+            TransparencyEvent::RemoveRequested {
+                device: DeviceId([12; 16]),
+                name: "iPad".to_owned(),
+            },
         ]
+    }
+
+    /// Logged before the `CardUpdate` leaves: the contacts stop encrypting
+    /// for the device only once they receive the new list.
+    #[test]
+    fn describe_device_removed_exact() {
+        let e = TransparencyEvent::DeviceRemoved {
+            device: DeviceId([0xab; 16]),
+            name: "iPad".to_owned(),
+        };
+        assert_eq!(
+            e.describe(),
+            "Your device \"iPad\" (abababab) was removed from your account: your \
+             other devices and your contacts will no longer encrypt anything for \
+             it once they receive the new device list."
+        );
     }
 
     #[test]
@@ -674,7 +793,7 @@ mod tests {
     #[test]
     fn security_class_is_session_key_change_and_link_only() {
         let security: Vec<_> = all().into_iter().filter(|e| e.is_security()).collect();
-        assert_eq!(security.len(), 6);
+        assert_eq!(security.len(), 11);
         assert!(security.iter().all(|e| matches!(
             e,
             TransparencyEvent::SessionEstablished { .. }
@@ -682,6 +801,11 @@ mod tests {
                 | TransparencyEvent::DeviceLinked { .. }
                 | TransparencyEvent::LinkFinished { .. }
                 | TransparencyEvent::ContactCardUpdated { .. }
+                | TransparencyEvent::AdminTransferred { .. }
+                | TransparencyEvent::AdminReceived
+                | TransparencyEvent::ThisDeviceRemoved { .. }
+                | TransparencyEvent::DeviceRemoved { .. }
+                | TransparencyEvent::RemoveRequested { .. }
                 | TransparencyEvent::OwnDevicesUpdated { .. }
         )));
     }

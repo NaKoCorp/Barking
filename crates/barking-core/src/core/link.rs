@@ -419,6 +419,22 @@ pub(super) fn pending_root(q: &impl Queries) -> Result<Option<RootPublic>> {
         .map(|p| p.root))
 }
 
+/// My card for a new device list (`link_device`, `remove_device`):
+/// `devices` and `bundles` signed by `root`, with my recorded display name
+/// (`contact_card`, `set_display_name`) and node hints.
+pub(super) fn rebuild_card(
+    q: &impl Queries,
+    root: &RootIdentity,
+    devices: &DeviceList,
+    bundles: Vec<PrekeyBundle>,
+) -> Result<ContactCard> {
+    let display_name = q.get_meta::<String>(META_DISPLAY_NAME)?.unwrap_or_default();
+    let nodes = q
+        .get_meta::<Vec<Vec<u8>>>(super::META_CARD_NODES)?
+        .unwrap_or_default();
+    ContactCard::sign(root, &display_name, devices.clone(), bundles, nodes)
+}
+
 impl Core {
     /// Refuses the operation while this device awaits the end of its link.
     pub(super) fn ensure_linked(&self) -> Result<()> {
@@ -428,11 +444,25 @@ impl Core {
         Ok(())
     }
 
+    /// Refuses an outgoing operation on a device awaiting its link or
+    /// removed from my account (`DeviceRemoved`).
+    pub(super) fn ensure_active(&self) -> Result<()> {
+        self.ensure_linked()?;
+        self.ensure_not_removed()
+    }
+
+    /// This device waits for its link bundle (`begin_link` done,
+    /// `finish_link` not yet).
+    pub fn is_pending_link(&self) -> bool {
+        self.pending
+    }
+
     /// Step 1 (A): new link offer, valid for 10 minutes. It
     /// replaces the previous offer. Admin only.
     pub fn link_offer(&mut self, now: u64, rng: &mut impl CryptoRng) -> Result<LinkOffer> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?.public();
+        super::admin::ensure_none_pending(&self.store, now)?;
         let mut stored = StoredOffer {
             secret: [0u8; 32],
             expires_at: now.saturating_add(LINK_OFFER_TTL_SECS),
@@ -525,8 +555,9 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<LinkOutcome> {
-        self.ensure_linked()?;
+        self.ensure_active()?;
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
+        super::admin::ensure_none_pending(&self.store, now)?;
         let root_pub = root.public();
         let offer = self
             .store
@@ -602,20 +633,7 @@ impl Core {
             .filter(|b| b.device != device)
             .cloned()
             .collect();
-        // My recorded display name (`contact_card`, `set_display_name`).
-        let display_name = self
-            .store
-            .get_meta::<String>(META_DISPLAY_NAME)?
-            .unwrap_or_default();
-        let card = ContactCard::sign(
-            root,
-            &display_name,
-            devices.clone(),
-            bundles,
-            self.store
-                .get_meta::<Vec<Vec<u8>>>(super::META_CARD_NODES)?
-                .unwrap_or_default(),
-        )?;
+        let card = rebuild_card(&self.store, root, &devices, bundles)?;
         let contacts = self
             .store
             .list_contacts()?
@@ -1077,7 +1095,7 @@ mod tests {
                     c1,
                     crate::store::Direction::In,
                     "invented",
-                    crate::store::MessageStatus::Delivered,
+                    crate::store::MessageStatus::Received,
                     NOW,
                     MessageId([7; 16]),
                 )?;

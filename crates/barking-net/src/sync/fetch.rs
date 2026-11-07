@@ -30,6 +30,20 @@ fn served_well(stop: FetchStop) -> bool {
     )
 }
 
+/// What a fetch stage reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FetchKind {
+    /// Session mailboxes: audits, cross-checks, the session slice.
+    Sessions,
+    /// Introduction mailboxes: their own byte budget and slice.
+    Intro,
+    /// Mailboxes of packets awaiting a verdict (spec §15.5), read only
+    /// for it: the introduction budget and slice, every node that accepted
+    /// the packet first, then every responsible of the mailbox (the
+    /// verdict rule needs them all).
+    Verdict,
+}
+
 /// How one group fetch ended.
 pub(super) enum GroupEnd {
     /// Fetched in full.
@@ -53,8 +67,10 @@ where
     /// (introductions and quick syncs: on failure only, a rate limit
     /// included for a quick sync). Returns true if every mailbox was
     /// fetched in full and processed.
-    pub(super) async fn fetch_stage(&mut self, mailboxes: &[MailboxId], intro: bool) -> bool {
+    pub(super) async fn fetch_stage(&mut self, mailboxes: &[MailboxId], kind: FetchKind) -> bool {
         let now = self.now;
+        // Introductions and verdicts: bounded, no audit.
+        let intro = kind != FetchKind::Sessions;
         let slice = if intro {
             intro_slice()
         } else {
@@ -65,7 +81,19 @@ where
             .iter()
             .map(|m| {
                 let ids = self.state.view.responsibles_by_score(m, now);
-                (*m, self.state.order_responsibles(ids))
+                let mut ids = self.state.order_responsibles(ids);
+                if kind == FetchKind::Verdict {
+                    // Every node that accepted a packet of it must answer,
+                    // responsible or not any more (as long as the view can
+                    // reach it); stable: those nodes first.
+                    for n in self.holders_of(m) {
+                        if !ids.contains(&n) && self.state.view.get(&n).is_some() {
+                            ids.push(n);
+                        }
+                    }
+                    ids.sort_by_key(|n| !self.held_one_of(m, n));
+                }
+                (*m, ids)
             })
             .collect();
         // Next responsible to try, by mailbox; `None`: given up.
@@ -120,11 +148,23 @@ where
                 }
                 let max_bytes = if capped { bytes_left } else { MAX_FETCH_BYTES };
                 let (end, bytes, processed) = self
-                    .fetch_group(node, &group, intro, max_bytes, slice_end)
+                    .fetch_group(node, &group, kind, max_bytes, slice_end)
                     .await;
                 bytes_left = bytes_left.saturating_sub(bytes);
                 all_processed &= processed;
                 match end {
+                    GroupEnd::Complete if kind == FetchKind::Verdict => {
+                        // Done once the verdict rule is met (every holder
+                        // and responsible answered); otherwise the next
+                        // node answers too.
+                        for m in &group {
+                            if self.verdict_settled(m) {
+                                done.insert(*m);
+                            } else {
+                                next.insert(*m, next[m].map(|i| i + 1));
+                            }
+                        }
+                    }
                     GroupEnd::Complete => {
                         complete_by_node.insert(node, true);
                         for m in &group {
@@ -217,7 +257,13 @@ where
                 self.state.note_crosscheck(&node, m, now);
             }
             let (end, _, _) = self
-                .fetch_group(node, &group, false, MAX_FETCH_BYTES, slice_end)
+                .fetch_group(
+                    node,
+                    &group,
+                    FetchKind::Sessions,
+                    MAX_FETCH_BYTES,
+                    slice_end,
+                )
                 .await;
             if matches!(end, GroupEnd::Stop) {
                 break;
@@ -243,6 +289,38 @@ where
         self.save();
     }
 
+    /// Nodes that accepted one of the packets awaiting a verdict in
+    /// `mailbox`, by id.
+    fn holders_of(&self, mailbox: &MailboxId) -> Vec<NodeId> {
+        let mut out: Vec<NodeId> = self
+            .verdict_packets
+            .values()
+            .filter(|(m, _)| m == mailbox)
+            .flat_map(|(_, holders)| holders.iter().copied())
+            .collect();
+        out.sort_unstable_by_key(|n| n.0);
+        out.dedup();
+        out
+    }
+
+    /// `node` accepted one of the packets awaiting a verdict in `mailbox`.
+    fn held_one_of(&self, mailbox: &MailboxId, node: &NodeId) -> bool {
+        self.verdict_packets
+            .iter()
+            .any(|(p, (m, _))| m == mailbox && self.accepted_by(p, node))
+    }
+
+    /// Saved positions of `group` on `node`. A verdict fetch reads its
+    /// mailboxes from their start: a node that still holds the packet
+    /// cannot hide it behind a saved position. Other stages resume.
+    fn resume(&self, node: NodeId, group: &[MailboxId], kind: FetchKind) -> FetchResume {
+        let mut resume = self.state.resume(&node, group);
+        if kind == FetchKind::Verdict {
+            resume.seen.clear();
+        }
+        resume
+    }
+
     /// Page size a fetch from `node` starts from.
     fn link_page(&self, node: NodeId) -> LinkPage {
         LinkPage {
@@ -266,11 +344,13 @@ where
         &mut self,
         node: NodeId,
         group: &[MailboxId],
-        intro: bool,
+        kind: FetchKind,
         max_bytes: usize,
         slice_end: Instant,
     ) -> (GroupEnd, usize, bool) {
-        let mut resume = self.state.resume(&node, group);
+        // Introductions and verdicts: no audit, no re-read.
+        let intro = kind != FetchKind::Sessions;
+        let mut resume = self.resume(node, group, kind);
         // Mailboxes read from their very start: the only ones a loss audit
         // may rely on (a resumed fetch skips the items already seen).
         let from_start: Vec<MailboxId> = group
@@ -306,7 +386,7 @@ where
             match &reply {
                 Err(e) if !fresh && !redialled && dead_session(e) => {
                     redialled = true;
-                    resume = self.state.resume(&node, group);
+                    resume = self.resume(node, group, kind);
                 }
                 _ => break (conn, reply),
             }
@@ -358,8 +438,14 @@ where
             .map(Vec::len)
             .fold(0usize, usize::saturating_add);
         let processed = self.take_items(&items);
+        self.note_seen(&items);
         if processed {
             self.state.set_positions(&node, group, &resume);
+            if complete {
+                for m in from_start.iter().filter(|m| self.verdict_boxes.contains(m)) {
+                    self.answered.entry(*m).or_default().insert(node);
+                }
+            }
         }
         if !intro && self.mode == Mode::Full {
             // A truncated fetch audits nothing.
@@ -377,6 +463,12 @@ where
         s.received = s
             .received
             .saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
+        s.fetched_ids.extend(
+            items
+                .iter()
+                .filter_map(|i| Packet::decode(i).ok())
+                .map(|p| p.id),
+        );
         self.save();
         // A cut connection leaves no session worth re-reading on.
         if !intro && self.mode == Mode::Full && stop != FetchStop::Connection {
@@ -481,6 +573,13 @@ where
                             items.iter().map(Vec::len).fold(0, usize::saturating_add),
                         );
                         let processed = self.take_items(&items);
+                        self.note_seen(&items);
+                        self.stats(node).fetched_ids.extend(
+                            items
+                                .iter()
+                                .filter_map(|i| Packet::decode(i).ok())
+                                .map(|p| p.id),
+                        );
                         let finished = stop == FetchStop::Complete && processed;
                         self.audit(node, &items, if finished { &one } else { &[] });
                         if finished {

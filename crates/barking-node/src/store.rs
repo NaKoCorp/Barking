@@ -8,14 +8,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use barking_packet::MailboxId;
+use barking_packet::{ACK_GRACE_SECS, MailboxId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 /// Previous schema, migrated at startup by `NodeStore::open`.
-const PREVIOUS_SCHEMA_VERSION: i64 = 2;
+const PREVIOUS_SCHEMA_VERSION: i64 = 3;
 /// Maximum number of rows kept in `peers` (spec §7).
 pub const MAX_PEER_ROWS: usize = 1024;
 /// Wait for a lock held by another process (`status` during `run`).
@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS subscriptions(
     mailbox BLOB NOT NULL, relay BLOB NOT NULL, sealed BLOB NOT NULL,
     cancel_hash BLOB NOT NULL, expires_day INTEGER NOT NULL,
     last_wake INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0,
+    kind INTEGER NOT NULL DEFAULT 0,
     UNIQUE(mailbox, cancel_hash));
 CREATE INDEX IF NOT EXISTS subscriptions_mailbox ON subscriptions(mailbox);
 CREATE INDEX IF NOT EXISTS subscriptions_pending ON subscriptions(pending, last_wake);
@@ -96,8 +97,8 @@ impl NodeStore {
 
     /// Read-only opening (`status`): no write, neither schema nor persistent
     /// pragma. The database must exist and have the right schema: a
-    /// version 2 database, which must be migrated first, yields
-    /// `SchemaVersion(2)`.
+    /// version 3 database, which must be migrated first, yields
+    /// `SchemaVersion(3)`.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<NodeStore> {
         let conn = Connection::open_with_flags(
             path,
@@ -164,11 +165,11 @@ impl NodeStore {
         conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
         conn.set_prepared_statement_cache_capacity(crate::rules::STATEMENT_CACHE);
         // Creation or migration, in a single transaction. The rows of a
-        // migrated database keep `pow = 0`; `SCHEMA` creates `peers` and does
-        // not touch existing tables. The `pow` column is the last one of
-        // `packets`, as in a fresh database.
+        // migrated database keep their subscriptions as message subscriptions
+        // (`kind = 0`); `SCHEMA` does not touch existing tables. The `kind`
+        // column is the last one of `subscriptions`, as in a fresh database.
         let alter = if migrate {
-            "ALTER TABLE packets ADD COLUMN pow INTEGER NOT NULL DEFAULT 0;"
+            "ALTER TABLE subscriptions ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;"
         } else {
             ""
         };
@@ -300,12 +301,13 @@ impl NodeStore {
         Ok(out)
     }
 
-    /// Deletes all expired packets, acks (`expires_at <= now`) and
-    /// subscriptions, batch after batch. Returns the number of deleted rows.
+    /// Deletes all expired packets (`expires_at <= now`), acks
+    /// (`expires_at + ACK_GRACE_SECS <= now`) and subscriptions, batch after
+    /// batch. Returns the number of deleted rows.
     pub fn purge_expired(&mut self, now: u64) -> Result<usize> {
         let mut removed = 0;
         loop {
-            let (n, more) = self.purge_expired_batch(now, PURGE_BATCH)?;
+            let (n, more, _) = self.purge_expired_batch(now, PURGE_BATCH)?;
             removed += n;
             if !more {
                 return Ok(removed);
@@ -314,23 +316,61 @@ impl NodeStore {
     }
 
     /// Deletes at most `limit` expired packets, `limit` acks and `limit`
-    /// subscriptions, oldest expiry first. Returns the number of deleted rows
-    /// and whether expired rows may remain (a table reached `limit`).
-    pub fn purge_expired_batch(&mut self, now: u64, limit: usize) -> Result<(usize, bool)> {
+    /// subscriptions, oldest expiry first. Returns the number of deleted rows,
+    /// whether expired rows may remain (a table reached `limit`), and whether
+    /// a subscription was marked pending. An expired packet is an unacked
+    /// message (an ack deletes its message): its mailbox's `Acks`
+    /// subscriptions are marked, in the same savepoint.
+    pub fn purge_expired_batch(&mut self, now: u64, limit: usize) -> Result<(usize, bool, bool)> {
         let today = i64::from(crate::wake::day_of(now));
-        let now = i64::try_from(now).unwrap_or(i64::MAX);
+        let now_sql = i64::try_from(now).unwrap_or(i64::MAX);
         let limit_sql = i64::try_from(limit).unwrap_or(i64::MAX);
         let tx = self.conn.savepoint()?;
         let mut freed: i64 = 0;
         let mut removed = 0;
         let mut more = false;
-        for table in ["packets", "acks"] {
-            let mut st = tx.prepare_cached(&format!(
-                "DELETE FROM {table} WHERE seq IN (SELECT seq FROM {table} \
+        let mut expired_boxes: Vec<MailboxId> = Vec::new();
+        {
+            let mut st = tx.prepare_cached(
+                "DELETE FROM packets WHERE seq IN (SELECT seq FROM packets \
                  WHERE expires_at <= ?1 ORDER BY expires_at, seq LIMIT ?2) \
-                 RETURNING length(bytes)"
-            ))?;
-            let lens = st.query_map(params![now, limit_sql], |r| r.get::<_, i64>(0))?;
+                 RETURNING mailbox, kind, length(bytes)",
+            )?;
+            let rows = st.query_map(params![now_sql, limit_sql], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            let mut n = 0;
+            for row in rows {
+                let (mailbox, kind, len) = row?;
+                freed += len;
+                n += 1;
+                if kind == i64::from(barking_packet::Kind::Message as u8)
+                    && let Ok(id) = <[u8; 16]>::try_from(&mailbox[..])
+                {
+                    let id = MailboxId(id);
+                    if !expired_boxes.contains(&id) {
+                        expired_boxes.push(id);
+                    }
+                }
+            }
+            removed += n;
+            more |= n >= limit;
+        }
+        {
+            // An ack stays `ACK_GRACE_SECS` past its stored expiry (the
+            // later of its own and its message's): a sender that missed the
+            // receipt wake-up still finds it a day later.
+            let ack_cut = i64::try_from(now.saturating_sub(ACK_GRACE_SECS)).unwrap_or(i64::MAX);
+            let mut st = tx.prepare_cached(
+                "DELETE FROM acks WHERE seq IN (SELECT seq FROM acks \
+                 WHERE expires_at <= ?1 ORDER BY expires_at, seq LIMIT ?2) \
+                 RETURNING length(bytes)",
+            )?;
+            let lens = st.query_map(params![ack_cut, limit_sql], |r| r.get::<_, i64>(0))?;
             let mut n = 0;
             for len in lens {
                 freed += len?;
@@ -340,6 +380,7 @@ impl NodeStore {
             more |= n >= limit;
         }
         add_stored_bytes(&tx, -freed)?;
+        let marked = crate::wake::mark_expired(&tx, &expired_boxes, now)?;
         let subs = tx.execute(
             "DELETE FROM subscriptions WHERE rowid IN (SELECT rowid FROM subscriptions \
              WHERE expires_day < ?1 LIMIT ?2)",
@@ -348,7 +389,7 @@ impl NodeStore {
         removed += subs;
         more |= subs >= limit;
         tx.commit()?;
-        Ok((removed, more))
+        Ok((removed, more, marked))
     }
 }
 
@@ -437,13 +478,14 @@ mod tests {
         assert_eq!(busy, 5_000);
     }
 
-    /// Schema 2 as it was before the migration.
-    const SCHEMA_V2: &str = "
+    /// Schema 3 as it was before the migration.
+    const SCHEMA_V3: &str = "
         CREATE TABLE packets(
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             id BLOB NOT NULL, mailbox BLOB NOT NULL, kind INTEGER NOT NULL,
             tier INTEGER NOT NULL, expires_at INTEGER NOT NULL,
             received_at INTEGER NOT NULL, hash BLOB NOT NULL, bytes BLOB NOT NULL,
+            pow INTEGER NOT NULL DEFAULT 0,
             UNIQUE(id, hash));
         CREATE INDEX packets_mailbox ON packets(mailbox);
         CREATE INDEX packets_expires ON packets(expires_at);
@@ -455,12 +497,22 @@ mod tests {
         CREATE INDEX acks_packet ON acks(packet_id);
         CREATE INDEX acks_mailbox ON acks(mailbox);
         CREATE INDEX acks_expires ON acks(expires_at);
+        CREATE TABLE peers(
+            node_id BLOB PRIMARY KEY, record BLOB NOT NULL,
+            first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);
         CREATE TABLE meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
-        INSERT INTO meta VALUES('schema_version', 2), ('stored_bytes', 0);";
+        CREATE TABLE subscriptions(
+            mailbox BLOB NOT NULL, relay BLOB NOT NULL, sealed BLOB NOT NULL,
+            cancel_hash BLOB NOT NULL, expires_day INTEGER NOT NULL,
+            last_wake INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(mailbox, cancel_hash));
+        CREATE INDEX subscriptions_mailbox ON subscriptions(mailbox);
+        CREATE INDEX subscriptions_pending ON subscriptions(pending, last_wake);
+        INSERT INTO meta VALUES('schema_version', 3), ('stored_bytes', 0);";
 
     const T0: u64 = 1_800_000_000;
 
-    fn v2_packet() -> barking_packet::Packet {
+    fn v3_packet() -> barking_packet::Packet {
         use barking_packet::{DEFAULT_HOPS, Kind, Packet, PacketId, Tier};
         Packet {
             kind: Kind::Message,
@@ -473,11 +525,11 @@ mod tests {
         }
     }
 
-    /// (columns of `packets`, index definitions): the shape of the schema.
+    /// (columns of `packets` and `subscriptions`, index definitions): the shape of the schema.
     fn shape(s: &NodeStore) -> (Vec<String>, Vec<(String, String)>) {
         let cols = s
             .conn()
-            .prepare("SELECT name || ' ' || type || ' ' || \"notnull\" || ' ' || COALESCE(dflt_value,'') FROM pragma_table_info('packets')")
+            .prepare("SELECT 'packets.' || name || ' ' || type || ' ' || \"notnull\" || ' ' || COALESCE(dflt_value,'') FROM pragma_table_info('packets') UNION ALL SELECT 'subscriptions.' || name || ' ' || type || ' ' || \"notnull\" || ' ' || COALESCE(dflt_value,'') FROM pragma_table_info('subscriptions')")
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
@@ -504,16 +556,16 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v2_keeps_packets() {
+    fn migrates_v3_keeps_subscriptions() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v2.db");
-        let p = v2_packet();
+        let path = dir.path().join("v3.db");
+        let p = v3_packet();
         let bytes = p.encode();
         {
             let c = Connection::open(&path).unwrap();
-            c.execute_batch(SCHEMA_V2).unwrap();
+            c.execute_batch(SCHEMA_V3).unwrap();
             c.execute(
-                "INSERT INTO packets(id,mailbox,kind,tier,expires_at,received_at,hash,bytes) VALUES(?1,?2,0,0,?3,0,?4,?5)",
+                "INSERT INTO packets(id,mailbox,kind,tier,expires_at,received_at,hash,bytes,pow) VALUES(?1,?2,0,0,?3,0,?4,?5,7)",
                 params![
                     &p.id.0[..],
                     &p.mailbox.0[..],
@@ -528,11 +580,16 @@ mod tests {
                 params![bytes.len() as i64],
             )
             .unwrap();
+            c.execute(
+                "INSERT INTO subscriptions(mailbox,relay,sealed,cancel_hash,expires_day,last_wake,pending) VALUES(?1,x'01',x'02',x'03',99999,5,1)",
+                params![&p.mailbox.0[..]],
+            )
+            .unwrap();
         }
-        // `status` refuses version 2 without modifying it.
+        // `status` refuses version 3 without modifying it.
         assert!(matches!(
             NodeStore::open_read_only(&path),
-            Err(Error::SchemaVersion(2))
+            Err(Error::SchemaVersion(3))
         ));
         let s = NodeStore::open(&path).unwrap();
         let version: i64 = s
@@ -541,7 +598,17 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+        // The subscription is kept as a message subscription, state included.
+        let sub: (i64, i64, i64) = s
+            .conn()
+            .query_row(
+                "SELECT kind, last_wake, pending FROM subscriptions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(sub, (0, 5, 1));
         let (page, _) = crate::rules::fetch(&s, &[p.mailbox], None, 1 << 20)
             .unwrap()
             .unwrap();
@@ -550,8 +617,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].pow, 0);
-        assert!(s.load_peers().unwrap().is_empty());
+        assert_eq!(items[0].pow, 7);
         assert_eq!(s.stats().unwrap().bytes, bytes.len() as u64);
         // Same shape as a fresh database (columns and indexes).
         assert_eq!(shape(&s), shape(&NodeStore::open_in_memory().unwrap()));
@@ -564,21 +630,21 @@ mod tests {
     #[test]
     fn unknown_schema_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v4.db");
+        let path = dir.path().join("v5.db");
         {
             let s = NodeStore::open(&path).unwrap();
             s.conn()
-                .execute("UPDATE meta SET v=4 WHERE k='schema_version'", [])
+                .execute("UPDATE meta SET v=5 WHERE k='schema_version'", [])
                 .unwrap();
         }
         let before = std::fs::read(&path).unwrap();
         assert!(matches!(
             NodeStore::open(&path),
-            Err(Error::SchemaVersion(4))
+            Err(Error::SchemaVersion(5))
         ));
         assert!(matches!(
             NodeStore::open_read_only(&path),
-            Err(Error::SchemaVersion(4))
+            Err(Error::SchemaVersion(5))
         ));
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
@@ -594,7 +660,7 @@ mod tests {
         };
         // Two packets in mailbox 9, one in mailbox 3.
         for (n, mb) in [(1u8, 9u8), (2, 9), (3, 3)] {
-            let mut p = v2_packet();
+            let mut p = v3_packet();
             p.id = barking_packet::PacketId([n; 16]);
             p.mailbox = MailboxId([mb; 16]);
             let nonce = barking_proto::pow::solve(

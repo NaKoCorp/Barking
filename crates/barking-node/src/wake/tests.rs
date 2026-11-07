@@ -2,6 +2,7 @@ use super::*;
 use crate::rules::{self, Policy};
 use barking_packet::{DEFAULT_HOPS, Kind, Packet, PacketId, Tier, ack};
 use barking_proto::node_id::NodeId;
+use barking_proto::push::SubKind;
 
 const NOW: u64 = 1_800_000_000;
 const BITS: u8 = 1;
@@ -42,6 +43,7 @@ fn raw_sub(mailbox: u8, cancel: u8) -> Subscription {
         sealed: vec![cancel; 80],
         cancel_hash: cancel_hash(&[cancel; 32]),
         expires_day: today() + 1,
+        kind: SubKind::Messages,
     }
 }
 
@@ -128,19 +130,21 @@ fn burst_is_coalesced_to_the_next_minute() {
     assert_eq!(next_due(&s).unwrap(), None);
 }
 
-#[test]
-fn ack_does_not_mark() {
-    let mut s = store();
-    subscribe_ok(&mut s, 1, 1);
-    let secret = [9u8; 16];
-    let mut m = message(1, 1);
-    m.id = ack::packet_id_for(&secret);
-    // Deposit then drain the message's own wake-up, so only the ack could mark.
-    deposit_at(&mut s, &m, NOW);
-    assert_eq!(take_due(&mut s, NOW, 100).unwrap().len(), 1);
+const SECRET: [u8; 16] = [9; 16];
+
+/// A message of `mailbox` whose id is derived from `SECRET`, expiring at `expires`.
+fn acked_message(mailbox: u8, expires: u64) -> Packet {
+    Packet {
+        id: ack::packet_id_for(&SECRET),
+        expires_at: u32::try_from(expires).unwrap(),
+        ..message(1, mailbox)
+    }
+}
+
+fn ack_of(m: &Packet) -> Packet {
     let mut payload = m.id.0.to_vec();
-    payload.extend_from_slice(&secret);
-    let a = Packet {
+    payload.extend_from_slice(&SECRET);
+    Packet {
         kind: Kind::Ack,
         hops: DEFAULT_HOPS,
         tier: Tier::S,
@@ -148,12 +152,194 @@ fn ack_does_not_mark() {
         expires_at: u32::try_from(NOW + 86_400).unwrap(),
         mailbox: m.mailbox,
         payload,
+    }
+}
+
+fn subscribe_kind(s: &mut NodeStore, mailbox: u8, cancel: u8, kind: SubKind) -> Subscription {
+    let sb = Subscription {
+        kind,
+        ..raw_sub(mailbox, cancel)
     };
+    assert_eq!(try_subscribe(s, &WakeConfig::default(), &sb), Ok(()));
+    sb
+}
+
+fn kind_of(s: &NodeStore, cancel: u8) -> i64 {
+    s.conn()
+        .query_row(
+            "SELECT kind FROM subscriptions WHERE cancel_hash=?1",
+            params![&cancel_hash(&[cancel; 32])[..]],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn ack_marks_only_ack_subscribers() {
+    let mut s = store();
+    let msgs = subscribe_kind(&mut s, 1, 1, SubKind::Messages);
+    let acks = subscribe_kind(&mut s, 1, 2, SubKind::Acks);
+    assert_eq!(kind_of(&s, 1), 0);
+    assert_eq!(kind_of(&s, 2), 1);
+    // Deposit then drain the message's own wake-up, so only the ack could mark.
+    let m = acked_message(1, NOW + 86_400);
+    deposit_at(&mut s, &m, NOW);
+    assert_eq!(take_due(&mut s, NOW, 100).unwrap(), vec![order(&msgs)]);
     assert_eq!(
-        rules::deposit(&mut s, &policy(), &a.encode(), 0, NOW + 120).unwrap(),
+        rules::deposit(&mut s, &policy(), &ack_of(&m).encode(), 0, NOW + 120).unwrap(),
+        Ok(())
+    );
+    assert_eq!(
+        take_due(&mut s, NOW + 120, 100).unwrap(),
+        vec![order(&acks)]
+    );
+}
+
+#[test]
+fn message_marks_only_message_subscribers() {
+    let mut s = store();
+    let msgs = subscribe_kind(&mut s, 1, 1, SubKind::Messages);
+    subscribe_kind(&mut s, 1, 2, SubKind::Acks);
+    deposit_at(&mut s, &message(1, 1), NOW);
+    assert_eq!(take_due(&mut s, NOW, 100).unwrap(), vec![order(&msgs)]);
+    assert!(take_due(&mut s, NOW + 120, 100).unwrap().is_empty());
+}
+
+#[test]
+fn replicated_ack_marks_once() {
+    let mut s = store();
+    let acks = subscribe_kind(&mut s, 1, 1, SubKind::Acks);
+    let m = acked_message(1, NOW + 86_400);
+    deposit_at(&mut s, &m, NOW);
+    let a = ack_of(&m).encode();
+    assert_eq!(
+        rules::deposit(&mut s, &policy(), &a, 0, NOW + 1).unwrap(),
+        Ok(())
+    );
+    assert_eq!(take_due(&mut s, NOW + 1, 100).unwrap(), vec![order(&acks)]);
+    // The same ack arriving again by replication is already known.
+    assert_eq!(
+        rules::store_copy(&mut s, &policy(), &a, 0, NOW + 120).unwrap(),
         Ok(())
     );
     assert!(take_due(&mut s, NOW + 120, 100).unwrap().is_empty());
+}
+
+#[test]
+fn ack_arriving_by_replication_marks_ack_subscribers() {
+    let mut s = store();
+    let acks = subscribe_kind(&mut s, 1, 1, SubKind::Acks);
+    let m = acked_message(1, NOW + 86_400);
+    deposit_at(&mut s, &m, NOW);
+    assert_eq!(
+        rules::store_copy(&mut s, &policy(), &ack_of(&m).encode(), 0, NOW + 1).unwrap(),
+        Ok(())
+    );
+    assert_eq!(take_due(&mut s, NOW + 1, 100).unwrap(), vec![order(&acks)]);
+}
+
+#[test]
+fn expired_unacked_message_marks_ack_subscribers() {
+    let mut s = store();
+    let acks = subscribe_kind(&mut s, 1, 1, SubKind::Acks);
+    subscribe_kind(&mut s, 1, 2, SubKind::Messages);
+    let m = message(1, 1);
+    let m = Packet {
+        expires_at: u32::try_from(NOW + 60).unwrap(),
+        ..m
+    };
+    deposit_at(&mut s, &m, NOW);
+    // Drain the message subscriber's own wake-up.
+    assert_eq!(take_due(&mut s, NOW, 100).unwrap().len(), 1);
+    // Not expired yet: nothing marked.
+    let (_, _, marked) = s.purge_expired_batch(NOW + 59, 100).unwrap();
+    assert!(!marked);
+    let (removed, more, marked) = s.purge_expired_batch(NOW + 61, 100).unwrap();
+    assert_eq!((removed, more, marked), (1, false, true));
+    assert_eq!(take_due(&mut s, NOW + 61, 100).unwrap(), vec![order(&acks)]);
+}
+
+#[test]
+fn acked_message_purge_does_not_mark() {
+    let mut s = store();
+    let acks = subscribe_kind(&mut s, 1, 1, SubKind::Acks);
+    let m = acked_message(1, NOW + 60);
+    deposit_at(&mut s, &m, NOW);
+    assert_eq!(
+        rules::deposit(&mut s, &policy(), &ack_of(&m).encode(), 0, NOW + 1).unwrap(),
+        Ok(())
+    );
+    assert_eq!(take_due(&mut s, NOW + 1, 100).unwrap(), vec![order(&acks)]);
+    // The message is gone with its ack; purging just past the expiry of both
+    // marks nothing again, and the subscription is still there (unexpired).
+    let late = NOW + 86_401;
+    assert!(day_of(late) <= today() + 1);
+    let (removed, _, marked) = s.purge_expired_batch(late, 100).unwrap();
+    assert_eq!(removed, 0, "the ack row stays a day past its expiry");
+    assert!(!marked);
+    let subs: i64 = s
+        .conn()
+        .query_row("SELECT COUNT(*) FROM subscriptions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(subs, 1);
+    assert!(take_due(&mut s, late, 100).unwrap().is_empty());
+    // Its purge after the grace marks nothing either.
+    let after = late + barking_packet::ACK_GRACE_SECS;
+    let (removed, _, marked) = s.purge_expired_batch(after, 100).unwrap();
+    assert!(removed >= 1, "the ack row expired");
+    assert!(!marked);
+}
+
+#[test]
+fn resubscribe_with_another_kind_is_refused() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    let sb = subscribe_kind(&mut s, 1, 1, SubKind::Messages);
+    let other = Subscription {
+        kind: SubKind::Acks,
+        sealed: vec![0x55; 80],
+        ..sb.clone()
+    };
+    assert_eq!(
+        try_subscribe(&mut s, &cfg, &other),
+        Err(ErrorReason::Malformed)
+    );
+    // Untouched: same kind, same sealed token.
+    assert_eq!(kind_of(&s, 1), 0);
+    let sealed: Vec<u8> = s
+        .conn()
+        .query_row("SELECT sealed FROM subscriptions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(sealed, sb.sealed);
+    // Same kind: still a replacement.
+    assert_eq!(try_subscribe(&mut s, &cfg, &sb), Ok(()));
+}
+
+#[test]
+fn cap_is_per_kind() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    let of = |cancel: u8, kind: SubKind| Subscription {
+        kind,
+        ..raw_sub(1, cancel)
+    };
+    for c in 1..=4 {
+        assert_eq!(
+            try_subscribe(&mut s, &cfg, &of(c, SubKind::Messages)),
+            Ok(())
+        );
+    }
+    for c in 11..=14 {
+        assert_eq!(try_subscribe(&mut s, &cfg, &of(c, SubKind::Acks)), Ok(()));
+    }
+    assert_eq!(
+        try_subscribe(&mut s, &cfg, &of(15, SubKind::Acks)),
+        Err(ErrorReason::MailboxFull)
+    );
+    assert_eq!(
+        try_subscribe(&mut s, &cfg, &of(5, SubKind::Messages)),
+        Err(ErrorReason::MailboxFull)
+    );
 }
 
 #[test]

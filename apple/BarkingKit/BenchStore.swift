@@ -17,8 +17,12 @@ public struct BenchRecord: Codable, Sendable {
     public var steps: [Step]
     public var peakBytes: UInt64
     public var totalMs: UInt64
-    /// `shown`, `original`, `locked`, `no-key`, `network-down` or `error`.
+    /// `shown`, `original`, `locked`, `no-key`, `network-down`, `opened`
+    /// (bench without sync) or `error`.
     public var outcome: String
+    /// Reading and unwrapping the database key (Secure Enclave, spec §7.4);
+    /// `nil` in records made before it was measured.
+    public var unwrapMs: UInt64? = nil
 }
 
 /// Records in the shared container, one JSON file each, the latest `keep` kept.
