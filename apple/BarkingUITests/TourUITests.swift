@@ -380,7 +380,9 @@ final class TourUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.tap()
         let cancelAll = app.buttons["pending.cancelAll"]
-        XCTAssertTrue(cancelAll.waitForExistence(timeout: 10))
+        // At accessibility sizes "Cancel all" is below the fold, not yet in the list.
+        let first = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", body.pending)).firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
         snap(app, "delivery-pending", numbered: false)
         app.buttons["pending.select"].tap()
         let selected = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", body.pending)).firstMatch
@@ -388,8 +390,12 @@ final class TourUITests: XCTestCase {
         app.buttons["pending.deleteSelected"].waitUntil({ $0.isEnabled })
         snap(app, "delivery-pending-selecting", numbered: false)
         app.buttons["pending.select"].tap()
-        XCTAssertTrue(cancelAll.waitForExistence(timeout: 5))
-        for _ in 0..<4 where !cancelAll.isHittable { app.swipeUp() }
+        app.buttons["pending.deleteSelected"].waitUntil({ !$0.exists })
+        for _ in 0..<6 where !(cancelAll.exists && cancelAll.isHittable) { app.swipeUp() }
+        XCTAssertTrue(cancelAll.waitUntilStill())
+        if size.contains(where: { $0.contains("Accessibility") }) {
+            snap(app, "delivery-pending-cancel-all", numbered: false)
+        }
         cancelAll.tap()
         let confirmAll = app.buttons[fr ? "Supprimer et annuler" : "Delete and cancel"].firstMatch
         if confirmAll.waitForExistence(timeout: 5) {
