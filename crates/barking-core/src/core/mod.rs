@@ -224,6 +224,9 @@ pub struct Core {
     /// Sent messages that became `NotDelivered` since the last
     /// `take_failed_notices`, as `(contact, row id)`, in memory.
     failed_notices: Vec<(Fingerprint, i64)>,
+    /// Sent messages whose delivery changed since the last
+    /// `take_delivery_changes`, as `(contact, row id)`, in memory.
+    delivery_changes: Vec<(Fingerprint, i64)>,
 }
 
 impl fmt::Debug for Core {
@@ -338,6 +341,7 @@ impl Core {
             frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
             log_limiter: LogLimiter::default(),
             failed_notices: Vec::new(),
+            delivery_changes: Vec::new(),
         }
     }
 
@@ -764,12 +768,12 @@ impl Core {
         };
         let (dropped, failed) = self.store.transaction(|tx| {
             if delivery::on_network(tx, packet.id)? {
-                return Ok((false, None));
+                return Ok((false, delivery::Failed::default()));
             }
             let failed = delivery::fail(tx, packet.id, MessageStatus::Pending, now)?;
             Ok((tx.outbox_remove(packet.id)?, failed))
         })?;
-        self.failed_notices.extend(failed);
+        self.settle(failed);
         Ok(dropped)
     }
 

@@ -18,7 +18,10 @@ use crate::Result;
 use crate::identity::Fingerprint;
 use crate::mailbox::MailboxId;
 use crate::packet::{Packet, PacketId};
-use crate::store::{Direction, MessageId, MessageStatus, Queries, arr, map_err, to_i64, to_u64};
+use crate::store::{
+    DeliverySummary, Direction, MessageDeliveryDetail, MessageId, MessageRow, MessageStatus,
+    PendingPackets, Queries, arr, map_err, to_i64, to_u64,
+};
 use crate::transparency::TransparencyEvent;
 
 /// Recomputes the state of the outgoing message `message_id` from its
@@ -70,7 +73,7 @@ impl Core {
     /// packet is ignored. A malformed node identifier is refused.
     pub fn record_deposit(&mut self, packet: PacketId, node: &str, now: u64) -> Result<()> {
         route::check_node(node)?;
-        self.store.transaction(|tx| {
+        let change = self.store.transaction(|tx| {
             tx.conn()
                 .execute(
                     "UPDATE outbox SET deposited_at = ?2 \
@@ -94,11 +97,19 @@ impl Core {
                 )
                 .optional()
                 .map_err(map_err)?;
-            if let Some(m) = message {
-                recompute_message_status(tx, MessageId(arr(m)?))?;
-            }
-            route::record_deposited(tx, packet, node, now)
-        })
+            let change = match message {
+                Some(m) => {
+                    let m = MessageId(arr(m)?);
+                    recompute_message_status(tx, m)?;
+                    change_of(tx, m)?
+                }
+                None => None,
+            };
+            route::record_deposited(tx, packet, node, now)?;
+            Ok(change)
+        })?;
+        self.note_changes(change);
+        Ok(())
     }
 
     /// Records that a deposit request for `packet` is about to be sent
@@ -147,12 +158,14 @@ impl Core {
             let mut failed = Vec::new();
             for (id, expires_at) in expired {
                 let id = PacketId(arr(id)?);
-                failed.extend(fail(tx, id, MessageStatus::Pending, to_u64(expires_at))?);
+                failed.push(fail(tx, id, MessageStatus::Pending, to_u64(expires_at))?);
             }
             tx.outbox_purge_expired(now)?;
             Ok(failed)
         })?;
-        self.failed_notices.extend(failed);
+        for f in failed {
+            self.settle(f);
+        }
         Ok(())
     }
 
@@ -238,7 +251,7 @@ impl Core {
         })?;
         match outcome {
             Some(failed) => {
-                self.failed_notices.extend(failed);
+                self.settle(failed);
                 Ok(true)
             }
             None => Ok(false),
@@ -251,6 +264,41 @@ impl Core {
     pub fn take_failed_notices(&mut self) -> Vec<(Fingerprint, i64)> {
         std::mem::take(&mut self.failed_notices)
     }
+
+    /// Keeps what a committed `fail` found: its change and its notice.
+    pub(super) fn settle(&mut self, failed: Failed) {
+        self.note_changes(failed.change);
+        self.failed_notices.extend(failed.notice);
+    }
+
+    /// Notes delivery changes of sent messages for `take_delivery_changes`,
+    /// each message once until the next take. Called once the transaction
+    /// that made them committed.
+    pub(super) fn note_changes(&mut self, changes: impl IntoIterator<Item = Change>) {
+        for change in changes {
+            if !self.delivery_changes.contains(&change) {
+                self.delivery_changes.push(change);
+            }
+        }
+    }
+}
+
+/// A sent message whose delivery changed: `(contact, row id)`.
+pub(crate) type Change = (Fingerprint, i64);
+
+/// The sent message `message` as a change, if it has a row (copies of a
+/// deleted message and messageless packets have none).
+pub(super) fn change_of(q: &impl Queries, message: MessageId) -> Result<Option<Change>> {
+    Ok(outgoing_status(q, message)?.map(|(contact, row, _)| (contact, row)))
+}
+
+/// What `fail` did to a sent message.
+#[derive(Debug, Default)]
+pub(super) struct Failed {
+    /// Its delivery changed (the message has a row).
+    pub change: Option<Change>,
+    /// It just became `NotDelivered`: a failure notice to give.
+    pub notice: Option<Change>,
 }
 
 /// Expiry of my sent `packet`: its queue row's, or, once it left the
@@ -290,16 +338,16 @@ pub(super) fn on_network(q: &impl Queries, packet: PacketId) -> Result<bool> {
 
 /// Fails the delivery carrying `packet` if it is in state `from`:
 /// `NotDelivered`, `expired_at` = `expired_at`, its message recomputed.
-/// Returns the message's `(contact, row id)` when the message itself just
-/// became `NotDelivered` (a notice to give), `None` otherwise. The caller
-/// keeps the notice for after its transaction commits.
+/// Returns the message's change, and its notice when the message itself
+/// just became `NotDelivered`. The caller keeps both for after its
+/// transaction commits (`Core::settle`).
 /// Every delivery state change that fails a message goes through here.
 pub(super) fn fail(
     q: &impl Queries,
     packet: PacketId,
     from: MessageStatus,
     expired_at: u64,
-) -> Result<Option<(Fingerprint, i64)>> {
+) -> Result<Failed> {
     let message: Option<Vec<u8>> = q
         .conn()
         .query_row(
@@ -316,19 +364,23 @@ pub(super) fn fail(
         .optional()
         .map_err(map_err)?;
     let Some(message) = message else {
-        return Ok(None);
+        return Ok(Failed::default());
     };
     let message = MessageId(arr(message)?);
     let before = outgoing_status(q, message)?;
     recompute_message_status(q, message)?;
     let after = outgoing_status(q, message)?;
-    Ok(match (before, after) {
+    let notice = match (before, after) {
         (Some((_, _, b)), Some((contact, row, a)))
             if a == MessageStatus::NotDelivered as i64 && b != a =>
         {
             Some((contact, row))
         }
         _ => None,
+    };
+    Ok(Failed {
+        change: after.map(|(contact, row, _)| (contact, row)),
+        notice,
     })
 }
 
@@ -389,10 +441,11 @@ impl Core {
     /// its identifier for two days) and the batch one `MessagesDeleted`
     /// log entry, without content nor contact.
     pub fn delete_messages(&mut self, row_ids: &[i64], now: u64) -> Result<DeleteOutcome> {
-        let outcome = self.store.transaction(|tx| delete_rows(tx, row_ids, now))?;
+        let (outcome, changes) = self.store.transaction(|tx| delete_rows(tx, row_ids, now))?;
         // A failure notice for a message that no longer exists is moot.
         self.failed_notices
             .retain(|(_, row)| !row_ids.contains(row));
+        self.note_changes(changes);
         Ok(outcome)
     }
 
@@ -428,14 +481,22 @@ impl Core {
             };
             Ok((delete_rows(tx, &rows, now)?, rows))
         })?;
+        let (outcome, changes) = outcome;
         self.failed_notices.retain(|(_, row)| !rows.contains(row));
+        self.note_changes(changes);
         Ok(outcome)
     }
 }
 
-/// The deletion of `delete_messages`, inside the caller's transaction.
-fn delete_rows(q: &impl Queries, row_ids: &[i64], now: u64) -> Result<DeleteOutcome> {
+/// The deletion of `delete_messages`, inside the caller's transaction,
+/// with one change per deleted message.
+fn delete_rows(
+    q: &impl Queries,
+    row_ids: &[i64],
+    now: u64,
+) -> Result<(DeleteOutcome, Vec<Change>)> {
     let mut out = DeleteOutcome::default();
+    let mut changes = Vec::new();
     for &row in row_ids {
         let found: Option<(Vec<u8>, i64, Vec<u8>)> = q
             .conn()
@@ -469,6 +530,7 @@ fn delete_rows(q: &impl Queries, row_ids: &[i64], now: u64) -> Result<DeleteOutc
             .map_err(map_err)?;
         q.add_tombstone(message, now)?;
         out.deleted += 1;
+        changes.push((contact, row));
     }
     if out.deleted > 0 {
         super::log(
@@ -482,7 +544,7 @@ fn delete_rows(q: &impl Queries, row_ids: &[i64], now: u64) -> Result<DeleteOutc
             },
         )?;
     }
-    Ok(out)
+    Ok((out, changes))
 }
 
 /// What the deletion of a sent message did to its deliveries.
@@ -572,4 +634,95 @@ pub(super) fn remove_delivery(q: &impl Queries, packet: PacketId) -> Result<()> 
             .map_err(map_err)?;
     }
     Ok(())
+}
+
+impl Core {
+    /// Messages with `contact`, oldest first, each with its delivery
+    /// summary (`None`: received, or sent without a delivery to the
+    /// contact). Expires the due packets first (`expire_due`), so a message
+    /// that expired while the app slept never shows `Pending`.
+    pub fn messages_with_delivery(
+        &mut self,
+        contact: &Fingerprint,
+        now: u64,
+    ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
+        self.expire_due(now)?;
+        self.store.messages_with_delivery(*contact)
+    }
+
+    /// Delivery summaries of the messages `ids`, in the order given (`None`
+    /// for an unknown or deleted row, a received message, or one without a
+    /// delivery to the contact). Expires the due packets first.
+    pub fn deliveries_of(
+        &mut self,
+        ids: &[i64],
+        now: u64,
+    ) -> Result<Vec<(i64, Option<DeliverySummary>)>> {
+        self.expire_due(now)?;
+        let found: std::collections::HashMap<i64, Option<DeliverySummary>> = self
+            .store
+            .deliveries_of(ids)?
+            .into_iter()
+            .map(|(m, s)| (m.id, s))
+            .collect();
+        Ok(ids
+            .iter()
+            .map(|id| (*id, found.get(id).copied().flatten()))
+            .collect())
+    }
+
+    /// Delivery detail of the sent message `row_id`; `None` if unknown,
+    /// received, or without a delivery to the contact. Expires the due
+    /// packets first.
+    pub fn message_delivery(
+        &mut self,
+        row_id: i64,
+        now: u64,
+    ) -> Result<Option<MessageDeliveryDetail>> {
+        self.expire_due(now)?;
+        self.store.message_delivery(row_id)
+    }
+
+    /// Sent messages to `contact` with a delivery to the contact, per
+    /// state: `[pending, on_network, received, not_delivered]`. Expires the
+    /// due packets first.
+    pub fn delivery_counts(&mut self, contact: &Fingerprint, now: u64) -> Result<[u32; 4]> {
+        self.expire_due(now)?;
+        self.store.delivery_counts(*contact)
+    }
+
+    /// One page of the sent messages to `contact` in `state` with a
+    /// delivery to the contact, newest first. Expires the due packets first.
+    pub fn delivery_page(
+        &mut self,
+        contact: &Fingerprint,
+        state: MessageStatus,
+        limit: u32,
+        offset: u32,
+        now: u64,
+    ) -> Result<Vec<(MessageRow, DeliverySummary)>> {
+        self.expire_due(now)?;
+        self.store.delivery_page(*contact, state, limit, offset)
+    }
+
+    /// Packets no node accepted yet that have not expired, classified
+    /// (spec §5.7). Expires the due packets first.
+    pub fn pending_packets(&mut self, now: u64) -> Result<PendingPackets> {
+        self.expire_due(now)?;
+        self.store.pending_packets(now)
+    }
+
+    /// Number of packets of `pending_packets`: the network screen's count.
+    pub fn pending_count(&mut self, now: u64) -> Result<u32> {
+        self.expire_due(now)?;
+        self.store.pending_count(now)
+    }
+
+    /// Sent messages whose delivery changed since the last call, as
+    /// `(contact, row id)`, each once, in the order of their first change.
+    /// A deleted message is listed too (its row no longer exists).
+    /// Empties the list.
+    pub fn take_delivery_changes(&mut self) -> Vec<(Fingerprint, i64)> {
+        std::mem::take(&mut self.delivery_changes)
+    }
 }

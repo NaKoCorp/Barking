@@ -3975,3 +3975,507 @@ fn tombstone_blocks_history_import() {
             .any(|(_, e)| *e == TransparencyEvent::HistoryImported { count: 1 })
     );
 }
+
+// --- Lot M, task 4: delivery queries, pending packets, noted changes.
+
+use crate::store::{
+    DeliverySummary, DeviceDeliveryRow, OwnCopies, PendingKind, PendingMessage, PendingPackets,
+    PendingSync, RelayHop,
+};
+
+/// The receipt `to` emits on receiving `packet`, if it opens it.
+fn ack_from(to: &mut Core, packet: &Packet, rng: &mut StdRng) -> Option<Packet> {
+    ack_at(to, packet, NOW, rng)
+}
+
+/// `ack_from`, received at `now`.
+fn ack_at(to: &mut Core, packet: &Packet, now: u64, rng: &mut StdRng) -> Option<Packet> {
+    match to.receive(&packet.encode(), "t", now, rng).unwrap() {
+        ReceiveOutcome::Message { ack, .. } => Some(ack),
+        _ => None,
+    }
+}
+
+/// The packet a receipt acknowledges.
+fn acked_by(ack: &Packet) -> PacketId {
+    PacketId(ack.payload[..16].try_into().unwrap())
+}
+
+fn tier_size(p: &Packet) -> u32 {
+    u32::try_from(p.tier.size()).unwrap()
+}
+
+#[test]
+fn summary_counts_devices_per_state() {
+    let (_d, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    // Alice has two devices: one packet each.
+    let sent = b.send_text(&alice, "two", NOW, &mut rng).unwrap();
+    assert_eq!(sent.len(), 2);
+    let ack = sent
+        .iter()
+        .find_map(|p| ack_from(&mut a, p, &mut rng))
+        .unwrap();
+    let other = sent.iter().find(|p| p.id != acked_by(&ack)).unwrap();
+    assert!(matches!(
+        b.receive(&ack.encode(), "t", NOW + 4, &mut rng).unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    let row = row_of(&b, &alice, "two");
+    let received = DeliverySummary {
+        state: MessageStatus::Received,
+        sealed_at: NOW,
+        deposited_at: None,
+        received_at: Some(NOW + 4),
+        expired_at: None,
+        devices: 2,
+        devices_received: 1,
+        devices_left: 1,
+        devices_pending: 1,
+    };
+    let rows = b.messages_with_delivery(&alice, NOW + 5).unwrap();
+    let (m, summary) = rows.iter().find(|(m, _)| m.id == row).unwrap();
+    assert_eq!(m.body, "two");
+    assert_eq!(*summary, Some(received));
+    assert_eq!(
+        b.deliveries_of(&[row, 9_999], NOW + 5).unwrap(),
+        vec![(row, Some(received)), (9_999, None)]
+    );
+    // The other device's packet reaches a node.
+    b.record_deposit(other.id, NODE, NOW + 6).unwrap();
+    let detail = b.message_delivery(row, NOW + 7).unwrap().unwrap();
+    assert_eq!(detail.row_id, row);
+    assert_eq!(detail.contact, alice);
+    assert_eq!(
+        detail.summary,
+        DeliverySummary {
+            deposited_at: Some(NOW + 6),
+            devices_left: 2,
+            devices_pending: 0,
+            ..received
+        }
+    );
+    assert_eq!(detail.deliveries.len(), 2);
+    assert!(detail.deliveries.iter().all(|d| !d.own));
+    let deposited: Vec<&DeviceDeliveryRow> = detail
+        .deliveries
+        .iter()
+        .filter(|d| d.state == MessageStatus::OnNetwork)
+        .collect();
+    assert_eq!(deposited.len(), 1);
+    assert_eq!(deposited[0].node.as_deref(), Some(NODE));
+    assert_eq!(deposited[0].deposited_at, Some(NOW + 6));
+    assert_eq!(deposited[0].size, Some(tier_size(other)));
+    assert_eq!(
+        detail.relays,
+        vec![RelayHop {
+            node: NODE.into(),
+            at: NOW + 6,
+            size: tier_size(other),
+        }]
+    );
+    // Bob has no other device: no copy.
+    assert_eq!(detail.own_copies, OwnCopies::default());
+}
+
+#[test]
+fn detail_counts_own_copies_and_falls_back_to_delivery_nodes() {
+    let (_d, mut a, _t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "copied", NOW, &mut rng).unwrap();
+    // Bob's device first, then the copy for my tablet.
+    a.record_deposit(sent[0].id, NODE, NOW + 1).unwrap();
+    a.record_deposit(sent[0].id, "B2C4D6F8", NOW + 2).unwrap();
+    let row = row_of(&a, &bob, "copied");
+    let detail = a.message_delivery(row, NOW + 3).unwrap().unwrap();
+    assert_eq!(
+        detail.own_copies,
+        OwnCopies {
+            total: 1,
+            left: 0,
+            waiting: 1
+        }
+    );
+    assert_eq!(
+        detail.deliveries.iter().map(|d| d.own).collect::<Vec<_>>(),
+        vec![false, true]
+    );
+    // Two relays from the route, in order.
+    let nodes: Vec<String> = detail.relays.iter().map(|r| r.node.clone()).collect();
+    assert_eq!(nodes, vec![NODE.to_string(), "B2C4D6F8".to_string()]);
+    // Route steps purged (30 days): the delivery's first node remains.
+    a.store
+        .conn()
+        .execute("DELETE FROM route_steps", [])
+        .unwrap();
+    let detail = a.message_delivery(row, NOW + 3).unwrap().unwrap();
+    assert_eq!(
+        detail.relays,
+        vec![RelayHop {
+            node: NODE.into(),
+            at: NOW + 1,
+            size: tier_size(&sent[0]),
+        }]
+    );
+}
+
+#[test]
+fn message_from_another_device_has_no_summary() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "elsewhere", NOW, &mut rng).unwrap();
+    // The sender knows its delivery.
+    let a_row = row_of(&a, &bob, "elsewhere");
+    assert!(a.deliveries_of(&[a_row], NOW).unwrap()[0].1.is_some());
+    // My tablet gets the copy: sent from another device, no delivery known.
+    assert!(matches!(
+        t.receive(&sent[1].encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Synced { .. }
+    ));
+    let row = row_of(&t, &bob, "elsewhere");
+    let rows = t.messages_with_delivery(&bob, NOW).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0.id, row);
+    assert_eq!(rows[0].1, None);
+    assert_eq!(t.deliveries_of(&[row], NOW).unwrap(), vec![(row, None)]);
+    assert_eq!(t.message_delivery(row, NOW).unwrap(), None);
+    assert_eq!(t.delivery_counts(&bob, NOW).unwrap(), [0; 4]);
+    // A received message has none either.
+    assert!(ack_from(&mut b, &sent[0], &mut rng).is_some());
+    let b_row = row_of(&b, &alice, "elsewhere");
+    let rows = b.messages_with_delivery(&alice, NOW).unwrap();
+    assert_eq!(rows.iter().find(|(m, _)| m.id == b_row).unwrap().1, None);
+    assert_eq!(b.message_delivery(b_row, NOW).unwrap(), None);
+}
+
+fn bodies(page: &[(MessageRow, DeliverySummary)]) -> Vec<&str> {
+    page.iter().map(|(m, _)| m.body.as_str()).collect()
+}
+
+#[test]
+fn counts_and_pages_ignore_messages_without_contact_delivery() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    // "x" (received by Bob) and "y" (from Bob) come from `pair`. A sent
+    // message without any delivery to Bob (imported, or sent from another
+    // of my devices) is stored `OnNetwork`.
+    p.a.store
+        .insert_message(
+            bob,
+            Direction::Out,
+            "imported",
+            MessageStatus::OnNetwork,
+            NOW + 1,
+            MessageId([9; 16]),
+        )
+        .unwrap();
+    for (n, body) in ["p1", "p2", "p3"].into_iter().enumerate() {
+        let at = NOW + 10 + u64::try_from(n).unwrap();
+        p.a.send_text(&bob, body, at, &mut p.rng).unwrap();
+    }
+    let dep = p.a.send_text(&bob, "dep", NOW + 20, &mut p.rng).unwrap();
+    p.a.record_deposit(dep[0].id, NODE, NOW + 21).unwrap();
+    assert_eq!(p.a.delivery_counts(&bob, NOW + 30).unwrap(), [3, 1, 1, 0]);
+    let page =
+        p.a.delivery_page(&bob, MessageStatus::OnNetwork, 50, 0, NOW + 30)
+            .unwrap();
+    assert_eq!(bodies(&page), vec!["dep"]);
+    assert_eq!(page[0].1.deposited_at, Some(NOW + 21));
+    let page =
+        p.a.delivery_page(&bob, MessageStatus::Received, 50, 0, NOW + 30)
+            .unwrap();
+    assert_eq!(bodies(&page), vec!["x"]);
+    // Newest first, by pages.
+    let first =
+        p.a.delivery_page(&bob, MessageStatus::Pending, 2, 0, NOW + 30)
+            .unwrap();
+    assert_eq!(bodies(&first), vec!["p3", "p2"]);
+    assert!(first.iter().all(|(_, s)| s.devices == 1));
+    let second =
+        p.a.delivery_page(&bob, MessageStatus::Pending, 2, 2, NOW + 30)
+            .unwrap();
+    assert_eq!(bodies(&second), vec!["p1"]);
+    assert!(
+        p.a.delivery_page(&bob, MessageStatus::NotDelivered, 50, 0, NOW + 30)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn reads_expire_due_packets_first() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "slept", NOW, &mut p.rng).unwrap();
+    let later = u64::from(sent[0].expires_at) + 1;
+    // The app slept past the expiry: no sync ran, the read is right.
+    let rows = p.a.messages_with_delivery(&bob, later).unwrap();
+    let (m, summary) = rows.iter().find(|(m, _)| m.body == "slept").unwrap();
+    assert_eq!(m.status, MessageStatus::NotDelivered);
+    let summary = summary.unwrap();
+    assert_eq!(summary.state, MessageStatus::NotDelivered);
+    assert_eq!(summary.expired_at, Some(u64::from(sent[0].expires_at)));
+    assert_eq!(summary.devices_pending, 0);
+    assert_eq!(p.a.delivery_counts(&bob, later).unwrap(), [0, 0, 1, 1]);
+}
+
+/// Alice (with a tablet) and Bob, with one pending packet of each sort on
+/// Alice's side, plus packets that are not pending. Returns the Bob
+/// message's packets.
+fn pending_scene() -> (TempDir, Core, Fingerprint, Vec<Packet>, StdRng) {
+    let (d, mut a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    // An ack for a message from Bob (its reference leads to Bob).
+    let from_bob = b.send_text(&alice, "hi", NOW, &mut rng).unwrap();
+    assert!(
+        from_bob
+            .iter()
+            .filter_map(|p| ack_from(&mut a, p, &mut rng))
+            .count()
+            == 1
+    );
+    // An ack queued before the migration: no reference.
+    let old_ack = Packet {
+        kind: Kind::Ack,
+        hops: DEFAULT_HOPS,
+        tier: Tier::fit(32).unwrap(),
+        id: PacketId([0xAB; 16]),
+        expires_at: u32::try_from(NOW + DAY_SECS).unwrap(),
+        mailbox: from_bob[0].mailbox,
+        payload: vec![0; 32],
+    };
+    a.store
+        .outbox_put(
+            old_ack.id,
+            &old_ack.encode(),
+            Kind::Ack,
+            NOW + DAY_SECS,
+            NOW,
+            None,
+        )
+        .unwrap();
+    // A message: Bob's packet and the copy for my tablet.
+    let sent = a.send_text(&bob, "m", NOW, &mut rng).unwrap();
+    assert_eq!(sent.len(), 2);
+    // Synchronisation for my tablet without a message.
+    a.mark_verified(&bob, NOW, &mut rng).unwrap();
+    // Not pending: a message already deposited.
+    let dep = a.send_text(&bob, "dep", NOW, &mut rng).unwrap();
+    a.record_deposit(dep[0].id, NODE, NOW).unwrap();
+    a.record_deposit(dep[1].id, NODE, NOW).unwrap();
+    // A message deleted after its packet to Bob left: its copy for my
+    // tablet keeps going, without a row.
+    let kept = a.send_text(&bob, "kept", NOW, &mut rng).unwrap();
+    a.record_deposit(kept[0].id, NODE, NOW).unwrap();
+    let row = row_of(&a, &bob, "kept");
+    assert!(a.delete_message(row, NOW).unwrap().own_copies_kept);
+    (d, a, bob, sent, rng)
+}
+
+#[test]
+fn pending_kinds_are_classified() {
+    let (_d, mut a, bob, sent, _rng) = pending_scene();
+    let pending = a.pending_packets(NOW + 1).unwrap();
+    assert_eq!(
+        pending.messages,
+        vec![PendingMessage {
+            row_id: row_of(&a, &bob, "m"),
+            contact: bob,
+            body: "m".into(),
+            sealed_at: NOW,
+            expires_at: u64::from(sent[0].expires_at),
+            packets: 1,
+            devices: 1,
+            devices_left: 0,
+        }]
+    );
+    assert_eq!(
+        pending.sync,
+        vec![
+            // With and without a reference.
+            PendingSync {
+                kind: PendingKind::Ack,
+                packets: 2,
+                contacts: vec![bob],
+            },
+            // The copy of "m" and that of the deleted "kept".
+            PendingSync {
+                kind: PendingKind::OwnCopy,
+                packets: 2,
+                contacts: vec![bob],
+            },
+            PendingSync {
+                kind: PendingKind::DeviceSync,
+                packets: 1,
+                contacts: vec![],
+            },
+            // The card update sent to Bob when the tablet was linked.
+            PendingSync {
+                kind: PendingKind::CardUpdate,
+                packets: 1,
+                contacts: vec![bob],
+            },
+        ]
+    );
+    assert_eq!(pending.packets, 7);
+}
+
+#[test]
+fn pending_count_equals_screen_total() {
+    let (_d, mut a, _bob, sent, _rng) = pending_scene();
+    let total = |p: &PendingPackets| -> u32 {
+        p.messages.iter().map(|m| m.packets).sum::<u32>()
+            + p.sync.iter().map(|s| s.packets).sum::<u32>()
+    };
+    let pending = a.pending_packets(NOW + 1).unwrap();
+    assert!(pending.packets > 0);
+    assert_eq!(total(&pending), pending.packets);
+    assert_eq!(a.pending_count(NOW + 1).unwrap(), pending.packets);
+    // Past every expiry, the deposited packets still await their verdict
+    // in the queue, yet nothing is pending.
+    let later = u64::from(sent[0].expires_at) + DAY_SECS;
+    let pending = a.pending_packets(later).unwrap();
+    assert_eq!(pending, PendingPackets::default());
+    assert_eq!(a.pending_count(later).unwrap(), 0);
+    assert!(!a.awaiting_verdict(later).unwrap().is_empty());
+}
+
+#[test]
+fn deposited_packets_and_deposited_acks_are_not_pending() {
+    let mut p = pair();
+    let alice = p.a.fingerprint();
+    let bob = p.b.fingerprint();
+    // Everything Bob queued while setting up reaches a node.
+    for bytes in p.b.pending_outbox(NOW).unwrap() {
+        let id = Packet::decode(&bytes).unwrap().id;
+        p.b.record_deposit(id, NODE, NOW).unwrap();
+    }
+    assert_eq!(p.b.pending_count(NOW).unwrap(), 0);
+    let sent = p.b.send_text(&alice, "out", NOW, &mut p.rng).unwrap();
+    let from_alice = p.a.send_text(&bob, "in", NOW, &mut p.rng).unwrap();
+    let ack = ack_from(&mut p.b, &from_alice[0], &mut p.rng).unwrap();
+    let before = p.b.pending_packets(NOW).unwrap();
+    assert_eq!(before.messages.len(), 1);
+    assert_eq!(before.sync.len(), 1);
+    assert_eq!(before.sync[0].kind, PendingKind::Ack);
+    assert_eq!(p.b.pending_count(NOW).unwrap(), 2);
+    p.b.record_deposit(ack.id, NODE, NOW).unwrap();
+    let after = p.b.pending_packets(NOW).unwrap();
+    assert!(after.sync.is_empty());
+    assert_eq!(after.messages.len(), 1);
+    p.b.record_deposit(sent[0].id, NODE, NOW).unwrap();
+    assert_eq!(p.b.pending_packets(NOW).unwrap(), PendingPackets::default());
+    assert_eq!(p.b.pending_count(NOW).unwrap(), 0);
+}
+
+#[test]
+fn every_state_change_is_noted_once() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    p.a.take_delivery_changes();
+    // A new message is not a state change.
+    let s1 = p.a.send_text(&bob, "s1", NOW, &mut p.rng).unwrap();
+    let r1 = row_of(&p.a, &bob, "s1");
+    assert!(p.a.take_delivery_changes().is_empty());
+    // Deposit, once.
+    p.a.record_deposit(s1[0].id, NODE, NOW + 1).unwrap();
+    p.a.record_deposit(s1[0].id, NODE, NOW + 2).unwrap();
+    assert_eq!(p.a.take_delivery_changes(), vec![(bob, r1)]);
+    assert!(p.a.take_delivery_changes().is_empty());
+    // Ack.
+    let ack = ack_from(&mut p.b, &s1[0], &mut p.rng).unwrap();
+    p.a.receive(&ack.encode(), "t", NOW + 3, &mut p.rng)
+        .unwrap();
+    assert_eq!(p.a.take_delivery_changes(), vec![(bob, r1)]);
+    // A replayed ack changes nothing.
+    p.a.receive(&ack.encode(), "t", NOW + 4, &mut p.rng)
+        .unwrap();
+    assert!(p.a.take_delivery_changes().is_empty());
+    // Expiry before deposit, then the retry.
+    let s2 = p.a.send_text(&bob, "s2", NOW, &mut p.rng).unwrap();
+    let r2 = row_of(&p.a, &bob, "s2");
+    let e2 = u64::from(s2[0].expires_at) + 1;
+    p.a.expire_due(e2).unwrap();
+    assert_eq!(p.a.take_delivery_changes(), vec![(bob, r2)]);
+    p.a.retry_message(r2, e2, &mut p.rng).unwrap();
+    assert_eq!(p.a.take_delivery_changes(), vec![(bob, r2)]);
+    // Confirmed failure after a deposit.
+    let s3 = p.a.send_text(&bob, "s3", e2, &mut p.rng).unwrap();
+    let r3 = row_of(&p.a, &bob, "s3");
+    p.a.record_deposit(s3[0].id, NODE, e2).unwrap();
+    p.a.take_delivery_changes();
+    let e3 = u64::from(s3[0].expires_at) + 1;
+    assert!(p.a.confirm_expired(s3[0].id, e3).unwrap());
+    assert_eq!(p.a.take_delivery_changes(), vec![(bob, r3)]);
+    // Undeliverable packet.
+    let s4 = p.a.send_text(&bob, "s4", e2, &mut p.rng).unwrap();
+    let r4 = row_of(&p.a, &bob, "s4");
+    assert!(p.a.drop_outbox_packet(&s4[0].encode(), e2).unwrap());
+    assert_eq!(p.a.take_delivery_changes(), vec![(bob, r4)]);
+    // Deletions: one change per deleted message.
+    p.a.delete_messages(&[r1, r2, r4], e2).unwrap();
+    assert_eq!(
+        p.a.take_delivery_changes(),
+        vec![(bob, r1), (bob, r2), (bob, r4)]
+    );
+    // Several changes of one message between two takes: noted once.
+    let s5 = p.a.send_text(&bob, "s5", e2, &mut p.rng).unwrap();
+    let r5 = row_of(&p.a, &bob, "s5");
+    p.a.record_deposit(s5[0].id, NODE, e2).unwrap();
+    let ack = ack_at(&mut p.b, &s5[0], e2, &mut p.rng).unwrap();
+    p.a.receive(&ack.encode(), "t", e2, &mut p.rng).unwrap();
+    assert_eq!(p.a.take_delivery_changes(), vec![(bob, r5)]);
+    // An expiry found by a read, outside any sync.
+    let s6 = p.a.send_text(&bob, "s6", e2, &mut p.rng).unwrap();
+    let r6 = row_of(&p.a, &bob, "s6");
+    let e6 = u64::from(s6[0].expires_at) + 1;
+    p.a.delivery_counts(&bob, e6).unwrap();
+    assert_eq!(p.a.take_delivery_changes(), vec![(bob, r6)]);
+    assert!(p.a.take_delivery_changes().is_empty());
+}
+
+#[test]
+#[ignore = "performance check (spec §13), run by hand"]
+fn summary_query_under_50ms_on_10k_messages() {
+    use std::time::{Duration, Instant};
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    // 10 000 sent messages with two contact deliveries each, written
+    // directly (sealing them would take minutes).
+    p.a.store
+        .transaction(|tx| {
+            for n in 0..10_000u32 {
+                let mut mid = [0xEE; 16];
+                mid[..4].copy_from_slice(&n.to_le_bytes());
+                let mid = MessageId(mid);
+                tx.insert_message(
+                    bob,
+                    Direction::Out,
+                    "perf",
+                    MessageStatus::Pending,
+                    NOW + u64::from(n),
+                    mid,
+                )?;
+                for dev in 0..2u8 {
+                    let mut pid = [0xEF; 16];
+                    pid[..4].copy_from_slice(&n.to_le_bytes());
+                    pid[4] = dev;
+                    tx.add_delivery(mid, PacketId(pid), DeviceId([dev; 16]), false, NOW, 1024)?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut times = Vec::new();
+    for _ in 0..3 {
+        let start = Instant::now();
+        let rows = p.a.messages_with_delivery(&bob, NOW).unwrap();
+        times.push(start.elapsed());
+        assert!(rows.len() > 10_000);
+    }
+    eprintln!("messages_with_delivery on 10 000 messages: {times:?}");
+    let best = *times.iter().min().unwrap();
+    assert!(best < Duration::from_millis(50), "{best:?}");
+}

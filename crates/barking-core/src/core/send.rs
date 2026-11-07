@@ -335,7 +335,9 @@ impl Core {
     ) -> Result<Vec<Packet>> {
         self.ensure_active()?;
         let Core { store, device, .. } = self;
-        store.transaction(|tx| reseal(tx, device, row_id, now, rng))
+        let (packets, change) = store.transaction(|tx| reseal(tx, device, row_id, now, rng))?;
+        self.note_changes([change]);
+        Ok(packets)
     }
 
     /// `retry_message` for each `NotDelivered` message to `contact`, oldest
@@ -350,7 +352,7 @@ impl Core {
     ) -> Result<u32> {
         self.ensure_active()?;
         let Core { store, device, .. } = self;
-        store.transaction(|tx| {
+        let (sent, changes) = store.transaction(|tx| {
             tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
             let rows: Vec<i64> = {
                 let mut stmt = tx
@@ -376,10 +378,14 @@ impl Core {
                 .map_err(map_err)?
             };
             let mut sent = 0u32;
+            let mut changes = Vec::new();
             let mut unreachable = false;
             for row in rows {
                 match reseal(tx, device, row, now, rng) {
-                    Ok(_) => sent += 1,
+                    Ok((_, change)) => {
+                        sent += 1;
+                        changes.push(change);
+                    }
                     Err(CoreError::NoSession) => unreachable = true,
                     Err(e) => return Err(e),
                 }
@@ -387,21 +393,24 @@ impl Core {
             if sent == 0 && unreachable {
                 return Err(CoreError::NoSession);
             }
-            Ok(sent)
-        })
+            Ok((sent, changes))
+        })?;
+        self.note_changes(changes);
+        Ok(sent)
     }
 }
 
-/// The new sealing of `retry_message`, inside the caller's transaction.
-/// Seals before writing anything else: a `NoSession` leaves the message
-/// as it was.
+/// The new sealing of `retry_message`, inside the caller's transaction,
+/// with the message's change. Seals before writing anything else: a
+/// `NoSession` leaves the message as it was. The failed deliveries are
+/// replaced with their route steps: only the latest attempt is known.
 fn reseal(
     q: &impl Queries,
     device: &DeviceKeys,
     row_id: i64,
     now: u64,
     rng: &mut impl CryptoRng,
-) -> Result<Vec<Packet>> {
+) -> Result<(Vec<Packet>, delivery::Change)> {
     let found: Option<(Vec<u8>, String, Vec<u8>)> = q
         .conn()
         .query_row(
@@ -499,5 +508,5 @@ fn reseal(
         )?);
     }
     delivery::recompute_message_status(q, message_id)?;
-    Ok(out)
+    Ok((out, (contact, row_id)))
 }

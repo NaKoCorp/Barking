@@ -122,12 +122,12 @@ impl Core {
             log_limiter,
             ..
         } = self;
-        let (outcome, transferred) = store.transaction(|tx| {
+        let (outcome, transferred, change) = store.transaction(|tx| {
             // A delivery is always one of my sent packets: a
             // message for a contact, or a sync for one of my
             // devices (without a message row for `SyncContact`/`SyncDevices`).
             if !tx.is_my_packet(acked)? {
-                return Ok((ReceiveOutcome::NotForUs, false));
+                return Ok((ReceiveOutcome::NotForUs, false, None));
             }
             // Nodes keep a receipt until `max(its expiry, the acknowledged
             // packet's) + ACK_GRACE_SECS`: so long it still proves the
@@ -136,7 +136,7 @@ impl Core {
             let own = u64::from(packet.expires_at);
             let acked_expiry = delivery::acked_expiry(tx, acked)?.unwrap_or(own);
             if own.max(acked_expiry).saturating_add(ACK_GRACE_SECS) < now {
-                return Ok((ReceiveOutcome::Expired, false));
+                return Ok((ReceiveOutcome::Expired, false, None));
             }
             if tx.delivery_acked(acked)? {
                 // A replayed ack (identifier and expiry rewritten at
@@ -150,14 +150,18 @@ impl Core {
                         packet_id: packet.id,
                     },
                 )?;
-                return Ok((ReceiveOutcome::Duplicate, false));
+                return Ok((ReceiveOutcome::Duplicate, false, None));
             }
             // The ack of one of my devices (`SyncSent` copy, `own`
             // delivery) does not make the message `Received`: only that of a
             // contact's device counts.
-            if let Some(message_id) = tx.mark_delivered_by_packet(acked, now)? {
-                delivery::recompute_message_status(tx, message_id)?;
-            }
+            let change = match tx.mark_delivered_by_packet(acked, now)? {
+                Some(message_id) => {
+                    delivery::recompute_message_status(tx, message_id)?;
+                    delivery::change_of(tx, message_id)?
+                }
+                None => None,
+            };
             route::record(tx, acked, RouteStep::AckVerified, now, None)?;
             tx.outbox_remove(acked)?;
             // An acked request to be removed has left, whatever the transport saw.
@@ -174,8 +178,10 @@ impl Core {
             Ok((
                 ReceiveOutcome::AckReceived { packet_id: acked },
                 transferred,
+                change,
             ))
         })?;
+        self.note_changes(change);
         if transferred {
             self.reload_root()?;
         }
