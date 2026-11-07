@@ -30,6 +30,20 @@ fn served_well(stop: FetchStop) -> bool {
     )
 }
 
+/// What a fetch stage reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FetchKind {
+    /// Session mailboxes: audits, cross-checks, the session slice.
+    Sessions,
+    /// Introduction mailboxes: their own byte budget and slice.
+    Intro,
+    /// Mailboxes of packets awaiting a verdict (spec §15.5), read only
+    /// for it: the introduction budget and slice, the nodes that accepted
+    /// the packet first, and the next responsible until the verdict rule
+    /// is met.
+    Verdict,
+}
+
 /// How one group fetch ended.
 pub(super) enum GroupEnd {
     /// Fetched in full.
@@ -53,8 +67,10 @@ where
     /// (introductions and quick syncs: on failure only, a rate limit
     /// included for a quick sync). Returns true if every mailbox was
     /// fetched in full and processed.
-    pub(super) async fn fetch_stage(&mut self, mailboxes: &[MailboxId], intro: bool) -> bool {
+    pub(super) async fn fetch_stage(&mut self, mailboxes: &[MailboxId], kind: FetchKind) -> bool {
         let now = self.now;
+        // Introductions and verdicts: bounded, no audit.
+        let intro = kind != FetchKind::Sessions;
         let slice = if intro {
             intro_slice()
         } else {
@@ -65,7 +81,12 @@ where
             .iter()
             .map(|m| {
                 let ids = self.state.view.responsibles_by_score(m, now);
-                (*m, self.state.order_responsibles(ids))
+                let mut ids = self.state.order_responsibles(ids);
+                if kind == FetchKind::Verdict {
+                    // Stable: the nodes that held a packet of it first.
+                    ids.sort_by_key(|n| !self.held_one_of(m, n));
+                }
+                (*m, ids)
             })
             .collect();
         // Next responsible to try, by mailbox; `None`: given up.
@@ -125,6 +146,17 @@ where
                 bytes_left = bytes_left.saturating_sub(bytes);
                 all_processed &= processed;
                 match end {
+                    GroupEnd::Complete if kind == FetchKind::Verdict => {
+                        // Done once the verdict rule is met; otherwise the
+                        // next responsible answers too.
+                        for m in &group {
+                            if self.verdict_settled(m) {
+                                done.insert(*m);
+                            } else {
+                                next.insert(*m, next[m].map(|i| i + 1));
+                            }
+                        }
+                    }
                     GroupEnd::Complete => {
                         complete_by_node.insert(node, true);
                         for m in &group {
@@ -172,11 +204,7 @@ where
             let queue = std::mem::take(&mut self.reread_queue);
             self.rereads(queue, slice_end).await;
         }
-        all_processed
-            && mailboxes
-                .iter()
-                .filter(|m| !self.verdict_only.contains(m))
-                .all(|m| done.contains(m))
+        all_processed && mailboxes.iter().all(|m| done.contains(m))
     }
 
     /// Cross-checks, once every primary round is over: each session mailbox
@@ -245,6 +273,13 @@ where
             }
         }
         self.save();
+    }
+
+    /// `node` accepted one of the packets awaiting a verdict in `mailbox`.
+    fn held_one_of(&self, mailbox: &MailboxId, node: &NodeId) -> bool {
+        self.verdict_packets
+            .iter()
+            .any(|(p, (m, _, _))| m == mailbox && self.accepted_by(p, node))
     }
 
     /// Saved positions of `group` on `node`, without those of the mailboxes
@@ -376,7 +411,9 @@ where
         if processed {
             self.state.set_positions(&node, group, &resume);
             if complete {
-                self.answered_boxes.extend(from_start.iter().copied());
+                for m in from_start.iter().filter(|m| self.verdict_boxes.contains(m)) {
+                    self.answered.entry(*m).or_default().insert(node);
+                }
             }
         }
         if !intro && self.mode == Mode::Full {

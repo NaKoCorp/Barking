@@ -9,7 +9,7 @@ use crate::identity::{
     DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic, RootIdentity,
 };
 use crate::mailbox::day_of;
-use crate::packet::{DEFAULT_HOPS, Kind, Tier, ack};
+use crate::packet::{ACK_GRACE_SECS, DEFAULT_HOPS, Kind, Tier, ack};
 use crate::store::{Direction, MessageId, MessageStatus, SessionRow};
 use crate::transparency::SyncKind;
 use rand::SeedableRng;
@@ -3404,9 +3404,10 @@ fn recompute_precedence_of_contact_deliveries() {
     let mut p = settled_pair();
     p.a.send_text(&p.b.fingerprint(), "mix", NOW, &mut p.rng)
         .unwrap();
-    let cases: [(&[(i64, i64)], MessageStatus); 5] = [
+    let cases: [(&[(i64, i64)], MessageStatus); 6] = [
         (&[(0, 3), (0, 1)], MessageStatus::Received),
         (&[(0, 1), (0, 0)], MessageStatus::OnNetwork),
+        (&[(0, 1), (0, 5)], MessageStatus::OnNetwork),
         (&[(0, 0), (0, 5)], MessageStatus::Pending),
         (&[(0, 5), (0, 5)], MessageStatus::NotDelivered),
         // My own copy received never makes the message received.
@@ -3415,4 +3416,57 @@ fn recompute_precedence_of_contact_deliveries() {
     for (rows, want) in cases {
         assert_eq!(recompute_with(&mut p, "mix", rows), want, "{rows:?}");
     }
+}
+
+#[test]
+fn ack_is_taken_a_day_past_its_expiry() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "late-ack", NOW, &mut p.rng).unwrap();
+    p.a.record_deposit(sent[0].id, NODE, NOW).unwrap();
+    let ack = match p
+        .b
+        .receive(&sent[0].encode(), "t", NOW, &mut p.rng)
+        .unwrap()
+    {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    let ack_expiry = u64::from(ack.expires_at);
+    // Beyond the grace: expired.
+    let mut q = settled_pair();
+    let other =
+        q.a.send_text(&q.b.fingerprint(), "too-late", NOW, &mut q.rng)
+            .unwrap();
+    let late = match q
+        .b
+        .receive(&other[0].encode(), "t", NOW, &mut q.rng)
+        .unwrap()
+    {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    let late_expiry = u64::from(late.expires_at);
+    assert!(matches!(
+        q.a.receive(
+            &late.encode(),
+            "t",
+            late_expiry + ACK_GRACE_SECS + 1,
+            &mut q.rng
+        )
+        .unwrap(),
+        ReceiveOutcome::Expired
+    ));
+    // Within the grace: the delivery is proven.
+    assert!(matches!(
+        p.a.receive(
+            &ack.encode(),
+            "t",
+            ack_expiry + ACK_GRACE_SECS - 3_600,
+            &mut p.rng
+        )
+        .unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    assert_eq!(status_of(&p.a, &bob, "late-ack"), MessageStatus::Received);
 }

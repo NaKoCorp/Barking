@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use barking_packet::MailboxId;
+use barking_packet::{ACK_GRACE_SECS, MailboxId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{Error, Result};
@@ -301,8 +301,9 @@ impl NodeStore {
         Ok(out)
     }
 
-    /// Deletes all expired packets, acks (`expires_at <= now`) and
-    /// subscriptions, batch after batch. Returns the number of deleted rows.
+    /// Deletes all expired packets (`expires_at <= now`), acks
+    /// (`expires_at + ACK_GRACE_SECS <= now`) and subscriptions, batch after
+    /// batch. Returns the number of deleted rows.
     pub fn purge_expired(&mut self, now: u64) -> Result<usize> {
         let mut removed = 0;
         loop {
@@ -360,12 +361,16 @@ impl NodeStore {
             more |= n >= limit;
         }
         {
+            // An ack stays `ACK_GRACE_SECS` past its stored expiry (the
+            // later of its own and its message's): a sender that missed the
+            // receipt wake-up still finds it a day later.
+            let ack_cut = i64::try_from(now.saturating_sub(ACK_GRACE_SECS)).unwrap_or(i64::MAX);
             let mut st = tx.prepare_cached(
                 "DELETE FROM acks WHERE seq IN (SELECT seq FROM acks \
                  WHERE expires_at <= ?1 ORDER BY expires_at, seq LIMIT ?2) \
                  RETURNING length(bytes)",
             )?;
-            let lens = st.query_map(params![now_sql, limit_sql], |r| r.get::<_, i64>(0))?;
+            let lens = st.query_map(params![ack_cut, limit_sql], |r| r.get::<_, i64>(0))?;
             let mut n = 0;
             for len in lens {
                 freed += len?;

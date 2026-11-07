@@ -10,9 +10,6 @@
 //!    responsible. Loss audit (spec §5.1) on the way. Then cross-checks:
 //!    each session mailbox served in full is read from the best other
 //!    responsible every `CROSSCHECK_EVERY_SECS` per (node, mailbox).
-//!    The mailboxes of my deposited packets past their expiry
-//!    (`Core::awaiting_verdict`) are fetched with them, from their start;
-//!    they do not count for `mark_polled`.
 //! 3. **Deposits**, following `plan_deposits`: receipts (no proof of work),
 //!    first copies, resends, extra copies. Proof budget exhausted: messages
 //!    wait, receipts go. `NotResponsible` from 2 responsibles of a mailbox:
@@ -21,8 +18,9 @@
 //! 4. **Introduction fetch**, within `INTRO_FETCH_BYTES` and
 //!    `INTRO_FETCH_SLICE`; a partial one blocks nothing. Then a second
 //!    deposit pass for receipts only (no proof of work), so that the
-//!    receipts of first contacts leave in the same sync. Then the failure
-//!    **verdict** (see below).
+//!    receipts of first contacts leave in the same sync. Then the mailboxes
+//!    of my deposited packets past their expiry, in a stage of their own,
+//!    and the failure **verdict** (see below).
 //! 5. **Maintenance**, with the time left: random lookups, candidate
 //!    confirmation, fallback lookups while the view is small, then the node
 //!    hints of my contact card. Skipped when nodes were tried and none
@@ -68,12 +66,20 @@
 //! `AUDIT_EVERY_SECS`, each in a call of its own once all regular session
 //! fetches are over, within `REREAD_BYTES` and `REREAD_TIME`.
 //!
-//! **Verdict** (spec §15.5). A deposited packet whose expiry passed by the
-//! start of the sync fails (`Core::confirm_expired`) only when a
-//! responsible of its mailbox served that mailbox in full, from its start,
-//! every item processed, and nothing fetched in the sync was the packet or
-//! a receipt for it. No responsible answering in full, or a node still
-//! returning the packet (its clock behind), leaves it for a later sync.
+//! **Verdict** (spec §15.5). The mailboxes of my deposited packets whose
+//! expiry passed by the start of the sync (`Core::awaiting_verdict`) are
+//! read from their start, after every other fetch, never grouped with
+//! other mailboxes, within the introductions' budget (`INTRO_FETCH_BYTES`,
+//! `QUICK_INTRO_BYTES`): the nodes that accepted the packet first, then the
+//! next responsible until the rule is met. Such a packet fails
+//! (`Core::confirm_expired`) only when a node that accepted it (the ledger,
+//! or the delivery's first node), or two responsibles, served its mailbox
+//! in full from its start, every item processed, and nothing fetched in
+//! the sync was the packet or a receipt for it. Otherwise (a node that
+//! never held the mailbox, no complete answer, a node still returning the
+//! packet with its clock behind) it waits for a later sync. Nodes keep a
+//! receipt a day past its expiry (`ACK_GRACE_SECS`), so a sync a day late
+//! still finds it.
 //! The messages that failed during the sync are returned in
 //! `SyncReport::failed`.
 //!
@@ -90,12 +96,12 @@
 //! my own session mailboxes of yesterday and today (`Core::own_mailboxes`)
 //! with the mailboxes where a message I sent awaits its ack
 //! (`Core::awaited_ack_mailboxes`, so that a receipt wake-up finds the ack)
-//! and those of my deposited packets past their expiry (so that an expiry
-//! wake-up gets its verdict, given as in a full sync after the fetches),
 //! then my introduction mailboxes of those days, are fetched from their
 //! best responsible, the next one only when the best failed, refused or
 //! rate-limited (a truncated fetch is kept as it is), resumed from the
-//! positions of the network state. Every fetch draws on
+//! positions of the network state; then the mailboxes of my deposited
+//! packets past their expiry, so that an expiry wake-up gets its verdict
+//! (as in a full sync). Every fetch draws on
 //! `QUICK_FETCH_BYTES` in all, the introductions on `QUICK_INTRO_BYTES` at
 //! most: a fetch cut by that cap is processed and its positions saved, so
 //! each wake-up makes bounded, lasting progress. Then, with time left,
@@ -133,6 +139,7 @@ use crate::state::NetState;
 use crate::{BOOTSTRAP_VIEW, CandidateBudget};
 
 mod fetch;
+use fetch::FetchKind;
 mod io;
 
 pub use barking_proto::client::FetchStop;
@@ -470,8 +477,8 @@ impl<'a, D: Connector> Run<'a, D> {
             pow_left: pow_budget,
             stats: BTreeMap::new(),
             verdict_boxes: HashSet::new(),
-            verdict_only: HashSet::new(),
-            answered_boxes: HashSet::new(),
+            verdict_packets: HashMap::new(),
+            answered: HashMap::new(),
             seen_ids: HashSet::new(),
             report: SyncReport::default(),
         }
@@ -548,12 +555,13 @@ struct Run<'a, D: Connector> {
     /// (`Core::awaiting_verdict`): read from their start, so that a packet
     /// a node still holds cannot hide behind a saved position.
     verdict_boxes: HashSet<MailboxId>,
-    /// Of them, those fetched only for the verdict: they do not count
-    /// for `polled_all_sessions`.
-    verdict_only: HashSet<MailboxId>,
-    /// Mailboxes a responsible served in full from their start, every item
-    /// processed: the network answered for them.
-    answered_boxes: HashSet<MailboxId>,
+    /// Each packet awaiting a verdict: its mailbox, the nodes the ledger
+    /// says accepted it (read at the start, before any pruning), and the
+    /// short id of the first node that accepted it (`deliveries.node`).
+    verdict_packets: HashMap<PacketId, (MailboxId, HashSet<NodeId>, Option<String>)>,
+    /// Per verdict mailbox, the responsibles that served it in full from
+    /// its start, every item processed.
+    answered: HashMap<MailboxId, HashSet<NodeId>>,
     /// Packets fetched (mine included) and packets acknowledged by a
     /// fetched receipt.
     seen_ids: HashSet<PacketId>,
@@ -626,15 +634,14 @@ where
             own.extend(self.core.awaited_ack_mailboxes(self.now)?);
             Ok(own)
         });
-        let mut own = match read {
+        let own = match read {
             Ok(m) => m,
             Err(e) => {
                 self.report.error = Some(e.to_string());
                 return;
             }
         };
-        let verdict = self.verdict_mailboxes();
-        own.extend(verdict.into_iter().map(|m| (m, today)));
+        self.load_verdicts();
         // Introductions apart, with their own small budget, after the
         // sessions: a flood there cannot take the sessions' bytes.
         let intro_set: HashSet<MailboxId> =
@@ -647,47 +654,103 @@ where
             list.sort_unstable_by_key(|m| m.0);
             list.dedup();
         }
-        self.fetch_stage(&sessions, false).await;
+        self.fetch_stage(&sessions, FetchKind::Sessions).await;
         if !intro.is_empty() && !self.over() {
-            let polled_intro = self.fetch_stage(&intro, true).await;
+            let polled_intro = self.fetch_stage(&intro, FetchKind::Intro).await;
             self.report.intro_partial = !polled_intro;
         }
+        self.verdict_stage().await;
         self.give_verdicts();
         if !self.over() {
             self.deposit_stage(true).await;
         }
     }
 
-    /// Mailboxes of the packets awaiting a verdict at the start of the
-    /// sync (`Core::awaiting_verdict`), noted in `verdict_boxes`, sorted,
-    /// without duplicates. A read error leaves the verdicts to a later sync.
-    fn verdict_mailboxes(&mut self) -> Vec<MailboxId> {
-        let mut out: Vec<MailboxId> = match self.core.awaiting_verdict(self.now) {
-            Ok(v) => v.into_iter().map(|(_, m)| m).collect(),
+    /// Reads the packets awaiting a verdict at the start of the sync
+    /// (`Core::awaiting_verdict_packets`), with the nodes the ledger says
+    /// accepted each one: the deposit stage prunes the ledger of expired
+    /// packets. A read error leaves the verdicts to a later sync.
+    fn load_verdicts(&mut self) {
+        let awaiting = match self.core.awaiting_verdict_packets(self.now) {
+            Ok(v) => v,
             Err(e) => {
                 tracing::warn!("packets awaiting a verdict not read: {e}");
-                Vec::new()
+                return;
             }
         };
-        out.sort_unstable_by_key(|m| m.0);
-        out.dedup();
-        self.verdict_boxes.extend(out.iter().copied());
-        out
+        for a in awaiting {
+            let holders: HashSet<NodeId> = self
+                .state
+                .ledger
+                .holders(&content_hash(&a.bytes))
+                .into_iter()
+                .collect();
+            self.verdict_boxes.insert(a.mailbox);
+            self.verdict_packets
+                .insert(a.packet, (a.mailbox, holders, a.node));
+        }
+    }
+
+    /// `node` accepted `packet` (ledger, or the delivery's first node).
+    pub(super) fn accepted_by(&self, packet: &PacketId, node: &NodeId) -> bool {
+        self.verdict_packets
+            .get(packet)
+            .is_some_and(|(_, holders, first)| {
+                holders.contains(node) || first.as_deref() == Some(short_id(node).as_str())
+            })
+    }
+
+    /// The network answered for `packet` (spec §15.5): a node that accepted
+    /// it served its mailbox in full from the start, or two responsibles
+    /// did. A node that never held the mailbox cannot fail it alone.
+    fn answered_for(&self, packet: &PacketId) -> bool {
+        let Some((mailbox, _, _)) = self.verdict_packets.get(packet) else {
+            return false;
+        };
+        let Some(nodes) = self.answered.get(mailbox) else {
+            return false;
+        };
+        nodes.len() >= 2 || nodes.iter().any(|n| self.accepted_by(packet, n))
+    }
+
+    /// Every packet awaiting a verdict in `mailbox` has its answer.
+    pub(super) fn verdict_settled(&self, mailbox: &MailboxId) -> bool {
+        self.verdict_packets
+            .iter()
+            .filter(|(_, (m, _, _))| m == mailbox)
+            .all(|(p, _)| self.answered_for(p))
+    }
+
+    /// Fetches, after every other fetch, the verdict mailboxes still
+    /// without their answer, in a stage of their own with the introduction
+    /// budget (they may be a contact's introduction mailbox, which anyone
+    /// can fill): the nodes that accepted the packet first.
+    async fn verdict_stage(&mut self) {
+        let mut boxes: Vec<MailboxId> = self
+            .verdict_boxes
+            .iter()
+            .filter(|m| !self.verdict_settled(m))
+            .copied()
+            .collect();
+        if boxes.is_empty() || self.over() {
+            return;
+        }
+        boxes.sort_unstable_by_key(|m| m.0);
+        self.fetch_stage(&boxes, FetchKind::Verdict).await;
     }
 
     /// The failure verdict (spec §15.5), once the fetches are over and
     /// their items processed (an ack found has made its message
     /// `Received`): each deposited packet that expired before this sync
-    /// started fails when a responsible of its mailbox served it in full
-    /// from its start, and nothing fetched was the packet or an ack for it.
-    /// Otherwise (no responsible answered in full, or a node still has the
-    /// packet) it waits for a later sync.
+    /// started fails when the network answered for its mailbox
+    /// (`answered_for`) and nothing fetched was the packet or an ack for
+    /// it. Otherwise it waits for a later sync.
     fn give_verdicts(&mut self) {
         let Ok(awaiting) = self.core.awaiting_verdict(self.now) else {
             return;
         };
-        for (packet, mailbox) in awaiting {
-            if self.answered_boxes.contains(&mailbox) && !self.seen_ids.contains(&packet) {
+        for (packet, _) in awaiting {
+            if self.answered_for(&packet) && !self.seen_ids.contains(&packet) {
                 let _ = self.core.confirm_expired(packet, self.now);
             }
         }
@@ -1333,29 +1396,22 @@ where
         intro.dedup();
         let watched: HashSet<MailboxId> = sessions.iter().chain(&intro).copied().collect();
         self.state.retain_positions(&watched);
-        // Mailboxes of the packets awaiting a verdict, fetched with the
-        // sessions; those only fetched for it do not hold back `mark_polled`.
-        for m in self.verdict_mailboxes() {
-            if !watched.contains(&m) {
-                self.verdict_only.insert(m);
-                sessions.push(m);
-            }
-        }
-        sessions.sort_unstable_by_key(|m| m.0);
+        self.load_verdicts();
 
-        let polled_sessions = self.fetch_stage(&sessions, false).await;
+        let polled_sessions = self.fetch_stage(&sessions, FetchKind::Sessions).await;
         self.report.polled_all_sessions = polled_sessions;
 
         self.deposit_stage(false).await;
 
         if !intro.is_empty() {
-            let polled_intro = self.fetch_stage(&intro, true).await;
+            let polled_intro = self.fetch_stage(&intro, FetchKind::Intro).await;
             self.report.intro_partial = !polled_intro;
             // Receipts of what the introductions brought.
             if !self.over() {
                 self.deposit_stage(true).await;
             }
         }
+        self.verdict_stage().await;
         self.give_verdicts();
 
         // Nodes tried and none answered: lookups would only dial dead ends.

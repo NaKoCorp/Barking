@@ -50,6 +50,17 @@ pub(crate) fn packet_size(packet: &Packet) -> u32 {
     u32::try_from(packet.tier.size()).unwrap_or(u32::MAX)
 }
 
+/// A deposited packet awaiting its verdict (`Core::awaiting_verdict_packets`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AwaitingVerdict {
+    pub packet: PacketId,
+    pub mailbox: MailboxId,
+    /// Encoded packet.
+    pub bytes: Vec<u8>,
+    /// Short id of the first node that accepted it (`deliveries.node`).
+    pub node: Option<String>,
+}
+
 impl Core {
     /// Records that the node `node` (its short identifier) accepted
     /// `packet` at `now`, whatever its kind (message or receipt). The first
@@ -135,30 +146,46 @@ impl Core {
     /// them nor their ack. As `(packet, mailbox)`, oldest expiry first;
     /// copies for my devices and messageless packets included.
     pub fn awaiting_verdict(&self, started_at: u64) -> Result<Vec<(PacketId, MailboxId)>> {
+        Ok(self
+            .awaiting_verdict_packets(started_at)?
+            .into_iter()
+            .map(|a| (a.packet, a.mailbox))
+            .collect())
+    }
+
+    /// `awaiting_verdict`, with each packet's bytes and the node that
+    /// first accepted it: the network client gives a verdict only on the
+    /// answer of a node that held the packet (or of two responsibles).
+    pub fn awaiting_verdict_packets(&self, started_at: u64) -> Result<Vec<AwaitingVerdict>> {
         let mut stmt = self
             .store
             .conn()
             .prepare(
-                "SELECT o.packet_id, o.bytes FROM outbox o \
+                "SELECT o.packet_id, o.bytes, d.node FROM outbox o \
                  JOIN deliveries d ON d.packet_id = o.packet_id \
                  WHERE o.expires_at <= ?1 AND d.status = ?2 \
                  ORDER BY o.expires_at, o.rowid",
             )
             .map_err(map_err)?;
-        let rows: Vec<(Vec<u8>, Vec<u8>)> = stmt
+        let rows: Vec<(Vec<u8>, Vec<u8>, Option<String>)> = stmt
             .query_map(
                 params![to_i64(started_at), MessageStatus::OnNetwork as i64],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .map_err(map_err)?
             .collect::<rusqlite::Result<_>>()
             .map_err(map_err)?;
         let mut out = Vec::new();
-        for (id, bytes) in rows {
+        for (id, bytes, node) in rows {
             let Ok(p) = Packet::decode(&bytes) else {
                 continue;
             };
-            out.push((PacketId(arr(id)?), p.mailbox));
+            out.push(AwaitingVerdict {
+                packet: PacketId(arr(id)?),
+                mailbox: p.mailbox,
+                bytes,
+                node,
+            });
         }
         Ok(out)
     }

@@ -275,7 +275,7 @@ fn acked_message_purge_does_not_mark() {
     let late = NOW + 86_401;
     assert!(day_of(late) <= today() + 1);
     let (removed, _, marked) = s.purge_expired_batch(late, 100).unwrap();
-    assert!(removed >= 1, "the ack row expired");
+    assert_eq!(removed, 0, "the ack row stays a day past its expiry");
     assert!(!marked);
     let subs: i64 = s
         .conn()
@@ -283,6 +283,11 @@ fn acked_message_purge_does_not_mark() {
         .unwrap();
     assert_eq!(subs, 1);
     assert!(take_due(&mut s, late, 100).unwrap().is_empty());
+    // Its purge after the grace marks nothing either.
+    let after = late + barking_packet::ACK_GRACE_SECS;
+    let (removed, _, marked) = s.purge_expired_batch(after, 100).unwrap();
+    assert!(removed >= 1, "the ack row expired");
+    assert!(!marked);
 }
 
 #[test]

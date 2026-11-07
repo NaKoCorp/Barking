@@ -18,7 +18,7 @@ use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
 use crate::identity::{DeviceKeys, DeviceList, DevicePublic, Fingerprint, RootIdentity};
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
-use crate::packet::{Kind, Packet, PacketId, ack};
+use crate::packet::{ACK_GRACE_SECS, Kind, Packet, PacketId, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
 use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow};
 use crate::transparency::{SyncKind, TransparencyEvent};
@@ -69,7 +69,13 @@ impl Core {
         let Ok(packet) = Packet::decode(bytes) else {
             return Ok(ReceiveOutcome::NotForUs);
         };
-        if u64::from(packet.expires_at) < now {
+        // A receipt stays on the nodes a day past its expiry
+        // (`ACK_GRACE_SECS`): it still proves the delivery.
+        let grace = match packet.kind {
+            Kind::Ack => ACK_GRACE_SECS,
+            Kind::Message => 0,
+        };
+        if u64::from(packet.expires_at).saturating_add(grace) < now {
             return Ok(ReceiveOutcome::Expired);
         }
         match packet.kind {

@@ -20,6 +20,11 @@ pub const HEADER_LEN: usize = 40;
 pub const DEFAULT_HOPS: u8 = 8;
 /// Default lifetime: 24 hours.
 pub const DEFAULT_TTL_SECS: u64 = 86_400;
+/// How long past `max(ack expiry, acknowledged message's expiry)` a node
+/// keeps a receipt, and how long past its own expiry a sender still takes
+/// it: an app that missed the receipt wake-up and syncs a day later still
+/// finds it, instead of concluding that the message was not delivered.
+pub const ACK_GRACE_SECS: u64 = 86_400;
 
 /// Header bytes + length field.
 pub const OVERHEAD: usize = HEADER_LEN + 2;

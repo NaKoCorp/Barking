@@ -3018,8 +3018,14 @@ struct Expired {
 }
 
 fn expired_reply() -> Expired {
-    let sealed = NOW - DAY - 1_200;
-    let (dir, mut core, ack) = subject_with_ack_at(sealed, NOW - 1_500);
+    expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, None)
+}
+
+/// Bob's reply sealed at `sealed` (expired by `NOW`), Alice's ack sealed at
+/// `ack_at`, the reply deposited on the responsible of rank `deposit_on`
+/// (`None`: on a node outside the test network).
+fn expired_reply_with(sealed: u64, ack_at: u64, deposit_on: Option<usize>) -> Expired {
+    let (dir, mut core, ack) = subject_with_ack_at(sealed, ack_at);
     let reply = core
         .pending_outbox(sealed)
         .unwrap()
@@ -3028,10 +3034,15 @@ fn expired_reply() -> Expired {
         .unwrap();
     let packet = Packet::decode(&reply).unwrap();
     assert!(u64::from(packet.expires_at) < NOW);
-    assert!(u64::from(Packet::decode(&ack).unwrap().expires_at) > NOW);
-    core.record_deposit(packet.id, DEPOSIT_NODE, sealed)
-        .unwrap();
     let net = setup_with(&mut core);
+    let node = match deposit_on {
+        Some(rank) => {
+            let state = load(&mut core);
+            short_id(&state.view.responsibles_by_score(&packet.mailbox, NOW)[rank])
+        }
+        None => DEPOSIT_NODE.to_string(),
+    };
+    core.record_deposit(packet.id, &node, sealed).unwrap();
     let alice = core.contacts().unwrap()[0].fingerprint;
     assert_eq!(
         core.awaiting_verdict(NOW).unwrap(),
@@ -3244,4 +3255,149 @@ async fn too_far_in_future_packet_is_not_delivered() {
         .unwrap();
     assert_eq!(sealed.status, MessageStatus::NotDelivered);
     assert_eq!(report.failed, vec![(alice, sealed.id)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn verdict_needs_the_accepting_node_or_two_responsibles() {
+    use barking_core::store::MessageStatus;
+    // Deposited on the second responsible: the best one never held it.
+    let mut e = expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, Some(1));
+    let r = load(&mut e.core)
+        .view
+        .responsibles_by_score(&e.mailbox, NOW);
+    assert!(r.len() >= 3);
+    let accepting = r[1];
+    // Only the best responsible answers, empty: no verdict.
+    for n in &r[1..] {
+        e.net.fail_fetch.insert(*n);
+    }
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert!(fetched_pairs(&e.net.calls()).contains(&(r[0], e.mailbox)));
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    // The accepting node answers: verdict, asked first.
+    e.net.fail_fetch.remove(&accepting);
+    let before = e.net.calls().len();
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
+    assert_eq!(report.failed.len(), 1);
+    let first = e.net.calls()[before..]
+        .iter()
+        .find_map(|c| match c {
+            Call::Fetch(n, mbs, _) if mbs.contains(&e.mailbox) => Some(*n),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(first, accepting);
+
+    // Deposited on a node gone from the view: two responsibles that answer
+    // in full give the verdict.
+    let mut e = expired_reply();
+    let r = load(&mut e.core)
+        .view
+        .responsibles_by_score(&e.mailbox, NOW);
+    for n in &r[2..] {
+        e.net.fail_fetch.insert(*n);
+    }
+    e.net.fail_fetch.insert(r[1]);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    e.net.fail_fetch.remove(&r[1]);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
+    assert_eq!(report.failed.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ack_found_a_day_after_expiry_makes_received() {
+    use barking_core::store::MessageStatus;
+    // Alice acked right away; Bob missed the wake-up and syncs a day after
+    // both expired. The node keeps the ack a day more (`ACK_GRACE_SECS`).
+    let sealed = NOW - 2 * DAY + 1_200;
+    let mut e = expired_reply_with(sealed, sealed + 60, None);
+    assert!(u64::from(Packet::decode(&e.ack).unwrap().expires_at) < NOW - DAY + 1_800);
+    e.net.mailbox_items.insert(e.mailbox, vec![e.ack.clone()]);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::Received);
+    assert!(report.failed.is_empty());
+}
+
+/// A verdict mailbox flooded with junk.
+fn flood_verdict_mailbox(e: &mut Expired) {
+    e.net.honor_max_bytes = true;
+    e.net
+        .mailbox_items
+        .insert(e.mailbox, vec![vec![0u8; 64 << 10]; 200]);
+}
+
+/// Bytes served to the fetches asking for `m`.
+fn bytes_for(net: &Net, m: MailboxId) -> usize {
+    let calls = net.calls();
+    let fetches = calls.iter().filter_map(|c| match c {
+        Call::Fetch(_, mbs, _) => Some(mbs),
+        _ => None,
+    });
+    net.fetch_bytes
+        .lock()
+        .unwrap()
+        .iter()
+        .zip(fetches)
+        .filter(|(_, mbs)| mbs.contains(&m))
+        .map(|((_, _, b), _)| *b)
+        .sum()
+}
+
+#[tokio::test(start_paused = true)]
+async fn verdict_fetch_comes_after_sessions_within_its_own_budget() {
+    let mut e = expired_reply();
+    flood_verdict_mailbox(&mut e);
+    let sessions = e.core.watched_mailbox_groups(NOW).unwrap().sessions;
+    assert!(!sessions.contains(&e.mailbox));
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    // The session fetches got their whole budget.
+    assert!(report.polled_all_sessions, "{report:?}");
+    let calls = e.net.calls();
+    let fetches: Vec<&Vec<MailboxId>> = calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Fetch(_, mbs, _) => Some(mbs),
+            _ => None,
+        })
+        .collect();
+    let first_verdict = fetches
+        .iter()
+        .position(|mbs| mbs.contains(&e.mailbox))
+        .unwrap();
+    for (i, mbs) in fetches.iter().enumerate() {
+        if mbs.contains(&e.mailbox) {
+            assert_eq!(mbs.len(), 1, "never grouped: {mbs:?}");
+        } else if mbs.iter().any(|m| sessions.contains(m)) {
+            assert!(i < first_verdict, "sessions first");
+        }
+    }
+    let verdict_bytes = bytes_for(&e.net, e.mailbox);
+    assert!(
+        verdict_bytes > 0 && verdict_bytes <= INTRO_FETCH_BYTES,
+        "{verdict_bytes}"
+    );
+
+    // Quick sync: after my own mailboxes, within the introductions' budget.
+    let mut e = expired_reply();
+    flood_verdict_mailbox(&mut e);
+    let own = quick_mailboxes(&e.core);
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert!(report.error.is_none());
+    let pairs = fetched_pairs(&e.net.calls());
+    let first_verdict = pairs.iter().position(|(_, m)| *m == e.mailbox).unwrap();
+    let last_own = pairs.iter().rposition(|(_, m)| own.contains(m)).unwrap();
+    assert!(last_own < first_verdict, "{pairs:?}");
+    let verdict_bytes = bytes_for(&e.net, e.mailbox);
+    assert!(
+        verdict_bytes > 0 && verdict_bytes <= QUICK_INTRO_BYTES,
+        "{verdict_bytes}"
+    );
 }
