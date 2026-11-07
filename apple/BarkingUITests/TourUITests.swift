@@ -11,6 +11,12 @@ import XCTest
 /// B3), taken after the numbered safety-code screens.
 @MainActor
 final class TourUITests: XCTestCase {
+    /// The tour is one long test: the UI plan's 60 s per-test allowance does not apply.
+    override func setUp() {
+        super.setUp()
+        executionTimeAllowance = 900
+    }
+
     private struct Labels {
         let create, phraseTitle, cont, confirm, later, add, message, send: String
         let chats, network, settings, linked, identity, security, recover, link, pdf, linkNew, close, cancel: String

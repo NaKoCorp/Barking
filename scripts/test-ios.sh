@@ -124,7 +124,7 @@ do_tour() {
   [ "$lang" = ax3 ] && export TEST_RUNNER_BARKING_TOUR_SIZE=UICTContentSizeCategoryAccessibilityL
   local bundle="$apple/build/tour-$lang.xcresult"
   rm -rf "$bundle"
-  step "tour $lang" xb test-without-building -testPlan UI -only-testing:BarkingUITests/TourUITests -resultBundlePath "$bundle"
+  step "tour $lang" xb test-without-building -testPlan UI -parallel-testing-enabled NO -only-testing:BarkingUITests/TourUITests -resultBundlePath "$bundle"
 }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift
