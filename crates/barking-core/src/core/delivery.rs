@@ -732,9 +732,11 @@ impl Core {
         self.store.messages_with_delivery(*contact)
     }
 
-    /// Delivery summaries of the messages `ids`, in the order given (`None`
-    /// for an unknown or deleted row, a received message, or one without a
-    /// delivery to the contact). Expires the due packets first.
+    /// Delivery summaries of the messages `ids` that still exist, in the
+    /// order given (`None`: a received message, or one without a delivery
+    /// to the contact). An unknown or deleted row is left out, so the
+    /// caller tells a removed message from one without a summary. Expires
+    /// the due packets first.
     pub fn deliveries_of(
         &mut self,
         ids: &[i64],
@@ -749,7 +751,7 @@ impl Core {
             .collect();
         Ok(ids
             .iter()
-            .map(|id| (*id, found.get(id).copied().flatten()))
+            .filter_map(|id| found.get(id).map(|s| (*id, *s)))
             .collect())
     }
 

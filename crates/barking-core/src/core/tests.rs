@@ -4039,7 +4039,8 @@ fn summary_counts_devices_per_state() {
     assert_eq!(*summary, Some(received));
     assert_eq!(
         b.deliveries_of(&[row, 9_999], NOW + 5).unwrap(),
-        vec![(row, Some(received)), (9_999, None)]
+        vec![(row, Some(received))],
+        "an unknown or deleted row is left out"
     );
     // The other device's packet reaches a node.
     b.record_deposit(other.id, NODE, NOW + 6).unwrap();
