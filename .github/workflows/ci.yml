@@ -160,6 +160,7 @@ jobs:
   apple:
     name: iOS app (build, XCTest)
     runs-on: macos-26
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:

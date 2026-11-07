@@ -2,12 +2,7 @@ import XCTest
 
 @MainActor
 final class OnboardingUITests: XCTestCase {
-    override func setUp() {
-        continueAfterFailure = false
-        // The dots test launches twice and scans six screenshots with the animations on:
-        // ~28 s alone, past the plan's 60 s when three parallel simulators saturate the CPU.
-        executionTimeAllowance = 180
-    }
+    override func setUp() { continueAfterFailure = false }
 
     func testCreateIdentityAndConfirmPhrase() throws {
         let app = XCUIApplication.fresh()
@@ -30,6 +25,9 @@ final class OnboardingUITests: XCTestCase {
     /// UI review B5 (U-32): the galaxy's dots never show over Welcome's
     /// header, text or buttons, at the default size and at AX3.
     func testWelcomeDotsStayOffTheText() throws {
+        // Two launches and six screenshot scans with the animations on: ~28 s alone,
+        // past the plan's 60 s when three parallel simulators saturate the CPU.
+        executionTimeAllowance = 180
         // The dots move: animations stay on, as the test looks at them.
         let app = XCUIApplication.fresh(extra: ["-BarkingUITestKeepAnimations"])
         app.launch()
