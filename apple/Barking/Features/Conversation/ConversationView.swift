@@ -10,8 +10,6 @@ struct ConversationView: View {
     @Environment(\.scenePhase) private var phase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// "Deliveries" is pushed.
-    @State private var showsDeliveries = false
     /// The message whose sheet is open.
     @State private var sheetOf: SheetTarget?
     /// The message the delete confirmation is open for, as it was then.
@@ -79,9 +77,6 @@ struct ConversationView: View {
         }
         .background(Color.surface)
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(isPresented: $showsDeliveries) {
-            DeliveriesView(core: core, contact: model.contact, contactName: model.name)
-        }
         .sheet(item: $sheetOf) { target in
             MessageSheet(core: core, messageId: target.id, contact: model.contact, contactName: model.name) {
                 model.showDeleted($0)
@@ -103,9 +98,12 @@ struct ConversationView: View {
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                // "Deliveries" (§6.5): disabled until a message was sent.
-                Button {
-                    showsDeliveries = true
+                // "Deliveries" (§6.5): disabled until a message was sent. A
+                // link, like the header's: a `navigationDestination(isPresented:)`
+                // in the chats' path-bound stack looped SwiftUI's layout at
+                // 100 % CPU on the push.
+                NavigationLink {
+                    DeliveriesView(core: core, contact: model.contact, contactName: model.name)
                 } label: {
                     Image(systemName: "checklist")
                 }
