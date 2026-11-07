@@ -168,10 +168,12 @@ final class DeliveryUITests: XCTestCase {
 
     // MARK: Pending (§6.6)
 
-    /// "N packets pending" on the Network screen (0: "Nothing pending").
+    /// "N packets pending" on the Network screen, once loaded: the row reads
+    /// "Nothing pending" until the screen has read the count.
     private func networkCount(_ app: XCUIApplication) -> Int {
         let row = app.buttons["network.pending"]
         XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(row.waitUntil({ (Int($0.label.prefix { $0.isNumber }) ?? 0) > 0 }), "count not loaded: \(row.label)")
         return Int(row.label.prefix { $0.isNumber }) ?? 0
     }
 
@@ -257,6 +259,10 @@ final class DeliveryUITests: XCTestCase {
         app.buttons["network.pending"].tap()
         let sync = any(app, containing: "Your card, for your contacts")
         XCTAssertTrue(sync.waitForExistence(timeout: 5), "the sync section")
+        // The launch sync found no network (this world has none): said here,
+        // without a pull (§6.6).
+        XCTAssertTrue(any(app, containing: "Unreachable · nothing is lost").waitForExistence(timeout: 10),
+                      "the offline line after the launch sync")
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Your card")).firstMatch.exists,
                        "a sync row is not a button")
         sync.swipeLeft()

@@ -8,6 +8,8 @@ struct ConversationView: View {
     let core: CoreService
     @State private var model: ConversationModel
     @Environment(\.scenePhase) private var phase
+    /// Told while this conversation is on screen: syncs every 15 s.
+    @Environment(\.syncLoop) private var syncLoop
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The message whose sheet is open.
@@ -116,7 +118,11 @@ struct ConversationView: View {
             }
         }
         .toolbar(.hidden, for: .tabBar)
-        .onDisappear { model.onDisappear() }
+        .onAppear { syncLoop?.conversationOpen = true }
+        .onDisappear {
+            model.onDisappear()
+            syncLoop?.conversationOpen = false
+        }
         .task {
             await model.onAppear()
             // The first not delivered message, if it is still there.

@@ -33,7 +33,15 @@ struct MainTabView: View {
     enum Tabs { case chats, network, settings }
     let core: CoreService
     @State private var tab = Tabs.chats
+    /// Syncs while the app is in front (spec iOS messaging §4.2).
+    @State private var loop: SyncLoop
     @Environment(AppRouter.self) private var router
+    @Environment(\.scenePhase) private var phase
+
+    init(core: CoreService) {
+        self.core = core
+        _loop = State(initialValue: SyncLoop(core: core))
+    }
 
     var body: some View {
         TabView(selection: $tab) {
@@ -45,6 +53,10 @@ struct MainTabView: View {
         }
         // A tapped notification opens a conversation, which lives under Chats.
         .onChange(of: router.pendingOpen, initial: true) { _, target in if target != nil { tab = .chats } }
+        .environment(\.syncLoop, loop)
+        .onChange(of: phase, initial: true) { _, now in loop.scenePhaseChanged(to: now) }
+        // The core goes (a reset, a removed device): its syncs go with it.
+        .onDisappear { loop.stop() }
     }
 }
 
