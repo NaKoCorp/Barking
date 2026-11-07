@@ -14,7 +14,7 @@ final class UITestSeedTests: XCTestCase {
 
     private func eraseIdentity() {
         try? DeviceFactory.resetIdentity()
-        for key in [OnboardingModel.confirmedKey, "barking.appearance"] {
+        for key in [OnboardingModel.confirmedKey, "barking.appearance", UITestDeliveries.Seed.key] {
             UserDefaults.standard.removeObject(forKey: key)
         }
     }
@@ -43,6 +43,78 @@ final class UITestSeedTests: XCTestCase {
         XCTAssertThrowsError(try UITestSeed.apply(["-BarkingUITestSeed", "nope"])) {
             XCTAssertEqual($0 as? UITestSeed.Error, .unknownScenario("nope"))
         }
+    }
+
+    func testDeliveriesWithoutCardThrows() {
+        XCTAssertThrowsError(try UITestSeed.apply(["-BarkingUITestReset", "-BarkingUITestSeed", "deliveries"])) {
+            XCTAssertEqual($0 as? UITestSeed.Error, .missingCard("deliveries"))
+        }
+    }
+
+    // MARK: The deliveries scenario (spec Lot M §6.8)
+
+    private let deliveriesArgs = ["-BarkingUITestReset", "-BarkingUITestSeed", "deliveries"]
+
+    /// The seeded device seen through the decorator, and Sam.
+    private func seededDeliveries() throws -> (device: any DeviceHandle, sam: String, ids: [Int64]) {
+        let args = deliveriesArgs + ["-BarkingUITestSeedCard", samCardForTests]
+        try UITestSeed.apply(args)
+        let real = try XCTUnwrap(DeviceFactory.openExisting(lockTimeoutMs: 1_000))
+        let device = UITestDeliveries.wrap(real, arguments: args)
+        XCTAssertTrue(device is UITestDeliveries)
+        let seed = try XCTUnwrap(UITestDeliveries.Seed.load())
+        return (device, seed.contact, seed.ids)
+    }
+
+    func testDeliveriesForcesTheFourStatesEverywhere() throws {
+        let (device, sam, ids) = try seededDeliveries()
+        XCTAssertEqual(ids.count, 4)
+        let sent = try device.messagesWith(contact: sam)
+        XCTAssertEqual(sent.map(\.body), UITestDeliveries.bodies())
+        XCTAssertEqual(sent.map { $0.delivery?.state }, [.notDelivered, .received, .onNetwork, .pending])
+        let received = try XCTUnwrap(sent[1].delivery)
+        XCTAssertEqual([received.devicesReceived, received.devices], [1, 2])
+        XCTAssertEqual(try device.deliveriesOf(ids: ids).map { $0.delivery?.state },
+                       [.notDelivered, .received, .onNetwork, .pending])
+        let sheet = try XCTUnwrap(device.messageDelivery(messageId: ids[1]))
+        XCTAssertEqual(sheet.devices.map(\.state), [.received, .onNetwork])
+        XCTAssertEqual(sheet.relays.map(\.node), [UITestDeliveries.relay])
+        XCTAssertEqual(try device.deliveryCounts(contact: sam),
+                       DeliveryCounts(pending: 1, onNetwork: 1, received: 1, notDelivered: 1))
+        XCTAssertEqual(try device.deliveryPage(contact: sam, state: .received, limit: 50, offset: 0).map(\.messageId),
+                       [ids[1]])
+        // "Pending" shows the pending one only, and the Network count is its total.
+        let pending = try device.pendingPackets()
+        XCTAssertEqual(pending.messages.map(\.messageId), [ids[3]])
+        XCTAssertFalse(pending.sync.isEmpty)
+        XCTAssertEqual(pending.packets, UInt32(pending.messages.reduce(0) { $0 + $1.packets }
+                                              + pending.sync.reduce(0) { $0 + $1.packets }))
+        XCTAssertEqual(try device.pendingCount(), pending.packets)
+        // No network in this world: a sync says so at once.
+        XCTAssertFalse(try device.sync(deadlineMs: 8_000).networkUp)
+    }
+
+    func testDeliveriesRetryShowsTheRealStateAndCancelAllKeepsTheOthers() throws {
+        let (device, sam, ids) = try seededDeliveries()
+        try device.retryMessage(messageId: ids[0])
+        XCTAssertEqual(try device.deliveriesOf(ids: [ids[0]]).first?.delivery?.state, .pending)
+        XCTAssertEqual(try device.deliveryCounts(contact: sam).notDelivered, 0)
+        XCTAssertEqual(try device.pendingPackets().messages.map(\.messageId).sorted(), [ids[0], ids[3]])
+        let outcome = try device.cancelAllPending()
+        XCTAssertEqual(outcome.deleted, 2)
+        XCTAssertEqual(try device.messagesWith(contact: sam).map(\.id), [ids[1], ids[2]])
+        let left = try device.pendingPackets()
+        XCTAssertTrue(left.messages.isEmpty)
+        XCTAssertEqual(try device.pendingCount(), left.packets)
+    }
+
+    func testNoDecoratorWithoutItsArguments() throws {
+        try UITestSeed.apply(["-BarkingUITestReset", "-BarkingUITestSeed", "ready", "-BarkingUITestSeedCard", samCardForTests])
+        let real = try XCTUnwrap(DeviceFactory.openExisting(lockTimeoutMs: 1_000))
+        XCTAssertTrue(UITestDeliveries.wrap(real, arguments: ["-BarkingUITestSeed", "ready"]) === real)
+        let fake = UITestDeliveries.wrap(real, arguments: ["-BarkingUITestFakeReceived"])
+        let sam = try XCTUnwrap(real.contacts().first?.fingerprint)
+        XCTAssertEqual(try fake.messagesWith(contact: sam).map(\.body), ["hi from Sam"])
     }
 
     // MARK: Guards on the UI test sources

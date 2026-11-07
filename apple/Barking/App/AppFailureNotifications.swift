@@ -17,7 +17,12 @@ enum AppFailureNotifications {
 
 extension CoreService {
     /// The app's `CoreService`: wired to post failure notices.
+    /// In development builds a UI test may ask for the core seen through
+    /// `UITestDeliveries` (forced delivery states, a fake received message).
     static func app(_ device: any DeviceHandle, runner: any CallRunner = AppCallRunner()) -> CoreService {
-        CoreService(device: device, runner: runner, onFailed: AppFailureNotifications.handler)
+        #if BARKING_DEV
+        let device = UITestDeliveries.wrap(device)
+        #endif
+        return CoreService(device: device, runner: runner, onFailed: AppFailureNotifications.handler)
     }
 }

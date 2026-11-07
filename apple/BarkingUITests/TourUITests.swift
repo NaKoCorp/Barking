@@ -300,6 +300,104 @@ final class TourUITests: XCTestCase {
         }
     }
 
+    /// Delivery states (spec Lot M §10, "Visite"), from the `deliveries`
+    /// seed: the conversation with the four states, the message sheet
+    /// (received on 1 of 2 devices, and not delivered), "Deliveries",
+    /// "Pending" and two confirmations, always dismissed. Unnumbered
+    /// ("delivery-…"): the numbers stay those of shots/index.md.
+    func testTourDeliveries() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipIf(env["BARKING_TOUR"] == nil)
+        let lang = env["BARKING_TOUR_LANG"] ?? "en"
+        let fr = lang == "fr"
+        let L = fr ? Labels.fr : Labels.en
+        let size = env["BARKING_TOUR_SIZE"].flatMap { $0.isEmpty ? nil : ["-UIPreferredContentSizeCategoryName", $0] } ?? []
+        let body = fr ? Seeded.french
+            : (notDelivered: Seeded.notDelivered, received: Seeded.received, onNetwork: Seeded.onNetwork, pending: Seeded.pending)
+        let app = XCUIApplication.seeded("deliveries", language: lang, extra: ["-BarkingUITestNoAutoUnlock"] + size)
+        app.launch()
+        let back = { app.navigationBars.buttons.firstMatch.tap() }
+        let close = { (marker: XCUIElement) in
+            app.buttons[L.close].firstMatch.tap()
+            marker.waitUntil({ !$0.exists }, timeout: 5)
+        }
+        // A dialog without a cancel button (iOS 26) closes with a tap beside it.
+        let dismissDialog = { (button: XCUIElement) in
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.12)).tap()
+            button.waitUntil({ !$0.exists }, timeout: 5)
+        }
+
+        let sam = app.staticTexts["Sam"].firstMatch
+        XCTAssertTrue(sam.waitForExistence(timeout: 10))
+        sam.tap()
+        let pending = app.staticTexts[body.pending].firstMatch
+        XCTAssertTrue(pending.waitForExistence(timeout: 10))
+        pending.waitUntilStill()
+        snap(app, "delivery-conversation", numbered: false)
+
+        // The sheet of a message received on 1 of its 2 devices, then its devices.
+        app.staticTexts[body.received].firstMatch.tap()
+        let timeline = app.descendants(matching: .any)["sheet.timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 10))
+        let delete = app.buttons["sheet.delete"]
+        snap(app, "delivery-sheet-received", numbered: false)
+        for _ in 0..<6 where !delete.isHittable { app.swipeUp() }
+        delete.waitUntilStill()
+        snap(app, "delivery-sheet-received-devices", numbered: false)
+        close(timeline)
+
+        // Not delivered: the reason and Retry.
+        app.staticTexts[body.notDelivered].firstMatch.tap()
+        XCTAssertTrue(app.buttons["sheet.retry"].waitForExistence(timeout: 10))
+        snap(app, "delivery-sheet-not-delivered", numbered: false)
+        close(app.buttons["sheet.retry"])
+
+        // The confirmation of a pending message.
+        pending.press(forDuration: 1.0)
+        let menuDelete = app.buttons[fr ? "Supprimer" : "Delete"].firstMatch
+        if menuDelete.waitForExistence(timeout: 5) {
+            menuDelete.tap()
+            let confirm = app.buttons[fr ? "Supprimer et annuler" : "Delete and cancel"].firstMatch
+            if confirm.waitForExistence(timeout: 5) {
+                snap(app, "delivery-dialog-delete-pending", numbered: false)
+                dismissDialog(confirm)
+            }
+        }
+
+        // Deliveries: the four groups.
+        let header = app.buttons["conversation.deliveries"]
+        XCTAssertTrue(header.waitUntil({ $0.exists && $0.isEnabled }))
+        header.tap()
+        XCTAssertTrue(app.buttons[body.received].waitForExistence(timeout: 10))
+        snap(app, "delivery-deliveries", numbered: false)
+        back()
+
+        // Pending, from the Network row: then selecting, then Cancel all's dialog.
+        back()
+        XCTAssertTrue(app.tabBars.buttons[L.network].waitForExistence(timeout: 5))
+        app.tabBars.buttons[L.network].tap()
+        let row = app.buttons["network.pending"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        let cancelAll = app.buttons["pending.cancelAll"]
+        XCTAssertTrue(cancelAll.waitForExistence(timeout: 10))
+        snap(app, "delivery-pending", numbered: false)
+        app.buttons["pending.select"].tap()
+        let selected = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", body.pending)).firstMatch
+        if selected.waitForExistence(timeout: 5) { selected.tap() }
+        app.buttons["pending.deleteSelected"].waitUntil({ $0.isEnabled })
+        snap(app, "delivery-pending-selecting", numbered: false)
+        app.buttons["pending.select"].tap()
+        XCTAssertTrue(cancelAll.waitForExistence(timeout: 5))
+        for _ in 0..<4 where !cancelAll.isHittable { app.swipeUp() }
+        cancelAll.tap()
+        let confirmAll = app.buttons[fr ? "Supprimer et annuler" : "Delete and cancel"].firstMatch
+        if confirmAll.waitForExistence(timeout: 5) {
+            snap(app, "delivery-dialog-cancel-all", numbered: false)
+            dismissDialog(confirmAll)
+        }
+    }
+
     private func snap(_ app: XCUIApplication, _ name: String, numbered: Bool = true) {
         if numbered { step += 1 }
         let shot = XCTAttachment(screenshot: app.screenshot())

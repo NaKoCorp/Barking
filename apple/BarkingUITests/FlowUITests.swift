@@ -147,7 +147,11 @@ final class ChatUITests: XCTestCase {
         field.typeText("hello Sam")
         app.buttons["Send"].tap()
         XCTAssertTrue(app.staticTexts["hello Sam"].waitForExistence(timeout: 5))
-        app.buttons["conversation.deliveries"].tap()
+        // Enabled once the conversation has read the sent message back: under
+        // parallel clones that can come after the bubble shows.
+        let deliveries = app.buttons["conversation.deliveries"]
+        XCTAssertTrue(deliveries.waitUntil({ $0.exists && $0.isEnabled }), "Deliveries stays disabled")
+        deliveries.tap()
         XCTAssertTrue(app.navigationBars["Deliveries"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Pending · 1"].waitForExistence(timeout: 5))
         let row = app.buttons["hello Sam"]
