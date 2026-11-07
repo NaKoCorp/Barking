@@ -2,7 +2,12 @@ import XCTest
 
 @MainActor
 final class OnboardingUITests: XCTestCase {
-    override func setUp() { continueAfterFailure = false }
+    override func setUp() {
+        continueAfterFailure = false
+        // The dots test launches twice and scans six screenshots with the animations on:
+        // ~28 s alone, past the plan's 60 s when three parallel simulators saturate the CPU.
+        executionTimeAllowance = 180
+    }
 
     func testCreateIdentityAndConfirmPhrase() throws {
         let app = XCUIApplication.fresh()
