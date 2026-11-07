@@ -86,9 +86,14 @@ struct ChatsView: View {
         }
         .onChange(of: router.pendingOpen, initial: true) { _, target in
             guard target != nil, let target = router.takePendingOpen() else { return }
-            focus = target.messageId
-            path = [target.contact]
+            Task {
+                // A contact removed since the notice: nothing to open.
+                guard await model.canOpen(target.contact) else { return }
+                focus = target.messageId
+                path = [target.contact]
+            }
         }
+        .onChange(of: path.isEmpty) { _, empty in if empty { focus = nil } }
         .onChange(of: router.pendingCardLink, initial: true) { _, link in
             if link != nil { pendingLink = router.takePendingCardLink(); adding = true }
         }

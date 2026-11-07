@@ -93,7 +93,7 @@ final class AppRouter {
     static func initialState(opening: () throws -> (any DeviceHandle)?, runner: any CallRunner) -> State {
         do {
             guard let device = try opening() else { return .onboarding }
-            let core = CoreService(device: device, runner: runner, onFailed: AppFailureNotifications.handler)
+            let core = CoreService.app(device, runner: runner)
             return (try? device.isPendingLink()) == true ? .linking(core) : .ready(core)
         } catch is KeyStore.Unavailable {
             return .unreadable
@@ -198,6 +198,8 @@ final class AppRouter {
     /// say where to go. False when it names no contact.
     @discardableResult
     func open(notification userInfo: [AnyHashable: Any]) -> Bool {
+        // Only an open identity has conversations: no stale target to fire later.
+        guard case .ready = state else { return false }
         guard let contact = userInfo[FailureNotifier.contactKey] as? String, !contact.isEmpty else { return false }
         let id = (userInfo[FailureNotifier.messageIdKey] as? NSNumber)?.int64Value
         pendingOpen = OpenTarget(contact: contact, messageId: id)

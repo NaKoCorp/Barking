@@ -107,7 +107,7 @@ final class FailureNotifierTests: XCTestCase {
     func testTapOpensTheConversationOnTheFirstUndeliveredMessage() async throws {
         await FailureNotifier(center: center).post(failed(("ann", 8), ("ann", 6)), appActive: false)
         let userInfo = try XCTUnwrap(center.requests.first).content.userInfo
-        let router = AppRouter(start: .onboarding)
+        let router = AppRouter(start: .ready(CoreService(device: FakeDevice(), runner: DirectRunner())))
         XCTAssertTrue(router.open(notification: userInfo))
         XCTAssertEqual(router.takePendingOpen(), AppRouter.OpenTarget(contact: "ann", messageId: 6))
         XCTAssertNil(router.takePendingOpen())
@@ -115,7 +115,7 @@ final class FailureNotifierTests: XCTestCase {
 
     @MainActor
     func testTapWithoutAContactIsIgnored() {
-        let router = AppRouter(start: .onboarding)
+        let router = AppRouter(start: .ready(CoreService(device: FakeDevice(), runner: DirectRunner())))
         XCTAssertFalse(router.open(notification: ["message_id": 1]))
         XCTAssertFalse(router.open(notification: [:]))
         XCTAssertNil(router.takePendingOpen())
@@ -123,8 +123,47 @@ final class FailureNotifierTests: XCTestCase {
 
     @MainActor
     func testTapOnANewMessageNotificationOpensTheConversationOnly() {
-        let router = AppRouter(start: .onboarding)
+        let router = AppRouter(start: .ready(CoreService(device: FakeDevice(), runner: DirectRunner())))
         XCTAssertTrue(router.open(notification: ["contact": "ann"]))
         XCTAssertEqual(router.takePendingOpen(), AppRouter.OpenTarget(contact: "ann", messageId: nil))
+    }
+
+    @MainActor
+    func testTapIsIgnoredUnlessTheAppIsReady() {
+        let router = AppRouter(start: .onboarding)
+        XCTAssertFalse(router.open(notification: ["contact": "ann"]))
+        XCTAssertNil(router.takePendingOpen())
+    }
+
+    // MARK: Mapping, removed contact, extension
+
+    func testTargetMappingUsesTheThreadWhenUserInfoHasNoContact() {
+        let failure = UNMutableNotificationContent()
+        failure.userInfo = ["contact": "ann", "message_id": NSNumber(value: 4)]
+        XCTAssertEqual(AppDelegate.target(of: failure), AppRouter.OpenTarget(contact: "ann", messageId: 4))
+        let message = UNMutableNotificationContent()
+        message.threadIdentifier = "bob"
+        XCTAssertEqual(AppDelegate.target(of: message), AppRouter.OpenTarget(contact: "bob", messageId: nil))
+        XCTAssertNil(AppDelegate.target(of: UNMutableNotificationContent()))
+    }
+
+    @MainActor
+    func testTapOnAnUnknownContactDoesNotPush() async {
+        let d = FakeDevice()
+        d.contactList = [Contact(fingerprint: "b", alias: "bob", displayName: "Bob", verified: false)]
+        let model = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        let known = await model.canOpen("b")
+        let removed = await model.canOpen("gone")
+        XCTAssertTrue(known)
+        XCTAssertFalse(removed)
+    }
+
+    func testTheExtensionPostsTheFailuresOfItsQuickSync() {
+        let summary = SyncSummary(itemsReceived: 1, sent: 0, newMessages: [], networkUp: true, error: nil,
+                                  deliveryChanges: failed(("ann", 2)), failed: failed(("ann", 2), ("bob", 3)))
+        FailureNotifier(center: center).postFromExtension(summary)
+        XCTAssertEqual(center.requests.map(\.content.threadIdentifier).sorted(), ["ann", "bob"])
+        FailureNotifier(center: center).postFromExtension(nil)
+        XCTAssertEqual(center.requests.count, 2)
     }
 }

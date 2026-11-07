@@ -39,6 +39,13 @@ final class ChatsModel {
         return rows.filter { $0.name.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
 
+    /// The contact is still there (a notification may outlive it): rows are
+    /// reloaded first.
+    func canOpen(_ contact: String) async -> Bool {
+        await reload()
+        return rows.contains { $0.contact == contact }
+    }
+
     func reload() async {
         offline = await core.lastSync.map { !$0.networkUp } ?? false
         guard let summaries = try? await core.chatSummaries() else { return }

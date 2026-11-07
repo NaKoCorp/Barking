@@ -65,6 +65,16 @@ public struct FailureNotifier: Sendable {
         }
     }
 
+    /// For the notification service extension, which is synchronous: posts
+    /// the failures its quick sync found, as notices of their own (never in
+    /// the alert being delivered), waiting at most `timeout` seconds.
+    public func postFromExtension(_ summary: SyncSummary?, timeout: TimeInterval = 5) {
+        guard let failed = summary?.failed, !failed.isEmpty else { return }
+        let done = DispatchSemaphore(value: 0)
+        Task { await post(failed, appActive: false); done.signal() }
+        _ = done.wait(timeout: .now() + timeout)
+    }
+
     func body(count: Int) -> String {
         if count == 1 {
             return NSLocalizedString("FAILED_MESSAGE", tableName: nil, bundle: bundle,

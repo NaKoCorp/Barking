@@ -65,7 +65,12 @@ struct ConversationView: View {
                 .onChange(of: model.items.last?.id) { _, id in
                     if let id, scrollTarget == nil { proxy.scrollTo(id, anchor: .bottom) }
                 }
-                .onChange(of: scrollTarget) { _, id in if let id { proxy.scrollTo(id, anchor: .center) } }
+                .onChange(of: scrollTarget) { _, id in
+                    guard let id else { return }
+                    proxy.scrollTo(id, anchor: .center)
+                    // Done: new messages scroll into view again.
+                    scrollTarget = nil
+                }
             }
             if let e = model.sendError {
                 Text(LocalizedStringKey(e)).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)

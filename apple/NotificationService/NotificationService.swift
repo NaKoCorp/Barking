@@ -28,6 +28,7 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
                 self.deliver(request.content)
                 return
             }
+            FailureNotifier().postFromExtension(summary)
             let shown = NotificationContent.apply(summary, to: content, locked: AppLock.isLockedForExtension)
             if record.outcome.isEmpty { record.outcome = shown }
             if self.deliver(content) == false { record.outcome = "expired" }

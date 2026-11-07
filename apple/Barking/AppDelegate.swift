@@ -48,17 +48,24 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// message; a new-message one only has its thread (the contact).
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             didReceive response: UNNotificationResponse) async {
-        let content = response.notification.request.content
-        let contact = (content.userInfo[FailureNotifier.contactKey] as? String)
-            ?? (content.threadIdentifier.isEmpty ? nil : content.threadIdentifier)
-        let messageId = (content.userInfo[FailureNotifier.messageIdKey] as? NSNumber)?.int64Value
-        guard let contact else { return }
+        guard let target = Self.target(of: response.notification.request.content) else { return }
         await MainActor.run {
-            var info: [AnyHashable: Any] = [FailureNotifier.contactKey: contact]
-            if let messageId { info[FailureNotifier.messageIdKey] = messageId }
+            var info: [AnyHashable: Any] = [FailureNotifier.contactKey: target.contact]
+            if let id = target.messageId { info[FailureNotifier.messageIdKey] = id }
             AppRouter.current?.open(notification: info)
         }
     }
+
+    /// Where a tapped notification leads: its `contact` (else its thread,
+    /// which is the contact for a new message) and, for a failure, the message.
+    nonisolated static func target(of content: UNNotificationContent) -> AppRouter.OpenTarget? {
+        let contact = (content.userInfo[FailureNotifier.contactKey] as? String)
+            ?? (content.threadIdentifier.isEmpty ? nil : content.threadIdentifier)
+        guard let contact else { return nil }
+        let id = (content.userInfo[FailureNotifier.messageIdKey] as? NSNumber)?.int64Value
+        return AppRouter.OpenTarget(contact: contact, messageId: id)
+    }
+
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
