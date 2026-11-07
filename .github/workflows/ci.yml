@@ -223,20 +223,26 @@ jobs:
       - name: Build the XCFramework (simulator slice)
         if: steps.paths.outputs.changed == 'true'
         run: scripts/build-xcframework.sh --sim-only
-      - name: Build and test the app
+      - name: Build the app once
         if: steps.paths.outputs.changed == 'true'
-        working-directory: apple
-        run: |
-          set -euo pipefail
-          xcodegen generate
-          # Ad-hoc signing (no team): the keychain tests need the entitlements
-          # an unsigned build lacks. First available iPhone simulator.
-          udid="$(xcrun simctl list devices available -j | python3 -c '
-          import json, sys
-          d = json.load(sys.stdin)["devices"]
-          print(next(x["udid"] for r, xs in d.items() if "iOS" in r for x in xs if x["name"].startswith("iPhone")))')"
-          xcodebuild test -project Barking.xcodeproj -scheme Barking -configuration Debug \
-            -destination "platform=iOS Simulator,id=$udid"
+        run: scripts/test-ios.sh build
+      - name: Unit tests
+        if: steps.paths.outputs.changed == 'true'
+        run: scripts/test-ios.sh unit
+      - name: UI tests (parallel clones)
+        if: steps.paths.outputs.changed == 'true'
+        run: scripts/test-ios.sh ui
+      - name: Localised tour (English)
+        if: steps.paths.outputs.changed == 'true'
+        run: scripts/test-ios.sh tour en
+      - name: Keep the tour result
+        if: steps.paths.outputs.changed == 'true' && always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tour-en
+          path: apple/build/tour-en.xcresult
+          retention-days: 3
+          if-no-files-found: ignore
 
   release-scripts:
     name: signing and verification scripts
