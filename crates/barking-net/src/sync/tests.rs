@@ -3018,13 +3018,20 @@ struct Expired {
 }
 
 fn expired_reply() -> Expired {
-    expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, None)
+    expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, None, None)
 }
 
 /// Bob's reply sealed at `sealed` (expired by `NOW`), Alice's ack sealed at
-/// `ack_at`, the reply deposited on the responsible of rank `deposit_on`
-/// (`None`: on a node outside the test network).
-fn expired_reply_with(sealed: u64, ack_at: u64, deposit_on: Option<usize>) -> Expired {
+/// `ack_at`. The delivery records as its first node the short id of the
+/// responsible of rank `noted_on` (`None`: a node outside the test
+/// network); the deposit ledger says the responsible of rank `ledger_on`
+/// accepted it (`None`: nobody).
+fn expired_reply_with(
+    sealed: u64,
+    ack_at: u64,
+    noted_on: Option<usize>,
+    ledger_on: Option<usize>,
+) -> Expired {
     let (dir, mut core, ack) = subject_with_ack_at(sealed, ack_at);
     let reply = core
         .pending_outbox(sealed)
@@ -3035,13 +3042,13 @@ fn expired_reply_with(sealed: u64, ack_at: u64, deposit_on: Option<usize>) -> Ex
     let packet = Packet::decode(&reply).unwrap();
     assert!(u64::from(packet.expires_at) < NOW);
     let net = setup_with(&mut core);
-    let node = match deposit_on {
-        Some(rank) => {
-            let state = load(&mut core);
-            short_id(&state.view.responsibles_by_score(&packet.mailbox, NOW)[rank])
-        }
-        None => DEPOSIT_NODE.to_string(),
-    };
+    let r = load(&mut core)
+        .view
+        .responsibles_by_score(&packet.mailbox, NOW);
+    let node = noted_on.map_or_else(|| DEPOSIT_NODE.to_string(), |rank| short_id(&r[rank]));
+    if let Some(rank) = ledger_on {
+        accepted_by(&mut core, r[rank], &reply);
+    }
     core.record_deposit(packet.id, &node, sealed).unwrap();
     let alice = core.contacts().unwrap()[0].fingerprint;
     assert_eq!(
@@ -3261,7 +3268,7 @@ async fn too_far_in_future_packet_is_not_delivered() {
 async fn verdict_needs_the_accepting_node_or_two_responsibles() {
     use barking_core::store::MessageStatus;
     // Deposited on the second responsible: the best one never held it.
-    let mut e = expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, Some(1));
+    let mut e = expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, Some(1), Some(1));
     let r = load(&mut e.core)
         .view
         .responsibles_by_score(&e.mailbox, NOW);
@@ -3318,7 +3325,7 @@ async fn ack_found_a_day_after_expiry_makes_received() {
     // Alice acked right away; Bob missed the wake-up and syncs a day after
     // both expired. The node keeps the ack a day more (`ACK_GRACE_SECS`).
     let sealed = NOW - 2 * DAY + 1_200;
-    let mut e = expired_reply_with(sealed, sealed + 60, None);
+    let mut e = expired_reply_with(sealed, sealed + 60, None, None);
     assert!(u64::from(Packet::decode(&e.ack).unwrap().expires_at) < NOW - DAY + 1_800);
     e.net.mailbox_items.insert(e.mailbox, vec![e.ack.clone()]);
     let report = sync(&mut e.core, &e.net, opts()).await;
@@ -3399,5 +3406,76 @@ async fn verdict_fetch_comes_after_sessions_within_its_own_budget() {
     assert!(
         verdict_bytes > 0 && verdict_bytes <= QUICK_INTRO_BYTES,
         "{verdict_bytes}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_shared_short_id_is_not_the_accepting_node() {
+    use barking_core::store::MessageStatus;
+    // The ledger says the second responsible accepted the reply; the
+    // delivery's short id is the best one's (a node sharing the prefix).
+    let mut e = expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, Some(0), Some(1));
+    let r = load(&mut e.core)
+        .view
+        .responsibles_by_score(&e.mailbox, NOW);
+    for n in &r[1..] {
+        e.net.fail_fetch.insert(*n);
+    }
+    // Only the best one answers, empty: it is not the accepting node.
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert!(fetched_pairs(&e.net.calls()).contains(&(r[0], e.mailbox)));
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    // The node the ledger names answers: verdict. Its ledger entry
+    // survived the deposit stages of the first sync.
+    e.net.fail_fetch.remove(&r[1]);
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
+    assert_eq!(report.failed.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_stage_resumes_a_mailbox_awaiting_a_verdict() {
+    // Bob's reply expired awaiting its verdict; a later message in the same
+    // session mailbox (sealed the same day) still awaits its ack.
+    let mut e = expired_reply();
+    let day_start = barking_core::mailbox::day_of(NOW - DAY - 1_200) as u64 * DAY;
+    let later = day_start + DAY - 1;
+    let mut rng = rand::rng();
+    let sent = e
+        .core
+        .send_text(&e.alice, "same box", later, &mut rng)
+        .unwrap();
+    assert_eq!(sent[0].mailbox, e.mailbox);
+    assert!(u64::from(sent[0].expires_at) > NOW);
+    let sessions = e.core.watched_mailbox_groups(NOW).unwrap().sessions;
+    assert!(sessions.contains(&e.mailbox));
+    let mut state = load(&mut e.core);
+    let mut resume = FetchResume::default();
+    resume.seen.insert(e.mailbox.0, 99);
+    for n in state.view.responsibles_by_score(&e.mailbox, NOW) {
+        state.set_positions(&n, &[e.mailbox], &resume);
+    }
+    state.save(&mut e.core).unwrap();
+    sync(&mut e.core, &e.net, opts()).await;
+    let fetches: Vec<(Vec<MailboxId>, bool)> = e
+        .net
+        .calls()
+        .iter()
+        .filter_map(|c| match c {
+            Call::Fetch(_, mbs, positioned) if mbs.contains(&e.mailbox) => {
+                Some((mbs.clone(), positioned.contains(&e.mailbox)))
+            }
+            _ => None,
+        })
+        .collect();
+    // The session stage resumes it, within its group.
+    assert!(fetches[0].1, "{fetches:?}");
+    // The verdict stage reads it alone, from its start.
+    assert!(
+        fetches
+            .iter()
+            .any(|(mbs, positioned)| mbs == &vec![e.mailbox] && !positioned),
+        "{fetches:?}"
     );
 }

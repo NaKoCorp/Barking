@@ -141,7 +141,7 @@ where
                 }
                 let max_bytes = if capped { bytes_left } else { MAX_FETCH_BYTES };
                 let (end, bytes, processed) = self
-                    .fetch_group(node, &group, intro, max_bytes, slice_end)
+                    .fetch_group(node, &group, kind, max_bytes, slice_end)
                     .await;
                 bytes_left = bytes_left.saturating_sub(bytes);
                 all_processed &= processed;
@@ -249,7 +249,13 @@ where
                 self.state.note_crosscheck(&node, m, now);
             }
             let (end, _, _) = self
-                .fetch_group(node, &group, false, MAX_FETCH_BYTES, slice_end)
+                .fetch_group(
+                    node,
+                    &group,
+                    FetchKind::Sessions,
+                    MAX_FETCH_BYTES,
+                    slice_end,
+                )
                 .await;
             if matches!(end, GroupEnd::Stop) {
                 break;
@@ -279,16 +285,17 @@ where
     fn held_one_of(&self, mailbox: &MailboxId, node: &NodeId) -> bool {
         self.verdict_packets
             .iter()
-            .any(|(p, (m, _, _))| m == mailbox && self.accepted_by(p, node))
+            .any(|(p, (m, _))| m == mailbox && self.accepted_by(p, node))
     }
 
-    /// Saved positions of `group` on `node`, without those of the mailboxes
-    /// awaiting a verdict: they are read from their start.
-    fn resume(&self, node: NodeId, group: &[MailboxId]) -> FetchResume {
+    /// Saved positions of `group` on `node`. A verdict fetch reads its
+    /// mailboxes from their start: a node that still holds the packet
+    /// cannot hide it behind a saved position. Other stages resume.
+    fn resume(&self, node: NodeId, group: &[MailboxId], kind: FetchKind) -> FetchResume {
         let mut resume = self.state.resume(&node, group);
-        resume
-            .seen
-            .retain(|m, _| !self.verdict_boxes.contains(&MailboxId(*m)));
+        if kind == FetchKind::Verdict {
+            resume.seen.clear();
+        }
         resume
     }
 
@@ -315,11 +322,13 @@ where
         &mut self,
         node: NodeId,
         group: &[MailboxId],
-        intro: bool,
+        kind: FetchKind,
         max_bytes: usize,
         slice_end: Instant,
     ) -> (GroupEnd, usize, bool) {
-        let mut resume = self.resume(node, group);
+        // Introductions and verdicts: no audit, no re-read.
+        let intro = kind != FetchKind::Sessions;
+        let mut resume = self.resume(node, group, kind);
         // Mailboxes read from their very start: the only ones a loss audit
         // may rely on (a resumed fetch skips the items already seen).
         let from_start: Vec<MailboxId> = group
@@ -355,7 +364,7 @@ where
             match &reply {
                 Err(e) if !fresh && !redialled && dead_session(e) => {
                     redialled = true;
-                    resume = self.resume(node, group);
+                    resume = self.resume(node, group, kind);
                 }
                 _ => break (conn, reply),
             }

@@ -555,10 +555,10 @@ struct Run<'a, D: Connector> {
     /// (`Core::awaiting_verdict`): read from their start, so that a packet
     /// a node still holds cannot hide behind a saved position.
     verdict_boxes: HashSet<MailboxId>,
-    /// Each packet awaiting a verdict: its mailbox, the nodes the ledger
-    /// says accepted it (read at the start, before any pruning), and the
-    /// short id of the first node that accepted it (`deliveries.node`).
-    verdict_packets: HashMap<PacketId, (MailboxId, HashSet<NodeId>, Option<String>)>,
+    /// Each packet awaiting a verdict: its mailbox and the nodes the
+    /// deposit ledger says accepted it (full ids; the ledger keeps the
+    /// packets awaiting a verdict, see `deposit_stage`).
+    verdict_packets: HashMap<PacketId, (MailboxId, HashSet<NodeId>)>,
     /// Per verdict mailbox, the responsibles that served it in full from
     /// its start, every item processed.
     answered: HashMap<MailboxId, HashSet<NodeId>>,
@@ -668,8 +668,7 @@ where
 
     /// Reads the packets awaiting a verdict at the start of the sync
     /// (`Core::awaiting_verdict_packets`), with the nodes the ledger says
-    /// accepted each one: the deposit stage prunes the ledger of expired
-    /// packets. A read error leaves the verdicts to a later sync.
+    /// accepted each one. A read error leaves the verdicts to a later sync.
     fn load_verdicts(&mut self) {
         let awaiting = match self.core.awaiting_verdict_packets(self.now) {
             Ok(v) => v,
@@ -686,25 +685,23 @@ where
                 .into_iter()
                 .collect();
             self.verdict_boxes.insert(a.mailbox);
-            self.verdict_packets
-                .insert(a.packet, (a.mailbox, holders, a.node));
+            self.verdict_packets.insert(a.packet, (a.mailbox, holders));
         }
     }
 
-    /// `node` accepted `packet` (ledger, or the delivery's first node).
+    /// `node` accepted `packet`, by its full id in the deposit ledger (a
+    /// short id could be shared by another node).
     pub(super) fn accepted_by(&self, packet: &PacketId, node: &NodeId) -> bool {
         self.verdict_packets
             .get(packet)
-            .is_some_and(|(_, holders, first)| {
-                holders.contains(node) || first.as_deref() == Some(short_id(node).as_str())
-            })
+            .is_some_and(|(_, holders)| holders.contains(node))
     }
 
     /// The network answered for `packet` (spec §15.5): a node that accepted
     /// it served its mailbox in full from the start, or two responsibles
     /// did. A node that never held the mailbox cannot fail it alone.
     fn answered_for(&self, packet: &PacketId) -> bool {
-        let Some((mailbox, _, _)) = self.verdict_packets.get(packet) else {
+        let Some((mailbox, _)) = self.verdict_packets.get(packet) else {
             return false;
         };
         let Some(nodes) = self.answered.get(mailbox) else {
@@ -717,7 +714,7 @@ where
     pub(super) fn verdict_settled(&self, mailbox: &MailboxId) -> bool {
         self.verdict_packets
             .iter()
-            .filter(|(_, (m, _, _))| m == mailbox)
+            .filter(|(_, (m, _))| m == mailbox)
             .all(|(p, _)| self.answered_for(p))
     }
 
@@ -1098,7 +1095,13 @@ where
         let Ok(mut outbox) = self.core.pending_outbox(now) else {
             return;
         };
-        plan::prune(&mut self.state.ledger, &outbox, now);
+        // The ledger also keeps the packets awaiting a verdict: who
+        // accepted them decides whose answer counts (`answered_for`).
+        let mut live = outbox.clone();
+        if let Ok(awaiting) = self.core.awaiting_verdict_packets(now) {
+            live.extend(awaiting.into_iter().map(|a| a.bytes));
+        }
+        plan::prune(&mut self.state.ledger, &live, now);
         let mut pow_exhausted = false;
         let mut not_responsible: HashMap<MailboxId, HashSet<NodeId>> = HashMap::new();
         let mut fallback_tried: HashSet<MailboxId> = HashSet::new();

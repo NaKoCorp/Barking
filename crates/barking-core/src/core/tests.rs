@@ -3470,3 +3470,44 @@ fn ack_is_taken_a_day_past_its_expiry() {
     ));
     assert_eq!(status_of(&p.a, &bob, "late-ack"), MessageStatus::Received);
 }
+
+#[test]
+fn ack_with_an_early_expiry_is_bounded_by_the_message() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "early-ack", NOW, &mut p.rng).unwrap();
+    p.a.record_deposit(sent[0].id, NODE, NOW).unwrap();
+    let message_expiry = u64::from(sent[0].expires_at);
+    // Bob's clock is 10 hours behind: his receipt expires well before the
+    // message.
+    let ack = match p
+        .b
+        .receive(&sent[0].encode(), "t", NOW - 10 * 3_600, &mut p.rng)
+        .unwrap()
+    {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    assert!(u64::from(ack.expires_at) + 9 * 3_600 < message_expiry);
+    // Past the receipt's own expiry plus the grace, within the message's:
+    // the nodes still serve it, and it still proves the delivery.
+    let at = message_expiry + ACK_GRACE_SECS - 3_600;
+    assert!(u64::from(ack.expires_at) + ACK_GRACE_SECS < at);
+    let mut q_rng = StdRng::seed_from_u64(5);
+    // Beyond the message's expiry plus the grace: expired.
+    assert!(matches!(
+        p.a.receive(
+            &ack.encode(),
+            "t",
+            message_expiry + ACK_GRACE_SECS + 1,
+            &mut q_rng
+        )
+        .unwrap(),
+        ReceiveOutcome::Expired
+    ));
+    assert!(matches!(
+        p.a.receive(&ack.encode(), "t", at, &mut q_rng).unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    assert_eq!(status_of(&p.a, &bob, "early-ack"), MessageStatus::Received);
+}

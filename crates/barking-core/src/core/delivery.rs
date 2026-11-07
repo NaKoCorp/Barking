@@ -57,8 +57,6 @@ pub struct AwaitingVerdict {
     pub mailbox: MailboxId,
     /// Encoded packet.
     pub bytes: Vec<u8>,
-    /// Short id of the first node that accepted it (`deliveries.node`).
-    pub node: Option<String>,
 }
 
 impl Core {
@@ -153,30 +151,31 @@ impl Core {
             .collect())
     }
 
-    /// `awaiting_verdict`, with each packet's bytes and the node that
-    /// first accepted it: the network client gives a verdict only on the
-    /// answer of a node that held the packet (or of two responsibles).
+    /// `awaiting_verdict`, with each packet's bytes: the network client
+    /// looks up the nodes that accepted it in its deposit ledger (full node
+    /// ids), and gives a verdict only on the answer of one of them (or of
+    /// two responsibles).
     pub fn awaiting_verdict_packets(&self, started_at: u64) -> Result<Vec<AwaitingVerdict>> {
         let mut stmt = self
             .store
             .conn()
             .prepare(
-                "SELECT o.packet_id, o.bytes, d.node FROM outbox o \
+                "SELECT o.packet_id, o.bytes FROM outbox o \
                  JOIN deliveries d ON d.packet_id = o.packet_id \
                  WHERE o.expires_at <= ?1 AND d.status = ?2 \
                  ORDER BY o.expires_at, o.rowid",
             )
             .map_err(map_err)?;
-        let rows: Vec<(Vec<u8>, Vec<u8>, Option<String>)> = stmt
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = stmt
             .query_map(
                 params![to_i64(started_at), MessageStatus::OnNetwork as i64],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(map_err)?
             .collect::<rusqlite::Result<_>>()
             .map_err(map_err)?;
         let mut out = Vec::new();
-        for (id, bytes, node) in rows {
+        for (id, bytes) in rows {
             let Ok(p) = Packet::decode(&bytes) else {
                 continue;
             };
@@ -184,7 +183,6 @@ impl Core {
                 packet: PacketId(arr(id)?),
                 mailbox: p.mailbox,
                 bytes,
-                node,
             });
         }
         Ok(out)
@@ -234,6 +232,28 @@ impl Core {
     pub fn take_failed_notices(&mut self) -> Vec<(Fingerprint, i64)> {
         std::mem::take(&mut self.failed_notices)
     }
+}
+
+/// Expiry of my sent `packet`: its queue row's, or, once it left the
+/// queue, its sealing date plus the packet lifetime. `None` if unknown.
+pub(super) fn acked_expiry(q: &impl Queries, packet: PacketId) -> Result<Option<u64>> {
+    let row: Option<(Option<i64>, i64)> = q
+        .conn()
+        .query_row(
+            "SELECT (SELECT expires_at FROM outbox WHERE packet_id = ?1), sealed_at \
+             FROM deliveries WHERE packet_id = ?1",
+            params![packet.0.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(map_err)?;
+    Ok(match row {
+        Some((Some(e), _)) => Some(to_u64(e)),
+        Some((None, sealed)) if sealed > 0 => {
+            Some(to_u64(sealed).saturating_add(crate::packet::DEFAULT_TTL_SECS))
+        }
+        _ => None,
+    })
 }
 
 /// `true` if the delivery carrying `packet` is `OnNetwork`.

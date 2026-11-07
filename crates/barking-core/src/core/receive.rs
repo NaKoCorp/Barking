@@ -69,13 +69,10 @@ impl Core {
         let Ok(packet) = Packet::decode(bytes) else {
             return Ok(ReceiveOutcome::NotForUs);
         };
-        // A receipt stays on the nodes a day past its expiry
-        // (`ACK_GRACE_SECS`): it still proves the delivery.
-        let grace = match packet.kind {
-            Kind::Ack => ACK_GRACE_SECS,
-            Kind::Message => 0,
-        };
-        if u64::from(packet.expires_at).saturating_add(grace) < now {
+        // A receipt's expiry is checked against the packet it acknowledges
+        // (`receive_ack`): nodes keep it until the later of the two, plus
+        // `ACK_GRACE_SECS`.
+        if packet.kind == Kind::Message && u64::from(packet.expires_at) < now {
             return Ok(ReceiveOutcome::Expired);
         }
         match packet.kind {
@@ -131,6 +128,15 @@ impl Core {
             // devices (without a message row for `SyncContact`/`SyncDevices`).
             if !tx.is_my_packet(acked)? {
                 return Ok((ReceiveOutcome::NotForUs, false));
+            }
+            // Nodes keep a receipt until `max(its expiry, the acknowledged
+            // packet's) + ACK_GRACE_SECS`: so long it still proves the
+            // delivery, even when the recipient's clock was behind and
+            // gave the receipt an earlier expiry.
+            let own = u64::from(packet.expires_at);
+            let acked_expiry = delivery::acked_expiry(tx, acked)?.unwrap_or(own);
+            if own.max(acked_expiry).saturating_add(ACK_GRACE_SECS) < now {
+                return Ok((ReceiveOutcome::Expired, false));
             }
             if tx.delivery_acked(acked)? {
                 // A replayed ack (identifier and expiry rewritten at
