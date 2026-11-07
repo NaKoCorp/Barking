@@ -142,6 +142,7 @@ fn single(wake: WakeConfig) -> Node {
     let mut spec = NodeSpec::new(0, None);
     spec.wake = wake;
     spec.wake_allow_private = true;
+    spec.purge_interval = Some(Duration::from_millis(200));
     start_node(spec, vec![socket], std::net::SocketAddr::V4(v4))
 }
 
@@ -287,8 +288,8 @@ async fn expiry_wakes_the_ack_subscriber() {
     deposit(&node, &msg).await;
     // Depositing marks no ack subscriber.
     assert_eq!(node.wake_next_due(), None);
-    // The purge runs every minute: wait for it, bounded.
-    wait_received(&relay, 1, Duration::from_secs(90)).await;
+    // The test node purges every 200 ms: wait for the expiry, bounded.
+    wait_received(&relay, 1, Duration::from_secs(8)).await;
     let got = relay.received();
     assert_eq!(got.len(), 1);
     assert_eq!(opened(&got[0]), Some(token_for(WakeReason::Receipt)));

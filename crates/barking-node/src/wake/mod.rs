@@ -105,12 +105,19 @@ pub fn subscribe(
     }
     let relay = postcard::to_allocvec(&sub.relay).expect("a relay reference always encodes");
     let tx = store.conn_mut().savepoint()?;
-    let exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE mailbox=?1 AND cancel_hash=?2)",
-        params![&sub.mailbox.0[..], &sub.cancel_hash[..]],
-        |r| r.get(0),
-    )?;
-    if exists {
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT kind FROM subscriptions WHERE mailbox=?1 AND cancel_hash=?2",
+            params![&sub.mailbox.0[..], &sub.cancel_hash[..]],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(kind) = existing {
+        // A subscription never changes kind: the same secret under another
+        // kind is refused, not migrated.
+        if kind != i64::from(sub.kind as u8) {
+            return Ok(Err(ErrorReason::Malformed));
+        }
         // Replacement: refreshes the relay, the token and the expiry; the
         // wake-up state is kept.
         tx.execute(

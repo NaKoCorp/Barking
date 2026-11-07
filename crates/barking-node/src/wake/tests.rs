@@ -270,11 +270,44 @@ fn acked_message_purge_does_not_mark() {
         Ok(())
     );
     assert_eq!(take_due(&mut s, NOW + 1, 100).unwrap(), vec![order(&acks)]);
-    // The message is gone with its ack; purging its (and the ack's) expiry
-    // marks nothing again.
-    let (_, _, marked) = s.purge_expired_batch(NOW + 200_000, 100).unwrap();
+    // The message is gone with its ack; purging just past the expiry of both
+    // marks nothing again, and the subscription is still there (unexpired).
+    let late = NOW + 86_401;
+    assert!(day_of(late) <= today() + 1);
+    let (removed, _, marked) = s.purge_expired_batch(late, 100).unwrap();
+    assert!(removed >= 1, "the ack row expired");
     assert!(!marked);
-    assert!(take_due(&mut s, NOW + 200_000, 100).unwrap().is_empty());
+    let subs: i64 = s
+        .conn()
+        .query_row("SELECT COUNT(*) FROM subscriptions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(subs, 1);
+    assert!(take_due(&mut s, late, 100).unwrap().is_empty());
+}
+
+#[test]
+fn resubscribe_with_another_kind_is_refused() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    let sb = subscribe_kind(&mut s, 1, 1, SubKind::Messages);
+    let other = Subscription {
+        kind: SubKind::Acks,
+        sealed: vec![0x55; 80],
+        ..sb.clone()
+    };
+    assert_eq!(
+        try_subscribe(&mut s, &cfg, &other),
+        Err(ErrorReason::Malformed)
+    );
+    // Untouched: same kind, same sealed token.
+    assert_eq!(kind_of(&s, 1), 0);
+    let sealed: Vec<u8> = s
+        .conn()
+        .query_row("SELECT sealed FROM subscriptions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(sealed, sb.sealed);
+    // Same kind: still a replacement.
+    assert_eq!(try_subscribe(&mut s, &cfg, &sb), Ok(()));
 }
 
 #[test]

@@ -7,7 +7,7 @@
 //! addresses allowed, diversity limits lifted, per-address caps raised,
 //! cadences brought down to `TICK`, and the test-only hooks of
 //! `ServerConfig` (`test_swallow_deposits`, `test_response_delay`,
-//! `test_send_rate`).
+//! `test_send_rate`, `test_purge_interval`).
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
@@ -123,6 +123,8 @@ pub struct NodeSpec {
     pub response_delay: Option<Duration>,
     /// `ServerConfig::test_send_rate`.
     pub send_rate: Option<u64>,
+    /// `ServerConfig::test_purge_interval`.
+    pub purge_interval: Option<Duration>,
     /// `ServerConfig::wake`.
     pub wake: WakeConfig,
     /// `ServerConfig::wake_allow_private`: the fake relay is on 127.0.0.1.
@@ -142,6 +144,7 @@ impl NodeSpec {
             swallow_deposits: false,
             response_delay: None,
             send_rate: None,
+            purge_interval: None,
             wake: WakeConfig::default(),
             wake_allow_private: false,
         }
@@ -277,6 +280,7 @@ fn launch(
     cfg.test_swallow_deposits = spec.swallow_deposits;
     cfg.test_response_delay = spec.response_delay;
     cfg.test_send_rate = spec.send_rate;
+    cfg.test_purge_interval = spec.purge_interval;
     cfg.wake = spec.wake.clone();
     cfg.wake_allow_private = spec.wake_allow_private;
     let stats = Arc::clone(&cfg.stats);

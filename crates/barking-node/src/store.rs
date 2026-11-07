@@ -97,7 +97,7 @@ impl NodeStore {
 
     /// Read-only opening (`status`): no write, neither schema nor persistent
     /// pragma. The database must exist and have the right schema: a
-    /// version 2 database, which must be migrated first, yields
+    /// version 3 database, which must be migrated first, yields
     /// `SchemaVersion(3)`.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<NodeStore> {
         let conn = Connection::open_with_flags(
@@ -322,8 +322,7 @@ impl NodeStore {
     /// subscriptions are marked, in the same savepoint.
     pub fn purge_expired_batch(&mut self, now: u64, limit: usize) -> Result<(usize, bool, bool)> {
         let today = i64::from(crate::wake::day_of(now));
-        let unix = now;
-        let now = i64::try_from(now).unwrap_or(i64::MAX);
+        let now_sql = i64::try_from(now).unwrap_or(i64::MAX);
         let limit_sql = i64::try_from(limit).unwrap_or(i64::MAX);
         let tx = self.conn.savepoint()?;
         let mut freed: i64 = 0;
@@ -336,7 +335,7 @@ impl NodeStore {
                  WHERE expires_at <= ?1 ORDER BY expires_at, seq LIMIT ?2) \
                  RETURNING mailbox, kind, length(bytes)",
             )?;
-            let rows = st.query_map(params![now, limit_sql], |r| {
+            let rows = st.query_map(params![now_sql, limit_sql], |r| {
                 Ok((
                     r.get::<_, Vec<u8>>(0)?,
                     r.get::<_, i64>(1)?,
@@ -366,7 +365,7 @@ impl NodeStore {
                  WHERE expires_at <= ?1 ORDER BY expires_at, seq LIMIT ?2) \
                  RETURNING length(bytes)",
             )?;
-            let lens = st.query_map(params![now, limit_sql], |r| r.get::<_, i64>(0))?;
+            let lens = st.query_map(params![now_sql, limit_sql], |r| r.get::<_, i64>(0))?;
             let mut n = 0;
             for len in lens {
                 freed += len?;
@@ -376,7 +375,7 @@ impl NodeStore {
             more |= n >= limit;
         }
         add_stored_bytes(&tx, -freed)?;
-        let marked = crate::wake::mark_expired(&tx, &expired_boxes, unix)?;
+        let marked = crate::wake::mark_expired(&tx, &expired_boxes, now)?;
         let subs = tx.execute(
             "DELETE FROM subscriptions WHERE rowid IN (SELECT rowid FROM subscriptions \
              WHERE expires_day < ?1 LIMIT ?2)",
