@@ -11,8 +11,11 @@ struct ChatsView: View {
     @State private var confirmDelete: ChatRow?
     /// The conversation pushed, so a tapped notification can open one.
     @State private var path: [String] = []
-    /// The message the pushed conversation scrolls to (a failure notice).
-    @State private var focus: Int64?
+    /// The message the pushed conversation scrolls to (a failure notice),
+    /// and its contact. Not read from `path`: the destination must not
+    /// depend on the path, which a push from the conversation ("Deliveries")
+    /// changes; that dependency looped SwiftUI's layout at 100 % CPU.
+    @State private var focus: (contact: String, id: Int64)?
 
     init(core: CoreService) {
         self.core = core
@@ -63,7 +66,7 @@ struct ChatsView: View {
             .navigationTitle(Text("Chats"))
             .toolbarVisibility(.hidden, for: .navigationBar)
             .navigationDestination(for: String.self) { contact in
-                ConversationView(core: core, contact: contact, focus: path.last == contact ? focus : nil)
+                ConversationView(core: core, contact: contact, focus: focus?.contact == contact ? focus?.id : nil)
             }
             .sheet(isPresented: $adding, onDismiss: { pendingLink = nil }) {
                 AddContactView(core: core, link: pendingLink) { adding = false }
@@ -89,7 +92,7 @@ struct ChatsView: View {
             Task {
                 // A contact removed since the notice: nothing to open.
                 guard await model.canOpen(target.contact) else { return }
-                focus = target.messageId
+                focus = target.messageId.map { (target.contact, $0) }
                 path = [target.contact]
             }
         }
