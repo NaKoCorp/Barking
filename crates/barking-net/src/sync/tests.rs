@@ -3283,7 +3283,7 @@ async fn too_far_in_future_packet_is_not_delivered() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn verdict_needs_the_accepting_node_or_two_responsibles() {
+async fn verdict_needs_the_accepting_node_and_every_responsible() {
     use barking_core::store::MessageStatus;
     // Deposited on the second responsible: the best one never held it.
     let mut e = expired_reply_with(SEALED, ACKED, Some(1), Some(1));
@@ -3303,8 +3303,13 @@ async fn verdict_needs_the_accepting_node_or_two_responsibles() {
     let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
     assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
     assert!(report.failed.is_empty());
-    // The accepting node answers: verdict, asked first.
+    // The accepting node answers, the others still fail: no verdict.
     e.net.fail_fetch.remove(&accepting);
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    // Every responsible answers: verdict, the accepting node asked first.
+    e.net.fail_fetch.clear();
     let before = e.net.calls().len();
     let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
     assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
@@ -3318,8 +3323,8 @@ async fn verdict_needs_the_accepting_node_or_two_responsibles() {
         .unwrap();
     assert_eq!(first, accepting);
 
-    // Deposited on a node gone from the view: two responsibles that answer
-    // in full give the verdict.
+    // Deposited on a node gone from the view: every current responsible
+    // must answer in full; two are no longer enough.
     let mut e = expired_reply();
     let r = load(&mut e.core)
         .view
@@ -3332,6 +3337,10 @@ async fn verdict_needs_the_accepting_node_or_two_responsibles() {
     assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
     assert!(report.failed.is_empty());
     e.net.fail_fetch.remove(&r[1]);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork, "two answered");
+    assert!(report.failed.is_empty());
+    e.net.fail_fetch.clear();
     let report = sync(&mut e.core, &e.net, opts()).await;
     assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
     assert_eq!(report.failed.len(), 1);
@@ -3387,6 +3396,72 @@ async fn ack_on_a_holder_other_than_the_best_makes_received() {
     let report = sync(&mut e.core, &e.net, opts()).await;
     assert_eq!(reply_status(&e), MessageStatus::Received);
     assert!(report.failed.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn ack_on_a_responsible_that_is_not_a_holder_makes_received() {
+    use barking_core::store::MessageStatus;
+    // The reply went to the best responsible only; Alice's ack landed on
+    // another current responsible, which never held the reply.
+    let mut e = expired_reply_with(SEALED, ACKED, Some(0), Some(0));
+    let r = load(&mut e.core)
+        .view
+        .responsibles_by_score(&e.mailbox, NOW);
+    assert!(r.len() >= 3);
+    e.net
+        .node_mailbox_items
+        .insert((r[2], e.mailbox), vec![e.ack.clone()]);
+    // Every holder answers in full, empty: not enough.
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::Received);
+    assert!(report.failed.is_empty());
+    let mut e = expired_reply_with(SEALED, ACKED, Some(0), Some(0));
+    e.net
+        .node_mailbox_items
+        .insert((r[2], e.mailbox), vec![e.ack.clone()]);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::Received);
+    assert!(report.failed.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_verdict_while_a_current_responsible_is_unreachable() {
+    use barking_core::store::MessageStatus;
+    // The holder answers in full, empty; a responsible that never held
+    // the reply cannot be reached: it may hold the ack.
+    let mut e = expired_reply_with(SEALED, ACKED, Some(0), Some(0));
+    let r = load(&mut e.core)
+        .view
+        .responsibles_by_score(&e.mailbox, NOW);
+    let last = *r.last().unwrap();
+    assert_ne!(last, r[0]);
+    e.net.fail_fetch.insert(last);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert!(fetched_pairs(&e.net.calls()).contains(&(r[0], e.mailbox)));
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    // A responsible that rate-limits gives no verdict either.
+    e.net.fail_fetch.clear();
+    e.net.rate_limit_fetch.insert(last);
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    // Every holder and responsible answers in full, empty: the verdict.
+    e.net.rate_limit_fetch.clear();
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
+    assert_eq!(report.failed.len(), 1);
+    let fetched: HashSet<NodeId> = fetched_pairs(&e.net.calls())
+        .into_iter()
+        .filter(|(_, m)| *m == e.mailbox)
+        .map(|(n, _)| n)
+        .collect();
+    for n in &r {
+        assert!(fetched.contains(n), "{n:?} asked");
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -3546,15 +3621,14 @@ async fn a_shared_short_id_is_not_the_accepting_node() {
     let r = load(&mut e.core)
         .view
         .responsibles_by_score(&e.mailbox, NOW);
-    for n in &r[1..] {
-        e.net.fail_fetch.insert(*n);
-    }
-    // Only the best one answers, empty: it is not the accepting node.
+    e.net.fail_fetch.insert(r[1]);
+    // Every node but the accepting one answers, empty (the best one with
+    // the shared short id among them): no verdict.
     let report = sync(&mut e.core, &e.net, opts()).await;
     assert!(fetched_pairs(&e.net.calls()).contains(&(r[0], e.mailbox)));
     assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
     assert!(report.failed.is_empty());
-    // The node the ledger names answers: verdict. Its ledger entry
+    // The node the ledger names answers too: verdict. Its ledger entry
     // survived the deposit stages of the first sync.
     e.net.fail_fetch.remove(&r[1]);
     let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;

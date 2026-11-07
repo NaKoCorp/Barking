@@ -39,8 +39,8 @@ pub(super) enum FetchKind {
     Intro,
     /// Mailboxes of packets awaiting a verdict (spec §15.5), read only
     /// for it: the introduction budget and slice, every node that accepted
-    /// the packet first, and the next responsible until the verdict rule
-    /// is met.
+    /// the packet first, then every responsible of the mailbox (the
+    /// verdict rule needs them all).
     Verdict,
 }
 
@@ -155,7 +155,8 @@ where
                 match end {
                     GroupEnd::Complete if kind == FetchKind::Verdict => {
                         // Done once the verdict rule is met (every holder
-                        // answered); otherwise the next node answers too.
+                        // and responsible answered); otherwise the next
+                        // node answers too.
                         for m in &group {
                             if self.verdict_settled(m) {
                                 done.insert(*m);

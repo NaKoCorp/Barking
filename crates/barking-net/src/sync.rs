@@ -74,19 +74,22 @@
 //! other mailboxes, within the introductions' budget (`INTRO_FETCH_BYTES`,
 //! `QUICK_INTRO_BYTES`): every node that accepted the packet first (the
 //! full ids of the deposit ledger, responsible or not any more, as long as
-//! the view has it), then the next responsible until the rule is met. A
+//! the view has it), then every responsible of the mailbox. A
 //! receipt is deposited on one node only and reaches the others in their
 //! hourly replication pass, so one holder answering empty proves nothing.
-//! Such a packet fails (`Core::confirm_expired`) only when its expiry is
-//! `REPLICATION_SLACK_SECS` past by the start of the sync, **every** node
-//! the ledger says accepted it served its mailbox in full from its start,
-//! every item processed (only a packet with no holder in the ledger falls
-//! back on two responsibles), and nothing fetched in the sync was the
-//! packet or a receipt for it. A holder that could not be reached, was
-//! rate-limited or did not serve in full means no verdict in this sync:
-//! the packet stays `OnNetwork` (a node that never held the mailbox, a
-//! node still returning the packet with its clock behind: likewise). Any
-//! sighting of the packet or its receipt settles it at once. Nodes keep a
+//! The receipt may also land on a responsible that never held the packet,
+//! and a holder that left the responsible set never gets it by
+//! replication. Such a packet fails (`Core::confirm_expired`) only when
+//! its expiry is `REPLICATION_SLACK_SECS` past by the start of the sync,
+//! **every** node the ledger says accepted it **and every** current
+//! responsible of its mailbox (the view at the start of the sync) served
+//! the mailbox in full from its start, every item processed, and nothing
+//! fetched in the sync was the packet or a receipt for it. Any of them
+//! unreachable, rate-limited, truncated, cut by the budget or the
+//! deadline, or not processed means no verdict in this sync: the packet
+//! stays `OnNetwork` (no node to ask at all, a node still returning the
+//! packet with its clock behind: likewise). Any sighting of the packet or
+//! its receipt settles it at once. Nodes keep a
 //! receipt a day past its expiry (`ACK_GRACE_SECS`), so a sync a day late
 //! still finds it. Past that, nothing can confirm it any more: the core
 //! lets it go from its queue (`Core::expire_due`), its mailbox is no longer
@@ -495,6 +498,7 @@ impl<'a, D: Connector> Run<'a, D> {
             stats: BTreeMap::new(),
             verdict_boxes: HashSet::new(),
             verdict_packets: HashMap::new(),
+            verdict_responsibles: HashMap::new(),
             answered: HashMap::new(),
             seen_ids: HashSet::new(),
             report: SyncReport::default(),
@@ -576,6 +580,10 @@ struct Run<'a, D: Connector> {
     /// deposit ledger says accepted it (full ids; the ledger keeps the
     /// packets awaiting a verdict, see `deposit_stage`).
     verdict_packets: HashMap<PacketId, (MailboxId, HashSet<NodeId>)>,
+    /// Per verdict mailbox, its responsibles in the view at the start of
+    /// the sync: each must answer too (a receipt may have landed on any of
+    /// them, and a holder outside them never gets it by replication).
+    verdict_responsibles: HashMap<MailboxId, HashSet<NodeId>>,
     /// Per verdict mailbox, the responsibles that served it in full from
     /// its start, every item processed.
     answered: HashMap<MailboxId, HashSet<NodeId>>,
@@ -702,6 +710,11 @@ where
                 .into_iter()
                 .collect();
             self.verdict_boxes.insert(a.mailbox);
+            let responsibles = self.state.view.responsibles(&a.mailbox, self.now);
+            self.verdict_responsibles
+                .entry(a.mailbox)
+                .or_default()
+                .extend(responsibles);
             self.verdict_packets.insert(a.packet, (a.mailbox, holders));
         }
     }
@@ -715,12 +728,12 @@ where
     }
 
     /// The network answered for `packet` (spec §15.5): every node that
-    /// accepted it (full ids in the deposit ledger) served its mailbox in
-    /// full from the start. A receipt lands on one node only and reaches the
-    /// others by replication, so one holder answering empty proves nothing
-    /// while another has not answered. Only a packet without any holder in
-    /// the ledger falls back on two responsibles. A node that never held
-    /// the mailbox cannot fail it alone.
+    /// accepted it (full ids in the deposit ledger) and every current
+    /// responsible of its mailbox (the view at the start of the sync)
+    /// served the mailbox in full from the start. A receipt lands on one
+    /// responsible only and reaches the others by replication, which never
+    /// reaches a holder that left the responsible set: any of them may be
+    /// the only one holding it. With none to ask, no answer.
     fn answered_for(&self, packet: &PacketId) -> bool {
         let Some((mailbox, holders)) = self.verdict_packets.get(packet) else {
             return false;
@@ -728,11 +741,12 @@ where
         let Some(nodes) = self.answered.get(mailbox) else {
             return false;
         };
-        if holders.is_empty() {
-            nodes.len() >= 2
-        } else {
-            holders.is_subset(nodes)
-        }
+        let responsibles = self.verdict_responsibles.get(mailbox);
+        let required = holders
+            .iter()
+            .chain(responsibles.into_iter().flatten())
+            .collect::<HashSet<_>>();
+        !required.is_empty() && required.into_iter().all(|n| nodes.contains(n))
     }
 
     /// Every packet awaiting a verdict in `mailbox` has its answer.
