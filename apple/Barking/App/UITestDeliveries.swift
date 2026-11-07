@@ -43,7 +43,7 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// The four messages, in the phone's language (French screenshots read French).
     static func bodies(french: Bool = Locale.preferredLanguages.first?.hasPrefix("fr") == true) -> [String] {
         french
-            ? ["Tu as récupéré les clés\u{00A0}?", "J’arrive, dix minutes.",
+            ? ["Tu as récupéré les clés\u{202F}?", "J’arrive, dix minutes.",
                "On se voit au marché à 18\u{00A0}h.", "Prends le sac bleu, s’il te plaît."]
             : ["Did you get the keys?", "On my way, ten minutes.",
                "Meet at the market at six.", "Bring the blue bag, please."]

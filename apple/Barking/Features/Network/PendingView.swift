@@ -415,7 +415,7 @@ enum PendingSamples {
         messages: [
             message(1, "Alice", "a", "On se voit au marché à 18 h,\ndevant la fontaine.", ago: 80_000, expiresIn: 4_000),
             message(2, "Sam", "s", "J’arrive dans dix minutes", ago: 7_200, expiresIn: 79_200, packets: 2, devices: 2, left: 1),
-            message(3, "Alice", "a", "Tu as reçu mon message ?", ago: 900, expiresIn: 85_500),
+            message(3, "Alice", "a", "Tu as reçu mon message\u{202F}?", ago: 900, expiresIn: 85_500),
         ],
         sync: [
             PendingSync(kind: .ack, packets: 2, names: ["Alice", "Sam"]),

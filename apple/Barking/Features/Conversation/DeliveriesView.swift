@@ -217,7 +217,7 @@ enum DeliveriesSamples {
         }
         model.preload([
             .notDelivered: [row(9, "On se voit au marché à 18 h,\ndevant la fontaine.", .notDelivered, 7_200)],
-            .pending: [row(8, "J’arrive dans dix minutes", .pending, 120), row(7, "Tu as reçu mon message ?", .pending, 900)],
+            .pending: [row(8, "J’arrive dans dix minutes", .pending, 120), row(7, "Tu as reçu mon message\u{202F}?", .pending, 900)],
             .onNetwork: [row(6, "Merci pour hier soir, c’était parfait", .onNetwork, 5_400)],
             .received: [row(5, "D’accord", .received, 90_000), row(4, "Bonne nuit", .received, 100_000),
                         row(3, "À demain", .received, 700_000)],

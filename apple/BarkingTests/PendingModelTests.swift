@@ -368,7 +368,7 @@ final class PendingModelTests: XCTestCase {
         XCTAssertEqual(e.message, "2 haven’t left and will be cancelled. 1 is already on the network: Sam will still receive it.")
         XCTAssertEqual(e.button, "Delete 3")
         let f = m.selectionConfirmation(bundle: fr.bundle, locale: fr.locale)
-        XCTAssertEqual(f.title, "Supprimer 3 messages\u{00A0}?")
+        XCTAssertEqual(f.title, "Supprimer 3 messages\u{202F}?")
         XCTAssertEqual(f.message, "2 ne sont pas partis et seront annulés. 1 est déjà sur le réseau\u{00A0}: Sam le recevra quand même.")
         XCTAssertEqual(f.button, "Supprimer 3")
 
@@ -395,7 +395,7 @@ final class PendingModelTests: XCTestCase {
         XCTAssertEqual(e.message, "They haven’t left this iPhone. Alice, Sam and 1 other won’t receive them.")
         XCTAssertEqual(e.button, "Delete and cancel")
         let f = m.cancelAllConfirmation(bundle: fr.bundle, locale: fr.locale)
-        XCTAssertEqual(f.title, "Annuler 4 messages\u{00A0}?")
+        XCTAssertEqual(f.title, "Annuler 4 messages\u{202F}?")
         XCTAssertEqual(f.message, "Ils n’ont pas quitté cet iPhone. Alice, Sam et 1 autre personne ne les recevront pas.")
         XCTAssertEqual(f.button, "Supprimer et annuler")
     }

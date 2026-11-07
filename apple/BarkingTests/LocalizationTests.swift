@@ -396,4 +396,49 @@ final class LocalizationTests: XCTestCase {
         }
         XCTAssertEqual(read, 8)
     }
+    /// French typography: a no-break space (U+00A0) before « : » and inside
+    /// « », a narrow no-break space (U+202F) before « ? », « ! » and « ; ».
+    func testFrenchPunctuationSpacing() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        var values: [(String, String)] = []
+        func collect(_ any: Any, _ path: String) {
+            if let s = any as? String {
+                values.append((path, s))
+            } else if let d = any as? NSDictionary {
+                for (k, v) in d { collect(v, "\(path) \(k)") }
+            }
+        }
+        var read = 0
+        for dir in ["Barking", "BarkingKit"] {
+            for file in ["Localizable.strings", "Localizable.stringsdict", "Log.strings", "Log.stringsdict",
+                         "InfoPlist.strings"] {
+                let url = root.appendingPathComponent("\(dir)/fr.lproj/\(file)")
+                guard let table = NSDictionary(contentsOf: url) else { continue }
+                read += 1
+                collect(table, "\(dir)/\(file)")
+            }
+        }
+        XCTAssertGreaterThanOrEqual(read, 6)
+        XCTAssertGreaterThan(values.count, 400)
+        for (path, text) in values {
+            let chars = Array(text)
+            for (i, c) in chars.enumerated() where i > 0 {
+                let before = chars[i - 1]
+                if before == "«" && c.isWhitespace {
+                    XCTAssertEqual(c, "\u{00A0}", "space inside « » in \(path): \(text)")
+                }
+                guard before.isWhitespace else { continue }
+                switch c {
+                case ":":
+                    XCTAssertEqual(before, "\u{00A0}", "space before « : » in \(path): \(text)")
+                case "?", "!", ";":
+                    XCTAssertEqual(before, "\u{202F}", "space before « \(c) » in \(path): \(text)")
+                case "»":
+                    XCTAssertEqual(before, "\u{00A0}", "space inside « » in \(path): \(text)")
+                default:
+                    break
+                }
+            }
+        }
+    }
 }

@@ -10,6 +10,6 @@ enum Seeded {
     static let onNetwork = "Meet at the market at six."
     static let pending = "Bring the blue bag, please."
     /// The same messages in French (`-AppleLanguages (fr)`).
-    static let french = (notDelivered: "Tu as récupéré les clés\u{00A0}?", received: "J’arrive, dix minutes.",
+    static let french = (notDelivered: "Tu as récupéré les clés\u{202F}?", received: "J’arrive, dix minutes.",
                          onNetwork: "On se voit au marché à 18\u{00A0}h.", pending: "Prends le sac bleu, s’il te plaît.")
 }

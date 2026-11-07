@@ -1,6 +1,6 @@
 /* French strings of the Barking app (spec iOS messaging §7.4). Keys are the English text. */
 "%@ %@  [%@]" = "%@ %@  [%@]";
-"%@ %@: peak %@ MB, %llu ms" = "%@ %@ : pic %@ Mo, %llu ms";
+"%@ %@: peak %@ MB, %llu ms" = "%@ %@ : pic %@ Mo, %llu ms";
 "%@'s key changed." = "La clé de %@ a changé.";
 "%lld of 8 devices" = "%lld appareils sur 8";
 "%lld packets pending" = "%lld paquets en attente";
@@ -37,9 +37,9 @@
 "Create my identity" = "Créer mon identité";
 "Dark" = "Sombre";
 "Delete" = "Supprimer";
-"Delete it: your recovery phrase should never be stored in a photo." = "Supprimez-la : votre phrase de récupération ne doit jamais rester dans une photo.";
+"Delete it: your recovery phrase should never be stored in a photo." = "Supprimez-la : votre phrase de récupération ne doit jamais rester dans une photo.";
 "Delete this contact" = "Supprimer ce contact";
-"Delete this contact? The history is kept." = "Supprimer ce contact ? L’historique est conservé.";
+"Delete this contact? The history is kept." = "Supprimer ce contact ? L’historique est conservé.";
 "Development" = "Développement";
 "Device name" = "Nom de l’appareil";
 "End-to-end encrypted, post-quantum" = "Chiffré de bout en bout, post-quantique";
@@ -57,7 +57,7 @@
 "Later" = "Plus tard";
 "Light" = "Clair";
 "Link" = "Lier";
-"Link %@?" = "Lier %@ ?";
+"Link %@?" = "Lier %@ ?";
 "Link a new device" = "Lier un nouvel appareil";
 "Link to an existing device" = "Lier à un appareil existant";
 "Linked devices" = "Appareils liés";
@@ -80,7 +80,7 @@
 "Node" = "Nœud";
 "None" = "Aucun";
 "OK" = "OK";
-"On your other device: Settings, Linked devices, Link a new device. Scan its code." = "Sur votre autre appareil : Réglages, Appareils liés, Lier un nouvel appareil. Scannez son code.";
+"On your other device: Settings, Linked devices, Link a new device. Scan its code." = "Sur votre autre appareil : Réglages, Appareils liés, Lier un nouvel appareil. Scannez son code.";
 "One identity on several devices." = "Une seule identité sur plusieurs appareils.";
 "One of the words is wrong. Check your copy." = "Un des mots est faux. Vérifiez votre copie.";
 "Only your first device can link new ones" = "Seul votre premier appareil peut en lier de nouveaux";
@@ -117,7 +117,7 @@
 "Text" = "Texte";
 "The camera is not available. Ask your contact for their link." = "La caméra n’est pas disponible. Demandez son lien à votre contact.";
 "The numbers match" = "Les chiffres sont identiques";
-"The same code shows on all your linked devices: verifying here is enough." = "Le même code s’affiche sur tous vos appareils liés : vérifier ici suffit.";
+"The same code shows on all your linked devices: verifying here is enough." = "Le même code s’affiche sur tous vos appareils liés : vérifier ici suffit.";
 "These 24 words do not match an identity." = "Ces 24 mots ne correspondent à aucune identité.";
 "These codes do not belong together. Start again." = "Ces codes ne vont pas ensemble. Recommencez.";
 "They don't match" = "Ils ne correspondent pas";
@@ -135,7 +135,7 @@
 "Waiting for your other device" = "En attente de votre autre appareil";
 "Word %lld" = "Mot %lld";
 "Write it down offline." = "Notez-la hors ligne.";
-"Write your phrase down now: it cannot be shown again" = "Notez votre phrase : elle ne pourra plus être affichée";
+"Write your phrase down now: it cannot be shown again" = "Notez votre phrase : elle ne pourra plus être affichée";
 "Your name travels in your contact card. No phone number, no email." = "Votre nom voyage dans votre carte de contact. Ni numéro ni e-mail.";
 "Your recovery phrase" = "Votre phrase de récupération";
 "added %@" = "ajouté %@";
@@ -168,18 +168,18 @@
 "Export your recovery phrase" = "Exporter votre phrase de récupération";
 "Barking recovery phrase" = "Phrase de récupération Barking";
 "These 24 words alone let you recover your identity on a new phone. Keep this page offline, somewhere safe. Anyone who reads it can become you." = "Ces 24 mots suffisent à retrouver votre identité sur un nouveau téléphone. Gardez cette page hors ligne, en lieu sûr. Quiconque la lit peut se faire passer pour vous.";
-"The PDF is only as safe as its password: anyone who gets the file can try passwords offline, as fast as they like." = "Le PDF ne vaut que par son mot de passe : quiconque obtient le fichier peut essayer des mots de passe hors ligne, aussi vite qu’il le veut.";
+"The PDF is only as safe as its password: anyone who gets the file can try passwords offline, as fast as they like." = "Le PDF ne vaut que par son mot de passe : quiconque obtient le fichier peut essayer des mots de passe hors ligne, aussi vite qu’il le veut.";
 "Suggest a strong password" = "Proposer un mot de passe solide";
 "Password" = "Mot de passe";
 "Same password again" = "Le même mot de passe";
 "Keep the password apart from the file, in your password manager or on paper." = "Gardez le mot de passe à part du fichier, dans votre gestionnaire de mots de passe ou sur papier.";
 "Create the PDF" = "Créer le PDF";
 "At least 12 characters." = "Au moins 12 caractères.";
-"Too easy to guess: use the suggestion or several random words." = "Trop facile à deviner : prenez la suggestion ou plusieurs mots au hasard.";
+"Too easy to guess: use the suggestion or several random words." = "Trop facile à deviner : prenez la suggestion ou plusieurs mots au hasard.";
 "The two passwords differ." = "Les deux mots de passe diffèrent.";
 "strong" = "solide";
 "Hidden while the screen is recorded or the app is in the background." = "Masquée pendant un enregistrement de l’écran ou quand l’app est en arrière-plan.";
-"Shown only once: Barking does not keep the words." = "Affichée une seule fois : Barking ne garde pas les mots.";
+"Shown only once: Barking does not keep the words." = "Affichée une seule fois : Barking ne garde pas les mots.";
 "Today" = "Aujourd’hui";
 "Yesterday" = "Hier";
 "Make admin" = "Rendre administrateur";
@@ -198,7 +198,7 @@
 "%@ will no longer receive or send your messages." = "%@ ne recevra plus et n’enverra plus vos messages.";
 "The removal could not start. Sync, then try again." = "Le retrait n’a pas pu démarrer. Synchronisez, puis réessayez.";
 "Disconnect this device" = "Déconnecter cet appareil";
-"Disconnect %@?" = "Déconnecter %@ ?";
+"Disconnect %@?" = "Déconnecter %@ ?";
 "Your other devices will remove this one, then everything on this iPhone will be erased." = "Vos autres appareils retireront celui-ci, puis tout ce qui est sur cet iPhone sera effacé.";
 "Erase" = "Effacer";
 "Everything on this iPhone will be erased. Your contacts will not be told. To get your identity back, you will need the 24-word phrase." = "Tout ce qui est sur cet iPhone sera effacé. Vos contacts ne seront pas prévenus. Pour retrouver votre identité, il faudra la phrase de 24 mots.";
@@ -207,9 +207,9 @@
 "Hand over to %@ and disconnect" = "Transmettre à %@ et se déconnecter";
 "%@ receives the admin key, then removes this device. Everything on this iPhone will then be erased." = "%@ reçoit la clé d’administration, puis retire cet appareil. Tout ce qui est sur cet iPhone sera ensuite effacé.";
 "Handing over to %@…" = "Transmission à %@…";
-"The handover to %@ did not finish. Nothing was erased: this device is still your admin." = "La transmission à %@ n’a pas abouti. Rien n’a été effacé : cet appareil reste votre administrateur.";
+"The handover to %@ did not finish. Nothing was erased: this device is still your admin." = "La transmission à %@ n’a pas abouti. Rien n’a été effacé : cet appareil reste votre administrateur.";
 "Sending the request to your other devices…" = "Envoi de la demande à vos autres appareils…";
-"The request has not left this iPhone yet. Nothing was erased: try again." = "La demande n’a pas encore quitté cet iPhone. Rien n’a été effacé : réessayez.";
+"The request has not left this iPhone yet. Nothing was erased: try again." = "La demande n’a pas encore quitté cet iPhone. Rien n’a été effacé : réessayez.";
 "Barking could not erase everything. Try again." = "Barking n’a pas pu tout effacer. Réessayez.";
 "Barking could not finish erasing. Try again." = "Barking n’a pas pu terminer l’effacement. Réessayez.";
 "This iPhone can no longer read your data, for example after restoring a backup from another iPhone." = "Cet iPhone ne peut plus lire vos données, par exemple après la restauration d’une sauvegarde d’un autre iPhone.";
@@ -225,7 +225,7 @@
 "5 min" = "5 min";
 "1 h" = "1 h";
 "Set a passcode on the iPhone first" = "Définissez d’abord un code sur l’iPhone";
-"Face ID, Touch ID or the iPhone's passcode opens it. Messages keep arriving; while it is locked, notifications only say “New message”." = "Face ID, Touch ID ou le code de l’iPhone le déverrouille. Les messages continuent d’arriver ; tant qu’il est verrouillé, les notifications disent seulement « Nouveau message ».";
+"Face ID, Touch ID or the iPhone's passcode opens it. Messages keep arriving; while it is locked, notifications only say “New message”." = "Face ID, Touch ID ou le code de l’iPhone le déverrouille. Les messages continuent d’arriver ; tant qu’il est verrouillé, les notifications disent seulement « Nouveau message ».";
 "Erase Barking" = "Effacer Barking";
 "Press and hold for 2 seconds" = "Maintenez appuyé 2 secondes";
 "Barking is locked" = "Barking est verrouillé";
@@ -252,8 +252,8 @@
 "sent %@" = "envoyé %@";
 "received %@" = "reçu %@";
 "Path not recorded" = "Trajet non enregistré";
-"Could see:" = "A pu voir :";
-"“%@”" = "« %@ »";
+"Could see:" = "A pu voir :";
+"“%@”" = "« %@ »";
 "// only you and %@ can read it" = "// seuls %@ et vous pouvez le lire";
 "hidden sender" = "expéditeur masqué";
 "This device" = "Cet appareil";
@@ -269,7 +269,7 @@
 "Journal filter" = "Filtre du journal";
 "Everything" = "Tout";
 "Keys and devices" = "Clés et appareils";
-"Keys and devices: key changes, devices added or removed, unreadable messages. These are the events to watch first." = "Clés et appareils : changements de clé, appareils ajoutés ou retirés, messages illisibles. Ce sont les événements à surveiller en priorité.";
+"Keys and devices: key changes, devices added or removed, unreadable messages. These are the events to watch first." = "Clés et appareils : changements de clé, appareils ajoutés ou retirés, messages illisibles. Ce sont les événements à surveiller en priorité.";
 "Nothing yet" = "Rien pour l’instant";
 "Devices" = "Appareils";
 "Encrypted database on this iPhone" = "Base chiffrée sur cet iPhone";
@@ -379,9 +379,9 @@
 "Message received by %@." = "Message reçu par %@.";
 "Message not delivered. Retry is in the actions." = "Message non distribué. Réessayer est dans les actions.";
 "Keep" = "Garder";
-"Delete this message?" = "Supprimer ce message ?";
-"Delete from this iPhone?" = "Supprimer de cet iPhone ?";
-"Delete this message from this iPhone?" = "Supprimer ce message de cet iPhone ?";
+"Delete this message?" = "Supprimer ce message ?";
+"Delete from this iPhone?" = "Supprimer de cet iPhone ?";
+"Delete this message from this iPhone?" = "Supprimer ce message de cet iPhone ?";
 "It hasn’t left this iPhone. %@ won’t receive it." = "Il n’a pas quitté cet iPhone. %@ ne le recevra pas.";
 "It’s already on the network: %@ will still receive it." = "Il est déjà sur le réseau : %@ le recevra quand même.";
 "%@ already received it and keeps it." = "%@ l’a déjà reçu et le garde.";
@@ -443,7 +443,7 @@
 "Copies of your messages for your other devices · %lld" = "Copies de vos messages pour vos autres appareils · %lld";
 "Updates for your other devices · %lld" = "Mises à jour pour vos autres appareils · %lld";
 "Your card, for your contacts · %lld" = "Votre carte, pour vos contacts · %lld";
-"Receipts tell your contacts their messages arrived. Copies and updates keep your other devices in step; copies hold your messages, encrypted. Barking sends them on its own, and they can’t be deleted here." = "Les accusés disent à vos contacts que leurs messages sont arrivés. Les copies et les mises à jour gardent vos autres appareils à jour ; les copies contiennent vos messages, chiffrés. Barking les envoie seul, ils ne se suppriment pas d’ici.";
+"Receipts tell your contacts their messages arrived. Copies and updates keep your other devices in step; copies hold your messages, encrypted. Barking sends them on its own, and they can’t be deleted here." = "Les accusés disent à vos contacts que leurs messages sont arrivés. Les copies et les mises à jour gardent vos autres appareils à jour ; les copies contiennent vos messages, chiffrés. Barking les envoie seul, ils ne se suppriment pas d’ici.";
 "Cancel all · %lld" = "Tout annuler · %lld";
 "Only your messages. Sync packets stay." = "Seulement vos messages. Les paquets de synchronisation restent.";
 "Select all" = "Tout sélectionner";
