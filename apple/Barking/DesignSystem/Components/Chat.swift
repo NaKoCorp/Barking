@@ -90,28 +90,38 @@ struct ChatTitle: View {
 }
 
 /// Chat bubble: received on the card color with a border, sent in purple.
-struct Bubble<Footer: View>: View {
+/// The text alone (spec Lot M §6.3): time and state go under it
+/// (`BubbleMeta`). Place it in its row with `bubbleRow(outgoing:)`, after
+/// the modifiers that should see the bubble only (context menu preview).
+struct Bubble: View {
     let text: String
     let outgoing: Bool
-    @ViewBuilder let footer: Footer
 
-    var body: some View {
-        let shape = UnevenRoundedRectangle(
+    static func shape(outgoing: Bool) -> UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
             topLeadingRadius: Radius.panel,
             bottomLeadingRadius: outgoing ? Radius.panel : 5,
             bottomTrailingRadius: outgoing ? 5 : Radius.panel,
             topTrailingRadius: Radius.panel)
-        VStack(alignment: .leading, spacing: 4) {
-            Text(text).font(BarkingFont.sans(.body, size: 15))
-            footer.font(BarkingFont.mono(.caption2, size: 11))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .foregroundStyle(outgoing ? Color.white : Color.fg)
-        .background(outgoing ? Color.accentFill : Color.surfaceCard, in: shape)
-        .overlay(shape.stroke(outgoing ? Color.clear : Color.border, lineWidth: 1))
-        .containerRelativeFrame(.horizontal, alignment: outgoing ? .trailing : .leading) { w, _ in w * 0.8 }
-        .frame(maxWidth: .infinity, alignment: outgoing ? .trailing : .leading)
+    }
+
+    var body: some View {
+        let shape = Self.shape(outgoing: outgoing)
+        Text(text).font(BarkingFont.sans(.body, size: 15))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .foregroundStyle(outgoing ? Color.white : Color.fg)
+            .background(outgoing ? Color.accentFill : Color.surfaceCard, in: shape)
+            .overlay(shape.stroke(outgoing ? Color.clear : Color.border, lineWidth: 1))
+            .contentShape(.contextMenuPreview, shape)
+    }
+}
+
+extension View {
+    /// A bubble on its side of the conversation, 80 % of the width at most.
+    func bubbleRow(outgoing: Bool) -> some View {
+        containerRelativeFrame(.horizontal, alignment: outgoing ? .trailing : .leading) { w, _ in w * 0.8 }
+            .frame(maxWidth: .infinity, alignment: outgoing ? .trailing : .leading)
     }
 }
 

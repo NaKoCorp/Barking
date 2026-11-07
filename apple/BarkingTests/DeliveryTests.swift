@@ -252,17 +252,34 @@ final class DeliveryCoreTests: XCTestCase {
         XCTAssertTrue(seen.all.isEmpty)
     }
 
-    func testRetryMessageThenReloadsAndSyncs() async throws {
+    /// A retry names its row: `.delivery` for the contact (other screens
+    /// update even offline), the chat list and the pending count; a sync follows.
+    func testRetryMessagePublishesItsRowAndSyncs() async throws {
         let d = FakeDevice()
-        let core = CoreService(device: d, runner: DirectRunner())
+        let gate = DeliveryGate()
+        let core = CoreService(device: d, runner: DirectRunner(), sleep: { await gate.sleep($0) })
         let seen = Seen(await core.changes)
-        try await core.retryMessage(7)
+        try await core.retryMessage(7, contact: "b")
         XCTAssertEqual(d.retried, [7])
-        let ok = await seen.eventually { $0.contains(.contacts) && $0.contains(.network) }
+        await gate.open()
+        let ok = await seen.eventually {
+            $0.contains(.delivery(contact: "b", ids: [7])) && $0.contains(.contacts) && $0.contains(.network)
+        }
         XCTAssertTrue(ok, "\(seen.all)")
         // The retry sends: a sync follows.
         for _ in 0..<100 where d.syncCalls == 0 { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(d.syncCalls, 1)
+    }
+
+    /// A refused retry publishes nothing.
+    func testFailedRetryPublishesNothing() async {
+        let d = FakeDevice()
+        d.retryError = BarkingError.NothingToRetry
+        let core = CoreService(device: d, runner: DirectRunner())
+        let seen = Seen(await core.changes)
+        try? await core.retryMessage(7, contact: "b")
+        try? await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(seen.all.isEmpty, "\(seen.all)")
     }
 
     func testRetryAllReturnsTheCountAndReloadsTheContact() async throws {
@@ -282,7 +299,7 @@ final class DeliveryCoreTests: XCTestCase {
         d.deliveryError = BarkingError.NothingToRetry
         let core = CoreService(device: d, runner: DirectRunner())
         do {
-            try await core.retryMessage(1)
+            try await core.retryMessage(1, contact: "b")
             XCTFail("expected an error")
         } catch let e as BarkingError {
             XCTAssertEqual(e, .NothingToRetry)

@@ -244,10 +244,12 @@ public actor CoreService {
         publishDeleted(outcome)
         return outcome
     }
-    /// Sends a not delivered message again (same row); a sync deposits it.
-    /// The core reports no change: every screen reloads.
-    public func retryMessage(_ id: Int64) async throws {
+    /// Sends a not delivered message to `contact` again (same row, back to
+    /// pending); a sync deposits it. The core returns no change, so the
+    /// row is named here: every screen showing it updates, even offline.
+    public func retryMessage(_ id: Int64, contact: String) async throws {
         try await call("retry") { try $0.retryMessage(messageId: id) }
+        noteDelivery([DeliveryChange(contact: contact, messageId: id)])
         publish(.contacts)
         publish(.network)
         Task { _ = await self.sync(reason: .afterSend) }

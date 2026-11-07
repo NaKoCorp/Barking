@@ -141,7 +141,6 @@ final class PathModelTests: XCTestCase {
         await chats.reload()
         let conv = ConversationModel(contact: "sam", core: core)
         await conv.reload()
-        XCTAssertEqual(conv.items.first?.route, "internet:2")
         XCTAssertEqual(conv.lastMessageId, 4)
     }
 

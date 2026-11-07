@@ -147,16 +147,13 @@
 "from a contact's card" = "carte d’un contact";
 "ip:port" = "ip:port";
 "last sync %@" = "dernière synchro %@";
-"not sent" = "non envoyé";
 "not verified" = "non vérifié";
-"queued" = "en attente";
 "receive, write, send" = "recevoir, écrire, envoyer";
 "sent" = "envoyé";
 "step 2 of 2" = "étape 2 sur 2";
 "this device" = "cet appareil";
 "verified" = "vérifié";
 "welcome" = "bienvenue";
-"⚠︎ not sent, tap to retry" = "⚠︎ non envoyé, touchez pour réessayer";
 "✓ verified · safety code matched" = "✓ vérifié · code identique";
 "Barking could not open your data" = "Barking n’a pas pu ouvrir vos données";
 "Your data is safe. Unlock the phone and try again." = "Vos données sont intactes. Déverrouillez le téléphone et réessayez.";
@@ -376,3 +373,23 @@
 "done" = "fait";
 "stopped" = "arrêté";
 "Sent from another of your devices" = "Envoyé depuis un autre de vos appareils";
+
+/* Lot M §6.3, §7.1, §7.4, §9: the bubble, its menu and the deletion */
+"Details" = "Détails";
+"Deliveries" = "Envois";
+"Opens the message details." = "Ouvre le détail du message.";
+"Message received by %@." = "Message reçu par %@.";
+"Message not delivered. Retry is in the actions." = "Message non distribué. Réessayer est dans les actions.";
+"Keep" = "Garder";
+"Delete this message?" = "Supprimer ce message ?";
+"Delete from this iPhone?" = "Supprimer de cet iPhone ?";
+"Delete this message from this iPhone?" = "Supprimer ce message de cet iPhone ?";
+"It hasn’t left this iPhone. %@ won’t receive it." = "Il n’a pas quitté cet iPhone. %@ ne le recevra pas.";
+"It’s already on the network: %@ will still receive it." = "Il est déjà sur le réseau : %@ le recevra quand même.";
+"%@ already received it and keeps it." = "%@ l’a déjà reçu et le garde.";
+"No device of theirs ever received it." = "Aucun de ses appareils ne l’a reçu.";
+"%@ keeps their copy." = "%@ garde sa copie.";
+"Delete and cancel" = "Supprimer et annuler";
+"Delete and cancel the rest" = "Supprimer et annuler le reste";
+"Deletion failed. Nothing has changed." = "Suppression impossible. Rien n’a changé.";
+"%@ has no reachable device left. The message can’t be sent again." = "%@ n’a plus d’appareil joignable. Le message ne peut pas être renvoyé.";

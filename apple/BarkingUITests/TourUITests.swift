@@ -160,7 +160,7 @@ final class TourUITests: XCTestCase {
             }
         }
         snap(app, "conversation")
-        let path = app.buttons["conversation.path"]
+        let path = app.buttons["conversation.deliveries"]
         if path.waitForExistence(timeout: 5) {
             path.tap()
             // The stops load after the screen shows: wait for the relay's row,

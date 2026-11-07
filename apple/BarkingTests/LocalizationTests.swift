@@ -241,6 +241,9 @@ final class LocalizationTests: XCTestCase {
         let fr = try XCTUnwrap(table("fr"))
         XCTAssertNil(fr["Words left to fill in: %lld."], "the old reason is gone")
         XCTAssertNil(fr["The clipboard holds no text."], "the old paste line is gone")
+        for unused in ["⚠︎ not sent, tap to retry", "queued", "not sent"] {
+            XCTAssertNil(fr[unused], "unused French string \(unused)")
+        }
         XCTAssertEqual(fr["Link this device"] as? String, "Lier cet appareil")
         XCTAssertEqual(fr["Link a device"] as? String, "Lier un appareil")
         XCTAssertEqual(fr["Nothing was pasted."] as? String, "Rien n’a été collé.")
@@ -248,9 +251,56 @@ final class LocalizationTests: XCTestCase {
         for key in ["Pasted.", "Expires in %@ · usable once", "Valid until %@ and usable once.", "This code has expired.", "New code",
                     "On the new device, tap Link to an existing device and scan this code.",
                     "Then tap Scan the new device's code and scan the code it shows.",
-                    "Link code. The new device scans it.", "⚠︎ not sent, tap to retry",
+                    "Link code. The new device scans it.",
                     "everything (it is the sender).", "everything (it is the recipient)."] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
+    }
+
+    /// Spec Lot M §7.1: the bubble's states, menu, VoiceOver values and
+    /// announcements, in both languages.
+    func testDeliveryBubbleStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected: [String: String] = [
+            "Pending": "En attente", "On the network": "Sur le réseau", "Received": "Reçu",
+            "Not delivered": "Non distribué", "Retry": "Réessayer",
+            "Copy": "Copier", "Details": "Détails", "Delete": "Supprimer", "Deliveries": "Envois",
+            "Pending since %@": "En attente depuis %@", "On the network since %@": "Sur le réseau depuis %@",
+            "Received at %@": "Reçu à %@", "Not delivered. Expired at %@.": "Non distribué. Expiré à %@.",
+            "Sent from another of your devices": "Envoyé depuis un autre de vos appareils",
+            "Opens the message details.": "Ouvre le détail du message.",
+            "Message received by %@.": "Message reçu par %@.",
+            "Message not delivered. Retry is in the actions.": "Message non distribué. Réessayer est dans les actions.",
+            "Keep": "Garder",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        for lang in ["en", "fr"] {
+            let plurals = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
+            for key in ["%lld messages received by %@.", "Received at %@, on %lld of %lld devices"] {
+                XCTAssertNotNil(plurals[key], "\(lang) plural \(key)")
+            }
+        }
+        let en = "%lld messages received by %@."
+        XCTAssertEqual(String.localizedStringWithFormat(NSLocalizedString(en, comment: ""), 2, "Sam"), "2 messages received by Sam.")
+    }
+
+    /// No em dash (U+2014) in the EN and FR string tables, read from the sources.
+    func testNoEmDashInStrings() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        var read = 0
+        for lang in ["en", "fr"] {
+            for file in ["Localizable.strings", "Localizable.stringsdict", "Log.strings", "Log.stringsdict"] {
+                let url = root.appendingPathComponent("Barking/\(lang).lproj/\(file)")
+                guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                read += 1
+                for (n, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()
+                where line.contains("\u{2014}") {
+                    XCTFail("em dash in \(lang)/\(file):\(n + 1): \(line)")
+                }
+            }
+        }
+        XCTAssertEqual(read, 8)
     }
 }

@@ -253,5 +253,37 @@
 			<string>%lld devices</string>
 		</dict>
 	</dict>
+	<key>%lld messages received by %@.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@n@ %2$@.</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld message received by</string>
+			<key>other</key>
+			<string>%lld messages received by</string>
+		</dict>
+	</dict>
+	<key>It already left for %lld of %@’s %lld devices: that one keeps it. The rest is cancelled.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@s@</string>
+		<key>s</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>It already left for %1$lld of %2$@’s %3$lld devices: that one keeps it. The rest is cancelled.</string>
+			<key>other</key>
+			<string>It already left for %1$lld of %2$@’s %3$lld devices: those keep it. The rest is cancelled.</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

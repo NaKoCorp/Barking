@@ -81,13 +81,16 @@ final class ChatUITests: XCTestCase {
         field.tap()
         field.typeText("hello Sam")
         app.buttons["Send"].tap()
-        XCTAssertTrue(app.staticTexts["hello Sam"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["queued"].exists || app.staticTexts["sent"].exists
-                      || app.otherElements["queued"].exists)
+        let bubble = app.staticTexts["hello Sam"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: 5))
+        // The state is the bubble's VoiceOver value (spec Lot M §8): no
+        // network in UI tests, so it waits here.
+        let value = bubble.value as? String ?? ""
+        XCTAssertTrue(value.hasPrefix("Pending since") || value.hasPrefix("On the network since"), "value: \(value)")
     }
 
-    /// The header icon opens the path of the last message (a real message
-    /// on a fake route: no network in UI tests).
+    /// The header button ("Deliveries") opens the path of the last sent
+    /// message for now (a real message on a fake route: no network in UI tests).
     func testPathScreenShowsTheRoute() throws {
         let app = XCUIApplication.seeded(extra: ["-BarkingUITestFakeRoute"])
         app.launch()
@@ -96,7 +99,7 @@ final class ChatUITests: XCTestCase {
         field.typeText("hello Sam")
         app.buttons["Send"].tap()
         XCTAssertTrue(app.staticTexts["hello Sam"].waitForExistence(timeout: 5))
-        app.buttons["conversation.path"].tap()
+        app.buttons["conversation.deliveries"].tap()
         // Each stop is one VoiceOver sentence: name, step, time, what it
         // could see, without the "·" separators (UI review U-36).
         let stop = { (name: String) in
@@ -166,9 +169,11 @@ final class AccessibilityUITests: XCTestCase {
         field.tap()
         field.typeText("status check")
         app.buttons["Send"].tap()
-        let labelled = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label IN %@", ["queued", "sent", "delivered", "not sent"]))
-        XCTAssertTrue(labelled.firstMatch.waitForExistence(timeout: 5))
+        // One element per bubble: the text as label, the state as value.
+        let bubble = app.staticTexts["status check"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: 5))
+        let value = bubble.value as? String ?? ""
+        XCTAssertTrue(value.hasPrefix("Pending since") || value.hasPrefix("On the network since"), "value: \(value)")
     }
 }
 

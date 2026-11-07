@@ -42,7 +42,13 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func displayName() throws -> String { "Me" }
     func setDisplayName(name: String) throws {}
     func contacts() throws -> [Contact] { contactList }
-    func messagesWith(contact: String) throws -> [Message] { messageList[contact] ?? [] }
+    private var _messagesCalls = 0
+    /// How many times `messagesWith` ran (a conversation's full reloads).
+    var messagesCalls: Int { lock.withLock { _messagesCalls } }
+    func messagesWith(contact: String) throws -> [Message] {
+        lock.withLock { _messagesCalls += 1 }
+        return messageList[contact] ?? []
+    }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { routes[messageId] ?? [] }
     func sendText(contact: String, text: String) throws {
         if let sendError { throw sendError }
@@ -242,7 +248,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         lock.withLock { _cancelAllCalls += 1 }
         return deleteResult
     }
+    /// Thrown by `retryMessage` only, when set (before `deliveryError`).
+    var retryError: Error?
     func retryMessage(messageId: Int64) throws {
+        if let retryError { throw retryError }
         if let deliveryError { throw deliveryError }
         Thread.sleep(forTimeInterval: syncDelay)
         lock.withLock { _retried.append(messageId) }
