@@ -1,4 +1,5 @@
-//! APNs HTTP/2 client: one alert push per wake token, authenticated with a
+//! APNs HTTP/2 client: one push per wake token (an alert for a message, a
+//! silent background push for a receipt), authenticated with a
 //! cached ES256 provider token.
 //!
 //! Nothing here logs a device token, a collapse label or an APNs reason.
@@ -6,7 +7,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use barking_proto::push::{ApnsEnv, WakeToken};
+use barking_proto::push::{ApnsEnv, WakeReason, WakeToken};
 use data_encoding::HEXLOWER;
 use p256::ecdsa::SigningKey;
 
@@ -14,9 +15,11 @@ use crate::config::{ApnsConfig, Error, Result};
 use crate::jwt::apns_jwt;
 use crate::server::{PushOutcome, Pusher};
 
-/// Exact notification payload (also what the client's extension expects).
-const BODY: &str =
+/// Exact alert payload (also what the client's extension expects).
+const ALERT_BODY: &str =
     r#"{"aps":{"alert":{"loc-key":"NEW_MESSAGE"},"mutable-content":1,"sound":"default"}}"#;
+/// Silent background payload for a receipt: no alert, no sound.
+const RECEIPT_BODY: &str = r#"{"aps":{"content-available":1}}"#;
 /// Apple asks for a provider token refresh at most every 60 min and at
 /// least every 60 min before expiry: renew after 50 min.
 const JWT_LIFETIME_SECS: u64 = 50 * 60;
@@ -137,20 +140,24 @@ impl ApnsPusher {
         };
         let url = format!("{base}/3/device/{}", HEXLOWER.encode(&token.apns_token));
         let (jwt, iat) = self.bearer(rejected_iat);
+        let (push_type, priority, body) = match token.reason {
+            WakeReason::Message => ("alert", "10", ALERT_BODY),
+            WakeReason::Receipt => ("background", "5", RECEIPT_BODY),
+        };
         let resp = self
             .client
             .post(url)
             .header("authorization", format!("bearer {jwt}"))
             .header("apns-topic", &self.topic)
-            .header("apns-push-type", "alert")
-            .header("apns-priority", "10")
+            .header("apns-push-type", push_type)
+            .header("apns-priority", priority)
             .header(
                 "apns-expiration",
                 ((self.clock)() + EXPIRATION_SECS).to_string(),
             )
             .header("apns-collapse-id", HEXLOWER.encode(&token.collapse))
             .header("content-type", "application/json")
-            .body(BODY)
+            .body(body)
             .send()
             .await;
         let resp = match resp {

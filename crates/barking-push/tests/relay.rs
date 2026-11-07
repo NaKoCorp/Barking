@@ -129,6 +129,18 @@ async fn valid_wake_reaches_pusher() {
 }
 
 #[tokio::test]
+async fn receipt_reason_reaches_pusher() {
+    let relay = start(ConnLimits::default()).await;
+    let mut t = token(2, today() + 1);
+    t.reason = WakeReason::Receipt;
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    session.wake(vec![relay.sealed(&t)]).await.unwrap();
+    relay.wait_pushed(1).await;
+    assert_eq!(relay.pusher.got.lock().unwrap().as_slice(), &[t]);
+    let _ = relay.stop.send(true);
+}
+
+#[tokio::test]
 async fn invalid_expired_and_unknown_key_are_counted() {
     let relay = start(ConnLimits::default()).await;
     let session = Client::connect(relay.addr, relay.id).await.unwrap();
