@@ -10,7 +10,7 @@ enum Motion {
     static let enter: Animation = .spring(response: 0.35, dampingFraction: 0.9)
 
     static func gated(_ animation: Animation, reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : animation
+        reduceMotion || UITestFlags.noAnimations ? nil : animation
     }
 }
 

@@ -22,6 +22,8 @@ struct BarkingApp: App {
                 .tint(Color.accent)
                 .preferredColorScheme(settings.colorScheme)
                 .onOpenURL { router.open(url: $0) }
+                // UI tests: nothing animates (`-BarkingUITestNoAnimations`).
+                .transaction { if UITestFlags.noAnimations { $0.disablesAnimations = true } }
         }
     }
 }

@@ -1,6 +1,9 @@
 import BarkingKit
 import Foundation
 import Observation
+#if BARKING_DEV
+import UIKit
+#endif
 
 /// Where the app is: onboarding, or ready with its `CoreService`. Keeps a card
 /// link opened before the identity exists (spec iOS messaging, Review Focus 3).
@@ -50,6 +53,8 @@ final class AppRouter {
                 UserDefaults.standard.removeObject(forKey: key)
             }
         }
+        if args.contains("-BarkingUITestNoAnimations") { UIView.setAnimationsEnabled(false) }
+        do { try UITestSeed.apply(args) } catch { fatalError("UI test seed failed: \(error)") }
         if args.contains("-BarkingDevBench") {
             // Device measurement without a push (spec §7.4): key and open
             // only, before the app opens the database; read with devicectl.

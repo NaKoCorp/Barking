@@ -5,8 +5,22 @@ extension XCUIApplication {
     /// A fresh install state (database, key and flags removed by the app).
     static func fresh(language: String = "en", extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-BarkingUITestReset", "-AppleLanguages", "(\(language))"] + extra
+        app.launchArguments = ["-BarkingUITestReset", "-AppleLanguages", "(\(language))"] + noAnimations(extra) + extra
         return app
+    }
+
+    /// A ready identity made by the app at launch (Alice, with Sam as a
+    /// contact when `card` is given), starting on the chats: no onboarding.
+    static func seeded(_ scenario: String = "ready", card: String? = samCard, language: String = "en",
+                       extra: [String] = []) -> XCUIApplication {
+        var seed = ["-BarkingUITestSeed", scenario]
+        if let card { seed += ["-BarkingUITestSeedCard", card] }
+        return fresh(language: language, extra: seed + extra)
+    }
+
+    /// Animations are off unless the test keeps them (`-BarkingUITestKeepAnimations`).
+    private static func noAnimations(_ extra: [String]) -> [String] {
+        extra.contains("-BarkingUITestKeepAnimations") ? [] : ["-BarkingUITestNoAnimations"]
     }
 }
 

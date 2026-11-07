@@ -13,7 +13,9 @@ struct Galaxy: View {
     let top: CGFloat
     let bottom: CGFloat
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    /// Reduce Motion, or UI tests with animations off: the galaxy stands still.
+    private var reduceMotion: Bool { systemReduceMotion || UITestFlags.noAnimations }
     @Environment(\.scenePhase) private var scenePhase
     @State private var start = Date()
     @State private var settled = false
