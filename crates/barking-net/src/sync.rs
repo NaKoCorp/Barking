@@ -72,14 +72,21 @@
 //! expiry passed by the start of the sync (`Core::awaiting_verdict`) are
 //! read from their start, after every other fetch, never grouped with
 //! other mailboxes, within the introductions' budget (`INTRO_FETCH_BYTES`,
-//! `QUICK_INTRO_BYTES`): the nodes that accepted the packet first, then the
-//! next responsible until the rule is met. Such a packet fails
-//! (`Core::confirm_expired`) only when a node that accepted it (the ledger,
-//! or the delivery's first node), or two responsibles, served its mailbox
-//! in full from its start, every item processed, and nothing fetched in
-//! the sync was the packet or a receipt for it. Otherwise (a node that
-//! never held the mailbox, no complete answer, a node still returning the
-//! packet with its clock behind) it waits for a later sync. Nodes keep a
+//! `QUICK_INTRO_BYTES`): every node that accepted the packet first (the
+//! full ids of the deposit ledger, responsible or not any more, as long as
+//! the view has it), then the next responsible until the rule is met. A
+//! receipt is deposited on one node only and reaches the others in their
+//! hourly replication pass, so one holder answering empty proves nothing.
+//! Such a packet fails (`Core::confirm_expired`) only when its expiry is
+//! `REPLICATION_SLACK_SECS` past by the start of the sync, **every** node
+//! the ledger says accepted it served its mailbox in full from its start,
+//! every item processed (only a packet with no holder in the ledger falls
+//! back on two responsibles), and nothing fetched in the sync was the
+//! packet or a receipt for it. A holder that could not be reached, was
+//! rate-limited or did not serve in full means no verdict in this sync:
+//! the packet stays `OnNetwork` (a node that never held the mailbox, a
+//! node still returning the packet with its clock behind: likewise). Any
+//! sighting of the packet or its receipt settles it at once. Nodes keep a
 //! receipt a day past its expiry (`ACK_GRACE_SECS`), so a sync a day late
 //! still finds it.
 //! The messages that failed during the sync are returned in
@@ -102,8 +109,9 @@
 //! best responsible, the next one only when the best failed, refused or
 //! rate-limited (a truncated fetch is kept as it is), resumed from the
 //! positions of the network state; then the mailboxes of my deposited
-//! packets past their expiry, so that an expiry wake-up gets its verdict
-//! (as in a full sync). Every fetch draws on
+//! packets past their expiry, so that an expiry wake-up finds a late
+//! receipt, and gets its verdict once `REPLICATION_SLACK_SECS` passed (as
+//! in a full sync). Every fetch draws on
 //! `QUICK_FETCH_BYTES` in all, the introductions on `QUICK_INTRO_BYTES` at
 //! most: a fetch cut by that cap is processed and its positions saved, so
 //! each wake-up makes bounded, lasting progress. Then, with time left,
@@ -154,6 +162,10 @@ use io::{Observation, Observed};
 /// A subscription to send: mailbox, kind, node.
 type SubTask = (MailboxId, SubKind, NodeId);
 
+/// No failure verdict before a packet's expiry plus this: a receipt lands
+/// on one node only, and nodes copy receipts to each other in their hourly
+/// replication pass (nodes keep receipts `ACK_GRACE_SECS` past expiry).
+pub const REPLICATION_SLACK_SECS: u64 = 7_200;
 /// Longest synchronization.
 pub const SYNC_DEADLINE: Duration = Duration::from_secs(180);
 /// Longest quick sync (the notification extension's), closing included.
@@ -699,17 +711,25 @@ where
             .is_some_and(|(_, holders)| holders.contains(node))
     }
 
-    /// The network answered for `packet` (spec §15.5): a node that accepted
-    /// it served its mailbox in full from the start, or two responsibles
-    /// did. A node that never held the mailbox cannot fail it alone.
+    /// The network answered for `packet` (spec §15.5): every node that
+    /// accepted it (full ids in the deposit ledger) served its mailbox in
+    /// full from the start. A receipt lands on one node only and reaches the
+    /// others by replication, so one holder answering empty proves nothing
+    /// while another has not answered. Only a packet without any holder in
+    /// the ledger falls back on two responsibles. A node that never held
+    /// the mailbox cannot fail it alone.
     fn answered_for(&self, packet: &PacketId) -> bool {
-        let Some((mailbox, _)) = self.verdict_packets.get(packet) else {
+        let Some((mailbox, holders)) = self.verdict_packets.get(packet) else {
             return false;
         };
         let Some(nodes) = self.answered.get(mailbox) else {
             return false;
         };
-        nodes.len() >= 2 || nodes.iter().any(|n| self.accepted_by(packet, n))
+        if holders.is_empty() {
+            nodes.len() >= 2
+        } else {
+            holders.is_subset(nodes)
+        }
     }
 
     /// Every packet awaiting a verdict in `mailbox` has its answer.
@@ -740,12 +760,14 @@ where
 
     /// The failure verdict (spec §15.5), once the fetches are over and
     /// their items processed (an ack found has made its message
-    /// `Received`): each deposited packet that expired before this sync
-    /// started fails when the network answered for its mailbox
-    /// (`answered_for`) and nothing fetched was the packet or an ack for
-    /// it. Otherwise it waits for a later sync.
+    /// `Received`): each deposited packet that expired
+    /// `REPLICATION_SLACK_SECS` before this sync started fails when the
+    /// network answered for its mailbox (`answered_for`) and nothing
+    /// fetched was the packet or an ack for it. Otherwise it waits for a
+    /// later sync.
     fn give_verdicts(&mut self) {
-        let Ok(awaiting) = self.core.awaiting_verdict(self.now) else {
+        let due = self.now.saturating_sub(REPLICATION_SLACK_SECS);
+        let Ok(awaiting) = self.core.awaiting_verdict(due) else {
             return;
         };
         for (packet, _) in awaiting {

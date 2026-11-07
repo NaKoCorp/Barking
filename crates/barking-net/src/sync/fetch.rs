@@ -38,7 +38,7 @@ pub(super) enum FetchKind {
     /// Introduction mailboxes: their own byte budget and slice.
     Intro,
     /// Mailboxes of packets awaiting a verdict (spec §15.5), read only
-    /// for it: the introduction budget and slice, the nodes that accepted
+    /// for it: the introduction budget and slice, every node that accepted
     /// the packet first, and the next responsible until the verdict rule
     /// is met.
     Verdict,
@@ -83,7 +83,14 @@ where
                 let ids = self.state.view.responsibles_by_score(m, now);
                 let mut ids = self.state.order_responsibles(ids);
                 if kind == FetchKind::Verdict {
-                    // Stable: the nodes that held a packet of it first.
+                    // Every node that accepted a packet of it must answer,
+                    // responsible or not any more (as long as the view can
+                    // reach it); stable: those nodes first.
+                    for n in self.holders_of(m) {
+                        if !ids.contains(&n) && self.state.view.get(&n).is_some() {
+                            ids.push(n);
+                        }
+                    }
                     ids.sort_by_key(|n| !self.held_one_of(m, n));
                 }
                 (*m, ids)
@@ -147,8 +154,8 @@ where
                 all_processed &= processed;
                 match end {
                     GroupEnd::Complete if kind == FetchKind::Verdict => {
-                        // Done once the verdict rule is met; otherwise the
-                        // next responsible answers too.
+                        // Done once the verdict rule is met (every holder
+                        // answered); otherwise the next node answers too.
                         for m in &group {
                             if self.verdict_settled(m) {
                                 done.insert(*m);
@@ -279,6 +286,20 @@ where
             }
         }
         self.save();
+    }
+
+    /// Nodes that accepted one of the packets awaiting a verdict in
+    /// `mailbox`, by id.
+    fn holders_of(&self, mailbox: &MailboxId) -> Vec<NodeId> {
+        let mut out: Vec<NodeId> = self
+            .verdict_packets
+            .values()
+            .filter(|(m, _)| m == mailbox)
+            .flat_map(|(_, holders)| holders.iter().copied())
+            .collect();
+        out.sort_unstable_by_key(|n| n.0);
+        out.dedup();
+        out
     }
 
     /// `node` accepted one of the packets awaiting a verdict in `mailbox`.

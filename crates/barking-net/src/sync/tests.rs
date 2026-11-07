@@ -42,6 +42,9 @@ struct Net {
     hang: HashSet<NodeId>,
     /// Items served by any node to a fetch that asks for this mailbox.
     mailbox_items: HashMap<MailboxId, Vec<Vec<u8>>>,
+    /// Items served by that node only to a fetch that asks for this
+    /// mailbox (a receipt not replicated yet).
+    node_mailbox_items: HashMap<(NodeId, MailboxId), Vec<Vec<u8>>>,
     /// Nodes whose fetch always stops early, for this reason.
     truncate: HashMap<NodeId, FetchStop>,
     /// A fetch asking for one of these mailboxes stops early.
@@ -281,6 +284,12 @@ impl Fetcher for Net {
         let mut items = self.items.get(conn).cloned().unwrap_or_default();
         for m in mailboxes {
             items.extend(self.mailbox_items.get(m).cloned().unwrap_or_default());
+            items.extend(
+                self.node_mailbox_items
+                    .get(&(*conn, *m))
+                    .cloned()
+                    .unwrap_or_default(),
+            );
         }
         if let [m] = mailboxes
             && positioned.is_empty()
@@ -3003,9 +3012,15 @@ async fn quick_sync_makes_no_fallback_lookup_after_not_responsible() {
 /// Short id of the node that took the expired reply.
 const DEPOSIT_NODE: &str = "K7QX2M4A";
 
-/// Bob's reply, sealed a day and 20 minutes ago, deposited, and expired
-/// 20 minutes ago without its ack; and Alice's ack for it (encoded),
-/// sealed 5 minutes before that expiry: still on the network.
+/// Sealing date of Bob's reply in `expired_reply`: it expired 20 minutes
+/// past the replication slack before `NOW`, so a verdict may come.
+const SEALED: u64 = NOW - DAY - REPLICATION_SLACK_SECS - 1_200;
+/// Alice's ack for it, sealed 5 minutes before that expiry.
+const ACKED: u64 = SEALED + DAY - 300;
+
+/// Bob's reply, sealed at `SEALED`, deposited, and expired without its ack
+/// more than `REPLICATION_SLACK_SECS` ago; and Alice's ack for it
+/// (encoded), sealed at `ACKED`: still on the network.
 struct Expired {
     _dir: TempDir,
     core: Core,
@@ -3018,7 +3033,7 @@ struct Expired {
 }
 
 fn expired_reply() -> Expired {
-    expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, None, None)
+    expired_reply_with(SEALED, ACKED, None, None)
 }
 
 /// Bob's reply sealed at `sealed` (expired by `NOW`), Alice's ack sealed at
@@ -3268,7 +3283,7 @@ async fn too_far_in_future_packet_is_not_delivered() {
 async fn verdict_needs_the_accepting_node_or_two_responsibles() {
     use barking_core::store::MessageStatus;
     // Deposited on the second responsible: the best one never held it.
-    let mut e = expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, Some(1), Some(1));
+    let mut e = expired_reply_with(SEALED, ACKED, Some(1), Some(1));
     let r = load(&mut e.core)
         .view
         .responsibles_by_score(&e.mailbox, NOW);
@@ -3314,6 +3329,92 @@ async fn verdict_needs_the_accepting_node_or_two_responsibles() {
     assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
     assert!(report.failed.is_empty());
     e.net.fail_fetch.remove(&r[1]);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
+    assert_eq!(report.failed.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_verdict_while_another_holder_is_unreachable() {
+    use barking_core::store::MessageStatus;
+    // Two responsibles accepted the reply; the second cannot be reached.
+    let mut e = expired_reply_with(SEALED, ACKED, Some(0), Some(0));
+    let r = load(&mut e.core)
+        .view
+        .responsibles_by_score(&e.mailbox, NOW);
+    accepted_by(&mut e.core, r[1], &e.reply);
+    e.net.fail_fetch.insert(r[1]);
+    // The first holder answers in full, empty: the second may hold the ack.
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert!(fetched_pairs(&e.net.calls()).contains(&(r[0], e.mailbox)));
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    // Both holders answer in full, empty: the verdict comes.
+    e.net.fail_fetch.remove(&r[1]);
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
+    assert_eq!(report.failed.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ack_on_a_holder_other_than_the_best_makes_received() {
+    use barking_core::store::MessageStatus;
+    // The reply went to the two best responsibles; Alice's ack landed on
+    // the second only, and replication has not copied it to the first.
+    let mut e = expired_reply_with(SEALED, ACKED, Some(0), Some(0));
+    let r = load(&mut e.core)
+        .view
+        .responsibles_by_score(&e.mailbox, NOW);
+    accepted_by(&mut e.core, r[1], &e.reply);
+    e.net
+        .node_mailbox_items
+        .insert((r[1], e.mailbox), vec![e.ack.clone()]);
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::Received);
+    assert!(report.failed.is_empty());
+    // A full sync gives the same.
+    let mut e = expired_reply_with(SEALED, ACKED, Some(0), Some(0));
+    accepted_by(&mut e.core, r[1], &e.reply);
+    e.net
+        .node_mailbox_items
+        .insert((r[1], e.mailbox), vec![e.ack.clone()]);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::Received);
+    assert!(report.failed.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_verdict_before_the_replication_slack() {
+    use barking_core::store::MessageStatus;
+    // Expired 20 minutes ago: an ack deposited just before may still be
+    // on its way to the other holders.
+    let mut e = expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, Some(0), Some(0));
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert!(
+        fetched_pairs(&e.net.calls())
+            .iter()
+            .any(|(_, m)| *m == e.mailbox),
+        "its mailbox is read: an ack found there settles it"
+    );
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    // An ack found within the slack still makes it received.
+    e.net.mailbox_items.insert(e.mailbox, vec![e.ack.clone()]);
+    sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::Received);
+    // Expired exactly the slack ago: the verdict may come.
+    let mut e = expired_reply_with(
+        NOW - DAY - REPLICATION_SLACK_SECS,
+        NOW - REPLICATION_SLACK_SECS - 300,
+        Some(0),
+        Some(0),
+    );
     let report = sync(&mut e.core, &e.net, opts()).await;
     assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
     assert_eq!(report.failed.len(), 1);
@@ -3414,7 +3515,7 @@ async fn a_shared_short_id_is_not_the_accepting_node() {
     use barking_core::store::MessageStatus;
     // The ledger says the second responsible accepted the reply; the
     // delivery's short id is the best one's (a node sharing the prefix).
-    let mut e = expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, Some(0), Some(1));
+    let mut e = expired_reply_with(SEALED, ACKED, Some(0), Some(1));
     let r = load(&mut e.core)
         .view
         .responsibles_by_score(&e.mailbox, NOW);
@@ -3439,7 +3540,7 @@ async fn session_stage_resumes_a_mailbox_awaiting_a_verdict() {
     // Bob's reply expired awaiting its verdict; a later message in the same
     // session mailbox (sealed the same day) still awaits its ack.
     let mut e = expired_reply();
-    let day_start = barking_core::mailbox::day_of(NOW - DAY - 1_200) as u64 * DAY;
+    let day_start = barking_core::mailbox::day_of(SEALED) as u64 * DAY;
     let later = day_start + DAY - 1;
     let mut rng = rand::rng();
     let sent = e

@@ -187,8 +187,8 @@ impl Core {
 
     /// `awaiting_verdict`, with each packet's bytes: the network client
     /// looks up the nodes that accepted it in its deposit ledger (full node
-    /// ids), and gives a verdict only on the answer of one of them (or of
-    /// two responsibles).
+    /// ids), and gives a verdict only on the answer of all of them (or of
+    /// two responsibles when the ledger names none).
     pub fn awaiting_verdict_packets(&self, started_at: u64) -> Result<Vec<AwaitingVerdict>> {
         let mut stmt = self
             .store
@@ -223,8 +223,9 @@ impl Core {
     }
 
     /// The failure verdict on a deposited packet (spec §15.5), to be called
-    /// only once a responsible of its mailbox answered a fetch, after its
-    /// expiry, with neither the packet nor its ack: its `OnNetwork`
+    /// only once every node that accepted it answered a fetch of its
+    /// mailbox, after its expiry and the replication slack, with neither the
+    /// packet nor its ack: its `OnNetwork`
     /// delivery becomes `NotDelivered` (`expired_at` = the packet's expiry,
     /// `deposited_at` kept), the packet leaves the send queue (and with it
     /// the awaited ack), the message is recomputed and, when it fails,
