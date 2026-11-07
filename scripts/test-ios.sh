@@ -20,7 +20,8 @@ Usage: scripts/test-ios.sh build|unit [Classe...]|ui [Classe...]|tour [en|fr|ax3
 
   build   xcodegen and XCFramework if stale, then build-for-testing
   unit    plan Unit (BarkingTests), optionally restricted to the given classes
-  ui      plan UI (BarkingUITests), 3 parallel clones, optionally restricted to classes
+  ui      plan UI (BarkingUITests); full run on BARKING_UI_WORKERS clones (default 3),
+          restricted to the given classes on the booted simulator alone
   tour    TourUITests with BARKING_TOUR=1 (en, fr or ax3), result in apple/build/tour-<lang>.xcresult
   all     build, unit, ui, tour en
 
@@ -119,7 +120,11 @@ do_unit() {
 do_ui() {
   ensure_sim
   only_args BarkingUITests "$@"
-  step "ui" xb test-without-building -testPlan UI -parallel-testing-enabled YES -parallel-testing-worker-count 3 ${only[@]+"${only[@]}"}
+  # A few classes run on the booted simulator: each clone boots a whole iOS,
+  # and three of them saturate the machine for little gain on a short run.
+  local par=(-parallel-testing-enabled YES -parallel-testing-worker-count "${BARKING_UI_WORKERS:-3}")
+  [ $# -gt 0 ] && par=(-parallel-testing-enabled NO)
+  step "ui" xb test-without-building -testPlan UI "${par[@]}" ${only[@]+"${only[@]}"}
 }
 
 do_tour() {
