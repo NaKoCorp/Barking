@@ -148,7 +148,7 @@ struct ChatRowView: View {
                 HStack(spacing: 6) {
                     switch row.line {
                     case .preview(let text):
-                        if let s = row.lastStatus, s != .received { StatusGlyph(status: s).foregroundStyle(Color.fgSoft) }
+                        if let s = row.lastStatus { DeliveryGlyph(s) }
                         Text(text).font(.bBodySmall).foregroundStyle(Color.fgMuted).lineLimit(1)
                     case .trust(let trust):
                         TrustLine(trust: trust)

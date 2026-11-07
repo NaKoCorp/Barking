@@ -10,7 +10,7 @@ struct ChatRow: Identifiable, Equatable {
     let verified: Bool
     let lastText: String?
     let lastAt: Date?
-    let lastStatus: MessageStatusKind?
+    let lastStatus: DeliveryState?
     let unread: Int
 
     /// The row's second line (U-22): the last message, or, with none, the
@@ -52,7 +52,7 @@ final class ChatsModel {
                 verified: c.verified,
                 lastText: last?.body,
                 lastAt: last.map { Date(timeIntervalSince1970: TimeInterval($0.at)) },
-                lastStatus: last.map { MessageStatusKind($0) },
+                lastStatus: last?.shownState,
                 unread: Int(s.unread)))
         }
         rows = out.sorted { ($0.lastAt ?? .distantPast) > ($1.lastAt ?? .distantPast) }

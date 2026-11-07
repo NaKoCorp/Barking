@@ -248,5 +248,21 @@
 			<string>%lld autres personnes</string>
 		</dict>
 	</dict>
+	<key>Received at %@, on %lld of %lld devices</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Reçu à %1$@, sur %2$lld de ses %3$#@d@</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld appareil</string>
+			<key>other</key>
+			<string>%lld appareils</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

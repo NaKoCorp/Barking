@@ -88,16 +88,15 @@ struct ConversationView: View {
         Bubble(text: item.text, outgoing: item.outgoing) {
             HStack(spacing: 4) {
                 Text(item.at, format: .dateTime.hour().minute())
-                if item.status == .failed {
+                if item.status == .notDelivered {
                     Button { Task { await model.retry(item.id) } } label: {
                         Text("⚠︎ not sent, tap to retry")
                     }
                     .foregroundStyle(item.outgoing ? Color.white : Color.danger)
-                } else if item.status == .queued {
-                    StatusGlyph(status: .queued)
-                    Text("queued")
-                } else {
-                    StatusGlyph(status: item.status)
+                } else if let status = item.status {
+                    // Interim: the glyph moves under the bubble with BubbleMeta.
+                    status.image.font(.bSymbol(11, relativeTo: .caption2, weight: .semibold))
+                    if status == .pending { Text("queued") }
                 }
                 if let route = RouteBadge.text(for: item.route) {
                     Button { pathOf = item.id } label: { RouteChip(text: route, outgoing: item.outgoing) }

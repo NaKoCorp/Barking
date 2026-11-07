@@ -2,44 +2,14 @@ import BarkingKit
 import SwiftUI
 import UIKit
 
-/// Message status, shown as a glyph and read by VoiceOver as a word.
-enum MessageStatusKind: Equatable {
-    case queued, sent, delivered, failed, received
-
-    /// From a message's delivery. A sent message without one (sent from
-    /// another of my devices) shows as sent.
-    init(_ m: Message) {
-        guard m.outgoing else { self = .received; return }
-        switch m.delivery?.state {
-        case .pending: self = .queued
-        case .onNetwork, nil: self = .sent
-        case .received: self = .delivered
-        case .notDelivered: self = .failed
-        }
-    }
-}
-
 extension Message {
     /// A sent message that was not delivered: it can be sent again.
     var failed: Bool { delivery?.state == .notDelivered }
-}
 
-struct StatusGlyph: View {
-    let status: MessageStatusKind
-
-    var body: some View {
-        glyph.font(.bSymbol(11, relativeTo: .caption2, weight: .semibold)) // Fira Code draws ✓ like a √.
-    }
-
-    @ViewBuilder private var glyph: some View {
-        switch status {
-        case .queued: Text(verbatim: "⏳").accessibilityLabel(Text("queued"))
-        case .sent: Text(verbatim: "✓").accessibilityLabel(Text("sent"))
-        case .delivered: Text(verbatim: "✓✓").accessibilityLabel(Text("delivered"))
-        case .failed: Text(verbatim: "⚠︎").foregroundStyle(Color.danger).accessibilityLabel(Text("not sent"))
-        case .received: EmptyView()
-        }
-    }
+    /// The state shown under an outgoing bubble; nil for a received message.
+    /// A sent message without a delivery (sent from another of my devices)
+    /// shows as on the network until the bubble says time only.
+    var shownState: DeliveryState? { outgoing ? (delivery?.state ?? .onNetwork) : nil }
 }
 
 /// Whether a contact's safety code was compared (UI review U-20): a glyph

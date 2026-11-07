@@ -147,13 +147,24 @@ private struct PathStop: View {
         }
     }
 
-    /// The mockup's fixed colors: white glyphs read on them in both themes.
-    private var color: Color {
-        switch row.glyph {
-        case .sender: Color(hex: 0x6640AF)
-        case .relay: Color(hex: 0x8A6A0B)
-        case .recipient: Color(hex: 0x1F7F55)
-        case .ownDevices: Color(hex: 0x4E3189)
+    /// Named colorsets: white glyphs read on them in both themes.
+    private var color: Color { Color(PathStopColor.name(for: row.glyph)) }
+}
+
+/// Asset names of the path discs.
+enum PathStopColor {
+    static let sender = "pathSender"
+    /// The internet transport color (the amber is gone).
+    static let relay = "transportNet"
+    static let recipient = "pathRecipient"
+    static let ownDevices = "pathOwnDevices"
+
+    static func name(for glyph: PathRow.Glyph) -> String {
+        switch glyph {
+        case .sender: sender
+        case .relay: relay
+        case .recipient: recipient
+        case .ownDevices: ownDevices
         }
     }
 }
@@ -178,12 +189,5 @@ struct RouteChip: View {
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(outgoing ? Color.white.opacity(0.18) : Color.wash, in: RoundedRectangle(cornerRadius: Radius.tag))
             .foregroundStyle(outgoing ? Color.white : Color.accent)
-    }
-}
-
-private extension Color {
-    init(hex: UInt32) {
-        self.init(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
-                  blue: Double(hex & 0xFF) / 255)
     }
 }

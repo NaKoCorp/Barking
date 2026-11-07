@@ -10,7 +10,8 @@ final class ConversationModel {
         let outgoing: Bool
         let text: String
         let at: Date
-        let status: MessageStatusKind
+        /// Nil for a received message.
+        let status: DeliveryState?
         /// Route hint from the core (`internet:N`), for the badge.
         var route: String? = nil
     }
@@ -74,7 +75,7 @@ final class ConversationModel {
         items = messages.filter { !hide.contains($0.id) }.map {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)),
-                 status: MessageStatusKind($0),
+                 status: $0.shownState,
                  route: $0.route)
         }
         // What arrives while the conversation is on screen is read.
