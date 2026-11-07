@@ -88,7 +88,10 @@
 //! node still returning the packet with its clock behind: likewise). Any
 //! sighting of the packet or its receipt settles it at once. Nodes keep a
 //! receipt a day past its expiry (`ACK_GRACE_SECS`), so a sync a day late
-//! still finds it.
+//! still finds it. Past that, nothing can confirm it any more: the core
+//! lets it go from its queue (`Core::expire_due`), its mailbox is no longer
+//! fetched, its ledger entry is pruned, and its delivery stays `OnNetwork`,
+//! unconfirmed, never `NotDelivered`.
 //! The messages that failed during the sync are returned in
 //! `SyncReport::failed`.
 //!

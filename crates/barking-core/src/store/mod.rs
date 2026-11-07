@@ -239,6 +239,12 @@ pub struct DeliverySummary {
     pub devices_tried: u32,
     /// Still waiting on this device (not deposited, not failed).
     pub devices_pending: u32,
+    /// A delivery on the network is still in the send queue: the network
+    /// client still looks for its ack and, past its expiry, for its
+    /// verdict (spec §15.5). False once the queue let it go unconfirmed
+    /// (past the nodes' ack grace, or a migrated delivery without a queue
+    /// row): the relays can no longer confirm it.
+    pub awaiting_verdict: bool,
 }
 
 /// One delivery of a sent message (`Queries::message_delivery`).
@@ -1176,15 +1182,23 @@ pub trait Queries {
     }
 
     /// Deletes expired packets, except the deposited ones whose delivery
-    /// still awaits its verdict (`OnNetwork`, spec §15.5); returns the
-    /// number of rows deleted.
+    /// still awaits its verdict (`OnNetwork`, spec §15.5) up to the nodes'
+    /// ack grace (`expires_at + ACK_GRACE_SECS`): past it, no node can hold
+    /// their ack any more, and they leave the queue unconfirmed, their
+    /// delivery still `OnNetwork`. Returns the number of rows deleted.
     fn outbox_purge_expired(&self, now: u64) -> Result<usize> {
+        let grace_start = now.saturating_sub(crate::packet::ACK_GRACE_SECS);
         self.conn()
             .execute(
                 "DELETE FROM outbox WHERE expires_at < ?1 AND NOT ( \
-                 deposited_at IS NOT NULL AND EXISTS (SELECT 1 FROM deliveries d \
+                 expires_at >= ?3 AND deposited_at IS NOT NULL \
+                 AND EXISTS (SELECT 1 FROM deliveries d \
                  WHERE d.packet_id = outbox.packet_id AND d.status = ?2))",
-                params![to_i64(now), MessageStatus::OnNetwork as i64],
+                params![
+                    to_i64(now),
+                    MessageStatus::OnNetwork as i64,
+                    to_i64(grace_start)
+                ],
             )
             .map_err(map_err)
     }
@@ -2008,7 +2022,8 @@ fn summaries(
          count(d.packet_id), coalesce(sum(d.status = 3), 0), \
          coalesce(sum(d.status IN (1, 3)), 0), coalesce(sum(d.status = 0), 0), \
          min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at), \
-         coalesce(sum(d.status = 0 AND o.deposit_tried_at IS NOT NULL), 0) \
+         coalesce(sum(d.status = 0 AND o.deposit_tried_at IS NOT NULL), 0), \
+         coalesce(sum(d.status = 1 AND o.packet_id IS NOT NULL), 0) \
          FROM messages m \
          LEFT JOIN deliveries d ON d.message_id = m.message_id AND d.own = 0 AND m.direction = 0 \
          LEFT JOIN outbox o ON o.packet_id = d.packet_id \
@@ -2025,6 +2040,7 @@ fn summaries(
         Option<i64>,
         Option<i64>,
         i64,
+        i64,
     );
     let raws = stmt
         .query_map(args, |r| {
@@ -2040,6 +2056,7 @@ fn summaries(
                     r.get(13)?,
                     r.get(14)?,
                     r.get(15)?,
+                    r.get(16)?,
                 ),
             ))
         })
@@ -2050,7 +2067,18 @@ fn summaries(
     raws.into_iter()
         .map(|(raw, agg)| {
             let message = message_from_raw(raw)?;
-            let (devices, received, left, pending, sealed, deposited, acked, expired, tried) = agg;
+            let (
+                devices,
+                received,
+                left,
+                pending,
+                sealed,
+                deposited,
+                acked,
+                expired,
+                tried,
+                awaiting,
+            ) = agg;
             let summary = (devices > 0).then(|| DeliverySummary {
                 state: message.status,
                 sealed_at: sealed.map_or(0, to_u64),
@@ -2064,6 +2092,7 @@ fn summaries(
                 devices_left: count(left),
                 devices_tried: count(tried),
                 devices_pending: count(pending),
+                awaiting_verdict: awaiting > 0,
             });
             Ok((message, summary))
         })

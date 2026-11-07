@@ -107,7 +107,8 @@ final class MessageSheetModel {
         confirmation.message(name: contactName, keepsOwnCopies: keepsOwnCopies, bundle: bundle, locale: locale)
     }
 
-    /// "Expired at 11:50. Checking with the relays at the next sync." at
+    /// "Expired at 11:50. Checking with the relays at the next sync." (or
+    /// "… Couldn’t be confirmed with the relays." once no sync checks it) at
     /// `date` (the view asks again each minute, §6.4).
     func verdict(at date: Date) -> String? {
         delivery.flatMap { Self.verdictPending($0, now: date) }
@@ -353,13 +354,22 @@ final class MessageSheetModel {
     }
 
     /// Past its expiry, still on the network: the verdict waits for the
-    /// next sync (§6.4, §15.5). The state stays "On the network".
+    /// next sync (§6.4, §15.5) while a sync still checks it
+    /// (`awaitingVerdict`). Once none does (let go past the relays' ack
+    /// grace, or a migrated message without a queue row), it says the relays
+    /// could not confirm it, and promises no check. The state stays "On the
+    /// network" either way (spec decision I).
     static func verdictPending(_ d: Delivery, now: Date, bundle: Bundle = .main, locale: Locale = .current,
                                timeZone: TimeZone = .current) -> String? {
         guard d.state == .onNetwork else { return nil }
         let expiry = Date(timeIntervalSince1970: TimeInterval(d.sealedAt) + lifetime)
         guard now >= expiry else { return nil }
-        return String(localized: "Expired at \(clock(expiry, locale: locale, timeZone: timeZone)). Checking with the relays at the next sync.",
+        let at = clock(expiry, locale: locale, timeZone: timeZone)
+        if d.awaitingVerdict {
+            return String(localized: "Expired at \(at). Checking with the relays at the next sync.",
+                          bundle: bundle, locale: locale)
+        }
+        return String(localized: "Expired at \(at). Couldn’t be confirmed with the relays.",
                       bundle: bundle, locale: locale)
     }
 

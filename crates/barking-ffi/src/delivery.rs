@@ -54,6 +54,13 @@ pub struct Delivery {
     pub devices_tried: u32,
     /// Still waiting on this iPhone (not deposited, not expired).
     pub devices_pending: u32,
+    /// On the network and still checked by the syncs: its ack, and past
+    /// its expiry its verdict (spec §15.5). False once the app let it go
+    /// unconfirmed (past the nodes' ack grace, or a migrated delivery
+    /// without a queue row): the relays can no longer confirm it, and it
+    /// stays `OnNetwork`.
+    #[uniffi(default = false)]
+    pub awaiting_verdict: bool,
 }
 
 /// One delivery of a sent message to a contact device.
@@ -253,6 +260,7 @@ pub(crate) fn delivery_of(s: DeliverySummary) -> Delivery {
         devices_left: s.devices_left,
         devices_tried: s.devices_tried,
         devices_pending: s.devices_pending,
+        awaiting_verdict: s.awaiting_verdict,
     }
 }
 

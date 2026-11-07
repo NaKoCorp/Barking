@@ -8,7 +8,10 @@
 //! accepted it (`expire_due`), or deposited then confirmed gone from the
 //! network after its expiry (`confirm_expired`, decided by the network
 //! client: spec §15.5). A deposited delivery never fails on the local clock
-//! alone.
+//! alone. One whose verdict never came (no holder could answer) leaves the
+//! send queue past `expires_at + ACK_GRACE_SECS`, when no node can hold its
+//! ack any more, and stays `OnNetwork`: unconfirmed, never failed by the app
+//! alone (spec decision I).
 
 use std::collections::{HashSet, VecDeque};
 
@@ -136,8 +139,10 @@ impl Core {
     /// any node accepted it: `NotDelivered`, `expired_at` = the packet's
     /// expiry, the message recomputed (and noted for `take_failed_notices`
     /// when it fails). Then purges the expired packets of the send queue,
-    /// except the deposited ones still awaiting their verdict. A deposited
-    /// packet is never failed here: only `confirm_expired` does that.
+    /// except the deposited ones still awaiting their verdict within the
+    /// nodes' ack grace. A deposited packet is never failed here: only
+    /// `confirm_expired` does that; past the grace it leaves the queue
+    /// still `OnNetwork`, without a notice.
     pub fn expire_due(&mut self, now: u64) -> Result<()> {
         let failed = self.store.transaction(|tx| {
             let expired: Vec<(Vec<u8>, i64)> = {
@@ -173,7 +178,9 @@ impl Core {
 
     /// Deposited packets whose delivery still awaits its fate
     /// (`OnNetwork`) although their expiry passed by `started_at`
-    /// (`expires_at <= started_at`): the network client checks their
+    /// (`expires_at <= started_at`), within the nodes' ack grace
+    /// (`started_at <= expires_at + ACK_GRACE_SECS`; past it, nothing can
+    /// confirm them and `expire_due` lets them go): the network client checks their
     /// mailbox and calls `confirm_expired` when the network no longer has
     /// them nor their ack. As `(packet, mailbox)`, oldest expiry first;
     /// copies for my devices and messageless packets included.
@@ -196,13 +203,18 @@ impl Core {
             .prepare(
                 "SELECT o.packet_id, o.bytes FROM outbox o \
                  JOIN deliveries d ON d.packet_id = o.packet_id \
-                 WHERE o.expires_at <= ?1 AND d.status = ?2 \
+                 WHERE o.expires_at <= ?1 AND o.expires_at >= ?3 AND d.status = ?2 \
                  ORDER BY o.expires_at, o.rowid",
             )
             .map_err(map_err)?;
+        let grace_start = started_at.saturating_sub(crate::packet::ACK_GRACE_SECS);
         let rows: Vec<(Vec<u8>, Vec<u8>)> = stmt
             .query_map(
-                params![to_i64(started_at), MessageStatus::OnNetwork as i64],
+                params![
+                    to_i64(started_at),
+                    MessageStatus::OnNetwork as i64,
+                    to_i64(grace_start)
+                ],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(map_err)?
@@ -231,7 +243,8 @@ impl Core {
     /// the awaited ack), the message is recomputed and, when it fails,
     /// noted for `take_failed_notices`. `true` if the delivery failed.
     /// No effect (false) on any other delivery, `Received` included, nor
-    /// before the packet's expiry. Idempotent.
+    /// before the packet's expiry, nor once it left the send queue or is
+    /// past the nodes' ack grace. Idempotent.
     pub fn confirm_expired(&mut self, packet: PacketId, now: u64) -> Result<bool> {
         let outcome = self.store.transaction(|tx| {
             let expires_at: Option<i64> = tx
@@ -243,9 +256,15 @@ impl Core {
                 )
                 .optional()
                 .map_err(map_err)?;
-            // Out of the queue, the expiry is unknown: the verdict date.
-            let expires_at = expires_at.map_or(now, to_u64);
-            if expires_at > now || !on_network(tx, packet)? {
+            // Out of the queue (let go unconfirmed past the ack grace), or
+            // past that grace: nothing can prove it lost any more.
+            let Some(expires_at) = expires_at.map(to_u64) else {
+                return Ok(None);
+            };
+            if expires_at > now
+                || expires_at.saturating_add(crate::packet::ACK_GRACE_SECS) < now
+                || !on_network(tx, packet)?
+            {
                 return Ok(None);
             }
             let failed = fail(tx, packet, MessageStatus::OnNetwork, expires_at)?;

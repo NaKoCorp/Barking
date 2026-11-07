@@ -3066,10 +3066,13 @@ fn expired_reply_with(
     }
     core.record_deposit(packet.id, &node, sealed).unwrap();
     let alice = core.contacts().unwrap()[0].fingerprint;
-    assert_eq!(
-        core.awaiting_verdict(NOW).unwrap(),
+    // Within the nodes' ack grace, it awaits its verdict.
+    let awaiting = if u64::from(packet.expires_at) + barking_packet::ACK_GRACE_SECS >= NOW {
         vec![(packet.id, packet.mailbox)]
-    );
+    } else {
+        Vec::new()
+    };
+    assert_eq!(core.awaiting_verdict(NOW).unwrap(), awaiting);
     assert!(core.awaited_ack_mailboxes(NOW).unwrap().is_empty());
     Expired {
         _dir: dir,
@@ -3418,6 +3421,30 @@ async fn no_verdict_before_the_replication_slack() {
     let report = sync(&mut e.core, &e.net, opts()).await;
     assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
     assert_eq!(report.failed.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn past_the_ack_grace_the_verdict_is_no_longer_sought() {
+    use barking_core::store::MessageStatus;
+    // Deposited, expired more than a day ago, its verdict never came: no
+    // node can hold its ack any more.
+    let sealed = NOW - 2 * DAY - 60;
+    let mut e = expired_reply_with(sealed, sealed + 30, Some(0), Some(0));
+    assert_eq!(holders(&mut e.core, &e.reply).len(), 1);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert!(
+        !fetched_pairs(&e.net.calls())
+            .iter()
+            .any(|(_, m)| *m == e.mailbox),
+        "its mailbox is no longer fetched"
+    );
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    assert!(
+        holders(&mut e.core, &e.reply).is_empty(),
+        "ledger entry dropped"
+    );
+    assert!(e.core.awaiting_verdict(NOW).unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

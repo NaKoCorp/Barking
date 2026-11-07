@@ -3213,6 +3213,47 @@ fn expiry_after_deposit_waits_for_the_verdict() {
 }
 
 #[test]
+fn verdict_never_given_ends_past_the_ack_grace_on_the_network() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "unconfirmed", NOW, &mut p.rng).unwrap();
+    let id = sent[0].id;
+    let expiry = u64::from(sent[0].expires_at);
+    p.a.record_deposit(id, NODE, NOW + 1).unwrap();
+    let row = row_of(&p.a, &bob, "unconfirmed");
+    let summary = |a: &mut Core, at: u64| a.deliveries_of(&[row], at).unwrap()[0].1.unwrap();
+    assert!(summary(&mut p.a, NOW + 2).awaiting_verdict);
+    // Up to the end of the nodes' ack grace, it still awaits its verdict.
+    let last = expiry + ACK_GRACE_SECS;
+    assert!(summary(&mut p.a, last).awaiting_verdict);
+    assert_eq!(
+        p.a.awaiting_verdict(last).unwrap(),
+        vec![(id, sent[0].mailbox)]
+    );
+    assert!(outbox_row(&p.a, id).is_some());
+    // Past it, no node can hold its ack any more: it leaves the queue and
+    // the awaited set, unconfirmed, and stays on the network.
+    assert!(p.a.awaiting_verdict(last + 1).unwrap().is_empty());
+    let s = summary(&mut p.a, last + 1);
+    assert!(!s.awaiting_verdict);
+    assert_eq!(s.state, MessageStatus::OnNetwork);
+    assert_eq!(delivery_state(&p.a, id).0, 1);
+    assert_eq!(
+        status_of(&p.a, &bob, "unconfirmed"),
+        MessageStatus::OnNetwork
+    );
+    assert_eq!(outbox_row(&p.a, id), None, "dropped from the queue");
+    assert!(p.a.pending_outbox(last + 1).unwrap().is_empty());
+    assert!(p.a.take_failed_notices().is_empty(), "no failure notice");
+    // A late verdict call can no longer fail it.
+    assert!(!p.a.confirm_expired(id, last + 2).unwrap());
+    assert_eq!(
+        status_of(&p.a, &bob, "unconfirmed"),
+        MessageStatus::OnNetwork
+    );
+}
+
+#[test]
 fn awaiting_verdict_skips_pending_and_received() {
     let mut p = settled_pair();
     let bob = p.b.fingerprint();
@@ -4072,6 +4113,7 @@ fn summary_counts_devices_per_state() {
         devices_left: 1,
         devices_tried: 0,
         devices_pending: 1,
+        awaiting_verdict: false,
     };
     let rows = b.messages_with_delivery(&alice, NOW + 5).unwrap();
     let (m, summary) = rows.iter().find(|(m, _)| m.id == row).unwrap();
@@ -4093,6 +4135,7 @@ fn summary_counts_devices_per_state() {
             deposited_at: Some(NOW + 6),
             devices_left: 2,
             devices_pending: 0,
+            awaiting_verdict: true,
             ..received
         }
     );

@@ -13,9 +13,10 @@ final class MessageSheetModelTests: XCTestCase {
 
     private func delivery(_ state: DeliveryState, deposited: UInt64? = nil, received: UInt64? = nil,
                           expired: UInt64? = nil, devices: UInt32 = 1, devicesReceived: UInt32 = 0,
-                          left: UInt32 = 0, pending: UInt32 = 0) -> Delivery {
+                          left: UInt32 = 0, pending: UInt32 = 0, awaiting: Bool = false) -> Delivery {
         Delivery(state: state, sealedAt: t0, depositedAt: deposited, receivedAt: received, expiredAt: expired,
-                 devices: devices, devicesReceived: devicesReceived, devicesLeft: left, devicesPending: pending)
+                 devices: devices, devicesReceived: devicesReceived, devicesLeft: left, devicesPending: pending,
+                 awaitingVerdict: awaiting)
     }
 
     private func device(_ id: String, _ name: String, _ state: DeliveryState, deposited: UInt64? = nil,
@@ -140,7 +141,7 @@ final class MessageSheetModelTests: XCTestCase {
 
         // Expired, verdict pending: still on the network, one line says so.
         let en = try lang("en")
-        let d = delivery(.onNetwork, deposited: t0 + 34, left: 1)
+        let d = delivery(.onNetwork, deposited: t0 + 34, left: 1, awaiting: true)
         XCTAssertNil(MessageSheetModel.verdictPending(d, now: Date(timeIntervalSince1970: TimeInterval(t0 + 3600)),
                                                       bundle: en.bundle, locale: en.locale, timeZone: utc))
         XCTAssertEqual(MessageSheetModel.verdictPending(d, now: Date(timeIntervalSince1970: TimeInterval(expiry + 60)),
@@ -150,6 +151,30 @@ final class MessageSheetModelTests: XCTestCase {
                                                       now: Date(timeIntervalSince1970: TimeInterval(expiry + 60)),
                                                       bundle: en.bundle, locale: en.locale, timeZone: utc),
                      "only a message still on the network waits for a verdict")
+    }
+
+    /// Important 1: past its expiry, a delivery no sync checks any more
+    /// (let go past the nodes' ack grace, or migrated without a queue row)
+    /// never promises a check at the next sync. It stays on the network.
+    func testUnconfirmedDeliveryDoesNotPromiseACheck() throws {
+        let expiry = t0 + 86_400
+        let after = Date(timeIntervalSince1970: TimeInterval(expiry + 60))
+        let unconfirmed = delivery(.onNetwork, deposited: t0 + 34, left: 1, awaiting: false)
+        let en = try lang("en")
+        XCTAssertEqual(MessageSheetModel.verdictPending(unconfirmed, now: after, bundle: en.bundle,
+                                                        locale: en.locale, timeZone: utc),
+                       "Expired at \(clock(expiry, en.locale)). Couldn’t be confirmed with the relays.")
+        let fr = try lang("fr")
+        XCTAssertEqual(MessageSheetModel.verdictPending(unconfirmed, now: after, bundle: fr.bundle,
+                                                        locale: fr.locale, timeZone: utc),
+                       "Expiré à \(clock(expiry, fr.locale)). Les relais n’ont pas pu le confirmer.")
+        let awaiting = delivery(.onNetwork, deposited: t0 + 34, left: 1, awaiting: true)
+        XCTAssertEqual(MessageSheetModel.verdictPending(awaiting, now: after, bundle: fr.bundle,
+                                                        locale: fr.locale, timeZone: utc),
+                       "Expiré à \(clock(expiry, fr.locale)). Vérification auprès des relais à la prochaine synchro.")
+        // Before its expiry, neither sentence.
+        XCTAssertNil(MessageSheetModel.verdictPending(unconfirmed, now: Date(timeIntervalSince1970: TimeInterval(t0 + 60)),
+                                                      bundle: en.bundle, locale: en.locale, timeZone: utc))
     }
 
     /// §6.4: a receipt that came before the deposit was traced, or a

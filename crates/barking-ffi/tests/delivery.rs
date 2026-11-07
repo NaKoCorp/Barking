@@ -88,6 +88,58 @@ fn expired_before_deposit_is_not_delivered() {
     assert_eq!(d.devices_pending, 0);
 }
 
+/// Runs `sql` on Alice's database (the deposit, then the expiry, as a
+/// sync and the clock would leave them).
+fn alice_sql(da: &tempfile::TempDir, sql: &str) {
+    let store = Store::open(&da.path().join("barking.db"), &[1; 32]).unwrap();
+    store.conn().execute(sql, ()).unwrap();
+}
+
+#[test]
+fn on_network_delivery_says_whether_it_awaits_its_verdict() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (alice, fb) = alice_with_bob(&da, &db);
+    alice.send_text(fb.clone(), "hello".into()).unwrap();
+    let delivery = |alice: &Device| {
+        alice.messages_with(fb.clone()).unwrap()[0]
+            .delivery
+            .clone()
+            .unwrap()
+    };
+    assert!(!delivery(&alice).awaiting_verdict, "pending: no verdict");
+    // A node accepted it: the sync checks it until its verdict.
+    alice_sql(
+        &da,
+        "UPDATE deliveries SET status = 1, deposited_at = 100, node = 'K7QX2M4A'",
+    );
+    alice_sql(&da, "UPDATE outbox SET deposited_at = 100");
+    alice_sql(&da, "UPDATE messages SET status = 1 WHERE direction = 0");
+    let d = delivery(&alice);
+    assert_eq!(d.state, DeliveryState::OnNetwork);
+    assert!(d.awaiting_verdict);
+    // Expired an hour ago: still awaiting its verdict.
+    alice_sql(
+        &da,
+        "UPDATE outbox SET expires_at = CAST(strftime('%s', 'now') AS INTEGER) - 3600",
+    );
+    let d = delivery(&alice);
+    assert_eq!(d.state, DeliveryState::OnNetwork);
+    assert!(d.awaiting_verdict);
+    // Past the nodes' ack grace: let go, unconfirmed, still on the network.
+    alice_sql(&da, "UPDATE outbox SET expires_at = 1");
+    let d = delivery(&alice);
+    assert_eq!(d.state, DeliveryState::OnNetwork);
+    assert!(!d.awaiting_verdict);
+    assert_eq!(
+        alice
+            .message_delivery(id_of(&alice, &fb, "hello"))
+            .unwrap()
+            .unwrap()
+            .delivery,
+        d
+    );
+}
+
 #[test]
 fn deliveries_of_tells_removed_from_no_summary() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());

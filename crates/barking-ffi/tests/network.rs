@@ -272,12 +272,21 @@ async fn sync_reports_failed_after_verdict() {
     .await
     .unwrap();
 
-    // Bob stays offline; two days later the relays purged the message,
-    // and Alice's packet is past its expiry.
+    // Bob stays offline; two days later the relays purged the message.
+    // Alice's packet expired three hours ago: past the replication slack,
+    // within the nodes' ack grace.
     set_clock_offset(2 * 86_400);
     tokio::time::sleep(TICK * 5).await;
     tokio::task::spawn_blocking(move || {
-        expire_queue(&da, 1);
+        let store = Store::open(&da.path().join("barking.db"), &[1; 32]).unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE outbox SET expires_at = CAST(strftime('%s', 'now') AS INTEGER) - 10800",
+                (),
+            )
+            .unwrap();
+        drop(store);
         let s = alice.sync(30_000).unwrap();
         let lost = DeliveryChange {
             contact: fb,

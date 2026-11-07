@@ -405,6 +405,7 @@
 "Expired on %@ before a relay accepted it. It never left this iPhone." = "Expiré le %@ avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.";
 "None of %@’s devices picked it up within 24 hours. The relay erased it on %@." = "Aucun appareil de %1$@ ne l’a relevé en 24 h. Le relais l’a effacé le %2$@.";
 "Expired at %@. Checking with the relays at the next sync." = "Expiré à %@. Vérification auprès des relais à la prochaine synchro.";
+"Expired at %@. Couldn’t be confirmed with the relays." = "Expiré à %@. Les relais n’ont pas pu le confirmer.";
 "%@ at %@" = "%1$@ à %2$@";
 "%@’s devices" = "Appareils de %@";
 "received" = "reçu";
