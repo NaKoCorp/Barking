@@ -75,6 +75,9 @@ struct Net {
     refuse_deposit: HashMap<NodeId, ErrorReason>,
     /// `refuse_deposit` refuses receipts too.
     refuse_acks: bool,
+    /// Message deposits expiring after this date are refused with
+    /// `TooFarInFuture`.
+    max_expiry: Option<u64>,
     /// Fetches from these nodes time out (on any session).
     fail_fetch: HashSet<NodeId>,
     /// Connections to these nodes are refused (the node answers).
@@ -334,7 +337,12 @@ impl Depositor for Net {
                 pow_spent: 0,
             };
         }
+        let too_far = message
+            && self.max_expiry.is_some_and(|max| {
+                Packet::decode(packet).is_ok_and(|p| u64::from(p.expires_at) > max)
+            });
         let result = match self.refuse_deposit.get(conn) {
+            _ if too_far => Err(ErrorReason::TooFarInFuture),
             Some(reason) if message || self.refuse_acks => Err(*reason),
             _ => Ok(()),
         };
@@ -1210,36 +1218,59 @@ async fn not_responsible_twice_runs_fallback_then_replans() {
     assert!(holders(&mut core, &bytes).contains(&r[2]));
 }
 
+/// Bob's message sealed at `at` (an outbox packet), found by its expiry.
+fn sealed_at(core: &mut Core, at: u64) -> Vec<u8> {
+    use rand::SeedableRng;
+    let to = core.contacts().unwrap()[0].fingerprint;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+    let sent = core.send_text(&to, "sealed", at, &mut rng).unwrap();
+    let expires = u64::from(sent[0].expires_at);
+    core.pending_outbox(NOW)
+        .unwrap()
+        .into_iter()
+        .find(|b| u64::from(Packet::decode(b).unwrap().expires_at) == expires)
+        .unwrap()
+}
+
+fn deposits_of(net: &Net, bytes: &[u8]) -> usize {
+    let h = content_hash(bytes);
+    net.calls()
+        .iter()
+        .filter(|c| matches!(c, Call::Deposit(_, x) if *x == h))
+        .count()
+}
+
 #[tokio::test(start_paused = true)]
 async fn too_far_in_future_is_refused_not_retried_forever() {
     let (_dir, mut core, mut net) = setup();
-    let (bytes, _) = message(&mut core);
-    // Every node refuses the message's expiry as too far in the future.
-    for n in 0..NODES {
-        net.refuse_deposit
-            .insert(id_of(n), ErrorReason::TooFarInFuture);
-    }
+    // The legacy case: a packet sealed with a 7-day expiry. Nodes refuse
+    // any expiry beyond 25 h from their clock.
+    net.max_expiry = Some(NOW + 25 * 3_600);
+    let legacy = sealed_at(&mut core, NOW + 6 * DAY);
     let first = sync(&mut core, &net, opts()).await;
-    // Dropped from the queue on the first refusal: no other node is asked.
-    assert_eq!(first.refused, 1);
-    assert_eq!(first.first_copies + first.extra_copies, 0);
-    // A sealed packet whose expiry is refused is never accepted: it left
-    // the outbox, so the next sync does not offer it again.
-    assert!(!core.pending_outbox(NOW).unwrap().contains(&bytes));
-    let h = content_hash(&bytes);
-    let before = net
-        .calls()
-        .iter()
-        .filter(|c| matches!(c, Call::Deposit(_, x) if *x == h))
-        .count();
+    assert!(first.refused >= 1);
+    // It will never be accepted: out of the queue, not offered again.
+    assert!(!core.pending_outbox(NOW).unwrap().contains(&legacy));
+    let before = deposits_of(&net, &legacy);
     let second = sync(&mut core, &net, opts()).await;
-    let after = net
-        .calls()
-        .iter()
-        .filter(|c| matches!(c, Call::Deposit(_, x) if *x == h))
-        .count();
-    assert_eq!(after, before);
+    assert_eq!(deposits_of(&net, &legacy), before);
     assert_eq!(second.refused, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_skewed_node_refusal_keeps_the_packet() {
+    let (_dir, mut core, mut net) = setup();
+    let (bytes, m) = message(&mut core);
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    // The best node's clock is behind: it refuses a normal 24 h packet.
+    net.refuse_deposit.insert(r[0], ErrorReason::TooFarInFuture);
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.refused >= 1);
+    // Another node took it, and it stays queued until its receipt.
+    assert_eq!(report.first_copies, 1);
+    assert!(core.pending_outbox(NOW).unwrap().contains(&bytes));
+    assert!(!holders(&mut core, &bytes).contains(&r[0]));
+    assert!(!holders(&mut core, &bytes).is_empty());
 }
 
 #[tokio::test(start_paused = true)]

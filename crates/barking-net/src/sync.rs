@@ -172,6 +172,9 @@ pub const REREAD_BYTES: usize = 8 << 20;
 /// Time all audit re-reads of a sync may take together (within the
 /// session fetch slice).
 pub const REREAD_TIME: Duration = Duration::from_secs(20);
+/// Furthest expiry a node accepts from now: 24 h plus one hour of clock
+/// tolerance (the node's `MAX_EXPIRY_SECS`).
+const NODE_MAX_EXPIRY_SECS: u64 = 90_000;
 /// `NotResponsible` answers from distinct responsibles of one mailbox that
 /// trigger a fallback lookup.
 pub const NOT_RESPONSIBLE_FALLBACK: usize = 2;
@@ -996,11 +999,21 @@ where
                 self.tally(&d, &result);
                 self.save();
                 match result {
-                    // A sealed packet whose expiry is refused is never
-                    // accepted: out of the queue, not offered again.
+                    // An expiry beyond what any node accepts by our own
+                    // clock is never accepted: out of the queue. Otherwise
+                    // the node's clock is the likely culprit: that node
+                    // failed, the packet stays queued for the others.
                     Err(ErrorReason::TooFarInFuture) => {
-                        let _ = self.core.drop_outbox_packet(&d.bytes);
-                        outbox.retain(|b| *b != d.bytes);
+                        let too_far = Packet::decode(&d.bytes).is_ok_and(|p| {
+                            u64::from(p.expires_at) > now.saturating_add(NODE_MAX_EXPIRY_SECS)
+                        });
+                        if too_far {
+                            let _ = self.core.drop_outbox_packet(&d.bytes);
+                            outbox.retain(|b| *b != d.bytes);
+                        } else {
+                            self.fail(d.node);
+                            self.save();
+                        }
                         continue 'plan;
                     }
                     Err(ErrorReason::RateLimited) => {

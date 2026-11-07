@@ -1215,7 +1215,7 @@ fn recovered_identity_reachable_by_existing_contact() {
 }
 
 #[test]
-fn skipped_keys_expire_after_seven_days() {
+fn skipped_key_is_still_usable_a_day_later() {
     let (mut a, mut b, mut rng) = pair();
     let p = one(a.send(&b.fp(), "opening", NOW, &mut rng));
     expect_msg(b.recv(&p, NOW, &mut rng));
@@ -1231,18 +1231,10 @@ fn skipped_keys_expire_after_seven_days() {
     // Bob receives p2 first: the keys of q0 and q1 are skipped up to `stored`.
     let stored = s + 1 - DAY;
     assert_eq!(expect_msg(b.recv(&p2, stored, &mut rng)).2, "p2");
-    // Key skipped for less than 7 days: still usable (the packet, which
-    // lives 24 hours, is still unexpired).
+    // A skipped key is still usable about a day later (the packet, which
+    // lives 24 hours, is still unexpired). The purge of a key skipped for
+    // more than 7 days is covered by crates/barking-core/src/ratchet/tests.rs.
     assert_eq!(expect_msg(b.recv(&q1, s + 3_000, &mut rng)).2, "q1");
-    // Key skipped for more than 7 days: purged. A packet lives only 24 hours,
-    // so a relay rewrites the expiry to make the old packet look fresh.
-    let late = stored + 7 * DAY + 1;
-    let mut rewritten = q0.clone();
-    rewritten.expires_at = u32::try_from(late + DEFAULT_TTL_SECS).unwrap();
-    match b.recv(&rewritten, late, &mut rng) {
-        ReceiveOutcome::Quarantined { .. } | ReceiveOutcome::NotForUs => {}
-        other => panic!("expired skipped key, got {other:?}"),
-    }
 }
 
 #[test]
