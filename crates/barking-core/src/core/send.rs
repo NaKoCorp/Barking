@@ -4,8 +4,8 @@
 use rand_core::CryptoRng;
 
 use super::{
-    Core, OwnDevices, de_init, de_state, load_card, log, route, ser_init, ser_state, session_ad,
-    session_id, sync,
+    Core, OwnDevices, de_init, de_state, delivery, load_card, log, route, ser_init, ser_state,
+    session_ad, session_id, sync,
 };
 use crate::envelope::{self, Body, Envelope, MAX_TEXT_LEN};
 use crate::handshake::{PrekeyBundle, pqxdh};
@@ -219,8 +219,9 @@ pub(super) fn seal_for(
             packet.kind,
             u64::from(packet.expires_at),
             now,
+            None,
         )?;
-        let size = u32::try_from(packet.tier.size()).unwrap_or(u32::MAX);
+        let size = delivery::packet_size(&packet);
         log(
             q,
             now,
@@ -280,16 +281,18 @@ impl Core {
                 *to,
                 Direction::Out,
                 text,
-                MessageStatus::Sent,
+                MessageStatus::Pending,
                 now,
                 message_id,
             )? {
                 return Err(CoreError::Store("duplicate message identifier".into()));
             }
             for (packet, peer_id) in &sealed {
-                tx.add_delivery(message_id, packet.id, *peer_id, false)?;
+                let size = delivery::packet_size(packet);
+                tx.add_delivery(message_id, packet.id, *peer_id, false, now, size)?;
                 route::record_sealed(tx, packet, now)?;
             }
+            delivery::recompute_message_status(tx, message_id)?;
             let copy = Body::SyncSent {
                 to: *to,
                 text: text.to_owned(),

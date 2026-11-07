@@ -98,7 +98,7 @@ pub(super) fn record(
 
 /// `Sealed` step of `packet`, with its size.
 pub(super) fn record_sealed(q: &impl Queries, packet: &Packet, now: u64) -> Result<()> {
-    let size = u32::try_from(packet.tier.size()).unwrap_or(u32::MAX);
+    let size = super::delivery::packet_size(packet);
     record(q, packet.id, RouteStep::Sealed, now, Some(size))
 }
 

@@ -14,6 +14,7 @@
 
 mod admin;
 mod contacts;
+pub(crate) mod delivery;
 mod frames;
 mod history;
 mod link;
@@ -135,7 +136,7 @@ pub enum ReceiveOutcome {
         text: String,
         ack: Packet,
     },
-    /// Verified ack for one of my packets, now `Delivered`.
+    /// Verified ack for one of my packets, its delivery now `Received`.
     AckReceived {
         packet_id: PacketId,
     },

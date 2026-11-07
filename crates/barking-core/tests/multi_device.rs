@@ -593,9 +593,10 @@ fn sent_on_a_appears_on_t() {
     }
     assert_eq!(acked, vec![sync_id]);
     assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 1);
+    // Bob's packet never reached a node: still pending.
     assert_eq!(
         a.core.messages_with(&bob_fp).unwrap()[0].status,
-        MessageStatus::Sent
+        MessageStatus::Pending
     );
     // Bob's ack, on the other hand, marks it delivered.
     let to_bob = pkts.iter().find(|p| p.id != sync_id).unwrap();
@@ -610,7 +611,7 @@ fn sent_on_a_appears_on_t() {
     }
     assert_eq!(
         a.core.messages_with(&bob_fp).unwrap()[0].status,
-        MessageStatus::Delivered
+        MessageStatus::Received
     );
     assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
 }
@@ -697,10 +698,10 @@ fn sent_on_t_reaches_bob_and_a() {
     }
     assert_eq!(
         t.core.messages_with(&bob_fp).unwrap()[0].status,
-        MessageStatus::Delivered
+        MessageStatus::Received
     );
     // On A, the copy stays "sent": only T receives Bob's ack.
-    assert_eq!(on_a[0].status, MessageStatus::Sent);
+    assert_eq!(on_a[0].status, MessageStatus::OnNetwork);
 }
 
 #[test]
@@ -1327,7 +1328,7 @@ fn history_setup(
     }
     let alice_view = conversation(&a.core, &alice_fp);
     assert!(alice_view.iter().any(|m| m.1 == Direction::In));
-    assert!(alice_view.iter().any(|m| m.3 == MessageStatus::Delivered));
+    assert!(alice_view.iter().any(|m| m.3 == MessageStatus::Received));
 
     let offer = a.core.link_offer(NOW, rng).unwrap();
     let (t, req) = begin(d, "t", 9, &offer, rng);

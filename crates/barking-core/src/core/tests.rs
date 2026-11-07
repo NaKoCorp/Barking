@@ -2010,7 +2010,7 @@ fn sync_sent_matching_imported_history_message_not_duplicated() {
             bob_fp,
             Direction::Out,
             "hello",
-            MessageStatus::Sent,
+            MessageStatus::OnNetwork,
             NOW + 1,
             sent[0].message_id,
         )
@@ -2894,4 +2894,118 @@ fn awaited_ack_mailboxes_lists_contact_messages_only() {
     let expiry = u64::from(late[0].expires_at);
     assert_eq!(a.awaited_ack_mailboxes(expiry).unwrap().len(), 1);
     assert!(a.awaited_ack_mailboxes(expiry + 1).unwrap().is_empty());
+}
+
+// --- Lot M, task 1: delivery states and times.
+
+/// `(status, sealed_at, size, acked_at)` of the delivery carrying `packet`.
+fn delivery_of(c: &Core, packet: PacketId) -> (i64, i64, Option<i64>, Option<i64>) {
+    c.store
+        .conn()
+        .query_row(
+            "SELECT status, sealed_at, size, acked_at FROM deliveries WHERE packet_id = ?1",
+            rusqlite::params![packet.0.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+}
+
+#[test]
+fn send_is_pending_until_deposit() {
+    let mut p = pair();
+    let sent =
+        p.a.send_text(&p.b.fingerprint(), "pending", NOW + 10, &mut p.rng)
+            .unwrap();
+    let rows = p.a.messages_with(&p.b.fingerprint()).unwrap();
+    let row = rows.iter().find(|m| m.body == "pending").unwrap();
+    assert_eq!(row.status, MessageStatus::Pending);
+    let size = i64::try_from(sent[0].tier.size()).unwrap();
+    assert!(size > 0);
+    let now = i64::try_from(NOW + 10).unwrap();
+    assert_eq!(delivery_of(&p.a, sent[0].id), (0, now, Some(size), None));
+}
+
+#[test]
+fn ack_sets_received_and_acked_at() {
+    let mut p = pair();
+    let sent =
+        p.a.send_text(&p.b.fingerprint(), "ack-me", NOW, &mut p.rng)
+            .unwrap();
+    let ack = match p
+        .b
+        .receive(&sent[0].encode(), "t", NOW, &mut p.rng)
+        .unwrap()
+    {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    assert!(matches!(
+        p.a.receive(&ack.encode(), "t", NOW + 7, &mut p.rng)
+            .unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    let rows = p.a.messages_with(&p.b.fingerprint()).unwrap();
+    let row = rows.iter().find(|m| m.body == "ack-me").unwrap();
+    assert_eq!(row.status, MessageStatus::Received);
+    let (status, _, _, acked_at) = delivery_of(&p.a, sent[0].id);
+    assert_eq!(
+        (status, acked_at),
+        (3, Some(i64::try_from(NOW + 7).unwrap()))
+    );
+}
+
+#[test]
+fn own_copy_ack_does_not_make_received() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let sent = a
+        .send_text(&b.fingerprint(), "copy", NOW, &mut rng)
+        .unwrap();
+    // Bob's device first, then the `SyncSent` copy for my tablet.
+    assert_eq!(sent.len(), 2);
+    let copy = &sent[1];
+    assert_eq!(delivery_of(&a, copy.id).1, i64::try_from(NOW).unwrap());
+    assert!(matches!(
+        t.receive(&copy.encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Synced { .. }
+    ));
+    let ack = t
+        .pending_outbox(NOW)
+        .unwrap()
+        .iter()
+        .map(|bytes| Packet::decode(bytes).unwrap())
+        .find(|p| p.kind == Kind::Ack)
+        .unwrap();
+    assert!(matches!(
+        a.receive(&ack.encode(), "t", NOW + 3, &mut rng).unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    assert_eq!(delivery_of(&a, copy.id).0, 3);
+    let rows = a.messages_with(&b.fingerprint()).unwrap();
+    assert_eq!(rows[0].status, MessageStatus::Pending);
+}
+
+#[test]
+fn emitted_ack_keeps_its_reference() {
+    let mut p = pair();
+    let sent =
+        p.a.send_text(&p.b.fingerprint(), "ref", NOW, &mut p.rng)
+            .unwrap();
+    let ack = match p
+        .b
+        .receive(&sent[0].encode(), "t", NOW, &mut p.rng)
+        .unwrap()
+    {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    let reference: Option<Vec<u8>> =
+        p.b.store
+            .conn()
+            .query_row(
+                "SELECT ref FROM outbox WHERE packet_id = ?1",
+                rusqlite::params![ack.id.0.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(reference, Some(sent[0].id.0.to_vec()));
 }

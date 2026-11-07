@@ -100,7 +100,8 @@ fn cards_contacts_and_outgoing_message() {
     assert_eq!(msgs.len(), 1);
     assert!(msgs[0].outgoing);
     assert_eq!(msgs[0].body, "salut");
-    assert_eq!(msgs[0].status, "sent");
+    // Not deposited on any node yet.
+    assert_eq!(msgs[0].status, "queued");
 }
 
 #[test]

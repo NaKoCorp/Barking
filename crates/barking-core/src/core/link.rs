@@ -1095,7 +1095,7 @@ mod tests {
                     c1,
                     crate::store::Direction::In,
                     "invented",
-                    crate::store::MessageStatus::Delivered,
+                    crate::store::MessageStatus::Received,
                     NOW,
                     MessageId([7; 16]),
                 )?;

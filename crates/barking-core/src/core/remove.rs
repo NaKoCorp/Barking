@@ -16,6 +16,7 @@
 
 use rand_core::CryptoRng;
 
+use super::delivery;
 use super::link::{META_OWN_CARD, rebuild_card};
 use super::send::{SealTime, Target, seal_for};
 use super::{Core, META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, admin, log, sync};
@@ -257,7 +258,14 @@ pub(super) fn send_remove_me(
         rng,
     )?;
     for (packet, peer) in &sealed {
-        q.add_delivery(message_id, packet.id, *peer, true)?;
+        q.add_delivery(
+            message_id,
+            packet.id,
+            *peer,
+            true,
+            now,
+            delivery::packet_size(packet),
+        )?;
     }
     if !sealed.is_empty() {
         q.put_meta(META_LEAVE_SENT, &true)?;

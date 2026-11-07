@@ -779,10 +779,10 @@ fn render_row(at: u64, direction: Direction, status: MessageStatus, body: &str) 
     };
     let status = match (direction, status) {
         (Direction::In, _) => "received",
-        (_, MessageStatus::Queued) => "pending",
-        (_, MessageStatus::Sent) => "sent",
-        (_, MessageStatus::Delivered) => "delivered",
-        (_, MessageStatus::Failed) => "failed",
+        (_, MessageStatus::Pending) => "pending",
+        (_, MessageStatus::OnNetwork) => "sent",
+        (_, MessageStatus::Received) => "delivered",
+        (_, MessageStatus::NotDelivered) => "failed",
     };
     format!(
         "{}  {arrow}  {status}  {}",
@@ -1019,7 +1019,7 @@ mod tests {
         let line = render_row(
             0,
             Direction::Out,
-            MessageStatus::Delivered,
+            MessageStatus::Received,
             "a\n[bob] x\u{1b}[31m",
         );
         assert_eq!(

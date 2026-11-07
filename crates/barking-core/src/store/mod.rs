@@ -22,21 +22,36 @@ use crate::identity::root::Fingerprint;
 use crate::packet::{Kind, Packet, PacketId};
 use crate::{CoreError, Result};
 
+/// State of a delivery (`deliveries.status`) or of a message
+/// (`messages.status`). The stored values are those of v2 (`Queued`,
+/// `Sent`, `Delivered`, `Failed`): only the names changed in v3.
+///
+/// An outgoing message takes the best state of its deliveries to the
+/// contact's devices (`own = 0`), see `core::delivery::recompute_message_status`;
+/// a copy for one of my devices never makes it `Received`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageStatus {
-    Queued = 0,
-    Sent = 1,
-    Delivered = 3,
-    Failed = 5,
+    /// Delivery: queued, no node accepted it yet. Message: no delivery
+    /// accepted, at least one pending.
+    Pending = 0,
+    /// Delivery: a node accepted it. Message: at least one delivery
+    /// accepted, none received.
+    OnNetwork = 1,
+    /// Delivery: its acknowledgement is verified. Message: at least one
+    /// delivery received. Also the state of every received message.
+    Received = 3,
+    /// Delivery: expired without a deposit, or deposited then expired
+    /// without an acknowledgement (confirmed). Message: all deliveries so.
+    NotDelivered = 5,
 }
 
 impl MessageStatus {
     fn from_i64(v: i64) -> Result<Self> {
         match v {
-            0 => Ok(Self::Queued),
-            1 => Ok(Self::Sent),
-            3 => Ok(Self::Delivered),
-            5 => Ok(Self::Failed),
+            0 => Ok(Self::Pending),
+            1 => Ok(Self::OnNetwork),
+            3 => Ok(Self::Received),
+            5 => Ok(Self::NotDelivered),
             _ => Err(CoreError::Store("unknown status".into())),
         }
     }
@@ -195,7 +210,7 @@ impl fmt::Debug for MessageRow {
     }
 }
 
-fn map_err(e: rusqlite::Error) -> CoreError {
+pub(crate) fn map_err(e: rusqlite::Error) -> CoreError {
     if let rusqlite::Error::SqliteFailure(f, _) = &e
         && f.code == ErrorCode::NotADatabase
     {
@@ -403,6 +418,10 @@ impl Store {
         self.conn
             .execute_batch(schema::ROUTE_STEPS)
             .map_err(map_err)?;
+        // Last: the backfill reads `deliveries.own` and `route_steps`.
+        if stored.is_none_or(|v| v < 3) {
+            schema::migrate_v2_to_v3(&self.conn).map_err(map_err)?;
+        }
         Ok(())
     }
 
@@ -645,25 +664,30 @@ pub trait Queries {
     }
 
     /// Records the packet `packet_id`, destined for device `device`, as a
-    /// delivery (awaiting acknowledgement) of the message `message_id`. `own`: synchronisation
-    /// copy for one of my devices.
+    /// `Pending` delivery of the message `message_id`, sealed at
+    /// `sealed_at`, of `size` bytes. `own`: synchronisation copy for one of
+    /// my devices.
     fn add_delivery(
         &self,
         message_id: MessageId,
         packet_id: PacketId,
         device: DeviceId,
         own: bool,
+        sealed_at: u64,
+        size: u32,
     ) -> Result<()> {
         self.conn()
             .execute(
-                "INSERT INTO deliveries(message_id, packet_id, device, status, own) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO deliveries(message_id, packet_id, device, status, own, \
+                 sealed_at, size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     message_id.0.as_slice(),
                     packet_id.0.as_slice(),
                     device.0.as_slice(),
-                    MessageStatus::Sent as i64,
-                    i64::from(own)
+                    MessageStatus::Pending as i64,
+                    i64::from(own),
+                    to_i64(sealed_at),
+                    i64::from(size)
                 ],
             )
             .map_err(map_err)?;
@@ -684,37 +708,37 @@ pub trait Queries {
         Ok(n > 0)
     }
 
-    /// Marks the delivery `packet_id` as delivered and the message `Delivered` (an
-    /// acknowledgement from a single recipient device is enough; that of a copy
-    /// for one of my devices, `own`, never counts). Returns the message
-    /// concerned, or `None` if no delivery carries this packet.
-    fn mark_delivered_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageId>> {
-        let row: Option<(Vec<u8>, i64)> = self
+    /// Marks the delivery `packet_id` as `Received`, acknowledged at `now`
+    /// (the first acknowledgement's time is kept). Returns the message
+    /// concerned, or `None` if no delivery carries this packet. The
+    /// message's state is left to the caller
+    /// (`core::delivery::recompute_message_status`): an acknowledgement from
+    /// a single recipient device makes it `Received`; that of a copy for one
+    /// of my devices (`own`) never does.
+    fn mark_delivered_by_packet(&self, packet_id: PacketId, now: u64) -> Result<Option<MessageId>> {
+        let mid: Option<Vec<u8>> = self
             .conn()
             .query_row(
-                "SELECT message_id, own FROM deliveries WHERE packet_id = ?1",
+                "SELECT message_id FROM deliveries WHERE packet_id = ?1",
                 params![packet_id.0.as_slice()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .optional()
             .map_err(map_err)?;
-        let Some((mid, own)) = row else {
+        let Some(mid) = mid else {
             return Ok(None);
         };
         self.conn()
             .execute(
-                "UPDATE deliveries SET status = ?1 WHERE packet_id = ?2",
-                params![MessageStatus::Delivered as i64, packet_id.0.as_slice()],
+                "UPDATE deliveries SET status = ?1, acked_at = coalesce(acked_at, ?2) \
+                 WHERE packet_id = ?3",
+                params![
+                    MessageStatus::Received as i64,
+                    to_i64(now),
+                    packet_id.0.as_slice()
+                ],
             )
             .map_err(map_err)?;
-        if own == 0 {
-            self.conn()
-                .execute(
-                    "UPDATE messages SET status = ?1 WHERE message_id = ?2 AND direction = ?3",
-                    params![MessageStatus::Delivered as i64, mid, Direction::Out as i64],
-                )
-                .map_err(map_err)?;
-        }
         Ok(Some(MessageId(arr(mid)?)))
     }
 
@@ -764,7 +788,7 @@ pub trait Queries {
             .conn()
             .query_row(
                 "SELECT count(*) FROM deliveries WHERE packet_id = ?1 AND status = ?2",
-                params![packet_id.0.as_slice(), MessageStatus::Delivered as i64],
+                params![packet_id.0.as_slice(), MessageStatus::Received as i64],
                 |r| r.get(0),
             )
             .map_err(map_err)?;
@@ -851,6 +875,7 @@ pub trait Queries {
     }
 
     /// Puts a packet in the send queue; no effect if it is already there.
+    /// `reference`: for a receipt, the packet it acknowledges (`outbox.ref`).
     fn outbox_put(
         &self,
         packet_id: PacketId,
@@ -858,17 +883,19 @@ pub trait Queries {
         kind: Kind,
         expires_at: u64,
         now: u64,
+        reference: Option<PacketId>,
     ) -> Result<()> {
         self.conn()
             .execute(
-                "INSERT INTO outbox(packet_id, bytes, kind, expires_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(packet_id) DO NOTHING",
+                "INSERT INTO outbox(packet_id, bytes, kind, expires_at, created_at, ref)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(packet_id) DO NOTHING",
                 params![
                     packet_id.0.as_slice(),
                     bytes,
                     kind as i64,
                     to_i64(expires_at),
-                    to_i64(now)
+                    to_i64(now),
+                    reference.as_ref().map(|r| r.0.as_slice())
                 ],
             )
             .map_err(map_err)?;
@@ -910,7 +937,8 @@ pub trait Queries {
 
     /// Queued packets (`expires_at >= now`) that carry a message (a
     /// `messages` row) to a contact's device (`own = 0`) and still await
-    /// its acknowledgement, with the date they were queued; oldest first.
+    /// its acknowledgement (`Pending` or `OnNetwork`), with the date they
+    /// were queued; oldest first.
     fn outbox_awaiting_ack(&self, now: u64) -> Result<Vec<(Vec<u8>, u64)>> {
         let mut stmt = self
             .conn()
@@ -918,12 +946,17 @@ pub trait Queries {
                 "SELECT o.bytes, o.created_at FROM outbox o \
                  JOIN deliveries d ON d.packet_id = o.packet_id \
                  JOIN messages m ON m.message_id = d.message_id \
-                 WHERE o.expires_at >= ?1 AND d.own = 0 AND d.status = ?2 \
+                 WHERE o.expires_at >= ?1 AND d.own = 0 AND d.status IN (?2, ?3) \
                  ORDER BY o.created_at, o.rowid",
             )
             .map_err(map_err)?;
+        let awaiting = params![
+            to_i64(now),
+            MessageStatus::Pending as i64,
+            MessageStatus::OnNetwork as i64
+        ];
         let rows = stmt
-            .query_map(params![to_i64(now), MessageStatus::Sent as i64], |r| {
+            .query_map(awaiting, |r| {
                 Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
             })
             .map_err(map_err)?

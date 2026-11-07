@@ -12,6 +12,7 @@ use std::collections::HashSet;
 
 use rand_core::CryptoRng;
 
+use super::delivery;
 use super::link::META_OWN_CARD;
 use super::route::{self, RouteStep};
 use super::send::{SealTime, Target, seal_for};
@@ -32,7 +33,7 @@ pub(super) const R_DEVICES_REFUSED: &str = "device list refused";
 
 /// Seals `body` for each of my other devices; each packet is
 /// recorded as an `own` delivery of `message_id` (its ack does not make
-/// the message "delivered"). Without another device, nothing is done.
+/// the message `Received`). Without another device, nothing is done.
 ///
 /// A content too large for a packet is not sent: the local
 /// operation succeeds anyway, and `SyncSkipped` is logged. The size is
@@ -56,7 +57,14 @@ pub(super) fn seal_to_own(
     }
     let sealed = seal_for(q, device, &Target::OwnDevices, body, message_id, time, rng)?;
     for (packet, peer) in &sealed {
-        q.add_delivery(message_id, packet.id, *peer, true)?;
+        q.add_delivery(
+            message_id,
+            packet.id,
+            *peer,
+            true,
+            time.now,
+            delivery::packet_size(packet),
+        )?;
         route::record(q, packet.id, RouteStep::OwnCopy, time.now, None)?;
     }
     Ok(sealed.into_iter().map(|(p, _)| p).collect())
@@ -94,7 +102,14 @@ pub(super) fn send_card_update(
             rng,
         )?;
         for (packet, peer) in sealed {
-            q.add_delivery(message_id, packet.id, peer, false)?;
+            q.add_delivery(
+                message_id,
+                packet.id,
+                peer,
+                false,
+                now,
+                delivery::packet_size(&packet),
+            )?;
             out.push(packet);
         }
     }
@@ -157,7 +172,14 @@ pub(super) fn send_own_card(
         rng,
     )?;
     for (packet, peer) in sealed {
-        q.add_delivery(message_id, packet.id, peer, false)?;
+        q.add_delivery(
+            message_id,
+            packet.id,
+            peer,
+            false,
+            now,
+            delivery::packet_size(&packet),
+        )?;
     }
     Ok(())
 }
@@ -201,7 +223,14 @@ pub(super) fn notify_revoked(
         rng,
     )?;
     for (packet, peer) in sealed {
-        q.add_delivery(message_id, packet.id, peer, false)?;
+        q.add_delivery(
+            message_id,
+            packet.id,
+            peer,
+            false,
+            now,
+            delivery::packet_size(&packet),
+        )?;
     }
     Ok(())
 }
@@ -308,7 +337,7 @@ pub(super) fn apply(
                 *to,
                 Direction::Out,
                 text,
-                MessageStatus::Sent,
+                MessageStatus::OnNetwork,
                 env.sent_at,
                 MessageId(env.message_id),
             )?;

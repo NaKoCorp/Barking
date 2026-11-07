@@ -16,6 +16,7 @@ use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+use super::delivery;
 use super::send::{SealTime, Target, seal_for};
 use super::sync::R_SYNC_REFUSED;
 use super::{Core, META_ROOT, OwnDevices, log, remove};
@@ -207,7 +208,14 @@ impl Core {
             let Some((packet, peer)) = sealed?.into_iter().next() else {
                 return Err(CoreError::NoSession);
             };
-            tx.add_delivery(message_id, packet.id, peer, true)?;
+            tx.add_delivery(
+                message_id,
+                packet.id,
+                peer,
+                true,
+                now,
+                delivery::packet_size(&packet),
+            )?;
             tx.put_meta(
                 META_ADMIN_TRANSFER,
                 &PendingTransfer {

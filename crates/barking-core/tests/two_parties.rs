@@ -188,7 +188,8 @@ fn ack_marks_delivered() {
     let (mut a, mut b, mut rng) = pair();
     let p = one(a.send(&b.fp(), "ack-me", NOW, &mut rng));
     let sent = a.core.messages_with(&b.fp()).unwrap();
-    assert_eq!(sent[0].status, MessageStatus::Sent);
+    // Not deposited on any node yet.
+    assert_eq!(sent[0].status, MessageStatus::Pending);
     assert_eq!(sent.len(), 1);
 
     let (_, _, _, ack) = expect_msg(b.recv(&p, NOW, &mut rng));
@@ -199,7 +200,7 @@ fn ack_marks_delivered() {
         other => panic!("AckReceived expected, got {other:?}"),
     }
     let after = a.core.messages_with(&b.fp()).unwrap();
-    assert_eq!(after[0].status, MessageStatus::Delivered);
+    assert_eq!(after[0].status, MessageStatus::Received);
     assert!(a.events().iter().any(
         |e| matches!(e, TransparencyEvent::AckVerified { for_packet } if *for_packet == p.id)
     ));
@@ -244,7 +245,7 @@ fn forged_or_malformed_acks_are_not_for_us() {
     ));
     assert_eq!(
         a.core.messages_with(&b.fp()).unwrap()[0].status,
-        MessageStatus::Sent
+        MessageStatus::Pending
     );
 }
 
@@ -586,7 +587,7 @@ fn send_to_multi_device_contact_is_one_message() {
     assert_eq!(pkts.len(), 2);
     let rows = a.core.messages_with(&bob).unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].status, MessageStatus::Sent);
+    assert_eq!(rows[0].status, MessageStatus::Pending);
     for core in [&mut bob1, &mut bob2] {
         let mut ack = None;
         for p in &pkts {
@@ -601,7 +602,7 @@ fn send_to_multi_device_contact_is_one_message() {
         assert!(matches!(out, ReceiveOutcome::AckReceived { .. }), "{out:?}");
         let rows = a.core.messages_with(&bob).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].status, MessageStatus::Delivered);
+        assert_eq!(rows[0].status, MessageStatus::Received);
     }
 }
 

@@ -4,6 +4,7 @@
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
+use super::delivery;
 use super::log_limit::{LogLimiter, log_limited};
 use super::route::{self, RouteStep};
 use super::{
@@ -140,9 +141,11 @@ impl Core {
                 return Ok((ReceiveOutcome::Duplicate, false));
             }
             // The ack of one of my devices (`SyncSent` copy, `own`
-            // delivery) does not make the message delivered: only that of a
+            // delivery) does not make the message `Received`: only that of a
             // contact's device counts.
-            tx.mark_delivered_by_packet(acked)?;
+            if let Some(message_id) = tx.mark_delivered_by_packet(acked, now)? {
+                delivery::recompute_message_status(tx, message_id)?;
+            }
             route::record(tx, acked, RouteStep::AckVerified, now, None)?;
             tx.outbox_remove(acked)?;
             // An acked request to be removed has left, whatever the transport saw.
@@ -530,7 +533,7 @@ fn accept(
         row.contact_fp,
         Direction::In,
         &text,
-        MessageStatus::Delivered,
+        MessageStatus::Received,
         now,
         message_id,
     )?;
@@ -875,6 +878,7 @@ fn emit_ack(
         ack.kind,
         u64::from(ack.expires_at),
         now,
+        Some(packet.id),
     )?;
     Ok(ack)
 }

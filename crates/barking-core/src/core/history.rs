@@ -111,7 +111,9 @@ enum WireDirection {
     In,
 }
 
-/// Status of a message in the archive.
+/// Status of a message in the archive. Wire format frozen: the v2 names
+/// stay, mapped one to one on `MessageStatus` (`Queued` ↔ `Pending`,
+/// `Sent` ↔ `OnNetwork`, `Delivered` ↔ `Received`, `Failed` ↔ `NotDelivered`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 enum WireStatus {
     Queued,
@@ -173,10 +175,10 @@ impl HistoryEntry {
             },
             body,
             status: match status {
-                MessageStatus::Queued => WireStatus::Queued,
-                MessageStatus::Sent => WireStatus::Sent,
-                MessageStatus::Delivered => WireStatus::Delivered,
-                MessageStatus::Failed => WireStatus::Failed,
+                MessageStatus::Pending => WireStatus::Queued,
+                MessageStatus::OnNetwork => WireStatus::Sent,
+                MessageStatus::Received => WireStatus::Delivered,
+                MessageStatus::NotDelivered => WireStatus::Failed,
             },
             at,
         }
@@ -191,10 +193,10 @@ impl HistoryEntry {
 
     fn status(&self) -> MessageStatus {
         match self.status {
-            WireStatus::Queued => MessageStatus::Queued,
-            WireStatus::Sent => MessageStatus::Sent,
-            WireStatus::Delivered => MessageStatus::Delivered,
-            WireStatus::Failed => MessageStatus::Failed,
+            WireStatus::Queued => MessageStatus::Pending,
+            WireStatus::Sent => MessageStatus::OnNetwork,
+            WireStatus::Delivered => MessageStatus::Received,
+            WireStatus::Failed => MessageStatus::NotDelivered,
         }
     }
 }
@@ -560,7 +562,7 @@ mod tests {
             (
                 MessageId([1; 16]),
                 Direction::In,
-                MessageStatus::Delivered,
+                MessageStatus::Received,
                 1,
                 "a"
             )

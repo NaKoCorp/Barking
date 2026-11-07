@@ -301,7 +301,7 @@ pub(crate) fn message_of(
     Ok(Message {
         route: crate::route::route_hint(core, m.id)?,
         id: m.id,
-        failed: m.status == MessageStatus::Failed,
+        failed: m.status == MessageStatus::NotDelivered,
         outgoing: m.direction == Direction::Out,
         body: m.body,
         status: status_name(m.status).to_owned(),
@@ -311,10 +311,10 @@ pub(crate) fn message_of(
 
 fn status_name(s: MessageStatus) -> &'static str {
     match s {
-        MessageStatus::Queued => "queued",
-        MessageStatus::Sent => "sent",
-        MessageStatus::Delivered => "delivered",
-        MessageStatus::Failed => "failed",
+        MessageStatus::Pending => "queued",
+        MessageStatus::OnNetwork => "sent",
+        MessageStatus::Received => "delivered",
+        MessageStatus::NotDelivered => "failed",
     }
 }
 
