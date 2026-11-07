@@ -121,6 +121,7 @@ private struct LinkOfferPanel: View {
                 .padding(12).background(Color.white, in: .rect(cornerRadius: Radius.card))
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel(Text("Link code. The new device scans it."))
+                .accessibilityIdentifier("link.code")
         }
     }
 }

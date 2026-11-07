@@ -65,10 +65,9 @@ final class ChatUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     func testAddContactByLinkAndSend() throws {
-        let app = XCUIApplication.fresh(extra: ["-BarkingUITestOpenCard", samCard])
+        // This test is the add: the app starts on the chats with no contact.
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestOpenCard", samCard])
         app.launch()
-        try onboard(app)
-        // The card link opened at launch waits for the identity, then shows.
         XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
         app.buttons["Add"].tap()
         app.staticTexts["Sam"].firstMatch.tap()
@@ -85,14 +84,9 @@ final class ChatUITests: XCTestCase {
     /// The header icon opens the path of the last message (a real message
     /// on a fake route: no network in UI tests).
     func testPathScreenShowsTheRoute() throws {
-        let app = XCUIApplication.fresh(extra: ["-BarkingUITestOpenCard", samCard, "-BarkingUITestFakeRoute"])
+        let app = XCUIApplication.seeded(extra: ["-BarkingUITestFakeRoute"])
         app.launch()
-        try onboard(app)
-        XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
-        app.buttons["Add"].tap()
-        app.staticTexts["Sam"].firstMatch.tap()
-        let field = app.textFields["Message"]
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        let field = openSamChat(app)
         field.tap()
         field.typeText("hello Sam")
         app.buttons["Send"].tap()
@@ -161,14 +155,9 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     func testStatusesHaveVoiceOverLabels() throws {
-        let app = XCUIApplication.fresh(extra: ["-BarkingUITestOpenCard", samCard])
+        let app = XCUIApplication.seeded()
         app.launch()
-        try onboard(app)
-        XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
-        app.buttons["Add"].tap()
-        app.staticTexts["Sam"].firstMatch.tap()
-        let field = app.textFields["Message"]
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        let field = openSamChat(app)
         field.tap()
         field.typeText("status check")
         app.buttons["Send"].tap()
@@ -186,9 +175,9 @@ final class DevicesUITests: XCTestCase {
     /// security filter (a new identity has logged nothing, so the filter
     /// only has to switch).
     func testTransparencyShowsWhereTheDataIs() throws {
-        let app = XCUIApplication.fresh()
+        let app = XCUIApplication.seeded(card: nil)
         app.launch()
-        try onboard(app)
+        XCTAssertTrue(app.tabBars.buttons["Settings"].waitForExistence(timeout: 10))
         app.tabBars.buttons["Settings"].tap()
         let row = app.buttons["settings.transparency"]
         XCTAssertTrue(row.waitForExistence(timeout: 5))
@@ -207,9 +196,9 @@ final class DevicesUITests: XCTestCase {
     /// The administrator alone: "Disconnect this device" is the wipe, with
     /// its warning, and leads back to the welcome screen.
     func testDisconnectingTheOnlyDeviceErasesIt() throws {
-        let app = XCUIApplication.fresh()
+        let app = XCUIApplication.seeded(card: nil)
         app.launch()
-        try onboard(app)
+        XCTAssertTrue(app.tabBars.buttons["Settings"].waitForExistence(timeout: 10))
         app.tabBars.buttons["Settings"].tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Linked devices")).firstMatch.tap()
         let disconnect = app.buttons["devices.disconnect"]
@@ -286,9 +275,9 @@ final class SecurityUITests: XCTestCase {
 
     /// UI review B3: a tap does nothing, a 2 s hold opens the confirmation.
     func testEraseNeedsATwoSecondHold() throws {
-        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestNoAutoUnlock"])
         app.launch()
-        try onboard(app)
+        XCTAssertTrue(app.buttons["New message"].waitForExistence(timeout: 10))
         openSecurity(app)
         let erase = app.buttons["security.erase"]
         XCTAssertTrue(erase.waitForExistence(timeout: 5))
@@ -302,9 +291,9 @@ final class SecurityUITests: XCTestCase {
     }
 
     func testEmergencyWipeReturnsToWelcome() throws {
-        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestNoAutoUnlock"])
         app.launch()
-        try onboard(app)
+        XCTAssertTrue(app.buttons["New message"].waitForExistence(timeout: 10))
         openSecurity(app)
         let erase = app.buttons["security.erase"]
         XCTAssertTrue(erase.waitForExistence(timeout: 5))
@@ -320,9 +309,9 @@ final class SecurityUITests: XCTestCase {
     }
 
     func testLockCoversTheAppAndUnlocks() throws {
-        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestNoAutoUnlock"])
         app.launch()
-        try onboard(app)
+        XCTAssertTrue(app.buttons["New message"].waitForExistence(timeout: 10))
         openSecurity(app)
         let toggle = app.switches["security.lock"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
@@ -337,9 +326,9 @@ final class SecurityUITests: XCTestCase {
 
     /// No Face ID on the way: the lock screen erases on its own.
     func testEmergencyWipeFromTheLockScreen() throws {
-        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestNoAutoUnlock"])
         app.launch()
-        try onboard(app)
+        XCTAssertTrue(app.buttons["New message"].waitForExistence(timeout: 10))
         openSecurity(app)
         let toggle = app.switches["security.lock"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
@@ -354,9 +343,9 @@ final class SecurityUITests: XCTestCase {
 
     /// A sheet open above the root stays under the cover, out of reach.
     func testLockCoversASheetOpenAboveTheRoot() throws {
-        let app = XCUIApplication.fresh(extra: ["-BarkingUITestNoAutoUnlock"])
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestNoAutoUnlock"])
         app.launch()
-        try onboard(app)
+        XCTAssertTrue(app.buttons["New message"].waitForExistence(timeout: 10))
         openSecurity(app)
         let toggle = app.switches["security.lock"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
@@ -379,9 +368,9 @@ final class SecurityUITests: XCTestCase {
 
     /// The lock screen asks for the owner by itself; "Unlock" is the retry.
     func testLockScreenAsksForTheOwnerOnItsOwn() throws {
-        let app = XCUIApplication.fresh()
+        let app = XCUIApplication.seeded(card: nil)
         app.launch()
-        try onboard(app)
+        XCTAssertTrue(app.buttons["New message"].waitForExistence(timeout: 10))
         openSecurity(app)
         let toggle = app.switches["security.lock"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
@@ -397,15 +386,11 @@ final class SecurityUITests: XCTestCase {
 final class SafetyCodeUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
-    /// Onboards, adds Sam from a link and opens Sam's safety code.
+    /// Opens Sam's safety code (Sam is seeded).
     private func openSafetyCode() throws -> XCUIApplication {
-        let app = XCUIApplication.fresh(extra: ["-BarkingUITestOpenCard", samCard])
+        let app = XCUIApplication.seeded()
         app.launch()
-        try onboard(app)
-        XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
-        app.buttons["Add"].tap()
-        app.staticTexts["Sam"].firstMatch.tap()
-        XCTAssertTrue(app.textFields["Message"].waitForExistence(timeout: 5))
+        openSamChat(app)
         app.staticTexts["Sam"].firstMatch.tap()
         XCTAssertTrue(app.buttons["The numbers match"].waitForExistence(timeout: 5))
         return app

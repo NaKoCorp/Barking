@@ -62,7 +62,8 @@ final class TourUITests: XCTestCase {
             if cancel.exists && cancel.isHittable { cancel.tap() }
             // Near the leading edge: at AX sizes the popover covers the middle.
             else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: outside)).tap() }
-            sleep(1)
+            // The dialog is gone once its Cancel button is.
+            app.buttons[L.cancel].firstMatch.waitUntil({ !$0.exists }, timeout: 3)
         }
         let row = { (prefix: String) in
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
@@ -72,9 +73,11 @@ final class TourUITests: XCTestCase {
         assertNoDotOverWelcomeText(app)
         snap(app, "welcome")
         // Onboarding side branches: first screens of recover and link.
-        app.buttons[L.recover].firstMatch.tap(); sleep(1)
+        app.buttons[L.recover].firstMatch.tap()
+        _ = app.textFields["recover.word.1"].waitForExistence(timeout: 10)
         snap(app, "recover-24-words"); back()
-        app.buttons[L.link].firstMatch.tap(); sleep(1)
+        app.buttons[L.link].firstMatch.tap()
+        _ = app.textFields["link.deviceName"].waitForExistence(timeout: 10)
         snap(app, "link-to-existing-device"); back()
         // Create.
         app.buttons[L.create].firstMatch.tap()
@@ -101,14 +104,16 @@ final class TourUITests: XCTestCase {
                 let c = app.secureTextFields["pdf.confirm"]
                 // At large sizes the second field can be below the fold, under the CTA bar.
                 // (At xxxLarge it is still in view, and a swipe would hide it.)
-                if size.contains(where: { $0.contains("Accessibility") }) || !c.isHittable { app.swipeUp(); sleep(1) }
+                if size.contains(where: { $0.contains("Accessibility") }) || !c.isHittable { app.swipeUp(); c.waitUntil({ $0.isHittable }) }
                 c.tap(); c.typeText("password1234")
                 snap(app, "pdf-password-sheet-weak")
-                app.buttons["pdf.suggest"].tap(); sleep(1)
+                app.buttons["pdf.suggest"].tap()
+                app.buttons["pdf.create"].waitUntil({ $0.isEnabled })
                 snap(app, "pdf-password-sheet-suggested")
             }
             if app.buttons[L.cancel].exists { app.buttons[L.cancel].tap() } else { app.swipeDown() }
-            sleep(1)
+            // Back on the phrase once the sheet's fields are gone.
+            app.secureTextFields["pdf.password"].waitUntil({ !$0.exists })
         }
         let wrote = app.descendants(matching: .any)["phrase.wroteItDown"]
         while !wrote.isHittable { app.swipeUp() }
@@ -127,31 +132,41 @@ final class TourUITests: XCTestCase {
                 let n = Int(l.value as? String ?? "") ?? 0
                 app.buttons["quiz.\(q).\(words[n] ?? "")"].tap()
             }
-            app.buttons[L.confirm].tap(); sleep(1)
+            app.buttons[L.confirm].tap()
+            _ = app.descendants(matching: .any)["quiz.error"].waitForExistence(timeout: 10)
             snap(app, "phrase-confirmation-wrong-word")
         }
         // Skip: the chats keep the "not confirmed" banner.
         if app.buttons[L.later].exists { app.buttons[L.later].tap() }
-        _ = app.staticTexts["Sam"].waitForExistence(timeout: 10)
-        sleep(1)
+        // The card opened at launch shows its Add button once the chats are up.
+        _ = app.buttons[L.add].waitForExistence(timeout: 10)
         snap(app, "add-contact-from-link")
         if app.buttons[L.add].exists { app.buttons[L.add].tap() }
-        sleep(1)
+        // The card sheet is gone and the chats show Sam.
+        app.buttons[L.add].waitUntil({ !$0.exists })
+        _ = app.staticTexts["Sam"].waitForExistence(timeout: 10)
         snap(app, "chats-phrase-not-confirmed-banner")
         // Conversation with a few messages and the route badge.
         app.staticTexts["Sam"].firstMatch.tap()
         let field = app.textFields[L.message]
         if field.waitForExistence(timeout: 5) {
             for text in ["hello Sam", "Are you there?", "Meet at the market at six."] {
-                field.tap(); field.typeText(text); app.buttons[L.send].tap(); sleep(1)
+                field.tap(); field.typeText(text); app.buttons[L.send].tap()
+                _ = app.staticTexts[text].waitForExistence(timeout: 10)
             }
-            if app.keyboards.count > 0 { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap() }
+            if app.keyboards.count > 0 {
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
+                app.keyboards.firstMatch.waitUntil({ !$0.exists })
+            }
         }
-        sleep(1)
         snap(app, "conversation")
         let path = app.buttons["conversation.path"]
         if path.waitForExistence(timeout: 5) {
-            path.tap(); sleep(2)
+            path.tap()
+            // The stops load after the screen shows: wait for the relay's row,
+            // whose id is the same in both languages.
+            _ = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS %@", "K7QX2M4A")).firstMatch.waitForExistence(timeout: 10)
             snap(app, "message-path")
             back()
         }
@@ -160,25 +175,28 @@ final class TourUITests: XCTestCase {
             : app.staticTexts["Sam"].firstMatch
         var popped = false
         if header.exists {
-            header.tap(); sleep(2)
+            header.tap()
+            let code = app.descendants(matching: .any)["contact.safetyCode"].firstMatch
+            _ = code.waitForExistence(timeout: 10)
             snap(app, "safety-code")
             // Review final #1: the groups never wrap, so at any text size the
             // code stays inside the screen (it would overflow, not wrap).
-            let code = app.descendants(matching: .any)["contact.safetyCode"].firstMatch
-            if code.waitForExistence(timeout: 2) {
+            if code.exists {
                 let screen = app.windows.firstMatch.frame
                 XCTAssertGreaterThanOrEqual(code.frame.minX, screen.minX, "safety code overflows")
                 XCTAssertLessThanOrEqual(code.frame.maxX, screen.maxX, "safety code overflows")
             } else {
                 XCTFail("safety code not found")
             }
-            app.swipeUp(); sleep(1)
+            app.swipeUp()
+            code.waitUntilStill()
             snap(app, "safety-code-devices")
             // The danger zone is at the bottom: at AX sizes, several screens down.
             let delete = app.buttons["contact.delete"]
             for _ in 0..<6 where delete.exists && !delete.isHittable { app.swipeUp() }
             if delete.exists && delete.isHittable {
-                delete.tap(); sleep(1)
+                delete.tap()
+                _ = app.buttons[L.cancel].firstMatch.waitForExistence(timeout: 3)
                 snap(app, "dialog-delete-contact", numbered: false)
                 dismissDialog(0.42)
             }
@@ -186,10 +204,11 @@ final class TourUITests: XCTestCase {
             let mismatch = app.buttons[L.mismatch]
             for _ in 0..<8 where mismatch.exists && !mismatch.isHittable { app.swipeDown() }
             if mismatch.exists && mismatch.isHittable {
-                mismatch.tap(); sleep(1)
+                mismatch.tap()
+                _ = app.buttons[L.close].firstMatch.waitForExistence(timeout: 5)
                 snap(app, "sheet-mismatch", numbered: false)
                 if app.buttons[L.close].firstMatch.exists { app.buttons[L.close].firstMatch.tap() } else { app.swipeDown() }
-                sleep(1)
+                app.buttons[L.close].firstMatch.waitUntil({ !$0.exists }, timeout: 5)
                 snap(app, "safety-code-mismatched", numbered: false)
             }
             let match = app.buttons[L.match]
@@ -203,36 +222,49 @@ final class TourUITests: XCTestCase {
         }
         // Back to the chats: the conversation hides the tab bar (UI review
         // B4), so go back until it shows, whatever the safety code left.
-        for _ in 0..<3 where !app.tabBars.buttons[L.network].exists { back(); sleep(1) }
-        app.tabBars.buttons[L.network].tap(); sleep(1)
+        for _ in 0..<3 where !app.tabBars.buttons[L.network].exists {
+            back()
+            _ = app.tabBars.buttons[L.network].waitForExistence(timeout: 3)
+        }
+        app.tabBars.buttons[L.network].tap()
+        _ = app.buttons[L.sync].waitForExistence(timeout: 10)
         snap(app, "network")
         // UI review B4: the line Sync now leaves (unnumbered).
         let sync = app.buttons[L.sync]
         if sync.exists {
-            sync.tap(); sleep(3)
+            sync.tap()
+            _ = app.descendants(matching: .any)["network.result"].waitForExistence(timeout: 15)
             snap(app, "network-synced", numbered: false)
         }
-        app.tabBars.buttons[L.settings].tap(); sleep(1)
+        app.tabBars.buttons[L.settings].tap()
+        _ = app.buttons["settings.transparency"].waitForExistence(timeout: 10)
         snap(app, "settings")
-        row(L.linked).tap(); sleep(1)
-        snap(app, "linked-devices")
+        row(L.linked).tap()
         let linkNew = app.buttons[L.linkNew]
-        if linkNew.waitForExistence(timeout: 3) {
-            linkNew.tap(); sleep(3)
+        _ = linkNew.waitForExistence(timeout: 10)
+        snap(app, "linked-devices")
+        if linkNew.exists {
+            linkNew.tap()
+            _ = app.images["link.code"].waitForExistence(timeout: 10)
             snap(app, "link-a-new-device-sheet")
             if app.buttons[L.close].firstMatch.exists { app.buttons[L.close].firstMatch.tap() } else { app.swipeDown() }
-            sleep(1)
+            app.buttons[L.close].firstMatch.waitUntil({ !$0.exists }, timeout: 5)
         }
         back()
-        row(L.identity).tap(); sleep(2)
+        row(L.identity).tap()
+        let edit = app.descendants(matching: .any)["identity.edit"]
+        _ = edit.waitForExistence(timeout: 10)
         snap(app, "my-identity")
-        app.swipeUp(); sleep(1)
+        app.swipeUp()
+        edit.waitUntilStill()
         snap(app, "my-identity-code")
         back()
-        app.buttons["settings.transparency"].tap(); sleep(2)
+        app.buttons["settings.transparency"].tap()
+        _ = app.descendants(matching: .any)["transparency.data"].waitForExistence(timeout: 10)
         snap(app, "transparency")
         back()
-        row(L.security).tap(); sleep(1)
+        row(L.security).tap()
+        _ = app.switches["security.lock"].waitForExistence(timeout: 10)
         snap(app, "security")
         let erase = app.buttons["security.erase"]
         if erase.waitForExistence(timeout: 3) {
@@ -247,21 +279,24 @@ final class TourUITests: XCTestCase {
             // At AX sizes the erase control sits below the fold: back to the top.
             for _ in 0..<3 where !toggle.isHittable { app.swipeDown() }
             toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
-            sleep(1)
+            toggle.waitUntil({ ($0.value as? String) == "1" })
             snap(app, "security-lock-on")
             // The delay is a menu (UI review B2): open it, snap it, keep the value.
             let delay = app.buttons["security.delay"]
             if delay.waitForExistence(timeout: 3) {
-                delay.tap(); sleep(1)
+                delay.tap()
+                _ = app.buttons[L.immediately].firstMatch.waitForExistence(timeout: 5)
                 snap(app, "menu-lock-delay", numbered: false)
                 let same = app.buttons[L.immediately].firstMatch
                 if same.exists && same.isHittable { same.tap() } else { dismissDialog(0.15) }
-                sleep(1)
+                // The menu is closed once the switch is reachable again.
+                toggle.waitUntil({ $0.isHittable })
             }
             XCUIDevice.shared.press(.home)
             app.activate()
-            if app.buttons["lock.unlock"].waitForExistence(timeout: 10) {
-                sleep(1)
+            let unlock = app.buttons["lock.unlock"]
+            if unlock.waitForExistence(timeout: 10) {
+                unlock.waitUntil({ $0.isHittable })
                 snap(app, "lock-screen")
             }
         }

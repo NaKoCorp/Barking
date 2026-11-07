@@ -62,15 +62,20 @@ final class AppRouter {
             try? BenchStore.shared().append(record)
             SharedPaths.devExportBench()
         }
+        let router = AppRouter(start: initialState(
+            opening: { try DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs) },
+            runner: AppCallRunner()))
+        // A card to add at launch: after the onboarding on a fresh install,
+        // over the chats on a seeded one.
         if let i = args.firstIndex(of: "-BarkingUITestOpenCard"), i + 1 < args.count {
-            let router = AppRouter(start: .onboarding)
             router.pendingCardLink = args[i + 1]
-            return router
         }
-        #endif
+        return router
+        #else
         return AppRouter(start: initialState(
             opening: { try DeviceFactory.openExisting(lockTimeoutMs: Budget.appLockMs) },
             runner: AppCallRunner()))
+        #endif
     }
 
     /// No identity: onboarding; a pending link: the waiting screen; an error

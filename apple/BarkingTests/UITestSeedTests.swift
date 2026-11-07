@@ -44,4 +44,49 @@ final class UITestSeedTests: XCTestCase {
             XCTAssertEqual($0 as? UITestSeed.Error, .unknownScenario("nope"))
         }
     }
+
+    // MARK: Guards on the UI test sources
+
+    private func uiTestSources() throws -> [(name: String, text: String)] {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("BarkingUITests")
+        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
+            throw XCTSkip("UI test sources not readable at \(root.path)")
+        }
+        return try walker.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+            .map { ($0.lastPathComponent, try String(contentsOf: $0, encoding: .utf8)) }
+    }
+
+    /// A test waits for the element the next screen shows; the only `sleep(`
+    /// left is the gap between two screenshots in assertNoDotOverWelcomeText.
+    func testNoSleepInUITests() throws {
+        let files = try uiTestSources()
+        XCTAssertTrue(files.contains { $0.name == "TourUITests.swift" }, "BarkingUITests not scanned")
+        for file in files {
+            var inAllowed = false
+            for (i, line) in file.text.components(separatedBy: "\n").enumerated() {
+                if line.contains("func assertNoDotOverWelcomeText") { inAllowed = true }
+                else if inAllowed, line.hasPrefix("}") { inAllowed = false; continue }
+                if !inAllowed, line.contains("sleep(") {
+                    XCTFail("\(file.name):\(i + 1): sleep( outside assertNoDotOverWelcomeText")
+                }
+            }
+        }
+    }
+
+    /// These tests cover the welcome and onboarding screens, so they start from a
+    /// fresh install, never from the seed.
+    func testOnboardingTestsStillOnboard() throws {
+        let flow = try XCTUnwrap(try uiTestSources().first { $0.name == "FlowUITests.swift" }?.text)
+        for name in ["testCreateIdentityAndConfirmPhrase", "testFieldFooterIsReadOnce",
+                     "testWelcomeDotsStayOffTheText", "testRecoverTileSaysItsWord",
+                     "testLaterKeepsTheBanner", "testAppearanceChosenOnWelcomeIsKept"] {
+            let start = try XCTUnwrap(flow.range(of: "func \(name)()"), "\(name) not found")
+            let rest = flow[start.upperBound...]
+            let end = rest.range(of: "\n    }\n")?.lowerBound ?? rest.endIndex
+            let body = rest[..<end]
+            XCTAssertTrue(body.contains("XCUIApplication.fresh("), "\(name) must start from a fresh install")
+            XCTAssertFalse(body.contains("seeded("), "\(name) must not use the seed")
+        }
+    }
 }

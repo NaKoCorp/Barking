@@ -24,6 +24,55 @@ extension XCUIApplication {
     }
 }
 
+extension XCUIElement {
+    /// Polls `predicate` on this element until it holds or `timeout` runs out.
+    /// The run loop keeps turning between polls, so this is not a fixed pause.
+    @discardableResult
+    func waitUntil(_ predicate: @escaping (XCUIElement) -> Bool, timeout: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if predicate(self) { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        return predicate(self)
+    }
+}
+
+extension XCUIElement {
+    /// Waits until the element's frame has stopped moving: a scroll that has
+    /// settled, so the screenshot that follows is of the final position.
+    /// False when the element is missing or never settles.
+    @discardableResult
+    func waitUntilStill(timeout: TimeInterval = 5) -> Bool {
+        guard waitForExistence(timeout: timeout) else { return false }
+        let deadline = Date().addingTimeInterval(timeout)
+        var last = frame
+        var calm = 0
+        while Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            guard exists else { return false }
+            let now = frame
+            calm = now == last ? calm + 1 : 0
+            last = now
+            if calm >= 3 { return true }
+        }
+        return false
+    }
+}
+
+/// From the chats of a seeded app, opens the conversation with Sam and
+/// returns its message field.
+@MainActor
+@discardableResult
+func openSamChat(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+    let sam = app.staticTexts["Sam"].firstMatch
+    XCTAssertTrue(sam.waitForExistence(timeout: 10), "Sam is not in the chats", file: file, line: line)
+    sam.tap()
+    let field = app.textFields["Message"]
+    XCTAssertTrue(field.waitForExistence(timeout: 5), "no message field", file: file, line: line)
+    return field
+}
+
 /// Creates an identity through the onboarding and lands on the chats.
 @MainActor
 func onboard(_ app: XCUIApplication, confirm: Bool = true) throws {
