@@ -48,6 +48,10 @@ pub struct Delivery {
     pub devices_received: u32,
     /// On the network or received.
     pub devices_left: u32,
+    /// Still pending but a deposit was tried: a node may have it, so a
+    /// deletion counts it as left (spec §14.1). Included in `devices_pending`.
+    #[uniffi(default = 0)]
+    pub devices_tried: u32,
     /// Still waiting on this iPhone (not deposited, not expired).
     pub devices_pending: u32,
 }
@@ -187,6 +191,10 @@ pub struct PendingMessage {
     pub devices: u32,
     /// Its contact deliveries on the network or received.
     pub devices_left: u32,
+    /// Its contact deliveries pending whose deposit was tried: a node may
+    /// have them (spec §14.1).
+    #[uniffi(default = 0)]
+    pub devices_tried: u32,
 }
 
 /// Pending packets of one sort (the "Synchronisation" section).
@@ -243,6 +251,7 @@ pub(crate) fn delivery_of(s: DeliverySummary) -> Delivery {
         devices: s.devices,
         devices_received: s.devices_received,
         devices_left: s.devices_left,
+        devices_tried: s.devices_tried,
         devices_pending: s.devices_pending,
     }
 }
@@ -368,6 +377,7 @@ fn pending_of(core: &Core, p: store::PendingPackets) -> Result<PendingPackets, B
                 packets: m.packets,
                 devices: m.devices,
                 devices_left: m.devices_left,
+                devices_tried: m.devices_tried,
             })
             .collect(),
         sync: p

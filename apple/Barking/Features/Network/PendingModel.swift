@@ -22,6 +22,8 @@ final class PendingModel {
         let packets: Int
         let devices: Int
         let devicesLeft: Int
+        /// Deposit tried, answer unknown: a node may have it (§14.1).
+        let devicesTried: Int
 
         init(_ m: PendingMessage) {
             id = m.messageId
@@ -33,10 +35,14 @@ final class PendingModel {
             packets = Int(m.packets)
             devices = Int(m.devices)
             devicesLeft = Int(m.devicesLeft)
+            devicesTried = Int(m.devicesTried)
         }
 
         /// Part of it already left for a device (it cannot be recalled).
         var partlyLeft: Bool { devicesLeft > 0 }
+        /// Part of it may have left: it left, or a deposit was tried. The
+        /// texts never say its contact will not receive it (§14.1).
+        var mayHaveLeft: Bool { devicesLeft + devicesTried > 0 }
     }
 
     /// One line of the "Sync" section: a sort of packet, in numbers.
@@ -259,7 +265,7 @@ final class PendingModel {
     private static func estimate(of row: Row) -> Delivery {
         Delivery(state: row.partlyLeft ? .onNetwork : .pending,
                  sealedAt: UInt64(row.sealedAt.timeIntervalSince1970), depositedAt: nil, receivedAt: nil, expiredAt: nil,
-                 devices: UInt32(row.devices), devicesReceived: 0, devicesLeft: UInt32(row.devicesLeft),
+                 devices: UInt32(row.devices), devicesReceived: 0, devicesLeft: UInt32(row.devicesLeft), devicesTried: UInt32(row.devicesTried),
                  devicesPending: UInt32(max(1, row.devices - row.devicesLeft)))
     }
 
@@ -350,7 +356,7 @@ final class PendingModel {
         let rows = messages
         let title = String(localized: "Cancel \(rows.count) messages?", bundle: bundle, locale: locale)
         let button = String(localized: "Delete and cancel", bundle: bundle, locale: locale)
-        guard !rows.contains(where: \.partlyLeft) else {
+        guard !rows.contains(where: \.mayHaveLeft) else {
             return Confirmation(title: title, message: Self.cancelledAndKept(rows, bundle: bundle, locale: locale), button: button)
         }
         let names = Self.recipients(of: rows)
@@ -365,8 +371,8 @@ final class PendingModel {
 
     /// "2 haven’t left and will be cancelled. 1 is already on the network: Sam will still receive it."
     private static func cancelledAndKept(_ rows: [Row], bundle: Bundle, locale: Locale) -> String {
-        let cancelled = rows.filter { !$0.partlyLeft }.count
-        let kept = rows.filter(\.partlyLeft)
+        let cancelled = rows.filter { !$0.mayHaveLeft }.count
+        let kept = rows.filter(\.mayHaveLeft)
         var sentences: [String] = []
         if cancelled > 0 {
             sentences.append(String(localized: "\(cancelled) haven’t left and will be cancelled.", bundle: bundle, locale: locale))

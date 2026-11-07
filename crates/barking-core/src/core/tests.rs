@@ -3912,6 +3912,31 @@ fn tried_own_copy_is_kept_when_nobody_receives() {
 }
 
 #[test]
+fn a_tried_deposit_counts_in_devices_tried() {
+    let (_d, mut a, _t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "tried", NOW, &mut rng).unwrap();
+    let row = row_of(&a, &bob, "tried");
+    let summary = |a: &mut Core| a.deliveries_of(&[row], NOW + 3).unwrap()[0].1.unwrap();
+    assert_eq!(summary(&mut a).devices_tried, 0);
+    // The request was sent, its answer lost: the packet may be on a node.
+    a.record_deposit_tried(sent[0].id, NOW + 1).unwrap();
+    let s = summary(&mut a);
+    assert_eq!(
+        (s.devices_tried, s.devices_left, s.devices_pending),
+        (1, 0, 1)
+    );
+    assert_eq!(s.state, MessageStatus::Pending, "the state stays Pending");
+    let detail = a.message_delivery(row, NOW + 3).unwrap().unwrap();
+    assert_eq!(detail.summary.devices_tried, 1);
+    let rows = a.messages_with_delivery(&bob, NOW + 3).unwrap();
+    assert_eq!(rows[0].1.unwrap().devices_tried, 1);
+    let pending = a.pending_packets(NOW + 3).unwrap();
+    assert_eq!(pending.messages[0].devices_tried, 1);
+    assert_eq!(pending.messages[0].devices_left, 0);
+}
+
+#[test]
 fn delete_event_has_no_content() {
     let mut p = settled_pair();
     let bob = p.b.fingerprint();
@@ -4045,6 +4070,7 @@ fn summary_counts_devices_per_state() {
         devices: 2,
         devices_received: 1,
         devices_left: 1,
+        devices_tried: 0,
         devices_pending: 1,
     };
     let rows = b.messages_with_delivery(&alice, NOW + 5).unwrap();
@@ -4304,6 +4330,7 @@ fn pending_kinds_are_classified() {
             packets: 1,
             devices: 1,
             devices_left: 0,
+            devices_tried: 0,
         }]
     );
     assert_eq!(

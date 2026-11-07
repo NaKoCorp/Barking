@@ -44,6 +44,7 @@ struct ChatsView: View {
                             Button(role: .destructive) { confirmDelete = row } label: {
                                 Label("Delete", systemImage: "trash")
                             }
+                            .tint(Color.danger)
                         }
                 }
             }

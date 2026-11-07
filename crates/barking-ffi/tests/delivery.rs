@@ -54,7 +54,15 @@ fn sent_message_carries_its_delivery() {
         (d.deposited_at, d.received_at, d.expired_at),
         (None, None, None)
     );
-    assert_eq!((d.devices, d.devices_received, d.devices_left), (1, 0, 0));
+    assert_eq!(
+        (
+            d.devices,
+            d.devices_received,
+            d.devices_left,
+            d.devices_tried
+        ),
+        (1, 0, 0, 0)
+    );
     assert_eq!(d.devices_pending, 1);
     // The chats list's last message keeps it too.
     let s = alice.chat_summaries().unwrap();
@@ -246,7 +254,10 @@ fn pending_packets_and_count() {
     assert_eq!((m.contact.as_str(), m.name.as_str()), (fb.as_str(), "Bob"));
     assert_eq!(m.body, "waiting");
     assert!(m.sealed_at > 0 && m.expires_at > m.sealed_at);
-    assert_eq!((m.packets, m.devices, m.devices_left), (1, 1, 0));
+    assert_eq!(
+        (m.packets, m.devices, m.devices_left, m.devices_tried),
+        (1, 1, 0, 0)
+    );
     let sync: u32 = p.sync.iter().map(|s| s.packets).sum();
     assert_eq!(p.packets, m.packets + sync);
     assert_eq!(alice.pending_count().unwrap(), p.packets);

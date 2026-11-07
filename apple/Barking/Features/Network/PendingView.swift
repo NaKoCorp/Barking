@@ -235,10 +235,13 @@ struct PendingContent: View {
                                                                  bundle: .strings(for: locale), locale: locale).spoken))
             .accessibilityHint(selecting ? Text("") : Text("Opens the message details."))
             .accessibilityAddTraits(selecting && selected ? [.isButton, .isSelected] : .isButton)
-            .accessibilityAction(named: Text("Delete")) { if !selecting { delete(row.id) } }
+            .accessibilityActions {
+                if !selecting { Button("Delete") { delete(row.id) } }
+            }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 if !selecting {
                     Button(role: .destructive) { delete(row.id) } label: { Text("Delete") }
+                        .tint(Color.danger)
                 }
             }
         }

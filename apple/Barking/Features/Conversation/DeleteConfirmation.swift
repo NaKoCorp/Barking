@@ -25,10 +25,16 @@ enum DeleteConfirmation: Equatable {
             self = .sentElsewhere
             return
         }
-        if d.devicesLeft == 0 && d.devicesPending > 0 {
+        // A pending packet whose deposit was tried may be on a node (§14.1):
+        // it counts as left, and only the untried rest can be cancelled.
+        let mayHaveLeft = d.devicesLeft + d.devicesTried
+        let cancellable = d.devicesPending > d.devicesTried ? d.devicesPending - d.devicesTried : 0
+        if d.devicesPending > 0 && mayHaveLeft == 0 {
             self = .pending
-        } else if d.devicesLeft > 0 && d.devicesPending > 0 {
-            self = .mixed(left: Int(d.devicesLeft), total: Int(d.devices))
+        } else if d.devicesPending > 0 && cancellable == 0 {
+            self = .onNetwork
+        } else if d.devicesPending > 0 {
+            self = .mixed(left: Int(mayHaveLeft), total: Int(d.devices))
         } else {
             switch d.state {
             case .pending: self = .pending
@@ -84,7 +90,7 @@ extension DeleteConfirmation {
     /// (`total` 0) there is no copy to speak of.
     static func keepsOwnCopies(delivery: Delivery, ownCopies: OwnCopies) -> Bool {
         guard ownCopies.total > 0 else { return false }
-        return ownCopies.left > 0 || (ownCopies.waiting > 0 && delivery.devicesLeft > 0)
+        return ownCopies.left > 0 || (ownCopies.waiting > 0 && delivery.devicesLeft + delivery.devicesTried > 0)
     }
 
     /// The message with, on its own line, "Your other devices keep their

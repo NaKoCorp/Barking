@@ -13,9 +13,9 @@ final class PendingModelTests: XCTestCase {
 
     private func msg(_ id: Int64, to name: String = "Alice", contact: String = "a", body: String = "hello",
                      expiresIn: UInt64 = 80_000, sealedAgo: UInt64 = 3_600, packets: UInt32 = 1,
-                     devices: UInt32 = 1, left: UInt32 = 0) -> PendingMessage {
+                     devices: UInt32 = 1, left: UInt32 = 0, tried: UInt32 = 0) -> PendingMessage {
         PendingMessage(messageId: id, contact: contact, name: name, body: body, sealedAt: t0 - sealedAgo,
-                       expiresAt: t0 + expiresIn, packets: packets, devices: devices, devicesLeft: left)
+                       expiresAt: t0 + expiresIn, packets: packets, devices: devices, devicesLeft: left, devicesTried: tried)
     }
 
     private func info(_ messages: [PendingMessage], sync: [PendingSync] = []) -> PendingPackets {
@@ -429,6 +429,51 @@ final class PendingModelTests: XCTestCase {
         XCTAssertEqual(e.message, "1 hasn’t left and will be cancelled. 1 is already on the network: Sam will still receive it.")
         let f = m.cancelAllConfirmation(bundle: fr.bundle, locale: fr.locale)
         XCTAssertFalse(f.message.contains("ne le recevra pas") || f.message.contains("ne les recevront pas"))
+    }
+
+    // MARK: A tried deposit may have left (§14.1)
+
+    /// A deposit request was sent and its answer lost: a node may have the
+    /// packet, so no text says its contact will not receive the message.
+    func testTriedOnlyMessageIsNeverCancelledInTheTexts() async throws {
+        let d = FakeDevice()
+        d.pendingInfo = info([msg(1, to: "Alice", contact: "a", tried: 1), msg(2, to: "Sam", contact: "s")])
+        let m = make(d)
+        await m.load()
+        let en = try lang("en"), fr = try lang("fr")
+        let all = m.cancelAllConfirmation(bundle: en.bundle, locale: en.locale)
+        XCTAssertEqual(all.message, "1 hasn’t left and will be cancelled. 1 is already on the network: Alice will still receive it.")
+        XCTAssertFalse(m.cancelAllConfirmation(bundle: fr.bundle, locale: fr.locale).message.contains("ne le recevra pas"))
+        m.selecting = true
+        m.toggle(1)
+        let only = m.selectionConfirmation(bundle: en.bundle, locale: en.locale)
+        XCTAssertEqual(only.message, "1 is already on the network: Alice will still receive it.")
+        m.toggle(2)
+        XCTAssertEqual(m.selectionConfirmation(bundle: en.bundle, locale: en.locale).message, all.message)
+    }
+
+    func testSingleDeletionOfATriedMessageSaysOnTheNetwork() async throws {
+        let d = FakeDevice()
+        d.pendingInfo = info([msg(1, tried: 1), msg(2, devices: 2, tried: 1)])
+        let tried = Delivery(state: .pending, sealedAt: t0, depositedAt: nil, receivedAt: nil, expiredAt: nil, devices: 1,
+                             devicesReceived: 0, devicesLeft: 0, devicesTried: 1, devicesPending: 1)
+        let mixed = Delivery(state: .pending, sealedAt: t0, depositedAt: nil, receivedAt: nil, expiredAt: nil, devices: 2,
+                             devicesReceived: 0, devicesLeft: 0, devicesTried: 1, devicesPending: 2)
+        let none = OwnCopies(total: 0, left: 0, waiting: 0)
+        d.messageDeliveries[1] = MessageDelivery(messageId: 1, delivery: tried, devices: [], relays: [], ownCopies: none)
+        d.messageDeliveries[2] = MessageDelivery(messageId: 2, delivery: mixed, devices: [], relays: [], ownCopies: none)
+        let m = make(d)
+        await m.load()
+        let one = await m.askDelete(1)
+        XCTAssertEqual(one?.confirmation, .onNetwork)
+        XCTAssertEqual(one?.message, "It’s already on the network: Alice will still receive it.")
+        let two = await m.askDelete(2)
+        XCTAssertEqual(two?.confirmation, .mixed(left: 1, total: 2))
+        // Unreadable delivery: the row's own numbers say the same.
+        d.messageDeliveries = [:]
+        d.deliveryError = BarkingError.NoSession
+        let fallback = await m.askDelete(1)
+        XCTAssertEqual(fallback?.confirmation, .onNetwork)
     }
 
     // MARK: Network line (§7.3)

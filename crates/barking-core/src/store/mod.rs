@@ -233,6 +233,10 @@ pub struct DeliverySummary {
     pub devices_received: u32,
     /// On the network or received.
     pub devices_left: u32,
+    /// Still `Pending`, but a deposit request was sent (its answer may have
+    /// been lost): a node may have it, so it counts as left when deleting
+    /// (spec §14.1). Included in `devices_pending`.
+    pub devices_tried: u32,
     /// Still waiting on this device (not deposited, not failed).
     pub devices_pending: u32,
 }
@@ -325,6 +329,9 @@ pub struct PendingMessage {
     pub devices: u32,
     /// Its contact deliveries on the network or received.
     pub devices_left: u32,
+    /// Its contact deliveries still pending whose deposit was tried: a node
+    /// may have them (spec §14.1).
+    pub devices_tried: u32,
 }
 
 /// Pending packets of one sort of the "Synchronisation" section.
@@ -1797,7 +1804,11 @@ pub trait Queries {
                  (SELECT count(*) FROM deliveries d2 \
                   WHERE d2.message_id = m.message_id AND d2.own = 0), \
                  (SELECT count(*) FROM deliveries d3 \
-                  WHERE d3.message_id = m.message_id AND d3.own = 0 AND d3.status IN (?2, ?3)) \
+                  WHERE d3.message_id = m.message_id AND d3.own = 0 AND d3.status IN (?2, ?3)), \
+                 (SELECT count(*) FROM deliveries d4 \
+                  JOIN outbox o4 ON o4.packet_id = d4.packet_id \
+                  WHERE d4.message_id = m.message_id AND d4.own = 0 AND d4.status = ?5 \
+                  AND o4.deposit_tried_at IS NOT NULL) \
                  FROM outbox o \
                  JOIN deliveries d ON d.packet_id = o.packet_id AND d.own = 0 \
                  JOIN messages m ON m.message_id = d.message_id AND m.direction = ?4 \
@@ -1805,14 +1816,15 @@ pub trait Queries {
                  GROUP BY m.id ORDER BY min(o.expires_at), m.id",
             )
             .map_err(map_err)?;
-        type Raw = (i64, Vec<u8>, String, i64, i64, i64, i64, i64);
+        type Raw = (i64, Vec<u8>, String, i64, i64, i64, i64, i64, i64);
         let raws = stmt
             .query_map(
                 params![
                     to_i64(now),
                     MessageStatus::OnNetwork as i64,
                     MessageStatus::Received as i64,
-                    Direction::Out as i64
+                    Direction::Out as i64,
+                    MessageStatus::Pending as i64
                 ],
                 |r| {
                     Ok((
@@ -1824,6 +1836,7 @@ pub trait Queries {
                         r.get(5)?,
                         r.get(6)?,
                         r.get(7)?,
+                        r.get(8)?,
                     ))
                 },
             )
@@ -1832,7 +1845,7 @@ pub trait Queries {
             .map_err(map_err)?;
         let count = |n: i64| u32::try_from(n).unwrap_or(u32::MAX);
         let mut out = PendingPackets::default();
-        for (row_id, fp, body, sealed, expires, packets, devices, left) in raws {
+        for (row_id, fp, body, sealed, expires, packets, devices, left, tried) in raws {
             out.packets = out.packets.saturating_add(count(packets));
             out.messages.push(PendingMessage {
                 row_id,
@@ -1843,6 +1856,7 @@ pub trait Queries {
                 packets: count(packets),
                 devices: count(devices),
                 devices_left: count(left),
+                devices_tried: count(tried),
             });
         }
         // Every other pending packet, with what classifies it: its kind,
@@ -1993,9 +2007,11 @@ fn summaries(
         "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, m.message_id, \
          count(d.packet_id), coalesce(sum(d.status = 3), 0), \
          coalesce(sum(d.status IN (1, 3)), 0), coalesce(sum(d.status = 0), 0), \
-         min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at) \
+         min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at), \
+         coalesce(sum(d.status = 0 AND o.deposit_tried_at IS NOT NULL), 0) \
          FROM messages m \
          LEFT JOIN deliveries d ON d.message_id = m.message_id AND d.own = 0 AND m.direction = 0 \
+         LEFT JOIN outbox o ON o.packet_id = d.packet_id \
          WHERE {filter} GROUP BY {group} {having} ORDER BY {order}"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(map_err)?;
@@ -2008,6 +2024,7 @@ fn summaries(
         Option<i64>,
         Option<i64>,
         Option<i64>,
+        i64,
     );
     let raws = stmt
         .query_map(args, |r| {
@@ -2022,6 +2039,7 @@ fn summaries(
                     r.get(12)?,
                     r.get(13)?,
                     r.get(14)?,
+                    r.get(15)?,
                 ),
             ))
         })
@@ -2032,7 +2050,7 @@ fn summaries(
     raws.into_iter()
         .map(|(raw, agg)| {
             let message = message_from_raw(raw)?;
-            let (devices, received, left, pending, sealed, deposited, acked, expired) = agg;
+            let (devices, received, left, pending, sealed, deposited, acked, expired, tried) = agg;
             let summary = (devices > 0).then(|| DeliverySummary {
                 state: message.status,
                 sealed_at: sealed.map_or(0, to_u64),
@@ -2044,6 +2062,7 @@ fn summaries(
                 devices: count(devices),
                 devices_received: count(received),
                 devices_left: count(left),
+                devices_tried: count(tried),
                 devices_pending: count(pending),
             });
             Ok((message, summary))

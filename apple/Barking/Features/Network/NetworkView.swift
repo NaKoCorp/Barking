@@ -9,6 +9,7 @@ struct NetworkView: View {
     @State private var relayId = ""
     @State private var relayAddr = ""
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.locale) private var locale
 
     init(core: CoreService) {
         self.core = core
@@ -45,7 +46,11 @@ struct NetworkView: View {
         }
         .task {
             await model.load()
-            for await change in await core.changes where change == .network { await model.load() }
+            for await change in await core.changes {
+                // Anything but a delivery state can move the queue or the relays.
+                if case .delivery = change { continue }
+                await model.load()
+            }
         }
     }
 
@@ -84,7 +89,7 @@ struct NetworkView: View {
                     PendingView(core: core)
                 } label: {
                     HStack(spacing: Space.s2) {
-                        (model.pending == 0 ? Text("Nothing pending") : Text("\(model.pending) packets pending"))
+                        Text(verbatim: NetworkModel.pendingLine(model.pending, bundle: .strings(for: locale), locale: locale))
                             .font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold)).foregroundStyle(Color.fg)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
