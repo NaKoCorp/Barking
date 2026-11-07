@@ -79,8 +79,15 @@ PY
 
 freshness() {
   local proj="$apple/Barking.xcodeproj/project.pbxproj"
-  if [ ! -f "$proj" ] || [ "$apple/project.yml" -nt "$proj" ]; then
+  # XcodeGen lists sources from folders: an added, edited-newer or removed file
+  # must regenerate. One find; the sorted list also catches deletions.
+  local list="$apple/build/xcodegen-files.txt" now
+  now="$(cd "$apple" && find Barking BarkingKit NotificationService BarkingTests BarkingUITests TestPlans -type f 2>/dev/null | LC_ALL=C sort)"
+  if [ ! -f "$proj" ] || [ "$apple/project.yml" -nt "$proj" ] \
+     || [ "$(cd "$apple" && find Barking BarkingKit NotificationService BarkingTests BarkingUITests TestPlans -type f -newer "$proj" -print -quit 2>/dev/null)" ] \
+     || [ ! -f "$list" ] || [ "$now" != "$(cat "$list")" ]; then
     step "xcodegen" bash -c "cd '$apple' && xcodegen generate >/dev/null"
+    mkdir -p "$apple/build" && printf '%s\n' "$now" | sed '/^$/d' > "$list"
   fi
   if [ ! -d "$xcfw" ] || [ -n "$(find "$root/crates" "$root/Cargo.lock" -type f -not -path '*/target/*' -newer "$xcfw" -print -quit)" ]; then
     step "build-xcframework" "$root/scripts/build-xcframework.sh" --sim-only
