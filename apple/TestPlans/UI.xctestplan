@@ -1,0 +1,26 @@
+{
+  "configurations" : [
+    {
+      "id" : "5B2C0A1E-6C3D-4A57-9F1B-0D1E7A2B4C02",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "defaultTestExecutionTimeAllowance" : 60,
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:Barking.xcodeproj",
+        "identifier" : "8E4FAA7D4E1CAAD62C395270",
+        "name" : "BarkingUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

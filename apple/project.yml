@@ -162,6 +162,7 @@ schemes:
         Barking: all
     test:
       config: Debug
-      targets:
-        - BarkingTests
-        - BarkingUITests
+      testPlans:
+        - path: TestPlans/Unit.xctestplan
+          defaultPlan: true
+        - path: TestPlans/UI.xctestplan
