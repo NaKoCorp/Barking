@@ -7,10 +7,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::contact::ContactCard;
-use barking_core::store::{Direction, MessageStatus};
+use barking_core::store::{DeliverySummary, Direction};
 use barking_core::{Core, CoreError};
 use zeroize::Zeroize;
 
+use crate::delivery::{Delivery, delivery_of};
 use crate::lock::DbLock;
 use crate::{BarkingError, guard};
 
@@ -63,12 +64,11 @@ pub struct Message {
     pub id: i64,
     pub outgoing: bool,
     pub body: String,
-    /// `queued`, `sent`, `delivered` or `failed`.
-    pub status: String,
     /// Unix time, in seconds.
     pub at: u64,
-    /// Expired before its ack: can be sent again.
-    pub failed: bool,
+    /// Delivery of a sent message; `None` for a received message, or one
+    /// sent from another of my devices.
+    pub delivery: Option<Delivery>,
     /// Route badge: `internet:N` (N distinct relay nodes), `None` while
     /// none is recorded.
     #[uniffi(default = None)]
@@ -275,9 +275,9 @@ impl Device {
         guard(|| {
             self.with_core(|core| {
                 let fp = core.resolve(&contact)?;
-                core.messages_with(&fp)?
+                core.messages_with_delivery(&fp, now())?
                     .into_iter()
-                    .map(|m| message_of(core, m))
+                    .map(|(m, d)| message_of(core, m, d))
                     .collect()
             })
         })
@@ -297,25 +297,16 @@ fn card_error(e: CoreError) -> BarkingError {
 pub(crate) fn message_of(
     core: &Core,
     m: barking_core::store::MessageRow,
+    delivery: Option<DeliverySummary>,
 ) -> Result<Message, BarkingError> {
     Ok(Message {
         route: crate::route::route_hint(core, m.id)?,
         id: m.id,
-        failed: m.status == MessageStatus::NotDelivered,
         outgoing: m.direction == Direction::Out,
         body: m.body,
-        status: status_name(m.status).to_owned(),
         at: m.at,
+        delivery: delivery.map(delivery_of),
     })
-}
-
-fn status_name(s: MessageStatus) -> &'static str {
-    match s {
-        MessageStatus::Pending => "queued",
-        MessageStatus::OnNetwork => "sent",
-        MessageStatus::Received => "delivered",
-        MessageStatus::NotDelivered => "failed",
-    }
 }
 
 impl Drop for Device {

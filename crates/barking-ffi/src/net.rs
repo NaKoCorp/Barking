@@ -10,6 +10,7 @@ use barking_core::{Core, ReceiveOutcome};
 use barking_net::{NetState, QuicDialer, QuickOptions, SyncOptions, SyncReport};
 use barking_proto::NodeId;
 
+use crate::delivery::{DeliveryChange, changes_of};
 use crate::device::{Device, now};
 use crate::{BarkingError, guard};
 
@@ -25,6 +26,13 @@ pub struct SyncSummary {
     pub network_up: bool,
     /// Local error that stopped the sync (logs only).
     pub error: Option<String>,
+    /// Sent messages whose delivery changed during the sync (deposit,
+    /// receipt, expiry, verdict), each once: the rows to refresh
+    /// (`Device::deliveries_of`).
+    pub delivery_changes: Vec<DeliveryChange>,
+    /// Sent messages that became `NotDelivered` during the sync (expired
+    /// before any deposit, verdict): the failure notification.
+    pub failed: Vec<DeliveryChange>,
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -99,7 +107,9 @@ fn block_on<F: Future>(f: F) -> Result<F::Output, BarkingError> {
     Ok(out)
 }
 
-fn summary(core: &Core, mut report: SyncReport) -> SyncSummary {
+/// What the apps show of `report`, with the delivery changes noted by
+/// `core` during the sync (the same core: they live in memory only).
+fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
     let contacts = core.contacts().unwrap_or_default();
     let new_messages = std::mem::take(&mut report.received)
         .into_iter()
@@ -132,6 +142,8 @@ fn summary(core: &Core, mut report: SyncReport) -> SyncSummary {
         new_messages,
         network_up: report.network_up,
         error: report.error,
+        delivery_changes: changes_of(core.take_delivery_changes()),
+        failed: changes_of(report.failed),
     }
 }
 
@@ -188,15 +200,6 @@ impl Device {
                     .collect();
                 out.sort_by(|a, b| b.score.total_cmp(&a.score));
                 Ok(out)
-            })
-        })
-    }
-
-    /// Packets waiting in the send queue (until their ack or expiry).
-    pub fn outbox_count(&self) -> Result<u32, BarkingError> {
-        guard(|| {
-            self.with_core(|core| {
-                Ok(u32::try_from(core.pending_outbox(now())?.len()).unwrap_or(u32::MAX))
             })
         })
     }

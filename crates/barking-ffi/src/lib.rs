@@ -4,6 +4,7 @@
 //! never lets a panic cross into Swift or Kotlin.
 
 mod contacts;
+mod delivery;
 mod device;
 mod error;
 mod identity;
@@ -17,6 +18,11 @@ mod route;
 use std::panic::{UnwindSafe, catch_unwind};
 
 pub use contacts::{CardPreview, inspect_card, inspect_card_text};
+pub use delivery::{
+    DeleteOutcome, Delivery, DeliveryChange, DeliveryCounts, DeliveryRowInfo, DeliveryState,
+    DeliveryUpdate, DeviceDelivery, MessageDelivery, OwnCopies, PendingKind, PendingMessage,
+    PendingPackets, PendingSync, RelayHop,
+};
 pub use device::{
     Contact, CreatedDevice, Device, DeviceConfig, Message, create_device, device_exists,
 };

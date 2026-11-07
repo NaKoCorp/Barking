@@ -101,7 +101,10 @@ fn cards_contacts_and_outgoing_message() {
     assert!(msgs[0].outgoing);
     assert_eq!(msgs[0].body, "salut");
     // Not deposited on any node yet.
-    assert_eq!(msgs[0].status, "queued");
+    assert_eq!(
+        msgs[0].delivery.as_ref().map(|d| d.state),
+        Some(barking_ffi::DeliveryState::Pending)
+    );
 }
 
 #[test]

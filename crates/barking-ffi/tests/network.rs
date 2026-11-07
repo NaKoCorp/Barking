@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use barking_ffi::{BarkingError, Device, DeviceConfig};
-use barking_node::testing::{id_of, key, network, stop_all};
+use barking_core::store::{Queries, Store};
+use barking_ffi::{BarkingError, DeliveryChange, DeliveryState, Device, DeviceConfig, Message};
+use barking_node::testing::{TICK, id_of, key, network, network_with, set_clock_offset, stop_all};
 
 fn config(dir: &tempfile::TempDir, key_byte: u8) -> DeviceConfig {
     DeviceConfig {
@@ -99,15 +100,6 @@ fn nodes_lists_manual_node() {
 }
 
 #[test]
-fn outbox_counts_queued_packets() {
-    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let (alice, _bob) = paired_devices(&da, &db);
-    assert_eq!(alice.outbox_count().unwrap(), 0);
-    alice.send_text("bob".into(), "hi".into()).unwrap();
-    assert!(alice.outbox_count().unwrap() > 0);
-}
-
-#[test]
 fn key_changes_is_empty_without_change() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, _bob) = paired_devices(&da, &db);
@@ -133,4 +125,172 @@ fn key_change_is_reported() {
     let changes = alice.key_changes(0).unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].contact, new_fp);
+}
+
+// --- Delivery states over the network (spec Lot M §5.9, §15.6) ---
+
+/// Moves every packet of the send queue in `dir` past its expiry, as if a
+/// day went by on this device.
+fn expire_queue(dir: &tempfile::TempDir, key_byte: u8) {
+    let store = Store::open(&dir.path().join("barking.db"), &[key_byte; 32]).unwrap();
+    store
+        .conn()
+        .execute("UPDATE outbox SET expires_at = 1", ())
+        .unwrap();
+}
+
+fn message(d: &Device, contact: &str, body: &str) -> Message {
+    d.messages_with(contact.to_owned())
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+}
+
+fn state(d: &Device, contact: &str, body: &str) -> DeliveryState {
+    message(d, contact, body).delivery.unwrap().state
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_reports_delivery_changes() {
+    let nodes = network(0..3, |_| u64::MAX).await;
+    let (id, addr) = (nodes[0].id.to_string(), nodes[0].addr.to_string());
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    tokio::task::spawn_blocking(move || {
+        let (alice, bob) = paired_devices(&da, &db);
+        for d in [&alice, &bob] {
+            d.add_node(id.clone(), addr.clone()).unwrap();
+        }
+        bob.sync(30_000).unwrap();
+        alice.send_text("bob".into(), "hello".into()).unwrap();
+        let sent = message(&alice, "bob", "hello").id;
+        let change = DeliveryChange {
+            contact: bob.fingerprint().unwrap(),
+            message_id: sent,
+        };
+
+        // The deposit: the summary names the message.
+        let s = alice.sync(30_000).unwrap();
+        assert!(s.delivery_changes.contains(&change), "{s:?}");
+        assert!(s.failed.is_empty(), "{s:?}");
+        let d = message(&alice, "bob", "hello").delivery.unwrap();
+        assert_eq!(d.state, DeliveryState::OnNetwork);
+        assert!(d.deposited_at.is_some());
+        let detail = alice.message_delivery(sent).unwrap().unwrap();
+        assert!(!detail.relays.is_empty());
+        assert!(detail.devices[0].node.is_some());
+
+        // A received message has no delivery of its own.
+        bob.sync(30_000).unwrap();
+        let received = message(&bob, "alice", "hello");
+        assert!(!received.outgoing);
+        assert!(received.delivery.is_none());
+
+        // Bob's receipt makes it `Received`, noted by the sync that
+        // fetched it.
+        let mut noted = false;
+        for _ in 0..5 {
+            bob.sync(30_000).unwrap();
+            let s = alice.sync(30_000).unwrap();
+            noted |= s.delivery_changes.contains(&change);
+            if state(&alice, "bob", "hello") == DeliveryState::Received {
+                break;
+            }
+        }
+        assert_eq!(state(&alice, "bob", "hello"), DeliveryState::Received);
+        assert!(noted);
+        let d = message(&alice, "bob", "hello").delivery.unwrap();
+        assert!(d.received_at.is_some());
+        assert_eq!(d.devices_received, 1);
+    })
+    .await
+    .unwrap();
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_and_quick_sync_report_expired_messages() {
+    let nodes = network(0..3, |_| u64::MAX).await;
+    let (id, addr) = (nodes[0].id.to_string(), nodes[0].addr.to_string());
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    tokio::task::spawn_blocking(move || {
+        let (alice, bob) = paired_devices(&da, &db);
+        alice.add_node(id, addr).unwrap();
+        let fb = bob.fingerprint().unwrap();
+
+        alice.send_text("bob".into(), "lost".into()).unwrap();
+        expire_queue(&da, 1);
+        let s = alice.sync(30_000).unwrap();
+        let lost = DeliveryChange {
+            contact: fb.clone(),
+            message_id: message(&alice, "bob", "lost").id,
+        };
+        assert_eq!(s.failed, vec![lost.clone()], "{s:?}");
+        assert!(s.delivery_changes.contains(&lost), "{s:?}");
+
+        alice.send_text("bob".into(), "lost too".into()).unwrap();
+        expire_queue(&da, 1);
+        let s = alice.quick_sync(20_000).unwrap();
+        let lost_too = DeliveryChange {
+            contact: fb,
+            message_id: message(&alice, "bob", "lost too").id,
+        };
+        assert_eq!(s.failed, vec![lost_too.clone()], "{s:?}");
+        assert!(s.delivery_changes.contains(&lost_too), "{s:?}");
+        let d = message(&alice, "bob", "lost too").delivery.unwrap();
+        assert_eq!(d.state, DeliveryState::NotDelivered);
+        assert_eq!(d.deposited_at, None);
+    })
+    .await
+    .unwrap();
+    stop_all(nodes).await;
+}
+
+/// Puts the nodes' clock back on the system clock when dropped.
+struct ClockReset;
+
+impl Drop for ClockReset {
+    fn drop(&mut self) {
+        set_clock_offset(0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_reports_failed_after_verdict() {
+    let _reset = ClockReset;
+    let nodes = network_with(0..3, |spec| spec.purge_interval = Some(TICK)).await;
+    let (id, addr) = (nodes[0].id.to_string(), nodes[0].addr.to_string());
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (da, alice, fb) = tokio::task::spawn_blocking(move || {
+        let (alice, bob) = paired_devices(&da, &db);
+        alice.add_node(id, addr).unwrap();
+        alice.send_text("bob".into(), "lost".into()).unwrap();
+        alice.sync(30_000).unwrap();
+        assert_eq!(state(&alice, "bob", "lost"), DeliveryState::OnNetwork);
+        (da, alice, bob.fingerprint().unwrap())
+    })
+    .await
+    .unwrap();
+
+    // Bob stays offline; two days later the relays purged the message,
+    // and Alice's packet is past its expiry.
+    set_clock_offset(2 * 86_400);
+    tokio::time::sleep(TICK * 5).await;
+    tokio::task::spawn_blocking(move || {
+        expire_queue(&da, 1);
+        let s = alice.sync(30_000).unwrap();
+        let lost = DeliveryChange {
+            contact: fb,
+            message_id: message(&alice, "bob", "lost").id,
+        };
+        assert_eq!(s.failed, vec![lost], "{s:?}");
+        let d = message(&alice, "bob", "lost").delivery.unwrap();
+        assert_eq!(d.state, DeliveryState::NotDelivered);
+        // Deposited, then failed: `expired_at` set too.
+        assert!(d.deposited_at.is_some());
+        assert!(d.expired_at.is_some());
+    })
+    .await
+    .unwrap();
+    stop_all(nodes).await;
 }

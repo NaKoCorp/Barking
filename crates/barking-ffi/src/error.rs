@@ -33,6 +33,10 @@ pub enum BarkingError {
     /// another device first (`transfer_and_leave`).
     #[error("this device is the administrator")]
     IsAdmin,
+    /// The message is not `NotDelivered` (it left or is still waiting):
+    /// nothing to send again.
+    #[error("nothing to retry")]
+    NothingToRetry,
 }
 
 /// Why a link step was refused (spec iOS messaging §5.8).
@@ -105,6 +109,7 @@ impl From<CoreError> for BarkingError {
             CoreError::AdminTransferPending => BarkingError::AdminTransferPending,
             CoreError::DeviceRemoved => BarkingError::DeviceRemoved,
             CoreError::IsAdmin => BarkingError::IsAdmin,
+            CoreError::NothingToRetry => BarkingError::NothingToRetry,
             _ => BarkingError::Internal { detail },
         }
     }

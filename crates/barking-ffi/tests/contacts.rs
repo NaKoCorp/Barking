@@ -102,7 +102,7 @@ fn messages_have_ids() {
     alice.send_text(fb.clone(), "two".into()).unwrap();
     let m = alice.messages_with(fb).unwrap();
     assert!(m[0].id < m[1].id);
-    assert!(!m[0].failed);
+    assert!(m[0].delivery.is_some());
 }
 
 #[test]

@@ -6,7 +6,7 @@ use barking_core::identity::root::Fingerprint;
 use barking_core::store::Direction;
 use barking_core::transparency::TransparencyEvent;
 
-use crate::device::{Contact, Device, Message, message_of};
+use crate::device::{Contact, Device, Message, message_of, now};
 use crate::{BarkingError, guard};
 
 /// Key of the unread marks in the core's state store.
@@ -113,18 +113,19 @@ impl Device {
         guard(|| {
             self.with_core(|core| {
                 let marks = load_marks(core)?;
+                let t = now();
                 let mut out = Vec::new();
                 for c in core.contacts()? {
                     let mark = mark_of(&marks, &c.fingerprint);
-                    let messages = core.messages_with(&c.fingerprint)?;
+                    let messages = core.messages_with_delivery(&c.fingerprint, t)?;
                     let unread = messages
                         .iter()
-                        .filter(|m| m.direction == Direction::In && m.id > mark)
+                        .filter(|(m, _)| m.direction == Direction::In && m.id > mark)
                         .count();
                     let last = messages
                         .into_iter()
                         .last()
-                        .map(|m| message_of(core, m))
+                        .map(|(m, d)| message_of(core, m, d))
                         .transpose()?;
                     out.push(ChatSummary {
                         route: last.as_ref().and_then(|m| m.route.clone()),
