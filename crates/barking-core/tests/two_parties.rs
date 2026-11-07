@@ -18,6 +18,8 @@ use tempfile::TempDir;
 
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 86_400;
+/// A delivery late but still before the 24-hour expiry.
+const LATE: u64 = DAY - 3_600;
 const T: &str = "file";
 
 struct Party {
@@ -284,21 +286,21 @@ fn expired_packet() {
 #[test]
 fn late_delivery_within_freshness_window() {
     let (mut a, mut b, mut rng) = pair();
-    // Initial delivered 5 days after sending: intro mailbox of the sending day.
-    let p1 = one(a.send(&b.fp(), "five days late", NOW, &mut rng));
+    // Initial delivered 23 hours after sending: intro mailbox of the sending day.
+    let p1 = one(a.send(&b.fp(), "one day late", NOW, &mut rng));
     assert_eq!(
-        expect_msg(b.recv(&p1, NOW + 5 * DAY, &mut rng)).2,
-        "five days late"
+        expect_msg(b.recv(&p1, NOW + LATE, &mut rng)).2,
+        "one day late"
     );
     // Session established in both directions.
-    let r = one(b.send(&a.fp(), "received", NOW + 5 * DAY, &mut rng));
-    expect_msg(a.recv(&r, NOW + 5 * DAY, &mut rng));
-    // Normal message (session mailbox) delivered 5 days after sending.
-    let t = NOW + 5 * DAY + 10;
+    let r = one(b.send(&a.fp(), "received", NOW + LATE, &mut rng));
+    expect_msg(a.recv(&r, NOW + LATE, &mut rng));
+    // Normal message (session mailbox) delivered 23 hours after sending.
+    let t = NOW + LATE + 10;
     let p2 = one(a.send(&b.fp(), "normal but late", t, &mut rng));
     assert!(!is_initial(&p2));
     assert_eq!(
-        expect_msg(b.recv(&p2, t + 5 * DAY, &mut rng)).2,
+        expect_msg(b.recv(&p2, t + LATE, &mut rng)).2,
         "normal but late"
     );
     // Beyond the freshness window: expired.
@@ -1229,15 +1231,15 @@ fn skipped_keys_expire_after_seven_days() {
     // Bob receives p2 first: the keys of q0 and q1 are skipped up to `stored`.
     let stored = s + 1 - DAY;
     assert_eq!(expect_msg(b.recv(&p2, stored, &mut rng)).2, "p2");
-    // Key skipped for less than 7 days: still usable.
-    assert_eq!(expect_msg(b.recv(&q1, stored + 3 * DAY, &mut rng)).2, "q1");
-    // Key skipped for more than 7 days: purged, even though the packet is not
-    // yet expired and its timestamp is still fresh.
-    // (Expiry rounded down to 10 min: just before.)
-    let late = u64::from(q0.expires_at) - 1;
-    assert!(late >= s + DEFAULT_TTL_SECS - 600);
-    assert!(late - stored > 7 * DAY);
-    match b.recv(&q0, late, &mut rng) {
+    // Key skipped for less than 7 days: still usable (the packet, which
+    // lives 24 hours, is still unexpired).
+    assert_eq!(expect_msg(b.recv(&q1, s + 3_000, &mut rng)).2, "q1");
+    // Key skipped for more than 7 days: purged. A packet lives only 24 hours,
+    // so a relay rewrites the expiry to make the old packet look fresh.
+    let late = stored + 7 * DAY + 1;
+    let mut rewritten = q0.clone();
+    rewritten.expires_at = u32::try_from(late + DEFAULT_TTL_SECS).unwrap();
+    match b.recv(&rewritten, late, &mut rng) {
         ReceiveOutcome::Quarantined { .. } | ReceiveOutcome::NotForUs => {}
         other => panic!("expired skipped key, got {other:?}"),
     }
@@ -1262,11 +1264,11 @@ fn ack_goes_to_the_original_mailbox_which_the_sender_watches_until_acked() {
             .unwrap()
             .contains(&ack_r.mailbox)
     );
-    // Message delivered three days later: its mailbox falls out of the
-    // three-day window, but A still watches it as long as it awaits the ack.
+    // Message delivered almost a day later (the packet lifetime): A still
+    // watches its mailbox as long as it awaits the ack.
     let q = one(a.send(&b.fp(), "late", NOW + 2, &mut rng));
     assert!(!is_initial(&q));
-    let late = NOW + 3 * DAY;
+    let late = NOW + LATE;
     let (_, _, _, ack_q) = expect_msg(b.recv(&q, late, &mut rng));
     assert_eq!(ack_q.mailbox, q.mailbox);
     assert!(

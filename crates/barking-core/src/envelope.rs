@@ -282,7 +282,7 @@ pub fn seal(
 /// Granularity of the expiry of a packet sealed by the core.
 pub const EXPIRY_GRANULARITY_SECS: u64 = 600;
 
-/// Expiry of a packet sealed at `now`: `now` + 7 days, rounded down
+/// Expiry of a packet sealed at `now`: `now` + 24 hours, rounded down
 /// to 10 minutes (nodes do not see the second of sealing).
 /// Saturated at `u32::MAX`.
 pub fn sealed_expiry(now: u64) -> u32 {
@@ -629,8 +629,8 @@ mod tests {
             (base + 600, base + 600 + DEFAULT_TTL_SECS),
         ] {
             assert_eq!(u64::from(sealed_expiry(now)), want);
-            // Always accepted by a node: in the future, at 7 d + 1 h at most.
-            assert!(want > now && want <= now + 7 * 86_400 + 3_600);
+            // Always accepted by a node: in the future, at 24 h + 1 h at most.
+            assert!(want > now && want <= now + 25 * 3_600);
         }
     }
 

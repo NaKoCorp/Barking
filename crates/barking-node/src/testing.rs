@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_dht::{BootstrapEntry, DiversityLimits};
 use barking_proto::client::{Client, Session};
-use barking_proto::{NodeId, RecordPolicy, Request, Response};
+use barking_proto::{NodeId, PROTOCOL_VERSION, RecordPolicy, Request, Response};
 use ed25519_dalek::SigningKey;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -510,8 +510,8 @@ impl FakeRelay {
                             };
                             let resp = match req {
                                 Request::Hello { .. } => Response::Hello {
-                                    version: 1,
-                                    min_version: 1,
+                                    version: PROTOCOL_VERSION,
+                                    min_version: PROTOCOL_VERSION,
                                     node_id: id,
                                     pow_bits: TEST_BITS,
                                     limits: barking_proto::Limits {

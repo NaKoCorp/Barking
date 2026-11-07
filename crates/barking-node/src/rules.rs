@@ -37,8 +37,8 @@ use crate::store::{NodeStore, add_stored_bytes, stored_bytes};
 /// Number of packets per additional difficulty step.
 const POW_STEP_PACKETS: i64 = 64;
 
-/// Expiry margin: 7 days + 1 h (one-hour clock tolerance).
-pub const MAX_EXPIRY_SECS: u64 = 7 * 86_400 + 3_600;
+/// Expiry margin: 24 h + 1 h (one-hour clock tolerance).
+pub const MAX_EXPIRY_SECS: u64 = 90_000;
 /// Maximum number of mailboxes per fetch.
 pub const MAX_MAILBOXES_PER_FETCH: usize = 64;
 const ACK_BASE: u64 = barking_proto::ACK_CURSOR_BASE;

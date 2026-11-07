@@ -920,7 +920,7 @@ where
     /// introduction fetch).
     async fn deposit_stage(&mut self, acks_only: bool) {
         let now = self.now;
-        let Ok(outbox) = self.core.pending_outbox(now) else {
+        let Ok(mut outbox) = self.core.pending_outbox(now) else {
             return;
         };
         plan::prune(&mut self.state.ledger, &outbox, now);
@@ -996,6 +996,13 @@ where
                 self.tally(&d, &result);
                 self.save();
                 match result {
+                    // A sealed packet whose expiry is refused is never
+                    // accepted: out of the queue, not offered again.
+                    Err(ErrorReason::TooFarInFuture) => {
+                        let _ = self.core.drop_outbox_packet(&d.bytes);
+                        outbox.retain(|b| *b != d.bytes);
+                        continue 'plan;
+                    }
                     Err(ErrorReason::RateLimited) => {
                         self.limited.insert(d.node);
                         continue 'plan;

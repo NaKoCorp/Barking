@@ -258,7 +258,7 @@ impl Core {
 /// Days for which a mailbox (session or introduction) is accepted at
 /// receive time: the whole freshness window, from the day of `now - MAX_AGE_SECS`
 /// to the day after `now`. A packet's mailbox is fixed at the day of its
-/// sealing; a packet delivered late (7-day send queue) must
+/// sealing; a packet delivered late (24-hour send queue) must
 /// remain readable. `watched_mailboxes` (poll) covers from the last poll
 /// to the next day, 9 days at most.
 fn accepted_days(now: u64) -> Vec<u32> {

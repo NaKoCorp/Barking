@@ -262,7 +262,7 @@ final class TransparencyModel {
                         : String(localized: "Kept in the keychain, without the Secure Enclave.")),
             DataRow(id: "nodes", icon: "point.3.connected.trianglepath.dotted",
                     title: String(localized: "Nothing in clear on the nodes"),
-                    detail: String(localized: "Packets stay there at most 7 days.")),
+                    detail: String(localized: "Packets stay there at most 24 hours.")),
             DataRow(id: "log", icon: "clock.arrow.circlepath", title: String(localized: "Journal and paths"),
                     detail: String(localized: "Kept 30 days on this iPhone, never sent.")),
         ]

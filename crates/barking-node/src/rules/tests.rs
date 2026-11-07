@@ -120,6 +120,15 @@ fn rejects_too_far_in_future() {
 }
 
 #[test]
+fn expiry_beyond_25_hours_is_refused() {
+    let (_d, mut s) = store();
+    let p = msg(1, 1, Tier::S, NOW + 25 * 3_600 + 1);
+    assert_eq!(put(&mut s, &p), Err(ErrorReason::TooFarInFuture));
+    let q = msg(2, 1, Tier::S, NOW + 25 * 3_600);
+    assert_eq!(put(&mut s, &q), Ok(()));
+}
+
+#[test]
 fn rejects_wrong_tier() {
     let (_d, mut s) = store();
     let p = ok_msg(1, 1);
@@ -274,11 +283,11 @@ fn ack_needs_no_pow() {
 #[test]
 fn deposit_window_tolerates_one_hour_skew() {
     let (_d, mut s) = store();
-    // Client clock one hour ahead: expires at now + 7 d + 1 h.
+    // Client clock one hour ahead: expires at now + 24 h + 1 h.
     let p = msg(1, 1, Tier::S, NOW + MAX_EXPIRY_SECS);
     assert_eq!(put(&mut s, &p), Ok(()));
-    // Client clock one hour behind: expires in 7 d - 1 h.
-    let q = msg(2, 1, Tier::S, NOW + 7 * 86_400 - 3_600);
+    // Client clock one hour behind: expires in 24 h - 1 h.
+    let q = msg(2, 1, Tier::S, NOW + 86_400 - 3_600);
     assert_eq!(put(&mut s, &q), Ok(()));
     // Packet expiring in one second: still valid.
     let r = msg(3, 1, Tier::S, NOW + 1);

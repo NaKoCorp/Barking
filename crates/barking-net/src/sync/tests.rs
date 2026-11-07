@@ -1211,6 +1211,38 @@ async fn not_responsible_twice_runs_fallback_then_replans() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn too_far_in_future_is_refused_not_retried_forever() {
+    let (_dir, mut core, mut net) = setup();
+    let (bytes, _) = message(&mut core);
+    // Every node refuses the message's expiry as too far in the future.
+    for n in 0..NODES {
+        net.refuse_deposit
+            .insert(id_of(n), ErrorReason::TooFarInFuture);
+    }
+    let first = sync(&mut core, &net, opts()).await;
+    // Dropped from the queue on the first refusal: no other node is asked.
+    assert_eq!(first.refused, 1);
+    assert_eq!(first.first_copies + first.extra_copies, 0);
+    // A sealed packet whose expiry is refused is never accepted: it left
+    // the outbox, so the next sync does not offer it again.
+    assert!(!core.pending_outbox(NOW).unwrap().contains(&bytes));
+    let h = content_hash(&bytes);
+    let before = net
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, Call::Deposit(_, x) if *x == h))
+        .count();
+    let second = sync(&mut core, &net, opts()).await;
+    let after = net
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, Call::Deposit(_, x) if *x == h))
+        .count();
+    assert_eq!(after, before);
+    assert_eq!(second.refused, 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn pow_budget_exhausted_messages_wait_receipts_go() {
     let (_dir, mut core, mut net) = setup();
     net.pow_cost = 1;

@@ -281,7 +281,7 @@
 "Database key protected by the Secure Enclave" = "Clé de la base protégée par le Secure Enclave";
 "Database key protected by the keychain only" = "Clé de la base protégée par le trousseau seulement";
 "Nothing in clear on the nodes" = "Rien en clair sur les nœuds";
-"Packets stay there at most 7 days." = "Les paquets y restent 7 jours au plus.";
+"Packets stay there at most 24 hours." = "Les paquets y restent au plus 24 heures.";
 "Journal and paths" = "Journal et trajets";
 "Kept 30 days on this iPhone, never sent." = "Gardés 30 jours sur cet iPhone, jamais envoyés.";
 "Wrapped by a key that never leaves this iPhone's chip." = "Enveloppée par une clé qui ne quitte jamais la puce de cet iPhone.";

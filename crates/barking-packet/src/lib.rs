@@ -18,8 +18,8 @@ pub struct MailboxId(pub [u8; 16]);
 pub const HEADER_LEN: usize = 40;
 /// Default number of hops.
 pub const DEFAULT_HOPS: u8 = 8;
-/// Default lifetime: 7 days.
-pub const DEFAULT_TTL_SECS: u64 = 7 * 86400;
+/// Default lifetime: 24 hours.
+pub const DEFAULT_TTL_SECS: u64 = 86_400;
 
 /// Header bytes + length field.
 pub const OVERHEAD: usize = HEADER_LEN + 2;

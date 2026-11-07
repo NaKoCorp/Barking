@@ -84,7 +84,8 @@ const META_LINKED_BUNDLES: &str = "linked_bundles";
 const META_LAST_POLLED: &str = "last_polled_day";
 /// Polling window: 7 days back, the current day and the next day =
 /// 9 days at most. Covers each day of `accepted_days` (receive) that may
-/// still hold an unexpired packet (7-day lifetime).
+/// still hold an unexpired packet (24-hour lifetime; the window is kept
+/// wider than that on purpose).
 const MAX_POLL_BACK_DAYS: u32 = 7;
 
 /// Mailboxes to poll, by class. A poll reads the sessions first: the
@@ -720,6 +721,16 @@ impl Core {
                 .map(|(_, bytes)| bytes)
                 .collect())
         })
+    }
+
+    /// Removes an undeliverable packet (encoded `bytes`) from the send
+    /// queue, for example one whose expiry a node refused as too far in
+    /// the future: it will never be accepted. `true` if it was queued.
+    pub fn drop_outbox_packet(&mut self, bytes: &[u8]) -> Result<bool> {
+        let Ok(packet) = Packet::decode(bytes) else {
+            return Ok(false);
+        };
+        self.store.transaction(|tx| tx.outbox_remove(packet.id))
     }
 
     /// Opaque state of a transport (for example poll positions and deposits
