@@ -2,7 +2,7 @@
 //!
 //! A client seals its APNs token to a relay's X25519 key: the node that stores
 //! the subscription never sees the token, only the relay can open it. Sealed
-//! layout (frozen): `[1 (version)] [key_id] [ephemeral public key, 32]
+//! layout (frozen): `[2 (version)] [key_id] [ephemeral public key, 32]
 //! [ChaCha20-Poly1305(postcard(WakeToken)), zero nonce]`. The AEAD key is
 //! HKDF-SHA256(empty salt, IKM = X25519 shared secret,
 //! info = `SEAL_CONTEXT || ephemeral || relay_public`). The key is unique per
@@ -33,7 +33,7 @@ pub const SUBSCRIBE_POW_CONTEXT: &str = "barking/v0/subscribe";
 /// Maximum length of a relay host name.
 pub const MAX_RELAY_HOST: usize = 253;
 
-const SEAL_VERSION: u8 = 1;
+const SEAL_VERSION: u8 = 2;
 const HEADER_LEN: usize = 2 + 32;
 
 /// Where a relay is reached, and which node identity it must present.
@@ -74,6 +74,25 @@ pub enum ApnsEnv {
     Production,
 }
 
+/// Why a device is woken. Travels sealed: neither the node nor the relay
+/// operator learns it from the subscription.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WakeReason {
+    /// A message is waiting for the device.
+    Message = 0,
+    /// A delivery receipt (or a failure) concerns a message the device sent.
+    Receipt = 1,
+}
+
+/// What a subscription wakes its mailbox for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SubKind {
+    /// Wake when a message is deposited in the mailbox.
+    Messages = 0,
+    /// Wake when an acknowledgement arrives or a packet expires unacked.
+    Acks = 1,
+}
+
 /// What a relay needs to wake one device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WakeToken {
@@ -82,6 +101,7 @@ pub struct WakeToken {
     /// Collapse label sent as the APNs collapse identifier.
     pub collapse: [u8; 16],
     pub expires_day: u32,
+    pub reason: WakeReason,
 }
 
 fn aead(shared: &[u8; 32], ephemeral: &[u8; 32], relay_public: &[u8; 32]) -> ChaCha20Poly1305 {
@@ -162,6 +182,7 @@ pub struct Subscription {
     pub sealed: Vec<u8>,
     pub cancel_hash: [u8; 32],
     pub expires_day: u32,
+    pub kind: SubKind,
 }
 
 /// Content fingerprint of a subscription, to feed `pow::check`.
@@ -188,6 +209,22 @@ mod tests {
             env: ApnsEnv::Sandbox,
             collapse: [5; 16],
             expires_day: 20_000,
+            reason: WakeReason::Message,
+        }
+    }
+
+    fn sample_subscription() -> Subscription {
+        Subscription {
+            mailbox: MailboxId([1; 16]),
+            relay: RelayRef {
+                host: "push.example.org".into(),
+                port: 443,
+                id: NodeId([2; 32]),
+            },
+            sealed: vec![3; 100],
+            cancel_hash: [4; 32],
+            expires_day: 20_000,
+            kind: SubKind::Messages,
         }
     }
 
@@ -207,12 +244,43 @@ mod tests {
     }
 
     #[test]
+    fn kind_is_covered_by_the_subscription_hash() {
+        let mut s = sample_subscription();
+        let a = subscription_hash(&s);
+        s.kind = SubKind::Acks;
+        assert_ne!(a, subscription_hash(&s));
+    }
+
+    #[test]
+    fn reason_survives_seal_and_open() {
+        let (sk, pk) = keypair(1);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(10);
+        let mut t = token();
+        t.reason = WakeReason::Receipt;
+        let sealed = seal(&pk, 3, &t, &mut rng);
+        let opened = open(&[(3, sk)], &sealed).expect("opens");
+        assert_eq!(opened.reason, WakeReason::Receipt);
+        assert_eq!(opened, t);
+    }
+
+    #[test]
+    fn seal_version_1_is_refused() {
+        let (sk, pk) = keypair(1);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let mut sealed = seal(&pk, 3, &token(), &mut rng);
+        assert_eq!(sealed[0], 2);
+        sealed[0] = 1;
+        assert_eq!(open(&[(3, sk)], &sealed), None);
+    }
+
+    #[test]
     fn sealed_fits_max() {
         let (_, pk) = keypair(1);
         let mut rng = rand::rngs::StdRng::seed_from_u64(2);
         let mut t = token();
         t.apns_token = vec![0xff; MAX_APNS_TOKEN];
         t.expires_day = u32::MAX;
+        t.reason = WakeReason::Receipt;
         assert!(seal(&pk, 1, &t, &mut rng).len() <= MAX_SEALED);
     }
 
@@ -242,7 +310,7 @@ mod tests {
         bad[2] ^= 1;
         assert_eq!(open(&keys, &bad), None);
         let mut bad = sealed.clone();
-        bad[0] = 2;
+        bad[0] = 3;
         assert_eq!(open(&keys, &bad), None);
         let mut long = sealed.clone();
         long.resize(MAX_SEALED + 1, 0);
@@ -264,10 +332,10 @@ mod tests {
         let (_, pk) = keypair(9);
         let sealed = seal_with_ephemeral(&pk, 1, &token(), [7; 32]);
         let frozen: &[u8] = &hex!(
-            "010113be4feaeaf204c7fd3358fc9c00721881d174278128227ec674f37f7fe9"
+            "020113be4feaeaf204c7fd3358fc9c00721881d174278128227ec674f37f7fe9"
             "7b6dfe935c5620e0af2515897718e5814b5b0b54e01de72d24e2a1147ed4abbf"
-            "08beccf713267b2cd0302b95249af06011443919a6c8905ce09bb4162934bbd5"
-            "aa8a0262aaa996"
+            "08beccf713267b2cd0302b95249af06011443919a6c890b6e55d620c6bb84d95"
+            "eb69b5b7f9fe709b"
         );
         assert_eq!(sealed, frozen);
     }
@@ -309,6 +377,7 @@ mod tests {
             sealed: vec![3; 100],
             cancel_hash: [4; 32],
             expires_day: 20_000,
+            kind: SubKind::Messages,
         };
         let h = subscription_hash(&base);
         assert_eq!(h, subscription_hash(&base.clone()));
@@ -333,6 +402,9 @@ mod tests {
         variants.push(s);
         let mut s = base.clone();
         s.expires_day += 1;
+        variants.push(s);
+        let mut s = base.clone();
+        s.kind = SubKind::Acks;
         variants.push(s);
         for v in variants {
             assert_ne!(subscription_hash(&v), h);

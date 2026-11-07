@@ -2,6 +2,7 @@ use super::*;
 use crate::rules::{self, Policy};
 use barking_packet::{DEFAULT_HOPS, Kind, Packet, PacketId, Tier, ack};
 use barking_proto::node_id::NodeId;
+use barking_proto::push::SubKind;
 
 const NOW: u64 = 1_800_000_000;
 const BITS: u8 = 1;
@@ -42,6 +43,7 @@ fn raw_sub(mailbox: u8, cancel: u8) -> Subscription {
         sealed: vec![cancel; 80],
         cancel_hash: cancel_hash(&[cancel; 32]),
         expires_day: today() + 1,
+        kind: SubKind::Messages,
     }
 }
 

@@ -14,7 +14,9 @@ use barking_core::mailbox::day_of;
 use barking_core::{Core, CoreError};
 use barking_packet::MailboxId;
 use barking_proto::NodeId;
-use barking_proto::push::{ApnsEnv, RelayRef, Subscription, WakeToken, cancel_hash, seal};
+use barking_proto::push::{
+    ApnsEnv, RelayRef, SubKind, Subscription, WakeReason, WakeToken, cancel_hash, seal,
+};
 use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
 
@@ -335,6 +337,7 @@ pub fn build_subscription(
         env: cfg.env,
         collapse,
         expires_day,
+        reason: WakeReason::Message,
     };
     let sealed = seal(&cfg.seal_public, cfg.seal_key_id, &token, rng);
     let mut secret = [0u8; 32];
@@ -345,6 +348,7 @@ pub fn build_subscription(
         sealed,
         cancel_hash: cancel_hash(&secret),
         expires_day,
+        kind: SubKind::Messages,
     };
     (sub, secret)
 }

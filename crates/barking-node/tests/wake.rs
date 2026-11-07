@@ -11,7 +11,9 @@ use barking_node::testing::{
 };
 use barking_node::wake::WakeConfig;
 use barking_packet::{DEFAULT_HOPS, Kind, MailboxId, Packet, PacketId, Tier, ack};
-use barking_proto::push::{ApnsEnv, Subscription, WakeToken, cancel_hash, open, seal};
+use barking_proto::push::{
+    ApnsEnv, SubKind, Subscription, WakeReason, WakeToken, cancel_hash, open, seal,
+};
 use barking_proto::{ErrorReason, Request, Response};
 use tokio::time::timeout;
 use tracing_subscriber::Layer;
@@ -46,6 +48,7 @@ fn token() -> WakeToken {
         env: ApnsEnv::Sandbox,
         collapse: COLLAPSE,
         expires_day: today() + 1,
+        reason: WakeReason::Message,
     }
 }
 
@@ -61,6 +64,7 @@ fn subscription(relay: &FakeRelay, mailbox: MailboxId, secret_byte: u8) -> Subsc
         sealed: seal(&public, SEAL_KEY_ID, &token(), &mut rand::rng()),
         cancel_hash: cancel_hash(&[secret_byte; 32]),
         expires_day: today() + 1,
+        kind: SubKind::Messages,
     }
 }
 

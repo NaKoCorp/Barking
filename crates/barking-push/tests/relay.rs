@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_proto::client::{Client, ClientError};
-use barking_proto::push::{ApnsEnv, WakeToken, seal};
+use barking_proto::push::{ApnsEnv, WakeReason, WakeToken, seal};
 use barking_proto::{ErrorReason, MAX_WAKE_ITEMS, NodeId, Request, Response};
 use barking_push::{ConnLimits, PushOutcome, Pusher, RelayStats, bind, serve};
 use ed25519_dalek::SigningKey;
@@ -54,6 +54,7 @@ fn token(byte: u8, expires_day: u32) -> WakeToken {
         env: ApnsEnv::Sandbox,
         collapse: [byte; 16],
         expires_day,
+        reason: WakeReason::Message,
     }
 }
 

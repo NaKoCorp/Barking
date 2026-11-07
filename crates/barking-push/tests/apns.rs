@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use barking_proto::push::{ApnsEnv, WakeToken};
+use barking_proto::push::{ApnsEnv, WakeReason, WakeToken};
 use barking_push::apns::ApnsPusher;
 use barking_push::{ApnsConfig, PushOutcome, Pusher};
 use http_body_util::{BodyExt, Full};
@@ -106,6 +106,7 @@ fn token(env: ApnsEnv) -> WakeToken {
         env,
         collapse: [0x11; 16],
         expires_day: 0,
+        reason: WakeReason::Message,
     }
 }
 

@@ -229,6 +229,7 @@ mod tests {
                 sealed: vec![7; 100],
                 cancel_hash: [8; 32],
                 expires_day: 20_000,
+                kind: crate::push::SubKind::Messages,
             },
             pow: 99,
         });
@@ -323,6 +324,7 @@ mod tests {
             sealed: vec![],
             cancel_hash: [0; 32],
             expires_day: 0,
+            kind: crate::push::SubKind::Messages,
         };
         assert_eq!(first(&Request::Subscribe { sub, pow: 0 }), find_value + 1);
         assert_eq!(
