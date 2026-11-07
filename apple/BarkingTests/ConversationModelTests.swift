@@ -157,6 +157,53 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertNil(m.notice)
     }
 
+    /// Spec §6.7 "Une partie était déjà partie : Alice le recevra sur 1 de
+    /// ses 2 appareils": the count is read just before deleting; a bubble
+    /// shown Pending has no device left.
+    func testPartlyLeftCountsTheDevicesReadBeforeDeleting() async {
+        let d = FakeDevice()
+        let two = Delivery(state: .pending, sealedAt: 1, depositedAt: nil, receivedAt: nil, expiredAt: nil,
+                           devices: 2, devicesReceived: 0, devicesLeft: 0, devicesPending: 2)
+        d.messageList = ["b": [Message(id: 7, outgoing: true, body: "m7", at: 1, delivery: two)]]
+        let m = make(d)
+        await m.onAppear()
+        let moved = Delivery(state: .onNetwork, sealedAt: 1, depositedAt: 2, receivedAt: nil, expiredAt: nil,
+                             devices: 2, devicesReceived: 0, devicesLeft: 1, devicesPending: 1)
+        d.deliveryUpdates[7] = DeliveryUpdate(messageId: 7, delivery: moved, removed: false)
+        d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 0, partlyCancelled: 1, alreadyLeft: 0,
+                                       stillReceiving: ["bob"], ownCopiesKept: false, changes: [])
+        _ = await m.delete(7)
+        XCTAssertEqual(m.notice, .deleted(.partlyLeft(name: "bob", left: 1, total: 2)))
+    }
+
+    /// Spec §7.4: the long-press confirmation adds "Your other devices keep
+    /// their copy." by the same rule as the sheet (§5.1); and a deletion
+    /// made in the sheet shows its banner here (§6.7).
+    func testConfirmationKnowsTheOwnCopiesAndTheSheetsBanner() async {
+        let d = FakeDevice()
+        d.messageList = ["b": [sent(7, .onNetwork), Message(id: 8, outgoing: false, body: "x", at: 2)]]
+        let m = make(d)
+        await m.onAppear()
+        let sent = m.items[0], received = m.items[1]
+        let none = await m.keepsOwnCopies(sent)
+        XCTAssertFalse(none, "no sheet data: no copy")
+        d.messageDeliveries[7] = MessageDelivery(messageId: 7, delivery: .state(.onNetwork), devices: [], relays: [],
+                                                 ownCopies: OwnCopies(total: 1, left: 0, waiting: 1))
+        let kept = await m.keepsOwnCopies(sent)
+        XCTAssertTrue(kept)
+        let alone = await m.keepsOwnCopies(received)
+        XCTAssertFalse(alone)
+        d.devicesList = [MyDeviceInfo(id: "aa", name: "iPhone", issuedAt: 1, thisDevice: true, admin: true),
+                         MyDeviceInfo(id: "bb", name: "iPad", issuedAt: 1, thisDevice: false, admin: false)]
+        let linked = await m.keepsOwnCopies(received)
+        XCTAssertTrue(linked, "my linked devices got their own packet")
+
+        m.showDeleted(.alreadyLeft(name: "bob"))
+        XCTAssertEqual(m.notice, .deleted(.alreadyLeft(name: "bob")))
+        m.showDeleted(nil)
+        XCTAssertNil(m.notice)
+    }
+
     func testFailedDeleteKeepsTheBubble() async {
         let d = FakeDevice()
         d.messageList = ["b": [sent(7, .pending)]]

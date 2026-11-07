@@ -89,6 +89,34 @@ final class ChatUITests: XCTestCase {
         XCTAssertTrue(value.hasPrefix("Pending since") || value.hasPrefix("On the network since"), "value: \(value)")
     }
 
+    /// Spec Lot M §6.4: a tap on a sent bubble opens its sheet; its delete
+    /// asks first (§7.4), then the sheet closes and the bubble leaves. (The
+    /// dialog's "Keep" is not exposed: iOS 26 hides the cancel action of an
+    /// iPhone confirmation dialog.)
+    func testBubbleOpensTheMessageSheet() throws {
+        let app = XCUIApplication.seeded()
+        app.launch()
+        let field = openSamChat(app)
+        field.tap()
+        field.typeText("sheet test")
+        app.buttons["Send"].tap()
+        let bubble = app.staticTexts["sheet test"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: 5))
+        bubble.tap()
+        let sealed = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Sealed and saved on this iPhone")).firstMatch
+        XCTAssertTrue(sealed.waitForExistence(timeout: 5), "the sheet shows the timeline")
+        let delete = app.buttons["sheet.delete"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 3))
+        delete.tap()
+        // No network in UI tests: pending, or on the network if a node answered.
+        let confirm = app.buttons.matching(NSPredicate(format: "label IN %@", ["Delete and cancel", "Delete"])).firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 3), "the deletion asks first")
+        confirm.tap()
+        XCTAssertTrue(delete.waitUntil({ !$0.exists }), "the sheet closes")
+        XCTAssertTrue(bubble.waitUntil({ !$0.exists }), "the bubble leaves")
+    }
+
     /// The header button ("Deliveries") opens the path of the last sent
     /// message for now (a real message on a fake route: no network in UI tests).
     func testPathScreenShowsTheRoute() throws {

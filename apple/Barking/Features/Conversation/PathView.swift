@@ -4,7 +4,6 @@ import SwiftUI
 /// Message path screen (screen 5 of the mockup, spec block 2b §4.2).
 struct PathView: View {
     @State private var model: PathModel
-    @Environment(\.colorScheme) private var scheme
 
     init(core: CoreService, messageId: Int64, contact: String, contactName: String) {
         _model = State(initialValue: PathModel(core: core, messageId: messageId, contact: contact,
@@ -17,18 +16,8 @@ struct PathView: View {
                 quoteCard
                 // 24 pt above a section label, 8 below (U-14).
                 SectionLabel("How it got here").padding(.top, Space.section - Space.s2)
-                if model.notRecorded {
-                    Text("Path not recorded")
-                        .font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
-                        .accessibilityIdentifier("path.notRecorded")
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(model.rows.enumerated()), id: \.element.id) { i, row in
-                            PathStop(row: row, more: i < model.rows.count - 1)
-                        }
-                    }
-                }
-                footer.padding(.top, Space.s3)
+                PathStops(rows: model.rows, notRecorded: model.notRecorded)
+                PrivacyBlock(contactName: model.contactName).padding(.top, Space.s3)
             }
             .padding(.horizontal, Space.gutter)
             .padding(.vertical, Space.s4)
@@ -56,12 +45,39 @@ struct PathView: View {
         .background(Color.surfaceCard, in: RoundedRectangle(cornerRadius: Radius.card))
         .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
     }
+}
 
-    /// The terminal block (U-38): `terminalBg` in both themes, with an
-    /// `accent` edge on Ink so it stays a block of its own.
-    private var footer: some View {
+/// The recorded stops of a message's way, or "Path not recorded". Shared
+/// by the path screen and the message sheet of a received message.
+struct PathStops: View {
+    let rows: [PathRow]
+    let notRecorded: Bool
+
+    var body: some View {
+        if notRecorded {
+            Text("Path not recorded")
+                .font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
+                .accessibilityIdentifier("path.notRecorded")
+        } else {
+            VStack(spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
+                    PathStop(row: row, more: i < rows.count - 1)
+                }
+            }
+        }
+    }
+}
+
+/// The terminal block (U-38): "// only you and Alice can read it" and the
+/// protocols, `terminalBg` in both themes, with an `accent` edge on Ink so
+/// it stays a block of its own.
+struct PrivacyBlock: View {
+    let contactName: String
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("// only you and \(model.contactName) can read it")
+            Text("// only you and \(contactName) can read it")
                 .font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.terminalFg)
             FlowLayout {
                 ForEach(["PQXDH", "Double Ratchet"], id: \.self) { chip(Text(verbatim: $0)) }

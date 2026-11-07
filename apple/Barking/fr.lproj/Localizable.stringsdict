@@ -296,5 +296,69 @@
 			<string>Il est déjà parti vers %1$lld de ses %3$lld appareils : %2$@ le garde sur ceux-ci. Le reste est annulé.</string>
 		</dict>
 	</dict>
+	<key>%lld devices · %@</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@n@ · %2$@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld appareil</string>
+			<key>other</key>
+			<string>%lld appareils</string>
+		</dict>
+	</dict>
+	<key>%lld devices</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld appareil</string>
+			<key>other</key>
+			<string>%lld appareils</string>
+		</dict>
+	</dict>
+	<key>Received on %lld of %lld devices</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Reçu sur %1$lld de ses %2$#@d@</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld appareil</string>
+			<key>other</key>
+			<string>%lld appareils</string>
+		</dict>
+	</dict>
+	<key>Received on %lld of %lld devices.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Reçu sur %1$lld de ses %2$#@d@.</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld appareil</string>
+			<key>other</key>
+			<string>%lld appareils</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

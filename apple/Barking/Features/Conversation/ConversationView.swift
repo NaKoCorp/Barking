@@ -2,9 +2,9 @@ import BarkingKit
 import SwiftUI
 
 /// Screen 4 of the mockup, without the "Send from" chooser. Each bubble
-/// has its time and state line under it (spec Lot M §6.3); a bubble and
-/// the header button open the message's path (the message sheet and
-/// "Deliveries" replace it in Lot M tasks 9 and 10).
+/// has its time and state line under it (spec Lot M §6.3); a bubble opens
+/// the message sheet (§6.4). The header button opens the last sent
+/// message's path until "Deliveries" replaces it (Lot M task 10).
 struct ConversationView: View {
     let core: CoreService
     @State private var model: ConversationModel
@@ -13,8 +13,14 @@ struct ConversationView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The message whose path is shown.
     @State private var pathOf: Int64?
+    /// The message whose sheet is open.
+    @State private var sheetOf: SheetTarget?
     /// The message the delete confirmation is open for, as it was then.
     @State private var confirming: ConversationModel.Item?
+    /// The confirmation adds "Your other devices keep their copy." (§7.4).
+    @State private var confirmingKeeps = false
+
+    private struct SheetTarget: Identifiable { let id: Int64 }
 
     init(core: CoreService, contact: String) {
         self.core = core
@@ -64,6 +70,11 @@ struct ConversationView: View {
         .navigationDestination(item: $pathOf) { id in
             PathView(core: core, messageId: id, contact: model.contact, contactName: model.name)
         }
+        .sheet(item: $sheetOf) { target in
+            MessageSheet(core: core, messageId: target.id, contact: model.contact, contactName: model.name) {
+                model.showDeleted($0)
+            }
+        }
         .confirmationDialog(confirmation?.title ?? "", isPresented: confirmingShown,
                             titleVisibility: .visible, presenting: confirming) { item in
             Button(DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery).button, role: .destructive) {
@@ -71,7 +82,8 @@ struct ConversationView: View {
             }
             Button("Keep", role: .cancel) {}
         } message: { item in
-            Text(verbatim: DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery).message(name: model.name))
+            Text(verbatim: DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery)
+                .message(name: model.name, keepsOwnCopies: confirmingKeeps))
         }
         // The message went meanwhile (deleted elsewhere): nothing to confirm (§9).
         .onChange(of: model.items.map(\.id)) { _, ids in
@@ -151,15 +163,15 @@ struct ConversationView: View {
     private func bubble(_ item: ConversationModel.Item) -> some View {
         let failed = item.state == .notDelivered
         return Bubble(text: item.text, outgoing: item.outgoing)
-            .onTapGesture { pathOf = item.id }
+            .onTapGesture { sheetOf = SheetTarget(id: item.id) }
             .contextMenu {
                 if failed {
                     Button { retry(item.id) } label: { Label("Retry", systemImage: "arrow.clockwise") }
                 }
                 Button { copy(item.text) } label: { Label("Copy", systemImage: "doc.on.doc") }
-                Button { pathOf = item.id } label: { Label("Details", systemImage: "info.circle") }
+                Button { sheetOf = SheetTarget(id: item.id) } label: { Label("Details", systemImage: "info.circle") }
                 Divider()
-                Button(role: .destructive) { confirming = item } label: { Label("Delete", systemImage: "trash") }
+                Button(role: .destructive) { confirm(item) } label: { Label("Delete", systemImage: "trash") }
             }
             .accessibilityElement(children: .combine)
             .accessibilityValue(Text(verbatim: Self.spoken(item)))
@@ -167,8 +179,8 @@ struct ConversationView: View {
             .accessibilityActions {
                 if failed { Button("Retry") { retry(item.id) } }
                 Button("Copy") { copy(item.text) }
-                Button("Details") { pathOf = item.id }
-                Button("Delete") { confirming = item }
+                Button("Details") { sheetOf = SheetTarget(id: item.id) }
+                Button("Delete") { confirm(item) }
             }
             .bubbleRow(outgoing: item.outgoing)
     }
@@ -182,6 +194,14 @@ struct ConversationView: View {
             return d.state.spoken(d)
         }
         return item.at.formatted(date: .omitted, time: .shortened)
+    }
+
+    /// Opens the delete confirmation once its own-copies line is known.
+    private func confirm(_ item: ConversationModel.Item) {
+        Task {
+            confirmingKeeps = await model.keepsOwnCopies(item)
+            confirming = item
+        }
     }
 
     private func retry(_ id: Int64) {

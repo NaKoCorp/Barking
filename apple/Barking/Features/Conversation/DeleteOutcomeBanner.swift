@@ -63,7 +63,9 @@ enum DeleteBanner {
         guard shown == .pending else { return nil }
         if outcome.alreadyLeft > 0 { return .alreadyLeft(name: contactName) }
         if outcome.partlyCancelled > 0 {
-            guard let devices else { return .alreadyLeft(name: contactName) }
+            // A delivery shown as Pending has no device left: without a
+            // fresher count, "already left" stays true where "0 of 2" would not.
+            guard let devices, devices.left > 0 else { return .alreadyLeft(name: contactName) }
             return .partlyLeft(name: contactName, left: devices.left, total: devices.total)
         }
         return nil

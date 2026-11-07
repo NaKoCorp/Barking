@@ -38,8 +38,9 @@ final class PathModelTests: XCTestCase {
         XCTAssertFalse(m.notRecorded)
         XCTAssertEqual(m.rows.map(\.title), ["This device", "Internet relay · K7QX2M4A", "Sam's phone"])
         XCTAssertEqual(m.rows.map(\.glyph), [.sender, .relay, .recipient])
-        XCTAssertTrue(m.rows[0].saw.contains("everything"))
-        XCTAssertTrue(m.rows[0].saw.contains("sender"))
+        // Spec Lot M §7.2: no parentheses, a colon.
+        XCTAssertEqual(m.rows[0].saw, "everything: it is the sender.")
+        XCTAssertEqual(m.rows[2].saw, "everything: it is the recipient.")
         XCTAssertTrue(m.rows[1].saw.contains("2 KB"), m.rows[1].saw)
         XCTAssertTrue(m.rows[1].saw.contains("daily") || m.rows[1].saw.contains("every day"), m.rows[1].saw)
         XCTAssertTrue(m.rows[1].saw.contains("whoever deposited it"))
@@ -181,7 +182,7 @@ final class PathModelTests: XCTestCase {
         ])
         await m.load()
         XCTAssertEqual(m.rows[0].spoken,
-                       "This device, wrote and encrypted, \(clock(t0)). Could see: everything (it is the sender).")
+                       "This device, wrote and encrypted, \(clock(t0)). Could see: everything: it is the sender.")
         XCTAssertFalse(m.rows[1].spoken.contains("·"), m.rows[1].spoken)
         XCTAssertTrue(m.rows[1].spoken.hasPrefix("Internet relay, K7QX2M4A, deposited, "), m.rows[1].spoken)
     }

@@ -252,7 +252,7 @@ final class LocalizationTests: XCTestCase {
                     "On the new device, tap Link to an existing device and scan this code.",
                     "Then tap Scan the new device's code and scan the code it shows.",
                     "Link code. The new device scans it.",
-                    "everything (it is the sender).", "everything (it is the recipient)."] {
+                    "everything: it is the sender.", "everything: it is the recipient."] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
     }
@@ -284,6 +284,36 @@ final class LocalizationTests: XCTestCase {
         }
         let en = "%lld messages received by %@."
         XCTAssertEqual(String.localizedStringWithFormat(NSLocalizedString(en, comment: ""), 2, "Sam"), "2 messages received by Sam.")
+    }
+
+    /// Spec Lot M §7.2: the message sheet, in French, with a non-breaking
+    /// space before the colon; its numbers through the stringsdict.
+    func testMessageSheetStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected: [String: String] = [
+            "Show all": "Tout afficher", "Delivery": "Acheminement",
+            "Sealed and saved on this iPhone": "Scellé et enregistré sur cet iPhone",
+            "Deposited on relay %@": "Déposé sur le relais %@", "Deposited on a relay": "Déposé sur un relais",
+            "Received on all their devices": "Reçu sur tous ses appareils",
+            "%@’s devices": "Appareils de %@", "Removed device": "Appareil retiré",
+            "pending": "en attente", "not delivered": "non distribué", "on the network %@": "sur le réseau %@",
+            "Copy for your other devices: pending.": "Copie pour vos autres appareils\u{00A0}: en attente.",
+            "Sent from another of your devices. Its delivery is tracked there.":
+                "Envoyé depuis un autre de vos appareils. Son acheminement est suivi là-bas.",
+            "Delete message": "Supprimer le message",
+            "Details unavailable. The message itself is unchanged.": "Détails indisponibles. Le message lui-même n’a pas changé.",
+            "everything: it is the sender.": "tout\u{00A0}: c’est l’expéditeur.",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        for lang in ["en", "fr"] {
+            let plurals = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
+            for key in ["%lld devices · %@", "%lld devices", "Received on %lld of %lld devices",
+                        "Received on %lld of %lld devices."] {
+                XCTAssertNotNil(plurals[key], "\(lang) plural \(key)")
+            }
+        }
     }
 
     /// No em dash (U+2014) in the EN and FR string tables, read from the sources.

@@ -243,8 +243,8 @@
 "fetched · %@" = "relevé · %@";
 "receipt received · %@" = "accusé reçu · %@";
 "copy encrypted · %@" = "copie chiffrée · %@";
-"everything (it is the sender)." = "tout (c’est l’expéditeur).";
-"everything (it is the recipient)." = "tout (c’est le destinataire).";
+"everything: it is the sender." = "tout : c’est l’expéditeur.";
+"everything: it is the recipient." = "tout : c’est le destinataire.";
 "the message, encrypted between your own devices." = "le message, chiffré entre vos propres appareils.";
 "a sealed packet of %@ for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it." = "un paquet scellé de %@ pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.";
 "a sealed packet for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it." = "un paquet scellé pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.";
@@ -394,3 +394,30 @@
 "Deletion failed. Nothing has changed." = "Suppression impossible. Rien n’a changé.";
 "%@ has no reachable device left. The message can’t be sent again." = "%@ n’a plus d’appareil joignable. Le message ne peut pas être renvoyé.";
 "Your other devices keep their copy." = "Vos autres appareils gardent leur copie.";
+
+/* Lot M §6.4, §7.2: the message sheet ("received %@" is shared with the path) */
+"Show all" = "Tout afficher";
+"Delivery" = "Acheminement";
+"Sealed and saved on this iPhone" = "Scellé et enregistré sur cet iPhone";
+"Deposited on relay %@" = "Déposé sur le relais %@";
+"Deposited on a relay" = "Déposé sur un relais";
+"Could see: a sealed packet of %@ for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it." = "A pu voir : un paquet scellé de %@ pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.";
+"Could see: a sealed packet for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it." = "A pu voir : un paquet scellé pour une boîte aux lettres qui change chaque jour. Ni l’expéditeur, ni le texte. L’adresse IP de qui l’a déposé.";
+"Received on all their devices" = "Reçu sur tous ses appareils";
+"Expired on %@ before a relay accepted it. It never left this iPhone." = "Expiré le %@ avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.";
+"None of %@’s devices picked it up within 24 hours. The relay erased it on %@." = "Aucun appareil de %1$@ ne l’a relevé en 24 h. Le relais l’a effacé le %2$@.";
+"Expired at %@. Checking with the relays at the next sync." = "Expiré à %@. Vérification auprès des relais à la prochaine synchro.";
+"%@ at %@" = "%1$@ à %2$@";
+"%@’s devices" = "Appareils de %@";
+"received" = "reçu";
+"on the network %@" = "sur le réseau %@";
+"on the network" = "sur le réseau";
+"pending" = "en attente";
+"not delivered" = "non distribué";
+"Removed device" = "Appareil retiré";
+"Copy for your other devices: left at %@." = "Copie pour vos autres appareils : partie à %@.";
+"Copy for your other devices: left." = "Copie pour vos autres appareils : partie.";
+"Copy for your other devices: pending." = "Copie pour vos autres appareils : en attente.";
+"Sent from another of your devices. Its delivery is tracked there." = "Envoyé depuis un autre de vos appareils. Son acheminement est suivi là-bas.";
+"Delete message" = "Supprimer le message";
+"Details unavailable. The message itself is unchanged." = "Détails indisponibles. Le message lui-même n’a pas changé.";

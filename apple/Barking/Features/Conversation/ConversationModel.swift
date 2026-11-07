@@ -236,11 +236,15 @@ final class ConversationModel {
         deleting.insert(id)
         defer { deleting.remove(id) }
         notice = nil
+        // How many devices it left for, read just before: a delivery shown
+        // as Pending has none, and the outcome carries no count (§6.7).
+        let fresh = item.outgoing ? (try? await core.deliveriesOf([id]).first)?.delivery : nil
         do {
             let outcome = try await core.deleteMessage(id)
             items.removeAll { $0.id == id }
             if item.outgoing, let delivery {
-                let devices = (left: Int(delivery.devicesLeft), total: Int(delivery.devices))
+                let counted = fresh ?? delivery
+                let devices = (left: Int(counted.devicesLeft), total: Int(counted.devices))
                 notice = DeleteBanner.message(shown: delivery.state, outcome: outcome, contactName: name,
                                               devices: devices).map(Notice.deleted)
             }
@@ -249,6 +253,23 @@ final class ConversationModel {
             notice = .deleteFailed
             return nil
         }
+    }
+
+    /// Whether deleting `item` keeps a copy for my other devices: the
+    /// confirmation then says so on its own line (§5.1, §7.4).
+    func keepsOwnCopies(_ item: Item) async -> Bool {
+        guard item.outgoing else {
+            // A received message: my linked devices got their own packet.
+            return ((try? await core.myDevices()) ?? []).contains { !$0.thisDevice }
+        }
+        // Sent from another device: its confirmation already says it.
+        guard item.delivery != nil, let sheet = try? await core.messageDelivery(item.id) else { return false }
+        return DeleteConfirmation.keepsOwnCopies(delivery: sheet.delivery, ownCopies: sheet.ownCopies)
+    }
+
+    /// After a deletion made in the message sheet: its banner, or none (§6.7).
+    func showDeleted(_ message: DeleteBanner.Message?) {
+        notice = message.map(Notice.deleted)
     }
 
     /// The rows showing their time and state line (§6.3): two sent messages
