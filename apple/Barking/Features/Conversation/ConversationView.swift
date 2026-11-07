@@ -95,7 +95,7 @@ struct ConversationView: View {
                     .foregroundStyle(item.outgoing ? Color.white : Color.danger)
                 } else if let status = item.status {
                     // Interim: the glyph moves under the bubble with BubbleMeta.
-                    status.symbolView(size: 11).font(.system(size: 11, weight: .semibold))
+                    status.symbolView(size: 11).font(.bSymbol(11, relativeTo: .caption2, weight: .semibold))
                     if status == .pending { Text("queued") }
                 }
                 if let route = RouteBadge.text(for: item.route) {
