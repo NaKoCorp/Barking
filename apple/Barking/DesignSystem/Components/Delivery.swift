@@ -5,23 +5,27 @@ import SwiftUI
 // from the core (`BarkingKit.DeliveryState`); this file only says how they
 // look and how VoiceOver reads them.
 
-extension DeliveryState: @retroactive CaseIterable {
-    public static var allCases: [DeliveryState] { [.pending, .onNetwork, .received, .notDelivered] }
-}
-
 extension DeliveryState {
-    /// SF symbol name (§6.2). `checkmark.double` is the custom symbol in
-    /// `Symbols.xcassets`, so it follows weights and sizes.
+    /// The states in the order the legend and lists show them.
+    static let ordered: [DeliveryState] = [.pending, .onNetwork, .received, .notDelivered]
+
+    /// Compile-time guard: a new state breaks this switch, and so `ordered`.
+    private var exhaustive: Void {
+        switch self { case .pending, .onNetwork, .received, .notDelivered: () }
+    }
+
+    /// SF symbol name (§6.2). Received is two `checkmark`s composed by
+    /// `DoubleCheck`, so it follows size, weight and tint like a symbol.
     var symbol: String {
         switch self {
         case .pending: "clock"
-        case .onNetwork: "checkmark"
-        case .received: "checkmark.double"
+        case .onNetwork, .received: "checkmark"
         case .notDelivered: "exclamationmark.triangle.fill"
         }
     }
 
-    var isCustomSymbol: Bool { self == .received }
+    /// Drawn as two checkmarks.
+    var isDouble: Bool { self == .received }
 
     /// Asset name of the tint. Never red: `danger` is for "Delete".
     var tintToken: String {
@@ -53,7 +57,10 @@ extension DeliveryState {
         }
     }
 
-    var image: Image { isCustomSymbol ? Image(symbol) : Image(systemName: symbol) }
+    /// The symbol at `size` points (font size). Inherits weight and foreground style.
+    @ViewBuilder func symbolView(size: CGFloat) -> some View {
+        if isDouble { DoubleCheck(size: size) } else { Image(systemName: symbol) }
+    }
 
     /// VoiceOver value (§7.1): "Pending since 14:02", "Received at 14:05, on
     /// 1 of 2 devices". `self` is the state to speak; `delivery` carries the times.
@@ -85,24 +92,73 @@ extension DeliveryState {
     }
 }
 
+/// Two checkmarks, the second shifted right, with the first knocked out
+/// around the second (a gap of about one stroke, no crossing). Built from
+/// the system `checkmark`, so it takes the font weight, baseline and
+/// foreground style of its context. `size` is the font size in points.
+struct DoubleCheck: View {
+    let size: CGFloat
+
+    private var offset: CGFloat { size * 0.42 }
+    private var gap: CGFloat { size * 0.11 }
+
+    var body: some View {
+        let check = Image(systemName: "checkmark")
+        ZStack(alignment: .leading) {
+            check.mask {
+                // Everything, minus the second check grown by `gap`.
+                Rectangle().overlay(alignment: .leading) {
+                    ZStack {
+                        ForEach(0..<16, id: \.self) { i in
+                            let a = Double(i) * .pi / 8
+                            check.padding(.leading, offset)
+                                .offset(x: cos(a) * gap, y: sin(a) * gap)
+                        }
+                        check.padding(.leading, offset)
+                    }
+                    .blendMode(.destinationOut)
+                }
+                .compositingGroup()
+            }
+            check.padding(.leading, offset)
+        }
+        .fixedSize()
+    }
+}
+
 /// The symbol, tinted, scaled with a text style. Hidden from VoiceOver:
-/// the parent element speaks the state.
+/// the parent element speaks the state. `maximum` is the width of the
+/// column it sits in; the symbol never outgrows it, and is centred.
 struct DeliveryGlyph: View {
     let state: DeliveryState
     let style: Font.TextStyle
+    let maximum: CGFloat?
+    @ScaledMetric private var scaled: CGFloat
 
-    init(_ state: DeliveryState, relativeTo style: Font.TextStyle = .caption) {
+    init(_ state: DeliveryState, relativeTo style: Font.TextStyle = .caption, maximum: CGFloat? = nil) {
         self.state = state
         self.style = style
+        self.maximum = maximum
+        _scaled = ScaledMetric(wrappedValue: 12, relativeTo: style)
     }
 
+    private var size: CGFloat { maximum.map { min(scaled, $0 * 0.7) } ?? scaled }
+
     var body: some View {
-        state.image
-            .font(.bSymbol(12, relativeTo: style, weight: .semibold))
+        state.symbolView(size: size)
+            .font(.system(size: size, weight: .semibold))
             .foregroundStyle(state.tint)
             .contentTransition(.symbolEffect(.replace))
             .barkingAnimation(Motion.feedback, value: state)
+            .frame(width: maximum, height: maximum)
             .accessibilityHidden(true)
+    }
+}
+
+/// Spoken for a sent message with no delivery record.
+extension BubbleMeta {
+    static func sentElsewhere(bundle: Bundle = .main, locale: Locale = .current) -> String {
+        String(localized: "Sent from another of your devices", bundle: bundle, locale: locale)
     }
 }
 
@@ -131,18 +187,10 @@ struct BubbleMeta: View {
             }
             .accessibilityHidden(true)
             .accessibilityShowsLargeContentViewer {
-                if let state { Label { Text(state.word) } icon: { state.image } }
+                if let state { Label { Text(state.word) } icon: { state.symbolView(size: 24) } }
             }
             if state == .notDelivered, let retry {
-                Button(action: retry) {
-                    Text("Retry")
-                        .font(BarkingFont.mono(.footnote, size: 13, weight: .medium))
-                        .foregroundStyle(Color.warnFg)
-                        .padding(.horizontal, Space.s2)
-                        .frame(minWidth: 44, minHeight: 44)
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
+                TextLink("Retry", tint: .warnFg, action: retry).frame(minWidth: 44)
             }
         }
         .frame(maxWidth: .infinity, alignment: Alignment(horizontal: alignment, vertical: .center))
@@ -246,7 +294,7 @@ struct DeliveryTimeline: View {
         let accessible = dynamicTypeSize.isAccessibilitySize
         return HStack(alignment: .top, spacing: Space.s3) {
             VStack(spacing: 2) {
-                marker(step).frame(width: width, height: width)
+                marker(step, width: width).frame(width: width, height: width)
                 if let below {
                     VerticalLine()
                         .stroke(below == .solid ? Color.accent : Color.borderStrong,
@@ -275,13 +323,13 @@ struct DeliveryTimeline: View {
         .barkingAnimation(Motion.feedback, value: step.phase)
     }
 
-    @ViewBuilder private func marker(_ step: Step) -> some View {
+    @ViewBuilder private func marker(_ step: Step, width: CGFloat) -> some View {
         switch step.phase {
         case .ahead:
             Circle().strokeBorder(Color.borderStrong, lineWidth: 1.5).frame(width: 10, height: 10)
         case .done, .stopped:
             if let glyph = step.glyph {
-                DeliveryGlyph(glyph)
+                DeliveryGlyph(glyph, maximum: width)
             } else {
                 Circle().fill(step.phase == .stopped ? Color.warnFg : Color.fgSoft).frame(width: 8, height: 8)
             }
@@ -359,7 +407,7 @@ struct DeliveryRow: View {
     var body: some View {
         let accessible = dynamicTypeSize.isAccessibilitySize
         HStack(alignment: .top, spacing: Space.s3) {
-            DeliveryGlyph(state, relativeTo: .body).frame(width: min(column, 28), height: 24)
+            DeliveryGlyph(state, relativeTo: .body, maximum: min(column, 28))
             VStack(alignment: .leading, spacing: 2) {
                 if accessible { metaLabel }
                 if let title { Text(verbatim: title).font(BarkingFont.sans(.subheadline, size: 15, weight: .semibold)).foregroundStyle(Color.fg) }
@@ -412,8 +460,8 @@ private enum Sample {
 
 #Preview("Delivery glyphs and meta") {
     PreviewMatrix {
-        HStack(spacing: 16) { ForEach(DeliveryState.allCases, id: \.self) { DeliveryGlyph($0) } }
-        HStack(spacing: 16) { ForEach(DeliveryState.allCases, id: \.self) { DeliveryGlyph($0, relativeTo: .title) } }
+        HStack(spacing: 16) { ForEach(DeliveryState.ordered, id: \.self) { DeliveryGlyph($0) } }
+        HStack(spacing: 16) { ForEach(DeliveryState.ordered, id: \.self) { DeliveryGlyph($0, relativeTo: .title) } }
         BubbleMeta(state: .received, at: Sample.time, alignment: .trailing, retry: nil)
         BubbleMeta(state: nil, at: Sample.time, alignment: .leading, retry: nil)
         BubbleMeta(state: .notDelivered, at: Sample.time, alignment: .trailing, retry: {})

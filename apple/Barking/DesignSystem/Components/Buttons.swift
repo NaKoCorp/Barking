@@ -372,11 +372,13 @@ struct HoldCaption: View {
 struct TextLink: View {
     let title: LocalizedStringKey
     let glyph: String?
+    let tint: Color
     let action: () -> Void
 
-    init(_ title: LocalizedStringKey, glyph: String? = nil, action: @escaping () -> Void) {
+    init(_ title: LocalizedStringKey, glyph: String? = nil, tint: Color = .accent, action: @escaping () -> Void) {
         self.title = title
         self.glyph = glyph
+        self.tint = tint
         self.action = action
     }
 
@@ -387,7 +389,7 @@ struct TextLink: View {
                 if let glyph { Text(verbatim: glyph).accessibilityHidden(true) }
             }
             .font(BarkingFont.mono(.footnote, size: 13, weight: .medium))
-            .foregroundStyle(Color.accent)
+            .foregroundStyle(tint)
             .frame(minHeight: 44)
             .contentShape(.rect)
         }

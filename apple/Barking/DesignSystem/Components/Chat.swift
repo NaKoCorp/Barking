@@ -7,9 +7,9 @@ extension Message {
     var failed: Bool { delivery?.state == .notDelivered }
 
     /// The state shown under an outgoing bubble; nil for a received message.
-    /// A sent message without a delivery (sent from another of my devices)
-    /// shows as on the network until the bubble says time only.
-    var shownState: DeliveryState? { outgoing ? (delivery?.state ?? .onNetwork) : nil }
+    /// A sent message without a delivery record (sent from another of my
+    /// devices) shows its time only.
+    var shownState: DeliveryState? { outgoing ? delivery?.state : nil }
 }
 
 /// Whether a contact's safety code was compared (UI review U-20): a glyph

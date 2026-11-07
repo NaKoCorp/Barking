@@ -179,46 +179,42 @@ final class ComponentTests: XCTestCase {
 
     /// §6.2: the table of symbols and tints.
     func testSymbolsAndTints() {
-        XCTAssertEqual(DeliveryState.allCases, [.pending, .onNetwork, .received, .notDelivered])
-        XCTAssertEqual(DeliveryState.allCases.map(\.symbol),
-                       ["clock", "checkmark", "checkmark.double", "exclamationmark.triangle.fill"])
-        XCTAssertEqual(DeliveryState.allCases.map(\.isCustomSymbol), [false, false, true, false])
-        XCTAssertEqual(DeliveryState.allCases.map(\.tintToken), ["fgSoft", "fgSoft", "accent", "warnFg"])
-        XCTAssertEqual(DeliveryState.allCases.map(\.tint), [.fgSoft, .fgSoft, .accent, .warnFg])
+        XCTAssertEqual(DeliveryState.ordered, [.pending, .onNetwork, .received, .notDelivered])
+        XCTAssertEqual(DeliveryState.ordered.map(\.symbol),
+                       ["clock", "checkmark", "checkmark", "exclamationmark.triangle.fill"])
+        XCTAssertEqual(DeliveryState.ordered.map(\.isDouble), [false, false, true, false])
+        XCTAssertEqual(DeliveryState.ordered.map(\.tintToken), ["fgSoft", "fgSoft", "accent", "warnFg"])
+        XCTAssertEqual(DeliveryState.ordered.map(\.tint), [.fgSoft, .fgSoft, .accent, .warnFg])
         // Never red for a network problem.
-        XCTAssertFalse(DeliveryState.allCases.map(\.tintToken).contains("danger"))
+        XCTAssertFalse(DeliveryState.ordered.map(\.tintToken).contains("danger"))
     }
 
-    func testCustomSymbolLoads() throws {
-        let custom = try XCTUnwrap(UIImage(named: "checkmark.double"), "custom symbol missing from the asset catalog")
-        XCTAssertTrue(custom.isSymbolImage)
-        // Same height as checkmark: the width carries the meaning.
-        let cfg = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
-        let check = try XCTUnwrap(UIImage(systemName: "checkmark", withConfiguration: cfg))
-        let double = try XCTUnwrap(UIImage(named: "checkmark.double", in: .main, with: cfg))
-        XCTAssertEqual(double.size.height, check.size.height, accuracy: 1.0)
-        XCTAssertGreaterThan(double.size.width, check.size.width * 1.2)
+    /// Ink rows (top, bottom) and columns of a view drawn black on clear at 1x.
+    private func inkBounds<V: View>(_ view: V) throws -> (top: Int, bottom: Int, width: Int) {
+        let renderer = ImageRenderer(content: view.frame(width: 240, height: 240).foregroundStyle(Color.black))
+        renderer.scale = 1
+        let cg = try XCTUnwrap(renderer.cgImage)
+        let data = try XCTUnwrap(cg.dataProvider?.data as Data?)
+        let w = cg.width, h = cg.height
+        var rows: [Int] = [], cols: [Int] = []
+        for y in 0..<h { for x in 0..<w where data[(y * cg.bytesPerRow) + x * 4 + 3] > 40 { rows.append(y); cols.append(x) } }
+        return (try XCTUnwrap(rows.min()), try XCTUnwrap(rows.max()), (cols.max() ?? 0) - (cols.min() ?? 0))
     }
 
-    /// The custom symbol follows the weights the components use: the ink
-    /// grows with the weight (a symbol with one weight draws the same everywhere).
-    func testCustomSymbolFollowsWeights() throws {
-        func ink(_ weight: UIImage.SymbolWeight) throws -> Double {
-            let cfg = UIImage.SymbolConfiguration(pointSize: 60, weight: weight)
-            let image = try XCTUnwrap(UIImage(named: "checkmark.double", in: .main, with: cfg))
-                .withTintColor(.black, renderingMode: .alwaysOriginal)
-            let size = CGSize(width: 160, height: 160)
-            let format = UIGraphicsImageRendererFormat(); format.scale = 1
-            let cg = try XCTUnwrap(UIGraphicsImageRenderer(size: size, format: format).image { _ in
-                image.draw(at: CGPoint(x: (size.width - image.size.width) / 2, y: (size.height - image.size.height) / 2))
-            }.cgImage)
-            let data = try XCTUnwrap(cg.dataProvider?.data as Data?)
-            return stride(from: 3, to: data.count, by: 4).reduce(0.0) { $0 + Double(data[$1]) } / 255
-        }
-        let weights: [UIImage.SymbolWeight] = [.ultraLight, .regular, .semibold, .black]
-        let inks = try weights.map(ink)
-        XCTAssertGreaterThan(inks[0], 50, "drawn")
-        for (a, b) in zip(inks, inks.dropFirst()) { XCTAssertGreaterThan(b, a * 1.05, "ink by weight: \(inks)") }
+    /// The composed double check has the ink height of one checkmark and is wider.
+    func testDoubleCheckMatchesCheckmarkHeight() throws {
+        let font = Font.system(size: 60, weight: .semibold)
+        let single = try inkBounds(Image(systemName: "checkmark").font(font))
+        let double = try inkBounds(DoubleCheck(size: 60).font(font))
+        XCTAssertEqual(double.top, single.top, accuracy: 1)
+        XCTAssertEqual(double.bottom, single.bottom, accuracy: 1)
+        XCTAssertGreaterThan(double.width, single.width + 15)
+    }
+
+    func testSentElsewhereIsSpoken() throws {
+        let en = try lang("en"), fr = try lang("fr")
+        XCTAssertEqual(BubbleMeta.sentElsewhere(bundle: en.bundle, locale: en.locale), "Sent from another of your devices")
+        XCTAssertEqual(BubbleMeta.sentElsewhere(bundle: fr.bundle, locale: fr.locale), "Envoyé depuis un autre de vos appareils")
     }
 
     func testSpokenPhrases() throws {
@@ -265,9 +261,9 @@ final class ComponentTests: XCTestCase {
 
     func testWordsInBothLanguages() throws {
         let en = try lang("en"), fr = try lang("fr")
-        XCTAssertEqual(DeliveryState.allCases.map { $0.wordString(bundle: en.bundle, locale: en.locale) },
+        XCTAssertEqual(DeliveryState.ordered.map { $0.wordString(bundle: en.bundle, locale: en.locale) },
                        ["Pending", "On the network", "Received", "Not delivered"])
-        XCTAssertEqual(DeliveryState.allCases.map { $0.wordString(bundle: fr.bundle, locale: fr.locale) },
+        XCTAssertEqual(DeliveryState.ordered.map { $0.wordString(bundle: fr.bundle, locale: fr.locale) },
                        ["En attente", "Sur le réseau", "Reçu", "Non distribué"])
     }
 
@@ -293,7 +289,7 @@ final class ComponentTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(DesignSystemTests.ratio(color("accent", style), color("wash", style)), 4.5)
         }
         // On the network and Received differ by shape, not by tint alone.
-        XCTAssertNotEqual(DeliveryState.onNetwork.symbol, DeliveryState.received.symbol)
+        XCTAssertNotEqual(DeliveryState.onNetwork.isDouble, DeliveryState.received.isDouble)
     }
 
     func testPathColorsetsMatchTokens() {
