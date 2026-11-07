@@ -3812,7 +3812,7 @@ fn cancel_all_pending_touches_only_pending_messages() {
 }
 
 #[test]
-fn tombstones_purged_after_two_days() {
+fn tombstones_kept_for_good() {
     let mut p = pair();
     let a_fp = p.a.fingerprint();
     let b_fp = p.b.fingerprint();
@@ -3824,17 +3824,77 @@ fn tombstones_purged_after_two_days() {
     p.b.delete_message(row_of(&p.b, &a_fp, "brief"), NOW)
         .unwrap();
     assert_eq!(tombstones(&p.b), 1);
-    // A day later, logging something keeps it.
-    p.b.send_text(&a_fp, "later", NOW + DAY_SECS, &mut p.rng)
-        .unwrap();
-    assert_eq!(tombstones(&p.b), 1);
-    // Past two days (the log's purge clock advances by two days at most
-    // per entry), it goes with the log's purge.
-    for k in 0..2 {
-        p.b.send_text(&a_fp, "much later", NOW + 3 * DAY_SECS + k, &mut p.rng)
+    // Weeks of log activity (the log's purge clock advances by two days
+    // at most per entry): the tombstone stays, a retry may come any time.
+    for k in 0..30 {
+        p.b.send_text(&a_fp, "later", NOW + k * DAY_SECS, &mut p.rng)
             .unwrap();
     }
-    assert_eq!(tombstones(&p.b), 0);
+    assert_eq!(tombstones(&p.b), 1);
+}
+
+#[test]
+fn delete_after_unconfirmed_deposit_reports_already_left() {
+    let (_d, mut a, _t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "maybe", NOW, &mut rng).unwrap();
+    let mid = message_id_of(&a, &bob, "maybe");
+    // A deposit request left for Bob's packet; its answer never came: a
+    // node may hold it.
+    a.record_deposit_tried(sent[0].id, NOW + 1).unwrap();
+    a.record_deposit_tried(sent[0].id, NOW + 2).unwrap();
+    let tried: Option<i64> = a
+        .store
+        .conn()
+        .query_row(
+            "SELECT deposit_tried_at FROM outbox WHERE packet_id = ?1",
+            rusqlite::params![sent[0].id.0.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tried, Some(i(NOW + 1)));
+    assert_eq!(delivery_state(&a, sent[0].id).0, 0);
+    let outcome = a
+        .delete_message(row_of(&a, &bob, "maybe"), NOW + 5)
+        .unwrap();
+    assert_eq!(
+        outcome,
+        DeleteOutcome {
+            deleted: 1,
+            already_left: 1,
+            still_receiving: vec![bob],
+            own_copies_kept: true,
+            ..DeleteOutcome::default()
+        }
+    );
+    // Its packet keeps going, and so does the copy for my tablet.
+    assert!(outbox_row(&a, sent[0].id).is_some());
+    assert!(outbox_row(&a, sent[1].id).is_some());
+    assert_eq!(deliveries_of(&a, mid), vec![(0, 0), (1, 0)]);
+    // An unknown packet is ignored.
+    a.record_deposit_tried(PacketId([9; 16]), NOW).unwrap();
+}
+
+#[test]
+fn tried_own_copy_is_kept_when_nobody_receives() {
+    let (_d, mut a, _t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "copy tried", NOW, &mut rng).unwrap();
+    a.record_deposit_tried(sent[1].id, NOW + 1).unwrap();
+    let outcome = a
+        .delete_message(row_of(&a, &bob, "copy tried"), NOW + 5)
+        .unwrap();
+    assert_eq!(
+        outcome,
+        DeleteOutcome {
+            deleted: 1,
+            cancelled: 1,
+            own_copies_kept: true,
+            ..DeleteOutcome::default()
+        }
+    );
+    assert_eq!(outbox_row(&a, sent[0].id), None);
+    assert!(outbox_row(&a, sent[1].id).is_some());
 }
 
 #[test]

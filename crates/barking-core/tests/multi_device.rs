@@ -15,6 +15,7 @@ use rand::rngs::StdRng;
 use tempfile::TempDir;
 
 const NOW: u64 = 1_800_000_000;
+const DAY: u64 = 86_400;
 const T: &str = "file";
 
 struct Dev {
@@ -2336,10 +2337,12 @@ fn transfer_and_leave_keeps_root_when_transfer_expires() {
 
 // --- Lot M, task 3: tombstones.
 
-#[test]
-fn tombstone_blocks_late_sync_copy() {
+/// T gets a message A sent before T existed from the history, then
+/// deletes it; `wait` seconds after its expiry, A retries it, which now
+/// seals a copy for T. Returns whether the message is back on T.
+fn retried_copy_comes_back(wait: u64, seed: u64) -> bool {
     let d = dir();
-    let mut rng = StdRng::seed_from_u64(61);
+    let mut rng = StdRng::seed_from_u64(seed);
     let (mut a, _alice, bob) = admin_with_contacts(d.path(), &mut rng);
     let bob_fp = bob.core.fingerprint();
     // Sent before T exists: no copy for it, T gets it from the history.
@@ -2360,8 +2363,14 @@ fn tombstone_blocks_late_sync_copy() {
     let on_t = row(&t.core).expect("imported");
     assert_eq!(t.core.delete_message(on_t, NOW + 40).unwrap().deleted, 1);
     // On A, the message never left; retried, it now also goes to T.
-    let after = u64::from(sent[0].expires_at) + 1;
+    let after = u64::from(sent[0].expires_at) + 1 + wait;
     a.core.expire_due(after).unwrap();
+    // T's log keeps going meanwhile.
+    let mut at = NOW + 40;
+    while at < after {
+        at = (at + DAY).min(after);
+        t.core.send_text(&bob_fp, "news", at, &mut rng).unwrap();
+    }
     let resent = a
         .core
         .retry_message(row(&a.core).unwrap(), after, &mut rng)
@@ -2370,5 +2379,15 @@ fn tombstone_blocks_late_sync_copy() {
     for p in &resent {
         t.core.receive(&p.encode(), T, after, &mut rng).unwrap();
     }
-    assert_eq!(row(&t.core), None);
+    row(&t.core).is_some()
+}
+
+#[test]
+fn tombstone_blocks_late_sync_copy() {
+    assert!(!retried_copy_comes_back(0, 61));
+}
+
+#[test]
+fn retry_days_after_delete_stays_deleted_on_own_device() {
+    assert!(!retried_copy_comes_back(2 * 86_400, 62));
 }

@@ -256,6 +256,7 @@ ALTER TABLE deliveries ADD COLUMN acked_at INTEGER;
 ALTER TABLE deliveries ADD COLUMN expired_at INTEGER;     -- set when it expired before any deposit
 ALTER TABLE outbox ADD COLUMN deposited_at INTEGER;       -- first node acceptance, any kind
 ALTER TABLE outbox ADD COLUMN ref BLOB;                   -- for an ack: the acked packet id
+ALTER TABLE outbox ADD COLUMN deposit_tried_at INTEGER;   -- first deposit request sent
 CREATE TABLE IF NOT EXISTS deleted_messages (
     message_id BLOB PRIMARY KEY NOT NULL,
     at INTEGER NOT NULL
@@ -263,6 +264,11 @@ CREATE TABLE IF NOT EXISTS deleted_messages (
 CREATE INDEX IF NOT EXISTS messages_delivery ON messages(contact_fp, direction, status, at);
 CREATE INDEX IF NOT EXISTS outbox_waiting ON outbox(deposited_at, expires_at);
 ";
+
+/// `outbox.deposit_tried_at` for a database migrated to v3 before the
+/// column joined `SCHEMA_V3_CHANGES` (development builds only).
+pub const OUTBOX_ADD_DEPOSIT_TRIED_AT: &str =
+    "ALTER TABLE outbox ADD COLUMN deposit_tried_at INTEGER;";
 
 /// Backfill of v3 from the route log (`route_steps`, `RouteStep` as stored:
 /// Sealed 0, Deposited 1, AckVerified 4, OwnCopy 5), in the order of §5.3:

@@ -541,14 +541,18 @@ fn accept(
     // Before `insert_message` (unique packet identifier).
     q.mark_seen(packet.id, now)?;
     let message_id = MessageId::incoming(&row.contact_fp, &env.message_id);
-    let inserted = q.insert_message(
-        row.contact_fp,
-        Direction::In,
-        &text,
-        MessageStatus::Received,
-        now,
-        message_id,
-    )?;
+    // A message already received once (`inbound`, never purged) stays as
+    // it is: a resend or a retry of it, even one I deleted since, is a
+    // duplicate.
+    let inserted = !q.inbound_has_message(message_id)?
+        && q.insert_message(
+            row.contact_fp,
+            Direction::In,
+            &text,
+            MessageStatus::Received,
+            now,
+            message_id,
+        )?;
     // Packet → message: found again through the emitted ack (`delete_contact`).
     q.record_inbound(packet.id, message_id)?;
     route::record(q, packet.id, RouteStep::Opened, now, None)?;

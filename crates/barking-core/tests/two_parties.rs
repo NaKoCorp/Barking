@@ -1561,8 +1561,8 @@ fn retry_dedups_when_the_old_one_arrived() {
 
 #[test]
 fn retry_without_not_delivered_is_refused() {
-    let (mut a, b, mut rng) = pair();
-    a.send(&b.fp(), "fresh", NOW, &mut rng);
+    let (mut a, mut b, mut rng) = pair();
+    let fresh = one(a.send(&b.fp(), "fresh", NOW, &mut rng));
     let row = row_of(&a.core, &b.fp(), "fresh");
     assert_eq!(
         a.core.retry_message(row, NOW + 1, &mut rng),
@@ -1571,6 +1571,12 @@ fn retry_without_not_delivered_is_refused() {
     // Nothing either for an unknown row or a received message.
     assert_eq!(
         a.core.retry_message(row + 100, NOW + 1, &mut rng),
+        Err(CoreError::NothingToRetry)
+    );
+    expect_msg(b.recv(&fresh, NOW, &mut rng));
+    let received = row_of(&b.core, &a.fp(), "fresh");
+    assert_eq!(
+        b.core.retry_message(received, NOW + 1, &mut rng),
         Err(CoreError::NothingToRetry)
     );
     assert_eq!(a.core.retry_all(&b.fp(), NOW + 1, &mut rng), Ok(0));
@@ -1674,5 +1680,34 @@ fn retry_skips_a_device_removed_from_the_card() {
     assert_eq!(
         alice.core.messages_with(&bob).unwrap()[0].status,
         MessageStatus::Received
+    );
+}
+
+#[test]
+fn retry_days_after_delete_stays_deleted_on_the_contact() {
+    let (mut a, mut b, mut rng) = pair();
+    let (old, _) = undelivered(&mut a, &b, "unwanted", &mut rng);
+    // The packet did reach Bob, who deleted it; its ack never came back.
+    expect_msg(b.recv(&old[0], NOW + 10, &mut rng));
+    let row = row_of(&b.core, &a.fp(), "unwanted");
+    assert_eq!(b.core.delete_message(row, NOW + 20).unwrap().deleted, 1);
+    // Days of activity on Bob's side.
+    for k in 1..=3 {
+        b.send(&a.fp(), "news", NOW + k * DAY, &mut rng);
+    }
+    // Alice retries three days after the delete.
+    let later = NOW + 3 * DAY + 60;
+    let row = row_of(&a.core, &b.fp(), "unwanted");
+    let new = one(a.core.retry_message(row, later, &mut rng).unwrap());
+    assert!(matches!(
+        b.recv(&new, later, &mut rng),
+        ReceiveOutcome::Duplicate
+    ));
+    assert!(
+        !b.core
+            .messages_with(&a.fp())
+            .unwrap()
+            .iter()
+            .any(|m| m.body == "unwanted")
     );
 }

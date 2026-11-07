@@ -3479,3 +3479,33 @@ async fn session_stage_resumes_a_mailbox_awaiting_a_verdict() {
         "{fetches:?}"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn unanswered_deposit_is_not_cancelled_by_a_delete() {
+    use barking_core::store::MessageStatus;
+    let (_dir, mut core, mut net) = setup();
+    let alice = core.contacts().unwrap()[0].fingerprint;
+    let reply = |core: &Core| {
+        core.messages_with(&alice)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.body == "hi")
+            .unwrap()
+    };
+    // The receipt is accepted; the reply's deposit request leaves but its
+    // answer never comes back, and the app is killed mid-sync.
+    net.stall_deposit_from = Some(1);
+    let cut = tokio::time::timeout(Duration::from_secs(60), sync(&mut core, &net, opts())).await;
+    assert!(cut.is_err());
+    assert_eq!(reply(&core).status, MessageStatus::Pending);
+    // The node may hold it: deleting it does not claim Alice won't get it.
+    let outcome = core.delete_message(reply(&core).id, NOW).unwrap();
+    assert_eq!((outcome.cancelled, outcome.already_left), (0, 1));
+    assert_eq!(outcome.still_receiving, vec![alice]);
+    assert!(
+        core.pending_outbox(NOW)
+            .unwrap()
+            .iter()
+            .any(|b| Packet::decode(b).is_ok_and(|p| p.kind == Kind::Message))
+    );
+}

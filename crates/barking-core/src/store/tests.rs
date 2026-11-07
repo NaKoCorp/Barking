@@ -1262,6 +1262,7 @@ fn migrate_v2_to_v3_backfills_from_route_steps() {
         .collect();
     assert_eq!(statuses, vec![3, 0, 1, 3, 1, 3, 1]);
     assert!(has_object(c, "table", "deleted_messages"));
+    assert!(has_column(c, "outbox", "deposit_tried_at"));
     assert!(has_object(c, "index", "messages_delivery"));
     assert!(has_object(c, "index", "outbox_waiting"));
     // Reopening: the migration is not replayed.
@@ -1289,6 +1290,7 @@ fn migration_is_one_transaction() {
         assert_eq!(version, postcard::to_allocvec(&2u32).unwrap());
         assert!(!has_column(&conn, "deliveries", "sealed_at"));
         assert!(!has_column(&conn, "outbox", "ref"));
+        assert!(!has_column(&conn, "outbox", "deposit_tried_at"));
         assert!(!has_object(&conn, "table", "deleted_messages"));
         assert_eq!(delivery_cols_v2_status(&conn, 0xA2), 1);
     }
@@ -1305,4 +1307,20 @@ fn delivery_cols_v2_status(conn: &Connection, pid: u8) -> i64 {
         |r| r.get(0),
     )
     .unwrap()
+}
+
+#[test]
+fn v3_database_without_deposit_tried_at_gets_it() {
+    let (_d, path) = v2_fixture_copy();
+    drop(Store::open(&path, &KEY).unwrap());
+    // A development database migrated to v3 before the column existed.
+    {
+        let conn = raw_conn(&path);
+        conn.execute_batch("ALTER TABLE outbox DROP COLUMN deposit_tried_at;")
+            .unwrap();
+        assert!(!has_column(&conn, "outbox", "deposit_tried_at"));
+    }
+    let store = Store::open(&path, &KEY).unwrap();
+    assert!(has_column(store.conn(), "outbox", "deposit_tried_at"));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
 }

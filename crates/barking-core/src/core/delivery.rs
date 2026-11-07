@@ -101,6 +101,24 @@ impl Core {
         })
     }
 
+    /// Records that a deposit request for `packet` is about to be sent
+    /// (`outbox.deposit_tried_at`, the first try kept). Called by the
+    /// network client before each deposit request: a node may store the
+    /// packet and its answer be lost, so a tried packet may have left this
+    /// device although no deposit is recorded. A deletion counts it as
+    /// already left (spec §14.1). An unknown packet is ignored.
+    pub fn record_deposit_tried(&mut self, packet: PacketId, now: u64) -> Result<()> {
+        self.store
+            .conn()
+            .execute(
+                "UPDATE outbox SET deposit_tried_at = ?2 \
+                 WHERE packet_id = ?1 AND deposit_tried_at IS NULL",
+                params![packet.0.as_slice(), to_i64(now)],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
     /// Fails the deliveries whose packet expired (`expires_at < now`) before
     /// any node accepted it: `NotDelivered`, `expired_at` = the packet's
     /// expiry, the message recomputed (and noted for `take_failed_notices`
@@ -356,8 +374,10 @@ impl Core {
     /// whatever the confirmation showed.
     ///
     /// Sent message: its contact deliveries still `Pending` are cancelled
-    /// (packet out of the queue, delivery and route steps removed); those
-    /// `OnNetwork` or `Received` are kept, with their packet if still
+    /// (packet out of the queue, delivery and route steps removed), unless
+    /// a deposit request was sent for their packet (`record_deposit_tried`:
+    /// a node may hold it); those, and those `OnNetwork` or `Received`,
+    /// are kept, with their packet if still
     /// queued, so the contact still receives it (a lost packet is
     /// redeposited, the ack clears it, or the verdict settles it); those
     /// `NotDelivered` are removed. The copies for my other devices are
@@ -478,35 +498,38 @@ struct Dropped {
 /// Drops the deliveries of the sent message `message` that a deletion
 /// cancels or makes moot (spec §5.5 points 1 to 4, §5.1).
 fn drop_deliveries(q: &impl Queries, message: MessageId) -> Result<Dropped> {
-    let rows: Vec<(Vec<u8>, bool, i64)> = {
+    let rows: Vec<(Vec<u8>, bool, i64, bool)> = {
         let mut stmt = q
             .conn()
-            .prepare("SELECT packet_id, own, status FROM deliveries WHERE message_id = ?1")
+            .prepare(
+                "SELECT d.packet_id, d.own, d.status, o.deposit_tried_at IS NOT NULL \
+                 FROM deliveries d LEFT JOIN outbox o ON o.packet_id = d.packet_id \
+                 WHERE d.message_id = ?1",
+            )
             .map_err(map_err)?;
         stmt.query_map(params![message.0.as_slice()], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })
         .map_err(map_err)?
         .collect::<rusqlite::Result<_>>()
         .map_err(map_err)?
     };
-    let pending = MessageStatus::Pending as i64;
     let failed = MessageStatus::NotDelivered as i64;
     let left = rows
         .iter()
-        .filter(|(_, own, s)| !own && *s != pending && *s != failed);
+        .filter(|(_, own, s, tried)| !own && may_have_left(*s, *tried));
     let left = u32::try_from(left.count()).unwrap_or(u32::MAX);
     let mut gone = Dropped {
         cancelled: 0,
         left,
         own_kept: false,
     };
-    for (packet, own, status) in rows {
+    for (packet, own, status, tried) in rows {
         let packet = PacketId(arr(packet)?);
         let drop = if status == failed {
             true
-        } else if status != pending {
-            // Left the phone: it cannot be recalled.
+        } else if may_have_left(status, tried) {
+            // Left the phone, or may have: it cannot be recalled.
             gone.own_kept |= own;
             false
         } else if !own {
@@ -523,6 +546,17 @@ fn drop_deliveries(q: &impl Queries, message: MessageId) -> Result<Dropped> {
         }
     }
     Ok(gone)
+}
+
+/// `true` if a delivery in state `status` may have left this device: a node
+/// accepted it (`OnNetwork`, `Received`), or it is `Pending` but a deposit
+/// request was sent (`tried`: `outbox.deposit_tried_at`), whose answer may
+/// have been lost while the node stored it. Never claim it did not leave
+/// when a node may have it (spec §14.1).
+pub(super) fn may_have_left(status: i64, tried: bool) -> bool {
+    status == MessageStatus::OnNetwork as i64
+        || status == MessageStatus::Received as i64
+        || (status == MessageStatus::Pending as i64 && tried)
 }
 
 /// Removes the delivery carrying `packet`, its packet from the send queue

@@ -242,10 +242,6 @@ pub const LOG_MAX_AGE_SECS: u64 = 30 * 86_400;
 /// with real time. With exactly one day, a lag would be permanent.
 pub const LOG_PURGE_CLOCK_STEP_SECS: u64 = 2 * 86_400;
 
-/// Age past which the tombstone of a deleted message (`deleted_messages`)
-/// is purged with the log: a packet's lifetime (24 h) plus a margin.
-pub const TOMBSTONE_MAX_AGE_SECS: u64 = 2 * 86_400;
-
 /// `meta` key of the log purge clock (u64, monotonic).
 const META_LOG_PURGE_CLOCK: &str = "transparency_purge_clock";
 /// Maximum number of regular entries kept in the transparency log.
@@ -426,6 +422,22 @@ impl Store {
         // Last: the backfill reads `deliveries.own` and `route_steps`.
         if stored.is_none_or(|v| v < 3) {
             schema::migrate_v2_to_v3(&self.conn).map_err(map_err)?;
+        }
+        // `outbox.deposit_tried_at`, added to v3 before its release: a
+        // development database already at v3 receives it here (idempotent).
+        let has_tried: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('outbox') \
+                 WHERE name = 'deposit_tried_at'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_tried {
+            self.conn
+                .execute_batch(schema::OUTBOX_ADD_DEPOSIT_TRIED_AT)
+                .map_err(map_err)?;
         }
         Ok(())
     }
@@ -629,10 +641,10 @@ pub trait Queries {
     }
 
     /// Inserts a message. `false` if `message_id` already exists, or was
-    /// deleted from this device less than `TOMBSTONE_MAX_AGE_SECS` ago (a
-    /// tombstone in `deleted_messages`): nothing is written. A late
-    /// `SyncSent` copy, a resend by the contact or a history import thus
-    /// never brings a deleted message back.
+    /// deleted from this device (a tombstone in `deleted_messages`, kept
+    /// for good): nothing is written. A late `SyncSent` copy, a resend or
+    /// retry by the contact or a history import thus never brings a deleted
+    /// message back.
     fn insert_message(
         &self,
         contact_fp: Fingerprint,
@@ -661,8 +673,9 @@ pub trait Queries {
         Ok(n == 1)
     }
 
-    /// Tombstone of the message `message_id`, deleted at `at`
-    /// (`insert_message` refuses it until the log's purge removes it).
+    /// Tombstone of the message `message_id`, deleted at `at`:
+    /// `insert_message` refuses it from now on. Never purged (16 bytes
+    /// and a date per deleted message): a retry may come any time later.
     fn add_tombstone(&self, message_id: MessageId, at: u64) -> Result<()> {
         self.conn()
             .execute(
@@ -1274,15 +1287,6 @@ pub trait Queries {
             .map_err(map_err)?;
         self.conn()
             .execute("DELETE FROM route_steps WHERE at < ?1", params![oldest])
-            .map_err(map_err)?;
-        // Tombstones live as long as a packet that could bring their
-        // message back, plus a margin.
-        let tombstone_cutoff = to_i64(purge_at.saturating_sub(TOMBSTONE_MAX_AGE_SECS));
-        self.conn()
-            .execute(
-                "DELETE FROM deleted_messages WHERE at < ?1",
-                params![tombstone_cutoff],
-            )
             .map_err(map_err)?;
         // Per-class cap: only the class of the added entry has grown.
         let cap = match class {

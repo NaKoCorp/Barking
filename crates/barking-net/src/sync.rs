@@ -13,8 +13,10 @@
 //! 3. **Deposits**, following `plan_deposits`: receipts (no proof of work),
 //!    first copies, resends, extra copies. Proof budget exhausted: messages
 //!    wait, receipts go. `NotResponsible` from 2 responsibles of a mailbox:
-//!    fallback lookup, then the plan is redone. Each accepted deposit is
-//!    recorded in the core at once (`Core::record_deposit`).
+//!    fallback lookup, then the plan is redone. Each request is noted in
+//!    the core before it is sent (`Core::record_deposit_tried`: its answer
+//!    may be lost while the node stores the packet), and each accepted
+//!    deposit is recorded at once (`Core::record_deposit`).
 //! 4. **Introduction fetch**, within `INTRO_FETCH_BYTES` and
 //!    `INTRO_FETCH_SLICE`; a partial one blocks nothing. Then a second
 //!    deposit pass for receipts only (no proof of work), so that the
@@ -1137,6 +1139,13 @@ where
                         }
                         continue 'plan;
                     };
+                    // Noted before the request: the node may store the
+                    // packet and its answer be lost (spec §14.1).
+                    if let Ok(p) = Packet::decode(&d.bytes)
+                        && let Err(e) = self.core.record_deposit_tried(p.id, now)
+                    {
+                        tracing::warn!("deposit try not recorded: {e}");
+                    }
                     let deposit = self.dialer.deposit(&mut conn, &d.bytes, self.pow_left);
                     let Ok(reply) = tokio::time::timeout_at(self.deadline, deposit).await else {
                         break 'plan;

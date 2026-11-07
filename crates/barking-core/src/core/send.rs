@@ -464,22 +464,27 @@ fn reseal(
     }
     let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
     // My other devices: sealed again only if no copy had left this device.
-    let own: Vec<(Vec<u8>, i64)> = {
+    let own: Vec<(Vec<u8>, i64, bool)> = {
         let mut stmt = q
             .conn()
-            .prepare("SELECT packet_id, status FROM deliveries WHERE message_id = ?1 AND own = 1")
+            .prepare(
+                "SELECT d.packet_id, d.status, o.deposit_tried_at IS NOT NULL \
+                 FROM deliveries d LEFT JOIN outbox o ON o.packet_id = d.packet_id \
+                 WHERE d.message_id = ?1 AND d.own = 1",
+            )
             .map_err(map_err)?;
         stmt.query_map(params![message_id.0.as_slice()], |r| {
-            Ok((r.get(0)?, r.get(1)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .map_err(map_err)?
         .collect::<rusqlite::Result<_>>()
         .map_err(map_err)?
     };
-    let stayed =
-        |s: i64| s == MessageStatus::Pending as i64 || s == MessageStatus::NotDelivered as i64;
-    if own.iter().all(|(_, s)| stayed(*s)) {
-        for (packet, _) in own {
+    if !own
+        .iter()
+        .any(|(_, s, tried)| delivery::may_have_left(*s, *tried))
+    {
+        for (packet, _, _) in own {
             delivery::remove_delivery(q, PacketId(arr(packet)?))?;
         }
         let copy = Body::SyncSent { to: contact, text };
