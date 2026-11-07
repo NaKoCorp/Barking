@@ -1467,3 +1467,212 @@ fn hash_failures_are_rate_limited() {
     run(&mut b, NOW + 61);
     assert_eq!(frame_rejections(&b), 2);
 }
+
+// --- Lot M, task 3: retry of undelivered messages.
+
+/// Row id of the message `body` in `core`'s conversation with `contact`.
+fn row_of(core: &Core, contact: &Fingerprint, body: &str) -> i64 {
+    core.messages_with(contact)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+        .id
+}
+
+/// Alice's message `body` to Bob, never deposited, expired: `NotDelivered`.
+/// Returns its packets and the time just after their expiry.
+fn undelivered(a: &mut Party, b: &Party, body: &str, rng: &mut StdRng) -> (Vec<Packet>, u64) {
+    let sent = a.send(&b.fp(), body, NOW, rng);
+    let after = sent.iter().map(|p| u64::from(p.expires_at)).max().unwrap() + 1;
+    a.core.expire_due(after).unwrap();
+    let row = a
+        .core
+        .messages_with(&b.fp())
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap();
+    assert_eq!(row.status, MessageStatus::NotDelivered);
+    (sent, after)
+}
+
+#[test]
+fn retry_reseals_same_message_id_with_new_date() {
+    let (mut a, mut b, mut rng) = pair();
+    let (old, after) = undelivered(&mut a, &b, "again", &mut rng);
+    let before = a.core.messages_with(&b.fp()).unwrap().remove(0);
+    let now = after + 60;
+    let new = one(a.core.retry_message(before.id, now, &mut rng).unwrap());
+    assert_ne!(new.id, old[0].id);
+    assert!(u64::from(new.expires_at) > u64::from(old[0].expires_at));
+    // Same message, same place and time in the conversation, pending again.
+    let row = a.core.messages_with(&b.fp()).unwrap().remove(0);
+    assert_eq!(
+        (row.id, row.message_id, row.at),
+        (before.id, before.message_id, before.at)
+    );
+    assert_eq!(row.status, MessageStatus::Pending);
+    // The old packet is stale for Bob; the new one, dated now, is taken once.
+    assert!(!matches!(
+        b.recv(&old[0], now, &mut rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    let (_, _, text, ack) = expect_msg(b.recv(&new, now, &mut rng));
+    assert_eq!(text, "again");
+    assert!(matches!(
+        b.recv(&new, now, &mut rng),
+        ReceiveOutcome::Duplicate
+    ));
+    assert_eq!(b.core.messages_with(&a.fp()).unwrap().len(), 1);
+    // Its ack makes it received.
+    assert!(matches!(
+        a.recv(&ack, now + 1, &mut rng),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    let row = a.core.messages_with(&b.fp()).unwrap().remove(0);
+    assert_eq!(row.status, MessageStatus::Received);
+}
+
+#[test]
+fn retry_dedups_when_the_old_one_arrived() {
+    let (mut a, mut b, mut rng) = pair();
+    let (old, after) = undelivered(&mut a, &b, "twice", &mut rng);
+    // The old packet did reach Bob (its ack never came back).
+    expect_msg(b.recv(&old[0], NOW + 10, &mut rng));
+    let row = row_of(&a.core, &b.fp(), "twice");
+    let new = one(a.core.retry_message(row, after, &mut rng).unwrap());
+    // Same message identifier: shown once, acked again.
+    assert!(matches!(
+        b.recv(&new, after, &mut rng),
+        ReceiveOutcome::Duplicate
+    ));
+    assert_eq!(b.core.messages_with(&a.fp()).unwrap().len(), 1);
+    let acks = b
+        .core
+        .pending_outbox(after)
+        .unwrap()
+        .into_iter()
+        .map(|bytes| Packet::decode(&bytes).unwrap())
+        .filter(|p| p.kind == Kind::Ack && p.payload[..16] == new.id.0)
+        .count();
+    assert_eq!(acks, 1);
+}
+
+#[test]
+fn retry_without_not_delivered_is_refused() {
+    let (mut a, b, mut rng) = pair();
+    a.send(&b.fp(), "fresh", NOW, &mut rng);
+    let row = row_of(&a.core, &b.fp(), "fresh");
+    assert_eq!(
+        a.core.retry_message(row, NOW + 1, &mut rng),
+        Err(CoreError::NothingToRetry)
+    );
+    // Nothing either for an unknown row or a received message.
+    assert_eq!(
+        a.core.retry_message(row + 100, NOW + 1, &mut rng),
+        Err(CoreError::NothingToRetry)
+    );
+    assert_eq!(a.core.retry_all(&b.fp(), NOW + 1, &mut rng), Ok(0));
+    assert_eq!(
+        a.core.messages_with(&b.fp()).unwrap()[0].status,
+        MessageStatus::Pending
+    );
+}
+
+#[test]
+fn retry_all_reseals_every_undelivered_message() {
+    let (mut a, mut b, mut rng) = pair();
+    let one_sent = a.send(&b.fp(), "one", NOW, &mut rng);
+    let two_sent = a.send(&b.fp(), "two", NOW, &mut rng);
+    let after = u64::from(two_sent[0].expires_at.max(one_sent[0].expires_at)) + 1;
+    a.core.expire_due(after).unwrap();
+    // A later message, still pending, is left alone.
+    a.send(&b.fp(), "three", after, &mut rng);
+    assert_eq!(a.core.retry_all(&b.fp(), after + 1, &mut rng), Ok(2));
+    let statuses: Vec<MessageStatus> = a
+        .core
+        .messages_with(&b.fp())
+        .unwrap()
+        .into_iter()
+        .map(|m| m.status)
+        .collect();
+    assert_eq!(statuses, vec![MessageStatus::Pending; 3]);
+    let mut texts = Vec::new();
+    for bytes in a.core.pending_outbox(after + 1).unwrap() {
+        if let ReceiveOutcome::Message { text, .. } =
+            b.core.receive(&bytes, T, after + 1, &mut rng).unwrap()
+        {
+            texts.push(text);
+        }
+    }
+    texts.sort();
+    assert_eq!(texts, vec!["one", "three", "two"]);
+}
+
+#[test]
+fn retry_skips_a_device_removed_from_the_card() {
+    let mut alice = Party::new("tel-alice", 1);
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(31);
+    let (mut bob1, phrase) =
+        Core::create(&dir.path().join("b1"), &[2; 32], "b1", NOW, &mut rng).unwrap();
+    let _bob2 = link_new(&mut bob1, &dir.path().join("b2"), [3; 32], "b2", &mut rng);
+    let v2 = bob1.contact_card("Bob").unwrap();
+    let bob = alice
+        .core
+        .add_contact(&v2, Some("bob"), NOW, &mut rng)
+        .unwrap();
+    bob1.add_contact(&alice.card("Alice"), Some("alice"), NOW, &mut rng)
+        .unwrap();
+    // Two messages, one packet per Bob device; Bob1 receives the first.
+    let first = alice.send(&bob, "first", NOW, &mut rng);
+    let second = alice.send(&bob, "second", NOW, &mut rng);
+    assert_eq!((first.len(), second.len()), (2, 2));
+    let bob1_id = v2.devices.certs[0].device.id();
+    let mut acked = 0;
+    for p in &first {
+        if let ReceiveOutcome::Message { ack, .. } =
+            bob1.receive(&p.encode(), T, NOW, &mut rng).unwrap()
+        {
+            alice.recv(&ack, NOW, &mut rng);
+            acked += 1;
+        }
+    }
+    assert_eq!(acked, 1);
+    let after = u64::from(second[0].expires_at) + 1;
+    alice.core.expire_due(after).unwrap();
+    // Bob drops Bob2 from his card.
+    let root = RootIdentity::from_phrase(phrase.as_str()).unwrap();
+    let bob1_cert = v2.devices.certs[0].clone();
+    assert_eq!(bob1_cert.device.id(), bob1_id);
+    let bob1_bundle = v2
+        .bundles
+        .iter()
+        .find(|b| b.device == bob1_cert.device)
+        .unwrap()
+        .clone();
+    let v3 = DeviceList::sign(&root, v2.devices.version + 1, vec![bob1_cert]).unwrap();
+    let card3 = ContactCard::sign(&root, "Bob", v3, vec![bob1_bundle], Vec::new()).unwrap();
+    alice
+        .core
+        .add_contact(&card3, Some("bob"), NOW, &mut rng)
+        .unwrap();
+    // "second": only Bob1 is left to try.
+    let row = row_of(&alice.core, &bob, "second");
+    let resent = one(alice.core.retry_message(row, after, &mut rng).unwrap());
+    assert_eq!(
+        expect_msg(bob1.receive(&resent.encode(), T, after, &mut rng).unwrap()).2,
+        "second"
+    );
+    // "first" reached Bob1 and failed only on Bob2: nobody left to try.
+    let row = row_of(&alice.core, &bob, "first");
+    assert_eq!(
+        alice.core.retry_message(row, after, &mut rng),
+        Err(CoreError::NoSession)
+    );
+    assert_eq!(
+        alice.core.messages_with(&bob).unwrap()[0].status,
+        MessageStatus::Received
+    );
+}

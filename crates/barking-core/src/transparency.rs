@@ -148,6 +148,16 @@ pub enum TransparencyEvent {
         device: DeviceId,
         name: String,
     },
+    /// `count` messages deleted from this device: `cancelled` of them
+    /// before any packet to the contact left it (nobody receives them),
+    /// `already_left` with at least one packet already on the network or
+    /// received (the contact still receives them). No content, no
+    /// contact. Added last.
+    MessagesDeleted {
+        count: u32,
+        cancelled: u32,
+        already_left: u32,
+    },
 }
 
 /// Why a node was set aside.
@@ -433,6 +443,15 @@ impl TransparencyEvent {
                 "Your device \"{name}\" ({}) asked to leave your account; it was \
                  removed from your device list.",
                 hex(&device.0[..4])
+            ),
+            Self::MessagesDeleted {
+                count,
+                cancelled,
+                already_left,
+            } => format!(
+                "{count} message(s) deleted from this device: {cancelled} cancelled before \
+                 leaving it, {already_left} had already left (the contact still receives \
+                 them)."
             ),
         }
     }

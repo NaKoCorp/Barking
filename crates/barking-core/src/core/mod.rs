@@ -52,7 +52,7 @@ use crate::{CoreError, Result};
 
 pub use crate::transparency::SyncKind;
 pub use contacts::ContactSummary;
-pub use delivery::AwaitingVerdict;
+pub use delivery::{AwaitingVerdict, DeleteOutcome};
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
 pub use history::{HistoryArchive, MAX_ARCHIVE_BYTES};
 pub use link::{

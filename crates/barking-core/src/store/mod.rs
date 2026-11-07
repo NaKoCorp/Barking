@@ -241,6 +241,11 @@ pub const LOG_MAX_AGE_SECS: u64 = 30 * 86_400;
 /// (after a period of rare activity), so it catches up
 /// with real time. With exactly one day, a lag would be permanent.
 pub const LOG_PURGE_CLOCK_STEP_SECS: u64 = 2 * 86_400;
+
+/// Age past which the tombstone of a deleted message (`deleted_messages`)
+/// is purged with the log: a packet's lifetime (24 h) plus a margin.
+pub const TOMBSTONE_MAX_AGE_SECS: u64 = 2 * 86_400;
+
 /// `meta` key of the log purge clock (u64, monotonic).
 const META_LOG_PURGE_CLOCK: &str = "transparency_purge_clock";
 /// Maximum number of regular entries kept in the transparency log.
@@ -623,7 +628,11 @@ pub trait Queries {
         query_sessions(self.conn(), "ORDER BY created_at, session_id", [])
     }
 
-    /// Inserts a message. `false` if `message_id` already exists (nothing is written).
+    /// Inserts a message. `false` if `message_id` already exists, or was
+    /// deleted from this device less than `TOMBSTONE_MAX_AGE_SECS` ago (a
+    /// tombstone in `deleted_messages`): nothing is written. A late
+    /// `SyncSent` copy, a resend by the contact or a history import thus
+    /// never brings a deleted message back.
     fn insert_message(
         &self,
         contact_fp: Fingerprint,
@@ -637,7 +646,8 @@ pub trait Queries {
             .conn()
             .execute(
                 "INSERT OR IGNORE INTO messages(message_id, contact_fp, direction, body, \
-                 status, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 status, at) SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE NOT EXISTS \
+                 (SELECT 1 FROM deleted_messages WHERE message_id = ?1)",
                 params![
                     message_id.0.as_slice(),
                     contact_fp.0.as_slice(),
@@ -649,6 +659,19 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         Ok(n == 1)
+    }
+
+    /// Tombstone of the message `message_id`, deleted at `at`
+    /// (`insert_message` refuses it until the log's purge removes it).
+    fn add_tombstone(&self, message_id: MessageId, at: u64) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO deleted_messages(message_id, at) VALUES (?1, ?2) \
+                 ON CONFLICT(message_id) DO UPDATE SET at = excluded.at",
+                params![message_id.0.as_slice(), to_i64(at)],
+            )
+            .map_err(map_err)?;
+        Ok(())
     }
 
     /// Records that the received packet `packet_id` carried the message
@@ -1251,6 +1274,15 @@ pub trait Queries {
             .map_err(map_err)?;
         self.conn()
             .execute("DELETE FROM route_steps WHERE at < ?1", params![oldest])
+            .map_err(map_err)?;
+        // Tombstones live as long as a packet that could bring their
+        // message back, plus a margin.
+        let tombstone_cutoff = to_i64(purge_at.saturating_sub(TOMBSTONE_MAX_AGE_SECS));
+        self.conn()
+            .execute(
+                "DELETE FROM deleted_messages WHERE at < ?1",
+                params![tombstone_cutoff],
+            )
             .map_err(map_err)?;
         // Per-class cap: only the class of the added entry has grown.
         let cap = match class {

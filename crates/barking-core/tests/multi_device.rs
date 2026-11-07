@@ -2333,3 +2333,42 @@ fn transfer_and_leave_keeps_root_when_transfer_expires() {
     assert!(!a.core.leave_ready().unwrap());
     assert!(a.core.pending_outbox(later).unwrap().is_empty());
 }
+
+// --- Lot M, task 3: tombstones.
+
+#[test]
+fn tombstone_blocks_late_sync_copy() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(61);
+    let (mut a, _alice, bob) = admin_with_contacts(d.path(), &mut rng);
+    let bob_fp = bob.core.fingerprint();
+    // Sent before T exists: no copy for it, T gets it from the history.
+    let sent = a.core.send_text(&bob_fp, "gone", NOW, &mut rng).unwrap();
+    let offer = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
+    let out = a.core.link_device(&req, true, NOW + 30, &mut rng).unwrap();
+    t.core
+        .finish_link(&out.bundle, out.history.as_ref(), NOW + 31)
+        .unwrap();
+    let row = |c: &Core| {
+        c.messages_with(&bob_fp)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.body == "gone")
+            .map(|m| m.id)
+    };
+    let on_t = row(&t.core).expect("imported");
+    assert_eq!(t.core.delete_message(on_t, NOW + 40).unwrap().deleted, 1);
+    // On A, the message never left; retried, it now also goes to T.
+    let after = u64::from(sent[0].expires_at) + 1;
+    a.core.expire_due(after).unwrap();
+    let resent = a
+        .core
+        .retry_message(row(&a.core).unwrap(), after, &mut rng)
+        .unwrap();
+    assert_eq!(resent.len(), 2);
+    for p in &resent {
+        t.core.receive(&p.encode(), T, after, &mut rng).unwrap();
+    }
+    assert_eq!(row(&t.core), None);
+}

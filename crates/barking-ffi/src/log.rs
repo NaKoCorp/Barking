@@ -40,7 +40,7 @@ pub struct LogEntry {
 
 /// Number of variants of `TransparencyEvent`: one more than the last
 /// position `index` gives.
-const VARIANTS: usize = 26;
+const VARIANTS: usize = 27;
 
 /// Every key `LogEntry::key` can take, one per `TransparencyEvent` variant,
 /// in the order of `index`. The key of an event is `KEYS[index(event)]`: there
@@ -72,6 +72,7 @@ const KEYS: [&str; VARIANTS] = [
     "log.this_device_removed",
     "log.device_removed",
     "log.remove_requested",
+    "log.messages_deleted",
 ];
 
 /// Position of a variant in `KEYS`. No wildcard: a new variant does not
@@ -105,6 +106,7 @@ fn index(e: &TransparencyEvent) -> usize {
         E::ThisDeviceRemoved { .. } => 23,
         E::DeviceRemoved { .. } => 24,
         E::RemoveRequested { .. } => 25,
+        E::MessagesDeleted { .. } => 26,
     }
 }
 
@@ -333,6 +335,11 @@ fn parts(e: &TransparencyEvent, name: &dyn Fn(&Fingerprint) -> String) -> (Strin
         E::ThisDeviceRemoved { version } => ("security", vec![version.to_string()]),
         E::DeviceRemoved { device, name } => ("device", vec![name.clone(), hex4(&device.0)]),
         E::RemoveRequested { device, name } => ("device", vec![name.clone(), hex4(&device.0)]),
+        E::MessagesDeleted {
+            count,
+            cancelled,
+            already_left,
+        } => ("packet", vec![n(*count), n(*cancelled), n(*already_left)]),
     };
     (family.to_owned(), args)
 }
@@ -504,6 +511,11 @@ mod tests {
             E::RemoveRequested {
                 device: dev,
                 name: "iPad".into(),
+            },
+            E::MessagesDeleted {
+                count: 3,
+                cancelled: 2,
+                already_left: 1,
             },
         ]
     }

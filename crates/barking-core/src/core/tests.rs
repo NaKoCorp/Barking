@@ -3511,3 +3511,407 @@ fn ack_with_an_early_expiry_is_bounded_by_the_message() {
     ));
     assert_eq!(status_of(&p.a, &bob, "early-ack"), MessageStatus::Received);
 }
+
+// --- Lot M, task 3: deletion, tombstones.
+
+/// Deliveries of the message `message_id`, as `(own, status)`, own last.
+fn deliveries_of(c: &Core, message_id: MessageId) -> Vec<(i64, i64)> {
+    let mut stmt = c
+        .store
+        .conn()
+        .prepare("SELECT own, status FROM deliveries WHERE message_id = ?1 ORDER BY own, status")
+        .unwrap();
+    stmt.query_map(rusqlite::params![message_id.0.as_slice()], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })
+    .unwrap()
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .unwrap()
+}
+
+fn message_id_of(c: &Core, contact: &Fingerprint, body: &str) -> MessageId {
+    c.messages_with(contact)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+        .message_id
+}
+
+fn has_message(c: &Core, contact: &Fingerprint, body: &str) -> bool {
+    c.messages_with(contact)
+        .unwrap()
+        .iter()
+        .any(|m| m.body == body)
+}
+
+fn tombstones(c: &Core) -> i64 {
+    c.store
+        .conn()
+        .query_row("SELECT count(*) FROM deleted_messages", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn route_steps_of(c: &Core, packet: PacketId) -> i64 {
+    c.store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM route_steps WHERE packet_id = ?1",
+            rusqlite::params![packet.0.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn delete_pending_cancels_and_drops_own_copies() {
+    let (_d, mut a, _t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "never", NOW, &mut rng).unwrap();
+    // Bob's device first, then the copy for my tablet.
+    assert_eq!(sent.len(), 2);
+    let mid = message_id_of(&a, &bob, "never");
+    let row = row_of(&a, &bob, "never");
+    assert_eq!(route_steps_of(&a, sent[0].id), 1);
+    let outcome = a.delete_message(row, NOW + 5).unwrap();
+    assert_eq!(
+        outcome,
+        DeleteOutcome {
+            deleted: 1,
+            cancelled: 1,
+            ..DeleteOutcome::default()
+        }
+    );
+    assert!(!has_message(&a, &bob, "never"));
+    // Nobody receives it: neither Bob nor my tablet.
+    assert!(deliveries_of(&a, mid).is_empty());
+    for p in &sent {
+        assert_eq!(outbox_row(&a, p.id), None);
+        assert_eq!(route_steps_of(&a, p.id), 0);
+    }
+    assert!(a.awaited_ack_mailboxes(NOW + 5).unwrap().is_empty());
+    assert_eq!(tombstones(&a), 1);
+}
+
+#[test]
+fn delete_after_deposit_reports_already_left() {
+    let (_d, mut a, _t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "gone", NOW, &mut rng).unwrap();
+    let mid = message_id_of(&a, &bob, "gone");
+    a.record_deposit(sent[0].id, NODE, NOW + 1).unwrap();
+    let outcome = a.delete_message(row_of(&a, &bob, "gone"), NOW + 5).unwrap();
+    assert_eq!(
+        outcome,
+        DeleteOutcome {
+            deleted: 1,
+            already_left: 1,
+            still_receiving: vec![bob],
+            own_copies_kept: true,
+            ..DeleteOutcome::default()
+        }
+    );
+    assert!(!has_message(&a, &bob, "gone"));
+    // Bob receives it all the same: its packet stays queued (redeposited
+    // if lost) and the copy for my tablet keeps going.
+    assert_eq!(outbox_row(&a, sent[0].id), Some(Some(i(NOW + 1))));
+    assert_eq!(outbox_row(&a, sent[1].id), Some(None));
+    assert_eq!(deliveries_of(&a, mid), vec![(0, 1), (1, 0)]);
+    // No ack subscription is left for a message that is gone.
+    assert!(a.awaited_ack_mailboxes(NOW + 5).unwrap().is_empty());
+}
+
+#[test]
+fn kept_delivery_of_a_deleted_message_settles() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let acked = p.a.send_text(&bob, "acked", NOW, &mut p.rng).unwrap();
+    let lost = p.a.send_text(&bob, "lost", NOW, &mut p.rng).unwrap();
+    for s in [&acked, &lost] {
+        p.a.record_deposit(s[0].id, NODE, NOW).unwrap();
+    }
+    let rows = [row_of(&p.a, &bob, "acked"), row_of(&p.a, &bob, "lost")];
+    assert_eq!(p.a.delete_messages(&rows, NOW + 1).unwrap().already_left, 2);
+    // The ack still clears its packet from the queue.
+    let ack = match p
+        .b
+        .receive(&acked[0].encode(), "t", NOW, &mut p.rng)
+        .unwrap()
+    {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    assert!(matches!(
+        p.a.receive(&ack.encode(), "t", NOW + 2, &mut p.rng)
+            .unwrap(),
+        ReceiveOutcome::AckReceived { .. }
+    ));
+    assert_eq!(outbox_row(&p.a, acked[0].id), None);
+    assert_eq!(delivery_state(&p.a, acked[0].id).0, 3);
+    // The other still gets its verdict, without a failure notice for a
+    // message that no longer exists.
+    let expiry = u64::from(lost[0].expires_at);
+    assert_eq!(
+        p.a.awaiting_verdict(expiry).unwrap(),
+        vec![(lost[0].id, lost[0].mailbox)]
+    );
+    assert!(p.a.confirm_expired(lost[0].id, expiry + 1).unwrap());
+    assert_eq!(outbox_row(&p.a, lost[0].id), None);
+    assert!(p.a.awaiting_verdict(expiry + 1).unwrap().is_empty());
+    assert!(p.a.take_failed_notices().is_empty());
+}
+
+#[test]
+fn delete_mixed_devices_is_partly_cancelled() {
+    let (_d, a, _t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    // Alice has two devices: one packet each.
+    let sent = b.send_text(&alice, "half", NOW, &mut rng).unwrap();
+    assert_eq!(sent.len(), 2);
+    let mid = message_id_of(&b, &alice, "half");
+    b.record_deposit(sent[0].id, NODE, NOW).unwrap();
+    let outcome = b
+        .delete_message(row_of(&b, &alice, "half"), NOW + 5)
+        .unwrap();
+    assert_eq!(
+        outcome,
+        DeleteOutcome {
+            deleted: 1,
+            partly_cancelled: 1,
+            still_receiving: vec![alice],
+            ..DeleteOutcome::default()
+        }
+    );
+    assert_eq!(deliveries_of(&b, mid), vec![(0, 1)]);
+    assert!(outbox_row(&b, sent[0].id).is_some());
+    assert_eq!(outbox_row(&b, sent[1].id), None);
+}
+
+#[test]
+fn delete_not_delivered_drops_its_deliveries() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "late", NOW, &mut p.rng).unwrap();
+    let mid = message_id_of(&p.a, &bob, "late");
+    p.a.expire_due(u64::from(sent[0].expires_at) + 1).unwrap();
+    assert_eq!(status_of(&p.a, &bob, "late"), MessageStatus::NotDelivered);
+    let row = row_of(&p.a, &bob, "late");
+    let outcome = p.a.delete_message(row, NOW + DAY_SECS).unwrap();
+    assert_eq!(
+        outcome,
+        DeleteOutcome {
+            deleted: 1,
+            ..DeleteOutcome::default()
+        }
+    );
+    assert!(deliveries_of(&p.a, mid).is_empty());
+    // Gone already: nothing more.
+    assert_eq!(
+        p.a.delete_message(row, NOW + DAY_SECS).unwrap(),
+        DeleteOutcome::default()
+    );
+}
+
+const DAY_SECS: u64 = 86_400;
+
+#[test]
+fn delete_received_message_keeps_inbound() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let b_fp = p.b.fingerprint();
+    let first =
+        p.a.send_text(&b_fp, "read-me", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    let ack = match p.b.receive(&first.encode(), "t", NOW, &mut p.rng).unwrap() {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    let row = row_of(&p.b, &a_fp, "read-me");
+    let outcome = p.b.delete_message(row, NOW + 1).unwrap();
+    assert_eq!(
+        outcome,
+        DeleteOutcome {
+            deleted: 1,
+            ..DeleteOutcome::default()
+        }
+    );
+    assert!(!has_message(&p.b, &a_fp, "read-me"));
+    // The pending ack still leaves; the packet stays known.
+    assert!(outbox_row(&p.b, ack.id).is_some());
+    let inbound: i64 =
+        p.b.store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM inbound WHERE packet_id = ?1",
+                rusqlite::params![first.id.0.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(inbound, 1);
+    // The contact resends it (same identifier, new packet): it stays gone,
+    // and is acked.
+    let mid = message_id_of(&p.a, &b_fp, "read-me");
+    let again = seal_body(
+        &mut p.a,
+        &send::Target::Contact(b_fp),
+        &Body::Text("read-me".into()),
+        mid,
+        &mut p.rng,
+    )
+    .remove(0)
+    .0;
+    assert!(matches!(
+        p.b.receive(&again.encode(), "t", NOW + 2, &mut p.rng)
+            .unwrap(),
+        ReceiveOutcome::Duplicate
+    ));
+    assert!(!has_message(&p.b, &a_fp, "read-me"));
+}
+
+#[test]
+fn cancel_all_pending_touches_only_pending_messages() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    p.a.send_text(&bob, "p1", NOW, &mut p.rng).unwrap();
+    p.a.send_text(&bob, "p2", NOW, &mut p.rng).unwrap();
+    let dep = p.a.send_text(&bob, "dep", NOW, &mut p.rng).unwrap();
+    p.a.record_deposit(dep[0].id, NODE, NOW).unwrap();
+    let got = p.a.send_text(&bob, "got", NOW, &mut p.rng).unwrap();
+    let ack = match p.b.receive(&got[0].encode(), "t", NOW, &mut p.rng).unwrap() {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    p.a.receive(&ack.encode(), "t", NOW, &mut p.rng).unwrap();
+    let before = p.a.messages_with(&bob).unwrap().len();
+    let outcome = p.a.cancel_all_pending(NOW + 10).unwrap();
+    assert_eq!(
+        outcome,
+        DeleteOutcome {
+            deleted: 2,
+            cancelled: 2,
+            ..DeleteOutcome::default()
+        }
+    );
+    let left: Vec<String> =
+        p.a.messages_with(&bob)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.body)
+            .collect();
+    assert_eq!(left.len(), before - 2);
+    assert!(!left.contains(&"p1".to_string()) && !left.contains(&"p2".to_string()));
+    for body in ["x", "y", "dep", "got"] {
+        assert!(left.contains(&body.to_string()), "{body}");
+    }
+    // Nothing more to cancel.
+    assert_eq!(
+        p.a.cancel_all_pending(NOW + 10).unwrap(),
+        DeleteOutcome::default()
+    );
+}
+
+#[test]
+fn tombstones_purged_after_two_days() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let b_fp = p.b.fingerprint();
+    let first =
+        p.a.send_text(&b_fp, "brief", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    p.b.receive(&first.encode(), "t", NOW, &mut p.rng).unwrap();
+    p.b.delete_message(row_of(&p.b, &a_fp, "brief"), NOW)
+        .unwrap();
+    assert_eq!(tombstones(&p.b), 1);
+    // A day later, logging something keeps it.
+    p.b.send_text(&a_fp, "later", NOW + DAY_SECS, &mut p.rng)
+        .unwrap();
+    assert_eq!(tombstones(&p.b), 1);
+    // Past two days (the log's purge clock advances by two days at most
+    // per entry), it goes with the log's purge.
+    for k in 0..2 {
+        p.b.send_text(&a_fp, "much later", NOW + 3 * DAY_SECS + k, &mut p.rng)
+            .unwrap();
+    }
+    assert_eq!(tombstones(&p.b), 0);
+}
+
+#[test]
+fn delete_event_has_no_content() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    p.a.send_text(&bob, "secret words", NOW, &mut p.rng)
+        .unwrap();
+    let dep = p.a.send_text(&bob, "other words", NOW, &mut p.rng).unwrap();
+    p.a.record_deposit(dep[0].id, NODE, NOW).unwrap();
+    let rows = [
+        row_of(&p.a, &bob, "secret words"),
+        row_of(&p.a, &bob, "other words"),
+    ];
+    p.a.delete_messages(&rows, NOW + 1).unwrap();
+    let (_, last) = p.a.transparency_log(1).unwrap().remove(0);
+    assert_eq!(
+        last,
+        TransparencyEvent::MessagesDeleted {
+            count: 2,
+            cancelled: 1,
+            already_left: 1,
+        }
+    );
+    assert!(!last.is_security());
+    let text = last.describe();
+    assert!(!text.contains("words") && !text.contains("bob"), "{text}");
+    let bytes: Vec<u8> =
+        p.a.store
+            .conn()
+            .query_row(
+                "SELECT event FROM transparency ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert!(!bytes.windows(5).any(|w| w == b"words"));
+    assert!(!bytes.windows(32).any(|w| w == bob.0.as_slice()));
+    // Nothing deleted, nothing logged.
+    let n = p.a.transparency_log(10_000).unwrap().len();
+    p.a.delete_messages(&rows, NOW + 2).unwrap();
+    assert_eq!(p.a.transparency_log(10_000).unwrap().len(), n);
+}
+
+#[test]
+fn tombstone_blocks_history_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(31);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    let (c, _) = Core::create(&dir.path().join("c"), &[3; 32], "c", NOW, &mut rng).unwrap();
+    let c_fp = a
+        .add_contact(&c.contact_card("C").unwrap(), Some("c"), NOW, &mut rng)
+        .unwrap();
+    a.send_text(&c_fp, "kept", NOW, &mut rng).unwrap();
+    a.send_text(&c_fp, "deleted", NOW, &mut rng).unwrap();
+    let deleted = message_id_of(&a, &c_fp, "deleted");
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) =
+        Core::begin_link(&dir.path().join("t"), &[2; 32], &offer, "t", NOW, &mut rng).unwrap();
+    let out = a.link_device(&req, true, NOW, &mut rng).unwrap();
+    // T already deleted that message (its tombstone is there): the
+    // archive does not bring it back.
+    t.store
+        .conn()
+        .execute(
+            "INSERT INTO deleted_messages(message_id, at) VALUES (?1, ?2)",
+            rusqlite::params![deleted.0.as_slice(), i(NOW)],
+        )
+        .unwrap();
+    t.finish_link(&out.bundle, out.history.as_ref(), NOW + 1)
+        .unwrap();
+    assert!(has_message(&t, &c_fp, "kept"));
+    assert!(!has_message(&t, &c_fp, "deleted"));
+    assert!(
+        t.transparency_log(10)
+            .unwrap()
+            .iter()
+            .any(|(_, e)| *e == TransparencyEvent::HistoryImported { count: 1 })
+    );
+}

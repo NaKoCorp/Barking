@@ -18,7 +18,8 @@ use crate::Result;
 use crate::identity::Fingerprint;
 use crate::mailbox::MailboxId;
 use crate::packet::{Packet, PacketId};
-use crate::store::{MessageId, MessageStatus, Queries, arr, map_err, to_i64, to_u64};
+use crate::store::{Direction, MessageId, MessageStatus, Queries, arr, map_err, to_i64, to_u64};
+use crate::transparency::TransparencyEvent;
 
 /// Recomputes the state of the outgoing message `message_id` from its
 /// deliveries to the contact's devices (`own = 0`): `Received` if one is
@@ -330,4 +331,211 @@ fn outgoing_status(
         .map_err(map_err)?;
     row.map(|(fp, id, status)| Ok((Fingerprint(arr(fp)?), id, status)))
         .transpose()
+}
+
+/// Outcome of a deletion (`Core::delete_messages`, spec §5.5).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeleteOutcome {
+    pub deleted: u32,
+    /// Messages nobody will receive: every contact packet was still here.
+    pub cancelled: u32,
+    /// Messages with some packets cancelled and some already gone.
+    pub partly_cancelled: u32,
+    /// Messages fully gone before the delete (on the network or received).
+    pub already_left: u32,
+    /// Contacts who will still receive at least one of them.
+    pub still_receiving: Vec<Fingerprint>,
+    /// At least one copy for my other devices left or keeps going.
+    pub own_copies_kept: bool,
+}
+
+impl Core {
+    /// Deletes the messages `row_ids` (spec §5.5), in one transaction;
+    /// unknown rows (already deleted) are skipped. Each message's state is
+    /// read inside the transaction: the outcome tells what really happened,
+    /// whatever the confirmation showed.
+    ///
+    /// Sent message: its contact deliveries still `Pending` are cancelled
+    /// (packet out of the queue, delivery and route steps removed); those
+    /// `OnNetwork` or `Received` are kept, with their packet if still
+    /// queued, so the contact still receives it (a lost packet is
+    /// redeposited, the ack clears it, or the verdict settles it); those
+    /// `NotDelivered` are removed. The copies for my other devices are
+    /// cancelled if nothing left for the contact and they did not leave
+    /// either, kept otherwise (spec §5.1). Received message: only the row
+    /// goes; `inbound` stays and a pending ack still leaves.
+    ///
+    /// Each deleted message leaves a tombstone (`insert_message` refuses
+    /// its identifier for two days) and the batch one `MessagesDeleted`
+    /// log entry, without content nor contact.
+    pub fn delete_messages(&mut self, row_ids: &[i64], now: u64) -> Result<DeleteOutcome> {
+        let outcome = self.store.transaction(|tx| delete_rows(tx, row_ids, now))?;
+        // A failure notice for a message that no longer exists is moot.
+        self.failed_notices
+            .retain(|(_, row)| !row_ids.contains(row));
+        Ok(outcome)
+    }
+
+    /// `delete_messages` for one message.
+    pub fn delete_message(&mut self, row_id: i64, now: u64) -> Result<DeleteOutcome> {
+        self.delete_messages(&[row_id], now)
+    }
+
+    /// Deletes every sent message still `Pending` (none of its packets to
+    /// the contact accepted by a node), all contacts: "Cancel all". The
+    /// packets that expired undeposited are failed first (`expire_due`):
+    /// their messages are `NotDelivered`, not cancelled. The list is read
+    /// in the deletion's transaction.
+    pub fn cancel_all_pending(&mut self, now: u64) -> Result<DeleteOutcome> {
+        self.expire_due(now)?;
+        let (outcome, rows) = self.store.transaction(|tx| {
+            let rows: Vec<i64> = {
+                let mut stmt = tx
+                    .conn()
+                    .prepare(
+                        "SELECT m.id FROM messages m WHERE m.direction = ?1 AND m.status = ?2 \
+                         AND EXISTS (SELECT 1 FROM deliveries d \
+                         WHERE d.message_id = m.message_id AND d.own = 0) ORDER BY m.id",
+                    )
+                    .map_err(map_err)?;
+                stmt.query_map(
+                    params![Direction::Out as i64, MessageStatus::Pending as i64],
+                    |r| r.get(0),
+                )
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(map_err)?
+            };
+            Ok((delete_rows(tx, &rows, now)?, rows))
+        })?;
+        self.failed_notices.retain(|(_, row)| !rows.contains(row));
+        Ok(outcome)
+    }
+}
+
+/// The deletion of `delete_messages`, inside the caller's transaction.
+fn delete_rows(q: &impl Queries, row_ids: &[i64], now: u64) -> Result<DeleteOutcome> {
+    let mut out = DeleteOutcome::default();
+    for &row in row_ids {
+        let found: Option<(Vec<u8>, i64, Vec<u8>)> = q
+            .conn()
+            .query_row(
+                "SELECT contact_fp, direction, message_id FROM messages WHERE id = ?1",
+                params![row],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(map_err)?;
+        let Some((contact, direction, message)) = found else {
+            continue;
+        };
+        let contact = Fingerprint(arr(contact)?);
+        let message = MessageId(arr(message)?);
+        if direction == Direction::Out as i64 {
+            let gone = drop_deliveries(q, message)?;
+            match (gone.cancelled > 0, gone.left > 0) {
+                (true, false) => out.cancelled += 1,
+                (true, true) => out.partly_cancelled += 1,
+                (false, true) => out.already_left += 1,
+                (false, false) => {}
+            }
+            if gone.left > 0 && !out.still_receiving.contains(&contact) {
+                out.still_receiving.push(contact);
+            }
+            out.own_copies_kept |= gone.own_kept;
+        }
+        q.conn()
+            .execute("DELETE FROM messages WHERE id = ?1", params![row])
+            .map_err(map_err)?;
+        q.add_tombstone(message, now)?;
+        out.deleted += 1;
+    }
+    if out.deleted > 0 {
+        super::log(
+            q,
+            now,
+            None,
+            &TransparencyEvent::MessagesDeleted {
+                count: out.deleted,
+                cancelled: out.cancelled,
+                already_left: out.already_left + out.partly_cancelled,
+            },
+        )?;
+    }
+    Ok(out)
+}
+
+/// What the deletion of a sent message did to its deliveries.
+struct Dropped {
+    /// Contact deliveries cancelled (they were still `Pending`).
+    cancelled: u32,
+    /// Contact deliveries kept: already `OnNetwork` or `Received`.
+    left: u32,
+    /// A copy for my other devices left or keeps going.
+    own_kept: bool,
+}
+
+/// Drops the deliveries of the sent message `message` that a deletion
+/// cancels or makes moot (spec §5.5 points 1 to 4, §5.1).
+fn drop_deliveries(q: &impl Queries, message: MessageId) -> Result<Dropped> {
+    let rows: Vec<(Vec<u8>, bool, i64)> = {
+        let mut stmt = q
+            .conn()
+            .prepare("SELECT packet_id, own, status FROM deliveries WHERE message_id = ?1")
+            .map_err(map_err)?;
+        stmt.query_map(params![message.0.as_slice()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(map_err)?
+    };
+    let pending = MessageStatus::Pending as i64;
+    let failed = MessageStatus::NotDelivered as i64;
+    let left = rows
+        .iter()
+        .filter(|(_, own, s)| !own && *s != pending && *s != failed);
+    let left = u32::try_from(left.count()).unwrap_or(u32::MAX);
+    let mut gone = Dropped {
+        cancelled: 0,
+        left,
+        own_kept: false,
+    };
+    for (packet, own, status) in rows {
+        let packet = PacketId(arr(packet)?);
+        let drop = if status == failed {
+            true
+        } else if status != pending {
+            // Left the phone: it cannot be recalled.
+            gone.own_kept |= own;
+            false
+        } else if !own {
+            gone.cancelled += 1;
+            true
+        } else {
+            // A copy for my devices still here: cancelled with the message
+            // only if nobody receives it.
+            gone.own_kept |= gone.left > 0;
+            gone.left == 0
+        };
+        if drop {
+            remove_delivery(q, packet)?;
+        }
+    }
+    Ok(gone)
+}
+
+/// Removes the delivery carrying `packet`, its packet from the send queue
+/// and its route steps.
+pub(super) fn remove_delivery(q: &impl Queries, packet: PacketId) -> Result<()> {
+    q.outbox_remove(packet)?;
+    for table in ["deliveries", "route_steps"] {
+        q.conn()
+            .execute(
+                &format!("DELETE FROM {table} WHERE packet_id = ?1"),
+                params![packet.0.as_slice()],
+            )
+            .map_err(map_err)?;
+    }
+    Ok(())
 }

@@ -24,6 +24,7 @@
 "log.this_device_removed" = "Cet appareil a été retiré de votre compte par une liste d’appareils plus récente (version %1$@). Il ne peut plus envoyer ; sa clé racine, s’il en avait une, a été effacée.";
 "log.device_removed" = "Votre appareil « %1$@ » (%2$@) a été retiré de votre compte. Vos autres appareils et vos contacts ne chiffreront plus rien pour lui dès qu’ils auront reçu la nouvelle liste d’appareils.";
 "log.remove_requested" = "Votre appareil « %1$@ » (%2$@) a demandé à quitter votre compte et a été retiré de votre liste d’appareils.";
+"log.messages_deleted" = "Messages supprimés de cet appareil : %1$@. Annulés avant de le quitter : %2$@. Déjà partis (le contact les reçoit quand même) : %3$@.";
 "log.arg.initiator" = "vous l’avez ouverte";
 "log.arg.responder" = "votre contact l’a ouverte";
 "log.arg.post_quantum" = "protégée aussi contre les ordinateurs quantiques";
@@ -84,5 +85,6 @@
 "log.title.this_device_removed" = "Cet appareil a été retiré";
 "log.title.device_removed" = "Appareil retiré : %1$@";
 "log.title.remove_requested" = "Appareil parti : %1$@";
+"log.title.messages_deleted" = "Messages supprimés : %1$@";
 /* A sealed packet's text under its title: size, tier and expiry are on the meta line. */
 "log.body.packet_sealed" = "%1$@ Les relais voient la taille, le type, le nombre de sauts, un identifiant de paquet, la boîte et l’expiration ; pas qui vous êtes, à qui vous écrivez, ni le contenu.";

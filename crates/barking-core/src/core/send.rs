@@ -2,6 +2,7 @@
 //! for each of my other devices.
 
 use rand_core::CryptoRng;
+use rusqlite::{OptionalExtension, params};
 
 use super::{
     Core, OwnDevices, de_init, de_state, delivery, load_card, log, route, ser_init, ser_state,
@@ -11,9 +12,9 @@ use crate::envelope::{self, Body, Envelope, MAX_TEXT_LEN};
 use crate::handshake::{PrekeyBundle, pqxdh};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
-use crate::packet::{Packet, ack};
+use crate::packet::{Packet, PacketId, ack};
 use crate::ratchet::RatchetState;
-use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow};
+use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow, arr, map_err};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -311,4 +312,187 @@ impl Core {
             Ok(out)
         })
     }
+}
+
+impl Core {
+    /// Sends the undelivered message `row_id` again (spec §5.6): its
+    /// contact devices whose delivery is `NotDelivered` get a new packet
+    /// with the **same** message identifier (the recipient dedups by it if
+    /// the old one arrived after all) and an envelope dated `now` (a
+    /// recipient refuses a too old one). The failed deliveries give way to
+    /// new `Pending` ones; a device no longer in the contact's card is
+    /// skipped, its delivery keeps its state. If no copy for my other
+    /// devices had left this device, they are sealed again too. The
+    /// message keeps its row and its time (`messages.at`). One transaction.
+    ///
+    /// `NothingToRetry` if no delivery to the contact is `NotDelivered`
+    /// (or no such sent message); `NoSession` if no device is left to try.
+    pub fn retry_message(
+        &mut self,
+        row_id: i64,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Packet>> {
+        self.ensure_active()?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| reseal(tx, device, row_id, now, rng))
+    }
+
+    /// `retry_message` for each `NotDelivered` message to `contact`, oldest
+    /// first, in one transaction; returns how many were sent again. A
+    /// message with no device left to try is skipped; `NoSession` if that
+    /// is the case of every one.
+    pub fn retry_all(
+        &mut self,
+        contact: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<u32> {
+        self.ensure_active()?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
+            let rows: Vec<i64> = {
+                let mut stmt = tx
+                    .conn()
+                    .prepare(
+                        "SELECT m.id FROM messages m \
+                         WHERE m.contact_fp = ?1 AND m.direction = ?2 AND m.status = ?3 \
+                         AND EXISTS (SELECT 1 FROM deliveries d \
+                         WHERE d.message_id = m.message_id AND d.own = 0) \
+                         ORDER BY m.at, m.id",
+                    )
+                    .map_err(map_err)?;
+                stmt.query_map(
+                    params![
+                        contact.0.as_slice(),
+                        Direction::Out as i64,
+                        MessageStatus::NotDelivered as i64
+                    ],
+                    |r| r.get(0),
+                )
+                .map_err(map_err)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(map_err)?
+            };
+            let mut sent = 0u32;
+            let mut unreachable = false;
+            for row in rows {
+                match reseal(tx, device, row, now, rng) {
+                    Ok(_) => sent += 1,
+                    Err(CoreError::NoSession) => unreachable = true,
+                    Err(e) => return Err(e),
+                }
+            }
+            if sent == 0 && unreachable {
+                return Err(CoreError::NoSession);
+            }
+            Ok(sent)
+        })
+    }
+}
+
+/// The new sealing of `retry_message`, inside the caller's transaction.
+/// Seals before writing anything else: a `NoSession` leaves the message
+/// as it was.
+fn reseal(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    row_id: i64,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Packet>> {
+    let found: Option<(Vec<u8>, String, Vec<u8>)> = q
+        .conn()
+        .query_row(
+            "SELECT contact_fp, body, message_id FROM messages WHERE id = ?1 AND direction = ?2",
+            params![row_id, Direction::Out as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(map_err)?;
+    let Some((contact, text, message)) = found else {
+        return Err(CoreError::NothingToRetry);
+    };
+    let contact = Fingerprint(arr(contact)?);
+    let message_id = MessageId(arr(message)?);
+    // Failed contact deliveries, as (packet, device).
+    let failed: Vec<(PacketId, DeviceId)> = {
+        let mut stmt = q
+            .conn()
+            .prepare(
+                "SELECT packet_id, device FROM deliveries \
+                 WHERE message_id = ?1 AND own = 0 AND status = ?2",
+            )
+            .map_err(map_err)?;
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = stmt
+            .query_map(
+                params![message_id.0.as_slice(), MessageStatus::NotDelivered as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(map_err)?;
+        rows.into_iter()
+            .map(|(p, d)| Ok((PacketId(arr(p)?), DeviceId(arr(d)?))))
+            .collect::<Result<_>>()?
+    };
+    if failed.is_empty() {
+        return Err(CoreError::NothingToRetry);
+    }
+    let devices: Vec<DeviceId> = failed.iter().map(|(_, d)| *d).collect();
+    // Devices out of the contact's card are left out by `ContactDevices`.
+    let sealed = seal_for(
+        q,
+        device,
+        &Target::ContactDevices(contact, devices),
+        &Body::Text(text.clone()),
+        message_id,
+        SealTime::at(now),
+        rng,
+    )?;
+    if sealed.is_empty() {
+        return Err(CoreError::NoSession);
+    }
+    for (packet, peer) in &sealed {
+        for (old, _) in failed.iter().filter(|(_, d)| d == peer) {
+            delivery::remove_delivery(q, *old)?;
+        }
+        let size = delivery::packet_size(packet);
+        q.add_delivery(message_id, packet.id, *peer, false, now, size)?;
+        route::record_sealed(q, packet, now)?;
+    }
+    let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
+    // My other devices: sealed again only if no copy had left this device.
+    let own: Vec<(Vec<u8>, i64)> = {
+        let mut stmt = q
+            .conn()
+            .prepare("SELECT packet_id, status FROM deliveries WHERE message_id = ?1 AND own = 1")
+            .map_err(map_err)?;
+        stmt.query_map(params![message_id.0.as_slice()], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(map_err)?
+    };
+    let stayed =
+        |s: i64| s == MessageStatus::Pending as i64 || s == MessageStatus::NotDelivered as i64;
+    if own.iter().all(|(_, s)| stayed(*s)) {
+        for (packet, _) in own {
+            delivery::remove_delivery(q, PacketId(arr(packet)?))?;
+        }
+        let copy = Body::SyncSent { to: contact, text };
+        out.extend(sync::seal_to_own(
+            q,
+            device,
+            &copy,
+            SyncKind::Sent,
+            message_id,
+            SealTime::at(now),
+            rng,
+        )?);
+    }
+    delivery::recompute_message_status(q, message_id)?;
+    Ok(out)
 }

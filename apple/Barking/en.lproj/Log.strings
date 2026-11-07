@@ -24,6 +24,7 @@
 "log.this_device_removed" = "This device was removed from your account by a newer device list (version %1$@). It can no longer send; its root key, if it had one, was erased.";
 "log.device_removed" = "Your device “%1$@” (%2$@) was removed from your account. Your other devices and your contacts will no longer encrypt anything for it once they receive the new device list.";
 "log.remove_requested" = "Your device “%1$@” (%2$@) asked to leave your account and was removed from your device list.";
+"log.messages_deleted" = "Messages deleted from this device: %1$@. Cancelled before leaving it: %2$@. Already gone (the contact still receives them): %3$@.";
 "log.arg.initiator" = "you opened it";
 "log.arg.responder" = "your contact opened it";
 "log.arg.post_quantum" = "also protected against quantum computers";
@@ -84,5 +85,6 @@
 "log.title.this_device_removed" = "This device was removed";
 "log.title.device_removed" = "Device removed: %1$@";
 "log.title.remove_requested" = "Device left: %1$@";
+"log.title.messages_deleted" = "Messages deleted: %1$@";
 /* A sealed packet's text under its title: size, tier and expiry are on the meta line. */
 "log.body.packet_sealed" = "%1$@ Relays see the size, the type, the hop count, a packet identifier, the mailbox and the expiry; not who you are, whom you write to, or the content.";

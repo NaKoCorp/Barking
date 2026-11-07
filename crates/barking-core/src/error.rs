@@ -45,6 +45,10 @@ pub enum CoreError {
     /// another device first (`transfer_and_leave`).
     #[error("this device is the administrator")]
     IsAdmin,
+    /// `retry_message`: no delivery of the message to the contact's devices
+    /// is `NotDelivered`. Added last.
+    #[error("nothing to retry")]
+    NothingToRetry,
 }
 
 impl From<barking_packet::PacketError> for CoreError {
