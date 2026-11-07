@@ -10,14 +10,19 @@
 //!    responsible. Loss audit (spec §5.1) on the way. Then cross-checks:
 //!    each session mailbox served in full is read from the best other
 //!    responsible every `CROSSCHECK_EVERY_SECS` per (node, mailbox).
+//!    The mailboxes of my deposited packets past their expiry
+//!    (`Core::awaiting_verdict`) are fetched with them, from their start;
+//!    they do not count for `mark_polled`.
 //! 3. **Deposits**, following `plan_deposits`: receipts (no proof of work),
 //!    first copies, resends, extra copies. Proof budget exhausted: messages
 //!    wait, receipts go. `NotResponsible` from 2 responsibles of a mailbox:
-//!    fallback lookup, then the plan is redone.
+//!    fallback lookup, then the plan is redone. Each accepted deposit is
+//!    recorded in the core at once (`Core::record_deposit`).
 //! 4. **Introduction fetch**, within `INTRO_FETCH_BYTES` and
 //!    `INTRO_FETCH_SLICE`; a partial one blocks nothing. Then a second
 //!    deposit pass for receipts only (no proof of work), so that the
-//!    receipts of first contacts leave in the same sync.
+//!    receipts of first contacts leave in the same sync. Then the failure
+//!    **verdict** (see below).
 //! 5. **Maintenance**, with the time left: random lookups, candidate
 //!    confirmation, fallback lookups while the view is small, then the node
 //!    hints of my contact card. Skipped when nodes were tried and none
@@ -63,6 +68,15 @@
 //! `AUDIT_EVERY_SECS`, each in a call of its own once all regular session
 //! fetches are over, within `REREAD_BYTES` and `REREAD_TIME`.
 //!
+//! **Verdict** (spec §15.5). A deposited packet whose expiry passed by the
+//! start of the sync fails (`Core::confirm_expired`) only when a
+//! responsible of its mailbox served that mailbox in full, from its start,
+//! every item processed, and nothing fetched in the sync was the packet or
+//! a receipt for it. No responsible answering in full, or a node still
+//! returning the packet (its clock behind), leaves it for a later sync.
+//! The messages that failed during the sync are returned in
+//! `SyncReport::failed`.
+//!
 //! **Network down.** While no node has answered, `DOWN_AFTER_FAILURES`
 //! failed dials in a row, then one node added by hand or built-in not tried
 //! yet failing too (or none left), end the sync: nothing lost, no score
@@ -75,7 +89,9 @@
 //! earlier). Stage 1 runs, bootstrapping only when the view is empty; then
 //! my own session mailboxes of yesterday and today (`Core::own_mailboxes`)
 //! with the mailboxes where a message I sent awaits its ack
-//! (`Core::awaited_ack_mailboxes`, so that a receipt wake-up finds the ack),
+//! (`Core::awaited_ack_mailboxes`, so that a receipt wake-up finds the ack)
+//! and those of my deposited packets past their expiry (so that an expiry
+//! wake-up gets its verdict, given as in a full sync after the fetches),
 //! then my introduction mailboxes of those days, are fetched from their
 //! best responsible, the next one only when the best failed, refused or
 //! rate-limited (a truncated fetch is kept as it is), resumed from the
@@ -98,11 +114,12 @@ use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::RouteStep;
+use barking_core::identity::Fingerprint;
 use barking_core::mailbox::day_of;
 use barking_core::transparency::{AvoidReason, TransparencyEvent};
 use barking_core::{Core, CoreError, ReceiveOutcome};
 use barking_dht::{BootstrapEntry, builtin_bootstrap};
-use barking_packet::{MailboxId, Packet, PacketId};
+use barking_packet::{Kind, MailboxId, Packet, PacketId};
 use barking_proto::pow::content_hash;
 use barking_proto::push::SubKind;
 use barking_proto::{ErrorReason, NodeId, NodeRecord};
@@ -349,6 +366,11 @@ pub struct SyncReport {
     pub subscribed: usize,
     /// Wake subscriptions cancelled.
     pub unsubscribed: usize,
+    /// Sent messages that became `NotDelivered` during this sync (expired
+    /// before any deposit, verdict, undeliverable packet), as
+    /// `(contact, row id)`: `Core::take_failed_notices`, taken from the
+    /// same core before the sync returns.
+    pub failed: Vec<(Fingerprint, i64)>,
 }
 
 /// Synchronizes with the network (see the module documentation).
@@ -447,13 +469,17 @@ impl<'a, D: Connector> Run<'a, D> {
             deadline,
             pow_left: pow_budget,
             stats: BTreeMap::new(),
+            verdict_boxes: HashSet::new(),
+            verdict_only: HashSet::new(),
+            answered_boxes: HashSet::new(),
+            seen_ids: HashSet::new(),
             report: SyncReport::default(),
         }
     }
 }
 
-/// Per-node counts for the transparency log, and the packets for the
-/// route of each message.
+/// Per-node counts for the transparency log, and the fetched packets for
+/// the route of each message (deposits are recorded as they are accepted).
 #[derive(Default)]
 struct NodeStats {
     mailboxes: u32,
@@ -461,8 +487,6 @@ struct NodeStats {
     deposited: u32,
     refused: u32,
     fetched: bool,
-    /// Messages (not receipts) the node accepted.
-    deposited_ids: Vec<PacketId>,
     /// Items fetched from the node.
     fetched_ids: Vec<PacketId>,
 }
@@ -520,6 +544,19 @@ struct Run<'a, D: Connector> {
     deadline: Instant,
     pow_left: u64,
     stats: BTreeMap<[u8; 32], (NodeId, NodeStats)>,
+    /// Mailboxes of my deposited packets past their expiry
+    /// (`Core::awaiting_verdict`): read from their start, so that a packet
+    /// a node still holds cannot hide behind a saved position.
+    verdict_boxes: HashSet<MailboxId>,
+    /// Of them, those fetched only for the verdict: they do not count
+    /// for `polled_all_sessions`.
+    verdict_only: HashSet<MailboxId>,
+    /// Mailboxes a responsible served in full from their start, every item
+    /// processed: the network answered for them.
+    answered_boxes: HashSet<MailboxId>,
+    /// Packets fetched (mine included) and packets acknowledged by a
+    /// fetched receipt.
+    seen_ids: HashSet<PacketId>,
     report: SyncReport,
 }
 
@@ -577,9 +614,10 @@ where
         }
     }
 
-    /// Quick sync: my mailboxes of yesterday and today, and those where a
-    /// message I sent awaits its ack (a receipt wake-up finds it there),
-    /// then receipts.
+    /// Quick sync: my mailboxes of yesterday and today, those where a
+    /// message I sent awaits its ack (a receipt wake-up finds it there) and
+    /// those of my deposited packets past their expiry (an expiry wake-up
+    /// gets its verdict), then receipts.
     async fn run_quick(&mut self, builtin: &[BootstrapEntry]) {
         self.prepare(&[], builtin).await;
         let today = day_of(self.now);
@@ -588,13 +626,15 @@ where
             own.extend(self.core.awaited_ack_mailboxes(self.now)?);
             Ok(own)
         });
-        let own = match read {
+        let mut own = match read {
             Ok(m) => m,
             Err(e) => {
                 self.report.error = Some(e.to_string());
                 return;
             }
         };
+        let verdict = self.verdict_mailboxes();
+        own.extend(verdict.into_iter().map(|m| (m, today)));
         // Introductions apart, with their own small budget, after the
         // sessions: a flood there cannot take the sessions' bytes.
         let intro_set: HashSet<MailboxId> =
@@ -612,8 +652,61 @@ where
             let polled_intro = self.fetch_stage(&intro, true).await;
             self.report.intro_partial = !polled_intro;
         }
+        self.give_verdicts();
         if !self.over() {
             self.deposit_stage(true).await;
+        }
+    }
+
+    /// Mailboxes of the packets awaiting a verdict at the start of the
+    /// sync (`Core::awaiting_verdict`), noted in `verdict_boxes`, sorted,
+    /// without duplicates. A read error leaves the verdicts to a later sync.
+    fn verdict_mailboxes(&mut self) -> Vec<MailboxId> {
+        let mut out: Vec<MailboxId> = match self.core.awaiting_verdict(self.now) {
+            Ok(v) => v.into_iter().map(|(_, m)| m).collect(),
+            Err(e) => {
+                tracing::warn!("packets awaiting a verdict not read: {e}");
+                Vec::new()
+            }
+        };
+        out.sort_unstable_by_key(|m| m.0);
+        out.dedup();
+        self.verdict_boxes.extend(out.iter().copied());
+        out
+    }
+
+    /// The failure verdict (spec §15.5), once the fetches are over and
+    /// their items processed (an ack found has made its message
+    /// `Received`): each deposited packet that expired before this sync
+    /// started fails when a responsible of its mailbox served it in full
+    /// from its start, and nothing fetched was the packet or an ack for it.
+    /// Otherwise (no responsible answered in full, or a node still has the
+    /// packet) it waits for a later sync.
+    fn give_verdicts(&mut self) {
+        let Ok(awaiting) = self.core.awaiting_verdict(self.now) else {
+            return;
+        };
+        for (packet, mailbox) in awaiting {
+            if self.answered_boxes.contains(&mailbox) && !self.seen_ids.contains(&packet) {
+                let _ = self.core.confirm_expired(packet, self.now);
+            }
+        }
+    }
+
+    /// Notes the packets among fetched `items` and those their receipts
+    /// acknowledge (`seen_ids`).
+    fn note_seen(&mut self, items: &[Vec<u8>]) {
+        for item in items {
+            let Ok(p) = Packet::decode(item) else {
+                continue;
+            };
+            if p.kind == Kind::Ack
+                && let Some(target) = p.payload.get(..16)
+                && let Ok(target) = <[u8; 16]>::try_from(target)
+            {
+                self.seen_ids.insert(PacketId(target));
+            }
+            self.seen_ids.insert(p.id);
         }
     }
 
@@ -639,13 +732,10 @@ where
         for (_, (id, s)) in std::mem::take(&mut self.stats) {
             let node = short_id(&id);
             // The core keeps only the packets that carry a message.
-            let steps = s
-                .deposited_ids
-                .iter()
-                .map(|p| (p, RouteStep::Deposited))
-                .chain(s.fetched_ids.iter().map(|p| (p, RouteStep::Fetched)));
-            for (packet, step) in steps {
-                let _ = self.core.record_route(*packet, step, &node, self.now);
+            for packet in &s.fetched_ids {
+                let _ = self
+                    .core
+                    .record_route(*packet, RouteStep::Fetched, &node, self.now);
             }
             if s.fetched {
                 let _ = self.core.log_transport_event(
@@ -670,6 +760,9 @@ where
         }
         self.report.network_up = self.network_up();
         self.report.view_size = self.state.view.len();
+        // The FFI reopens the core on every call: the notices are taken
+        // from this core, now.
+        self.report.failed = self.core.take_failed_notices();
         self.report
     }
 
@@ -1024,7 +1117,7 @@ where
                             u64::from(p.expires_at) > now.saturating_add(NODE_MAX_EXPIRY_SECS)
                         });
                         if too_far {
-                            let _ = self.core.drop_outbox_packet(&d.bytes);
+                            let _ = self.core.drop_outbox_packet(&d.bytes, now);
                             outbox.retain(|b| *b != d.bytes);
                         } else {
                             self.fail(d.node);
@@ -1057,16 +1150,20 @@ where
         }
     }
 
+    /// Counts a deposit's outcome. An accepted one is recorded in the core
+    /// at once (message or receipt): an app killed later in the sync keeps
+    /// it.
     fn tally(&mut self, d: &plan::PlannedDeposit, result: &Result<(), ErrorReason>) {
+        if result.is_ok()
+            && let Ok(p) = Packet::decode(&d.bytes)
+            && let Err(e) = self.core.record_deposit(p.id, &short_id(&d.node), self.now)
+        {
+            tracing::warn!("deposit not recorded: {e}");
+        }
         let s = self.stats(d.node);
         match result {
             Ok(()) => {
                 s.deposited = s.deposited.saturating_add(1);
-                if !d.is_ack
-                    && let Ok(p) = Packet::decode(&d.bytes)
-                {
-                    s.deposited_ids.push(p.id);
-                }
                 if d.is_ack {
                     self.report.acks_deposited += 1;
                 } else if d.first_copy {
@@ -1236,6 +1333,15 @@ where
         intro.dedup();
         let watched: HashSet<MailboxId> = sessions.iter().chain(&intro).copied().collect();
         self.state.retain_positions(&watched);
+        // Mailboxes of the packets awaiting a verdict, fetched with the
+        // sessions; those only fetched for it do not hold back `mark_polled`.
+        for m in self.verdict_mailboxes() {
+            if !watched.contains(&m) {
+                self.verdict_only.insert(m);
+                sessions.push(m);
+            }
+        }
+        sessions.sort_unstable_by_key(|m| m.0);
 
         let polled_sessions = self.fetch_stage(&sessions, false).await;
         self.report.polled_all_sessions = polled_sessions;
@@ -1250,6 +1356,7 @@ where
                 self.deposit_stage(true).await;
             }
         }
+        self.give_verdicts();
 
         // Nodes tried and none answered: lookups would only dial dead ends.
         if !self.over() && (self.network_up() || !self.tried) {

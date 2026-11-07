@@ -96,6 +96,29 @@ pub(super) fn record(
     q.add_route_step(packet, now, step.to_u8(), None, size)
 }
 
+/// Refuses a node identifier that is not a short id (8 ASCII
+/// alphanumeric characters).
+pub(super) fn check_node(node: &str) -> Result<()> {
+    if node.len() != NODE_SHORT_ID_LEN || !node.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(CoreError::Malformed("route node"));
+    }
+    Ok(())
+}
+
+/// `Deposited` step of `packet` on `node`, if the packet carries one of my
+/// sent messages (a delivery); a receipt has no route.
+pub(super) fn record_deposited(
+    q: &impl Queries,
+    packet: PacketId,
+    node: &str,
+    now: u64,
+) -> Result<()> {
+    if !q.packet_has_message(packet)?.0 {
+        return Ok(());
+    }
+    q.add_route_step(packet, now, RouteStep::Deposited.to_u8(), Some(node), None)
+}
+
 /// `Sealed` step of `packet`, with its size.
 pub(super) fn record_sealed(q: &impl Queries, packet: &Packet, now: u64) -> Result<()> {
     let size = super::delivery::packet_size(packet);
@@ -105,7 +128,8 @@ pub(super) fn record_sealed(q: &impl Queries, packet: &Packet, now: u64) -> Resu
 impl Core {
     /// Records a transport step of `packet` on the node `node` (its short
     /// identifier, never an address): only `Deposited` and `Fetched` are
-    /// accepted, the other steps are written by the core. A packet that
+    /// accepted, the other steps are written by the core. `Deposited` is
+    /// `record_deposit` (the delivery's state included). A packet that
     /// carries none of my messages (a receipt, junk) is ignored, and so is
     /// a step that is not part of the packet's way: `Deposited` for a
     /// received packet, `Fetched` for one I sent (an audit reading back
@@ -120,16 +144,12 @@ impl Core {
         if !matches!(step, RouteStep::Deposited | RouteStep::Fetched) {
             return Err(CoreError::Malformed("route step"));
         }
-        if node.len() != NODE_SHORT_ID_LEN || !node.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return Err(CoreError::Malformed("route node"));
+        check_node(node)?;
+        if step == RouteStep::Deposited {
+            return self.record_deposit(packet, node, now);
         }
         self.store.transaction(|tx| {
-            let (sent, received) = tx.packet_has_message(packet)?;
-            let on_its_way = match step {
-                RouteStep::Deposited => sent,
-                _ => received,
-            };
-            if !on_its_way {
+            if !tx.packet_has_message(packet)?.1 {
                 return Ok(());
             }
             tx.add_route_step(packet, now, step.to_u8(), Some(node), None)

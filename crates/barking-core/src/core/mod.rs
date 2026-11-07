@@ -46,7 +46,7 @@ use crate::identity::{
 use crate::mailbox::{MailboxId, day_of, intro_mailbox, session_mailbox};
 use crate::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId};
 use crate::ratchet::RatchetState;
-use crate::store::{EventClass, MessageRow, Queries, Store};
+use crate::store::{EventClass, MessageRow, MessageStatus, Queries, Store};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
@@ -220,6 +220,9 @@ pub struct Core {
     /// Grouping of noisy events in the log (rejected frames,
     /// undecryptable packets, duplicates), in memory.
     log_limiter: LogLimiter,
+    /// Sent messages that became `NotDelivered` since the last
+    /// `take_failed_notices`, as `(contact, row id)`, in memory.
+    failed_notices: Vec<(Fingerprint, i64)>,
 }
 
 impl fmt::Debug for Core {
@@ -333,6 +336,7 @@ impl Core {
             pending,
             frames: Reassembler::new(MAX_PENDING_FRAMES, FRAME_TTL_SECS),
             log_limiter: LogLimiter::default(),
+            failed_notices: Vec::new(),
         }
     }
 
@@ -729,12 +733,14 @@ impl Core {
             .collect())
     }
 
-    /// Purges expired packets from the send queue then returns the bytes to
-    /// (re)transmit, from oldest to newest. A packet stays there
-    /// until its receipt ack or its expiry.
+    /// Expires the packets that no node accepted in time (`expire_due`),
+    /// purges the expired ones that await no verdict, then returns the
+    /// bytes to (re)transmit, from oldest to newest. A packet stays there
+    /// until its receipt ack or its expiry; a deposited one until its
+    /// verdict (`confirm_expired`).
     pub fn pending_outbox(&mut self, now: u64) -> Result<Vec<Vec<u8>>> {
+        self.expire_due(now)?;
         self.store.transaction(|tx| {
-            tx.outbox_purge_expired(now)?;
             admin::purge_expired(tx, now)?;
             sweep_skipped(tx, now)?;
             Ok(tx
@@ -747,12 +753,23 @@ impl Core {
 
     /// Removes an undeliverable packet (encoded `bytes`) from the send
     /// queue, for example one whose expiry a node refused as too far in
-    /// the future: it will never be accepted. `true` if it was queued.
-    pub fn drop_outbox_packet(&mut self, bytes: &[u8]) -> Result<bool> {
+    /// the future: it will never be accepted, so its pending deliveries are
+    /// `NotDelivered` from `now`. A packet a node already accepted stays
+    /// queued for its verdict (`confirm_expired`): only the network may
+    /// fail it. `true` if it left the queue.
+    pub fn drop_outbox_packet(&mut self, bytes: &[u8], now: u64) -> Result<bool> {
         let Ok(packet) = Packet::decode(bytes) else {
             return Ok(false);
         };
-        self.store.transaction(|tx| tx.outbox_remove(packet.id))
+        let (dropped, failed) = self.store.transaction(|tx| {
+            if delivery::on_network(tx, packet.id)? {
+                return Ok((false, None));
+            }
+            let failed = delivery::fail(tx, packet.id, MessageStatus::Pending, now)?;
+            Ok((tx.outbox_remove(packet.id)?, failed))
+        })?;
+        self.failed_notices.extend(failed);
+        Ok(dropped)
     }
 
     /// Opaque state of a transport (for example poll positions and deposits

@@ -226,7 +226,7 @@ fn ser<T: Serialize>(v: &T) -> Result<Vec<u8>> {
 
 /// Fixed-size field. On a length error the bytes (possibly key material)
 /// are wiped before being dropped.
-fn arr<const N: usize>(b: Vec<u8>) -> Result<[u8; N]> {
+pub(crate) fn arr<const N: usize>(b: Vec<u8>) -> Result<[u8; N]> {
     b.try_into().map_err(|mut v: Vec<u8>| {
         v.zeroize();
         CoreError::Store("invalid field length".into())
@@ -259,12 +259,12 @@ pub enum EventClass {
     Security = 1,
 }
 
-fn to_i64(v: u64) -> i64 {
+pub(crate) fn to_i64(v: u64) -> i64 {
     // Unix seconds fit comfortably in an i64.
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
-fn to_u64(v: i64) -> u64 {
+pub(crate) fn to_u64(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
 }
 
@@ -965,12 +965,16 @@ pub trait Queries {
         Ok(rows.into_iter().map(|(b, at)| (b, to_u64(at))).collect())
     }
 
-    /// Deletes expired packets; returns the number of rows deleted.
+    /// Deletes expired packets, except the deposited ones whose delivery
+    /// still awaits its verdict (`OnNetwork`, spec §15.5); returns the
+    /// number of rows deleted.
     fn outbox_purge_expired(&self, now: u64) -> Result<usize> {
         self.conn()
             .execute(
-                "DELETE FROM outbox WHERE expires_at < ?1",
-                params![to_i64(now)],
+                "DELETE FROM outbox WHERE expires_at < ?1 AND NOT ( \
+                 deposited_at IS NOT NULL AND EXISTS (SELECT 1 FROM deliveries d \
+                 WHERE d.packet_id = outbox.packet_id AND d.status = ?2))",
+                params![to_i64(now), MessageStatus::OnNetwork as i64],
             )
             .map_err(map_err)
     }

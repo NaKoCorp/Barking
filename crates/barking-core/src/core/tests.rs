@@ -14,6 +14,7 @@ use crate::store::{Direction, MessageId, MessageStatus, SessionRow};
 use crate::transparency::SyncKind;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rusqlite::OptionalExtension;
 use tempfile::TempDir;
 
 const NOW: u64 = 1_800_000_000;
@@ -3008,4 +3009,410 @@ fn emitted_ack_keeps_its_reference() {
             )
             .unwrap();
     assert_eq!(reference, Some(sent[0].id.0.to_vec()));
+}
+
+// --- Lot M, task 2: deposits, expiry and the failure verdict.
+
+/// Short id of a test node.
+const NODE: &str = "K7QX2M4A";
+
+/// `(status, deposited_at, node, expired_at)` of the delivery carrying `packet`.
+fn delivery_state(c: &Core, packet: PacketId) -> (i64, Option<i64>, Option<String>, Option<i64>) {
+    c.store
+        .conn()
+        .query_row(
+            "SELECT status, deposited_at, node, expired_at FROM deliveries WHERE packet_id = ?1",
+            rusqlite::params![packet.0.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+}
+
+/// `Some(deposited_at)` of `packet` in the send queue; `None` if it left it.
+fn outbox_row(c: &Core, packet: PacketId) -> Option<Option<i64>> {
+    c.store
+        .conn()
+        .query_row(
+            "SELECT deposited_at FROM outbox WHERE packet_id = ?1",
+            rusqlite::params![packet.0.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+/// `Deposited` steps of `packet`.
+fn deposited_steps(c: &Core, packet: PacketId) -> Vec<(i64, Option<String>)> {
+    let mut stmt = c
+        .store
+        .conn()
+        .prepare("SELECT at, node FROM route_steps WHERE packet_id = ?1 AND step = 1")
+        .unwrap();
+    stmt.query_map(rusqlite::params![packet.0.as_slice()], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })
+    .unwrap()
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .unwrap()
+}
+
+fn status_of(c: &Core, contact: &Fingerprint, body: &str) -> MessageStatus {
+    c.messages_with(contact)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+        .status
+}
+
+fn row_of(c: &Core, contact: &Fingerprint, body: &str) -> i64 {
+    c.messages_with(contact)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+        .id
+}
+
+fn i(v: u64) -> i64 {
+    i64::try_from(v).unwrap()
+}
+
+/// `pair`, with Alice's first message acknowledged: nothing of hers awaits.
+fn settled_pair() -> Pair {
+    let mut p = pair();
+    for bytes in p.b.pending_outbox(NOW).unwrap() {
+        let packet = Packet::decode(&bytes).unwrap();
+        if packet.kind == Kind::Ack {
+            p.a.receive(&bytes, "t", NOW, &mut p.rng).unwrap();
+        }
+    }
+    assert!(p.a.awaited_ack_mailboxes(NOW).unwrap().is_empty());
+    p
+}
+
+#[test]
+fn record_deposit_is_idempotent_and_sets_on_network() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "dep", NOW, &mut p.rng).unwrap();
+    let id = sent[0].id;
+    p.a.record_deposit(id, NODE, NOW + 5).unwrap();
+    p.a.record_deposit(id, NODE, NOW + 9).unwrap();
+    assert_eq!(
+        delivery_state(&p.a, id),
+        (1, Some(i(NOW + 5)), Some(NODE.to_string()), None)
+    );
+    assert_eq!(outbox_row(&p.a, id), Some(Some(i(NOW + 5))));
+    assert_eq!(
+        deposited_steps(&p.a, id),
+        vec![(i(NOW + 5), Some(NODE.to_string()))]
+    );
+    assert_eq!(status_of(&p.a, &bob, "dep"), MessageStatus::OnNetwork);
+    // A second node: one more step, the first deposit stays.
+    p.a.record_deposit(id, "ZZZZZZZZ", NOW + 12).unwrap();
+    assert_eq!(deposited_steps(&p.a, id).len(), 2);
+    assert_eq!(delivery_state(&p.a, id).1, Some(i(NOW + 5)));
+    // A malformed node id is refused; an unknown packet is ignored.
+    assert!(p.a.record_deposit(id, "short", NOW).is_err());
+    p.a.record_deposit(PacketId([9; 16]), NODE, NOW).unwrap();
+}
+
+#[test]
+fn record_route_deposited_delegates_to_record_deposit() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "route-dep", NOW, &mut p.rng).unwrap();
+    p.a.record_route(sent[0].id, RouteStep::Deposited, NODE, NOW + 3)
+        .unwrap();
+    assert_eq!(delivery_state(&p.a, sent[0].id).0, 1);
+    assert_eq!(outbox_row(&p.a, sent[0].id), Some(Some(i(NOW + 3))));
+    assert_eq!(status_of(&p.a, &bob, "route-dep"), MessageStatus::OnNetwork);
+}
+
+#[test]
+fn deposited_ack_sets_outbox_deposited_at() {
+    let mut p = settled_pair();
+    let sent =
+        p.a.send_text(&p.b.fingerprint(), "acked", NOW, &mut p.rng)
+            .unwrap();
+    let ack = match p
+        .b
+        .receive(&sent[0].encode(), "t", NOW, &mut p.rng)
+        .unwrap()
+    {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(outbox_row(&p.b, ack.id), Some(None));
+    p.b.record_deposit(ack.id, NODE, NOW + 2).unwrap();
+    assert_eq!(outbox_row(&p.b, ack.id), Some(Some(i(NOW + 2))));
+    // A receipt has no delivery and no route.
+    assert!(deposited_steps(&p.b, ack.id).is_empty());
+}
+
+#[test]
+fn expiry_without_deposit_is_not_delivered() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "lost", NOW, &mut p.rng).unwrap();
+    let id = sent[0].id;
+    let expiry = u64::from(sent[0].expires_at);
+    p.a.expire_due(expiry).unwrap();
+    assert_eq!(delivery_state(&p.a, id).0, 0, "not expired at its expiry");
+    p.a.expire_due(expiry + 1).unwrap();
+    assert_eq!(delivery_state(&p.a, id), (5, None, None, Some(i(expiry))));
+    assert_eq!(status_of(&p.a, &bob, "lost"), MessageStatus::NotDelivered);
+    assert_eq!(outbox_row(&p.a, id), None, "purged");
+    let row = row_of(&p.a, &bob, "lost");
+    assert_eq!(p.a.take_failed_notices(), vec![(bob, row)]);
+    assert!(p.a.take_failed_notices().is_empty());
+    // Idempotent.
+    p.a.expire_due(expiry + 2).unwrap();
+    assert!(p.a.take_failed_notices().is_empty());
+}
+
+#[test]
+fn pending_outbox_expires_before_purging() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "late", NOW, &mut p.rng).unwrap();
+    let expiry = u64::from(sent[0].expires_at);
+    p.a.pending_outbox(expiry + 1).unwrap();
+    assert_eq!(delivery_state(&p.a, sent[0].id).0, 5);
+    assert_eq!(status_of(&p.a, &bob, "late"), MessageStatus::NotDelivered);
+}
+
+#[test]
+fn expiry_after_deposit_waits_for_the_verdict() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "wait", NOW, &mut p.rng).unwrap();
+    let id = sent[0].id;
+    let expiry = u64::from(sent[0].expires_at);
+    p.a.record_deposit(id, NODE, NOW + 1).unwrap();
+    p.a.expire_due(expiry + 1).unwrap();
+    assert_eq!(delivery_state(&p.a, id).0, 1);
+    assert_eq!(status_of(&p.a, &bob, "wait"), MessageStatus::OnNetwork);
+    assert!(outbox_row(&p.a, id).is_some(), "still queued");
+    assert!(p.a.take_failed_notices().is_empty());
+    // Awaiting the verdict from its expiry on, with its mailbox.
+    assert!(p.a.awaiting_verdict(expiry - 1).unwrap().is_empty());
+    assert_eq!(
+        p.a.awaiting_verdict(expiry).unwrap(),
+        vec![(id, sent[0].mailbox)]
+    );
+    assert_eq!(
+        p.a.awaiting_verdict(expiry + 1).unwrap(),
+        vec![(id, sent[0].mailbox)]
+    );
+    // Never redeposited once expired.
+    assert!(p.a.pending_outbox(expiry + 1).unwrap().is_empty());
+}
+
+#[test]
+fn awaiting_verdict_skips_pending_and_received() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let queued = p.a.send_text(&bob, "queued", NOW, &mut p.rng).unwrap();
+    let acked = p.a.send_text(&bob, "acked", NOW, &mut p.rng).unwrap();
+    p.a.record_deposit(acked[0].id, NODE, NOW).unwrap();
+    let ack = match p
+        .b
+        .receive(&acked[0].encode(), "t", NOW, &mut p.rng)
+        .unwrap()
+    {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    p.a.receive(&ack.encode(), "t", NOW, &mut p.rng).unwrap();
+    let expiry = u64::from(queued[0].expires_at);
+    assert!(p.a.awaiting_verdict(expiry + 1).unwrap().is_empty());
+}
+
+#[test]
+fn confirm_expired_marks_not_delivered_and_keeps_deposited_at() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "gone", NOW, &mut p.rng).unwrap();
+    let id = sent[0].id;
+    let expiry = u64::from(sent[0].expires_at);
+    p.a.record_deposit(id, NODE, NOW + 1).unwrap();
+    // Not before its expiry.
+    assert!(!p.a.confirm_expired(id, expiry - 1).unwrap());
+    assert_eq!(delivery_state(&p.a, id).0, 1);
+    assert!(p.a.confirm_expired(id, expiry + 30).unwrap());
+    assert_eq!(
+        delivery_state(&p.a, id),
+        (5, Some(i(NOW + 1)), Some(NODE.to_string()), Some(i(expiry)))
+    );
+    assert_eq!(status_of(&p.a, &bob, "gone"), MessageStatus::NotDelivered);
+    assert_eq!(outbox_row(&p.a, id), None);
+    assert!(p.a.awaiting_verdict(expiry + 30).unwrap().is_empty());
+    assert!(p.a.awaited_ack_mailboxes(NOW).unwrap().is_empty());
+    let row = row_of(&p.a, &bob, "gone");
+    assert_eq!(p.a.take_failed_notices(), vec![(bob, row)]);
+    // Idempotent.
+    assert!(!p.a.confirm_expired(id, expiry + 40).unwrap());
+    assert!(p.a.take_failed_notices().is_empty());
+}
+
+#[test]
+fn confirm_expired_leaves_received_alone() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "got", NOW, &mut p.rng).unwrap();
+    let id = sent[0].id;
+    let expiry = u64::from(sent[0].expires_at);
+    p.a.record_deposit(id, NODE, NOW).unwrap();
+    let ack = match p
+        .b
+        .receive(&sent[0].encode(), "t", NOW, &mut p.rng)
+        .unwrap()
+    {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    p.a.receive(&ack.encode(), "t", NOW + 1, &mut p.rng)
+        .unwrap();
+    assert!(!p.a.confirm_expired(id, expiry + 1).unwrap());
+    assert_eq!(delivery_state(&p.a, id).0, 3);
+    assert_eq!(status_of(&p.a, &bob, "got"), MessageStatus::Received);
+    assert!(p.a.take_failed_notices().is_empty());
+}
+
+#[test]
+fn not_delivered_on_one_device_keeps_the_message_on_the_network() {
+    let (_d, mut a, _t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "split", NOW, &mut rng).unwrap();
+    // Bob's device first, then the copy for my tablet.
+    let expiry = u64::from(sent[0].expires_at);
+    a.record_deposit(sent[1].id, NODE, NOW).unwrap();
+    // The contact's only delivery expires undeposited: the message failed,
+    // whatever became of my own copy.
+    a.expire_due(expiry + 1).unwrap();
+    assert_eq!(status_of(&a, &bob, "split"), MessageStatus::NotDelivered);
+    // The deposited copy for my tablet awaits its own verdict.
+    assert_eq!(delivery_state(&a, sent[1].id).0, 1);
+    assert_eq!(
+        a.awaiting_verdict(expiry + 1).unwrap(),
+        vec![(sent[1].id, sent[1].mailbox)]
+    );
+    assert!(a.confirm_expired(sent[1].id, expiry + 1).unwrap());
+    assert_eq!(delivery_state(&a, sent[1].id).0, 5);
+    // One notice for the message: the copy's verdict changes nothing.
+    assert_eq!(a.take_failed_notices().len(), 1);
+}
+
+#[test]
+fn local_purge_spares_deposited_packets_without_verdict() {
+    let mut p = settled_pair();
+    let sent =
+        p.a.send_text(&p.b.fingerprint(), "spared", NOW, &mut p.rng)
+            .unwrap();
+    let id = sent[0].id;
+    let expiry = u64::from(sent[0].expires_at);
+    p.a.record_deposit(id, NODE, NOW).unwrap();
+    // A deposited receipt has no verdict to wait for: purged at its expiry.
+    let msg =
+        p.b.send_text(&p.a.fingerprint(), "to-ack", NOW, &mut p.rng)
+            .unwrap();
+    let ack = match p.a.receive(&msg[0].encode(), "t", NOW, &mut p.rng).unwrap() {
+        ReceiveOutcome::Message { ack, .. } => ack,
+        o => panic!("{o:?}"),
+    };
+    p.a.record_deposit(ack.id, NODE, NOW).unwrap();
+    let later = expiry.max(u64::from(ack.expires_at)) + 1;
+    p.a.pending_outbox(later).unwrap();
+    assert!(outbox_row(&p.a, id).is_some(), "awaits its verdict");
+    assert_eq!(outbox_row(&p.a, ack.id), None);
+    // After the verdict, nothing is left.
+    assert!(p.a.confirm_expired(id, later).unwrap());
+    p.a.pending_outbox(later).unwrap();
+    assert_eq!(outbox_row(&p.a, id), None);
+}
+
+#[test]
+fn dropped_packet_is_not_delivered() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "refused", NOW, &mut p.rng).unwrap();
+    let id = sent[0].id;
+    assert!(p.a.drop_outbox_packet(&sent[0].encode(), NOW + 4).unwrap());
+    assert_eq!(delivery_state(&p.a, id), (5, None, None, Some(i(NOW + 4))));
+    assert_eq!(
+        status_of(&p.a, &bob, "refused"),
+        MessageStatus::NotDelivered
+    );
+    assert_eq!(outbox_row(&p.a, id), None);
+    let row = row_of(&p.a, &bob, "refused");
+    assert_eq!(p.a.take_failed_notices(), vec![(bob, row)]);
+}
+
+#[test]
+fn dropped_packet_already_on_the_network_awaits_its_verdict() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "legacy", NOW, &mut p.rng).unwrap();
+    let id = sent[0].id;
+    p.a.record_deposit(id, NODE, NOW).unwrap();
+    // A node accepted it earlier: only `confirm_expired` may fail it.
+    assert!(!p.a.drop_outbox_packet(&sent[0].encode(), NOW + 4).unwrap());
+    assert_eq!(delivery_state(&p.a, id).0, 1);
+    assert!(outbox_row(&p.a, id).is_some());
+    assert!(p.a.take_failed_notices().is_empty());
+}
+
+/// Rewrites the deliveries of the message `body` with hand-written
+/// `(own, status)` rows and recomputes its status.
+fn recompute_with(p: &mut Pair, body: &str, rows: &[(i64, i64)]) -> MessageStatus {
+    let bob = p.b.fingerprint();
+    let mid =
+        p.a.messages_with(&bob)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.body == body)
+            .unwrap()
+            .message_id;
+    let conn = p.a.store.conn();
+    conn.execute(
+        "DELETE FROM deliveries WHERE message_id = ?1",
+        rusqlite::params![mid.0.as_slice()],
+    )
+    .unwrap();
+    for (n, (own, status)) in rows.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO deliveries(message_id, packet_id, device, status, own) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                mid.0.as_slice(),
+                [u8::try_from(n).unwrap(); 16].as_slice(),
+                [7u8; 32].as_slice(),
+                status,
+                own
+            ],
+        )
+        .unwrap();
+    }
+    delivery::recompute_message_status(&p.a.store, mid).unwrap();
+    status_of(&p.a, &bob, body)
+}
+
+#[test]
+fn recompute_precedence_of_contact_deliveries() {
+    let mut p = settled_pair();
+    p.a.send_text(&p.b.fingerprint(), "mix", NOW, &mut p.rng)
+        .unwrap();
+    let cases: [(&[(i64, i64)], MessageStatus); 5] = [
+        (&[(0, 3), (0, 1)], MessageStatus::Received),
+        (&[(0, 1), (0, 0)], MessageStatus::OnNetwork),
+        (&[(0, 0), (0, 5)], MessageStatus::Pending),
+        (&[(0, 5), (0, 5)], MessageStatus::NotDelivered),
+        // My own copy received never makes the message received.
+        (&[(1, 3), (0, 5)], MessageStatus::NotDelivered),
+    ];
+    for (rows, want) in cases {
+        assert_eq!(recompute_with(&mut p, "mix", rows), want, "{rows:?}");
+    }
 }

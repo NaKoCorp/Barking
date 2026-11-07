@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::identity::Fingerprint;
+use barking_core::store::MessageStatus;
 use barking_core::transparency::{AvoidReason, TransparencyEvent};
 use barking_core::{Core, ReceiveOutcome, RouteStep};
 use barking_dht::{distance, mailbox_key};
@@ -20,7 +21,9 @@ use barking_net::push::PushConfig;
 use barking_net::score::{START_SCORE, ScoreEvent};
 use barking_net::sync::short_id;
 use barking_net::{NetState, QuicDialer, SyncOptions, SyncReport, sync};
-use barking_node::testing::{FakeRelay, StoppedNode, TestNode, id_of, key, network, network_with};
+use barking_node::testing::{
+    FakeRelay, StoppedNode, TICK, TestNode, id_of, key, network, network_with, set_clock_offset,
+};
 use barking_packet::{Kind, MailboxId, Packet};
 use barking_proto::NodeId;
 use barking_proto::pow::content_hash;
@@ -956,5 +959,122 @@ async fn deposit_and_fetch_record_route() {
     let fetched = route.iter().position(|e| e.step == RouteStep::Fetched);
     let opened = route.iter().position(|e| e.step == RouteStep::Opened);
     assert!(opened.is_some() && fetched < opened, "{route:?}");
+    stop_all(nodes).await;
+}
+
+// --- Delivery verdict (spec §15.5) ---
+
+/// Puts the nodes' clock back on the system clock when dropped.
+struct ClockReset;
+
+impl Drop for ClockReset {
+    fn drop(&mut self) {
+        set_clock_offset(0);
+    }
+}
+
+/// Moves the nodes' clock to `at` (Unix seconds, ahead of now), lets
+/// their purge run, and returns the offset for the clients' syncs.
+async fn nodes_at(at: u64) -> u64 {
+    let offset = at.saturating_sub(now());
+    set_clock_offset(offset);
+    // The purge runs every `TICK` (test nodes).
+    tokio::time::sleep(TICK * 5).await;
+    offset
+}
+
+/// One sync of `c` with its clock `offset` seconds ahead.
+async fn sync_later(c: &mut Client, boot: (NodeId, SocketAddr), offset: u64) -> SyncReport {
+    let opts = SyncOptions {
+        now: Some(now() + offset),
+        ..options(boot)
+    };
+    let report = sync(&mut c.core, &QuicDialer, opts).await;
+    assert_eq!(report.error, None);
+    report
+}
+
+fn status_of(c: &Client, contact: &Fingerprint, body: &str) -> MessageStatus {
+    c.core
+        .messages_with(contact)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+        .status
+}
+
+/// Alice writes `body` to Bob and her sync deposits it; returns the
+/// message's expiry.
+async fn deposit_one(
+    alice: &mut Client,
+    fb: &Fingerprint,
+    body: &str,
+    boot: (NodeId, SocketAddr),
+) -> u64 {
+    let sent = alice
+        .core
+        .send_text(fb, body, now(), &mut rand::rng())
+        .unwrap();
+    let r = sync_on(alice, boot).await;
+    assert!(r.first_copies >= 1, "{r:?}");
+    assert_eq!(status_of(alice, fb, body), MessageStatus::OnNetwork);
+    u64::from(sent[0].expires_at)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sender_sees_not_delivered_after_relay_purge() {
+    let _timing = TIMING.lock().await;
+    capture_logs();
+    let _reset = ClockReset;
+    let nodes = network_with(0..NODES, |spec| spec.purge_interval = Some(TICK)).await;
+    let boot = seed(&nodes[0]);
+    let (mut alice, _bob, fb, _) = acquainted();
+    warm_up(&mut alice, boot).await;
+    let expiry = deposit_one(&mut alice, &fb, "lost", boot).await;
+
+    // Bob stays offline; a day later the relays purge the message.
+    let offset = nodes_at(expiry + 60).await;
+    let r = sync_later(&mut alice, boot, offset).await;
+    assert_eq!(status_of(&alice, &fb, "lost"), MessageStatus::NotDelivered);
+    let row = alice
+        .core
+        .messages_with(&fb)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "lost")
+        .unwrap()
+        .id;
+    assert_eq!(r.failed, vec![(fb, row)], "{r:?}");
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ack_just_before_expiry_is_received() {
+    let _timing = TIMING.lock().await;
+    capture_logs();
+    let _reset = ClockReset;
+    let nodes = network_with(0..NODES, |spec| spec.purge_interval = Some(TICK)).await;
+    let boot = seed(&nodes[0]);
+    let (mut alice, mut bob, fb, fa) = acquainted();
+    warm_up(&mut alice, boot).await;
+    warm_up(&mut bob, boot).await;
+    let expiry = deposit_one(&mut alice, &fb, "just in time", boot).await;
+
+    // Bob comes back a minute before the expiry, and acknowledges.
+    let offset = nodes_at(expiry - 60).await;
+    let r = sync_later(&mut bob, boot, offset).await;
+    assert_eq!(texts(&r), ["just in time"], "{r:?}");
+    assert!(r.acks_deposited >= 1, "{r:?}");
+    assert!(inbox(&bob, &fa).contains(&"just in time".to_string()));
+
+    // Alice syncs only after the expiry: the ack is still there.
+    let offset = nodes_at(expiry + 60).await;
+    let r = sync_later(&mut alice, boot, offset).await;
+    assert_eq!(
+        status_of(&alice, &fb, "just in time"),
+        MessageStatus::Received
+    );
+    assert!(r.failed.is_empty(), "{r:?}");
     stop_all(nodes).await;
 }

@@ -711,11 +711,19 @@ pub(crate) enum Stored<T> {
     Failed,
 }
 
+/// Tests only: seconds added to the clock of every node of the process
+/// (`testing::set_clock_offset`).
+#[cfg(feature = "test-harness")]
+pub(crate) static TEST_CLOCK_OFFSET: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) fn unix_now() -> u64 {
-    SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    #[cfg(feature = "test-harness")]
+    let now = now.saturating_add(TEST_CLOCK_OFFSET.load(Ordering::Relaxed));
+    now
 }
 
 impl Shared {

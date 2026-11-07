@@ -172,7 +172,11 @@ where
             let queue = std::mem::take(&mut self.reread_queue);
             self.rereads(queue, slice_end).await;
         }
-        all_processed && mailboxes.iter().all(|m| done.contains(m))
+        all_processed
+            && mailboxes
+                .iter()
+                .filter(|m| !self.verdict_only.contains(m))
+                .all(|m| done.contains(m))
     }
 
     /// Cross-checks, once every primary round is over: each session mailbox
@@ -243,6 +247,16 @@ where
         self.save();
     }
 
+    /// Saved positions of `group` on `node`, without those of the mailboxes
+    /// awaiting a verdict: they are read from their start.
+    fn resume(&self, node: NodeId, group: &[MailboxId]) -> FetchResume {
+        let mut resume = self.state.resume(&node, group);
+        resume
+            .seen
+            .retain(|m, _| !self.verdict_boxes.contains(&MailboxId(*m)));
+        resume
+    }
+
     /// Page size a fetch from `node` starts from.
     fn link_page(&self, node: NodeId) -> LinkPage {
         LinkPage {
@@ -270,7 +284,7 @@ where
         max_bytes: usize,
         slice_end: Instant,
     ) -> (GroupEnd, usize, bool) {
-        let mut resume = self.state.resume(&node, group);
+        let mut resume = self.resume(node, group);
         // Mailboxes read from their very start: the only ones a loss audit
         // may rely on (a resumed fetch skips the items already seen).
         let from_start: Vec<MailboxId> = group
@@ -306,7 +320,7 @@ where
             match &reply {
                 Err(e) if !fresh && !redialled && dead_session(e) => {
                     redialled = true;
-                    resume = self.state.resume(&node, group);
+                    resume = self.resume(node, group);
                 }
                 _ => break (conn, reply),
             }
@@ -358,8 +372,12 @@ where
             .map(Vec::len)
             .fold(0usize, usize::saturating_add);
         let processed = self.take_items(&items);
+        self.note_seen(&items);
         if processed {
             self.state.set_positions(&node, group, &resume);
+            if complete {
+                self.answered_boxes.extend(from_start.iter().copied());
+            }
         }
         if !intro && self.mode == Mode::Full {
             // A truncated fetch audits nothing.
@@ -487,6 +505,7 @@ where
                             items.iter().map(Vec::len).fold(0, usize::saturating_add),
                         );
                         let processed = self.take_items(&items);
+                        self.note_seen(&items);
                         self.stats(node).fetched_ids.extend(
                             items
                                 .iter()

@@ -7,12 +7,13 @@
 //! addresses allowed, diversity limits lifted, per-address caps raised,
 //! cadences brought down to `TICK`, and the test-only hooks of
 //! `ServerConfig` (`test_swallow_deposits`, `test_response_delay`,
-//! `test_send_rate`, `test_purge_interval`).
+//! `test_send_rate`, `test_purge_interval`), and a clock offset shared by
+//! the nodes of the process (`set_clock_offset`).
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use barking_dht::{BootstrapEntry, DiversityLimits};
 use barking_proto::client::{Client, Session};
@@ -97,9 +98,15 @@ pub fn id_of(k: &SigningKey) -> NodeId {
 }
 
 fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    server::unix_now()
+}
+
+/// Moves the clock of every node of this process `secs` seconds ahead of
+/// the system clock (0: back to it), for tests that need the nodes a day
+/// later (expiry, purge). Process-wide: nextest runs each test in a
+/// process of its own; under `cargo test`, hold the caller's lock.
+pub fn set_clock_offset(secs: u64) {
+    server::TEST_CLOCK_OFFSET.store(secs, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// How a test node runs; kept so that it can be restarted as it was.

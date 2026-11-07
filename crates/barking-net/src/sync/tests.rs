@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::push::{PushConfig, PushState};
 use crate::score::Score;
-use crate::test_support::{id_of, record, subject, subject_with_ack};
+use crate::test_support::{id_of, record, subject, subject_with_ack, subject_with_ack_at};
 
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 86_400;
@@ -2996,4 +2996,252 @@ async fn quick_sync_makes_no_fallback_lookup_after_not_responsible() {
         assert!(calls.contains(&Call::Deposit(n, ha)), "{calls:?}");
     }
     assert!(!calls.iter().any(|c| matches!(c, Call::Find(..))));
+}
+
+// ---- Deposits noted at once, and the failure verdict (spec §15.5) ----
+
+/// Short id of the node that took the expired reply.
+const DEPOSIT_NODE: &str = "K7QX2M4A";
+
+/// Bob's reply, sealed a day and 20 minutes ago, deposited, and expired
+/// 20 minutes ago without its ack; and Alice's ack for it (encoded),
+/// sealed 5 minutes before that expiry: still on the network.
+struct Expired {
+    _dir: TempDir,
+    core: Core,
+    net: Net,
+    alice: barking_core::identity::Fingerprint,
+    reply: Vec<u8>,
+    id: PacketId,
+    mailbox: MailboxId,
+    ack: Vec<u8>,
+}
+
+fn expired_reply() -> Expired {
+    let sealed = NOW - DAY - 1_200;
+    let (dir, mut core, ack) = subject_with_ack_at(sealed, NOW - 1_500);
+    let reply = core
+        .pending_outbox(sealed)
+        .unwrap()
+        .into_iter()
+        .find(|b| Packet::decode(b).unwrap().kind == Kind::Message)
+        .unwrap();
+    let packet = Packet::decode(&reply).unwrap();
+    assert!(u64::from(packet.expires_at) < NOW);
+    assert!(u64::from(Packet::decode(&ack).unwrap().expires_at) > NOW);
+    core.record_deposit(packet.id, DEPOSIT_NODE, sealed)
+        .unwrap();
+    let net = setup_with(&mut core);
+    let alice = core.contacts().unwrap()[0].fingerprint;
+    assert_eq!(
+        core.awaiting_verdict(NOW).unwrap(),
+        vec![(packet.id, packet.mailbox)]
+    );
+    assert!(core.awaited_ack_mailboxes(NOW).unwrap().is_empty());
+    Expired {
+        _dir: dir,
+        core,
+        net,
+        alice,
+        reply,
+        id: packet.id,
+        mailbox: packet.mailbox,
+        ack,
+    }
+}
+
+fn reply_status(e: &Expired) -> barking_core::store::MessageStatus {
+    e.core
+        .messages_with(&e.alice)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "hi")
+        .unwrap()
+        .status
+}
+
+fn reply_row(e: &Expired) -> i64 {
+    e.core
+        .messages_with(&e.alice)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "hi")
+        .unwrap()
+        .id
+}
+
+#[tokio::test(start_paused = true)]
+async fn verdict_when_a_responsible_answers_without_packet_or_ack() {
+    use barking_core::store::MessageStatus;
+    let mut e = expired_reply();
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert!(
+        fetched_pairs(&e.net.calls())
+            .iter()
+            .any(|(_, m)| *m == e.mailbox)
+    );
+    assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
+    assert_eq!(report.failed, vec![(e.alice, reply_row(&e))]);
+    assert!(e.core.awaiting_verdict(NOW).unwrap().is_empty());
+    // The verdict mailbox does not hold back the poll record.
+    assert!(report.polled_all_sessions);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_verdict_without_an_answering_responsible() {
+    use barking_core::store::MessageStatus;
+    let mut e = expired_reply();
+    let state = load(&mut e.core);
+    let responsibles = state.view.responsibles_by_score(&e.mailbox, NOW);
+    // Every responsible answers but cuts its pages short.
+    for n in &responsibles {
+        e.net.truncate.insert(*n, FetchStop::Paced);
+    }
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert!(report.network_up);
+    assert!(
+        fetched_pairs(&e.net.calls())
+            .iter()
+            .any(|(_, m)| *m == e.mailbox)
+    );
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    // Every responsible fails.
+    e.net.truncate.clear();
+    for n in &responsibles {
+        e.net.fail_fetch.insert(*n);
+    }
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    // Every responsible is down: the quick sync gives no verdict either.
+    e.net.fail_fetch.clear();
+    for n in &responsibles {
+        e.net.down.insert(*n);
+    }
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    assert_eq!(
+        e.core.awaiting_verdict(NOW).unwrap(),
+        vec![(e.id, e.mailbox)]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_verdict_while_a_node_still_returns_the_packet() {
+    use barking_core::store::MessageStatus;
+    let mut e = expired_reply();
+    // A node whose clock is behind still serves my own packet.
+    e.net.mailbox_items.insert(e.mailbox, vec![e.reply.clone()]);
+    // Positions saved past the packet must not hide it: the verdict
+    // mailbox is read from its start.
+    let mut state = load(&mut e.core);
+    let mut resume = FetchResume::default();
+    resume.seen.insert(e.mailbox.0, 99);
+    for n in state.view.responsibles_by_score(&e.mailbox, NOW) {
+        state.set_positions(&n, &[e.mailbox], &resume);
+    }
+    state.save(&mut e.core).unwrap();
+    // The node's expiry wake-up: a quick sync, then a full one.
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::OnNetwork);
+    assert!(report.failed.is_empty());
+    let calls = e.net.calls();
+    let verdict_fetches: Vec<&Call> = calls
+        .iter()
+        .filter(|c| matches!(c, Call::Fetch(_, mbs, _) if mbs.contains(&e.mailbox)))
+        .collect();
+    assert!(verdict_fetches.len() >= 2);
+    for c in verdict_fetches {
+        let Call::Fetch(_, _, positioned) = c else {
+            unreachable!()
+        };
+        assert!(!positioned.contains(&e.mailbox), "{c:?}");
+    }
+    // Once the network lets it go, the verdict comes.
+    e.net.mailbox_items.clear();
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
+    assert_eq!(report.failed.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_ack_found_after_expiry_makes_received() {
+    use barking_core::store::MessageStatus;
+    let mut e = expired_reply();
+    e.net.mailbox_items.insert(e.mailbox, vec![e.ack.clone()]);
+    let report = sync(&mut e.core, &e.net, opts()).await;
+    assert_eq!(reply_status(&e), MessageStatus::Received);
+    assert!(report.failed.is_empty());
+    assert!(e.core.awaiting_verdict(NOW).unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_fetches_awaiting_verdict_mailboxes() {
+    use barking_core::store::MessageStatus;
+    let mut e = expired_reply();
+    // The node's expiry wake-up: a quick sync gives the verdict.
+    let report = quick_sync(&mut e.core, &e.net, quick_opts()).await;
+    assert!(
+        fetched_pairs(&e.net.calls())
+            .iter()
+            .any(|(_, m)| *m == e.mailbox)
+    );
+    assert_eq!(reply_status(&e), MessageStatus::NotDelivered);
+    assert_eq!(report.failed, vec![(e.alice, reply_row(&e))]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn deposit_recorded_before_finish() {
+    use barking_core::store::MessageStatus;
+    let (_dir, mut core, mut net) = setup();
+    let alice = core.contacts().unwrap()[0].fingerprint;
+    let status = |core: &Core| {
+        core.messages_with(&alice)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.body == "hi")
+            .unwrap()
+            .status
+    };
+    assert_eq!(status(&core), MessageStatus::Pending);
+    // The receipt, then the reply's first copy, are accepted; the next
+    // deposit never gets an answer and the app is killed mid-sync.
+    net.stall_deposit_from = Some(2);
+    let cut = tokio::time::timeout(Duration::from_secs(60), sync(&mut core, &net, opts())).await;
+    assert!(
+        cut.is_err(),
+        "the sync is cut in the middle of the deposits"
+    );
+    assert_eq!(status(&core), MessageStatus::OnNetwork);
+    // `finish` never ran: no deposit was logged.
+    let logged = core.transparency_log(100).unwrap();
+    assert!(
+        !logged
+            .iter()
+            .any(|(_, ev)| matches!(ev, TransparencyEvent::NodeDeposit { .. })),
+        "{logged:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn too_far_in_future_packet_is_not_delivered() {
+    use barking_core::store::MessageStatus;
+    let (_dir, mut core, mut net) = setup();
+    net.max_expiry = Some(NOW + 25 * 3_600);
+    sealed_at(&mut core, NOW + 6 * DAY);
+    let alice = core.contacts().unwrap()[0].fingerprint;
+    let report = sync(&mut core, &net, opts()).await;
+    let sealed = core
+        .messages_with(&alice)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "sealed")
+        .unwrap();
+    assert_eq!(sealed.status, MessageStatus::NotDelivered);
+    assert_eq!(report.failed, vec![(alice, sealed.id)]);
 }

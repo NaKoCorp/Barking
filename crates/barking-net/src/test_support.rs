@@ -46,7 +46,16 @@ pub(crate) fn subject_with_hello(
 /// `subject`, plus Alice's receipt for Bob's reply (encoded), as a node
 /// would serve it in the reply's mailbox.
 pub(crate) fn subject_with_ack(now: u64) -> (tempfile::TempDir, barking_core::Core, Vec<u8>) {
-    let (dir, bob, ack, _) = build_subject(now, false);
+    subject_with_ack_at(now, now)
+}
+
+/// `subject_with_ack`, Alice receiving Bob's reply (and sealing her
+/// receipt) at `ack_at` rather than at `now`.
+pub(crate) fn subject_with_ack_at(
+    now: u64,
+    ack_at: u64,
+) -> (tempfile::TempDir, barking_core::Core, Vec<u8>) {
+    let (dir, bob, ack, _) = build_subject_at(now, false, ack_at);
     (dir, bob, ack)
 }
 
@@ -60,6 +69,10 @@ pub(crate) fn subject_two_messages(now: u64) -> (tempfile::TempDir, barking_core
 type Subject = (tempfile::TempDir, barking_core::Core, Vec<u8>, Vec<Vec<u8>>);
 
 fn build_subject(now: u64, second: bool) -> Subject {
+    build_subject_at(now, second, now)
+}
+
+fn build_subject_at(now: u64, second: bool, ack_at: u64) -> Subject {
     use barking_core::{Core, ReceiveOutcome};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -91,8 +104,9 @@ fn build_subject(now: u64, second: bool) -> Subject {
     }
     let mut ack = None;
     for p in bob.send_text(&fa, "hi", now, &mut rng).unwrap() {
-        if let ReceiveOutcome::Message { ack: a, .. } =
-            alice.receive(&p.encode(), "test", now, &mut rng).unwrap()
+        if let ReceiveOutcome::Message { ack: a, .. } = alice
+            .receive(&p.encode(), "test", ack_at, &mut rng)
+            .unwrap()
         {
             ack = Some(a.encode());
         }
