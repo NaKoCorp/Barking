@@ -74,19 +74,27 @@ final class UITestSeedTests: XCTestCase {
         }
     }
 
-    /// These tests cover the welcome and onboarding screens, so they start from a
-    /// fresh install, never from the seed.
+    /// These tests cover the welcome and onboarding screens: each one still
+    /// walks the screen it is about and never starts from the seed.
     func testOnboardingTestsStillOnboard() throws {
         let flow = try XCTUnwrap(try uiTestSources().first { $0.name == "FlowUITests.swift" }?.text)
-        for name in ["testCreateIdentityAndConfirmPhrase", "testFieldFooterIsReadOnce",
-                     "testWelcomeDotsStayOffTheText", "testRecoverTileSaysItsWord",
-                     "testLaterKeepsTheBanner", "testAppearanceChosenOnWelcomeIsKept"] {
+        // What each body must still do (any one of the strings).
+        let walks: [String: [String]] = [
+            "testCreateIdentityAndConfirmPhrase": ["onboard("],
+            "testFieldFooterIsReadOnce": ["Create my identity"],
+            "testWelcomeDotsStayOffTheText": ["-BarkingUITestKeepAnimations"],
+            "testRecoverTileSaysItsWord": ["Recover with 24 words"],
+            "testLaterKeepsTheBanner": ["onboard("],
+            "testAppearanceChosenOnWelcomeIsKept": ["appearance.dark"]]
+        XCTAssertEqual(walks.count, 6)
+        for (name, needles) in walks {
             let start = try XCTUnwrap(flow.range(of: "func \(name)()"), "\(name) not found")
             let rest = flow[start.upperBound...]
             let end = rest.range(of: "\n    }\n")?.lowerBound ?? rest.endIndex
             let body = rest[..<end]
-            XCTAssertTrue(body.contains("XCUIApplication.fresh("), "\(name) must start from a fresh install")
-            XCTAssertFalse(body.contains("seeded("), "\(name) must not use the seed")
+            XCTAssertTrue(needles.contains { body.contains($0) }, "\(name) lost \(needles)")
+            XCTAssertFalse(body.contains("seeded(") || body.contains("-BarkingUITestSeed"),
+                           "\(name) must not use the seed")
         }
     }
 }

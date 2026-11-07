@@ -25,11 +25,13 @@ final class OnboardingUITests: XCTestCase {
     /// UI review B5 (U-32): the galaxy's dots never show over Welcome's
     /// header, text or buttons, at the default size and at AX3.
     func testWelcomeDotsStayOffTheText() throws {
-        let app = XCUIApplication.fresh()
+        // The dots move: animations stay on, as the test looks at them.
+        let app = XCUIApplication.fresh(extra: ["-BarkingUITestKeepAnimations"])
         app.launch()
         assertNoDotOverWelcomeText(app)
         app.terminate()
-        let large = XCUIApplication.fresh(extra: ["-UIPreferredContentSizeCategoryName",
+        let large = XCUIApplication.fresh(extra: ["-BarkingUITestKeepAnimations",
+                                                  "-UIPreferredContentSizeCategoryName",
                                                   "UICTContentSizeCategoryAccessibilityXL"])
         large.launch()
         assertNoDotOverWelcomeText(large, shots: 2)
@@ -172,8 +174,8 @@ final class DevicesUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
     /// Settings › Transparency: where the data is, and the journal with its
-    /// security filter (a new identity has logged nothing, so the filter
-    /// only has to switch).
+    /// security filter (the seeded identity has only added a contact, so the
+    /// journal has little to show and the filter only has to switch).
     func testTransparencyShowsWhereTheDataIs() throws {
         let app = XCUIApplication.seeded(card: nil)
         app.launch()
