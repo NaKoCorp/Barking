@@ -299,14 +299,14 @@ enum MessageSheetSamples {
 }
 
 /// Answers nothing: the previews never reach the device.
-private struct PreviewSheetRunner: CallRunner {
+struct PreviewSheetRunner: CallRunner {
     func run<T: Sendable>(_ name: String, _ body: @escaping @Sendable () throws -> T) async throws -> T {
         throw CancellationError()
     }
 }
 
 /// Never called (the runner refuses every call); only satisfies `CoreService`.
-private final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
+final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     private struct Never: Error {}
     func fingerprint() throws -> String { throw Never() }
     func displayName() throws -> String { throw Never() }

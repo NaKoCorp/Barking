@@ -119,10 +119,11 @@ final class ChatUITests: XCTestCase {
         XCTAssertTrue(bubble.waitUntil({ !$0.exists }), "the bubble leaves")
     }
 
-    /// The header button ("Deliveries") opens the path of the last sent
-    /// message for now (a real message on a fake route: no network in UI tests).
-    func testPathScreenShowsTheRoute() throws {
-        let app = XCUIApplication.seeded(extra: ["-BarkingUITestFakeRoute"])
+    /// The header button ("Deliveries") opens the list of what was sent, the
+    /// message in its group (no network in UI tests: it is pending); a row
+    /// opens the message sheet.
+    func testDeliveriesListsTheSentMessage() throws {
+        let app = XCUIApplication.seeded()
         app.launch()
         let field = openSamChat(app)
         field.tap()
@@ -130,14 +131,12 @@ final class ChatUITests: XCTestCase {
         app.buttons["Send"].tap()
         XCTAssertTrue(app.staticTexts["hello Sam"].waitForExistence(timeout: 5))
         app.buttons["conversation.deliveries"].tap()
-        // Each stop is one VoiceOver sentence: name, step, time, what it
-        // could see, without the "·" separators (UI review U-36).
-        let stop = { (name: String) in
-            app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
-        }
-        XCTAssertTrue(stop("Internet relay, K7QX2M4A, deposited").waitForExistence(timeout: 5))
-        XCTAssertTrue(stop("Sam's phone, receipt received").exists)
-        XCTAssertTrue(app.staticTexts["Internet · 1 relay"].exists)
+        XCTAssertTrue(app.navigationBars["Deliveries"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Pending · 1"].waitForExistence(timeout: 5))
+        let row = app.buttons["hello Sam"]
+        XCTAssertTrue(row.exists)
+        row.tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 5), "the message sheet opens")
     }
 }
 

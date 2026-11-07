@@ -212,6 +212,11 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var retriedAll: [String] { lock.withLock { _retriedAll } }
     var cancelAllCalls: Int { lock.withLock { _cancelAllCalls } }
     var retryAllCount: UInt32 = 0
+    /// Thrown by `retryAll` only, when set (before `deliveryError`).
+    var retryAllError: Error?
+    private var _deliveryPageCalls = 0
+    /// Calls of `deliveryPage`.
+    var deliveryPageCalls: Int { lock.withLock { _deliveryPageCalls } }
 
     static let nothingDeleted = DeleteOutcome(deleted: 0, cancelled: 0, partlyCancelled: 0, alreadyLeft: 0,
                                               stillReceiving: [], ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: [])
@@ -230,6 +235,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     }
     func deliveryPage(contact: String, state: DeliveryState, limit: UInt32, offset: UInt32) throws -> [DeliveryRowInfo] {
         if let deliveryError { throw deliveryError }
+        lock.withLock { _deliveryPageCalls += 1 }
         let all = deliveryRows[contact]?[state] ?? []
         return Array(all.dropFirst(Int(offset)).prefix(Int(limit)))
     }
@@ -257,6 +263,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         lock.withLock { _retried.append(messageId) }
     }
     func retryAll(contact: String) throws -> UInt32 {
+        if let retryAllError { throw retryAllError }
         if let deliveryError { throw deliveryError }
         lock.withLock { _retriedAll.append(contact) }
         return retryAllCount

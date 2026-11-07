@@ -320,18 +320,6 @@ final class ConversationModelTests: XCTestCase {
                        "Message reçu par Sam. Message non distribué. Réessayer est dans les actions.")
     }
 
-    /// Spec §6.5: the header opens the last sent message.
-    func testHeaderOpensTheLastSentMessage() async {
-        let d = FakeDevice()
-        d.messageList = ["b": [sent(7, .pending), Message(id: 8, outgoing: false, body: "x", at: 2)]]
-        let m = make(d)
-        await m.onAppear()
-        XCTAssertEqual(m.lastSentId, 7)
-        d.messageList = ["b": [Message(id: 8, outgoing: false, body: "x", at: 2)]]
-        await m.reload()
-        XCTAssertNil(m.lastSentId)
-    }
-
     func testOpeningMarksRead() async {
         let d = FakeDevice()
         d.messageList = ["b": [

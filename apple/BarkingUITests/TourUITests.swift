@@ -160,14 +160,12 @@ final class TourUITests: XCTestCase {
             }
         }
         snap(app, "conversation")
-        let path = app.buttons["conversation.deliveries"]
-        if path.waitForExistence(timeout: 5) {
-            path.tap()
-            // The stops load after the screen shows: wait for the relay's row,
-            // whose id is the same in both languages.
-            _ = app.descendants(matching: .any).matching(
-                NSPredicate(format: "label CONTAINS %@", "K7QX2M4A")).firstMatch.waitForExistence(timeout: 10)
-            snap(app, "message-path")
+        let deliveries = app.buttons["conversation.deliveries"]
+        if deliveries.waitForExistence(timeout: 5) {
+            deliveries.tap()
+            // The groups load after the screen shows: wait for the last message's row.
+            _ = app.buttons["Meet at the market at six."].waitForExistence(timeout: 10)
+            snap(app, "deliveries")
             back()
         }
         // Safety code: header of the conversation (one button, UI review B4).

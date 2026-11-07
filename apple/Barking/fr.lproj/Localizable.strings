@@ -423,3 +423,9 @@
 "Details unavailable. The message itself is unchanged." = "Détails indisponibles. Le message lui-même n’a pas changé.";
 "Expired before a relay accepted it. It never left this iPhone." = "Expiré avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.";
 "None of %@’s devices picked it up within 24 hours. The relay erased it." = "Aucun appareil de %@ ne l’a relevé en 24 h. Le relais l’a effacé.";
+
+/* Lot M §6.5, §7.3: Deliveries (the group titles are in the stringsdict) */
+"Retry all" = "Tout réessayer";
+"No messages sent yet. Their delivery will show here." = "Aucun message envoyé. Leur acheminement s’affichera ici.";
+"Couldn’t read the list. Your messages are unchanged." = "Impossible de lire la liste. Vos messages n’ont pas changé.";
+"Reads the list again." = "Relit la liste.";

@@ -84,8 +84,10 @@ final class ConversationModel {
 
     var byteCount: Int { draft.utf8.count }
     var lastMessageId: Int64? { items.last?.id }
-    /// The header button opens the last sent message.
-    var lastSentId: Int64? { items.last(where: \.outgoing)?.id }
+    /// The header button opens "Deliveries"; it has nothing to list before a
+    /// message is sent from this iPhone (one sent from another of my devices
+    /// has no delivery here).
+    var hasSentMessage: Bool { items.contains { $0.outgoing && $0.delivery != nil } }
     var showsCounter: Bool { byteCount >= Self.counterFrom }
     var canSend: Bool {
         !sending && !removed && byteCount <= Self.maxBytes
