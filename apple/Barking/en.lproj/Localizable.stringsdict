@@ -162,7 +162,34 @@
 			<string>Found %lld words; 24 are needed.</string>
 		</dict>
 	</dict>
-	<key>%lld had already left: %@ will still receive it.</key>
+	<key>%lld had already left: %@ will still receive it.%lld</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@m@: %2$@ will still receive %1$#@q@.</string>
+		<key>m</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld had already left</string>
+			<key>other</key>
+			<string>%lld had already left</string>
+		</dict>
+		<key>q</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>it</string>
+			<key>other</key>
+			<string>them</string>
+		</dict>
+	</dict>
+	<key>%lld had already left and will still be delivered.</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>
 		<string>%#@n@</string>
@@ -173,9 +200,25 @@
 			<key>NSStringFormatValueTypeKey</key>
 			<string>lld</string>
 			<key>one</key>
-			<string>%lld had already left: %@ will still receive it.</string>
+			<string>%lld had already left and will still be delivered.</string>
 			<key>other</key>
-			<string>%lld had already left: %@ will still receive it.</string>
+			<string>%lld had already left and will still be delivered.</string>
+		</dict>
+	</dict>
+	<key>Part of it had already left: %@ will receive it on %lld of their %lld devices.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Part of it had already left: %1$@ will receive it on %2$lld of their %3$#@d@.</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld device</string>
+			<key>other</key>
+			<string>%lld devices</string>
 		</dict>
 	</dict>
 	<key>%@, %@ and %lld others</key>

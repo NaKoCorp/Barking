@@ -193,6 +193,39 @@ final class DeliveryCoreTests: XCTestCase {
         XCTAssertEqual(seen.all.filter { $0 == .messages(contact: "a") }.count, 1)
     }
 
+    /// After `close`, the open window publishes nothing.
+    func testNothingIsPublishedAfterClose() async {
+        let gate = DeliveryGate()
+        let d = FakeDevice()
+        let core = CoreService(device: d, runner: DirectRunner(), sleep: { await gate.sleep($0) })
+        let seen = Seen(await core.changes)
+        d.summary = summary(deliveryChanges: changes(("b", 1)))
+        _ = await core.sync(reason: .pull)
+        await core.close()
+        await gate.open()
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(deliveries(seen.all).isEmpty, "\(seen.all)")
+    }
+
+    /// A deletion reloads its contact whole: its waiting state changes go,
+    /// those of the other contacts stay.
+    func testDeleteClearsWaitingIdsOfItsContact() async throws {
+        let gate = DeliveryGate()
+        let d = FakeDevice()
+        let core = CoreService(device: d, runner: DirectRunner(), sleep: { await gate.sleep($0) })
+        let seen = Seen(await core.changes)
+        d.summary = summary(deliveryChanges: changes(("b", 1), ("c", 2)))
+        _ = await core.sync(reason: .pull)
+        d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 1, partlyCancelled: 0, alreadyLeft: 0, stillReceiving: [],
+                                       ownCopiesKept: false, changes: changes(("b", 1)))
+        _ = try await core.deleteMessage(1)
+        await gate.open()
+        let ok = await seen.eventually { !deliveries($0).isEmpty }
+        XCTAssertTrue(ok, "\(seen.all)")
+        XCTAssertEqual(deliveries(seen.all), [.delivery(contact: "c", ids: [2])])
+        XCTAssertTrue(seen.all.contains(.messages(contact: "b")))
+    }
+
     func testDeleteOneAndCancelAllReportTheOutcome() async throws {
         let d = FakeDevice()
         d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 0, partlyCancelled: 0, alreadyLeft: 1,
@@ -330,6 +363,13 @@ final class DeleteBannerTests: XCTestCase {
                        "Une partie était déjà partie\u{00A0}: Alice le recevra sur 1 de ses 2 appareils.")
     }
 
+    func testPartlyLeftThreeDevices() throws {
+        let m = DeleteBanner.Message.partlyLeft(name: "Alice", left: 2, total: 3)
+        XCTAssertEqual(try text(m, "en"), "Part of it had already left: Alice will receive it on 2 of their 3 devices.")
+        XCTAssertEqual(try text(m, "fr"),
+                       "Une partie était déjà partie\u{00A0}: Alice le recevra sur 2 de ses 3 appareils.")
+    }
+
     func testPartlyLeftWithoutTheDeviceCountStaysTrue() throws {
         let m = DeleteBanner.message(shown: .pending, outcome: outcome(partly: 1), contactName: "Alice")
         XCTAssertEqual(m, .alreadyLeft(name: "Alice"))
@@ -347,17 +387,43 @@ final class DeleteBannerTests: XCTestCase {
     func testSeveralWithSomeAlreadyGone() throws {
         let o = outcome(cancelled: 1, partly: 1, left: 1, still: ["Alice"])
         let m = DeleteBanner.message(shown: nil, outcome: o, contactName: "Alice")
-        XCTAssertEqual(m, .several(count: 2, names: "Alice"))
+        XCTAssertEqual(m, .several(count: 2, names: ["Alice"]))
         XCTAssertNotNil(DeleteBanner.text(shown: nil, outcome: o, contactName: "Alice"))
-        XCTAssertEqual(try text(m, "en"), "2 had already left: Alice will still receive it.")
-        XCTAssertEqual(try text(m, "fr"), "2 étaient déjà partis\u{00A0}: Alice le recevra quand même.")
     }
 
-    func testSeveralSingularForm() throws {
-        let m = DeleteBanner.message(shown: nil, outcome: outcome(left: 1, still: ["Sam"]), contactName: "")
-        XCTAssertEqual(m, .several(count: 1, names: "Sam"))
-        XCTAssertEqual(try text(m, "en"), "1 had already left: Sam will still receive it.")
-        XCTAssertEqual(try text(m, "fr"), "1 était déjà parti\u{00A0}: Sam le recevra quand même.")
+    /// The pronoun follows the number of messages, the French verb the number of names.
+    func testSeveralAgreesInNumber() throws {
+        let nb = "\u{00A0}"
+        let cases: [(Int, [String], String, String)] = [
+            (1, ["Alice"], "1 had already left: Alice will still receive it.",
+             "1 était déjà parti\(nb): Alice le recevra quand même."),
+            (2, ["Alice"], "2 had already left: Alice will still receive them.",
+             "2 étaient déjà partis\(nb): Alice les recevra quand même."),
+            (1, ["Alice", "Sam"], "1 had already left: Alice and Sam will still receive it.",
+             "1 était déjà parti\(nb): Alice et Sam le recevront quand même."),
+            (2, ["Alice", "Sam"], "2 had already left: Alice and Sam will still receive them.",
+             "2 étaient déjà partis\(nb): Alice et Sam les recevront quand même."),
+            (2, ["Alice", "Sam", "Lou"], "2 had already left: Alice, Sam and 1 other will still receive them.",
+             "2 étaient déjà partis\(nb): Alice, Sam et 1 autre personne les recevront quand même."),
+            (3, ["A", "B", "C", "D"], "3 had already left: A, B and 2 others will still receive them.",
+             "3 étaient déjà partis\(nb): A, B et 2 autres personnes les recevront quand même."),
+        ]
+        for (count, names, en, fr) in cases {
+            let m = DeleteBanner.Message.several(count: count, names: names)
+            XCTAssertEqual(try text(m, "en"), en)
+            XCTAssertEqual(try text(m, "fr"), fr)
+        }
+    }
+
+    /// "Cancel all" with no name to give: a sentence without one.
+    func testSeveralWithoutNamesIsNameless() throws {
+        let m = DeleteBanner.message(shown: nil, outcome: outcome(left: 2), contactName: "")
+        XCTAssertEqual(m, .several(count: 2, names: []))
+        XCTAssertEqual(try text(m, "en"), "2 had already left and will still be delivered.")
+        XCTAssertEqual(try text(m, "fr"), "2 étaient déjà partis et seront quand même distribués.")
+        let one = DeleteBanner.Message.several(count: 1, names: [])
+        XCTAssertEqual(try text(one, "en"), "1 had already left and will still be delivered.")
+        XCTAssertEqual(try text(one, "fr"), "1 était déjà parti et sera quand même distribué.")
     }
 
     func testSeveralNothingGoneSaysNothing() {
@@ -366,11 +432,8 @@ final class DeleteBannerTests: XCTestCase {
 
     func testSeveralNamesComeFromTheOutcome() {
         let o = outcome(left: 2, still: ["Alice", "Sam", "Lou", "Max"])
-        guard case .several(let n, let names)? = DeleteBanner.message(shown: nil, outcome: o, contactName: "") else {
-            return XCTFail("a banner is due")
-        }
-        XCTAssertEqual(n, 2)
-        XCTAssertEqual(names, DeleteBanner.names(["Alice", "Sam", "Lou", "Max"], bundle: .main, locale: .current))
+        XCTAssertEqual(DeleteBanner.message(shown: nil, outcome: o, contactName: ""),
+                       .several(count: 2, names: ["Alice", "Sam", "Lou", "Max"]))
     }
 
     func testNamesListAtMostTwoThenTheOthers() throws {
@@ -391,7 +454,8 @@ final class DeleteBannerTests: XCTestCase {
     func testTextsFollowTheWritingRules() throws {
         let all: [DeleteBanner.Message] = [
             .alreadyLeft(name: "Alice"), .partlyLeft(name: "Alice", left: 1, total: 2),
-            .several(count: 1, names: "Alice"), .several(count: 2, names: "Alice and Sam"),
+            .several(count: 1, names: ["Alice"]), .several(count: 2, names: ["Alice", "Sam"]),
+            .several(count: 2, names: ["A", "B", "C"]), .several(count: 1, names: []), .several(count: 2, names: []),
         ]
         for lang in ["en", "fr"] {
             for m in all {

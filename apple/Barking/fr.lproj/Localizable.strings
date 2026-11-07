@@ -360,4 +360,3 @@
 "Link a device" = "Lier un appareil";
 "Nothing was pasted." = "Rien n’a été collé.";
 "It had already left: %@ will still receive it." = "Il était déjà parti : %@ le recevra quand même.";
-"Part of it had already left: %@ will receive it on %lld of their %lld devices." = "Une partie était déjà partie : %@ le recevra sur %lld de ses %lld appareils.";

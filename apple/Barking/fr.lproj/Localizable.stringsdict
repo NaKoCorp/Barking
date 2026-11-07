@@ -162,7 +162,45 @@
 			<string>%lld mots trouvés ; il en faut 24.</string>
 		</dict>
 	</dict>
-	<key>%lld had already left: %@ will still receive it.</key>
+	<key>%lld had already left: %@ will still receive it.%lld</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@m@ : %2$@ %1$#@q@ %3$#@p@ quand même.</string>
+		<key>m</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld était déjà parti</string>
+			<key>other</key>
+			<string>%lld étaient déjà partis</string>
+		</dict>
+		<key>q</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>le</string>
+			<key>other</key>
+			<string>les</string>
+		</dict>
+		<key>p</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>recevra</string>
+			<key>other</key>
+			<string>recevront</string>
+		</dict>
+	</dict>
+	<key>%lld had already left and will still be delivered.</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>
 		<string>%#@n@</string>
@@ -173,9 +211,25 @@
 			<key>NSStringFormatValueTypeKey</key>
 			<string>lld</string>
 			<key>one</key>
-			<string>%lld était déjà parti : %@ le recevra quand même.</string>
+			<string>%lld était déjà parti et sera quand même distribué.</string>
 			<key>other</key>
-			<string>%lld étaient déjà partis : %@ le recevra quand même.</string>
+			<string>%lld étaient déjà partis et seront quand même distribués.</string>
+		</dict>
+	</dict>
+	<key>Part of it had already left: %@ will receive it on %lld of their %lld devices.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Une partie était déjà partie : %1$@ le recevra sur %2$lld de ses %3$#@d@.</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld appareil</string>
+			<key>other</key>
+			<string>%lld appareils</string>
 		</dict>
 	</dict>
 	<key>%@, %@ and %lld others</key>
