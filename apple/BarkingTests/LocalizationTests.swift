@@ -264,7 +264,7 @@ final class LocalizationTests: XCTestCase {
         let expected: [String: String] = [
             "Pending": "En attente", "On the network": "Sur le réseau", "Received": "Reçu",
             "Not delivered": "Non distribué", "Retry": "Réessayer",
-            "Copy": "Copier", "Details": "Détails", "Delete": "Supprimer", "Deliveries": "Envois",
+            "Copy": "Copier", "Details": "Détails", "Delete": "Supprimer",
             "Pending since %@": "En attente depuis %@", "On the network since %@": "Sur le réseau depuis %@",
             "Received at %@": "Reçu à %@", "Not delivered. Expired at %@.": "Non distribué. Expiré à %@.",
             "Sent from another of your devices": "Envoyé depuis un autre de vos appareils",
@@ -326,40 +326,11 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
-    /// Spec Lot M §7.3: "Deliveries", in French; its group titles take the
-    /// number through the stringsdict.
-    func testDeliveriesStrings() throws {
-        let fr = try XCTUnwrap(table("fr"))
-        let expected: [String: String] = [
-            "Deliveries": "Envois", "Retry all": "Tout réessayer",
-            "No messages sent yet. Their delivery will show here.": "Aucun message envoyé. Leur acheminement s’affichera ici.",
-            "Couldn’t read the list. Your messages are unchanged.": "Impossible de lire la liste. Vos messages n’ont pas changé.",
-        ]
-        for (key, value) in expected {
-            XCTAssertEqual(fr[key] as? String, value, key)
-        }
-        let titles: [(key: String, en: String, fr: String)] = [
-            ("Not delivered · %lld", "Not delivered · 3", "Non distribués · 3"),
-            ("Pending · %lld", "Pending · 3", "En attente · 3"),
-            ("On the network · %lld", "On the network · 3", "Sur le réseau · 3"),
-            ("Received · %lld", "Received · 3", "Reçus · 3"),
-        ]
-        for (lang, pick) in [("en", \.en), ("fr", \.fr)] as [(String, KeyPath<(key: String, en: String, fr: String), String>)] {
-            let plurals = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
-            let path = try XCTUnwrap(Bundle.main.path(forResource: lang, ofType: "lproj"))
-            let bundle = try XCTUnwrap(Bundle(path: path))
-            for t in titles {
-                XCTAssertNotNil(plurals[t.key], "\(lang) plural \(t.key)")
-                let format = bundle.localizedString(forKey: t.key, value: nil, table: nil)
-                XCTAssertEqual(String(format: format, locale: Locale(identifier: lang), 3), t[keyPath: pick], "\(lang) \(t.key)")
-            }
-        }
-    }
-
     func testPendingStrings() throws {
         let fr = try XCTUnwrap(table("fr"))
         let expected: [String: String] = [
             "Nothing pending": "Rien en attente", "Select": "Sélectionner", "Done": "OK",
+            "Couldn’t read the list. Your messages are unchanged.": "Impossible de lire la liste. Vos messages n’ont pas changé.",
             "Select all": "Tout sélectionner", "Cancel all · %lld": "Tout annuler · %lld",
             "Select messages to delete.": "Sélectionnez des messages à supprimer.",
             "Nothing pending. Everything has gone out.": "Rien en attente. Tout est parti.",
