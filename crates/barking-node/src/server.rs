@@ -165,8 +165,8 @@ pub struct ServerConfig {
     pub dht_diversity: DiversityLimits,
     /// Wake subscriptions and wake-ups (`[wake]`).
     pub wake: WakeConfig,
-    /// Allow wake-ups to relays on private addresses. Tests only, never read
-    /// from the configuration; default: false.
+    /// Allow wake-ups to relays on private addresses. Follows
+    /// `dht.allow_private_addrs` (tests, local networks); default: false.
     pub wake_allow_private: bool,
     /// Tests only (feature `test-harness`, never in a production build),
     /// never read from the configuration: answers `Ok` to `Deposit` and

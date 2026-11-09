@@ -312,6 +312,8 @@ impl Config {
         cfg.max_db_jobs = self.max_db_jobs;
         cfg.max_db_jobs_per_prefix = self.max_db_jobs_per_prefix;
         cfg.min_send_rate = self.min_send_rate;
+        // A node on a private network may wake a relay on the same network.
+        cfg.wake_allow_private = self.dht.as_ref().is_some_and(|d| d.allow_private_addrs);
         cfg.dht = self.dht.clone();
         cfg
     }
@@ -342,6 +344,24 @@ mod tests {
     fn unknown_key_is_rejected() {
         let e = Config::parse("pow_bits = 18\nlisten_adress = []\n").unwrap_err();
         assert!(e.to_string().contains("listen_adress"), "{e}");
+    }
+
+    #[test]
+    fn private_dht_also_allows_private_relays() {
+        let key = || SigningKey::from_bytes(&[1; 32]);
+        assert!(
+            !Config::parse("")
+                .unwrap()
+                .server_config(vec![], key())
+                .wake_allow_private
+        );
+        let c = Config::parse("[dht]\npublic_addr = [\"1.2.3.4:4433\"]\n").unwrap();
+        assert!(!c.server_config(vec![], key()).wake_allow_private);
+        let c = Config::parse(
+            "[dht]\npublic_addr = [\"192.168.1.2:4433\"]\nallow_private_addrs = true\n",
+        )
+        .unwrap();
+        assert!(c.server_config(vec![], key()).wake_allow_private);
     }
 
     #[test]
