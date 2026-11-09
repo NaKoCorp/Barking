@@ -31,6 +31,20 @@ final class MinorFixTests: XCTestCase {
         XCTAssertEqual(m.error, .notACard)
     }
 
+    // On an iPhone, VisionKit's raw symbol of a large link QR (version 36)
+    // decoded to 939 of its 2,375 bytes while its own text was whole: the
+    // text is read when the bytes give no card.
+    func testCutLinkBytesFallBackOnTheScannerText() async throws {
+        let me = try tempDevice()
+        let link = "barking://card#" + (try tempDevice("Bob").contactCard(displayName: "Bob"))
+        let m = AddContactModel(core: CoreService(device: me, runner: DirectRunner()))
+        await m.scanned(Data(link.utf8.prefix(939)), text: link)
+        XCTAssertEqual(m.preview?.displayName, "Bob")
+        XCTAssertNil(m.error)
+        await m.scanned(Data(link.utf8.prefix(939)), text: nil)
+        XCTAssertEqual(m.error, .notACard)
+    }
+
     // Model errors are keys, rendered in the current language at display time.
     func testModelErrorsAreKeysNotTranslatedText() {
         XCTAssertEqual(LinkModel.text(for: .expired), "This offer has expired. Start again.")

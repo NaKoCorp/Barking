@@ -30,7 +30,7 @@ struct AddContactView: View {
                                          labelAtAXSizes: true)
                         if let e = model.error { errorText(e) }
                         if tab == 0 {
-                            ScannerView(onBytes: { data in Task { await model.scanned(data) } },
+                            ScannerView(onBytes: { data, text in Task { await model.scanned(data, text: text) } },
                                         onText: { s in Task { await model.scannedText(s) } })
                         } else {
                             ScrollView { MyCodeView(core: core) }
@@ -95,9 +95,10 @@ struct AddContactView: View {
     }
 }
 
-/// VisionKit scanner; each QR code's raw symbol is decoded as bytes.
+/// VisionKit scanner; each QR code's raw symbol is decoded as bytes, handed
+/// over with the scanner's own text.
 struct ScannerView: View {
-    let onBytes: (Data) -> Void
+    let onBytes: (Data, String?) -> Void
     var onText: (String) -> Void = { _ in }
     /// What to do without a camera: it differs between adding a contact and
     /// linking a device.
@@ -119,7 +120,7 @@ struct ScannerView: View {
     }
 
     private struct Representable: UIViewControllerRepresentable {
-        let onBytes: (Data) -> Void
+        let onBytes: (Data, String?) -> Void
         let onText: (String) -> Void
 
         func makeUIViewController(context: Context) -> DataScannerViewController {
@@ -134,9 +135,9 @@ struct ScannerView: View {
         func makeCoordinator() -> Coordinator { Coordinator(onBytes: onBytes, onText: onText) }
 
         final class Coordinator: NSObject, DataScannerViewControllerDelegate {
-            let onBytes: (Data) -> Void
+            let onBytes: (Data, String?) -> Void
             let onText: (String) -> Void
-            init(onBytes: @escaping (Data) -> Void, onText: @escaping (String) -> Void) {
+            init(onBytes: @escaping (Data, String?) -> Void, onText: @escaping (String) -> Void) {
                 self.onBytes = onBytes
                 self.onText = onText
             }
@@ -144,7 +145,7 @@ struct ScannerView: View {
             func dataScanner(_ s: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
                 for case .barcode(let b) in items {
                     if let d = (b.observation.barcodeDescriptor as? CIQRCodeDescriptor).flatMap(QRPayload.bytes(from:)) {
-                        onBytes(d)
+                        onBytes(d, b.payloadStringValue)
                         return
                     }
                     // Not byte mode (numeric, alphanumeric…): its text decides.

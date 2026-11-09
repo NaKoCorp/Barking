@@ -25,6 +25,49 @@ final class QRPayloadTests: XCTestCase {
         XCTAssertEqual(roundTrip(card), card)
     }
 
+    /// A card link (another Barking or the CLI's `card`) is about 2,400
+    /// characters: its QR is read back whole.
+    @MainActor
+    func testRoundTripCardLink() async throws {
+        // Whether the generator splits a link depends on the card: several.
+        let m = AddContactModel(core: CoreService(device: try tempDevice(), runner: DirectRunner()))
+        for _ in 0..<5 {
+            let link = "barking://card#" + (try tempDevice("Bob").contactCard(displayName: "Bob"))
+            let read = try XCTUnwrap(roundTrip(Data(link.utf8)), "the symbol was not read as bytes")
+            XCTAssertEqual(read, Data(link.utf8))
+            await m.scanned(read)
+            XCTAssertEqual(m.preview?.displayName, "Bob")
+        }
+    }
+
+    /// The generator splits some payloads into segments of other modes (a
+    /// run of digits, of capitals): every segment is read, up to the
+    /// terminator.
+    func testEverySegmentIsRead() throws {
+        var bits = ""
+        func put(_ v: Int, _ n: Int) {
+            let b = String(v, radix: 2)
+            bits += String(repeating: "0", count: n - b.count) + b
+        }
+        put(0b0100, 4); put(2, 8); put(0x61, 8); put(0x62, 8)    // byte "ab"
+        put(0b0010, 4); put(3, 9); put(12 * 45 + 13, 11); put(36, 6) // alphanumeric "CD "
+        put(0b0001, 4); put(4, 10); put(123, 10); put(4, 4)      // numeric "1234"
+        put(0b0111, 4); put(26, 8)                               // ECI 26 (UTF-8)
+        put(0b0100, 4); put(1, 8); put(0x7A, 8)                  // byte "z"
+        put(0, 4)
+        while bits.count % 8 != 0 { bits += "0" }
+        var payload = Data()
+        var i = bits.startIndex
+        while i < bits.endIndex {
+            let next = bits.index(i, offsetBy: 8)
+            payload.append(UInt8(bits[i..<next], radix: 2)!)
+            i = next
+        }
+        payload.append(contentsOf: [0xEC, 0x11])
+        let d = try XCTUnwrap(CIQRCodeDescriptor(payload: payload, symbolVersion: 2, maskPattern: 0, errorCorrectionLevel: .levelL))
+        XCTAssertEqual(QRPayload.bytes(from: d), Data("abCD 1234z".utf8))
+    }
+
     func testForeignAndTruncatedPayloadsAreRejected() throws {
         let url = Data("https://example.org".utf8)
         XCTAssertThrowsError(try inspectCard(bytes: roundTrip(url) ?? url))
