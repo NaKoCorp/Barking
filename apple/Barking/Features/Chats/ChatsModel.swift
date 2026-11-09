@@ -86,13 +86,19 @@ final class AddContactModel {
 
     init(core: CoreService) { self.core = core }
 
-    /// A QR code's bytes: a binary card, else a card link in text.
-    func scanned(_ data: Data) async {
+    /// A QR code's bytes: a binary card, else a card link in text. `text` is
+    /// the scanner's own decoding: VisionKit's raw symbol of a large link QR
+    /// can decode short on an iPhone while its text is whole.
+    func scanned(_ data: Data, text scannerText: String? = nil) async {
         if let p = try? inspectCard(bytes: data) {
             await show(p)
             if preview != nil { bytes = data; text = nil }
-        } else if let s = String(data: data, encoding: .utf8) {
-            await scannedText(s)
+            return
+        }
+        let candidates = [String(data: data, encoding: .utf8), scannerText].compactMap { $0 }
+        if let link = candidates.lazy.compactMap(Self.cardText(inLink:))
+            .first(where: { (try? inspectCardText(text: $0)) != nil }) {
+            await opened(link: link)
         } else {
             await show(nil)
         }
@@ -100,9 +106,14 @@ final class AddContactModel {
 
     /// A QR code's text (any mode): only a `barking://card#…` link is a card.
     func scannedText(_ s: String) async {
+        guard let link = Self.cardText(inLink: s) else { await show(nil); return }
+        await opened(link: link)
+    }
+
+    /// The card text of a `barking://card#…` link.
+    private static func cardText(inLink s: String) -> String? {
         let prefix = "barking://card#"
-        guard s.hasPrefix(prefix) else { await show(nil); return }
-        await opened(link: String(s.dropFirst(prefix.count)))
+        return s.hasPrefix(prefix) ? String(s.dropFirst(prefix.count)) : nil
     }
 
     func opened(link: String) async {

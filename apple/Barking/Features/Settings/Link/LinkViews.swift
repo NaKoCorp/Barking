@@ -24,7 +24,7 @@ struct LinkNewDeviceView: View {
                 case .offer(let offer):
                     if scanning {
                         Text("Scan the new device's code").font(.bBody).foregroundStyle(Color.fgMuted)
-                        ScannerView { data in Task { await model.scannedRequest(data) } }
+                        ScannerView { data, _ in Task { await model.scannedRequest(data) } }
                     } else {
                         LinkOfferPanel(offer: offer, onScan: { scanning = true },
                                        onNewCode: { Task { await model.start() } })
@@ -167,7 +167,7 @@ struct LinkFromExistingView: View {
                     .font(.bBody).foregroundStyle(Color.fgMuted)
                     .fixedSize(horizontal: false, vertical: true)
                 // Linking needs the camera: the other device's code is only a QR (U-13).
-                ScannerView(onBytes: { data in Task { await model.scannedOffer(data) } },
+                ScannerView(onBytes: { data, _ in Task { await model.scannedOffer(data) } },
                             unavailable: "The camera is not available. Linking needs it to scan your other device's code.")
             case .request(let request):
                 Text("Scan this code with your other device.").font(.bBody).foregroundStyle(Color.fgMuted)
