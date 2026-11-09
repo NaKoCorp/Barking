@@ -21,6 +21,39 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(m.draft, "")
     }
 
+    /// A send waits on the core lock while a sync holds it: the bubble shows
+    /// at once, Pending, and the core's row takes its place.
+    func testSentTextShowsAtOnce() async throws {
+        let d = FakeDevice()
+        d.syncDelay = 0.5
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "hello"
+        let send = Task { await m.send() }
+        for _ in 0..<50 where m.items.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(d.sent.isEmpty, "the core has not sealed it yet")
+        XCTAssertEqual(m.items.map(\.text), ["hello"])
+        XCTAssertEqual(m.items.first?.state, .pending)
+        XCTAssertFalse(m.hasSentMessage, "nothing to list in Deliveries yet")
+        await m.handle(.messages(contact: "b"))
+        XCTAssertEqual(m.items.map(\.text), ["hello"], "a reload meanwhile keeps it")
+        d.messageList = ["b": [Message(id: 5, outgoing: true, body: "hello", at: 1, delivery: .state(.pending))]]
+        await send.value
+        XCTAssertEqual(m.items.map(\.id), [5], "the core's row replaces the shown one")
+    }
+
+    func testFailedSendTakesItsBubbleBack() async {
+        let d = FakeDevice()
+        d.sendError = BarkingError.Locked
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "hello"
+        await m.send()
+        XCTAssertTrue(m.items.isEmpty)
+        XCTAssertEqual(m.draft, "hello")
+        XCTAssertNotNil(m.sendError)
+    }
+
     func testCounterAndLimit() {
         let m = make(FakeDevice())
         m.draft = String(repeating: "a", count: 3499)

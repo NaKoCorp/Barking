@@ -179,25 +179,31 @@ struct ConversationView: View {
     /// actions by name. A tap opens the message; a long press its menu.
     private func bubble(_ item: ConversationModel.Item) -> some View {
         let failed = item.state == .notDelivered
+        // Still being sent: the core has no row to open or delete yet.
+        let saved = !item.local
         return Bubble(text: item.text, outgoing: item.outgoing)
-            .onTapGesture { sheetOf = SheetTarget(id: item.id) }
+            .onTapGesture { if saved { sheetOf = SheetTarget(id: item.id) } }
             .contextMenu {
                 if failed {
                     Button { retry(item.id) } label: { Label("Retry", systemImage: "arrow.clockwise") }
                 }
                 Button { copy(item.text) } label: { Label("Copy", systemImage: "doc.on.doc") }
-                Button { sheetOf = SheetTarget(id: item.id) } label: { Label("Details", systemImage: "info.circle") }
-                Divider()
-                Button(role: .destructive) { confirm(item) } label: { Label("Delete", systemImage: "trash") }
+                if saved {
+                    Button { sheetOf = SheetTarget(id: item.id) } label: { Label("Details", systemImage: "info.circle") }
+                    Divider()
+                    Button(role: .destructive) { confirm(item) } label: { Label("Delete", systemImage: "trash") }
+                }
             }
             .accessibilityElement(children: .combine)
             .accessibilityValue(Text(verbatim: Self.spoken(item)))
-            .accessibilityHint(Text("Opens the message details."))
+            .accessibilityHint(saved ? Text("Opens the message details.") : Text(verbatim: ""))
             .accessibilityActions {
                 if failed { Button("Retry") { retry(item.id) } }
                 Button("Copy") { copy(item.text) }
-                Button("Details") { sheetOf = SheetTarget(id: item.id) }
-                Button("Delete") { confirm(item) }
+                if saved {
+                    Button("Details") { sheetOf = SheetTarget(id: item.id) }
+                    Button("Delete") { confirm(item) }
+                }
             }
             .bubbleRow(outgoing: item.outgoing)
     }
