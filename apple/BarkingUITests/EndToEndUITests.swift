@@ -23,6 +23,13 @@ final class EndToEndUITests: XCTestCase {
         try onboard(app)
         XCTAssertTrue(app.staticTexts["Alice"].waitForExistence(timeout: 10))
         app.buttons["Add"].tap()
+        // Safety code later; back from Alice's conversation to the tab bar.
+        let later = app.buttons["addContact.later"]
+        XCTAssertTrue(later.waitForExistence(timeout: 5))
+        later.tap()
+        XCTAssertTrue(app.textFields["Message"].waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(app.tabBars.buttons["Network"].waitForExistence(timeout: 5))
         app.tabBars.buttons["Network"].tap()
         app.buttons["+ Add a relay"].tap()
         let node = env["BARKING_E2E_NODE"]!.split(separator: "@").map(String.init)

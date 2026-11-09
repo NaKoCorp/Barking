@@ -57,6 +57,11 @@ final class ConversationModel {
     /// What the header says (U-20).
     var trust: Trust { Trust(verified: verified) }
     private(set) var keyChanged = false
+    /// The contact was read from the core: until then `verified` says nothing.
+    private var contactLoaded = false
+    /// Writing to a contact whose safety code was never compared: a warning,
+    /// never a block. The key-changed banner says more and replaces it.
+    var showsUnverified: Bool { contactLoaded && !verified && !keyChanged }
     private var sending = false
     /// The bubble of the send running: a send can wait seconds on the core
     /// lock while a sync holds it, so it shows at once and survives reloads.
@@ -91,10 +96,6 @@ final class ConversationModel {
 
     var byteCount: Int { draft.utf8.count }
     var lastMessageId: Int64? { items.last?.id }
-    /// The header button opens "Deliveries"; it has nothing to list before a
-    /// message is sent from this iPhone (one sent from another of my devices
-    /// has no delivery here).
-    var hasSentMessage: Bool { items.contains { $0.outgoing && $0.delivery != nil && !$0.local } }
     var showsCounter: Bool { byteCount >= Self.counterFrom }
     var canSend: Bool {
         !sending && !removed && byteCount <= Self.maxBytes
@@ -130,6 +131,7 @@ final class ConversationModel {
         if let c = try? await core.contacts().first(where: { $0.fingerprint == contact }) {
             name = c.alias ?? c.displayName
             verified = c.verified
+            contactLoaded = true
         }
     }
 

@@ -34,7 +34,6 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertTrue(d.sent.isEmpty, "the core has not sealed it yet")
         XCTAssertEqual(m.items.map(\.text), ["hello"])
         XCTAssertEqual(m.items.first?.state, .pending)
-        XCTAssertFalse(m.hasSentMessage, "nothing to list in Deliveries yet")
         await m.handle(.messages(contact: "b"))
         XCTAssertEqual(m.items.map(\.text), ["hello"], "a reload meanwhile keeps it")
         d.messageList = ["b": [Message(id: 5, outgoing: true, body: "hello", at: 1, delivery: .state(.pending))]]
@@ -372,6 +371,21 @@ final class ConversationModelTests: XCTestCase {
         let m = make(d)
         await m.onAppear()
         XCTAssertTrue(m.keyChanged)
+        // The key-changed banner says more: the unverified one stays away.
+        XCTAssertFalse(m.showsUnverified)
+    }
+
+    /// Writing to an unverified contact warns, once the contact is read;
+    /// the warning goes when the contact is marked verified.
+    func testUnverifiedBanner() async {
+        let d = FakeDevice()
+        let m = make(d)
+        XCTAssertFalse(m.showsUnverified, "nothing is said before the contact is read")
+        await m.onAppear()
+        XCTAssertTrue(m.showsUnverified)
+        d.contactList = [Contact(fingerprint: "b", alias: "bob", displayName: "Bob", verified: true)]
+        await m.handle(.contacts)
+        XCTAssertFalse(m.showsUnverified)
     }
 
     /// UI review U-20: the header says the trust, read from the contact.

@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Screen 4 of the mockup, without the "Send from" chooser. Each bubble
 /// has its time and state line under it (spec Lot M §6.3); a bubble opens
-/// the message sheet (§6.4). The header button opens "Deliveries" (§6.5).
+/// the message sheet (§6.4), which tells each message's delivery.
 struct ConversationView: View {
     let core: CoreService
     @State private var model: ConversationModel
@@ -18,10 +18,17 @@ struct ConversationView: View {
     @State private var confirming: ConversationModel.Item?
     /// The confirmation adds "Your other devices keep their copy." (§7.4).
     @State private var confirmingKeeps = false
+    /// The unverified banner's safety code, in a sheet: a
+    /// `navigationDestination(isPresented:)` in the chats' path-bound stack
+    /// looped SwiftUI's layout at 100 % CPU on the push.
+    @State private var verifying = false
 
     /// A message to bring into view once the conversation is loaded.
     let focus: Int64?
     @State private var scrollTarget: Int64?
+    /// The last message is in view (within `bottomSlack`).
+    @State private var atBottom = true
+    private static let bottomSlack: CGFloat = 24
 
     private struct SheetTarget: Identifiable { let id: Int64 }
 
@@ -37,6 +44,12 @@ struct ConversationView: View {
                 Banner(kind: .danger, title: "\(model.name)'s key changed.",
                        message: "Compare your safety code again.")
                     .padding(.horizontal, 16).padding(.top, 8)
+            } else if model.showsUnverified {
+                Banner(kind: .warning, title: "\(model.name) is not verified.",
+                       message: "Compare your safety code before sending anything sensitive.",
+                       action: .init(label: "Verify now", hint: "Opens the safety code.") { verifying = true })
+                    .padding(.horizontal, 16).padding(.top, 8)
+                    .accessibilityIdentifier("conversation.unverified")
             }
             if let notice = model.notice {
                 noticeBanner(notice).padding(.horizontal, 16).padding(.top, 8)
@@ -62,8 +75,23 @@ struct ConversationView: View {
                     .padding(16)
                     .animation(Motion.gated(Motion.enter, reduceMotion: reduceMotion), value: model.items.map(\.id))
                 }
+                // Held at the bottom: it opens there, and the keyboard or a
+                // new bubble keeps the last message in view without a jump.
+                .defaultScrollAnchor(.bottom)
+                .onScrollGeometryChange(for: Bool.self) { g in
+                    g.visibleRect.maxY >= g.contentSize.height - Self.bottomSlack
+                } action: { _, bottom in
+                    atBottom = bottom
+                }
+                // A message I send while reading higher up: brought into
+                // view. At the bottom the anchor already shows it, and a
+                // received message never moves what I am reading.
                 .onChange(of: model.items.last?.id) { _, id in
-                    if let id, scrollTarget == nil { proxy.scrollTo(id, anchor: .bottom) }
+                    guard let id, scrollTarget == nil, !atBottom,
+                          model.items.last?.outgoing == true else { return }
+                    withAnimation(Motion.gated(Motion.enter, reduceMotion: reduceMotion)) {
+                        proxy.scrollTo(id, anchor: .bottom)
+                    }
                 }
                 .onChange(of: scrollTarget) { _, id in
                     guard let id else { return }
@@ -79,6 +107,15 @@ struct ConversationView: View {
         }
         .background(Color.surface)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $verifying) {
+            NavigationStack {
+                SafetyCodeView(core: core, contact: model.contact)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) { Button("Close") { verifying = false } }
+                    }
+            }
+            .presentationBackground(Color.surface)
+        }
         .sheet(item: $sheetOf) { target in
             MessageSheet(core: core, messageId: target.id, contact: model.contact, contactName: model.name) {
                 model.showDeleted($0)
@@ -99,20 +136,6 @@ struct ConversationView: View {
             if let c = confirming, !ids.contains(c.id) { confirming = nil }
         }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                // "Deliveries" (§6.5): disabled until a message was sent. A
-                // link, like the header's: a `navigationDestination(isPresented:)`
-                // in the chats' path-bound stack looped SwiftUI's layout at
-                // 100 % CPU on the push.
-                NavigationLink {
-                    DeliveriesView(core: core, contact: model.contact, contactName: model.name)
-                } label: {
-                    Image(systemName: "checklist")
-                }
-                .disabled(!model.hasSentMessage)
-                .accessibilityLabel(Text("Deliveries"))
-                .accessibilityIdentifier("conversation.deliveries")
-            }
             ToolbarItem(placement: .principal) {
                 ChatHeader(core: core, model: model)
             }

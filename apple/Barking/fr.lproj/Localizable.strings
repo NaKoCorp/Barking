@@ -374,7 +374,6 @@
 
 /* Lot M §6.3, §7.1, §7.4, §9: the bubble, its menu and the deletion */
 "Details" = "Détails";
-"Deliveries" = "Envois";
 "Opens the message details." = "Ouvre le détail du message.";
 "Message received by %@." = "Message reçu par %@.";
 "Message not delivered. Retry is in the actions." = "Message non distribué. Réessayer est dans les actions.";
@@ -424,8 +423,6 @@
 "None of %@’s devices picked it up within 24 hours. The relay erased it." = "Aucun appareil de %@ ne l’a relevé en 24 h. Le relais l’a effacé.";
 
 /* Lot M §6.5, §7.3: Deliveries (the group titles are in the stringsdict) */
-"Retry all" = "Tout réessayer";
-"No messages sent yet. Their delivery will show here." = "Aucun message envoyé. Leur acheminement s’affichera ici.";
 "Couldn’t read the list. Your messages are unchanged." = "Impossible de lire la liste. Vos messages n’ont pas changé.";
 "Reads the list again." = "Relit la liste.";
 
@@ -449,3 +446,8 @@
 "Select all" = "Tout sélectionner";
 "Select messages to delete." = "Sélectionnez des messages à supprimer.";
 "Nothing pending. Everything has gone out." = "Rien en attente. Tout est parti.";
+
+/* Verify after adding, and the unverified warning in a conversation. */
+"%@ is not verified." = "Le contact %@ n’est pas vérifié.";
+"Compare your safety code before sending anything sensitive." = "Comparez votre code de sécurité avant d’envoyer quoi que ce soit de sensible.";
+"Verify now" = "Vérifier maintenant";
