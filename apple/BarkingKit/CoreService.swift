@@ -354,6 +354,10 @@ public actor CoreService {
         try await call("node") { try $0.addNode(id: id, addr: addr) }
         publish(.network)
     }
+    /// Wake-up settings (`nil`: push off), used from the next full sync.
+    public func setPush(_ settings: PushSettings?) async throws {
+        try await call("push") { try $0.setPush(settings: settings) }
+    }
     /// Packets no node accepted yet (the pending packets screen's count).
     public func pendingCount() async throws -> Int { Int(try await call("pending") { try $0.pendingCount() }) }
 

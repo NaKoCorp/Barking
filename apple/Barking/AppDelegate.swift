@@ -2,19 +2,38 @@ import BarkingKit
 import UIKit
 import UserNotifications
 
-/// The APNs token, shown by the development screen (the subscriptions of
-/// block 3 will use it).
+/// The APNs token: shown by the development screen, and given to the core
+/// with the relay the app was built with, so that its syncs subscribe to
+/// wake-ups.
 @MainActor @Observable
 final class PushToken {
     static let shared = PushToken()
+    var token: Data?
     var hex: String?
     var failure: String?
+    /// Where the relay is read from (tests give their own).
+    @ObservationIgnored var info: [String: Any] = Bundle.main.infoDictionary ?? [:]
+
+    /// Gives `core` the wake-up settings for the token, or push off when no
+    /// relay was built in. Nothing before iOS gave a token: the settings the
+    /// core holds stay.
+    func apply(to core: CoreService) async {
+        guard let token else { return }
+        do {
+            try await core.setPush(PushRelay.settings(info: info, token: token))
+        } catch {
+            failure = String(describing: error)
+        }
+    }
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     /// The service a background wake syncs: the app's, once its device is
     /// open (nil before). Tests give their own.
     var service: @MainActor () -> CoreService? = { AppRouter.current?.core }
+    /// Where the APNs token goes (tests give their own).
+    @MainActor var pushToken: PushToken { get { _pushToken ?? .shared } set { _pushToken = newValue } }
+    @MainActor private var _pushToken: PushToken?
 
     /// A background push (`content-available`): the relay's receipt wake,
     /// sent when an ack for one of my messages reached a node, or when the
@@ -69,7 +88,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
-        PushToken.shared.hex = hex
+        let push = pushToken
+        push.token = deviceToken
+        push.hex = hex
+        if let core = service() {
+            Task { await push.apply(to: core) }
+        }
         #if BARKING_DEV
         // Scripted measurements read it from the shared container
         // (scripts/apns-send.sh needs it).
@@ -79,6 +103,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func application(_ application: UIApplication,
                      didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        PushToken.shared.failure = error.localizedDescription
+        pushToken.failure = error.localizedDescription
     }
 }

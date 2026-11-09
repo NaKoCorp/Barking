@@ -334,6 +334,7 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func quickSync(deadlineMs: UInt64) throws -> SyncSummary { throw Never() }
     func nodes() throws -> [NodeInfo] { throw Never() }
     func addNode(id: String, addr: String) throws { throw Never() }
+    func setPush(settings: PushSettings?) throws {}
     func pendingCount() throws -> UInt32 { throw Never() }
     func myDevices() throws -> [MyDeviceInfo] { throw Never() }
     func linkOffer() throws -> Data { throw Never() }
