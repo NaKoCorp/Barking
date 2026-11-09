@@ -16,6 +16,9 @@ final class ConversationModel {
         /// Delivery of a sent message; nil for a received message, or one
         /// sent from another of my devices.
         var delivery: Delivery?
+        /// Shown at Send, before the core has the row (negative id): no
+        /// details, delete or retry yet.
+        var local = false
 
         /// The state under the bubble; nil shows the time only.
         var state: DeliveryState? { outgoing ? delivery?.state : nil }
@@ -55,6 +58,10 @@ final class ConversationModel {
     var trust: Trust { Trust(verified: verified) }
     private(set) var keyChanged = false
     private var sending = false
+    /// The bubble of the send running: a send can wait seconds on the core
+    /// lock while a sync holds it, so it shows at once and survives reloads.
+    private var shownAtSend: Item?
+    private var nextLocalId: Int64 = -1
     /// Rows whose retry is running: a second tap on one does nothing.
     private var retrying: Set<Int64> = []
     private var visible = false
@@ -87,7 +94,7 @@ final class ConversationModel {
     /// The header button opens "Deliveries"; it has nothing to list before a
     /// message is sent from this iPhone (one sent from another of my devices
     /// has no delivery here).
-    var hasSentMessage: Bool { items.contains { $0.outgoing && $0.delivery != nil } }
+    var hasSentMessage: Bool { items.contains { $0.outgoing && $0.delivery != nil && !$0.local } }
     var showsCounter: Bool { byteCount >= Self.counterFrom }
     var canSend: Bool {
         !sending && !removed && byteCount <= Self.maxBytes
@@ -137,7 +144,7 @@ final class ConversationModel {
         items = messages.filter { !resent.contains($0.id) }.map {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)), delivery: $0.delivery)
-        }
+        } + [shownAtSend].compactMap { $0 }
         // What arrives while the conversation is on screen is read.
         if visible, let last = items.last(where: { !$0.outgoing }) {
             try? await core.markRead(contact, upTo: last.id)
@@ -200,12 +207,23 @@ final class ConversationModel {
         draft = ""
         sendError = nil
         notice = nil
+        let at = now()
+        let shown = Item(id: nextLocalId, outgoing: true, text: text, at: at,
+                         delivery: Delivery(state: .pending, sealedAt: UInt64(at.timeIntervalSince1970),
+                                            depositedAt: nil, receivedAt: nil, expiredAt: nil, devices: 0,
+                                            devicesReceived: 0, devicesLeft: 0, devicesPending: 0),
+                         local: true)
+        nextLocalId -= 1
+        shownAtSend = shown
+        items.append(shown)
         do {
             try await core.send(text, to: contact)
         } catch {
             draft = text
             sendError = "Not sent. Try again in a moment."
         }
+        // The reload swaps it for the core's row, or drops it on failure.
+        shownAtSend = nil
         await reload()
     }
 
