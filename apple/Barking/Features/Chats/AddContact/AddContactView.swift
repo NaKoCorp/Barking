@@ -3,58 +3,80 @@ import SwiftUI
 import VisionKit
 
 /// Add a contact (spec §5.3): scan a QR code, or show mine; a link opens the
-/// confirmation directly.
+/// confirmation directly. Once added, the sheet shows the contact's safety
+/// code: compare now, or later.
 struct AddContactView: View {
     let core: CoreService
     let link: String?
+    /// Called with the contact's fingerprint as soon as it is added, before
+    /// the safety code: the sheet may then close any way (Later, a match,
+    /// a swipe).
+    let onAdded: (String) -> Void
     let onDone: () -> Void
     @State private var model: AddContactModel
     @State private var tab = 0
     @State private var alias = ""
 
-    init(core: CoreService, link: String?, onDone: @escaping () -> Void) {
+    init(core: CoreService, link: String?, onAdded: @escaping (String) -> Void = { _ in },
+         onDone: @escaping () -> Void) {
         self.core = core
         self.link = link
+        self.onAdded = onAdded
         self.onDone = onDone
         _model = State(initialValue: AddContactModel(core: core))
     }
 
     var body: some View {
         NavigationStack {
-            Group {
-                if let p = model.preview {
-                    confirmation(p)
-                } else {
-                    VStack(spacing: Space.s4) {
-                        BarkingSegmented("Add a contact", selection: $tab, options: [(0, LocalizedStringKey("Scan")), (1, LocalizedStringKey("My code"))],
-                                         labelAtAXSizes: true)
-                        if let e = model.error { errorText(e) }
-                        if tab == 0 {
-                            ScannerView(onBytes: { data, text in Task { await model.scanned(data, text: text) } },
-                                        onText: { s in Task { await model.scannedText(s) } })
-                        } else {
-                            ScrollView { MyCodeView(core: core) }
+            if let contact = model.added {
+                // Its own dismiss: a match closes the sheet, as it goes back
+                // from a conversation.
+                SafetyCodeView(core: core, contact: contact)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Later", action: onDone).accessibilityIdentifier("addContact.later")
                         }
-                        Spacer(minLength: 0)
                     }
-                    .padding(.horizontal, Space.gutter)
-                    .padding(.top, Space.s2)
-                    .background(Color.surface)
-                }
-            }
-            // A short inline title, never an empty one (iOS 26 then draws no
-            // bar behind the toolbar): the confirmation's headline is the name.
-            .navigationTitle(Text("Add a contact"))
-            .toolbarTitleDisplayMode(.inline)
-            .toolbar {
-                // One dismiss control (U-29): Cancel discards a pending add.
-                ToolbarItem(placement: .cancellationAction) {
-                    if model.preview == nil { Button("Close", action: onDone) } else { Button("Cancel", action: onDone) }
-                }
+            } else {
+                entry
             }
         }
         .presentationBackground(Color.surface)
         .task { if let link { await model.opened(link: link) } }
+    }
+
+    private var entry: some View {
+        Group {
+            if let p = model.preview {
+                confirmation(p)
+            } else {
+                VStack(spacing: Space.s4) {
+                    BarkingSegmented("Add a contact", selection: $tab, options: [(0, LocalizedStringKey("Scan")), (1, LocalizedStringKey("My code"))],
+                                     labelAtAXSizes: true)
+                    if let e = model.error { errorText(e) }
+                    if tab == 0 {
+                        ScannerView(onBytes: { data, text in Task { await model.scanned(data, text: text) } },
+                                    onText: { s in Task { await model.scannedText(s) } })
+                    } else {
+                        ScrollView { MyCodeView(core: core) }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, Space.gutter)
+                .padding(.top, Space.s2)
+                .background(Color.surface)
+            }
+        }
+        // A short inline title, never an empty one (iOS 26 then draws no
+        // bar behind the toolbar): the confirmation's headline is the name.
+        .navigationTitle(Text("Add a contact"))
+        .toolbarTitleDisplayMode(.inline)
+        .toolbar {
+            // One dismiss control (U-29): Cancel discards a pending add.
+            ToolbarItem(placement: .cancellationAction) {
+                if model.preview == nil { Button("Close", action: onDone) } else { Button("Cancel", action: onDone) }
+            }
+        }
     }
 
     private func errorText(_ e: AddContactModel.AddError) -> some View {
@@ -86,9 +108,9 @@ struct AddContactView: View {
             PrimaryButton("Add", isLoading: model.isAdding) {
                 guard !model.isAdding else { return }
                 Task {
-                    guard await model.add(alias: alias) else { return }
+                    guard await model.add(alias: alias), let contact = model.added else { return }
                     Haptic.success.play()
-                    onDone()
+                    onAdded(contact)
                 }
             }
         }

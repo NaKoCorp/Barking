@@ -221,6 +221,36 @@ async fn dropped_caller_releases_slots() {
     assert!(matches!(w.run(insert(1), ()).await, Some(Ok(()))));
 }
 
+/// The slots are free by the time the caller has the result: a client that
+/// sends its next request on the reply finds them free (no `Busy` at
+/// `max_db_jobs` = 1). The slow drop leaves no room for the race.
+#[tokio::test(flavor = "multi_thread")]
+async fn slots_are_free_when_the_result_arrives() {
+    struct Slot(Arc<AtomicUsize>);
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            std::thread::sleep(Duration::from_millis(50));
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let w = writer(&dir, MAX_BATCH);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    assert!(matches!(
+        w.run(insert(1), Slot(Arc::clone(&dropped))).await,
+        Some(Ok(()))
+    ));
+    assert_eq!(dropped.load(Ordering::SeqCst), 1, "committed job");
+    let failed = w
+        .run(
+            |_, _| -> Result<()> { Err(crate::Error::Config("refused".into())) },
+            Slot(Arc::clone(&dropped)),
+        )
+        .await;
+    assert!(matches!(failed, Some(Err(_))));
+    assert_eq!(dropped.load(Ordering::SeqCst), 2, "failed job");
+}
+
 /// Deposit throughput under concurrent load, one commit per operation
 /// (`max_batch` = 1, as before) against group commit. Database in
 /// `BARKING_BENCH_DIR` (the disk to measure), else a temporary directory:

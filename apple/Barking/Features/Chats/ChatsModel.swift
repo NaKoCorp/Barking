@@ -83,6 +83,8 @@ final class AddContactModel {
     private var text: String?
     /// An add is running: Add shows its spinner and ignores taps.
     private(set) var isAdding = false
+    /// The contact just added: the sheet then shows its safety code.
+    private(set) var added: String?
 
     init(core: CoreService) { self.core = core }
 
@@ -140,9 +142,9 @@ final class AddContactModel {
         let a = alias.trimmingCharacters(in: .whitespaces)
         do {
             if let bytes {
-                _ = try await core.addContact(card: bytes, alias: a.isEmpty ? nil : a)
+                added = try await core.addContact(card: bytes, alias: a.isEmpty ? nil : a)
             } else if let text {
-                _ = try await core.addContact(text: text, alias: a.isEmpty ? nil : a)
+                added = try await core.addContact(text: text, alias: a.isEmpty ? nil : a)
             }
             preview = nil
             return true
@@ -152,5 +154,5 @@ final class AddContactModel {
         }
     }
 
-    func reset() { preview = nil; error = nil; bytes = nil; text = nil }
+    func reset() { preview = nil; error = nil; bytes = nil; text = nil; added = nil }
 }

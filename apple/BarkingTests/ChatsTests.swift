@@ -103,6 +103,9 @@ final class AddContactModelTests: XCTestCase {
         let results = await [a, b]
         XCTAssertEqual(results.filter { $0 }.count, 1)
         XCTAssertEqual(try me.contacts().count, 1)
+        // The sheet goes on to this contact's safety code.
+        XCTAssertEqual(m.added, try me.contacts().first?.fingerprint)
+        XCTAssertNotNil(m.added)
     }
 }
 

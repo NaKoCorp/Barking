@@ -142,13 +142,22 @@ final class TourUITests: XCTestCase {
         _ = app.buttons[L.add].waitForExistence(timeout: 10)
         snap(app, "add-contact-from-link")
         if app.buttons[L.add].exists { app.buttons[L.add].tap() }
-        // The card sheet is gone and the chats show Sam.
-        app.buttons[L.add].waitUntil({ !$0.exists })
+        // The sheet goes on to Sam's safety code; Later opens the
+        // conversation, with its unverified warning.
+        let later = app.buttons["addContact.later"]
+        if later.waitForExistence(timeout: 10) {
+            snap(app, "add-contact-safety-code")
+            later.tap()
+        }
+        let field = app.textFields[L.message]
+        if field.waitForExistence(timeout: 5) {
+            snap(app, "conversation-unverified-banner")
+            back()
+        }
         _ = app.staticTexts["Sam"].waitForExistence(timeout: 10)
         snap(app, "chats-phrase-not-confirmed-banner")
         // Conversation with a few messages and the route badge.
         app.staticTexts["Sam"].firstMatch.tap()
-        let field = app.textFields[L.message]
         if field.waitForExistence(timeout: 5) {
             for text in ["hello Sam", "Are you there?", "Meet at the market at six."] {
                 field.tap(); field.typeText(text); app.buttons[L.send].tap()
@@ -160,14 +169,6 @@ final class TourUITests: XCTestCase {
             }
         }
         snap(app, "conversation")
-        let deliveries = app.buttons["conversation.deliveries"]
-        if deliveries.waitForExistence(timeout: 5) {
-            deliveries.tap()
-            // The groups load after the screen shows: wait for the last message's row.
-            _ = app.buttons["Meet at the market at six."].waitForExistence(timeout: 10)
-            snap(app, "deliveries")
-            back()
-        }
         // Safety code: header of the conversation (one button, UI review B4).
         let header = app.buttons["conversation.header"].exists ? app.buttons["conversation.header"]
             : app.staticTexts["Sam"].firstMatch
@@ -302,7 +303,7 @@ final class TourUITests: XCTestCase {
 
     /// Delivery states (spec Lot M §10, "Visite"), from the `deliveries`
     /// seed: the conversation with the four states, the message sheet
-    /// (received on 1 of 2 devices, and not delivered), "Deliveries",
+    /// (received on 1 of 2 devices, and not delivered),
     /// "Pending" and two confirmations, always dismissed. Unnumbered
     /// ("delivery-…"): the numbers stay those of shots/index.md.
     func testTourDeliveries() throws {
@@ -363,14 +364,6 @@ final class TourUITests: XCTestCase {
                 dismissDialog(confirm)
             }
         }
-
-        // Deliveries: the four groups.
-        let header = app.buttons["conversation.deliveries"]
-        XCTAssertTrue(header.waitUntil({ $0.exists && $0.isEnabled }))
-        header.tap()
-        XCTAssertTrue(app.buttons[body.received].waitForExistence(timeout: 10))
-        snap(app, "delivery-deliveries", numbered: false)
-        back()
 
         // Pending, from the Network row: then selecting, then Cancel all's dialog.
         back()

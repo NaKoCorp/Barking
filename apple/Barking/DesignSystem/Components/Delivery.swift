@@ -386,7 +386,7 @@ private struct VerticalLine: Shape {
     }
 }
 
-/// A row of "Deliveries" or "Pending": glyph column, title, one-line excerpt, meta.
+/// A row of "Pending": glyph column, title, one-line excerpt, meta.
 /// No chevron unless asked for (`chevron()`); the list owns selection and chevrons.
 struct DeliveryRow: View {
     let state: DeliveryState

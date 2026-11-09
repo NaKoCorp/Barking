@@ -37,6 +37,7 @@ enum UITestSeed {
         switch scenario {
         case "ready": _ = try ready(card: value(of: "-BarkingUITestSeedCard", in: arguments))
         case "deliveries": try deliveries(card: value(of: "-BarkingUITestSeedCard", in: arguments))
+        case "history": try history(card: value(of: "-BarkingUITestSeedCard", in: arguments))
         default: throw Error.unknownScenario(scenario)
         }
     }
@@ -60,6 +61,13 @@ enum UITestSeed {
         for body in UITestDeliveries.bodies() { try device.sendText(contact: sam, text: body) }
         let ids = try device.messagesWith(contact: sam).filter(\.outgoing).map(\.id)
         UITestDeliveries.Seed(contact: sam, ids: ids, base: UInt64(Date().timeIntervalSince1970)).save()
+    }
+
+    /// `ready`, then 40 messages to Sam: more than a screen of history.
+    private static func history(card: String?) throws {
+        let (device, sam) = try ready(card: card)
+        guard let sam else { throw Error.missingCard("history") }
+        for n in 1...40 { try device.sendText(contact: sam, text: "History message \(n)") }
     }
 
     private static func value(of flag: String, in arguments: [String]) -> String? {

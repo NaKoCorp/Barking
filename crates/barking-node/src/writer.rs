@@ -68,8 +68,8 @@ impl Writer {
         })
     }
 
-    /// Runs `f` in the next batch. `hold` (queue slots) is dropped when the
-    /// result is handed back, or when the operation is abandoned. `None`: the
+    /// Runs `f` in the next batch. `hold` (queue slots) is dropped just before
+    /// the result is handed back, or when the operation is abandoned. `None`: the
     /// operation panicked, its batch was not committed (logged by the
     /// writer), or the writer has stopped.
     pub(crate) async fn run<T, F, H>(&self, f: F, hold: H) -> Option<Result<T>>
@@ -83,7 +83,9 @@ impl Writer {
             let r = f(store, policy);
             let ok = r.is_ok();
             let deliver: Deliver = Box::new(move || {
-                let _hold = hold;
+                // Slots first: a caller that sends its next request on this
+                // result must find them free.
+                drop(hold);
                 let _ = tx.send(r);
             });
             (ok, deliver)

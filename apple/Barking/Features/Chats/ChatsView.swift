@@ -8,12 +8,15 @@ struct ChatsView: View {
     @State private var model: ChatsModel
     @State private var adding = false
     @State private var pendingLink: String?
+    /// The contact the add sheet just added: its conversation opens once the
+    /// sheet closes, however it closes.
+    @State private var addedContact: String?
     @State private var confirmDelete: ChatRow?
     /// The conversation pushed, so a tapped notification can open one.
     @State private var path: [String] = []
     /// The message the pushed conversation scrolls to (a failure notice),
     /// and its contact. Not read from `path`: the destination must not
-    /// depend on the path, which a push from the conversation ("Deliveries")
+    /// depend on the path, which a push from the conversation
     /// changes; that dependency looped SwiftUI's layout at 100 % CPU.
     @State private var focus: (contact: String, id: Int64)?
 
@@ -68,8 +71,8 @@ struct ChatsView: View {
             .navigationDestination(for: String.self) { contact in
                 ConversationView(core: core, contact: contact, focus: focus?.contact == contact ? focus?.id : nil)
             }
-            .sheet(isPresented: $adding, onDismiss: { pendingLink = nil }) {
-                AddContactView(core: core, link: pendingLink) { adding = false }
+            .sheet(isPresented: $adding, onDismiss: openAdded) {
+                AddContactView(core: core, link: pendingLink, onAdded: { addedContact = $0 }) { adding = false }
             }
             .confirmationDialog(Text("Delete this contact? The history is kept."),
                                 isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } }),
@@ -104,6 +107,19 @@ struct ChatsView: View {
 }
 
 extension ChatsView {
+    /// After the add sheet: the new contact's conversation, unless it was
+    /// deleted from its safety code meanwhile.
+    private func openAdded() {
+        pendingLink = nil
+        guard let contact = addedContact else { return }
+        addedContact = nil
+        Task {
+            guard await model.canOpen(contact) else { return }
+            focus = nil
+            path = [contact]
+        }
+    }
+
     /// The mockup's header: title, compose button, search field.
     private var header: some View {
         @Bindable var model = model

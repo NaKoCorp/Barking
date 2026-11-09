@@ -142,30 +142,6 @@ final class DeliveryUITests: XCTestCase {
         XCTAssertFalse(retry.exists)
     }
 
-    // MARK: Deliveries (§6.5)
-
-    /// Four groups; "Retry all" moves the not delivered row to Pending; a row
-    /// opens the sheet and speaks its state.
-    func testDeliveriesGroupsAndARowThatMoves() throws {
-        let app = openDeliveries()
-        let header = app.buttons["conversation.deliveries"]
-        XCTAssertTrue(header.waitUntil({ $0.exists && $0.isEnabled }))
-        header.tap()
-        for title in ["Not delivered · 1", "Pending · 1", "On the network · 1", "Received · 1"] {
-            XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 5), title)
-        }
-        let row = app.buttons[Seeded.notDelivered]
-        XCTAssertTrue(value(row).hasPrefix("Not delivered."), value(row))
-        app.buttons["Retry all"].tap()
-        XCTAssertTrue(app.staticTexts["Pending · 2"].waitForExistence(timeout: 5), "the row moved to Pending")
-        XCTAssertFalse(app.staticTexts["Not delivered · 1"].exists)
-        XCTAssertTrue(row.waitUntil({ ($0.value as? String ?? "").hasPrefix("Pending since ") }), value(row))
-        let received = app.buttons[Seeded.received]
-        XCTAssertTrue(value(received).hasSuffix("on 1 of 2 devices"), value(received))
-        received.tap()
-        XCTAssertTrue(any(app, containing: "Current state: Received.").waitForExistence(timeout: 5), "its sheet")
-    }
-
     // MARK: Pending (§6.6)
 
     /// "N packets pending" on the Network screen, once loaded: the row reads

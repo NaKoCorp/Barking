@@ -75,9 +75,15 @@ final class ChatUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
         app.buttons["Add"].tap()
-        app.staticTexts["Sam"].firstMatch.tap()
+        // The safety code comes next; Later opens the conversation, which
+        // warns that Sam is not verified.
+        let later = app.buttons["addContact.later"]
+        XCTAssertTrue(later.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["The numbers match"].exists)
+        later.tap()
         let field = app.textFields["Message"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.unverified"].waitForExistence(timeout: 5))
         field.tap()
         field.typeText("hello Sam")
         app.buttons["Send"].tap()
@@ -87,6 +93,64 @@ final class ChatUITests: XCTestCase {
         // network in UI tests, so it waits here.
         let value = bubble.value as? String ?? ""
         XCTAssertTrue(value.hasPrefix("Pending since") || value.hasPrefix("On the network since"), "value: \(value)")
+    }
+
+    /// A bubble shows when it sits above the composer, inside the screen.
+    private func shows(_ bubble: XCUIElement, above field: XCUIElement) -> Bool {
+        bubble.exists && bubble.frame.minY >= 0 && bubble.frame.maxY <= field.frame.minY + 1
+    }
+
+    /// At the bottom of a long conversation: the keyboard keeps the last
+    /// message in view, and a send shows the new one without moving what was
+    /// already in view away.
+    func testSendAtTheBottomKeepsTheHistoryInPlace() throws {
+        let app = XCUIApplication.seeded("history")
+        app.launch()
+        let field = openSamChat(app)
+        let last = app.staticTexts["History message 40"]
+        XCTAssertTrue(last.waitForExistence(timeout: 5))
+        XCTAssertTrue(shows(last, above: field), "the conversation opens on its last message")
+        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(last.waitUntil({ _ in self.shows(last, above: field) }), "the keyboard hides the last message")
+        field.typeText("one more")
+        app.buttons["Send"].tap()
+        let sent = app.staticTexts["one more"]
+        XCTAssertTrue(sent.waitUntil({ _ in self.shows(sent, above: field) }), "the sent message is not in view")
+        // Settled: the core's row has replaced the shown one.
+        XCTAssertTrue(sent.waitUntil({ ($0.value as? String ?? "").hasPrefix("Pending since") }))
+        XCTAssertTrue(shows(sent, above: field), "the sent message left the view")
+        XCTAssertTrue(shows(last, above: field), "the history moved")
+    }
+
+    /// Scrolled up in the history, a send brings the new message into view.
+    func testSendFromHigherUpShowsTheNewMessage() throws {
+        let app = XCUIApplication.seeded("history")
+        app.launch()
+        let field = openSamChat(app)
+        XCTAssertTrue(app.staticTexts["History message 40"].waitForExistence(timeout: 5))
+        for _ in 0..<4 { app.swipeDown() }
+        XCTAssertFalse(shows(app.staticTexts["History message 40"], above: field), "still at the bottom")
+        field.tap()
+        field.typeText("from above")
+        app.buttons["Send"].tap()
+        let sent = app.staticTexts["from above"]
+        XCTAssertTrue(sent.waitUntil({ _ in self.shows(sent, above: field) }), "the sent message is not in view")
+    }
+
+    /// Right after the add, a match in the sheet marks Sam verified, closes
+    /// the sheet and opens the conversation without the unverified warning.
+    func testMatchRightAfterAddingVerifies() throws {
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestOpenCard", samCard])
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
+        app.buttons["Add"].tap()
+        let match = app.buttons["The numbers match"]
+        XCTAssertTrue(match.waitForExistence(timeout: 5))
+        for _ in 0..<6 where !match.isHittable { app.swipeUp() }
+        match.tap()
+        XCTAssertTrue(app.textFields["Message"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.descendants(matching: .any)["conversation.unverified"].exists)
     }
 
     /// Spec Lot M §6.4: a tap on a sent bubble opens its sheet; its delete
@@ -136,29 +200,6 @@ final class ChatUITests: XCTestCase {
         XCTAssertTrue(app.buttons["sheet.delete"].exists)
     }
 
-    /// The header button ("Deliveries") opens the list of what was sent, the
-    /// message in its group (no network in UI tests: it is pending); a row
-    /// opens the message sheet.
-    func testDeliveriesListsTheSentMessage() throws {
-        let app = XCUIApplication.seeded()
-        app.launch()
-        let field = openSamChat(app)
-        field.tap()
-        field.typeText("hello Sam")
-        app.buttons["Send"].tap()
-        XCTAssertTrue(app.staticTexts["hello Sam"].waitForExistence(timeout: 5))
-        // Enabled once the conversation has read the sent message back: under
-        // parallel clones that can come after the bubble shows.
-        let deliveries = app.buttons["conversation.deliveries"]
-        XCTAssertTrue(deliveries.waitUntil({ $0.exists && $0.isEnabled }), "Deliveries stays disabled")
-        deliveries.tap()
-        XCTAssertTrue(app.navigationBars["Deliveries"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Pending · 1"].waitForExistence(timeout: 5))
-        let row = app.buttons["hello Sam"]
-        XCTAssertTrue(row.exists)
-        row.tap()
-        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 5), "the message sheet opens")
-    }
 }
 
 @MainActor
