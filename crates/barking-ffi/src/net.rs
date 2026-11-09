@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use barking_core::{Core, ReceiveOutcome};
+use barking_net::push::PushConfig;
 use barking_net::{NetState, QuicDialer, QuickOptions, SyncOptions, SyncReport};
 use barking_proto::NodeId;
 
@@ -39,6 +40,12 @@ pub struct SyncSummary {
     /// arrived for, each once: their conversations gain a row.
     #[uniffi(default = [])]
     pub synced_contacts: Vec<String>,
+    /// Wake subscriptions a node accepted during the sync.
+    #[uniffi(default = 0)]
+    pub subscribed: u32,
+    /// Wake subscriptions cancelled during the sync.
+    #[uniffi(default = 0)]
+    pub unsubscribed: u32,
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -153,6 +160,8 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
         delivery_changes: changes_of(core.take_delivery_changes()),
         failed: changes_of(report.failed),
         synced_contacts,
+        subscribed: u32::try_from(report.subscribed).unwrap_or(u32::MAX),
+        unsubscribed: u32::try_from(report.unsubscribed).unwrap_or(u32::MAX),
     }
 }
 
@@ -270,16 +279,18 @@ impl Device {
         })
     }
 
-    /// Full sync, for at most `deadline_ms`.
+    /// Full sync, for at most `deadline_ms`, with the wake-up settings last
+    /// given to `set_push`.
     pub fn sync(&self, deadline_ms: u64) -> Result<SyncSummary, BarkingError> {
         guard(|| {
             let opts_private = self.allow_private();
-            let opts = SyncOptions {
-                deadline: Duration::from_millis(deadline_ms),
-                allow_private: self.allow_private(),
-                ..SyncOptions::default()
-            };
             self.with_core(|core| {
+                let opts = SyncOptions {
+                    deadline: Duration::from_millis(deadline_ms),
+                    allow_private: opts_private,
+                    push: PushConfig::load(core)?,
+                    ..SyncOptions::default()
+                };
                 let report = block_on(barking_net::sync(core, &QuicDialer, opts))?;
                 note_leave_deposits(core, now(), opts_private)?;
                 Ok(summary(core, report))

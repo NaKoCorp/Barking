@@ -13,6 +13,7 @@ mod lock;
 mod log;
 mod messages;
 mod net;
+mod push;
 mod route;
 
 use std::panic::{UnwindSafe, catch_unwind};
@@ -32,6 +33,7 @@ pub use link::{PendingLink, begin_link, inspect_link_request};
 pub use log::{LogEntry, log_arg_tokens, log_keys};
 pub use messages::{ChatSummary, KeyChange, UnreadCount};
 pub use net::{LeaveState, NewMessage, NodeInfo, SyncSummary};
+pub use push::PushSettings;
 pub use route::RouteStepInfo;
 
 uniffi::setup_scaffolding!();

@@ -3,8 +3,12 @@
 use std::sync::Arc;
 
 use barking_core::store::{Queries, Store};
-use barking_ffi::{BarkingError, DeliveryChange, DeliveryState, Device, DeviceConfig, Message};
-use barking_node::testing::{TICK, id_of, key, network, network_with, set_clock_offset, stop_all};
+use barking_ffi::{
+    BarkingError, DeliveryChange, DeliveryState, Device, DeviceConfig, Message, PushSettings,
+};
+use barking_node::testing::{
+    FakeRelay, TICK, id_of, key, network, network_with, set_clock_offset, stop_all,
+};
 
 fn config(dir: &tempfile::TempDir, key_byte: u8) -> DeviceConfig {
     DeviceConfig {
@@ -75,6 +79,119 @@ fn bad_node_input_is_invalid() {
         d.add_node(valid, "nowhere".into()),
         Err(BarkingError::InvalidInput { .. })
     ));
+}
+
+fn push_settings(relay_id: String, port: u16) -> PushSettings {
+    PushSettings {
+        relay_host: "localhost".into(),
+        relay_port: port,
+        relay_id,
+        seal_key_id: 1,
+        seal_public: vec![0x5E; 32],
+        apns_token: vec![0xB0; 32],
+        sandbox: true,
+    }
+}
+
+#[test]
+fn bad_push_settings_are_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
+    let good = push_settings(id_of(&key(0)).to_string(), 4433);
+    let bad = [
+        PushSettings {
+            relay_id: "XYZ".into(),
+            ..good.clone()
+        },
+        PushSettings {
+            relay_port: 0,
+            ..good.clone()
+        },
+        // A private IP literal: nodes refuse it, a name must be given.
+        PushSettings {
+            relay_host: "192.168.1.10".into(),
+            ..good.clone()
+        },
+        PushSettings {
+            seal_public: vec![1; 31],
+            ..good.clone()
+        },
+        PushSettings {
+            apns_token: Vec::new(),
+            ..good.clone()
+        },
+        PushSettings {
+            apns_token: vec![1; 65],
+            ..good.clone()
+        },
+    ];
+    for s in bad {
+        assert!(
+            matches!(
+                d.set_push(Some(s.clone())),
+                Err(BarkingError::InvalidInput { .. })
+            ),
+            "{s:?}"
+        );
+    }
+    d.set_push(Some(good)).unwrap();
+    d.set_push(None).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn push_settings_subscribe_wake_and_cancel() {
+    let relay = FakeRelay::start().await;
+    // The fake relay listens on 127.0.0.1: the nodes are allowed to reach it.
+    let nodes = network_with(0..3, |spec| spec.wake_allow_private = true).await;
+    let (id, addr) = (nodes[0].id.to_string(), nodes[0].addr.to_string());
+    let settings = push_settings(relay.relay_ref().id.to_string(), relay.relay_ref().port);
+    let received = {
+        let relay = &relay;
+        move || relay.received().len()
+    };
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (alice, bob) = paired_devices(&da, &db);
+    for d in [&alice, &bob] {
+        d.add_node(id.clone(), addr.clone()).unwrap();
+    }
+    let (alice2, bob2) = (alice.clone(), bob.clone());
+    let s = tokio::task::spawn_blocking(move || {
+        bob2.set_push(Some(settings)).unwrap();
+        bob2.sync(30_000).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(s.error, None);
+    assert!(s.subscribed > 0, "{s:?}");
+    assert_eq!(received(), 0);
+
+    tokio::task::spawn_blocking(move || {
+        alice2.send_text("bob".into(), "wake up".into()).unwrap();
+        assert!(alice2.sync(30_000).unwrap().sent >= 1);
+    })
+    .await
+    .unwrap();
+    let t0 = tokio::time::Instant::now();
+    while received() == 0 {
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "no wake-up"
+        );
+        tokio::time::sleep(TICK).await;
+    }
+
+    // Push off: the next sync cancels every subscription held.
+    let bob2 = bob.clone();
+    let s = tokio::task::spawn_blocking(move || {
+        bob2.set_push(None).unwrap();
+        bob2.sync(30_000).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(s.unsubscribed > 0, "{s:?}");
+    drop((alice, bob));
+    relay.stop();
+    stop_all(nodes).await;
 }
 
 #[test]
