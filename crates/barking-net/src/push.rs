@@ -52,6 +52,42 @@ pub struct PushConfig {
     pub env: ApnsEnv,
 }
 
+/// Key of the configuration in the core's database.
+pub const PUSH_CONFIG_KEY: &str = "push-config";
+/// Version of the stored configuration. Frozen: any change to `PushConfig`
+/// must bump it and migrate (`push_config_golden_bytes` holds its bytes).
+const CONFIG_FORMAT: u8 = 1;
+
+impl PushConfig {
+    /// Reads the configuration the app set (`None`: push off). An unreadable
+    /// one reads as push off: the next sync cancels what it held, the app
+    /// sets it again at its next launch.
+    pub fn load(core: &Core) -> Result<Option<PushConfig>, CoreError> {
+        let bytes = core.transport_state(PUSH_CONFIG_KEY)?.unwrap_or_default();
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let cfg = match bytes.split_first() {
+            Some((&CONFIG_FORMAT, rest)) => postcard::from_bytes(rest).ok(),
+            _ => None,
+        };
+        if cfg.is_none() {
+            tracing::warn!("unreadable push config: push off");
+        }
+        Ok(cfg)
+    }
+
+    /// Writes `cfg` to the core's encrypted database (`None`: push off).
+    pub fn store(core: &mut Core, cfg: Option<&PushConfig>) -> Result<(), CoreError> {
+        let mut bytes = Vec::new();
+        if let Some(cfg) = cfg {
+            bytes.push(CONFIG_FORMAT);
+            bytes.extend(postcard::to_allocvec(cfg).expect("a push config always encodes"));
+        }
+        core.set_transport_state(PUSH_CONFIG_KEY, &bytes)
+    }
+}
+
 /// Subscriptions held for one mailbox and one kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoxSubs {

@@ -123,6 +123,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var syncEvents: [String] { lock.withLock { _syncEvents } }
     func nodes() throws -> [NodeInfo] { [] }
     func addNode(id: String, addr: String) throws {}
+    private var _pushSettings: [PushSettings?] = []
+    /// Every `setPush` call, in order (`nil`: push off).
+    var pushSettings: [PushSettings?] { lock.withLock { _pushSettings } }
+    func setPush(settings: PushSettings?) throws { lock.withLock { _pushSettings.append(settings) } }
     func pendingCount() throws -> UInt32 { pendingCountValue }
     func myDevices() throws -> [MyDeviceInfo] { devicesList }
     func linkOffer() throws -> Data { Data([0xAA]) }

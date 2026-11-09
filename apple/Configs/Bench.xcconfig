@@ -1,4 +1,6 @@
 // Bench: optimized like Release (Rust release-apple), with the development
 // screen and private node addresses. Measurements run here (spec §6).
+// APNs environment of the entitlement and of the tokens given to the relay.
+BARKING_APS_ENVIRONMENT = development
 #include? "../Local.xcconfig"
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) BARKING_DEV

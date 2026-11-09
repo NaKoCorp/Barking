@@ -29,6 +29,7 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func quickSync(deadlineMs: UInt64) throws -> SyncSummary
     func nodes() throws -> [NodeInfo]
     func addNode(id: String, addr: String) throws
+    func setPush(settings: PushSettings?) throws
     func pendingCount() throws -> UInt32
     func myDevices() throws -> [MyDeviceInfo]
     func linkOffer() throws -> Data

@@ -1,2 +1,4 @@
 // Release: no development screen, no private node addresses.
+// APNs environment of the entitlement and of the tokens given to the relay.
+BARKING_APS_ENVIRONMENT = development
 #include? "../Local.xcconfig"

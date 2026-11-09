@@ -1,2 +1,12 @@
 // Copy to apple/Local.xcconfig (ignored by git) and set your Apple team.
 DEVELOPMENT_TEAM = ABCDE12345
+
+// Optional: the wake-up relay (barking-push). Without it, push stays off.
+// The host is a DNS name (nodes refuse a private IP literal; on a local
+// network, the Mac's `.local` name). Identifier: `barking-push keygen-node`;
+// sealing key: `barking-push keygen-seal` (public half, 64 hex characters).
+// BARKING_RELAY_HOST = relay.example.org
+// BARKING_RELAY_PORT = 4434
+// BARKING_RELAY_ID = <52-character base32 node identifier>
+// BARKING_RELAY_SEAL_ID = 1
+// BARKING_RELAY_SEAL_PUBLIC = <64 hex characters>

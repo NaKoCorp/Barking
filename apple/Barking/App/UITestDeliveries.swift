@@ -321,6 +321,7 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     }
     func nodes() throws -> [NodeInfo] { try device.nodes() }
     func addNode(id: String, addr: String) throws { try device.addNode(id: id, addr: addr) }
+    func setPush(settings: PushSettings?) throws { try device.setPush(settings: settings) }
     func myDevices() throws -> [MyDeviceInfo] { try device.myDevices() }
     func linkOffer() throws -> Data { try device.linkOffer() }
     func linkDevice(request: Data, withHistory: Bool) throws -> Data {

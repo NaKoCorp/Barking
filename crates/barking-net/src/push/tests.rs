@@ -521,3 +521,32 @@ fn wake_nodes_always_meet_the_first_copies() {
     // The node keeps at most 4 subscriptions per mailbox.
     const { assert!(WAKE_NODES <= 4) };
 }
+
+#[test]
+fn push_config_load_store_and_clear() {
+    let (_dir, mut core) = subject(NOW);
+    assert_eq!(PushConfig::load(&core).unwrap(), None);
+    let c = cfg(4);
+    PushConfig::store(&mut core, Some(&c)).unwrap();
+    assert_eq!(PushConfig::load(&core).unwrap(), Some(c));
+    PushConfig::store(&mut core, None).unwrap();
+    assert_eq!(PushConfig::load(&core).unwrap(), None);
+    // An unreadable config reads as push off, never as an error.
+    core.set_transport_state(PUSH_CONFIG_KEY, b"\xff garbage")
+        .unwrap();
+    assert_eq!(PushConfig::load(&core).unwrap(), None);
+}
+
+const PUSH_CONFIG_GOLDEN: &str = "011172656c61792e6578616d706c652e6f7267bb03f5954b3061ca9baf0b2000d6b900dcc5584bd887d0a41ce6d21290fd2df2733a07070707070707070707070707070707070707070707070707070707070707070120040404040404040404040404040404040404040404040404040404040404040400";
+
+#[test]
+fn push_config_golden_bytes() {
+    let (_dir, mut core) = subject(NOW);
+    PushConfig::store(&mut core, Some(&cfg(4))).unwrap();
+    let bytes = core.transport_state(PUSH_CONFIG_KEY).unwrap().unwrap();
+    assert_eq!(
+        hex(&bytes),
+        PUSH_CONFIG_GOLDEN,
+        "the stored push config changed: bump its format and migrate"
+    );
+}

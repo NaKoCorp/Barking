@@ -2,10 +2,22 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BarkingApnsEnvironment</key>
+	<string>$(BARKING_APS_ENVIRONMENT)</string>
 	<key>BarkingAppGroup</key>
 	<string>$(BARKING_APP_GROUP)</string>
 	<key>BarkingKeychainGroup</key>
 	<string>$(BARKING_KEYCHAIN_GROUP)</string>
+	<key>BarkingRelayHost</key>
+	<string>$(BARKING_RELAY_HOST)</string>
+	<key>BarkingRelayId</key>
+	<string>$(BARKING_RELAY_ID)</string>
+	<key>BarkingRelayPort</key>
+	<string>$(BARKING_RELAY_PORT)</string>
+	<key>BarkingRelaySealId</key>
+	<string>$(BARKING_RELAY_SEAL_ID)</string>
+	<key>BarkingRelaySealPublic</key>
+	<string>$(BARKING_RELAY_SEAL_PUBLIC)</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

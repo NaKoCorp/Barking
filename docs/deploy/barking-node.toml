@@ -63,7 +63,8 @@ pow_bits = 18
 # Additional bootstrap nodes `identifier@address:port`, tried after
 # the list built into the binary.
 # bootstrap = []
-# Accepts non-routable addresses: tests and local networks only.
+# Accepts non-routable addresses, for peers and push relays alike: tests
+# and local networks only.
 # allow_private_addrs = false
 # Cap on outgoing replication to the other responsible nodes, in bytes per
 # hour. Default: 512 MiB. Small device (Raspberry Pi): 128 MiB.
