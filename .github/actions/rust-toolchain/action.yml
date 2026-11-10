@@ -1,0 +1,34 @@
+name: Pinned Rust toolchain
+description: >-
+  Installs the channel pinned by rust-toolchain.toml (minimal profile) and makes it the default.
+  Needs a prior checkout of the repository; rustup must be on the runner.
+
+inputs:
+  components:
+    description: Space-separated components to install (for example "rustfmt clippy").
+    required: false
+    default: ''
+  targets:
+    description: Space-separated extra targets to install (for example "aarch64-apple-ios-sim").
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Installed explicitly rather than through rustup's automatic installation.
+    - name: Install the pinned Rust toolchain
+      shell: bash
+      env:
+        COMPONENTS: ${{ inputs.components }}
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        set -euo pipefail
+        canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+        [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
+        # bash 3.2 (macOS runners): an empty array must not be expanded bare under set -u.
+        extra=()
+        for c in $COMPONENTS; do extra+=(--component "$c"); done
+        for t in $TARGETS; do extra+=(--target "$t"); done
+        rustup toolchain install "$canal" --profile minimal ${extra[@]+"${extra[@]}"}
+        rustup default "$canal"
