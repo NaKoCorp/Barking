@@ -3,9 +3,12 @@ name: ci
 # Pull request checks. Build reproducibility: double build on pull requests
 # that change the build environment, full double build of every target on
 # demand (workflow_dispatch), and at release time (release.yml).
+# A push to main does not replay what its pull request already validated: the
+# gate job skips the checks when the merged tree is the tested tree and that
+# run was green (scripts/ci-gate.sh). Those runs then only fill the Cargo
+# caches that pull requests start from. Any doubt runs the full CI.
 on:
   pull_request:
-  # Runs on main fill the Cargo cache that pull requests start from.
   push:
     branches: [main]
   workflow_dispatch:
@@ -18,6 +21,32 @@ concurrency:
 permissions: {}
 
 jobs:
+  # Decides whether the checks below run (scripts/ci-gate.sh). It always exits
+  # 0; the checks run unless it says run=false, so a failure of this job
+  # itself (no output) can never skip them.
+  gate:
+    name: gate
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Was this tree already validated by its pull request?
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci-gate.sh >> "$GITHUB_OUTPUT"
+
   # Always reports (a required check): skipped steps when the pull request
   # leaves the build environment untouched.
   repro-twice:
@@ -54,6 +83,9 @@ jobs:
 
   rust:
     name: Rust checks (fmt, clippy, tests)
+    needs: gate
+    # Also runs when the gate job failed (no output): only run=false skips.
+    if: ${{ !cancelled() && needs.gate.outputs.run != 'false' }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -95,6 +127,9 @@ jobs:
   # (HIGH and CRITICAL fail), cargo-deny, zizmor and actionlint.
   security:
     name: security (secrets, vulnerabilities, licenses, workflows)
+    needs: gate
+    # Also runs when the gate job failed (no output): only run=false skips.
+    if: ${{ !cancelled() && needs.gate.outputs.run != 'false' }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -153,6 +188,9 @@ jobs:
   # touches neither the app nor the Rust code it wraps.
   apple:
     name: iOS app (build, XCTest)
+    needs: gate
+    # Also runs when the gate job failed (no output): only run=false skips.
+    if: ${{ !cancelled() && needs.gate.outputs.run != 'false' }}
     runs-on: macos-26
     # Serial UI tests with one retry: room for a couple of 60 s hangs.
     timeout-minutes: 60
@@ -248,7 +286,10 @@ jobs:
           if-no-files-found: ignore
 
   release-scripts:
-    name: signing and verification scripts
+    name: release scripts
+    needs: gate
+    # Also runs when the gate job failed (no output): only run=false skips.
+    if: ${{ !cancelled() && needs.gate.outputs.run != 'false' }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -257,6 +298,87 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/tests/release-scripts.sh
+      - run: bash scripts/tests/ci-scripts.sh
+
+  # Cargo cache warm-up when main skipped its checks: same paths and key as
+  # the rust job, saved only when that key is missing.
+  cache:
+    name: Cargo cache (Linux)
+    needs: gate
+    if: github.event_name == 'push' && needs.gate.outputs.run == 'false'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Is the cache already there?
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      - if: steps.restore.outputs.cache-hit != 'true'
+        uses: $/.github/actions/rust-toolchain
+      - if: steps.restore.outputs.cache-hit != 'true'
+        run: cargo build --workspace --all-targets --locked
+      - if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+
+  # Same warm-up for the iOS job (simulator slice of the Rust code).
+  cache-ios:
+    name: Cargo cache (iOS)
+    needs: gate
+    if: github.event_name == 'push' && needs.gate.outputs.run == 'false'
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Is the cache already there?
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-ios-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      - if: steps.restore.outputs.cache-hit != 'true'
+        uses: $/.github/actions/select-xcode
+      - if: steps.restore.outputs.cache-hit != 'true'
+        uses: $/.github/actions/rust-toolchain
+        with:
+          targets: aarch64-apple-ios-sim
+      - if: steps.restore.outputs.cache-hit != 'true'
+        run: scripts/build-xcframework.sh --sim-only
+      - if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-ios-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
   # Full double build of every target, on demand.
   repro:

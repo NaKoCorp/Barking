@@ -189,6 +189,145 @@ cas_pr_title_unset() {
   case "$SORTIE" in *"PR_TITLE is not set"*) ;; *) echo "unexpected message: $SORTIE" >&2; return 1 ;; esac
 }
 
+# --- ci-gate.sh ---
+# A throwaway origin exposes a "pull request head" under refs/pull/7/head; the work clone holds the
+# merge commit. The stub gh in <d>/bin prints GH_API_OUT / GH_RUN_OUT and exits GH_API_RC / GH_RUN_RC,
+# and logs each call to GH_LOG. The tree of the merge commit is the PR tree (SHA) or another one (SHA_AUTRE).
+git_test() { git -c user.name=test -c user.email=test@example.com -c commit.gpgsign=false "$@"; }
+
+faire_depot_gate() { # $1 = directory
+  local base tete
+  mkdir -p "$1/bin" "$1/origin"
+  git_test init -q "$1/origin"
+  echo base > "$1/origin/f"
+  git_test -C "$1/origin" add f
+  git_test -C "$1/origin" commit -q -m base
+  base="$(git -C "$1/origin" rev-parse HEAD)"
+  echo change > "$1/origin/f"
+  git_test -C "$1/origin" commit -q -am "pr head"
+  tete="$(git -C "$1/origin" rev-parse HEAD)"
+  git -C "$1/origin" update-ref refs/pull/7/head "$tete"
+  git -C "$1/origin" reset -q --hard "$base"
+  git_test clone -q "$1/origin" "$1/work"
+  git -C "$1/work" fetch -q origin "refs/pull/7/head"
+  # Squash-merge commit: the PR tree on top of the base, as a fresh commit.
+  SHA="$(git_test -C "$1/work" commit-tree "$tete^{tree}" -p "$base" -m squash)"
+  SHA_AUTRE="$(git_test -C "$1/work" commit-tree "$base^{tree}" -p "$base" -m other)"
+  # Forget the PR head locally: the script must fetch it itself.
+  git -C "$1/work" update-ref -d FETCH_HEAD 2>/dev/null || true
+  cat > "$1/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$GH_LOG"
+case "$1" in
+  api) [ -z "$GH_API_OUT" ] || printf '%s\n' "$GH_API_OUT"; exit "${GH_API_RC:-0}" ;;
+  run) [ -z "$GH_RUN_OUT" ] || printf '%s\n' "$GH_RUN_OUT"; exit "${GH_RUN_RC:-0}" ;;
+esac
+exit 99
+STUB
+  chmod +x "$1/bin/gh"
+  : > "$1/gh.log"
+}
+
+# Runs ci-gate.sh in <d>/work; sets SORTIE (stdout), ERREUR (stderr) and RC. Event: $EVENEMENT (default push).
+lancer_gate() { # $1 = working directory, $2 = SHA
+  RC=0
+  SORTIE="$(cd "$1/work" && PATH="$1/bin:$PATH" GH_LOG="$1/gh.log" EVENT="${EVENEMENT:-push}" SHA="$2" \
+    GITHUB_REPOSITORY=acme/barking GH_TOKEN=unused \
+    GH_API_OUT="${GH_API_OUT-7}" GH_API_RC="${GH_API_RC-0}" \
+    GH_RUN_OUT="${GH_RUN_OUT-success}" GH_RUN_RC="${GH_RUN_RC-0}" \
+    "$racine/scripts/ci-gate.sh" 2>"$1/stderr")" || RC=$?
+  ERREUR="$(cat "$1/stderr")"
+}
+
+# Expects exit 0 and exactly one line on stdout, equal to $2.
+attendre_gate() { # $1 = case name, $2 = expected line
+  [ "$RC" -eq 0 ] || { echo "$1: expected exit 0, got $RC: $ERREUR" >&2; return 1; }
+  [ "$SORTIE" = "$2" ] || { echo "$1: expected '$2', got '$SORTIE' ($ERREUR)" >&2; return 1; }
+  [ -n "$ERREUR" ] || { echo "$1: the reason is missing on stderr" >&2; return 1; }
+}
+
+cas_gate_pull_request_runs() {
+  d="$(mktemp -d "${TMPDIR:-/tmp}/ci-scripts.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  faire_depot_gate "$d"
+  EVENEMENT=pull_request lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+  [ ! -s "$d/gh.log" ] || { echo "gh must not be called: $(cat "$d/gh.log")" >&2; return 1; }
+}
+
+cas_gate_dispatch_runs() {
+  d="$(mktemp -d "${TMPDIR:-/tmp}/ci-scripts.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  faire_depot_gate "$d"
+  EVENEMENT=workflow_dispatch lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+  [ ! -s "$d/gh.log" ] || { echo "gh must not be called: $(cat "$d/gh.log")" >&2; return 1; }
+}
+
+cas_gate_same_tree_green_skips() {
+  d="$(mktemp -d "${TMPDIR:-/tmp}/ci-scripts.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  faire_depot_gate "$d"
+  lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=false" || return 1
+  grep -q -- '--workflow ci.yml' "$d/gh.log" || { echo "the ci workflow was not queried" >&2; return 1; }
+  grep -q -- '--event pull_request' "$d/gh.log" || { echo "pull_request runs were not queried" >&2; return 1; }
+  grep -q -- "--commit $(git -C "$d/work" rev-parse FETCH_HEAD)" "$d/gh.log" \
+    || { echo "runs were not queried for the PR head" >&2; return 1; }
+}
+
+cas_gate_different_tree_runs() {
+  d="$(mktemp -d "${TMPDIR:-/tmp}/ci-scripts.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  faire_depot_gate "$d"
+  lancer_gate "$d" "$SHA_AUTRE"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+}
+
+cas_gate_ci_not_green_runs() {
+  d="$(mktemp -d "${TMPDIR:-/tmp}/ci-scripts.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  faire_depot_gate "$d"
+  GH_RUN_OUT=failure lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+  GH_RUN_OUT='' lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+}
+
+cas_gate_no_pull_request_runs() {
+  d="$(mktemp -d "${TMPDIR:-/tmp}/ci-scripts.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  faire_depot_gate "$d"
+  GH_API_OUT='' lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+}
+
+cas_gate_two_pull_requests_runs() {
+  d="$(mktemp -d "${TMPDIR:-/tmp}/ci-scripts.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  faire_depot_gate "$d"
+  GH_API_OUT=$'7\n8' lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+}
+
+cas_gate_api_error_runs() {
+  d="$(mktemp -d "${TMPDIR:-/tmp}/ci-scripts.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  faire_depot_gate "$d"
+  GH_API_RC=1 lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+  GH_RUN_RC=1 lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+}
+
+cas_gate_fetch_error_runs() {
+  d="$(mktemp -d "${TMPDIR:-/tmp}/ci-scripts.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  faire_depot_gate "$d"
+  GH_API_OUT=8 lancer_gate "$d" "$SHA"
+  attendre_gate "${FUNCNAME[0]}" "run=true" || return 1
+}
+
 # --- runner ---
 echec=""
 for cas in $(declare -F | awk '{print $3}' | grep '^cas_'); do
