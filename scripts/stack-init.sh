@@ -128,6 +128,15 @@ addr_is_public() {
   ip_is_public "$host"
 }
 
+# True if $1 is exactly 10 characters among A-Z and 0-9 (Apple team and key ids).
+apple_id() {
+  case "$1" in
+    *[!A-Z0-9]*) return 1 ;;
+    ??????????) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 host_arch() {
   case "$(uname -m)" in
     arm64 | aarch64) echo aarch64 ;;
@@ -172,11 +181,13 @@ if [ "$relay" -eq 1 ]; then
   apns_key="$(cd "$(dirname "$apns_key")" && pwd)/$(basename "$apns_key")"
   [ -n "$team_id" ] || usage_error "--relay needs --team-id"
   [ -n "$key_id" ] || usage_error "--relay needs --key-id"
-  printf '%s' "$team_id" | grep -Eq '^[A-Z0-9]{10}$' \
-    || usage_error "--team-id must be the 10-character Apple team identifier (got $team_id)"
-  printf '%s' "$key_id" | grep -Eq '^[A-Z0-9]{10}$' \
-    || usage_error "--key-id must be the 10-character APNs key identifier (got $key_id)"
-  printf '%s' "$topic" | grep -Eq '^[A-Za-z0-9.-]+$' || usage_error "--topic: invalid bundle identifier $topic"
+  # `case`, not grep: grep accepts a value if any one of its lines matches, and
+  # these values are written into the TOML as they are.
+  apple_id "$team_id" || usage_error "--team-id must be the 10-character Apple team identifier"
+  apple_id "$key_id" || usage_error "--key-id must be the 10-character APNs key identifier"
+  case "$topic" in
+    '' | *[!A-Za-z0-9.-]*) usage_error "--topic: invalid bundle identifier" ;;
+  esac
 elif [ -n "$relay_host$apns_key$team_id$key_id" ]; then
   usage_error "--relay-host, --apns-key, --team-id and --key-id go with --relay"
 fi
@@ -206,7 +217,9 @@ fi
 command -v docker >/dev/null 2>&1 || fail "docker is not installed"
 docker info >/dev/null 2>&1 || fail "the Docker daemon does not answer (is Docker Desktop running?)"
 
-dc() { docker compose -f "$compose_file" "$@"; }
+# BARKING_VERSION in the environment: compose interpolates the whole file, and
+# deploy/.env may not exist yet (first run with --force).
+dc() { BARKING_VERSION="$version" docker compose -f "$compose_file" "$@"; }
 
 if [ "$force" -eq 1 ]; then
   echo "--force: stopping the stack and deleting the volumes to regenerate"
@@ -214,6 +227,24 @@ if [ "$force" -eq 1 ]; then
   [ "$do_node" -eq 0 ] || docker volume rm -f "$node_volume"
   [ "$do_relay" -eq 0 ] || docker volume rm -f "$relay_volume"
 fi
+
+# A failed run must not leave a configuration behind (it marks the component
+# as initialized) nor a half-filled volume (keygen refuses existing keys).
+# Only what this run created is removed: never a volume that held keys before.
+new_node_volume=0 new_relay_volume=0
+if [ "$do_node" -eq 1 ] && ! docker volume inspect "$node_volume" >/dev/null 2>&1; then new_node_volume=1; fi
+if [ "$do_relay" -eq 1 ] && ! docker volume inspect "$relay_volume" >/dev/null 2>&1; then new_relay_volume=1; fi
+on_exit() {
+  local status=$?
+  [ "$status" -ne 0 ] || return 0
+  echo "error: set-up failed; removing what this run created so that it can be run again" >&2
+  [ "$do_node" -eq 0 ] || rm -f "$node_toml"
+  [ "$do_relay" -eq 0 ] || rm -f "$push_toml"
+  [ "$new_node_volume" -eq 0 ] || docker volume rm -f "$node_volume" >/dev/null 2>&1 || true
+  [ "$new_relay_volume" -eq 0 ] || docker volume rm -f "$relay_volume" >/dev/null 2>&1 || true
+  return "$status"
+}
+trap on_exit EXIT
 
 mkdir -p "$config_dir"
 printf 'BARKING_VERSION=%s\n' "$version" > "$root/deploy/.env"

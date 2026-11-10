@@ -17,10 +17,21 @@ seal_pub="1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 # Fake docker: one line per call in $FAKE_DOCKER_LOG (arguments separated by
 # a tab, so a path with spaces stays one field).
 mkdir -p "$tmp/bin"
+# Knobs: FAKE_FAIL=<word> fails any call that has this word; FAKE_VOLUMES lists
+# volumes that already exist; FAKE_STRICT_ENV=1 fails compose calls made
+# without BARKING_VERSION in the environment (compose would refuse to
+# interpolate the file when deploy/.env is missing).
 cat > "$tmp/bin/docker" <<EOF
 #!/usr/bin/env bash
 ( IFS=\$'\t'; printf '%s\n' "\$*" ) >> "\$FAKE_DOCKER_LOG"
+if [ -n "\${FAKE_FAIL:-}" ]; then
+  case " \$* " in *" \$FAKE_FAIL "*) echo "fake docker: failing \$FAKE_FAIL" >&2; exit 1 ;; esac
+fi
+if [ "\${FAKE_STRICT_ENV:-}" = 1 ] && [ "\$1" = compose ] && [ -z "\${BARKING_VERSION:-}" ]; then
+  echo "required variable BARKING_VERSION is missing a value" >&2; exit 1
+fi
 case " \$* " in
+  " volume inspect "*) case " \${FAKE_VOLUMES:-} " in *" \$3 "*) exit 0 ;; *) exit 1 ;; esac ;;
   *" init "*) printf 'identifier  : $node_id\naddress     : 0.0.0.0:4433\n' ;;
   *" keygen-node "*) printf 'node id : $relay_id\n' ;;
   *" keygen-seal "*) printf 'id         : 1\npublic key : $seal_pub\n' ;;
@@ -183,6 +194,74 @@ t=relay_added_later_keeps_node
 if [ "$code" -eq 0 ] && ! grep -q $'\tinit\t' "$FAKE_DOCKER_LOG" && grep -q keygen-node "$FAKE_DOCKER_LOG" \
   && cmp -s "$tmp/before.toml" "$repo/deploy/config/barking-node.toml" \
   && [ -e "$repo/deploy/config/barking-push.toml" ]; then ok "$t"; else ko "$t"; fi
+
+# --- force_first_run_without_env
+fresh
+FAKE_STRICT_ENV=1 run --version 0.1.0 --public-addr 80.67.169.12:4433 --force
+t=force_first_run_without_env
+if [ "$code" -eq 0 ]; then ok "$t"; else ko "$t (code $code)"; fi
+
+# --- force_sequence: down, then only the node volume (no --relay)
+fresh
+run --version 0.1.0 --public-addr 80.67.169.12:4433
+: > "$FAKE_DOCKER_LOG"
+run --version 0.1.0 --public-addr 80.67.169.12:4433 --force
+t=force_sequence
+down_line="$(grep -n $'\tdown' "$FAKE_DOCKER_LOG" | head -n1 | cut -d: -f1)"
+rm_line="$(grep -n $'volume\trm\t-f\tbarking_node-data' "$FAKE_DOCKER_LOG" | head -n1 | cut -d: -f1)"
+if [ "$code" -eq 0 ] && [ -n "$down_line" ] && [ -n "$rm_line" ] && [ "$down_line" -lt "$rm_line" ] \
+  && ! grep -q 'barking_relay-secrets' "$FAKE_DOCKER_LOG"; then ok "$t"; else ko "$t"; fi
+
+# --- failed_relay_init_is_cleaned: a failed run leaves nothing that blocks a retry
+fresh
+run --version 0.1.0 --public-addr 80.67.169.12:4433
+cp "$repo/deploy/config/barking-node.toml" "$tmp/before.toml"
+: > "$FAKE_DOCKER_LOG"
+relay_args
+FAKE_FAIL=keygen-seal run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}"
+t=failed_relay_init_is_cleaned
+if [ "$code" -eq 1 ] && [ ! -e "$repo/deploy/config/barking-push.toml" ] \
+  && grep -q $'volume\trm\t-f\tbarking_relay-secrets' "$FAKE_DOCKER_LOG" \
+  && ! grep -q 'barking_node-data' "$FAKE_DOCKER_LOG" \
+  && cmp -s "$tmp/before.toml" "$repo/deploy/config/barking-node.toml"; then ok "$t"; else ko "$t (code $code)"; fi
+: > "$FAKE_DOCKER_LOG"
+run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}"
+t=retry_after_failed_relay_init
+if [ "$code" -eq 0 ] && ! grep -q $'\tinit\t' "$FAKE_DOCKER_LOG" && grep -q keygen-seal "$FAKE_DOCKER_LOG"
+then ok "$t"; else ko "$t (code $code)"; fi
+
+# --- a failed run deletes only a volume it created
+fresh
+FAKE_VOLUMES=barking_node-data FAKE_FAIL=init run --version 0.1.0 --public-addr 80.67.169.12:4433
+t=failed_init_keeps_preexisting_volume
+if [ "$code" -eq 1 ] && [ ! -e "$repo/deploy/config/barking-node.toml" ] \
+  && ! grep -q $'volume\trm' "$FAKE_DOCKER_LOG"; then ok "$t"; else ko "$t (code $code)"; fi
+fresh
+FAKE_FAIL=init run --version 0.1.0 --public-addr 80.67.169.12:4433
+t=failed_init_removes_new_volume
+if [ "$code" -eq 1 ] && [ ! -e "$repo/deploy/config/barking-node.toml" ] \
+  && grep -q $'volume\trm\t-f\tbarking_node-data' "$FAKE_DOCKER_LOG"; then ok "$t"; else ko "$t (code $code)"; fi
+
+# --- apns_values_are_strict (no newline or quote may reach the TOML)
+t=apns_values_are_strict
+nl=$'\n'
+for bad in "--team-id|abcde12345" "--team-id|ABCDE12345${nl}key_file = \"x" "--key-id|FGHIJ6789!" \
+  "--topic|com.x\"y" "--topic|com.x${nl}evil"; do
+  fresh
+  relay_args
+  opt="${bad%%|*}"
+  val="${bad#*|}"
+  run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}" "$opt" "$val"
+  if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t $opt"; else ko "$t $opt (code $code)"; fi
+done
+
+# --- accepts_public_ipv6
+t=accepts_public_ipv6
+for a in '[2a01:e0a::1]:4433' '[2A01:E0A::1]:4433'; do
+  fresh
+  run --version 0.1.0 --public-addr "$a"
+  if [ "$code" -eq 0 ]; then ok "$t $a"; else ko "$t $a (code $code)"; fi
+done
 
 # --- usage
 fresh
