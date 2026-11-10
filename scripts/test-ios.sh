@@ -21,7 +21,9 @@ Usage: scripts/test-ios.sh build|unit [Classe...]|ui [Classe...]|tour [en|fr|ax3
   build   xcodegen and XCFramework if stale, then build-for-testing
   unit    plan Unit (BarkingTests), optionally restricted to the given classes
   ui      plan UI (BarkingUITests); full run on BARKING_UI_WORKERS clones (default 3),
-          restricted to the given classes on the booted simulator alone
+          restricted to the given classes on the booted simulator alone (as with
+          BARKING_UI_WORKERS=1); BARKING_UI_RETRIES=n reruns a failed test up to n
+          times; result in apple/build/ui.xcresult
   tour    TourUITests with BARKING_TOUR=1 (en, fr or ax3), result in apple/build/tour-<lang>.xcresult
   all     build, unit, ui, tour en
 
@@ -122,9 +124,20 @@ do_ui() {
   only_args BarkingUITests "$@"
   # A few classes run on the booted simulator: each clone boots a whole iOS,
   # and three of them saturate the machine for little gain on a short run.
-  local par=(-parallel-testing-enabled YES -parallel-testing-worker-count "${BARKING_UI_WORKERS:-3}")
-  [ $# -gt 0 ] && par=(-parallel-testing-enabled NO)
-  step "ui" xb test-without-building -testPlan UI "${par[@]}" ${only[@]+"${only[@]}"}
+  # BARKING_UI_WORKERS=1 keeps the full run there too (CI: a 3-core runner
+  # cannot carry three clones).
+  local workers="${BARKING_UI_WORKERS:-3}"
+  local par=(-parallel-testing-enabled YES -parallel-testing-worker-count "$workers")
+  { [ $# -gt 0 ] || [ "$workers" = 1 ]; } && par=(-parallel-testing-enabled NO)
+  # BARKING_UI_RETRIES=n reruns a failed test up to n more times (CI); the
+  # result bundle keeps every attempt.
+  local retry=()
+  [ "${BARKING_UI_RETRIES:-0}" -gt 0 ] \
+    && retry=(-retry-tests-on-failure -test-iterations "$((BARKING_UI_RETRIES + 1))")
+  local bundle="$apple/build/ui.xcresult"
+  rm -rf "$bundle"
+  step "ui" xb test-without-building -testPlan UI "${par[@]}" ${retry[@]+"${retry[@]}"} \
+    -resultBundlePath "$bundle" ${only[@]+"${only[@]}"}
 }
 
 do_tour() {

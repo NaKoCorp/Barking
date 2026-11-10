@@ -51,13 +51,18 @@ final class SyncLoopTests: XCTestCase {
         return (loop, clock)
     }
 
-    /// Polls until `condition` holds (the loop runs on its own task).
+    /// Polls until `condition` holds (the loop runs on its own task). A wall
+    /// clock deadline, not a number of polls: on a loaded CI runner a 5 ms
+    /// sleep can last much longer, and the loop's task may wait its turn.
     private func until(_ condition: @escaping () async -> Bool, _ message: String,
+                       timeout: Duration = .seconds(10),
                        file: StaticString = #filePath, line: UInt = #line) async {
-        for _ in 0..<200 {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
             if await condition() { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
+        if await condition() { return }
         XCTFail("timed out: \(message)", file: file, line: line)
     }
 
