@@ -59,7 +59,7 @@ tracing = "0.1.44"
 # Node logs: text output only, filter by target (no env-filter nor
 # ANSI, no `log` bridge).
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "registry"] }
-toml = "1.1.8"
+toml = "1.2.1"
 # Swift and Kotlin bindings of barking-ffi.
 uniffi = "0.32.2"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets", "zeroize"] }

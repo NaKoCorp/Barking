@@ -1,7 +1,7 @@
 # Fuzzing image for barking-core: dated nightly + pinned cargo-fuzz.
 # Approved glibc exception: Rust AddressSanitizer does not support musl targets.
 # Base pinned by digest (multi-architecture index, rust 1.99.1, Debian bookworm).
-FROM rust:1.99.1-slim-bookworm@sha256:24707e70a4f1e23d9a7b25202ec43126d28a52294b96aad5c670df1fd1f1d400
+FROM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd
 
 # Packages come from a dated Debian snapshot: same versions on every build.
 # Match perl-base to the snapshot when the base image carries a newer version.

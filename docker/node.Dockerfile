@@ -5,8 +5,8 @@
 # The binary of the target architecture is checked against SHA256SUMS.
 
 # Preparation only (checksum, tree, ownership); nothing of it is kept.
-# Base pinned by digest (multi-architecture index, Alpine 3.24.3).
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS prepare
+# Base pinned by digest (multi-architecture index, Alpine 3.24.4).
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS prepare
 ARG VERSION
 ARG TARGETARCH
 COPY . /release/
