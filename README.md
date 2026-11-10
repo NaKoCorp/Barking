@@ -138,7 +138,7 @@ Linux release builds run in a pinned Rust/Alpine Docker image and produce static
 
 ## ✅ Verify a binary
 
-Release tooling for `barking-cli`, `barking-node` and `barking-push` provides reproducible builds, GitHub CI attestations, an offline maintainer signature, and verification and rebuild scripts.
+Release tooling for `barking-cli`, `barking-node` and `barking-push` provides reproducible builds and GitHub provenance attestations, and verification and rebuild scripts.
 
 - 📖 [docs/VERIFYING.md](docs/VERIFYING.md): how to verify a release, and its limitations
 - 🏷️ [docs/RELEASING.md](docs/RELEASING.md): the maintainer's release procedure

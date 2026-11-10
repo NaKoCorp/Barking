@@ -41,7 +41,6 @@ step() { echo "── $*"; }
 bad() { echo "✗ $*" >&2; status=1; }
 
 # Files that hold credentials: never committed, whatever their content.
-# keys/ only holds the maintainer's public key (minisign .pub).
 forbidden='\.(p8|p12|pfx|mobileprovision|keystore|jks|key|pem)$|(^|/)\.env($|\.)|(^|/)id_(rsa|ed25519|ecdsa)($|\.)|(^|/)\.netrc$|^apple/Local\.xcconfig$'
 
 case "$mode" in

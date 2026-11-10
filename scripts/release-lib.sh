@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Functions shared by sign-release.sh and verify-release.sh (to be sourced, not executed).
+# Functions shared by verify-release.sh and repro-build.sh (to be sourced, not executed).
 # Compatible with bash 3.2 (macOS): no associative arrays, no mapfile.
 
 erreur() { echo "error: $*" >&2; exit 1; }
@@ -47,13 +47,6 @@ resoudre_repo() {
 }
 exiger_repo() {
   [ -n "$REPO" ] || erreur "unknown GitHub repository: pass --repo <owner/repo> or set BARKING_REPO"
-}
-
-# A minisign public key contains an « RW… » line (56 base64 characters), not just comments.
-exiger_cle_publique() { # $1 = fichier
-  [ -f "$1" ] || erreur "public key not found: $1"
-  grep -qE '^RW[A-Za-z0-9+/]{54}$' "$1" \
-    || erreur "the public key $1 is empty or invalid: the maintainer must first publish their minisign key there (see keys/README.md). Or pass a key with --pubkey <file>."
 }
 
 # CI macOS environment, read from an .xcode-version file (« key=value » lines).
