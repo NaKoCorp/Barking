@@ -156,6 +156,39 @@ cas_compare_out_not_empty() {
   [ ! -e "$d/out/SHA256SUMS" ] || { echo "nothing must be written to a non-empty output" >&2; return 1; }
 }
 
+# --- check-pr-title.sh ---
+# Runs the script with PR_TITLE=$1; sets SORTIE and RC.
+lancer_titre() { # $1 = title
+  RC=0
+  SORTIE="$(PR_TITLE="$1" "$racine/scripts/check-pr-title.sh" 2>&1)" || RC=$?
+}
+
+cas_pr_title_accepted() {
+  local t
+  for t in 'feat: add relay stats' 'fix(ios): read every QR segment' 'feat(node)!: protocol v3' \
+    'chore(deps): update rust crate tokio to v1.55' 'chore(main): release 0.2.0' 'revert: "feat: x"'; do
+    lancer_titre "$t"
+    [ "$RC" -eq 0 ] || { echo "rejected a valid title: $t: $SORTIE" >&2; return 1; }
+  done
+}
+
+cas_pr_title_rejected() {
+  local t
+  for t in 'iOS app, block 2: messaging' 'Feat: x' 'feat:x' 'feat : x' 'feat(): x' 'feat(iOS): x' \
+    'feature: x' 'feat: ' 'feat: x ' '' $'feat: x\ny' $'feat: x\r'; do
+    lancer_titre "$t"
+    [ "$RC" -eq 1 ] || { echo "accepted or crashed on an invalid title: '$t' (rc=$RC): $SORTIE" >&2; return 1; }
+    case "$SORTIE" in *"Expected:"*"Types:"*) ;; *) echo "no format hint for '$t': $SORTIE" >&2; return 1 ;; esac
+  done
+}
+
+cas_pr_title_unset() {
+  RC=0
+  SORTIE="$(env -u PR_TITLE "$racine/scripts/check-pr-title.sh" 2>&1)" || RC=$?
+  [ "$RC" -eq 1 ] || { echo "expected exit 1, got $RC" >&2; return 1; }
+  case "$SORTIE" in *"PR_TITLE is not set"*) ;; *) echo "unexpected message: $SORTIE" >&2; return 1 ;; esac
+}
+
 # --- runner ---
 echec=""
 for cas in $(declare -F | awk '{print $3}' | grep '^cas_'); do
