@@ -5,7 +5,7 @@ struct BarkingApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var router: AppRouter
     @State private var settings = AppSettings()
-    @State private var lock = LockController()
+    @State private var lock: LockController
 
     init() {
         BarkingNavigationAppearance.apply()
@@ -14,6 +14,9 @@ struct BarkingApp: App {
         let router = AppRouter.boot()
         AppRouter.current = router
         _router = State(initialValue: router)
+        // After boot: a wipe it finished (or a UI test reset) removed the
+        // lock settings, and the lock must not start from the old ones.
+        _lock = State(initialValue: LockController())
     }
 
     var body: some Scene {
