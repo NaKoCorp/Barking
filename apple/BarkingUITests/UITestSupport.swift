@@ -69,7 +69,9 @@ extension XCUIElement {
     /// sit under the pinned button, which then takes the tap.
     func focusAndType(_ text: String, in app: XCUIApplication,
                       file: StaticString = #filePath, line: UInt = #line) {
-        let scroll = app.scrollViews.firstMatch
+        // The scroll view holding this field: under a sheet, the first one
+        // in the app may be the screen behind it.
+        let scroll = app.scrollViews.containing(elementType, identifier: identifier).firstMatch
         for _ in 0..<3 where !hasKeyboardFocus {
             for _ in 0..<3 where !isHittable { (scroll.exists ? scroll : app).swipeUp() }
             tap()

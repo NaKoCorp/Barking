@@ -341,7 +341,9 @@ final class PhraseExportUITests: XCTestCase {
         pdf.tap()
         let field = app.secureTextFields["pdf.password"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.focusAndType("password1234", in: app)
+        // Return ends the entry and lowers the keyboard: with it up, the
+        // pinned "Create the PDF" button covers the second field (CI).
+        field.focusAndType("password1234\n", in: app)
         let confirm = app.secureTextFields["pdf.confirm"]
         XCTAssertTrue(confirm.waitForExistence(timeout: 5))
         confirm.focusAndType("password1234", in: app)
