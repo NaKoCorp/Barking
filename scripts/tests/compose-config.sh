@@ -52,6 +52,10 @@ check services.node.ports.0.target 4433
 check services.node.ports.0.protocol '"udp"'
 check services.relay.ports.0.target 4434
 check services.relay.ports.0.protocol '"udp"'
+check networks.default.enable_ipv6 false
+printf 'BARKING_VERSION=0.0.1\nBARKING_IPV6=true\n' > "$tmp/v6.env"
+expect "networks.default.enable_ipv6 with BARKING_IPV6=true" \
+  "$(docker compose --env-file "$tmp/v6.env" -f "$compose_file" config --format json | field networks.default.enable_ipv6)" true
 expect "volumes" "$(dc --profile relay config --volumes | sort | tr '\n' ' ')" "node-data relay-secrets "
 
 if (unset BARKING_VERSION; docker compose --env-file "$tmp/empty.env" -f "$compose_file" config >/dev/null 2>&1); then

@@ -68,45 +68,105 @@ ipv4_is_public() {
   return 0
 }
 
-# True if $1 is a routable dotted IPv4. IPv6 is out of scope: Docker Desktop
-# publishes ports on IPv4.
+# Checks the colon-separated hex groups of $1 (no "::" inside): each 1 to 4
+# hex digits. Appends them, as numbers, to the global `groups`.
+ipv6_part() {
+  local IFS=: g
+  [ -n "$1" ] || return 0
+  case "$1" in :* | *:) return 1 ;; esac
+  # shellcheck disable=SC2086 # split on colons, on purpose
+  set -- $1
+  for g in "$@"; do
+    case "$g" in '' | *[!0-9a-f]* | ?????*) return 1 ;; esac
+    groups="$groups $((16#$g))"
+  done
+}
+
+# True if the IPv6 literal $1 (no brackets, lower case) is well formed and
+# routable, as barking_proto::record::{routable_v6, embeds_ipv4} decide: not
+# unspecified, loopback or IPv4 embedded (first five groups zero),
+# link-local (fe80::/10), site-local (fec0::/10), unique local (fc00::/7),
+# multicast (ff00::/8) or documentation (2001:db8::/32).
+ipv6_is_public() {
+  local h="$1" n zeros
+  groups=""
+  case "$h" in '' | *[!0-9a-f:]* | *:::*) return 1 ;; esac
+  case "$h" in *::*::*) return 1 ;; esac
+  case "$h" in
+    *::*)
+      ipv6_part "${h%%::*}" || return 1
+      ipv6_part "${h#*::}" || return 1
+      # shellcheck disable=SC2086 # count words
+      set -- $groups
+      n=$#
+      [ "$n" -le 7 ] || return 1
+      zeros=""
+      while [ "$n" -lt 8 ]; do zeros="$zeros 0"; n=$((n + 1)); done
+      groups=""
+      ipv6_part "${h%%::*}"
+      groups="$groups$zeros"
+      ipv6_part "${h#*::}"
+      ;;
+    *) ipv6_part "$h" || return 1 ;;
+  esac
+  # shellcheck disable=SC2086 # eight words
+  set -- $groups
+  [ "$#" -eq 8 ] || return 1
+  [ "$1" -eq 0 ] && [ "$2" -eq 0 ] && [ "$3" -eq 0 ] && [ "$4" -eq 0 ] && [ "$5" -eq 0 ] && return 1
+  [ $(($1 & 0xffc0)) -eq $((0xfe80)) ] && return 1
+  [ $(($1 & 0xffc0)) -eq $((0xfec0)) ] && return 1
+  [ $(($1 & 0xfe00)) -eq $((0xfc00)) ] && return 1
+  [ $(($1 & 0xff00)) -eq $((0xff00)) ] && return 1
+  [ "$1" -eq $((0x2001)) ] && [ "$2" -eq $((0xdb8)) ] && return 1
+  return 0
+}
+
+# Lower case of $1.
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# True if $1 is a routable IP literal: dotted IPv4, or IPv6 in brackets.
 ip_is_public() {
   case "$1" in
+    \[*\]) local h="${1#[}"; ipv6_is_public "$(lower "${h%]}")" ;;
     *[!0-9.]* | '') return 1 ;;
     *) ipv4_is_public "$1" ;;
   esac
 }
 
-# True if $1 is a routable IPv4 or a DNS name that is not obviously local
-# (what a relay host may be).
+# True if $1 is a routable IP literal (IPv6 in brackets) or a DNS name that is
+# not obviously local (what a relay host may be).
 host_is_public() {
   local h="$1"
   case "$h" in
+    \[*\]) ip_is_public "$h"; return ;;
     *[!0-9.]*) ;;
     *) ipv4_is_public "$h"; return ;;
   esac
   case "$h" in
     '' | *[!A-Za-z0-9.-]* | .* | *. | *..*) return 1 ;;
   esac
-  h="$(printf '%s' "$h" | tr '[:upper:]' '[:lower:]')"
+  h="$(lower "$h")"
   case "$h" in
     localhost | *.localhost | *.local | *.internal | *.lan | *.home.arpa) return 1 ;;
   esac
   return 0
 }
 
-# True if $1 is IPV4:PORT with a routable address and a port from 1 to 65535.
-# The node publishes it in its signed record: no DNS name.
-addr_is_public() {
+# Prints the family (4 or 6) of $1 if it is IPV4:PORT or [IPV6]:PORT with a
+# routable address and a port from 1 to 65535; fails otherwise. The node
+# publishes it in its signed record: no DNS name.
+addr_family() {
   local host port
   case "$1" in
+    \[*\]:*) host="${1%:*}"; port="${1##*:}" ;;
     *:*:*) return 1 ;;
     *:*) host="${1%:*}"; port="${1##*:}" ;;
     *) return 1 ;;
   esac
-  case "$port" in '' | *[!0-9]*) return 1 ;; esac
-  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
-  ip_is_public "$host"
+  case "$port" in '' | *[!0-9]* | 0*) return 1 ;; esac
+  [ "${#port}" -le 5 ] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+  ip_is_public "$host" || return 1
+  case "$host" in \[*) echo 6 ;; *) echo 4 ;; esac
 }
 
 # True if $1 is exactly 10 characters among A-Z and 0-9 (Apple team and key ids).
@@ -128,13 +188,25 @@ host_arch() {
 
 # --- arguments ------------------------------------------------------------
 
-version="" public_addr="" force=0 relay=0
+version="" public_v4="" public_v6="" force=0 relay=0
 relay_host="" apns_key="" team_id="" key_id="" topic="com.nakocorp.barking"
 need_value() { [ "$2" -ge 2 ] || usage_error "$1 expects a value"; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version) need_value "$1" "$#"; version="$2"; shift 2 ;;
-    --public-addr) need_value "$1" "$#"; public_addr="$2"; shift 2 ;;
+    --public-addr)
+      need_value "$1" "$#"
+      family="$(addr_family "$2")" || usage_error \
+        "--public-addr must be a public IPV4:PORT or [IPV6]:PORT of this server, reachable from the internet (got $2)"
+      if [ "$family" = 4 ]; then
+        [ -z "$public_v4" ] || usage_error "--public-addr: at most one IPv4 address"
+        public_v4="$2"
+      else
+        [ -z "$public_v6" ] || usage_error "--public-addr: at most one IPv6 address"
+        public_v6="$(lower "$2")"
+      fi
+      shift 2
+      ;;
     --force) force=1; shift ;;
     --relay) relay=1; shift ;;
     --relay-host) need_value "$1" "$#"; relay_host="$2"; shift 2 ;;
@@ -149,14 +221,13 @@ done
 
 [ -n "$version" ] || usage_error "--version is required"
 case "$version" in *[!0-9A-Za-z.-]*) usage_error "--version: invalid version $version" ;; esac
-[ -n "$public_addr" ] || usage_error "--public-addr is required"
-addr_is_public "$public_addr" \
-  || usage_error "--public-addr must be the public IPv4:PORT of this connection, reachable from the internet (got $public_addr)"
+[ -n "$public_v4$public_v6" ] || usage_error "--public-addr is required"
 
 if [ "$relay" -eq 1 ]; then
   [ -n "$relay_host" ] || usage_error "--relay needs --relay-host"
   host_is_public "$relay_host" \
-    || usage_error "--relay-host must be a public DNS name or IPv4 address, without a port (got $relay_host)"
+    || usage_error "--relay-host must be a public DNS name, IPv4 or [IPv6] address, without a port (got $relay_host)"
+  case "$relay_host" in \[*) relay_host="$(lower "$relay_host")" ;; esac
   [ -n "$apns_key" ] || usage_error "--relay needs --apns-key"
   [ -f "$apns_key" ] || usage_error "--apns-key: no such file: $apns_key"
   # Mounted with --mount, whose value is comma-separated.
@@ -236,20 +307,29 @@ on_exit() {
 trap on_exit EXIT
 
 mkdir -p "$config_dir"
-printf 'BARKING_VERSION=%s\n' "$version" > "$root/deploy/.env"
+# IPv6: the compose network gets IPv6 (BARKING_IPV6) and the services listen on
+# [::], which also accepts IPv4 on Linux. Without it, Docker disables IPv6 in
+# the containers and [::] cannot be bound: listen on 0.0.0.0.
+ipv6=false listen_host="0.0.0.0"
+case "$public_v6$relay_host" in *\[*) ipv6=true listen_host="[::]" ;; esac
+public_list=""
+for a in "$public_v4" "$public_v6"; do
+  [ -z "$a" ] || public_list="$public_list${public_list:+, }\"$a\""
+done
+printf 'BARKING_VERSION=%s\nBARKING_IPV6=%s\n' "$version" "$ipv6" > "$root/deploy/.env"
 
 # --- node -----------------------------------------------------------------
 
 if [ "$do_node" -eq 1 ]; then
   cat > "$node_toml" <<EOF
 # Generated by scripts/stack-init.sh; see docs/deploy/barking-node.toml for every key.
-listen = ["0.0.0.0:$node_port"]
+listen = ["$listen_host:$node_port"]
 data_dir = "/var/lib/barking-node"
 
 [dht]
-# Address published in the node's signed record: reachable from the internet
-# (UDP $node_port forwarded to this machine).
-public_addr = ["$public_addr"]
+# Addresses published in the node's signed record (at most one per family):
+# reachable from the internet on UDP $node_port.
+public_addr = [$public_list]
 EOF
   dc build node
   init_out="$(dc run --rm node init --config /etc/barking-node.toml)"
@@ -258,7 +338,7 @@ EOF
   echo
   echo "Node initialized."
   echo "  identifier : $node_id"
-  echo "  address    : $public_addr"
+  echo "  addresses  : $public_v4${public_v4:+ }$public_v6"
 else
   echo "Node already initialized ($node_toml), kept."
 fi
@@ -269,7 +349,7 @@ if [ "$do_relay" -eq 1 ]; then
   cat > "$push_toml" <<EOF
 # Generated by scripts/stack-init.sh; see docs/deploy/barking-push.toml.example
 # for every key.
-listen = ["0.0.0.0:$relay_port"]
+listen = ["$listen_host:$relay_port"]
 node_key_file = "/var/lib/barking-push/node.key"
 seal_keys = [
   { id = $seal_id, file = "/var/lib/barking-push/seal$seal_id.key" },

@@ -57,6 +57,13 @@ services:
     security_opt: ["no-new-privileges:true"]
     logging: *logging
 
+networks:
+  default:
+    # Set by scripts/stack-init.sh when the server has a public IPv6: Docker
+    # Engine (27 or later) then publishes the ports on IPv6 too, keeping the
+    # peers' source addresses.
+    enable_ipv6: ${BARKING_IPV6:-false}
+
 volumes:
   node-data:
   relay-secrets:

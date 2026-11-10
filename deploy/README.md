@@ -7,7 +7,7 @@
 
 Both must be reachable from the internet: TestFlight and App Store builds refuse private addresses.
 
-These steps target a Mac with Docker Desktop. They work the same on Linux with Docker Engine. For a systemd host without Docker, see [`docs/deploy`](../docs/deploy).
+These steps work on a Mac with Docker Desktop (IPv4) and on a Linux server with Docker Engine (IPv4, IPv6 or both, see [IPv6 server](#ipv6-server)). For a systemd host without Docker, see [`docs/deploy`](../docs/deploy).
 
 ## 1. Get a verified release
 
@@ -33,7 +33,7 @@ docker compose -f deploy/compose.yaml exec node /barking-node status
 3. creates the node key in the `barking_node-data` volume;
 4. prints the identifier and the address to publish.
 
-`--public-addr` is the public IPv4 address of your connection. The node publishes it in its signed record, so it cannot be a DNS name. IPv6 is not supported here, because Docker Desktop publishes ports on IPv4. The script refuses a private or reserved address.
+`--public-addr` is the public address of the server: `IPV4:PORT`, `[IPV6]:PORT`, or one of each (pass the option twice). The node publishes it in its signed record, so it cannot be a DNS name. The script refuses a private, local or reserved address, as the node does.
 
 It also refuses to run twice. Without `--relay`, `--force` stops the node and deletes its volume, and with it the node's key and stored packets. A running relay is left alone.
 
@@ -75,6 +75,29 @@ A node that is already running keeps its key when you add `--relay` later.
 - **Always on.** Prevent sleep (System Settings › Energy, or `sudo pmset -a sleep 0`), start Docker Desktop at login, and keep the services' `restart: unless-stopped`.
 - **Docker Desktop hides client addresses.** On a Mac, published ports go through Docker Desktop's proxy, so the containers likely see every peer coming from the same internal address. The node's per-address limits (`max_connections_per_ip`, 8 by default) then apply to all peers together, and it does not learn peers that connect to it. The relay's per-address limits behave the same way. This is fine for a TestFlight test with a few devices. A node meant to serve the public network belongs on Linux with Docker Engine, where peer addresses are preserved. To check on your Mac: `docker run --rm -p 5000:5000/udp alpine nc -ulv -p 5000`, send a datagram from an outside host, and look at the source address it prints.
 - **Logs and state.** `docker compose -f deploy/compose.yaml logs -f relay`, `… exec node /barking-node status`.
+
+## IPv6 server
+
+On a Linux server with a public IPv6, the node and the relay can be reached over IPv6, alone or next to IPv4:
+
+```sh
+scripts/stack-init.sh --version 0.1.0 --public-addr 203.0.113.7:4433 --public-addr '[2001:db8:1::7]:4433'
+```
+
+(Replace the example addresses with yours: the script refuses documentation ranges.)
+
+Given an IPv6 address, the script:
+
+- sets `BARKING_IPV6=true` in `deploy/.env`, so the compose network gets IPv6;
+- makes both services listen on `[::]`, which also accepts IPv4.
+
+Docker Engine then publishes the ports on the host's IPv6 and keeps the peers' source addresses.
+
+- **Docker Engine 27 or later.** It gives IPv6 networks an address range by itself and filters them with ip6tables. With an older engine, enable `"ipv6": true` and `"ip6tables": true` in `/etc/docker/daemon.json`, then restart Docker.
+- **Firewall.** IPv6 has no port forwarding, but the provider's or the host's firewall usually blocks inbound traffic. Open UDP 4433 (node) and 4434 (relay) for IPv6, for example `ufw allow 4433/udp` and `ufw allow 4434/udp`, and in the provider's panel.
+- **Stable address.** Publish the server's fixed address, not a temporary (privacy) one. If the provider changes the prefix, update `public_addr` (see Hosting on a Mac, "Public address"; the steps are the same).
+- **Relay host.** `--relay-host` accepts a DNS name, an IPv4 or an `[IPv6]` in brackets. A DNS name with A and AAAA records is best: nodes on either family can reach the relay, and the address can change without a new app build.
+- **On a Mac,** Docker Desktop's IPv6 publishing is not guaranteed. Prefer IPv4 there.
 
 ## 5. Check that the node reaches its relay (hairpin NAT)
 

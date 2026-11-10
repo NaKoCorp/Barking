@@ -86,7 +86,8 @@ fresh
 run --version 0.1.0 --public-addr 80.67.169.12:4433
 t=node_only_writes_env_and_toml
 cfg="$repo/deploy/config/barking-node.toml"
-if [ "$code" -eq 0 ] && [ "$(cat "$repo/deploy/.env")" = "BARKING_VERSION=0.1.0" ] \
+if [ "$code" -eq 0 ] && [ "$(cat "$repo/deploy/.env")" = "BARKING_VERSION=0.1.0
+BARKING_IPV6=false" ] \
   && has "$cfg" 'listen = ["0.0.0.0:4433"]' && has "$cfg" 'data_dir = "/var/lib/barking-node"' \
   && has "$cfg" '[dht]' && has "$cfg" 'public_addr = ["80.67.169.12:4433"]' \
   && grep -q $'build\tnode' "$FAKE_DOCKER_LOG" \
@@ -255,18 +256,75 @@ for bad in "--team-id|abcde12345" "--team-id|ABCDE12345${nl}key_file = \"x" "--k
   if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t $opt"; else ko "$t $opt (code $code)"; fi
 done
 
-# --- ipv4_only: Docker Desktop publishes IPv4; IPv6 is out of scope
-t=ipv4_only
-for a in '[2a01:e0a::1]:4433' '[2A01:E0A::1]:4433'; do
+# --- IPv6 (a server with a public IPv6; at most one address per family, as the node)
+t=ipv6_only_node
+fresh
+run --version 0.1.0 --public-addr '[2a01:e0a::1]:4433'
+cfg="$repo/deploy/config/barking-node.toml"
+if [ "$code" -eq 0 ] && grep -qx 'BARKING_IPV6=true' "$repo/deploy/.env" \
+  && has "$cfg" 'listen = ["[::]:4433"]' && has "$cfg" 'public_addr = ["[2a01:e0a::1]:4433"]'
+then ok "$t"; else ko "$t (code $code)"; fi
+
+t=dual_stack_node
+fresh
+cfg="$repo/deploy/config/barking-node.toml"
+run --version 0.1.0 --public-addr 80.67.169.12:4433 --public-addr '[2A01:E0A::1]:4433'
+if [ "$code" -eq 0 ] && grep -qx 'BARKING_IPV6=true' "$repo/deploy/.env" \
+  && has "$cfg" 'public_addr = ["80.67.169.12:4433", "[2a01:e0a::1]:4433"]' \
+  && has "$cfg" 'listen = ["[::]:4433"]'; then ok "$t"; else ko "$t (code $code)"; fi
+
+t=ipv4_only_keeps_ipv4_listen
+fresh
+cfg="$repo/deploy/config/barking-node.toml"
+run --version 0.1.0 --public-addr 80.67.169.12:4433
+if [ "$code" -eq 0 ] && grep -qx 'BARKING_IPV6=false' "$repo/deploy/.env" \
+  && has "$cfg" 'listen = ["0.0.0.0:4433"]'; then ok "$t"; else ko "$t (code $code)"; fi
+
+t=one_address_per_family
+for pair in "80.67.169.12:4433 80.67.169.40:4433" "[2a01:e0a::1]:4433 [2a01:e0a::2]:4433"; do
+  fresh
+  # shellcheck disable=SC2086 # two words, on purpose
+  set -- $pair
+  run --version 0.1.0 --public-addr "$1" --public-addr "$2"
+  if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t $pair"; else ko "$t $pair (code $code)"; fi
+done
+set --
+
+t=ipv6_accepted
+for a in '[2a01:e0a::1]:4433' '[2A01:E0A::1]:4433' '[2a01:e0a:0:0:0:0:0:1]:4433' \
+  '[2a01:0e0a:0000:0000:0000:0000:0000:0001]:4433' '[2606:4700:4700::1111]:4433' \
+  '[fe8::1]:4433' '[fc::1]:4433' '[2a01:e0a::]:4433' '[::2a01:e0a:0:1]:4433'; do
   fresh
   run --version 0.1.0 --public-addr "$a"
-  if [ "$code" -eq 2 ] && printf '%s' "$out" | grep -q IPv4 && [ ! -s "$FAKE_DOCKER_LOG" ]
-  then ok "$t $a"; else ko "$t $a (code $code)"; fi
+  if [ "$code" -eq 0 ]; then ok "$t $a"; else ko "$t $a (code $code)"; fi
 done
+
+t=ipv6_refused
+for a in '[::]:4433' '[::1]:4433' '[0:0:0:0:0:0:0:1]:4433' '[0::]:4433' '[::ffff:192.168.1.1]:4433' \
+  '[::ffff:8.8.8.8]:4433' '[::8.8.8.8]:4433' '[0:0:0:0:0:ffff:c0a8:101]:4433' '[::ffff:c0a8:101]:4433' \
+  '[fe80::1]:4433' '[febf::1]:4433' '[fe80:0:0:0::1]:4433' '[fec0::1]:4433' '[fc00::1]:4433' \
+  '[fd12:3456::1]:4433' '[ff02::1]:4433' '[2001:db8::1]:4433' '[2001:0db8:1::1]:4433' \
+  '[1:2]:4433' '[:::]:4433' '[1::2::3]:4433' '[12345::1]:4433' '[g::1]:4433' '[1:2:3:4:5:6:7:8:9]:4433' \
+  '[1:2:3:4:5:6:7::8]:4433' '[:1::2]:4433' '[1::2:]:4433' '2a01:e0a::1:4433' '[2a01:e0a::1]' \
+  '[2a01:e0a::1]:0' '[2a01:e0a::1]:65536' '[2a01:e0a::1%en0]:4433'; do
+  fresh
+  run --version 0.1.0 --public-addr "$a"
+  if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t $a"; else ko "$t $a (code $code)"; fi
+done
+
+t=ipv6_relay
 fresh
-relay_args
-run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}" --relay-host '[2a01:e0a::1]'
-if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t relay host"; else ko "$t relay host (code $code)"; fi
+run --version 0.1.0 --public-addr '[2a01:e0a::1]:4433' --relay --relay-host '[2a01:e0a::1]' \
+  --apns-key "$repo/Key Dir/AuthKey.p8" --team-id ABCDE12345 --key-id FGHIJ67890
+pcfg="$repo/deploy/config/barking-push.toml"
+if [ "$code" -eq 0 ] && printf '%s' "$out" | grep -qxF 'BARKING_RELAY_HOST = [2a01:e0a::1]' \
+  && has "$pcfg" 'listen = ["[::]:4434"]'; then ok "$t"; else ko "$t (code $code)"; fi
+for h in '[fe80::1]' '2a01:e0a::1' '[2a01:e0a::1]:4434'; do
+  fresh
+  relay_args
+  run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}" --relay-host "$h"
+  if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t refuses $h"; else ko "$t refuses $h (code $code)"; fi
+done
 
 # --- leading_zero_octets (the node's parser refuses them)
 t=leading_zero_octets
