@@ -1,0 +1,48 @@
+name: release-please
+
+# Maintains the release pull request: the next version comes from the
+# Conventional Commits merged since the last release, and the pull request
+# carries the version bump (Cargo.toml, Cargo.lock) and CHANGELOG.md.
+# Merging it makes release-please create the tag vX.Y.Z and a draft GitHub
+# release; the tag push then triggers release.yml, which builds and publishes.
+#
+# The release is a draft with the tag forced: a draft release creates no tag
+# by itself, and release.yml needs the tag to start. Publishing the draft is
+# the last, manual step.
+#
+# The token is a GitHub App installation token, not GITHUB_TOKEN: events
+# caused by GITHUB_TOKEN never start other workflows, so the release pull
+# request would get no CI and the tag push would not start release.yml. The
+# token is restricted to this repository and to the two permissions
+# release-please uses.
+on:
+  push:
+    branches: [main]
+
+# Runs queue instead of cancelling each other: a cancelled run could leave a
+# release half created.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release-please:
+    runs-on: ubuntu-26.04
+    # Holds the App credentials (variable RELEASE_APP_CLIENT_ID, secret
+    # RELEASE_APP_PRIVATE_KEY).
+    environment: release-please
+    steps:
+      - id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
