@@ -341,11 +341,10 @@ final class PhraseExportUITests: XCTestCase {
         pdf.tap()
         let field = app.secureTextFields["pdf.password"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.tap()
-        field.typeText("password1234")
+        field.focusAndType("password1234", in: app)
         let confirm = app.secureTextFields["pdf.confirm"]
-        confirm.tap()
-        confirm.typeText("password1234")
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.focusAndType("password1234", in: app)
         // The error line is the field's VoiceOver hint (read once, UI review
         // B3), which XCUITest cannot read; the gate is what this checks.
         XCTAssertFalse(app.buttons["pdf.create"].isEnabled)
@@ -362,16 +361,21 @@ final class PhraseExportUITests: XCTestCase {
 final class SecurityUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 
-    private func openSecurity(_ app: XCUIApplication) {
+    private func openSecurity(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         app.tabBars.buttons["Settings"].tap()
-        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Security")).firstMatch.tap()
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Security")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "no Security row", file: file, line: line)
+        row.tap()
     }
 
-    /// The switch sits at the trailing edge of its row.
-    private func turnOn(_ toggle: XCUIElement) {
-        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
-        let on = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == '1'"), object: toggle)
-        XCTAssertEqual(XCTWaiter().wait(for: [on], timeout: 5), .completed)
+    /// The switch sits at the trailing edge of its row. A tap that lands
+    /// while the screen is still settling (slow CI) is tried again.
+    private func turnOn(_ toggle: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        for _ in 0..<3 where !(toggle.value as? String == "1") {
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            toggle.waitUntil({ $0.value as? String == "1" }, timeout: 5)
+        }
+        XCTAssertEqual(toggle.value as? String, "1", "the switch did not turn on", file: file, line: line)
     }
 
     /// UI review B3: a tap does nothing, a 2 s hold opens the confirmation.

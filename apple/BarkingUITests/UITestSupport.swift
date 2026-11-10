@@ -60,6 +60,26 @@ extension XCUIElement {
     }
 }
 
+extension XCUIElement {
+    var hasKeyboardFocus: Bool { (value(forKey: "hasKeyboardFocus") as? Bool) ?? false }
+
+    /// Taps a text field until it holds the keyboard, then types. On a fresh
+    /// simulator (CI) a new-password field may first get iOS's strong
+    /// password offer, which keeps the focus away from the next field.
+    func focusAndType(_ text: String, in app: XCUIApplication,
+                      file: StaticString = #filePath, line: UInt = #line) {
+        for _ in 0..<3 where !hasKeyboardFocus {
+            for title in ["Choose My Own Password", "Not Now"] where app.buttons[title].exists {
+                app.buttons[title].tap()
+            }
+            tap()
+            waitUntil({ $0.hasKeyboardFocus }, timeout: 3)
+        }
+        XCTAssertTrue(hasKeyboardFocus, "\(self) never got the keyboard", file: file, line: line)
+        typeText(text)
+    }
+}
+
 /// From the chats of a seeded app, opens the conversation with Sam and
 /// returns its message field.
 @MainActor
