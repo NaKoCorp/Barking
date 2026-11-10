@@ -100,12 +100,18 @@ final class TourUITests: XCTestCase {
             pdf.tap()
             let pw = app.secureTextFields["pdf.password"]
             if pw.waitForExistence(timeout: 5) {
-                pw.tap(); pw.typeText("password1234")
+                // Return ends the entry and lowers the keyboard: with it up, the
+                // pinned "Create the PDF" button covers the second field (CI).
+                pw.focusAndType("password1234\n", in: app)
                 let c = app.secureTextFields["pdf.confirm"]
-                // At large sizes the second field can be below the fold, under the CTA bar.
-                // (At xxxLarge it is still in view, and a swipe would hide it.)
-                if size.contains(where: { $0.contains("Accessibility") }) || !c.isHittable { app.swipeUp(); c.waitUntil({ $0.isHittable }) }
-                c.tap(); c.typeText("password1234")
+                XCTAssertTrue(c.waitForExistence(timeout: 5))
+                // At accessibility sizes the second field sits under the CTA bar while
+                // still reported hittable. (At xxxLarge it is in view, and a swipe would hide it.)
+                if size.contains(where: { $0.contains("Accessibility") }) {
+                    app.scrollViews.containing(.secureTextField, identifier: "pdf.confirm").firstMatch.swipeUp()
+                    c.waitUntilStill()
+                }
+                c.focusAndType("password1234", in: app)
                 snap(app, "pdf-password-sheet-weak")
                 app.buttons["pdf.suggest"].tap()
                 app.buttons["pdf.create"].waitUntil({ $0.isEnabled })
