@@ -60,6 +60,28 @@ extension XCUIElement {
     }
 }
 
+extension XCUIElement {
+    var hasKeyboardFocus: Bool { (value(forKey: "hasKeyboardFocus") as? Bool) ?? false }
+
+    /// Scrolls the field out from under the keyboard's call-to-action bar,
+    /// taps it until it holds the keyboard, then types. With the software
+    /// keyboard up (CI has no hardware keyboard), a field low in a form can
+    /// sit under the pinned button, which then takes the tap.
+    func focusAndType(_ text: String, in app: XCUIApplication,
+                      file: StaticString = #filePath, line: UInt = #line) {
+        // The scroll view holding this field: under a sheet, the first one
+        // in the app may be the screen behind it.
+        let scroll = app.scrollViews.containing(elementType, identifier: identifier).firstMatch
+        for _ in 0..<3 where !hasKeyboardFocus {
+            for _ in 0..<3 where !isHittable { (scroll.exists ? scroll : app).swipeUp() }
+            tap()
+            waitUntil({ $0.hasKeyboardFocus }, timeout: 3)
+        }
+        XCTAssertTrue(hasKeyboardFocus, "\(self) never got the keyboard", file: file, line: line)
+        typeText(text)
+    }
+}
+
 /// From the chats of a seeded app, opens the conversation with Sam and
 /// returns its message field.
 @MainActor
