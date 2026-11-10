@@ -4,6 +4,20 @@
 
 erreur() { echo "error: $*" >&2; exit 1; }
 
+# Version of the workspace: the `version` key of the [workspace.package] section of <dir>/Cargo.toml
+# (the single source of truth; every crate inherits it). Reads the file only, no cargo needed.
+version_du_workspace() { # $1 = directory containing the workspace Cargo.toml
+  local v
+  [ -f "$1/Cargo.toml" ] || erreur "Cargo.toml not found in $1"
+  v="$(awk '
+    /^[[:space:]]*\[/ { en_section = ($0 ~ /^[[:space:]]*\[workspace\.package\][[:space:]]*(#.*)?$/); next }
+    en_section && /^[[:space:]]*version[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*"/, ""); sub(/".*$/, ""); print; exit
+    }' "$1/Cargo.toml")"
+  [ -n "$v" ] || erreur "version not found in [workspace.package] of $1/Cargo.toml"
+  printf '%s\n' "$v"
+}
+
 # sha256sum is not available everywhere (macOS): fall back to shasum.
 sha256_de() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1

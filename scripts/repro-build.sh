@@ -55,14 +55,7 @@ src="$tmp/src"
 mkdir -p "$src"
 git -C "$depot" archive --format=tar "$ref" | tar -x -C "$src"
 
-version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-cli/Cargo.toml" | head -n1)"
-[ -n "$version" ] || erreur "version not found in crates/barking-cli/Cargo.toml"
-version_node="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-node/Cargo.toml" | head -n1)"
-[ -n "$version_node" ] || erreur "version not found in crates/barking-node/Cargo.toml"
-version_push="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$src/crates/barking-push/Cargo.toml" | head -n1)"
-[ -n "$version_push" ] || erreur "version not found in crates/barking-push/Cargo.toml"
-[ "$version" = "$version_node" ] && [ "$version" = "$version_push" ] \
-  || erreur "barking-cli ($version), barking-node ($version_node) and barking-push ($version_push) must have the same version: a published release carries all three binaries"
+version="$(version_du_workspace "$src")"
 SOURCE_DATE_EPOCH="$(git -C "$depot" log -1 --format=%ct "$ref")"
 export SOURCE_DATE_EPOCH
 

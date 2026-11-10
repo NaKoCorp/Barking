@@ -39,22 +39,15 @@ jobs:
           fi
           echo "tag $TAG: commit $commit, ancestor of origin/main"
 
-      - name: The tag matches the version of barking-cli, barking-node and barking-push
+      - name: The tag matches the workspace version
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-cli/Cargo.toml | head -n1)"
-          [ -n "$version" ] || { echo "version not found in crates/barking-cli/Cargo.toml" >&2; exit 1; }
-          version_node="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-node/Cargo.toml | head -n1)"
-          [ -n "$version_node" ] || { echo "version not found in crates/barking-node/Cargo.toml" >&2; exit 1; }
-          version_push="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-push/Cargo.toml | head -n1)"
-          [ -n "$version_push" ] || { echo "version not found in crates/barking-push/Cargo.toml" >&2; exit 1; }
-          if [ "$version" != "$version_node" ] || [ "$version" != "$version_push" ]; then
-            echo "barking-cli ($version), barking-node ($version_node) and barking-push ($version_push) must have the same version" >&2
-            exit 1
-          fi
+          set -euo pipefail
+          . scripts/release-lib.sh
+          version="$(version_du_workspace .)"
           if [ "$TAG" != "v$version" ]; then
-            echo "tag $TAG does not match version v$version of crates/barking-cli/Cargo.toml, crates/barking-node/Cargo.toml and crates/barking-push/Cargo.toml" >&2
+            echo "tag $TAG does not match the workspace version v$version (Cargo.toml)" >&2
             exit 1
           fi
 

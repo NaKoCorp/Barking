@@ -3,6 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
+version = "0.1.0"
 license = "AGPL-3.0-only"
 # Nothing goes to crates.io (and cargo-deny treats path dependencies of
 # unpublished crates as pinned).
