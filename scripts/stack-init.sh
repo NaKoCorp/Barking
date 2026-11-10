@@ -3,7 +3,7 @@
 # barking-node, and with --relay the barking-push relay too (NaKoCorp).
 #
 # Usage:
-#   scripts/stack-init.sh --version V --public-addr HOST:PORT [--force]
+#   scripts/stack-init.sh --version V --public-addr IP:PORT [--force]
 #       [--relay --relay-host NAME --apns-key PATH --team-id ID --key-id ID [--topic T]]
 #
 # Writes deploy/.env and deploy/config/*.toml, builds the images from the
@@ -36,8 +36,11 @@ fail() { echo "error: $*" >&2; exit 1; }
 
 # --- address checks -------------------------------------------------------
 
-# True if the dotted IPv4 $1 is public (not private, loopback, link-local,
-# shared, "this network", multicast or reserved).
+# Address checks mirror barking_proto::record::routable: the node refuses to
+# start with a non-routable public_addr, and to dial a non-routable relay.
+
+# True if the dotted IPv4 $1 is routable (not private, loopback, link-local,
+# shared, documentation, "this network", multicast, broadcast or reserved).
 ipv4_is_public() {
   local IFS=. a b c d
   # shellcheck disable=SC2086 # split on dots, on purpose
@@ -48,7 +51,7 @@ ipv4_is_public() {
     [ "$x" -le 255 ] || return 1
   done
   a=$1 b=$2 c=$3 d=$4
-  : "$c" "$d"
+  : "$d"
   [ "$a" -eq 0 ] && return 1
   [ "$a" -eq 10 ] && return 1
   [ "$a" -eq 127 ] && return 1
@@ -56,12 +59,17 @@ ipv4_is_public() {
   [ "$a" -eq 169 ] && [ "$b" -eq 254 ] && return 1
   [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 1
   [ "$a" -eq 192 ] && [ "$b" -eq 168 ] && return 1
+  # Documentation: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24.
+  [ "$a" -eq 192 ] && [ "$b" -eq 0 ] && [ "$c" -eq 2 ] && return 1
+  [ "$a" -eq 198 ] && [ "$b" -eq 51 ] && [ "$c" -eq 100 ] && return 1
+  [ "$a" -eq 203 ] && [ "$b" -eq 0 ] && [ "$c" -eq 113 ] && return 1
   [ "$a" -ge 224 ] && return 1
   return 0
 }
 
-# True if the IPv6 literal $1 (without brackets) is public: not unspecified,
-# loopback, unique local (fc00::/7), link-local (fe80::/10) or multicast.
+# True if the IPv6 literal $1 (without brackets) is routable: not unspecified,
+# loopback, IPv4-mapped, unique local (fc00::/7), link-local (fe80::/10),
+# site-local (fec0::/10), multicast or documentation (2001:db8::/32).
 ipv6_is_public() {
   local h
   h="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
@@ -69,22 +77,31 @@ ipv6_is_public() {
   case "$h" in *:*) ;; *) return 1 ;; esac
   case "$h" in
     :: | ::1 | ::ffff:*) return 1 ;;
-    fc* | fd* | fe8* | fe9* | fea* | feb* | ff*) return 1 ;;
+    fc* | fd* | fe[89ab]?:* | fe[c-f]?:* | ff*) return 1 ;;
+    2001:db8:* | 2001:0db8:*) return 1 ;;
   esac
   return 0
 }
 
-# True if $1 is a public IP literal (IPv6 in brackets) or a DNS name that is
-# not obviously local.
+# True if $1 is a routable IP literal: dotted IPv4, or IPv6 in brackets.
+ip_is_public() {
+  case "$1" in
+    \[*\]) local h="${1#[}"; ipv6_is_public "${h%]}" ;;
+    *[!0-9.]* | '') return 1 ;;
+    *) ipv4_is_public "$1" ;;
+  esac
+}
+
+# True if $1 is a routable IP literal or a DNS name that is not obviously local
+# (what a relay host may be).
 host_is_public() {
   local h="$1"
   case "$h" in
-    \[*\]) ipv6_is_public "${h#[}" && return 0 || return 1 ;;
-  esac
-  h="${h%]}"
-  case "$h" in
-    *[!0-9.]*) ;;
+    \[*\] | *[!0-9.]* ) ;;
     *) ipv4_is_public "$h"; return ;;
+  esac
+  case "$h" in
+    \[*\]) ip_is_public "$h"; return ;;
   esac
   case "$h" in
     '' | *[!A-Za-z0-9.-]* | .* | *. | *..*) return 1 ;;
@@ -96,7 +113,8 @@ host_is_public() {
   return 0
 }
 
-# True if $1 is HOST:PORT with a public host and a port from 1 to 65535.
+# True if $1 is IP:PORT (IPv6 in brackets) with a routable address and a port
+# from 1 to 65535. The node publishes it in its signed record: no DNS name.
 addr_is_public() {
   local host port
   case "$1" in
@@ -107,7 +125,7 @@ addr_is_public() {
   esac
   case "$port" in '' | *[!0-9]*) return 1 ;; esac
   [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
-  host_is_public "$host"
+  ip_is_public "$host"
 }
 
 host_arch() {
@@ -143,7 +161,7 @@ done
 case "$version" in *[!0-9A-Za-z.-]*) usage_error "--version: invalid version $version" ;; esac
 [ -n "$public_addr" ] || usage_error "--public-addr is required"
 addr_is_public "$public_addr" \
-  || usage_error "--public-addr must be a public HOST:PORT reachable from the internet (got $public_addr)"
+  || usage_error "--public-addr must be the public IP:PORT of this machine, reachable from the internet (got $public_addr)"
 
 if [ "$relay" -eq 1 ]; then
   [ -n "$relay_host" ] || usage_error "--relay needs --relay-host"

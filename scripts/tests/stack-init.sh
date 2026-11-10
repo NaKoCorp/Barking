@@ -72,12 +72,12 @@ has() { grep -qF -- "$2" "$1"; }
 
 # --- node_only_writes_env_and_toml
 fresh
-run --version 0.1.0 --public-addr 203.0.113.7:4433
+run --version 0.1.0 --public-addr 80.67.169.12:4433
 t=node_only_writes_env_and_toml
 cfg="$repo/deploy/config/barking-node.toml"
 if [ "$code" -eq 0 ] && [ "$(cat "$repo/deploy/.env")" = "BARKING_VERSION=0.1.0" ] \
   && has "$cfg" 'listen = ["0.0.0.0:4433"]' && has "$cfg" 'data_dir = "/var/lib/barking-node"' \
-  && has "$cfg" '[dht]' && has "$cfg" 'public_addr = ["203.0.113.7:4433"]' \
+  && has "$cfg" '[dht]' && has "$cfg" 'public_addr = ["80.67.169.12:4433"]' \
   && grep -q $'build\tnode' "$FAKE_DOCKER_LOG" \
   && grep -q $'run\t--rm\tnode\tinit\t--config\t/etc/barking-node.toml' "$FAKE_DOCKER_LOG" \
   && ! grep -q relay "$FAKE_DOCKER_LOG" && [ ! -e "$repo/deploy/config/barking-push.toml" ] \
@@ -86,7 +86,7 @@ if [ "$code" -eq 0 ] && [ "$(cat "$repo/deploy/.env")" = "BARKING_VERSION=0.1.0"
 # --- relay_prints_xcconfig_block
 fresh
 relay_args
-run --version 0.1.0 --public-addr relay.example.org:4433 "${ra[@]}"
+run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}"
 t=relay_prints_xcconfig_block
 pcfg="$repo/deploy/config/barking-push.toml"
 block="BARKING_RELAY_HOST = relay.example.org
@@ -109,7 +109,9 @@ if [ "$code" -eq 0 ] && printf '%s' "$out" | grep -qF "$block" \
 # --- rejects_private_public_addr
 t=rejects_private_public_addr
 for a in 192.168.1.10:4433 10.0.0.1:4433 172.16.0.1:4433 127.0.0.1:4433 '[::1]:4433' \
-  100.64.0.1:4433 169.254.1.1:4433 '[fd00::1]:4433' '[fe80::1]:4433' 203.0.113.7 localhost:4433; do
+  100.64.0.1:4433 169.254.1.1:4433 '[fd00::1]:4433' '[fe80::1]:4433' 80.67.169.12 localhost:4433 \
+  203.0.113.7:4433 198.51.100.9:4433 192.0.2.1:4433 '[2001:db8::1]:4433' '[fec0::1]:4433' \
+  240.0.0.1:4433 80.67.169.12:0 relay.example.org:4433; do
   fresh
   run --version 0.1.0 --public-addr "$a"
   if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t $a"; else ko "$t $a (code $code)"; fi
@@ -117,34 +119,34 @@ done
 
 # --- second_run_without_force_keeps_keys
 fresh
-run --version 0.1.0 --public-addr 203.0.113.7:4433
+run --version 0.1.0 --public-addr 80.67.169.12:4433
 cp "$repo/deploy/config/barking-node.toml" "$tmp/before.toml" 2>/dev/null || : > "$tmp/before.toml"
 : > "$FAKE_DOCKER_LOG"
-run --version 0.1.0 --public-addr 198.51.100.9:4433
+run --version 0.1.0 --public-addr 80.67.169.40:4433
 t=second_run_without_force_keeps_keys
 if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -q "already initialized" \
   && ! grep -qE $'\tinit\t|keygen' "$FAKE_DOCKER_LOG" \
   && cmp -s "$tmp/before.toml" "$repo/deploy/config/barking-node.toml"; then ok "$t"; else ko "$t"; fi
-run --version 0.1.0 --public-addr 198.51.100.9:4433 --force
+run --version 0.1.0 --public-addr 80.67.169.40:4433 --force
 t=second_run_with_force_regenerates
 if [ "$code" -eq 0 ] && grep -q $'volume\trm' "$FAKE_DOCKER_LOG" \
-  && has "$repo/deploy/config/barking-node.toml" 'public_addr = ["198.51.100.9:4433"]'; then ok "$t"; else ko "$t"; fi
+  && has "$repo/deploy/config/barking-node.toml" 'public_addr = ["80.67.169.40:4433"]'; then ok "$t"; else ko "$t"; fi
 
 # --- missing_binary_for_arch
 fresh
 grep -v "barking-node-0.1.0-$arch-" "$repo/dist/SHA256SUMS" > "$tmp/sums" && cp "$tmp/sums" "$repo/dist/SHA256SUMS"
-run --version 0.1.0 --public-addr 203.0.113.7:4433
+run --version 0.1.0 --public-addr 80.67.169.12:4433
 t=missing_binary_for_arch
 if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -qF "barking-node-0.1.0-$arch-unknown-linux-musl" \
   && ! grep -q build "$FAKE_DOCKER_LOG"; then ok "$t"; else ko "$t"; fi
 fresh
-run --version 9.9.9 --public-addr 203.0.113.7:4433
+run --version 9.9.9 --public-addr 80.67.169.12:4433
 t=missing_version
 if [ "$code" -eq 1 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t"; else ko "$t"; fi
 
 # --- apns_key_missing_or_spaced
 fresh
-run --version 0.1.0 --public-addr 203.0.113.7:4433 --relay --relay-host relay.example.org \
+run --version 0.1.0 --public-addr 80.67.169.12:4433 --relay --relay-host relay.example.org \
   --apns-key "$repo/nope.p8" --team-id ABCDE12345 --key-id FGHIJ67890
 t=apns_key_missing
 if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t"; else ko "$t"; fi
@@ -161,22 +163,22 @@ for missing in --relay-host --apns-key --team-id --key-id; do
     if [ "${ra[$i]}" = "$missing" ]; then i=$((i + 2)); continue; fi
     args+=("${ra[$i]}"); i=$((i + 1))
   done
-  run --version 0.1.0 --public-addr 203.0.113.7:4433 "${args[@]}"
+  run --version 0.1.0 --public-addr 80.67.169.12:4433 "${args[@]}"
   if [ "$code" -eq 2 ] && printf '%s' "$out" | grep -qF -- "$missing" && [ ! -s "$FAKE_DOCKER_LOG" ]
   then ok "$t $missing"; else ko "$t $missing (code $code)"; fi
 done
 fresh
-run --version 0.1.0 --public-addr 203.0.113.7:4433 --relay --relay-host relay.example.org \
+run --version 0.1.0 --public-addr 80.67.169.12:4433 --relay --relay-host relay.example.org \
   --apns-key "$repo/Key Dir/AuthKey.p8" --team-id ABC --key-id FGHIJ67890
 if [ "$code" -eq 2 ] && printf '%s' "$out" | grep -qF -- --team-id; then ok "$t short team id"; else ko "$t short team id"; fi
 
 # --- relay_added_later_keeps_node
 fresh
-run --version 0.1.0 --public-addr 203.0.113.7:4433
+run --version 0.1.0 --public-addr 80.67.169.12:4433
 cp "$repo/deploy/config/barking-node.toml" "$tmp/before.toml"
 : > "$FAKE_DOCKER_LOG"
 relay_args
-run --version 0.1.0 --public-addr 203.0.113.7:4433 "${ra[@]}"
+run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}"
 t=relay_added_later_keeps_node
 if [ "$code" -eq 0 ] && ! grep -q $'\tinit\t' "$FAKE_DOCKER_LOG" && grep -q keygen-node "$FAKE_DOCKER_LOG" \
   && cmp -s "$tmp/before.toml" "$repo/deploy/config/barking-node.toml" \
@@ -184,9 +186,9 @@ if [ "$code" -eq 0 ] && ! grep -q $'\tinit\t' "$FAKE_DOCKER_LOG" && grep -q keyg
 
 # --- usage
 fresh
-run --public-addr 203.0.113.7:4433
+run --public-addr 80.67.169.12:4433
 if [ "$code" -eq 2 ]; then ok "missing --version"; else ko "missing --version"; fi
-run --version 0.1.0 --public-addr 203.0.113.7:4433 --bogus
+run --version 0.1.0 --public-addr 80.67.169.12:4433 --bogus
 if [ "$code" -eq 2 ]; then ok "unknown option"; else ko "unknown option"; fi
 
 [ "$echecs" -eq 0 ] || { echo "$echecs failure(s)" >&2; exit 1; }
