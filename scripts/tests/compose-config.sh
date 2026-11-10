@@ -45,6 +45,8 @@ for s in node relay; do
   check "services.$s.cap_drop" '["ALL"]'
   check "services.$s.restart" '"unless-stopped"'
   check "services.$s.tmpfs" '["/tmp"]'
+  check "services.$s.logging.options.max-size" '"10m"'
+  check "services.$s.logging.options.max-file" '"3"'
 done
 check services.node.ports.0.target 4433
 check services.node.ports.0.protocol '"udp"'

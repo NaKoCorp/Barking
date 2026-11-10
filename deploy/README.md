@@ -21,7 +21,7 @@ Use the `aarch64` binaries on Apple silicon and the `x86_64` ones on Intel. Alte
 ## 2. Run a node
 
 ```sh
-scripts/stack-init.sh --version 0.1.0 --public-addr <public-ip>:4433
+scripts/stack-init.sh --version 0.1.0 --public-addr <public-ipv4>:4433
 docker compose -f deploy/compose.yaml up -d
 docker compose -f deploy/compose.yaml exec node /barking-node status
 ```
@@ -33,14 +33,18 @@ docker compose -f deploy/compose.yaml exec node /barking-node status
 3. creates the node key in the `barking_node-data` volume;
 4. prints the identifier and the address to publish.
 
-`--public-addr` is the public IP of your connection (the node publishes it in its signed record, so no DNS name). The script refuses a private or reserved address. It also refuses to run twice unless you pass `--force`, which deletes the volume and therefore the node's key and stored packets.
+`--public-addr` is the public IPv4 address of your connection. The node publishes it in its signed record, so it cannot be a DNS name. IPv6 is not supported here, because Docker Desktop publishes ports on IPv4. The script refuses a private or reserved address.
+
+It also refuses to run twice. Without `--relay`, `--force` stops the node and deletes its volume, and with it the node's key and stored packets. A running relay is left alone.
+
+If a run fails, the script removes the configuration and the volumes it created, so you can run it again without `--force`.
 
 ## 3. NaKoCorp: node and push relay
 
 You need the APNs authentication key (`.p8`) of the app, with its key id and the Apple team id. Keep it outside the repository, for example in `~/.apple/`.
 
 ```sh
-scripts/stack-init.sh --version 0.1.0 --public-addr <public-ip>:4433 \
+scripts/stack-init.sh --version 0.1.0 --public-addr <public-ipv4>:4433 \
   --relay --relay-host relay.example.org \
   --apns-key ~/.apple/AuthKey_FGHIJ67890.p8 --team-id ABCDE12345 --key-id FGHIJ67890
 docker compose -f deploy/compose.yaml --profile relay up -d
@@ -62,10 +66,12 @@ These values are **built into the app**: changing the host, the relay key or the
 
 A node that is already running keeps its key when you add `--relay` later.
 
+> **Warning:** `--relay --force` stops the whole stack and deletes **both** volumes. The relay then gets a new identity and a new seal key. Every installed build stops receiving wake-ups until a new TestFlight build carries the new `Local.xcconfig` values. Only use it to start over.
+
 ## 4. Hosting on a Mac
 
 - **Router.** Forward UDP 4433 (node) and, for the relay, UDP 4434 to the Mac. Give the Mac a fixed address on the local network (DHCP reservation).
-- **Public address.** A fixed IP is best. With a dynamic one, give the relay a dynamic DNS name (`--relay-host`): nodes resolve it at each wake-up. The node's own `public_addr` is an IP: when it changes, edit it in `deploy/config/barking-node.toml` and run `docker compose -f deploy/compose.yaml restart node` (do not use `--force`, which deletes the keys).
+- **Public address.** A fixed IP is best. With a dynamic one, give the relay a dynamic DNS name (`--relay-host`): nodes resolve it at each wake-up. The node's own `public_addr` is an IP: when it changes, edit it in `deploy/config/barking-node.toml` and run `docker compose -f deploy/compose.yaml up -d --force-recreate node`. A plain `restart` can keep the old file, since editors often replace it. Do not use `--force`, which deletes the keys.
 - **Always on.** Prevent sleep (System Settings › Energy, or `sudo pmset -a sleep 0`), start Docker Desktop at login, and keep the services' `restart: unless-stopped`.
 - **Docker Desktop hides client addresses.** On a Mac, published ports go through Docker Desktop's proxy, so the containers likely see every peer coming from the same internal address. The node's per-address limits (`max_connections_per_ip`, 8 by default) then apply to all peers together, and it does not learn peers that connect to it. The relay's per-address limits behave the same way. This is fine for a TestFlight test with a few devices. A node meant to serve the public network belongs on Linux with Docker Engine, where peer addresses are preserved. To check on your Mac: `docker run --rm -p 5000:5000/udp alpine nc -ulv -p 5000`, send a datagram from an outside host, and look at the source address it prints.
 - **Logs and state.** `docker compose -f deploy/compose.yaml logs -f relay`, `… exec node /barking-node status`.

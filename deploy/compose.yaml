@@ -6,6 +6,13 @@
 # BARKING_VERSION comes from deploy/.env, written by scripts/stack-init.sh.
 name: barking
 
+# Always-on host: cap each service's logs at 3 files of 10 MB.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   node:
     build:
@@ -25,6 +32,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    logging: *logging
 
   relay:
     profiles: [relay]
@@ -47,6 +55,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    logging: *logging
 
 volumes:
   node-data:

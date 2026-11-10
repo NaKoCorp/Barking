@@ -114,7 +114,7 @@ if [ "$code" -eq 0 ] && printf '%s' "$out" | grep -qF "$block" \
   && has "$pcfg" 'key_file = "/var/lib/barking-push/apns.p8"' \
   && grep -q $'keygen-node\t--out\t/var/lib/barking-push/node.key' "$FAKE_DOCKER_LOG" \
   && grep -q $'keygen-seal\t--out\t/var/lib/barking-push/seal1.key\t--id\t1' "$FAKE_DOCKER_LOG" \
-  && grep -qF "$repo/Key Dir/AuthKey.p8:/in/apns.p8:ro" "$FAKE_DOCKER_LOG" \
+  && grep -qF "type=bind,src=$repo/Key Dir/AuthKey.p8,dst=/in/apns.p8,readonly" "$FAKE_DOCKER_LOG" \
   && grep -q 'barking_relay-secrets:/s' "$FAKE_DOCKER_LOG"; then ok "$t"; else ko "$t"; fi
 
 # --- rejects_private_public_addr
@@ -201,14 +201,14 @@ FAKE_STRICT_ENV=1 run --version 0.1.0 --public-addr 80.67.169.12:4433 --force
 t=force_first_run_without_env
 if [ "$code" -eq 0 ]; then ok "$t"; else ko "$t (code $code)"; fi
 
-# --- force_sequence: down, then only the node volume (no --relay)
+# --- force_sequence: the node is stopped, then only its volume is deleted (no --relay)
 fresh
 run --version 0.1.0 --public-addr 80.67.169.12:4433
 : > "$FAKE_DOCKER_LOG"
 run --version 0.1.0 --public-addr 80.67.169.12:4433 --force
 t=force_sequence
-down_line="$(grep -n $'\tdown' "$FAKE_DOCKER_LOG" | head -n1 | cut -d: -f1)"
-rm_line="$(grep -n $'volume\trm\t-f\tbarking_node-data' "$FAKE_DOCKER_LOG" | head -n1 | cut -d: -f1)"
+down_line="$(grep -n $'rm\t--stop\t--force\tnode' "$FAKE_DOCKER_LOG" | head -n1 | cut -d: -f1 || true)"
+rm_line="$(grep -n $'volume\trm\t-f\tbarking_node-data' "$FAKE_DOCKER_LOG" | head -n1 | cut -d: -f1 || true)"
 if [ "$code" -eq 0 ] && [ -n "$down_line" ] && [ -n "$rm_line" ] && [ "$down_line" -lt "$rm_line" ] \
   && ! grep -q 'barking_relay-secrets' "$FAKE_DOCKER_LOG"; then ok "$t"; else ko "$t"; fi
 
@@ -255,13 +255,60 @@ for bad in "--team-id|abcde12345" "--team-id|ABCDE12345${nl}key_file = \"x" "--k
   if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t $opt"; else ko "$t $opt (code $code)"; fi
 done
 
-# --- accepts_public_ipv6
-t=accepts_public_ipv6
+# --- ipv4_only: Docker Desktop publishes IPv4; IPv6 is out of scope
+t=ipv4_only
 for a in '[2a01:e0a::1]:4433' '[2A01:E0A::1]:4433'; do
   fresh
   run --version 0.1.0 --public-addr "$a"
-  if [ "$code" -eq 0 ]; then ok "$t $a"; else ko "$t $a (code $code)"; fi
+  if [ "$code" -eq 2 ] && printf '%s' "$out" | grep -q IPv4 && [ ! -s "$FAKE_DOCKER_LOG" ]
+  then ok "$t $a"; else ko "$t $a (code $code)"; fi
 done
+fresh
+relay_args
+run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}" --relay-host '[2a01:e0a::1]'
+if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t relay host"; else ko "$t relay host (code $code)"; fi
+
+# --- leading_zero_octets (the node's parser refuses them)
+t=leading_zero_octets
+for a in 08.8.8.8:4433 80.067.169.12:4433 80.67.169.012:4433; do
+  fresh
+  run --version 0.1.0 --public-addr "$a"
+  if [ "$code" -eq 2 ]; then ok "$t $a"; else ko "$t $a (code $code)"; fi
+done
+
+# --- force_node_keeps_relay_running: --force without --relay touches the node only
+fresh
+relay_args
+run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}"
+: > "$FAKE_DOCKER_LOG"
+run --version 0.1.0 --public-addr 80.67.169.12:4433 --force
+t=force_node_keeps_relay_running
+if [ "$code" -eq 0 ] && ! grep -q $'\tdown' "$FAKE_DOCKER_LOG" \
+  && grep -q $'rm\t--stop\t--force\tnode' "$FAKE_DOCKER_LOG" \
+  && ! grep -q 'barking_relay-secrets' "$FAKE_DOCKER_LOG" \
+  && printf '%s' "$out" | grep -qF -- '--profile relay up -d'; then ok "$t"; else ko "$t (code $code)"; fi
+
+# --- apns_key_path_with_colon_or_comma
+fresh
+mkdir -p "$repo/a:b"
+cp "$repo/Key Dir/AuthKey.p8" "$repo/a:b/AuthKey.p8"
+run --version 0.1.0 --public-addr 80.67.169.12:4433 --relay --relay-host relay.example.org \
+  --apns-key "$repo/a:b/AuthKey.p8" --team-id ABCDE12345 --key-id FGHIJ67890
+t=apns_key_path_with_colon
+if [ "$code" -eq 0 ] && grep -qF "src=$repo/a:b/AuthKey.p8," "$FAKE_DOCKER_LOG"; then ok "$t"; else ko "$t (code $code)"; fi
+fresh
+mkdir -p "$repo/a,b"
+cp "$repo/Key Dir/AuthKey.p8" "$repo/a,b/AuthKey.p8"
+run --version 0.1.0 --public-addr 80.67.169.12:4433 --relay --relay-host relay.example.org \
+  --apns-key "$repo/a,b/AuthKey.p8" --team-id ABCDE12345 --key-id FGHIJ67890
+t=apns_key_path_with_comma
+if [ "$code" -eq 2 ] && [ ! -s "$FAKE_DOCKER_LOG" ]; then ok "$t"; else ko "$t (code $code)"; fi
+
+# --- dynamic_ip_note
+fresh
+run --version 0.1.0 --public-addr 80.67.169.12:4433
+t=dynamic_ip_note
+if [ "$code" -eq 0 ] && printf '%s' "$out" | grep -q "public IP changes"; then ok "$t"; else ko "$t"; fi
 
 # --- usage
 fresh

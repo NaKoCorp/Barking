@@ -42,12 +42,13 @@ fail() { echo "error: $*" >&2; exit 1; }
 # True if the dotted IPv4 $1 is routable (not private, loopback, link-local,
 # shared, documentation, "this network", multicast, broadcast or reserved).
 ipv4_is_public() {
-  local IFS=. a b c d
+  local IFS=. a b c d x
   # shellcheck disable=SC2086 # split on dots, on purpose
   set -- $1
   [ "$#" -eq 4 ] || return 1
   for x in "$@"; do
-    case "$x" in '' | *[!0-9]*) return 1 ;; esac
+    # Rust's Ipv4Addr parser refuses leading zeros (octal ambiguity).
+    case "$x" in '' | *[!0-9]* | 0[0-9]*) return 1 ;; esac
     [ "$x" -le 255 ] || return 1
   done
   a=$1 b=$2 c=$3 d=$4
@@ -67,41 +68,22 @@ ipv4_is_public() {
   return 0
 }
 
-# True if the IPv6 literal $1 (without brackets) is routable: not unspecified,
-# loopback, IPv4-mapped, unique local (fc00::/7), link-local (fe80::/10),
-# site-local (fec0::/10), multicast or documentation (2001:db8::/32).
-ipv6_is_public() {
-  local h
-  h="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  case "$h" in *[!0-9a-f:.]* | '' | *:*:*:*:*:*:*:*:*:*) return 1 ;; esac
-  case "$h" in *:*) ;; *) return 1 ;; esac
-  case "$h" in
-    :: | ::1 | ::ffff:*) return 1 ;;
-    fc* | fd* | fe[89ab]?:* | fe[c-f]?:* | ff*) return 1 ;;
-    2001:db8:* | 2001:0db8:*) return 1 ;;
-  esac
-  return 0
-}
-
-# True if $1 is a routable IP literal: dotted IPv4, or IPv6 in brackets.
+# True if $1 is a routable dotted IPv4. IPv6 is out of scope: Docker Desktop
+# publishes ports on IPv4.
 ip_is_public() {
   case "$1" in
-    \[*\]) local h="${1#[}"; ipv6_is_public "${h%]}" ;;
     *[!0-9.]* | '') return 1 ;;
     *) ipv4_is_public "$1" ;;
   esac
 }
 
-# True if $1 is a routable IP literal or a DNS name that is not obviously local
+# True if $1 is a routable IPv4 or a DNS name that is not obviously local
 # (what a relay host may be).
 host_is_public() {
   local h="$1"
   case "$h" in
-    \[*\] | *[!0-9.]* ) ;;
+    *[!0-9.]*) ;;
     *) ipv4_is_public "$h"; return ;;
-  esac
-  case "$h" in
-    \[*\]) ip_is_public "$h"; return ;;
   esac
   case "$h" in
     '' | *[!A-Za-z0-9.-]* | .* | *. | *..*) return 1 ;;
@@ -113,12 +95,11 @@ host_is_public() {
   return 0
 }
 
-# True if $1 is IP:PORT (IPv6 in brackets) with a routable address and a port
-# from 1 to 65535. The node publishes it in its signed record: no DNS name.
+# True if $1 is IPV4:PORT with a routable address and a port from 1 to 65535.
+# The node publishes it in its signed record: no DNS name.
 addr_is_public() {
   local host port
   case "$1" in
-    \[*\]:*) host="${1%:*}"; port="${1##*:}" ;;
     *:*:*) return 1 ;;
     *:*) host="${1%:*}"; port="${1##*:}" ;;
     *) return 1 ;;
@@ -170,14 +151,16 @@ done
 case "$version" in *[!0-9A-Za-z.-]*) usage_error "--version: invalid version $version" ;; esac
 [ -n "$public_addr" ] || usage_error "--public-addr is required"
 addr_is_public "$public_addr" \
-  || usage_error "--public-addr must be the public IP:PORT of this machine, reachable from the internet (got $public_addr)"
+  || usage_error "--public-addr must be the public IPv4:PORT of this connection, reachable from the internet (got $public_addr)"
 
 if [ "$relay" -eq 1 ]; then
   [ -n "$relay_host" ] || usage_error "--relay needs --relay-host"
   host_is_public "$relay_host" \
-    || usage_error "--relay-host must be a public name or address, without a port (got $relay_host)"
+    || usage_error "--relay-host must be a public DNS name or IPv4 address, without a port (got $relay_host)"
   [ -n "$apns_key" ] || usage_error "--relay needs --apns-key"
   [ -f "$apns_key" ] || usage_error "--apns-key: no such file: $apns_key"
+  # Mounted with --mount, whose value is comma-separated.
+  case "$apns_key" in *,*) usage_error "--apns-key: the path must not contain a comma" ;; esac
   apns_key="$(cd "$(dirname "$apns_key")" && pwd)/$(basename "$apns_key")"
   [ -n "$team_id" ] || usage_error "--relay needs --team-id"
   [ -n "$key_id" ] || usage_error "--relay needs --key-id"
@@ -222,8 +205,14 @@ docker info >/dev/null 2>&1 || fail "the Docker daemon does not answer (is Docke
 dc() { BARKING_VERSION="$version" docker compose -f "$compose_file" "$@"; }
 
 if [ "$force" -eq 1 ]; then
-  echo "--force: stopping the stack and deleting the volumes to regenerate"
-  dc --profile relay down
+  if [ "$do_relay" -eq 1 ]; then
+    echo "--force: stopping the node and the relay, deleting their volumes to regenerate"
+    dc --profile relay down
+  else
+    # Only the node: a running relay keeps its keys and keeps running.
+    echo "--force: stopping the node and deleting its volume to regenerate"
+    dc rm --stop --force node
+  fi
   [ "$do_node" -eq 0 ] || docker volume rm -f "$node_volume"
   [ "$do_relay" -eq 0 ] || docker volume rm -f "$relay_volume"
 fi
@@ -303,7 +292,7 @@ EOF
   # The relay refuses a key readable by others: install it owned by the
   # container user, mode 0600, from a throwaway container.
   docker run --rm --network none --user 0:0 \
-    -v "$relay_volume:/s" -v "$apns_key:/in/apns.p8:ro" "$alpine" \
+    -v "$relay_volume:/s" --mount "type=bind,src=$apns_key,dst=/in/apns.p8,readonly" "$alpine" \
     install -m 0600 -o 65532 -g 65532 /in/apns.p8 /s/apns.p8
   echo
   echo "Relay initialized. Put these lines in apple/Local.xcconfig, then build the app:"
@@ -321,10 +310,12 @@ fi
 
 echo
 echo "Next:"
-if [ "$relay" -eq 1 ]; then
+if [ "$relay" -eq 1 ] || [ -e "$push_toml" ]; then
   echo "  docker compose -f deploy/compose.yaml --profile relay up -d"
   echo "  Forward UDP $node_port (node) and UDP $relay_port (relay) from your router to this machine."
 else
   echo "  docker compose -f deploy/compose.yaml up -d"
   echo "  Forward UDP $node_port from your router to this machine."
 fi
+echo "  If your public IP changes, edit public_addr in deploy/config/barking-node.toml and run"
+echo "  docker compose -f deploy/compose.yaml up -d --force-recreate node (keys are kept)."
