@@ -62,7 +62,7 @@ jobs:
         with:
           persist-credentials: false
       # Toolchain pinned by rust-toolchain.toml, installed explicitly (rustup is on the Ubuntu runners).
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
         with:
           components: rustfmt clippy
       # Only GitHub-owned actions are allowed in this repository: the Cargo
@@ -104,7 +104,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       # cargo-deny reads the dependency graph with cargo.
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
       # Official releases, pinned by version and checksum (GitHub's asset
       # digest, equal to the project's own checksum file where it has one).
       - name: Install the scanners
@@ -180,10 +180,10 @@ jobs:
           fi
       - name: Select the pinned Xcode
         if: steps.paths.outputs.changed == 'true'
-        uses: ./.github/actions/select-xcode
+        uses: $/.github/actions/select-xcode
       - name: Install the pinned Rust toolchain
         if: steps.paths.outputs.changed == 'true'
-        uses: ./.github/actions/rust-toolchain
+        uses: $/.github/actions/rust-toolchain
         with:
           targets: aarch64-apple-ios-sim
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -264,6 +264,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
-    uses: ./.github/workflows/repro-build.yml
+    uses: $/.github/workflows/repro-build.yml
     with:
       ref: ${{ github.sha }}

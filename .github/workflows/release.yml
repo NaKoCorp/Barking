@@ -56,7 +56,7 @@ jobs:
     needs: verifier-tag
     permissions:
       contents: read
-    uses: ./.github/workflows/repro-build.yml
+    uses: $/.github/workflows/repro-build.yml
     with:
       ref: refs/tags/${{ github.ref_name }}
       retention-days: 7
