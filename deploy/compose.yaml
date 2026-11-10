@@ -1,0 +1,53 @@
+# Barking: a node, and for NaKoCorp the push relay too (profile `relay`).
+# Images are built from a verified release directory (../dist, see
+# deploy/README.md). Set up once with scripts/stack-init.sh, then:
+#   node only:       docker compose -f deploy/compose.yaml up -d --build
+#   node and relay:  docker compose -f deploy/compose.yaml --profile relay up -d --build
+# BARKING_VERSION comes from deploy/.env, written by scripts/stack-init.sh.
+name: barking
+
+services:
+  node:
+    build:
+      context: ../dist
+      dockerfile: ../docker/node.Dockerfile
+      args:
+        VERSION: ${BARKING_VERSION:?set BARKING_VERSION in deploy/.env (scripts/stack-init.sh)}
+    image: barking-node:${BARKING_VERSION:?set BARKING_VERSION in deploy/.env (scripts/stack-init.sh)}
+    command: ["run", "--config", "/etc/barking-node.toml"]
+    ports: ["4433:4433/udp"]
+    volumes:
+      # node.key and node.db, owned by the container user (65532).
+      - node-data:/var/lib/barking-node
+      - ./config/barking-node.toml:/etc/barking-node.toml:ro
+    tmpfs: ["/tmp"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  relay:
+    profiles: [relay]
+    build:
+      context: ../dist
+      dockerfile: ../docker/push.Dockerfile
+      additional_contexts:
+        apk: ../docker/apk
+      args:
+        VERSION: ${BARKING_VERSION:?set BARKING_VERSION in deploy/.env (scripts/stack-init.sh)}
+    image: barking-push:${BARKING_VERSION:?set BARKING_VERSION in deploy/.env (scripts/stack-init.sh)}
+    ports: ["4434:4434/udp"]
+    volumes:
+      # node.key, seal1.key and apns.p8 (mode 0600, owned by 65532). Not a bind
+      # mount: on Docker Desktop, host files do not belong to the container user.
+      - relay-secrets:/var/lib/barking-push
+      - ./config/barking-push.toml:/etc/barking-push/barking-push.toml:ro
+    tmpfs: ["/tmp"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  node-data:
+  relay-secrets:

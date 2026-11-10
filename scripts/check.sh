@@ -28,3 +28,8 @@ if cargo nextest --version >/dev/null 2>&1; then
 else
   cargo test --workspace --locked
 fi
+# Deployment files: deploy/compose.yaml resolves for both profiles (needs
+# docker compose, no daemon).
+if docker compose version >/dev/null 2>&1; then
+  scripts/tests/compose-config.sh
+fi
