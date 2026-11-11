@@ -1,6 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
+  "semanticCommits": "enabled",
   "automergeStrategy": "squash",
   "platformAutomerge": true,
   "osvVulnerabilityAlerts": true,

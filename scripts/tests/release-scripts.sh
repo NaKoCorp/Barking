@@ -125,7 +125,11 @@ cas_attestation_binds_tag_commit() {
   nouveau
   verifier; attendre_code 0 || return 1
   attendre_log "--source-ref refs/tags/v$version" && attendre_log "--source-digest $commit_tag" \
-    && attendre_log "--deny-self-hosted-runners" && attendre_log "--signer-workflow"
+    && attendre_log "--deny-self-hosted-runners" \
+    && attendre_log "--signer-workflow owner/repo/.github/workflows/release.yml" \
+    && attendre_log "-R owner/repo" || return 1
+  # Every published binary is verified, not just one of them.
+  [ "$(grep -c "attestation verify" "$tmp/gh.log")" -eq 9 ] || { echo "expected 9 attestation checks"; return 1; }
 }
 cas_attestation_without_local_tag() {
   nouveau

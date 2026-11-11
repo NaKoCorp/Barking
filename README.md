@@ -80,7 +80,7 @@ The CLI asks for a passphrase and stores its data in `~/.barking` (use `--home <
 <details open>
 <summary><b>With Docker</b> (~5 MB image)</summary>
 
-Each release publishes the image `ghcr.io/nakocorp/barking-node` for `linux/amd64` and `linux/arm64`, with the tags `X.Y.Z`, `X.Y` and `latest` (and `ghcr.io/nakocorp/barking-push` for the push relay). It holds the static `barking-node` binary of the release alone on an empty base. To check where an image comes from, see [docs/VERIFYING.md](docs/VERIFYING.md#container-images).
+Each release publishes the image `ghcr.io/nakocorp/barking-node` for `linux/amd64` and `linux/arm64`, with the tags `X.Y.Z`, `X.Y` and `latest` (and `ghcr.io/nakocorp/barking-push` for the push relay). It holds the static `barking-node` binary of the release alone on an empty base. No release has been published yet: until the first one, build the image yourself as shown below. To check where an image comes from, see [docs/VERIFYING.md](docs/VERIFYING.md#container-images).
 
 ```sh
 docker run --rm -v barking-node:/var/lib/barking-node ghcr.io/nakocorp/barking-node:<version> init

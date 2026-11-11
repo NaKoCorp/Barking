@@ -1,4 +1,4 @@
-# CI environment for the aarch64-apple-darwin target (release.yml, ci.yml).
+# CI environment for the aarch64-apple-darwin target (repro-build.yml, called by release.yml and ci.yml).
 # The macOS binary is only reproducible with the same Xcode and the same SDK: repro-build.sh refuses
 # to build this target if `xcodebuild -version` and `xcrun --show-sdk-version` do not give these values.
 # Source: actions/runner-images, images/macos/macos-26-arm64-Readme.md (image 20261013.0424.1):

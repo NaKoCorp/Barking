@@ -18,7 +18,7 @@ There is no maintainer signature: no key held offline signs a release. A release
 
 **GitHub is therefore the only root of trust of steps 1 and 2.** The attestations are Sigstore signatures issued to the workflow run. They prove where a binary was built: this repository, the release workflow, this tag and this commit. They do not protect against a compromise of GitHub, of its runners or of the release workflow, and whoever takes over a maintainer account can publish a release that passes both steps.
 
-**The independent rebuild is the counter-check.** The builds are reproducible: anyone can rebuild a release from its tag and must get the same bytes. A binary that does not come from the tagged source cannot pass step 3, whatever the attestation says. This is the only check that does not rest on GitHub's build and signing infrastructure. It shows that the binary matches the source; it says nothing about the source itself, which is public and reviewable.
+**The independent rebuild is the counter-check.** The builds are reproducible: anyone can rebuild a release from its tag and must get the same bytes. A binary that does not come from the tagged source cannot pass step 3, whatever the attestation says (step 3 covers the targets your machine can rebuild, see below). This is the only check that does not rest on GitHub's build and signing infrastructure. It shows that the binary matches the source; it says nothing about the source itself, which is public and reviewable.
 
 In practice:
 

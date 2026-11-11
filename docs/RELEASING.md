@@ -69,7 +69,7 @@ On every push to `main`, `release-please.yml` opens or updates a pull request ti
 
 Each merge into `main` makes this pull request out of date. Release-please regenerates it on that same push, and its checks run again.
 
-Read the changelog before merging; you can edit `CHANGELOG.md` on the release branch. Do it last: a later merge into `main` regenerates the pull request. For the first release in particular, the commits that predate this procedure have no Conventional Commits title and are missing from the changelog: complete the section by hand.
+Read the changelog before merging; you can edit `CHANGELOG.md` on the release branch. Do it last: a later merge into `main` regenerates the pull request. The notes of the GitHub release may come from the pull request description rather than from `CHANGELOG.md`: check them on the published release, and edit them there if needed (`gh release edit <tag> --notes-file`). For the first release in particular, the commits that predate this procedure have no Conventional Commits title and are missing from the changelog: complete the section by hand.
 
 ### 3. Merge the release pull request
 
@@ -111,6 +111,7 @@ Before the first release, and after any change to the release workflows, rehears
 2. Merge the release pull request that follows.
 3. Check the result:
    - the tag `v0.2.0-rc.1` exists, and the release is published with nine binaries and `SHA256SUMS`;
+   - (the packages are private until you make them public, setting above: run `docker login ghcr.io` first)
    - `docker buildx imagetools inspect ghcr.io/nakocorp/barking-node:0.2.0-rc.1` lists `linux/amd64` and `linux/arm64`;
    - the image tags `latest` and `0.2` do **not** exist;
    - `docker run --rm ghcr.io/nakocorp/barking-push:0.2.0-rc.1 --version` prints the version;
@@ -154,6 +155,6 @@ A difference between two builds means a non-reproducible build, a new source of 
     bash scripts/tests/ci-scripts.sh    # pull request titles, CI gate, comparison of the copies (no Docker)
     scripts/tests/images.sh <dir> <version>   # the two images build and start from a release directory
 
-In `ci.yml`, the `release scripts` job runs `release-scripts.sh` and `ci-scripts.sh`, and `scripts/check.sh` runs the format, clippy and Rust tests, on every pull request. `repro-twice.sh` and `images.sh` run on pull requests that change the build environment (lockfile, manifests, `build.rs`, toolchain, `docker/`, `.xcode-version`, build scripts, workflows); the `double build (PR)` job still reports, with its build skipped, on the others. Run by hand (`workflow_dispatch`), `ci` does the full double build of all targets with comparison of the copies, as `release.yml` does on every tag.
+In `ci.yml`, the `release scripts` job runs `release-scripts.sh`, `ci-scripts.sh`, `stack-init.sh` and `compose-config.sh`, and `scripts/check.sh` runs the format, clippy and Rust tests, on every pull request. `repro-twice.sh` and `images.sh` run on pull requests that change the build environment (lockfile, manifests, `build.rs`, toolchain, `docker/`, `.xcode-version`, build scripts, workflows); the `double build (PR)` job still reports, with its build skipped, on the others. Run by hand (`workflow_dispatch`), `ci` does the full double build of all targets with comparison of the copies, as `release.yml` does on every tag.
 
 A push to `main` does not repeat what its pull request validated. The `gate` job (`scripts/ci-gate.sh`) skips the checks when the merged tree is exactly the tree the pull request tested and that run was green. In any other case, and in any doubt, the full CI runs.

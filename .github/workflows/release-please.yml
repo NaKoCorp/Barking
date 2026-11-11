@@ -7,8 +7,8 @@ name: release-please
 # release; the tag push then triggers release.yml, which builds and publishes.
 #
 # The release is a draft with the tag forced: a draft release creates no tag
-# by itself, and release.yml needs the tag to start. Publishing the draft is
-# the last, manual step.
+# by itself, and release.yml needs the tag to start. release.yml attaches the
+# files to the draft and publishes it.
 #
 # The token is a GitHub App installation token, not GITHUB_TOKEN: events
 # caused by GITHUB_TOKEN never start other workflows, so the release pull
