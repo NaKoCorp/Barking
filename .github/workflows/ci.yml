@@ -68,7 +68,7 @@ jobs:
           if git diff --quiet "$BASE" HEAD -- \
             Cargo.lock ':(glob)**/Cargo.toml' ':(glob)**/build.rs' rust-toolchain.toml \
             .cargo/ docker/ .xcode-version scripts/repro-build.sh scripts/release-lib.sh \
-            scripts/tests/repro-twice.sh scripts/compare-copies.sh \
+            scripts/tests/repro-twice.sh scripts/tests/images.sh scripts/compare-copies.sh \
             .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/repro-build.yml \
             .github/actions/
           then
@@ -79,7 +79,17 @@ jobs:
           fi
       - name: Two builds, two paths, same checksums
         if: steps.env.outputs.changed == 'true'
+        env:
+          REPRO_KEEP: ${{ runner.temp }}/release
         run: scripts/tests/repro-twice.sh
+      - name: Runtime images build and start
+        if: steps.env.outputs.changed == 'true'
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/release
+        run: |
+          . scripts/release-lib.sh
+          version="$(version_du_workspace .)"
+          scripts/tests/images.sh "$RELEASE_DIR" "$version"
 
   rust:
     name: Rust checks (fmt, clippy, tests)
