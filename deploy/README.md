@@ -13,7 +13,7 @@ These steps work on a Mac with Docker Desktop (IPv4) and on a Linux server with 
 
 The images are built from the static binaries of a release. Each binary is checked against `SHA256SUMS`.
 
-1. Download the release files (`barking-node-…`, `barking-push-…` for NaKoCorp, `SHA256SUMS`, `SHA256SUMS.minisig`) into `dist/`.
+1. Download the release files (`barking-node-…`, `barking-push-…` for NaKoCorp and `SHA256SUMS`) into `dist/`.
 2. Verify them as described in [Verify a binary](../README.md#-verify-a-binary) (`scripts/verify-release.sh`).
 
 Use the `aarch64` binaries on Apple silicon and the `x86_64` ones on Intel. Alternatively, build them yourself with `scripts/repro-build.sh --target aarch64-unknown-linux-musl`.
