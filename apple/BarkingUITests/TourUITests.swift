@@ -11,7 +11,7 @@ import XCTest
 /// B3), taken after the numbered safety-code screens.
 @MainActor
 final class TourUITests: XCTestCase {
-    /// The tour is one long test: the UI plan's 60 s per-test allowance does not apply.
+    /// The tour is one long test: the UI plan's per-test allowance does not apply.
     override func setUp() {
         super.setUp()
         executionTimeAllowance = 900
