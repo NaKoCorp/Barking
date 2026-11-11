@@ -26,7 +26,7 @@ final class OnboardingUITests: XCTestCase {
     /// header, text or buttons, at the default size and at AX3.
     func testWelcomeDotsStayOffTheText() throws {
         // Two launches and six screenshot scans with the animations on: ~28 s alone,
-        // past the plan's 60 s when three parallel simulators saturate the CPU.
+        // past the plan's allowance when three parallel simulators saturate the CPU.
         executionTimeAllowance = 180
         // The dots move: animations stay on, as the test looks at them.
         let app = XCUIApplication.fresh(extra: ["-BarkingUITestKeepAnimations"])
