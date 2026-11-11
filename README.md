@@ -96,6 +96,8 @@ To use a configuration file, mount it read-only and pass it to `run`:
 
 `docker exec barking-node /barking-node status` shows what the node holds.
 
+To run a node, or a node and the push relay, with Docker Compose on a Mac: see [`deploy/README.md`](deploy/README.md).
+
 </details>
 
 <details>

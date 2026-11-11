@@ -2,7 +2,7 @@
 # dependencies, secrets and misconfigurations; HIGH and CRITICAL fail.
 scan:
   scanners: [vuln, secret, misconfig]
-  skip-dirs: [target, graphify-out, dist, .superpowers]
+  skip-dirs: [target, graphify-out, dist, .superpowers, .claude]
 severity: [HIGH, CRITICAL]
 exit-code: 1
 ignorefile: .trivyignore.yaml

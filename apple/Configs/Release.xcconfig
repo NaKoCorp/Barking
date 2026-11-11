@@ -1,4 +1,5 @@
 // Release: no development screen, no private node addresses.
-// APNs environment of the entitlement and of the tokens given to the relay.
-BARKING_APS_ENVIRONMENT = development
+// APNs environment of the entitlement and of the tokens given to the relay:
+// TestFlight and App Store builds get production tokens.
+BARKING_APS_ENVIRONMENT = production
 #include? "../Local.xcconfig"

@@ -270,6 +270,9 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/tests/release-scripts.sh
+      # Deployment set-up (fake docker) and compose file of deploy/.
+      - run: scripts/tests/stack-init.sh
+      - run: scripts/tests/compose-config.sh
 
   build:
     name: build ${{ matrix.target }} (${{ matrix.copie }})
