@@ -201,7 +201,7 @@ jobs:
     # Also runs when the gate job failed (no output): only run=false skips.
     if: ${{ !cancelled() && needs.gate.outputs.run != 'false' }}
     runs-on: macos-26
-    # Serial UI tests with one retry: room for a couple of 60 s hangs.
+    # Serial UI tests with one retry: room for a couple of 120 s hangs (the plan's per-test allowance).
     timeout-minutes: 60
     permissions:
       contents: read
