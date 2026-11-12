@@ -1,47 +1,54 @@
 name: cla
 
-# Contributor License Agreement check (CLA.md). On each pull request, a bot
-# asks the authors who have not signed yet to post the signing comment, then
-# records the signature in signatures/cla.json on the cla-signatures branch.
-# That branch must exist and must not be protected: this workflow pushes to it.
+# Contributor License Agreement check (CLA.md, scripts/cla-check.sh). On each
+# pull request, the authors who have not signed yet are asked to post the
+# signing comment; signatures are recorded in signatures/cla.json on the
+# cla-signatures branch, which must not be protected (the script creates it on
+# the first signature). The result is the commit status "cla-signed".
 #
-# pull_request_target gives this run write access even for pull requests from
-# forks. That is safe only because no step checks out or runs code from the
-# pull request: never add one here.
+# Both triggers run with write access, even for a pull request from a fork:
+# that is what lets the check comment, report a status and record a signature.
+# It is safe only as long as this workflow runs nothing that comes from the
+# pull request. The checkout below is pinned to the default branch, and the
+# script treats comments and logins as data. Never check out the pull request
+# here.
 on:
-  pull_request_target:
-    types: [opened, synchronize, closed]
-  issue_comment:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] no code from the pull request runs
+    types: [opened, reopened, synchronize]
+  issue_comment: # zizmor: ignore[dangerous-triggers] no code from the pull request runs
     types: [created]
+
+# One run at a time per pull request. A waiting run may be dropped for a newer
+# one: every run redoes the whole check, so nothing is lost.
+concurrency:
+  group: cla-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
 
 permissions: {}
 
 jobs:
-  cla:
-    name: cla
+  check:
+    name: check
     runs-on: ubuntu-26.04
-    # Comments are only read on pull requests, and only the two the bot
-    # understands: the signature and a request to check again.
+    # Comments count only on pull requests, and only the signature or a
+    # request to check again. The script decides what a signature is.
     if: >-
       github.event_name == 'pull_request_target' ||
       (github.event.issue.pull_request &&
        (github.event.comment.body == 'recheck' ||
-        github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+        contains(github.event.comment.body, 'I hereby sign the CLA')))
     permissions:
-      actions: write # re-run the check after a signature
-      contents: write # commit the signature to the cla-signatures branch
-      pull-requests: write # comment on, and lock, the pull request
-      statuses: write # report the check on the head commit
+      contents: write # commit signatures to the cla-signatures branch
+      pull-requests: write # comment on the pull request
+      statuses: write # report cla-signed on the head commit
     steps:
-      - uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path-to-document: https://github.com/NaKoCorp/Barking/blob/main/CLA.md
-          path-to-signatures: signatures/cla.json
-          branch: cla-signatures
-          # The maintainer needs no license from himself; bots hold no rights.
-          allowlist: HoaMi,*[bot]
-          # A merged pull request is locked so its signature comment cannot be
-          # edited or deleted afterwards.
-          lock-pullrequest-aftermerge: true
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: scripts
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: scripts/cla-check.sh
