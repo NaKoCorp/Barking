@@ -1,0 +1,47 @@
+name: cla
+
+# Contributor License Agreement check (CLA.md). On each pull request, a bot
+# asks the authors who have not signed yet to post the signing comment, then
+# records the signature in signatures/cla.json on the cla-signatures branch.
+# That branch must exist and must not be protected: this workflow pushes to it.
+#
+# pull_request_target gives this run write access even for pull requests from
+# forks. That is safe only because no step checks out or runs code from the
+# pull request: never add one here.
+on:
+  pull_request_target:
+    types: [opened, synchronize, closed]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  cla:
+    name: cla
+    runs-on: ubuntu-26.04
+    # Comments are only read on pull requests, and only the two the bot
+    # understands: the signature and a request to check again.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+       (github.event.comment.body == 'recheck' ||
+        github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    permissions:
+      actions: write # re-run the check after a signature
+      contents: write # commit the signature to the cla-signatures branch
+      pull-requests: write # comment on, and lock, the pull request
+      statuses: write # report the check on the head commit
+    steps:
+      - uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-document: https://github.com/NaKoCorp/Barking/blob/main/CLA.md
+          path-to-signatures: signatures/cla.json
+          branch: cla-signatures
+          # The maintainer needs no license from himself; bots hold no rights.
+          allowlist: HoaMi,*[bot]
+          # A merged pull request is locked so its signature comment cannot be
+          # edited or deleted afterwards.
+          lock-pullrequest-aftermerge: true

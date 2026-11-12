@@ -174,6 +174,10 @@ No maintainer key signs a release: GitHub's attestations are the only root of tr
 - [ ] Tor / mixnet integration to hide client IPs from relays
 - [ ] External security audit
 
+## 🤝 Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). A first pull request asks you to sign the [Contributor License Agreement](CLA.md).
+
 ## 📄 License
 
 [AGPL-3.0-only](LICENSE)
