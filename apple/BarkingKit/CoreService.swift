@@ -358,6 +358,23 @@ public actor CoreService {
     public func setPush(_ settings: PushSettings?) async throws {
         try await call("push") { try $0.setPush(settings: settings) }
     }
+    public func notificationPrefs() async throws -> NotificationPrefs {
+        try await call("notification-prefs") { try $0.notificationPrefs() }
+    }
+    public func setInstant(_ on: Bool) async throws {
+        try await call("instant") { try $0.setInstant(on: on) }
+    }
+    public func setPreview(_ preview: PushPreview) async throws {
+        try await call("preview") { try $0.setPreview(preview: preview) }
+    }
+    /// Notes that a push woke the app now; a failure changes nothing.
+    public func noteWake() async {
+        let now = UInt64(Date().timeIntervalSince1970)
+        try? await call("note-wake") { try $0.noteWake(atSecs: now) }
+    }
+    public func wakeStatus() async throws -> WakeStatus {
+        try await call("wake-status") { try $0.wakeStatus() }
+    }
     /// Packets no node accepted yet (the pending packets screen's count).
     public func pendingCount() async throws -> Int { Int(try await call("pending") { try $0.pendingCount() }) }
 

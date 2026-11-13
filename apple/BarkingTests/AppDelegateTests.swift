@@ -57,4 +57,10 @@ final class AppDelegateTests: XCTestCase {
         let result = await wake(delegate)
         XCTAssertEqual(result, .noData)
     }
+
+    func testBackgroundWakeNotesWake() async {
+        let d = FakeDevice()
+        _ = await delegate(syncing: d).backgroundWake()
+        XCTAssertEqual(d.wakeNotes.count, 1)
+    }
 }

@@ -54,6 +54,11 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func retryMessage(messageId: Int64) throws
     func retryAll(contact: String) throws -> UInt32
     func pendingPackets() throws -> PendingPackets
+    func notificationPrefs() throws -> NotificationPrefs
+    func setInstant(on: Bool) throws
+    func setPreview(preview: PushPreview) throws
+    func noteWake(atSecs: UInt64) throws
+    func wakeStatus() throws -> WakeStatus
 }
 
 extension Device: DeviceHandle {}

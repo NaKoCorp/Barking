@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func backgroundWake() async -> UIBackgroundFetchResult {
         guard let core = service() else { return .noData }
         let outcome = await core.quickSync()
+        await core.noteWake()
         guard outcome.networkUp else { return .failed }
         return outcome.changed ? .newData : .noData
     }

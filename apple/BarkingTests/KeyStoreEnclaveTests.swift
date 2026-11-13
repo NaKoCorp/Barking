@@ -150,12 +150,12 @@ final class KeyStoreEnclaveTests: XCTestCase {
         // Hermetic (review B4 #13): the key comes from this test's store,
         // never from whatever the simulator keychain holds.
         _ = try store.create()
-        let (record, _) = BenchRun.run(source: "test", paths: paths, sync: false, keyStore: store)
+        let (record, _, _) = BenchRun.run(source: "test", paths: paths, sync: false, keyStore: store)
         XCTAssertTrue(record.steps.contains { $0.name == "key" })
         XCTAssertNotNil(record.unwrapMs)
         // A locked keychain reads as no key, without a key step.
         entries.locked = true
-        let (locked, _) = BenchRun.run(source: "test", paths: paths, sync: false, keyStore: store)
+        let (locked, _, _) = BenchRun.run(source: "test", paths: paths, sync: false, keyStore: store)
         XCTAssertEqual(locked.outcome, "no-key")
         XCTAssertNil(locked.unwrapMs)
     }

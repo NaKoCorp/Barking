@@ -68,7 +68,7 @@ final class AppRouter {
         if args.contains("-BarkingDevBench") {
             // Device measurement without a push (spec §7.4): key and open
             // only, before the app opens the database; read with devicectl.
-            let (record, _) = BenchRun.run(source: "launch", sync: false)
+            let (record, _, _) = BenchRun.run(source: "launch", sync: false)
             try? BenchStore.shared().append(record)
             SharedPaths.devExportBench()
         }

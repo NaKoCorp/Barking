@@ -281,6 +281,19 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         lock.withLock { _retriedAll.append(contact) }
         return retryAllCount
     }
+    /// What `notificationPrefs`, `setInstant` and `setPreview` keep.
+    var prefs = NotificationPrefs(instant: true, preview: .nameAndText, lastWake: nil)
+    var wakeStatusValue = WakeStatus(configSet: false, nodes: [])
+    private var _wakeNotes: [UInt64] = []
+    /// Every `noteWake` time, in call order.
+    var wakeNotes: [UInt64] { lock.withLock { _wakeNotes } }
+    func notificationPrefs() throws -> NotificationPrefs { lock.withLock { prefs } }
+    func setInstant(on: Bool) throws { lock.withLock { prefs.instant = on } }
+    func setPreview(preview: PushPreview) throws { lock.withLock { prefs.preview = preview } }
+    func noteWake(atSecs: UInt64) throws {
+        lock.withLock { _wakeNotes.append(atSecs); prefs.lastWake = atSecs }
+    }
+    func wakeStatus() throws -> WakeStatus { wakeStatusValue }
     func pendingPackets() throws -> PendingPackets {
         if let deliveryError { throw deliveryError }
         return pendingInfo
