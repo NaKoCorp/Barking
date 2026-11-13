@@ -6,6 +6,8 @@
 	<string>$(BARKING_APS_ENVIRONMENT)</string>
 	<key>BarkingAppGroup</key>
 	<string>$(BARKING_APP_GROUP)</string>
+	<key>BarkingBootstrapNodes</key>
+	<string>$(BARKING_BOOTSTRAP_NODES)</string>
 	<key>BarkingKeychainGroup</key>
 	<string>$(BARKING_KEYCHAIN_GROUP)</string>
 	<key>BarkingRelayHost</key>

@@ -93,6 +93,8 @@ targets:
         BarkingRelaySealId: $(BARKING_RELAY_SEAL_ID)
         BarkingRelaySealPublic: $(BARKING_RELAY_SEAL_PUBLIC)
         BarkingApnsEnvironment: $(BARKING_APS_ENVIRONMENT)
+        # Nodes added at first start (empty: none); set in Local.xcconfig.
+        BarkingBootstrapNodes: $(BARKING_BOOTSTRAP_NODES)
         UIBackgroundModes: [remote-notification]
         UIAppFonts: [FiraCode-Regular.ttf, FiraCode-Medium.ttf, FiraCode-SemiBold.ttf]
         NSCameraUsageDescription: Scan a contact's Barking code.

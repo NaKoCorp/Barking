@@ -10,3 +10,10 @@ DEVELOPMENT_TEAM = ABCDE12345
 // BARKING_RELAY_ID = <52-character base32 node identifier>
 // BARKING_RELAY_SEAL_ID = 1
 // BARKING_RELAY_SEAL_PUBLIC = <64 hex characters>
+
+// Optional: nodes the app adds at start, so that a new install reaches the
+// network (Release builds have no screen to add one). Entries
+// `<52-character base32 node identifier>@<ip:port>`, separated by spaces; the
+// identifier is what `barking-node status` prints. A node publishes an IP, not
+// a DNS name: a new address needs a new build.
+// BARKING_BOOTSTRAP_NODES = <identifier>@203.0.113.7:4433

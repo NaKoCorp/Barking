@@ -122,7 +122,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     /// Starts and ends of syncs, in order ("sync", "sync-done", "quick", "quick-done").
     var syncEvents: [String] { lock.withLock { _syncEvents } }
     func nodes() throws -> [NodeInfo] { [] }
-    func addNode(id: String, addr: String) throws {}
+    private var _addedNodes: [String] = []
+    /// `id@addr` of each `addNode` call, in order.
+    var addedNodes: [String] { lock.withLock { _addedNodes } }
+    func addNode(id: String, addr: String) throws { lock.withLock { _addedNodes.append("\(id)@\(addr)") } }
     private var _pushSettings: [PushSettings?] = []
     /// Every `setPush` call, in order (`nil`: push off).
     var pushSettings: [PushSettings?] { lock.withLock { _pushSettings } }
