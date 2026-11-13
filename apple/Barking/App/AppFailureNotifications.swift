@@ -16,8 +16,8 @@ enum AppFailureNotifications {
 }
 
 extension CoreService {
-    /// The app's `CoreService`: wired to post failure notices, and given the
-    /// wake-up settings once iOS gave a token.
+    /// The app's `CoreService`: wired to post failure notices, given the nodes
+    /// the app was built with, and the wake-up settings once iOS gave a token.
     /// In development builds a UI test may ask for the core seen through
     /// `UITestDeliveries` (forced delivery states, a fake received message).
     static func app(_ device: any DeviceHandle, runner: any CallRunner = AppCallRunner()) -> CoreService {
@@ -25,6 +25,8 @@ extension CoreService {
         let device = UITestDeliveries.wrap(device)
         #endif
         let core = CoreService(device: device, runner: runner, onFailed: AppFailureNotifications.handler)
+        let info = Bundle.main.infoDictionary ?? [:]
+        Task { await BootstrapNodes.add(to: core, info: info) }
         // The token may have come before the device opened.
         Task { @MainActor in await PushToken.shared.apply(to: core) }
         return core

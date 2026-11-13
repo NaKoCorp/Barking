@@ -6,6 +6,8 @@
 	<string>$(BARKING_APS_ENVIRONMENT)</string>
 	<key>BarkingAppGroup</key>
 	<string>$(BARKING_APP_GROUP)</string>
+	<key>BarkingBootstrapNodes</key>
+	<string>$(BARKING_BOOTSTRAP_NODES)</string>
 	<key>BarkingKeychainGroup</key>
 	<string>$(BARKING_KEYCHAIN_GROUP)</string>
 	<key>BarkingRelayHost</key>
@@ -46,7 +48,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -59,7 +61,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<false/>
 	<key>NSCameraUsageDescription</key>
@@ -78,6 +80,10 @@
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>

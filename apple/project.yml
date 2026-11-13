@@ -24,6 +24,10 @@ settings:
     LOCALIZATION_PREFERS_STRING_CATALOGS: YES
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1"
+    # One version for every target: App Store Connect rejects an embedded
+    # framework without one, and an extension whose version differs from the app.
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
     # The XCFramework has an arm64 simulator slice only (Apple Silicon Macs).
     "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
     BARKING_APP_GROUP: group.com.nakocorp.barking
@@ -76,7 +80,10 @@ targets:
       path: Barking/Info.plist
       properties:
         CFBundleDisplayName: Barking
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         BarkingAppGroup: $(BARKING_APP_GROUP)
         BarkingKeychainGroup: $(BARKING_KEYCHAIN_GROUP)
         # Wake-up relay (empty: push off); set in Local.xcconfig.
@@ -86,6 +93,8 @@ targets:
         BarkingRelaySealId: $(BARKING_RELAY_SEAL_ID)
         BarkingRelaySealPublic: $(BARKING_RELAY_SEAL_PUBLIC)
         BarkingApnsEnvironment: $(BARKING_APS_ENVIRONMENT)
+        # Nodes added at first start (empty: none); set in Local.xcconfig.
+        BarkingBootstrapNodes: $(BARKING_BOOTSTRAP_NODES)
         UIBackgroundModes: [remote-notification]
         UIAppFonts: [FiraCode-Regular.ttf, FiraCode-Medium.ttf, FiraCode-SemiBold.ttf]
         NSCameraUsageDescription: Scan a contact's Barking code.
@@ -107,6 +116,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking
+        # iPhone only: XcodeGen's target preset ("1,2") overrides the project value.
+        TARGETED_DEVICE_FAMILY: "1"
         # UIKit chrome (alerts, dialogs, share sheets) uses the brand accent too.
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: accent
 
@@ -127,6 +138,8 @@ targets:
       path: NotificationService/Info.plist
       properties:
         CFBundleDisplayName: NotificationService
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         BarkingAppGroup: $(BARKING_APP_GROUP)
         BarkingKeychainGroup: $(BARKING_KEYCHAIN_GROUP)
         NSExtension:
@@ -135,6 +148,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nakocorp.barking.NotificationService
+        TARGETED_DEVICE_FAMILY: "1"
 
   BarkingTests:
     type: bundle.unit-test
