@@ -624,3 +624,18 @@ fn effective_config_none_when_instant_off() {
     .unwrap();
     assert_eq!(PushConfig::effective(&core).unwrap(), Some(c));
 }
+
+#[test]
+fn preview_variant_golden_bytes() {
+    for (preview, byte) in [
+        (Preview::NameAndText, 0u8),
+        (Preview::NameOnly, 1),
+        (Preview::Generic, 2),
+    ] {
+        assert_eq!(
+            postcard::to_allocvec(&preview).unwrap(),
+            [byte],
+            "{preview:?} changed encoding: stored prefs would read back differently"
+        );
+    }
+}
