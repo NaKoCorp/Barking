@@ -18,7 +18,7 @@ In scope: everything in this repository, in particular
 - the protocol and its cryptography (`barking-core`, `barking-packet`, `barking-proto`): confidentiality, authentication, metadata leaks;
 - the nodes and the push relay (`barking-node`, `barking-dht`, `barking-push`): remote crashes, resource exhaustion, ways to link a mailbox to a user;
 - the clients (`barking-cli`, `barking-net`, `barking-ffi`, the iOS app in `apple/`): local storage, key handling;
-- the release process: reproducible builds and signatures (`scripts/`, `.github/workflows/`).
+- the release process: reproducible builds and GitHub provenance attestations (`scripts/`, `.github/workflows/`).
 
 Out of scope: findings that need a compromised device, and denial of service by sheer volume against a single node.
 

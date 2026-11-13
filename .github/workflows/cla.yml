@@ -1,0 +1,54 @@
+name: cla
+
+# Contributor License Agreement check (CLA.md, scripts/cla-check.sh). On each
+# pull request, the authors who have not signed yet are asked to post the
+# signing comment; signatures are recorded in signatures/cla.json on the
+# cla-signatures branch, which must not be protected (the script creates it on
+# the first signature). The result is the commit status "cla-signed".
+#
+# Both triggers run with write access, even for a pull request from a fork:
+# that is what lets the check comment, report a status and record a signature.
+# It is safe only as long as this workflow runs nothing that comes from the
+# pull request. The checkout below is pinned to the default branch, and the
+# script treats comments and logins as data. Never check out the pull request
+# here.
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] no code from the pull request runs
+    types: [opened, reopened, synchronize]
+  issue_comment: # zizmor: ignore[dangerous-triggers] no code from the pull request runs
+    types: [created]
+
+# One run at a time per pull request. A waiting run may be dropped for a newer
+# one: every run redoes the whole check, so nothing is lost.
+concurrency:
+  group: cla-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-26.04
+    # Comments count only on pull requests, and only the signature or a
+    # request to check again. The script decides what a signature is.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+       (github.event.comment.body == 'recheck' ||
+        contains(github.event.comment.body, 'I hereby sign the CLA')))
+    permissions:
+      contents: write # commit signatures to the cla-signatures branch
+      pull-requests: write # comment on the pull request
+      statuses: write # report cla-signed on the head commit
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: scripts
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: scripts/cla-check.sh

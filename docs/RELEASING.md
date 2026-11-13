@@ -1,127 +1,160 @@
 # Publishing a release
 
-Maintainer procedure. The design is in the spec, §15. The model: CI builds twice and attests, then the maintainer rebuilds at home and signs offline.
+Maintainer procedure. Releases are automatic: merging pull requests keeps a release pull request up to date, and merging that one publishes the binaries and the container images. Nothing is built or signed on the maintainer's machine.
+
+```
+pull request (Conventional Commits title) ──squash──▶ main
+                                                       │  release-please.yml
+                                                       ▼
+                               release pull request (version, Cargo.lock, CHANGELOG.md)
+                                                       │  merged by the maintainer
+                                                       ▼
+                                  tag vX.Y.Z and draft release (release notes)
+                                                       │  release.yml
+                                                       ▼
+        tag check ─▶ double build ─▶ comparison ─▶ attestations, files attached, release published
+                                                       │
+                                                       ▼
+                                  images pushed to ghcr.io and attested
+```
 
 ## Prerequisites
 
-- Docker (Linux targets); to also rebuild the macOS target, an Apple Silicon Mac with `rustup` and exactly the Xcode and SDK used by CI, given in `.xcode-version` (otherwise that target is skipped, see step 4);
-- `minisign` and `gh` 2.68.0 or newer (logged in with an account that can edit the repository's releases);
-- the **maintainer's minisign secret key**, offline: see `keys/README.md` for generation, storage and rotation. This key never goes into the repository, into CI or into an automated tool;
-- `keys/maintainer.pub` filled in with the public key. While it is empty, `sign-release.sh` refuses to sign, unless you pass `--pubkey <file>`.
+- The right to merge into `main`.
+- `gh` 2.68.0 or newer, logged in (`gh auth login`), to follow the workflows and to run the final check.
+- For the final check with a rebuild: Docker, and for the macOS target an Apple Silicon Mac with `rustup` and exactly the Xcode and SDK given in `.xcode-version` (otherwise that target is skipped, see [VERIFYING.md](VERIFYING.md)).
+
+There is no signing key and no secret to keep on a maintainer machine.
 
 ## GitHub settings to configure once
 
-Pushing a `v*` tag is the only gate into the release workflow. It must therefore be locked down:
+The workflows rely on these settings. The first six must be in place before the first release; the last two come after it.
 
-- **Tag ruleset**: restrict who can create, modify or delete `v*` tags (for example the maintainer alone), and forbid moving them;
-- **Protection of the `main` branch**: no force pushes, required review, required `ci` checks (Rust check, signing scripts, double build);
-- keep the workflow actions pinned by commit SHA, as they are today.
+1. **Allowed actions.** In the repository's Actions settings, allow these third-party actions next to the GitHub-owned ones: `googleapis/release-please-action@*`, `docker/login-action@*`, `docker/setup-buildx-action@*`, `docker/metadata-action@*`, `docker/build-push-action@*`. Without them, the workflows fail to load. Every action stays pinned by commit SHA in the workflow files.
+2. **Release GitHub App.** Create a GitHub App with the repository permissions Contents and Pull requests in read and write, and install it on `NaKoCorp/Barking` only. Create the `release-please` environment, restricted to the `main` branch, with the variable `RELEASE_APP_CLIENT_ID` and the secret `RELEASE_APP_PRIVATE_KEY`. `release-please.yml` uses the App's token instead of `GITHUB_TOKEN`: a pull request or a tag created with `GITHUB_TOKEN` starts no workflow, so the release pull request would get no checks and the tag would not start `release.yml`.
+3. **`release tags` ruleset.** It restricts who can create `v*` tags and forbids moving or deleting them. Add the App to its bypass list, so that release-please can create the tag.
+4. **`release` environment.** Only `v*` tags may deploy to it. The job of `release.yml` that attests and publishes runs in this environment.
+5. **Squash commits.** The squash commit must take the pull request's title and description:
 
-## Before the first release
+        gh api -X PATCH repos/NaKoCorp/Barking -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY
 
-In this order, once:
+6. **`main` ruleset.** Squash merges only, up-to-date branches, and these required checks: `Rust checks (fmt, clippy, tests)`, `double build (PR)`, `release scripts` and `PR title`.
+7. **Container packages.** After the first release, make the two packages `barking-node` and `barking-push` public on ghcr.io.
+8. **Immutable releases** (recommended). Nothing is added to a release after its publication:
 
-1. Make the GitHub repository public (attestations and independent rebuilds depend on it).
-2. Create the `v*` tag ruleset and the `main` protection described above, with the required `ci` checks (Rust check, signing scripts, double build).
-3. In the repository's Actions settings, allow workflows to create releases (`GITHUB_TOKEN` with write access for `release.yml`, which requests `contents: write` only in its last job).
-4. Push `main`, then open a first pull request and wait for `ci` to be green: Rust check, signing scripts, and the `x86_64-unknown-linux-musl` double build when the pull request changes the build environment.
-5. Run `ci` by hand (`workflow_dispatch`: `gh workflow run ci.yml --ref main`) to get the full double build of all three targets, and check that the copies are identical, macOS included (Xcode from `.xcode-version`).
-6. Generate the offline key (`keys/README.md`), commit `keys/maintainer.pub` with review by a second person, and publish the `RW…` line through a channel independent of the repository.
-7. Do a full rehearsal on a pre-release tag, for example `0.1.0-rc.1` (with the version in `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` and `crates/barking-push/Cargo.toml` updated accordingly): tag, CI, `sign-release.sh`, then `verify-release.sh --rebuild`.
-8. Create the `barking-rebuilds` repository (entry format in `docs/VERIFYING.md`).
-9. Tag `v0.1.0`, following the steps below.
+        gh api -X PUT repos/NaKoCorp/Barking/immutable-releases
 
-## Preserving the Alpine environment
+The independent rebuilds are collected in the `barking-rebuilds` repository (entry format in [VERIFYING.md](VERIFYING.md)), which is yet to be created.
 
-Linux builds use the pinned Rust/Alpine image and the APK versions in `docker/apk/build.txt`. Before a release, keep the signed APKs and the matching indexes in an immutable mirror, or keep the build image by its digest: the public Alpine repositories may remove old revisions. To change the image (digest) or a package, regenerate the full list (sorted `package=version` lines, the format that `docker/apk/install.sh` compares) and check that it is the same on x86-64 and ARM64, then get `ci` to pass (the pull request runs the double build): `docker/apk/install.sh` rejects any difference. `docker/apk/release.txt` plays the same role for the test image of the signing scripts. Fuzzing keeps its Debian (glibc) image: AddressSanitizer does not support musl targets.
+## How a release happens
 
-## Changing the CI's Xcode
+### 1. Pull requests carry a Conventional Commits title
 
-`.xcode-version` fixes the macOS runner (`runner=`), the Xcode version (`xcode=`) and the SDK version (`sdk=`). The workflows select that Xcode and fail if the SDK differs. When GitHub removes that Xcode or runner from its images, choose a version listed in the image's README (`actions/runner-images` repository, `images/macos/macos-<n>-arm64-Readme.md`, sections "Xcode" and "Installed SDKs"), update `.xcode-version` and the `runner` of the matrices in `ci.yml` and `release.yml`, then run `ci` by hand (`workflow_dispatch`). Each tag records its `.xcode-version`: an old version is rebuilt with the Xcode of its tag.
+Pull requests are squash-merged: the title becomes the commit message, the only thing release-please reads. The `PR title` check (`pr-title.yml`, `scripts/check-pr-title.sh`) refuses any other format:
 
-## Steps
+    <type>(<scope>)!: <description>
 
-### 1. Prepare
+- The scope and the `!` are optional. The scope is made of lowercase letters, digits, `.`, `_`, `/` and `-`.
+- Types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `ci`, `build`, `chore`, `revert`.
+- `fix` and `perf` raise the patch version, `feat` raises the minor version. A breaking change (`!` after the type, or a `BREAKING CHANGE:` footer) raises the minor version while the version is 0.x.
+- The changelog lists `feat` (Features), `fix` (Bug Fixes), `perf` (Performance) and `revert` (Reverts). The `refactor`, `docs`, `test`, `ci`, `build` and `chore` types are hidden from it and do not cause a release on their own.
 
-1. Update `version` in `crates/barking-cli/Cargo.toml`, `crates/barking-node/Cargo.toml` **and** `crates/barking-push/Cargo.toml` (all three must be identical), as well as `Cargo.lock`, commit, merge into `main`, and wait for `ci` to be green.
-2. Run `ci` by hand on `main` (`gh workflow run ci.yml --ref main`) and wait for the full double build of all three targets: pull requests only check it when the build environment changes, and a pushed tag does not move (a failure at the release stage costs a new version).
-3. Check out the commit to release, with a clean working tree.
+### 2. The release pull request follows `main`
 
-### 2. Tag
+On every push to `main`, `release-please.yml` opens or updates a pull request titled `chore(main): release X.Y.Z`. It contains:
 
-    git tag v<version>
-    git push origin v<version>
+- the version in `Cargo.toml` (`[workspace.package]`, the single source that every crate inherits);
+- the version of each workspace crate in `Cargo.lock`;
+- the new section of `CHANGELOG.md`.
 
-The tag must be `v` followed by the version in `crates/barking-cli/Cargo.toml`, which must match that of `crates/barking-node/Cargo.toml` and of `crates/barking-push/Cargo.toml`: otherwise the first job of the `release.yml` workflow fails.
+Each merge into `main` makes this pull request out of date. Release-please regenerates it on that same push, and its checks run again.
 
-Never recreate a tag on a rewritten or amended commit: the binary contains the commit date, so a different commit gives different hashes (see `docs/VERIFYING.md`).
+Read the changelog before merging; you can edit `CHANGELOG.md` on the release branch. Do it last: a later merge into `main` regenerates the pull request. The notes of the GitHub release may come from the pull request description rather than from `CHANGELOG.md`: check them on the published release, and edit them there if needed (`gh release edit <tag> --notes-file`). For the first release in particular, the commits that predate this procedure have no Conventional Commits title and are missing from the changelog: complete the section by hand.
 
-### 3. Let CI work
+### 3. Merge the release pull request
 
-The `release.yml` workflow:
+Merge it when you want to release. Release-please then creates the tag `vX.Y.Z` and a **draft** release that holds the release notes. The tag starts `release.yml`.
 
-1. checks that the tag's commit is an ancestor of `main` and that the tag matches the version;
-2. builds each target twice (`barking-cli`, `barking-node` then `barking-push`, in three separate `cargo build -p` invocations: `repro-build.sh` refuses the build if the dependency tree of the node or of the notification relay contains OpenSSL or SQLCipher), in two independent runs (two fresh runners);
-3. compares the copies byte by byte (`cmp`): any difference blocks everything;
-4. produces the provenance attestations;
-5. creates the GitHub release **as a draft**, with the three binaries `barking-cli`, `barking-node` and `barking-push` for each target and `SHA256SUMS`.
+Before merging, you can run `ci` by hand on `main` to get the full double build of the three targets (`gh workflow run ci.yml --ref main`). Pull requests only run the `x86_64-unknown-linux-musl` double build, and only when they change the build environment. A tag does not move: a build that fails at release time costs a new version.
 
-At this point, no release is published (the tag and the attestations, however, are already public). If a release `v<version>` already exists (a draft from a previous run), the last step fails and says so: delete it (`gh release delete v<version> -R <owner>/barking`), then rerun the workflow.
+### 4. `release.yml` builds and publishes
 
-### 4. Sign
+1. **`tag and version`**: the tag's commit is an ancestor of `main`, and the tag is `v` followed by the workspace version.
+2. **`double build`** (`repro-build.yml`): each target is built twice, on two fresh runners. `scripts/repro-build.sh` builds `barking-cli`, `barking-node` and `barking-push` separately, and refuses the build if the dependency tree of the node or of the push relay contains OpenSSL or SQLCipher. `scripts/compare-copies.sh` then compares the two copies byte by byte and merges `SHA256SUMS`. Any difference stops the release.
+3. **`attestation and publication`**: checks the file names and the checksums, produces the provenance attestation of each binary, attaches the nine binaries and `SHA256SUMS` to the draft, then publishes it. A release is therefore never visible without its files.
+4. **`image node`** and **`image push`**: once the release is published, builds the images from those same files for `linux/amd64` and `linux/arm64`, pushes them to `ghcr.io/nakocorp/barking-node` and `ghcr.io/nakocorp/barking-push`, and attests each image digest. The attestation is stored in the registry next to the image.
 
-On the signing machine, from an up-to-date clone that contains the tag. `<version>` is written without the `v` prefix (for example `0.1.0`):
-
-    git fetch --tags
-    scripts/sign-release.sh <version> --seckey <path/maintainer.key> --repo <owner>/barking
-
-The script:
-
-1. prints the commit of the local tag `v<version>` (it refuses to sign if that tag does not exist in the clone): check that it is the expected commit. It compares it with the tag on `origin` (`git ls-remote`) and refuses if the tag is missing there or points to another commit; if `origin` is not configured or is unreachable, it also refuses, except with `--from-dir` (a simple warning);
-2. downloads the draft's files and checks `SHA256SUMS` and the hashes;
-3. **rebuilds locally** every target possible on this machine and compares. The rebuild uses the build environment recorded in the tag (`scripts/`, `docker/`, `.xcode-version`, `rust-toolchain.toml`, extracted with `git archive`), not that of the working tree;
-4. signs **only if everything is identical** and no listed file is missing;
-5. signs `SHA256SUMS` with the signed comment `barking v<version> commit <tag commit>`, and checks the resulting signature with the public key;
-6. uploads `SHA256SUMS.minisig` and **publishes** the draft.
-
-Options: `--pubkey <file>` for another public key (required while `keys/maintainer.pub` is empty), `--from-dir <dir>` to work on local files instead of the draft (the signature is then written to that directory, nothing is published), `--rebuilt-dir <dir>` to compare with a rebuild already done by `repro-build.sh`.
-
-A single machine does not build every target: a Linux x86_64 machine rebuilds `x86_64-unknown-linux-musl`; an arm64 Mac rebuilds `aarch64-unknown-linux-musl`, and **Docker is required there** (without it, the script fails). It rebuilds `aarch64-apple-darwin` only if it has `rustup` and the Xcode/SDK of `.xcode-version`: otherwise the script says so (notice "aarch64-apple-darwin is not rebuilt on this machine") and signs with only the rebuilt Linux target. Targets that are not rebuilt here are signed on the strength of the CI's double build and the attestations: the signature does not otherwise cover them (see `docs/VERIFYING.md`).
-
-To rebuild everything, build the other targets on other machines, then gather all the outputs of `repro-build.sh` into **a single directory** and pass it with `--rebuilt-dir`. This directory must contain all the targets that can be built on the signing machine. The script does not check how this directory was produced: by using it, you trust those machines and whatever you copied there.
+Image tags: `X.Y.Z`, `X.Y` and `latest`. A pre-release (`X.Y.Z-rc.N`) only gets its exact tag and moves neither `X.Y` nor `latest`.
 
 ### 5. Final check
 
-As any user would (it is the same command as in `docs/VERIFYING.md`):
+As any user would (it is the same command as in [VERIFYING.md](VERIFYING.md)), from an up-to-date clone that contains the tag:
 
-    scripts/verify-release.sh <version> --rebuild --repo <owner>/barking
+    git fetch --tags
+    scripts/verify-release.sh <version> --rebuild
 
-It must end with `Version <version> verified ✓`.
+`<version>` is written without the `v` prefix, for example `0.2.0`. It must end with `Version <version> verified ✓`. This local rebuild is the only check made outside GitHub: do it for every release.
 
-## If CI or the rebuild differs
+## Choosing the version
 
-**Do not sign.** A difference means a non-reproducible build, a new source of non-determinism, or a compromise.
+Release-please computes the next version from the titles merged since the last release. To force another one, such as `1.0.0` or a pre-release, end the description of a pull request with a `Release-As:` footer:
 
-- If CI fails at the comparison (`compare`): nothing is published. Open an issue with the workflow log.
-- If `sign-release.sh` reports that the local rebuild differs: it stops without signing or publishing anything. To get the two hashes to compare:
+    Release-As: 1.0.0
 
-        gh release download v<version> -R <owner>/barking --dir <d1>
+The description becomes the body of the squash commit (setting 5 above), where release-please reads the footer. The release pull request then proposes that version.
+
+## Rehearsing with a pre-release
+
+Before the first release, and after any change to the release workflows, rehearse on a pre-release:
+
+1. Open a pull request with an empty commit, titled `chore: release rehearsal`, whose description ends with `Release-As: 0.2.0-rc.1`. Merge it.
+2. Merge the release pull request that follows.
+3. Check the result:
+   - the tag `v0.2.0-rc.1` exists, and the release is published with nine binaries and `SHA256SUMS`;
+   - (the packages are private until you make them public, setting above: run `docker login ghcr.io` first)
+   - `docker buildx imagetools inspect ghcr.io/nakocorp/barking-node:0.2.0-rc.1` lists `linux/amd64` and `linux/arm64`;
+   - the image tags `latest` and `0.2` do **not** exist;
+   - `docker run --rm ghcr.io/nakocorp/barking-push:0.2.0-rc.1 --version` prints the version;
+   - `scripts/verify-release.sh 0.2.0-rc.1 --rebuild` ends with `verified ✓`;
+   - rerunning `release.yml` (`gh run rerun <run-id>`) succeeds.
+
+Check the version that the next release pull request proposes, and set it with `Release-As:` if it is not the one you want.
+
+## Preserving the Alpine environment
+
+Linux builds use the pinned Rust/Alpine image and the APK versions in `docker/apk/build.txt`. Before a release, keep the signed APKs and the matching indexes in an immutable mirror, or keep the build image by its digest: the public Alpine repositories may remove old revisions. To change the image (digest) or a package, regenerate the full list (sorted `package=version` lines, the format that `docker/apk/install.sh` compares) and check that it is the same on x86-64 and ARM64, then get `ci` to pass (the pull request runs the double build): `docker/apk/install.sh` rejects any difference. `docker/apk/release.txt` plays the same role for the test image of the release scripts, and `docker/apk/push.txt` for the CA bundle of the `barking-push` image. Fuzzing keeps its Debian (glibc) image: AddressSanitizer does not support musl targets.
+
+## Changing the CI's Xcode
+
+`.xcode-version` fixes the macOS runner (`runner=`), the Xcode version (`xcode=`) and the SDK version (`sdk=`). The workflows select that Xcode, and the double build fails if the runner or the SDK differs. When GitHub removes that Xcode or runner from its images, choose a version listed in the image's README (`actions/runner-images` repository, `images/macos/macos-<n>-arm64-Readme.md`, sections "Xcode" and "Installed SDKs"). Update `.xcode-version`, the `runner` of the macOS rows of the matrix in `repro-build.yml` and the `runs-on` of the macOS jobs in `ci.yml`, then run `ci` by hand (`workflow_dispatch`). Each tag records its `.xcode-version`: an old version is rebuilt with the Xcode of its tag.
+
+## When something fails
+
+A difference between two builds means a non-reproducible build, a new source of non-determinism, or a compromise. Do not work around it.
+
+- **`tag and version` fails.** The tag is not on `main`, or it does not match the workspace version. Nothing is built.
+- **The comparison of the copies differs.** Nothing is attested or published; the tag and the draft stay. Open an issue with the workflow log. Look first for benign causes: a macOS runner image updated by GitHub with a different clang for the same Xcode, or an interrupted macOS build that left `/private/tmp/barking-repro-darwin` behind (delete it and rerun; this has no effect on the checksums).
+- **A later job fails** (network, registry, GitHub API). Rerun the workflow: `gh run rerun <run-id>`. The publication job replaces the files of a draft and leaves an already published release untouched; the image jobs then run again. The build artifacts are kept for 7 days: after that, rerun all the jobs, not only the failed ones.
+- **`no draft release for vX.Y.Z`.** The tag was pushed by hand. Releases are cut by merging the release pull request, never by pushing a tag.
+- **Several releases exist for the tag.** Keep the one created by release-please, delete the others, then rerun the workflow.
+- **The final check reports that the local rebuild differs.** To get the two checksums to compare:
+
+        gh release download v<version> -R NaKoCorp/Barking --dir <d1>
         scripts/repro-build.sh --target <target> --ref v<version> --out <d2>
-        cmp <d1>/barking-<cli|node>-<version>-<target> <d2>/barking-<cli|node>-<version>-<target>
 
-  (or compare the lines of `<d1>/SHA256SUMS` and `<d2>/SHA256SUMS`). Open an issue with these two hashes, the tag's commit, the machine and the Docker version, or the Xcode version for macOS.
-- Look first for benign causes: wrong commit (`git rev-parse v<version>^{commit}`), a macOS SDK different from the CI's (normally rejected by `repro-build.sh`, which compares against `.xcode-version`), a macOS runner image updated by GitHub with a different clang for the same Xcode.
-- Troubleshooting: if a macOS build fails without compiling, `/private/tmp/barking-repro-darwin` exists, left by an interrupted build. Delete it and rerun; this has no effect on the hashes.
-- Only publish the release once the cause is understood and fixed, with a new tag and a new version: do not move a tag that has already been pushed.
-- If the release is already published and a binary is disputed, withdraw it (`gh release edit v<version> --draft=true -R <owner>/barking`) and announce it.
+  then compare the lines of `<d1>/SHA256SUMS` and `<d2>/SHA256SUMS`. Check first that you built the right commit (`git rev-parse v<version>^{commit}`) and, for macOS, with the SDK of `.xcode-version` (`repro-build.sh` normally refuses another one). Open an issue with the two checksums, the tag's commit, the machine and the Docker version, or the Xcode version for macOS.
 
-## Key rotation
+**Never move a tag.** The binary contains the commit date, so a recreated or amended commit gives different checksums. Fix the cause on `main` and release a new version. The draft of the failed version can be deleted (`gh release delete v<version> -R NaKoCorp/Barking`); its tag stays.
 
-See `keys/README.md`: the old key signs the new one (`keys/rotation-<date>.minisig`), then `keys/maintainer.pub` is replaced in the same commit, reviewed by a second person. Publish the new fingerprint through a channel independent of the repository. Then sign subsequent releases with the new key.
+**Withdrawing a published release.** If a binary is disputed, delete the release (`gh release delete v<version> -R NaKoCorp/Barking`), delete the matching image versions on the two package pages of ghcr.io, and announce it. The image tags `X.Y` and `latest` that pointed to those versions go with them. Then publish a fixed version.
 
 ## Script tests
 
-    scripts/tests/repro-twice.sh        # two builds from two paths, same hashes (Docker)
-    scripts/tests/release-scripts.sh    # signing and detected tampering (Docker, throwaway keys)
+    scripts/tests/repro-twice.sh        # two builds from two paths, same checksums (Docker)
+    scripts/tests/release-scripts.sh    # verify-release.sh against valid and tampered releases (Docker, offline)
+    bash scripts/tests/ci-scripts.sh    # pull request titles, CI gate, comparison of the copies (no Docker)
+    scripts/tests/images.sh <dir> <version>   # the two images build and start from a release directory
 
-In `ci.yml`, `release-scripts.sh` and `scripts/check.sh` (format, clippy, Rust tests in parallel with `cargo-nextest`, with the pinned toolchain) run on every pull request and on `main`. `repro-twice.sh` runs on pull requests that change the build environment (lockfile, manifests, `build.rs`, toolchain, `docker/`, `.xcode-version`, build scripts, workflows); the job still reports, with its build skipped, on the others. Run by hand (`workflow_dispatch`), `ci` does the full double build of all targets with comparison of the copies, as `release.yml` does on every tag.
+In `ci.yml`, the `release scripts` job runs `release-scripts.sh`, `ci-scripts.sh`, `stack-init.sh` and `compose-config.sh`, and `scripts/check.sh` runs the format, clippy and Rust tests, on every pull request. `repro-twice.sh` and `images.sh` run on pull requests that change the build environment (lockfile, manifests, `build.rs`, toolchain, `docker/`, `.xcode-version`, build scripts, workflows); the `double build (PR)` job still reports, with its build skipped, on the others. Run by hand (`workflow_dispatch`), `ci` does the full double build of all targets with comparison of the copies, as `release.yml` does on every tag.
+
+A push to `main` does not repeat what its pull request validated. The `gate` job (`scripts/ci-gate.sh`) skips the checks when the merged tree is exactly the tree the pull request tested and that run was green. In any other case, and in any doubt, the full CI runs.

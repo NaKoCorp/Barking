@@ -2,7 +2,7 @@
 target/
 **/*.rs.bk
 
-# Release artifacts (scripts/repro-build.sh, scripts/sign-release.sh)
+# Release artifacts (scripts/repro-build.sh)
 dist/
 
 # Fuzzing: build output and crash artifacts; the corpus stays tracked
@@ -15,12 +15,6 @@ crates/barking-core/fuzz/coverage/
 *.profdata
 lcov.info
 tarpaulin-report.html
-
-# Secrets: only public keys belong in keys/
-*.key
-*.sec
-.env
-.env.*
 
 # Editors and OS
 .idea/
@@ -41,5 +35,7 @@ Thumbs.db
 *.p12
 *.pfx
 *.mobileprovision
+*.key
+*.sec
 .env
 .env.*

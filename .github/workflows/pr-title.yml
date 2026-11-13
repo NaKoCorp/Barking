@@ -1,0 +1,30 @@
+name: pr-title
+
+# Pull requests are squash-merged: the title becomes the commit message that
+# release-please reads for the version and the changelog. It must follow
+# Conventional Commits (see scripts/check-pr-title.sh).
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+# A new event on a pull request replaces the run in progress.
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  pr-title:
+    name: PR title
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Conventional Commits title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: scripts/check-pr-title.sh

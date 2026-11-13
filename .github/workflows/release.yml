@@ -1,7 +1,10 @@
 name: release
 
-# Reproducible release: double build per target, byte-by-byte comparison,
-# provenance attestation, then draft release (signed afterwards by the maintainer).
+# Reproducible release, triggered by the tag that release-please creates when the release pull
+# request is merged (docs/RELEASING.md): double build per target, byte-by-byte comparison,
+# provenance attestation of the binaries, then the files are attached to the draft release that
+# release-please prepared and the release is published. The runtime images are then built from
+# those same files, pushed to ghcr.io and attested.
 on:
   push:
     tags: ['v*']
@@ -39,152 +42,38 @@ jobs:
           fi
           echo "tag $TAG: commit $commit, ancestor of origin/main"
 
-      - name: The tag matches the version of barking-cli, barking-node and barking-push
+      - name: The tag matches the workspace version
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-cli/Cargo.toml | head -n1)"
-          [ -n "$version" ] || { echo "version not found in crates/barking-cli/Cargo.toml" >&2; exit 1; }
-          version_node="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-node/Cargo.toml | head -n1)"
-          [ -n "$version_node" ] || { echo "version not found in crates/barking-node/Cargo.toml" >&2; exit 1; }
-          version_push="$(sed -n 's/^version *= *"\(.*\)"/\1/p' crates/barking-push/Cargo.toml | head -n1)"
-          [ -n "$version_push" ] || { echo "version not found in crates/barking-push/Cargo.toml" >&2; exit 1; }
-          if [ "$version" != "$version_node" ] || [ "$version" != "$version_push" ]; then
-            echo "barking-cli ($version), barking-node ($version_node) and barking-push ($version_push) must have the same version" >&2
-            exit 1
-          fi
+          set -euo pipefail
+          . scripts/release-lib.sh
+          version="$(version_du_workspace .)"
           if [ "$TAG" != "v$version" ]; then
-            echo "tag $TAG does not match version v$version of crates/barking-cli/Cargo.toml, crates/barking-node/Cargo.toml and crates/barking-push/Cargo.toml" >&2
+            echo "tag $TAG does not match the workspace version v$version (Cargo.toml)" >&2
             exit 1
           fi
 
-  build:
-    name: build ${{ matrix.target }} (${{ matrix.copie }})
+  repro:
+    name: double build
     needs: verifier-tag
-    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - { target: x86_64-unknown-linux-musl, runner: ubuntu-26.04, copie: a }
-          - { target: x86_64-unknown-linux-musl, runner: ubuntu-26.04, copie: b }
-          - { target: aarch64-unknown-linux-musl, runner: ubuntu-26.04-arm, copie: a }
-          - { target: aarch64-unknown-linux-musl, runner: ubuntu-26.04-arm, copie: b }
-          - { target: aarch64-apple-darwin, runner: macos-26, copie: a }
-          - { target: aarch64-apple-darwin, runner: macos-26, copie: b }
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      # The macOS target builds natively with rustup: the pinned compiler is needed
-      # (rust-toolchain.toml), installed explicitly rather than through automatic installation.
-      - name: Install the pinned Rust toolchain (macOS)
-        if: matrix.target == 'aarch64-apple-darwin'
-        run: |
-          canal="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
-          [ -n "$canal" ] || { echo "channel not found in rust-toolchain.toml" >&2; exit 1; }
-          rustup toolchain install "$canal" --profile minimal --target aarch64-apple-darwin
-          rustup default "$canal"
-
-      # The macOS binary is only reproducible with the same Xcode and the same SDK: those of .xcode-version.
-      - name: Select the pinned Xcode (macOS)
-        if: matrix.target == 'aarch64-apple-darwin'
-        env:
-          RUNNER_LABEL: ${{ matrix.runner }}
-        run: |
-          set -euo pipefail
-          runner="$(sed -n 's/^runner=//p' .xcode-version | head -n1)"
-          xcode="$(sed -n 's/^xcode=//p' .xcode-version | head -n1)"
-          sdk="$(sed -n 's/^sdk=//p' .xcode-version | head -n1)"
-          [ -n "$runner" ] && [ -n "$xcode" ] && [ -n "$sdk" ] || { echo ".xcode-version incomplete" >&2; exit 1; }
-          [ "$runner" = "$RUNNER_LABEL" ] \
-            || { echo "runner $RUNNER_LABEL differs from the one in .xcode-version ($runner)" >&2; exit 1; }
-          sudo xcode-select -s "/Applications/Xcode_${xcode}.app"
-          reel_xcode="$(xcodebuild -version | sed -n 's/^Xcode //p' | head -n1)"
-          reel_sdk="$(xcrun --show-sdk-version)"
-          echo "Xcode $reel_xcode, SDK $reel_sdk"
-          [ "$reel_xcode" = "$xcode" ] || { echo "Xcode $reel_xcode instead of $xcode" >&2; exit 1; }
-          [ "$reel_sdk" = "$sdk" ] || { echo "SDK $reel_sdk instead of $sdk" >&2; exit 1; }
-
-      - name: Reproducible build
-        env:
-          TARGET: ${{ matrix.target }}
-          COPIE: ${{ matrix.copie }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          scripts/repro-build.sh --target "$TARGET" --ref "refs/tags/$TAG" \
-            --out "$RUNNER_TEMP/out-$TARGET-$COPIE"
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: build-${{ matrix.target }}-${{ matrix.copie }}
-          path: ${{ runner.temp }}/out-${{ matrix.target }}-${{ matrix.copie }}/
-          if-no-files-found: error
-          retention-days: 7
-
-  compare:
-    name: comparison of the copies
-    needs: build
-    runs-on: ubuntu-26.04
-    permissions: {}
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: build-*
-          path: copies
-
-      - name: Compare copies a and b, merge SHA256SUMS
-        run: |
-          set -euo pipefail
-          targets="x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
-          mkdir release
-          for t in $targets; do
-            a="copies/build-$t-a"; b="copies/build-$t-b"
-            [ -d "$a" ] && [ -d "$b" ] || { echo "missing copies for $t" >&2; exit 1; }
-            for prog in barking-cli barking-node barking-push; do
-              bins_a="$(cd "$a" && ls "$prog"-* 2>/dev/null || true)"
-              bins_b="$(cd "$b" && ls "$prog"-* 2>/dev/null || true)"
-              [ -n "$bins_a" ] && [ "$(printf '%s\n' "$bins_a" | wc -l)" -eq 1 ] \
-                || { echo "there must be exactly one $prog binary for $t (copy a): $bins_a" >&2; exit 1; }
-              [ "$bins_a" = "$bins_b" ] \
-                || { echo "binary names differ for $t: $bins_a / $bins_b" >&2; exit 1; }
-              case "$bins_a" in *"-$t") ;; *) echo "unexpected name for $t: $bins_a" >&2; exit 1 ;; esac
-              cmp "$a/$bins_a" "$b/$bins_a" \
-                || { echo "the two copies of $t differ ($prog): non-reproducible build" >&2; exit 1; }
-              cp "$a/$bins_a" release/
-            done
-            cmp "$a/SHA256SUMS" "$b/SHA256SUMS" \
-              || { echo "the SHA256SUMS of the copies of $t differ" >&2; exit 1; }
-            (cd "$a" && sha256sum -c SHA256SUMS)
-          done
-          chmod 755 release/barking-cli-* release/barking-node-* release/barking-push-*
-          [ "$(find release -maxdepth 1 -type f -name 'barking-cli-*' | wc -l)" -eq 3 ] || { echo "3 barking-cli binaries expected" >&2; exit 1; }
-          [ "$(find release -maxdepth 1 -type f -name 'barking-node-*' | wc -l)" -eq 3 ] || { echo "3 barking-node binaries expected" >&2; exit 1; }
-          [ "$(find release -maxdepth 1 -type f -name 'barking-push-*' | wc -l)" -eq 3 ] || { echo "3 barking-push binaries expected" >&2; exit 1; }
-          (cd release && sha256sum barking-cli-* barking-node-* barking-push-* | LC_ALL=C sort -k2 > SHA256SUMS && sha256sum -c SHA256SUMS)
-          cat release/SHA256SUMS
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-files
-          path: release/
-          if-no-files-found: error
-          retention-days: 7
+    uses: $/.github/workflows/repro-build.yml
+    with:
+      ref: refs/tags/${{ github.ref_name }}
+      retention-days: 7
 
   publish:
-    name: attestation and draft
-    needs: compare
+    name: attestation and publication
+    needs: repro
     runs-on: ubuntu-26.04
     # Only v* tags may deploy to this environment (repository settings).
     environment: release
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: write # attach the files to the release and publish it
+      id-token: write # sign the provenance attestation (Sigstore, OIDC)
+      attestations: write # record the provenance attestation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -194,6 +83,36 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      # Before anything is attested: a tag pushed by hand has no draft and stops here. On a rerun,
+      # the release may already be published (the images failed afterwards): nothing left to do
+      # in this job.
+      - name: Release state of the tag
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # A draft cannot be looked up by its tag: search the complete list of releases.
+          states="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.tag_name == env.TAG) | if .draft then "draft" else "published" end')" \
+            || { echo "cannot list existing releases (GitHub API)" >&2; exit 1; }
+          count="$(printf '%s\n' "$states" | grep -c . || true)"
+          if [ "$count" -eq 0 ]; then
+            echo "no draft release for $TAG: releases are cut by merging the release pull request (docs/RELEASING.md)" >&2
+            exit 1
+          fi
+          if [ "$count" -gt 1 ]; then
+            echo "$count releases exist for $TAG: keep the one created by release-please, delete the others, then rerun the workflow" >&2
+            exit 1
+          fi
+          if [ "$states" = published ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "release $TAG: $states"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -207,28 +126,121 @@ jobs:
           done
           (cd release && sha256sum -c SHA256SUMS)
 
+      # Rerun on a published release: this run rebuilt the binaries. They must be the published
+      # ones, or the images would ship binaries that are not the release's.
+      - name: The rebuilt binaries are the published ones
+        if: steps.state.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$RUNNER_TEMP/published" \
+            || { echo "::error::release $TAG is published without SHA256SUMS: it was not published by this workflow" >&2; exit 1; }
+          if ! cmp "$RUNNER_TEMP/published/SHA256SUMS" release/SHA256SUMS; then
+            echo "::error::the rebuilt binaries differ from those of the published release $TAG: no image is built from them" >&2
+            exit 1
+          fi
+
+      # Already attested by the run that published the release.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: steps.state.outputs.published != 'true'
         with:
           subject-path: |
             release/barking-cli-*
             release/barking-node-*
             release/barking-push-*
 
-      - name: Create the draft release
+      - name: Attach the files and publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          PUBLISHED: ${{ steps.state.outputs.published }}
         run: |
           set -euo pipefail
-          # Drafts have no published tag: look for them in the complete list of releases.
-          ids="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
-            --jq '.[] | select(.tag_name == env.TAG) | .id')" \
-            || { echo "cannot list existing releases (GitHub API)" >&2; exit 1; }
-          if [ -n "$ids" ]; then
-            echo "a release $TAG already exists (draft from a previous run?): delete it (gh release delete $TAG) then rerun the workflow" >&2
-            exit 1
+          if [ "$PUBLISHED" = true ]; then
+            echo "::notice::release $TAG is already published: its files are left untouched"
+            exit 0
           fi
-          notes="Draft: awaiting the maintainer's signature (\`scripts/sign-release.sh\`)."
-          gh release create "$TAG" --draft --verify-tag -R "$GITHUB_REPOSITORY" \
-            --title "$TAG" --notes "$notes" \
+          # A previous run may have attached some of the files already: replace them.
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber \
             release/barking-cli-* release/barking-node-* release/barking-push-* release/SHA256SUMS
+          # A pre-release (vX.Y.Z-rc.N) must not become the repository's latest release.
+          case "$TAG" in
+            *-*) gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --prerelease ;;
+            *) gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false ;;
+          esac
+
+  images:
+    name: image ${{ matrix.image }}
+    needs: publish
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write # push the image and its attestation to ghcr.io
+      id-token: write # sign the provenance attestation (Sigstore, OIDC)
+      attestations: write # record the provenance attestation
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [node, push]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tag version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # The build context: the binaries of both Linux architectures and SHA256SUMS, against
+      # which the Dockerfile checks the binary it copies.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: release
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # X.Y.Z, X.Y and latest for a release; the full version alone for a pre-release
+      # (vX.Y.Z-rc.N), which moves neither X.Y nor latest.
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
+        with:
+          images: ghcr.io/nakocorp/barking-${{ matrix.image }}
+          flavor: latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: org.opencontainers.image.licenses=AGPL-3.0-only
+
+      # No emulation: the prepare stage runs on the build platform and only copies the binary
+      # of the target architecture. No BuildKit provenance or SBOM: the attestation is the
+      # GitHub one, below.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
+        with:
+          context: release
+          file: docker/${{ matrix.image }}.Dockerfile
+          build-contexts: apk=docker/apk
+          build-args: VERSION=${{ steps.version.outputs.version }}
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: true
+          provenance: false
+          sbom: false
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/nakocorp/barking-${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

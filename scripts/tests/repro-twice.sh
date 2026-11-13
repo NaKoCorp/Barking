@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Test: two builds from two clones at different paths give the same checksums.
+# REPRO_TARGET=<triple> builds another target than the host's; REPRO_KEEP=<dir>
+# copies the release directory of the first build there once the test passed.
 set -euo pipefail
 
 racine="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -52,5 +54,11 @@ for b in barking-cli barking-node barking-push; do
     *) "$bin" --help >/dev/null || echec "$b --help failed" ;;
   esac
 done
+
+# Every comparison passed: keep the first build for the caller if asked to.
+if [ -n "${REPRO_KEEP:-}" ]; then
+  mkdir -p "$REPRO_KEEP"
+  cp -R "$tmp/out-a/." "$REPRO_KEEP/"
+fi
 
 echo "OK: identical builds ($(cat "$tmp/out-a/SHA256SUMS"))"

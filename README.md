@@ -80,18 +80,23 @@ The CLI asks for a passphrase and stores its data in `~/.barking` (use `--home <
 <details open>
 <summary><b>With Docker</b> (~5 MB image)</summary>
 
-[`docker/node.Dockerfile`](docker/node.Dockerfile) packages the static `barking-node` binary of a release alone on an empty base. The build context is the release directory, and the binary is checked against its `SHA256SUMS`.
+Each release publishes the image `ghcr.io/nakocorp/barking-node` for `linux/amd64` and `linux/arm64`, with the tags `X.Y.Z`, `X.Y` and `latest` (and `ghcr.io/nakocorp/barking-push` for the push relay). It holds the static `barking-node` binary of the release alone on an empty base. No release has been published yet: until the first one, build the image yourself as shown below. To check where an image comes from, see [docs/VERIFYING.md](docs/VERIFYING.md#container-images).
 
 ```sh
-docker build -f docker/node.Dockerfile --build-arg VERSION=0.1.0 -t barking-node dist
-docker run --rm -v barking-node:/var/lib/barking-node barking-node init
-docker run -d --name barking-node -v barking-node:/var/lib/barking-node -p 4433:4433/udp barking-node
+docker run --rm -v barking-node:/var/lib/barking-node ghcr.io/nakocorp/barking-node:<version> init
+docker run -d --name barking-node -v barking-node:/var/lib/barking-node -p 4433:4433/udp ghcr.io/nakocorp/barking-node:<version>
+```
+
+To build the same image yourself, [`docker/node.Dockerfile`](docker/node.Dockerfile) takes a release directory as its build context and checks the binary against its `SHA256SUMS`:
+
+```sh
+docker build -f docker/node.Dockerfile --build-arg VERSION=<version> -t barking-node dist
 ```
 
 To use a configuration file, mount it read-only and pass it to `run`:
 
 ```sh
--v ./barking-node.toml:/etc/barking-node.toml:ro barking-node run --config /etc/barking-node.toml
+-v ./barking-node.toml:/etc/barking-node.toml:ro <image> run --config /etc/barking-node.toml
 ```
 
 `docker exec barking-node /barking-node status` shows what the node holds.
@@ -138,15 +143,24 @@ Installs the git hooks: before a commit, no credential file and no secret (gitle
 
 Linux release builds run in a pinned Rust/Alpine Docker image and produce static musl binaries; Apple binaries are built natively on macOS.
 
+Pull request titles follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) (`feat: …`, `fix(node): …`): pull requests are squash-merged, and the title decides the next version and the changelog entry. The `PR title` check enforces the format (`scripts/check-pr-title.sh`).
+
 ## ✅ Verify a binary
 
-Release tooling for `barking-cli`, `barking-node` and `barking-push` provides reproducible builds, GitHub CI attestations, an offline maintainer signature, and verification and rebuild scripts.
+Releases are automatic. Merging the release pull request makes the CI build `barking-cli`, `barking-node` and `barking-push` twice for each target, compare the two builds byte by byte, attest the binaries and publish them with their `SHA256SUMS`. The same workflow then pushes the container images `ghcr.io/nakocorp/barking-node` and `ghcr.io/nakocorp/barking-push` (`linux/amd64` and `linux/arm64`; tags `X.Y.Z`, `X.Y` and `latest`).
 
-- 📖 [docs/VERIFYING.md](docs/VERIFYING.md): how to verify a release, and its limitations
+```sh
+scripts/verify-release.sh <version>             # checksums and GitHub provenance attestations
+scripts/verify-release.sh <version> --rebuild   # and rebuild the binaries locally, then compare
+```
+
+No maintainer key signs a release: GitHub's attestations are the only root of trust, and the reproducible build is the counter-check. Rebuild when you can.
+
+- 📖 [docs/VERIFYING.md](docs/VERIFYING.md): how to verify a release or an image, the trust model and its limits
 - 🏷️ [docs/RELEASING.md](docs/RELEASING.md): the maintainer's release procedure
 
 > [!NOTE]
-> The full publication process still needs an end-to-end rehearsal, and the maintainer public key is not yet published in the repository.
+> No release has been published yet: the automated process still needs its end-to-end rehearsal.
 
 ## 🗺️ Roadmap
 
@@ -159,6 +173,10 @@ Release tooling for `barking-cli`, `barking-node` and `barking-push` provides re
 - [ ] Groups and media attachments
 - [ ] Tor / mixnet integration to hide client IPs from relays
 - [ ] External security audit
+
+## 🤝 Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). A first pull request asks you to sign the [Contributor License Agreement](CLA.md).
 
 ## 📄 License
 

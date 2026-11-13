@@ -41,7 +41,6 @@ step() { echo "── $*"; }
 bad() { echo "✗ $*" >&2; status=1; }
 
 # Files that hold credentials: never committed, whatever their content.
-# keys/ only holds the maintainer's public key (minisign .pub).
 forbidden='\.(p8|p12|pfx|mobileprovision|keystore|jks|key|pem)$|(^|/)\.env($|\.)|(^|/)id_(rsa|ed25519|ecdsa)($|\.)|(^|/)\.netrc$|^apple/Local\.xcconfig$'
 
 case "$mode" in
@@ -91,7 +90,11 @@ if [ "$mode" != staged ]; then
   need actionlint actionlint
   zizmor --quiet --format plain .github/workflows/ || bad "zizmor"
   # The runner labels of this repository are newer than actionlint's list.
-  actionlint -ignore 'label ".*" is unknown' || bad "actionlint"
+  # actionlint does not know the self-repository syntax ($/path, supported by GitHub); remove the
+  # second -ignore once it does.
+  actionlint -ignore 'label ".*" is unknown' \
+    -ignore '"\$/[^"]*" (at "uses" is not following the format|in invalid format because ref is missing)' \
+    || bad "actionlint"
 fi
 
 if [ "$status" -ne 0 ]; then

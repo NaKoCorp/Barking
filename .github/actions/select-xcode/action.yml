@@ -1,0 +1,40 @@
+name: Pinned Xcode
+description: >-
+  Selects the Xcode pinned in .xcode-version. With a runner label, also checks that the label matches
+  the file's and that the Xcode and SDK actually in use are those of the file (reproducible builds).
+  Needs a prior checkout of the repository.
+
+inputs:
+  runner:
+    description: Label of the runner the job runs on. When set, the runner, Xcode and SDK are verified.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # The macOS binary is only reproducible with the same Xcode and the same SDK: those of .xcode-version.
+    - name: Select the pinned Xcode
+      shell: bash
+      env:
+        RUNNER_LABEL: ${{ inputs.runner }}
+      run: |
+        set -euo pipefail
+        runner="$(sed -n 's/^runner=//p' .xcode-version | head -n1)"
+        xcode="$(sed -n 's/^xcode=//p' .xcode-version | head -n1)"
+        sdk="$(sed -n 's/^sdk=//p' .xcode-version | head -n1)"
+        [ -n "$xcode" ] || { echo ".xcode-version incomplete" >&2; exit 1; }
+        if [ -z "$RUNNER_LABEL" ]; then
+          sudo xcode-select -s "/Applications/Xcode_${xcode}.app"
+          xcodebuild -version
+          exit 0
+        fi
+        [ -n "$runner" ] && [ -n "$sdk" ] || { echo ".xcode-version incomplete" >&2; exit 1; }
+        [ "$runner" = "$RUNNER_LABEL" ] \
+          || { echo "runner $RUNNER_LABEL differs from the one in .xcode-version ($runner)" >&2; exit 1; }
+        sudo xcode-select -s "/Applications/Xcode_${xcode}.app"
+        reel_xcode="$(xcodebuild -version | sed -n 's/^Xcode //p' | head -n1)"
+        reel_sdk="$(xcrun --show-sdk-version)"
+        echo "Xcode $reel_xcode, SDK $reel_sdk"
+        [ "$reel_xcode" = "$xcode" ] || { echo "Xcode $reel_xcode instead of $xcode" >&2; exit 1; }
+        [ "$reel_sdk" = "$sdk" ] || { echo "SDK $reel_sdk instead of $sdk" >&2; exit 1; }

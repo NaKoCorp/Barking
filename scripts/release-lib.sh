@@ -1,8 +1,22 @@
 #!/usr/bin/env bash
-# Functions shared by sign-release.sh and verify-release.sh (to be sourced, not executed).
+# Functions shared by verify-release.sh and repro-build.sh (to be sourced, not executed).
 # Compatible with bash 3.2 (macOS): no associative arrays, no mapfile.
 
 erreur() { echo "error: $*" >&2; exit 1; }
+
+# Version of the workspace: the `version` key of the [workspace.package] section of <dir>/Cargo.toml
+# (the single source of truth; every crate inherits it). Reads the file only, no cargo needed.
+version_du_workspace() { # $1 = directory containing the workspace Cargo.toml
+  local v
+  [ -f "$1/Cargo.toml" ] || erreur "Cargo.toml not found in $1"
+  v="$(awk '
+    /^[[:space:]]*\[/ { en_section = ($0 ~ /^[[:space:]]*\[workspace\.package\][[:space:]]*(#.*)?$/); next }
+    en_section && /^[[:space:]]*version[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*"/, ""); sub(/".*$/, ""); print; exit
+    }' "$1/Cargo.toml")"
+  [ -n "$v" ] || erreur "version not found in [workspace.package] of $1/Cargo.toml"
+  printf '%s\n' "$v"
+}
 
 # sha256sum is not available everywhere (macOS): fall back to shasum.
 sha256_de() {
@@ -33,13 +47,6 @@ resoudre_repo() {
 }
 exiger_repo() {
   [ -n "$REPO" ] || erreur "unknown GitHub repository: pass --repo <owner/repo> or set BARKING_REPO"
-}
-
-# A minisign public key contains an « RW… » line (56 base64 characters), not just comments.
-exiger_cle_publique() { # $1 = fichier
-  [ -f "$1" ] || erreur "public key not found: $1"
-  grep -qE '^RW[A-Za-z0-9+/]{54}$' "$1" \
-    || erreur "the public key $1 is empty or invalid: the maintainer must first publish their minisign key there (see keys/README.md). Or pass a key with --pubkey <file>."
 }
 
 # CI macOS environment, read from an .xcode-version file (« key=value » lines).

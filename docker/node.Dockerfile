@@ -2,11 +2,17 @@
 # on an empty base (no shell, no libc, no package). The build context is a
 # release directory (binaries and SHA256SUMS, see scripts/repro-build.sh):
 #   docker build -f docker/node.Dockerfile --build-arg VERSION=0.1.0 -t barking-node dist
-# The binary of the target architecture is checked against SHA256SUMS.
+# The binary of the target architecture is checked against SHA256SUMS. For
+# several architectures at once (no emulation needed), the release directory
+# holds the binary of each of them:
+#   docker buildx build --platform linux/amd64,linux/arm64 -f docker/node.Dockerfile \
+#     --build-arg VERSION=0.1.0 dist
 
-# Preparation only (checksum, tree, ownership); nothing of it is kept.
-# Base pinned by digest (multi-architecture index, Alpine 3.24.4).
-FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS prepare
+# Preparation only (checksum, tree, ownership); nothing of it is kept. It runs
+# on the build platform, whatever the target: it only copies the binary of
+# TARGETARCH and never executes it. Base pinned by digest (multi-architecture
+# index, Alpine 3.24.4).
+FROM --platform=$BUILDPLATFORM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS prepare
 ARG VERSION
 ARG TARGETARCH
 COPY . /release/
