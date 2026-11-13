@@ -288,7 +288,7 @@ impl Device {
                 let opts = SyncOptions {
                     deadline: Duration::from_millis(deadline_ms),
                     allow_private: opts_private,
-                    push: PushConfig::load(core)?,
+                    push: PushConfig::effective(core)?,
                     ..SyncOptions::default()
                 };
                 let report = block_on(barking_net::sync(core, &QuicDialer, opts))?;
