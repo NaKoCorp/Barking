@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.0](https://github.com/NaKoCorp/Barking/compare/v0.0.1...v0.1.0) (2026-11-13)
+
+
+### Features
+
+* **ios:** TestFlight-ready release builds ([#46](https://github.com/NaKoCorp/Barking/issues/46)) ([cb43912](https://github.com/NaKoCorp/Barking/commit/cb439128bfa97be942b1b3003859541ae653043f))
+
 ## 0.0.1 (2026-11-13)
 
 
