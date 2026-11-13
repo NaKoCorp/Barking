@@ -30,6 +30,12 @@ export IPHONEOS_DEPLOYMENT_TARGET=26.0
 
 cd "$root"
 out="$root/target/apple"
+# The iOS standard libraries come from rustup: run cargo and rustc of the
+# toolchain it picks from rust-toolchain.toml, even when another Rust
+# (Homebrew's, for instance) comes first in PATH.
+command -v rustup >/dev/null 2>&1 || fail "rustup is required (iOS targets)"
+toolchain_bin="$(dirname "$(rustup which cargo)")"
+export PATH="$toolchain_bin:$PATH"
 rustup target add "${targets[@]}" >/dev/null
 
 libs=()
