@@ -128,6 +128,19 @@ async fn valid_wake_reaches_pusher() {
     let _ = relay.stop.send(true);
 }
 
+/// Simulator tokens are 80 bytes (iOS 26).
+#[tokio::test]
+async fn eighty_byte_token_reaches_pusher() {
+    let relay = start(ConnLimits::default()).await;
+    let mut t = token(4, today() + 1);
+    t.apns_token = (0..80).collect();
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    session.wake(vec![relay.sealed(&t)]).await.unwrap();
+    relay.wait_pushed(1).await;
+    assert_eq!(relay.pusher.got.lock().unwrap().as_slice(), &[t]);
+    let _ = relay.stop.send(true);
+}
+
 #[tokio::test]
 async fn receipt_reason_reaches_pusher() {
     let relay = start(ConnLimits::default()).await;
