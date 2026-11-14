@@ -32,7 +32,10 @@ jobs:
     runs-on: ubuntu-26.04
     # Holds the App credentials (variable RELEASE_APP_CLIENT_ID, secret
     # RELEASE_APP_PRIVATE_KEY).
-    environment: release-please
+    # deployment: false: nothing is deployed, so no entry in Deployments.
+    environment:
+      name: release-please
+      deployment: false
     steps:
       - id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0

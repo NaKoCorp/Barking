@@ -68,8 +68,12 @@ jobs:
     name: attestation and publication
     needs: repro
     runs-on: ubuntu-26.04
-    # Only v* tags may deploy to this environment (repository settings).
-    environment: release
+    # Only v* tags may use this environment (repository settings).
+    # deployment: false keeps the secrets and protection rules without
+    # recording a deployment in the repository's Deployments list.
+    environment:
+      name: release
+      deployment: false
     permissions:
       contents: write # attach the files to the release and publish it
       id-token: write # sign the provenance attestation (Sigstore, OIDC)
