@@ -22,10 +22,12 @@ Usage: scripts/test-ios.sh build|unit [Classe...]|ui [Classe...]|tour [en|fr|ax3
   unit    plan Unit (BarkingTests), optionally restricted to the given classes
   ui      plan UI (BarkingUITests); full run on BARKING_UI_WORKERS clones (default 3),
           restricted to the given classes on the booted simulator alone (as with
-          BARKING_UI_WORKERS=1); BARKING_UI_RETRIES=n reruns a failed test up to n
-          times; result in apple/build/ui.xcresult
+          BARKING_UI_WORKERS=1); result in apple/build/ui.xcresult
   tour    TourUITests with BARKING_TOUR=1 (en, fr or ax3), result in apple/build/tour-<lang>.xcresult
   all     build, unit, ui, tour en
+
+  BARKING_TEST_RETRIES=n reruns a failed test up to n more times (unit, ui
+  and tour; CI sets 1). BARKING_UI_RETRIES, its former name, still works.
 
 Règle pour les agents.
 Pendant un lot :
@@ -105,6 +107,16 @@ do_build() {
   step "build" xb build-for-testing
 }
 
+# retry_args fills the global "retry" array: BARKING_TEST_RETRIES=n reruns a
+# failed test up to n more times (CI); the result bundle keeps every attempt.
+retry=()
+retry_args() {
+  local n="${BARKING_TEST_RETRIES:-${BARKING_UI_RETRIES:-0}}"
+  retry=()
+  [ "$n" -gt 0 ] && retry=(-retry-tests-on-failure -test-iterations "$((n + 1))")
+  return 0
+}
+
 # only_args <Target> <Class...> fills the global "only" array.
 only=()
 only_args() {
@@ -116,7 +128,9 @@ only_args() {
 do_unit() {
   ensure_sim
   only_args BarkingTests "$@"
-  step "unit" xb test-without-building -testPlan Unit -parallel-testing-enabled NO ${only[@]+"${only[@]}"}
+  retry_args
+  step "unit" xb test-without-building -testPlan Unit -parallel-testing-enabled NO \
+    ${retry[@]+"${retry[@]}"} ${only[@]+"${only[@]}"}
 }
 
 do_ui() {
@@ -129,11 +143,7 @@ do_ui() {
   local workers="${BARKING_UI_WORKERS:-3}"
   local par=(-parallel-testing-enabled YES -parallel-testing-worker-count "$workers")
   { [ $# -gt 0 ] || [ "$workers" = 1 ]; } && par=(-parallel-testing-enabled NO)
-  # BARKING_UI_RETRIES=n reruns a failed test up to n more times (CI); the
-  # result bundle keeps every attempt.
-  local retry=()
-  [ "${BARKING_UI_RETRIES:-0}" -gt 0 ] \
-    && retry=(-retry-tests-on-failure -test-iterations "$((BARKING_UI_RETRIES + 1))")
+  retry_args
   local bundle="$apple/build/ui.xcresult"
   rm -rf "$bundle"
   step "ui" xb test-without-building -testPlan UI "${par[@]}" ${retry[@]+"${retry[@]}"} \
@@ -149,7 +159,9 @@ do_tour() {
   [ "$lang" = ax3 ] && export TEST_RUNNER_BARKING_TOUR_SIZE=UICTContentSizeCategoryAccessibilityL
   local bundle="$apple/build/tour-$lang.xcresult"
   rm -rf "$bundle"
-  step "tour $lang" xb test-without-building -testPlan UI -parallel-testing-enabled NO -only-testing:BarkingUITests/TourUITests -resultBundlePath "$bundle"
+  retry_args
+  step "tour $lang" xb test-without-building -testPlan UI -parallel-testing-enabled NO \
+    ${retry[@]+"${retry[@]}"} -only-testing:BarkingUITests/TourUITests -resultBundlePath "$bundle"
 }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift

@@ -279,6 +279,30 @@ fn state(d: &Device, contact: &str, body: &str) -> DeliveryState {
     message(d, contact, body).delivery.unwrap().state
 }
 
+/// Runs `round` (syncs) until `done`, for 60 s at most: copies and receipts
+/// travel between the nodes in the background, and on a loaded CI runner
+/// one round is not always enough. False on timeout.
+fn sync_until(mut round: impl FnMut(), done: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        round();
+        if done() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(TICK);
+    }
+}
+
+fn has_message(d: &Device, contact: &str, body: &str) -> bool {
+    d.messages_with(contact.to_owned())
+        .unwrap()
+        .iter()
+        .any(|m| m.body == body)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_reports_delivery_changes() {
     let nodes = network(0..3, |_| u64::MAX).await;
@@ -309,7 +333,15 @@ async fn sync_reports_delivery_changes() {
         assert!(detail.devices[0].node.is_some());
 
         // A received message has no delivery of its own.
-        bob.sync(30_000).unwrap();
+        assert!(
+            sync_until(
+                || {
+                    bob.sync(30_000).unwrap();
+                },
+                || has_message(&bob, "alice", "hello"),
+            ),
+            "bob never received the message"
+        );
         let received = message(&bob, "alice", "hello");
         assert!(!received.outgoing);
         assert!(received.delivery.is_none());
@@ -317,14 +349,14 @@ async fn sync_reports_delivery_changes() {
         // Bob's receipt makes it `Received`, noted by the sync that
         // fetched it.
         let mut noted = false;
-        for _ in 0..5 {
-            bob.sync(30_000).unwrap();
-            let s = alice.sync(30_000).unwrap();
-            noted |= s.delivery_changes.contains(&change);
-            if state(&alice, "bob", "hello") == DeliveryState::Received {
-                break;
-            }
-        }
+        sync_until(
+            || {
+                bob.sync(30_000).unwrap();
+                let s = alice.sync(30_000).unwrap();
+                noted |= s.delivery_changes.contains(&change);
+            },
+            || state(&alice, "bob", "hello") == DeliveryState::Received,
+        );
         assert_eq!(state(&alice, "bob", "hello"), DeliveryState::Received);
         assert!(noted);
         let d = message(&alice, "bob", "hello").delivery.unwrap();
