@@ -287,7 +287,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _wakeNotes: [UInt64] = []
     /// Every `noteWake` time, in call order.
     var wakeNotes: [UInt64] { lock.withLock { _wakeNotes } }
-    func notificationPrefs() throws -> NotificationPrefs { lock.withLock { prefs } }
+    /// Thrown by `notificationPrefs` when set.
+    var prefsError: Error?
+    func notificationPrefs() throws -> NotificationPrefs {
+        if let prefsError { throw prefsError }
+        return lock.withLock { prefs }
+    }
     func setInstant(on: Bool) throws { lock.withLock { prefs.instant = on } }
     func setPreview(preview: PushPreview) throws { lock.withLock { prefs.preview = preview } }
     func noteWake(atSecs: UInt64) throws {

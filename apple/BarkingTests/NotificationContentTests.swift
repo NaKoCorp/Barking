@@ -84,4 +84,16 @@ final class NotificationContentTests: XCTestCase {
         XCTAssertEqual(NotificationContent.apply(summary([msg("FP1", "Alice", "secret")]), to: c, preview: .nameAndText, locked: true), "shown")
         XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "New message", ""])
     }
+
+    func testNameOnlySeveralContacts() {
+        let c = original()
+        _ = NotificationContent.apply(summary([msg("FP1", "Alice", "a"), msg("FP2", "Bob", "b")]), to: c, preview: .nameOnly, locked: false)
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "2 new messages", ""])
+    }
+
+    func testGenericSeveralMessages() {
+        let c = original()
+        _ = NotificationContent.apply(summary([msg("FP1", "Alice", "a"), msg("FP2", "Bob", "b")]), to: c, preview: .generic, locked: false)
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "New message", ""])
+    }
 }

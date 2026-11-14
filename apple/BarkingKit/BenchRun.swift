@@ -10,8 +10,13 @@ public enum BenchRun {
     /// gets what is left of the work time. `sync: false` stops once the
     /// device is opened (outcome `opened`): key and open timings only.
     /// `keyStore` is the app's keychain; a test passes its own.
+    /// Opens the device, calling `keyRead` once the key is read. The live
+    /// default is `DeviceFactory.existing`; a test injects a fake device.
+    public typealias Opener = (_ keyRead: () -> Void) throws -> (any DeviceHandle)?
+
     public static func run(source: String, paths: WipePaths = .live, sync: Bool = true,
-                           keyStore: KeyStore = DeviceFactory.keyStore) -> (BenchRecord, SyncSummary?, PushPreview) {
+                           keyStore: KeyStore = DeviceFactory.keyStore,
+                           opener: Opener? = nil) -> (BenchRecord, SyncSummary?, PushPreview) {
         let start = DispatchTime.now()
         let startedAt = Date()
         let sampler = FootprintSampler()
@@ -23,7 +28,7 @@ public enum BenchRun {
         mark("start")
         var outcome = ""
         var summary: SyncSummary?
-        // `.generic` unless the device says otherwise: an unreadable setting hides.
+        // `.generic` unless the device says otherwise.
         var preview = PushPreview.generic
         var unwrapMs: UInt64?
         do {
@@ -32,21 +37,27 @@ public enum BenchRun {
                 outcome = wipePending
             } else {
                 let before = elapsedMs(since: start)
-                let device = try DeviceFactory.existing(lockTimeoutMs: Budget.extensionLockMs, paths: paths,
-                                                       keyStore: keyStore) {
+                let open: Opener = opener ?? { keyRead in
+                    try DeviceFactory.existing(lockTimeoutMs: Budget.extensionLockMs, paths: paths,
+                                               keyStore: keyStore, keyRead: keyRead)
+                }
+                let device = try open {
                     unwrapMs = elapsedMs(since: start) - before
                     mark("key")
                 }
                 if let device {
                     mark("opened")
                     if sync {
+                        // The push is handled with the database open: the wake
+                        // counts even if the quick sync then fails (spec §5.5).
+                        // An unreadable preview setting hides everything.
+                        if let prefs = try? device.notificationPrefs() { preview = prefs.preview }
+                        try? device.noteWake(atSecs: UInt64(Date().timeIntervalSince1970))
                         let left = Budget.quickSyncDeadline(elapsedMs: elapsedMs(since: start) + Budget.extensionLockMs)
                         let s = try device.quickSync(deadlineMs: left)
                         mark("fetched")
                         summary = s
                         if !s.networkUp { outcome = "network-down" }
-                        if let prefs = try? device.notificationPrefs() { preview = prefs.preview }
-                        try? device.noteWake(atSecs: UInt64(Date().timeIntervalSince1970))
                     } else {
                         outcome = "opened"
                     }
