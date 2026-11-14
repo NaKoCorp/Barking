@@ -5,12 +5,13 @@ import UserNotifications
 public enum NotificationContent {
     /// Fills `content` from the quick sync; returns `shown`, or `original`
     /// when it leaves the push as it came ("New message").
-    /// While the app is locked (`locked`), nothing but "New message" shows:
-    /// no name, no text, no thread (spec §6.1).
+    /// While the app is locked (`locked`) or the preview is `.generic`,
+    /// nothing but "New message" shows: no name, no text, no thread (spec §5.4, §6.1).
+    /// `.nameOnly` keeps the name and the thread but never the text.
     public static func apply(_ summary: SyncSummary?, to content: UNMutableNotificationContent,
-                             locked: Bool) -> String {
+                             preview: PushPreview, locked: Bool) -> String {
         guard let messages = summary?.newMessages, let first = messages.first else { return "original" }
-        if locked {
+        if locked || preview == .generic {
             content.title = ""
             content.body = localized("NEW_MESSAGE", fallback: "New message")
             content.threadIdentifier = ""
@@ -19,7 +20,7 @@ public enum NotificationContent {
         let oneContact = messages.allSatisfy { $0.contact == first.contact }
         if messages.count == 1 {
             content.title = first.name
-            content.body = first.text
+            content.body = preview == .nameAndText ? first.text : localized("NEW_MESSAGE", fallback: "New message")
         } else {
             content.title = oneContact ? first.name : ""
             content.body = String(format: localized("NEW_MESSAGES_COUNT", fallback: "%lld new messages"), Int64(messages.count))

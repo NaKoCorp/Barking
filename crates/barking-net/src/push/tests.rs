@@ -550,3 +550,92 @@ fn push_config_golden_bytes() {
         "the stored push config changed: bump its format and migrate"
     );
 }
+
+fn wake_prefs() -> PushPrefs {
+    PushPrefs {
+        instant: false,
+        preview: Preview::NameOnly,
+        last_wake: Some(1_763_100_000),
+    }
+}
+
+#[test]
+fn push_prefs_default_when_absent() {
+    let (_dir, core) = subject(NOW);
+    assert_eq!(PushPrefs::load(&core).unwrap(), PushPrefs::default());
+    assert_eq!(
+        PushPrefs::default(),
+        PushPrefs {
+            instant: true,
+            preview: Preview::NameAndText,
+            last_wake: None,
+        }
+    );
+}
+
+#[test]
+fn push_prefs_round_trip() {
+    let (_dir, mut core) = subject(NOW);
+    wake_prefs().store(&mut core).unwrap();
+    assert_eq!(PushPrefs::load(&core).unwrap(), wake_prefs());
+}
+
+#[test]
+fn push_prefs_golden_bytes() {
+    let (_dir, mut core) = subject(NOW);
+    wake_prefs().store(&mut core).unwrap();
+    let bytes = core.transport_state(PUSH_PREFS_KEY).unwrap().unwrap();
+    assert_eq!(bytes[0], 0x01);
+    assert_eq!(
+        hex(&bytes),
+        "01000101e08adbc806",
+        "the stored push prefs changed: bump their format and migrate"
+    );
+}
+
+#[test]
+fn push_prefs_unreadable_reads_as_default() {
+    let (_dir, mut core) = subject(NOW);
+    wake_prefs().store(&mut core).unwrap();
+    core.set_transport_state(PUSH_PREFS_KEY, &[0x09, 0xff])
+        .unwrap();
+    assert_eq!(PushPrefs::load(&core).unwrap(), PushPrefs::default());
+    core.set_transport_state(PUSH_PREFS_KEY, &[0x01]).unwrap();
+    assert_eq!(PushPrefs::load(&core).unwrap(), PushPrefs::default());
+}
+
+#[test]
+fn effective_config_none_when_instant_off() {
+    let (_dir, mut core) = subject(NOW);
+    let c = cfg(2);
+    PushConfig::store(&mut core, Some(&c)).unwrap();
+    PushPrefs {
+        instant: false,
+        ..PushPrefs::default()
+    }
+    .store(&mut core)
+    .unwrap();
+    assert_eq!(PushConfig::effective(&core).unwrap(), None);
+    PushPrefs {
+        instant: true,
+        ..PushPrefs::default()
+    }
+    .store(&mut core)
+    .unwrap();
+    assert_eq!(PushConfig::effective(&core).unwrap(), Some(c));
+}
+
+#[test]
+fn preview_variant_golden_bytes() {
+    for (preview, byte) in [
+        (Preview::NameAndText, 0u8),
+        (Preview::NameOnly, 1),
+        (Preview::Generic, 2),
+    ] {
+        assert_eq!(
+            postcard::to_allocvec(&preview).unwrap(),
+            [byte],
+            "{preview:?} changed encoding: stored prefs would read back differently"
+        );
+    }
+}

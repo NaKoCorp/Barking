@@ -1,3 +1,4 @@
+import UserNotifications
 import XCTest
 @testable import Barking
 @testable import BarkingKit
@@ -22,9 +23,122 @@ final class TransparencyModelTests: XCTestCase {
                  args: args, security: security)
     }
 
-    private func model(_ d: FakeDevice, protection: String = "secure-enclave") -> TransparencyModel {
-        TransparencyModel(core: CoreService(device: d, runner: DirectRunner()),
-                          protection: { protection }, calendar: utc)
+    private func model(_ d: FakeDevice, protection: String = "secure-enclave", push: PushToken? = nil) -> TransparencyModel {
+        let token = push ?? Self.push(.authorized)
+        return TransparencyModel(core: CoreService(device: d, runner: DirectRunner()), push: token,
+                                 protection: { protection }, calendar: utc,
+                                 locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    private static func push(_ status: UNAuthorizationStatus, relay: Bool = true) -> PushToken {
+        let push = PushToken()
+        push.info = ["BarkingRelayHost": relay ? "relay.local" : ""]
+        push.authorization = { status }
+        return push
+    }
+
+    /// 20_405 days after the epoch: 2025-11-13.
+    func testWakeRowsFromStatus() async {
+        let d = FakeDevice()
+        d.wakeStatusValue = WakeStatus(configSet: true, nodes: [
+            WakeNode(node: "K7QX2M4A", mailboxes: 3, messages: true, acks: true, expiresDay: 20_405),
+            WakeNode(node: "B2C3D4E5", mailboxes: 1, messages: false, acks: true, expiresDay: 20_405),
+        ])
+        let m = model(d)
+        await m.load()
+        XCTAssertEqual(m.wakeRows.map(\.id), ["K7QX2M4A", "B2C3D4E5"])
+        XCTAssertEqual(m.wakeRows.map(\.title), ["K7QX2M4A", "B2C3D4E5"])
+        XCTAssertEqual(m.wakeRows[0].detail, "3 mailboxes · messages, receipts · until Nov 13, 2025")
+        XCTAssertEqual(m.wakeRows[1].detail, "1 mailbox · receipts · until Nov 13, 2025")
+    }
+
+    func testWakeRowsEmpty() async {
+        let m = model(FakeDevice())
+        await m.load()
+        XCTAssertTrue(m.wakeRows.isEmpty)
+    }
+
+    func testLastWakeNilIsNever() async {
+        let m = model(FakeDevice())
+        await m.load()
+        XCTAssertNil(m.lastWake)
+    }
+
+    func testLastWakeFromPrefs() async {
+        let d = FakeDevice()
+        d.prefs.lastWake = noon
+        let m = model(d)
+        await m.load()
+        XCTAssertEqual(m.lastWake, Date(timeIntervalSince1970: TimeInterval(noon)))
+    }
+
+    func testWakeStateReusesTheNotificationsPriority() async {
+        let off = FakeDevice()
+        off.prefs.instant = false
+        let a = model(off)
+        await a.load()
+        XCTAssertEqual(a.wakeState, .off)
+        let b = model(FakeDevice(), push: Self.push(.denied))
+        await b.load()
+        XCTAssertEqual(b.wakeState, .denied)
+        let c = model(FakeDevice(), push: Self.push(.authorized, relay: false))
+        await c.load()
+        XCTAssertEqual(c.wakeState, .noRelay)
+    }
+
+    func testWaitingForTokenWhenOnWithoutToken() async {
+        let push = Self.push(.authorized)
+        let m = model(FakeDevice(), push: push)
+        await m.load()
+        XCTAssertEqual(m.wakeState, .on)
+        XCTAssertTrue(m.waitingForToken)
+        push.token = Data([1, 2, 3])
+        await m.load()
+        XCTAssertFalse(m.waitingForToken)
+    }
+
+    private struct Boom: Error {}
+
+    func testFailedPrefsReadIsNotACleanState() async {
+        let d = FakeDevice()
+        d.prefsError = Boom()
+        let m = model(d)
+        await m.load()
+        XCTAssertTrue(m.prefsFailed)
+        XCTAssertNil(m.lastWake)
+        XCTAssertFalse(m.waitingForToken)
+        XCTAssertFalse(m.nodesFailed)
+    }
+
+    func testFailedWakeStatusReadIsNotNone() async {
+        let d = FakeDevice()
+        d.wakeStatusError = Boom()
+        let m = model(d)
+        await m.load()
+        XCTAssertTrue(m.nodesFailed)
+        XCTAssertFalse(m.prefsFailed)
+        XCTAssertTrue(m.wakeRows.isEmpty)
+        d.wakeStatusError = nil
+        await m.load()
+        XCTAssertFalse(m.nodesFailed)
+    }
+
+    func testOpeningTheViewWritesNothing() async {
+        let push = Self.push(.denied)
+        push.token = Data([1, 2, 3])
+        let d = FakeDevice()
+        let m = model(d, push: push)
+        await m.load()
+        XCTAssertEqual(m.wakeState, .denied)
+        XCTAssertTrue(d.pushSettings.isEmpty, "the transparency view never calls setPush")
+    }
+
+    func testNotWaitingForTokenWhenOff() async {
+        let d = FakeDevice()
+        d.prefs.instant = false
+        let m = model(d)
+        await m.load()
+        XCTAssertFalse(m.waitingForToken)
     }
 
     func testGroupsByDayNewestFirst() async {

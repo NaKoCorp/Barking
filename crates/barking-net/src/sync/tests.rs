@@ -10,7 +10,7 @@ use barking_core::Core;
 use tempfile::TempDir;
 
 use super::*;
-use crate::push::{PushConfig, PushState};
+use crate::push::{PushConfig, PushPrefs, PushState};
 use crate::score::Score;
 use crate::test_support::{id_of, record, subject, subject_with_ack, subject_with_ack_at};
 
@@ -2155,6 +2155,44 @@ async fn no_push_config_sends_nothing_when_state_empty() {
         core.transport_state(crate::push::PUSH_STATE_KEY).unwrap(),
         None
     );
+}
+
+/// Spec §6: instant notifications off in the preferences, with the app's
+/// config still stored: the sync's effective config is none, so the held
+/// subscriptions are cancelled and none is created.
+#[tokio::test(start_paused = true)]
+async fn full_sync_with_instant_off_cancels_subscriptions() {
+    let (_dir, mut core, net) = setup();
+    PushConfig::store(&mut core, Some(&push_config())).unwrap();
+    let options = SyncOptions {
+        push: PushConfig::effective(&core).unwrap(),
+        ..opts()
+    };
+    let first = sync(&mut core, &net, options).await;
+    assert!(first.subscribed > 0, "{first:?}");
+    net.calls.lock().unwrap().clear();
+    PushPrefs {
+        instant: false,
+        ..PushPrefs::default()
+    }
+    .store(&mut core)
+    .unwrap();
+    assert!(
+        PushConfig::load(&core).unwrap().is_some(),
+        "config stays stored"
+    );
+    let options = SyncOptions {
+        push: PushConfig::effective(&core).unwrap(),
+        ..opts()
+    };
+    assert!(options.push.is_none(), "instant off: no effective config");
+    let report = sync(&mut core, &net, options).await;
+    let calls = net.calls();
+    assert_eq!(unsubscribes(&calls).len(), first.subscribed);
+    assert_eq!(report.unsubscribed, first.subscribed);
+    assert!(subscribes(&calls).is_empty());
+    let st = push_state(&core);
+    assert!(st.subs.is_empty() && st.config_hash.is_none());
 }
 
 #[tokio::test(start_paused = true)]

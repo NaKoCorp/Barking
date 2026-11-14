@@ -33,7 +33,7 @@ pub use link::{PendingLink, begin_link, inspect_link_request};
 pub use log::{LogEntry, log_arg_tokens, log_keys};
 pub use messages::{ChatSummary, KeyChange, UnreadCount};
 pub use net::{LeaveState, NewMessage, NodeInfo, SyncSummary};
-pub use push::PushSettings;
+pub use push::{NotificationPrefs, PushPreview, PushSettings, WakeNode, WakeStatus};
 pub use route::RouteStepInfo;
 
 uniffi::setup_scaffolding!();

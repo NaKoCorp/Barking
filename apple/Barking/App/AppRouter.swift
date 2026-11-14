@@ -64,11 +64,19 @@ final class AppRouter {
             }
         }
         if args.contains("-BarkingUITestNoAnimations") { UIView.setAnimationsEnabled(false) }
+        if args.contains("-BarkingUITestPushAuthorized") {
+            // The simulator never answers the permission prompt, and a build
+            // may have no relay: the Notifications screen needs both.
+            PushToken.shared.authorization = { .authorized }
+            if ((PushToken.shared.info["BarkingRelayHost"] as? String) ?? "").isEmpty {
+                PushToken.shared.info["BarkingRelayHost"] = "relay.ui-test.local"
+            }
+        }
         do { try UITestSeed.apply(args) } catch { fatalError("UI test seed failed: \(error)") }
         if args.contains("-BarkingDevBench") {
             // Device measurement without a push (spec §7.4): key and open
             // only, before the app opens the database; read with devicectl.
-            let (record, _) = BenchRun.run(source: "launch", sync: false)
+            let (record, _, _) = BenchRun.run(source: "launch", sync: false)
             try? BenchStore.shared().append(record)
             SharedPaths.devExportBench()
         }

@@ -86,6 +86,75 @@ impl PushConfig {
         }
         core.set_transport_state(PUSH_CONFIG_KEY, &bytes)
     }
+
+    /// The configuration a sync subscribes with: `None` when the user turned
+    /// instant notifications off, else what the app set (`load`).
+    pub fn effective(core: &Core) -> Result<Option<PushConfig>, CoreError> {
+        if !PushPrefs::load(core)?.instant {
+            return Ok(None);
+        }
+        PushConfig::load(core)
+    }
+}
+
+/// How much of a message a notification shows.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Preview {
+    #[default]
+    NameAndText = 0,
+    NameOnly = 1,
+    Generic = 2,
+}
+
+/// The user's notification preferences on this device.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PushPrefs {
+    /// Instant notifications on: the sync subscribes to push.
+    pub instant: bool,
+    pub preview: Preview,
+    /// When a push last woke the app (Unix seconds), if ever.
+    pub last_wake: Option<u64>,
+}
+
+impl Default for PushPrefs {
+    fn default() -> Self {
+        PushPrefs {
+            instant: true,
+            preview: Preview::default(),
+            last_wake: None,
+        }
+    }
+}
+
+/// Key of the preferences in the core's database.
+pub const PUSH_PREFS_KEY: &str = "push-prefs";
+/// Version of the stored preferences. Frozen: any change to `PushPrefs` must
+/// bump it and migrate (`push_prefs_golden_bytes` holds its bytes).
+const PREFS_FORMAT: u8 = 1;
+
+impl PushPrefs {
+    /// Reads the preferences; absent or unreadable ones read as the defaults.
+    pub fn load(core: &Core) -> Result<PushPrefs, CoreError> {
+        let bytes = core.transport_state(PUSH_PREFS_KEY)?.unwrap_or_default();
+        if bytes.is_empty() {
+            return Ok(PushPrefs::default());
+        }
+        let prefs = match bytes.split_first() {
+            Some((&PREFS_FORMAT, rest)) => postcard::from_bytes(rest).ok(),
+            _ => None,
+        };
+        Ok(prefs.unwrap_or_else(|| {
+            tracing::warn!("unreadable push prefs: defaults");
+            PushPrefs::default()
+        }))
+    }
+
+    /// Writes the preferences to the core's encrypted database.
+    pub fn store(&self, core: &mut Core) -> Result<(), CoreError> {
+        let mut bytes = vec![PREFS_FORMAT];
+        bytes.extend(postcard::to_allocvec(self).expect("push prefs always encode"));
+        core.set_transport_state(PUSH_PREFS_KEY, &bytes)
+    }
 }
 
 /// Subscriptions held for one mailbox and one kind.

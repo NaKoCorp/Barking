@@ -99,6 +99,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         let queued = lock.withLock {
             _syncCalls += 1
             _syncEvents.append("sync")
+            _order.append("sync")
             return _leaveReady && !_leaveExpired
         }
         defer { lock.withLock { _syncEvents.append("sync-done") } }
@@ -129,7 +130,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _pushSettings: [PushSettings?] = []
     /// Every `setPush` call, in order (`nil`: push off).
     var pushSettings: [PushSettings?] { lock.withLock { _pushSettings } }
-    func setPush(settings: PushSettings?) throws { lock.withLock { _pushSettings.append(settings) } }
+    private var _order: [String] = []
+    /// `setPush` and `sync` calls interleaved, in call order.
+    var order: [String] { lock.withLock { _order } }
+    func setPush(settings: PushSettings?) throws {
+        lock.withLock { _pushSettings.append(settings); _order.append("setPush") }
+    }
     func pendingCount() throws -> UInt32 { pendingCountValue }
     func myDevices() throws -> [MyDeviceInfo] { devicesList }
     func linkOffer() throws -> Data { Data([0xAA]) }
@@ -280,6 +286,38 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if let deliveryError { throw deliveryError }
         lock.withLock { _retriedAll.append(contact) }
         return retryAllCount
+    }
+    /// What `notificationPrefs`, `setInstant` and `setPreview` keep.
+    var prefs = NotificationPrefs(instant: true, preview: .nameAndText, lastWake: nil)
+    var wakeStatusValue = WakeStatus(configSet: false, nodes: [])
+    private var _wakeNotes: [UInt64] = []
+    /// Every `noteWake` time, in call order.
+    var wakeNotes: [UInt64] { lock.withLock { _wakeNotes } }
+    /// Thrown by `notificationPrefs` when set.
+    var prefsError: Error?
+    func notificationPrefs() throws -> NotificationPrefs {
+        if let prefsError { throw prefsError }
+        return lock.withLock { prefs }
+    }
+    /// Thrown by `setInstant` / `setPreview` when set (nothing is stored then).
+    var setInstantError: Error?
+    var setPreviewError: Error?
+    func setInstant(on: Bool) throws {
+        if let setInstantError { throw setInstantError }
+        lock.withLock { prefs.instant = on }
+    }
+    func setPreview(preview: PushPreview) throws {
+        if let setPreviewError { throw setPreviewError }
+        lock.withLock { prefs.preview = preview }
+    }
+    func noteWake(atSecs: UInt64) throws {
+        lock.withLock { _wakeNotes.append(atSecs); prefs.lastWake = atSecs }
+    }
+    /// Thrown by `wakeStatus` when set.
+    var wakeStatusError: Error?
+    func wakeStatus() throws -> WakeStatus {
+        if let wakeStatusError { throw wakeStatusError }
+        return wakeStatusValue
     }
     func pendingPackets() throws -> PendingPackets {
         if let deliveryError { throw deliveryError }

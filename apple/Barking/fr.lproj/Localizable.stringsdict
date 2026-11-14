@@ -580,5 +580,21 @@
 			<string>%lld appareils</string>
 		</dict>
 	</dict>
+	<key>%lld mailboxes</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld boîte aux lettres</string>
+			<key>other</key>
+			<string>%lld boîtes aux lettres</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

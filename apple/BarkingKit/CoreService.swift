@@ -292,10 +292,7 @@ public actor CoreService {
     /// outcome. During a quick sync it waits for it, then runs its own: a
     /// quick sync deposits no message (a send would wait for the next timer).
     public func sync(reason: SyncReason) async -> SyncOutcome {
-        while inFlightQuick, let task = inFlight {
-            _ = await task.value
-            if inFlight == task { finish(task) }
-        }
+        await waitForQuickSync()
         return await runSync("sync", quick: false) { try $0.sync(deadlineMs: Budget.appSyncMs) }
     }
 
@@ -306,6 +303,21 @@ public actor CoreService {
     /// these too). A failure gives `networkUp: false`.
     public func quickSync() async -> SyncOutcome {
         await runSync("quick-sync", quick: true) { try $0.quickSync(deadlineMs: Budget.appQuickSyncMs) }
+    }
+
+    /// The full sync of a background refresh, within `Budget.refreshSyncMs`.
+    /// Its outcome carries the new messages to notify.
+    public func refreshSync() async -> SyncOutcome {
+        await waitForQuickSync()
+        return await runSync("refresh", quick: false) { try $0.sync(deadlineMs: Budget.refreshSyncMs) }
+    }
+
+    /// Waits out a quick sync in flight (a full sync must not take its outcome).
+    private func waitForQuickSync() async {
+        while inFlightQuick, let task = inFlight {
+            _ = await task.value
+            if inFlight == task { finish(task) }
+        }
     }
 
     /// Clears the sync in flight, if it is still `task`.
@@ -357,6 +369,23 @@ public actor CoreService {
     /// Wake-up settings (`nil`: push off), used from the next full sync.
     public func setPush(_ settings: PushSettings?) async throws {
         try await call("push") { try $0.setPush(settings: settings) }
+    }
+    public func notificationPrefs() async throws -> NotificationPrefs {
+        try await call("notification-prefs") { try $0.notificationPrefs() }
+    }
+    public func setInstant(_ on: Bool) async throws {
+        try await call("instant") { try $0.setInstant(on: on) }
+    }
+    public func setPreview(_ preview: PushPreview) async throws {
+        try await call("preview") { try $0.setPreview(preview: preview) }
+    }
+    /// Notes that a push woke the app now; a failure changes nothing.
+    public func noteWake() async {
+        let now = UInt64(Date().timeIntervalSince1970)
+        try? await call("note-wake") { try $0.noteWake(atSecs: now) }
+    }
+    public func wakeStatus() async throws -> WakeStatus {
+        try await call("wake-status") { try $0.wakeStatus() }
     }
     /// Packets no node accepted yet (the pending packets screen's count).
     public func pendingCount() async throws -> Int { Int(try await call("pending") { try $0.pendingCount() }) }
