@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/NaKoCorp/Barking/compare/v0.1.0...v0.2.0) (2026-11-14)
+
+
+### Features
+
+* **ios:** notification settings, background refresh and wake transparency ([#49](https://github.com/NaKoCorp/Barking/issues/49)) ([25d987c](https://github.com/NaKoCorp/Barking/commit/25d987c6712af48ffe9fe8cdd1d6913bdb68eb27))
+
 ## [0.1.0](https://github.com/NaKoCorp/Barking/compare/v0.0.1...v0.1.0) (2026-11-13)
 
 
