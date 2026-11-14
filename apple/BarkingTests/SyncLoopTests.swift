@@ -9,11 +9,17 @@ import XCTest
 @MainActor
 final class SyncLoopTests: XCTestCase {
     /// Records the syncs and the waits; a wait ends when the test ticks it,
-    /// or throws when the loop's task is cancelled.
+    /// or throws when its own task is cancelled.
+    ///
+    /// Each wait has its own id: a restart cancels the old task while the
+    /// new one may already wait, and the old task's cancellation must not
+    /// end the new wait (it arrives later, through its own `Task`).
     private actor Clock {
         private(set) var reasons: [SyncReason] = []
         private(set) var waits: [Duration] = []
-        private var waiting: CheckedContinuation<Void, Error>?
+        /// Pending waits, by id; `latest` is the newest one, the one `tick` ends.
+        private var pending: [Int: CheckedContinuation<Void, Error>] = [:]
+        private var latest = 0
 
         private(set) var events: [String] = []
 
@@ -22,30 +28,37 @@ final class SyncLoopTests: XCTestCase {
 
         func wait(_ d: Duration) async throws {
             waits.append(d)
+            latest += 1
+            let id = latest
             try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { waiting = $0 }
+                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) -> Void in
+                    // Cancelled before suspending: the handler found nothing to end.
+                    guard !Task.isCancelled else {
+                        c.resume(throwing: CancellationError())
+                        return
+                    }
+                    pending[id] = c
+                }
             } onCancel: {
-                Task { await self.cancelWait() }
+                Task { await self.cancelWait(id) }
             }
         }
 
-        private func cancelWait() {
-            waiting?.resume(throwing: CancellationError())
-            waiting = nil
+        private func cancelWait(_ id: Int) {
+            pending.removeValue(forKey: id)?.resume(throwing: CancellationError())
         }
 
-        /// Ends the current wait; false when nothing waits.
+        /// Ends the newest wait; false when it is not pending.
         @discardableResult
         func tick() -> Bool {
-            guard let w = waiting else { return false }
-            waiting = nil
+            guard let w = pending.removeValue(forKey: latest) else { return false }
             w.resume()
             return true
         }
 
-        var isWaiting: Bool { waiting != nil }
-        func waiting(afterSyncs n: Int) -> Bool { reasons.count == n && waiting != nil }
-        func waiting(afterWaits n: Int) -> Bool { waits.count == n && waiting != nil }
+        var isWaiting: Bool { pending[latest] != nil }
+        func waiting(afterSyncs n: Int) -> Bool { reasons.count == n && isWaiting }
+        func waiting(afterWaits n: Int) -> Bool { waits.count == n && isWaiting }
     }
 
     private func makeLoop() -> (SyncLoop, Clock) {

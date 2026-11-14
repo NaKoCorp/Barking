@@ -323,15 +323,23 @@ final class TourUITests: XCTestCase {
             : (notDelivered: Seeded.notDelivered, received: Seeded.received, onNetwork: Seeded.onNetwork, pending: Seeded.pending)
         let app = XCUIApplication.seeded("deliveries", language: lang, extra: ["-BarkingUITestNoAutoUnlock"] + size)
         app.launch()
-        let back = { app.navigationBars.buttons.firstMatch.tap() }
         let close = { (marker: XCUIElement) in
             app.buttons[L.close].firstMatch.tap()
             marker.waitUntil({ !$0.exists }, timeout: 5)
         }
-        // A dialog without a cancel button (iOS 26) closes with a tap beside it.
+        // Cancels a dialog: its Cancel button, else (iOS 26 popovers have none)
+        // a tap beside it. That tap lands near the back button and may also
+        // pop the screen; `backIfPushed` copes with it.
         let dismissDialog = { (button: XCUIElement) in
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.12)).tap()
+            let cancel = app.buttons[L.cancel].firstMatch
+            if cancel.exists && cancel.isHittable { cancel.tap() }
+            else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.12)).tap() }
             button.waitUntil({ !$0.exists }, timeout: 5)
+        }
+        // Back to the root, unless the dialog's dismissal already went there.
+        let backIfPushed = {
+            let button = app.navigationBars.buttons.firstMatch
+            if button.waitForExistence(timeout: 2) { button.tap() }
         }
 
         let sam = app.staticTexts["Sam"].firstMatch
@@ -372,7 +380,7 @@ final class TourUITests: XCTestCase {
         }
 
         // Pending, from the Network row: then selecting, then Cancel all's dialog.
-        back()
+        backIfPushed()
         XCTAssertTrue(app.tabBars.buttons[L.network].waitForExistence(timeout: 5))
         app.tabBars.buttons[L.network].tap()
         let row = app.buttons["network.pending"]
