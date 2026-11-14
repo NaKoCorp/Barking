@@ -86,6 +86,44 @@ final class NotificationsModelTests: XCTestCase {
         XCTAssertEqual(m.preview, .nameOnly)
     }
 
+    func testFailedSetInstantRevertsReportsAndDoesNotSync() async {
+        let d = FakeDevice()
+        let m = model(d, push(.authorized))
+        await m.load()
+        d.setInstantError = BarkingError.Locked
+        await m.setInstant(false)
+        XCTAssertTrue(m.instant, "the stored value shows, not the one that failed")
+        XCTAssertEqual(m.state, .on)
+        XCTAssertTrue(m.saveFailed)
+        XCTAssertNil(m.lastSync)
+        XCTAssertEqual(d.syncCalls, 0)
+        d.setInstantError = nil
+        await m.setInstant(false)
+        XCTAssertFalse(m.saveFailed, "a later write that works clears the error")
+    }
+
+    func testFailedSetPreviewRevertsAndReports() async {
+        let d = FakeDevice()
+        let m = model(d, push(.authorized))
+        await m.load()
+        d.setPreviewError = BarkingError.Locked
+        await m.setPreview(.generic)
+        XCTAssertEqual(m.preview, .nameAndText)
+        XCTAssertEqual(d.prefs.preview, .nameAndText)
+        XCTAssertTrue(m.saveFailed)
+    }
+
+    func testFailedWriteKeepsPreviousValueWhenTheReadFailsToo() async {
+        let d = FakeDevice()
+        let m = model(d, push(.authorized))
+        await m.load()
+        d.setInstantError = BarkingError.Locked
+        d.prefsError = BarkingError.Locked
+        await m.setInstant(false)
+        XCTAssertTrue(m.instant)
+        XCTAssertTrue(m.saveFailed)
+    }
+
     func testRequestPermissionReapplies() async {
         let d = FakeDevice()
         let status = StatusBox(.notDetermined)

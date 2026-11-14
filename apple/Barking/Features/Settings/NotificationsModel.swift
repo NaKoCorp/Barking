@@ -20,6 +20,9 @@ final class NotificationsModel {
     private(set) var instant = true
     private(set) var preview: PushPreview = .nameAndText
     private(set) var appLocked = false
+    /// The last change of the switch or the preview was not stored: the
+    /// screen shows the value the core holds and says so.
+    private(set) var saveFailed = false
     /// The full sync a change of the switch started (tests await it).
     @ObservationIgnored private(set) var lastSync: Task<SyncOutcome, Never>?
 
@@ -50,16 +53,33 @@ final class NotificationsModel {
     }
 
     func setInstant(_ on: Bool) async {
+        let previous = instant
         instant = on
-        try? await core.setInstant(on)
+        do {
+            try await core.setInstant(on)
+            saveFailed = false
+        } catch {
+            // Never shows a value the core does not hold, and no sync follows.
+            saveFailed = true
+            instant = previous
+            await readPrefs()
+            return
+        }
         await readPrefs()
         // The sync follows at once, without making the screen wait.
         lastSync = Task { [core] in await core.sync(reason: .foreground) }
     }
 
     func setPreview(_ p: PushPreview) async {
+        let previous = preview
         preview = p
-        try? await core.setPreview(p)
+        do {
+            try await core.setPreview(p)
+            saveFailed = false
+        } catch {
+            saveFailed = true
+            preview = previous
+        }
         await readPrefs()
     }
 

@@ -30,6 +30,9 @@ struct NotificationsView: View {
                 stateNote
                 action
             }
+            if model.saveFailed {
+                Banner(kind: .danger, title: "Not saved. Try again.")
+            }
             VStack(alignment: .leading, spacing: Space.s2) {
                 SectionLabel("Preview")
                 FormCard {

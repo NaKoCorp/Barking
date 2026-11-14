@@ -293,8 +293,17 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if let prefsError { throw prefsError }
         return lock.withLock { prefs }
     }
-    func setInstant(on: Bool) throws { lock.withLock { prefs.instant = on } }
-    func setPreview(preview: PushPreview) throws { lock.withLock { prefs.preview = preview } }
+    /// Thrown by `setInstant` / `setPreview` when set (nothing is stored then).
+    var setInstantError: Error?
+    var setPreviewError: Error?
+    func setInstant(on: Bool) throws {
+        if let setInstantError { throw setInstantError }
+        lock.withLock { prefs.instant = on }
+    }
+    func setPreview(preview: PushPreview) throws {
+        if let setPreviewError { throw setPreviewError }
+        lock.withLock { prefs.preview = preview }
+    }
     func noteWake(atSecs: UInt64) throws {
         lock.withLock { _wakeNotes.append(atSecs); prefs.lastWake = atSecs }
     }
