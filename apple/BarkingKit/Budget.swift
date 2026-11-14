@@ -15,6 +15,9 @@ public enum Budget {
     /// same bound (quick sync + shutdown < `appLockMs`), not the extension's
     /// longer work time.
     public static let appQuickSyncMs: UInt64 = appSyncMs
+    /// Full sync of a background refresh (`BGAppRefreshTask`, about 30 s).
+    /// Nothing else runs then, so it may hold the lock for the whole time.
+    public static let refreshSyncMs: UInt64 = 25_000
     /// Lock wait in the extension (spec iOS push §6.1).
     public static let extensionLockMs: UInt64 = 2_000
     /// The extension's work from its start; 5 s of margin on the 25 s.

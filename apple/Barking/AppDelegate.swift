@@ -74,7 +74,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         application.registerForRemoteNotifications()
         UNUserNotificationCenter.current().delegate = self
+        BackgroundRefresh.register()
         return true
+    }
+
+    /// The app leaves the screen: asks iOS for the next refresh.
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        BackgroundRefresh.schedule()
     }
 
     /// A tap on a notification: the failure notice names its contact and

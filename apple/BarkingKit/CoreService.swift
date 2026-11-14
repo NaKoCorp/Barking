@@ -308,6 +308,12 @@ public actor CoreService {
         await runSync("quick-sync", quick: true) { try $0.quickSync(deadlineMs: Budget.appQuickSyncMs) }
     }
 
+    /// The full sync of a background refresh, within `Budget.refreshSyncMs`.
+    /// Its outcome carries the new messages to notify.
+    public func refreshSync() async -> SyncOutcome {
+        await runSync("refresh", quick: false) { try $0.sync(deadlineMs: Budget.refreshSyncMs) }
+    }
+
     /// Clears the sync in flight, if it is still `task`.
     private func finish(_ task: Task<SyncOutcome, Never>) {
         guard inFlight == task else { return }
