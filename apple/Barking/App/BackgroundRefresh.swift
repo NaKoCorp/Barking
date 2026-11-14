@@ -38,8 +38,11 @@ enum BackgroundRefresh {
                     post: (UNNotificationRequest) async -> Void) async -> Bool {
         guard let service else { return false }
         let outcome = await service.refreshSync()
+        // Expired meanwhile (the sync itself is not cancelled with us): post nothing.
+        if Task.isCancelled { return false }
         if !outcome.newMessages.isEmpty {
             let preview = (try? await service.notificationPrefs().preview) ?? .generic
+            if Task.isCancelled { return false }
             let content = UNMutableNotificationContent()
             let summary = SyncSummary(itemsReceived: UInt32(outcome.items), sent: UInt32(outcome.sent),
                                       newMessages: outcome.newMessages, networkUp: outcome.networkUp, error: nil)
@@ -49,24 +52,42 @@ enum BackgroundRefresh {
         return outcome.networkUp
     }
 
-    /// `BGAppRefreshTask` is not `Sendable`; iOS lets `setTaskCompleted` be
-    /// called from any thread.
-    private struct TaskBox: @unchecked Sendable { let task: BGAppRefreshTask }
+    /// Completes a task exactly once, whichever of the run's end and the
+    /// expiration comes first: BGTask does not allow a second completion.
+    final class OnceCompletion: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        private let complete: @Sendable (Bool) -> Void
 
-    private static func handle(_ bgTask: BGAppRefreshTask) {
+        init(_ complete: @escaping @Sendable (Bool) -> Void) { self.complete = complete }
+
+        /// Completes with `success` the first time; `false` (and nothing) after.
+        @discardableResult
+        func finish(success: Bool) -> Bool {
+            let first = lock.withLock { () -> Bool in
+                defer { done = true }
+                return !done
+            }
+            if first { complete(success) }
+            return first
+        }
+    }
+
+    private static func handle(_ task: BGAppRefreshTask) {
         // Always asks for the next one, whatever happens to this one.
         schedule()
-        let box = TaskBox(task: bgTask)
-        let task = bgTask
+        // `BGAppRefreshTask` is not `Sendable`; `setTaskCompleted` may be called from any thread.
+        nonisolated(unsafe) let bg = task
+        let completion = OnceCompletion { bg.setTaskCompleted(success: $0) }
         let work = Task { @MainActor in
             let ok = await run(service: AppRouter.current?.core, locked: AppLock.isLockedForExtension) {
                 try? await UNUserNotificationCenter.current().add($0)
             }
-            box.task.setTaskCompleted(success: ok && !Task.isCancelled)
+            completion.finish(success: ok)
         }
         task.expirationHandler = {
             work.cancel()
-            box.task.setTaskCompleted(success: false)
+            completion.finish(success: false)
         }
     }
 }

@@ -64,4 +64,39 @@ final class BackgroundRefreshTests: XCTestCase {
         XCTAssertEqual(request.identifier, "com.nakocorp.barking.refresh")
         XCTAssertEqual(request.earliestBeginDate, now.addingTimeInterval(3600))
     }
+
+    func testPreviewReadFailingFallsBackToGeneric() async {
+        let (core, d) = service(alice(1))
+        d.prefsError = BarkingError.Locked
+        let (ok, posted) = await run(core)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(posted.count, 1)
+        XCTAssertEqual(posted.first?.content.body, "New message")
+        XCTAssertEqual(posted.first?.content.title, "")
+    }
+
+    func testCancelledDuringSyncPostsNothing() async {
+        let (core, d) = service(alice(2))
+        d.syncDelay = 0.4
+        var posted: [UNNotificationRequest] = []
+        let work = Task { @MainActor in
+            await BackgroundRefresh.run(service: core, locked: false) { posted.append($0) }
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        work.cancel()
+        let ok = await work.value
+        XCTAssertFalse(ok)
+        XCTAssertTrue(posted.isEmpty)
+    }
+
+    func testOnceCompletionCompletesExactlyOnce() {
+        final class Calls: @unchecked Sendable {
+            let lock = NSLock(); var values: [Bool] = []
+        }
+        let calls = Calls()
+        let once = BackgroundRefresh.OnceCompletion { v in calls.lock.withLock { calls.values.append(v) } }
+        XCTAssertTrue(once.finish(success: false))   // expiry
+        XCTAssertFalse(once.finish(success: true))   // run end after expiry
+        XCTAssertEqual(calls.values, [false])
+    }
 }
