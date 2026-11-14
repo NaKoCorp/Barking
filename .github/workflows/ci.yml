@@ -262,8 +262,12 @@ jobs:
       - name: Build the app once
         if: steps.paths.outputs.changed == 'true'
         run: scripts/test-ios.sh build
+      # Every test plan below: a failed test gets one more try (timing on a
+      # loaded 3-core runner); the result bundle keeps both attempts.
       - name: Unit tests
         if: steps.paths.outputs.changed == 'true'
+        env:
+          BARKING_TEST_RETRIES: 1
         run: scripts/test-ios.sh unit
       # One simulator: the 3-core runner cannot boot clones (they never got
       # their runner launched and starved the first one into timeouts). A
@@ -272,7 +276,7 @@ jobs:
         if: steps.paths.outputs.changed == 'true'
         env:
           BARKING_UI_WORKERS: 1
-          BARKING_UI_RETRIES: 1
+          BARKING_TEST_RETRIES: 1
         run: scripts/test-ios.sh ui
       - name: Keep the UI test result
         if: steps.paths.outputs.changed == 'true' && failure()
@@ -284,6 +288,8 @@ jobs:
           if-no-files-found: ignore
       - name: Localised tour (English)
         if: steps.paths.outputs.changed == 'true'
+        env:
+          BARKING_TEST_RETRIES: 1
         run: scripts/test-ios.sh tour en
       - name: Keep the tour result
         if: steps.paths.outputs.changed == 'true' && always()

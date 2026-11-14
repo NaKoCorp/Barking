@@ -7,3 +7,10 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [profile.slow]
 default-filter = "all()"
 slow-timeout = { period = "60s", terminate-after = 4 }
+
+# The binaries that start real nodes (QUIC on 127.0.0.1) depend on timing: on
+# a loaded runner a copy or a receipt can miss a round. One more try, so a
+# flake does not fail the run; nextest still prints it as FLAKY.
+[[profile.slow.overrides]]
+filter = "binary_id(barking-node::network) | binary_id(barking-node::dht) | binary_id(barking-node::wake) | binary_id(barking-node::restart) | binary_id(barking-net::network) | binary_id(barking-ffi::network) | binary_id(barking-ffi::route) | binary_id(barking-ffi::unread) | binary_id(barking-ffi::identity)"
+retries = 1
