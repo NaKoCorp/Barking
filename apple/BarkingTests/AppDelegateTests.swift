@@ -1,4 +1,5 @@
 import UIKit
+import UserNotifications
 import XCTest
 @testable import Barking
 @testable import BarkingKit
@@ -56,5 +57,47 @@ final class AppDelegateTests: XCTestCase {
         delegate.service = { nil }
         let result = await wake(delegate)
         XCTAssertEqual(result, .noData)
+    }
+
+    func testBackgroundWakeNotesWake() async {
+        let d = FakeDevice()
+        _ = await delegate(syncing: d).backgroundWake()
+        XCTAssertEqual(d.wakeNotes.count, 1)
+    }
+
+    private func guarded(_ status: UNAuthorizationStatus, token: Data?, device: FakeDevice) async -> PushToken {
+        let push = PushToken()
+        push.info = [
+            "BarkingRelayHost": "relay.local", "BarkingRelayPort": "4434",
+            "BarkingRelayId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "BarkingRelaySealId": "1", "BarkingRelaySealPublic": String(repeating: "5e", count: 32),
+        ]
+        push.authorization = { status }
+        push.token = token
+        await push.apply(to: CoreService(device: device, runner: DirectRunner()))
+        return push
+    }
+
+    func testDeniedClearsPushWithoutToken() async {
+        let d = FakeDevice()
+        let push = await guarded(.denied, token: nil, device: d)
+        XCTAssertEqual(d.pushSettings.count, 1)
+        XCTAssertNil(d.pushSettings.last ?? nil)
+        XCTAssertEqual(push.status, .denied)
+    }
+
+    func testNotDeterminedClearsPush() async {
+        let d = FakeDevice()
+        let push = await guarded(.notDetermined, token: Data([1, 2]), device: d)
+        XCTAssertEqual(d.pushSettings.count, 1)
+        XCTAssertNil(d.pushSettings.last ?? nil)
+        XCTAssertEqual(push.status, .notDetermined)
+    }
+
+    func testAuthorizedGivesSettings() async {
+        let d = FakeDevice()
+        _ = await guarded(.authorized, token: Data([1, 2]), device: d)
+        XCTAssertEqual(d.pushSettings.count, 1)
+        XCTAssertNotNil(d.pushSettings.last ?? nil)
     }
 }

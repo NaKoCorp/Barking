@@ -214,7 +214,7 @@ final class WipeTests: XCTestCase {
     func testExtensionSkipsTheDatabaseWhileAWipeIsPending() throws {
         try touch(container, [Wipe.markerName, "barking.db"])
         XCTAssertNil(try DeviceFactory.existing(lockTimeoutMs: 100, paths: paths))
-        let (record, summary) = BenchRun.run(source: "test", paths: paths)
+        let (record, summary, _) = BenchRun.run(source: "test", paths: paths)
         XCTAssertEqual(record.outcome, BenchRun.wipePending)
         XCTAssertNil(summary)
         XCTAssertFalse(record.steps.contains { $0.name == "opened" })

@@ -13,11 +13,31 @@ final class PushToken {
     var failure: String?
     /// Where the relay is read from (tests give their own).
     @ObservationIgnored var info: [String: Any] = Bundle.main.infoDictionary ?? [:]
+    /// Where the notification permission is read from (tests give their own).
+    @ObservationIgnored var authorization: @Sendable () async -> UNAuthorizationStatus = {
+        await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
+    /// The last permission read by `refreshStatus()`, which `apply(to:)` also
+    /// calls (nil before the first).
+    private(set) var status: UNAuthorizationStatus?
+
+    /// Reads the notification permission and nothing else (no setting is
+    /// written): what a read-only screen needs.
+    func refreshStatus() async {
+        status = await authorization()
+    }
 
     /// Gives `core` the wake-up settings for the token, or push off when no
-    /// relay was built in. Nothing before iOS gave a token: the settings the
-    /// core holds stay.
+    /// relay was built in. Push is off, token or not, while iOS notifications
+    /// are denied or not yet asked. Authorized but no token yet: the
+    /// settings the core holds stay.
     func apply(to core: CoreService) async {
+        await refreshStatus()
+        guard let status else { return }
+        guard PushRelay.allows(status) else {
+            do { try await core.setPush(nil) } catch { failure = String(describing: error) }
+            return
+        }
         guard let token else { return }
         do {
             try await core.setPush(PushRelay.settings(info: info, token: token))
@@ -52,6 +72,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func backgroundWake() async -> UIBackgroundFetchResult {
         guard let core = service() else { return .noData }
         let outcome = await core.quickSync()
+        await core.noteWake()
         guard outcome.networkUp else { return .failed }
         return outcome.changed ? .newData : .noData
     }
@@ -60,6 +81,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         application.registerForRemoteNotifications()
         UNUserNotificationCenter.current().delegate = self
+        BackgroundRefresh.register()
         return true
     }
 

@@ -215,7 +215,7 @@ struct BenchSection: View {
             running = true
             Task {
                 _ = try? await DeviceCall.run("bench") {
-                    let (r, _) = BenchRun.run(source: "app")
+                    let (r, _, _) = BenchRun.run(source: "app")
                     var record = r
                     if record.outcome.isEmpty { record.outcome = "fetched" }
                     try BenchStore.shared().append(record)

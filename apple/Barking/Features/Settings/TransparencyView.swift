@@ -29,6 +29,8 @@ struct TransparencyView: View {
                 .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
                 .accessibilityIdentifier("transparency.data")
 
+                wakeUps
+
                 heading("Journal")
                 BarkingSegmented("Journal filter",
                                  selection: Binding(get: { model.filter }, set: { f in Task { await model.setFilter(f) } }),
@@ -62,6 +64,77 @@ struct TransparencyView: View {
         .navigationTitle(Text("Transparency"))
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.load() }
+    }
+
+    /// "Wake-ups" (spec §5.7): the state and why, the nodes holding a
+    /// subscription, who sees what, and the last wake handled.
+    @ViewBuilder private var wakeUps: some View {
+        heading("Wake-ups")
+        card(id: "transparency.wake.state") {
+            dataRow(DataRow(id: "state", icon: "bolt", title: String(localized: "State"), detail: stateText))
+        }
+
+        SectionLabel("Subscribed nodes").padding(.top, Space.section - Space.s2)
+        if model.nodesFailed {
+            Text("Unavailable").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
+                .accessibilityIdentifier("transparency.wake.unavailable")
+        } else if model.wakeRows.isEmpty {
+            Text("None").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
+                .accessibilityIdentifier("transparency.wake.none")
+        } else {
+            card(id: "transparency.wake.nodes") {
+                ForEach(Array(model.wakeRows.enumerated()), id: \.element.id) { i, row in
+                    if i > 0 { Rectangle().fill(Color.border).frame(height: 1) }
+                    dataRow(DataRow(id: row.id, icon: "point.3.connected.trianglepath.dotted",
+                                    title: row.title, detail: row.detail))
+                }
+            }
+        }
+
+        SectionLabel("Who sees what").padding(.top, Space.section - Space.s2)
+        card(id: "transparency.wake.who") {
+            dataRow(DataRow(id: "node", icon: "point.3.connected.trianglepath.dotted", title: String(localized: "Node"),
+                            detail: String(localized: "A mailbox, an opaque sealed token and the relay's address.")))
+            Rectangle().fill(Color.border).frame(height: 1)
+            dataRow(DataRow(id: "relay", icon: "arrow.left.arrow.right", title: String(localized: "Relay"),
+                            detail: String(localized: "That a node asks to wake a token.")))
+            Rectangle().fill(Color.border).frame(height: 1)
+            dataRow(DataRow(id: "apple", icon: "apple.logo", title: String(localized: "Apple"),
+                            detail: String(localized: "That an iPhone receives a Barking push.")))
+        }
+        Text("None of them sees the sender or the content.")
+            .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
+        Text("Limit: a node that cooperates with the relay or with Apple can link a mailbox to this iPhone. Turning instant notifications off prevents it.")
+            .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
+
+        card(id: "transparency.wake.last") {
+            dataRow(DataRow(id: "last", icon: "clock", title: String(localized: "Last wake handled"), detail: lastWakeText))
+        }
+        .padding(.top, Space.s2)
+    }
+
+    private var stateText: String {
+        if model.prefsFailed { return String(localized: "Unavailable") }
+        if model.waitingForToken { return String(localized: "Waiting for Apple's token") }
+        switch model.wakeState {
+        case .on: return String(localized: "On")
+        case .off: return String(localized: "Off: instant notifications are turned off")
+        case .notAsked, .denied: return String(localized: "Off: notifications are not allowed on this iPhone")
+        case .noRelay: return String(localized: "Off: no wake-up relay in this build")
+        }
+    }
+
+    private var lastWakeText: String {
+        if model.prefsFailed { return String(localized: "Unavailable") }
+        guard let at = model.lastWake else { return String(localized: "Never") }
+        return at.formatted(.relative(presentation: .named))
+    }
+
+    private func card<Content: View>(id: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(spacing: 0, content: content)
+            .background(Color.surfaceCard, in: .rect(cornerRadius: Radius.card))
+            .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
+            .accessibilityIdentifier(id)
     }
 
     /// 24 pt above a section label, 8 below (U-14); the stack gives the 8.

@@ -95,7 +95,8 @@ targets:
         BarkingApnsEnvironment: $(BARKING_APS_ENVIRONMENT)
         # Nodes added at first start (empty: none); set in Local.xcconfig.
         BarkingBootstrapNodes: $(BARKING_BOOTSTRAP_NODES)
-        UIBackgroundModes: [remote-notification]
+        UIBackgroundModes: [remote-notification, fetch]
+        BGTaskSchedulerPermittedIdentifiers: [com.nakocorp.barking.refresh]
         UIAppFonts: [FiraCode-Regular.ttf, FiraCode-Medium.ttf, FiraCode-SemiBold.ttf]
         NSCameraUsageDescription: Scan a contact's Barking code.
         NSFaceIDUsageDescription: Confirm it is you before exporting your recovery phrase.

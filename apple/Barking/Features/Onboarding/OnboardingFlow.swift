@@ -40,7 +40,20 @@ struct OnboardingFlow: View {
     private func ready(_ core: CoreService) {
         PhraseMemory.shared.phrase = model.phrase
         router.becomeReady(core: core)
-        Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) }
+        Task { await Self.askForNotifications(core: core) }
+    }
+
+    /// Asks iOS for the notification permission, then applies the push guard
+    /// to `core`: it was created while the status was still undetermined, so
+    /// it holds push off, and no foreground transition follows the alert.
+    static func askForNotifications(
+        core: CoreService, push: PushToken = .shared,
+        request: @Sendable () async -> Void = {
+            _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
+        }
+    ) async {
+        await request()
+        await push.apply(to: core)
     }
 }
 

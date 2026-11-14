@@ -54,6 +54,11 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func retryMessage(messageId: Int64) throws
     func retryAll(contact: String) throws -> UInt32
     func pendingPackets() throws -> PendingPackets
+    func notificationPrefs() throws -> NotificationPrefs
+    func setInstant(on: Bool) throws
+    func setPreview(preview: PushPreview) throws
+    func noteWake(atSecs: UInt64) throws
+    func wakeStatus() throws -> WakeStatus
 }
 
 extension Device: DeviceHandle {}
@@ -101,6 +106,8 @@ public struct SyncOutcome: Sendable, Equatable {
     public var failed: [DeliveryChange] = []
     /// Contacts a copy of a message I sent from another device arrived for.
     public var syncedContacts: [String] = []
+    /// The new messages themselves, for the notifications of a background refresh.
+    public var newMessages: [NewMessage] = []
 
     /// Something came in or went out: what a background wake reports.
     public var changed: Bool { items > 0 || received > 0 || sent > 0 }
@@ -115,7 +122,7 @@ public struct SyncOutcome: Sendable, Equatable {
                            lines: ["$ barking sync", result], items: Int(s.itemsReceived),
                            deliveryChanges: s.deliveryChanges,
                            newMessageContacts: s.newMessages.map(\.contact), failed: s.failed,
-                           syncedContacts: s.syncedContacts)
+                           syncedContacts: s.syncedContacts, newMessages: s.newMessages)
     }
 }
 

@@ -280,7 +280,8 @@ impl Device {
     }
 
     /// Full sync, for at most `deadline_ms`, with the wake-up settings last
-    /// given to `set_push`.
+    /// given to `set_push`. It also follows the stored notification
+    /// preferences: with instant notifications off, it holds no subscriptions.
     pub fn sync(&self, deadline_ms: u64) -> Result<SyncSummary, BarkingError> {
         guard(|| {
             let opts_private = self.allow_private();
@@ -288,7 +289,7 @@ impl Device {
                 let opts = SyncOptions {
                     deadline: Duration::from_millis(deadline_ms),
                     allow_private: opts_private,
-                    push: PushConfig::load(core)?,
+                    push: PushConfig::effective(core)?,
                     ..SyncOptions::default()
                 };
                 let report = block_on(barking_net::sync(core, &QuicDialer, opts))?;

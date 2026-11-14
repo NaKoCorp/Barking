@@ -67,6 +67,23 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
+    /// Transparency › Wake-ups (spec iOS push §5.7) has French and a plural.
+    func testWakeUpsStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        for key in ["Wake-ups", "State", "Subscribed nodes", "Who sees what", "Last wake handled", "Never", "On",
+                    "Waiting for Apple's token", "Unavailable", "until %@", "messages", "receipts",
+                    "Off: instant notifications are turned off",
+                    "Off: notifications are not allowed on this iPhone", "Off: no wake-up relay in this build",
+                    "None of them sees the sender or the content."] {
+            XCTAssertNotNil(fr[key], "missing French for \(key)")
+        }
+        for lang in ["en", "fr"] {
+            let rule = (try XCTUnwrap(table(lang, "Localizable", "stringsdict"))["%lld mailboxes"] as? NSDictionary)?["n"] as? NSDictionary
+            XCTAssertNotNil(rule?["one"], lang)
+            XCTAssertNotNil(rule?["other"], lang)
+        }
+    }
+
     func testPluralsInBothLanguages() throws {
         for lang in ["en", "fr"] {
             let d = try XCTUnwrap(table(lang, "Localizable", "stringsdict"), lang)

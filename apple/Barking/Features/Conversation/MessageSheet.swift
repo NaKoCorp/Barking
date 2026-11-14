@@ -359,5 +359,10 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func retryMessage(messageId: Int64) throws { throw Never() }
     func retryAll(contact: String) throws -> UInt32 { throw Never() }
     func pendingPackets() throws -> PendingPackets { throw Never() }
+    func notificationPrefs() throws -> NotificationPrefs { throw Never() }
+    func setInstant(on: Bool) throws { throw Never() }
+    func setPreview(preview: PushPreview) throws { throw Never() }
+    func noteWake(atSecs: UInt64) throws { throw Never() }
+    func wakeStatus() throws -> WakeStatus { throw Never() }
 }
 #endif

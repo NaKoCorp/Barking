@@ -1,9 +1,20 @@
 import Foundation
+import UserNotifications
 
 /// The relay the app was built with: Info.plist keys filled from the build
 /// settings `BARKING_RELAY_*` (empty in the repository, set in the
 /// git-ignored `Local.xcconfig`), and `BARKING_APS_ENVIRONMENT`.
 public enum PushRelay {
+    /// Whether iOS lets the app show notifications: the wake subscription
+    /// only exists then (denied or not yet asked: push off).
+    public static func allows(_ status: UNAuthorizationStatus) -> Bool {
+        switch status {
+        case .authorized, .provisional, .ephemeral: true
+        case .denied, .notDetermined: false
+        @unknown default: false
+        }
+    }
+
     /// What to give the core for `token`; `nil` (push off) when no relay was
     /// built in or a key is malformed.
     public static func settings(info: [String: Any], token: Data) -> PushSettings? {

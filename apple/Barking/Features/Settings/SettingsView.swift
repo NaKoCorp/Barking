@@ -33,6 +33,10 @@ struct SettingsView: View {
                                     .accessibilityLabel(Text(verbatim: FingerprintFormat.spoken(model.fingerprint, form: .short))),
                                 icon: "key") { RowGlyph() }
                     }
+                    NavigationLink { NotificationsView(core: core) } label: {
+                        FormRow("Notifications", subtitle: "Instant wake-ups and previews", icon: "bell") { RowGlyph() }
+                    }
+                    .accessibilityIdentifier("settings.notifications")
                     NavigationLink { SecuritySettingsView() } label: {
                         FormRow("Security", subtitle: "Lock and erase", icon: "lock") { RowGlyph() }
                     }

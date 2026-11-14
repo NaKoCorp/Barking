@@ -1,3 +1,4 @@
+import UserNotifications
 import XCTest
 @testable import Barking
 @testable import BarkingKit
@@ -37,12 +38,21 @@ final class PushRelayTests: XCTestCase {
         XCTAssertNil(PushRelay.settings(info: info(), token: Data()))
     }
 
+    func testAllowsStatuses() {
+        XCTAssertFalse(PushRelay.allows(.notDetermined))
+        XCTAssertFalse(PushRelay.allows(.denied))
+        XCTAssertTrue(PushRelay.allows(.authorized))
+        XCTAssertTrue(PushRelay.allows(.provisional))
+        XCTAssertTrue(PushRelay.allows(.ephemeral))
+    }
+
     @MainActor
     func testTokenArrivalHandsTheSettingsToTheCore() async throws {
         let device = FakeDevice()
         let core = CoreService(device: device, runner: DirectRunner())
         let push = PushToken()
         push.info = info()
+        push.authorization = { .authorized }
         let delegate = AppDelegate()
         delegate.service = { core }
         delegate.pushToken = push
@@ -58,6 +68,7 @@ final class PushRelayTests: XCTestCase {
         let core = CoreService(device: device, runner: DirectRunner())
         let push = PushToken()
         push.info = [:]
+        push.authorization = { .authorized }
         push.token = token
         await push.apply(to: core)
         XCTAssertEqual(device.pushSettings.count, 1)
@@ -70,8 +81,38 @@ final class PushRelayTests: XCTestCase {
         let core = CoreService(device: device, runner: DirectRunner())
         let push = PushToken()
         push.info = info()
+        push.authorization = { .authorized }
         await push.apply(to: core)
         XCTAssertTrue(device.pushSettings.isEmpty)
+    }
+
+    @MainActor
+    private func onboardingPush(_ status: UNAuthorizationStatus) async -> FakeDevice {
+        let device = FakeDevice()
+        let core = CoreService(device: device, runner: DirectRunner())
+        let push = PushToken()
+        push.info = info()
+        push.token = token
+        // The core was made while undetermined: push off, then the prompt is answered.
+        push.authorization = { .notDetermined }
+        await push.apply(to: core)
+        push.authorization = { status }
+        await OnboardingFlow.askForNotifications(core: core, push: push, request: {})
+        return device
+    }
+
+    @MainActor
+    func testOnboardingPromptAllowedSubscribes() async {
+        let device = await onboardingPush(.authorized)
+        XCTAssertEqual(device.pushSettings.count, 2)
+        XCTAssertNil(device.pushSettings.first ?? nil)
+        XCTAssertNotNil(device.pushSettings.last ?? nil)
+    }
+
+    @MainActor
+    func testOnboardingPromptDeniedStaysOff() async {
+        let device = await onboardingPush(.denied)
+        XCTAssertNil(device.pushSettings.last ?? nil)
     }
 
     @MainActor
