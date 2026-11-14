@@ -307,7 +307,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func noteWake(atSecs: UInt64) throws {
         lock.withLock { _wakeNotes.append(atSecs); prefs.lastWake = atSecs }
     }
-    func wakeStatus() throws -> WakeStatus { wakeStatusValue }
+    /// Thrown by `wakeStatus` when set.
+    var wakeStatusError: Error?
+    func wakeStatus() throws -> WakeStatus {
+        if let wakeStatusError { throw wakeStatusError }
+        return wakeStatusValue
+    }
     func pendingPackets() throws -> PendingPackets {
         if let deliveryError { throw deliveryError }
         return pendingInfo

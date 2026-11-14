@@ -184,8 +184,12 @@ final class TransparencyModel {
     private(set) var wakeRows: [WakeRow] = []
     /// When the last wake was handled; nil: never.
     private(set) var lastWake: Date?
+    /// The settings read failed: the state and the last wake are unknown.
+    private(set) var prefsFailed = false
+    /// The subscriptions read failed: the nodes are unknown.
+    private(set) var nodesFailed = false
     /// Instant notifications are on but Apple has not given a token yet.
-    var waitingForToken: Bool { wakeState == .on && push.token == nil }
+    var waitingForToken: Bool { !prefsFailed && wakeState == .on && push.token == nil }
     private(set) var canLoadMore = false
     private(set) var loading = false
     private(set) var filter: JournalFilter = .everything
@@ -213,14 +217,29 @@ final class TransparencyModel {
         await reload()
     }
 
-    /// Reads the permission, the switch, the subscriptions and the last wake.
+    /// Reads the permission, the switch, the subscriptions and the last
+    /// wake. Read-only: nothing is written to the core. A failed read is
+    /// remembered, never shown as a clean state.
     private func loadWakeUps() async {
-        await push.apply(to: core)
-        let prefs = try? await core.notificationPrefs()
-        wakeState = .resolve(info: push.info, status: push.status, instant: prefs?.instant ?? true)
-        lastWake = prefs?.lastWake.map { Date(timeIntervalSince1970: TimeInterval($0)) }
-        let status = try? await core.wakeStatus()
-        wakeRows = (status?.nodes ?? []).map { Self.wakeRow($0, calendar: calendar, locale: locale) }
+        await push.refreshStatus()
+        do {
+            let prefs = try await core.notificationPrefs()
+            prefsFailed = false
+            wakeState = .resolve(info: push.info, status: push.status, instant: prefs.instant)
+            lastWake = prefs.lastWake.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        } catch {
+            prefsFailed = true
+            wakeState = .resolve(info: push.info, status: push.status, instant: false)
+            lastWake = nil
+        }
+        do {
+            let status = try await core.wakeStatus()
+            nodesFailed = false
+            wakeRows = status.nodes.map { Self.wakeRow($0, calendar: calendar, locale: locale) }
+        } catch {
+            nodesFailed = true
+            wakeRows = []
+        }
     }
 
     /// "3 mailboxes · messages, receipts · until Nov 13, 2025": `expiresDay`

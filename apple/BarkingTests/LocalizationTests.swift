@@ -71,7 +71,7 @@ final class LocalizationTests: XCTestCase {
     func testWakeUpsStringsInFrench() throws {
         let fr = try XCTUnwrap(table("fr"))
         for key in ["Wake-ups", "State", "Subscribed nodes", "Who sees what", "Last wake handled", "Never", "On",
-                    "Waiting for Apple's token", "until %@", "messages", "receipts",
+                    "Waiting for Apple's token", "Unavailable", "until %@", "messages", "receipts",
                     "Off: instant notifications are turned off",
                     "Off: notifications are not allowed on this iPhone", "Off: no wake-up relay in this build",
                     "None of them sees the sender or the content."] {

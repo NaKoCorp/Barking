@@ -97,6 +97,42 @@ final class TransparencyModelTests: XCTestCase {
         XCTAssertFalse(m.waitingForToken)
     }
 
+    private struct Boom: Error {}
+
+    func testFailedPrefsReadIsNotACleanState() async {
+        let d = FakeDevice()
+        d.prefsError = Boom()
+        let m = model(d)
+        await m.load()
+        XCTAssertTrue(m.prefsFailed)
+        XCTAssertNil(m.lastWake)
+        XCTAssertFalse(m.waitingForToken)
+        XCTAssertFalse(m.nodesFailed)
+    }
+
+    func testFailedWakeStatusReadIsNotNone() async {
+        let d = FakeDevice()
+        d.wakeStatusError = Boom()
+        let m = model(d)
+        await m.load()
+        XCTAssertTrue(m.nodesFailed)
+        XCTAssertFalse(m.prefsFailed)
+        XCTAssertTrue(m.wakeRows.isEmpty)
+        d.wakeStatusError = nil
+        await m.load()
+        XCTAssertFalse(m.nodesFailed)
+    }
+
+    func testOpeningTheViewWritesNothing() async {
+        let push = Self.push(.denied)
+        push.token = Data([1, 2, 3])
+        let d = FakeDevice()
+        let m = model(d, push: push)
+        await m.load()
+        XCTAssertEqual(m.wakeState, .denied)
+        XCTAssertTrue(d.pushSettings.isEmpty, "the transparency view never calls setPush")
+    }
+
     func testNotWaitingForTokenWhenOff() async {
         let d = FakeDevice()
         d.prefs.instant = false

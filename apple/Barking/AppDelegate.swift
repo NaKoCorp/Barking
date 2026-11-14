@@ -20,13 +20,19 @@ final class PushToken {
     /// The last permission read by `apply(to:)` (nil before the first).
     private(set) var status: UNAuthorizationStatus?
 
+    /// Reads the notification permission and nothing else (no setting is
+    /// written): what a read-only screen needs.
+    func refreshStatus() async {
+        status = await authorization()
+    }
+
     /// Gives `core` the wake-up settings for the token, or push off when no
     /// relay was built in. Push is off, token or not, while iOS notifications
     /// are denied or not yet asked. Authorized but no token yet: the
     /// settings the core holds stay.
     func apply(to core: CoreService) async {
-        let status = await authorization()
-        self.status = status
+        await refreshStatus()
+        guard let status else { return }
         guard PushRelay.allows(status) else {
             do { try await core.setPush(nil) } catch { failure = String(describing: error) }
             return

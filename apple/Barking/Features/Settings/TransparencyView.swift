@@ -75,7 +75,10 @@ struct TransparencyView: View {
         }
 
         SectionLabel("Subscribed nodes").padding(.top, Space.section - Space.s2)
-        if model.wakeRows.isEmpty {
+        if model.nodesFailed {
+            Text("Unavailable").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
+                .accessibilityIdentifier("transparency.wake.unavailable")
+        } else if model.wakeRows.isEmpty {
             Text("None").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
                 .accessibilityIdentifier("transparency.wake.none")
         } else {
@@ -111,6 +114,7 @@ struct TransparencyView: View {
     }
 
     private var stateText: String {
+        if model.prefsFailed { return String(localized: "Unavailable") }
         if model.waitingForToken { return String(localized: "Waiting for Apple's token") }
         switch model.wakeState {
         case .on: return String(localized: "On")
@@ -121,6 +125,7 @@ struct TransparencyView: View {
     }
 
     private var lastWakeText: String {
+        if model.prefsFailed { return String(localized: "Unavailable") }
         guard let at = model.lastWake else { return String(localized: "Never") }
         return at.formatted(.relative(presentation: .named))
     }
