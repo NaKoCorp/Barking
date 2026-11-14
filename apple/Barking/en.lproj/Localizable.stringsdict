@@ -547,5 +547,21 @@
 			<string>%lld devices</string>
 		</dict>
 	</dict>
+	<key>%lld mailboxes</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld mailbox</string>
+			<key>other</key>
+			<string>%lld mailboxes</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

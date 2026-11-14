@@ -156,6 +156,13 @@ struct DataRow: Identifiable, Equatable {
     let detail: String
 }
 
+/// A subscribed node of "Wake-ups": its short id and what it holds.
+struct WakeRow: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let detail: String
+}
+
 /// Which events the journal lists. "Keys and devices" is the security class:
 /// the events to watch first.
 enum JournalFilter: Hashable { case everything, keysAndDevices }
@@ -167,10 +174,18 @@ final class TransparencyModel {
     static let pageSize: UInt32 = 100
 
     private let core: CoreService
+    private let push: PushToken
+    private let locale: Locale
     private let protection: () -> String
     private let calendar: Calendar
     private(set) var days: [LogDay] = []
     private(set) var dataRows: [DataRow] = []
+    private(set) var wakeState: NotificationsState = .off
+    private(set) var wakeRows: [WakeRow] = []
+    /// When the last wake was handled; nil: never.
+    private(set) var lastWake: Date?
+    /// Instant notifications are on but Apple has not given a token yet.
+    var waitingForToken: Bool { wakeState == .on && push.token == nil }
     private(set) var canLoadMore = false
     private(set) var loading = false
     private(set) var filter: JournalFilter = .everything
@@ -178,9 +193,12 @@ final class TransparencyModel {
     /// Id of the oldest row loaded: the next page starts before it.
     private var cursor: Int64?
 
-    init(core: CoreService, protection: @escaping () -> String = { KeyStore.live.protection },
-         calendar: Calendar = .current) {
+    init(core: CoreService, push: PushToken = .shared,
+         protection: @escaping () -> String = { KeyStore.live.protection },
+         calendar: Calendar = .current, locale: Locale = .current) {
         self.core = core
+        self.push = push
+        self.locale = locale
         self.protection = protection
         self.calendar = calendar
     }
@@ -191,7 +209,42 @@ final class TransparencyModel {
 
     func load() async {
         dataRows = Self.dataRows(protection: protection())
+        await loadWakeUps()
         await reload()
+    }
+
+    /// Reads the permission, the switch, the subscriptions and the last wake.
+    private func loadWakeUps() async {
+        await push.apply(to: core)
+        let prefs = try? await core.notificationPrefs()
+        wakeState = .resolve(info: push.info, status: push.status, instant: prefs?.instant ?? true)
+        lastWake = prefs?.lastWake.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let status = try? await core.wakeStatus()
+        wakeRows = (status?.nodes ?? []).map { Self.wakeRow($0, calendar: calendar, locale: locale) }
+    }
+
+    /// "3 mailboxes · messages, receipts · until Nov 13, 2025": `expiresDay`
+    /// counts days since the Unix epoch.
+    static func wakeRow(_ node: WakeNode, calendar: Calendar, locale: Locale) -> WakeRow {
+        let day = Date(timeIntervalSince1970: TimeInterval(node.expiresDay) * 86_400)
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC") ?? .gmt
+        // The day's own date, whatever the phone's zone: the epoch day is UTC.
+        let parts = utc.dateComponents([.year, .month, .day], from: day)
+        let local = calendar.date(from: parts) ?? day
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = calendar.timeZone
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        let date = formatter.string(from: local)
+        let kinds = [node.messages ? String(localized: "messages") : nil,
+                     node.acks ? String(localized: "receipts") : nil].compactMap { $0 }
+        let count = String(format: NSLocalizedString("%lld mailboxes", comment: ""), locale: locale,
+                           Int(node.mailboxes))
+        let until = String(format: NSLocalizedString("until %@", comment: ""), locale: locale, date)
+        return WakeRow(id: node.node, title: node.node,
+                       detail: [count, kinds.joined(separator: ", "), until].joined(separator: " · "))
     }
 
     func setFilter(_ filter: JournalFilter) async {

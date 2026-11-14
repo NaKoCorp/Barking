@@ -7,6 +7,17 @@ import UserNotifications
 /// this build, permission not asked, permission denied, else the switch.
 enum NotificationsState: Equatable {
     case on, off, notAsked, denied, noRelay
+
+    /// The one place the priority lives: relay, then permission, then the switch.
+    static func resolve(info: [String: Any], status: UNAuthorizationStatus?, instant: Bool) -> NotificationsState {
+        let host = (info["BarkingRelayHost"] as? String) ?? ""
+        if host.isEmpty { return .noRelay }
+        switch status {
+        case nil, .notDetermined?: return .notAsked
+        case .denied?: return .denied
+        default: return instant ? .on : .off
+        }
+    }
 }
 
 /// Settings › Notifications: instant wake-ups and the preview mode.
@@ -36,13 +47,7 @@ final class NotificationsModel {
     }
 
     var state: NotificationsState {
-        let host = (push.info["BarkingRelayHost"] as? String) ?? ""
-        if host.isEmpty { return .noRelay }
-        switch push.status {
-        case nil, .notDetermined?: return .notAsked
-        case .denied?: return .denied
-        default: return instant ? .on : .off
-        }
+        .resolve(info: push.info, status: push.status, instant: instant)
     }
 
     func load() async {
