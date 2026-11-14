@@ -1,3 +1,4 @@
+import UserNotifications
 import XCTest
 @testable import Barking
 @testable import BarkingKit
@@ -37,12 +38,21 @@ final class PushRelayTests: XCTestCase {
         XCTAssertNil(PushRelay.settings(info: info(), token: Data()))
     }
 
+    func testAllowsStatuses() {
+        XCTAssertFalse(PushRelay.allows(.notDetermined))
+        XCTAssertFalse(PushRelay.allows(.denied))
+        XCTAssertTrue(PushRelay.allows(.authorized))
+        XCTAssertTrue(PushRelay.allows(.provisional))
+        XCTAssertTrue(PushRelay.allows(.ephemeral))
+    }
+
     @MainActor
     func testTokenArrivalHandsTheSettingsToTheCore() async throws {
         let device = FakeDevice()
         let core = CoreService(device: device, runner: DirectRunner())
         let push = PushToken()
         push.info = info()
+        push.authorization = { .authorized }
         let delegate = AppDelegate()
         delegate.service = { core }
         delegate.pushToken = push
@@ -58,6 +68,7 @@ final class PushRelayTests: XCTestCase {
         let core = CoreService(device: device, runner: DirectRunner())
         let push = PushToken()
         push.info = [:]
+        push.authorization = { .authorized }
         push.token = token
         await push.apply(to: core)
         XCTAssertEqual(device.pushSettings.count, 1)
@@ -70,6 +81,7 @@ final class PushRelayTests: XCTestCase {
         let core = CoreService(device: device, runner: DirectRunner())
         let push = PushToken()
         push.info = info()
+        push.authorization = { .authorized }
         await push.apply(to: core)
         XCTAssertTrue(device.pushSettings.isEmpty)
     }

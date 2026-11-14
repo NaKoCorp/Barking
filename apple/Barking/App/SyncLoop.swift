@@ -10,6 +10,9 @@ import SwiftUI
 final class SyncLoop {
     private let sync: @Sendable (SyncReason) async -> Void
     private let sleep: @Sendable (Duration) async throws -> Void
+    /// Runs before each resume sync (not the launch one): the notification
+    /// permission may have changed while the app was away.
+    private let beforeForeground: (@Sendable () async -> Void)?
     private var task: Task<Void, Never>?
     /// The first time it starts is the launch.
     private var started = false
@@ -28,15 +31,21 @@ final class SyncLoop {
 
     var isRunning: Bool { task != nil }
 
-    /// `sync` runs one sync; `sleep` waits (throws when cancelled).
+    /// `sync` runs one sync; `sleep` waits (throws when cancelled);
+    /// `beforeForeground` runs ahead of a `.foreground` sync.
     init(sync: @escaping @Sendable (SyncReason) async -> Void,
-         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
+         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+         beforeForeground: (@Sendable () async -> Void)? = nil) {
         self.sync = sync
         self.sleep = sleep
+        self.beforeForeground = beforeForeground
     }
 
+    /// The launch applies the push guard itself (`CoreService.app`); a
+    /// resume applies it before its sync.
     convenience init(core: CoreService) {
-        self.init(sync: { _ = await core.sync(reason: $0) })
+        self.init(sync: { _ = await core.sync(reason: $0) },
+                  beforeForeground: { await PushToken.shared.apply(to: core) })
     }
 
     /// Active: syncs now and runs (not again if it already runs: an
@@ -64,8 +73,12 @@ final class SyncLoop {
     private func run(first: SyncReason?) {
         task?.cancel()
         let sync = self.sync, sleep = self.sleep, delay = scheduler.nextDelay()
+        let before = beforeForeground
         task = Task {
-            if let first { await sync(first) }
+            if let first {
+                if first == .foreground { await before?() }
+                await sync(first)
+            }
             while !Task.isCancelled {
                 do { try await sleep(delay) } catch { return }
                 if Task.isCancelled { return }

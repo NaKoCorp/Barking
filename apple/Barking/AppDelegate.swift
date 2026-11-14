@@ -13,11 +13,24 @@ final class PushToken {
     var failure: String?
     /// Where the relay is read from (tests give their own).
     @ObservationIgnored var info: [String: Any] = Bundle.main.infoDictionary ?? [:]
+    /// Where the notification permission is read from (tests give their own).
+    @ObservationIgnored var authorization: @Sendable () async -> UNAuthorizationStatus = {
+        await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
+    /// The last permission read by `apply(to:)` (nil before the first).
+    private(set) var status: UNAuthorizationStatus?
 
     /// Gives `core` the wake-up settings for the token, or push off when no
-    /// relay was built in. Nothing before iOS gave a token: the settings the
-    /// core holds stay.
+    /// relay was built in. Push is off, token or not, while iOS notifications
+    /// are denied or not yet asked. Authorized but no token yet: the
+    /// settings the core holds stay.
     func apply(to core: CoreService) async {
+        let status = await authorization()
+        self.status = status
+        guard PushRelay.allows(status) else {
+            do { try await core.setPush(nil) } catch { failure = String(describing: error) }
+            return
+        }
         guard let token else { return }
         do {
             try await core.setPush(PushRelay.settings(info: info, token: token))
