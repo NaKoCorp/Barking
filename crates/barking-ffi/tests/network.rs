@@ -121,7 +121,7 @@ fn bad_push_settings_are_invalid() {
             ..good.clone()
         },
         PushSettings {
-            apns_token: vec![1; 65],
+            apns_token: vec![1; 129],
             ..good.clone()
         },
     ];
@@ -134,6 +134,17 @@ fn bad_push_settings_are_invalid() {
             "{s:?}"
         );
     }
+    // The iOS 26 simulator gives 80-byte tokens.
+    d.set_push(Some(PushSettings {
+        apns_token: vec![0xB1; 80],
+        ..good.clone()
+    }))
+    .unwrap();
+    d.set_push(Some(PushSettings {
+        apns_token: vec![0xB2; 128],
+        ..good.clone()
+    }))
+    .unwrap();
     d.set_push(Some(good)).unwrap();
     d.set_push(None).unwrap();
 }

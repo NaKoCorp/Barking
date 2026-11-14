@@ -22,10 +22,12 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use crate::node_id::NodeId;
 use crate::record::routable;
 
-/// Maximum size of a sealed token.
-pub const MAX_SEALED: usize = 160;
-/// Maximum size of an APNs device token.
-pub const MAX_APNS_TOKEN: usize = 64;
+/// Maximum size of a sealed token. A token sealed with a `MAX_APNS_TOKEN`
+/// device token takes 203 bytes; the rest is headroom.
+pub const MAX_SEALED: usize = 256;
+/// Maximum size of an APNs device token. Apple documents tokens as variable
+/// length: devices give 32 bytes, the iOS 26 simulator 80.
+pub const MAX_APNS_TOKEN: usize = 128;
 /// HKDF context of the sealing key.
 pub const SEAL_CONTEXT: &str = "barking/v0/push-seal";
 /// BLAKE3 context of the subscription proof of work.
@@ -282,6 +284,38 @@ mod tests {
         t.expires_day = u32::MAX;
         t.reason = WakeReason::Receipt;
         assert!(seal(&pk, 1, &t, &mut rng).len() <= MAX_SEALED);
+    }
+
+    /// Simulator tokens are 80 bytes (iOS 26).
+    #[test]
+    fn eighty_byte_token_roundtrips() {
+        let (sk, pk) = keypair(1);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(12);
+        let mut t = token();
+        t.apns_token = (0..80).collect();
+        let sealed = seal(&pk, 3, &t, &mut rng);
+        // Nodes built when the limit was 160 bytes still store it.
+        assert!(sealed.len() <= 160);
+        assert_eq!(open(&[(3, sk)], &sealed), Some(t));
+    }
+
+    #[test]
+    fn max_token_seal_size_is_known() {
+        let (sk, pk) = keypair(1);
+        let mut t = token();
+        t.apns_token = vec![0xff; MAX_APNS_TOKEN];
+        t.expires_day = u32::MAX;
+        let sealed = seal_with_ephemeral(&pk, 1, &t, [7; 32]);
+        assert_eq!(sealed.len(), 203);
+        assert_eq!(open(&[(1, sk)], &sealed), Some(t));
+    }
+
+    #[test]
+    fn a_full_wake_batch_fits_a_request_frame() {
+        // Each item: the sealed bytes and a 2-byte length prefix, plus room
+        // for the request envelope.
+        let batch = crate::MAX_WAKE_ITEMS * (MAX_SEALED + 2);
+        assert!(batch + 1024 <= crate::frame::MAX_REQUEST_BYTES);
     }
 
     #[test]

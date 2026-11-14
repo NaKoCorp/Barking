@@ -51,7 +51,9 @@ impl TryFrom<PushSettings> for PushConfig {
             .try_into()
             .map_err(|_| BarkingError::invalid("sealing key: 32 bytes expected"))?;
         if s.apns_token.is_empty() || s.apns_token.len() > MAX_APNS_TOKEN {
-            return Err(BarkingError::invalid("APNs token: 1 to 64 bytes expected"));
+            return Err(BarkingError::invalid(format!(
+                "APNs token: 1 to {MAX_APNS_TOKEN} bytes expected"
+            )));
         }
         Ok(PushConfig {
             relay,
