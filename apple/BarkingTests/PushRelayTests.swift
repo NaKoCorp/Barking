@@ -87,6 +87,35 @@ final class PushRelayTests: XCTestCase {
     }
 
     @MainActor
+    private func onboardingPush(_ status: UNAuthorizationStatus) async -> FakeDevice {
+        let device = FakeDevice()
+        let core = CoreService(device: device, runner: DirectRunner())
+        let push = PushToken()
+        push.info = info()
+        push.token = token
+        // The core was made while undetermined: push off, then the prompt is answered.
+        push.authorization = { .notDetermined }
+        await push.apply(to: core)
+        push.authorization = { status }
+        await OnboardingFlow.askForNotifications(core: core, push: push, request: {})
+        return device
+    }
+
+    @MainActor
+    func testOnboardingPromptAllowedSubscribes() async {
+        let device = await onboardingPush(.authorized)
+        XCTAssertEqual(device.pushSettings.count, 2)
+        XCTAssertNil(device.pushSettings.first ?? nil)
+        XCTAssertNotNil(device.pushSettings.last ?? nil)
+    }
+
+    @MainActor
+    func testOnboardingPromptDeniedStaysOff() async {
+        let device = await onboardingPush(.denied)
+        XCTAssertNil(device.pushSettings.last ?? nil)
+    }
+
+    @MainActor
     private func waitUntil(_ condition: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(2)
         while !condition() {
