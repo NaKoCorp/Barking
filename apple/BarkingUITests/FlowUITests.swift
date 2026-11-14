@@ -234,6 +234,47 @@ final class SettingsUITests: XCTestCase {
 }
 
 @MainActor
+final class NotificationsUITests: XCTestCase {
+    override func setUp() { continueAfterFailure = false }
+
+    private func openNotifications(_ app: XCUIApplication) {
+        app.tabBars.buttons["Settings"].tap()
+        let row = app.buttons["settings.notifications"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "no Notifications row")
+        row.tap()
+    }
+
+    /// The choices survive a relaunch that keeps the data.
+    func testChoicesAreKeptAfterARelaunch() throws {
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestPushAuthorized"])
+        app.launch()
+        openNotifications(app)
+        let nameOnly = app.buttons["notifications.preview.nameOnly"]
+        XCTAssertTrue(nameOnly.waitForExistence(timeout: 10))
+        nameOnly.tap()
+        XCTAssertTrue(nameOnly.waitUntil({ $0.isSelected }, timeout: 5))
+        let toggle = app.switches["notifications.instant"]
+        XCTAssertTrue(toggle.waitUntil({ $0.isEnabled }, timeout: 10), "the switch stays disabled")
+        XCTAssertEqual(toggle.value as? String, "1")
+        for _ in 0..<3 where toggle.value as? String == "1" {
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            toggle.waitUntil({ $0.value as? String == "0" }, timeout: 5)
+        }
+        XCTAssertEqual(toggle.value as? String, "0")
+        app.terminate()
+
+        let again = XCUIApplication()
+        again.launchArguments = ["-AppleLanguages", "(en)", "-BarkingUITestNoAnimations", "-BarkingUITestPushAuthorized"]
+        again.launch()
+        openNotifications(again)
+        XCTAssertTrue(again.buttons["notifications.preview.nameOnly"].waitForExistence(timeout: 10))
+        XCTAssertTrue(again.buttons["notifications.preview.nameOnly"].isSelected)
+        let toggleAgain = again.switches["notifications.instant"]
+        XCTAssertTrue(toggleAgain.waitUntil({ $0.value as? String == "0" }, timeout: 10))
+    }
+}
+
+@MainActor
 final class AccessibilityUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
 

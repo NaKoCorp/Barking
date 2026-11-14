@@ -451,3 +451,19 @@
 "%@ is not verified." = "Le contact %@ n’est pas vérifié.";
 "Compare your safety code before sending anything sensitive." = "Comparez votre code de sécurité avant d’envoyer quoi que ce soit de sensible.";
 "Verify now" = "Vérifier maintenant";
+
+/* Settings › Notifications */
+"Notifications" = "Notifications";
+"Instant wake-ups and previews" = "Réveil immédiat et aperçus";
+"Instant notifications" = "Notifications instantanées";
+"A node asks the relay to wake this iPhone when a message arrives." = "Un nœud demande au relais de réveiller cet iPhone quand un message arrive.";
+"Off: messages arrive when you open the app or during an iOS refresh." = "Désactivé : les messages arrivent à l’ouverture de l’app ou lors d’une actualisation d’iOS.";
+"Preview" = "Aperçu";
+"Name and text" = "Nom et texte";
+"Name only" = "Nom seulement";
+"“New message”" = "« Nouveau message »";
+"With the app lock, always “New message”." = "Avec le verrou de l’app, toujours « Nouveau message ».";
+"Allow notifications" = "Autoriser les notifications";
+"Notifications are off in the iPhone's Settings" = "Les notifications sont désactivées dans les Réglages de l’iPhone";
+"Open iPhone Settings" = "Ouvrir les Réglages de l’iPhone";
+"No wake-up relay in this build" = "Aucun relais de réveil dans cette version";
