@@ -88,13 +88,29 @@ final class SyncLoopTests: XCTestCase {
         let clock = Clock()
         let loop = SyncLoop(sync: { await clock.synced($0) }, sleep: { try await clock.wait($0) },
                             beforeForeground: { await clock.applied() })
-        loop.scenePhaseChanged(to: .active)   // launch: the launch path applies it
+        loop.scenePhaseChanged(to: .active)   // launch: the guard runs before its sync too
         await until({ await clock.isWaiting }, "launch wait")
         loop.scenePhaseChanged(to: .background)
         loop.scenePhaseChanged(to: .active)
         await until({ await clock.waiting(afterSyncs: 2) }, "foreground sync")
         let events = await clock.events
-        XCTAssertEqual(events, ["sync(launch)", "apply", "sync(foreground)"])
+        XCTAssertEqual(events, ["apply", "sync(launch)", "apply", "sync(foreground)"])
+        loop.stop()
+    }
+
+    /// The scene lifecycle never calls `applicationDidEnterBackground`: the
+    /// next background refresh is asked for when the scene goes to the background.
+    func testBackgroundPhaseSchedulesTheRefreshOnce() async {
+        let clock = Clock()
+        var scheduled = 0
+        let loop = SyncLoop(sync: { await clock.synced($0) }, sleep: { try await clock.wait($0) },
+                            onBackground: { scheduled += 1 })
+        loop.scenePhaseChanged(to: .active)
+        await until({ await clock.isWaiting }, "first wait")
+        loop.scenePhaseChanged(to: .inactive)
+        XCTAssertEqual(scheduled, 0, "inactive schedules nothing")
+        loop.scenePhaseChanged(to: .background)
+        XCTAssertEqual(scheduled, 1)
         loop.stop()
     }
 

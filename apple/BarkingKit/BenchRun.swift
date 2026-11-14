@@ -3,6 +3,10 @@ import Foundation
 /// The extension's work, measured step by step (spec iOS foundations §6):
 /// key and database, quick sync. The app's bench button runs the same code.
 public enum BenchRun {
+    /// Opens the device, calling `keyRead` once the key is read. The live
+    /// default is `DeviceFactory.existing`; a test injects a fake device.
+    public typealias Opener = (_ keyRead: () -> Void) throws -> (any DeviceHandle)?
+
     /// The third element is the preview mode for the notification.
     /// `record.outcome` is empty when the sync reached the network: the
     /// caller sets it from what the notification shows.
@@ -10,10 +14,6 @@ public enum BenchRun {
     /// gets what is left of the work time. `sync: false` stops once the
     /// device is opened (outcome `opened`): key and open timings only.
     /// `keyStore` is the app's keychain; a test passes its own.
-    /// Opens the device, calling `keyRead` once the key is read. The live
-    /// default is `DeviceFactory.existing`; a test injects a fake device.
-    public typealias Opener = (_ keyRead: () -> Void) throws -> (any DeviceHandle)?
-
     public static func run(source: String, paths: WipePaths = .live, sync: Bool = true,
                            keyStore: KeyStore = DeviceFactory.keyStore,
                            opener: Opener? = nil) -> (BenchRecord, SyncSummary?, PushPreview) {

@@ -16,7 +16,9 @@ public enum Budget {
     /// longer work time.
     public static let appQuickSyncMs: UInt64 = appSyncMs
     /// Full sync of a background refresh (`BGAppRefreshTask`, about 30 s).
-    /// Nothing else runs then, so it may hold the lock for the whole time.
+    /// The user may open the app or a push may arrive meanwhile: the app's UI
+    /// work queues behind the sync, and the extension's 2 s lock wait gives
+    /// up and falls back to "New message".
     public static let refreshSyncMs: UInt64 = 25_000
     /// Lock wait in the extension (spec iOS push §6.1).
     public static let extensionLockMs: UInt64 = 2_000

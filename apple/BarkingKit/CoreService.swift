@@ -292,10 +292,7 @@ public actor CoreService {
     /// outcome. During a quick sync it waits for it, then runs its own: a
     /// quick sync deposits no message (a send would wait for the next timer).
     public func sync(reason: SyncReason) async -> SyncOutcome {
-        while inFlightQuick, let task = inFlight {
-            _ = await task.value
-            if inFlight == task { finish(task) }
-        }
+        await waitForQuickSync()
         return await runSync("sync", quick: false) { try $0.sync(deadlineMs: Budget.appSyncMs) }
     }
 
@@ -311,7 +308,16 @@ public actor CoreService {
     /// The full sync of a background refresh, within `Budget.refreshSyncMs`.
     /// Its outcome carries the new messages to notify.
     public func refreshSync() async -> SyncOutcome {
-        await runSync("refresh", quick: false) { try $0.sync(deadlineMs: Budget.refreshSyncMs) }
+        await waitForQuickSync()
+        return await runSync("refresh", quick: false) { try $0.sync(deadlineMs: Budget.refreshSyncMs) }
+    }
+
+    /// Waits out a quick sync in flight (a full sync must not take its outcome).
+    private func waitForQuickSync() async {
+        while inFlightQuick, let task = inFlight {
+            _ = await task.value
+            if inFlight == task { finish(task) }
+        }
     }
 
     /// Clears the sync in flight, if it is still `task`.

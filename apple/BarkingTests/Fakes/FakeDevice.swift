@@ -99,6 +99,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         let queued = lock.withLock {
             _syncCalls += 1
             _syncEvents.append("sync")
+            _order.append("sync")
             return _leaveReady && !_leaveExpired
         }
         defer { lock.withLock { _syncEvents.append("sync-done") } }
@@ -129,7 +130,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _pushSettings: [PushSettings?] = []
     /// Every `setPush` call, in order (`nil`: push off).
     var pushSettings: [PushSettings?] { lock.withLock { _pushSettings } }
-    func setPush(settings: PushSettings?) throws { lock.withLock { _pushSettings.append(settings) } }
+    private var _order: [String] = []
+    /// `setPush` and `sync` calls interleaved, in call order.
+    var order: [String] { lock.withLock { _order } }
+    func setPush(settings: PushSettings?) throws {
+        lock.withLock { _pushSettings.append(settings); _order.append("setPush") }
+    }
     func pendingCount() throws -> UInt32 { pendingCountValue }
     func myDevices() throws -> [MyDeviceInfo] { devicesList }
     func linkOffer() throws -> Data { Data([0xAA]) }

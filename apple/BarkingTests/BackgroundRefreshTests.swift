@@ -21,10 +21,28 @@ final class BackgroundRefreshTests: XCTestCase {
         return (CoreService(device: d, runner: DirectRunner()), d)
     }
 
-    private func run(_ core: CoreService?, locked: Bool = false) async -> (Bool, [UNNotificationRequest]) {
+    private func push(_ status: UNAuthorizationStatus) -> PushToken {
+        let push = PushToken()
+        push.authorization = { status }
+        return push
+    }
+
+    private func run(_ core: CoreService?, locked: Bool = false,
+                     status: UNAuthorizationStatus = .authorized) async -> (Bool, [UNNotificationRequest]) {
         var posted: [UNNotificationRequest] = []
-        let ok = await BackgroundRefresh.run(service: core, locked: locked) { posted.append($0) }
+        let ok = await BackgroundRefresh.run(service: core, locked: locked, push: push(status)) { posted.append($0) }
         return (ok, posted)
+    }
+
+    /// Spec §2 anti-goal: notifications denied while the app was suspended
+    /// must not let the refresh renew subscriptions with the stored config:
+    /// the guard puts push off before the sync.
+    func testDeniedPermissionTurnsPushOffBeforeTheSync() async {
+        let (core, d) = service(alice(1))
+        _ = await run(core, status: .denied)
+        XCTAssertEqual(d.order, ["setPush", "sync"])
+        XCTAssertEqual(d.pushSettings.count, 1)
+        XCTAssertNil(d.pushSettings[0])
     }
 
     func testRunWithoutServiceDoesNothing() async {
@@ -80,7 +98,7 @@ final class BackgroundRefreshTests: XCTestCase {
         d.syncDelay = 0.4
         var posted: [UNNotificationRequest] = []
         let work = Task { @MainActor in
-            await BackgroundRefresh.run(service: core, locked: false) { posted.append($0) }
+            await BackgroundRefresh.run(service: core, locked: false, push: self.push(.authorized)) { posted.append($0) }
         }
         try? await Task.sleep(for: .milliseconds(100))
         work.cancel()

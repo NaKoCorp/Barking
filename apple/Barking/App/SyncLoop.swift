@@ -10,9 +10,14 @@ import SwiftUI
 final class SyncLoop {
     private let sync: @Sendable (SyncReason) async -> Void
     private let sleep: @Sendable (Duration) async throws -> Void
-    /// Runs before each resume sync (not the launch one): the notification
-    /// permission may have changed while the app was away.
+    /// Runs before each sync that opens a run (the launch one and each
+    /// resume): the notification permission may have changed while the app
+    /// was away, and the core still holds the config of the last run.
     private let beforeForeground: (@Sendable () async -> Void)?
+    /// Runs when the scene goes to the background. The SwiftUI scene
+    /// lifecycle never calls `applicationDidEnterBackground`, so the next
+    /// background refresh is asked for here.
+    private let onBackground: (@MainActor () -> Void)?
     private var task: Task<Void, Never>?
     /// The first time it starts is the launch.
     private var started = false
@@ -32,25 +37,29 @@ final class SyncLoop {
     var isRunning: Bool { task != nil }
 
     /// `sync` runs one sync; `sleep` waits (throws when cancelled);
-    /// `beforeForeground` runs ahead of a `.foreground` sync.
+    /// `beforeForeground` runs ahead of a `.launch` or `.foreground` sync;
+    /// `onBackground` when the scene goes to the background.
     init(sync: @escaping @Sendable (SyncReason) async -> Void,
          sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
-         beforeForeground: (@Sendable () async -> Void)? = nil) {
+         beforeForeground: (@Sendable () async -> Void)? = nil,
+         onBackground: (@MainActor () -> Void)? = nil) {
         self.sync = sync
         self.sleep = sleep
         self.beforeForeground = beforeForeground
+        self.onBackground = onBackground
     }
 
-    /// The launch applies the push guard itself (`CoreService.app`); a
-    /// resume applies it before its sync.
+    /// The push guard runs before the launch sync and each resume sync (the
+    /// only path that applies it); the background asks for the next refresh.
     convenience init(core: CoreService) {
         self.init(sync: { _ = await core.sync(reason: $0) },
-                  beforeForeground: { await PushToken.shared.apply(to: core) })
+                  beforeForeground: { await PushToken.shared.apply(to: core) },
+                  onBackground: { BackgroundRefresh.schedule() })
     }
 
     /// Active: syncs now and runs (not again if it already runs: an
     /// inactive spell, such as the app switcher, did not stop it).
-    /// Background: stops. Inactive: leaves it as it is.
+    /// Background: stops, and asks for the next background refresh. Inactive: leaves it as it is.
     func scenePhaseChanged(to phase: ScenePhase) {
         switch phase {
         case .active:
@@ -59,6 +68,7 @@ final class SyncLoop {
             started = true
         case .background:
             stop()
+            onBackground?()
         default:
             break
         }
@@ -76,7 +86,7 @@ final class SyncLoop {
         let before = beforeForeground
         task = Task {
             if let first {
-                if first == .foreground { await before?() }
+                await before?()
                 await sync(first)
             }
             while !Task.isCancelled {

@@ -17,7 +17,8 @@ final class PushToken {
     @ObservationIgnored var authorization: @Sendable () async -> UNAuthorizationStatus = {
         await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
     }
-    /// The last permission read by `apply(to:)` (nil before the first).
+    /// The last permission read by `refreshStatus()`, which `apply(to:)` also
+    /// calls (nil before the first).
     private(set) var status: UNAuthorizationStatus?
 
     /// Reads the notification permission and nothing else (no setting is
@@ -82,11 +83,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         UNUserNotificationCenter.current().delegate = self
         BackgroundRefresh.register()
         return true
-    }
-
-    /// The app leaves the screen: asks iOS for the next refresh.
-    func applicationDidEnterBackground(_ application: UIApplication) {
-        BackgroundRefresh.schedule()
     }
 
     /// A tap on a notification: the failure notice names its contact and

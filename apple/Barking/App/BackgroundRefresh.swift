@@ -30,13 +30,16 @@ enum BackgroundRefresh {
         try? BGTaskScheduler.shared.submit(request(now: now))
     }
 
-    /// Syncs, then posts one notification for the new messages. `false` when
-    /// there is no open core (no device, wipe pending, before first unlock:
-    /// nothing is opened here) or the network was down.
+    /// Applies the permission guard (iOS notifications may have been denied
+    /// while the app was suspended: push goes off before any subscription is
+    /// renewed), syncs, then posts one notification for the new messages.
+    /// `false` when there is no open core (no device, wipe pending, before
+    /// first unlock: nothing is opened here) or the network was down.
     @MainActor
-    static func run(service: CoreService?, locked: Bool,
+    static func run(service: CoreService?, locked: Bool, push: PushToken = .shared,
                     post: (UNNotificationRequest) async -> Void) async -> Bool {
         guard let service else { return false }
+        await push.apply(to: service)
         let outcome = await service.refreshSync()
         // Expired meanwhile (the sync itself is not cancelled with us): post nothing.
         if Task.isCancelled { return false }
