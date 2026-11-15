@@ -83,5 +83,21 @@ pub fn default_expiry(now: u64) -> u32 {
     u32::try_from(now.saturating_add(DEFAULT_TTL_SECS)).unwrap_or(u32::MAX)
 }
 
+/// BLAKE3 context of the introduction mailbox (first message).
+pub const INTRO_MAILBOX_CONTEXT: &str = "barking/v1/intro-mailbox";
+
+/// Introduction mailbox of a device for a given day. Binding the device
+/// signing key `sig` lets its owner later prove ownership of the mailbox.
+pub fn intro_mailbox(sig: &[u8; 32], dh: &[u8; 32], day: u32) -> MailboxId {
+    let mut input = [0u8; 68];
+    input[..32].copy_from_slice(sig);
+    input[32..64].copy_from_slice(dh);
+    input[64..].copy_from_slice(&day.to_be_bytes());
+    let full = blake3::derive_key(INTRO_MAILBOX_CONTEXT, &input);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&full[..16]);
+    MailboxId(out)
+}
+
 #[cfg(test)]
 mod tests;

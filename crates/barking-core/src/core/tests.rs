@@ -428,10 +428,10 @@ fn ambiguous_sender_never_misattributed() {
 #[test]
 fn session_to_mixed_device_fails_at_its_real_owner() {
     // Carol does not know Alice: she accepts Mallory's "mixed" card
-    // (Alice's dh key). Her Initial arrives at Alice, who knows Carol. The
-    // device identifiers bound to the associated data make
-    // decryption fail: Alice does not take for herself a message meant for Mallory,
-    // and cannot reply to it in a session that Carol would attribute to Mallory.
+    // (Alice's dh key). Her Initial targets Mallory's intro mailbox, which
+    // Alice does not watch. Even if it reached her, the device identifiers
+    // bound to the associated data make decryption fail: Alice does not take
+    // for herself a message meant for Mallory.
     let (_da, mut alice) = party("a", 1);
     let (_dc, mut carol) = party("c", 3);
     alice
@@ -455,16 +455,18 @@ fn session_to_mixed_device_fails_at_its_real_owner() {
     let p = carol
         .send_text(&mallory, "for Mallory", NOW, &mut rng)
         .unwrap();
+    // The intro mailbox binds the signing key: Mallory's key puts the Initial
+    // in a mailbox Alice does not watch, so she does not even try to open it.
     assert!(
-        alice
+        !alice
             .watched_mailboxes(NOW)
             .unwrap()
             .contains(&p[0].mailbox)
     );
-    assert_eq!(
-        reason(alice.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap()),
-        "decryption impossible"
-    );
+    assert!(matches!(
+        alice.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::NotForUs
+    ));
     assert!(
         alice
             .messages_with(&carol.fingerprint())

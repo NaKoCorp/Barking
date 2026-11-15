@@ -47,9 +47,6 @@ pub const RATCHET_MK: &[u8] = b"barking/v0/ratchet-mk";
 /// Session mailbox domain (hash keyed by `mailbox_secret`).
 pub const MAILBOX: &[u8] = b"barking/v0/mailbox";
 
-/// BLAKE3 context of the introduction mailbox (first message).
-pub const INTRO_MAILBOX_CONTEXT: &str = "barking/v0/intro-mailbox";
-
 /// BLAKE3 context of the packet identifier derived from the acknowledgement secret.
 pub use barking_packet::labels::ACK_CONTEXT;
 
