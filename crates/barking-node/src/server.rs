@@ -67,6 +67,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use barking_dht::DiversityLimits;
 use barking_packet::Tier;
+use barking_proto::client::MIN_PROTOCOL_VERSION;
 use barking_proto::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use barking_proto::{
     ErrorReason, Limits, MAX_HOLDINGS_PER_PAGE, NodeId, PROTOCOL_VERSION, Request, Response, tls,
@@ -563,7 +564,7 @@ impl ServerConfig {
             max_db_jobs: DEFAULT_MAX_DB_JOBS,
             max_db_jobs_per_prefix: None,
             version: PROTOCOL_VERSION,
-            min_version: PROTOCOL_VERSION,
+            min_version: MIN_PROTOCOL_VERSION,
             stats: Arc::new(ServerStats::default()),
             dht: None,
             dht_tick: None,
@@ -1615,7 +1616,10 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
             Stored::Failed => Stored::Failed,
         },
         // A node is not a relay.
-        Request::Wake { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
+        // Handled in a later change.
+        Request::Wake { .. } | Request::SubscribeOwned { .. } => {
+            Stored::Done(Response::Error(ErrorReason::Unsupported))
+        }
         Request::Ping { .. }
         | Request::FindNode { .. }
         | Request::Store { .. }

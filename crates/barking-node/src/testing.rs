@@ -522,7 +522,7 @@ impl FakeRelay {
                             let resp = match req {
                                 Request::Hello { .. } => Response::Hello {
                                     version: PROTOCOL_VERSION,
-                                    min_version: PROTOCOL_VERSION,
+                                    min_version: barking_proto::client::MIN_PROTOCOL_VERSION,
                                     node_id: id,
                                     pow_bits: TEST_BITS,
                                     limits: barking_proto::Limits {

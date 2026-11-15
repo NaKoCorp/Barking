@@ -48,7 +48,7 @@ use tokio::time::timeout;
 
 use crate::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use crate::msg::{ACK_CURSOR_BASE, ErrorReason, Limits, MAX_PAGE_ITEMS, Request, Response};
-use crate::push::{Subscription, subscription_hash};
+use crate::push::{OwnerProof, Subscription, subscription_hash};
 use crate::{NodeId, PROTOCOL_VERSION, pow, tls};
 
 /// Oldest protocol version this client can speak.
@@ -392,13 +392,14 @@ impl Client {
     /// `Hello` and checks the announced version and parameters.
     pub async fn connect(addr: SocketAddr, expected: NodeId) -> Result<Session> {
         let (endpoint, conn) = open_connection(addr, expected).await?;
-        let (pow_bits, limits) = hello(&conn, expected).await?;
+        let (pow_bits, limits, peer_version) = hello(&conn, expected).await?;
         Ok(Session {
             endpoint,
             conn,
             node_id: expected,
             pow_bits,
             limits,
+            peer_version,
             stop: FetchStop::Complete,
             pow_budget: None,
             pow_spent: 0,
@@ -450,7 +451,7 @@ pub async fn connect_node(
     // timing). A connection closed during `Hello` is therefore a connection
     // failure.
     match hello(&conn, expected).await {
-        Ok((pow_bits, _)) => Ok((conn, pow_bits)),
+        Ok((pow_bits, ..)) => Ok((conn, pow_bits)),
         // Only transport errors are remapped: `Version`,
         // `Refused` and `Protocol` are responses from the node, returned as
         // they are even if the connection closes right after.
@@ -474,8 +475,9 @@ fn no_incoming_streams() -> quinn::TransportConfig {
 }
 
 /// Sends `Hello` and checks the announced version and parameters; returns the
-/// base difficulty and the node's limits.
-async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits)> {
+/// base difficulty, the node's limits and the protocol version to speak with
+/// it (the lower of its highest and ours).
+async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits, u16)> {
     let hello = Request::Hello {
         version: PROTOCOL_VERSION,
         min_version: MIN_PROTOCOL_VERSION,
@@ -508,7 +510,7 @@ async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits)> {
             if limits.max_mailboxes_per_fetch == 0 {
                 return Err(ClientError::Protocol("pickup limit is zero"));
             }
-            Ok((pow_bits, limits))
+            Ok((pow_bits, limits, version.min(PROTOCOL_VERSION)))
         }
         Response::Error(ErrorReason::VersionTooOld) => Err(ClientError::Version),
         Response::Error(r) => Err(ClientError::Refused(r)),
@@ -523,6 +525,8 @@ pub struct Session {
     node_id: NodeId,
     pow_bits: u8,
     limits: Limits,
+    /// Highest protocol version both sides speak.
+    peer_version: u16,
     /// Why the last pickup stopped.
     stop: FetchStop,
     /// Permitted proof work (expected attempts), `None`: unbounded.
@@ -596,6 +600,11 @@ impl Session {
         self.limits
     }
 
+    /// True if the node understands `SubscribeOwned` (protocol 3).
+    pub fn owner_proof_supported(&self) -> bool {
+        self.peer_version >= 3
+    }
+
     /// Underlying QUIC connection (tests, diagnostics).
     pub fn connection(&self) -> &Connection {
         &self.conn
@@ -660,15 +669,39 @@ impl Session {
         &mut self,
         sub: &Subscription,
     ) -> Result<core::result::Result<(), ErrorReason>> {
+        self.subscribe_with(sub, |pow| Request::Subscribe {
+            sub: sub.clone(),
+            pow,
+        })
+        .await
+    }
+
+    /// `subscribe` for an intro mailbox, with proof of ownership. Requires a
+    /// node that speaks protocol 3 (`owner_proof_supported`).
+    pub async fn subscribe_owned(
+        &mut self,
+        sub: &Subscription,
+        owner: &OwnerProof,
+    ) -> Result<core::result::Result<(), ErrorReason>> {
+        self.subscribe_with(sub, |pow| Request::SubscribeOwned {
+            sub: sub.clone(),
+            pow,
+            owner: owner.clone(),
+        })
+        .await
+    }
+
+    /// Proof-of-work loop shared by `subscribe` and `subscribe_owned`.
+    async fn subscribe_with(
+        &mut self,
+        sub: &Subscription,
+        build: impl Fn(u64) -> Request,
+    ) -> Result<core::result::Result<(), ErrorReason>> {
         let content = subscription_hash(sub);
         let mut bits = self.pow_bits;
         loop {
             let nonce = self.prove(content, sub.mailbox, bits).await?;
-            let req = Request::Subscribe {
-                sub: sub.clone(),
-                pow: nonce,
-            };
-            match self.request(&req).await? {
+            match self.request(&build(nonce)).await? {
                 Response::Ok => return Ok(Ok(())),
                 Response::Error(ErrorReason::PowTooWeak) if bits < pow::MAX_POW_BITS => {
                     bits = retry_bits(bits);
