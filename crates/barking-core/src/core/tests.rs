@@ -2270,6 +2270,49 @@ fn own_card_meta_in_old_form_is_still_read() {
 // --- Push: own mailboxes.
 
 #[test]
+fn sign_intro_ownership_for_own_mailbox() {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let p = pair();
+    let me = p.a.device.public();
+    let day = day_of(NOW);
+    let msg = [0x5Au8; 32];
+    let s =
+        p.a.sign_intro_ownership(&intro_mailbox(&me, day), day, &msg)
+            .expect("own intro mailbox");
+    assert_eq!(s.sig, me.sig);
+    assert_eq!(s.dh, me.dh);
+    VerifyingKey::from_bytes(&s.sig)
+        .unwrap()
+        .verify_strict(&msg, &Signature::from_bytes(&s.signature))
+        .unwrap();
+}
+
+#[test]
+fn sign_intro_ownership_refuses_other_mailbox() {
+    let p = pair();
+    let me = p.a.device.public();
+    let day = day_of(NOW);
+    let msg = [0x5Au8; 32];
+    // The mailbox of another day.
+    assert!(
+        p.a.sign_intro_ownership(&intro_mailbox(&me, day + 1), day, &msg)
+            .is_none()
+    );
+    // Another device's introduction mailbox.
+    let other = p.b.device.public();
+    assert!(
+        p.a.sign_intro_ownership(&intro_mailbox(&other, day), day, &msg)
+            .is_none()
+    );
+    // A session mailbox.
+    let secret = p.a.store.all_sessions().unwrap().into_iter().next();
+    if let Some(sess) = secret {
+        let m = session_mailbox(&sess.mailbox_secret, &me.id(), day);
+        assert!(p.a.sign_intro_ownership(&m, day, &msg).is_none());
+    }
+}
+
+#[test]
 fn own_mailboxes_cover_sessions_and_intro_per_day() {
     let mut p = pair();
     let (_dc, mut c) = party("c", 3);

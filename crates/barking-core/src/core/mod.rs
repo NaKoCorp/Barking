@@ -207,6 +207,14 @@ impl fmt::Debug for ReceiveOutcome {
     }
 }
 
+/// Proof that a device owns its introduction mailbox: its public keys and
+/// an Ed25519 signature by the device signing key.
+pub struct IntroOwnerSignature {
+    pub sig: [u8; 32],
+    pub dh: [u8; 32],
+    pub signature: [u8; 64],
+}
+
 /// Messaging core for one device.
 pub struct Core {
     store: Store,
@@ -665,6 +673,29 @@ impl Core {
             }
         }
         out
+    }
+
+    /// Signs `msg` (already domain-separated by the caller) to prove this
+    /// device owns `mailbox`, its introduction mailbox for `day`. `None`
+    /// while awaiting the link, or for any other mailbox.
+    pub fn sign_intro_ownership(
+        &self,
+        mailbox: &MailboxId,
+        day: u32,
+        msg: &[u8; 32],
+    ) -> Option<IntroOwnerSignature> {
+        if self.pending {
+            return None;
+        }
+        let me = self.device.public();
+        if *mailbox != intro_mailbox(&me, day) {
+            return None;
+        }
+        Some(IntroOwnerSignature {
+            sig: me.sig,
+            dh: me.dh,
+            signature: self.device.sign_raw(msg),
+        })
     }
 
     /// Records that the mailboxes were polled at `now`. To be called after
