@@ -274,8 +274,8 @@ impl TransparencyEvent {
                 let (mailbox, hidden) = if *first_contact {
                     (
                         "First message of a session: the introduction mailbox \
-                         is computed from the public key of the recipient device \
-                         and the day.",
+                         is computed from the public keys (signing and key \
+                         agreement) of the recipient device and the day.",
                         RELAYS_DONT_SEE_FIRST,
                     )
                 } else {
@@ -301,8 +301,8 @@ impl TransparencyEvent {
                 let (intro, hidden) = if *first_contact {
                     (
                         " It opened a session: it arrived in your introduction \
-                         mailbox, computed from the public key of your device \
-                         and the day.",
+                         mailbox, computed from the public keys (signing and key \
+                         agreement) of your device and the day.",
                         RELAYS_DONT_SEE_FIRST,
                     )
                 } else {

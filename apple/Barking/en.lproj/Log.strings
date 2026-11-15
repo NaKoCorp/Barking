@@ -38,7 +38,7 @@
 "log.arg.sync_admin" = "admin key";
 "log.arg.node_lost" = "a message deposited there was lost";
 "log.arg.node_unreachable" = "it kept failing to answer";
-"log.arg.intro_mailbox" = "First message of a session: its mailbox is computed from the public key of the recipient's device and the day.";
+"log.arg.intro_mailbox" = "First message of a session: its mailbox is computed from the public keys (signing and key agreement) of the recipient's device and the day.";
 "log.arg.daily_mailbox" = "The mailbox changes every day and does not reveal your contact's identity.";
 "log.arg.transport_node" = "a node";
 "log.arg.transport_file" = "a file";
