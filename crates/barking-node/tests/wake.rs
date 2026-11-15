@@ -10,11 +10,13 @@ use barking_node::testing::{
     start_node, stop_all,
 };
 use barking_node::wake::WakeConfig;
-use barking_packet::{DEFAULT_HOPS, Kind, MailboxId, Packet, PacketId, Tier, ack};
+use barking_packet::{DEFAULT_HOPS, Kind, MailboxId, Packet, PacketId, Tier, ack, intro_mailbox};
 use barking_proto::push::{
-    ApnsEnv, SubKind, Subscription, WakeReason, WakeToken, cancel_hash, open, seal,
+    ApnsEnv, OwnerProof, SubKind, Subscription, WakeReason, WakeToken, cancel_hash, open,
+    owner_message, seal,
 };
 use barking_proto::{ErrorReason, Request, Response};
+use ed25519_dalek::{Signer, SigningKey};
 use tokio::time::timeout;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::Targets;
@@ -316,6 +318,59 @@ async fn subscribe_refusals_through_client() {
     );
     s.close().await;
     relay.stop();
+    node.stop().await;
+}
+
+/// Third parties fill the node's four subscription slots of a device's intro
+/// mailbox (its identifier is public). The owner is refused as any other
+/// client, then reclaims a slot with an ownership proof and is woken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn third_party_cannot_lock_intro_mailbox() {
+    let attacker_relay = FakeRelay::start().await;
+    let owner_relay = FakeRelay::start().await;
+    let node = single(WakeConfig::default());
+
+    let signing = SigningKey::from_bytes(&[0x0A; 32]);
+    let sig = signing.verifying_key().to_bytes();
+    let dh = [0x0D; 32];
+    let day = today();
+    let mailbox = intro_mailbox(&sig, &dh, day);
+
+    for i in 0..4u8 {
+        subscribe(&node, &subscription(&attacker_relay, mailbox, 0x20 + i)).await;
+    }
+
+    let sub = subscription(&owner_relay, mailbox, 0x40);
+    let mut s = anon(&node).await;
+    assert!(s.owner_proof_supported());
+    assert_eq!(
+        timeout(LONG, s.subscribe(&sub)).await.unwrap().unwrap(),
+        Err(ErrorReason::MailboxFull)
+    );
+    let owner = OwnerProof {
+        sig,
+        dh,
+        day,
+        signature: signing.sign(&owner_message(&sub, day)).to_bytes(),
+    };
+    assert_eq!(
+        timeout(LONG, s.subscribe_owned(&sub, &owner))
+            .await
+            .unwrap()
+            .unwrap(),
+        Ok(())
+    );
+    s.close().await;
+
+    let (msg, _) = message_and_ack(mailbox, [0x62; 16]);
+    deposit(&node, &msg).await;
+    wait_received(&owner_relay, 1, Duration::from_secs(5)).await;
+    let got = owner_relay.received();
+    assert_eq!(got.len(), 1);
+    assert_eq!(opened(&got[0]), Some(token()));
+
+    attacker_relay.stop();
+    owner_relay.stop();
     node.stop().await;
 }
 

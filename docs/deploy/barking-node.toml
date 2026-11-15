@@ -74,6 +74,8 @@ pow_bits = 18
 # wake subscriptions (at most 4 per mailbox) and, when a message arrives for a
 # subscribed mailbox, hands the sealed token to the push relay it names
 # (barking-push). Tokens are sealed for the relay: the node learns no device.
+# A proved owner of an intro mailbox can reclaim a slot: when the mailbox is full,
+# a subscription carrying an ownership proof evicts the oldest unproved one.
 # [wake]
 # Accept subscriptions and send wake-ups. Default: true.
 # enabled = true
