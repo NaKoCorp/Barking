@@ -867,6 +867,11 @@ fn owned_day_window() {
         try_owned(&mut s, &cfg, &sb, &owner),
         Err(ErrorReason::Expired)
     );
+    // Inclusive upper bound. `sub.expires_day` stays `today + 1` (from
+    // `raw_sub`), inside precheck's own window: only the proof day varies.
+    let (sb, owner) = at(today() + MAX_EXPIRY_DAYS, 4);
+    assert!(sb.expires_day <= today() + MAX_EXPIRY_DAYS);
+    assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
     let (sb, owner) = at(today() + MAX_EXPIRY_DAYS + 1, 3);
     assert_eq!(
         try_owned(&mut s, &cfg, &sb, &owner),

@@ -368,6 +368,12 @@ async fn third_party_cannot_lock_intro_mailbox() {
     let got = owner_relay.received();
     assert_eq!(got.len(), 1);
     assert_eq!(opened(&got[0]), Some(token()));
+    // The owner took one attacker row's slot: the three left are woken, the
+    // evicted one is not.
+    wait_received(&attacker_relay, 3, Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(node.wake_next_due(), None);
+    assert_eq!(attacker_relay.received().len(), 3);
 
     attacker_relay.stop();
     owner_relay.stop();
