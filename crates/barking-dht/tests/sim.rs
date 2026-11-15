@@ -556,9 +556,8 @@ fn sybil_slash24_is_capped() {
         }
     }
     let mut worst = 0.0f64;
-    for h in 0..honest {
-        let table = &net.nodes[h].table;
-        let active = table.closest(&[0; 32], usize::MAX);
+    for (h, node) in net.nodes.iter().take(honest).enumerate() {
+        let active = node.table.closest(&[0; 32], usize::MAX);
         let sybils = active
             .iter()
             .filter(|p| prefixes(&p.record).contains(&block))
