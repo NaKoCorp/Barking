@@ -675,14 +675,16 @@ impl Core {
         out
     }
 
-    /// Signs `msg` (already domain-separated by the caller) to prove this
-    /// device owns `mailbox`, its introduction mailbox for `day`. `None`
-    /// while awaiting the link, or for any other mailbox.
+    /// Signs the owner message of a push subscription (`subscription_hash`,
+    /// see `barking_packet::owner_message`) to prove this device owns
+    /// `mailbox`, its introduction mailbox for `day`. The message is derived
+    /// here, so the device key never signs caller-chosen bytes. `None` while
+    /// awaiting the link, or for any other mailbox.
     pub fn sign_intro_ownership(
         &self,
         mailbox: &MailboxId,
         day: u32,
-        msg: &[u8; 32],
+        subscription_hash: &[u8; 32],
     ) -> Option<IntroOwnerSignature> {
         if self.pending {
             return None;
@@ -694,7 +696,9 @@ impl Core {
         Some(IntroOwnerSignature {
             sig: me.sig,
             dh: me.dh,
-            signature: self.device.sign_raw(msg),
+            signature: self
+                .device
+                .sign_raw(&barking_packet::owner_message(subscription_hash, day)),
         })
     }
 

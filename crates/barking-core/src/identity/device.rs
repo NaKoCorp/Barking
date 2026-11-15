@@ -100,8 +100,8 @@ impl DeviceKeys {
 
     /// Signs the 32 bytes `msg` as they are, without the `labelled` prefix.
     /// Reserved for messages already domain-separated by a `derive_key`
-    /// context.
-    pub fn sign_raw(&self, msg: &[u8; 32]) -> [u8; 64] {
+    /// context, derived inside this crate.
+    pub(crate) fn sign_raw(&self, msg: &[u8; 32]) -> [u8; 64] {
         self.signing.sign(msg).to_bytes()
     }
 

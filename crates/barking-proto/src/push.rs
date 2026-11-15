@@ -34,7 +34,7 @@ pub const SEAL_CONTEXT: &str = "barking/v0/push-seal";
 /// BLAKE3 context of the subscription proof of work.
 pub const SUBSCRIBE_POW_CONTEXT: &str = "barking/v0/subscribe";
 /// BLAKE3 context of the owner signature over a subscription.
-pub const OWNER_CONTEXT: &str = "barking/v1/subscribe-owner";
+pub use barking_packet::OWNER_CONTEXT;
 /// Maximum length of a relay host name.
 pub const MAX_RELAY_HOST: usize = 253;
 
@@ -250,10 +250,7 @@ mod signature_bytes {
 /// Message the owner signs: BLAKE3 `derive_key(OWNER_CONTEXT,
 /// subscription_hash(sub) || day.to_be_bytes())`, raw 32 bytes.
 pub fn owner_message(sub: &Subscription, day: u32) -> [u8; 32] {
-    let mut input = Vec::with_capacity(36);
-    input.extend_from_slice(&subscription_hash(sub));
-    input.extend_from_slice(&day.to_be_bytes());
-    blake3::derive_key(OWNER_CONTEXT, &input)
+    barking_packet::owner_message(&subscription_hash(sub), day)
 }
 
 /// True if `owner` is the owner of `sub.mailbox`: the mailbox derives from

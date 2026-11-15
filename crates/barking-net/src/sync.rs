@@ -143,7 +143,7 @@ use barking_core::{Core, CoreError, ReceiveOutcome};
 use barking_dht::{BootstrapEntry, builtin_bootstrap};
 use barking_packet::{Kind, MailboxId, Packet, PacketId};
 use barking_proto::pow::content_hash;
-use barking_proto::push::{OwnerProof, SubKind, Subscription, owner_message};
+use barking_proto::push::{OwnerProof, SubKind, Subscription, subscription_hash};
 use barking_proto::{ErrorReason, NodeId, NodeRecord};
 use tokio::time::Instant;
 
@@ -1647,6 +1647,10 @@ where
                                 break 'stage;
                             };
                             self.pow_left = self.pow_left.saturating_sub(reply.pow_spent);
+                            // A failure here skips the node without
+                            // redialling, on purpose: the node just answered
+                            // on this connection, and the proof is not sent
+                            // a second time.
                             let Ok(owned) = reply.outcome else {
                                 skipped.insert(node);
                                 continue 'stage;
@@ -1715,7 +1719,7 @@ where
         }
         let signed = self
             .core
-            .sign_intro_ownership(&sub.mailbox, day, &owner_message(sub, day))?;
+            .sign_intro_ownership(&sub.mailbox, day, &subscription_hash(sub))?;
         Some(OwnerProof {
             sig: signed.sig,
             dh: signed.dh,

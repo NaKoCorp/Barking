@@ -467,6 +467,16 @@ fn session_to_mixed_device_fails_at_its_real_owner() {
         alice.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap(),
         ReceiveOutcome::NotForUs
     ));
+    // Relabelled into Alice's own intro mailbox, the Initial reaches the
+    // decryption step: the device identifiers bound to the associated data
+    // (Mallory's, not Alice's) make it fail there.
+    let mut q = p[0].clone();
+    q.mailbox = intro_mailbox(&alice.device.public(), day_of(NOW));
+    assert!(alice.watched_mailboxes(NOW).unwrap().contains(&q.mailbox));
+    assert_eq!(
+        reason(alice.receive(&q.encode(), "t", NOW, &mut rng).unwrap()),
+        "decryption impossible"
+    );
     assert!(
         alice
             .messages_with(&carol.fingerprint())
@@ -2275,16 +2285,24 @@ fn sign_intro_ownership_for_own_mailbox() {
     let p = pair();
     let me = p.a.device.public();
     let day = day_of(NOW);
-    let msg = [0x5Au8; 32];
+    let hash = [0x5Au8; 32];
     let s =
-        p.a.sign_intro_ownership(&intro_mailbox(&me, day), day, &msg)
+        p.a.sign_intro_ownership(&intro_mailbox(&me, day), day, &hash)
             .expect("own intro mailbox");
     assert_eq!(s.sig, me.sig);
     assert_eq!(s.dh, me.dh);
+    // Core signs the derived owner message, never the hash itself.
+    let msg = barking_packet::owner_message(&hash, day);
     VerifyingKey::from_bytes(&s.sig)
         .unwrap()
         .verify_strict(&msg, &Signature::from_bytes(&s.signature))
         .unwrap();
+    assert!(
+        VerifyingKey::from_bytes(&s.sig)
+            .unwrap()
+            .verify_strict(&hash, &Signature::from_bytes(&s.signature))
+            .is_err()
+    );
 }
 
 #[test]
@@ -2292,24 +2310,41 @@ fn sign_intro_ownership_refuses_other_mailbox() {
     let p = pair();
     let me = p.a.device.public();
     let day = day_of(NOW);
-    let msg = [0x5Au8; 32];
+    let hash = [0x5Au8; 32];
     // The mailbox of another day.
     assert!(
-        p.a.sign_intro_ownership(&intro_mailbox(&me, day + 1), day, &msg)
+        p.a.sign_intro_ownership(&intro_mailbox(&me, day + 1), day, &hash)
             .is_none()
     );
     // Another device's introduction mailbox.
     let other = p.b.device.public();
     assert!(
-        p.a.sign_intro_ownership(&intro_mailbox(&other, day), day, &msg)
+        p.a.sign_intro_ownership(&intro_mailbox(&other, day), day, &hash)
             .is_none()
     );
     // A session mailbox.
-    let secret = p.a.store.all_sessions().unwrap().into_iter().next();
-    if let Some(sess) = secret {
-        let m = session_mailbox(&sess.mailbox_secret, &me.id(), day);
-        assert!(p.a.sign_intro_ownership(&m, day, &msg).is_none());
-    }
+    let sess =
+        p.a.store
+            .all_sessions()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("pair() establishes a session");
+    let m = session_mailbox(&sess.mailbox_secret, &me.id(), day);
+    assert!(p.a.sign_intro_ownership(&m, day, &hash).is_none());
+}
+
+#[test]
+fn sign_intro_ownership_refused_while_awaiting_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(6);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (t, _req) =
+        Core::begin_link(&dir.path().join("t"), &[2; 32], &offer, "t", NOW, &mut rng).unwrap();
+    let day = day_of(NOW);
+    let mine = intro_mailbox(&t.device.public(), day);
+    assert!(t.sign_intro_ownership(&mine, day, &[0x5A; 32]).is_none());
 }
 
 #[test]
