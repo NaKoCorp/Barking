@@ -28,13 +28,9 @@ const NODES_FILE: &str = "nodes.toml";
 const LEGACY_FILES: [&str; 2] = ["sync_state.toml", "fetch_cursors.toml"];
 
 /// Accept non-routable node addresses (test builds only: the test nodes
-/// listen on 127.0.0.1).
+/// listen on 127.0.0.1). A release build never reads the variable.
 pub fn allow_private() -> bool {
-    #[cfg(debug_assertions)]
-    if std::env::var("BARKING_TEST_ALLOW_PRIVATE").is_ok_and(|v| v == "1") {
-        return true;
-    }
-    false
+    cfg!(debug_assertions) && std::env::var("BARKING_TEST_ALLOW_PRIVATE").is_ok_and(|v| v == "1")
 }
 
 /// The first 8 characters of the identifier: what the log shows.
