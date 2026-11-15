@@ -1586,14 +1586,34 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
             let bits = shared.policy.pow_bits;
             // Refused before taking a slot in the database queue;
             // `wake::subscribe` stays the authoritative check.
-            if let Err(r) = wake::precheck(&cfg, bits, &sub, pow, unix_now()) {
+            if let Err(r) = wake::precheck(&cfg, bits, &sub, pow, None, unix_now()) {
                 return Stored::Done(Response::Error(r));
             }
             // Before the write: a message marking this row will notify.
             shared.wake_signal.arm();
             match shared
                 .with_store(false, Some(group), move |s, _| {
-                    wake::subscribe(s, &cfg, bits, &sub, pow, unix_now())
+                    wake::subscribe(s, &cfg, bits, &sub, pow, None, unix_now())
+                })
+                .await
+            {
+                Stored::Done(r) => Stored::Done(to_resp(r.map(|()| Response::Ok))),
+                Stored::Busy => Stored::Busy,
+                Stored::Failed => Stored::Failed,
+            }
+        }
+        Request::SubscribeOwned { sub, pow, owner } => {
+            let cfg = shared.wake.clone();
+            let bits = shared.policy.pow_bits;
+            // Same path as `Subscribe`, owner proof included: checked before
+            // taking a slot in the database queue, then authoritatively.
+            if let Err(r) = wake::precheck(&cfg, bits, &sub, pow, Some(&owner), unix_now()) {
+                return Stored::Done(Response::Error(r));
+            }
+            shared.wake_signal.arm();
+            match shared
+                .with_store(false, Some(group), move |s, _| {
+                    wake::subscribe(s, &cfg, bits, &sub, pow, Some(&owner), unix_now())
                 })
                 .await
             {
@@ -1616,10 +1636,7 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
             Stored::Failed => Stored::Failed,
         },
         // A node is not a relay.
-        // Handled in a later change.
-        Request::Wake { .. } | Request::SubscribeOwned { .. } => {
-            Stored::Done(Response::Error(ErrorReason::Unsupported))
-        }
+        Request::Wake { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
         Request::Ping { .. }
         | Request::FindNode { .. }
         | Request::Store { .. }

@@ -8,7 +8,8 @@ use barking_packet::MailboxId;
 use barking_proto::msg::ErrorReason;
 use barking_proto::pow;
 use barking_proto::push::{
-    MAX_SEALED, RelayRef, SubKind, Subscription, cancel_hash, subscription_hash,
+    MAX_SEALED, OwnerProof, RelayRef, SubKind, Subscription, cancel_hash, subscription_hash,
+    verify_owner,
 };
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
@@ -64,12 +65,15 @@ fn int(v: u64) -> i64 {
 }
 
 /// Checks a subscription without touching the database: enabled, shape, day
-/// bounds and proof of work. `subscribe` runs it again, authoritatively.
+/// bounds, proof of work and, when given, the owner proof (message
+/// subscriptions only, proof day within `[today - 1, today + MAX_EXPIRY_DAYS]`).
+/// `subscribe` runs it again, authoritatively.
 pub(crate) fn precheck(
     cfg: &WakeConfig,
     base_bits: u8,
     sub: &Subscription,
     pow_nonce: u64,
+    owner: Option<&OwnerProof>,
     now: u64,
 ) -> core::result::Result<(), ErrorReason> {
     if !cfg.enabled {
@@ -88,47 +92,75 @@ pub(crate) fn precheck(
     if !pow::check(&subscription_hash(sub), &sub.mailbox, pow_nonce, base_bits) {
         return Err(ErrorReason::PowTooWeak);
     }
+    if let Some(owner) = owner {
+        // Only an intro mailbox's message subscription can be proved.
+        if sub.kind != SubKind::Messages {
+            return Err(ErrorReason::Malformed);
+        }
+        if owner.day < today.saturating_sub(1) {
+            return Err(ErrorReason::Expired);
+        }
+        if owner.day > today.saturating_add(MAX_EXPIRY_DAYS) {
+            return Err(ErrorReason::TooFarInFuture);
+        }
+        if !verify_owner(sub, owner) {
+            return Err(ErrorReason::Malformed);
+        }
+    }
     Ok(())
 }
 
 /// Stores (or replaces) a subscription. `Ok(Err(reason))`: refusal.
+///
+/// `owner` proves the subscriber owns the (intro) mailbox; the row is then
+/// marked `owned`. A proved subscription may take a slot of a full mailbox
+/// (evicting the oldest unproved row, else the oldest proved one); an
+/// unproved one never evicts anything and never replaces a proved row, so a
+/// third party cannot lock the owner out nor push it out.
 pub fn subscribe(
     store: &mut NodeStore,
     cfg: &WakeConfig,
     base_bits: u8,
     sub: &Subscription,
     pow_nonce: u64,
+    owner: Option<&OwnerProof>,
     now: u64,
 ) -> Result<core::result::Result<(), ErrorReason>> {
-    if let Err(r) = precheck(cfg, base_bits, sub, pow_nonce, now) {
+    if let Err(r) = precheck(cfg, base_bits, sub, pow_nonce, owner, now) {
         return Ok(Err(r));
     }
+    let owned = owner.is_some();
     let relay = postcard::to_allocvec(&sub.relay).expect("a relay reference always encodes");
     let tx = store.conn_mut().savepoint()?;
-    let existing: Option<i64> = tx
+    let existing: Option<(i64, bool)> = tx
         .query_row(
-            "SELECT kind FROM subscriptions WHERE mailbox=?1 AND cancel_hash=?2",
+            "SELECT kind, owned FROM subscriptions WHERE mailbox=?1 AND cancel_hash=?2",
             params![&sub.mailbox.0[..], &sub.cancel_hash[..]],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if let Some(kind) = existing {
+    if let Some((kind, row_owned)) = existing {
         // A subscription never changes kind: the same secret under another
         // kind is refused, not migrated.
         if kind != i64::from(sub.kind as u8) {
             return Ok(Err(ErrorReason::Malformed));
         }
+        // A proved row is only replaced by a proved request.
+        if row_owned && !owned {
+            return Ok(Err(ErrorReason::MailboxFull));
+        }
         // Replacement: refreshes the relay, the token and the expiry; the
-        // wake-up state is kept.
+        // wake-up state is kept, and a proved row stays proved.
         tx.execute(
-            "UPDATE subscriptions SET relay=?3, sealed=?4, expires_day=?5
+            "UPDATE subscriptions SET relay=?3, sealed=?4, expires_day=?5, owned=MAX(owned, ?6)
              WHERE mailbox=?1 AND cancel_hash=?2",
             params![
                 &sub.mailbox.0[..],
                 &sub.cancel_hash[..],
                 relay,
                 &sub.sealed[..],
-                i64::from(sub.expires_day)
+                i64::from(sub.expires_day),
+                owned
             ],
         )?;
     } else {
@@ -137,23 +169,35 @@ pub fn subscribe(
             params![&sub.mailbox.0[..], sub.kind as u8],
             |r| r.get(0),
         )?;
-        if in_box >= MAX_SUBS_PER_MAILBOX {
+        if in_box < MAX_SUBS_PER_MAILBOX {
+            let total: i64 =
+                tx.query_row("SELECT COUNT(*) FROM subscriptions", [], |r| r.get(0))?;
+            if total >= int(cfg.max_subscriptions) {
+                return Ok(Err(ErrorReason::NodeFull));
+            }
+        } else if owned {
+            // The owner takes the slot of the oldest unproved row, else of
+            // the oldest proved one. The total does not grow: no `NodeFull`.
+            tx.execute(
+                "DELETE FROM subscriptions WHERE rowid = (
+                    SELECT rowid FROM subscriptions WHERE mailbox=?1 AND kind=?2
+                    ORDER BY owned, rowid LIMIT 1)",
+                params![&sub.mailbox.0[..], sub.kind as u8],
+            )?;
+        } else {
             return Ok(Err(ErrorReason::MailboxFull));
         }
-        let total: i64 = tx.query_row("SELECT COUNT(*) FROM subscriptions", [], |r| r.get(0))?;
-        if total >= int(cfg.max_subscriptions) {
-            return Ok(Err(ErrorReason::NodeFull));
-        }
         tx.execute(
-            "INSERT INTO subscriptions(mailbox,relay,sealed,cancel_hash,expires_day,kind)
-             VALUES(?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO subscriptions(mailbox,relay,sealed,cancel_hash,expires_day,kind,owned)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![
                 &sub.mailbox.0[..],
                 relay,
                 &sub.sealed[..],
                 &sub.cancel_hash[..],
                 i64::from(sub.expires_day),
-                sub.kind as u8
+                sub.kind as u8,
+                owned
             ],
         )?;
     }
@@ -280,8 +324,9 @@ pub fn has_subscriptions(store: &NodeStore) -> Result<bool> {
 /// Tells the wake loop that a message arrived, only once the node holds (or
 /// is taking) a subscription: a node without any skips the loop's database
 /// round on every stored packet. Armed at startup if the database holds
-/// subscriptions, and by each `Subscribe` before its write, so that a row
-/// marked pending always finds the signal armed. Never disarmed.
+/// subscriptions, and by each `Subscribe` or `SubscribeOwned` before its
+/// write, so that a row marked pending always finds the signal armed. Never
+/// disarmed.
 pub(crate) struct WakeSignal {
     armed: std::sync::atomic::AtomicBool,
     notify: tokio::sync::Notify,

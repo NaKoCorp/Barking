@@ -2,7 +2,8 @@ use super::*;
 use crate::rules::{self, Policy};
 use barking_packet::{DEFAULT_HOPS, Kind, Packet, PacketId, Tier, ack};
 use barking_proto::node_id::NodeId;
-use barking_proto::push::SubKind;
+use barking_proto::push::{OwnerProof, SubKind, owner_message};
+use ed25519_dalek::{Signer, SigningKey};
 
 const NOW: u64 = 1_800_000_000;
 const BITS: u8 = 1;
@@ -60,7 +61,7 @@ fn sub(mailbox: u8, cancel: u8) -> (Subscription, u64) {
 fn subscribe_ok(s: &mut NodeStore, mailbox: u8, cancel: u8) {
     let (sb, n) = sub(mailbox, cancel);
     assert_eq!(
-        subscribe(s, &WakeConfig::default(), BITS, &sb, n, NOW).unwrap(),
+        subscribe(s, &WakeConfig::default(), BITS, &sb, n, None, NOW).unwrap(),
         Ok(())
     );
 }
@@ -70,7 +71,7 @@ fn try_subscribe(
     cfg: &WakeConfig,
     sb: &Subscription,
 ) -> core::result::Result<(), ErrorReason> {
-    subscribe(s, cfg, BITS, sb, solve(sb), NOW).unwrap()
+    subscribe(s, cfg, BITS, sb, solve(sb), None, NOW).unwrap()
 }
 
 fn message(n: u8, mailbox: u8) -> Packet {
@@ -108,7 +109,7 @@ fn order(sb: &Subscription) -> WakeOrder {
 fn subscribe_then_message_gives_one_wake() {
     let mut s = store();
     let (sb, n) = sub(1, 1);
-    subscribe(&mut s, &WakeConfig::default(), BITS, &sb, n, NOW)
+    subscribe(&mut s, &WakeConfig::default(), BITS, &sb, n, None, NOW)
         .unwrap()
         .unwrap();
     deposit_at(&mut s, &message(1, 1), NOW);
@@ -472,7 +473,7 @@ fn subscribe_disabled_and_weak_pow() {
         .find(|n| !pow::check(&subscription_hash(&sb), &sb.mailbox, *n, 8))
         .unwrap();
     assert_eq!(
-        subscribe(&mut s, &WakeConfig::default(), 8, &sb, bad, NOW).unwrap(),
+        subscribe(&mut s, &WakeConfig::default(), 8, &sb, bad, None, NOW).unwrap(),
         Err(ErrorReason::PowTooWeak)
     );
 }
@@ -621,4 +622,272 @@ fn has_subscriptions_reads_the_table() {
     assert!(!has_subscriptions(&store).unwrap());
     subscribe_ok(&mut store, 1, 1);
     assert!(has_subscriptions(&store).unwrap());
+}
+
+const DH: [u8; 32] = [0x44; 32];
+
+fn device() -> SigningKey {
+    SigningKey::from_bytes(&[0x21; 32])
+}
+
+/// A message subscription on the intro mailbox of `dev` for `day`, with the
+/// owner proof signed by `dev`.
+fn owned_sub_on(
+    dev: &SigningKey,
+    dh: [u8; 32],
+    cancel: u8,
+    day: u32,
+) -> (Subscription, OwnerProof) {
+    let sig = dev.verifying_key().to_bytes();
+    let sb = Subscription {
+        mailbox: barking_packet::intro_mailbox(&sig, &dh, day),
+        ..raw_sub(0, cancel)
+    };
+    let signature = dev.sign(&owner_message(&sb, day)).to_bytes();
+    let owner = OwnerProof {
+        sig,
+        dh,
+        day,
+        signature,
+    };
+    (sb, owner)
+}
+
+fn owned_sub(dev: &SigningKey, dh: [u8; 32], cancel: u8) -> (Subscription, OwnerProof) {
+    owned_sub_on(dev, dh, cancel, today())
+}
+
+fn try_owned(
+    s: &mut NodeStore,
+    cfg: &WakeConfig,
+    sb: &Subscription,
+    owner: &OwnerProof,
+) -> core::result::Result<(), ErrorReason> {
+    subscribe(s, cfg, BITS, sb, solve(sb), Some(owner), NOW).unwrap()
+}
+
+/// An unproved subscription of a third party on `mailbox`.
+fn third_party(mailbox: MailboxId, cancel: u8) -> Subscription {
+    Subscription {
+        mailbox,
+        ..raw_sub(0, cancel)
+    }
+}
+
+/// `owned` of the row identified by `cancel`; `None` if absent.
+fn owned_of(s: &NodeStore, cancel: u8) -> Option<i64> {
+    s.conn()
+        .query_row(
+            "SELECT owned FROM subscriptions WHERE cancel_hash=?1",
+            params![&cancel_hash(&[cancel; 32])[..]],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+fn rows_in(s: &NodeStore, mailbox: &MailboxId) -> i64 {
+    s.conn()
+        .query_row(
+            "SELECT COUNT(*) FROM subscriptions WHERE mailbox=?1",
+            params![&mailbox.0[..]],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn owned_takes_oldest_third_party_slot() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    let (sb, owner) = owned_sub(&device(), DH, 9);
+    for c in 1..=4 {
+        assert_eq!(
+            try_subscribe(&mut s, &cfg, &third_party(sb.mailbox, c)),
+            Ok(())
+        );
+        assert_eq!(owned_of(&s, c), Some(0));
+    }
+    assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
+    assert_eq!(rows_in(&s, &sb.mailbox), 4);
+    assert_eq!(owned_of(&s, 1), None);
+    assert_eq!(owned_of(&s, 9), Some(1));
+}
+
+#[test]
+fn owned_eviction_prefers_unowned_rows() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    let (first, first_owner) = owned_sub(&device(), DH, 1);
+    assert_eq!(try_owned(&mut s, &cfg, &first, &first_owner), Ok(()));
+    for c in 2..=4 {
+        assert_eq!(
+            try_subscribe(&mut s, &cfg, &third_party(first.mailbox, c)),
+            Ok(())
+        );
+    }
+    let (sb, owner) = owned_sub(&device(), DH, 9);
+    assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
+    // The oldest unproved row goes, not the older proved one.
+    assert_eq!(owned_of(&s, 1), Some(1));
+    assert_eq!(owned_of(&s, 2), None);
+    assert_eq!(rows_in(&s, &sb.mailbox), 4);
+}
+
+#[test]
+fn owned_evicts_oldest_owned_when_all_owned() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    for c in 1..=4 {
+        let (sb, owner) = owned_sub(&device(), DH, c);
+        assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
+    }
+    let (sb, owner) = owned_sub(&device(), DH, 5);
+    assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
+    assert_eq!(owned_of(&s, 1), None);
+    assert_eq!(owned_of(&s, 5), Some(1));
+    assert_eq!(rows_in(&s, &sb.mailbox), 4);
+}
+
+#[test]
+fn unowned_cannot_replace_owned_row() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    let (sb, owner) = owned_sub(&device(), DH, 7);
+    assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
+    let hijack = Subscription {
+        sealed: vec![0x66; 80],
+        ..sb.clone()
+    };
+    assert_eq!(
+        try_subscribe(&mut s, &cfg, &hijack),
+        Err(ErrorReason::MailboxFull)
+    );
+    let sealed: Vec<u8> = s
+        .conn()
+        .query_row("SELECT sealed FROM subscriptions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(sealed, sb.sealed);
+    assert_eq!(owned_of(&s, 7), Some(1));
+}
+
+#[test]
+fn owned_replacement_keeps_the_row_proved() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    let (sb, owner) = owned_sub(&device(), DH, 7);
+    assert_eq!(try_subscribe(&mut s, &cfg, &sb), Ok(()));
+    assert_eq!(owned_of(&s, 7), Some(0));
+    // A proved replacement marks an unproved row as proved.
+    assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
+    assert_eq!(owned_of(&s, 7), Some(1));
+}
+
+#[test]
+fn unowned_still_refused_when_full() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    let (sb, _) = owned_sub(&device(), DH, 9);
+    for c in 1..=4 {
+        assert_eq!(
+            try_subscribe(&mut s, &cfg, &third_party(sb.mailbox, c)),
+            Ok(())
+        );
+    }
+    assert_eq!(
+        try_subscribe(&mut s, &cfg, &third_party(sb.mailbox, 5)),
+        Err(ErrorReason::MailboxFull)
+    );
+    assert_eq!(rows_in(&s, &sb.mailbox), 4);
+}
+
+#[test]
+fn owned_proof_bound_to_content() {
+    let mut s = store();
+    let (sb, owner) = owned_sub(&device(), DH, 1);
+    let other = Subscription {
+        cancel_hash: cancel_hash(&[2; 32]),
+        ..sb
+    };
+    assert_eq!(
+        try_owned(&mut s, &WakeConfig::default(), &other, &owner),
+        Err(ErrorReason::Malformed)
+    );
+    assert_eq!(rows_in(&s, &other.mailbox), 0);
+}
+
+#[test]
+fn owned_foreign_sig_key_refused() {
+    let mut s = store();
+    let (victim, _) = owned_sub(&device(), DH, 1);
+    let attacker = SigningKey::from_bytes(&[0x99; 32]);
+    let day = today();
+    let owner = OwnerProof {
+        sig: attacker.verifying_key().to_bytes(),
+        dh: DH,
+        day,
+        signature: attacker.sign(&owner_message(&victim, day)).to_bytes(),
+    };
+    assert_eq!(
+        try_owned(&mut s, &WakeConfig::default(), &victim, &owner),
+        Err(ErrorReason::Malformed)
+    );
+}
+
+#[test]
+fn owned_acks_refused() {
+    let mut s = store();
+    let dev = device();
+    let (sb, _) = owned_sub(&dev, DH, 1);
+    let acks = Subscription {
+        kind: SubKind::Acks,
+        ..sb
+    };
+    let owner = OwnerProof {
+        sig: dev.verifying_key().to_bytes(),
+        dh: DH,
+        day: today(),
+        signature: dev.sign(&owner_message(&acks, today())).to_bytes(),
+    };
+    assert_eq!(
+        try_owned(&mut s, &WakeConfig::default(), &acks, &owner),
+        Err(ErrorReason::Malformed)
+    );
+}
+
+#[test]
+fn owned_day_window() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    let at = |day: u32, cancel: u8| owned_sub_on(&device(), DH, cancel, day);
+    let (sb, owner) = at(today() - 1, 1);
+    assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
+    let (sb, owner) = at(today() - 2, 2);
+    assert_eq!(
+        try_owned(&mut s, &cfg, &sb, &owner),
+        Err(ErrorReason::Expired)
+    );
+    let (sb, owner) = at(today() + MAX_EXPIRY_DAYS + 1, 3);
+    assert_eq!(
+        try_owned(&mut s, &cfg, &sb, &owner),
+        Err(ErrorReason::TooFarInFuture)
+    );
+}
+
+#[test]
+fn owned_eviction_ignores_node_full() {
+    let mut s = store();
+    let cfg = WakeConfig {
+        max_subscriptions: 4,
+        ..WakeConfig::default()
+    };
+    let (sb, owner) = owned_sub(&device(), DH, 9);
+    for c in 1..=4 {
+        assert_eq!(
+            try_subscribe(&mut s, &cfg, &third_party(sb.mailbox, c)),
+            Ok(())
+        );
+    }
+    assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
+    assert_eq!(owned_of(&s, 9), Some(1));
 }
