@@ -34,10 +34,7 @@ pub fn session_mailbox(secret: &[u8; 32], recipient: &DeviceId, day: u32) -> Mai
 
 /// Introduction mailbox, for the first message.
 pub fn intro_mailbox(recipient: &DevicePublic, day: u32) -> MailboxId {
-    let mut input = [0u8; 36];
-    input[..32].copy_from_slice(&recipient.dh);
-    input[32..].copy_from_slice(&day.to_be_bytes());
-    truncate(&blake3::derive_key(labels::INTRO_MAILBOX_CONTEXT, &input))
+    barking_packet::intro_mailbox(&recipient.sig, &recipient.dh, day)
 }
 
 #[cfg(test)]
@@ -87,6 +84,19 @@ mod tests {
         assert_ne!(intro_mailbox(&p, 5), intro_mailbox(&q, 5));
     }
 
+    #[test]
+    fn intro_mailbox_changes_with_sig() {
+        let p = DevicePublic {
+            sig: [3; 32],
+            dh: [4; 32],
+        };
+        let q = DevicePublic {
+            sig: [9; 32],
+            dh: [4; 32],
+        };
+        assert_ne!(intro_mailbox(&p, 5), intro_mailbox(&q, 5));
+    }
+
     /// Mailbox ids are on the wire: any change to their derivation breaks
     /// interoperability. Pinned outputs guard against silent drift.
     #[test]
@@ -102,7 +112,7 @@ mod tests {
         );
         assert_eq!(
             hex(intro_mailbox(&p, 20000)),
-            "a2aebce66c3e516036b2c46710b96b57"
+            "5f360eaa67f5ba9974caf66eb47eb4d2"
         );
         assert_eq!(day_of(20000 * 86400 + 86399), 20000);
         assert_eq!(day_of(1_800_000_000), 20833);

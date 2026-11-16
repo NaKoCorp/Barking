@@ -38,7 +38,7 @@
 "log.arg.sync_admin" = "clé d’administrateur";
 "log.arg.node_lost" = "un message déposé là-bas s’est perdu";
 "log.arg.node_unreachable" = "il ne répondait plus";
-"log.arg.intro_mailbox" = "Premier message d’une session : sa boîte est calculée à partir de la clé publique de l’appareil destinataire et du jour.";
+"log.arg.intro_mailbox" = "Premier message d’une session : sa boîte est calculée à partir des clés publiques (signature et accord de clés) de l’appareil destinataire et du jour.";
 "log.arg.daily_mailbox" = "La boîte change chaque jour et ne révèle pas l’identité de votre contact.";
 "log.arg.transport_node" = "un nœud";
 "log.arg.transport_file" = "un fichier";

@@ -272,7 +272,7 @@ async fn stolen_certificate_without_key_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn old_version_refused() {
     let (_d, path) = db();
-    // A default node (protocol version 2) no longer accepts version 1.
+    // A default node (minimum protocol version 2) no longer accepts version 1.
     let node = start(&path);
     // A raw version-1 request: `Error(VersionTooOld)`, then closing.
     let (_ep, conn) = client::open_connection(node.addr, node.id).await.unwrap();
@@ -287,6 +287,67 @@ async fn old_version_refused() {
     .unwrap();
     assert_eq!(resp, Response::Error(ErrorReason::VersionTooOld));
     timeout(LONG, conn.closed()).await.unwrap();
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hello_v2_peer_accepted() {
+    // A protocol 2 peer (an older node or client) is served, not refused:
+    // the node announces its own highest version and its minimum, 2.
+    let (_d, path) = db();
+    let node = start(&path);
+    let (_ep, conn) = client::open_connection(node.addr, node.id).await.unwrap();
+    let resp = client::request(
+        &conn,
+        &Request::Hello {
+            version: 2,
+            min_version: 2,
+        },
+    )
+    .await
+    .unwrap();
+    match resp {
+        Response::Hello {
+            version,
+            min_version,
+            node_id,
+            ..
+        } => {
+            assert_eq!(version, PROTOCOL_VERSION);
+            assert_eq!(min_version, 2);
+            assert_eq!(node_id, node.id);
+        }
+        other => panic!("expected Hello, got {other:?}"),
+    }
+    conn.close(0u32.into(), b"");
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_proof_unsupported_on_v2_node() {
+    // A node that only speaks protocol 2 does not understand `SubscribeOwned`:
+    // the client must not send it there.
+    let (_d, path) = db();
+    let node = start_with(&path, key(0), policy(), |c| {
+        c.version = 2;
+        c.min_version = 2;
+    });
+    let s = timeout(LONG, Client::connect(node.addr, node.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!s.owner_proof_supported());
+    s.close().await;
+    // The default node does.
+    node.stop().await;
+    let (_d, path) = db();
+    let node = start(&path);
+    let s = timeout(LONG, Client::connect(node.addr, node.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(s.owner_proof_supported());
+    s.close().await;
     node.stop().await;
 }
 

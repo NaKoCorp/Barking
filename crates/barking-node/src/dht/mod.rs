@@ -350,7 +350,8 @@ impl Dht {
             | Request::Fetch { .. }
             | Request::Subscribe { .. }
             | Request::Unsubscribe { .. }
-            | Request::Wake { .. } => err(ErrorReason::Malformed),
+            | Request::Wake { .. }
+            | Request::SubscribeOwned { .. } => err(ErrorReason::Malformed),
         }
     }
 

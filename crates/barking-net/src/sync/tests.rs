@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use barking_packet::Kind;
 use barking_proto::client::FetchResume;
-use barking_proto::push::{ApnsEnv, RelayRef, SubKind, Subscription};
+use barking_proto::push::{ApnsEnv, OwnerProof, RelayRef, SubKind, Subscription};
 
 use barking_core::Core;
 use tempfile::TempDir;
@@ -27,6 +27,7 @@ enum Call {
     Fetch(NodeId, Vec<MailboxId>, Vec<MailboxId>),
     Deposit(NodeId, [u8; 32]),
     Subscribe(NodeId, MailboxId, SubKind),
+    SubscribeOwned(NodeId, MailboxId),
     Unsubscribe(NodeId, MailboxId),
     Close(NodeId),
 }
@@ -109,6 +110,11 @@ struct Net {
     no_wake: HashSet<NodeId>,
     /// Subscriptions on that node are refused with this reason.
     refuse_subscribe: HashMap<NodeId, ErrorReason>,
+    /// Nodes that refuse a subscription with `MailboxFull` unless its owner
+    /// proves it (`subscribe_owned`).
+    full_unless_owned: HashSet<NodeId>,
+    /// Nodes that speak protocol 2: no proved subscriptions.
+    v2: HashSet<NodeId>,
     /// Fetches honour `max_bytes`: the items beyond it are left out and the
     /// fetch stops with `FetchStop::ClientLimit`.
     honor_max_bytes: bool,
@@ -386,10 +392,48 @@ impl Subscriber for Net {
                 pow_spent: 0,
             };
         }
-        let result = match self.refuse_subscribe.get(&conn.id) {
-            Some(reason) => Err(*reason),
-            None => Ok(()),
+        let result = if self.full_unless_owned.contains(&conn.id) {
+            Err(ErrorReason::MailboxFull)
+        } else {
+            self.refuse_subscribe
+                .get(&conn.id)
+                .map_or(Ok(()), |reason| Err(*reason))
         };
+        SubscribeReply {
+            outcome: Ok(DepositOutcome::Answered(result)),
+            pow_spent: self.pow_cost,
+        }
+    }
+
+    fn owner_proof_supported(&self, conn: &Conn) -> bool {
+        !self.v2.contains(&conn.id)
+    }
+
+    async fn subscribe_owned(
+        &self,
+        conn: &mut Conn,
+        sub: &Subscription,
+        owner: &OwnerProof,
+        pow_left: u64,
+    ) -> SubscribeReply {
+        self.log(Call::SubscribeOwned(conn.id, sub.mailbox));
+        assert!(barking_proto::push::verify_owner(sub, owner), "bad proof");
+        if self.dead(conn) {
+            return SubscribeReply {
+                outcome: Err(DialError::Unreachable),
+                pow_spent: 0,
+            };
+        }
+        if self.pow_cost > pow_left {
+            return SubscribeReply {
+                outcome: Ok(DepositOutcome::PowBudget),
+                pow_spent: 0,
+            };
+        }
+        let result = self
+            .refuse_subscribe
+            .get(&conn.id)
+            .map_or(Ok(()), |reason| Err(*reason));
         SubscribeReply {
             outcome: Ok(DepositOutcome::Answered(result)),
             pow_spent: self.pow_cost,
@@ -2571,6 +2615,126 @@ async fn full_refusals_fall_through_to_the_next_responsible() {
     };
     assert_eq!(to(node_full), 1, "left out after its first NodeFull");
     assert!(to(mailbox_full) > 1, "tried again for the other mailboxes");
+}
+
+/// This device's intro mailbox for today.
+fn today_intro(core: &Core) -> MailboxId {
+    core.own_intro_mailboxes(&[barking_core::mailbox::day_of(NOW)])[0]
+}
+
+/// The nodes holding the subscription of `mailbox` for messages.
+fn wake_holders(core: &Core, mailbox: MailboxId) -> BTreeSet<NodeId> {
+    push_state(core).subs[&(mailbox, SubKind::Messages)]
+        .nodes
+        .iter()
+        .map(|(n, _)| *n)
+        .collect()
+}
+
+/// Every proved subscription sent, in call order.
+fn subscribes_owned(calls: &[Call]) -> Vec<(NodeId, MailboxId)> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::SubscribeOwned(n, m) => Some((*n, *m)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn owned_retry_on_full_intro_mailbox() {
+    let (_dir, mut core, mut net) = setup();
+    let intro = today_intro(&core);
+    let x = load(&mut core).view.responsibles_by_score(&intro, NOW)[0];
+    net.full_unless_owned.insert(x);
+    sync(&mut core, &net, push_opts()).await;
+    let calls = net.calls();
+    let plain = positions_of(&calls, |c| {
+        *c == Call::Subscribe(x, intro, SubKind::Messages)
+    });
+    let owned = positions_of(&calls, |c| *c == Call::SubscribeOwned(x, intro));
+    assert_eq!((plain.len(), owned.len()), (1, 1), "{calls:?}");
+    // Right after the refusal, on the same connection.
+    assert_eq!(owned[0], plain[0] + 1);
+    assert!(wake_holders(&core, intro).contains(&x));
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_owned_retry_on_session_mailbox() {
+    let (_dir, mut core, mut net) = setup();
+    let today = barking_core::mailbox::day_of(NOW);
+    let intros = core.own_intro_mailboxes(&[today]);
+    let (session, _) = *horizon(&core)
+        .iter()
+        .find(|(m, d)| *d == today && !intros.contains(m))
+        .unwrap();
+    let ranked = load(&mut core).view.responsibles_by_score(&session, NOW);
+    let x = ranked[0];
+    net.full_unless_owned.insert(x);
+    sync(&mut core, &net, push_opts()).await;
+    let calls = net.calls();
+    assert!(
+        !subscribes_owned(&calls).iter().any(|(_, m)| *m == session),
+        "{calls:?}"
+    );
+    assert!(subscribes(&calls).contains(&(x, session)));
+    // The next responsible takes its place.
+    let expected: BTreeSet<NodeId> = ranked
+        .into_iter()
+        .filter(|n| *n != x)
+        .take(crate::push::WAKE_NODES)
+        .collect();
+    assert_eq!(wake_holders(&core, session), expected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_owned_retry_on_v2_node() {
+    let (_dir, mut core, mut net) = setup();
+    let intro = today_intro(&core);
+    let ranked = load(&mut core).view.responsibles_by_score(&intro, NOW);
+    let x = ranked[0];
+    net.full_unless_owned.insert(x);
+    net.v2.insert(x);
+    sync(&mut core, &net, push_opts()).await;
+    let calls = net.calls();
+    assert!(
+        !subscribes_owned(&calls).iter().any(|(n, _)| *n == x),
+        "{calls:?}"
+    );
+    assert!(subscribes(&calls).contains(&(x, intro)));
+    let expected: BTreeSet<NodeId> = ranked
+        .into_iter()
+        .filter(|n| *n != x)
+        .take(crate::push::WAKE_NODES)
+        .collect();
+    assert_eq!(wake_holders(&core, intro), expected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn owned_retry_once_per_node() {
+    let (_dir, mut core, mut net) = setup();
+    let intro = today_intro(&core);
+    let ranked = load(&mut core).view.responsibles_by_score(&intro, NOW);
+    let x = ranked[0];
+    // Full even for its owner.
+    net.refuse_subscribe.insert(x, ErrorReason::MailboxFull);
+    sync(&mut core, &net, push_opts()).await;
+    let calls = net.calls();
+    let owned = positions_of(&calls, |c| *c == Call::SubscribeOwned(x, intro));
+    assert_eq!(owned.len(), 1, "{calls:?}");
+    assert_eq!(
+        positions_of(&calls, |c| *c
+            == Call::Subscribe(x, intro, SubKind::Messages))
+        .len(),
+        1
+    );
+    let expected: BTreeSet<NodeId> = ranked
+        .into_iter()
+        .filter(|n| *n != x)
+        .take(crate::push::WAKE_NODES)
+        .collect();
+    assert_eq!(wake_holders(&core, intro), expected);
 }
 
 // ---- Quick sync (notification extension) ----

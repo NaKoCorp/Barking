@@ -67,6 +67,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use barking_dht::DiversityLimits;
 use barking_packet::Tier;
+use barking_proto::client::MIN_PROTOCOL_VERSION;
 use barking_proto::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use barking_proto::{
     ErrorReason, Limits, MAX_HOLDINGS_PER_PAGE, NodeId, PROTOCOL_VERSION, Request, Response, tls,
@@ -563,7 +564,7 @@ impl ServerConfig {
             max_db_jobs: DEFAULT_MAX_DB_JOBS,
             max_db_jobs_per_prefix: None,
             version: PROTOCOL_VERSION,
-            min_version: PROTOCOL_VERSION,
+            min_version: MIN_PROTOCOL_VERSION,
             stats: Arc::new(ServerStats::default()),
             dht: None,
             dht_tick: None,
@@ -1585,14 +1586,34 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
             let bits = shared.policy.pow_bits;
             // Refused before taking a slot in the database queue;
             // `wake::subscribe` stays the authoritative check.
-            if let Err(r) = wake::precheck(&cfg, bits, &sub, pow, unix_now()) {
+            if let Err(r) = wake::precheck(&cfg, bits, &sub, pow, None, unix_now()) {
                 return Stored::Done(Response::Error(r));
             }
             // Before the write: a message marking this row will notify.
             shared.wake_signal.arm();
             match shared
                 .with_store(false, Some(group), move |s, _| {
-                    wake::subscribe(s, &cfg, bits, &sub, pow, unix_now())
+                    wake::subscribe(s, &cfg, bits, &sub, pow, None, unix_now())
+                })
+                .await
+            {
+                Stored::Done(r) => Stored::Done(to_resp(r.map(|()| Response::Ok))),
+                Stored::Busy => Stored::Busy,
+                Stored::Failed => Stored::Failed,
+            }
+        }
+        Request::SubscribeOwned { sub, pow, owner } => {
+            let cfg = shared.wake.clone();
+            let bits = shared.policy.pow_bits;
+            // Same path as `Subscribe`, owner proof included: checked before
+            // taking a slot in the database queue, then authoritatively.
+            if let Err(r) = wake::precheck(&cfg, bits, &sub, pow, Some(&owner), unix_now()) {
+                return Stored::Done(Response::Error(r));
+            }
+            shared.wake_signal.arm();
+            match shared
+                .with_store(false, Some(group), move |s, _| {
+                    wake::subscribe(s, &cfg, bits, &sub, pow, Some(&owner), unix_now())
                 })
                 .await
             {

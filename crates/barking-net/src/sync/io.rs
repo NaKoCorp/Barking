@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use barking_packet::MailboxId;
 use barking_proto::client::{Client, ClientError, FetchResume, FetchStop, Session};
-use barking_proto::push::Subscription;
+use barking_proto::push::{OwnerProof, Subscription};
 use barking_proto::{ErrorReason, NodeId, NodeRecord};
 
 use crate::discover::{DIAL_TIMEOUT, DialError, Dialer, QuicDialer, dial_error};
@@ -132,6 +132,19 @@ pub trait Subscriber: Connector {
         pow_left: u64,
     ) -> impl Future<Output = SubscribeReply> + Send;
 
+    /// The node accepts subscriptions proved by their owner (protocol 3).
+    fn owner_proof_supported(&self, conn: &Self::Conn) -> bool;
+
+    /// Registers `sub` with the proof that its sender owns the mailbox,
+    /// spending at most `pow_left` proof work.
+    fn subscribe_owned(
+        &self,
+        conn: &mut Self::Conn,
+        sub: &Subscription,
+        owner: &OwnerProof,
+        pow_left: u64,
+    ) -> impl Future<Output = SubscribeReply> + Send;
+
     /// Cancels the subscriptions of `mailbox` made with `cancel_secret`; a
     /// refusal is `DialError::Refused`.
     fn unsubscribe(
@@ -224,6 +237,30 @@ impl Subscriber for QuicDialer {
         let before = conn.pow_spent();
         conn.set_pow_budget(Some(before.saturating_add(pow_left)));
         let outcome = match conn.subscribe(sub).await {
+            Ok(result) => Ok(DepositOutcome::Answered(result)),
+            Err(ClientError::PowBudget) => Ok(DepositOutcome::PowBudget),
+            Err(e) => Err(dial_error(e)),
+        };
+        SubscribeReply {
+            outcome,
+            pow_spent: conn.pow_spent().saturating_sub(before),
+        }
+    }
+
+    fn owner_proof_supported(&self, conn: &Session) -> bool {
+        conn.owner_proof_supported()
+    }
+
+    async fn subscribe_owned(
+        &self,
+        conn: &mut Session,
+        sub: &Subscription,
+        owner: &OwnerProof,
+        pow_left: u64,
+    ) -> SubscribeReply {
+        let before = conn.pow_spent();
+        conn.set_pow_budget(Some(before.saturating_add(pow_left)));
+        let outcome = match conn.subscribe_owned(sub, owner).await {
             Ok(result) => Ok(DepositOutcome::Answered(result)),
             Err(ClientError::PowBudget) => Ok(DepositOutcome::PowBudget),
             Err(e) => Err(dial_error(e)),

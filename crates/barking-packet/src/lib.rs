@@ -83,5 +83,35 @@ pub fn default_expiry(now: u64) -> u32 {
     u32::try_from(now.saturating_add(DEFAULT_TTL_SECS)).unwrap_or(u32::MAX)
 }
 
+/// BLAKE3 context of the introduction mailbox (first message).
+pub const INTRO_MAILBOX_CONTEXT: &str = "barking/v1/intro-mailbox";
+
+/// Introduction mailbox of a device for a given day. Binding the device
+/// signing key `sig` lets its owner later prove ownership of the mailbox.
+pub fn intro_mailbox(sig: &[u8; 32], dh: &[u8; 32], day: u32) -> MailboxId {
+    let mut input = [0u8; 68];
+    input[..32].copy_from_slice(sig);
+    input[32..64].copy_from_slice(dh);
+    input[64..].copy_from_slice(&day.to_be_bytes());
+    let full = blake3::derive_key(INTRO_MAILBOX_CONTEXT, &input);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&full[..16]);
+    MailboxId(out)
+}
+
+/// BLAKE3 context of the owner signature over a push subscription.
+pub const OWNER_CONTEXT: &str = "barking/v1/subscribe-owner";
+
+/// Message the owner of an intro mailbox signs to prove ownership of a push
+/// subscription: BLAKE3 `derive_key(OWNER_CONTEXT, subscription_hash ||
+/// day.to_be_bytes())`, raw 32 bytes. Lives here, beside `intro_mailbox`, so
+/// the device key is only ever asked to sign this domain-separated message.
+pub fn owner_message(subscription_hash: &[u8; 32], day: u32) -> [u8; 32] {
+    let mut input = [0u8; 36];
+    input[..32].copy_from_slice(subscription_hash);
+    input[32..].copy_from_slice(&day.to_be_bytes());
+    blake3::derive_key(OWNER_CONTEXT, &input)
+}
+
 #[cfg(test)]
 mod tests;

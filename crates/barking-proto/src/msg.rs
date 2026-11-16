@@ -4,7 +4,11 @@
 use barking_packet::MailboxId;
 use serde::{Deserialize, Serialize};
 
-use crate::{node_id::NodeId, push::Subscription, record::NodeRecord};
+use crate::{
+    node_id::NodeId,
+    push::{OwnerProof, Subscription},
+    record::NodeRecord,
+};
 
 /// Pickup cursors: packets first (cursor = their sequence number,
 /// below this base), then acknowledgements (`ACK_CURSOR_BASE + number`).
@@ -77,6 +81,13 @@ pub enum Request {
     /// Node to relay: sealed wake tokens to push (at most `MAX_WAKE_ITEMS`).
     Wake {
         items: Vec<Vec<u8>>,
+    },
+    /// `Subscribe` for an intro mailbox, with proof that the sender owns it
+    /// (protocol 3). `pow` is over `push::subscription_hash(&sub)`.
+    SubscribeOwned {
+        sub: Subscription,
+        pow: u64,
+        owner: OwnerProof,
     },
 }
 
@@ -326,6 +337,7 @@ mod tests {
             expires_day: 0,
             kind: crate::push::SubKind::Messages,
         };
+        let sub2 = sub.clone();
         assert_eq!(first(&Request::Subscribe { sub, pow: 0 }), find_value + 1);
         assert_eq!(
             first(&Request::Unsubscribe {
@@ -335,6 +347,19 @@ mod tests {
             find_value + 2
         );
         assert_eq!(first(&Request::Wake { items: vec![] }), find_value + 3);
+        let owner = crate::push::OwnerProof {
+            sig: [1; 32],
+            dh: [2; 32],
+            day: 7,
+            signature: [3; 64],
+        };
+        let owned = Request::SubscribeOwned {
+            sub: sub2,
+            pow: 5,
+            owner,
+        };
+        assert_eq!(first(&owned), find_value + 4);
+        rt(owned);
     }
 
     #[test]

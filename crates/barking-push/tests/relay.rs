@@ -302,6 +302,38 @@ async fn hello_announces_relay_limits() {
 }
 
 #[tokio::test]
+async fn hello_v2_peer() {
+    // A protocol 2 peer (an older node or client) is served, not refused.
+    let relay = start(ConnLimits::default()).await;
+    let session = Client::connect(relay.addr, relay.id).await.unwrap();
+    let (mut send, mut recv) = session.connection().open_bi().await.unwrap();
+    let hello = Request::Hello {
+        version: 2,
+        min_version: 2,
+    };
+    barking_proto::frame::write(&mut send, &hello, barking_proto::frame::MAX_REQUEST_BYTES)
+        .await
+        .unwrap();
+    send.finish().unwrap();
+    let resp: Response =
+        barking_proto::frame::read(&mut recv, barking_proto::frame::MAX_RESPONSE_BYTES)
+            .await
+            .unwrap();
+    match resp {
+        Response::Hello {
+            version,
+            min_version,
+            ..
+        } => {
+            assert_eq!(version, barking_proto::PROTOCOL_VERSION);
+            assert_eq!(min_version, 2);
+        }
+        other => panic!("expected Hello, got {other:?}"),
+    }
+    let _ = relay.stop.send(true);
+}
+
+#[tokio::test]
 async fn clients_connect_through_retry() {
     // The first Initial of every client carries an unvalidated source
     // address and is answered with a Retry; connecting and waking still work.

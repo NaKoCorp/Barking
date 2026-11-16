@@ -143,7 +143,7 @@ use barking_core::{Core, CoreError, ReceiveOutcome};
 use barking_dht::{BootstrapEntry, builtin_bootstrap};
 use barking_packet::{Kind, MailboxId, Packet, PacketId};
 use barking_proto::pow::content_hash;
-use barking_proto::push::SubKind;
+use barking_proto::push::{OwnerProof, SubKind, Subscription, subscription_hash};
 use barking_proto::{ErrorReason, NodeId, NodeRecord};
 use tokio::time::Instant;
 
@@ -1577,6 +1577,9 @@ where
         // during this run.
         let mut full_boxes: HashSet<SubTask> = HashSet::new();
         let mut full_nodes: HashSet<NodeId> = HashSet::new();
+        // (mailbox, node) where an ownership proof was sent during this run:
+        // at most once each, as it reveals this device's public keys.
+        let mut owned_tried: HashSet<(MailboxId, NodeId)> = HashSet::new();
         'stage: while let Some((mailbox, kind, node)) = queue.pop_front() {
             if self.over() {
                 break;
@@ -1626,7 +1629,34 @@ where
                         skipped.insert(node);
                         continue 'stage;
                     }
-                    Ok(outcome) => {
+                    Ok(mut outcome) => {
+                        // My intro mailbox found full (third parties may hold
+                        // its places): claimed once with a proof, on the same
+                        // connection and with the same subscription.
+                        if outcome == DepositOutcome::Answered(Err(ErrorReason::MailboxFull))
+                            && self.dialer.owner_proof_supported(&conn)
+                            && !owned_tried.contains(&(mailbox, node))
+                            && let Some(owner) = self.owner_proof(&sub, day)
+                        {
+                            owned_tried.insert((mailbox, node));
+                            let request =
+                                self.dialer
+                                    .subscribe_owned(&mut conn, &sub, &owner, self.pow_left);
+                            let Ok(reply) = tokio::time::timeout_at(self.deadline, request).await
+                            else {
+                                break 'stage;
+                            };
+                            self.pow_left = self.pow_left.saturating_sub(reply.pow_spent);
+                            // A failure here skips the node without
+                            // redialling, on purpose: the node just answered
+                            // on this connection, and the proof is not sent
+                            // a second time.
+                            let Ok(owned) = reply.outcome else {
+                                skipped.insert(node);
+                                continue 'stage;
+                            };
+                            outcome = owned;
+                        }
                         self.conns.insert(node, conn);
                         break Some((outcome, secret));
                     }
@@ -1679,6 +1709,23 @@ where
                 break;
             }
         }
+    }
+
+    /// Proof that this device owns `sub`'s mailbox, its intro mailbox for
+    /// `day`; `None` for any other mailbox (sessions included) or kind.
+    fn owner_proof(&self, sub: &Subscription, day: u32) -> Option<OwnerProof> {
+        if sub.kind != SubKind::Messages {
+            return None;
+        }
+        let signed = self
+            .core
+            .sign_intro_ownership(&sub.mailbox, day, &subscription_hash(sub))?;
+        Some(OwnerProof {
+            sig: signed.sig,
+            dh: signed.dh,
+            day,
+            signature: signed.signature,
+        })
     }
 
     /// Puts first in `queue` the best-ranked responsible of `mailbox` that

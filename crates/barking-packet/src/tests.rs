@@ -169,3 +169,27 @@ proptest! {
 fn default_expiry_is_one_day() {
     assert_eq!(default_expiry(1_000), 1_000 + 86_400);
 }
+
+#[test]
+fn intro_mailbox_depends_on_sig() {
+    assert_ne!(
+        intro_mailbox(&[3; 32], &[4; 32], 20000),
+        intro_mailbox(&[5; 32], &[4; 32], 20000)
+    );
+}
+
+/// Intro mailbox ids are on the wire: pin the derivation.
+#[test]
+fn intro_mailbox_vector() {
+    let mut input = Vec::new();
+    input.extend_from_slice(&[3u8; 32]);
+    input.extend_from_slice(&[4u8; 32]);
+    input.extend_from_slice(&20000u32.to_be_bytes());
+    let full = blake3::derive_key("barking/v1/intro-mailbox", &input);
+    let got = intro_mailbox(&[3; 32], &[4; 32], 20000);
+    assert_eq!(got.0, full[..16]);
+    assert_eq!(
+        got.0.map(|b| format!("{b:02x}")).concat(),
+        "5f360eaa67f5ba9974caf66eb47eb4d2"
+    );
+}

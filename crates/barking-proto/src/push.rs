@@ -13,6 +13,7 @@ use std::net::{IpAddr, SocketAddr};
 use barking_packet::MailboxId;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use ed25519_dalek::{Signature, VerifyingKey};
 use hkdf::Hkdf;
 use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,8 @@ pub const MAX_APNS_TOKEN: usize = 128;
 pub const SEAL_CONTEXT: &str = "barking/v0/push-seal";
 /// BLAKE3 context of the subscription proof of work.
 pub const SUBSCRIBE_POW_CONTEXT: &str = "barking/v0/subscribe";
+/// BLAKE3 context of the owner signature over a subscription.
+pub use barking_packet::OWNER_CONTEXT;
 /// Maximum length of a relay host name.
 pub const MAX_RELAY_HOST: usize = 253;
 
@@ -193,6 +196,81 @@ pub fn subscription_hash(sub: &Subscription) -> [u8; 32] {
     blake3::derive_key(SUBSCRIBE_POW_CONTEXT, &bytes)
 }
 
+/// Proof that the sender of a subscription owns its intro mailbox: the
+/// mailbox is derived from the owner's signing key `sig`, key-agreement key
+/// `dh` and the day `day`, and `signature` is that key's Ed25519 signature of
+/// `owner_message(sub, day)`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerProof {
+    pub sig: [u8; 32],
+    pub dh: [u8; 32],
+    pub day: u32,
+    #[serde(with = "signature_bytes")]
+    pub signature: [u8; 64],
+}
+
+/// Serde has no `[u8; 64]` impl: a tuple of 64 bytes, which postcard writes
+/// without a length prefix.
+mod signature_bytes {
+    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::ser::SerializeTuple;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
+        let mut t = s.serialize_tuple(64)?;
+        for b in bytes {
+            t.serialize_element(b)?;
+        }
+        t.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = [u8; 64];
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("64 bytes")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[u8; 64], A::Error> {
+                let mut out = [0u8; 64];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| A::Error::invalid_length(i, &self))?;
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_tuple(64, V)
+    }
+}
+
+/// Message the owner signs: BLAKE3 `derive_key(OWNER_CONTEXT,
+/// subscription_hash(sub) || day.to_be_bytes())`, raw 32 bytes.
+pub fn owner_message(sub: &Subscription, day: u32) -> [u8; 32] {
+    barking_packet::owner_message(&subscription_hash(sub), day)
+}
+
+/// True if `owner` is the owner of `sub.mailbox`: the mailbox derives from
+/// the proof's keys and day, and the signature over the subscription is valid
+/// under `owner.sig`. Checks neither the subscription kind nor the day window
+/// (the node does).
+pub fn verify_owner(sub: &Subscription, owner: &OwnerProof) -> bool {
+    if barking_packet::intro_mailbox(&owner.sig, &owner.dh, owner.day) != sub.mailbox {
+        return false;
+    }
+    let Ok(key) = VerifyingKey::from_bytes(&owner.sig) else {
+        return false;
+    };
+    key.verify_strict(
+        &owner_message(sub, owner.day),
+        &Signature::from_bytes(&owner.signature),
+    )
+    .is_ok()
+}
+
 /// Hash of the cancel secret, stored in the subscription.
 pub fn cancel_hash(secret: &[u8; 32]) -> [u8; 32] {
     *blake3::hash(secret).as_bytes()
@@ -201,6 +279,7 @@ pub fn cancel_hash(secret: &[u8; 32]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
     use hex_literal::hex;
     use rand::SeedableRng;
     use x25519_dalek::{PublicKey, StaticSecret};
@@ -444,5 +523,63 @@ mod tests {
             assert_ne!(subscription_hash(&v), h);
         }
         assert_eq!(cancel_hash(&[1; 32]), *blake3::hash(&[1; 32]).as_bytes());
+    }
+
+    fn owner_fixture(day: u32) -> (SigningKey, [u8; 32], Subscription, OwnerProof) {
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let pk = key.verifying_key().to_bytes();
+        let dh = [7; 32];
+        let mut sub = sample_subscription();
+        sub.mailbox = barking_packet::intro_mailbox(&pk, &dh, day);
+        let signature = key.sign(&owner_message(&sub, day)).to_bytes();
+        let owner = OwnerProof {
+            sig: pk,
+            dh,
+            day,
+            signature,
+        };
+        (key, dh, sub, owner)
+    }
+
+    #[test]
+    fn verify_owner_accepts_owner() {
+        let (_, _, sub, owner) = owner_fixture(20_000);
+        assert!(verify_owner(&sub, &owner));
+    }
+
+    #[test]
+    fn verify_owner_rejects_foreign_sig_key() {
+        let (_, dh, sub, _) = owner_fixture(20_000);
+        let attacker = SigningKey::from_bytes(&[10; 32]);
+        let owner = OwnerProof {
+            sig: attacker.verifying_key().to_bytes(),
+            dh,
+            day: 20_000,
+            signature: attacker.sign(&owner_message(&sub, 20_000)).to_bytes(),
+        };
+        assert!(!verify_owner(&sub, &owner));
+    }
+
+    #[test]
+    fn verify_owner_rejects_other_content() {
+        let (_, _, mut sub, owner) = owner_fixture(20_000);
+        sub.cancel_hash = [99; 32];
+        assert!(!verify_owner(&sub, &owner));
+    }
+
+    #[test]
+    fn verify_owner_rejects_other_day() {
+        let (_, _, sub, mut owner) = owner_fixture(20_000);
+        owner.day += 1;
+        assert!(!verify_owner(&sub, &owner));
+    }
+
+    #[test]
+    fn owner_proof_roundtrips_through_postcard() {
+        let (_, _, _, owner) = owner_fixture(20_000);
+        let bytes = postcard::to_allocvec(&owner).unwrap();
+        // Fixed-size arrays carry no length prefix; `day` is a 3-byte varint.
+        assert_eq!(bytes.len(), 32 + 32 + 3 + 64);
+        assert_eq!(postcard::from_bytes::<OwnerProof>(&bytes).unwrap(), owner);
     }
 }

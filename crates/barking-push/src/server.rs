@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use barking_proto::client::MIN_PROTOCOL_VERSION;
 use barking_proto::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use barking_proto::push::{WakeToken, open};
 use barking_proto::{
@@ -315,13 +316,13 @@ async fn handle<P: Pusher>(req: Request, peer: IpAddr, shared: &Arc<Shared<P>>) 
             min_version,
         } => {
             if min_version > version
-                || !versions_overlap(min_version, version, PROTOCOL_VERSION, PROTOCOL_VERSION)
+                || !versions_overlap(min_version, version, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION)
             {
                 return Response::Error(ErrorReason::VersionTooOld);
             }
             Response::Hello {
                 version: PROTOCOL_VERSION,
-                min_version: PROTOCOL_VERSION,
+                min_version: MIN_PROTOCOL_VERSION,
                 node_id: shared.node_id,
                 pow_bits: 0,
                 limits: Limits {
