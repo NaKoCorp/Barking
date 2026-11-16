@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0](https://github.com/NaKoCorp/Barking/compare/v0.1.0...v0.2.0) (2026-11-16)
+
+
+### Features
+
+* **ios:** notification settings, background refresh and wake transparency ([#49](https://github.com/NaKoCorp/Barking/issues/49)) ([25d987c](https://github.com/NaKoCorp/Barking/commit/25d987c6712af48ffe9fe8cdd1d6913bdb68eb27))
+
+
+### Bug Fixes
+
+* let the owner reclaim a full intro mailbox with an ownership proof ([#59](https://github.com/NaKoCorp/Barking/issues/59)) ([f495e22](https://github.com/NaKoCorp/Barking/commit/f495e228c01e5575d14205ab50ef3bcd3617f4fa))
+* **push:** accept APNs device tokens up to 128 bytes ([#50](https://github.com/NaKoCorp/Barking/issues/50)) ([4768086](https://github.com/NaKoCorp/Barking/commit/4768086c7a9734becda5bff7ddf00e609b994c6f))
+
 ## [0.1.0](https://github.com/NaKoCorp/Barking/compare/v0.0.1...v0.1.0) (2026-11-13)
 
 
