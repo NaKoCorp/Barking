@@ -199,5 +199,23 @@ final class AppRouterTests: XCTestCase {
         let router = AppRouter(start: .onboarding)
         router.open(url: URL(string: "https://example.org/#x")!)
         XCTAssertNil(router.pendingCardLink)
+        XCTAssertNil(router.pendingRelayLink)
+    }
+
+    func testRelayLinkIsKeptForConfirmation() {
+        let id = String(repeating: "B", count: 52)
+        let router = AppRouter(start: .onboarding)
+        router.open(url: URL(string: "barking://node#\(id)@203.0.113.7:4433")!)
+        XCTAssertNil(router.pendingCardLink)
+        XCTAssertEqual(router.pendingRelayLink, AppRouter.RelayLink(id: id, addr: "203.0.113.7:4433"))
+        XCTAssertEqual(router.takePendingRelayLink()?.addr, "203.0.113.7:4433")
+        XCTAssertNil(router.pendingRelayLink)
+    }
+
+    func testInvalidRelayLinkIsIgnored() {
+        let router = AppRouter(start: .onboarding)
+        router.open(url: URL(string: "barking://node#SHORT@203.0.113.7:4433")!)
+        XCTAssertNil(router.pendingRelayLink)
+        XCTAssertNil(router.pendingCardLink)
     }
 }

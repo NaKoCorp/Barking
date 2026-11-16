@@ -112,6 +112,19 @@ final class NetworkModel {
         return validRelay(id: String(frag[..<at]), addr: String(frag[frag.index(after: at)...]))
     }
 
+    /// A scanned QR code: its bytes as UTF-8, else the scanner's own text,
+    /// whichever holds a relay link.
+    static func scannedRelay(_ data: Data?, text: String?) -> (id: String, addr: String)? {
+        [data.flatMap { String(data: $0, encoding: .utf8) }, text]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .lazy.compactMap(parseRelay(link:)).first
+    }
+
+    /// The link a relay is shared with, as `parseRelay` reads it.
+    static func relayLink(id: String, addr: String) -> URL? {
+        URL(string: "barking://node#\(id)@\(addr)")
+    }
+
     static func validRelay(id: String, addr: String) -> (id: String, addr: String)? {
         let id = id.trimmingCharacters(in: .whitespaces).uppercased()
         let addr = addr.trimmingCharacters(in: .whitespaces)

@@ -64,7 +64,16 @@ final class ReviewFixTests: XCTestCase {
         XCTAssertTrue(defaults.bool(forKey: OnboardingModel.confirmedKey))
         XCTAssertEqual(PhraseBanner.state(confirmed: true, inMemory: false), .hidden)
         XCTAssertEqual(PhraseBanner.state(confirmed: false, inMemory: true), .confirmable)
-        XCTAssertEqual(PhraseBanner.state(confirmed: false, inMemory: false), .lost)
+        // After a relaunch the phrase is gone: nothing left to check, no banner.
+        XCTAssertEqual(PhraseBanner.state(confirmed: false, inMemory: false), .hidden)
+    }
+
+    func testClosingThePhraseReminderForgetsThePhrase() {
+        let memory = PhraseMemory()
+        memory.phrase = ["abandon", "ability"]
+        PhraseBanner.dismiss(memory: memory)
+        XCTAssertNil(memory.phrase)
+        XCTAssertEqual(PhraseBanner.state(confirmed: false, inMemory: memory.phrase != nil), .hidden)
     }
 
     // I3: a call waits longer than a sync can hold the lock.

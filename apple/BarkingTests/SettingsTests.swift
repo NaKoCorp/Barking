@@ -64,6 +64,16 @@ final class NetworkModelTests: XCTestCase {
         XCTAssertNil(NetworkModel.parseRelay(link: "barking://node#\(id)@203.0.113.7"))
         XCTAssertNil(NetworkModel.parseRelay(link: "https://node#\(id)@203.0.113.7:4433"))
     }
+
+    func testScannedRelayReadsBytesOrText() throws {
+        let id = String(repeating: "C", count: 52)
+        let link = try XCTUnwrap(NetworkModel.relayLink(id: id, addr: "198.51.100.2:4433"))
+        XCTAssertEqual(NetworkModel.parseRelay(link: link.absoluteString)?.id, id)
+        XCTAssertEqual(NetworkModel.scannedRelay(Data(link.absoluteString.utf8), text: nil)?.addr, "198.51.100.2:4433")
+        XCTAssertEqual(NetworkModel.scannedRelay(Data([0xFF, 0x00]), text: link.absoluteString + "\n")?.id, id)
+        XCTAssertNil(NetworkModel.scannedRelay(Data("barking://card#barking1:abc".utf8), text: nil))
+        XCTAssertNil(NetworkModel.scannedRelay(nil, text: nil))
+    }
 }
 
 @MainActor

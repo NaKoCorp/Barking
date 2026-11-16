@@ -69,7 +69,7 @@
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<false/>
 	<key>NSCameraUsageDescription</key>
-	<string>Scan a contact's Barking code.</string>
+	<string>Scan a contact's or a relay's Barking code.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Confirm it is you before exporting your recovery phrase.</string>
 	<key>UIAppFonts</key>
