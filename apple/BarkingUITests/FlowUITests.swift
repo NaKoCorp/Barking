@@ -63,6 +63,22 @@ final class OnboardingUITests: XCTestCase {
         try onboard(app, confirm: false)
         XCTAssertTrue(app.staticTexts["Recovery phrase not confirmed"].exists)
     }
+
+    /// Closing asks first; Cancel keeps it, Hide removes it.
+    func testClosingThePhraseBannerWarnsFirst() throws {
+        let app = XCUIApplication.fresh()
+        app.launch()
+        try onboard(app, confirm: false)
+        let banner = app.staticTexts["Recovery phrase not confirmed"]
+        XCTAssertTrue(banner.exists)
+        app.buttons["phraseBanner.close"].tap()
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
+        app.alerts.buttons["Cancel"].firstMatch.tap()
+        XCTAssertTrue(banner.exists)
+        app.buttons["phraseBanner.close"].tap()
+        app.alerts.buttons["phraseBanner.hide"].firstMatch.tap()
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 5))
+    }
 }
 
 @MainActor

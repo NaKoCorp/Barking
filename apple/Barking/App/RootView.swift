@@ -53,6 +53,9 @@ struct MainTabView: View {
         }
         // A tapped notification opens a conversation, which lives under Chats.
         .onChange(of: router.pendingOpen, initial: true) { _, target in if target != nil { tab = .chats } }
+        // A shared link: a card is added from Chats, a relay from Network.
+        .onChange(of: router.pendingCardLink, initial: true) { _, link in if link != nil { tab = .chats } }
+        .onChange(of: router.pendingRelayLink, initial: true) { _, link in if link != nil { tab = .network } }
         .environment(\.syncLoop, loop)
         .onChange(of: phase, initial: true) { _, now in loop.scenePhaseChanged(to: now) }
         // The core goes (a reset, a removed device): its syncs go with it.

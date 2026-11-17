@@ -30,6 +30,13 @@ final class AppRouter {
     /// SwiftUI gives no other way to reach.
     static weak var current: AppRouter?
     private(set) var pendingCardLink: String?
+    /// A relay to add, from a `barking://node#…` link: the Network tab asks
+    /// before adding it.
+    struct RelayLink: Equatable, Identifiable {
+        let id: String
+        let addr: String
+    }
+    private(set) var pendingRelayLink: RelayLink?
     /// A `.barkinglink` file opened from AirDrop or Files.
     private(set) var pendingLinkFile: URL?
     /// A conversation to open (a tapped notification), on `messageId` when
@@ -191,10 +198,15 @@ final class AppRouter {
     }
 
     /// `barking://card#<card text>` keeps the card for the add-contact sheet;
-    /// a `.barkinglink` file waits for the linking screen.
+    /// `barking://node#<id>@<ip:port>` the relay for the Network tab's
+    /// confirmation; a `.barkinglink` file waits for the linking screen.
     func open(url: URL) {
         if url.isFileURL, url.pathExtension == "barkinglink" {
             pendingLinkFile = url
+            return
+        }
+        if let r = NetworkModel.parseRelay(link: url.absoluteString) {
+            pendingRelayLink = RelayLink(id: r.id, addr: r.addr)
             return
         }
         guard url.scheme == "barking", url.host() == "card",
@@ -222,6 +234,11 @@ final class AppRouter {
     func takePendingLinkFile() -> URL? {
         defer { pendingLinkFile = nil }
         return pendingLinkFile
+    }
+
+    func takePendingRelayLink() -> RelayLink? {
+        defer { pendingRelayLink = nil }
+        return pendingRelayLink
     }
 
     func takePendingCardLink() -> String? {

@@ -58,8 +58,9 @@ struct OnboardingFlow: View {
 }
 
 /// The phrase kept in memory after onboarding, for a later confirmation
-/// (spec §5.2): gone when the app quits.
-@MainActor
+/// (spec §5.2): gone when the app quits, or when the reminder is closed.
+/// Observable: the reminder goes as soon as the phrase does.
+@MainActor @Observable
 final class PhraseMemory {
     static let shared = PhraseMemory()
     var phrase: [String]?

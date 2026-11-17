@@ -49,7 +49,6 @@
 "I wrote the 24 words down" = "J’ai noté les 24 mots";
 "Identifier" = "Identifiant";
 "Identity" = "Identité";
-"If you lose this phone without it, your identity is lost." = "Si vous perdez ce téléphone sans elle, votre identité est perdue.";
 "Import a card" = "Importer une carte";
 "Import a card from the clipboard" = "Importer une carte depuis le presse-papiers";
 "Internet relays" = "Relais Internet";
@@ -489,3 +488,14 @@
 "receipts" = "accusés";
 "until %@" = "jusqu’au %@";
 "Unavailable" = "Indisponible";
+"Add this relay?" = "Ajouter ce relais ?";
+"Barking will use %@ to send and receive your sealed messages.\n%@…" = "Barking utilisera %@ pour envoyer et recevoir vos messages scellés.\n%@…";
+"Share this relay" = "Partager ce relais";
+"Show its QR code" = "Afficher son code QR";
+"Relay QR code. Another phone scans it to add this relay." = "Code QR du relais. Un autre téléphone le scanne pour ajouter ce relais.";
+"Scan a relay QR code" = "Scanner le code QR d’un relais";
+"The camera is not available. Paste the relay link instead." = "La caméra n’est pas disponible. Collez plutôt le lien du relais.";
+"This is not a Barking relay code" = "Ce n’est pas un code de relais Barking";
+"Hide this reminder" = "Masquer ce rappel";
+"Hide this reminder?" = "Masquer ce rappel ?";
+"Your phrase will be erased from this iPhone and can never be shown again. Without a written copy, losing this phone means losing your identity." = "Votre phrase sera effacée de cet iPhone et ne pourra plus jamais être affichée. Sans copie écrite, perdre ce téléphone, c’est perdre votre identité.";

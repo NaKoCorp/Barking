@@ -26,13 +26,23 @@ struct Banner: View {
         let perform: () -> Void
     }
 
+    /// A close button in the top corner: its VoiceOver label, and what it does.
+    struct Close {
+        let label: LocalizedStringKey
+        let identifier: String
+        let perform: () -> Void
+    }
+
     let kind: Kind
     let title: Text
     var message: LocalizedStringKey?
     var action: Action?
+    var close: Close?
 
-    init(kind: Kind, title: LocalizedStringKey, message: LocalizedStringKey? = nil, action: Action? = nil) {
+    init(kind: Kind, title: LocalizedStringKey, message: LocalizedStringKey? = nil, action: Action? = nil,
+         close: Close? = nil) {
         self.init(kind: kind, title: Text(title), message: message, action: action)
+        self.close = close
     }
 
     /// A title already localized (a sentence built with its arguments).
@@ -65,6 +75,19 @@ struct Banner: View {
                     if let message { Text(message) }
                 }
                 Spacer(minLength: 0)
+                if let close {
+                    Button(action: close.perform) {
+                        Image(systemName: "xmark")
+                            .font(.footnote.weight(.semibold))
+                            .frame(width: 44, height: 44)
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    // The 44 pt target reaches past the padding, not the text.
+                    .padding(.top, -12).padding(.trailing, -12)
+                    .accessibilityLabel(Text(close.label))
+                    .accessibilityIdentifier(close.identifier)
+                }
             }
             if let action {
                 // The banner's own colour: `warnFg` is 4.5:1 or more on its ground,
@@ -90,7 +113,7 @@ struct Banner: View {
         .padding(.bottom, action == nil ? 12 : 0)
         .background(colors.bg, in: .rect(cornerRadius: Radius.chip))
         .overlay(RoundedRectangle(cornerRadius: Radius.chip).stroke(colors.border, lineWidth: 1))
-        if action == nil {
+        if action == nil && close == nil {
             content.accessibilityElement(children: .combine)
         } else {
             // The text and the action stay two elements: a combined banner

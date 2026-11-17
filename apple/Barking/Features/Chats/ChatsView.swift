@@ -202,12 +202,19 @@ struct ChatRowView: View {
 }
 
 /// Recovery phrase reminder (spec §5.2): opens the 3-word check while the
-/// phrase is still in memory; after a relaunch it can only say to write it down.
+/// phrase is still in memory. Once it is gone (the app quit, or the reminder
+/// was closed) nothing can be checked any more, so nothing is shown.
 struct PhraseBanner: View {
-    enum Kind: Equatable { case hidden, confirmable, lost }
+    enum Kind: Equatable { case hidden, confirmable }
 
     static func state(confirmed: Bool, inMemory: Bool) -> Kind {
-        confirmed ? .hidden : (inMemory ? .confirmable : .lost)
+        !confirmed && inMemory ? .confirmable : .hidden
+    }
+
+    /// Closing the reminder, once the warning is accepted: the phrase leaves
+    /// memory for good.
+    static func dismiss(memory: PhraseMemory = .shared) {
+        memory.phrase = nil
     }
 
     static var current: Kind {
@@ -216,6 +223,7 @@ struct PhraseBanner: View {
     }
 
     @State private var checking = false
+    @State private var confirmingClose = false
     @State private var model = OnboardingModel()
 
     var body: some View {
@@ -228,15 +236,22 @@ struct PhraseBanner: View {
                        model.phrase = PhraseMemory.shared.phrase
                        model.startQuiz()
                        checking = true
+                   },
+                   close: .init(label: "Hide this reminder", identifier: "phraseBanner.close") {
+                       confirmingClose = true
                    })
+            .alert(Text("Hide this reminder?"), isPresented: $confirmingClose) {
+                Button("Hide", role: .destructive) { Self.dismiss() }
+                    .accessibilityIdentifier("phraseBanner.hide")
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Your phrase will be erased from this iPhone and can never be shown again. Without a written copy, losing this phone means losing your identity.")
+            }
             .sheet(isPresented: $checking) {
                 NavigationStack {
                     PhraseConfirmView(model: model) { checking = false }
                 }
             }
-        case .lost:
-            Banner(kind: .warning, title: "Write your phrase down now: it cannot be shown again",
-                   message: "If you lose this phone without it, your identity is lost.")
         }
     }
 }

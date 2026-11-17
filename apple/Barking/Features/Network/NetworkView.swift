@@ -8,6 +8,14 @@ struct NetworkView: View {
     @State private var adding = false
     @State private var relayId = ""
     @State private var relayAddr = ""
+    /// The add sheet's camera, and what it last read when not a relay.
+    @State private var scanning = false
+    @State private var notARelay = false
+    /// A relay from a shared link, waiting for "Add".
+    @State private var confirming: AppRouter.RelayLink?
+    /// A relay shown as a QR code, for another phone to scan.
+    @State private var sharing: AppRouter.RelayLink?
+    @Environment(AppRouter.self) private var router
     @Environment(\.colorScheme) private var scheme
     @Environment(\.locale) private var locale
 
@@ -42,7 +50,23 @@ struct NetworkView: View {
             .background(Color.surface)
             .navigationTitle(Text("Network"))
             .refreshable { await model.syncNow() }
-            .sheet(isPresented: $adding) { addSheet }
+            .sheet(isPresented: $adding, onDismiss: { scanning = false; notARelay = false }) { addSheet }
+            .sheet(item: $sharing) { relayCode($0) }
+            .alert(Text("Add this relay?"),
+                   isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+                   presenting: confirming) { r in
+                Button("Add") { Task { await addLinked(r) } }
+                    .accessibilityIdentifier("relay.confirm")
+                Button("Cancel", role: .cancel) {}
+            } message: { r in
+                Text("Barking will use \(r.addr) to send and receive your sealed messages.\n\(String(r.id.prefix(12)))…")
+            }
+        }
+        // A `barking://node#…` link opened from outside: asked, never added silently.
+        .onChange(of: router.pendingRelayLink, initial: true) { _, link in
+            guard link != nil, let r = router.takePendingRelayLink() else { return }
+            adding = false
+            confirming = r
         }
         .task {
             await model.load()
@@ -142,6 +166,60 @@ struct NetworkView: View {
             }
             .accessibilityHidden(true)
         }
+        .contentShape(.rect)
+        .contextMenu {
+            if let link = NetworkModel.relayLink(id: r.id, addr: r.addr) {
+                ShareLink(item: link) { Label("Share this relay", systemImage: "square.and.arrow.up") }
+            }
+            Button { sharing = AppRouter.RelayLink(id: r.id, addr: r.addr) } label: {
+                Label("Show its QR code", systemImage: "qrcode")
+            }
+        }
+    }
+
+    /// A relay from a link, once confirmed. If it fails, the add sheet opens
+    /// with the relay filled in and the error under it.
+    private func addLinked(_ r: AppRouter.RelayLink) async {
+        if await model.addRelay(id: r.id, addr: r.addr) {
+            Haptic.success.play()
+        } else {
+            relayId = r.id; relayAddr = r.addr
+            adding = true
+        }
+    }
+
+    /// A relay QR code read by the add sheet's camera fills the fields; the
+    /// user still taps Add.
+    private func scanned(_ data: Data?, _ text: String?) {
+        guard let r = NetworkModel.scannedRelay(data, text: text) else { notARelay = true; return }
+        relayId = r.id; relayAddr = r.addr
+        notARelay = false
+        scanning = false
+        Haptic.success.play()
+    }
+
+    /// The relay's link as a QR code (white ground in both themes).
+    private func relayCode(_ r: AppRouter.RelayLink) -> some View {
+        NavigationStack {
+            VStack(spacing: Space.s4) {
+                if let link = NetworkModel.relayLink(id: r.id, addr: r.addr),
+                   let img = QRPayload.image(for: Data(link.absoluteString.utf8), scale: 6) {
+                    Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
+                        .padding(12).background(Color.white, in: .rect(cornerRadius: Radius.card))
+                        .frame(maxWidth: 320)
+                        .accessibilityLabel(Text("Relay QR code. Another phone scans it to add this relay."))
+                    Text(verbatim: r.addr).font(BarkingFont.mono(.footnote, size: 13)).foregroundStyle(Color.fgMuted)
+                    ShareLink(item: link) { Text("Share this relay") }.buttonStyle(.barkingPrimary)
+                }
+            }
+            .padding(Space.gutter)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.surface)
+            .navigationTitle(Text("Relay"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { sharing = nil } } }
+        }
+        .presentationBackground(Color.surface)
     }
 
     private var addSheet: some View {
@@ -152,6 +230,16 @@ struct NetworkView: View {
                 BarkingTextField("Address", text: $relayAddr, prompt: "ip:port", identifier: "relay.addr")
                     .keyboardType(.numbersAndPunctuation).autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
+                if scanning {
+                    ScannerView(onBytes: { scanned($0, $1) }, onText: { scanned(nil, $0) },
+                                unavailable: "The camera is not available. Paste the relay link instead.")
+                    if notARelay {
+                        Text("This is not a Barking relay code").font(.bBodySmall).foregroundStyle(Color.danger)
+                    }
+                } else {
+                    SecondaryButton("Scan a relay QR code") { notARelay = false; scanning = true }
+                        .accessibilityIdentifier("relay.scan")
+                }
                 SecondaryButton("Paste a relay link") {
                     if let s = UIPasteboard.general.string, let r = NetworkModel.parseRelay(link: s) {
                         relayId = r.id; relayAddr = r.addr
