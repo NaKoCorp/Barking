@@ -412,7 +412,7 @@ impl Device {
     /// deleted or unknown id comes back `removed`.
     pub fn deliveries_of(&self, ids: Vec<i64>) -> Result<Vec<DeliveryUpdate>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let found = core.deliveries_of(&ids, now())?;
                 let mut found = found.into_iter().peekable();
                 Ok(ids
@@ -441,7 +441,7 @@ impl Device {
         message_id: i64,
     ) -> Result<Option<MessageDelivery>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 core.message_delivery(message_id, now())?
                     .map(|d| detail_of(core, d))
                     .transpose()
@@ -452,7 +452,7 @@ impl Device {
     /// Sent messages to `contact` (fingerprint or alias) per state.
     pub fn delivery_counts(&self, contact: String) -> Result<DeliveryCounts, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let fp = core.resolve(&contact)?;
                 let [pending, on_network, received, not_delivered] =
                     core.delivery_counts(&fp, now())?;
@@ -475,7 +475,7 @@ impl Device {
         offset: u32,
     ) -> Result<Vec<DeliveryRowInfo>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let fp = core.resolve(&contact)?;
                 Ok(core
                     .delivery_page(&fp, status_of(state), limit, offset, now())?
@@ -551,7 +551,7 @@ impl Device {
     /// The pending packets screen.
     pub fn pending_packets(&self) -> Result<PendingPackets, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let p = core.pending_packets(now())?;
                 pending_of(core, p)
             })
@@ -560,6 +560,6 @@ impl Device {
 
     /// Packets of `pending_packets`: the network screen's count.
     pub fn pending_count(&self) -> Result<u32, BarkingError> {
-        guard(|| self.with_core(|core| Ok(core.pending_count(now())?)))
+        guard(|| self.with_core_read(|core| Ok(core.pending_count(now())?)))
     }
 }

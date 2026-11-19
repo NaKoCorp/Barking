@@ -368,7 +368,27 @@ impl Core {
         if !path.exists() {
             return Err(CoreError::Store("database missing".into()));
         }
-        let mut store = Store::open(path, db_key)?;
+        let mut core = Core::load(Store::open(path, db_key)?)?;
+        core.store.transaction(|tx| {
+            link::purge_expired_offer(tx, now)?;
+            admin::purge_expired(tx, now)?;
+            sweep_skipped(tx, now)
+        })?;
+        Ok(core)
+    }
+
+    /// Reopens an existing database for reading only, while another opening
+    /// of this process (a sync) may be writing it: a read-only connection,
+    /// no schema step and no purge. Calls that write fail (`Store`).
+    pub fn open_read(path: &Path, db_key: &[u8; 32]) -> Result<Core> {
+        if !path.exists() {
+            return Err(CoreError::Store("database missing".into()));
+        }
+        Core::load(Store::open_read(path, db_key)?)
+    }
+
+    /// Reads the keys and lists kept in `store` and assembles the core.
+    fn load(store: Store) -> Result<Core> {
         let dev = Zeroizing::new(
             store
                 .get_meta::<Vec<u8>>(META_DEVICE)?
@@ -397,11 +417,6 @@ impl Core {
         let linked_bundles = store
             .get_meta::<Vec<PrekeyBundle>>(META_LINKED_BUNDLES)?
             .unwrap_or_default();
-        store.transaction(|tx| {
-            link::purge_expired_offer(tx, now)?;
-            admin::purge_expired(tx, now)?;
-            sweep_skipped(tx, now)
-        })?;
         Ok(Core::assemble(
             store,
             root,

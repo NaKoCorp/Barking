@@ -285,7 +285,7 @@ impl Device {
     pub fn sync(&self, deadline_ms: u64) -> Result<SyncSummary, BarkingError> {
         guard(|| {
             let opts_private = self.allow_private();
-            self.with_core(|core| {
+            self.with_core_sync(|core| {
                 let opts = SyncOptions {
                     deadline: Duration::from_millis(deadline_ms),
                     allow_private: opts_private,
@@ -308,7 +308,7 @@ impl Device {
                 allow_private: self.allow_private(),
                 ..QuickOptions::default()
             };
-            self.with_core(|core| {
+            self.with_core_sync(|core| {
                 let report = block_on(barking_net::quick_sync(core, &QuicDialer, opts))?;
                 note_leave_deposits(core, now(), opts_private)?;
                 Ok(summary(core, report))

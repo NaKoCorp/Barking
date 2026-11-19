@@ -86,7 +86,7 @@ impl Device {
     /// Received messages after the last read one, per contact (none: absent).
     pub fn unread_counts(&self) -> Result<Vec<UnreadCount>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let marks = load_marks(core)?;
                 let mut out = Vec::new();
                 for c in core.contacts()?.into_iter().filter(|c| !c.blocked) {
@@ -111,7 +111,7 @@ impl Device {
     /// Every contact with its last message and unread count.
     pub fn chat_summaries(&self) -> Result<Vec<ChatSummary>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let marks = load_marks(core)?;
                 let t = now();
                 let mut out = Vec::new();
@@ -142,7 +142,7 @@ impl Device {
     /// Contact key changes logged after `since` (Unix seconds).
     pub fn key_changes(&self, since: u64) -> Result<Vec<KeyChange>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 Ok(core
                     .transparency_log(LOG_LIMIT)?
                     .into_iter()
