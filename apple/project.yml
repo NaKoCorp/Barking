@@ -101,6 +101,10 @@ targets:
         NSCameraUsageDescription: Scan a contact's or a relay's Barking code.
         NSFaceIDUsageDescription: Confirm it is you before exporting your recovery phrase.
         LSSupportsOpeningDocumentsInPlace: false
+        # Export compliance: end-to-end encryption (PQXDH, Double Ratchet) and
+        # SQLCipher are not exempt. App Store Connect then asks its questions per
+        # build; ITSEncryptionExportComplianceCode goes here once Apple grants one.
+        ITSAppUsesNonExemptEncryption: true
         UTExportedTypeDeclarations:
           - UTTypeIdentifier: org.nakocorp.barking.link
             UTTypeDescription: Barking device link
