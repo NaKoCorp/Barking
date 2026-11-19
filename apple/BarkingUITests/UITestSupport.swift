@@ -4,8 +4,16 @@ import XCTest
 extension XCUIApplication {
     /// A fresh install state (database, key and flags removed by the app).
     static func fresh(language: String = "en", extra: [String] = []) -> XCUIApplication {
-        let app = XCUIApplication()
+        let app = XCUIApplication.isolated()
         app.launchArguments = ["-BarkingUITestReset", "-AppleLanguages", "(\(language))"] + noAnimations(extra) + extra
+        return app
+    }
+
+    /// The app kept off the network its build was configured with
+    /// (`UITestNetwork` in the app): every launch of a UI test, relaunches too.
+    static func isolated() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["BARKING_UI_TEST"] = "1"
         return app
     }
 
