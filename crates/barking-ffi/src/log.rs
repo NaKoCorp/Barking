@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use barking_core::Core;
 use barking_core::core::{
-    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
+    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
     R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
 };
 use barking_core::fragment::{REASON_BAD_HASH, REASON_CONTRADICTORY};
@@ -141,6 +141,7 @@ const TOKENS: &[&str] = &[
     "reason_id_mismatch",
     "reason_stale",
     "reason_id_reused",
+    "reason_blocked",
     "reason_bad_hash",
     "reason_contradictory",
     "reason_unknown",
@@ -190,6 +191,7 @@ fn reason_token(r: &str) -> String {
         R_ID_MISMATCH => "reason_id_mismatch",
         R_STALE => "reason_stale",
         R_ID_REUSED => "reason_id_reused",
+        R_BLOCKED => "reason_blocked",
         REASON_BAD_HASH => "reason_bad_hash",
         REASON_CONTRADICTORY => "reason_contradictory",
         _ => "reason_unknown",
@@ -578,6 +580,7 @@ mod tests {
             R_ID_MISMATCH,
             R_STALE,
             R_ID_REUSED,
+            R_BLOCKED,
             REASON_BAD_HASH,
             REASON_CONTRADICTORY,
         ] {

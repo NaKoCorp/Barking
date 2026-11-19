@@ -714,6 +714,11 @@ impl Core {
             tx.put_meta(META_LINKED_BUNDLES, &linked)?;
             tx.put_meta(META_OWN_CARD, &card)?;
             sync::purge_removed_own_sessions(tx, &devices)?;
+            // The block registers, which the link bundle does not carry: queued
+            // after the new list, so the new device receives them too.
+            for (fp, state) in tx.block_states()? {
+                sync::send_block(tx, me, fp, &state, SealTime::at(now), rng)?;
+            }
             log(tx, now, None, &event)?;
             // And for each of my contacts (spec §3.2).
             packets.extend(sync::send_card_update(tx, me, &card, now, rng)?);

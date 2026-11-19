@@ -83,6 +83,7 @@ struct AddContactView: View {
         let text: LocalizedStringKey = switch e {
         case .notACard: "This is not a Barking card"
         case .ownCard: "This is your own card"
+        case .blocked: "You blocked this person. Unblock them in Settings › Blocked contacts first."
         case .failed: "Something went wrong. Your data is safe."
         }
         return Text(text).font(.bBodySmall).foregroundStyle(Color.danger).frame(maxWidth: .infinity, alignment: .leading)

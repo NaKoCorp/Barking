@@ -56,6 +56,22 @@ pub struct Contact {
     pub alias: Option<String>,
     pub display_name: String,
     pub verified: bool,
+    /// Blocked: left out of `contacts` and `chat_summaries`, listed by
+    /// `blocked_contacts`.
+    #[uniffi(default = false)]
+    pub blocked: bool,
+}
+
+impl From<barking_core::ContactSummary> for Contact {
+    fn from(c: barking_core::ContactSummary) -> Self {
+        Contact {
+            fingerprint: c.fingerprint.to_string(),
+            alias: c.alias,
+            display_name: c.display_name,
+            verified: c.verified,
+            blocked: c.blocked,
+        }
+    }
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -244,18 +260,29 @@ impl Device {
         })
     }
 
+    /// Contacts, blocked ones left out (see `blocked_contacts`).
     pub fn contacts(&self) -> Result<Vec<Contact>, BarkingError> {
         guard(|| {
             self.with_core(|core| {
                 Ok(core
                     .contacts()?
                     .into_iter()
-                    .map(|c| Contact {
-                        fingerprint: c.fingerprint.to_string(),
-                        alias: c.alias,
-                        display_name: c.display_name,
-                        verified: c.verified,
-                    })
+                    .filter(|c| !c.blocked)
+                    .map(Contact::from)
+                    .collect())
+            })
+        })
+    }
+
+    /// Blocked contacts, for the list where they are unblocked.
+    pub fn blocked_contacts(&self) -> Result<Vec<Contact>, BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                Ok(core
+                    .contacts()?
+                    .into_iter()
+                    .filter(|c| c.blocked)
+                    .map(Contact::from)
                     .collect())
             })
         })

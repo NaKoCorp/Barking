@@ -46,6 +46,7 @@
 "log.arg.reason_unreadable" = "unreadable content";
 "log.arg.reason_unexpected" = "unexpected content for this mailbox";
 "log.arg.reason_undecryptable" = "it could not be decrypted";
+"log.arg.reason_blocked" = "blocked contact";
 "log.arg.reason_unknown_sender" = "unknown sender";
 "log.arg.reason_ambiguous_sender" = "ambiguous sender";
 "log.arg.reason_handshake" = "the session could not be opened";

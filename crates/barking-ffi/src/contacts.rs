@@ -96,6 +96,28 @@ impl Device {
         })
     }
 
+    /// Blocks a contact: its messages are dropped without an ack, nothing is
+    /// sent to it, and it leaves the contact and chat lists (its history
+    /// stays stored). Synchronized with my other devices.
+    pub fn block_contact(&self, contact: String) -> Result<(), BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                let fp = core.resolve(&contact)?;
+                Ok(core.block_contact(&fp, now(), &mut rand::rng())?)
+            })
+        })
+    }
+
+    /// Lifts a block. Messages sent while blocked stay dropped.
+    pub fn unblock_contact(&self, contact: String) -> Result<(), BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                let fp = core.resolve(&contact)?;
+                Ok(core.unblock_contact(&fp, now(), &mut rand::rng())?)
+            })
+        })
+    }
+
     pub fn mark_verified(&self, contact: String) -> Result<(), BarkingError> {
         guard(|| {
             self.with_core(|core| {

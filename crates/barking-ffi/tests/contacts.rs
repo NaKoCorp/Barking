@@ -122,3 +122,45 @@ fn chat_summaries_in_one_call() {
     assert_eq!((last.body.as_str(), last.outgoing), ("last", true));
     assert_eq!(s[0].unread, 0);
 }
+
+#[test]
+fn block_hides_the_contact_and_unblock_restores_it() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let alice = device(&da, 1, "Alice");
+    let bob = device(&db, 2, "Bob");
+    let card = bob.contact_card_bytes().unwrap();
+    let fb = alice
+        .add_contact_bytes(card.clone(), Some("bob".into()))
+        .unwrap();
+    alice.send_text(fb.clone(), "hi".into()).unwrap();
+    alice.block_contact(fb.clone()).unwrap();
+    assert!(alice.contacts().unwrap().is_empty());
+    assert!(alice.chat_summaries().unwrap().is_empty());
+    let blocked = alice.blocked_contacts().unwrap();
+    assert_eq!(blocked.len(), 1);
+    assert!(blocked[0].blocked && blocked[0].fingerprint == fb);
+    assert!(matches!(
+        alice.send_text(fb.clone(), "no".into()),
+        Err(BarkingError::ContactBlocked)
+    ));
+    // The history stays stored.
+    assert_eq!(alice.messages_with(fb.clone()).unwrap().len(), 1);
+    alice.unblock_contact(fb.clone()).unwrap();
+    assert!(alice.blocked_contacts().unwrap().is_empty());
+    assert_eq!(alice.chat_summaries().unwrap().len(), 1);
+    assert!(!alice.contacts().unwrap()[0].blocked);
+}
+
+#[test]
+fn a_blocked_card_is_not_added_again() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let alice = device(&da, 1, "Alice");
+    let bob = device(&db, 2, "Bob");
+    let card = bob.contact_card_bytes().unwrap();
+    let fb = alice.add_contact_bytes(card.clone(), None).unwrap();
+    alice.block_contact(fb).unwrap();
+    assert!(matches!(
+        alice.add_contact_bytes(card, None),
+        Err(BarkingError::ContactBlocked)
+    ));
+}

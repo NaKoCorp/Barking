@@ -12,6 +12,8 @@ struct SafetyCodeView: View {
     /// Set once the contact is deleted: leaving then saves nothing.
     @State private var deleted = false
     @State private var confirmDelete = false
+    @State private var confirmBlock = false
+    @State private var blockFailed = false
     @State private var showsMismatch = false
     @Environment(\.dismiss) private var dismiss
 
@@ -48,6 +50,11 @@ struct SafetyCodeView: View {
             }
             if !model.devices.isEmpty { devicesSection }
             DangerZone {
+                DangerButton("Block this contact", hint: "Their messages stop reaching you. They are not told.",
+                             identifier: "contact.block") {
+                    confirmBlock = true
+                }
+                if blockFailed { Banner(kind: .danger, title: "Not saved. Try again.") }
                 DangerButton("Delete this contact", hint: "The history is kept.", identifier: "contact.delete") {
                     confirmDelete = true
                 }
@@ -79,6 +86,24 @@ struct SafetyCodeView: View {
         .confirmationDialog(Text("Delete this contact? The history is kept."), isPresented: $confirmDelete,
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) { deleted = true; Task { await model.delete(); dismiss() } }
+        }
+        // Blocked, the contact leaves the chats: the chats list closes its
+        // conversation once the change is published.
+        .confirmationDialog(Text("Block \(model.name)?"), isPresented: $confirmBlock, titleVisibility: .visible) {
+            Button("Block", role: .destructive) {
+                Task {
+                    if await model.block() {
+                        deleted = true
+                        Haptic.success.play()
+                        dismiss()
+                    } else {
+                        blockFailed = true
+                        Haptic.error.play()
+                    }
+                }
+            }
+        } message: {
+            Text("Their messages will no longer reach you and they leave your chats, on all your devices. They are not told. You can unblock them in Settings.")
         }
         .sheet(isPresented: $showsMismatch) { MismatchSheet() }
     }

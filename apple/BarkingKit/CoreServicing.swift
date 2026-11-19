@@ -18,6 +18,9 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func removeContact(contact: String) throws
     func markVerified(contact: String) throws
     func unmarkVerified(contact: String) throws
+    func blockContact(contact: String) throws
+    func unblockContact(contact: String) throws
+    func blockedContacts() throws -> [Contact]
     func safetyNumber(contact: String) throws -> [String]
     func unreadCounts() throws -> [UnreadCount]
     func chatSummaries() throws -> [ChatSummary]

@@ -61,7 +61,7 @@ pub use link::{
 };
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
 pub use receive::{
-    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
+    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
     R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
 };
 pub use remove::LeaveState;
@@ -568,7 +568,10 @@ impl Core {
             push(&mut g.intro, intro_mailbox(&me, d));
         }
         let sessions = self.store.all_sessions()?;
-        for s in &sessions {
+        // A blocked contact's mailboxes are not watched: nothing fetched,
+        // no push wake. Those where I await its ack still are (below).
+        let blocked = self.store.blocked_fingerprints()?;
+        for s in sessions.iter().filter(|s| !blocked.contains(&s.contact_fp)) {
             for &d in &days {
                 push(
                     &mut g.sessions,
@@ -620,7 +623,13 @@ impl Core {
         }
         let me = self.device.public();
         let my_id = me.id();
-        let sessions = self.store.all_sessions()?;
+        let blocked = self.store.blocked_fingerprints()?;
+        let sessions: Vec<_> = self
+            .store
+            .all_sessions()?
+            .into_iter()
+            .filter(|s| !blocked.contains(&s.contact_fp))
+            .collect();
         let mut out: Vec<(MailboxId, u32)> = Vec::new();
         let mut push = |m: MailboxId, d: u32| {
             if !out.iter().any(|(x, _)| *x == m) {

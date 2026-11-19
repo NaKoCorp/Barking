@@ -499,3 +499,15 @@
 "Hide this reminder" = "Masquer ce rappel";
 "Hide this reminder?" = "Masquer ce rappel ?";
 "Your phrase will be erased from this iPhone and can never be shown again. Without a written copy, losing this phone means losing your identity." = "Votre phrase sera effacée de cet iPhone et ne pourra plus jamais être affichée. Sans copie écrite, perdre ce téléphone, c’est perdre votre identité.";
+"Block this contact" = "Bloquer ce contact";
+"Their messages stop reaching you. They are not told." = "Ses messages ne vous parviennent plus. Cette personne n’est pas prévenue.";
+"Block %@?" = "Bloquer %@ ?";
+"Block" = "Bloquer";
+"Their messages will no longer reach you and they leave your chats, on all your devices. They are not told. You can unblock them in Settings." = "Ses messages ne vous parviendront plus et la conversation disparaît, sur tous vos appareils. Cette personne n’est pas prévenue. Vous pourrez la débloquer dans les Réglages.";
+"Blocked contacts" = "Contacts bloqués";
+"Their messages no longer reach you" = "Leurs messages ne vous parviennent plus";
+"A blocked contact's messages are dropped without being shown, and nothing is sent to them. They are not told, but their messages stay marked as not delivered on their side." = "Les messages d’un contact bloqué sont écartés sans être affichés, et rien ne lui est envoyé. Cette personne n’est pas prévenue, mais ses messages restent marqués comme non distribués de son côté.";
+"No blocked contacts" = "Aucun contact bloqué";
+"Unblock" = "Débloquer";
+"Unblock %@" = "Débloquer %@";
+"You blocked this person. Unblock them in Settings › Blocked contacts first." = "Vous avez bloqué cette personne. Débloquez-la d’abord dans Réglages › Contacts bloqués.";

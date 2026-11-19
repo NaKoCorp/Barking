@@ -1711,3 +1711,123 @@ fn retry_days_after_delete_stays_deleted_on_the_contact() {
             .any(|m| m.body == "unwanted")
     );
 }
+
+fn blocked_of(core: &Core, fp: Fingerprint) -> bool {
+    core.contacts()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.fingerprint == fp)
+        .is_some_and(|c| c.blocked)
+}
+
+#[test]
+fn blocked_contact_texts_are_dropped_without_ack() {
+    let (mut a, mut b, mut rng) = pair();
+    expect_msg(b.recv(
+        &one(a.send(&b.fp(), "before", NOW, &mut rng)),
+        NOW,
+        &mut rng,
+    ));
+    b.core.block_contact(&a.fp(), NOW + 1, &mut rng).unwrap();
+    assert!(blocked_of(&b.core, a.fp()));
+    let queued = b.core.pending_outbox(NOW + 2).unwrap();
+    let p = one(a.send(&b.fp(), "while blocked", NOW + 2, &mut rng));
+    match b.recv(&p, NOW + 2, &mut rng) {
+        ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("blocked"), "{reason}"),
+        other => panic!("Quarantined expected, got {other:?}"),
+    }
+    // Nothing stored, no ack queued: Alice sees it undelivered.
+    let texts: Vec<String> = b
+        .core
+        .messages_with(&a.fp())
+        .unwrap()
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
+    assert_eq!(texts, vec!["before".to_owned()]);
+    assert_eq!(b.core.pending_outbox(NOW + 2).unwrap(), queued);
+    // A copy of the same packet is a duplicate, not a second drop.
+    assert!(matches!(
+        b.recv(&p, NOW + 3, &mut rng),
+        ReceiveOutcome::Duplicate
+    ));
+}
+
+#[test]
+fn blocked_contact_mailboxes_are_not_watched() {
+    let (mut a, mut b, mut rng) = pair();
+    expect_msg(b.recv(&one(a.send(&b.fp(), "hi", NOW, &mut rng)), NOW, &mut rng));
+    let days = [day_of(NOW)];
+    let before = b.core.own_mailboxes(&days).unwrap().len();
+    let watched = b.core.watched_mailboxes(NOW).unwrap().len();
+    b.core.block_contact(&a.fp(), NOW, &mut rng).unwrap();
+    assert_eq!(b.core.own_mailboxes(&days).unwrap().len(), before - 1);
+    assert!(b.core.watched_mailboxes(NOW).unwrap().len() < watched);
+    b.core.unblock_contact(&a.fp(), NOW + 1, &mut rng).unwrap();
+    assert_eq!(b.core.own_mailboxes(&days).unwrap().len(), before);
+}
+
+#[test]
+fn sending_to_a_blocked_contact_is_refused() {
+    let (a, mut b, mut rng) = pair();
+    b.core.block_contact(&a.fp(), NOW, &mut rng).unwrap();
+    assert_eq!(
+        b.core.send_text(&a.fp(), "no", NOW, &mut rng).unwrap_err(),
+        CoreError::ContactBlocked
+    );
+    b.core.unblock_contact(&a.fp(), NOW + 1, &mut rng).unwrap();
+    assert!(!blocked_of(&b.core, a.fp()));
+    assert_eq!(b.send(&a.fp(), "yes", NOW + 1, &mut rng).len(), 1);
+}
+
+#[test]
+fn texts_sent_while_blocked_stay_dropped_after_unblock() {
+    let (mut a, mut b, mut rng) = pair();
+    b.core.block_contact(&a.fp(), NOW + 10, &mut rng).unwrap();
+    let during = one(a.send(&b.fp(), "during", NOW + 20, &mut rng));
+    b.core.unblock_contact(&a.fp(), NOW + 30, &mut rng).unwrap();
+    let after = a.send(&b.fp(), "after", NOW + 40, &mut rng);
+    // Fetched only now, the text of the blocked period is still dropped;
+    // the next one goes through.
+    assert!(matches!(
+        b.recv(&during, NOW + 40, &mut rng),
+        ReceiveOutcome::Quarantined { .. }
+    ));
+    assert_eq!(
+        expect_msg(b.recv(&one(after), NOW + 40, &mut rng)).2,
+        "after"
+    );
+}
+
+#[test]
+fn block_outlives_removal_and_refuses_the_card_again() {
+    let (a, mut b, mut rng) = pair();
+    b.core.block_contact(&a.fp(), NOW, &mut rng).unwrap();
+    b.core.remove_contact(&a.fp(), NOW + 1, &mut rng).unwrap();
+    assert_eq!(
+        b.core
+            .add_contact(&a.card("Alice"), Some("alice"), NOW + 2, &mut rng)
+            .unwrap_err(),
+        CoreError::ContactBlocked
+    );
+    b.core.unblock_contact(&a.fp(), NOW + 3, &mut rng).unwrap();
+    b.core
+        .add_contact(&a.card("Alice"), Some("alice"), NOW + 4, &mut rng)
+        .unwrap();
+    assert!(!blocked_of(&b.core, a.fp()));
+}
+
+#[test]
+fn blocking_an_unknown_contact_is_unknown() {
+    let (_a, mut b, mut rng) = pair();
+    assert_eq!(
+        b.core
+            .block_contact(&Fingerprint([7; 32]), NOW, &mut rng)
+            .unwrap_err(),
+        CoreError::UnknownContact
+    );
+    // Unblocking what was never blocked changes nothing.
+    b.core
+        .unblock_contact(&Fingerprint([7; 32]), NOW, &mut rng)
+        .unwrap();
+}

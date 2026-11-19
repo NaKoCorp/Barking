@@ -46,6 +46,7 @@
 "log.arg.reason_unreadable" = "contenu illisible";
 "log.arg.reason_unexpected" = "contenu inattendu pour cette boîte";
 "log.arg.reason_undecryptable" = "déchiffrement impossible";
+"log.arg.reason_blocked" = "contact bloqué";
 "log.arg.reason_unknown_sender" = "expéditeur inconnu";
 "log.arg.reason_ambiguous_sender" = "expéditeur ambigu";
 "log.arg.reason_handshake" = "la session n’a pas pu s’ouvrir";
