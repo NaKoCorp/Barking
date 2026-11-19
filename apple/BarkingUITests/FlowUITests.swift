@@ -240,7 +240,7 @@ final class SettingsUITests: XCTestCase {
         dark.tap()
         XCTAssertTrue(dark.isSelected)
         app.terminate()
-        let again = XCUIApplication()
+        let again = XCUIApplication.isolated()
         again.launchArguments = ["-AppleLanguages", "(en)"]
         again.launch()
         XCTAssertTrue(again.buttons["appearance.dark"].waitForExistence(timeout: 5))
@@ -279,7 +279,7 @@ final class NotificationsUITests: XCTestCase {
         XCTAssertEqual(toggle.value as? String, "0")
         app.terminate()
 
-        let again = XCUIApplication()
+        let again = XCUIApplication.isolated()
         again.launchArguments = ["-AppleLanguages", "(en)", "-BarkingUITestNoAnimations", "-BarkingUITestPushAuthorized"]
         again.launch()
         openNotifications(again)
@@ -372,7 +372,7 @@ final class DevicesUITests: XCTestCase {
 
         // Nothing is left: a relaunch (without the test reset) is a fresh install.
         app.terminate()
-        let again = XCUIApplication()
+        let again = XCUIApplication.isolated()
         again.launchArguments = ["-AppleLanguages", "(en)"]
         again.launch()
         XCTAssertTrue(again.buttons["Create my identity"].waitForExistence(timeout: 10))

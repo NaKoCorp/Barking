@@ -25,7 +25,13 @@ extension CoreService {
         let device = UITestDeliveries.wrap(device)
         #endif
         let core = CoreService(device: device, runner: runner, onFailed: AppFailureNotifications.handler)
-        let info = Bundle.main.infoDictionary ?? [:]
+        var info = Bundle.main.infoDictionary ?? [:]
+        #if BARKING_DEV
+        // A UI test never dials the nodes of a developer's Local.xcconfig: a
+        // live launch sync holds the core for seconds, and the run would
+        // depend on the network (CI builds have none).
+        if UITestNetwork.isolated { info["BarkingBootstrapNodes"] = nil }
+        #endif
         Task { await BootstrapNodes.add(to: core, info: info) }
         // The push guard is applied by `SyncLoop`, before the launch sync and
         // each resume sync: one ordered path.
