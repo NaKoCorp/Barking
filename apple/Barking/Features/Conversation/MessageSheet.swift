@@ -321,6 +321,8 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func contactCard(displayName: String) throws -> String { throw Never() }
     func setAlias(contact: String, alias: String) throws { throw Never() }
     func removeContact(contact: String) throws { throw Never() }
+    func setDraft(contact: String, text: String) throws { throw Never() }
+    func draft(contact: String) throws -> String? { throw Never() }
     func markVerified(contact: String) throws { throw Never() }
     func unmarkVerified(contact: String) throws { throw Never() }
     func blockContact(contact: String) throws { throw Never() }

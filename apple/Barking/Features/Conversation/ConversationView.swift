@@ -12,6 +12,8 @@ struct ConversationView: View {
     @Environment(\.syncLoop) private var syncLoop
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Saves the draft once typing stops for 2 s; restarted by each change.
+    @State private var draftSave: Task<Void, Never>?
     /// The message whose sheet is open.
     @State private var sheetOf: SheetTarget?
     /// The message the delete confirmation is open for, as it was then.
@@ -145,6 +147,19 @@ struct ConversationView: View {
         .onDisappear {
             model.onDisappear()
             syncLoop?.conversationOpen = false
+            draftSave?.cancel()
+            Task { await model.saveDraft() }
+        }
+        .onChange(of: phase) { _, new in
+            if new == .background { Task { await model.saveDraft() } }
+        }
+        .onChange(of: model.draft) {
+            draftSave?.cancel()
+            draftSave = Task {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                await model.saveDraft()
+            }
         }
         .task {
             await model.onAppear()

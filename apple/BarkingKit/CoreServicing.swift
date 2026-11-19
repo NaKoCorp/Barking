@@ -16,6 +16,8 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func contactCard(displayName: String) throws -> String
     func setAlias(contact: String, alias: String) throws
     func removeContact(contact: String) throws
+    func setDraft(contact: String, text: String) throws
+    func draft(contact: String) throws -> String?
     func markVerified(contact: String) throws
     func unmarkVerified(contact: String) throws
     func blockContact(contact: String) throws

@@ -69,6 +69,13 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func contactCard(displayName: String) throws -> String { "barking1:abc" }
     func setAlias(contact: String, alias: String) throws {}
     func removeContact(contact: String) throws {}
+    /// Stored drafts by contact.
+    private var _drafts: [String: String] = [:]
+    var drafts: [String: String] { get { lock.withLock { _drafts } } set { lock.withLock { _drafts = newValue } } }
+    func setDraft(contact: String, text: String) throws {
+        lock.withLock { _drafts[contact] = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text }
+    }
+    func draft(contact: String) throws -> String? { lock.withLock { _drafts[contact] } }
     func markVerified(contact: String) throws {
         if let verifyError { throw verifyError }
         verified.insert(contact)

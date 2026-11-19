@@ -53,6 +53,55 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertNotNil(m.sendError)
     }
 
+    func testDraftLoadedOnAppear() async {
+        let d = FakeDevice()
+        d.drafts = ["b": "hello"]
+        let m = make(d)
+        await m.onAppear()
+        XCTAssertEqual(m.draft, "hello")
+    }
+
+    func testDraftSavedOnDisappearAndBackground() async {
+        let d = FakeDevice()
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "x"
+        await m.saveDraft()
+        XCTAssertEqual(d.drafts["b"], "x")
+    }
+
+    func testDraftClearedOnlyAfterSuccessfulSend() async {
+        let d = FakeDevice()
+        d.drafts = ["b": "hello"]
+        let m = make(d)
+        await m.onAppear()
+        await m.send()
+        XCTAssertNil(d.drafts["b"])
+        XCTAssertEqual(d.sent.count, 1)
+    }
+
+    func testFailedSendKeepsStoredDraft() async {
+        let d = FakeDevice()
+        d.drafts = ["b": "hello"]
+        d.sendError = BarkingError.Locked
+        let m = make(d)
+        await m.onAppear()
+        await m.send()
+        XCTAssertEqual(d.drafts["b"], "hello")
+        XCTAssertEqual(m.draft, "hello")
+    }
+
+    func testOversizeDraftIsNotSaved() async {
+        let d = FakeDevice()
+        d.drafts = ["b": "ok"]
+        let m = make(d)
+        await m.onAppear()
+        m.draft = String(repeating: "a", count: 4001)
+        await m.saveDraft()
+        XCTAssertEqual(d.drafts["b"], "ok")
+        XCTAssertNil(m.sendError)
+    }
+
     func testCounterAndLimit() {
         let m = make(FakeDevice())
         m.draft = String(repeating: "a", count: 3499)
