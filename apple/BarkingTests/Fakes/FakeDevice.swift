@@ -72,10 +72,22 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     /// Stored drafts by contact.
     private var _drafts: [String: String] = [:]
     var drafts: [String: String] { get { lock.withLock { _drafts } } set { lock.withLock { _drafts = newValue } } }
+    /// Thrown by `setDraft` when set.
+    var setDraftError: Error?
+    /// Slows `draft` down, to type while it loads.
+    var draftDelay: TimeInterval = 0
+    private var _setDraftCalls = 0
+    /// How many times `setDraft` ran, failed ones included.
+    var setDraftCalls: Int { lock.withLock { _setDraftCalls } }
     func setDraft(contact: String, text: String) throws {
+        lock.withLock { _setDraftCalls += 1 }
+        if let setDraftError { throw setDraftError }
         lock.withLock { _drafts[contact] = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text }
     }
-    func draft(contact: String) throws -> String? { lock.withLock { _drafts[contact] } }
+    func draft(contact: String) throws -> String? {
+        Thread.sleep(forTimeInterval: draftDelay)
+        return lock.withLock { _drafts[contact] }
+    }
     func markVerified(contact: String) throws {
         if let verifyError { throw verifyError }
         verified.insert(contact)

@@ -128,7 +128,12 @@ final class ConversationModel {
     /// later save tries again. Never while a send runs: the field is empty
     /// then, and the stored text must stay until the send succeeds.
     func saveDraft() async {
-        guard !removed, !sending, byteCount <= Self.maxBytes, draft != lastSaved else { return }
+        guard !sending else { return }
+        await persistDraft()
+    }
+
+    private func persistDraft() async {
+        guard !removed, byteCount <= Self.maxBytes, draft != lastSaved else { return }
         let text = draft
         if (try? await core.setDraft(contact, text: text)) != nil { lastSaved = text }
     }
@@ -248,6 +253,8 @@ final class ConversationModel {
         } catch {
             draft = text
             sendError = "Not sent. Try again in a moment."
+            // A disappear during the send skipped its save: store it now.
+            await persistDraft()
         }
         // The reload swaps it for the core's row, or drops it on failure.
         shownAtSend = nil
