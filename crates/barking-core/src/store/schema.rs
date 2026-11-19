@@ -243,6 +243,18 @@ CREATE TABLE IF NOT EXISTS contact_blocks (
 );
 ";
 
+/// Unsent text typed for a contact (created at open, idempotent), at most
+/// one per fingerprint, in the encrypted database so that it is never in
+/// the clear on disk. `at`: date of the last edit. Never synchronized,
+/// never logged; erased with the contact and when it is blocked.
+pub const DRAFTS: &str = "
+CREATE TABLE IF NOT EXISTS drafts (
+    fp BLOB PRIMARY KEY NOT NULL,
+    text TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
+";
+
 /// Route of each packet (spec block 2b §4.1), created at open
 /// (idempotent). `step`: `RouteStep` as stored, fixed order, additions at
 /// the end. `node`: a node's short identifier, never an address. `size`:
