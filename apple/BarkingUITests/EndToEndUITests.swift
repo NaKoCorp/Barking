@@ -50,7 +50,7 @@ final class EndToEndUITests: XCTestCase {
 
     /// Step 2, after the CLI wrote first: the message arrives, the reply leaves.
     func test2ReceiveAndReply() throws {
-        let app = XCUIApplication()
+        let app = XCUIApplication.isolated()
         app.launch()
         app.tabBars.buttons["Network"].tap()
         app.buttons["Sync now"].tap()

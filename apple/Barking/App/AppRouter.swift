@@ -71,6 +71,8 @@ final class AppRouter {
             }
         }
         if args.contains("-BarkingUITestNoAnimations") { UIView.setAnimationsEnabled(false) }
+        // No real relay either (see `UITestNetwork`).
+        if UITestNetwork.isolated { PushToken.shared.info["BarkingRelayHost"] = "" }
         if args.contains("-BarkingUITestPushAuthorized") {
             // The simulator never answers the permission prompt, and a build
             // may have no relay: the Notifications screen needs both.
