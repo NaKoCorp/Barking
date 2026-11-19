@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use barking_core::mailbox::day_of;
 use barking_core::{Core, CoreError};
-use barking_packet::MailboxId;
+use barking_packet::{DEFAULT_TTL_SECS, MailboxId};
 use barking_proto::NodeId;
 use barking_proto::push::{
     ApnsEnv, RelayRef, SubKind, Subscription, WakeReason, WakeToken, cancel_hash, seal,
@@ -374,14 +374,19 @@ impl PushState {
     }
 }
 
+/// Whole days of a message's lifetime (`DEFAULT_TTL_SECS`).
+pub fn lifetime_days() -> u32 {
+    (DEFAULT_TTL_SECS / 86_400) as u32
+}
+
 /// First day whose mailboxes a subscription of `kind` is planned for: today
-/// for messages; yesterday too for acks, since a message sealed yesterday
-/// (in yesterday's mailbox) may still be acked or expire today, and the
-/// subscription runs until the end of the day after its mailbox's day.
+/// for messages; for acks, every day back over a message's lifetime, since a
+/// message sealed that many days ago (in that day's mailbox) may still be
+/// acked or expire today.
 fn first_day(kind: SubKind, today: u32) -> u32 {
     match kind {
         SubKind::Messages => today,
-        SubKind::Acks => today.saturating_sub(1),
+        SubKind::Acks => today.saturating_sub(lifetime_days()),
     }
 }
 
@@ -486,7 +491,7 @@ pub fn plan_push(
 pub fn expires_day(day: u32, kind: SubKind) -> u32 {
     match kind {
         SubKind::Messages => day.saturating_add(1),
-        SubKind::Acks => day.saturating_add(2),
+        SubKind::Acks => day.saturating_add(lifetime_days()).saturating_add(1),
     }
 }
 
@@ -496,10 +501,10 @@ pub fn expires_day(day: u32, kind: SubKind) -> u32 {
 /// the relay sends a receipt wake as a background push. `collapse` comes
 /// from `PushState::collapse_for`, called first. A `Messages` subscription
 /// expires the day after the mailbox's day, so that a node a day ahead still
-/// takes it. An `Acks` one expires two days after: a message sealed just
-/// before midnight expires 24 h later, just before the next midnight, and
-/// the node's purge that notices it may run just after; the subscriber must
-/// still be there to be woken.
+/// takes it. An `Acks` one expires `lifetime_days() + 1` days after: a
+/// message sealed just before midnight expires a lifetime later, just
+/// before a midnight, and the node's purge that notices it may run just
+/// after; the subscriber must still be there to be woken.
 pub fn build_subscription(
     cfg: &PushConfig,
     mailbox: MailboxId,

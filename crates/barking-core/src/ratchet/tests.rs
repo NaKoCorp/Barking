@@ -246,7 +246,7 @@ fn skipped_total_evicts_oldest() {
 }
 
 #[test]
-fn skipped_keys_expire_after_seven_days() {
+fn skipped_keys_expire_after_max_age() {
     let (mut rng, mut a, mut b) = setup(13);
     let m0 = a.encrypt(&msg(0), AD, &mut rng).unwrap();
     let m1 = a.encrypt(&msg(1), AD, &mut rng).unwrap();
@@ -254,7 +254,7 @@ fn skipped_keys_expire_after_seven_days() {
     // m2 first: the keys of m0 and m1 are set aside at T0.
     assert_eq!(b.decrypt(&m2, AD, T0).unwrap(), msg(2));
     assert_eq!(b.mkskipped.len(), 2);
-    // Exactly 7 days: still usable.
+    // Exactly `MAX_SKIPPED_AGE_SECS`: still usable.
     assert_eq!(
         b.decrypt(&m1, AD, T0 + MAX_SKIPPED_AGE_SECS).unwrap(),
         msg(1)
@@ -403,6 +403,17 @@ fn could_open_accepts_skipped_chain_header() {
 }
 
 #[test]
+fn skipped_key_kept_past_the_lifetime() {
+    let (mut rng, mut a, mut b) = setup(15);
+    let m0 = a.encrypt(&msg(0), AD, &mut rng).unwrap();
+    let m1 = a.encrypt(&msg(1), AD, &mut rng).unwrap();
+    assert_eq!(b.decrypt(&m1, AD, T0).unwrap(), msg(1));
+    // A message may be delivered up to its 7-day lifetime later (plus skew):
+    // its skipped key is still there.
+    assert_eq!(b.decrypt(&m0, AD, T0 + 7 * 86_400 + 3_600).unwrap(), msg(0));
+}
+
+#[test]
 fn purge_with_clock_behind() {
     let (mut rng, mut a, mut b) = setup(14);
     let _m0 = a.encrypt(&msg(0), AD, &mut rng).unwrap();
@@ -412,7 +423,7 @@ fn purge_with_clock_behind() {
     // Clock one day behind: nothing is removed, no panic.
     assert!(!b.purge_skipped(T0 - 86_400));
     assert_eq!(b.mkskipped.len(), 1);
-    // Exactly 7 days: kept; beyond that: removed.
+    // Exactly `MAX_SKIPPED_AGE_SECS`: kept; beyond that: removed.
     assert!(!b.purge_skipped(T0 + MAX_SKIPPED_AGE_SECS));
     assert!(b.purge_skipped(T0 + MAX_SKIPPED_AGE_SECS + 1));
     assert!(b.mkskipped.is_empty());

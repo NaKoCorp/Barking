@@ -618,10 +618,10 @@ fn skipped_total(c: &Core) -> usize {
 #[test]
 fn idle_session_purges_skipped_keys() {
     let mut p = bob_with_two_skipped();
-    // Negative control: at 6 days, the keys are still there.
-    p.b.pending_outbox(NOW + 6 * 86_400).unwrap();
-    assert_eq!(skipped_total(&p.b), 2);
+    // Negative control: at 8 days (the retention), the keys are still there.
     p.b.pending_outbox(NOW + 8 * 86_400).unwrap();
+    assert_eq!(skipped_total(&p.b), 2);
+    p.b.pending_outbox(NOW + 9 * 86_400).unwrap();
     assert_eq!(skipped_total(&p.b), 0);
 }
 
@@ -652,10 +652,10 @@ fn open_purges_skipped_keys() {
     b.receive(&pkts[2].encode(), "t", NOW, &mut rng).unwrap();
     assert_eq!(skipped_total(&b), 1);
     drop(b);
-    let b = Core::open(&path, &key, NOW + 6 * 86_400).unwrap();
+    let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
     assert_eq!(skipped_total(&b), 1);
     drop(b);
-    let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
+    let b = Core::open(&path, &key, NOW + 9 * 86_400).unwrap();
     assert_eq!(skipped_total(&b), 0);
 }
 
@@ -667,7 +667,7 @@ fn corrupt_session_row_does_not_block_pending_outbox() {
     bad.session_id = [0xee; 16];
     bad.state = vec![0xff; 7];
     p.b.store.put_session(&bad).unwrap();
-    let later = NOW + 8 * 86_400;
+    let later = NOW + 9 * 86_400;
     p.b.pending_outbox(later).unwrap();
     assert_eq!(skipped_total(&p.b), 0);
     // The unreadable row is intact and does not prevent reopening.
@@ -709,7 +709,7 @@ fn corrupt_session_row_does_not_block_open() {
     bad.state = vec![0xff; 7];
     b.store.put_session(&bad).unwrap();
     drop(b);
-    let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
+    let b = Core::open(&path, &key, NOW + 9 * 86_400).unwrap();
     assert_eq!(skipped_total(&b), 0);
 }
 
@@ -4878,4 +4878,38 @@ fn draft_erased_when_blocked_by_sync() {
     deliver_all(&mut a, &mut t, &mut rng);
     assert!(t.store.block_state(fp).unwrap().blocked);
     assert_eq!(t.draft(&fp).unwrap(), None);
+}
+
+#[test]
+fn watched_days_cover_the_whole_lifetime() {
+    let mut p = pair();
+    let day = 86_400;
+    let later = NOW + day;
+    // Polled yesterday: the full window still starts 8 days back.
+    p.b.mark_polled(NOW).unwrap();
+    let watched = p.b.watched_mailboxes(later).unwrap();
+    let b_id = p.b.device.public().id();
+    let s = best_session(&p.b);
+    let oldest = session_mailbox(&s.mailbox_secret, &b_id, day_of(later) - 8);
+    assert!(watched.contains(&oldest));
+    // A packet Alice sealed 5 days ago (offline, deposited late) sits in the
+    // mailbox of its seal day: still polled.
+    let target = send::Target::Contact(p.b.fingerprint());
+    let body = Body::Text("late".into());
+    let Core { store, device, .. } = &mut p.a;
+    let sealed = store
+        .transaction(|tx| {
+            send::seal_for(
+                tx,
+                device,
+                &target,
+                &body,
+                MessageId([6; 16]),
+                send::SealTime::at(NOW - 5 * day),
+                &mut p.rng,
+            )
+        })
+        .unwrap();
+    let (late, _) = &sealed[0];
+    assert!(watched.contains(&late.mailbox));
 }

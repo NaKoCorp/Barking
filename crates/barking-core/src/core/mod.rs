@@ -84,11 +84,12 @@ const META_DEVICE_LIST: &str = "device_list";
 const META_LINKED_BUNDLES: &str = "linked_bundles";
 /// Last day (day number) on which this device polled its mailboxes.
 const META_LAST_POLLED: &str = "last_polled_day";
-/// Polling window: 7 days back, the current day and the next day =
-/// 9 days at most. Covers each day of `accepted_days` (receive) that may
-/// still hold an unexpired packet (24-hour lifetime; the window is kept
-/// wider than that on purpose).
-const MAX_POLL_BACK_DAYS: u32 = 7;
+/// Polling window: 8 days back, the current day and the next day = 10
+/// days, always. A packet's mailbox is fixed at its seal day, and a packet
+/// sealed offline may be deposited days later, up to its lifetime: the
+/// window covers every day of `accepted_days` (receive) that may still hold
+/// an unexpired packet (lifetime up to 7 days, plus a day of clock skew).
+const MAX_POLL_BACK_DAYS: u32 = 8;
 
 /// Mailboxes to poll, by class. A poll reads the sessions first: the
 /// introduction mailbox is derivable from my public key, so anyone who has my
@@ -541,9 +542,9 @@ impl Core {
     }
 
     /// Mailboxes to poll: this device's introduction mailbox
-    /// and those of each session (from the last poll to the next day, 9 days
-    /// at most; the day before, the day and the next day when no poll is recorded), plus the mailbox of
-    /// each of my messages awaiting an ack, where the ack will arrive.
+    /// and those of each session (from `MAX_POLL_BACK_DAYS` back to the next
+    /// day, 10 days), plus the mailbox of each of my messages awaiting an
+    /// ack, where the ack will arrive.
     /// Union of the two groups of `watched_mailbox_groups`, introduction
     /// first.
     ///
@@ -728,24 +729,25 @@ impl Core {
 
     /// Records that the mailboxes were polled at `now`. To be called after
     /// polling all mailboxes successfully; deliberately overwrites the
-    /// previous value (an earlier value only widens the window).
+    /// previous value. The polling window no longer depends on it (it always
+    /// covers the whole lifetime); `last_polled_day` reads it back.
     pub fn mark_polled(&mut self, now: u64) -> Result<()> {
         self.store.put_meta(META_LAST_POLLED, &day_of(now))
     }
 
-    /// Days to poll: from the last poll (or the day before) to the next day,
-    /// 9 days at most. A failed read or a poll dated in the future
-    /// (clock set back) falls back to the normal window.
+    /// Day of the last poll recorded by `mark_polled`, if any.
+    pub fn last_polled_day(&self) -> Result<Option<u32>> {
+        self.store.get_meta(META_LAST_POLLED)
+    }
+
+    /// Days to poll: `MAX_POLL_BACK_DAYS` back to the next day, whatever
+    /// the last poll. A packet sealed offline lands in the mailbox of its
+    /// seal day and may be deposited any time within its lifetime, after a
+    /// poll already covered that day.
     fn watched_days(&self, now: u64) -> Vec<u32> {
         let today = day_of(now);
-        let end = today.saturating_add(1);
-        let normal = today.saturating_sub(1);
-        let start = match self.store.get_meta::<u32>(META_LAST_POLLED) {
-            Ok(Some(last)) if last <= end => last.min(normal),
-            _ => normal,
-        };
-        let start = start.max(today.saturating_sub(MAX_POLL_BACK_DAYS));
-        (start..=end).collect()
+        let start = today.saturating_sub(MAX_POLL_BACK_DAYS);
+        (start..=today.saturating_add(1)).collect()
     }
 
     /// Security code to compare with the contact.

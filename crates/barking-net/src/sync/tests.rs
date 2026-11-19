@@ -654,12 +654,19 @@ async fn crosscheck_reads_another_responsible_every_six_hours() {
     let calls = net.calls();
     assert_eq!(fetches_for(&calls, r[0], m).len(), 1);
     assert_eq!(fetches_for(&calls, r[1], m).len(), 1);
-    // After every primary fetch, items processed as usual.
-    let last_primary = fetches_of(&calls, &sessions)
+    // After every primary fetch (the first fetch of each session mailbox;
+    // the cross-checks of the other mailboxes come after them too), items
+    // processed as usual.
+    let fetches = fetches_of(&calls, &sessions);
+    let last_primary = sessions
         .iter()
-        .filter(|(_, n, mbs)| *n != r[1] || !mbs.contains(&m))
-        .map(|(i, _, _)| *i)
-        .filter(|i| !matches!(&calls[*i], Call::Fetch(n, mbs, _) if *n != r[0] && mbs.contains(&m)))
+        .map(|s| {
+            fetches
+                .iter()
+                .find(|(_, _, mbs)| mbs.contains(s))
+                .unwrap()
+                .0
+        })
         .max()
         .unwrap();
     let crosscheck = fetches_of(&calls, &sessions)
@@ -825,17 +832,17 @@ async fn state_saved_after_each_response() {
 async fn mark_polled_only_when_all_sessions_polled() {
     let (_dir, mut core, mut net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
+    let before = Some(day_of(NOW - 5 * DAY));
     // Every node truncates: no session mailbox is fetched in full.
     net.truncate = all_nodes(&net, FetchStop::Connection);
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.network_up && !report.polled_all_sessions);
-    assert_eq!(core.watched_mailbox_groups(NOW).unwrap().intro.len(), wide);
+    assert_eq!(core.last_polled_day().unwrap(), before);
 
     net.truncate.clear();
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.polled_all_sessions);
-    assert!(core.watched_mailbox_groups(NOW).unwrap().intro.len() < wide);
+    assert_eq!(core.last_polled_day().unwrap(), Some(day_of(NOW)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -843,7 +850,7 @@ async fn unreadable_watch_list_aborts_without_mark_polled() {
     use barking_core::store::{Queries, Store};
     let (dir, mut core, net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
+    let before = Some(day_of(NOW - 5 * DAY));
     let raw = Store::open(&dir.path().join("bob.db"), &[2; 32]).unwrap();
     raw.conn()
         .execute_batch("ALTER TABLE sessions RENAME TO sessions_gone;")
@@ -852,11 +859,11 @@ async fn unreadable_watch_list_aborts_without_mark_polled() {
     assert!(report.error.is_some());
     assert!(!report.polled_all_sessions);
     assert!(!net.calls().iter().any(|c| matches!(c, Call::Fetch(..))));
-    // The poll date did not move: restored, the window is as wide as before.
+    // The poll date did not move.
     raw.conn()
         .execute_batch("ALTER TABLE sessions_gone RENAME TO sessions;")
         .unwrap();
-    assert_eq!(core.watched_mailbox_groups(NOW).unwrap().intro.len(), wide);
+    assert_eq!(core.last_polled_day().unwrap(), before);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1517,7 +1524,6 @@ fn due_reread(core: &mut Core) -> (NodeId, MailboxId, Vec<u8>) {
 async fn slow_reread_waits_for_every_regular_fetch_and_mark_polled() {
     let (_dir, mut core, mut net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
     let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let (x, m, _) = due_reread(&mut core);
     // The re-read would take longer than the whole session slice.
@@ -1538,7 +1544,7 @@ async fn slow_reread_waits_for_every_regular_fetch_and_mark_polled() {
     );
     assert!(regular.iter().all(|(i, _)| *i < reread[0]));
     assert!(report.polled_all_sessions);
-    assert!(core.watched_mailbox_groups(NOW).unwrap().intro.len() < wide);
+    assert_eq!(core.last_polled_day().unwrap(), Some(day_of(NOW)));
     // The re-read was cut by its own cap, and dated.
     let state = load(&mut core);
     assert!(state.reread_at.contains_key(&(x, m)));
@@ -2930,14 +2936,14 @@ async fn quick_sync_skips_audit_maintenance_and_push() {
 async fn quick_sync_never_marks_polled() {
     let (_dir, mut core, net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
+    let before = Some(day_of(NOW - 5 * DAY));
     let report = quick_sync(&mut core, &net, quick_opts()).await;
     assert!(report.network_up && report.mailboxes_polled > 0);
     assert!(!report.polled_all_sessions);
-    assert_eq!(core.watched_mailbox_groups(NOW).unwrap().intro.len(), wide);
+    assert_eq!(core.last_polled_day().unwrap(), before);
     // A full sync afterwards does mark it.
     sync(&mut core, &net, opts()).await;
-    assert!(core.watched_mailbox_groups(NOW).unwrap().intro.len() < wide);
+    assert_eq!(core.last_polled_day().unwrap(), Some(day_of(NOW)));
 }
 
 #[tokio::test(start_paused = true)]

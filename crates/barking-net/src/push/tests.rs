@@ -639,3 +639,27 @@ fn preview_variant_golden_bytes() {
         );
     }
 }
+
+#[test]
+fn ack_subscription_window_follows_lifetime() {
+    // Derived from `DEFAULT_TTL_SECS`: with a 24 h lifetime these are
+    // `T - 1` and `D + 2`.
+    let t = today();
+    assert_eq!(first_day(A, t), t - lifetime_days());
+    assert_eq!(expires_day(t, A), t + lifetime_days() + 1);
+    assert_eq!(first_day(M, t), t);
+    assert_eq!(expires_day(t, M), t + 1);
+}
+
+#[test]
+fn ack_subscription_within_node_bound() {
+    use barking_node::wake::MAX_EXPIRY_DAYS;
+    // Every sealing day an ack is still awaited for, from the oldest to today.
+    let t = today();
+    for d in first_day(A, t)..=t {
+        assert!(
+            expires_day(d, A) <= t + MAX_EXPIRY_DAYS,
+            "day {d}: the node would refuse the subscription"
+        );
+    }
+}
