@@ -139,7 +139,7 @@ impl Device {
     /// The safety code: 12 groups of 5 digits, the same on both sides.
     pub fn safety_number(&self, contact: String) -> Result<Vec<String>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let fp = core.resolve(&contact)?;
                 Ok(core
                     .safety_number(&fp)?

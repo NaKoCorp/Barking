@@ -199,10 +199,57 @@ impl Device {
         &self,
         f: impl FnOnce(&mut Core) -> Result<T, BarkingError>,
     ) -> Result<T, BarkingError> {
-        let _lock = self.lock()?;
+        let lock = self.lock()?;
+        self.run_on_core(lock, f)
+    }
+
+    /// Runs the sync `f` like `with_core`, its lock open to the reads of
+    /// this process (`with_core_read`) for its whole run.
+    pub(crate) fn with_core_sync<T>(
+        &self,
+        f: impl FnOnce(&mut Core) -> Result<T, BarkingError>,
+    ) -> Result<T, BarkingError> {
+        let lock = DbLock::acquire_for_sync(
+            Path::new(&self.config.lock_path),
+            Duration::from_millis(self.config.lock_timeout_ms),
+        )?;
+        self.run_on_core(lock, f)
+    }
+
+    /// Runs `f`, a read, on the opened core. During a sync of this process it
+    /// does not wait for the sync: it joins its lock and reads through a
+    /// read-only connection, beside the sync's (the core then leaves the due
+    /// packets to the sync to expire, `Core::expire_due`). Otherwise as
+    /// `with_core`. A write in `f` fails while it joins (`Storage`).
+    pub(crate) fn with_core_read<T>(
+        &self,
+        f: impl FnOnce(&mut Core) -> Result<T, BarkingError>,
+    ) -> Result<T, BarkingError> {
+        let lock = DbLock::acquire_read(
+            Path::new(&self.config.lock_path),
+            Duration::from_millis(self.config.lock_timeout_ms),
+        )?;
+        if !lock.joined() {
+            return self.run_on_core(lock, f);
+        }
+        let mut core = Core::open_read(&PathBuf::from(&self.config.db_path), &self.key)?;
+        let out = f(&mut core);
+        drop(core);
+        drop(lock);
+        out
+    }
+
+    /// Runs `f` on the core opened under `lock`; the core is closed before
+    /// the lock is released.
+    fn run_on_core<T>(
+        &self,
+        lock: DbLock,
+        f: impl FnOnce(&mut Core) -> Result<T, BarkingError>,
+    ) -> Result<T, BarkingError> {
         let mut core = Core::open(&PathBuf::from(&self.config.db_path), &self.key, now())?;
         let out = f(&mut core);
         drop(core);
+        drop(lock);
         out
     }
 }
@@ -239,7 +286,7 @@ impl Device {
     }
 
     pub fn fingerprint(&self) -> Result<String, BarkingError> {
-        guard(|| self.with_core(|core| Ok(core.fingerprint().to_string())))
+        guard(|| self.with_core_read(|core| Ok(core.fingerprint().to_string())))
     }
 
     /// Signed contact card, as text (`ContactCard::to_text`).
@@ -263,7 +310,7 @@ impl Device {
     /// Contacts, blocked ones left out (see `blocked_contacts`).
     pub fn contacts(&self) -> Result<Vec<Contact>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 Ok(core
                     .contacts()?
                     .into_iter()
@@ -277,7 +324,7 @@ impl Device {
     /// Blocked contacts, for the list where they are unblocked.
     pub fn blocked_contacts(&self) -> Result<Vec<Contact>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 Ok(core
                     .contacts()?
                     .into_iter()
@@ -301,7 +348,7 @@ impl Device {
 
     pub fn messages_with(&self, contact: String) -> Result<Vec<Message>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let fp = core.resolve(&contact)?;
                 core.messages_with_delivery(&fp, now())?
                     .into_iter()

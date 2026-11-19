@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 
-use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use zeroize::Zeroize;
@@ -498,6 +498,39 @@ impl Store {
             noted: RefCell::new(Vec::new()),
         };
         store.apply_schema()?;
+        Ok(store)
+    }
+
+    /// Opened by `open_read`: every write fails.
+    pub fn is_read_only(&self) -> bool {
+        self.conn.is_readonly(rusqlite::MAIN_DB).unwrap_or(false)
+    }
+
+    /// Opens the existing database for reading only, beside another
+    /// opening that may be writing it (a sync of the same process): a
+    /// read-only connection, no schema step. The schema must already be
+    /// current (the other opening applied it): `Store` otherwise.
+    pub fn open_read(path: &Path, key: &[u8; 32]) -> Result<Store> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI;
+        let conn = Connection::open_with_flags(path, flags).map_err(map_err)?;
+        // The writer's commits are short: wait for them.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(map_err)?;
+        let mut hex = data_encoding::HEXLOWER.encode(key);
+        let mut pragma = format!("PRAGMA key = \"x'{hex}'\";");
+        let r = conn.execute_batch(&pragma);
+        hex.zeroize();
+        pragma.zeroize();
+        r.map_err(map_err)?;
+        let store = Store {
+            conn,
+            noted: RefCell::new(Vec::new()),
+        };
+        if store.get_meta::<u32>("schema_version")? != Some(schema::SCHEMA_VERSION) {
+            return Err(CoreError::Store("database schema not current".into()));
+        }
         Ok(store)
     }
 

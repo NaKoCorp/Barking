@@ -143,7 +143,13 @@ impl Core {
     /// nodes' ack grace. A deposited packet is never failed here: only
     /// `confirm_expired` does that; past the grace it leaves the queue
     /// still `OnNetwork`, without a notice.
+    ///
+    /// Does nothing on a core opened for reading (`Core::open_read`): the
+    /// sync writing beside it expires them (`pending_outbox`) and reports it.
     pub fn expire_due(&mut self, now: u64) -> Result<()> {
+        if self.store.is_read_only() {
+            return Ok(());
+        }
         let failed = self.store.transaction(|tx| {
             let expired: Vec<(Vec<u8>, i64)> = {
                 let mut stmt = tx

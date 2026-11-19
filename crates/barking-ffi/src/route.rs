@@ -61,7 +61,7 @@ impl Device {
     /// when nothing was recorded (an old or purged message).
     pub fn message_route(&self, message_id: i64) -> Result<Vec<RouteStepInfo>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let mine = core.my_devices();
                 Ok(core
                     .message_route(message_id)?

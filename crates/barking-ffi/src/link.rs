@@ -149,6 +149,6 @@ impl Device {
     }
 
     pub fn is_pending_link(&self) -> Result<bool, BarkingError> {
-        guard(|| self.with_core(|core| Ok(core.is_pending_link())))
+        guard(|| self.with_core_read(|core| Ok(core.is_pending_link())))
     }
 }

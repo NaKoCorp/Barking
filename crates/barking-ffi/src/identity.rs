@@ -61,7 +61,7 @@ pub fn bip39_words() -> Vec<String> {
 #[uniffi::export]
 impl Device {
     pub fn display_name(&self) -> Result<String, BarkingError> {
-        guard(|| self.with_core(|core| Ok(core.display_name()?)))
+        guard(|| self.with_core_read(|core| Ok(core.display_name()?)))
     }
 
     /// At most 64 bytes.
@@ -71,7 +71,7 @@ impl Device {
 
     pub fn my_devices(&self) -> Result<Vec<MyDeviceInfo>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 Ok(core
                     .my_devices()
                     .into_iter()
@@ -91,7 +91,7 @@ impl Device {
     /// `this_device` and `admin` are always false: they are about my devices.
     pub fn contact_devices(&self, contact: String) -> Result<Vec<MyDeviceInfo>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let fp = core.resolve(&contact)?;
                 Ok(core
                     .contact_devices(&fp)?
@@ -120,7 +120,9 @@ impl Device {
     /// Hex identifier of the device a root key transfer awaits the ack of.
     pub fn admin_transfer_pending(&self) -> Result<Option<String>, BarkingError> {
         guard(|| {
-            self.with_core(|core| Ok(core.admin_transfer_pending(now())?.map(|id| to_hex(&id.0))))
+            self.with_core_read(|core| {
+                Ok(core.admin_transfer_pending(now())?.map(|id| to_hex(&id.0)))
+            })
         })
     }
 
@@ -163,13 +165,13 @@ impl Device {
     /// The request to be removed is queued (`leave`, or `transfer_and_leave`
     /// after the ack): the app may wipe once a sync has sent it.
     pub fn leave_ready(&self) -> Result<bool, BarkingError> {
-        guard(|| self.with_core(|core| Ok(core.leave_ready()?)))
+        guard(|| self.with_core_read(|core| Ok(core.leave_ready()?)))
     }
 
     /// Set once a newer device list has removed this device from the account.
     pub fn removed(&self) -> Result<Option<RemovedInfo>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 Ok(core.removed()?.map(|r| RemovedInfo {
                     version: r.version,
                     at: r.at,

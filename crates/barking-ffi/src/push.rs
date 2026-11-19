@@ -85,7 +85,7 @@ impl Device {
 
     /// The notification preferences (defaults on a new device).
     pub fn notification_prefs(&self) -> Result<NotificationPrefs, BarkingError> {
-        guard(|| self.with_core(|core| Ok(PushPrefs::load(core)?.into())))
+        guard(|| self.with_core_read(|core| Ok(PushPrefs::load(core)?.into())))
     }
 
     /// Turns instant notifications on or off. The next full sync subscribes
@@ -109,7 +109,7 @@ impl Device {
     /// the nodes holding a subscription for this device.
     pub fn wake_status(&self) -> Result<WakeStatus, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let config_set = PushConfig::load(core)?.is_some();
                 let state = PushState::load(core)?;
                 Ok(WakeStatus {

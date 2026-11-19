@@ -392,7 +392,7 @@ impl Device {
         security_only: bool,
     ) -> Result<Vec<LogEntry>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let names = contact_names(core)?;
                 Ok(core
                     .transparency_page(limit as usize, before, security_only)?

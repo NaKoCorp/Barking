@@ -9,6 +9,8 @@ public enum Budget {
     /// Full sync in the app. It holds the database lock for its whole run, so
     /// it stays under the lock wait of the other calls (sync + shutdown <
     /// `appLockMs`): a send during a sync waits for it instead of failing.
+    /// Reads do not wait: they join the sync's lock (barking-ffi
+    /// `DbLock::acquire_read`), so a screen opened meanwhile shows at once.
     public static let appSyncMs: UInt64 = 8_000
     /// Quick sync of a background (receipt) wake in the app. Like a full
     /// sync it holds the database lock for its whole run, so it gets the
@@ -16,9 +18,9 @@ public enum Budget {
     /// longer work time.
     public static let appQuickSyncMs: UInt64 = appSyncMs
     /// Full sync of a background refresh (`BGAppRefreshTask`, about 30 s).
-    /// The user may open the app or a push may arrive meanwhile: the app's UI
-    /// work queues behind the sync, and the extension's 2 s lock wait gives
-    /// up and falls back to "New message".
+    /// The user may open the app or a push may arrive meanwhile: the app's
+    /// reads go through at once, its writes queue behind the sync, and the
+    /// extension's 2 s lock wait gives up and falls back to "New message".
     public static let refreshSyncMs: UInt64 = 25_000
     /// Lock wait in the extension (spec iOS push §6.1).
     public static let extensionLockMs: UInt64 = 2_000
