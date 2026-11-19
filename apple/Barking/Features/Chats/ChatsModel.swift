@@ -74,7 +74,7 @@ final class ChatsModel {
 /// Adding a contact (spec §5.3): scan, link, confirmation.
 @MainActor @Observable
 final class AddContactModel {
-    enum AddError: Equatable { case notACard, ownCard, failed }
+    enum AddError: Equatable { case notACard, ownCard, blocked, failed }
 
     private let core: CoreService
     private(set) var preview: CardPreview?
@@ -148,6 +148,9 @@ final class AddContactModel {
             }
             preview = nil
             return true
+        } catch BarkingError.ContactBlocked {
+            self.error = .blocked
+            return false
         } catch {
             self.error = .failed
             return false

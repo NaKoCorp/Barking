@@ -89,7 +89,7 @@ impl Device {
             self.with_core(|core| {
                 let marks = load_marks(core)?;
                 let mut out = Vec::new();
-                for c in core.contacts()? {
+                for c in core.contacts()?.into_iter().filter(|c| !c.blocked) {
                     let mark = mark_of(&marks, &c.fingerprint);
                     let count = core
                         .messages_with(&c.fingerprint)?
@@ -115,7 +115,7 @@ impl Device {
                 let marks = load_marks(core)?;
                 let t = now();
                 let mut out = Vec::new();
-                for c in core.contacts()? {
+                for c in core.contacts()?.into_iter().filter(|c| !c.blocked) {
                     let mark = mark_of(&marks, &c.fingerprint);
                     let messages = core.messages_with_delivery(&c.fingerprint, t)?;
                     let unread = messages
@@ -129,12 +129,7 @@ impl Device {
                         .transpose()?;
                     out.push(ChatSummary {
                         route: last.as_ref().and_then(|m| m.route.clone()),
-                        contact: Contact {
-                            fingerprint: c.fingerprint.to_string(),
-                            alias: c.alias,
-                            display_name: c.display_name,
-                            verified: c.verified,
-                        },
+                        contact: Contact::from(c),
                         last,
                         unread: u32::try_from(unread).unwrap_or(u32::MAX),
                     });

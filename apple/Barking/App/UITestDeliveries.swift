@@ -304,6 +304,9 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func removeContact(contact: String) throws { try device.removeContact(contact: contact) }
     func markVerified(contact: String) throws { try device.markVerified(contact: contact) }
     func unmarkVerified(contact: String) throws { try device.unmarkVerified(contact: contact) }
+    func blockContact(contact: String) throws { try device.blockContact(contact: contact) }
+    func unblockContact(contact: String) throws { try device.unblockContact(contact: contact) }
+    func blockedContacts() throws -> [Contact] { try device.blockedContacts() }
     func safetyNumber(contact: String) throws -> [String] { try device.safetyNumber(contact: contact) }
     func unreadCounts() throws -> [UnreadCount] { try device.unreadCounts() }
     func chatSummaries() throws -> [ChatSummary] { try device.chatSummaries() }

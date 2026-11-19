@@ -2398,3 +2398,66 @@ fn tombstone_blocks_late_sync_copy() {
 fn retry_days_after_delete_stays_deleted_on_own_device() {
     assert!(!retried_copy_comes_back(2 * 86_400, 62));
 }
+
+fn blocked_state(core: &Core) -> Vec<(Fingerprint, bool)> {
+    core.contacts()
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.fingerprint, c.blocked))
+        .collect()
+}
+
+#[test]
+fn block_and_unblock_sync() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(31);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let carol = create(d.path(), "carol", 6, &mut rng);
+    let card = carol.core.contact_card("Carol").unwrap();
+    let carol_fp = a
+        .core
+        .add_contact(&card, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+    a.core.block_contact(&carol_fp, NOW + 1, &mut rng).unwrap();
+    assert_eq!(
+        sync_round(&mut a, &mut t, &mut rng),
+        vec![SyncKind::Contact]
+    );
+    assert_eq!(blocked_state(&t.core), vec![(carol_fp, true)]);
+    // The tablet unblocks; the admin follows.
+    t.core
+        .unblock_contact(&carol_fp, NOW + 2, &mut rng)
+        .unwrap();
+    sync_round(&mut t, &mut a, &mut rng);
+    assert_eq!(blocked_state(&a.core), vec![(carol_fp, false)]);
+    // Unblocking on the tablet before the admin's new block arrives is a
+    // no-op (it still sees the contact unblocked): the block wins.
+    a.core.block_contact(&carol_fp, NOW + 3, &mut rng).unwrap();
+    t.core
+        .unblock_contact(&carol_fp, NOW + 1_000, &mut rng)
+        .unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+    assert_eq!(blocked_state(&t.core), vec![(carol_fp, true)]);
+}
+
+#[test]
+fn a_new_device_receives_the_blocks() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(32);
+    let mut a = create(d.path(), "a", 1, &mut rng);
+    let carol = create(d.path(), "carol", 6, &mut rng);
+    let card = carol.core.contact_card("Carol").unwrap();
+    let carol_fp = a
+        .core
+        .add_contact(&card, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    a.core.block_contact(&carol_fp, NOW, &mut rng).unwrap();
+    let offer = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
+    let out = a.core.link_device(&req, false, NOW, &mut rng).unwrap();
+    t.core.finish_link(&out.bundle, None, NOW).unwrap();
+    assert_eq!(blocked_state(&t.core), vec![(carol_fp, false)]);
+    sync_round(&mut a, &mut t, &mut rng);
+    assert_eq!(blocked_state(&t.core), vec![(carol_fp, true)]);
+}

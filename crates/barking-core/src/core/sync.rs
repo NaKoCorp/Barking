@@ -22,7 +22,7 @@ use crate::envelope::{self, Body, Envelope, SyncOp};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint};
 use crate::packet::Packet;
-use crate::store::{ContactClock, Direction, MessageId, MessageStatus, Queries};
+use crate::store::{BlockState, ContactClock, Direction, MessageId, MessageStatus, Queries};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -275,6 +275,31 @@ pub(super) fn send_state(
         verified: row.verified,
         verified_at: q.verified_at(fp)?,
     };
+    send_op(q, device, op, time, rng)?;
+    // The block register goes along, once it has ever changed: a device
+    // that missed the `Block` operation catches up with the next state.
+    let block = q.block_state(fp)?;
+    if block.at != 0 {
+        send_block(q, device, fp, &block, time, rng)?;
+    }
+    Ok(())
+}
+
+/// Queues the block register of `fp` (`SyncOp::Block`).
+pub(super) fn send_block(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    fp: Fingerprint,
+    state: &BlockState,
+    time: SealTime,
+    rng: &mut impl CryptoRng,
+) -> Result<()> {
+    let op = SyncOp::Block {
+        fp,
+        blocked: state.blocked,
+        at: state.at,
+        since: state.since,
+    };
     send_op(q, device, op, time, rng)
 }
 
@@ -423,6 +448,19 @@ fn apply_op(
     let (fp, removing) = match op {
         SyncOp::Upsert { card, .. } | SyncOp::UpsertV2 { card, .. } => (card.fingerprint(), false),
         SyncOp::Remove(fp) => (*fp, true),
+        SyncOp::Block {
+            fp,
+            blocked,
+            at,
+            since,
+        } => {
+            let state = BlockState {
+                blocked: *blocked,
+                at: *at,
+                since: *since,
+            };
+            return contacts::merge_block(q, *fp, &state);
+        }
     };
     // The verified status is its own register: merged whatever the clock of
     // the contact's other operations.
@@ -433,7 +471,7 @@ fn apply_op(
             verified_at,
             ..
         } => Some((*verified, *verified_at)),
-        SyncOp::Remove(_) => None,
+        SyncOp::Remove(_) | SyncOp::Block { .. } => None,
     };
     if let Some((verified, at)) = register {
         contacts::merge_verified(q, fp, verified, at)?;
@@ -469,6 +507,8 @@ fn apply_op(
                 contacts::delete_in(q, *fp, now)?;
             }
         }
+        // Returned above.
+        SyncOp::Block { .. } => {}
     }
     q.set_contact_clock(fp, &clock)
 }

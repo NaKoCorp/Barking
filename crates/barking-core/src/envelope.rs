@@ -89,6 +89,16 @@ pub enum SyncOp {
         verified: bool,
         verified_at: u64,
     },
+    /// Block register of a contact: its own register, the most recent
+    /// change wins, whatever the contact's other operations (and whether the
+    /// contact is known yet). `since`: start of the last block. Appended
+    /// last: older devices refuse it and keep showing the contact.
+    Block {
+        fp: Fingerprint,
+        blocked: bool,
+        at: u64,
+        since: u64,
+    },
 }
 
 /// Encrypted content of a packet. No sender identity.
@@ -127,6 +137,7 @@ impl fmt::Debug for SyncOp {
             SyncOp::Upsert { .. } => "Upsert",
             SyncOp::Remove(_) => "Remove",
             SyncOp::UpsertV2 { .. } => "UpsertV2",
+            SyncOp::Block { .. } => "Block",
         })
     }
 }

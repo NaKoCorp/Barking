@@ -35,6 +35,7 @@ pub const R_BAD_CONTENT: &str = "authenticated but malformed content";
 pub const R_ID_MISMATCH: &str = "inconsistent packet identifier";
 pub const R_STALE: &str = "message too old or dated in the future";
 pub const R_ID_REUSED: &str = "packet identifier already used";
+pub const R_BLOCKED: &str = "blocked contact";
 
 /// Maximum number of sessions kept per remote device.
 const MAX_SESSIONS_PER_DEVICE: usize = 2;
@@ -529,6 +530,12 @@ fn accept(
         (Body::CardUpdate(_), true) => {
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
+        }
+        // A blocked contact's text: dropped like a refused packet (ratchet
+        // kept, marked seen, no ack), so its sender sees it undelivered.
+        (Body::Text(_), false) if q.block_state(o.row.contact_fp)?.drops(env.sent_at) => {
+            let id = Some(authenticated_id);
+            return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
         }
         (Body::Text(t), false) => t.clone(),
         // My devices do not exchange texts with each other: a text coming from me

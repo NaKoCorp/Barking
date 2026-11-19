@@ -261,6 +261,9 @@ impl Core {
         if text.len() > MAX_TEXT_LEN {
             return Err(CoreError::TooLarge);
         }
+        if self.store.block_state(*to)?.blocked {
+            return Err(CoreError::ContactBlocked);
+        }
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             let message_id = new_message_id(rng);

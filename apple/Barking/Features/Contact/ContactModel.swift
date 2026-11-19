@@ -59,4 +59,7 @@ final class ContactModel {
     }
 
     func delete() async { try? await core.removeContact(contact) }
+
+    /// Blocks the contact; false if the core did not record it.
+    func block() async -> Bool { (try? await core.blockContact(contact)) != nil }
 }

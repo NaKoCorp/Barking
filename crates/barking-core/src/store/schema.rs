@@ -228,6 +228,21 @@ CREATE INDEX IF NOT EXISTS transparency_class_id ON transparency(class, id);
 pub const CONTACTS_ADD_VERIFIED_AT: &str =
     "ALTER TABLE contacts ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0;";
 
+/// Blocked contacts (created at open, idempotent), one register per
+/// fingerprint, kept when the contact is deleted so that adding its card
+/// again does not lift the block. `blocked`: current state; `at`: date of the
+/// last change (the most recent change wins between my devices); `since`:
+/// start of the last block, which with `at` bounds the period whose
+/// messages stay dropped after an unblock. Synchronized (`SyncOp::Block`).
+pub const CONTACT_BLOCKS: &str = "
+CREATE TABLE IF NOT EXISTS contact_blocks (
+    fp BLOB PRIMARY KEY NOT NULL,
+    blocked INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    since INTEGER NOT NULL
+);
+";
+
 /// Route of each packet (spec block 2b §4.1), created at open
 /// (idempotent). `step`: `RouteStep` as stored, fixed order, additions at
 /// the end. `node`: a node's short identifier, never an address. `size`:

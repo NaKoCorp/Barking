@@ -10,6 +10,7 @@
 mod schema;
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 
@@ -81,6 +82,26 @@ pub struct ContactRow {
     pub card: Vec<u8>,
     pub alias: String,
     pub verified: bool,
+}
+
+/// Block register of a contact (`contact_blocks`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockState {
+    pub blocked: bool,
+    /// Date of the last change (0: never changed).
+    pub at: u64,
+    /// Start of the last block (0: never blocked).
+    pub since: u64,
+}
+
+impl BlockState {
+    /// Is a message dated `sent_at` dropped? Every message while blocked;
+    /// after an unblock, those dated within the last blocked period,
+    /// which this device may fetch only now (it stopped watching the
+    /// contact's mailboxes).
+    pub fn drops(&self, sent_at: u64) -> bool {
+        self.blocked || (self.since != 0 && self.since <= sent_at && sent_at < self.at)
+    }
 }
 
 /// Last known operation on a contact (last writer wins between
@@ -577,6 +598,9 @@ impl Store {
         self.conn
             .execute_batch(schema::ROUTE_STEPS)
             .map_err(map_err)?;
+        self.conn
+            .execute_batch(schema::CONTACT_BLOCKS)
+            .map_err(map_err)?;
         // Last: the backfill reads `deliveries.own` and `route_steps`.
         if stored.is_none_or(|v| v < 3) {
             schema::migrate_v2_to_v3(&self.conn).map_err(map_err)?;
@@ -956,6 +980,92 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         Ok(Some(MessageId(arr(mid)?)))
+    }
+
+    /// Block register of `fp` (default: never blocked).
+    fn block_state(&self, fp: Fingerprint) -> Result<BlockState> {
+        let row: Option<(bool, i64, i64)> = self
+            .conn()
+            .query_row(
+                "SELECT blocked, at, since FROM contact_blocks WHERE fp = ?1",
+                params![fp.0.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(map_err)?;
+        Ok(
+            row.map_or_else(BlockState::default, |(blocked, at, since)| BlockState {
+                blocked,
+                at: to_u64(at),
+                since: to_u64(since),
+            }),
+        )
+    }
+
+    /// Writes the block register of `fp`.
+    fn set_block_state(&self, fp: Fingerprint, state: &BlockState) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO contact_blocks(fp, blocked, at, since) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(fp) DO UPDATE SET blocked = excluded.blocked, at = excluded.at, \
+                 since = excluded.since",
+                params![
+                    fp.0.as_slice(),
+                    state.blocked,
+                    to_i64(state.at),
+                    to_i64(state.since)
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Every block register, by fingerprint.
+    fn block_states(&self) -> Result<Vec<(Fingerprint, BlockState)>> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT fp, blocked, at, since FROM contact_blocks ORDER BY fp")
+            .map_err(map_err)?;
+        let raws = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, bool>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        raws.into_iter()
+            .map(|(fp, blocked, at, since)| {
+                Ok((
+                    Fingerprint(arr(fp)?),
+                    BlockState {
+                        blocked,
+                        at: to_u64(at),
+                        since: to_u64(since),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Fingerprints currently blocked.
+    fn blocked_fingerprints(&self) -> Result<HashSet<Fingerprint>> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT fp FROM contact_blocks WHERE blocked = 1")
+            .map_err(map_err)?;
+        let raws = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        raws.into_iter()
+            .map(|fp| Ok(Fingerprint(arr(fp)?)))
+            .collect()
     }
 
     /// Last known operation on the contact `fp`.

@@ -41,6 +41,10 @@ pub enum BarkingError {
     /// card): the message cannot be sealed again. Added last.
     #[error("no session")]
     NoSession,
+    /// The contact is blocked: nothing is sent to it, and its card is not
+    /// added again until it is unblocked. Added last.
+    #[error("contact blocked")]
+    ContactBlocked,
 }
 
 /// Why a link step was refused (spec iOS messaging §5.8).
@@ -115,6 +119,7 @@ impl From<CoreError> for BarkingError {
             CoreError::IsAdmin => BarkingError::IsAdmin,
             CoreError::NothingToRetry => BarkingError::NothingToRetry,
             CoreError::NoSession => BarkingError::NoSession,
+            CoreError::ContactBlocked => BarkingError::ContactBlocked,
             _ => BarkingError::Internal { detail },
         }
     }

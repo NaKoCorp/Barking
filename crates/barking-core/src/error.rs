@@ -49,6 +49,10 @@ pub enum CoreError {
     /// is `NotDelivered`. Added last.
     #[error("nothing to retry")]
     NothingToRetry,
+    /// The contact is blocked: nothing is sent to it, and its card is not
+    /// added again until it is unblocked. Added last.
+    #[error("contact blocked")]
+    ContactBlocked,
 }
 
 impl From<barking_packet::PacketError> for CoreError {

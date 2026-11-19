@@ -40,6 +40,10 @@ struct SettingsView: View {
                     NavigationLink { SecuritySettingsView() } label: {
                         FormRow("Security", subtitle: "Lock and erase", icon: "lock") { RowGlyph() }
                     }
+                    NavigationLink { BlockedContactsView(core: core) } label: {
+                        FormRow("Blocked contacts", subtitle: "Their messages no longer reach you", icon: "hand.raised") { RowGlyph() }
+                    }
+                    .accessibilityIdentifier("settings.blocked")
                     NavigationLink { TransparencyView(core: core) } label: {
                         FormRow("Transparency", subtitle: "What this phone did, and who could see it", icon: "eye") { RowGlyph() }
                     }

@@ -184,6 +184,19 @@ public actor CoreService {
         try await call("unverify") { try $0.unmarkVerified(contact: contact) }
         publish(.contacts)
     }
+    /// Blocks a contact: it leaves the contact and chat lists, its messages
+    /// are dropped and nothing is sent to it. Synchronized with my devices.
+    public func blockContact(_ contact: String) async throws {
+        try await call("block") { try $0.blockContact(contact: contact) }
+        publish(.contacts)
+    }
+    public func unblockContact(_ contact: String) async throws {
+        try await call("unblock") { try $0.unblockContact(contact: contact) }
+        publish(.contacts)
+    }
+    public func blockedContacts() async throws -> [Contact] {
+        try await call("blocked") { try $0.blockedContacts() }
+    }
     public func safetyNumber(for contact: String) async throws -> [String] {
         try await call("safety") { try $0.safetyNumber(contact: contact) }
     }

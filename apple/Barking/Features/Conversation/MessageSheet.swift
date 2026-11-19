@@ -323,6 +323,9 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func removeContact(contact: String) throws { throw Never() }
     func markVerified(contact: String) throws { throw Never() }
     func unmarkVerified(contact: String) throws { throw Never() }
+    func blockContact(contact: String) throws { throw Never() }
+    func unblockContact(contact: String) throws { throw Never() }
+    func blockedContacts() throws -> [Contact] { [] }
     func safetyNumber(contact: String) throws -> [String] { throw Never() }
     func unreadCounts() throws -> [UnreadCount] { throw Never() }
     func chatSummaries() throws -> [ChatSummary] { throw Never() }

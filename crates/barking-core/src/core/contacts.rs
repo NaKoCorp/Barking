@@ -4,11 +4,12 @@ use std::collections::HashSet;
 
 use rand_core::CryptoRng;
 
+use super::send::SealTime;
 use super::{Core, OwnDevices, load_card, log, sync};
 use crate::contact::ContactCard;
 use crate::envelope::SyncOp;
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
-use crate::store::{ContactClock, ContactRow, Queries};
+use crate::store::{BlockState, ContactClock, ContactRow, Queries};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
@@ -22,6 +23,9 @@ pub struct ContactSummary {
     pub alias: Option<String>,
     pub display_name: String,
     pub verified: bool,
+    /// Blocked: hidden from the contact and chat lists, nothing sent to it,
+    /// its messages dropped (see `block_contact`).
+    pub blocked: bool,
 }
 
 /// Stored alias: the empty string means "no alias".
@@ -49,6 +53,9 @@ impl Core {
         rng: &mut impl CryptoRng,
     ) -> Result<Fingerprint> {
         self.ensure_active()?;
+        if self.store.block_state(card.fingerprint())?.blocked {
+            return Err(CoreError::ContactBlocked);
+        }
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             let me = device.public().id();
@@ -122,6 +129,47 @@ impl Core {
         })
     }
 
+    /// Blocks a known contact: its texts are dropped without an ack (the
+    /// sender sees them undelivered), its mailboxes are no longer watched
+    /// (no fetch, no push wake), nothing is sent to it, and the apps hide
+    /// it and its history, which stays stored. Its card updates are still
+    /// accepted, so that unblocking finds working sessions. The block
+    /// survives the contact's deletion: its card is not added again until
+    /// it is unblocked. Synchronized with my other devices.
+    pub fn block_contact(
+        &mut self,
+        contact: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<()> {
+        self.ensure_active()?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
+            set_block_in(tx, device, *contact, true, now, rng)
+        })
+    }
+
+    /// Lifts the block of `contact`, known or not (a blocked contact may
+    /// have been deleted since). The messages it sent while blocked stay
+    /// dropped, even those fetched only now. Never blocked: no effect.
+    /// Synchronized with my other devices.
+    pub fn unblock_contact(
+        &mut self,
+        contact: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<()> {
+        self.ensure_active()?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            if !tx.block_state(*contact)?.blocked {
+                return Ok(());
+            }
+            set_block_in(tx, device, *contact, false, now, rng)
+        })
+    }
+
     /// Changes the alias of a known contact; an empty alias removes it. Alias
     /// too long: `TooLarge`; already taken by another contact: refused.
     /// Synchronized with my other devices.
@@ -160,6 +208,7 @@ impl Core {
 
     /// All contacts, sorted by alias.
     pub fn contacts(&self) -> Result<Vec<ContactSummary>> {
+        let blocked = self.store.blocked_fingerprints()?;
         self.store
             .list_contacts()?
             .into_iter()
@@ -170,6 +219,7 @@ impl Core {
                     alias: alias_of(&row.alias),
                     display_name: card.display_name,
                     verified: row.verified,
+                    blocked: blocked.contains(&row.fp),
                 })
             })
             .collect()
@@ -511,6 +561,39 @@ fn set_verified_in(q: &impl Queries, fp: Fingerprint, verified: bool, now: u64) 
     q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
     let at = now.max(q.verified_at(fp)?.saturating_add(1));
     q.set_verified(fp, verified, at)
+}
+
+/// Local block change of `fp`, queued for my other devices. Its date
+/// strictly follows the last known one, so that it wins over every change
+/// this device has seen; a block starts its period, an unblock keeps it.
+fn set_block_in(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    fp: Fingerprint,
+    blocked: bool,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<()> {
+    let known = q.block_state(fp)?;
+    let at = now.max(known.at.saturating_add(1));
+    let since = if blocked && !known.blocked {
+        at
+    } else {
+        known.since
+    };
+    let state = BlockState { blocked, at, since };
+    q.set_block_state(fp, &state)?;
+    sync::send_block(q, device, fp, &state, SealTime::at(now), rng)
+}
+
+/// Merges a received block register: the most recent change wins; at an
+/// equal date, the block, so that all my devices decide the same way.
+pub(super) fn merge_block(q: &impl Queries, fp: Fingerprint, state: &BlockState) -> Result<()> {
+    let known = q.block_state(fp)?;
+    if (state.at, state.blocked) > (known.at, known.blocked) {
+        q.set_block_state(fp, state)?;
+    }
+    Ok(())
 }
 
 /// Merges a received verified register: the most recent change wins; an

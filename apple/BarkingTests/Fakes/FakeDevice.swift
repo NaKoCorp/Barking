@@ -77,6 +77,24 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if let verifyError { throw verifyError }
         verified.remove(contact)
     }
+    /// Blocked contacts move from `contactList` to `blockedList`.
+    var blockedList: [Contact] = []
+    var blockError: Error?
+    func blockContact(contact: String) throws {
+        if let blockError { throw blockError }
+        guard let i = contactList.firstIndex(where: { $0.fingerprint == contact }) else { throw BarkingError.NotFound }
+        var c = contactList.remove(at: i)
+        c.blocked = true
+        blockedList.append(c)
+    }
+    func unblockContact(contact: String) throws {
+        if let blockError { throw blockError }
+        guard let i = blockedList.firstIndex(where: { $0.fingerprint == contact }) else { return }
+        var c = blockedList.remove(at: i)
+        c.blocked = false
+        contactList.append(c)
+    }
+    func blockedContacts() throws -> [Contact] { blockedList }
     func safetyNumber(contact: String) throws -> [String] { Array(repeating: "12345", count: 12) }
     func unreadCounts() throws -> [UnreadCount] { unread }
     func chatSummaries() throws -> [ChatSummary] {

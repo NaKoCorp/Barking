@@ -155,6 +155,17 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
+    /// Blocking a contact: every string of the flow lands in French.
+    func testBlockStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        for key in ["Block this contact", "Block %@?", "Block", "Blocked contacts", "Unblock", "Unblock %@",
+                    "No blocked contacts",
+                    "You blocked this person. Unblock them in Settings › Blocked contacts first."] {
+            XCTAssertNotNil(fr[key], "missing French for \(key)")
+        }
+        XCTAssertEqual(fr["Blocked contacts"] as? String, "Contacts bloqués")
+    }
+
     /// UI review B4: messaging and status strings land in both languages.
     func testMessagingStringsInFrench() throws {
         let fr = try XCTUnwrap(table("fr"))

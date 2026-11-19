@@ -88,6 +88,7 @@ struct ChatsView: View {
                 if change == .contacts || change == .network || { if case .messages = change { true } else if case .delivery = change { true } else { false } }() {
                     await model.reload()
                 }
+                if change == .contacts { await closeBlocked() }
             }
         }
         .onChange(of: router.pendingOpen, initial: true) { _, target in
@@ -107,6 +108,14 @@ struct ChatsView: View {
 }
 
 extension ChatsView {
+    /// A blocked contact leaves the chats: its open conversation closes.
+    private func closeBlocked() async {
+        guard let open = path.last,
+              let blocked = try? await core.blockedContacts(),
+              blocked.contains(where: { $0.fingerprint == open }) else { return }
+        path = []
+    }
+
     /// After the add sheet: the new contact's conversation, unless it was
     /// deleted from its safety code meanwhile.
     private func openAdded() {
