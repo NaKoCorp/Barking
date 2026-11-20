@@ -250,6 +250,12 @@ final class MessageSheetModelTests: XCTestCase {
             XCTAssertEqual(last.phase, .ahead)
             XCTAssertEqual(last.detail, "\(prefix)\(on).", code)
         }
+        // Past the expiry, the verdict line speaks: no "waits until" a past date.
+        let l = try lang("en")
+        let late = MessageSheetModel.lines(for: md, sealedSize: 1024, contactName: "Alice", bundle: l.bundle,
+                                           locale: l.locale, timeZone: utc,
+                                           now: until.addingTimeInterval(60))
+        XCTAssertNil(late.last?.detail)
         // Not on the network: nothing waits yet, or it is over.
         XCTAssertNil(try lines(sheet(delivery(.pending, pending: 1))).last?.detail)
         let got = delivery(.received, deposited: t0 + 34, received: t0 + 60, devicesReceived: 1, left: 1)

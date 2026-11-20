@@ -268,7 +268,7 @@ enum MessageSheetSamples {
                           DeviceDelivery(device: "d4e5f6", name: "iPad", state: .onNetwork, sealedAt: t0,
                                          depositedAt: t0 + 36, node: "K7QX2M4A", receivedAt: nil, expiredAt: nil)],
                 relays: [relay], ownCopies: copies)),
-            ("notdelivered", MessageDelivery(messageId: 1, delivery: delivery(.notDelivered, expired: t0 + 86_400),
+            ("notdelivered", MessageDelivery(messageId: 1, delivery: delivery(.notDelivered, expired: t0 + messageLifetimeSecs()),
                                              devices: [], relays: [], ownCopies: OwnCopies(total: 0, left: 0, waiting: 0))),
             ("mixed", MessageDelivery(
                 messageId: 1,

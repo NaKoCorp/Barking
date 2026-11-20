@@ -59,7 +59,7 @@ final class MessageSheetModel {
     /// (`DEFAULT_TTL_SECS`), never a number written here.
     static let lifetime = TimeInterval(messageLifetimeSecs())
     /// The lifetime in whole days, for the texts.
-    static var lifetimeDays: Int { Int(messageLifetimeSecs() / 86_400) }
+    static var lifetimeDays: Int { Int(lifetime / 86_400) }
 
     private let core: CoreService
     let messageId: Int64
@@ -257,7 +257,8 @@ final class MessageSheetModel {
 
     /// The timeline of a sent message, top to bottom (§6.4 point 3).
     static func lines(for md: MessageDelivery, sealedSize: UInt32?, contactName: String,
-                      bundle: Bundle = .main, locale: Locale = .current, timeZone: TimeZone = .current) -> [Line] {
+                      bundle: Bundle = .main, locale: Locale = .current, timeZone: TimeZone = .current,
+                      now: Date = .now) -> [Line] {
         let d = md.delivery
         let date = { (s: UInt64) in Date(timeIntervalSince1970: TimeInterval(s)) }
         var out: [Line] = []
@@ -353,9 +354,11 @@ final class MessageSheetModel {
                 out.append(Line(id: "all", glyph: .received, title: all, at: nil, detail: nil, phase: .ahead))
             }
         }
-        // On the network: the receipt can come until the packet is erased.
-        if d.state == .onNetwork, let last = out.indices.last, out[last].phase == .ahead {
-            let until = dayAndTime(Date(timeIntervalSince1970: TimeInterval(d.sealedAt) + lifetime),
+        // On the network: the receipt can come until the packet is erased
+        // (past that, the verdict line speaks instead).
+        let expiry = Date(timeIntervalSince1970: TimeInterval(d.sealedAt) + lifetime)
+        if d.state == .onNetwork, now <= expiry, let last = out.indices.last, out[last].phase == .ahead {
+            let until = dayAndTime(expiry,
                                    bundle: bundle, locale: locale, timeZone: timeZone)
             out[last].detail = String(localized: "It waits on the relays until \(until).", bundle: bundle, locale: locale)
         }
