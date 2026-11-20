@@ -1096,12 +1096,24 @@ async fn full_sync_reads_past_v3_responsibles() {
 async fn full_sync_on_a_v3_network_still_polls() {
     // Every node speaks 3: a complete fetch from the best responsible
     // settles each mailbox once no newer one is left; the window moves.
-    let (_dir, mut core, mut net) = setup();
+    let (_dir, mut core, ack) = subject_with_ack(NOW);
+    let mut net = setup_with(&mut core);
     net.v3 = net.records.keys().copied().collect();
+    // Every responsible holds the receipt: it is read from each of them.
+    let (_, m) = message(&mut core);
+    net.mailbox_items.insert(m, vec![ack]);
     let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.polled_all_sessions);
     assert!(report.mailboxes_polled >= sessions.len());
+    // Read again, the same item is neither an error nor a second receipt.
+    assert_eq!(report.receive_errors, 0);
+    let acks = report
+        .received
+        .iter()
+        .filter(|o| matches!(o, ReceiveOutcome::AckReceived { .. }))
+        .count();
+    assert_eq!(acks, 1, "{:?}", report.received);
     // Not one mailbox counted twice.
     let mut fresh = setup();
     let base = sync(&mut fresh.1, &fresh.2, opts()).await;
@@ -2367,6 +2379,34 @@ async fn wake_subscriptions_prefer_v4_responsibles() {
     assert_eq!(acks.len(), crate::push::WAKE_NODES, "{acks:?}");
     assert!(acks.contains(&r[3]) && acks.contains(&r[4]), "{acks:?}");
     assert_eq!(acks.iter().filter(|n| r[..3].contains(n)).count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn message_wake_subscriptions_prefer_v4_responsibles() {
+    // Today's own mailbox, fetched by the sync: its three best-ranked
+    // responsibles speak 3.
+    let (_dir, mut core, mut net) = setup();
+    let m = horizon(&core)[0].0;
+    assert!(
+        core.watched_mailbox_groups(NOW)
+            .unwrap()
+            .sessions
+            .contains(&m)
+            || core.watched_mailbox_groups(NOW).unwrap().intro.contains(&m)
+    );
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert_eq!(r.len(), crate::RESPONSIBLES);
+    rank_first(&mut core, &r[..3]);
+    net.v3.extend(r[..3].iter().copied());
+    sync(&mut core, &net, push_opts()).await;
+    let subs: HashSet<NodeId> = subscribes_of(&net.calls(), SubKind::Messages)
+        .into_iter()
+        .filter(|(_, mb)| *mb == m)
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(subs.len(), crate::push::WAKE_NODES, "{subs:?}");
+    assert!(subs.contains(&r[3]) && subs.contains(&r[4]), "{subs:?}");
+    assert_eq!(subs.iter().filter(|n| r[..3].contains(n)).count(), 1);
 }
 
 #[tokio::test(start_paused = true)]
