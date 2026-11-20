@@ -134,6 +134,18 @@ pub fn plan_deposits(
     responsibles: impl Fn(&MailboxId) -> Vec<NodeId>,
     now: u64,
 ) -> Vec<PlannedDeposit> {
+    plan_packet_deposits(outbox, ledger, |p| responsibles(&p.mailbox), now)
+}
+
+/// `plan_deposits`, with the candidate nodes given per packet: the caller
+/// can leave out, for one packet, the nodes that cannot take it (a protocol
+/// too old for its expiry); the next responsibles stand in, in rank order.
+pub fn plan_packet_deposits(
+    outbox: &[Vec<u8>],
+    ledger: &Ledger,
+    responsibles: impl Fn(&Packet) -> Vec<NodeId>,
+    now: u64,
+) -> Vec<PlannedDeposit> {
     let empty = PacketState::default();
     let mut seen = HashSet::new();
     let (mut acks, mut first, mut resends, mut extra) = (vec![], vec![], vec![], vec![]);
@@ -153,7 +165,7 @@ pub fn plan_deposits(
             is_ack,
             first_copy,
         };
-        let mut nodes = responsibles(&p.mailbox)
+        let mut nodes = responsibles(&p)
             .into_iter()
             .filter(|n| state.eligible(n, now));
         let needed = CLIENT_COPIES.saturating_sub(state.accepted.len());
@@ -385,6 +397,30 @@ mod tests {
         accept(&mut ledger, &ack(4), 1, NOW);
         let plan = plan_deposits(&[ack(4), vec![1, 2, 3]], &ledger, five, NOW);
         assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn per_packet_candidates_let_the_next_responsibles_stand_in() {
+        // Nodes 9 and 1 cannot take message 1 (but take the receipt): the
+        // copies go to the next ones in rank order, the receipt to node 9.
+        let ranked = [node(9), node(1), node(2), node(3), node(4)];
+        let candidates = |p: &Packet| {
+            ranked
+                .iter()
+                .copied()
+                .filter(|n| p.kind == Kind::Ack || (*n != node(9) && *n != node(1)))
+                .collect()
+        };
+        let plan = plan_packet_deposits(&[msg(1), ack(4)], &Ledger::default(), candidates, NOW);
+        assert_eq!(
+            summary(&plan),
+            vec![
+                (4, 9, true, true),
+                (1, 2, false, true),
+                (1, 3, false, false),
+                (1, 4, false, false),
+            ]
+        );
     }
 
     #[test]

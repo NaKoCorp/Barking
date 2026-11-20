@@ -176,6 +176,14 @@ public actor CoreService {
         try await call("remove") { try $0.removeContact(contact: contact) }
         publish(.contacts)
     }
+    /// Keeps the unsent text of a conversation (blank clears it). No change
+    /// is published: nothing else shows a draft.
+    public func setDraft(_ contact: String, text: String) async throws {
+        try await call("draft-set") { try $0.setDraft(contact: contact, text: text) }
+    }
+    public func draft(_ contact: String) async throws -> String? {
+        try await call("draft") { try $0.draft(contact: contact) }
+    }
     public func markVerified(_ contact: String) async throws {
         try await call("verify") { try $0.markVerified(contact: contact) }
         publish(.contacts)

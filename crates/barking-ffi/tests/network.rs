@@ -432,10 +432,10 @@ async fn sync_reports_failed_after_verdict() {
     .await
     .unwrap();
 
-    // Bob stays offline; two days later the relays purged the message.
-    // Alice's packet expired three hours ago: past the replication slack,
-    // within the nodes' ack grace.
-    set_clock_offset(2 * 86_400);
+    // Bob stays offline; a day past its lifetime the relays purged the
+    // message. Alice's packet expired three hours ago: past the
+    // replication slack, within the nodes' ack grace.
+    set_clock_offset(barking_core::packet::DEFAULT_TTL_SECS + 86_400);
     tokio::time::sleep(TICK * 5).await;
     tokio::task::spawn_blocking(move || {
         let store = Store::open(&da.path().join("barking.db"), &[1; 32]).unwrap();

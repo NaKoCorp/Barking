@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 86_400;
-/// A delivery late but still before the 24-hour expiry.
+/// A delivery late but still well before the packet's expiry.
 const LATE: u64 = DAY - 3_600;
 const T: &str = "file";
 
@@ -466,8 +466,9 @@ fn stale_initial_replayed_into_today_mailbox_quarantined() {
         ReceiveOutcome::Quarantined { reason } => assert!(reason.contains("too old"), "{reason}"),
         other => panic!("Quarantined expected, got {other:?}"),
     }
-    // The session that this old Initial would have opened is not created.
-    assert_eq!(b.core.watched_mailboxes(later).unwrap().len(), 3);
+    // The session that this old Initial would have opened is not created:
+    // only the 10 intro mailboxes of the window.
+    assert_eq!(b.core.watched_mailboxes(later).unwrap().len(), 10);
     assert!(b.core.messages_with(&a.fp()).unwrap().is_empty());
 }
 
@@ -819,27 +820,27 @@ fn open_wrong_key_and_double_create() {
 }
 
 #[test]
-fn watched_mailboxes_cover_three_days() {
+fn watched_mailboxes_cover_ten_days() {
     let (mut a, mut b, mut rng) = pair();
-    // Without a session: 3 intro mailboxes.
-    assert_eq!(b.core.watched_mailboxes(NOW).unwrap().len(), 3);
+    // Without a session: 10 intro mailboxes (8 days back to the next day).
+    assert_eq!(b.core.watched_mailboxes(NOW).unwrap().len(), 10);
     let p = one(a.send(&b.fp(), "x", NOW, &mut rng));
     assert!(b.core.watched_mailboxes(NOW).unwrap().contains(&p.mailbox));
     assert!(
         b.core
-            .watched_mailboxes(NOW + DAY)
+            .watched_mailboxes(NOW + 8 * DAY)
             .unwrap()
             .contains(&p.mailbox)
     );
     assert!(
         !b.core
-            .watched_mailboxes(NOW + 2 * DAY)
+            .watched_mailboxes(NOW + 9 * DAY)
             .unwrap()
             .contains(&p.mailbox)
     );
     expect_msg(b.recv(&p, NOW, &mut rng));
-    // With a session: 3 more mailboxes.
-    assert_eq!(b.core.watched_mailboxes(NOW).unwrap().len(), 6);
+    // With a session: 10 more mailboxes.
+    assert_eq!(b.core.watched_mailboxes(NOW).unwrap().len(), 20);
 }
 
 #[test]
@@ -859,16 +860,16 @@ fn offline_five_days_still_watches_missed_days() {
 }
 
 #[test]
-fn polling_window_capped_at_nine_days() {
+fn polling_window_capped_at_ten_days() {
     let (_a, mut b, _rng) = pair();
     let bob_dev = b.card("Bob").devices.certs[0].device;
     b.core.mark_polled(NOW).unwrap();
     let later = NOW + 20 * DAY;
     let watched = b.core.watched_mailboxes(later).unwrap();
-    // 7 days back, the same day and the next day.
-    assert_eq!(watched.len(), 9);
+    // 8 days back, the same day and the next day.
+    assert_eq!(watched.len(), 10);
     let last = day_of(later) + 1;
-    for d in last - 8..=last {
+    for d in last - 9..=last {
         assert!(watched.contains(&intro_mailbox(&bob_dev, d)), "day {d}");
     }
 }
@@ -1233,7 +1234,7 @@ fn skipped_key_is_still_usable_a_day_later() {
     let stored = s + 1 - DAY;
     assert_eq!(expect_msg(b.recv(&p2, stored, &mut rng)).2, "p2");
     // A skipped key is still usable about a day later (the packet, which
-    // lives 24 hours, is still unexpired). The purge of a key skipped for
+    // lives `DEFAULT_TTL_SECS`, is still unexpired). The purge of a key skipped for
     // more than 7 days is covered by crates/barking-core/src/ratchet/tests.rs.
     assert_eq!(expect_msg(b.recv(&q1, s + 3_000, &mut rng)).2, "q1");
 }

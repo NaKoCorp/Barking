@@ -634,6 +634,7 @@ impl Store {
         self.conn
             .execute_batch(schema::CONTACT_BLOCKS)
             .map_err(map_err)?;
+        self.conn.execute_batch(schema::DRAFTS).map_err(map_err)?;
         // Last: the backfill reads `deliveries.own` and `route_steps`.
         if stored.is_none_or(|v| v < 3) {
             schema::migrate_v2_to_v3(&self.conn).map_err(map_err)?;
@@ -1033,6 +1034,38 @@ pub trait Queries {
                 since: to_u64(since),
             }),
         )
+    }
+
+    /// The draft typed for `fp`, if any.
+    fn draft(&self, fp: Fingerprint) -> Result<Option<String>> {
+        self.conn()
+            .query_row(
+                "SELECT text FROM drafts WHERE fp = ?1",
+                params![fp.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(map_err)
+    }
+
+    /// Writes the draft of `fp`, replacing the previous one.
+    fn put_draft(&self, fp: Fingerprint, text: &str, at: u64) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO drafts(fp, text, at) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(fp) DO UPDATE SET text = excluded.text, at = excluded.at",
+                params![fp.0.as_slice(), text, to_i64(at)],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Deletes the draft of `fp`, if any.
+    fn delete_draft(&self, fp: Fingerprint) -> Result<()> {
+        self.conn()
+            .execute("DELETE FROM drafts WHERE fp = ?1", params![fp.0.as_slice()])
+            .map_err(map_err)?;
+        Ok(())
     }
 
     /// Writes the block register of `fp`.
@@ -1462,6 +1495,7 @@ pub trait Queries {
                 params![fp.0.as_slice()],
             )
             .map_err(map_err)?;
+        self.delete_draft(fp)?;
         self.conn()
             .execute(
                 "DELETE FROM contacts WHERE fp = ?1",

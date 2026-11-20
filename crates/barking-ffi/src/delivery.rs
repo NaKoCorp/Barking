@@ -17,6 +17,13 @@ use crate::device::{Device, now};
 use crate::identity::to_hex;
 use crate::{BarkingError, guard};
 
+/// How long a message waits on the relays, in seconds: the packet's default
+/// lifetime. The apps show it and never write the number themselves.
+#[uniffi::export]
+pub fn message_lifetime_secs() -> u64 {
+    barking_core::packet::DEFAULT_TTL_SECS
+}
+
 /// State of a sent message, or of one of its deliveries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum DeliveryState {
@@ -561,5 +568,20 @@ impl Device {
     /// Packets of `pending_packets`: the network screen's count.
     pub fn pending_count(&self) -> Result<u32, BarkingError> {
         guard(|| self.with_core_read(|core| Ok(core.pending_count(now())?)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The apps show this lifetime; it is the packet's, in whole days.
+    #[test]
+    fn message_lifetime_is_the_packet_ttl_in_whole_days() {
+        assert_eq!(
+            message_lifetime_secs(),
+            barking_core::packet::DEFAULT_TTL_SECS
+        );
+        assert_eq!(message_lifetime_secs() % 86_400, 0);
     }
 }

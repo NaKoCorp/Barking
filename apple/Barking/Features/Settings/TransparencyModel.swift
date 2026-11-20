@@ -322,7 +322,7 @@ final class TransparencyModel {
     }
 
     /// Where the data is: here, the key, the nodes, the log (spec §5).
-    static func dataRows(protection: String) -> [DataRow] {
+    static func dataRows(protection: String, bundle: Bundle = .main, locale: Locale = .current) -> [DataRow] {
         let enclave = protection == "secure-enclave"
         return [
             DataRow(id: "database", icon: "internaldrive", title: String(localized: "Encrypted database on this iPhone"),
@@ -334,7 +334,8 @@ final class TransparencyModel {
                         : String(localized: "Kept in the keychain, without the Secure Enclave.")),
             DataRow(id: "nodes", icon: "point.3.connected.trianglepath.dotted",
                     title: String(localized: "Nothing in clear on the nodes"),
-                    detail: String(localized: "Packets stay there at most 24 hours.")),
+                    detail: String(localized: "Packets stay there at most \(MessageSheetModel.lifetimeDays) days.",
+                                   bundle: bundle, locale: locale)),
             DataRow(id: "log", icon: "clock.arrow.circlepath", title: String(localized: "Journal and paths"),
                     detail: String(localized: "Kept 30 days on this iPhone, never sent.")),
         ]

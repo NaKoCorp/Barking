@@ -80,6 +80,9 @@ final class ConversationModel {
     /// This device was removed from the account: it can no longer send.
     private(set) var removed = false
     var draft = ""
+    /// What the core holds as this conversation's draft, as far as known:
+    /// a save only runs when `draft` differs from it.
+    private var lastSaved = ""
 
     /// Bubbles on screen: only their changes are announced (§8).
     private var onScreen: Set<Int64> = []
@@ -105,9 +108,34 @@ final class ConversationModel {
     func onAppear() async {
         visible = true
         removed = ((try? await core.removed()) ?? nil) != nil
+        await loadDraft()
         await reload()
         let changes = (try? await core.keyChanges(since: 0)) ?? []
         keyChanged = !verified && changes.contains { $0.contact == contact }
+    }
+
+    /// Puts the stored draft in the field, unless something was typed
+    /// meanwhile. A removed device keeps no draft.
+    private func loadDraft() async {
+        guard !removed, draft.isEmpty,
+              let stored = (try? await core.draft(contact)) ?? nil else { return }
+        lastSaved = stored
+        if draft.isEmpty { draft = stored }
+    }
+
+    /// Keeps the draft in the core. Silent: a draft too long for a message,
+    /// a removed device or a core error saves nothing and says nothing; a
+    /// later save tries again. Never while a send runs: the field is empty
+    /// then, and the stored text must stay until the send succeeds.
+    func saveDraft() async {
+        guard !sending else { return }
+        await persistDraft()
+    }
+
+    private func persistDraft() async {
+        guard !removed, byteCount <= Self.maxBytes, draft != lastSaved else { return }
+        let text = draft
+        if (try? await core.setDraft(contact, text: text)) != nil { lastSaved = text }
     }
 
     func onDisappear() {
@@ -220,9 +248,13 @@ final class ConversationModel {
         items.append(shown)
         do {
             try await core.send(text, to: contact)
+            // Sent: the stored draft goes too. Not before, so a failure keeps it.
+            if (try? await core.setDraft(contact, text: "")) != nil { lastSaved = "" }
         } catch {
             draft = text
             sendError = "Not sent. Try again in a moment."
+            // A disappear during the send skipped its save: store it now.
+            await persistDraft()
         }
         // The reload swaps it for the core's row, or drops it on failure.
         shownAtSend = nil

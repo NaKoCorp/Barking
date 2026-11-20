@@ -331,10 +331,6 @@ final class LocalizationTests: XCTestCase {
             "Delete message": "Supprimer le message",
             "Details unavailable. The message itself is unchanged.": "Détails indisponibles. Le message lui-même n’a pas changé.",
             "everything: it is the sender.": "tout\u{00A0}: c’est l’expéditeur.",
-            "None of %@’s devices picked it up within 24 hours. The relay erased it on %@.":
-                "Aucun appareil de %1$@ ne l’a relevé en 24\u{00A0}h. Le relais l’a effacé le %2$@.",
-            "None of %@’s devices picked it up within 24 hours. The relay erased it.":
-                "Aucun appareil de %@ ne l’a relevé en 24\u{00A0}h. Le relais l’a effacé.",
             "Expired before a relay accepted it. It never left this iPhone.":
                 "Expiré avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.",
             "Could see: a sealed packet of %@ for a mailbox that changes every day. Not the sender, not the text. The IP address of whoever deposited it.":
@@ -352,6 +348,26 @@ final class LocalizationTests: XCTestCase {
                 XCTAssertNotNil(plurals[key], "\(lang) plural \(key)")
             }
         }
+    }
+
+    /// §5.3: no text states the old 24 hour lifetime; the days come through
+    /// the stringsdict, in both languages.
+    func testNoStringStatesTheOldLifetime() throws {
+        for lang in ["en", "fr"] {
+            for (key, value) in table(lang) ?? [:] {
+                let text = "\(key) \(value)"
+                XCTAssertFalse(text.contains("24 hours") || text.contains("24 h"), "\(lang): \(key)")
+            }
+            let plurals = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
+            for key in ["Packets stay there at most %lld days.",
+                        "None of %@’s devices picked it up within %lld days. The relay erased it on %@.",
+                        "None of %@’s devices picked it up within %lld days. The relay erased it."] {
+                XCTAssertNotNil(plurals[key], "\(lang) plural \(key)")
+            }
+        }
+        let fr = try XCTUnwrap(table("fr"))
+        XCTAssertNotNil(fr["It waits on the relays until %@."])
+        XCTAssertEqual(fr["It waits on the relays until %@."] as? String, "Il attend sur les relais jusqu’au %@.")
     }
 
     func testPendingStrings() throws {

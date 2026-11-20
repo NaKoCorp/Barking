@@ -618,10 +618,10 @@ fn skipped_total(c: &Core) -> usize {
 #[test]
 fn idle_session_purges_skipped_keys() {
     let mut p = bob_with_two_skipped();
-    // Negative control: at 6 days, the keys are still there.
-    p.b.pending_outbox(NOW + 6 * 86_400).unwrap();
-    assert_eq!(skipped_total(&p.b), 2);
+    // Negative control: at 8 days (the retention), the keys are still there.
     p.b.pending_outbox(NOW + 8 * 86_400).unwrap();
+    assert_eq!(skipped_total(&p.b), 2);
+    p.b.pending_outbox(NOW + 9 * 86_400).unwrap();
     assert_eq!(skipped_total(&p.b), 0);
 }
 
@@ -652,10 +652,10 @@ fn open_purges_skipped_keys() {
     b.receive(&pkts[2].encode(), "t", NOW, &mut rng).unwrap();
     assert_eq!(skipped_total(&b), 1);
     drop(b);
-    let b = Core::open(&path, &key, NOW + 6 * 86_400).unwrap();
+    let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
     assert_eq!(skipped_total(&b), 1);
     drop(b);
-    let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
+    let b = Core::open(&path, &key, NOW + 9 * 86_400).unwrap();
     assert_eq!(skipped_total(&b), 0);
 }
 
@@ -667,7 +667,7 @@ fn corrupt_session_row_does_not_block_pending_outbox() {
     bad.session_id = [0xee; 16];
     bad.state = vec![0xff; 7];
     p.b.store.put_session(&bad).unwrap();
-    let later = NOW + 8 * 86_400;
+    let later = NOW + 9 * 86_400;
     p.b.pending_outbox(later).unwrap();
     assert_eq!(skipped_total(&p.b), 0);
     // The unreadable row is intact and does not prevent reopening.
@@ -709,7 +709,7 @@ fn corrupt_session_row_does_not_block_open() {
     bad.state = vec![0xff; 7];
     b.store.put_session(&bad).unwrap();
     drop(b);
-    let b = Core::open(&path, &key, NOW + 8 * 86_400).unwrap();
+    let b = Core::open(&path, &key, NOW + 9 * 86_400).unwrap();
     assert_eq!(skipped_total(&b), 0);
 }
 
@@ -4747,4 +4747,172 @@ fn summary_query_under_50ms_on_10k_messages() {
     let best = *times.iter().min().unwrap();
     let bound = if cfg!(debug_assertions) { 150 } else { 50 };
     assert!(best < Duration::from_millis(bound), "{best:?}");
+}
+
+#[test]
+fn draft_roundtrip_and_clear() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    assert_eq!(p.a.draft(&bob).unwrap(), None);
+    p.a.set_draft(&bob, "hello", NOW).unwrap();
+    assert_eq!(p.a.draft(&bob).unwrap().as_deref(), Some("hello"));
+    p.a.set_draft(&bob, "hello again", NOW + 1).unwrap();
+    assert_eq!(p.a.draft(&bob).unwrap().as_deref(), Some("hello again"));
+    p.a.set_draft(&bob, "  \n", NOW + 2).unwrap();
+    assert_eq!(p.a.draft(&bob).unwrap(), None);
+}
+
+#[test]
+fn draft_survives_reopen() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("db");
+    let mut rng = StdRng::seed_from_u64(9);
+    let (mut a, _) = Core::create(&path, &[9; 32], "a", NOW, &mut rng).unwrap();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    a.set_draft(&fp, "later", NOW).unwrap();
+    drop(a);
+    let a = Core::open(&path, &[9; 32], NOW).unwrap();
+    assert_eq!(a.draft(&fp).unwrap().as_deref(), Some("later"));
+}
+
+#[test]
+fn draft_refuses_oversize_and_unknown() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    p.a.set_draft(&bob, "keep", NOW).unwrap();
+    // The same error `send_text` gives for an oversize text.
+    assert_eq!(
+        p.a.set_draft(&bob, &"a".repeat(4001), NOW),
+        p.a.send_text(&bob, &"a".repeat(4001), NOW, &mut p.rng)
+            .map(|_| ())
+    );
+    assert_eq!(
+        p.a.set_draft(&bob, &"a".repeat(4001), NOW),
+        Err(CoreError::TooLarge)
+    );
+    assert_eq!(p.a.draft(&bob).unwrap().as_deref(), Some("keep"));
+    p.a.set_draft(&bob, &"a".repeat(4000), NOW).unwrap();
+    assert_eq!(
+        p.a.set_draft(&Fingerprint([7; 32]), "x", NOW),
+        Err(CoreError::UnknownContact)
+    );
+}
+
+#[test]
+fn draft_erased_with_contact() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    p.a.set_draft(&bob, "hello", NOW).unwrap();
+    p.a.remove_contact(&bob, NOW, &mut p.rng).unwrap();
+    assert_eq!(p.a.draft(&bob).unwrap(), None);
+    p.a.add_contact(
+        &p.b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW,
+        &mut p.rng,
+    )
+    .unwrap();
+    assert_eq!(p.a.draft(&bob).unwrap(), None);
+}
+
+#[test]
+fn draft_erased_when_blocked() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    p.a.set_draft(&bob, "hello", NOW).unwrap();
+    p.a.block_contact(&bob, NOW, &mut p.rng).unwrap();
+    assert_eq!(p.a.draft(&bob).unwrap(), None);
+}
+
+/// Delivers every packet queued by `from` to `to`, ignoring what is not for it.
+fn deliver_all(from: &mut Core, to: &mut Core, rng: &mut StdRng) {
+    for b in from.pending_outbox(NOW + 9).unwrap() {
+        let _ = to.receive(&b, "t", NOW + 9, rng);
+    }
+}
+
+#[test]
+fn draft_erased_when_contact_removed_by_sync() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert!(t.resolve("bob").is_ok());
+    t.set_draft(&fp, "typing", NOW).unwrap();
+    a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert_eq!(t.resolve("bob"), Err(CoreError::UnknownContact));
+    assert_eq!(t.draft(&fp).unwrap(), None);
+}
+
+#[test]
+fn draft_erased_when_blocked_by_sync() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    t.set_draft(&fp, "typing", NOW).unwrap();
+    a.block_contact(&fp, NOW + 5, &mut rng).unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert!(t.store.block_state(fp).unwrap().blocked);
+    assert_eq!(t.draft(&fp).unwrap(), None);
+    // The conversation still open on `t` saves again: nothing is kept.
+    t.set_draft(&fp, "typing more", NOW + 10).unwrap();
+    assert_eq!(t.draft(&fp).unwrap(), None);
+}
+
+#[test]
+fn watched_days_cover_the_whole_lifetime() {
+    let mut p = pair();
+    let day = 86_400;
+    let later = NOW + day;
+    // Polled yesterday: the full window still starts 8 days back.
+    p.b.mark_polled(NOW).unwrap();
+    let watched = p.b.watched_mailboxes(later).unwrap();
+    let b_id = p.b.device.public().id();
+    let s = best_session(&p.b);
+    let oldest = session_mailbox(&s.mailbox_secret, &b_id, day_of(later) - 8);
+    assert!(watched.contains(&oldest));
+    // A packet Alice sealed 5 days ago (offline, deposited late) sits in the
+    // mailbox of its seal day: still polled.
+    let target = send::Target::Contact(p.b.fingerprint());
+    let body = Body::Text("late".into());
+    let Core { store, device, .. } = &mut p.a;
+    let sealed = store
+        .transaction(|tx| {
+            send::seal_for(
+                tx,
+                device,
+                &target,
+                &body,
+                MessageId([6; 16]),
+                send::SealTime::at(NOW - 5 * day),
+                &mut p.rng,
+            )
+        })
+        .unwrap();
+    let (late, _) = &sealed[0];
+    assert!(watched.contains(&late.mailbox));
 }

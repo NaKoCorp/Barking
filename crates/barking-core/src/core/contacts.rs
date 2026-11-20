@@ -7,7 +7,7 @@ use rand_core::CryptoRng;
 use super::send::SealTime;
 use super::{Core, OwnDevices, load_card, log, sync};
 use crate::contact::ContactCard;
-use crate::envelope::SyncOp;
+use crate::envelope::{MAX_TEXT_LEN, SyncOp};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::store::{BlockState, ContactClock, ContactRow, Queries};
 use crate::transparency::TransparencyEvent;
@@ -148,6 +148,35 @@ impl Core {
             tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
             set_block_in(tx, device, *contact, true, now, rng)
         })
+    }
+
+    /// Keeps the unsent text typed for a known contact, replacing the
+    /// previous one; empty or blank: deletes it. Too long: `TooLarge`, the
+    /// previous draft kept. Unknown: `UnknownContact`. Blocked (here or by
+    /// another of my devices, the block erased the draft): nothing is kept,
+    /// and no error. Local to this device: never synchronized, logged or
+    /// noted as a change.
+    pub fn set_draft(&mut self, contact: &Fingerprint, text: &str, now: u64) -> Result<()> {
+        self.ensure_active()?;
+        if text.len() > MAX_TEXT_LEN {
+            return Err(CoreError::TooLarge);
+        }
+        self.store.transaction(|tx| {
+            tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
+            if tx.block_state(*contact)?.blocked {
+                return Ok(());
+            }
+            if text.trim().is_empty() {
+                tx.delete_draft(*contact)
+            } else {
+                tx.put_draft(*contact, text, now)
+            }
+        })
+    }
+
+    /// The draft kept for `contact`, if any.
+    pub fn draft(&self, contact: &Fingerprint) -> Result<Option<String>> {
+        self.store.draft(*contact)
     }
 
     /// Lifts the block of `contact`, known or not (a blocked contact may
@@ -583,6 +612,9 @@ fn set_block_in(
     };
     let state = BlockState { blocked, at, since };
     q.set_block_state(fp, &state)?;
+    if blocked {
+        q.delete_draft(fp)?;
+    }
     sync::send_block(q, device, fp, &state, SealTime::at(now), rng)
 }
 
@@ -592,6 +624,9 @@ pub(super) fn merge_block(q: &impl Queries, fp: Fingerprint, state: &BlockState)
     let known = q.block_state(fp)?;
     if (state.at, state.blocked) > (known.at, known.blocked) {
         q.set_block_state(fp, state)?;
+        if state.blocked {
+            q.delete_draft(fp)?;
+        }
     }
     Ok(())
 }

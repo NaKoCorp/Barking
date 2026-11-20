@@ -23,6 +23,7 @@ pub const MAX_SKIP: u32 = 1000;
 /// Maximum number of skipped keys kept in total; beyond that, the oldest are dropped.
 pub const MAX_SKIPPED_TOTAL: usize = 2000;
 
-/// Retention time of a skipped key (spec §11: 7 days at most),
-/// counted from when it was set aside.
-pub const MAX_SKIPPED_AGE_SECS: u64 = 7 * 86_400;
+/// Retention time of a skipped key, counted from when it was set aside:
+/// 8 days, the 7-day message lifetime plus a day of clock skew, so that a
+/// message delivered late within its lifetime still decrypts.
+pub const MAX_SKIPPED_AGE_SECS: u64 = 8 * 86_400;

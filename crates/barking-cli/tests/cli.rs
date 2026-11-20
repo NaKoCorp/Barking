@@ -1181,7 +1181,13 @@ mod node {
     /// Proof budget exhausted: the receipts (without proof) still go out.
     #[test]
     fn pow_budget_exhausted_still_sends_acks() {
-        let node = TestNode::start(0);
+        // Three syncs back to back from one address, each polling the whole
+        // lifetime window: the default bucket of 127.0.0.1 would rate-limit
+        // the last one, which this test is not about.
+        let node = TestNode::start_with(0, |c| {
+            c.limits.requests_per_sec = 100_000;
+            c.limits.bytes_per_sec = 1 << 30;
+        });
         let ((da, a), (db, b)) = pair();
         node_add(&a, node.addr, &node.id);
         node_add(&b, node.addr, &node.id);

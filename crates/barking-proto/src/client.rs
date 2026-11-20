@@ -49,7 +49,7 @@ use tokio::time::timeout;
 use crate::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use crate::msg::{ACK_CURSOR_BASE, ErrorReason, Limits, MAX_PAGE_ITEMS, Request, Response};
 use crate::push::{OwnerProof, Subscription, subscription_hash};
-use crate::{NodeId, PROTOCOL_VERSION, pow, tls};
+use crate::{NodeId, PROTOCOL_VERSION, max_expiry_secs, pow, tls};
 
 /// Oldest protocol version this client can speak.
 pub const MIN_PROTOCOL_VERSION: u16 = 2;
@@ -605,6 +605,12 @@ impl Session {
         self.peer_version >= 3
     }
 
+    /// Furthest expiry from now the node accepts (`max_expiry_secs` of the
+    /// negotiated version).
+    pub fn max_expiry_secs(&self) -> u64 {
+        max_expiry_secs(self.peer_version)
+    }
+
     /// Underlying QUIC connection (tests, diagnostics).
     pub fn connection(&self) -> &Connection {
         &self.conn
@@ -963,6 +969,16 @@ mod tests {
     use super::*;
 
     const MIB: f64 = 1_048_576.0;
+
+    #[test]
+    fn max_expiry_by_version() {
+        assert_eq!(max_expiry_secs(2), 90_000);
+        assert_eq!(max_expiry_secs(3), 90_000);
+        assert_eq!(max_expiry_secs(4), 608_400);
+        assert_eq!(max_expiry_secs(5), 608_400);
+        assert_eq!(crate::P4_MAX_EXPIRY_SECS, 608_400);
+        assert_eq!(crate::P4_LIFETIME_SECS, 604_800);
+    }
 
     #[test]
     fn page_timeouts_grow_with_the_page() {

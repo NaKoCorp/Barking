@@ -166,8 +166,9 @@ proptest! {
 }
 
 #[test]
-fn default_expiry_is_one_day() {
-    assert_eq!(default_expiry(1_000), 1_000 + 86_400);
+fn default_expiry_is_seven_days() {
+    assert_eq!(DEFAULT_TTL_SECS, 7 * 86_400);
+    assert_eq!(u64::from(default_expiry(1_000)), 1_000 + DEFAULT_TTL_SECS);
 }
 
 #[test]

@@ -102,6 +102,10 @@ pub trait Fetcher: Connector {
 
 /// Deposits on a kept connection (see `Session::deposit`).
 pub trait Depositor: Connector {
+    /// Furthest expiry from now the node accepts (protocol 3: 25 h,
+    /// protocol 4: the message lifetime plus one hour).
+    fn max_expiry_secs(&self, conn: &Self::Conn) -> u64;
+
     /// Deposits `packet`, spending at most `pow_left` proof work.
     fn deposit(
         &self,
@@ -208,6 +212,10 @@ impl Fetcher for QuicDialer {
 }
 
 impl Depositor for QuicDialer {
+    fn max_expiry_secs(&self, conn: &Session) -> u64 {
+        conn.max_expiry_secs()
+    }
+
     async fn deposit(&self, conn: &mut Session, packet: &[u8], pow_left: u64) -> DepositReply {
         let before = conn.pow_spent();
         conn.set_pow_budget(Some(before.saturating_add(pow_left)));

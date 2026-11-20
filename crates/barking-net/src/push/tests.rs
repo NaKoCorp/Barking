@@ -438,11 +438,13 @@ fn plan_push_keeps_kinds_apart() {
 fn acks_of_yesterday_are_still_subscribed() {
     let c = cfg(1);
     // A message sealed yesterday may be acked today: its mailbox (of
-    // yesterday) is still subscribed for acks, not for messages.
+    // yesterday) is still subscribed for acks, not for messages. One sealed
+    // a day before the lifetime began is no longer awaited.
+    let old = today() - lifetime_days() - 1;
     let wanted = [
         (mb(1), today() - 1, A),
         (mb(2), today() - 1, M),
-        (mb(3), today() - 2, A),
+        (mb(3), old, A),
     ];
     let plan = plan_push(&state_for(&c), Some(&c), &wanted, ranked, NOW);
     assert_eq!(
@@ -453,11 +455,11 @@ fn acks_of_yesterday_are_still_subscribed() {
             (mb(1), A, id_of(2))
         ]
     );
-    // No longer awaited: yesterday's is cancelled (its subscription runs
-    // until the end of today), older ones are forgotten.
+    // No longer awaited: yesterday's is cancelled (its subscription still
+    // runs), older ones are forgotten.
     let mut s = state_for(&c);
     subbed_kind(&mut s, mb(1), A, today() - 1, &[0]);
-    subbed_kind(&mut s, mb(3), A, today() - 2, &[1]);
+    subbed_kind(&mut s, mb(3), A, old, &[1]);
     let plan = plan_push(&s, Some(&c), &[], ranked, NOW);
     assert_eq!(plan.unsubscribe, vec![(mb(1), A, id_of(0), [0; 32])]);
     assert_eq!(plan.forget, vec![(mb(1), A), (mb(3), A)]);
@@ -474,9 +476,13 @@ fn subscription_carries_its_kind_and_the_wake_reason() {
         assert_eq!(sub.kind, kind);
         let token = barking_proto::push::open(&[(1, secret.clone())], &sub.sealed).unwrap();
         assert_eq!(token.reason, reason);
-        // Acks outlive the day after: the expiry purge may run past the
-        // next midnight.
-        let expires = if kind == A { 102 } else { 101 };
+        // Acks outlive the message lifetime by a day: the expiry purge may
+        // run past the next midnight.
+        let expires = if kind == A {
+            100 + lifetime_days() + 1
+        } else {
+            101
+        };
         assert_eq!(sub.expires_day, expires);
         assert_eq!(token.expires_day, expires);
     }
@@ -638,4 +644,50 @@ fn preview_variant_golden_bytes() {
             "{preview:?} changed encoding: stored prefs would read back differently"
         );
     }
+}
+
+#[test]
+fn ack_subscription_window_follows_lifetime() {
+    // Derived from `DEFAULT_TTL_SECS`: with a 7-day lifetime these are
+    // `T - 7` and `D + 8`.
+    let t = today();
+    assert_eq!(first_day(A, t), t - lifetime_days());
+    assert_eq!(expires_day(t, A), t + lifetime_days() + 1);
+    assert_eq!(first_day(M, t), t);
+    assert_eq!(expires_day(t, M), t + 1);
+}
+
+#[test]
+fn ack_subscription_within_node_bound() {
+    use barking_node::wake::MAX_EXPIRY_DAYS;
+    // Every sealing day an ack is still awaited for, from the oldest to today.
+    let t = today();
+    for d in first_day(A, t)..=t {
+        assert!(
+            expires_day(d, A) <= t + MAX_EXPIRY_DAYS,
+            "day {d}: the node would refuse the subscription"
+        );
+    }
+    // One day of clock slack: a node whose day already turned still takes
+    // today's receipt subscription.
+    assert!(expires_day(t, A) < t + MAX_EXPIRY_DAYS);
+}
+
+#[test]
+fn prefer_long_lived_puts_old_nodes_last_and_only_to_fill() {
+    use std::collections::HashSet;
+    let n = |b: u8| NodeId([b; 32]);
+    let ranked = vec![n(1), n(2), n(3), n(4), n(5)];
+    let short: HashSet<NodeId> = [n(1), n(2), n(3)].into_iter().collect();
+    // Protocol 4 (or not met) first, in score order; old ones only up to
+    // WAKE_NODES, best first.
+    assert_eq!(
+        prefer_long_lived(ranked.clone(), &short),
+        vec![n(4), n(5), n(1)]
+    );
+    // Nothing known: unchanged.
+    assert_eq!(prefer_long_lived(ranked.clone(), &HashSet::new()), ranked);
+    // All old: the best WAKE_NODES of them.
+    let all: HashSet<NodeId> = ranked.iter().copied().collect();
+    assert_eq!(prefer_long_lived(ranked, &all), vec![n(1), n(2), n(3)]);
 }

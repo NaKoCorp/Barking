@@ -596,5 +596,53 @@
 			<string>%lld boîtes aux lettres</string>
 		</dict>
 	</dict>
+	<key>Packets stay there at most %lld days.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Les paquets y restent au plus %1$#@d@.</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld jour</string>
+			<key>other</key>
+			<string>%lld jours</string>
+		</dict>
+	</dict>
+	<key>None of %@’s devices picked it up within %lld days. The relay erased it on %@.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Aucun appareil de %1$@ ne l’a relevé en %2$#@d@. Le relais l’a effacé le %3$@.</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld jour</string>
+			<key>other</key>
+			<string>%lld jours</string>
+		</dict>
+	</dict>
+	<key>None of %@’s devices picked it up within %lld days. The relay erased it.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Aucun appareil de %1$@ ne l’a relevé en %2$#@d@. Le relais l’a effacé.</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld jour</string>
+			<key>other</key>
+			<string>%lld jours</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

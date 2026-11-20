@@ -120,6 +120,17 @@ Before the first release, and after any change to the release workflows, rehears
 
 Check the version that the next release pull request proposes, and set it with `Release-As:` if it is not the one you want.
 
+## Protocol 4
+
+The client lifetime of a packet goes from 24 hours to 7 days (`DEFAULT_TTL_SECS`, issue #21). Only a node that speaks protocol 4 accepts such an expiry: the client deposits a 7-day packet on protocol 4 responsibles only, passing over protocol 3 ones, so such a packet lives only on protocol 4 nodes.
+
+Until every node a build can reach speaks protocol 4, that packet reaches its recipient only through the fetch-side rule: in a full sync, a complete answer from a protocol 3 node does not settle a mailbox, and the client also reads the next responsibles until a protocol 4 one answers (or none is left). Wake subscriptions pass over the protocol 3 responsibles that the same sync met; a node not met yet counts as newer, so a subscription may still sit on a protocol 3 node until a later sync meets it. A quick sync does not read past a protocol 3 node: on a mixed network a 7-day packet may wait for the next full sync. On a network where many responsibles still speak protocol 3, each full sync reads more nodes per mailbox.
+
+- Production nodes must run protocol 4 before any App Store build that carries the 7-day lifetime.
+- Deploy order: the test node, then the TestFlight build, then the production nodes, then the App Store build.
+- The client constant `DEFAULT_TTL_SECS` is the only revert switch: set it back and rebuild. Protocol 4 nodes still accept short packets. What protocol 4 accepts is fixed apart from it (`P4_MAX_EXPIRY_SECS` in `barking-proto`): a rebuilt node keeps accepting 7-day packets, and a client keeps sending its already sealed 7-day packets to protocol 4 nodes only.
+- During the trial, the review contact and the development builds must run the new build: an older client refuses a message more than 2 days old.
+
 ## Preserving the Alpine environment
 
 Linux builds use the pinned Rust/Alpine image and the APK versions in `docker/apk/build.txt`. Before a release, keep the signed APKs and the matching indexes in an immutable mirror, or keep the build image by its digest: the public Alpine repositories may remove old revisions. To change the image (digest) or a package, regenerate the full list (sorted `package=version` lines, the format that `docker/apk/install.sh` compares) and check that it is the same on x86-64 and ARM64, then get `ci` to pass (the pull request runs the double build): `docker/apk/install.sh` rejects any difference. `docker/apk/release.txt` plays the same role for the test image of the release scripts, and `docker/apk/push.txt` for the CA bundle of the `barking-push` image. Fuzzing keeps its Debian (glibc) image: AddressSanitizer does not support musl targets.

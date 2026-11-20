@@ -96,6 +96,28 @@ impl Device {
         })
     }
 
+    /// Keeps the unsent text of a conversation (blank deletes it); it
+    /// survives relaunches, stays on this device and is never sent.
+    pub fn set_draft(&self, contact: String, text: String) -> Result<(), BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                let fp = core.resolve(&contact)?;
+                Ok(core.set_draft(&fp, &text, now())?)
+            })
+        })
+    }
+
+    /// The unsent text kept for a conversation, if any (a read: it does not
+    /// wait for a sync in flight).
+    pub fn draft(&self, contact: String) -> Result<Option<String>, BarkingError> {
+        guard(|| {
+            self.with_core_read(|core| {
+                let fp = core.resolve(&contact)?;
+                Ok(core.draft(&fp)?)
+            })
+        })
+    }
+
     /// Blocks a contact: its messages are dropped without an ack, nothing is
     /// sent to it, and it leaves the contact and chat lists (its history
     /// stays stored). Synchronized with my other devices.

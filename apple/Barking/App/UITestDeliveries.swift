@@ -50,9 +50,11 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     }
 
     /// How long before the seed each message shows as sent: the Not
-    /// delivered one yesterday (it expired 24 h later), the others today.
-    private static let ages: [UInt64] = [26 * 3600, 40 * 60, 12 * 60, 2 * 60]
-    private static let lifetime: UInt64 = 86_400
+    /// delivered one sealed 2 h more than the lifetime ago (it expired 2 h
+    /// ago), the others today.
+    private static let ages: [UInt64] = [lifetime + 2 * 3600, 40 * 60, 12 * 60, 2 * 60]
+    /// The real message lifetime, never a number written here.
+    private static let lifetime = UInt64(messageLifetimeSecs())
     static let relay = "K7QX2M4A"
     /// The two devices on Sam's card, in this world.
     private static let devices = [("5a3f9c21d4e8b706", "iPhone"), ("c90e14b7a2f65d38", "iPad")]
@@ -302,6 +304,8 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func contactCard(displayName: String) throws -> String { try device.contactCard(displayName: displayName) }
     func setAlias(contact: String, alias: String) throws { try device.setAlias(contact: contact, alias: alias) }
     func removeContact(contact: String) throws { try device.removeContact(contact: contact) }
+    func setDraft(contact: String, text: String) throws { try device.setDraft(contact: contact, text: text) }
+    func draft(contact: String) throws -> String? { try device.draft(contact: contact) }
     func markVerified(contact: String) throws { try device.markVerified(contact: contact) }
     func unmarkVerified(contact: String) throws { try device.unmarkVerified(contact: contact) }
     func blockContact(contact: String) throws { try device.blockContact(contact: contact) }

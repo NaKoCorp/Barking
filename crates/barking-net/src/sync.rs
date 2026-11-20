@@ -33,7 +33,8 @@
 //!    mailboxes where a message I sent awaits its ack
 //!    (`Core::awaited_ack_mailboxes`, `SubKind::Acks`: the node wakes me
 //!    when the ack arrives or the message expires unacked), planned by
-//!    `plan_push` on the responsibles by score; an acks subscription no
+//!    `plan_push` on the responsibles by score, those met this sync that
+//!    speak protocol 3 last (`prefer_long_lived`); an acks subscription no
 //!    longer awaited is cancelled. Unsubscribes first, then subscriptions,
 //!    nearest day first, on the connections of the sync. A node that does not take
 //!    wake-ups is left out (`PushState::note_no_wake`) and not replaced
@@ -148,8 +149,10 @@ use barking_proto::{ErrorReason, NodeId, NodeRecord};
 use tokio::time::Instant;
 
 use crate::discover::{self, DialError, Dialer};
-use crate::plan::{self, plan_deposits, record_outcome};
-use crate::push::{HORIZON_DAYS, PushConfig, PushState, build_subscription, plan_push};
+use crate::plan::{self, plan_packet_deposits, record_outcome};
+use crate::push::{
+    HORIZON_DAYS, PushConfig, PushState, build_subscription, plan_push, prefer_long_lived,
+};
 use crate::score::ScoreEvent;
 use crate::state::NetState;
 use crate::{BOOTSTRAP_VIEW, CandidateBudget};
@@ -226,9 +229,17 @@ pub const REREAD_BYTES: usize = 8 << 20;
 /// Time all audit re-reads of a sync may take together (within the
 /// session fetch slice).
 pub const REREAD_TIME: Duration = Duration::from_secs(20);
-/// Furthest expiry a node accepts from now: 24 h plus one hour of clock
-/// tolerance (the node's `MAX_EXPIRY_SECS`).
-const NODE_MAX_EXPIRY_SECS: u64 = 90_000;
+/// True if `packet` expires beyond `max_expiry` seconds from `now` (what a
+/// node of an older protocol accepts) but within what a node of our
+/// protocol accepts: it must go to a newer node. Beyond any node's limit it
+/// is not "too old" for that node: it is deposited and refused
+/// (`TooFarInFuture`), then dropped.
+fn too_old(packet: &Packet, max_expiry: u64, now: u64) -> bool {
+    let expires = u64::from(packet.expires_at);
+    let ours = barking_proto::max_expiry_secs(barking_proto::PROTOCOL_VERSION);
+    expires > now.saturating_add(max_expiry) && expires <= now.saturating_add(ours)
+}
+
 /// `NotResponsible` answers from distinct responsibles of one mailbox that
 /// trigger a fallback lookup.
 pub const NOT_RESPONSIBLE_FALLBACK: usize = 2;
@@ -491,6 +502,7 @@ impl<'a, D: Connector> Run<'a, D> {
             probed: false,
             reread_queue: Vec::new(),
             page_confirmed: HashSet::new(),
+            short_lived: HashSet::new(),
             budget: CandidateBudget::default(),
             now,
             deadline,
@@ -590,6 +602,9 @@ struct Run<'a, D: Connector> {
     /// Packets fetched (mine included) and packets acknowledged by a
     /// fetched receipt.
     seen_ids: HashSet<PacketId>,
+    /// Nodes met this sync whose protocol accepts less than the protocol 4
+    /// lifetime (protocol 3 and older): they never hold a 7-day packet.
+    short_lived: HashSet<NodeId>,
     report: SyncReport,
 }
 
@@ -597,6 +612,16 @@ impl<D> Run<'_, D>
 where
     D: Dialer + Depositor + Fetcher + Sync,
 {
+    /// Notes whether `node`, on `conn`, speaks a protocol older than 4
+    /// (`short_lived`); returns the furthest expiry it accepts.
+    fn note_protocol(&mut self, node: NodeId, conn: &D::Conn) -> u64 {
+        let max = self.dialer.max_expiry_secs(conn);
+        if max < barking_proto::P4_MAX_EXPIRY_SECS {
+            self.short_lived.insert(node);
+        }
+        max
+    }
+
     /// Stage 1 (view), shared by both modes: a quick sync bootstraps only
     /// from an empty view.
     async fn prepare(&mut self, manual_nodes: &[(NodeId, SocketAddr)], builtin: &[BootstrapEntry]) {
@@ -1146,16 +1171,21 @@ where
         let mut pow_exhausted = false;
         let mut not_responsible: HashMap<MailboxId, HashSet<NodeId>> = HashMap::new();
         let mut fallback_tried: HashSet<MailboxId> = HashSet::new();
+        // Furthest expiry each node dialled in this stage accepts, when its
+        // protocol is older than ours: for a packet beyond it, the node is
+        // unavailable and the next responsibles stand in.
+        let mut old_nodes: HashMap<NodeId, u64> = HashMap::new();
         'plan: loop {
             let excluded = self.excluded();
             let st = &self.state;
-            let deposits = plan_deposits(
+            let deposits = plan_packet_deposits(
                 &outbox,
                 &self.state.ledger,
-                |m| {
-                    st.order_responsibles(st.view.responsibles_by_score(m, now))
+                |p| {
+                    st.order_responsibles(st.view.responsibles_by_score(&p.mailbox, now))
                         .into_iter()
                         .filter(|n| !excluded.contains(n))
+                        .filter(|n| !old_nodes.get(n).is_some_and(|max| too_old(p, *max, now)))
                         .collect()
                 },
                 now,
@@ -1178,6 +1208,17 @@ where
                         }
                         continue 'plan;
                     };
+                    // An expiry this node's protocol refuses but a newer
+                    // node accepts: the node is unavailable for the packet
+                    // and the plan is redone without it (the next
+                    // responsible stands in). Not tried, not scored, never
+                    // dropped. Each node is learned once: the replans end.
+                    let max = self.note_protocol(d.node, &conn);
+                    if Packet::decode(&d.bytes).is_ok_and(|p| too_old(&p, max, now)) {
+                        self.conns.insert(d.node, conn);
+                        old_nodes.insert(d.node, max);
+                        continue 'plan;
+                    }
                     // Noted before the request: the node may store the
                     // packet and its answer be lost (spec §14.1).
                     if let Ok(p) = Packet::decode(&d.bytes)
@@ -1195,6 +1236,7 @@ where
                         _ => break (conn, reply),
                     }
                 };
+                let node_max = self.dialer.max_expiry_secs(&conn);
                 let result = match reply.outcome {
                     Ok(DepositOutcome::Answered(result)) => result,
                     Ok(DepositOutcome::PowBudget) => {
@@ -1227,9 +1269,8 @@ where
                     // the node's clock is the likely culprit: that node
                     // failed, the packet stays queued for the others.
                     Err(ErrorReason::TooFarInFuture) => {
-                        let too_far = Packet::decode(&d.bytes).is_ok_and(|p| {
-                            u64::from(p.expires_at) > now.saturating_add(NODE_MAX_EXPIRY_SECS)
-                        });
+                        let too_far = Packet::decode(&d.bytes)
+                            .is_ok_and(|p| u64::from(p.expires_at) > now.saturating_add(node_max));
                         if too_far {
                             let _ = self.core.drop_outbox_packet(&d.bytes, now);
                             outbox.retain(|b| *b != d.bytes);
@@ -1526,11 +1567,14 @@ where
             None => Vec::new(),
         };
         let view = &self.state.view;
+        let short = &self.short_lived;
+        // Nodes met this sync that speak protocol 3 hold no 7-day packet:
+        // newer ones first (`prefer_long_lived`), for both kinds.
         let plan = plan_push(
             &push,
             cfg,
             &wanted,
-            |m| view.responsibles_by_score(m, now),
+            |m| prefer_long_lived(view.responsibles_by_score(m, now), short),
             now,
         );
         // Push off or a new configuration: every stored subscription is
@@ -1746,18 +1790,17 @@ where
                 .get(&(mailbox, kind))
                 .is_some_and(|b| b.nodes.iter().any(|(h, _)| h == n))
         };
-        let next = self
-            .state
-            .view
-            .responsibles_by_score(&mailbox, now)
-            .into_iter()
-            .find(|n| {
-                !holds(n)
-                    && !queue.contains(&(mailbox, kind, *n))
-                    && !full_boxes.contains(&(mailbox, kind, *n))
-                    && !skipped.contains(n)
-                    && !push.no_wake.get(n).is_some_and(|until| *until > now)
-            });
+        // Newer nodes first; a protocol 3 one still takes the place when
+        // no newer one is left.
+        let mut ranked = self.state.view.responsibles_by_score(&mailbox, now);
+        ranked.sort_by_key(|n| self.short_lived.contains(n));
+        let next = ranked.into_iter().find(|n| {
+            !holds(n)
+                && !queue.contains(&(mailbox, kind, *n))
+                && !full_boxes.contains(&(mailbox, kind, *n))
+                && !skipped.contains(n)
+                && !push.no_wake.get(n).is_some_and(|until| *until > now)
+        });
         if let Some(n) = next {
             queue.push_front((mailbox, kind, n));
         }

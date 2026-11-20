@@ -367,13 +367,16 @@ fn subscribe_day_bounds() {
         ..raw_sub(1, cancel)
     };
     assert_eq!(try_subscribe(&mut s, &cfg, &at(today(), 1)), Ok(()));
-    assert_eq!(try_subscribe(&mut s, &cfg, &at(today() + 8, 2)), Ok(()));
+    assert_eq!(
+        try_subscribe(&mut s, &cfg, &at(today() + MAX_EXPIRY_DAYS, 2)),
+        Ok(())
+    );
     assert_eq!(
         try_subscribe(&mut s, &cfg, &at(today() - 1, 3)),
         Err(ErrorReason::Expired)
     );
     assert_eq!(
-        try_subscribe(&mut s, &cfg, &at(today() + 9, 3)),
+        try_subscribe(&mut s, &cfg, &at(today() + MAX_EXPIRY_DAYS + 1, 3)),
         Err(ErrorReason::TooFarInFuture)
     );
 }
@@ -895,4 +898,15 @@ fn owned_eviction_ignores_node_full() {
     }
     assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
     assert_eq!(owned_of(&s, 9), Some(1));
+}
+
+#[test]
+fn max_expiry_days_is_fixed_by_protocol_4() {
+    // The protocol 4 lifetime (7 days) plus two, whatever the client's own
+    // lifetime (`DEFAULT_TTL_SECS`, the revert switch).
+    assert_eq!(MAX_EXPIRY_DAYS, 9);
+    assert_eq!(
+        MAX_EXPIRY_DAYS,
+        (barking_proto::P4_LIFETIME_SECS / 86_400) as u32 + 2
+    );
 }

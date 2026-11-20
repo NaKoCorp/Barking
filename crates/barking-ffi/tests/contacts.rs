@@ -164,3 +164,18 @@ fn a_blocked_card_is_not_added_again() {
         Err(BarkingError::ContactBlocked)
     ));
 }
+
+#[test]
+fn draft_roundtrip() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let alice = device(&da, 1, "Alice");
+    let bob = device(&db, 2, "Bob");
+    let fb = alice
+        .add_contact_bytes(bob.contact_card_bytes().unwrap(), None)
+        .unwrap();
+    assert_eq!(alice.draft(fb.clone()).unwrap(), None);
+    alice.set_draft(fb.clone(), "hi".into()).unwrap();
+    assert_eq!(alice.draft(fb.clone()).unwrap(), Some("hi".to_string()));
+    alice.set_draft(fb.clone(), "".into()).unwrap();
+    assert_eq!(alice.draft(fb).unwrap(), None);
+}

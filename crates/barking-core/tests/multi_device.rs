@@ -2172,6 +2172,63 @@ fn admin_removes_linked_device() {
     assert_eq!(a.core.my_devices().len(), 1);
 }
 
+/// A ghost device: A committed a list with T, but T never received the
+/// bundle and never ran `finish_link`. A can still remove it, and contacts
+/// stop sealing for it.
+#[test]
+fn ghost_device_can_be_removed() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(61);
+    let (mut a, mut alice, _bob) = admin_with_contacts(d.path(), &mut rng);
+    alice
+        .core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, &mut rng)
+        .unwrap();
+    let a_fp = a.core.fingerprint();
+
+    let offer = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (_t, req) = begin(d.path(), "t", 9, &offer, &mut rng);
+    let out = a.core.link_device(&req, false, NOW + 1, &mut rng).unwrap();
+    // The bundle is lost: `finish_link` is never called.
+    for p in &out.packets {
+        alice
+            .core
+            .receive(&p.encode(), T, NOW + 1, &mut rng)
+            .unwrap();
+    }
+    assert_eq!(a.core.my_devices().len(), 2);
+    assert_eq!(
+        alice
+            .core
+            .send_text(&a_fp, "to the ghost", NOW + 1, &mut rng)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let t_id = device_id(&a.core, "t");
+    let packets = a.core.remove_device(t_id, NOW + 2, &mut rng).unwrap();
+    for p in &packets {
+        alice
+            .core
+            .receive(&p.encode(), T, NOW + 2, &mut rng)
+            .unwrap();
+    }
+    assert_eq!(a.core.my_devices().len(), 1);
+    assert_eq!(
+        alice
+            .core
+            .send_text(&a_fp, "after", NOW + 2, &mut rng)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(events(&a.core).contains(&TransparencyEvent::DeviceRemoved {
+        device: t_id,
+        name: "t".to_owned(),
+    }));
+}
+
 #[test]
 fn remove_device_refuses_self_unknown_and_non_admin() {
     let d = dir();

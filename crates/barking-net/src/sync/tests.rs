@@ -16,6 +16,10 @@ use crate::test_support::{id_of, record, subject, subject_with_ack, subject_with
 
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 86_400;
+/// Message lifetime.
+const TTL: u64 = barking_packet::DEFAULT_TTL_SECS;
+/// Furthest expiry from now any node accepts (protocol 4).
+const ANY_NODE_MAX: u64 = barking_proto::max_expiry_secs(barking_proto::PROTOCOL_VERSION);
 const NODES: usize = 11;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,6 +119,9 @@ struct Net {
     full_unless_owned: HashSet<NodeId>,
     /// Nodes that speak protocol 2: no proved subscriptions.
     v2: HashSet<NodeId>,
+    /// Nodes that speak protocol 3: expiries up to 25 h only. The others
+    /// (but `v2`) speak protocol 4.
+    v3: HashSet<NodeId>,
     /// Fetches honour `max_bytes`: the items beyond it are left out and the
     /// fetch stops with `FetchStop::ClientLimit`.
     honor_max_bytes: bool,
@@ -324,6 +331,17 @@ impl Fetcher for Net {
 }
 
 impl Depositor for Net {
+    fn max_expiry_secs(&self, conn: &Conn) -> u64 {
+        let version = if self.v2.contains(&conn.id) {
+            2
+        } else if self.v3.contains(&conn.id) {
+            3
+        } else {
+            4
+        };
+        barking_proto::max_expiry_secs(version)
+    }
+
     async fn deposit(&self, session: &mut Conn, packet: &[u8], pow_left: u64) -> DepositReply {
         let conn = &session.id;
         let n = {
@@ -654,12 +672,19 @@ async fn crosscheck_reads_another_responsible_every_six_hours() {
     let calls = net.calls();
     assert_eq!(fetches_for(&calls, r[0], m).len(), 1);
     assert_eq!(fetches_for(&calls, r[1], m).len(), 1);
-    // After every primary fetch, items processed as usual.
-    let last_primary = fetches_of(&calls, &sessions)
+    // After every primary fetch (the first fetch of each session mailbox;
+    // the cross-checks of the other mailboxes come after them too), items
+    // processed as usual.
+    let fetches = fetches_of(&calls, &sessions);
+    let last_primary = sessions
         .iter()
-        .filter(|(_, n, mbs)| *n != r[1] || !mbs.contains(&m))
-        .map(|(i, _, _)| *i)
-        .filter(|i| !matches!(&calls[*i], Call::Fetch(n, mbs, _) if *n != r[0] && mbs.contains(&m)))
+        .map(|s| {
+            fetches
+                .iter()
+                .find(|(_, _, mbs)| mbs.contains(s))
+                .unwrap()
+                .0
+        })
         .max()
         .unwrap();
     let crosscheck = fetches_of(&calls, &sessions)
@@ -825,17 +850,17 @@ async fn state_saved_after_each_response() {
 async fn mark_polled_only_when_all_sessions_polled() {
     let (_dir, mut core, mut net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
+    let before = Some(day_of(NOW - 5 * DAY));
     // Every node truncates: no session mailbox is fetched in full.
     net.truncate = all_nodes(&net, FetchStop::Connection);
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.network_up && !report.polled_all_sessions);
-    assert_eq!(core.watched_mailbox_groups(NOW).unwrap().intro.len(), wide);
+    assert_eq!(core.last_polled_day().unwrap(), before);
 
     net.truncate.clear();
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.polled_all_sessions);
-    assert!(core.watched_mailbox_groups(NOW).unwrap().intro.len() < wide);
+    assert_eq!(core.last_polled_day().unwrap(), Some(day_of(NOW)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -843,7 +868,7 @@ async fn unreadable_watch_list_aborts_without_mark_polled() {
     use barking_core::store::{Queries, Store};
     let (dir, mut core, net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
+    let before = Some(day_of(NOW - 5 * DAY));
     let raw = Store::open(&dir.path().join("bob.db"), &[2; 32]).unwrap();
     raw.conn()
         .execute_batch("ALTER TABLE sessions RENAME TO sessions_gone;")
@@ -852,11 +877,11 @@ async fn unreadable_watch_list_aborts_without_mark_polled() {
     assert!(report.error.is_some());
     assert!(!report.polled_all_sessions);
     assert!(!net.calls().iter().any(|c| matches!(c, Call::Fetch(..))));
-    // The poll date did not move: restored, the window is as wide as before.
+    // The poll date did not move.
     raw.conn()
         .execute_batch("ALTER TABLE sessions_gone RENAME TO sessions;")
         .unwrap();
-    assert_eq!(core.watched_mailbox_groups(NOW).unwrap().intro.len(), wide);
+    assert_eq!(core.last_polled_day().unwrap(), before);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1040,6 +1065,80 @@ async fn receipt_in_the_fetch_prevents_a_loss() {
             .any(|b| content_hash(b) == h)
     );
     assert!(score_of(&mut core, &x) >= 0.5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_sync_reads_past_v3_responsibles() {
+    // A 7-day packet goes only to protocol 4 nodes: here the fourth
+    // responsible holds Alice's receipt; the three better-ranked ones speak
+    // 3 and answer, complete and empty.
+    let (_dir, mut core, ack) = subject_with_ack(NOW);
+    let mut net = setup_with(&mut core);
+    let (_, m) = message(&mut core);
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert!(r.len() >= 4);
+    rank_first(&mut core, &r[..3]);
+    net.v3.extend(r[..3].iter().copied());
+    net.node_mailbox_items.insert((r[3], m), vec![ack]);
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(
+        report
+            .received
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::AckReceived { .. })),
+        "{:?}",
+        report.received
+    );
+    assert!(report.polled_all_sessions);
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_sync_on_a_v3_network_still_polls() {
+    // Every node speaks 3: a complete fetch from the best responsible
+    // settles each mailbox once no newer one is left; the window moves.
+    let (_dir, mut core, ack) = subject_with_ack(NOW);
+    let mut net = setup_with(&mut core);
+    net.v3 = net.records.keys().copied().collect();
+    // Every responsible holds the receipt: it is read from each of them.
+    let (_, m) = message(&mut core);
+    net.mailbox_items.insert(m, vec![ack]);
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.polled_all_sessions);
+    assert!(report.mailboxes_polled >= sessions.len());
+    // Read again, the same item is neither an error nor a second receipt.
+    assert_eq!(report.receive_errors, 0);
+    let acks = report
+        .received
+        .iter()
+        .filter(|o| matches!(o, ReceiveOutcome::AckReceived { .. }))
+        .count();
+    assert_eq!(acks, 1, "{:?}", report.received);
+    // Not one mailbox counted twice.
+    let mut fresh = setup();
+    let base = sync(&mut fresh.1, &fresh.2, opts()).await;
+    assert_eq!(report.mailboxes_polled, base.mailboxes_polled);
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_does_not_read_past_a_v3_responsible() {
+    let (_dir, mut core, mut net) = setup();
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
+    net.v3 = net.records.keys().copied().collect();
+    quick_sync(&mut core, &net, quick_opts()).await;
+    let calls = net.calls();
+    // Each session mailbox it reads is read once, from one node: the
+    // quick sync's budget is not spent going past a protocol 3 node.
+    let mut read = 0;
+    for m in &sessions {
+        let n = calls
+            .iter()
+            .filter(|c| matches!(c, Call::Fetch(_, mbs, _) if mbs.contains(m)))
+            .count();
+        assert!(n <= 1, "{m:?}: {n}");
+        read += n;
+    }
+    assert!(read > 0);
 }
 
 /// A node `x`, best responsible of the message mailbox `m` once scored 0.8,
@@ -1296,10 +1395,10 @@ fn deposits_of(net: &Net, bytes: &[u8]) -> usize {
 #[tokio::test(start_paused = true)]
 async fn too_far_in_future_is_refused_not_retried_forever() {
     let (_dir, mut core, mut net) = setup();
-    // The legacy case: a packet sealed with a 7-day expiry. Nodes refuse
-    // any expiry beyond 25 h from their clock.
-    net.max_expiry = Some(NOW + 25 * 3_600);
-    let legacy = sealed_at(&mut core, NOW + 6 * DAY);
+    // A packet sealed by a clock two hours ahead: its expiry is beyond
+    // what any node accepts (the lifetime plus one hour from its clock).
+    net.max_expiry = Some(NOW + ANY_NODE_MAX);
+    let legacy = sealed_at(&mut core, NOW + 2 * 3_600);
     let first = sync(&mut core, &net, opts()).await;
     assert!(first.refused >= 1);
     // It will never be accepted: out of the queue, not offered again.
@@ -1311,11 +1410,176 @@ async fn too_far_in_future_is_refused_not_retried_forever() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn packet_beyond_every_limit_is_dropped_on_a_v3_network() {
+    let (_dir, mut core, mut net) = setup();
+    // Every node speaks 3 and refuses beyond 25 h. A packet sealed by a
+    // clock two hours ahead expires beyond what even a protocol 4 node
+    // accepts: no newer node would ever take it, so it does not wait for
+    // one. It is offered, refused and dropped, as on a protocol 4 network.
+    net.v3 = net.records.keys().copied().collect();
+    net.max_expiry = Some(NOW + barking_proto::max_expiry_secs(3));
+    let legacy = sealed_at(&mut core, NOW + 2 * 3_600);
+    assert!(u64::from(Packet::decode(&legacy).unwrap().expires_at) > NOW + ANY_NODE_MAX);
+    let first = sync(&mut core, &net, opts()).await;
+    assert!(deposits_of(&net, &legacy) >= 1);
+    assert!(first.refused >= 1);
+    assert!(!core.pending_outbox(NOW).unwrap().contains(&legacy));
+    let before = deposits_of(&net, &legacy);
+    sync(&mut core, &net, opts()).await;
+    assert_eq!(deposits_of(&net, &legacy), before);
+}
+
+/// Deletes Bob's message "hi" (the fixture's outbox message): the outcome
+/// tells whether a deposit was tried for its packet (`cancelled == 1`: no).
+fn delete_hi(core: &mut Core) -> barking_core::DeleteOutcome {
+    let alice = core.contacts().unwrap()[0].fingerprint;
+    let row = core
+        .messages_with(&alice)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "hi")
+        .unwrap()
+        .id;
+    core.delete_messages(&[row], NOW).unwrap()
+}
+
+/// Scores of `nodes` after a sync over `net` of a fresh subject whose
+/// message "hi" was deleted first: what the sync gives them without it.
+async fn scores_without_hi(
+    view: impl Fn(&mut Core) -> Net,
+    tweak: impl Fn(&mut Net),
+    nodes: &[NodeId],
+) -> Vec<f32> {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view(&mut core);
+    tweak(&mut net);
+    assert_eq!(delete_hi(&mut core).cancelled, 1);
+    sync(&mut core, &net, opts()).await;
+    nodes.iter().map(|n| score_of(&mut core, n)).collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_packet_waits_for_a_v4_node() {
+    let (_dir, mut core, mut net) = setup();
+    let (bytes, m) = message(&mut core);
+    assert_eq!(
+        u64::from(Packet::decode(&bytes).unwrap().expires_at),
+        NOW + 604_800
+    );
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    let all_v3 = |net: &mut Net| net.v3 = net.records.keys().copied().collect();
+    all_v3(&mut net);
+    sync(&mut core, &net, opts()).await;
+    // Never offered to a protocol 3 node, which would refuse it.
+    assert_eq!(deposits_of(&net, &bytes), 0);
+    // Not a node failure: the scores are those of a sync without it.
+    let after: Vec<f32> = r.iter().map(|n| score_of(&mut core, n)).collect();
+    assert_eq!(after, scores_without_hi(setup_with, all_v3, &r).await);
+    // Still queued, and no deposit try recorded: it can still be cancelled.
+    assert!(core.pending_outbox(NOW).unwrap().contains(&bytes));
+    assert_eq!(delete_hi(&mut core).cancelled, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_packet_goes_to_v4_node() {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view_of(&mut core, &[0, 1]);
+    let (bytes, m) = message(&mut core);
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert_eq!(r.len(), 2);
+    // The better-ranked node speaks 3: skipped, the other one takes it.
+    rank_first(&mut core, &r[..1]);
+    let old = r[0];
+    let v3 = move |net: &mut Net| {
+        net.v3.insert(old);
+    };
+    v3(&mut net);
+    sync(&mut core, &net, opts()).await;
+    let h = content_hash(&bytes);
+    let calls = net.calls();
+    assert!(!calls.contains(&Call::Deposit(r[0], h)));
+    assert!(calls.contains(&Call::Deposit(r[1], h)));
+    assert_eq!(holders(&mut core, &bytes), vec![r[1]]);
+    let ranked = |c: &mut Core| {
+        let net = view_of(c, &[0, 1]);
+        rank_first(c, &[old]);
+        net
+    };
+    let without = scores_without_hi(ranked, v3, &[r[0]]).await;
+    assert_eq!(score_of(&mut core, &r[0]), without[0]);
+}
+
+/// Raises the scores of `nodes` well above the others', so that the
+/// successes of the sync's fetches do not reorder the responsibles.
+fn rank_first(core: &mut Core, nodes: &[NodeId]) {
+    let mut state = load(core);
+    for n in nodes {
+        for _ in 0..5 {
+            state
+                .view
+                .apply_score(n, crate::score::ScoreEvent::Found, NOW, true);
+        }
+    }
+    state.save(core).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_packet_skips_v3_top_responsibles() {
+    let (_dir, mut core, mut net) = setup();
+    let (bytes, m) = message(&mut core);
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert!(r.len() > crate::plan::CLIENT_COPIES);
+    // The responsibles the plan picks first all speak 3; the one after
+    // them is the only one that speaks 4.
+    let old = &r[..crate::plan::CLIENT_COPIES];
+    rank_first(&mut core, old);
+    net.v3.extend(r.iter().copied());
+    net.v3.remove(&r[crate::plan::CLIENT_COPIES]);
+    let report = sync(&mut core, &net, opts()).await;
+    let h = content_hash(&bytes);
+    let calls = net.calls();
+    for n in old {
+        assert!(!calls.contains(&Call::Deposit(*n, h)));
+    }
+    // The next responsible, which speaks 4, takes it in the same sync.
+    let next = r[crate::plan::CLIENT_COPIES];
+    assert!(calls.contains(&Call::Deposit(next, h)));
+    assert!(holders(&mut core, &bytes).contains(&next));
+    assert_eq!(report.first_copies, 1);
+    assert!(core.pending_outbox(NOW).unwrap().contains(&bytes));
+}
+
+#[tokio::test(start_paused = true)]
+async fn receipt_skips_v3_best_responsible() {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view_of(&mut core, &[0, 1]);
+    let receipt = core
+        .pending_outbox(NOW)
+        .unwrap()
+        .into_iter()
+        .find(|b| Packet::decode(b).unwrap().kind == Kind::Ack)
+        .unwrap();
+    let p = Packet::decode(&receipt).unwrap();
+    assert!(u64::from(p.expires_at) > NOW + barking_proto::max_expiry_secs(3));
+    let r = load(&mut core).view.responsibles_by_score(&p.mailbox, NOW);
+    assert_eq!(r.len(), 2);
+    rank_first(&mut core, &r[..1]);
+    net.v3.insert(r[0]);
+    let report = sync(&mut core, &net, opts()).await;
+    let h = content_hash(&receipt);
+    let calls = net.calls();
+    assert!(!calls.contains(&Call::Deposit(r[0], h)));
+    assert!(calls.contains(&Call::Deposit(r[1], h)));
+    assert_eq!(report.acks_deposited, 1);
+    assert_eq!(holders(&mut core, &receipt), vec![r[1]]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn one_skewed_node_refusal_keeps_the_packet() {
     let (_dir, mut core, mut net) = setup();
     let (bytes, m) = message(&mut core);
     let r = load(&mut core).view.responsibles_by_score(&m, NOW);
-    // The best node's clock is behind: it refuses a normal 24 h packet.
+    // The best node's clock is behind: it refuses a normal packet.
     net.refuse_deposit.insert(r[0], ErrorReason::TooFarInFuture);
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.refused >= 1);
@@ -1517,7 +1781,6 @@ fn due_reread(core: &mut Core) -> (NodeId, MailboxId, Vec<u8>) {
 async fn slow_reread_waits_for_every_regular_fetch_and_mark_polled() {
     let (_dir, mut core, mut net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
     let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
     let (x, m, _) = due_reread(&mut core);
     // The re-read would take longer than the whole session slice.
@@ -1538,7 +1801,7 @@ async fn slow_reread_waits_for_every_regular_fetch_and_mark_polled() {
     );
     assert!(regular.iter().all(|(i, _)| *i < reread[0]));
     assert!(report.polled_all_sessions);
-    assert!(core.watched_mailbox_groups(NOW).unwrap().intro.len() < wide);
+    assert_eq!(core.last_polled_day().unwrap(), Some(day_of(NOW)));
     // The re-read was cut by its own cap, and dated.
     let state = load(&mut core);
     assert!(state.reread_at.contains_key(&(x, m)));
@@ -2087,6 +2350,63 @@ fn horizon(core: &Core) -> Vec<(MailboxId, u32)> {
     let today = barking_core::mailbox::day_of(NOW);
     let days: Vec<u32> = (today..=today + crate::push::HORIZON_DAYS).collect();
     core.own_mailboxes(&days).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn wake_subscriptions_prefer_v4_responsibles() {
+    // A receipt lives 7 days: only protocol 4 nodes ever hold it, so only
+    // they can wake for it. The three best-ranked responsibles of the
+    // awaited mailbox speak 3 (met by the fetch); the two protocol 4 ones
+    // take the subscriptions, one protocol 3 node completes them.
+    let (_dir, mut core, mut net) = setup();
+    let (_, m) = message(&mut core);
+    assert!(
+        core.awaited_ack_mailboxes(NOW)
+            .unwrap()
+            .iter()
+            .any(|(a, _)| *a == m)
+    );
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert_eq!(r.len(), crate::RESPONSIBLES);
+    rank_first(&mut core, &r[..3]);
+    net.v3.extend(r[..3].iter().copied());
+    sync(&mut core, &net, push_opts()).await;
+    let acks: HashSet<NodeId> = subscribes_of(&net.calls(), SubKind::Acks)
+        .into_iter()
+        .filter(|(_, mb)| *mb == m)
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(acks.len(), crate::push::WAKE_NODES, "{acks:?}");
+    assert!(acks.contains(&r[3]) && acks.contains(&r[4]), "{acks:?}");
+    assert_eq!(acks.iter().filter(|n| r[..3].contains(n)).count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn message_wake_subscriptions_prefer_v4_responsibles() {
+    // Today's own mailbox, fetched by the sync: its three best-ranked
+    // responsibles speak 3.
+    let (_dir, mut core, mut net) = setup();
+    let m = horizon(&core)[0].0;
+    assert!(
+        core.watched_mailbox_groups(NOW)
+            .unwrap()
+            .sessions
+            .contains(&m)
+            || core.watched_mailbox_groups(NOW).unwrap().intro.contains(&m)
+    );
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert_eq!(r.len(), crate::RESPONSIBLES);
+    rank_first(&mut core, &r[..3]);
+    net.v3.extend(r[..3].iter().copied());
+    sync(&mut core, &net, push_opts()).await;
+    let subs: HashSet<NodeId> = subscribes_of(&net.calls(), SubKind::Messages)
+        .into_iter()
+        .filter(|(_, mb)| *mb == m)
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(subs.len(), crate::push::WAKE_NODES, "{subs:?}");
+    assert!(subs.contains(&r[3]) && subs.contains(&r[4]), "{subs:?}");
+    assert_eq!(subs.iter().filter(|n| r[..3].contains(n)).count(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -2695,7 +3015,9 @@ async fn no_owned_retry_on_v2_node() {
     let ranked = load(&mut core).view.responsibles_by_score(&intro, NOW);
     let x = ranked[0];
     net.full_unless_owned.insert(x);
-    net.v2.insert(x);
+    // Every node speaks 2 (an older one alone would be passed over for
+    // the newer responsibles): `x` is still the best one to subscribe on.
+    net.v2 = net.records.keys().copied().collect();
     sync(&mut core, &net, push_opts()).await;
     let calls = net.calls();
     assert!(
@@ -2930,14 +3252,14 @@ async fn quick_sync_skips_audit_maintenance_and_push() {
 async fn quick_sync_never_marks_polled() {
     let (_dir, mut core, net) = setup();
     core.mark_polled(NOW - 5 * DAY).unwrap();
-    let wide = core.watched_mailbox_groups(NOW).unwrap().intro.len();
+    let before = Some(day_of(NOW - 5 * DAY));
     let report = quick_sync(&mut core, &net, quick_opts()).await;
     assert!(report.network_up && report.mailboxes_polled > 0);
     assert!(!report.polled_all_sessions);
-    assert_eq!(core.watched_mailbox_groups(NOW).unwrap().intro.len(), wide);
+    assert_eq!(core.last_polled_day().unwrap(), before);
     // A full sync afterwards does mark it.
     sync(&mut core, &net, opts()).await;
-    assert!(core.watched_mailbox_groups(NOW).unwrap().intro.len() < wide);
+    assert_eq!(core.last_polled_day().unwrap(), Some(day_of(NOW)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -3216,9 +3538,9 @@ const DEPOSIT_NODE: &str = "K7QX2M4A";
 
 /// Sealing date of Bob's reply in `expired_reply`: it expired 20 minutes
 /// past the replication slack before `NOW`, so a verdict may come.
-const SEALED: u64 = NOW - DAY - REPLICATION_SLACK_SECS - 1_200;
+const SEALED: u64 = NOW - TTL - REPLICATION_SLACK_SECS - 1_200;
 /// Alice's ack for it, sealed 5 minutes before that expiry.
-const ACKED: u64 = SEALED + DAY - 300;
+const ACKED: u64 = SEALED + TTL - 300;
 
 /// Bob's reply, sealed at `SEALED`, deposited, and expired without its ack
 /// more than `REPLICATION_SLACK_SECS` ago; and Alice's ack for it
@@ -3470,8 +3792,8 @@ async fn deposit_recorded_before_finish() {
 async fn too_far_in_future_packet_is_not_delivered() {
     use barking_core::store::MessageStatus;
     let (_dir, mut core, mut net) = setup();
-    net.max_expiry = Some(NOW + 25 * 3_600);
-    sealed_at(&mut core, NOW + 6 * DAY);
+    net.max_expiry = Some(NOW + ANY_NODE_MAX);
+    sealed_at(&mut core, NOW + 2 * 3_600);
     let alice = core.contacts().unwrap()[0].fingerprint;
     let report = sync(&mut core, &net, opts()).await;
     let sealed = core
@@ -3671,7 +3993,7 @@ async fn no_verdict_before_the_replication_slack() {
     use barking_core::store::MessageStatus;
     // Expired 20 minutes ago: an ack deposited just before may still be
     // on its way to the other holders.
-    let mut e = expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, Some(0), Some(0));
+    let mut e = expired_reply_with(NOW - TTL - 1_200, NOW - 1_500, Some(0), Some(0));
     let report = sync(&mut e.core, &e.net, opts()).await;
     assert!(
         fetched_pairs(&e.net.calls())
@@ -3690,7 +4012,7 @@ async fn no_verdict_before_the_replication_slack() {
     assert_eq!(reply_status(&e), MessageStatus::Received);
     // Expired exactly the slack ago: the verdict may come.
     let mut e = expired_reply_with(
-        NOW - DAY - REPLICATION_SLACK_SECS,
+        NOW - TTL - REPLICATION_SLACK_SECS,
         NOW - REPLICATION_SLACK_SECS - 300,
         Some(0),
         Some(0),
@@ -3705,7 +4027,7 @@ async fn past_the_ack_grace_the_verdict_is_no_longer_sought() {
     use barking_core::store::MessageStatus;
     // Deposited, expired more than a day ago, its verdict never came: no
     // node can hold its ack any more.
-    let sealed = NOW - 2 * DAY - 60;
+    let sealed = NOW - TTL - barking_packet::ACK_GRACE_SECS - 60;
     let mut e = expired_reply_with(sealed, sealed + 30, Some(0), Some(0));
     assert_eq!(holders(&mut e.core, &e.reply).len(), 1);
     let report = sync(&mut e.core, &e.net, opts()).await;
@@ -3729,7 +4051,7 @@ async fn ack_found_a_day_after_expiry_makes_received() {
     use barking_core::store::MessageStatus;
     // Alice acked right away; Bob missed the wake-up and syncs a day after
     // both expired. The node keeps the ack a day more (`ACK_GRACE_SECS`).
-    let sealed = NOW - 2 * DAY + 1_200;
+    let sealed = NOW - TTL - DAY + 1_200;
     let mut e = expired_reply_with(sealed, sealed + 60, None, None);
     assert!(u64::from(Packet::decode(&e.ack).unwrap().expires_at) < NOW - DAY + 1_800);
     e.net.mailbox_items.insert(e.mailbox, vec![e.ack.clone()]);

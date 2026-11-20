@@ -53,6 +53,138 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertNotNil(m.sendError)
     }
 
+    func testDraftLoadedOnAppear() async {
+        let d = FakeDevice()
+        d.drafts = ["b": "hello"]
+        let m = make(d)
+        await m.onAppear()
+        XCTAssertEqual(m.draft, "hello")
+    }
+
+    func testSaveDraftStoresTheDraft() async {
+        let d = FakeDevice()
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "x"
+        await m.saveDraft()
+        XCTAssertEqual(d.drafts["b"], "x")
+    }
+
+    func testDraftClearedOnlyAfterSuccessfulSend() async {
+        let d = FakeDevice()
+        d.drafts = ["b": "hello"]
+        let m = make(d)
+        await m.onAppear()
+        await m.send()
+        XCTAssertNil(d.drafts["b"])
+        XCTAssertEqual(d.sent.count, 1)
+    }
+
+    func testFailedSendKeepsStoredDraft() async {
+        let d = FakeDevice()
+        d.drafts = ["b": "hello"]
+        d.sendError = BarkingError.Locked
+        let m = make(d)
+        await m.onAppear()
+        await m.send()
+        XCTAssertEqual(d.drafts["b"], "hello")
+        XCTAssertEqual(m.draft, "hello")
+    }
+
+    func testOversizeDraftIsNotSaved() async {
+        let d = FakeDevice()
+        d.drafts = ["b": "ok"]
+        let m = make(d)
+        await m.onAppear()
+        m.draft = String(repeating: "a", count: 4001)
+        await m.saveDraft()
+        XCTAssertEqual(d.drafts["b"], "ok")
+        XCTAssertNil(m.sendError)
+    }
+
+    /// The send empties the field: a save then must not erase the stored draft.
+    func testSaveDraftDuringASendKeepsTheStoredDraft() async throws {
+        let d = FakeDevice()
+        d.drafts = ["b": "hello"]
+        d.syncDelay = 0.3
+        let m = make(d)
+        await m.onAppear()
+        let send = Task { await m.send() }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(m.draft, "")
+        await m.saveDraft()
+        XCTAssertEqual(d.drafts["b"], "hello")
+        await send.value
+        XCTAssertNil(d.drafts["b"])
+    }
+
+    func testUnchangedDraftIsNotRewritten() async {
+        let d = FakeDevice()
+        d.drafts = ["b": "hello"]
+        let m = make(d)
+        await m.onAppear()
+        await m.saveDraft()
+        XCTAssertEqual(d.setDraftCalls, 0, "right after a load")
+        m.draft = "x"
+        await m.saveDraft()
+        await m.saveDraft()
+        XCTAssertEqual(d.setDraftCalls, 1)
+    }
+
+    func testFailedSaveIsRetriedAndSaysNothing() async {
+        let d = FakeDevice()
+        d.setDraftError = BarkingError.Locked
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "x"
+        await m.saveDraft()
+        XCTAssertNil(d.drafts["b"])
+        XCTAssertNil(m.sendError)
+        XCTAssertNil(m.notice)
+        d.setDraftError = nil
+        await m.saveDraft()
+        XCTAssertEqual(d.setDraftCalls, 2)
+        XCTAssertEqual(d.drafts["b"], "x")
+    }
+
+    func testRemovedDeviceNeitherLoadsNorSavesDrafts() async {
+        let d = FakeDevice()
+        d.removedInfo = RemovedInfo(version: 1, at: 1)
+        d.drafts = ["b": "hello"]
+        let m = make(d)
+        await m.onAppear()
+        XCTAssertTrue(m.removed)
+        XCTAssertEqual(m.draft, "")
+        m.draft = "x"
+        await m.saveDraft()
+        XCTAssertEqual(d.setDraftCalls, 0)
+        XCTAssertEqual(d.drafts["b"], "hello")
+    }
+
+    func testTextTypedDuringTheLoadIsNotOverwritten() async throws {
+        let d = FakeDevice()
+        d.drafts = ["b": "stored"]
+        d.draftDelay = 0.3
+        let m = make(d)
+        let appear = Task { await m.onAppear() }
+        try await Task.sleep(for: .milliseconds(100))
+        m.draft = "typed"
+        await appear.value
+        XCTAssertEqual(m.draft, "typed")
+    }
+
+    /// A disappear during the send skipped its save; the failure stores the text.
+    func testFailedSendStoresTheRestoredDraft() async {
+        let d = FakeDevice()
+        d.sendError = BarkingError.Locked
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "hello"
+        await m.send()
+        XCTAssertEqual(m.draft, "hello")
+        XCTAssertEqual(d.drafts["b"], "hello")
+    }
+
     func testCounterAndLimit() {
         let m = make(FakeDevice())
         m.draft = String(repeating: "a", count: 3499)
