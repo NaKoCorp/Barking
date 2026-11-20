@@ -627,7 +627,7 @@ fn record_message(
             placeholder: false,
         })?;
     // Packet → message: found again through the emitted ack (`delete_contact`).
-    q.record_inbound(packet.id, message_id)?;
+    q.record_inbound(packet.id, message_id, row.contact_fp)?;
     route::record(q, packet.id, RouteStep::Opened, now, None)?;
     if inserted {
         log(
@@ -776,7 +776,7 @@ fn accept_reaction(
     let from = row.contact_fp;
     let received = MessageId::incoming(&from, &env.message_id);
     let already = q.inbound_has_message(received)?;
-    q.record_inbound(packet.id, received)?;
+    q.record_inbound(packet.id, received, from)?;
     route::record(q, packet.id, RouteStep::Opened, now, None)?;
     if already {
         log_limited(
@@ -843,7 +843,7 @@ fn accept_unknown(
     // For my own devices `row.contact_fp` is my fingerprint, as in `accept_sync`.
     let message_id = MessageId::incoming(&row.contact_fp, &env.message_id);
     let already = q.inbound_has_message(message_id)?;
-    q.record_inbound(packet.id, message_id)?;
+    q.record_inbound(packet.id, message_id, row.contact_fp)?;
     route::record(q, packet.id, RouteStep::Opened, now, None)?;
     if already {
         log_limited(
@@ -937,7 +937,7 @@ fn accept_card_update(
     };
     let (_, new_prekeys, _) = commit_session(q, o, now)?;
     q.mark_seen(packet.id, now)?;
-    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id))?;
+    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id), fp)?;
     let Some(verified) = verified else {
         // Card already known or superseded: acked so that the sender
         // stops resending it, nothing is written.
@@ -997,7 +997,7 @@ fn accept_own_card(
     let removal = removed::is_removal(&own.list, &device.public(), card);
     let (_, new_prekeys, _) = commit_session(q, o, now)?;
     q.mark_seen(packet.id, now)?;
-    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id))?;
+    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id), fp)?;
     if removal && removed::enter(q, device, card, now, rng)? {
         emit_ack(q, packet, env.ack_secret, now, rng)?;
         return Ok((ReceiveOutcome::Removed, new_prekeys));
@@ -1073,7 +1073,7 @@ fn accept_sync(
         }
     }
     q.mark_seen(packet.id, now)?;
-    q.record_inbound(packet.id, sync_id)?;
+    q.record_inbound(packet.id, sync_id, *my_fp)?;
     route::record(q, packet.id, RouteStep::Opened, now, None)?;
     match kind {
         Some(kind) => log(

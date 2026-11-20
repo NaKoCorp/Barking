@@ -61,7 +61,7 @@ pub use link::{
     MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES,
 };
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
-pub use reactions::{ME_REACTOR, ReactionChip};
+pub use reactions::{ME_REACTOR, ReactionChip, ReactionResend};
 pub use receive::{
     R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
     R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,

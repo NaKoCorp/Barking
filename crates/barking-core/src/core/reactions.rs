@@ -23,14 +23,24 @@ use rusqlite::{OptionalExtension, params};
 
 use super::delivery;
 use super::send::{SealTime, Target, quote_ref, seal_for};
-use super::{Core, sync};
+use super::{Core, MAX_AGE_SECS, sync};
 use crate::content::{ExtContent, MessageRef};
 use crate::emoji;
 use crate::identity::{DeviceKeys, Fingerprint};
 use crate::packet::Packet;
-use crate::store::{MessageId, Queries, ReactionRow, arr, map_err};
+use crate::store::{MessageId, Queries, ReactionRow, arr, drop_reaction_packets, map_err, to_i64};
 use crate::transparency::SyncKind;
 use crate::{CoreError, Result};
+
+/// What `Core::resend_reactions` did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReactionResend {
+    /// Audiences resent.
+    pub resent: u32,
+    /// Groups whose resend failed (rolled back, retried at the next full
+    /// sync): the caller logs them.
+    pub failed: u32,
+}
 
 /// `reactions.reactor` of my own rows (this device and my other devices).
 pub const ME_REACTOR: [u8; 32] = [0u8; 32];
@@ -141,27 +151,33 @@ impl Core {
     /// with no row of mine on the target (message deleted here, contact
     /// erased) there is nothing to say, and the audience is dropped. A
     /// contact that is unknown or blocked is skipped and dropped too. The
-    /// flagged rows are removed. Returns the number of audiences resent.
+    /// flagged rows are removed, with their packets' deliveries. Returns the
+    /// number of audiences resent and of groups that failed.
     /// The quick sync never calls it.
-    pub fn resend_reactions(&mut self, now: u64, rng: &mut impl CryptoRng) -> Result<u32> {
+    ///
+    /// It also purges the orphan reactions (`purge_orphans`).
+    pub fn resend_reactions(
+        &mut self,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<ReactionResend> {
         self.ensure_active()?;
         self.expire_due(now)?;
         if self.store.is_read_only() {
-            return Ok(0);
+            return Ok(ReactionResend::default());
         }
         let Core { store, device, .. } = self;
+        purge_orphans(&*store, now)?;
         // Rows of packets that left the send queue without failing (deposited
-        // and acknowledged, or purged) have nothing left to resend.
-        store
-            .conn()
-            .execute(
-                "DELETE FROM reaction_sends WHERE expired = 0 \
-                 AND packet_id NOT IN (SELECT packet_id FROM outbox)",
-                [],
-            )
-            .map_err(map_err)?;
+        // and acknowledged, or purged) have nothing left to resend: their
+        // deliveries go with them.
+        drop_reaction_packets(
+            &*store,
+            "expired = 0 AND packet_id NOT IN (SELECT packet_id FROM outbox)",
+            [],
+        )?;
         let groups = flagged_audiences(&*store)?;
-        let mut resent = 0u32;
+        let mut out = ReactionResend::default();
         for (to, message, audience) in groups {
             // A group that fails (its transaction rolled back, its rows
             // still flagged) is retried at the next full sync and does not
@@ -195,20 +211,19 @@ impl Core {
                     }
                     _ => 0,
                 };
-                tx.conn()
-                    .execute(
-                        "DELETE FROM reaction_sends \
-                         WHERE expired = 1 AND message_id = ?1 AND contact_fp = ?2",
-                        params![message.0.as_slice(), to.0.as_slice()],
-                    )
-                    .map_err(map_err)?;
+                drop_reaction_packets(
+                    tx,
+                    "expired = 1 AND message_id = ?1 AND contact_fp = ?2",
+                    params![message.0.as_slice(), to.0.as_slice()],
+                )?;
                 Ok(sent)
             }) else {
+                out.failed += 1;
                 continue;
             };
-            resent += sent;
+            out.resent += sent;
         }
-        Ok(resent)
+        Ok(out)
     }
 
     /// The chips under `message` of the conversation with `contact`: rows in
@@ -239,6 +254,22 @@ impl Core {
         }
         Ok(chips)
     }
+}
+
+/// Erases the orphan reactions: a row whose target is not stored here and
+/// was first seen more than `MAX_AGE_SECS` ago. Past that age the target
+/// would be refused as too old if it came at all, so the row would never
+/// show. Keyed on `first_seen`: later updates of an orphan set do not keep
+/// it alive.
+fn purge_orphans(q: &impl Queries, now: u64) -> Result<()> {
+    q.conn()
+        .execute(
+            "DELETE FROM reactions WHERE first_seen < ?1 AND NOT EXISTS \
+             (SELECT 1 FROM messages m WHERE m.message_id = reactions.message_id)",
+            params![to_i64(now.saturating_sub(MAX_AGE_SECS))],
+        )
+        .map_err(map_err)?;
+    Ok(())
 }
 
 /// What `seal_set` seals: my set on a target, dated and identified.

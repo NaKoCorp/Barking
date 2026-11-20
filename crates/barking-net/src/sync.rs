@@ -1505,7 +1505,15 @@ where
 
         // Reaction packets that expired undeposited go out again, with the
         // current set, in this sync's first deposit.
-        let _ = self.core.resend_reactions(now, &mut rand::rng());
+        // A failure here never stops the sync: what is left stays flagged
+        // for the next one. Logged without any content or identifier.
+        match self.core.resend_reactions(now, &mut rand::rng()) {
+            Ok(r) if r.failed > 0 => {
+                tracing::warn!(failed = r.failed, "reaction resend: groups failed");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "reaction resend failed"),
+        }
         self.deposit_stage(false).await;
 
         if !intro.is_empty() {

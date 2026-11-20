@@ -297,6 +297,12 @@ CREATE INDEX IF NOT EXISTS outbox_waiting ON outbox(deposited_at, expires_at);
 pub const OUTBOX_ADD_DEPOSIT_TRIED_AT: &str =
     "ALTER TABLE outbox ADD COLUMN deposit_tried_at INTEGER;";
 
+/// `inbound.contact_fp`, added to v4 before its release: the conversation
+/// (or my own fingerprint, for a sync) of the received packet, so that the
+/// acks of a removed contact's packets with no message row (reactions,
+/// content set aside) can be found. Rows written before it stay NULL.
+pub const INBOUND_ADD_CONTACT_FP: &str = "ALTER TABLE inbound ADD COLUMN contact_fp BLOB;";
+
 /// Backfill of v3 from the route log (`route_steps`, `RouteStep` as stored:
 /// Sealed 0, Deposited 1, AckVerified 4, OwnCopy 5), in the order of §5.3:
 /// 1. `sealed_at`: the `Sealed` or `OwnCopy` step, else the message's

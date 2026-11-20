@@ -827,7 +827,7 @@ fn migration_from_pre_1a_database() {
         .unwrap();
     assert_eq!(count_class(&store, EventClass::Security), 1);
     store
-        .record_inbound(PacketId([9; 16]), m[0].message_id)
+        .record_inbound(PacketId([9; 16]), m[0].message_id, Fingerprint([0; 32]))
         .unwrap();
     assert!(
         store
@@ -854,7 +854,9 @@ fn inbound_packets_map_to_their_message() {
         .unwrap();
     // The message and its resend (two packets) lead to the same message.
     for pid in [PacketId([1; 16]), PacketId([2; 16])] {
-        store.record_inbound(pid, mid).unwrap();
+        store
+            .record_inbound(pid, mid, Fingerprint([0; 32]))
+            .unwrap();
         let m = store.message_by_packet(pid).unwrap().unwrap();
         assert_eq!((m.message_id, m.direction), (mid, Direction::In));
     }
@@ -883,7 +885,9 @@ fn v2_database_without_inbound_gets_it() {
     store
         .insert_message(fp, Direction::In, "x", MessageStatus::Received, 5, mid)
         .unwrap();
-    store.record_inbound(PacketId([1; 16]), mid).unwrap();
+    store
+        .record_inbound(PacketId([1; 16]), mid, Fingerprint([0; 32]))
+        .unwrap();
     assert!(
         store
             .message_by_packet(PacketId([1; 16]))

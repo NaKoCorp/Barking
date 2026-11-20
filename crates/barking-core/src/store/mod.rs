@@ -509,6 +509,27 @@ pub struct PendingPackets {
     pub packets: u32,
 }
 
+/// Drops the reaction packets tracked by the `reaction_sends` rows that
+/// match `rows` (a condition on its columns, with `p`): first their queued
+/// packets, then their deliveries (keyed on these packet ids only: cards
+/// and syncs also have deliveries without a message row), then the rows,
+/// which the first two select from.
+pub(crate) fn drop_reaction_packets(
+    q: &(impl Queries + ?Sized),
+    rows: &str,
+    p: impl rusqlite::Params + Copy,
+) -> Result<()> {
+    let selected = format!("SELECT packet_id FROM reaction_sends WHERE {rows}");
+    for sql in [
+        format!("DELETE FROM outbox WHERE packet_id IN ({selected})"),
+        format!("DELETE FROM deliveries WHERE packet_id IN ({selected})"),
+        format!("DELETE FROM reaction_sends WHERE {rows}"),
+    ] {
+        q.conn().execute(&sql, p).map_err(map_err)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn map_err(e: rusqlite::Error) -> CoreError {
     if let rusqlite::Error::SqliteFailure(f, _) = &e
         && f.code == ErrorCode::NotADatabase
@@ -785,6 +806,21 @@ impl Store {
         }
         if stored.is_none_or(|v| v < 4) {
             schema::migrate_v3_to_v4(&self.conn).map_err(map_err)?;
+        }
+        // `inbound.contact_fp`, added to v4 before its release (idempotent).
+        let has_inbound_contact: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('inbound') \
+                 WHERE name = 'contact_fp'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_inbound_contact {
+            self.conn
+                .execute_batch(schema::INBOUND_ADD_CONTACT_FP)
+                .map_err(map_err)?;
         }
         Ok(())
     }
@@ -1083,13 +1119,24 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Records that the received packet `packet_id` carried the message
+    /// Records that the received packet `packet_id`, from the conversation
+    /// with `contact` (my own fingerprint for a sync), carried the message
     /// `message_id` (a resend adds a row for the same message).
-    fn record_inbound(&self, packet_id: PacketId, message_id: MessageId) -> Result<()> {
+    fn record_inbound(
+        &self,
+        packet_id: PacketId,
+        message_id: MessageId,
+        contact: Fingerprint,
+    ) -> Result<()> {
         self.conn()
             .execute(
-                "INSERT OR IGNORE INTO inbound(packet_id, message_id) VALUES (?1, ?2)",
-                params![packet_id.0.as_slice(), message_id.0.as_slice()],
+                "INSERT OR IGNORE INTO inbound(packet_id, message_id, contact_fp) \
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    packet_id.0.as_slice(),
+                    message_id.0.as_slice(),
+                    contact.0.as_slice()
+                ],
             )
             .map_err(map_err)?;
         Ok(())
@@ -1235,14 +1282,16 @@ pub trait Queries {
                 params![message.0.as_slice()],
             )
             .map_err(map_err)?;
-        // Nor may the tracking of its reaction packets keep the link.
-        self.conn()
-            .execute(
-                "DELETE FROM reaction_sends WHERE message_id = ?1",
-                params![message.0.as_slice()],
-            )
-            .map_err(map_err)?;
-        Ok(())
+        // Nor may its queued reaction packets, their deliveries and their
+        // tracking keep the link (a removal still queued goes with them).
+        drop_reaction_packets(self, "message_id = ?1", params![message.0.as_slice()])
+    }
+
+    /// Drops my queued reaction packets about the conversation with
+    /// `contact` (to the contact and to my other devices), with their
+    /// deliveries and their tracking (`drop_reaction_packets`).
+    fn drop_reaction_packets_with(&self, contact: Fingerprint) -> Result<()> {
+        drop_reaction_packets(self, "contact_fp = ?1", params![contact.0.as_slice()])
     }
 
     /// Erases every reaction of the conversation with `contact`, mine
@@ -1804,6 +1853,15 @@ pub trait Queries {
                 self.outbox_remove(PacketId(arr(id)?))?;
             }
         }
+        // And those of its packets without a message row (reactions,
+        // content set aside, cards), by the sender `inbound` recorded.
+        self.conn()
+            .execute(
+                "DELETE FROM outbox WHERE kind = ?1 AND ref IN \
+                 (SELECT packet_id FROM inbound WHERE contact_fp = ?2)",
+                params![Kind::Ack as i64, fp.0.as_slice()],
+            )
+            .map_err(map_err)?;
         self.conn()
             .execute(
                 "DELETE FROM sessions WHERE contact_fp = ?1",
@@ -1812,12 +1870,7 @@ pub trait Queries {
             .map_err(map_err)?;
         self.delete_draft(fp)?;
         self.delete_reactions_with(fp)?;
-        self.conn()
-            .execute(
-                "DELETE FROM reaction_sends WHERE contact_fp = ?1",
-                params![fp.0.as_slice()],
-            )
-            .map_err(map_err)?;
+        self.drop_reaction_packets_with(fp)?;
         self.conn()
             .execute(
                 "DELETE FROM contacts WHERE fp = ?1",
