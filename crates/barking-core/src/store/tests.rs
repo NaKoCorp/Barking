@@ -1364,3 +1364,11 @@ fn v3_database_upgrades_to_v4() {
     drop(store);
     Store::open_read(&path, &KEY).unwrap();
 }
+
+/// A message row to insert carries plaintext: dropped, it is wiped
+/// (history import, `record_message`, sends).
+#[test]
+fn message_insert_wipes_its_body() {
+    fn assert_zod<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zod::<MessageInsert>();
+}

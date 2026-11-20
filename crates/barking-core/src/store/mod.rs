@@ -228,7 +228,8 @@ pub struct MessageRow {
     pub placeholder: bool,
 }
 
-/// A message row to insert (`Queries::insert_message_row`).
+/// A message row to insert (`Queries::insert_message_row`). Its body is
+/// plaintext, wiped when the value is dropped.
 #[derive(Clone)]
 pub struct MessageInsert {
     pub contact_fp: Fingerprint,
@@ -242,6 +243,14 @@ pub struct MessageInsert {
     pub reply_ref: Option<MessageRef>,
     pub placeholder: bool,
 }
+
+impl Drop for MessageInsert {
+    fn drop(&mut self) {
+        self.body.zeroize();
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for MessageInsert {}
 
 /// One reactor's set of emoji on a message (`reactions` table): a
 /// last-writer-wins register per `(message_id, reactor)`, keyed
