@@ -180,7 +180,7 @@ struct ConversationView: View {
     @ViewBuilder private func noticeBanner(_ notice: ConversationModel.Notice) -> some View {
         switch notice {
         case .deleted(let message): Banner(kind: .info, title: message.key)
-        case .deleteFailed, .noReachableDevice:
+        case .deleteFailed, .noReachableDevice, .reactionTooMany, .reactionFailed, .contactRemoved:
             Banner(kind: .warning, verbatim: notice.text())
         }
     }

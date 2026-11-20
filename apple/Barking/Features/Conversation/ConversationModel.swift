@@ -19,6 +19,16 @@ final class ConversationModel {
         /// Shown at Send, before the core has the row (negative id): no
         /// details, delete or retry yet.
         var local = false
+        /// What this message answers; nil when it is not a reply.
+        var quote: Quote?
+        /// The emoji under it, ordered by the core.
+        var reactions: [ReactionChip] = []
+        /// A placeholder for content this version cannot read.
+        var needsUpdate = false
+
+        /// A local row (not in the core yet) or a placeholder can be neither
+        /// replied to, reacted to, nor copied.
+        var canReplyOrReact: Bool { !local && !needsUpdate }
 
         /// The state under the bubble; nil shows the time only.
         var state: DeliveryState? { outgoing ? delivery?.state : nil }
@@ -32,6 +42,12 @@ final class ConversationModel {
         case deleteFailed
         /// A retry found no device of the contact to seal for (§9).
         case noReachableDevice(name: String)
+        /// A reaction was refused: 20 emoji of mine on the message at most.
+        case reactionTooMany
+        /// A reaction was not saved (the emoji or the message is gone, or the core failed).
+        case reactionFailed
+        /// The contact was removed meanwhile; nothing can be sent to them.
+        case contactRemoved
 
         /// What the banner says, spoken when it appears.
         func text(bundle: Bundle = .main, locale: Locale = .current) -> String {
@@ -42,12 +58,24 @@ final class ConversationModel {
             case .noReachableDevice(let name):
                 String(localized: "\(name) has no reachable device left. The message can’t be sent again.",
                        bundle: bundle, locale: locale)
+            case .reactionTooMany:
+                String(localized: "You can react with 20 emoji at most on one message.", bundle: bundle, locale: locale)
+            case .reactionFailed:
+                String(localized: "Reaction not saved. Try again.", bundle: bundle, locale: locale)
+            case .contactRemoved:
+                String(localized: "This contact was removed. Nothing can be sent to them.", bundle: bundle, locale: locale)
             }
         }
     }
 
     static let maxBytes = 4000
     static let counterFrom = 3500
+    /// The quick row of the reaction picker.
+    static let frequentEmoji = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+    /// Emoji of mine on one message at most (the core refuses more).
+    static let maxReactions = 20
+    /// Characters of the original the reply banner shows.
+    static let bannerChars = 60
 
     let contact: String
     private let core: CoreService
@@ -80,6 +108,15 @@ final class ConversationModel {
     /// This device was removed from the account: it can no longer send.
     private(set) var removed = false
     var draft = ""
+    /// The message the next send answers. Not part of the draft (spec §5.6):
+    /// it is kept when a send fails and dropped when its row is gone.
+    private(set) var replyingTo: Item?
+    /// The row a tapped quote jumped to, lit for `highlightDuration`.
+    private(set) var highlighted: Int64?
+    var highlightDuration: Duration = .milliseconds(1500)
+    private var highlightClear: Task<Void, Never>?
+    /// Rows whose reaction change is running: a second tap waits for the first.
+    private var reacting: Set<Int64> = []
     /// What the core holds as this conversation's draft, as far as known:
     /// a save only runs when `draft` differs from it.
     private var lastSaved = ""
@@ -95,6 +132,14 @@ final class ConversationModel {
     init(contact: String, core: CoreService) {
         self.contact = contact
         self.core = core
+    }
+
+    /// The banner above the field while replying: who is quoted and the
+    /// first line of their text.
+    var replyBanner: (name: String, excerpt: String)? {
+        guard let item = replyingTo else { return nil }
+        let line = item.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        return (item.outgoing ? String(localized: "You") : name, String(line.prefix(Self.bannerChars)))
     }
 
     var byteCount: Int { draft.utf8.count }
@@ -173,8 +218,11 @@ final class ConversationModel {
         }.map(\.id)
         items = messages.filter { !resent.contains($0.id) }.map {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
-                 at: Date(timeIntervalSince1970: TimeInterval($0.at)), delivery: $0.delivery)
+                 at: Date(timeIntervalSince1970: TimeInterval($0.at)), delivery: $0.delivery,
+                 quote: $0.replyTo, reactions: $0.reactions, needsUpdate: $0.needsUpdate)
         } + [shownAtSend].compactMap { $0 }
+        // The row being answered left (deleted): nothing to answer any more.
+        if let target = replyingTo, !items.contains(where: { $0.id == target.id }) { replyingTo = nil }
         // What arrives while the conversation is on screen is read.
         if visible, let last = items.last(where: { !$0.outgoing }) {
             try? await core.markRead(contact, upTo: last.id)
@@ -238,6 +286,7 @@ final class ConversationModel {
         sendError = nil
         notice = nil
         let at = now()
+        let replyId = replyingTo?.id
         let shown = Item(id: nextLocalId, outgoing: true, text: text, at: at,
                          delivery: Delivery(state: .pending, sealedAt: UInt64(at.timeIntervalSince1970),
                                             depositedAt: nil, receivedAt: nil, expiredAt: nil, devices: 0,
@@ -247,7 +296,8 @@ final class ConversationModel {
         shownAtSend = shown
         items.append(shown)
         do {
-            try await core.send(text, to: contact)
+            try await core.send(text, to: contact, replyTo: replyId)
+            replyingTo = nil
             // Sent: the stored draft goes too. Not before, so a failure keeps it.
             if (try? await core.setDraft(contact, text: "")) != nil { lastSaved = "" }
         } catch {
@@ -259,6 +309,63 @@ final class ConversationModel {
         // The reload swaps it for the core's row, or drops it on failure.
         shownAtSend = nil
         await reload()
+    }
+
+    /// Starts answering the row `id`; ignored for a local row, a placeholder
+    /// or a row not shown.
+    func startReply(_ id: Int64) {
+        guard let item = items.first(where: { $0.id == id }), item.canReplyOrReact else { return }
+        replyingTo = item
+    }
+
+    func cancelReply() { replyingTo = nil }
+
+    /// Fewer than 20 emoji of mine on the row `id`.
+    func canAdd(on id: Int64) -> Bool {
+        guard let item = items.first(where: { $0.id == id }) else { return false }
+        return item.reactions.filter(\.mine).count < Self.maxReactions
+    }
+
+    /// Adds my `emoji` on the row `id`, or removes it if it is already mine,
+    /// then reloads the chips. A refusal reloads and is said in the banner.
+    func toggle(_ emoji: String, on id: Int64) async {
+        guard let item = items.first(where: { $0.id == id }), item.canReplyOrReact,
+              !reacting.contains(id) else { return }
+        var mine = item.reactions.filter(\.mine).map(\.emoji)
+        if let at = mine.firstIndex(of: emoji) {
+            mine.remove(at: at)
+        } else {
+            guard mine.count < Self.maxReactions else { return }
+            mine.append(emoji)
+        }
+        reacting.insert(id)
+        defer { reacting.remove(id) }
+        notice = nil
+        do {
+            try await core.setReactions(id, emojis: mine, contact: contact)
+        } catch BarkingError.TooManyEmoji {
+            notice = .reactionTooMany
+        } catch BarkingError.NotFound {
+            notice = .contactRemoved
+        } catch {
+            notice = .reactionFailed
+        }
+        await reload()
+    }
+
+    /// The row a quote points at, lit for `highlightDuration`; nil when the
+    /// original is unavailable or not among the rows.
+    @discardableResult
+    func jump(to quote: Quote) -> Int64? {
+        guard let id = quote.id, items.contains(where: { $0.id == id }) else { return nil }
+        highlighted = id
+        highlightClear?.cancel()
+        highlightClear = Task { [weak self, duration = highlightDuration] in
+            try? await Task.sleep(for: duration)
+            guard !Task.isCancelled, let self else { return }
+            self.highlighted = nil
+        }
+        return id
     }
 
     /// Sends a not delivered message again: same row, back to pending,

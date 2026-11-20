@@ -530,4 +530,218 @@ final class ConversationModelTests: XCTestCase {
         await m.reload()
         XCTAssertEqual(m.trust, .verified)
     }
+
+    // MARK: Replies and reactions
+
+    private func chips(_ emojis: [String], mine: Bool = true) -> [ReactionChip] {
+        emojis.map { ReactionChip(emoji: $0, count: 1, mine: mine) }
+    }
+
+    private func loaded(_ messages: [Message]) async -> (FakeDevice, ConversationModel) {
+        let d = FakeDevice()
+        d.messageList = ["b": messages]
+        let m = make(d)
+        await m.onAppear()
+        return (d, m)
+    }
+
+    func testQuoteAndChipsLoaded() async {
+        let quote = Quote(id: 3, authorIsMe: false, excerpt: "salut")
+        let chip = ReactionChip(emoji: "👍", count: 2, mine: true)
+        let (_, m) = await loaded([
+            Message(id: 5, outgoing: true, body: "oui", at: 1, replyTo: quote, reactions: [chip]),
+            Message(id: 6, outgoing: false, body: "", at: 2, needsUpdate: true),
+        ])
+        XCTAssertEqual(m.items[0].quote, quote)
+        XCTAssertEqual(m.items[0].reactions, [chip])
+        XCTAssertFalse(m.items[0].needsUpdate)
+        XCTAssertTrue(m.items[1].needsUpdate)
+        XCTAssertNil(m.items[1].quote)
+    }
+
+    func testReplySendsTheTarget() async {
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        m.startReply(5)
+        XCTAssertEqual(m.replyingTo?.id, 5)
+        m.draft = "oui"
+        await m.send()
+        XCTAssertEqual(d.sent.count, 1)
+        XCTAssertEqual(d.sent.first?.contact, "b")
+        XCTAssertEqual(d.sent.first?.text, "oui")
+        XCTAssertEqual(d.sent.first?.replyTo, 5)
+        XCTAssertNil(m.replyingTo)
+    }
+
+    func testFailedReplyKeepsTheTarget() async {
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        d.sendError = BarkingError.Locked
+        m.startReply(5)
+        m.draft = "oui"
+        await m.send()
+        XCTAssertEqual(m.replyingTo?.id, 5)
+        XCTAssertEqual(m.draft, "oui")
+    }
+
+    func testPlainSendHasNoTarget() async {
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        m.draft = "oui"
+        await m.send()
+        XCTAssertNil(d.sent.first?.replyTo)
+    }
+
+    func testCancelReply() async {
+        let (_, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        m.startReply(5)
+        m.cancelReply()
+        XCTAssertNil(m.replyingTo)
+        XCTAssertNil(m.replyBanner)
+    }
+
+    func testReplyBanner() async {
+        let (_, m) = await loaded([
+            Message(id: 5, outgoing: false, body: "first line\nsecond", at: 1),
+            Message(id: 6, outgoing: true, body: String(repeating: "x", count: 100), at: 2),
+        ])
+        m.startReply(5)
+        XCTAssertEqual(m.replyBanner?.name, "bob")
+        XCTAssertEqual(m.replyBanner?.excerpt, "first line")
+        m.startReply(6)
+        XCTAssertEqual(m.replyBanner?.name, "You")
+        XCTAssertEqual(m.replyBanner?.excerpt, String(repeating: "x", count: 60))
+    }
+
+    func testReplyTargetThatVanishesIsDropped() async {
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        m.startReply(5)
+        d.messageList = ["b": []]
+        await m.reload()
+        XCTAssertNil(m.replyingTo)
+    }
+
+    /// A local row (negative id, not in the core yet) and a placeholder row
+    /// can be neither replied to nor reacted to.
+    func testNoReplyOrReactionOnLocalOrUpdateRows() async throws {
+        let d = FakeDevice()
+        d.syncDelay = 0.5
+        d.messageList = ["b": [Message(id: 6, outgoing: false, body: "", at: 1, needsUpdate: true)]]
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "hello"
+        let send = Task { await m.send() }
+        for _ in 0..<100 where m.items.count < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        let local = try XCTUnwrap(m.items.last)
+        XCTAssertLessThan(local.id, 0)
+        XCTAssertTrue(local.local)
+        XCTAssertFalse(local.canReplyOrReact)
+        XCTAssertFalse(m.items[0].canReplyOrReact)
+        m.startReply(local.id)
+        XCTAssertNil(m.replyingTo)
+        m.startReply(6)
+        XCTAssertNil(m.replyingTo)
+        m.startReply(99)
+        XCTAssertNil(m.replyingTo, "an unknown row")
+        await m.toggle("👍", on: local.id)
+        await m.toggle("👍", on: 6)
+        XCTAssertTrue(d.reactions.isEmpty)
+        XCTAssertNil(m.notice)
+        await send.value
+    }
+
+    func testCapabilityOfAnOrdinaryRow() async {
+        let (_, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        XCTAssertTrue(m.items[0].canReplyOrReact)
+    }
+
+    func testToggleAddsThenRemoves() async {
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1, reactions: chips(["👍"]))])
+        await m.toggle("😂", on: 5)
+        XCTAssertEqual(d.reactions[5], ["👍", "😂"])
+        await m.toggle("👍", on: 5)
+        XCTAssertEqual(d.reactions[5], [])
+    }
+
+    func testToggleKeepsOthersChipsOut() async {
+        // Only my own chips are sent back.
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1,
+                                           reactions: chips(["❤️"], mine: false) + chips(["👍"]))])
+        await m.toggle("🙏", on: 5)
+        XCTAssertEqual(d.reactions[5], ["👍", "🙏"])
+    }
+
+    func testToggleReloadsTheChips() async {
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        let before = d.messagesCalls
+        await m.toggle("👍", on: 5)
+        XCTAssertGreaterThan(d.messagesCalls, before)
+    }
+
+    func testTwentyMineBlocksAdding() async {
+        let twenty = (0..<20).map { "\(UnicodeScalar(0x1F600 + $0)!)" }
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1, reactions: chips(twenty))])
+        XCTAssertFalse(m.canAdd(on: 5))
+        await m.toggle("🙏", on: 5)
+        XCTAssertTrue(d.reactions.isEmpty)
+        await m.toggle(twenty[0], on: 5)
+        XCTAssertEqual(d.reactions[5]?.count, 19)
+        XCTAssertNil(m.notice)
+    }
+
+    func testCanAddBelowTheLimit() async {
+        let (_, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1, reactions: chips(["👍"]))])
+        XCTAssertTrue(m.canAdd(on: 5))
+        XCTAssertFalse(m.canAdd(on: 99))
+    }
+
+    func testFrequentEmoji() {
+        XCTAssertEqual(ConversationModel.frequentEmoji, ["👍", "❤️", "😂", "😮", "😢", "🙏"])
+        XCTAssertEqual(ConversationModel.maxReactions, 20)
+    }
+
+    /// A reaction the core refused is said, never swallowed; the chips reload.
+    func testReactionErrorsSurfaceAsNotices() async {
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        let before = d.messagesCalls
+        for (error, expected) in [
+            (BarkingError.TooManyEmoji, ConversationModel.Notice.reactionTooMany),
+            (BarkingError.InvalidEmoji, .reactionFailed),
+            (BarkingError.MessageNotFound, .reactionFailed),
+            (BarkingError.NotFound, .contactRemoved),
+            (BarkingError.Locked, .reactionFailed),
+        ] {
+            d.sendError = error
+            await m.toggle("👍", on: 5)
+            XCTAssertEqual(m.notice, expected, "\(error)")
+            XCTAssertFalse(m.notice?.text().isEmpty ?? true)
+            m.showDeleted(nil)
+        }
+        XCTAssertGreaterThan(d.messagesCalls, before, "reloaded after an error")
+        XCTAssertTrue(d.reactions.isEmpty)
+    }
+
+    func testSuccessfulToggleClearsAnOldReactionNotice() async {
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        d.sendError = BarkingError.InvalidEmoji
+        await m.toggle("👍", on: 5)
+        XCTAssertNotNil(m.notice)
+        d.sendError = nil
+        await m.toggle("👍", on: 5)
+        XCTAssertNil(m.notice)
+    }
+
+    func testJumpToOriginal() async throws {
+        let (_, m) = await loaded([Message(id: 3, outgoing: false, body: "salut", at: 1)])
+        m.highlightDuration = .milliseconds(50)
+        XCTAssertEqual(m.jump(to: Quote(id: 3, authorIsMe: false, excerpt: "salut")), 3)
+        XCTAssertEqual(m.highlighted, 3)
+        XCTAssertNil(m.jump(to: Quote(id: nil, authorIsMe: false, excerpt: nil)))
+        XCTAssertEqual(m.highlighted, 3, "an unavailable quote leaves it alone")
+        XCTAssertNil(m.jump(to: Quote(id: 42, authorIsMe: true, excerpt: "gone from here")), "not in the rows")
+        for _ in 0..<100 where m.highlighted != nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(m.highlighted, "cleared after the delay")
+    }
+
+    func testHighlightDefaultsToOneAndAHalfSeconds() async {
+        let (_, m) = await loaded([])
+        XCTAssertEqual(m.highlightDuration, .milliseconds(1500))
+    }
 }
