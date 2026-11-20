@@ -649,6 +649,7 @@ fn delete_rows(
             .execute("DELETE FROM messages WHERE id = ?1", params![row])
             .map_err(map_err)?;
         q.add_tombstone(message, now)?;
+        q.delete_reactions_of(message)?;
         out.deleted += 1;
         changes.push((contact, row));
     }

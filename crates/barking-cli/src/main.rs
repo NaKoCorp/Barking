@@ -870,6 +870,20 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
                 printable(&who)
             );
         }
+        ReceiveOutcome::Reaction {
+            from, alias, added, ..
+        } => {
+            let who = alias.unwrap_or_else(|| from.to_string());
+            if added.is_empty() {
+                println!("{label}: {} changed their reactions", printable(&who));
+            } else {
+                println!(
+                    "{label}: {} reacted {}",
+                    printable(&who),
+                    printable(&added.join(" "))
+                );
+            }
+        }
     }
     Ok(())
 }

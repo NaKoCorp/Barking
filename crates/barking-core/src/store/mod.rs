@@ -243,6 +243,82 @@ pub struct MessageInsert {
     pub placeholder: bool,
 }
 
+/// One reactor's set of emoji on a message (`reactions` table): a
+/// last-writer-wins register per `(message_id, reactor)`, keyed
+/// `(clock, tie)`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReactionRow {
+    /// Stored identifier of the target message.
+    pub message_id: MessageId,
+    /// The contact's fingerprint, or `core::ME_REACTOR` for my devices.
+    pub reactor: [u8; 32],
+    /// The conversation.
+    pub contact_fp: Fingerprint,
+    pub emojis: Vec<String>,
+    /// `sent_at` of the envelope that carried the set.
+    pub clock: u64,
+    /// Envelope identifier of that packet: breaks a tie on `clock`.
+    pub tie: [u8; 16],
+    /// Clock of the write that created the row, kept when it is replaced:
+    /// the chips keep their place.
+    pub first_seen: u64,
+}
+
+impl fmt::Debug for ReactionRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The emoji are content: only their number.
+        f.debug_struct("ReactionRow")
+            .field("message_id", &self.message_id)
+            .field("contact_fp", &self.contact_fp)
+            .field("emojis", &format_args!("<{} emoji>", self.emojis.len()))
+            .field("clock", &self.clock)
+            .field("first_seen", &self.first_seen)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `reactions.emojis`: the set joined by `'\n'` (no valid emoji contains one).
+fn join_emojis(emojis: &[String]) -> String {
+    emojis.join("\n")
+}
+
+fn split_emojis(stored: &str) -> Vec<String> {
+    if stored.is_empty() {
+        Vec::new()
+    } else {
+        stored.split('\n').map(str::to_owned).collect()
+    }
+}
+
+type ReactionRaw = (Vec<u8>, Vec<u8>, Vec<u8>, String, i64, Vec<u8>, i64);
+
+const REACTION_COLUMNS: &str = "message_id, reactor, contact_fp, emojis, clock, tie, first_seen";
+
+fn reaction_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReactionRaw> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+    ))
+}
+
+fn reaction_from_raw(raw: ReactionRaw) -> Result<ReactionRow> {
+    let (message_id, reactor, contact_fp, emojis, clock, tie, first_seen) = raw;
+    Ok(ReactionRow {
+        message_id: MessageId(arr(message_id)?),
+        reactor: arr(reactor)?,
+        contact_fp: Fingerprint(arr(contact_fp)?),
+        emojis: split_emojis(&emojis),
+        clock: to_u64(clock),
+        tie: arr(tie)?,
+        first_seen: to_u64(first_seen),
+    })
+}
+
 impl fmt::Debug for MessageRow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The message text never appears: only its size.
@@ -686,6 +762,22 @@ impl Store {
         if stored.is_none_or(|v| v < 4) {
             schema::migrate_v3_to_v4(&self.conn).map_err(map_err)?;
         }
+        // `reactions.first_seen`, added to v4 before its release: a
+        // development database already at v4 receives it here (idempotent).
+        let has_first_seen: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('reactions') \
+                 WHERE name = 'first_seen'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_first_seen {
+            self.conn
+                .execute_batch(schema::REACTIONS_ADD_FIRST_SEEN)
+                .map_err(map_err)?;
+        }
         Ok(())
     }
 
@@ -1038,6 +1130,97 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         Ok(n > 0)
+    }
+
+    /// The reactions of `reactor` on `message`, if any.
+    fn reaction(&self, message: MessageId, reactor: [u8; 32]) -> Result<Option<ReactionRow>> {
+        let raw = self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {REACTION_COLUMNS} FROM reactions \
+                     WHERE message_id = ?1 AND reactor = ?2"
+                ),
+                params![message.0.as_slice(), reactor.as_slice()],
+                reaction_raw,
+            )
+            .optional()
+            .map_err(map_err)?;
+        raw.map(reaction_from_raw).transpose()
+    }
+
+    /// Writes `r` if no row exists for its `(message_id, reactor)`, or if
+    /// its `(clock, tie)` is strictly greater than the stored one (`tie`
+    /// compared bytewise) within the same conversation; a replaced row keeps
+    /// its `first_seen`. Returns whether it was written.
+    fn put_reaction_if_newer(&self, r: &ReactionRow) -> Result<bool> {
+        let n = self
+            .conn()
+            .execute(
+                &format!(
+                    "INSERT INTO reactions({REACTION_COLUMNS}) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                     ON CONFLICT(message_id, reactor) DO UPDATE SET \
+                     emojis = excluded.emojis, clock = excluded.clock, tie = excluded.tie \
+                     WHERE reactions.contact_fp = excluded.contact_fp \
+                     AND (excluded.clock, excluded.tie) > (reactions.clock, reactions.tie)"
+                ),
+                params![
+                    r.message_id.0.as_slice(),
+                    r.reactor.as_slice(),
+                    r.contact_fp.0.as_slice(),
+                    join_emojis(&r.emojis),
+                    to_i64(r.clock),
+                    r.tie.as_slice(),
+                    to_i64(r.first_seen),
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(n == 1)
+    }
+
+    /// The reactions on `message` in the conversation with `contact`, in
+    /// first-seen order (then local insertion order).
+    fn reactions_on(&self, contact: Fingerprint, message: MessageId) -> Result<Vec<ReactionRow>> {
+        let mut stmt = self
+            .conn()
+            .prepare(&format!(
+                "SELECT {REACTION_COLUMNS} FROM reactions \
+                 WHERE message_id = ?1 AND contact_fp = ?2 ORDER BY first_seen, rowid"
+            ))
+            .map_err(map_err)?;
+        let raws = stmt
+            .query_map(
+                params![message.0.as_slice(), contact.0.as_slice()],
+                reaction_raw,
+            )
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        raws.into_iter().map(reaction_from_raw).collect()
+    }
+
+    /// Erases every reaction on `message`.
+    fn delete_reactions_of(&self, message: MessageId) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM reactions WHERE message_id = ?1",
+                params![message.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Erases every reaction of the conversation with `contact`, mine
+    /// included.
+    fn delete_reactions_with(&self, contact: Fingerprint) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM reactions WHERE contact_fp = ?1",
+                params![contact.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(())
     }
 
     /// Marks the delivery `packet_id` as `Received`, acknowledged at `now`
@@ -1594,6 +1777,7 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         self.delete_draft(fp)?;
+        self.delete_reactions_with(fp)?;
         self.conn()
             .execute(
                 "DELETE FROM contacts WHERE fp = ?1",

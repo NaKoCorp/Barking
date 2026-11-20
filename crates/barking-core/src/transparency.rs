@@ -181,8 +181,10 @@ pub enum SyncKind {
     Sent,
     Contact,
     Devices,
-    /// The root key (admin transfer). Added last.
+    /// The root key (admin transfer).
     Admin,
+    /// My emoji reactions on a message. Added last.
+    Reaction,
 }
 
 impl SyncKind {
@@ -193,6 +195,7 @@ impl SyncKind {
             SyncKind::Contact => "contact",
             SyncKind::Devices => "device list",
             SyncKind::Admin => "admin key",
+            SyncKind::Reaction => "reaction",
         }
     }
 }
@@ -705,6 +708,10 @@ mod tests {
         assert_eq!(
             d(SyncKind::Devices),
             "Synchronized from one of your devices: device list."
+        );
+        assert_eq!(
+            d(SyncKind::Reaction),
+            "Synchronized from one of your devices: reaction."
         );
         assert!(
             !TransparencyEvent::SyncApplied {

@@ -19,6 +19,7 @@ mod frames;
 mod history;
 mod link;
 mod log_limit;
+mod reactions;
 mod receive;
 mod remove;
 mod removed;
@@ -60,6 +61,7 @@ pub use link::{
     MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES,
 };
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
+pub use reactions::{ME_REACTOR, ReactionChip};
 pub use receive::{
     R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
     R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
@@ -179,6 +181,16 @@ pub enum ReceiveOutcome {
         from: Fingerprint,
         alias: Option<String>,
     },
+    /// A contact's reactions on `target` (stored identifier, in the
+    /// conversation with `from`), applied or already superseded; the ack is
+    /// queued. `added`: the emoji its newer set adds to the one it replaced
+    /// (empty for a removal or a superseded packet: nothing to notify).
+    Reaction {
+        from: Fingerprint,
+        alias: Option<String>,
+        target: MessageId,
+        added: Vec<String>,
+    },
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -220,6 +232,19 @@ impl fmt::Debug for ReceiveOutcome {
                 .debug_struct("NeedsUpdate")
                 .field("from", from)
                 .field("alias", alias)
+                .finish(),
+            // The emoji are content: only their number.
+            Self::Reaction {
+                from,
+                alias,
+                target,
+                added,
+            } => f
+                .debug_struct("Reaction")
+                .field("from", from)
+                .field("alias", alias)
+                .field("target", target)
+                .field("added", &format_args!("<{} emoji>", added.len()))
                 .finish(),
         }
     }

@@ -5459,3 +5459,493 @@ fn reply_body_never_contains_quoted_text() {
             .unwrap();
     assert!(matches!(peek_envelope(&p.b, &plain[0]).body, Body::Text(_)));
 }
+
+// --- Lot 2, task 4: reactions.
+
+fn emo(list: &[&str]) -> Vec<String> {
+    list.iter().map(|e| (*e).to_owned()).collect()
+}
+
+/// Chips as `(emoji, count)`: `mine` differs between the two sides.
+fn counts(c: &Core, contact: &Fingerprint, message: MessageId) -> Vec<(String, u32)> {
+    c.reaction_chips(contact, message)
+        .unwrap()
+        .into_iter()
+        .map(|chip| (chip.emoji, chip.count))
+        .collect()
+}
+
+fn reaction_rows(c: &Core) -> i64 {
+    c.store
+        .conn()
+        .query_row("SELECT count(*) FROM reactions", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn added_of(o: ReceiveOutcome) -> Vec<String> {
+    match o {
+        ReceiveOutcome::Reaction { added, .. } => added,
+        other => panic!("Reaction expected, got {other:?}"),
+    }
+}
+
+/// Alice reacts on her message "x" to Bob; returns the packet for Bob.
+fn react_x(p: &mut Pair, set: &[&str], now: u64) -> Packet {
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "x");
+    let mut out = p.a.set_reactions(row, &emo(set), now, &mut p.rng).unwrap();
+    assert_eq!(out.len(), 1, "one packet for Bob's only device");
+    out.remove(0)
+}
+
+#[test]
+fn reaction_add_remove_replace() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let on_a = message_id_of(&p.a, &b, "x");
+    let on_b = message_id_of(&p.b, &a, "x");
+    for (i, set) in [&["👍"][..], &["👍", "😂"], &[]].iter().enumerate() {
+        let pk = react_x(&mut p, set, NOW + i as u64);
+        deliver(&mut p.b, &pk, &mut p.rng);
+        let mine = p.a.reaction_chips(&b, on_a).unwrap();
+        assert!(mine.iter().all(|c| c.mine && c.count == 1));
+        assert_eq!(counts(&p.b, &a, on_b), counts(&p.a, &b, on_a), "step {i}");
+        assert_eq!(counts(&p.b, &a, on_b).len(), set.len());
+    }
+    assert!(counts(&p.a, &b, on_a).is_empty());
+    assert!(counts(&p.b, &a, on_b).is_empty());
+}
+
+#[test]
+fn reaction_out_of_order_and_duplicate_converge() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let on_b = message_id_of(&p.b, &a, "x");
+    let p1 = react_x(&mut p, &["👍"], NOW);
+    let p2 = react_x(&mut p, &["👍", "❤️"], NOW + 1);
+    let p3 = react_x(&mut p, &["🎉"], NOW + 2);
+    assert_eq!(added_of(deliver(&mut p.b, &p3, &mut p.rng)), emo(&["🎉"]));
+    assert!(added_of(deliver(&mut p.b, &p2, &mut p.rng)).is_empty());
+    assert!(added_of(deliver(&mut p.b, &p1, &mut p.rng)).is_empty());
+    assert!(matches!(
+        deliver(&mut p.b, &p1, &mut p.rng),
+        ReceiveOutcome::Duplicate
+    ));
+    assert_eq!(counts(&p.b, &a, on_b), vec![("🎉".to_owned(), 1)]);
+}
+
+#[test]
+fn reaction_clock_tie_breaks_on_message_id() {
+    let body = |set: &[&str], p: &Pair| {
+        ExtContent::Reaction {
+            target: MessageRef {
+                id: message_id_of(&p.a, &p.b.fingerprint(), "x").0,
+                by_sender: true,
+            },
+            emojis: emo(set),
+        }
+        .to_body()
+    };
+    for reverse in [false, true] {
+        // `pair` is seeded: each run gives the same fresh Bob.
+        let mut p = pair();
+        let a = p.a.fingerprint();
+        let low = body(&["👍"], &p);
+        let high = body(&["❤️"], &p);
+        let low = seal_to_b(&mut p, &low, 0x10);
+        let high = seal_to_b(&mut p, &high, 0x20);
+        let order = if reverse {
+            [&high, &low]
+        } else {
+            [&low, &high]
+        };
+        for pk in order {
+            assert!(matches!(
+                deliver(&mut p.b, pk, &mut p.rng),
+                ReceiveOutcome::Reaction { .. }
+            ));
+        }
+        let on_b = message_id_of(&p.b, &a, "x");
+        assert_eq!(
+            counts(&p.b, &a, on_b),
+            vec![("❤️".to_owned(), 1)],
+            "reverse: {reverse}"
+        );
+    }
+}
+
+#[test]
+fn same_second_toggles_keep_their_order() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let on = react_x(&mut p, &["👍"], NOW);
+    let off = react_x(&mut p, &[], NOW);
+    let mine =
+        p.a.store
+            .reaction(message_id_of(&p.a, &b, "x"), ME_REACTOR)
+            .unwrap()
+            .unwrap();
+    assert_eq!(mine.clock, NOW + 1);
+    assert!(mine.emojis.is_empty());
+    assert_eq!(peek_envelope(&p.b, &off).sent_at, NOW + 1);
+    deliver(&mut p.b, &off, &mut p.rng);
+    deliver(&mut p.b, &on, &mut p.rng);
+    assert!(counts(&p.b, &a, message_id_of(&p.b, &a, "x")).is_empty());
+}
+
+#[test]
+fn reaction_limits() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "x");
+    let many: Vec<String> = "😀😁😂🤣😃😄😅😆😉😊😋😎😍😘🥰😗😙😚🙂🤗🤩"
+        .chars()
+        .map(String::from)
+        .collect();
+    assert_eq!(many.len(), 21);
+    let outbox = p.a.pending_outbox(NOW).unwrap().len();
+    let cases: [(i64, Vec<String>, CoreError); 3] = [
+        (row, many, CoreError::TooManyEmoji),
+        (row, emo(&["a"]), CoreError::InvalidEmoji),
+        (-1, emo(&["👍"]), CoreError::MessageNotFound),
+    ];
+    for (id, set, err) in cases {
+        assert_eq!(p.a.set_reactions(id, &set, NOW, &mut p.rng), Err(err));
+    }
+    p.a.block_contact(&b, NOW, &mut p.rng).unwrap();
+    let outbox_blocked = p.a.pending_outbox(NOW).unwrap().len();
+    assert_eq!(
+        p.a.set_reactions(row, &emo(&["👍"]), NOW, &mut p.rng),
+        Err(CoreError::ContactBlocked)
+    );
+    assert_eq!(reaction_rows(&p.a), 0);
+    assert_eq!(outbox_blocked, outbox);
+    assert_eq!(p.a.pending_outbox(NOW).unwrap().len(), outbox);
+}
+
+#[test]
+fn reaction_from_blocked_contact_refused() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    p.b.block_contact(&a, NOW, &mut p.rng).unwrap();
+    let pk = react_x(&mut p, &["👍"], NOW + 1);
+    assert_eq!(
+        reason(deliver(&mut p.b, &pk, &mut p.rng)),
+        "blocked contact"
+    );
+    assert_eq!(reaction_rows(&p.b), 0);
+    assert_eq!(acks_for(&mut p.b, &pk), 0);
+}
+
+#[test]
+fn reaction_on_deleted_message_ignored() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let row = row_of(&p.b, &a, "x");
+    p.b.delete_message(row, NOW).unwrap();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    assert!(matches!(
+        deliver(&mut p.b, &pk, &mut p.rng),
+        ReceiveOutcome::Ignored
+    ));
+    assert_eq!(reaction_rows(&p.b), 0);
+    assert_eq!(acks_for(&mut p.b, &pk), 1);
+}
+
+#[test]
+fn reaction_before_its_message_shows_on_arrival() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let late = p.a.send_text(&b, "late", NOW, &mut p.rng).unwrap();
+    let row = row_of(&p.a, &b, "late");
+    let r =
+        p.a.set_reactions(row, &emo(&["👀"]), NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(added_of(deliver(&mut p.b, &r[0], &mut p.rng)), emo(&["👀"]));
+    assert!(!has_message(&p.b, &a, "late"));
+    deliver(&mut p.b, &late[0], &mut p.rng);
+    let on_b = message_id_of(&p.b, &a, "late");
+    assert_eq!(counts(&p.b, &a, on_b), vec![("👀".to_owned(), 1)]);
+}
+
+#[test]
+fn reaction_cannot_reach_another_conversation() {
+    let (mut p, _dc, mut c) = with_carol();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let to_bob = full_row(&p.a, &b, "x");
+    let forged = ExtContent::Reaction {
+        target: MessageRef {
+            id: to_bob.message_id.0,
+            by_sender: false,
+        },
+        emojis: emo(&["💩"]),
+    }
+    .to_body();
+    let out = seal_body(
+        &mut c,
+        &send::Target::Contact(a),
+        &forged,
+        MessageId([0x72; 16]),
+        &mut p.rng,
+    );
+    assert!(matches!(
+        deliver(&mut p.a, &out[0].0, &mut p.rng),
+        ReceiveOutcome::Ignored
+    ));
+    assert!(
+        p.a.reaction_chips(&b, to_bob.message_id)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(reaction_rows(&p.a), 0);
+}
+
+/// Alice holds her reaction on "x" and Bob's on "y".
+fn both_react(p: &mut Pair) {
+    let a = p.a.fingerprint();
+    react_x(p, &["👍"], NOW);
+    let y = row_of(&p.b, &a, "y");
+    let pk =
+        p.b.set_reactions(y, &emo(&["❤️"]), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &pk[0], &mut p.rng);
+    assert_eq!(reaction_rows(&p.a), 2);
+}
+
+#[test]
+fn reactions_erased_with_message_contact_and_block() {
+    // Deleting a message erases its reactions only.
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    both_react(&mut p);
+    let x = message_id_of(&p.a, &b, "x");
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW).unwrap();
+    assert!(p.a.store.reaction(x, ME_REACTOR).unwrap().is_none());
+    assert_eq!(reaction_rows(&p.a), 1);
+    // Removing the contact erases every row of the conversation.
+    p.a.remove_contact(&b, NOW, &mut p.rng).unwrap();
+    assert_eq!(reaction_rows(&p.a), 0);
+    // Blocking does too, mine included.
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    both_react(&mut p);
+    p.a.block_contact(&b, NOW, &mut p.rng).unwrap();
+    assert_eq!(reaction_rows(&p.a), 0);
+
+    // The same, received from my other device.
+    for block in [false, true] {
+        let (_d, mut a, mut t, mut rng) = linked();
+        let (_db, bob) = party("bob", 5);
+        let fp = a
+            .add_contact(
+                &bob.contact_card("Bob").unwrap(),
+                Some("bob"),
+                NOW,
+                &mut rng,
+            )
+            .unwrap();
+        deliver_all(&mut a, &mut t, &mut rng);
+        t.store
+            .insert_message(
+                fp,
+                Direction::Out,
+                "m",
+                MessageStatus::OnNetwork,
+                NOW,
+                MessageId([0x61; 16]),
+            )
+            .unwrap();
+        let row = row_of(&t, &fp, "m");
+        t.set_reactions(row, &emo(&["👍"]), NOW, &mut rng).unwrap();
+        assert_eq!(reaction_rows(&t), 1);
+        if block {
+            a.block_contact(&fp, NOW + 5, &mut rng).unwrap();
+        } else {
+            a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
+        }
+        deliver_all(&mut a, &mut t, &mut rng);
+        assert_eq!(reaction_rows(&t), 0, "block: {block}");
+    }
+}
+
+/// What the chat list reads of a conversation: its rows, its last message
+/// (with delivery) and the received rows (the unread count's input).
+type ConversationView = (
+    Vec<MessageRow>,
+    Option<(MessageRow, Option<crate::store::DeliverySummary>)>,
+    usize,
+);
+
+fn conversation_view(c: &mut Core, contact: &Fingerprint) -> ConversationView {
+    let rows = c.messages_with(contact).unwrap();
+    let last = c
+        .messages_with_delivery(contact, NOW)
+        .unwrap()
+        .into_iter()
+        .last();
+    let received = rows.iter().filter(|m| m.direction == Direction::In).count();
+    (rows, last, received)
+}
+
+#[test]
+fn reaction_is_never_a_message() {
+    let mut p = settled_pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    // Every receipt of the two messages back home first.
+    deliver_all(&mut p.b, &mut p.a, &mut p.rng);
+    deliver_all(&mut p.a, &mut p.b, &mut p.rng);
+    let before_a = conversation_view(&mut p.a, &b);
+    let before_b = conversation_view(&mut p.b, &a);
+    let pk = react_x(&mut p, &["👍"], NOW);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let y = row_of(&p.b, &a, "y");
+    let back =
+        p.b.set_reactions(y, &emo(&["🎉"]), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &back[0], &mut p.rng);
+    // The receipts go back too.
+    deliver_all(&mut p.b, &mut p.a, &mut p.rng);
+    deliver_all(&mut p.a, &mut p.b, &mut p.rng);
+    assert_eq!(reaction_rows(&p.a), 2);
+    assert_eq!(reaction_rows(&p.b), 2);
+    assert_eq!(conversation_view(&mut p.a, &b), before_a);
+    assert_eq!(conversation_view(&mut p.b, &a), before_b);
+    assert_eq!(before_a.0.len(), 2);
+    assert_eq!(before_a.2, 1);
+}
+
+#[test]
+fn reaction_outcome_lists_added_only() {
+    let mut p = pair();
+    let steps: [(&[&str], &[&str]); 3] =
+        [(&["👍"], &["👍"]), (&["👍", "❤️"], &["❤️"]), (&["❤️"], &[])];
+    for (i, (set, added)) in steps.into_iter().enumerate() {
+        let pk = react_x(&mut p, set, NOW + i as u64);
+        assert_eq!(added_of(deliver(&mut p.b, &pk, &mut p.rng)), emo(added));
+    }
+}
+
+#[test]
+fn reaction_leaves_target_delivery_alone() {
+    let mut p = settled_pair();
+    let b = p.b.fingerprint();
+    let x = message_id_of(&p.a, &b, "x");
+    let row = row_of(&p.a, &b, "x");
+    let status = status_of(&p.a, &b, "x");
+    assert_eq!(status, MessageStatus::Received);
+    let deliveries = deliveries_of(&p.a, x);
+    let pk = react_x(&mut p, &["👍"], NOW);
+    // The reaction packet has its own delivery, keyed on its own id.
+    let tie = p.a.store.reaction(x, ME_REACTOR).unwrap().unwrap().tie;
+    assert_eq!(deliveries_of(&p.a, MessageId(tie)), vec![(0, 0)]);
+    assert_eq!(deliveries_of(&p.a, x), deliveries);
+    // It expires undeposited: the target is not touched.
+    let late = u64::from(pk.expires_at) + 1;
+    p.a.expire_due(late).unwrap();
+    assert_eq!(deliveries_of(&p.a, MessageId(tie)), vec![(0, 5)]);
+    assert_eq!(status_of(&p.a, &b, "x"), status);
+    assert_eq!(deliveries_of(&p.a, x), deliveries);
+    assert!(p.a.take_failed_notices().is_empty());
+    assert_eq!(
+        p.a.retry_message(row, late, &mut p.rng),
+        Err(CoreError::NothingToRetry)
+    );
+    assert_eq!(p.a.retry_all(&b, late, &mut p.rng), Ok(0));
+    assert!(
+        p.a.store
+            .messages_with(b)
+            .unwrap()
+            .iter()
+            .all(|m| m.message_id.0 != tie)
+    );
+}
+
+#[test]
+fn reaction_chips_keep_first_seen_order() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = react_x(&mut p, &["👍"], NOW);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let x_on_b = row_of(&p.b, &a, "x");
+    let back =
+        p.b.set_reactions(x_on_b, &emo(&["❤️"]), NOW + 1, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &back[0], &mut p.rng);
+    // Alice updates hers last: her chips stay first.
+    let pk = react_x(&mut p, &["👍", "😂"], NOW + 2);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let order = |c: &Core, contact: &Fingerprint, body: &str| -> Vec<String> {
+        c.reaction_chips(contact, message_id_of(c, contact, body))
+            .unwrap()
+            .into_iter()
+            .map(|chip| chip.emoji)
+            .collect()
+    };
+    assert_eq!(order(&p.a, &b, "x"), emo(&["👍", "😂", "❤️"]));
+    assert_eq!(order(&p.b, &a, "x"), emo(&["👍", "😂", "❤️"]));
+    // Alice drops 👍 and adds it back: it goes to the end of her list.
+    let pk = react_x(&mut p, &["😂"], NOW + 3);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let pk = react_x(&mut p, &["😂", "👍"], NOW + 4);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    assert_eq!(order(&p.b, &a, "x"), emo(&["😂", "👍", "❤️"]));
+    let mine =
+        p.a.reaction_chips(&b, message_id_of(&p.a, &b, "x"))
+            .unwrap();
+    assert_eq!(
+        mine.iter().map(|c| c.mine).collect::<Vec<_>>(),
+        [true, true, false]
+    );
+}
+
+#[test]
+fn reaction_sync_crossing_a_block_is_dropped() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    t.store
+        .insert_message(
+            fp,
+            Direction::Out,
+            "m",
+            MessageStatus::OnNetwork,
+            NOW,
+            MessageId([0x62; 16]),
+        )
+        .unwrap();
+    a.store
+        .insert_message(
+            fp,
+            Direction::Out,
+            "m",
+            MessageStatus::OnNetwork,
+            NOW,
+            MessageId([0x62; 16]),
+        )
+        .unwrap();
+    // T reacts; its copy is held back while A blocks Bob.
+    let row = row_of(&t, &fp, "m");
+    let pkts = t.set_reactions(row, &emo(&["👍"]), NOW, &mut rng).unwrap();
+    a.block_contact(&fp, NOW + 1, &mut rng).unwrap();
+    let mut seen = 0;
+    for p in &pkts {
+        match a.receive(&p.encode(), "t", NOW, &mut rng).unwrap() {
+            ReceiveOutcome::NotForUs => {}
+            o => {
+                assert!(matches!(o, ReceiveOutcome::Duplicate), "{o:?}");
+                assert_eq!(acks_for(&mut a, p), 1);
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(seen, 1);
+    assert_eq!(reaction_rows(&a), 0);
+}

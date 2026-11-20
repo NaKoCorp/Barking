@@ -126,6 +126,7 @@ const TOKENS: &[&str] = &[
     "sync_contact",
     "sync_devices",
     "sync_admin",
+    "sync_reaction",
     "node_lost",
     "node_unreachable",
     "intro_mailbox",
@@ -206,6 +207,7 @@ fn sync_token(k: SyncKind) -> String {
         SyncKind::Contact => "sync_contact",
         SyncKind::Devices => "sync_devices",
         SyncKind::Admin => "sync_admin",
+        SyncKind::Reaction => "sync_reaction",
     })
 }
 

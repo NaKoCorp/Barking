@@ -50,7 +50,9 @@ use crate::content::MessageRef;
 use crate::crypto::aead::{XNONCE_LEN, xopen, xseal};
 use crate::crypto::labels;
 use crate::identity::root::{Fingerprint, RootIdentity, RootPublic};
-use crate::store::{Direction, MessageId, MessageInsert, MessageRow, MessageStatus, Queries};
+use crate::store::{
+    Direction, MessageId, MessageInsert, MessageRow, MessageStatus, Queries, ReactionRow,
+};
 use crate::{CoreError, Result};
 
 /// Size of a plaintext chunk: 64 KiB (the last one may be shorter).
@@ -142,7 +144,13 @@ pub(super) struct HistoryEntry {
     reply_to: Option<[u8; 16]>,
     reply_ref: Option<MessageRef>,
     placeholder: bool,
+    /// The reactions on this message: `(reactor, emojis, clock, tie,
+    /// first_seen)`, as stored.
+    reactions: Vec<HistoryReaction>,
 }
+
+/// A reaction of the archive: `(reactor, emojis, clock, tie, first_seen)`.
+type HistoryReaction = ([u8; 32], Vec<String>, u64, [u8; 16], u64);
 
 impl Drop for HistoryEntry {
     fn drop(&mut self) {
@@ -160,12 +168,13 @@ impl core::fmt::Debug for HistoryEntry {
             .field("status", &self.status)
             .field("at", &self.at)
             .field("placeholder", &self.placeholder)
+            .field("reactions", &self.reactions.len())
             .finish()
     }
 }
 
 impl HistoryEntry {
-    fn from_row(row: MessageRow) -> HistoryEntry {
+    fn from_row(row: MessageRow, reactions: Vec<HistoryReaction>) -> HistoryEntry {
         let MessageRow {
             contact_fp,
             direction,
@@ -198,6 +207,7 @@ impl HistoryEntry {
             reply_to: reply_to.map(|id| id.0),
             reply_ref,
             placeholder,
+            reactions,
         }
     }
 
@@ -241,7 +251,12 @@ pub(super) fn export(
     let mut out = Vec::new();
     for mut row in q.all_messages()? {
         if contacts.contains(&row.contact_fp) {
-            out.push(HistoryEntry::from_row(row));
+            let reactions = q
+                .reactions_on(row.contact_fp, row.message_id)?
+                .into_iter()
+                .map(|r| (r.reactor, r.emojis, r.clock, r.tie, r.first_seen))
+                .collect();
+            out.push(HistoryEntry::from_row(row, reactions));
         } else {
             row.body.zeroize();
         }
@@ -349,11 +364,18 @@ pub(super) fn check_entries(
         if !contacts.contains(&e.contact) || !ids.insert(e.message_id) {
             return Err(BAD_HISTORY);
         }
+        if e.reactions
+            .iter()
+            .any(|(_, emojis, ..)| crate::emoji::check_set(emojis).is_err())
+        {
+            return Err(BAD_HISTORY);
+        }
     }
     Ok(())
 }
 
-/// Inserts the absent entries (an already present identifier is ignored).
+/// Inserts the absent entries (an already present identifier is ignored),
+/// then their reactions, each kept only if newer than the stored one.
 /// Returns the number of messages inserted.
 pub(super) fn import(q: &impl Queries, entries: &[HistoryEntry]) -> Result<u32> {
     let mut inserted = 0u32;
@@ -371,6 +393,17 @@ pub(super) fn import(q: &impl Queries, entries: &[HistoryEntry]) -> Result<u32> 
             placeholder: e.placeholder,
         })? {
             inserted = inserted.saturating_add(1);
+        }
+        for (reactor, emojis, clock, tie, first_seen) in &e.reactions {
+            q.put_reaction_if_newer(&ReactionRow {
+                message_id: MessageId(e.message_id),
+                reactor: *reactor,
+                contact_fp: e.contact,
+                emojis: emojis.clone(),
+                clock: *clock,
+                tie: *tie,
+                first_seen: *first_seen,
+            })?;
         }
     }
     Ok(inserted)
@@ -401,6 +434,7 @@ mod tests {
             reply_to: None,
             reply_ref: None,
             placeholder: false,
+            reactions: Vec::new(),
         }
     }
 

@@ -383,6 +383,7 @@ const SCHEMA_V4_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS reactions (
     message_id BLOB NOT NULL, reactor BLOB NOT NULL, contact_fp BLOB NOT NULL,
     emojis TEXT NOT NULL, clock INTEGER NOT NULL, tie BLOB NOT NULL,
+    first_seen INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (message_id, reactor));
 CREATE INDEX IF NOT EXISTS reactions_contact ON reactions(contact_fp);
 CREATE TABLE IF NOT EXISTS reaction_sends (
@@ -410,3 +411,7 @@ pub fn migrate_v3_to_v4(conn: &Connection) -> rusqlite::Result<()> {
     set_version(&tx, 4)?;
     tx.commit()
 }
+
+/// `reactions.first_seen` (chip order), added to v4 before its release.
+pub const REACTIONS_ADD_FIRST_SEEN: &str =
+    "ALTER TABLE reactions ADD COLUMN first_seen INTEGER NOT NULL DEFAULT 0;";

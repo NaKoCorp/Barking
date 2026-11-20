@@ -360,11 +360,33 @@ pub(super) fn apply(
         Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
         Body::Ext { kind, data, .. } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
-            // Only `SyncReply` is a sync content; any other kind is refused.
-            let Ok(Some(ExtContent::SyncReply { to, text, reply_to })) =
-                ExtContent::decode(*kind, data)
-            else {
-                return Ok(Err(R_SYNC_REFUSED));
+            // Only `SyncReply` and `SyncReaction` are sync contents; any
+            // other kind is refused.
+            let (to, text, reply_to) = match ExtContent::decode(*kind, data) {
+                Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => (to, text, reply_to),
+                Ok(Some(ExtContent::SyncReaction { to, target, emojis }))
+                    if to != own.list.root.fingerprint() =>
+                {
+                    // Blocked here: the block erased my reactions with `to`
+                    // and `set_reactions` refuses it; a copy crossing the
+                    // block is acked without effect.
+                    if q.block_state(to)?.blocked {
+                        return Ok(Ok(None));
+                    }
+                    // My set, the same rules as a contact's: a target deleted
+                    // here or of another conversation is ignored (acked).
+                    let applied = super::reactions::apply(
+                        q,
+                        to,
+                        super::reactions::ME_REACTOR,
+                        target.resolve(true, &to),
+                        emojis,
+                        env.sent_at,
+                        env.message_id,
+                    )?;
+                    return Ok(Ok(applied.map(|_| SyncKind::Reaction)));
+                }
+                _ => return Ok(Err(R_SYNC_REFUSED)),
             };
             if to == own.list.root.fingerprint() {
                 return Ok(Err(R_SYNC_REFUSED));
@@ -437,12 +459,14 @@ pub(super) fn apply(
     }
 }
 
-/// The contact a `SyncSent` or `SyncReply` body was sent to.
+/// The contact a `SyncSent`, `SyncReply` or `SyncReaction` body was sent to.
 pub(super) fn sent_to(body: &Body) -> Option<Fingerprint> {
     match body {
         Body::SyncSent { to, .. } => Some(*to),
         Body::Ext { kind, data, .. } => match ExtContent::decode(*kind, data) {
-            Ok(Some(ExtContent::SyncReply { to, .. })) => Some(to),
+            Ok(Some(ExtContent::SyncReply { to, .. } | ExtContent::SyncReaction { to, .. })) => {
+                Some(to)
+            }
             _ => None,
         },
         _ => None,

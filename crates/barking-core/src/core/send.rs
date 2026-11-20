@@ -351,7 +351,7 @@ impl Core {
 /// Reference to the message of row `row_id` in the conversation with `to`:
 /// `MessageNotFound` if it is not there, belongs to another conversation, or
 /// is a received message without a wire identifier (nothing to refer to).
-fn quote_ref(q: &impl Queries, to: &Fingerprint, row_id: i64) -> Result<MessageRef> {
+pub(super) fn quote_ref(q: &impl Queries, to: &Fingerprint, row_id: i64) -> Result<MessageRef> {
     let row = q
         .message_by_row(row_id)?
         .filter(|m| m.contact_fp == *to)

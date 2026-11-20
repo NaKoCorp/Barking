@@ -9,8 +9,8 @@ use super::log_limit::{LogLimiter, log_limited};
 use super::route::{self, RouteStep};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
-    SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, remove, removed, ser_state,
-    session_ad, session_id, sync,
+    SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, reactions, remove, removed,
+    ser_state, session_ad, session_id, sync,
 };
 use crate::contact::ContactCard;
 use crate::content::{ExtContent, MessageRef, UnknownPolicy};
@@ -668,9 +668,9 @@ struct Ext<'a> {
 /// | One of my devices | `R_UNEXPECTED` | the sync path | `unknown` policy |
 ///
 /// Every `Ext` from my own fingerprint first requires the sending device to
-/// be in my current list. A `Reply` is recorded like a text, a `SyncReply`
-/// goes through the sync path (`accept_sync`); until the reaction paths
-/// exist, their cells quarantine with `R_UNEXPECTED`. An unknown kind is
+/// be in my current list. A `Reply` is recorded like a text, a `Reaction`
+/// applied as the contact's (`accept_reaction`); `SyncReply` and
+/// `SyncReaction` go through the sync path (`accept_sync`). An unknown kind is
 /// acknowledged like a message (the sender stops resending it) and, per its
 /// `unknown` policy, ignored or shown as a placeholder asking for an update
 /// (never for my own devices: they would show it twice).
@@ -720,13 +720,89 @@ fn accept_ext(
                 rng,
             );
         }
-        (ExtContent::SyncReply { .. }, true) => {
+        (ExtContent::Reaction { target, emojis }, false) => {
+            // Blocked: dropped like a text (ratchet kept, no ack).
+            if q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+                return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+            }
+            return accept_reaction(
+                q, limiter, packet, o, env, target, emojis, transport, now, rng,
+            );
+        }
+        (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, true) => {
             return accept_sync(q, limiter, packet, o, env, device, admin, my_fp, now, rng);
         }
         (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, false) => sync::R_NOT_MINE,
         _ => R_UNEXPECTED,
     };
     reject_authenticated(q, limiter, packet, o, now, reason, id)
+}
+
+/// A contact's `Reaction`, once accepted: session written, packet marked
+/// seen, the set applied as the contact's (`reactions::apply`), ack emitted.
+/// Deduplicated by envelope identifier (`inbound`), like a text. A target
+/// deleted here or of another conversation is ignored: nothing written,
+/// acked, `Ignored` (nothing to notify).
+#[allow(clippy::too_many_arguments)]
+fn accept_reaction(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    target: MessageRef,
+    emojis: Vec<String>,
+    transport: &str,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
+    q.mark_seen(packet.id, now)?;
+    let from = row.contact_fp;
+    let received = MessageId::incoming(&from, &env.message_id);
+    let already = q.inbound_has_message(received)?;
+    q.record_inbound(packet.id, received)?;
+    route::record(q, packet.id, RouteStep::Opened, now, None)?;
+    if already {
+        log_limited(
+            q,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DuplicateIgnored {
+                packet_id: packet.id,
+            },
+        )?;
+        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        return Ok((ReceiveOutcome::Duplicate, new_prekeys));
+    }
+    log(
+        q,
+        now,
+        Some(packet.id),
+        &TransparencyEvent::PacketOpened {
+            packet_id: packet.id,
+            sender: from,
+            transport: transport.to_owned(),
+            first_contact,
+        },
+    )?;
+    let target = target.resolve(false, &from);
+    let applied = reactions::apply(q, from, from.0, target, emojis, env.sent_at, env.message_id)?;
+    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    let Some(added) = applied else {
+        return Ok((ReceiveOutcome::Ignored, new_prekeys));
+    };
+    let alias = Core::alias_in(q, from)?;
+    Ok((
+        ReceiveOutcome::Reaction {
+            from,
+            alias,
+            target,
+            added,
+        },
+        new_prekeys,
+    ))
 }
 
 /// Unknown kind of `Body::Ext`: see `accept_ext`.
@@ -1018,7 +1094,7 @@ fn accept_sync(
         Some(kind) => ReceiveOutcome::Synced {
             kind,
             contact: match &env.body {
-                body if kind == SyncKind::Sent => sync::sent_to(body),
+                body if matches!(kind, SyncKind::Sent | SyncKind::Reaction) => sync::sent_to(body),
                 _ => None,
             },
         },
