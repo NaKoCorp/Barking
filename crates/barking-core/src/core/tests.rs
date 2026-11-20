@@ -4878,6 +4878,9 @@ fn draft_erased_when_blocked_by_sync() {
     deliver_all(&mut a, &mut t, &mut rng);
     assert!(t.store.block_state(fp).unwrap().blocked);
     assert_eq!(t.draft(&fp).unwrap(), None);
+    // The conversation still open on `t` saves again: nothing is kept.
+    t.set_draft(&fp, "typing more", NOW + 10).unwrap();
+    assert_eq!(t.draft(&fp).unwrap(), None);
 }
 
 #[test]

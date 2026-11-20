@@ -152,8 +152,10 @@ impl Core {
 
     /// Keeps the unsent text typed for a known contact, replacing the
     /// previous one; empty or blank: deletes it. Too long: `TooLarge`, the
-    /// previous draft kept. Unknown: `UnknownContact`. Local to this device:
-    /// never synchronized, logged or noted as a change.
+    /// previous draft kept. Unknown: `UnknownContact`. Blocked (here or by
+    /// another of my devices, the block erased the draft): nothing is kept,
+    /// and no error. Local to this device: never synchronized, logged or
+    /// noted as a change.
     pub fn set_draft(&mut self, contact: &Fingerprint, text: &str, now: u64) -> Result<()> {
         self.ensure_active()?;
         if text.len() > MAX_TEXT_LEN {
@@ -161,6 +163,9 @@ impl Core {
         }
         self.store.transaction(|tx| {
             tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
+            if tx.block_state(*contact)?.blocked {
+                return Ok(());
+            }
             if text.trim().is_empty() {
                 tx.delete_draft(*contact)
             } else {
