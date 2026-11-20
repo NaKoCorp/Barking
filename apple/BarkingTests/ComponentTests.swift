@@ -367,4 +367,45 @@ final class ComponentTests: XCTestCase {
         XCTAssertEqual(DeliveryRow.oneLine("See you\nat the market\r\n\nat 6"), "See you at the market at 6")
         XCTAssertEqual(DeliveryRow.oneLine("plain"), "plain")
     }
+
+    // MARK: Reply and reactions (§5.6)
+
+    /// A chip reads its emoji, its count and whether it is mine, in the
+    /// language asked for, with the plural.
+    func testChipLabel() {
+        let en = Bundle.strings(for: Locale(identifier: "en"))
+        let fr = Bundle.strings(for: Locale(identifier: "fr"))
+        XCTAssertEqual(ReactionChip(emoji: "👍", count: 2, mine: true).label(bundle: en, locale: Locale(identifier: "en")),
+                       "👍, 2 reactions, including yours")
+        XCTAssertEqual(ReactionChip(emoji: "😂", count: 1, mine: false).label(bundle: en, locale: Locale(identifier: "en")),
+                       "😂, 1 reaction")
+        XCTAssertEqual(ReactionChip(emoji: "👍", count: 1, mine: true).label(bundle: fr, locale: Locale(identifier: "fr")),
+                       "👍, 1 réaction, dont la vôtre")
+        XCTAssertEqual(ReactionChip(emoji: "😮", count: 2, mine: false).label(bundle: fr, locale: Locale(identifier: "fr")),
+                       "😮, 2 réactions")
+    }
+
+    /// The quote reads "Reply to Sam: …", or that the original is gone.
+    func testQuoteLineSpeech() {
+        let fr = (bundle: Bundle.strings(for: Locale(identifier: "fr")), locale: Locale(identifier: "fr"))
+        let shown = QuoteLine(quote: Quote(id: 3, authorIsMe: false, excerpt: "À six heures"), author: "Sam")
+        XCTAssertTrue(shown.available)
+        XCTAssertEqual(shown.spoken(bundle: fr.bundle, locale: fr.locale), "Réponse à Sam\u{00A0}: À six heures")
+        let gone = QuoteLine(quote: Quote(id: nil, authorIsMe: true, excerpt: nil), author: "Vous")
+        XCTAssertFalse(gone.available)
+        XCTAssertEqual(gone.spoken(bundle: fr.bundle, locale: fr.locale), "Message original indisponible")
+    }
+
+    /// The picker takes the first emoji and nothing else.
+    func testEmojiPickerKeepsTheFirstEmoji() {
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "👍"), "👍")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "a👍😂"), "👍")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "❤️"), "❤️")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "🇫🇷"), "🇫🇷")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "1️⃣"), "1️⃣")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "👍🏽"), "👍🏽")
+        for plain in ["", "a", "7", "#", "*", " ", "é"] {
+            XCTAssertNil(EmojiPicker.firstEmoji(in: plain), "\(plain) is not an emoji")
+        }
+    }
 }

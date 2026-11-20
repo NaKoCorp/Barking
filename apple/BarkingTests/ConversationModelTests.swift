@@ -559,6 +559,24 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertNil(m.items[1].quote)
     }
 
+    /// The banner's "You" and the quote's author follow the language asked
+    /// for (the app's override), not the device's.
+    func testReplyBannerAndQuoteFollowTheLanguage() async {
+        let fr = (bundle: Bundle.strings(for: Locale(identifier: "fr")), locale: Locale(identifier: "fr"))
+        let quote = Quote(id: 5, authorIsMe: true, excerpt: "oui")
+        let (_, m) = await loaded([
+            Message(id: 5, outgoing: true, body: "oui\nsuite", at: 1),
+            Message(id: 6, outgoing: false, body: "ok", at: 2, replyTo: quote),
+        ])
+        m.startReply(5)
+        XCTAssertEqual(m.replyBanner(bundle: fr.bundle, locale: fr.locale)?.name, "Vous")
+        XCTAssertEqual(m.replyBanner(bundle: fr.bundle, locale: fr.locale)?.excerpt, "oui")
+        m.startReply(6)
+        XCTAssertEqual(m.replyBanner(bundle: fr.bundle, locale: fr.locale)?.name, "bob")
+        XCTAssertEqual(m.quoteLine(for: m.items[1], bundle: fr.bundle, locale: fr.locale)?.author, "Vous")
+        XCTAssertNil(m.quoteLine(for: m.items[0]), "not a reply")
+    }
+
     func testReplySendsTheTarget() async {
         let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
         m.startReply(5)

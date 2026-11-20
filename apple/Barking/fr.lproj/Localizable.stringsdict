@@ -644,5 +644,37 @@
 			<string>%lld jours</string>
 		</dict>
 	</dict>
+	<key>%@, %lld reactions, including yours</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$@, %2$#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld réaction, dont la vôtre</string>
+			<key>other</key>
+			<string>%lld réactions, dont la vôtre</string>
+		</dict>
+	</dict>
+	<key>%@, %lld reactions</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$@, %2$#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld réaction</string>
+			<key>other</key>
+			<string>%lld réactions</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

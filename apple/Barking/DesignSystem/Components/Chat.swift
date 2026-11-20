@@ -89,13 +89,83 @@ struct ChatTitle: View {
     }
 }
 
+/// What a reply's quote shows above its text (spec reply and reactions
+/// §5.6): who wrote the original and the start of it, or that it is gone.
+struct QuoteLine: Equatable {
+    let quote: Quote
+    /// "You" or the contact's name, already in the language shown.
+    let author: String
+
+    /// The original is among the rows: its text can be shown and tapped.
+    var available: Bool { quote.id != nil && quote.excerpt != nil }
+    var excerpt: String { quote.excerpt ?? "" }
+
+    /// What VoiceOver says: "Reply to Sam: see you at six".
+    func spoken(bundle: Bundle = .main, locale: Locale = .current) -> String {
+        available
+            ? String(localized: "Reply to \(author): \(excerpt)", bundle: bundle, locale: locale)
+            : String(localized: "Original message unavailable", bundle: bundle, locale: locale)
+    }
+}
+
+extension ReactionChip {
+    /// The chip for VoiceOver: "👍, 2 reactions, including yours".
+    func label(bundle: Bundle = .main, locale: Locale = .current) -> String {
+        let n = Int(count)
+        return mine
+            ? String(localized: "\(emoji), \(n) reactions, including yours", bundle: bundle, locale: locale)
+            : String(localized: "\(emoji), \(n) reactions", bundle: bundle, locale: locale)
+    }
+}
+
+/// The quote inside a bubble: a 3 pt bar, the author, two lines of the
+/// original. An unavailable original is one italic line, not tappable.
+/// One VoiceOver element: "Reply to Sam: …".
+struct QuoteView: View {
+    let line: QuoteLine
+    let outgoing: Bool
+    @Environment(\.locale) private var locale
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            // Accent on the card; white on the purple bubble, where it would vanish.
+            RoundedRectangle(cornerRadius: 1.5).fill(outgoing ? Color.white : Color.accentFill).frame(width: 3)
+            VStack(alignment: .leading, spacing: 2) {
+                if line.available {
+                    Text(verbatim: line.author).font(BarkingFont.sans(.footnote, size: 12, weight: .semibold))
+                        .foregroundStyle(outgoing ? Color.white : Color.accent)
+                    Text(verbatim: line.excerpt).font(BarkingFont.sans(.footnote, size: 13))
+                        .foregroundStyle(outgoing ? Color.white : Color.fgMuted)
+                        .lineLimit(2)
+                } else {
+                    Text("Original message unavailable").font(BarkingFont.sans(.footnote, size: 13)).italic()
+                        .foregroundStyle(outgoing ? Color.white : Color.fgMuted)
+                }
+            }
+            .multilineTextAlignment(.leading)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: line.spoken(bundle: .strings(for: locale), locale: locale)))
+    }
+}
+
 /// Chat bubble: received on the card color with a border, sent in purple.
 /// The text alone (spec Lot M §6.3): time and state go under it
 /// (`BubbleMeta`). Place it in its row with `bubbleRow(outgoing:)`, after
 /// the modifiers that should see the bubble only (context menu preview).
+/// A reply carries its quote above the text; a tap on an available quote
+/// calls `onQuote`.
 struct Bubble: View {
     let text: String
     let outgoing: Bool
+    var quote: QuoteLine?
+    /// A placeholder for something this version cannot read: italic.
+    var placeholder = false
+    /// Lit after a quote jumped here: an accent outline that fades out.
+    var highlighted = false
+    var onQuote: () -> Void = {}
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func shape(outgoing: Bool) -> UnevenRoundedRectangle {
         UnevenRoundedRectangle(
@@ -105,15 +175,65 @@ struct Bubble: View {
             topTrailingRadius: Radius.panel)
     }
 
+    /// The outline's fade: 1.5 s out, at once in; none under Reduce Motion.
+    static let highlightFade: Animation = .easeOut(duration: 1.5)
+
     var body: some View {
         let shape = Self.shape(outgoing: outgoing)
-        Text(text).font(BarkingFont.sans(.body, size: 15))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .foregroundStyle(outgoing ? Color.white : Color.fg)
-            .background(outgoing ? Color.accentFill : Color.surfaceCard, in: shape)
-            .overlay(shape.stroke(outgoing ? Color.clear : Color.border, lineWidth: 1))
-            .contentShape(.contextMenuPreview, shape)
+        VStack(alignment: .leading, spacing: 6) {
+            if let quote {
+                if quote.available {
+                    QuoteView(line: quote, outgoing: outgoing).onTapGesture(perform: onQuote)
+                } else {
+                    QuoteView(line: quote, outgoing: outgoing)
+                }
+            }
+            Text(text).font(BarkingFont.sans(.body, size: 15)).italic(placeholder)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .foregroundStyle(outgoing ? Color.white : Color.fg)
+        .background(outgoing ? Color.accentFill : Color.surfaceCard, in: shape)
+        .overlay(shape.stroke(outgoing ? Color.clear : Color.border, lineWidth: 1))
+        .overlay {
+            shape.stroke(Color.accent, lineWidth: 3).opacity(highlighted ? 1 : 0)
+                .animation(highlighted ? nil : Motion.gated(Self.highlightFade, reduceMotion: reduceMotion),
+                           value: highlighted)
+                .allowsHitTesting(false)
+        }
+        .contentShape(.contextMenuPreview, shape)
+    }
+}
+
+/// The emoji under a bubble: `emoji count` in a capsule, outlined in the
+/// accent when mine; a tap toggles mine. Each chip is one VoiceOver element.
+struct ReactionChips: View {
+    let chips: [ReactionChip]
+    let outgoing: Bool
+    let toggle: (String) -> Void
+    @Environment(\.locale) private var locale
+
+    var body: some View {
+        FlowLayout(spacing: 4) {
+            ForEach(chips, id: \.emoji) { chip in
+                Button { toggle(chip.emoji) } label: {
+                    Text(verbatim: "\(chip.emoji) \(chip.count)")
+                        .font(BarkingFont.sans(.footnote, size: 13))
+                        .foregroundStyle(Color.fg)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .frame(minHeight: 28)
+                        .background(chip.mine ? Color.accentFill.opacity(0.12) : Color.surfaceCard, in: .capsule)
+                        .overlay(Capsule().stroke(chip.mine ? Color.accentFill : Color.border,
+                                                  lineWidth: chip.mine ? 1.5 : 1))
+                        .contentShape(.capsule)
+                }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(verbatim: chip.label(bundle: .strings(for: locale), locale: locale)))
+                .accessibilityAddTraits(chip.mine ? .isSelected : [])
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: outgoing ? .trailing : .leading)
     }
 }
 

@@ -514,3 +514,14 @@
 "Unblock" = "Débloquer";
 "Unblock %@" = "Débloquer %@";
 "You blocked this person. Unblock them in Settings › Blocked contacts first." = "Vous avez bloqué cette personne. Débloquez-la d’abord dans Réglages › Contacts bloqués.";
+
+/* Reply and reactions (spec §5.6) */
+"Reply" = "Répondre";
+"React" = "Réagir";
+"Original message unavailable" = "Message original indisponible";
+"Replying to %@" = "Réponse à %@";
+"Cancel reply" = "Annuler la réponse";
+"Reply to %@: %@" = "Réponse à %1$@ : %2$@";
+"More emoji" = "Plus d’emoji";
+"20 reactions at most on a message." = "20 réactions au plus sur un message.";
+"This message needs a newer version of Barking." = "Ce message nécessite une version plus récente de Barking.";

@@ -136,10 +136,23 @@ final class ConversationModel {
 
     /// The banner above the field while replying: who is quoted and the
     /// first line of their text.
-    var replyBanner: (name: String, excerpt: String)? {
+    var replyBanner: (name: String, excerpt: String)? { replyBanner() }
+
+    /// The same, with "You" in the language of `bundle` (the app's own
+    /// override, not only the device's).
+    func replyBanner(bundle: Bundle = .main, locale: Locale = .current) -> (name: String, excerpt: String)? {
         guard let item = replyingTo else { return nil }
         let line = item.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-        return (item.outgoing ? String(localized: "You") : name, String(line.prefix(Self.bannerChars)))
+        return (item.outgoing ? String(localized: "You", bundle: bundle, locale: locale) : name,
+                String(line.prefix(Self.bannerChars)))
+    }
+
+    /// What the quote of `item` shows: its author ("You" or the contact) and
+    /// the start of the original; nil when `item` is not a reply.
+    func quoteLine(for item: Item, bundle: Bundle = .main, locale: Locale = .current) -> QuoteLine? {
+        guard let quote = item.quote else { return nil }
+        return QuoteLine(quote: quote,
+                         author: quote.authorIsMe ? String(localized: "You", bundle: bundle, locale: locale) : name)
     }
 
     var byteCount: Int { draft.utf8.count }

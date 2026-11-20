@@ -90,6 +90,36 @@ final class DeliveryUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Copy"].exists)
         XCTAssertEqual(buttons(app, "Retry"), retries + 1, "Retry is in the menu of the not delivered message")
         closeMenu(app)
+        // §5.6: the quick emoji row and Reply come with the usual entries.
+        menu(app, of: Seeded.received)
+        for label in ["👍", "Reply", "Copy", "Details", "Delete"] {
+            XCTAssertTrue(app.buttons[label].exists, "\(label) is in the menu of the received message")
+        }
+        app.buttons["👍"].tap()
+        XCTAssertTrue(app.buttons["Details"].waitUntil({ !$0.exists }, timeout: 5), "choosing an emoji closes the menu")
+        let chip = any(app, containing: "👍, 1 reaction, including yours")
+        XCTAssertTrue(chip.waitForExistence(timeout: 10), "the chip of my reaction")
+        // The same emoji again takes it back.
+        menu(app, of: Seeded.received)
+        app.buttons["👍"].tap()
+        XCTAssertTrue(chip.waitUntil({ !$0.exists }, timeout: 10), "the chip goes with my reaction")
+    }
+
+    /// Reply from the menu shows who is answered above the field; Cancel
+    /// reply takes it away (§5.6). The one message from Sam is the faked one:
+    /// the seeded four are mine.
+    func testReplyBannerAndCancel() throws {
+        let app = XCUIApplication.seeded("deliveries", extra: ["-BarkingUITestFakeReceived"])
+        app.launch()
+        openSamChat(app)
+        let received = bubble(app, "hi from Sam")
+        XCTAssertTrue(received.waitForExistence(timeout: 10), "the message from Sam")
+        menu(app, of: "hi from Sam")
+        app.buttons["Reply"].tap()
+        let banner = app.staticTexts["Replying to Sam"]
+        XCTAssertTrue(banner.waitForExistence(timeout: 5), "the reply banner")
+        app.buttons["Cancel reply"].tap()
+        XCTAssertTrue(banner.waitUntil({ !$0.exists }, timeout: 5), "Cancel reply removes the banner")
     }
 
     /// Retry under a not delivered bubble sends it again: pending, no Retry left.

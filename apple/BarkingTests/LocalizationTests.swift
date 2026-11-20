@@ -285,6 +285,40 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
+    /// Spec reply and reactions §5.6: the menu, the quote, the banner, the
+    /// chips and the update row in French, with the plurals in both languages.
+    func testReplyReactionStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let keys = ["Reply", "React", "You", "Original message unavailable", "Replying to %@", "Cancel reply",
+                    "Reply to %@: %@", "More emoji", "20 reactions at most on a message.",
+                    "This message needs a newer version of Barking."]
+        for key in keys {
+            let value = fr[key] as? String ?? ""
+            XCTAssertFalse(value.isEmpty, "missing French for \(key)")
+            XCTAssertNotEqual(value, key, "French is English for \(key)")
+        }
+        XCTAssertEqual(fr["Reply"] as? String, "Répondre")
+        XCTAssertEqual(fr["React"] as? String, "Réagir")
+        XCTAssertEqual(fr["Reply to %@: %@"] as? String, "Réponse à %1$@\u{00A0}: %2$@")
+        XCTAssertEqual(fr["Replying to %@"] as? String, "Réponse à %@")
+        XCTAssertEqual(fr["More emoji"] as? String, "Plus d’emoji")
+        let plurals = ["%@, %lld reactions, including yours": ("réaction, dont la vôtre", "réactions, dont la vôtre"),
+                       "%@, %lld reactions": ("réaction", "réactions")]
+        for lang in ["en", "fr"] {
+            let table = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
+            for (key, french) in plurals {
+                let rule = try XCTUnwrap((table[key] as? NSDictionary)?["n"] as? NSDictionary, "\(lang) \(key)")
+                let one = try XCTUnwrap(rule["one"] as? String, "\(lang) \(key) one")
+                let other = try XCTUnwrap(rule["other"] as? String, "\(lang) \(key) other")
+                if lang == "fr" {
+                    XCTAssertTrue(one.hasSuffix(french.0) && other.hasSuffix(french.1), "\(key): \(one) / \(other)")
+                } else {
+                    XCTAssertTrue(one.contains("reaction") && other.contains("reactions"), "\(key): \(one) / \(other)")
+                }
+            }
+        }
+    }
+
     /// Spec Lot M §7.1: the bubble's states, menu, VoiceOver values and
     /// announcements, in both languages.
     func testDeliveryBubbleStrings() throws {
