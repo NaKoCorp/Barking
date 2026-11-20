@@ -53,6 +53,16 @@ pub enum CoreError {
     /// added again until it is unblocked. Added last.
     #[error("contact blocked")]
     ContactBlocked,
+    /// A reaction carries more than 20 emoji. Added last.
+    #[error("too many emoji")]
+    TooManyEmoji,
+    /// Not exactly one emoji, or a duplicate in a reaction. Added last.
+    #[error("invalid emoji")]
+    InvalidEmoji,
+    /// The message a reply or reaction points at is not in the conversation.
+    /// Added last.
+    #[error("message not found")]
+    MessageNotFound,
 }
 
 impl From<barking_packet::PacketError> for CoreError {

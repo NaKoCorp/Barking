@@ -1,8 +1,10 @@
 //! barking-core: core of the Barking messenger (no network, no platform).
 
 pub mod contact;
+pub mod content;
 pub mod core;
 pub mod crypto;
+pub mod emoji;
 pub mod envelope;
 pub mod error;
 pub mod fragment {

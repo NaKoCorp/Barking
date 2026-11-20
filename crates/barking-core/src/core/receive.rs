@@ -544,6 +544,12 @@ fn accept(
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
         }
+        // Replies and reactions are not handled yet, from a contact or from
+        // my own devices.
+        (Body::Ext { .. }, _) => {
+            let id = Some(authenticated_id);
+            return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
+        }
         (_, false) => {
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);

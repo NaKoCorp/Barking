@@ -347,7 +347,7 @@ pub(super) fn apply(
 ) -> Result<core::result::Result<Option<SyncKind>, &'static str>> {
     let me = &device.public();
     match &env.body {
-        Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
+        Body::Text(_) | Body::CardUpdate(_) | Body::Ext { .. } => Ok(Err(R_SYNC_REFUSED)),
         Body::AdminTransfer { seed, version } => super::admin::apply(q, seed, *version),
         // Handled by the receiver once the session is written (`remove.rs`).
         Body::RemoveMe => Ok(Ok(None)),
