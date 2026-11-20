@@ -131,6 +131,9 @@ impl Core {
             // message for a contact, or a sync for one of my
             // devices (without a message row for `SyncContact`/`SyncDevices`).
             if !tx.is_my_packet(acked)? {
+                // A superseded reaction packet (no delivery, no state):
+                // received, it only leaves the send queue.
+                reactions::drop_acked_superseded(tx, acked)?;
                 return Ok((ReceiveOutcome::NotForUs, false, None));
             }
             // Nodes keep a receipt until `max(its expiry, the acknowledged

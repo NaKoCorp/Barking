@@ -34,7 +34,7 @@ use super::{Core, MAX_AGE_SECS, sync};
 use crate::content::{ExtContent, MessageRef};
 use crate::emoji;
 use crate::identity::{DeviceKeys, Fingerprint};
-use crate::packet::Packet;
+use crate::packet::{Packet, PacketId};
 use crate::store::{
     MessageId, Queries, ReactionRow, arr, drop_reaction_packets, forget_reaction_tracking, map_err,
     to_i64,
@@ -301,6 +301,23 @@ fn drop_left_superseded(q: &impl Queries) -> Result<()> {
             [],
         )
         .map_err(map_err)?;
+    Ok(())
+}
+
+/// The verified ack of `packet`, a superseded reaction packet: it arrived,
+/// so it leaves the send queue with its row. No delivery nor state to
+/// change (the current send has its own). Nothing for any other packet.
+pub(super) fn drop_acked_superseded(q: &impl Queries, packet: PacketId) -> Result<()> {
+    let removed = q
+        .conn()
+        .execute(
+            "DELETE FROM reaction_sends WHERE packet_id = ?1 AND superseded = 1",
+            params![packet.0.as_slice()],
+        )
+        .map_err(map_err)?;
+    if removed > 0 {
+        q.outbox_remove(packet)?;
+    }
     Ok(())
 }
 

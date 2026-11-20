@@ -285,11 +285,13 @@ impl Core {
                 return Ok(None);
             }
             let failed = fail(tx, packet, MessageStatus::OnNetwork, expires_at)?;
-            // A reaction packet lost on the network: `resend_reactions` reseals it.
+            // A reaction packet lost on the network: flagged.
+            // `resend_reactions` reseals a copy for my devices; a send to
+            // the contact stays `NotDelivered` until the manual resend.
             tx.conn()
                 .execute(
                     "UPDATE reaction_sends SET expired = 1 \
-                         WHERE packet_id = ?1 AND superseded = 0",
+                     WHERE packet_id = ?1 AND superseded = 0",
                     params![packet.0.as_slice()],
                 )
                 .map_err(map_err)?;

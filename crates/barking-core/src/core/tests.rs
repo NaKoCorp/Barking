@@ -6943,3 +6943,33 @@ fn superseded_rows_go_once_the_packet_leaves() {
     assert_eq!(sends_where(&p.a, "superseded = 1"), 0);
     assert_eq!(superseded(&p.a, second.id), Some(false));
 }
+
+#[test]
+fn acked_superseded_reaction_leaves_the_queue() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "x");
+    let first = react_x(&mut p, &["👍"], NOW);
+    let second = react_x(&mut p, &["👍", "❤️"], NOW + 1);
+    p.a.record_deposit(first.id, NODE, NOW + 2).unwrap();
+    deliver(&mut p.b, &first, &mut p.rng);
+    let ack = ack_bytes(&mut p.b, &first, NOW);
+    p.a.receive(&ack, "t", NOW + 3, &mut p.rng).unwrap();
+    assert_eq!(packet_rows(&p.a, "outbox", first.id), 0, "left the queue");
+    assert_eq!(superseded(&p.a, first.id), None);
+    let pending = p.a.pending_packets(NOW + 3).unwrap();
+    let reaction: Vec<_> = pending
+        .sync
+        .iter()
+        .filter(|s| s.kind == PendingKind::Reaction)
+        .collect();
+    assert_eq!(reaction.len(), 1);
+    assert_eq!(reaction[0].packets, 1, "only the current send");
+    // The current send is untouched.
+    let tie = tie_of(&p.a, second.id);
+    assert_eq!(contact_tie(&p.a, b, target), Some(tie));
+    assert_eq!(
+        tie_states(&p.a, tie, false),
+        vec![MessageStatus::Pending as i64]
+    );
+}
