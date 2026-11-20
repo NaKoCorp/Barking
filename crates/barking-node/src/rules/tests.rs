@@ -122,7 +122,9 @@ fn rejects_too_far_in_future() {
 #[test]
 fn expiry_beyond_lifetime_plus_one_hour_is_refused() {
     let (_d, mut s) = store();
-    let limit = barking_packet::DEFAULT_TTL_SECS + 3_600;
+    // Fixed by protocol 4, whatever the client's own lifetime.
+    assert_eq!(MAX_EXPIRY_SECS, barking_proto::P4_MAX_EXPIRY_SECS);
+    let limit = 604_800 + 3_600;
     let p = msg(1, 1, Tier::S, NOW + limit + 1);
     assert_eq!(put(&mut s, &p), Err(ErrorReason::TooFarInFuture));
     let q = msg(2, 1, Tier::S, NOW + limit);
@@ -297,12 +299,7 @@ fn deposit_window_tolerates_one_hour_skew() {
     let p = msg(1, 1, Tier::S, NOW + MAX_EXPIRY_SECS);
     assert_eq!(put(&mut s, &p), Ok(()));
     // Client clock one hour behind: expires in lifetime - 1 h.
-    let q = msg(
-        2,
-        1,
-        Tier::S,
-        NOW + barking_packet::DEFAULT_TTL_SECS - 3_600,
-    );
+    let q = msg(2, 1, Tier::S, NOW + barking_proto::P4_LIFETIME_SECS - 3_600);
     assert_eq!(put(&mut s, &q), Ok(()));
     // Packet expiring in one second: still valid.
     let r = msg(3, 1, Tier::S, NOW + 1);

@@ -37,9 +37,9 @@ use crate::store::{NodeStore, add_stored_bytes, stored_bytes};
 /// Number of packets per additional difficulty step.
 const POW_STEP_PACKETS: i64 = 64;
 
-/// Expiry margin: the message lifetime (7 days) + 1 h (one-hour clock
-/// tolerance).
-pub const MAX_EXPIRY_SECS: u64 = barking_packet::DEFAULT_TTL_SECS + 3_600;
+/// Expiry margin: the protocol 4 message lifetime (7 days) + 1 h (one-hour
+/// clock tolerance), fixed by the protocol this node announces.
+pub const MAX_EXPIRY_SECS: u64 = barking_proto::P4_MAX_EXPIRY_SECS;
 /// Maximum number of mailboxes per fetch.
 pub const MAX_MAILBOXES_PER_FETCH: usize = 64;
 const ACK_BASE: u64 = barking_proto::ACK_CURSOR_BASE;

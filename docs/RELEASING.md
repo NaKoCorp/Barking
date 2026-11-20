@@ -126,7 +126,7 @@ The client lifetime of a packet goes from 24 hours to 7 days (`DEFAULT_TTL_SECS`
 
 - Production nodes must run protocol 4 before any App Store build that carries the 7-day lifetime.
 - Deploy order: the test node, then the TestFlight build, then the production nodes, then the App Store build.
-- The client constant `DEFAULT_TTL_SECS` is the only revert switch: set it back and rebuild. Protocol 4 nodes still accept short packets.
+- The client constant `DEFAULT_TTL_SECS` is the only revert switch: set it back and rebuild. Protocol 4 nodes still accept short packets. What protocol 4 accepts is fixed apart from it (`P4_MAX_EXPIRY_SECS` in `barking-proto`): a rebuilt node keeps accepting 7-day packets, and a client keeps sending its already sealed 7-day packets to protocol 4 nodes only.
 - During the trial, the review contact and the development builds must run the new build: an older client refuses a message more than 2 days old.
 
 ## Preserving the Alpine environment

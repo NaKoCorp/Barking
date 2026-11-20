@@ -975,7 +975,9 @@ mod tests {
         assert_eq!(max_expiry_secs(2), 90_000);
         assert_eq!(max_expiry_secs(3), 90_000);
         assert_eq!(max_expiry_secs(4), 608_400);
-        assert_eq!(max_expiry_secs(4), barking_packet::DEFAULT_TTL_SECS + 3_600);
+        assert_eq!(max_expiry_secs(5), 608_400);
+        assert_eq!(crate::P4_MAX_EXPIRY_SECS, 608_400);
+        assert_eq!(crate::P4_LIFETIME_SECS, 604_800);
     }
 
     #[test]

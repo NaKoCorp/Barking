@@ -1335,6 +1335,26 @@ async fn too_far_in_future_is_refused_not_retried_forever() {
     assert_eq!(second.refused, 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn packet_beyond_every_limit_is_dropped_on_a_v3_network() {
+    let (_dir, mut core, mut net) = setup();
+    // Every node speaks 3 and refuses beyond 25 h. A packet sealed by a
+    // clock two hours ahead expires beyond what even a protocol 4 node
+    // accepts: no newer node would ever take it, so it does not wait for
+    // one. It is offered, refused and dropped, as on a protocol 4 network.
+    net.v3 = net.records.keys().copied().collect();
+    net.max_expiry = Some(NOW + barking_proto::max_expiry_secs(3));
+    let legacy = sealed_at(&mut core, NOW + 2 * 3_600);
+    assert!(u64::from(Packet::decode(&legacy).unwrap().expires_at) > NOW + ANY_NODE_MAX);
+    let first = sync(&mut core, &net, opts()).await;
+    assert!(deposits_of(&net, &legacy) >= 1);
+    assert!(first.refused >= 1);
+    assert!(!core.pending_outbox(NOW).unwrap().contains(&legacy));
+    let before = deposits_of(&net, &legacy);
+    sync(&mut core, &net, opts()).await;
+    assert_eq!(deposits_of(&net, &legacy), before);
+}
+
 /// Deletes Bob's message "hi" (the fixture's outbox message): the outcome
 /// tells whether a deposit was tried for its packet (`cancelled == 1`: no).
 fn delete_hi(core: &mut Core) -> barking_core::DeleteOutcome {

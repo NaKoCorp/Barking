@@ -899,3 +899,14 @@ fn owned_eviction_ignores_node_full() {
     assert_eq!(try_owned(&mut s, &cfg, &sb, &owner), Ok(()));
     assert_eq!(owned_of(&s, 9), Some(1));
 }
+
+#[test]
+fn max_expiry_days_is_fixed_by_protocol_4() {
+    // The protocol 4 lifetime (7 days) plus two, whatever the client's own
+    // lifetime (`DEFAULT_TTL_SECS`, the revert switch).
+    assert_eq!(MAX_EXPIRY_DAYS, 9);
+    assert_eq!(
+        MAX_EXPIRY_DAYS,
+        (barking_proto::P4_LIFETIME_SECS / 86_400) as u32 + 2
+    );
+}
