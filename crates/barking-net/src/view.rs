@@ -522,6 +522,22 @@ mod tests {
     }
 
     #[test]
+    fn view_outlives_a_packet_and_its_ack_grace() {
+        use barking_packet::{ACK_GRACE_SECS, DEFAULT_TTL_SECS};
+        assert_eq!(VIEW_TTL_SECS, DEFAULT_TTL_SECS + ACK_GRACE_SECS + DAY);
+        // Nodes last seen when a packet was sealed (`last_seen` rounded
+        // down to the hour) are all still there once the packet expired
+        // and its ack grace ended, an hour later included.
+        let mut v = view();
+        for n in 0..4 {
+            v.insert(record(n, NOW), NOW + 3_599);
+        }
+        let end = NOW + 3_599 + DEFAULT_TTL_SECS + ACK_GRACE_SECS + 3_600;
+        assert_eq!(v.expire(end), 0);
+        assert_eq!(v.len(), 4);
+    }
+
+    #[test]
     fn expire_after_ttl_except_manual() {
         let mut v = view();
         v.insert(record(0, NOW), NOW);

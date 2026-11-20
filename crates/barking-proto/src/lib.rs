@@ -17,8 +17,19 @@ pub use msg::{
 pub use node_id::{NodeId, generate_node_key};
 pub use record::{NodeRecord, RecordError, RecordPolicy, embeds_ipv4, routable};
 
-/// Protocol version.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// Protocol version. 4: messages live `DEFAULT_TTL_SECS` (7 days).
+pub const PROTOCOL_VERSION: u16 = 4;
+
+/// Furthest expiry, from its own clock, that a node speaking protocol
+/// `version` accepts: from protocol 4 on, the message lifetime plus one
+/// hour of clock tolerance; before, 24 h plus one hour.
+pub const fn max_expiry_secs(version: u16) -> u64 {
+    if version >= 4 {
+        barking_packet::DEFAULT_TTL_SECS + 3_600
+    } else {
+        90_000
+    }
+}
 /// ALPN identifier of the QUIC layer.
 pub const ALPN: &[u8] = b"barking/0";
 

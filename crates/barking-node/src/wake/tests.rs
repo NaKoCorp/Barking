@@ -367,13 +367,16 @@ fn subscribe_day_bounds() {
         ..raw_sub(1, cancel)
     };
     assert_eq!(try_subscribe(&mut s, &cfg, &at(today(), 1)), Ok(()));
-    assert_eq!(try_subscribe(&mut s, &cfg, &at(today() + 8, 2)), Ok(()));
+    assert_eq!(
+        try_subscribe(&mut s, &cfg, &at(today() + MAX_EXPIRY_DAYS, 2)),
+        Ok(())
+    );
     assert_eq!(
         try_subscribe(&mut s, &cfg, &at(today() - 1, 3)),
         Err(ErrorReason::Expired)
     );
     assert_eq!(
-        try_subscribe(&mut s, &cfg, &at(today() + 9, 3)),
+        try_subscribe(&mut s, &cfg, &at(today() + MAX_EXPIRY_DAYS + 1, 3)),
         Err(ErrorReason::TooFarInFuture)
     );
 }

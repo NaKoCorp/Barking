@@ -32,8 +32,13 @@ pub use view::{NodeEntry, View};
 pub const MAX_VIEW: usize = 2048;
 /// Longest avoidance of a node, from the current time.
 pub const AVOID_SECS: u64 = 7 * 86_400;
-/// Entries not seen for this long are dropped (manual nodes excepted).
-pub const VIEW_TTL_SECS: u64 = 7 * 86_400;
+/// Entries not seen for this long are dropped (manual nodes excepted):
+/// the message lifetime, plus the nodes' ack grace, plus a day. A client
+/// offline that long still reaches the holders of its last packets (their
+/// verdict, their receipts) when it comes back (spec decision I: no false
+/// failure).
+pub const VIEW_TTL_SECS: u64 =
+    barking_packet::DEFAULT_TTL_SECS + barking_packet::ACK_GRACE_SECS + 86_400;
 /// Number of responsible nodes selected for a mailbox.
 pub const RESPONSIBLES: usize = 5;
 /// Maximum responsibles sharing an address block (/24 or /48).

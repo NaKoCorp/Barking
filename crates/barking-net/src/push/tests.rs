@@ -438,11 +438,13 @@ fn plan_push_keeps_kinds_apart() {
 fn acks_of_yesterday_are_still_subscribed() {
     let c = cfg(1);
     // A message sealed yesterday may be acked today: its mailbox (of
-    // yesterday) is still subscribed for acks, not for messages.
+    // yesterday) is still subscribed for acks, not for messages. One sealed
+    // a day before the lifetime began is no longer awaited.
+    let old = today() - lifetime_days() - 1;
     let wanted = [
         (mb(1), today() - 1, A),
         (mb(2), today() - 1, M),
-        (mb(3), today() - 2, A),
+        (mb(3), old, A),
     ];
     let plan = plan_push(&state_for(&c), Some(&c), &wanted, ranked, NOW);
     assert_eq!(
@@ -453,11 +455,11 @@ fn acks_of_yesterday_are_still_subscribed() {
             (mb(1), A, id_of(2))
         ]
     );
-    // No longer awaited: yesterday's is cancelled (its subscription runs
-    // until the end of today), older ones are forgotten.
+    // No longer awaited: yesterday's is cancelled (its subscription still
+    // runs), older ones are forgotten.
     let mut s = state_for(&c);
     subbed_kind(&mut s, mb(1), A, today() - 1, &[0]);
-    subbed_kind(&mut s, mb(3), A, today() - 2, &[1]);
+    subbed_kind(&mut s, mb(3), A, old, &[1]);
     let plan = plan_push(&s, Some(&c), &[], ranked, NOW);
     assert_eq!(plan.unsubscribe, vec![(mb(1), A, id_of(0), [0; 32])]);
     assert_eq!(plan.forget, vec![(mb(1), A), (mb(3), A)]);
@@ -474,9 +476,13 @@ fn subscription_carries_its_kind_and_the_wake_reason() {
         assert_eq!(sub.kind, kind);
         let token = barking_proto::push::open(&[(1, secret.clone())], &sub.sealed).unwrap();
         assert_eq!(token.reason, reason);
-        // Acks outlive the day after: the expiry purge may run past the
-        // next midnight.
-        let expires = if kind == A { 102 } else { 101 };
+        // Acks outlive the message lifetime by a day: the expiry purge may
+        // run past the next midnight.
+        let expires = if kind == A {
+            100 + lifetime_days() + 1
+        } else {
+            101
+        };
         assert_eq!(sub.expires_day, expires);
         assert_eq!(token.expires_day, expires);
     }
@@ -642,8 +648,8 @@ fn preview_variant_golden_bytes() {
 
 #[test]
 fn ack_subscription_window_follows_lifetime() {
-    // Derived from `DEFAULT_TTL_SECS`: with a 24 h lifetime these are
-    // `T - 1` and `D + 2`.
+    // Derived from `DEFAULT_TTL_SECS`: with a 7-day lifetime these are
+    // `T - 7` and `D + 8`.
     let t = today();
     assert_eq!(first_day(A, t), t - lifetime_days());
     assert_eq!(expires_day(t, A), t + lifetime_days() + 1);
@@ -662,4 +668,7 @@ fn ack_subscription_within_node_bound() {
             "day {d}: the node would refuse the subscription"
         );
     }
+    // One day of clock slack: a node whose day already turned still takes
+    // today's receipt subscription.
+    assert!(expires_day(t, A) < t + MAX_EXPIRY_DAYS);
 }

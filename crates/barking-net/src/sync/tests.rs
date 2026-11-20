@@ -16,6 +16,10 @@ use crate::test_support::{id_of, record, subject, subject_with_ack, subject_with
 
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 86_400;
+/// Message lifetime.
+const TTL: u64 = barking_packet::DEFAULT_TTL_SECS;
+/// Furthest expiry from now any node accepts (protocol 4).
+const ANY_NODE_MAX: u64 = barking_proto::max_expiry_secs(barking_proto::PROTOCOL_VERSION);
 const NODES: usize = 11;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,6 +119,9 @@ struct Net {
     full_unless_owned: HashSet<NodeId>,
     /// Nodes that speak protocol 2: no proved subscriptions.
     v2: HashSet<NodeId>,
+    /// Nodes that speak protocol 3: expiries up to 25 h only. The others
+    /// (but `v2`) speak protocol 4.
+    v3: HashSet<NodeId>,
     /// Fetches honour `max_bytes`: the items beyond it are left out and the
     /// fetch stops with `FetchStop::ClientLimit`.
     honor_max_bytes: bool,
@@ -324,6 +331,17 @@ impl Fetcher for Net {
 }
 
 impl Depositor for Net {
+    fn max_expiry_secs(&self, conn: &Conn) -> u64 {
+        let version = if self.v2.contains(&conn.id) {
+            2
+        } else if self.v3.contains(&conn.id) {
+            3
+        } else {
+            4
+        };
+        barking_proto::max_expiry_secs(version)
+    }
+
     async fn deposit(&self, session: &mut Conn, packet: &[u8], pow_left: u64) -> DepositReply {
         let conn = &session.id;
         let n = {
@@ -1303,10 +1321,10 @@ fn deposits_of(net: &Net, bytes: &[u8]) -> usize {
 #[tokio::test(start_paused = true)]
 async fn too_far_in_future_is_refused_not_retried_forever() {
     let (_dir, mut core, mut net) = setup();
-    // The legacy case: a packet sealed with a 7-day expiry. Nodes refuse
-    // any expiry beyond 25 h from their clock.
-    net.max_expiry = Some(NOW + 25 * 3_600);
-    let legacy = sealed_at(&mut core, NOW + 6 * DAY);
+    // A packet sealed by a clock two hours ahead: its expiry is beyond
+    // what any node accepts (the lifetime plus one hour from its clock).
+    net.max_expiry = Some(NOW + ANY_NODE_MAX);
+    let legacy = sealed_at(&mut core, NOW + 2 * 3_600);
     let first = sync(&mut core, &net, opts()).await;
     assert!(first.refused >= 1);
     // It will never be accepted: out of the queue, not offered again.
@@ -1317,12 +1335,157 @@ async fn too_far_in_future_is_refused_not_retried_forever() {
     assert_eq!(second.refused, 0);
 }
 
+/// Deletes Bob's message "hi" (the fixture's outbox message): the outcome
+/// tells whether a deposit was tried for its packet (`cancelled == 1`: no).
+fn delete_hi(core: &mut Core) -> barking_core::DeleteOutcome {
+    let alice = core.contacts().unwrap()[0].fingerprint;
+    let row = core
+        .messages_with(&alice)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "hi")
+        .unwrap()
+        .id;
+    core.delete_messages(&[row], NOW).unwrap()
+}
+
+/// Scores of `nodes` after a sync over `net` of a fresh subject whose
+/// message "hi" was deleted first: what the sync gives them without it.
+async fn scores_without_hi(
+    view: impl Fn(&mut Core) -> Net,
+    tweak: impl Fn(&mut Net),
+    nodes: &[NodeId],
+) -> Vec<f32> {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view(&mut core);
+    tweak(&mut net);
+    assert_eq!(delete_hi(&mut core).cancelled, 1);
+    sync(&mut core, &net, opts()).await;
+    nodes.iter().map(|n| score_of(&mut core, n)).collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_packet_waits_for_a_v4_node() {
+    let (_dir, mut core, mut net) = setup();
+    let (bytes, m) = message(&mut core);
+    assert_eq!(
+        u64::from(Packet::decode(&bytes).unwrap().expires_at),
+        NOW + 604_800
+    );
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    let all_v3 = |net: &mut Net| net.v3 = net.records.keys().copied().collect();
+    all_v3(&mut net);
+    sync(&mut core, &net, opts()).await;
+    // Never offered to a protocol 3 node, which would refuse it.
+    assert_eq!(deposits_of(&net, &bytes), 0);
+    // Not a node failure: the scores are those of a sync without it.
+    let after: Vec<f32> = r.iter().map(|n| score_of(&mut core, n)).collect();
+    assert_eq!(after, scores_without_hi(setup_with, all_v3, &r).await);
+    // Still queued, and no deposit try recorded: it can still be cancelled.
+    assert!(core.pending_outbox(NOW).unwrap().contains(&bytes));
+    assert_eq!(delete_hi(&mut core).cancelled, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_packet_goes_to_v4_node() {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view_of(&mut core, &[0, 1]);
+    let (bytes, m) = message(&mut core);
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert_eq!(r.len(), 2);
+    // The better-ranked node speaks 3: skipped, the other one takes it.
+    rank_first(&mut core, &r[..1]);
+    let old = r[0];
+    let v3 = move |net: &mut Net| {
+        net.v3.insert(old);
+    };
+    v3(&mut net);
+    sync(&mut core, &net, opts()).await;
+    let h = content_hash(&bytes);
+    let calls = net.calls();
+    assert!(!calls.contains(&Call::Deposit(r[0], h)));
+    assert!(calls.contains(&Call::Deposit(r[1], h)));
+    assert_eq!(holders(&mut core, &bytes), vec![r[1]]);
+    let ranked = |c: &mut Core| {
+        let net = view_of(c, &[0, 1]);
+        rank_first(c, &[old]);
+        net
+    };
+    let without = scores_without_hi(ranked, v3, &[r[0]]).await;
+    assert_eq!(score_of(&mut core, &r[0]), without[0]);
+}
+
+/// Raises the scores of `nodes` well above the others', so that the
+/// successes of the sync's fetches do not reorder the responsibles.
+fn rank_first(core: &mut Core, nodes: &[NodeId]) {
+    let mut state = load(core);
+    for n in nodes {
+        for _ in 0..5 {
+            state
+                .view
+                .apply_score(n, crate::score::ScoreEvent::Found, NOW, true);
+        }
+    }
+    state.save(core).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_packet_skips_v3_top_responsibles() {
+    let (_dir, mut core, mut net) = setup();
+    let (bytes, m) = message(&mut core);
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert!(r.len() > crate::plan::CLIENT_COPIES);
+    // The responsibles the plan picks first all speak 3; the one after
+    // them is the only one that speaks 4.
+    let old = &r[..crate::plan::CLIENT_COPIES];
+    rank_first(&mut core, old);
+    net.v3.extend(r.iter().copied());
+    net.v3.remove(&r[crate::plan::CLIENT_COPIES]);
+    let report = sync(&mut core, &net, opts()).await;
+    let h = content_hash(&bytes);
+    let calls = net.calls();
+    for n in old {
+        assert!(!calls.contains(&Call::Deposit(*n, h)));
+    }
+    // The next responsible, which speaks 4, takes it in the same sync.
+    let next = r[crate::plan::CLIENT_COPIES];
+    assert!(calls.contains(&Call::Deposit(next, h)));
+    assert!(holders(&mut core, &bytes).contains(&next));
+    assert_eq!(report.first_copies, 1);
+    assert!(core.pending_outbox(NOW).unwrap().contains(&bytes));
+}
+
+#[tokio::test(start_paused = true)]
+async fn receipt_skips_v3_best_responsible() {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view_of(&mut core, &[0, 1]);
+    let receipt = core
+        .pending_outbox(NOW)
+        .unwrap()
+        .into_iter()
+        .find(|b| Packet::decode(b).unwrap().kind == Kind::Ack)
+        .unwrap();
+    let p = Packet::decode(&receipt).unwrap();
+    assert!(u64::from(p.expires_at) > NOW + barking_proto::max_expiry_secs(3));
+    let r = load(&mut core).view.responsibles_by_score(&p.mailbox, NOW);
+    assert_eq!(r.len(), 2);
+    rank_first(&mut core, &r[..1]);
+    net.v3.insert(r[0]);
+    let report = sync(&mut core, &net, opts()).await;
+    let h = content_hash(&receipt);
+    let calls = net.calls();
+    assert!(!calls.contains(&Call::Deposit(r[0], h)));
+    assert!(calls.contains(&Call::Deposit(r[1], h)));
+    assert_eq!(report.acks_deposited, 1);
+    assert_eq!(holders(&mut core, &receipt), vec![r[1]]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn one_skewed_node_refusal_keeps_the_packet() {
     let (_dir, mut core, mut net) = setup();
     let (bytes, m) = message(&mut core);
     let r = load(&mut core).view.responsibles_by_score(&m, NOW);
-    // The best node's clock is behind: it refuses a normal 24 h packet.
+    // The best node's clock is behind: it refuses a normal packet.
     net.refuse_deposit.insert(r[0], ErrorReason::TooFarInFuture);
     let report = sync(&mut core, &net, opts()).await;
     assert!(report.refused >= 1);
@@ -3222,9 +3385,9 @@ const DEPOSIT_NODE: &str = "K7QX2M4A";
 
 /// Sealing date of Bob's reply in `expired_reply`: it expired 20 minutes
 /// past the replication slack before `NOW`, so a verdict may come.
-const SEALED: u64 = NOW - DAY - REPLICATION_SLACK_SECS - 1_200;
+const SEALED: u64 = NOW - TTL - REPLICATION_SLACK_SECS - 1_200;
 /// Alice's ack for it, sealed 5 minutes before that expiry.
-const ACKED: u64 = SEALED + DAY - 300;
+const ACKED: u64 = SEALED + TTL - 300;
 
 /// Bob's reply, sealed at `SEALED`, deposited, and expired without its ack
 /// more than `REPLICATION_SLACK_SECS` ago; and Alice's ack for it
@@ -3476,8 +3639,8 @@ async fn deposit_recorded_before_finish() {
 async fn too_far_in_future_packet_is_not_delivered() {
     use barking_core::store::MessageStatus;
     let (_dir, mut core, mut net) = setup();
-    net.max_expiry = Some(NOW + 25 * 3_600);
-    sealed_at(&mut core, NOW + 6 * DAY);
+    net.max_expiry = Some(NOW + ANY_NODE_MAX);
+    sealed_at(&mut core, NOW + 2 * 3_600);
     let alice = core.contacts().unwrap()[0].fingerprint;
     let report = sync(&mut core, &net, opts()).await;
     let sealed = core
@@ -3677,7 +3840,7 @@ async fn no_verdict_before_the_replication_slack() {
     use barking_core::store::MessageStatus;
     // Expired 20 minutes ago: an ack deposited just before may still be
     // on its way to the other holders.
-    let mut e = expired_reply_with(NOW - DAY - 1_200, NOW - 1_500, Some(0), Some(0));
+    let mut e = expired_reply_with(NOW - TTL - 1_200, NOW - 1_500, Some(0), Some(0));
     let report = sync(&mut e.core, &e.net, opts()).await;
     assert!(
         fetched_pairs(&e.net.calls())
@@ -3696,7 +3859,7 @@ async fn no_verdict_before_the_replication_slack() {
     assert_eq!(reply_status(&e), MessageStatus::Received);
     // Expired exactly the slack ago: the verdict may come.
     let mut e = expired_reply_with(
-        NOW - DAY - REPLICATION_SLACK_SECS,
+        NOW - TTL - REPLICATION_SLACK_SECS,
         NOW - REPLICATION_SLACK_SECS - 300,
         Some(0),
         Some(0),
@@ -3711,7 +3874,7 @@ async fn past_the_ack_grace_the_verdict_is_no_longer_sought() {
     use barking_core::store::MessageStatus;
     // Deposited, expired more than a day ago, its verdict never came: no
     // node can hold its ack any more.
-    let sealed = NOW - 2 * DAY - 60;
+    let sealed = NOW - TTL - barking_packet::ACK_GRACE_SECS - 60;
     let mut e = expired_reply_with(sealed, sealed + 30, Some(0), Some(0));
     assert_eq!(holders(&mut e.core, &e.reply).len(), 1);
     let report = sync(&mut e.core, &e.net, opts()).await;
@@ -3735,7 +3898,7 @@ async fn ack_found_a_day_after_expiry_makes_received() {
     use barking_core::store::MessageStatus;
     // Alice acked right away; Bob missed the wake-up and syncs a day after
     // both expired. The node keeps the ack a day more (`ACK_GRACE_SECS`).
-    let sealed = NOW - 2 * DAY + 1_200;
+    let sealed = NOW - TTL - DAY + 1_200;
     let mut e = expired_reply_with(sealed, sealed + 60, None, None);
     assert!(u64::from(Packet::decode(&e.ack).unwrap().expires_at) < NOW - DAY + 1_800);
     e.net.mailbox_items.insert(e.mailbox, vec![e.ack.clone()]);

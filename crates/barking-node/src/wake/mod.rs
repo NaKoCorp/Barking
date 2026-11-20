@@ -22,8 +22,11 @@ mod tests;
 
 /// Subscriptions kept per mailbox and per kind.
 pub const MAX_SUBS_PER_MAILBOX: i64 = 4;
-/// A subscription may expire at most this many days after the current day.
-pub const MAX_EXPIRY_DAYS: u32 = 8;
+/// A subscription may expire at most this many days after the current day:
+/// the message lifetime in days plus two (a receipt subscription for
+/// today's mailbox expires at `today + lifetime + 1`, plus one day of
+/// clock slack).
+pub const MAX_EXPIRY_DAYS: u32 = (barking_packet::DEFAULT_TTL_SECS / 86_400) as u32 + 2;
 /// Minimum delay between two wake-ups of the same subscription.
 pub const WAKE_INTERVAL_SECS: u64 = 60;
 

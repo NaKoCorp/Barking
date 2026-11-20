@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 86_400;
-/// A delivery late but still before the 24-hour expiry.
+/// A delivery late but still well before the packet's expiry.
 const LATE: u64 = DAY - 3_600;
 const T: &str = "file";
 
@@ -1234,7 +1234,7 @@ fn skipped_key_is_still_usable_a_day_later() {
     let stored = s + 1 - DAY;
     assert_eq!(expect_msg(b.recv(&p2, stored, &mut rng)).2, "p2");
     // A skipped key is still usable about a day later (the packet, which
-    // lives 24 hours, is still unexpired). The purge of a key skipped for
+    // lives `DEFAULT_TTL_SECS`, is still unexpired). The purge of a key skipped for
     // more than 7 days is covered by crates/barking-core/src/ratchet/tests.rs.
     assert_eq!(expect_msg(b.recv(&q1, s + 3_000, &mut rng)).2, "q1");
 }

@@ -18,8 +18,10 @@ pub struct MailboxId(pub [u8; 16]);
 pub const HEADER_LEN: usize = 40;
 /// Default number of hops.
 pub const DEFAULT_HOPS: u8 = 8;
-/// Default lifetime: 24 hours.
-pub const DEFAULT_TTL_SECS: u64 = 86_400;
+/// Default lifetime: 7 days (relays speaking protocol 4 and later).
+pub const DEFAULT_TTL_SECS: u64 = 604_800;
+// Whole days: day windows derived from it (`lifetime_days`) never floor.
+const _: () = assert!(DEFAULT_TTL_SECS.is_multiple_of(86_400));
 /// How long past `max(ack expiry, acknowledged message's expiry)` a node
 /// keeps a receipt, and how long past its own expiry a sender still takes
 /// it: an app that missed the receipt wake-up and syncs a day later still

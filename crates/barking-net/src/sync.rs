@@ -148,7 +148,7 @@ use barking_proto::{ErrorReason, NodeId, NodeRecord};
 use tokio::time::Instant;
 
 use crate::discover::{self, DialError, Dialer};
-use crate::plan::{self, plan_deposits, record_outcome};
+use crate::plan::{self, plan_packet_deposits, record_outcome};
 use crate::push::{HORIZON_DAYS, PushConfig, PushState, build_subscription, plan_push};
 use crate::score::ScoreEvent;
 use crate::state::NetState;
@@ -226,9 +226,17 @@ pub const REREAD_BYTES: usize = 8 << 20;
 /// Time all audit re-reads of a sync may take together (within the
 /// session fetch slice).
 pub const REREAD_TIME: Duration = Duration::from_secs(20);
-/// Furthest expiry a node accepts from now: 24 h plus one hour of clock
-/// tolerance (the node's `MAX_EXPIRY_SECS`).
-const NODE_MAX_EXPIRY_SECS: u64 = 90_000;
+/// True if `packet` expires beyond `max_expiry` seconds from `now` (what a
+/// node of an older protocol accepts) but within what a node of our
+/// protocol accepts: it must go to a newer node. Beyond any node's limit it
+/// is not "too old" for that node: it is deposited and refused
+/// (`TooFarInFuture`), then dropped.
+fn too_old(packet: &Packet, max_expiry: u64, now: u64) -> bool {
+    let expires = u64::from(packet.expires_at);
+    let ours = barking_proto::max_expiry_secs(barking_proto::PROTOCOL_VERSION);
+    expires > now.saturating_add(max_expiry) && expires <= now.saturating_add(ours)
+}
+
 /// `NotResponsible` answers from distinct responsibles of one mailbox that
 /// trigger a fallback lookup.
 pub const NOT_RESPONSIBLE_FALLBACK: usize = 2;
@@ -1146,16 +1154,21 @@ where
         let mut pow_exhausted = false;
         let mut not_responsible: HashMap<MailboxId, HashSet<NodeId>> = HashMap::new();
         let mut fallback_tried: HashSet<MailboxId> = HashSet::new();
+        // Furthest expiry each node dialled in this stage accepts, when its
+        // protocol is older than ours: for a packet beyond it, the node is
+        // unavailable and the next responsibles stand in.
+        let mut old_nodes: HashMap<NodeId, u64> = HashMap::new();
         'plan: loop {
             let excluded = self.excluded();
             let st = &self.state;
-            let deposits = plan_deposits(
+            let deposits = plan_packet_deposits(
                 &outbox,
                 &self.state.ledger,
-                |m| {
-                    st.order_responsibles(st.view.responsibles_by_score(m, now))
+                |p| {
+                    st.order_responsibles(st.view.responsibles_by_score(&p.mailbox, now))
                         .into_iter()
                         .filter(|n| !excluded.contains(n))
+                        .filter(|n| !old_nodes.get(n).is_some_and(|max| too_old(p, *max, now)))
                         .collect()
                 },
                 now,
@@ -1178,6 +1191,17 @@ where
                         }
                         continue 'plan;
                     };
+                    // An expiry this node's protocol refuses but a newer
+                    // node accepts: the node is unavailable for the packet
+                    // and the plan is redone without it (the next
+                    // responsible stands in). Not tried, not scored, never
+                    // dropped. Each node is learned once: the replans end.
+                    let max = self.dialer.max_expiry_secs(&conn);
+                    if Packet::decode(&d.bytes).is_ok_and(|p| too_old(&p, max, now)) {
+                        self.conns.insert(d.node, conn);
+                        old_nodes.insert(d.node, max);
+                        continue 'plan;
+                    }
                     // Noted before the request: the node may store the
                     // packet and its answer be lost (spec §14.1).
                     if let Ok(p) = Packet::decode(&d.bytes)
@@ -1195,6 +1219,7 @@ where
                         _ => break (conn, reply),
                     }
                 };
+                let node_max = self.dialer.max_expiry_secs(&conn);
                 let result = match reply.outcome {
                     Ok(DepositOutcome::Answered(result)) => result,
                     Ok(DepositOutcome::PowBudget) => {
@@ -1227,9 +1252,8 @@ where
                     // the node's clock is the likely culprit: that node
                     // failed, the packet stays queued for the others.
                     Err(ErrorReason::TooFarInFuture) => {
-                        let too_far = Packet::decode(&d.bytes).is_ok_and(|p| {
-                            u64::from(p.expires_at) > now.saturating_add(NODE_MAX_EXPIRY_SECS)
-                        });
+                        let too_far = Packet::decode(&d.bytes)
+                            .is_ok_and(|p| u64::from(p.expires_at) > now.saturating_add(node_max));
                         if too_far {
                             let _ = self.core.drop_outbox_packet(&d.bytes, now);
                             outbox.retain(|b| *b != d.bytes);
