@@ -362,8 +362,9 @@ impl Core {
     }
 
     /// Reopens an existing database. Wrong key: `StoreLocked`. Skipped keys
-    /// older than 7 days at `now` are purged (irreversible, including a `now`
-    /// very far in the future, as in decryption).
+    /// older than 8 days (`MAX_SKIPPED_AGE_SECS`) at `now` are purged
+    /// (irreversible, including a `now` very far in the future, as in
+    /// decryption).
     pub fn open(path: &Path, db_key: &[u8; 32], now: u64) -> Result<Core> {
         // Do not create an empty database when trying to open one.
         if !path.exists() {
