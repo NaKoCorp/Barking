@@ -18,7 +18,7 @@ final class SyncReadsTests: XCTestCase {
         let alice = try createDevice(config: cfg, deviceName: "alice").device
         let bob = try createDevice(config: try TestDevice.config(), deviceName: "bob").device
         let fp = try alice.addContact(card: try bob.contactCard(displayName: "Bob"), alias: "bob")
-        try alice.sendText(contact: fp, text: "hello")
+        try alice.sendText(contact: fp, text: "hello", replyTo: nil)
         // A node that never answers: the sync runs for its whole deadline,
         // as against a reachable but slow node.
         let hole = try SilentPort()

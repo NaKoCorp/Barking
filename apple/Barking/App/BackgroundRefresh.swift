@@ -48,7 +48,8 @@ enum BackgroundRefresh {
             if Task.isCancelled { return false }
             let content = UNMutableNotificationContent()
             let summary = SyncSummary(itemsReceived: UInt32(outcome.items), sent: UInt32(outcome.sent),
-                                      newMessages: outcome.newMessages, networkUp: outcome.networkUp, error: nil)
+                                      newMessages: outcome.newMessages, networkUp: outcome.networkUp, error: nil,
+                                      newReactions: outcome.newReactions)
             _ = NotificationContent.apply(summary, to: content, preview: preview, locked: locked)
             await post(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }

@@ -197,7 +197,7 @@ async fn remove_device_via_ffi() {
         sync_until(&a, &t, || t.removed().unwrap().is_some());
         assert!(t.removed().unwrap().is_some());
         assert!(matches!(
-            t.send_text("x".into(), "y".into()),
+            t.send_text("x".into(), "y".into(), None),
             Err(BarkingError::DeviceRemoved | BarkingError::NotFound)
         ));
     })

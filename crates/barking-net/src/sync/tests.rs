@@ -4279,3 +4279,42 @@ async fn quick_sync_does_not_resend_expired_reactions() {
     quick_sync(&mut core, &net, quick_opts()).await;
     assert_eq!(core.pending_outbox(NOW).unwrap().len(), queued);
 }
+
+/// What the notification extension relies on to drop a wake-up that shows
+/// nothing: the quick sync read everything it meant to (a deadline or a
+/// truncation that cut a mailbox leaves it false).
+#[tokio::test(start_paused = true)]
+async fn quick_sync_cut_by_deadline_is_not_fetched_all() {
+    let (_dir, mut core, mut net) = setup();
+    // Each fetch outlasts a third of the deadline: the first mailboxes
+    // answer, the later ones are cut by the deadline.
+    net.fetch_delay = Duration::from_secs(10);
+    let cut = quick_sync(&mut core, &net, quick_opts()).await;
+    assert!(cut.network_up, "{cut:?}");
+    assert!(!cut.fetched_all, "{cut:?}");
+
+    // Every mailbox answered in full: true.
+    let (_dir, mut core, net) = setup();
+    let full = quick_sync(&mut core, &net, quick_opts()).await;
+    assert_eq!(full.receive_errors, 0);
+    assert!(full.fetched_all, "{full:?}");
+
+    // Every node truncates: no mailbox fetched in full.
+    let (_dir, mut core, mut net) = setup();
+    net.truncate = all_nodes(&net, FetchStop::Connection);
+    let truncated = quick_sync(&mut core, &net, quick_opts()).await;
+    assert!(!truncated.fetched_all, "{truncated:?}");
+}
+
+/// The full sync reads it the same way: all sessions and introductions.
+#[tokio::test(start_paused = true)]
+async fn full_sync_fetched_all_follows_the_polling() {
+    let (_dir, mut core, mut net) = setup();
+    net.truncate = all_nodes(&net, FetchStop::Connection);
+    let cut = sync(&mut core, &net, opts()).await;
+    assert!(cut.network_up && !cut.fetched_all, "{cut:?}");
+    net.truncate.clear();
+    let full = sync(&mut core, &net, opts()).await;
+    assert!(full.polled_all_sessions && !full.intro_partial);
+    assert!(full.fetched_all, "{full:?}");
+}

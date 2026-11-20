@@ -45,7 +45,7 @@ fn id_of(alice: &Device, fb: &str, body: &str) -> i64 {
 fn sent_message_carries_its_delivery() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
-    alice.send_text(fb.clone(), "hello".into()).unwrap();
+    alice.send_text(fb.clone(), "hello".into(), None).unwrap();
     let m = &alice.messages_with(fb.clone()).unwrap()[0];
     let d = m.delivery.as_ref().unwrap();
     assert_eq!(d.state, DeliveryState::Pending);
@@ -77,7 +77,7 @@ fn sent_message_carries_its_delivery() {
 fn expired_before_deposit_is_not_delivered() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
-    alice.send_text(fb.clone(), "lost".into()).unwrap();
+    alice.send_text(fb.clone(), "lost".into(), None).unwrap();
     expire_queue(&da);
     let m = &alice.messages_with(fb).unwrap()[0];
     let d = m.delivery.as_ref().unwrap();
@@ -99,7 +99,7 @@ fn alice_sql(da: &tempfile::TempDir, sql: &str) {
 fn on_network_delivery_says_whether_it_awaits_its_verdict() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
-    alice.send_text(fb.clone(), "hello".into()).unwrap();
+    alice.send_text(fb.clone(), "hello".into(), None).unwrap();
     let delivery = |alice: &Device| {
         alice.messages_with(fb.clone()).unwrap()[0]
             .delivery
@@ -144,8 +144,8 @@ fn on_network_delivery_says_whether_it_awaits_its_verdict() {
 fn deliveries_of_tells_removed_from_no_summary() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
-    alice.send_text(fb.clone(), "one".into()).unwrap();
-    alice.send_text(fb.clone(), "two".into()).unwrap();
+    alice.send_text(fb.clone(), "one".into(), None).unwrap();
+    alice.send_text(fb.clone(), "two".into(), None).unwrap();
     let (one, two) = (id_of(&alice, &fb, "one"), id_of(&alice, &fb, "two"));
     alice.delete_message(one).unwrap();
     let u = alice.deliveries_of(vec![two, one, 9_999]).unwrap();
@@ -167,7 +167,7 @@ fn deliveries_of_tells_removed_from_no_summary() {
 fn message_delivery_lists_contact_devices() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
-    alice.send_text(fb.clone(), "hello".into()).unwrap();
+    alice.send_text(fb.clone(), "hello".into(), None).unwrap();
     let id = id_of(&alice, &fb, "hello");
     let detail = alice.message_delivery(id).unwrap().unwrap();
     assert_eq!(detail.message_id, id);
@@ -188,10 +188,10 @@ fn message_delivery_lists_contact_devices() {
 fn counts_and_pages_per_state() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
-    alice.send_text(fb.clone(), "old".into()).unwrap();
+    alice.send_text(fb.clone(), "old".into(), None).unwrap();
     expire_queue(&da);
-    alice.send_text(fb.clone(), "a".into()).unwrap();
-    alice.send_text(fb.clone(), "b".into()).unwrap();
+    alice.send_text(fb.clone(), "a".into(), None).unwrap();
+    alice.send_text(fb.clone(), "b".into(), None).unwrap();
     let c = alice.delivery_counts(fb.clone()).unwrap();
     assert_eq!(
         (c.pending, c.on_network, c.received, c.not_delivered),
@@ -224,7 +224,7 @@ fn counts_and_pages_per_state() {
 fn delete_message_cancels_and_reports() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
-    alice.send_text(fb.clone(), "oops".into()).unwrap();
+    alice.send_text(fb.clone(), "oops".into(), None).unwrap();
     let id = id_of(&alice, &fb, "oops");
     let o = alice.delete_message(id).unwrap();
     assert_eq!(
@@ -248,7 +248,7 @@ fn delete_messages_and_cancel_all() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
     for body in ["a", "b", "c"] {
-        alice.send_text(fb.clone(), body.into()).unwrap();
+        alice.send_text(fb.clone(), body.into(), None).unwrap();
     }
     let ids = vec![id_of(&alice, &fb, "a"), id_of(&alice, &fb, "b")];
     let o = alice.delete_messages(ids).unwrap();
@@ -266,14 +266,14 @@ fn delete_messages_and_cancel_all() {
 fn retry_message_and_retry_all() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
-    alice.send_text(fb.clone(), "one".into()).unwrap();
+    alice.send_text(fb.clone(), "one".into(), None).unwrap();
     let one = id_of(&alice, &fb, "one");
     // Still pending: nothing to retry, its own error for the app.
     assert!(matches!(
         alice.retry_message(one),
         Err(BarkingError::NothingToRetry)
     ));
-    alice.send_text(fb.clone(), "two".into()).unwrap();
+    alice.send_text(fb.clone(), "two".into(), None).unwrap();
     expire_queue(&da);
     alice.retry_message(one).unwrap();
     let state = |body: &str| {
@@ -298,7 +298,7 @@ fn retry_message_and_retry_all() {
 fn pending_packets_and_count() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, fb) = alice_with_bob(&da, &db);
-    alice.send_text(fb.clone(), "waiting".into()).unwrap();
+    alice.send_text(fb.clone(), "waiting".into(), None).unwrap();
     let p = alice.pending_packets().unwrap();
     assert_eq!(p.messages.len(), 1);
     let m = &p.messages[0];

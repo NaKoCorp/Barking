@@ -45,6 +45,18 @@ pub enum BarkingError {
     /// added again until it is unblocked. Added last.
     #[error("contact blocked")]
     ContactBlocked,
+    /// A set of reactions over the limit of 20 emoji. Added last.
+    #[error("too many emoji")]
+    TooManyEmoji,
+    /// A reaction that is not one emoji (several, text, too long, empty).
+    /// Added last.
+    #[error("invalid emoji")]
+    InvalidEmoji,
+    /// No such message in a conversation: a reply or a reaction to a row that
+    /// is gone, never existed, or has no identifier the other side knows.
+    /// Added last.
+    #[error("message not found")]
+    MessageNotFound,
 }
 
 /// Why a link step was refused (spec iOS messaging §5.8).
@@ -120,6 +132,9 @@ impl From<CoreError> for BarkingError {
             CoreError::NothingToRetry => BarkingError::NothingToRetry,
             CoreError::NoSession => BarkingError::NoSession,
             CoreError::ContactBlocked => BarkingError::ContactBlocked,
+            CoreError::TooManyEmoji => BarkingError::TooManyEmoji,
+            CoreError::InvalidEmoji => BarkingError::InvalidEmoji,
+            CoreError::MessageNotFound => BarkingError::MessageNotFound,
             _ => BarkingError::Internal { detail },
         }
     }

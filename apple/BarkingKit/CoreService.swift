@@ -230,8 +230,17 @@ public actor CoreService {
     public func messageRoute(_ id: Int64) async throws -> [RouteStepInfo] {
         try await call("route") { try $0.messageRoute(messageId: id) }
     }
-    public func send(_ text: String, to contact: String) async throws {
-        try await call("send") { try $0.sendText(contact: contact, text: text) }
+    /// Queues `text` for `contact`; `replyTo`: the `Message.id` it answers
+    /// (`BarkingError.MessageNotFound` if that row is gone or not quotable).
+    public func send(_ text: String, to contact: String, replyTo: Int64? = nil) async throws {
+        try await call("send") { try $0.sendText(contact: contact, text: text, replyTo: replyTo) }
+        publish(.messages(contact: contact))
+        Task { _ = await self.sync(reason: .afterSend) }
+    }
+    /// Replaces my reactions on message `messageId` of the conversation with
+    /// `contact` (empty: removes mine); the packets leave with the next sync.
+    public func setReactions(_ messageId: Int64, emojis: [String], contact: String) async throws {
+        try await call("reactions") { try $0.setReactions(message: messageId, emojis: emojis) }
         publish(.messages(contact: contact))
         Task { _ = await self.sync(reason: .afterSend) }
     }
@@ -377,7 +386,7 @@ public actor CoreService {
         // changed, refresh their rows after the window.
         noteDelivery(outcome.deliveryChanges)
         if !outcome.failed.isEmpty { await onFailed?(outcome.failed) }
-        for contact in Set(outcome.newMessageContacts + outcome.syncedContacts).sorted() {
+        for contact in Set(outcome.newMessageContacts + outcome.syncedContacts + outcome.reactionContacts).sorted() {
             publish(.messages(contact: contact))
         }
         return outcome

@@ -14,6 +14,7 @@ mod log;
 mod messages;
 mod net;
 mod push;
+mod reactions;
 mod route;
 
 use std::panic::{UnwindSafe, catch_unwind};
@@ -34,6 +35,7 @@ pub use log::{LogEntry, log_arg_tokens, log_keys};
 pub use messages::{ChatSummary, KeyChange, UnreadCount};
 pub use net::{LeaveState, NewMessage, NodeInfo, SyncSummary};
 pub use push::{NotificationPrefs, PushPreview, PushSettings, WakeNode, WakeStatus};
+pub use reactions::{NewReaction, Quote, ReactionChip, excerpt};
 pub use route::RouteStepInfo;
 
 uniffi::setup_scaffolding!();

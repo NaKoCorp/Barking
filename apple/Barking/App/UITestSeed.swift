@@ -58,7 +58,7 @@ enum UITestSeed {
         guard card != nil else { throw Error.missingCard("deliveries") }
         let (device, sam) = try ready(card: card)
         guard let sam else { throw Error.missingCard("deliveries") }
-        for body in UITestDeliveries.bodies() { try device.sendText(contact: sam, text: body) }
+        for body in UITestDeliveries.bodies() { try device.sendText(contact: sam, text: body, replyTo: nil) }
         let ids = try device.messagesWith(contact: sam).filter(\.outgoing).map(\.id)
         UITestDeliveries.Seed(contact: sam, ids: ids, base: UInt64(Date().timeIntervalSince1970)).save()
     }
@@ -67,7 +67,7 @@ enum UITestSeed {
     private static func history(card: String?) throws {
         let (device, sam) = try ready(card: card)
         guard let sam else { throw Error.missingCard("history") }
-        for n in 1...40 { try device.sendText(contact: sam, text: "History message \(n)") }
+        for n in 1...40 { try device.sendText(contact: sam, text: "History message \(n)", replyTo: nil) }
     }
 
     private static func value(of flag: String, in arguments: [String]) -> String? {

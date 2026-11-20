@@ -18,7 +18,7 @@ final class LockReleaseTests: XCTestCase {
         let created = try createDevice(config: try TestDevice.config(), deviceName: "t")
         let device = created.device
         do {
-            _ = try await DeviceCall.run("send") { try device.sendText(contact: "nobody", text: "x") }
+            _ = try await DeviceCall.run("send") { try device.sendText(contact: "nobody", text: "x", replyTo: nil) }
             XCTFail("expected an error")
         } catch BarkingError.NotFound {}
     }

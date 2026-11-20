@@ -314,7 +314,8 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func contacts() throws -> [Contact] { throw Never() }
     func messagesWith(contact: String) throws -> [Message] { throw Never() }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { throw Never() }
-    func sendText(contact: String, text: String) throws { throw Never() }
+    func sendText(contact: String, text: String, replyTo: Int64?) throws { throw Never() }
+    func setReactions(message: Int64, emojis: [String]) throws { throw Never() }
     func addContactBytes(card: Data, alias: String?) throws -> String { throw Never() }
     func addContact(card: String, alias: String?) throws -> String { throw Never() }
     func contactCardBytes() throws -> Data { throw Never() }

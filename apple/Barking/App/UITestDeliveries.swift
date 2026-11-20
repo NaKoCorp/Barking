@@ -297,7 +297,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func setDisplayName(name: String) throws { try device.setDisplayName(name: name) }
     func contacts() throws -> [Contact] { try device.contacts() }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { try device.messageRoute(messageId: messageId) }
-    func sendText(contact: String, text: String) throws { try device.sendText(contact: contact, text: text) }
+    func sendText(contact: String, text: String, replyTo: Int64?) throws {
+        try device.sendText(contact: contact, text: text, replyTo: replyTo)
+    }
+    func setReactions(message: Int64, emojis: [String]) throws { try device.setReactions(message: message, emojis: emojis) }
     func addContactBytes(card: Data, alias: String?) throws -> String { try device.addContactBytes(card: card, alias: alias) }
     func addContact(card: String, alias: String?) throws -> String { try device.addContact(card: card, alias: alias) }
     func contactCardBytes() throws -> Data { try device.contactCardBytes() }

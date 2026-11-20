@@ -25,7 +25,7 @@ async fn message_route_lists_steps() {
             d.add_node(id.clone(), addr.clone()).unwrap();
         }
         bob.sync(30_000).unwrap();
-        alice.send_text(fb.clone(), "hello".into()).unwrap();
+        alice.send_text(fb.clone(), "hello".into(), None).unwrap();
         let sent = alice.messages_with(fb.clone()).unwrap()[0].id;
         // Before any sync: sealed only, no relay yet.
         let route = alice.message_route(sent).unwrap();
@@ -108,7 +108,7 @@ async fn own_copies_are_not_relays_to_the_contact() {
         }
         bob.sync(30_000).unwrap();
         tablet.sync(30_000).unwrap();
-        alice.send_text(fb.clone(), "hello".into()).unwrap();
+        alice.send_text(fb.clone(), "hello".into(), None).unwrap();
         alice.sync(30_000).unwrap();
         let msg = alice.messages_with(fb).unwrap().pop().unwrap();
         let route = alice.message_route(msg.id).unwrap();

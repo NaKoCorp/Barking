@@ -5,7 +5,8 @@ import Foundation
 final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private let lock = NSLock()
     private var _syncCalls = 0
-    private var _sent: [(String, String)] = []
+    private var _sent: [(contact: String, text: String, replyTo: Int64?)] = []
+    private var _reactions: [Int64: [String]] = [:]
     var syncDelay: TimeInterval = 0
     var summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: true, error: nil)
     var contactList: [Contact] = []
@@ -36,7 +37,9 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var linkCalls: Int { lock.withLock { _linkCalls } }
 
     var syncCalls: Int { lock.withLock { _syncCalls } }
-    var sent: [(String, String)] { lock.withLock { _sent } }
+    var sent: [(contact: String, text: String, replyTo: Int64?)] { lock.withLock { _sent } }
+    /// My reactions by message row, as `setReactions` last set them.
+    var reactions: [Int64: [String]] { lock.withLock { _reactions } }
 
     func fingerprint() throws -> String { "fp-me" }
     func displayName() throws -> String { "Me" }
@@ -50,10 +53,14 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         return messageList[contact] ?? []
     }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { routes[messageId] ?? [] }
-    func sendText(contact: String, text: String) throws {
+    func sendText(contact: String, text: String, replyTo: Int64?) throws {
         if let sendError { throw sendError }
         Thread.sleep(forTimeInterval: syncDelay)
-        lock.withLock { _sent.append((contact, text)) }
+        lock.withLock { _sent.append((contact, text, replyTo)) }
+    }
+    func setReactions(message: Int64, emojis: [String]) throws {
+        if let sendError { throw sendError }
+        lock.withLock { _reactions[message] = emojis }
     }
     /// How long `addContactBytes` takes, and how many times it ran.
     var addDelay: TimeInterval = 0
