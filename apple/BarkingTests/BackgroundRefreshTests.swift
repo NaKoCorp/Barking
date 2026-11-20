@@ -69,6 +69,16 @@ final class BackgroundRefreshTests: XCTestCase {
         XCTAssertEqual(posted.first?.content.title, "")
     }
 
+    func testReactionPostsANotification() async {
+        let (core, d) = service([])
+        d.summary.newReactions = [NewReaction(contact: "fp-alice", name: "Alice", emojis: ["👍"], excerpt: "hi")]
+        let (ok, posted) = await run(core)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(posted.count, 1)
+        XCTAssertEqual(posted.first?.content.title, "Alice")
+        XCTAssertEqual(posted.first?.content.body, "Reacted 👍 to “hi”")
+    }
+
     func testRunNoNewMessagesPostsNothing() async {
         let (core, _) = service([])
         let (ok, posted) = await run(core)

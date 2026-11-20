@@ -31,7 +31,10 @@ final class NotificationService: UNNotificationServiceExtension, @unchecked Send
             FailureNotifier().postFromExtension(summary)
             let shown = NotificationContent.apply(summary, to: content, preview: preview, locked: AppLock.isLockedForExtension)
             if record.outcome.isEmpty { record.outcome = shown }
-            if self.deliver(content) == false { record.outcome = "expired" }
+            // `suppressed`: an empty content, which the system drops where
+            // the filtering entitlement is granted (spec §5.5). The code does
+            // not branch on the entitlement.
+            if self.deliver(shown == "suppressed" ? UNNotificationContent() : content) == false { record.outcome = "expired" }
             if record.outcome != BenchRun.wipePending { try? BenchStore.shared().append(record) }
         }
     }
