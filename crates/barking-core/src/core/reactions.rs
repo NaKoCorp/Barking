@@ -12,6 +12,11 @@
 //! `message_id` (the reaction packet's own identifier), never on the target:
 //! no message row, so nothing of it reaches the message status, its expiry
 //! or its Retry.
+//!
+//! Each packet is also tracked in `reaction_sends` (packet, target,
+//! conversation, audience). `expire_due` flags the ones that expired
+//! undeposited, and `resend_reactions` (full sync) reseals my current set
+//! for each such audience with a fresh clock.
 
 use rand_core::CryptoRng;
 use rusqlite::{OptionalExtension, params};
@@ -19,9 +24,9 @@ use rusqlite::{OptionalExtension, params};
 use super::delivery;
 use super::send::{SealTime, Target, quote_ref, seal_for};
 use super::{Core, sync};
-use crate::content::ExtContent;
+use crate::content::{ExtContent, MessageRef};
 use crate::emoji;
-use crate::identity::Fingerprint;
+use crate::identity::{DeviceKeys, Fingerprint};
 use crate::packet::Packet;
 use crate::store::{MessageId, Queries, ReactionRow, arr, map_err};
 use crate::transparency::SyncKind;
@@ -101,32 +106,91 @@ impl Core {
                 first_seen: mine.as_ref().map_or(clock, |m| m.first_seen),
                 first_tie: mine.as_ref().map_or(tie, |m| m.first_tie),
             })?;
-            let id = MessageId(tie);
             let time = SealTime {
                 now,
                 sent_at: clock,
             };
-            let body = ExtContent::Reaction {
-                target,
-                emojis: stored.clone(),
-            }
-            .to_body();
-            let sealed = seal_for(tx, device, &Target::Contact(to), &body, id, time, rng)?;
-            for (packet, peer) in &sealed {
-                let size = delivery::packet_size(packet);
-                tx.add_delivery(id, packet.id, *peer, false, now, size)?;
-            }
-            let copy = ExtContent::SyncReaction {
+            let seal = Seal {
                 to,
+                message: row.message_id,
                 target,
-                emojis: stored,
-            }
-            .to_body();
-            let own = sync::seal_to_own(tx, device, &copy, SyncKind::Reaction, id, time, rng)?;
-            let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
+                emojis: &stored,
+                tie,
+                time,
+            };
+            let (mut out, own) = seal_set(tx, device, &seal, (true, true), rng)?;
             out.extend(own);
             Ok(out)
         })
+    }
+
+    /// Resends, after their expiry, the reaction packets that left no node.
+    ///
+    /// Runs `expire_due(now)` first, which flags each reaction packet that
+    /// expired undeposited. Then, for each `(target, contact)` with a
+    /// flagged audience (the contact's devices, my other devices), reseals
+    /// my *current* set on that target to the flagged audiences: the packets
+    /// of older sets that expired are not replayed. My row is re-stamped
+    /// first (`clock = max(now, clock + 1)`, fresh tie), because the old
+    /// clock would be stale at the receiver (`MAX_AGE_SECS`); the audiences
+    /// of a target share the new clock and tie.
+    ///
+    /// Only a set that exists is resent, an empty one (a removal) included:
+    /// with no row of mine on the target (message deleted here, contact
+    /// erased) there is nothing to say, and the audience is dropped. A
+    /// contact that is unknown or blocked is skipped and dropped too. The
+    /// flagged rows are removed. Returns the number of audiences resent.
+    /// The quick sync never calls it.
+    pub fn resend_reactions(&mut self, now: u64, rng: &mut impl CryptoRng) -> Result<u32> {
+        self.ensure_active()?;
+        self.expire_due(now)?;
+        if self.store.is_read_only() {
+            return Ok(0);
+        }
+        let Core { store, device, .. } = self;
+        let groups = flagged_audiences(&*store)?;
+        let mut resent = 0u32;
+        for (to, message, audience) in groups {
+            resent += store.transaction(|tx| {
+                let usable = tx.get_contact(to)?.is_some() && !tx.block_state(to)?.blocked;
+                let mine = tx.reaction(message, ME_REACTOR)?;
+                let target =
+                    row_id_of(tx, to, message)?.and_then(|row_id| quote_ref(tx, &to, row_id).ok());
+                let sent = match (usable, mine, target) {
+                    (true, Some(mine), Some(target)) => {
+                        let clock = now.max(mine.clock.saturating_add(1));
+                        let mut tie = [0u8; 16];
+                        rng.fill_bytes(&mut tie);
+                        let seal = Seal {
+                            to,
+                            message,
+                            target,
+                            emojis: &mine.emojis,
+                            tie,
+                            time: SealTime {
+                                now,
+                                sent_at: clock,
+                            },
+                        };
+                        let (contact, own) = seal_set(tx, device, &seal, audience, rng)?;
+                        if !contact.is_empty() || !own.is_empty() {
+                            tx.put_reaction_if_newer(&ReactionRow { clock, tie, ..mine })?;
+                        }
+                        u32::from(!contact.is_empty()) + u32::from(!own.is_empty())
+                    }
+                    _ => 0,
+                };
+                tx.conn()
+                    .execute(
+                        "DELETE FROM reaction_sends \
+                         WHERE expired = 1 AND message_id = ?1 AND contact_fp = ?2",
+                        params![message.0.as_slice(), to.0.as_slice()],
+                    )
+                    .map_err(map_err)?;
+                Ok(sent)
+            })?;
+        }
+        Ok(resent)
     }
 
     /// The chips under `message` of the conversation with `contact`: rows in
@@ -157,6 +221,121 @@ impl Core {
         }
         Ok(chips)
     }
+}
+
+/// What `seal_set` seals: my set on a target, dated and identified.
+struct Seal<'a> {
+    /// The conversation.
+    to: Fingerprint,
+    /// The target (`reactions.message_id`).
+    message: MessageId,
+    target: MessageRef,
+    emojis: &'a [String],
+    /// The packets' message identifier: the reaction's own.
+    tie: [u8; 16],
+    time: SealTime,
+}
+
+/// Seals `s` for the contact's devices (`audience.0`) and for my other
+/// devices (`audience.1`): one delivery per packet, keyed on the tie, and
+/// one `reaction_sends` row per packet. Returns the contact's packets, then
+/// my devices'.
+fn seal_set(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    s: &Seal<'_>,
+    audience: (bool, bool),
+    rng: &mut impl CryptoRng,
+) -> Result<(Vec<Packet>, Vec<Packet>)> {
+    let id = MessageId(s.tie);
+    let (mut contact, mut own) = (Vec::new(), Vec::new());
+    if audience.0 {
+        let body = ExtContent::Reaction {
+            target: s.target,
+            emojis: s.emojis.to_vec(),
+        }
+        .to_body();
+        let sealed = seal_for(q, device, &Target::Contact(s.to), &body, id, s.time, rng)?;
+        for (packet, peer) in &sealed {
+            let size = delivery::packet_size(packet);
+            q.add_delivery(id, packet.id, *peer, false, s.time.now, size)?;
+            track(q, packet, s, false)?;
+        }
+        contact = sealed.into_iter().map(|(p, _)| p).collect();
+    }
+    if audience.1 {
+        let body = ExtContent::SyncReaction {
+            to: s.to,
+            target: s.target,
+            emojis: s.emojis.to_vec(),
+        }
+        .to_body();
+        own = sync::seal_to_own(q, device, &body, SyncKind::Reaction, id, s.time, rng)?;
+        for packet in &own {
+            track(q, packet, s, true)?;
+        }
+    }
+    Ok((contact, own))
+}
+
+/// Records that `packet` carries a reaction on `s.message`.
+fn track(q: &impl Queries, packet: &Packet, s: &Seal<'_>, own: bool) -> Result<()> {
+    q.conn()
+        .execute(
+            "INSERT OR REPLACE INTO reaction_sends (packet_id, message_id, contact_fp, own) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                packet.id.0.as_slice(),
+                s.message.0.as_slice(),
+                s.to.0.as_slice(),
+                own
+            ],
+        )
+        .map_err(map_err)?;
+    Ok(())
+}
+
+/// `(contact, target, (contact devices, my devices))`: see `flagged_audiences`.
+type Flagged = (Fingerprint, MessageId, (bool, bool));
+
+/// The audiences with a packet
+/// that expired undeposited, oldest first.
+fn flagged_audiences(q: &impl Queries) -> Result<Vec<Flagged>> {
+    let mut stmt = q
+        .conn()
+        .prepare(
+            "SELECT contact_fp, message_id, max(own = 0), max(own = 1) \
+             FROM reaction_sends WHERE expired = 1 \
+             GROUP BY contact_fp, message_id ORDER BY min(rowid)",
+        )
+        .map_err(map_err)?;
+    let raw = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, bool>(3)?,
+            ))
+        })
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map_err)?;
+    raw.into_iter()
+        .map(|(c, m, contact, own)| Ok((Fingerprint(arr(c)?), MessageId(arr(m)?), (contact, own))))
+        .collect()
+}
+
+/// The row of the message `message` in the conversation with `contact`.
+fn row_id_of(q: &impl Queries, contact: Fingerprint, message: MessageId) -> Result<Option<i64>> {
+    q.conn()
+        .query_row(
+            "SELECT id FROM messages WHERE message_id = ?1 AND contact_fp = ?2 LIMIT 1",
+            params![message.0.as_slice(), contact.0.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(map_err)
 }
 
 /// Same emoji, whatever the order (a set has no duplicate).

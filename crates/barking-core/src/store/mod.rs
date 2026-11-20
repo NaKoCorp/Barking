@@ -456,6 +456,8 @@ pub enum PendingKind {
     DeviceSync,
     /// My card update for a contact's device.
     CardUpdate,
+    /// A reaction packet (to a contact's device, or a copy for one of mine).
+    Reaction,
 }
 
 /// One of my messages with packets to the contact still pending.
@@ -1796,6 +1798,12 @@ pub trait Queries {
         self.delete_reactions_with(fp)?;
         self.conn()
             .execute(
+                "DELETE FROM reaction_sends WHERE contact_fp = ?1",
+                params![fp.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        self.conn()
+            .execute(
                 "DELETE FROM contacts WHERE fp = ?1",
                 params![fp.0.as_slice()],
             )
@@ -2360,8 +2368,10 @@ pub trait Queries {
                   JOIN messages mi ON mi.message_id = i.message_id AND mi.direction = ?3 \
                   WHERE i.packet_id = o.ref LIMIT 1), \
                  (SELECT s.contact_fp FROM sessions s \
-                  WHERE s.contact_device = d.device LIMIT 1) \
+                  WHERE s.contact_device = d.device LIMIT 1), \
+                 rs.packet_id IS NOT NULL, rs.contact_fp \
                  FROM outbox o \
+                 LEFT JOIN reaction_sends rs ON rs.packet_id = o.packet_id \
                  LEFT JOIN deliveries d ON d.packet_id = o.packet_id \
                  LEFT JOIN messages m ON m.message_id = d.message_id AND m.direction = ?2 \
                  WHERE o.deposited_at IS NULL AND o.expires_at >= ?1 \
@@ -2376,6 +2386,8 @@ pub trait Queries {
             Option<bool>,
             Option<Vec<u8>>,
             Option<Vec<u8>>,
+            bool,
+            Option<Vec<u8>>,
         );
         let raws = stmt
             .query_map(
@@ -2389,6 +2401,8 @@ pub trait Queries {
                         r.get(4)?,
                         r.get(5)?,
                         r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
                     ))
                 },
             )
@@ -2397,8 +2411,21 @@ pub trait Queries {
             .map_err(map_err)?;
         let mut sync: std::collections::BTreeMap<PendingKind, (u32, Vec<Fingerprint>)> =
             std::collections::BTreeMap::new();
-        for (kind, delivered, own, row_contact, tombstone, ack_contact, device_contact) in raws {
-            let (kind, contact) = if kind == Kind::Ack as i64 {
+        for (
+            kind,
+            delivered,
+            own,
+            row_contact,
+            tombstone,
+            ack_contact,
+            device_contact,
+            reaction,
+            reaction_contact,
+        ) in raws
+        {
+            let (kind, contact) = if reaction {
+                (PendingKind::Reaction, reaction_contact)
+            } else if kind == Kind::Ack as i64 {
                 (PendingKind::Ack, ack_contact)
             } else if !delivered {
                 // A queued message packet without a delivery: none is

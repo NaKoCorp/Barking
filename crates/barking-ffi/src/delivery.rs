@@ -185,6 +185,8 @@ pub enum PendingKind {
     DeviceSync,
     /// My card update for a contact's device.
     CardUpdate,
+    /// A reaction packet (to a contact's device, or a copy for one of mine).
+    Reaction,
 }
 
 /// One of my messages with packets to the contact still waiting here.
@@ -301,6 +303,7 @@ fn kind_of(k: store::PendingKind) -> PendingKind {
         store::PendingKind::OwnCopy => PendingKind::OwnCopy,
         store::PendingKind::DeviceSync => PendingKind::DeviceSync,
         store::PendingKind::CardUpdate => PendingKind::CardUpdate,
+        store::PendingKind::Reaction => PendingKind::Reaction,
     }
 }
 

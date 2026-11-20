@@ -6013,3 +6013,158 @@ fn reaction_chips_same_order_on_both_phones() {
     assert_eq!(order(&p.a, &b).len(), 2);
     assert_eq!(order(&p.a, &b), order(&p.b, &a));
 }
+
+// --- Lot 2, task 5: reaction packets tracked and resent after expiry.
+
+#[test]
+fn expired_reaction_resent_with_current_state() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let on_a = message_id_of(&p.a, &b, "x");
+    let on_b = message_id_of(&p.b, &a, "x");
+    react_x(&mut p, &["👍"], NOW);
+    let last = react_x(&mut p, &["👍", "❤️"], NOW + 1);
+    // Both packets expire undeposited.
+    let late = u64::from(last.expires_at) + 1;
+    assert_eq!(p.a.resend_reactions(late, &mut p.rng), Ok(1));
+    // Only the new packet is left in the send queue.
+    let queued = p.a.pending_outbox(late).unwrap();
+    assert_eq!(queued.len(), 1);
+    let fresh = Packet::decode(&queued[0]).unwrap();
+    assert!(peek_envelope(&p.b, &fresh).sent_at > NOW + 1);
+    p.b.receive(&queued[0], "t", late, &mut p.rng).unwrap();
+    assert_eq!(
+        counts(&p.b, &a, on_b),
+        vec![("👍".to_owned(), 1), ("❤️".to_owned(), 1)]
+    );
+    assert_eq!(counts(&p.a, &b, on_a), counts(&p.b, &a, on_b));
+    // Nothing more to resend.
+    assert_eq!(p.a.resend_reactions(late + 1, &mut p.rng), Ok(0));
+}
+
+#[test]
+fn expired_reaction_resent_to_my_other_devices_too() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    for c in [&mut a, &mut t] {
+        c.store
+            .insert_message(
+                fp,
+                Direction::Out,
+                "m",
+                MessageStatus::OnNetwork,
+                NOW,
+                MessageId([0x71; 16]),
+            )
+            .unwrap();
+    }
+    let row = row_of(&a, &fp, "m");
+    let sent = a.set_reactions(row, &emo(&["👍"]), NOW, &mut rng).unwrap();
+    assert_eq!(sent.len(), 2, "one for Bob, one for T");
+    let late = sent.iter().map(|p| u64::from(p.expires_at)).max().unwrap() + 1;
+    assert_eq!(a.resend_reactions(late, &mut rng), Ok(2));
+    let queued = a.pending_outbox(late).unwrap();
+    assert_eq!(queued.len(), 2);
+    // Both audiences carry the same new clock.
+    let mine = a
+        .store
+        .reaction(MessageId([0x71; 16]), ME_REACTOR)
+        .unwrap()
+        .unwrap();
+    assert_eq!(mine.clock, late);
+    for bytes in &queued {
+        let _ = t.receive(bytes, "t", late, &mut rng).unwrap();
+    }
+    let on_t = t
+        .store
+        .reaction(MessageId([0x71; 16]), ME_REACTOR)
+        .unwrap()
+        .unwrap();
+    assert_eq!((on_t.clock, on_t.emojis), (late, emo(&["👍"])));
+}
+
+#[test]
+fn deposited_reaction_not_resent() {
+    let mut p = pair();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    let late = u64::from(pk.expires_at) + 1;
+    assert_eq!(p.a.resend_reactions(late, &mut p.rng), Ok(0));
+}
+
+#[test]
+fn expired_reaction_without_my_row_is_dropped_not_resent() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    // The message goes (its reactions with it) before the packet expires.
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1).unwrap();
+    let late = u64::from(pk.expires_at) + 1;
+    assert_eq!(p.a.resend_reactions(late, &mut p.rng), Ok(0));
+    assert!(p.a.pending_outbox(late).unwrap().is_empty());
+    let left: i64 =
+        p.a.store
+            .conn()
+            .query_row("SELECT count(*) FROM reaction_sends", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn removed_set_is_resent_as_empty() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    react_x(&mut p, &["👍"], NOW);
+    let last = react_x(&mut p, &[], NOW + 1);
+    let late = u64::from(last.expires_at) + 1;
+    assert_eq!(p.a.resend_reactions(late, &mut p.rng), Ok(1));
+    let queued = p.a.pending_outbox(late).unwrap();
+    assert_eq!(queued.len(), 1);
+    let on_a = message_id_of(&p.a, &b, "x");
+    assert!(p.a.reaction_chips(&b, on_a).unwrap().is_empty());
+}
+
+#[test]
+fn pending_reaction_listed_as_reaction() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    react_x(&mut p, &["👍"], NOW);
+    let pending = p.a.pending_packets(NOW + 1).unwrap();
+    let reactions: Vec<_> = pending
+        .sync
+        .iter()
+        .filter(|s| s.kind == PendingKind::Reaction)
+        .collect();
+    assert_eq!(reactions.len(), 1);
+    assert_eq!(reactions[0].packets, 1);
+    assert_eq!(reactions[0].contacts, vec![b]);
+    assert!(
+        pending
+            .sync
+            .iter()
+            .all(|s| s.kind != PendingKind::CardUpdate)
+    );
+}
+
+#[test]
+fn removing_a_contact_drops_its_reaction_sends() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    react_x(&mut p, &["👍"], NOW);
+    p.a.remove_contact(&b, NOW + 1, &mut p.rng).unwrap();
+    let left: i64 =
+        p.a.store
+            .conn()
+            .query_row("SELECT count(*) FROM reaction_sends", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(left, 0);
+}

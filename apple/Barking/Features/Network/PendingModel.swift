@@ -59,7 +59,7 @@ final class PendingModel {
         }
 
         var id: Int { Self.order.firstIndex(of: kind) ?? 0 }
-        static let order: [PendingKind] = [.ack, .ownCopy, .deviceSync, .cardUpdate]
+        static let order: [PendingKind] = [.ack, .ownCopy, .deviceSync, .cardUpdate, .reaction]
 
         var symbol: String {
             switch kind {
@@ -67,6 +67,7 @@ final class PendingModel {
             case .ownCopy: "arrow.triangle.2.circlepath"
             case .deviceSync: "iphone.and.arrow.forward"
             case .cardUpdate: "person.text.rectangle"
+            case .reaction: "face.smiling"
             }
         }
     }
@@ -426,6 +427,8 @@ final class PendingModel {
             return String(localized: "Updates for your other devices · \(n)", bundle: bundle, locale: locale)
         case .cardUpdate:
             return String(localized: "Your card, for your contacts · \(n)", bundle: bundle, locale: locale)
+        case .reaction:
+            return String(localized: "Reactions · \(n)", bundle: bundle, locale: locale)
         }
     }
 }

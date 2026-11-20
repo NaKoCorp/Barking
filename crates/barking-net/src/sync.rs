@@ -1493,6 +1493,9 @@ where
         let polled_sessions = self.fetch_stage(&sessions, FetchKind::Sessions).await;
         self.report.polled_all_sessions = polled_sessions;
 
+        // Reaction packets that expired undeposited go out again, with the
+        // current set, in this sync's first deposit.
+        let _ = self.core.resend_reactions(now, &mut rand::rng());
         self.deposit_stage(false).await;
 
         if !intro.is_empty() {

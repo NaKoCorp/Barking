@@ -172,6 +172,13 @@ impl Core {
             for (id, expires_at) in expired {
                 let id = PacketId(arr(id)?);
                 failed.push(fail(tx, id, MessageStatus::Pending, to_u64(expires_at))?);
+                // A reaction packet that never left: `resend_reactions` reseals it.
+                tx.conn()
+                    .execute(
+                        "UPDATE reaction_sends SET expired = 1 WHERE packet_id = ?1",
+                        params![id.0.as_slice()],
+                    )
+                    .map_err(map_err)?;
             }
             tx.outbox_purge_expired(now)?;
             Ok(failed)

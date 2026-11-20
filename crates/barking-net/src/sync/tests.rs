@@ -4235,3 +4235,47 @@ async fn unanswered_deposit_is_not_cancelled_by_a_delete() {
             .any(|b| Packet::decode(b).is_ok_and(|p| p.kind == Kind::Message))
     );
 }
+
+// --- Lot 2, task 5: expired reaction packets are resent by the full sync.
+
+/// Bob's reaction to his own message, sealed so long ago that its packet
+/// expired undeposited, on a network where every node is down (the outbox
+/// stays as the sync leaves it). Returns the core, the network and the
+/// number of packets queued meanwhile.
+fn expired_reaction_scene() -> (TempDir, Core, Net, usize) {
+    use rand::SeedableRng;
+    let (dir, mut core, mut net) = setup();
+    net.down = net.records.keys().copied().collect();
+    let to = core.contacts().unwrap()[0].fingerprint;
+    let row = core.messages_with(&to).unwrap()[0].id;
+    let old = NOW - TTL - 100;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+    let sent = core
+        .set_reactions(row, &["👍".to_owned()], old, &mut rng)
+        .unwrap();
+    assert!(u64::from(sent[0].expires_at) < NOW);
+    // Expires the old packet (flagged for a resend), leaving the baseline.
+    let queued = core.pending_outbox(NOW).unwrap().len();
+    (dir, core, net, queued)
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_sync_resends_expired_reactions() {
+    let (_dir, mut core, net, queued) = expired_reaction_scene();
+    sync(&mut core, &net, opts()).await;
+    assert_eq!(core.pending_outbox(NOW).unwrap().len(), queued + 1);
+    let pending = core.pending_packets(NOW).unwrap();
+    assert!(
+        pending
+            .sync
+            .iter()
+            .any(|s| s.kind == barking_core::store::PendingKind::Reaction && s.packets == 1)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_does_not_resend_expired_reactions() {
+    let (_dir, mut core, net, queued) = expired_reaction_scene();
+    quick_sync(&mut core, &net, quick_opts()).await;
+    assert_eq!(core.pending_outbox(NOW).unwrap().len(), queued);
+}
