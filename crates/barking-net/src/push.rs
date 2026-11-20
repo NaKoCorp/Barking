@@ -9,7 +9,7 @@
 //! The state lives in the core's encrypted database
 //! (`Core::transport_state("push")`), never in the clear.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use barking_core::mailbox::day_of;
 use barking_core::{Core, CoreError};
@@ -372,6 +372,19 @@ impl PushState {
     fn left_out(&self, node: &NodeId, now: u64) -> bool {
         self.no_wake.get(node).is_some_and(|until| *until > now)
     }
+}
+
+/// `ranked` (best first) with the nodes known to speak a protocol older
+/// than 4 (`short`) moved last, and kept only as far as needed to reach
+/// `WAKE_NODES`. Such a node never holds a 7-day packet (deposits skip
+/// it), so it would never wake for one; it only fills in when too few
+/// newer responsibles are known. A node not met yet counts as newer.
+pub fn prefer_long_lived(ranked: Vec<NodeId>, short: &HashSet<NodeId>) -> Vec<NodeId> {
+    let (old, mut out): (Vec<NodeId>, Vec<NodeId>) =
+        ranked.into_iter().partition(|n| short.contains(n));
+    let room = WAKE_NODES.saturating_sub(out.len());
+    out.extend(old.into_iter().take(room));
+    out
 }
 
 /// Whole days of a message's lifetime (`DEFAULT_TTL_SECS`).

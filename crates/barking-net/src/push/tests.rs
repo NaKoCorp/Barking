@@ -672,3 +672,22 @@ fn ack_subscription_within_node_bound() {
     // today's receipt subscription.
     assert!(expires_day(t, A) < t + MAX_EXPIRY_DAYS);
 }
+
+#[test]
+fn prefer_long_lived_puts_old_nodes_last_and_only_to_fill() {
+    use std::collections::HashSet;
+    let n = |b: u8| NodeId([b; 32]);
+    let ranked = vec![n(1), n(2), n(3), n(4), n(5)];
+    let short: HashSet<NodeId> = [n(1), n(2), n(3)].into_iter().collect();
+    // Protocol 4 (or not met) first, in score order; old ones only up to
+    // WAKE_NODES, best first.
+    assert_eq!(
+        prefer_long_lived(ranked.clone(), &short),
+        vec![n(4), n(5), n(1)]
+    );
+    // Nothing known: unchanged.
+    assert_eq!(prefer_long_lived(ranked.clone(), &HashSet::new()), ranked);
+    // All old: the best WAKE_NODES of them.
+    let all: HashSet<NodeId> = ranked.iter().copied().collect();
+    assert_eq!(prefer_long_lived(ranked, &all), vec![n(1), n(2), n(3)]);
+}

@@ -65,8 +65,10 @@ where
     /// Fetches `mailboxes`, grouped by best responsible, moving the
     /// mailboxes of a failed or truncated group to their next responsible
     /// (introductions and quick syncs: on failure only, a rate limit
-    /// included for a quick sync). Returns true if every mailbox was
-    /// fetched in full and processed.
+    /// included for a quick sync). In a full sync, a mailbox served in full
+    /// by a protocol 3 node is read from the next responsible too (see
+    /// `settled_by_old`). Returns true if every mailbox was fetched in full
+    /// and processed.
     pub(super) async fn fetch_stage(&mut self, mailboxes: &[MailboxId], kind: FetchKind) -> bool {
         let now = self.now;
         // Introductions and verdicts: bounded, no audit.
@@ -118,25 +120,47 @@ where
         let mut complete_by_node: HashMap<NodeId, bool> = HashMap::new();
         // Node that served each mailbox in full.
         let mut served: HashMap<MailboxId, NodeId> = HashMap::new();
+        // Full sync: a complete fetch from a node older than protocol 4
+        // does not settle a mailbox. Such a node never holds a 7-day
+        // packet (deposits skip it), so the next responsible is read too;
+        // the mailbox settles on the protocol 3 answer only once no other
+        // responsible is left. Quick syncs and verdicts keep their rules.
+        let read_past_old = self.mode == Mode::Full && kind != FetchKind::Verdict;
+        // If the time or the bytes run out first, such a mailbox stays
+        // unsettled (not polled): the next sync reads it again.
+        let mut settled_by_old: HashSet<MailboxId> = HashSet::new();
         'rounds: loop {
             let mut groups: BTreeMap<[u8; 32], (NodeId, Vec<MailboxId>)> = BTreeMap::new();
             for m in mailboxes {
                 if done.contains(m) {
                     continue;
                 }
-                let Some(Some(from)) = next.get(m).copied() else {
-                    continue;
+                let pick = match next.get(m).copied() {
+                    Some(Some(from)) => {
+                        let list = &ranked[m];
+                        (from..list.len()).find(|&i| {
+                            !self.failed.contains(&list[i]) && !self.limited.contains(&list[i])
+                        })
+                    }
+                    _ => None,
                 };
-                let list = &ranked[m];
-                let pick = (from..list.len())
-                    .find(|&i| !self.failed.contains(&list[i]) && !self.limited.contains(&list[i]));
                 next.insert(*m, pick);
-                if let Some(i) = pick {
-                    groups
-                        .entry(list[i].0)
-                        .or_insert_with(|| (list[i], Vec::new()))
-                        .1
-                        .push(*m);
+                match pick {
+                    Some(i) => {
+                        let list = &ranked[m];
+                        groups
+                            .entry(list[i].0)
+                            .or_insert_with(|| (list[i], Vec::new()))
+                            .1
+                            .push(*m);
+                    }
+                    // No newer responsible left: the protocol 3 answer is
+                    // all there is.
+                    None if settled_by_old.remove(m) => {
+                        done.insert(*m);
+                        self.report.mailboxes_polled += 1;
+                    }
+                    None => {}
                 }
             }
             if groups.is_empty() {
@@ -165,10 +189,19 @@ where
                             }
                         }
                     }
+                    GroupEnd::Complete if read_past_old && self.short_lived.contains(&node) => {
+                        complete_by_node.insert(node, true);
+                        for m in &group {
+                            served.insert(*m, node);
+                            settled_by_old.insert(*m);
+                            next.insert(*m, next[m].map(|i| i + 1));
+                        }
+                    }
                     GroupEnd::Complete => {
                         complete_by_node.insert(node, true);
                         for m in &group {
                             served.insert(*m, node);
+                            settled_by_old.remove(m);
                         }
                         done.extend(group.iter().copied());
                         self.report.mailboxes_polled += group.len();
@@ -391,6 +424,7 @@ where
                 _ => break (conn, reply),
             }
         };
+        self.note_protocol(node, &conn);
         let not_served = |truncated| GroupEnd::Incomplete {
             truncated,
             counts: false,

@@ -33,7 +33,8 @@
 //!    mailboxes where a message I sent awaits its ack
 //!    (`Core::awaited_ack_mailboxes`, `SubKind::Acks`: the node wakes me
 //!    when the ack arrives or the message expires unacked), planned by
-//!    `plan_push` on the responsibles by score; an acks subscription no
+//!    `plan_push` on the responsibles by score, those met this sync that
+//!    speak protocol 3 last (`prefer_long_lived`); an acks subscription no
 //!    longer awaited is cancelled. Unsubscribes first, then subscriptions,
 //!    nearest day first, on the connections of the sync. A node that does not take
 //!    wake-ups is left out (`PushState::note_no_wake`) and not replaced
@@ -149,7 +150,9 @@ use tokio::time::Instant;
 
 use crate::discover::{self, DialError, Dialer};
 use crate::plan::{self, plan_packet_deposits, record_outcome};
-use crate::push::{HORIZON_DAYS, PushConfig, PushState, build_subscription, plan_push};
+use crate::push::{
+    HORIZON_DAYS, PushConfig, PushState, build_subscription, plan_push, prefer_long_lived,
+};
 use crate::score::ScoreEvent;
 use crate::state::NetState;
 use crate::{BOOTSTRAP_VIEW, CandidateBudget};
@@ -499,6 +502,7 @@ impl<'a, D: Connector> Run<'a, D> {
             probed: false,
             reread_queue: Vec::new(),
             page_confirmed: HashSet::new(),
+            short_lived: HashSet::new(),
             budget: CandidateBudget::default(),
             now,
             deadline,
@@ -598,6 +602,9 @@ struct Run<'a, D: Connector> {
     /// Packets fetched (mine included) and packets acknowledged by a
     /// fetched receipt.
     seen_ids: HashSet<PacketId>,
+    /// Nodes met this sync whose protocol accepts less than the protocol 4
+    /// lifetime (protocol 3 and older): they never hold a 7-day packet.
+    short_lived: HashSet<NodeId>,
     report: SyncReport,
 }
 
@@ -605,6 +612,16 @@ impl<D> Run<'_, D>
 where
     D: Dialer + Depositor + Fetcher + Sync,
 {
+    /// Notes whether `node`, on `conn`, speaks a protocol older than 4
+    /// (`short_lived`); returns the furthest expiry it accepts.
+    fn note_protocol(&mut self, node: NodeId, conn: &D::Conn) -> u64 {
+        let max = self.dialer.max_expiry_secs(conn);
+        if max < barking_proto::P4_MAX_EXPIRY_SECS {
+            self.short_lived.insert(node);
+        }
+        max
+    }
+
     /// Stage 1 (view), shared by both modes: a quick sync bootstraps only
     /// from an empty view.
     async fn prepare(&mut self, manual_nodes: &[(NodeId, SocketAddr)], builtin: &[BootstrapEntry]) {
@@ -1196,7 +1213,7 @@ where
                     // and the plan is redone without it (the next
                     // responsible stands in). Not tried, not scored, never
                     // dropped. Each node is learned once: the replans end.
-                    let max = self.dialer.max_expiry_secs(&conn);
+                    let max = self.note_protocol(d.node, &conn);
                     if Packet::decode(&d.bytes).is_ok_and(|p| too_old(&p, max, now)) {
                         self.conns.insert(d.node, conn);
                         old_nodes.insert(d.node, max);
@@ -1550,11 +1567,14 @@ where
             None => Vec::new(),
         };
         let view = &self.state.view;
+        let short = &self.short_lived;
+        // Nodes met this sync that speak protocol 3 hold no 7-day packet:
+        // newer ones first (`prefer_long_lived`), for both kinds.
         let plan = plan_push(
             &push,
             cfg,
             &wanted,
-            |m| view.responsibles_by_score(m, now),
+            |m| prefer_long_lived(view.responsibles_by_score(m, now), short),
             now,
         );
         // Push off or a new configuration: every stored subscription is
@@ -1770,18 +1790,17 @@ where
                 .get(&(mailbox, kind))
                 .is_some_and(|b| b.nodes.iter().any(|(h, _)| h == n))
         };
-        let next = self
-            .state
-            .view
-            .responsibles_by_score(&mailbox, now)
-            .into_iter()
-            .find(|n| {
-                !holds(n)
-                    && !queue.contains(&(mailbox, kind, *n))
-                    && !full_boxes.contains(&(mailbox, kind, *n))
-                    && !skipped.contains(n)
-                    && !push.no_wake.get(n).is_some_and(|until| *until > now)
-            });
+        // Newer nodes first; a protocol 3 one still takes the place when
+        // no newer one is left.
+        let mut ranked = self.state.view.responsibles_by_score(&mailbox, now);
+        ranked.sort_by_key(|n| self.short_lived.contains(n));
+        let next = ranked.into_iter().find(|n| {
+            !holds(n)
+                && !queue.contains(&(mailbox, kind, *n))
+                && !full_boxes.contains(&(mailbox, kind, *n))
+                && !skipped.contains(n)
+                && !push.no_wake.get(n).is_some_and(|until| *until > now)
+        });
         if let Some(n) = next {
             queue.push_front((mailbox, kind, n));
         }

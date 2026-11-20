@@ -1067,6 +1067,68 @@ async fn receipt_in_the_fetch_prevents_a_loss() {
     assert!(score_of(&mut core, &x) >= 0.5);
 }
 
+#[tokio::test(start_paused = true)]
+async fn full_sync_reads_past_v3_responsibles() {
+    // A 7-day packet goes only to protocol 4 nodes: here the fourth
+    // responsible holds Alice's receipt; the three better-ranked ones speak
+    // 3 and answer, complete and empty.
+    let (_dir, mut core, ack) = subject_with_ack(NOW);
+    let mut net = setup_with(&mut core);
+    let (_, m) = message(&mut core);
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert!(r.len() >= 4);
+    rank_first(&mut core, &r[..3]);
+    net.v3.extend(r[..3].iter().copied());
+    net.node_mailbox_items.insert((r[3], m), vec![ack]);
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(
+        report
+            .received
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::AckReceived { .. })),
+        "{:?}",
+        report.received
+    );
+    assert!(report.polled_all_sessions);
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_sync_on_a_v3_network_still_polls() {
+    // Every node speaks 3: a complete fetch from the best responsible
+    // settles each mailbox once no newer one is left; the window moves.
+    let (_dir, mut core, mut net) = setup();
+    net.v3 = net.records.keys().copied().collect();
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
+    let report = sync(&mut core, &net, opts()).await;
+    assert!(report.polled_all_sessions);
+    assert!(report.mailboxes_polled >= sessions.len());
+    // Not one mailbox counted twice.
+    let mut fresh = setup();
+    let base = sync(&mut fresh.1, &fresh.2, opts()).await;
+    assert_eq!(report.mailboxes_polled, base.mailboxes_polled);
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_does_not_read_past_a_v3_responsible() {
+    let (_dir, mut core, mut net) = setup();
+    let sessions = core.watched_mailbox_groups(NOW).unwrap().sessions;
+    net.v3 = net.records.keys().copied().collect();
+    quick_sync(&mut core, &net, quick_opts()).await;
+    let calls = net.calls();
+    // Each session mailbox it reads is read once, from one node: the
+    // quick sync's budget is not spent going past a protocol 3 node.
+    let mut read = 0;
+    for m in &sessions {
+        let n = calls
+            .iter()
+            .filter(|c| matches!(c, Call::Fetch(_, mbs, _) if mbs.contains(m)))
+            .count();
+        assert!(n <= 1, "{m:?}: {n}");
+        read += n;
+    }
+    assert!(read > 0);
+}
+
 /// A node `x`, best responsible of the message mailbox `m` once scored 0.8,
 /// and second (after `y`, scored 0.9) for another session mailbox `m2`.
 fn two_groups(core: &mut Core) -> (NodeId, NodeId, MailboxId) {
@@ -2279,6 +2341,35 @@ fn horizon(core: &Core) -> Vec<(MailboxId, u32)> {
 }
 
 #[tokio::test(start_paused = true)]
+async fn wake_subscriptions_prefer_v4_responsibles() {
+    // A receipt lives 7 days: only protocol 4 nodes ever hold it, so only
+    // they can wake for it. The three best-ranked responsibles of the
+    // awaited mailbox speak 3 (met by the fetch); the two protocol 4 ones
+    // take the subscriptions, one protocol 3 node completes them.
+    let (_dir, mut core, mut net) = setup();
+    let (_, m) = message(&mut core);
+    assert!(
+        core.awaited_ack_mailboxes(NOW)
+            .unwrap()
+            .iter()
+            .any(|(a, _)| *a == m)
+    );
+    let r = load(&mut core).view.responsibles_by_score(&m, NOW);
+    assert_eq!(r.len(), crate::RESPONSIBLES);
+    rank_first(&mut core, &r[..3]);
+    net.v3.extend(r[..3].iter().copied());
+    sync(&mut core, &net, push_opts()).await;
+    let acks: HashSet<NodeId> = subscribes_of(&net.calls(), SubKind::Acks)
+        .into_iter()
+        .filter(|(_, mb)| *mb == m)
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(acks.len(), crate::push::WAKE_NODES, "{acks:?}");
+    assert!(acks.contains(&r[3]) && acks.contains(&r[4]), "{acks:?}");
+    assert_eq!(acks.iter().filter(|n| r[..3].contains(n)).count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn push_stage_runs_after_maintenance_and_saves_state() {
     let (_dir, mut core, net) = setup();
     let report = sync(&mut core, &net, push_opts()).await;
@@ -2884,7 +2975,9 @@ async fn no_owned_retry_on_v2_node() {
     let ranked = load(&mut core).view.responsibles_by_score(&intro, NOW);
     let x = ranked[0];
     net.full_unless_owned.insert(x);
-    net.v2.insert(x);
+    // Every node speaks 2 (an older one alone would be passed over for
+    // the newer responsibles): `x` is still the best one to subscribe on.
+    net.v2 = net.records.keys().copied().collect();
     sync(&mut core, &net, push_opts()).await;
     let calls = net.calls();
     assert!(
