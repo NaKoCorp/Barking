@@ -259,9 +259,10 @@ pub struct ReactionRow {
     pub clock: u64,
     /// Envelope identifier of that packet: breaks a tie on `clock`.
     pub tie: [u8; 16],
-    /// Clock of the write that created the row, kept when it is replaced:
-    /// the chips keep their place.
+    /// `(clock, tie)` of the write that created the row, kept when it is
+    /// replaced: the chips keep their place, the same on every side.
     pub first_seen: u64,
+    pub first_tie: [u8; 16],
 }
 
 impl fmt::Debug for ReactionRow {
@@ -290,9 +291,19 @@ fn split_emojis(stored: &str) -> Vec<String> {
     }
 }
 
-type ReactionRaw = (Vec<u8>, Vec<u8>, Vec<u8>, String, i64, Vec<u8>, i64);
+type ReactionRaw = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    String,
+    i64,
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+);
 
-const REACTION_COLUMNS: &str = "message_id, reactor, contact_fp, emojis, clock, tie, first_seen";
+const REACTION_COLUMNS: &str =
+    "message_id, reactor, contact_fp, emojis, clock, tie, first_seen, first_tie";
 
 fn reaction_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReactionRaw> {
     Ok((
@@ -303,11 +314,12 @@ fn reaction_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReactionRaw> {
         r.get(4)?,
         r.get(5)?,
         r.get(6)?,
+        r.get(7)?,
     ))
 }
 
 fn reaction_from_raw(raw: ReactionRaw) -> Result<ReactionRow> {
-    let (message_id, reactor, contact_fp, emojis, clock, tie, first_seen) = raw;
+    let (message_id, reactor, contact_fp, emojis, clock, tie, first_seen, first_tie) = raw;
     Ok(ReactionRow {
         message_id: MessageId(arr(message_id)?),
         reactor: arr(reactor)?,
@@ -316,6 +328,7 @@ fn reaction_from_raw(raw: ReactionRaw) -> Result<ReactionRow> {
         clock: to_u64(clock),
         tie: arr(tie)?,
         first_seen: to_u64(first_seen),
+        first_tie: arr(first_tie)?,
     })
 }
 
@@ -762,22 +775,6 @@ impl Store {
         if stored.is_none_or(|v| v < 4) {
             schema::migrate_v3_to_v4(&self.conn).map_err(map_err)?;
         }
-        // `reactions.first_seen`, added to v4 before its release: a
-        // development database already at v4 receives it here (idempotent).
-        let has_first_seen: bool = self
-            .conn
-            .query_row(
-                "SELECT count(*) > 0 FROM pragma_table_info('reactions') \
-                 WHERE name = 'first_seen'",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(map_err)?;
-        if !has_first_seen {
-            self.conn
-                .execute_batch(schema::REACTIONS_ADD_FIRST_SEEN)
-                .map_err(map_err)?;
-        }
         Ok(())
     }
 
@@ -1152,14 +1149,14 @@ pub trait Queries {
     /// Writes `r` if no row exists for its `(message_id, reactor)`, or if
     /// its `(clock, tie)` is strictly greater than the stored one (`tie`
     /// compared bytewise) within the same conversation; a replaced row keeps
-    /// its `first_seen`. Returns whether it was written.
+    /// its `first_seen` and `first_tie`. Returns whether it was written.
     fn put_reaction_if_newer(&self, r: &ReactionRow) -> Result<bool> {
         let n = self
             .conn()
             .execute(
                 &format!(
                     "INSERT INTO reactions({REACTION_COLUMNS}) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
                      ON CONFLICT(message_id, reactor) DO UPDATE SET \
                      emojis = excluded.emojis, clock = excluded.clock, tie = excluded.tie \
                      WHERE reactions.contact_fp = excluded.contact_fp \
@@ -1173,6 +1170,7 @@ pub trait Queries {
                     to_i64(r.clock),
                     r.tie.as_slice(),
                     to_i64(r.first_seen),
+                    r.first_tie.as_slice(),
                 ],
             )
             .map_err(map_err)?;
@@ -1180,13 +1178,13 @@ pub trait Queries {
     }
 
     /// The reactions on `message` in the conversation with `contact`, in
-    /// first-seen order (then local insertion order).
+    /// first-seen order: `(first_seen, first_tie)`, the same on both sides.
     fn reactions_on(&self, contact: Fingerprint, message: MessageId) -> Result<Vec<ReactionRow>> {
         let mut stmt = self
             .conn()
             .prepare(&format!(
                 "SELECT {REACTION_COLUMNS} FROM reactions \
-                 WHERE message_id = ?1 AND contact_fp = ?2 ORDER BY first_seen, rowid"
+                 WHERE message_id = ?1 AND contact_fp = ?2 ORDER BY first_seen, first_tie"
             ))
             .map_err(map_err)?;
         let raws = stmt
@@ -1194,6 +1192,24 @@ pub trait Queries {
                 params![message.0.as_slice(), contact.0.as_slice()],
                 reaction_raw,
             )
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        raws.into_iter().map(reaction_from_raw).collect()
+    }
+
+    /// Every reaction of the conversation with `contact`, whether its
+    /// target is stored or not yet received (history archive).
+    fn reactions_with(&self, contact: Fingerprint) -> Result<Vec<ReactionRow>> {
+        let mut stmt = self
+            .conn()
+            .prepare(&format!(
+                "SELECT {REACTION_COLUMNS} FROM reactions WHERE contact_fp = ?1 \
+                 ORDER BY first_seen, first_tie, message_id, reactor"
+            ))
+            .map_err(map_err)?;
+        let raws = stmt
+            .query_map(params![contact.0.as_slice()], reaction_raw)
             .map_err(map_err)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map_err)?;

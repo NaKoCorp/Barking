@@ -373,6 +373,15 @@ pub(super) fn apply(
                     if q.block_state(to)?.blocked {
                         return Ok(Ok(None));
                     }
+                    // Removed since this copy was sealed: the removal erased
+                    // my reactions with `to`, a late copy must not bring one
+                    // back. One sealed after the removal (or before the
+                    // contact's first `Upsert` arrives) still applies.
+                    if q.contact_clock(to)?
+                        .is_some_and(|c| c.removed && c.at >= env.sent_at)
+                    {
+                        return Ok(Ok(None));
+                    }
                     // My set, the same rules as a contact's: a target deleted
                     // here or of another conversation is ignored (acked).
                     let applied = super::reactions::apply(

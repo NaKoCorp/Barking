@@ -5949,3 +5949,67 @@ fn reaction_sync_crossing_a_block_is_dropped() {
     assert_eq!(seen, 1);
     assert_eq!(reaction_rows(&a), 0);
 }
+
+#[test]
+fn reaction_sync_after_a_removal_does_not_resurrect() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    t.store
+        .insert_message(
+            fp,
+            Direction::Out,
+            "m",
+            MessageStatus::OnNetwork,
+            NOW,
+            MessageId([0x63; 16]),
+        )
+        .unwrap();
+    let row = row_of(&t, &fp, "m");
+    // Sealed at NOW, held back while A removes Bob at NOW + 5.
+    let early = t.set_reactions(row, &emo(&["👍"]), NOW, &mut rng).unwrap();
+    a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
+    for p in &early {
+        let _ = a.receive(&p.encode(), "t", NOW + 9, &mut rng).unwrap();
+    }
+    assert_eq!(reaction_rows(&a), 0);
+    // A copy sealed after the removal still applies (last writer wins).
+    let late = t
+        .set_reactions(row, &emo(&["🎉"]), NOW + 6, &mut rng)
+        .unwrap();
+    for p in &late {
+        let _ = a.receive(&p.encode(), "t", NOW + 9, &mut rng).unwrap();
+    }
+    assert_eq!(reaction_rows(&a), 1);
+}
+
+#[test]
+fn reaction_chips_same_order_on_both_phones() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    // Both react in the same second, each before seeing the other's.
+    let from_a = react_x(&mut p, &["👍"], NOW);
+    let x_on_b = row_of(&p.b, &a, "x");
+    let from_b =
+        p.b.set_reactions(x_on_b, &emo(&["❤️"]), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.b, &from_a, &mut p.rng);
+    deliver(&mut p.a, &from_b[0], &mut p.rng);
+    let order = |c: &Core, contact: &Fingerprint| -> Vec<String> {
+        c.reaction_chips(contact, message_id_of(c, contact, "x"))
+            .unwrap()
+            .into_iter()
+            .map(|chip| chip.emoji)
+            .collect()
+    };
+    assert_eq!(order(&p.a, &b).len(), 2);
+    assert_eq!(order(&p.a, &b), order(&p.b, &a));
+}

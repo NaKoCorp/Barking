@@ -99,6 +99,7 @@ impl Core {
                 clock,
                 tie,
                 first_seen: mine.as_ref().map_or(clock, |m| m.first_seen),
+                first_tie: mine.as_ref().map_or(tie, |m| m.first_tie),
             })?;
             let id = MessageId(tie);
             let time = SealTime {
@@ -129,7 +130,8 @@ impl Core {
     }
 
     /// The chips under `message` of the conversation with `contact`: rows in
-    /// first-seen order (a replaced row keeps its place), each row's emoji in
+    /// first-seen order, `(first_seen, first_tie)` (a replaced row keeps its
+    /// place, the same on both sides), each row's emoji in
     /// its stored order, each emoji at its first appearance.
     pub fn reaction_chips(
         &self,
@@ -197,6 +199,7 @@ pub(super) fn apply(
         clock,
         tie,
         first_seen: old.as_ref().map_or(clock, |o| o.first_seen),
+        first_tie: old.as_ref().map_or(tie, |o| o.first_tie),
     };
     if !q.put_reaction_if_newer(&row)? {
         return Ok(Some(Vec::new()));
