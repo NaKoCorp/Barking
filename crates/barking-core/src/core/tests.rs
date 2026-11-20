@@ -6155,6 +6155,112 @@ fn pending_reaction_listed_as_reaction() {
     );
 }
 
+fn sends_where(c: &Core, clause: &str) -> i64 {
+    c.store
+        .conn()
+        .query_row(
+            &format!("SELECT count(*) FROM reaction_sends WHERE {clause}"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn deleting_the_message_drops_its_reaction_sends() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    assert_eq!(sends_where(&p.a, "1"), 1);
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 2).unwrap();
+    assert_eq!(sends_where(&p.a, "1"), 0, "no link to the deleted message");
+}
+
+#[test]
+fn rows_of_packets_that_left_the_queue_are_pruned() {
+    let mut p = pair();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    p.a.store
+        .conn()
+        .execute(
+            "DELETE FROM outbox WHERE packet_id = ?1",
+            [pk.id.0.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(p.a.resend_reactions(NOW + 1, &mut p.rng), Ok(0));
+    assert_eq!(sends_where(&p.a, "1"), 0);
+}
+
+#[test]
+fn a_failing_group_does_not_block_the_others() {
+    let (mut p, _dc, _c) = with_carol();
+    let carol = p.a.resolve("carol").unwrap();
+    let b = p.b.fingerprint();
+    let sent = p.a.send_text(&carol, "hi", NOW, &mut p.rng).unwrap();
+    // Bob's group is first, then Carol's.
+    let first = react_x(&mut p, &["👍"], NOW);
+    let row = row_of(&p.a, &carol, "hi");
+    let second =
+        p.a.set_reactions(row, &emo(&["🎉"]), NOW, &mut p.rng)
+            .unwrap();
+    let late = [first.expires_at, second[0].expires_at, sent[0].expires_at]
+        .iter()
+        .map(|e| u64::from(*e))
+        .max()
+        .unwrap()
+        + 1;
+    // Bob's stored card became unreadable: sealing to him fails.
+    p.a.store
+        .conn()
+        .execute(
+            "UPDATE contacts SET card = x'00' WHERE fp = ?1",
+            [b.0.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(p.a.resend_reactions(late, &mut p.rng), Ok(1));
+    assert_eq!(sends_where(&p.a, "expired = 1"), 1, "Bob's stays flagged");
+    assert_eq!(p.a.pending_outbox(late).unwrap().len(), 1, "Carol's went");
+}
+
+#[test]
+fn blocked_or_unknown_contact_audience_is_skipped() {
+    for block in [true, false] {
+        let mut p = pair();
+        let b = p.b.fingerprint();
+        let pk = react_x(&mut p, &["👍"], NOW);
+        if block {
+            p.a.block_contact(&b, NOW + 1, &mut p.rng).unwrap();
+        } else {
+            p.a.store
+                .conn()
+                .execute("DELETE FROM contacts WHERE fp = ?1", [b.0.as_slice()])
+                .unwrap();
+        }
+        let late = u64::from(pk.expires_at) + 1;
+        assert_eq!(
+            p.a.resend_reactions(late, &mut p.rng),
+            Ok(0),
+            "block {block}"
+        );
+        assert_eq!(sends_where(&p.a, "1"), 0, "block {block}");
+        assert!(p.a.pending_outbox(late).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn reaction_lost_after_deposit_is_resent() {
+    let mut p = pair();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    let expiry = u64::from(pk.expires_at);
+    assert_eq!(p.a.resend_reactions(expiry + 1, &mut p.rng), Ok(0));
+    // The network confirms it gone.
+    assert_eq!(p.a.confirm_expired(pk.id, expiry + 1), Ok(true));
+    assert_eq!(p.a.resend_reactions(expiry + 2, &mut p.rng), Ok(1));
+    assert_eq!(p.a.pending_outbox(expiry + 2).unwrap().len(), 1);
+}
+
 #[test]
 fn removing_a_contact_drops_its_reaction_sends() {
     let mut p = pair();

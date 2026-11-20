@@ -148,10 +148,23 @@ impl Core {
             return Ok(0);
         }
         let Core { store, device, .. } = self;
+        // Rows of packets that left the send queue without failing (deposited
+        // and acknowledged, or purged) have nothing left to resend.
+        store
+            .conn()
+            .execute(
+                "DELETE FROM reaction_sends WHERE expired = 0 \
+                 AND packet_id NOT IN (SELECT packet_id FROM outbox)",
+                [],
+            )
+            .map_err(map_err)?;
         let groups = flagged_audiences(&*store)?;
         let mut resent = 0u32;
         for (to, message, audience) in groups {
-            resent += store.transaction(|tx| {
+            // A group that fails (its transaction rolled back, its rows
+            // still flagged) is retried at the next full sync and does not
+            // hold the others back.
+            let Ok(sent) = store.transaction(|tx| {
                 let usable = tx.get_contact(to)?.is_some() && !tx.block_state(to)?.blocked;
                 let mine = tx.reaction(message, ME_REACTOR)?;
                 let target =
@@ -188,7 +201,10 @@ impl Core {
                     )
                     .map_err(map_err)?;
                 Ok(sent)
-            })?;
+            }) else {
+                continue;
+            };
+            resent += sent;
         }
         Ok(resent)
     }

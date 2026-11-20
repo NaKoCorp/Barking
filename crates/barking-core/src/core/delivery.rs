@@ -173,6 +173,7 @@ impl Core {
                 let id = PacketId(arr(id)?);
                 failed.push(fail(tx, id, MessageStatus::Pending, to_u64(expires_at))?);
                 // A reaction packet that never left: `resend_reactions` reseals it.
+                // Flagged here, before `outbox_purge_expired` below.
                 tx.conn()
                     .execute(
                         "UPDATE reaction_sends SET expired = 1 WHERE packet_id = ?1",
@@ -281,6 +282,13 @@ impl Core {
                 return Ok(None);
             }
             let failed = fail(tx, packet, MessageStatus::OnNetwork, expires_at)?;
+            // A reaction packet lost on the network: `resend_reactions` reseals it.
+            tx.conn()
+                .execute(
+                    "UPDATE reaction_sends SET expired = 1 WHERE packet_id = ?1",
+                    params![packet.0.as_slice()],
+                )
+                .map_err(map_err)?;
             tx.outbox_remove(packet)?;
             Ok(Some(failed))
         })?;

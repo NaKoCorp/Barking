@@ -1226,6 +1226,13 @@ pub trait Queries {
                 params![message.0.as_slice()],
             )
             .map_err(map_err)?;
+        // Nor may the tracking of its reaction packets keep the link.
+        self.conn()
+            .execute(
+                "DELETE FROM reaction_sends WHERE message_id = ?1",
+                params![message.0.as_slice()],
+            )
+            .map_err(map_err)?;
         Ok(())
     }
 
