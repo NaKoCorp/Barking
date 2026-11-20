@@ -161,6 +161,7 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
     };
     let mut new_messages = Vec::new();
     let mut new_reactions = Vec::new();
+    let mut repeats = 0usize;
     for outcome in received {
         match outcome {
             ReceiveOutcome::Message {
@@ -199,10 +200,17 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
                     excerpt,
                 });
             }
+            // A message already in its conversation, received again: no
+            // new row, but the push may have come for it.
+            ReceiveOutcome::DuplicateMessage => repeats += 1,
+            // `Partial` lands here too and counts as nothing to show only
+            // because the packet's last fragment is a deposit of its own,
+            // which sends its own push: that wake-up shows the message.
             _ => {}
         }
     }
-    let nothing_to_show = nothing_to_show(&report, new_messages.len(), new_reactions.len());
+    let nothing_to_show =
+        nothing_to_show(&report, new_messages.len(), new_reactions.len(), repeats);
     SyncSummary {
         items_received: u32::try_from(report.items_received).unwrap_or(u32::MAX),
         sent: u32::try_from(report.first_copies).unwrap_or(u32::MAX),
@@ -222,15 +230,23 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
 
 /// The wake-up that came for `report` has nothing to show: the sync read
 /// every mailbox it meant to (`fetched_all`: so no message was cut off by a
-/// deadline), brought items, and none of them is a visible message or a
-/// reaction to notify.
-fn nothing_to_show(report: &SyncReport, new_messages: usize, new_reactions: usize) -> bool {
+/// deadline), brought items, and none of them is a visible message, a
+/// reaction to notify, or a repeat of a message still shown (`repeats`,
+/// `ReceiveOutcome::DuplicateMessage`: an earlier sync or another node may
+/// have taken the message this push came for).
+fn nothing_to_show(
+    report: &SyncReport,
+    new_messages: usize,
+    new_reactions: usize,
+    repeats: usize,
+) -> bool {
     report.error.is_none()
         && report.network_up
         && report.fetched_all
         && report.items_received > 0
         && new_messages == 0
         && new_reactions == 0
+        && repeats == 0
 }
 
 /// Contacts whose conversation a reaction changed (a contact's own, or a
@@ -565,6 +581,33 @@ mod tests {
         assert!(s.new_messages.is_empty() && s.nothing_to_show);
     }
 
+    /// A message already stored (an earlier sync, another node serving it
+    /// again) beside a removed reaction: the push may be for that message,
+    /// so it is kept; other repeats (a reaction, an ack) still leave
+    /// nothing to show.
+    #[test]
+    fn visible_duplicate_keeps_the_wake_up() {
+        let (_dir, mut core, bob) = core_with_bob_message();
+        let report = |received| SyncReport {
+            items_received: 2,
+            network_up: true,
+            fetched_all: true,
+            received,
+            ..SyncReport::default()
+        };
+        let s = summary(
+            &mut core,
+            report(vec![ReceiveOutcome::DuplicateMessage, reaction(bob, &[])]),
+        );
+        assert!(s.new_messages.is_empty() && s.new_reactions.is_empty());
+        assert!(!s.nothing_to_show);
+        let s = summary(
+            &mut core,
+            report(vec![ReceiveOutcome::Duplicate, reaction(bob, &[])]),
+        );
+        assert!(s.nothing_to_show);
+    }
+
     /// The wake-up is dropped only after a clean, complete sync that brought
     /// something and showed nothing (Review Focus 1): any doubt keeps it.
     #[test]
@@ -575,7 +618,7 @@ mod tests {
             fetched_all: true,
             ..SyncReport::default()
         };
-        assert!(nothing_to_show(&clean, 0, 0));
+        assert!(nothing_to_show(&clean, 0, 0, 0));
         let cases = [
             (
                 "error",
@@ -619,8 +662,9 @@ mod tests {
             ("new reaction", clean_copy(&clean), 0, 1),
         ];
         for (what, report, messages, reactions) in cases {
-            assert!(!nothing_to_show(&report, messages, reactions), "{what}");
+            assert!(!nothing_to_show(&report, messages, reactions, 0), "{what}");
         }
+        assert!(!nothing_to_show(&clean, 0, 0, 1), "a visible repeat");
     }
 
     fn clean_copy(r: &SyncReport) -> SyncReport {

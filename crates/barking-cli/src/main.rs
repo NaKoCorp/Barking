@@ -845,7 +845,9 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
         }
         ReceiveOutcome::AckReceived { .. } => println!("{label}: delivered ✓"),
         ReceiveOutcome::Partial => println!("{label}: partial frame"),
-        ReceiveOutcome::Duplicate => println!("{label}: duplicate"),
+        ReceiveOutcome::Duplicate | ReceiveOutcome::DuplicateMessage => {
+            println!("{label}: duplicate");
+        }
         ReceiveOutcome::NotForUs => println!("{label}: not for you"),
         ReceiveOutcome::Expired => println!("{label}: expired"),
         ReceiveOutcome::Quarantined { reason } => {

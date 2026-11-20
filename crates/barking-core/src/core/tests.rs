@@ -846,7 +846,7 @@ fn replayed_packets_and_acks_are_coalesced() {
         let now = NOW + i / 10;
         assert!(matches!(
             p.b.receive(&m.encode(), "t", now, &mut p.rng).unwrap(),
-            ReceiveOutcome::Duplicate
+            ReceiveOutcome::DuplicateMessage
         ));
         assert!(matches!(
             p.a.receive(&ack.encode(), "t", now, &mut p.rng).unwrap(),
@@ -1039,7 +1039,7 @@ fn message_id_dedups_resend() {
     assert_ne!(again.id, first.id);
     assert!(matches!(
         p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap(),
-        ReceiveOutcome::Duplicate
+        ReceiveOutcome::DuplicateMessage
     ));
     assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before);
     // The duplicate is still acked: the sender stops resending it.
@@ -4997,7 +4997,7 @@ fn unknown_show_update_kind_adds_placeholder_row() {
     // A resend of it is a duplicate, not a second placeholder.
     let again = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x32);
     let r = p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap();
-    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
     assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before + 1);
 }
 
@@ -6273,4 +6273,75 @@ fn removing_a_contact_drops_its_reaction_sends() {
             .query_row("SELECT count(*) FROM reaction_sends", [], |r| r.get(0))
             .unwrap();
     assert_eq!(left, 0);
+}
+
+// --- Final review: a repeat of a visible message is told apart.
+
+#[test]
+fn repeat_of_a_stored_message_is_a_visible_duplicate() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let b = p.b.fingerprint();
+    let m =
+        p.a.send_text(&b, "seen", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    assert!(matches!(
+        deliver(&mut p.b, &m, &mut p.rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    // The same packet again (another node serves it): already seen.
+    let r = deliver(&mut p.b, &m, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
+    // The same message in a new packet (a resend).
+    let mid = p.a.messages_with(&b).unwrap().last().unwrap().message_id;
+    let again = seal_body(
+        &mut p.a,
+        &send::Target::Contact(b),
+        &Body::Text("seen".into()),
+        mid,
+        &mut p.rng,
+    )
+    .remove(0)
+    .0;
+    let r = deliver(&mut p.b, &again, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
+    // An update placeholder received again is visible too.
+    let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x41);
+    assert!(matches!(
+        deliver(&mut p.b, &pk, &mut p.rng),
+        ReceiveOutcome::NeedsUpdate { .. }
+    ));
+    let r = deliver(&mut p.b, &pk, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
+    let pk2 = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x41);
+    let r = deliver(&mut p.b, &pk2, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
+
+    // Deleted here since: nothing of it shows, a plain duplicate.
+    let row = row_of(&p.b, &a, "seen");
+    p.b.delete_message(row, NOW).unwrap();
+    for pk in [&m, &again] {
+        let r = deliver(&mut p.b, pk, &mut p.rng);
+        assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    }
+    // A reaction received twice, an ignored kind, an ack: plain duplicates.
+    let rx = react_x(&mut p, &["👍"], NOW);
+    deliver(&mut p.b, &rx, &mut p.rng);
+    let r = deliver(&mut p.b, &rx, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    let ig = seal_to_b(&mut p, &ext(999, UnknownPolicy::Ignore), 0x42);
+    deliver(&mut p.b, &ig, &mut p.rng);
+    let r = deliver(&mut p.b, &ig, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    let n =
+        p.a.send_text(&b, "acked", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    let ReceiveOutcome::Message { ack, .. } = deliver(&mut p.b, &n, &mut p.rng) else {
+        panic!("message expected");
+    };
+    deliver(&mut p.a, &ack, &mut p.rng);
+    let r = deliver(&mut p.a, &ack, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
 }

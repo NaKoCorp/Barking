@@ -191,6 +191,12 @@ pub enum ReceiveOutcome {
         target: MessageId,
         added: Vec<String>,
     },
+    /// A message (text, reply or update placeholder) received again while
+    /// its row is still in the conversation: nothing is added, but what the
+    /// packet carried is visible here, so a wake-up that came for it must
+    /// not be dropped as having nothing to show. Any other repeat (a
+    /// reaction, a sync, an ack, a message deleted since) is `Duplicate`.
+    DuplicateMessage,
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -210,6 +216,7 @@ impl fmt::Debug for ReceiveOutcome {
                 .finish(),
             Self::Partial => f.write_str("Partial"),
             Self::Duplicate => f.write_str("Duplicate"),
+            Self::DuplicateMessage => f.write_str("DuplicateMessage"),
             Self::NotForUs => f.write_str("NotForUs"),
             Self::Expired => f.write_str("Expired"),
             Self::Quarantined { reason } => f

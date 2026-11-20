@@ -241,7 +241,7 @@ impl Core {
                         packet_id: packet.id,
                     },
                 )?;
-                return Ok((ReceiveOutcome::Duplicate, None));
+                return Ok((repeat_outcome(tx, packet.id)?, None));
             }
             let opened = match parse_wire(&packet.payload) {
                 Err(_) => Err(R_UNREADABLE),
@@ -278,6 +278,21 @@ impl Core {
         }
         Ok(outcome)
     }
+}
+
+/// What a repeat of the received packet `packet_id` is: `DuplicateMessage`
+/// when the message it carried (text, reply or update placeholder) is still
+/// a row of the conversation, `Duplicate` otherwise (a reaction, a sync, a
+/// card, content set aside, or a message deleted since).
+fn repeat_outcome(q: &impl Queries, packet_id: PacketId) -> Result<ReceiveOutcome> {
+    let shown = q
+        .message_by_packet(packet_id)?
+        .is_some_and(|m| m.direction == Direction::In);
+    Ok(if shown {
+        ReceiveOutcome::DuplicateMessage
+    } else {
+        ReceiveOutcome::Duplicate
+    })
 }
 
 /// Days for which a mailbox (session or introduction) is accepted at
@@ -640,7 +655,7 @@ fn record_message(
     let ack = emit_ack(q, packet, env.ack_secret, now, rng)?;
     let alias = Core::alias_in(q, row.contact_fp)?;
     if !inserted {
-        return Ok((ReceiveOutcome::Duplicate, new_prekeys));
+        return Ok((repeat_outcome(q, packet.id)?, new_prekeys));
     }
     Ok((
         ReceiveOutcome::Message {
@@ -841,7 +856,7 @@ fn accept_unknown(
             },
         )?;
         emit_ack(q, packet, env.ack_secret, now, rng)?;
-        return Ok((ReceiveOutcome::Duplicate, new_prekeys));
+        return Ok((repeat_outcome(q, packet.id)?, new_prekeys));
     }
     log(
         q,
