@@ -291,7 +291,7 @@ final class LocalizationTests: XCTestCase {
         let fr = try XCTUnwrap(table("fr"))
         let keys = ["Reply", "React", "You", "Original message unavailable", "Replying to %@", "Cancel reply",
                     "Reply to %@: %@", "More emoji", "20 reactions at most on a message.",
-                    "This message needs a newer version of Barking."]
+                    "This message needs a newer version of Barking.", "Show original"]
         for key in keys {
             let value = fr[key] as? String ?? ""
             XCTAssertFalse(value.isEmpty, "missing French for \(key)")

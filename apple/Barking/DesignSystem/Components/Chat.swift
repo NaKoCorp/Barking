@@ -196,7 +196,7 @@ struct Bubble: View {
         .background(outgoing ? Color.accentFill : Color.surfaceCard, in: shape)
         .overlay(shape.stroke(outgoing ? Color.clear : Color.border, lineWidth: 1))
         .overlay {
-            shape.stroke(Color.accent, lineWidth: 3).opacity(highlighted ? 1 : 0)
+            shape.stroke(outgoing ? Color.fg : Color.accent, lineWidth: 3).opacity(highlighted ? 1 : 0)
                 .animation(highlighted ? nil : Motion.gated(Self.highlightFade, reduceMotion: reduceMotion),
                            value: highlighted)
                 .allowsHitTesting(false)

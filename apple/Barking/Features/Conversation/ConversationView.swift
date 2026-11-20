@@ -150,6 +150,7 @@ struct ConversationView: View {
             }
         }
         .toolbar(.hidden, for: .tabBar)
+        .onChange(of: locale, initial: true) { _, new in model.language = (Bundle.strings(for: new), new) }
         .onAppear { syncLoop?.conversationOpen = true }
         .onDisappear {
             model.onDisappear()
@@ -245,7 +246,7 @@ struct ConversationView: View {
             if let quote = item.quote { scrollTarget = model.jump(to: quote) }
         }
             .onTapGesture { if saved { sheetOf = SheetTarget(id: item.id) } }
-            .swipeToReply(enabled: acts) { model.startReply(item.id) }
+            .swipeToReply(enabled: acts, outgoing: item.outgoing) { model.startReply(item.id) }
             .contextMenu {
                 if acts {
                     emojiRow(item)
@@ -272,6 +273,9 @@ struct ConversationView: View {
                 if acts {
                     Button("Reply") { model.startReply(item.id) }
                     Button("React") { reactingTo = SheetTarget(id: item.id) }
+                }
+                if let quote = item.quote, quote.id != nil, quote.excerpt != nil {
+                    Button("Show original") { scrollTarget = model.jump(to: quote) }
                 }
                 if failed { Button("Retry") { retry(item.id) } }
                 if acts { Button("Copy") { copy(item.text) } }
@@ -435,37 +439,46 @@ extension ComposerView {
 }
 
 /// A swipe to the right on a bubble answers it (§5.6): the bubble follows the
-/// finger up to 60 pt and a drag past it, mostly sideways, starts the reply.
-/// Not under VoiceOver, where the "Reply" action does it.
+/// finger (up to 60 pt, less on a sent bubble, which sits at the edge and
+/// would be clipped) and a drag past 60 pt, mostly sideways, starts the
+/// reply. A drag that starts within 20 pt of the left edge is the system's
+/// back gesture. Not under VoiceOver, where the "Reply" action does it.
+/// The shift is a `GestureState`: it resets by itself if the drag is cancelled.
 private struct SwipeToReply: ViewModifier {
     let enabled: Bool
+    let outgoing: Bool
     let reply: () -> Void
-    @State private var offset: CGFloat = 0
+    @GestureState private var shift: CGFloat = 0
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static let reach: CGFloat = 60
+    static let edge: CGFloat = 20
+    /// How far a sent bubble moves: the screen's gutter.
+    static let outgoingShift: CGFloat = 12
+
+    private func counts(_ drag: DragGesture.Value) -> Bool {
+        enabled && !voiceOver && drag.startLocation.x > Self.edge
+    }
 
     func body(content: Content) -> some View {
         content
-            .offset(x: offset)
-            .simultaneousGesture(DragGesture(minimumDistance: 20)
-                .onChanged { drag in
-                    guard enabled, !voiceOver else { return }
-                    let sideways = abs(drag.translation.width) > abs(drag.translation.height)
-                    offset = sideways ? min(max(drag.translation.width, 0), Self.reach) : 0
+            .offset(x: shift)
+            .animation(Motion.gated(Motion.feedback, reduceMotion: reduceMotion), value: shift)
+            .simultaneousGesture(DragGesture(minimumDistance: 20, coordinateSpace: .global)
+                .updating($shift) { drag, state, _ in
+                    guard counts(drag), abs(drag.translation.width) > abs(drag.translation.height) else { return }
+                    state = min(max(drag.translation.width, 0), outgoing ? Self.outgoingShift : Self.reach)
                 }
                 .onEnded { drag in
-                    guard enabled, !voiceOver else { return }
-                    if drag.translation.width > Self.reach, abs(drag.translation.height) < 30 { reply() }
-                    withAnimation(Motion.gated(Motion.feedback, reduceMotion: reduceMotion)) { offset = 0 }
+                    if counts(drag), drag.translation.width > Self.reach, abs(drag.translation.height) < 30 { reply() }
                 })
     }
 }
 
 extension View {
-    fileprivate func swipeToReply(enabled: Bool, reply: @escaping () -> Void) -> some View {
-        modifier(SwipeToReply(enabled: enabled, reply: reply))
+    fileprivate func swipeToReply(enabled: Bool, outgoing: Bool, reply: @escaping () -> Void) -> some View {
+        modifier(SwipeToReply(enabled: enabled, outgoing: outgoing, reply: reply))
     }
 }
 

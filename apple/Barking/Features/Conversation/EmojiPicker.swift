@@ -61,7 +61,6 @@ private struct EmojiField: UIViewRepresentable {
         field.attributedPlaceholder = NSAttributedString(
             string: "🙂", attributes: [.font: UIFont.systemFont(ofSize: 34)])
         field.accessibilityLabel = String(localized: "More emoji")
-        DispatchQueue.main.async { field.becomeFirstResponder() }
         return field
     }
 
@@ -90,6 +89,12 @@ private struct EmojiField: UIViewRepresentable {
 final class EmojiTextField: UITextField {
     override var textInputMode: UITextInputMode? {
         UITextInputMode.activeInputModes.first { $0.primaryLanguage == "emoji" } ?? super.textInputMode
+    }
+
+    /// The keyboard opens once the field is in the sheet's window.
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { becomeFirstResponder() }
     }
 
     /// A context of its own: the system does not restore the last keyboard.

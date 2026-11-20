@@ -101,7 +101,7 @@ final class ConversationModel {
     private(set) var sendError: String?
     /// Said to VoiceOver when it appears: the banner itself is not focused.
     private(set) var notice: Notice? {
-        didSet { if let notice, notice != oldValue { announce(notice.text()) } }
+        didSet { if let notice, notice != oldValue { announce(notice.text(bundle: language.bundle, locale: language.locale)) } }
     }
     /// Rows whose deletion is running (§9: dimmed, a spinner for the symbol).
     private(set) var deleting: Set<Int64> = []
@@ -125,6 +125,9 @@ final class ConversationModel {
     private var onScreen: Set<Int64> = []
     private var announcements = DeliveryAnnouncements()
     private var announcementFlush: Task<Void, Never>?
+    /// The app's language, set by the view: what is spoken follows the same
+    /// override as what is shown.
+    var language: (bundle: Bundle, locale: Locale) = (.main, .current)
     /// Posts a VoiceOver announcement (tests record it).
     var announce: (String) -> Void = { AccessibilityNotification.Announcement($0).post() }
     var now: () -> Date = Date.init
@@ -278,7 +281,7 @@ final class ConversationModel {
     /// Says what waits, if the last announcement is 3 s old; otherwise
     /// comes back when it is.
     func flushAnnouncements() {
-        if let text = announcements.take(now: now(), name: name) { announce(text) }
+        if let text = announcements.take(now: now(), name: name, bundle: language.bundle, locale: language.locale) { announce(text) }
         guard let due = announcements.due, announcementFlush == nil else { return }
         let wait = max(0, due.timeIntervalSince(now()))
         announcementFlush = Task { [weak self] in

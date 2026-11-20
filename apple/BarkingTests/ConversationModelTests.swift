@@ -736,6 +736,18 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertTrue(d.reactions.isEmpty)
     }
 
+    /// What VoiceOver says about a notice follows the app's language, as the banner does.
+    func testNoticeIsSpokenInTheAppLanguage() async {
+        let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
+        var said: [String] = []
+        m.announce = { said.append($0) }
+        let fr = Locale(identifier: "fr")
+        m.language = (Bundle.strings(for: fr), fr)
+        d.sendError = BarkingError.InvalidEmoji
+        await m.toggle("👍", on: 5)
+        XCTAssertEqual(said, ["Réaction non enregistrée. Réessayez."])
+    }
+
     func testSuccessfulToggleClearsAnOldReactionNotice() async {
         let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])
         d.sendError = BarkingError.InvalidEmoji
