@@ -303,6 +303,13 @@ pub const OUTBOX_ADD_DEPOSIT_TRIED_AT: &str =
 /// content set aside) can be found. Rows written before it stay NULL.
 pub const INBOUND_ADD_CONTACT_FP: &str = "ALTER TABLE inbound ADD COLUMN contact_fp BLOB;";
 
+/// `reaction_sends.superseded`, added to v4 before its release: the row of
+/// a packet that a newer send on the same target replaced, kept only while
+/// the packet is queued so that the Pending screen still counts it as a
+/// reaction. It has no delivery and no state.
+pub const REACTION_SENDS_ADD_SUPERSEDED: &str =
+    "ALTER TABLE reaction_sends ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0;";
+
 /// Backfill of v3 from the route log (`route_steps`, `RouteStep` as stored:
 /// Sealed 0, Deposited 1, AckVerified 4, OwnCopy 5), in the order of §5.3:
 /// 1. `sealed_at`: the `Sealed` or `OwnCopy` step, else the message's
@@ -394,7 +401,8 @@ CREATE TABLE IF NOT EXISTS reactions (
 CREATE INDEX IF NOT EXISTS reactions_contact ON reactions(contact_fp);
 CREATE TABLE IF NOT EXISTS reaction_sends (
     packet_id BLOB PRIMARY KEY NOT NULL, message_id BLOB NOT NULL,
-    contact_fp BLOB NOT NULL, own INTEGER NOT NULL, expired INTEGER NOT NULL DEFAULT 0);
+    contact_fp BLOB NOT NULL, own INTEGER NOT NULL, expired INTEGER NOT NULL DEFAULT 0,
+    superseded INTEGER NOT NULL DEFAULT 0);
 ";
 
 /// Migrates a v3 database to v4 in a single transaction (DDL only): the new

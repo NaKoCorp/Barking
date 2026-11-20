@@ -533,9 +533,13 @@ pub(crate) fn drop_reaction_packets(
 }
 
 /// Forgets the tracking of the reaction packets of the `reaction_sends`
-/// rows that match `rows` (as `drop_reaction_packets`): their deliveries,
-/// then the rows. Their queued packets stay and still leave: an older set
-/// is a valid state, only no longer followed.
+/// rows that match `rows` (as `drop_reaction_packets`): their deliveries
+/// go, then the rows of packets no longer queued. The rows of queued
+/// packets stay, flagged `superseded`: the packets still leave (an older
+/// set is a valid state, only no longer followed) and the Pending screen
+/// still counts them as reactions. A superseded row has no state, is never
+/// flagged expired nor resent, and goes at the full sync once its packet
+/// left the queue (`drop_left_superseded`).
 pub(crate) fn forget_reaction_tracking(
     q: &(impl Queries + ?Sized),
     rows: &str,
@@ -546,7 +550,11 @@ pub(crate) fn forget_reaction_tracking(
             "DELETE FROM deliveries WHERE packet_id IN \
              (SELECT packet_id FROM reaction_sends WHERE {rows})"
         ),
-        format!("DELETE FROM reaction_sends WHERE {rows}"),
+        format!(
+            "DELETE FROM reaction_sends WHERE ({rows}) \
+             AND packet_id NOT IN (SELECT packet_id FROM outbox)"
+        ),
+        format!("UPDATE reaction_sends SET superseded = 1 WHERE {rows}"),
     ] {
         q.conn().execute(&sql, p).map_err(map_err)?;
     }
@@ -843,6 +851,22 @@ impl Store {
         if !has_inbound_contact {
             self.conn
                 .execute_batch(schema::INBOUND_ADD_CONTACT_FP)
+                .map_err(map_err)?;
+        }
+        // `reaction_sends.superseded`, added to v4 before its release
+        // (idempotent).
+        let has_superseded: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('reaction_sends') \
+                 WHERE name = 'superseded'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_superseded {
+            self.conn
+                .execute_batch(schema::REACTION_SENDS_ADD_SUPERSEDED)
                 .map_err(map_err)?;
         }
         Ok(())

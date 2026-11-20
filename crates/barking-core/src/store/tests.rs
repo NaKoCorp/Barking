@@ -1330,6 +1330,22 @@ fn v3_database_without_deposit_tried_at_gets_it() {
 }
 
 #[test]
+fn v4_database_without_superseded_gets_it() {
+    let (_d, path, store) = open_tmp();
+    // A development database at v4 before the column existed.
+    store
+        .conn()
+        .execute_batch("ALTER TABLE reaction_sends DROP COLUMN superseded;")
+        .unwrap();
+    assert!(!has_column(store.conn(), "reaction_sends", "superseded"));
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert!(has_column(store.conn(), "reaction_sends", "superseded"));
+    drop(store);
+    Store::open(&path, &KEY).unwrap();
+}
+
+#[test]
 fn v3_database_upgrades_to_v4() {
     let (_d, path, store) = open_tmp();
     // Turn the fresh database back into a v3 one.

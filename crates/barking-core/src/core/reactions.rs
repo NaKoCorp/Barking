@@ -18,7 +18,9 @@
 //! contact (`current_contact_tie`) stays after its packets leave the send
 //! queue, so a late ack still marks it received; a new send that seals for
 //! the contact (`set_reactions`) replaces it, while the older packets still
-//! queued leave anyway, untracked. `expire_due` flags the packets that
+//! queued leave anyway, untracked (their rows stay, flagged `superseded`,
+//! only so that the Pending screen counts them as reactions, until the full
+//! sync after they left the queue). `expire_due` flags the packets that
 //! expired undeposited: a flagged contact send stays `NotDelivered` until
 //! the user resends it by hand, and `resend_reactions` (full sync) reseals
 //! my current set, with a fresh clock, only for my other devices.
@@ -191,6 +193,7 @@ impl Core {
         }
         let Core { store, device, .. } = self;
         purge_orphans(&*store, now)?;
+        drop_left_superseded(&*store)?;
         let groups = flagged_audiences(&*store)?;
         let mut out = ReactionResend::default();
         for (to, message) in groups {
@@ -287,6 +290,20 @@ fn purge_orphans(q: &impl Queries, now: u64) -> Result<()> {
     Ok(())
 }
 
+/// Erases the superseded rows (`forget_reaction_tracking`) whose packet
+/// left the send queue: deposited, acknowledged or expired, it is no
+/// longer pending.
+fn drop_left_superseded(q: &impl Queries) -> Result<()> {
+    q.conn()
+        .execute(
+            "DELETE FROM reaction_sends WHERE superseded = 1 \
+             AND packet_id NOT IN (SELECT packet_id FROM outbox)",
+            [],
+        )
+        .map_err(map_err)?;
+    Ok(())
+}
+
 /// What `seal_set` seals: my set on a target, dated and identified.
 struct Seal<'a> {
     /// The conversation.
@@ -370,7 +387,7 @@ fn flagged_audiences(q: &impl Queries) -> Result<Vec<Flagged>> {
         .conn()
         .prepare(
             "SELECT contact_fp, message_id FROM reaction_sends \
-             WHERE expired = 1 AND own = 1 \
+             WHERE expired = 1 AND own = 1 AND superseded = 0 \
              GROUP BY contact_fp, message_id ORDER BY min(rowid)",
         )
         .map_err(map_err)?;
@@ -406,6 +423,7 @@ pub(super) fn current_contact_tie(
             "SELECT d.message_id FROM reaction_sends rs \
              JOIN deliveries d ON d.packet_id = rs.packet_id \
              WHERE rs.message_id = ?1 AND rs.contact_fp = ?2 AND rs.own = 0 \
+             AND rs.superseded = 0 \
              ORDER BY rs.rowid DESC LIMIT 1",
             params![target.0.as_slice(), contact.0.as_slice()],
             |r| r.get(0),

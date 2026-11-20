@@ -6790,8 +6790,9 @@ fn new_reaction_send_replaces_the_previous_tracking() {
     let first = react_x(&mut p, &["👍"], NOW);
     let second = react_x(&mut p, &["👍", "❤️"], NOW + 1);
     assert_eq!(packet_rows(&p.a, "deliveries", first.id), 0);
-    assert_eq!(packet_rows(&p.a, "reaction_sends", first.id), 0);
+    assert_eq!(superseded(&p.a, first.id), Some(true), "kept, untracked");
     assert_eq!(packet_rows(&p.a, "outbox", first.id), 1, "it still leaves");
+    assert_eq!(superseded(&p.a, second.id), Some(false));
     assert_eq!(packet_rows(&p.a, "deliveries", second.id), 1);
     assert_eq!(packet_rows(&p.a, "reaction_sends", second.id), 1);
     assert_eq!(contact_tie(&p.a, b, target), Some(tie_of(&p.a, second.id)));
@@ -6883,4 +6884,62 @@ fn reaction_delivery_change_names_the_target_row() {
         p.a.take_delivery_changes()
             .contains(&(b, row_of(&p.a, &b, "y")))
     );
+}
+
+/// `reaction_sends.superseded` of `packet`, `None` without a row.
+fn superseded(c: &Core, packet: PacketId) -> Option<bool> {
+    c.store
+        .conn()
+        .query_row(
+            "SELECT superseded FROM reaction_sends WHERE packet_id = ?1",
+            [packet.0.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+#[test]
+fn superseded_queued_reaction_still_counts_as_reaction() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    // Offline: both sets stay queued.
+    react_x(&mut p, &["👍"], NOW);
+    react_x(&mut p, &["👍", "❤️"], NOW + 1);
+    let pending = p.a.pending_packets(NOW + 2).unwrap();
+    let reaction: Vec<_> = pending
+        .sync
+        .iter()
+        .filter(|s| s.kind == PendingKind::Reaction)
+        .collect();
+    assert_eq!(reaction.len(), 1);
+    assert_eq!(
+        (reaction[0].packets, reaction[0].contacts.clone()),
+        (2, vec![b])
+    );
+    assert!(
+        pending
+            .sync
+            .iter()
+            .all(|s| s.kind != PendingKind::DeviceSync),
+        "{pending:?}"
+    );
+}
+
+#[test]
+fn superseded_rows_go_once_the_packet_leaves() {
+    let mut p = pair();
+    let first = react_x(&mut p, &["👍"], NOW);
+    // Sent just before the first expires (expiries are coarse).
+    let later = u64::from(first.expires_at) - 10;
+    let second = react_x(&mut p, &["👍", "❤️"], later);
+    assert_eq!(superseded(&p.a, first.id), Some(true));
+    // The first packet expires and leaves the queue; the second is still
+    // queued.
+    let late = u64::from(first.expires_at) + 1;
+    assert!(u64::from(second.expires_at) >= late);
+    p.a.resend_reactions(late, &mut p.rng).unwrap();
+    assert!(gone(&p.a, first.id));
+    assert_eq!(sends_where(&p.a, "superseded = 1"), 0);
+    assert_eq!(superseded(&p.a, second.id), Some(false));
 }

@@ -178,7 +178,8 @@ impl Core {
                 // manual resend.
                 tx.conn()
                     .execute(
-                        "UPDATE reaction_sends SET expired = 1 WHERE packet_id = ?1",
+                        "UPDATE reaction_sends SET expired = 1 \
+                         WHERE packet_id = ?1 AND superseded = 0",
                         params![id.0.as_slice()],
                     )
                     .map_err(map_err)?;
@@ -287,7 +288,8 @@ impl Core {
             // A reaction packet lost on the network: `resend_reactions` reseals it.
             tx.conn()
                 .execute(
-                    "UPDATE reaction_sends SET expired = 1 WHERE packet_id = ?1",
+                    "UPDATE reaction_sends SET expired = 1 \
+                         WHERE packet_id = ?1 AND superseded = 0",
                     params![packet.0.as_slice()],
                 )
                 .map_err(map_err)?;
