@@ -30,12 +30,42 @@ pub const KIND_SYNC_REACTION: u16 = 4;
 /// A future kind must never be dangerous to ignore: `Ignore` means that
 /// dropping the content silently loses nothing the user must see, and a kind
 /// for which that is false must use `ShowUpdate`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+///
+/// On the wire: one raw byte (`0` Ignore, `1` ShowUpdate), inside the frozen
+/// `Body::Ext`. A value this version does not know (a policy added later)
+/// reads as `ShowUpdate`, never as an error: the envelope still decodes and
+/// the user is asked to update rather than losing the content silently.
+/// A kind never gains fields: new fields need a new kind (`ExtContent`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UnknownPolicy {
     /// Acknowledge and drop silently.
     Ignore,
     /// Show a placeholder asking the user to update the app.
     ShowUpdate,
+}
+
+impl UnknownPolicy {
+    const IGNORE: u8 = 0;
+    const SHOW_UPDATE: u8 = 1;
+}
+
+impl Serialize for UnknownPolicy {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> core::result::Result<S::Ok, S::Error> {
+        s.serialize_u8(match self {
+            UnknownPolicy::Ignore => Self::IGNORE,
+            UnknownPolicy::ShowUpdate => Self::SHOW_UPDATE,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for UnknownPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
+        Ok(match u8::deserialize(d)? {
+            Self::IGNORE => UnknownPolicy::Ignore,
+            // `SHOW_UPDATE` and any later value.
+            _ => UnknownPolicy::ShowUpdate,
+        })
+    }
 }
 
 /// Reference to a message, never its text (a message deleted here never comes
@@ -63,6 +93,10 @@ impl MessageRef {
 }
 
 /// A known content of `Body::Ext`.
+///
+/// A kind never gains fields: its `data` is parsed with no trailing byte
+/// allowed (`parse`), so an older reader would refuse the longer form. New
+/// fields need a new kind.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ExtContent {
     /// Text answering `reply_to` (kind 1).
@@ -115,6 +149,11 @@ fn parse<T: DeserializeOwned>(data: &[u8]) -> Result<T> {
     Ok(value)
 }
 
+/// Each emoji of `emojis` in its canonical spelling.
+fn canonical(emojis: &[String]) -> Vec<String> {
+    emojis.iter().map(|e| emoji::canonical(e)).collect()
+}
+
 fn check_text(text: &str) -> Result<()> {
     if text.len() > MAX_TEXT_LEN {
         return Err(CoreError::TooLarge);
@@ -156,7 +195,9 @@ impl ExtContent {
     }
 
     /// Reads the content of kind `kind`; `None` for a kind this version does
-    /// not know. The content is validated (text length, emoji set).
+    /// not know. The content is validated (text length, emoji set), its emoji
+    /// in their canonical spelling (`emoji::canonical`): two spellings of
+    /// one emoji in a set are a duplicate.
     ///
     /// # Errors
     /// `Malformed` on bad or trailing bytes, `TooLarge` for a long text,
@@ -172,12 +213,19 @@ impl ExtContent {
                 ExtContent::SyncReply { to, text, reply_to }
             }
             KIND_REACTION => {
-                let (target, emojis) = parse(data)?;
-                ExtContent::Reaction { target, emojis }
+                let (target, emojis): (_, Vec<String>) = parse(data)?;
+                ExtContent::Reaction {
+                    target,
+                    emojis: canonical(&emojis),
+                }
             }
             KIND_SYNC_REACTION => {
-                let (to, target, emojis) = parse(data)?;
-                ExtContent::SyncReaction { to, target, emojis }
+                let (to, target, emojis): (_, _, Vec<String>) = parse(data)?;
+                ExtContent::SyncReaction {
+                    to,
+                    target,
+                    emojis: canonical(&emojis),
+                }
             }
             _ => return Ok(None),
         };
@@ -191,6 +239,26 @@ impl ExtContent {
             ExtContent::Reaction { emojis, .. } | ExtContent::SyncReaction { emojis, .. } => {
                 emoji::check_set(emojis)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_is_one_byte_and_unknown_values_ask_for_an_update() {
+        assert_eq!(postcard::to_allocvec(&UnknownPolicy::Ignore).unwrap(), [0]);
+        assert_eq!(
+            postcard::to_allocvec(&UnknownPolicy::ShowUpdate).unwrap(),
+            [1]
+        );
+        let read = |b: u8| postcard::from_bytes::<UnknownPolicy>(&[b]).unwrap();
+        assert_eq!(read(0), UnknownPolicy::Ignore);
+        assert_eq!(read(1), UnknownPolicy::ShowUpdate);
+        for b in [2, 7, 0x7f, 0x80, 0xff] {
+            assert_eq!(read(b), UnknownPolicy::ShowUpdate, "{b}");
         }
     }
 }

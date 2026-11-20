@@ -386,7 +386,7 @@ pub(super) fn check_entries(history: &History, contacts: &HashSet<Fingerprint>) 
         }
     }
     for r in &history.reactions {
-        if !contacts.contains(&r.contact) || crate::emoji::check_set(&r.emojis).is_err() {
+        if !contacts.contains(&r.contact) || crate::emoji::canonical_set(&r.emojis).is_err() {
             return Err(BAD_HISTORY);
         }
     }
@@ -419,7 +419,11 @@ pub(super) fn import(q: &impl Queries, history: &History) -> Result<u32> {
             message_id: MessageId(r.message_id),
             reactor: r.reactor,
             contact_fp: r.contact,
-            emojis: r.emojis.clone(),
+            emojis: r
+                .emojis
+                .iter()
+                .map(|e| crate::emoji::canonical(e))
+                .collect(),
             clock: r.clock,
             tie: r.tie,
             first_seen: r.first_seen,

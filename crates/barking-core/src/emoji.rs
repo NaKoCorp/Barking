@@ -474,17 +474,7 @@ const EXTENDED_PICTOGRAPHIC: &[(char, char)] = &[
 ];
 
 fn is_extended_pictographic(c: char) -> bool {
-    EXTENDED_PICTOGRAPHIC
-        .binary_search_by(|&(lo, hi)| {
-            if c < lo {
-                core::cmp::Ordering::Greater
-            } else if c > hi {
-                core::cmp::Ordering::Less
-            } else {
-                core::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
+    in_table(EXTENDED_PICTOGRAPHIC, c)
 }
 
 fn is_regional_indicator(c: char) -> bool {
@@ -545,6 +535,184 @@ pub fn check_set(emojis: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Emoji whose default presentation is text (`Emoji=Yes` without
+/// `Emoji_Presentation`), the keycap bases `[0-9#*]` excepted, from Unicode
+/// emoji 16.0 `emoji-data.txt`, sorted. Since emoji 1.0 every new emoji has
+/// the emoji presentation by default, so a newer one is never missing here.
+const TEXT_DEFAULT: &[(char, char)] = &[
+    ('\u{a9}', '\u{a9}'),
+    ('\u{ae}', '\u{ae}'),
+    ('\u{203c}', '\u{203c}'),
+    ('\u{2049}', '\u{2049}'),
+    ('\u{2122}', '\u{2122}'),
+    ('\u{2139}', '\u{2139}'),
+    ('\u{2194}', '\u{2199}'),
+    ('\u{21a9}', '\u{21aa}'),
+    ('\u{2328}', '\u{2328}'),
+    ('\u{23cf}', '\u{23cf}'),
+    ('\u{23ed}', '\u{23ef}'),
+    ('\u{23f1}', '\u{23f2}'),
+    ('\u{23f8}', '\u{23fa}'),
+    ('\u{24c2}', '\u{24c2}'),
+    ('\u{25aa}', '\u{25ab}'),
+    ('\u{25b6}', '\u{25b6}'),
+    ('\u{25c0}', '\u{25c0}'),
+    ('\u{25fb}', '\u{25fc}'),
+    ('\u{2600}', '\u{2604}'),
+    ('\u{260e}', '\u{260e}'),
+    ('\u{2611}', '\u{2611}'),
+    ('\u{2618}', '\u{2618}'),
+    ('\u{261d}', '\u{261d}'),
+    ('\u{2620}', '\u{2620}'),
+    ('\u{2622}', '\u{2623}'),
+    ('\u{2626}', '\u{2626}'),
+    ('\u{262a}', '\u{262a}'),
+    ('\u{262e}', '\u{262f}'),
+    ('\u{2638}', '\u{263a}'),
+    ('\u{2640}', '\u{2640}'),
+    ('\u{2642}', '\u{2642}'),
+    ('\u{265f}', '\u{2660}'),
+    ('\u{2663}', '\u{2663}'),
+    ('\u{2665}', '\u{2666}'),
+    ('\u{2668}', '\u{2668}'),
+    ('\u{267b}', '\u{267b}'),
+    ('\u{267e}', '\u{267e}'),
+    ('\u{2692}', '\u{2692}'),
+    ('\u{2694}', '\u{2697}'),
+    ('\u{2699}', '\u{2699}'),
+    ('\u{269b}', '\u{269c}'),
+    ('\u{26a0}', '\u{26a0}'),
+    ('\u{26a7}', '\u{26a7}'),
+    ('\u{26b0}', '\u{26b1}'),
+    ('\u{26c8}', '\u{26c8}'),
+    ('\u{26cf}', '\u{26cf}'),
+    ('\u{26d1}', '\u{26d1}'),
+    ('\u{26d3}', '\u{26d3}'),
+    ('\u{26e9}', '\u{26e9}'),
+    ('\u{26f0}', '\u{26f1}'),
+    ('\u{26f4}', '\u{26f4}'),
+    ('\u{26f7}', '\u{26f9}'),
+    ('\u{2702}', '\u{2702}'),
+    ('\u{2708}', '\u{2709}'),
+    ('\u{270c}', '\u{270d}'),
+    ('\u{270f}', '\u{270f}'),
+    ('\u{2712}', '\u{2712}'),
+    ('\u{2714}', '\u{2714}'),
+    ('\u{2716}', '\u{2716}'),
+    ('\u{271d}', '\u{271d}'),
+    ('\u{2721}', '\u{2721}'),
+    ('\u{2733}', '\u{2734}'),
+    ('\u{2744}', '\u{2744}'),
+    ('\u{2747}', '\u{2747}'),
+    ('\u{2763}', '\u{2764}'),
+    ('\u{27a1}', '\u{27a1}'),
+    ('\u{2934}', '\u{2935}'),
+    ('\u{2b05}', '\u{2b07}'),
+    ('\u{3030}', '\u{3030}'),
+    ('\u{303d}', '\u{303d}'),
+    ('\u{3297}', '\u{3297}'),
+    ('\u{3299}', '\u{3299}'),
+    ('\u{1f170}', '\u{1f171}'),
+    ('\u{1f17e}', '\u{1f17f}'),
+    ('\u{1f202}', '\u{1f202}'),
+    ('\u{1f237}', '\u{1f237}'),
+    ('\u{1f321}', '\u{1f321}'),
+    ('\u{1f324}', '\u{1f32c}'),
+    ('\u{1f336}', '\u{1f336}'),
+    ('\u{1f37d}', '\u{1f37d}'),
+    ('\u{1f396}', '\u{1f397}'),
+    ('\u{1f399}', '\u{1f39b}'),
+    ('\u{1f39e}', '\u{1f39f}'),
+    ('\u{1f3cb}', '\u{1f3ce}'),
+    ('\u{1f3d4}', '\u{1f3df}'),
+    ('\u{1f3f3}', '\u{1f3f3}'),
+    ('\u{1f3f5}', '\u{1f3f5}'),
+    ('\u{1f3f7}', '\u{1f3f7}'),
+    ('\u{1f43f}', '\u{1f43f}'),
+    ('\u{1f441}', '\u{1f441}'),
+    ('\u{1f4fd}', '\u{1f4fd}'),
+    ('\u{1f549}', '\u{1f54a}'),
+    ('\u{1f56f}', '\u{1f570}'),
+    ('\u{1f573}', '\u{1f579}'),
+    ('\u{1f587}', '\u{1f587}'),
+    ('\u{1f58a}', '\u{1f58d}'),
+    ('\u{1f590}', '\u{1f590}'),
+    ('\u{1f5a5}', '\u{1f5a5}'),
+    ('\u{1f5a8}', '\u{1f5a8}'),
+    ('\u{1f5b1}', '\u{1f5b2}'),
+    ('\u{1f5bc}', '\u{1f5bc}'),
+    ('\u{1f5c2}', '\u{1f5c4}'),
+    ('\u{1f5d1}', '\u{1f5d3}'),
+    ('\u{1f5dc}', '\u{1f5de}'),
+    ('\u{1f5e1}', '\u{1f5e1}'),
+    ('\u{1f5e3}', '\u{1f5e3}'),
+    ('\u{1f5e8}', '\u{1f5e8}'),
+    ('\u{1f5ef}', '\u{1f5ef}'),
+    ('\u{1f5f3}', '\u{1f5f3}'),
+    ('\u{1f5fa}', '\u{1f5fa}'),
+    ('\u{1f6cb}', '\u{1f6cb}'),
+    ('\u{1f6cd}', '\u{1f6cf}'),
+    ('\u{1f6e0}', '\u{1f6e5}'),
+    ('\u{1f6e9}', '\u{1f6e9}'),
+    ('\u{1f6f0}', '\u{1f6f0}'),
+    ('\u{1f6f3}', '\u{1f6f3}'),
+];
+
+fn in_table(table: &[(char, char)], c: char) -> bool {
+    table
+        .binary_search_by(|&(lo, hi)| {
+            if c < lo {
+                core::cmp::Ordering::Greater
+            } else if c > hi {
+                core::cmp::Ordering::Less
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+fn is_modifier(c: char) -> bool {
+    ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+}
+
+/// The one spelling an emoji is stored, compared and sent in: its fully
+/// qualified form (UTS #51). Every U+FE0F is dropped, then one is put back
+/// after each component (the first scalar, or one after a ZWJ) that is
+/// text by default and not followed by a skin-tone modifier or U+FE0E, and
+/// between a keycap base and U+20E3. So "❤" and "❤\u{FE0F}" are the same
+/// emoji, spelled "❤\u{FE0F}" as the emoji keyboard types it, and a set
+/// holding both is a duplicate. Idempotent; `s` is not validated.
+#[must_use]
+pub fn canonical(s: &str) -> String {
+    let chars: Vec<char> = s.chars().filter(|c| *c != '\u{FE0F}').collect();
+    let mut out = String::with_capacity(s.len() + 3);
+    for (i, &c) in chars.iter().enumerate() {
+        out.push(c);
+        let next = chars.get(i + 1).copied();
+        let starts = i == 0 || chars[i - 1] == '\u{200D}';
+        let text_default = starts
+            && in_table(TEXT_DEFAULT, c)
+            && !next.is_some_and(|n| is_modifier(n) || n == '\u{FE0E}');
+        let keycap = i == 0 && matches!(c, '0'..='9' | '#' | '*') && next == Some('\u{20E3}');
+        if text_default || keycap {
+            out.push('\u{FE0F}');
+        }
+    }
+    out
+}
+
+/// `emojis` in their canonical spelling (`canonical`), checked as a set
+/// (`check_set`): two spellings of one emoji are a duplicate.
+///
+/// # Errors
+/// As `check_set`.
+pub fn canonical_set(emojis: &[String]) -> Result<Vec<String>> {
+    let out: Vec<String> = emojis.iter().map(|e| canonical(e)).collect();
+    check_set(&out)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -627,6 +795,53 @@ mod tests {
             Err(CoreError::InvalidEmoji)
         );
         assert_eq!(check_set(&["a".to_owned()]), Err(CoreError::InvalidEmoji));
+    }
+
+    #[test]
+    fn canonical_spelling_is_fully_qualified() {
+        let fq = [
+            "👍",
+            "👍🏽",
+            "❤\u{FE0F}",
+            "☝🏽",
+            "1\u{FE0F}\u{20E3}",
+            "#\u{FE0F}\u{20E3}",
+            "🇫🇷",
+            "\u{A9}\u{FE0F}",
+            "👨\u{200D}👩\u{200D}👧\u{200D}👦",
+            "🏳\u{FE0F}\u{200D}🌈",
+            "🏳\u{FE0F}\u{200D}⚧\u{FE0F}",
+            "❤\u{FE0F}\u{200D}🔥",
+            "🏃\u{200D}♂\u{FE0F}",
+            "🏋🏽\u{200D}♀\u{FE0F}",
+            "🕵\u{FE0F}\u{200D}♂\u{FE0F}",
+            "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+        ];
+        for e in fq {
+            // Fixed point, and idempotent.
+            assert_eq!(canonical(e), e, "{e:?}");
+            assert_eq!(canonical(&canonical(e)), e, "{e:?}");
+            // Every U+FE0F removed, or one too many: the same spelling back.
+            let bare: String = e.chars().filter(|c| *c != '\u{FE0F}').collect();
+            assert_eq!(canonical(&bare), e, "{e:?}");
+            assert_eq!(canonical(&format!("{e}\u{FE0F}")), e, "{e:?}");
+        }
+        // Text presentation asked for: kept as it is.
+        assert_eq!(canonical("❤\u{FE0E}"), "❤\u{FE0E}");
+    }
+
+    #[test]
+    fn canonical_set_dedups_spellings() {
+        let set = |l: &[&str]| l.iter().map(|e| (*e).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            canonical_set(&set(&["❤", "👍\u{FE0F}"])),
+            Ok(set(&["❤\u{FE0F}", "👍"]))
+        );
+        assert_eq!(
+            canonical_set(&set(&["❤", "❤\u{FE0F}"])),
+            Err(CoreError::InvalidEmoji)
+        );
+        assert_eq!(canonical_set(&set(&["a"])), Err(CoreError::InvalidEmoji));
     }
 
     #[test]

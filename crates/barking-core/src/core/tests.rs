@@ -6345,3 +6345,122 @@ fn repeat_of_a_stored_message_is_a_visible_duplicate() {
     let r = deliver(&mut p.a, &ack, &mut p.rng);
     assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
 }
+
+// --- Final review: a policy this version does not know.
+
+/// The plaintext of an `Ext` of unknown kind whose policy byte is `policy`,
+/// found as the one byte that differs between the two known policies.
+fn ext_with_policy_byte(secret: [u8; 16], policy: u8) -> Vec<u8> {
+    let pt = |unknown| {
+        postcard::to_allocvec(&Envelope {
+            sent_at: NOW,
+            ack_secret: secret,
+            message_id: secret,
+            body: ext(999, unknown),
+        })
+        .unwrap()
+    };
+    let (ignore, show) = (pt(UnknownPolicy::Ignore), pt(UnknownPolicy::ShowUpdate));
+    let diff: Vec<usize> = (0..ignore.len())
+        .filter(|&i| ignore[i] != show[i])
+        .collect();
+    assert_eq!(diff.len(), 1, "one policy byte");
+    assert_eq!((ignore[diff[0]], show[diff[0]]), (0, 1));
+    let mut out = ignore;
+    out[diff[0]] = policy;
+    out
+}
+
+#[test]
+fn future_policy_shows_an_update_placeholder() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let secret = [0x51; 16];
+    let pt = ext_with_policy_byte(secret, 7);
+    let pk = forge(&mut p.a, &pt, ack::packet_id_for(&secret), &mut p.rng);
+    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::NeedsUpdate { .. }), "{r:?}");
+    assert_eq!(acks_for(&mut p.b, &pk), 1);
+    let rows = p.b.messages_with(&a_fp).unwrap();
+    assert_eq!(rows.len(), before + 1);
+    assert!(rows.last().unwrap().placeholder);
+}
+
+// --- Final review: one emoji, one spelling (U+FE0F).
+
+#[test]
+fn heart_with_or_without_fe0f_is_one_emoji_on_send() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "x");
+    let on_a = message_id_of(&p.a, &b, "x");
+    // Both spellings in one set: a duplicate.
+    assert_eq!(
+        p.a.set_reactions(row, &emo(&["❤", "❤\u{FE0F}"]), NOW, &mut p.rng),
+        Err(CoreError::InvalidEmoji)
+    );
+    // The bare heart is stored and sent fully qualified.
+    let sent =
+        p.a.set_reactions(row, &emo(&["❤"]), NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(counts(&p.a, &b, on_a), vec![("❤\u{FE0F}".to_owned(), 1)]);
+    let Body::Ext { kind, data, .. } = peek_envelope(&p.b, &sent[0]).body else {
+        panic!("Ext expected");
+    };
+    let Some(ExtContent::Reaction { emojis, .. }) = ExtContent::decode(kind, &data).unwrap() else {
+        panic!("Reaction expected");
+    };
+    assert_eq!(emojis, emo(&["❤\u{FE0F}"]));
+    // The other spelling is the same set: nothing to send.
+    assert!(
+        p.a.set_reactions(row, &emo(&["❤\u{FE0F}"]), NOW + 1, &mut p.rng)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn heart_with_or_without_fe0f_is_one_emoji_on_receive() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let on_a = message_id_of(&p.a, &b, "x");
+    let on_b = message_id_of(&p.b, &a, "x");
+    let target = MessageRef {
+        id: on_a.0,
+        by_sender: true,
+    };
+    // A peer that sends the bare heart: stored in the canonical spelling.
+    let bare = ExtContent::Reaction {
+        target,
+        emojis: emo(&["❤"]),
+    }
+    .to_body();
+    let pk = seal_to_b(&mut p, &bare, 0x61);
+    let added = added_of(deliver(&mut p.b, &pk, &mut p.rng));
+    assert_eq!(added, emo(&["❤\u{FE0F}"]));
+    assert_eq!(counts(&p.b, &a, on_b), vec![("❤\u{FE0F}".to_owned(), 1)]);
+    // Bob's own fully-qualified heart counts with it, as one chip.
+    let row = row_of(&p.b, &a, "x");
+    p.b.set_reactions(row, &emo(&["❤\u{FE0F}"]), NOW, &mut p.rng)
+        .unwrap();
+    assert_eq!(counts(&p.b, &a, on_b), vec![("❤\u{FE0F}".to_owned(), 2)]);
+    // Both spellings in one received set: a duplicate, refused (sealing
+    // refuses it too: forged with the session state).
+    let secret = [0x62; 16];
+    let pt = postcard::to_allocvec(&Envelope {
+        sent_at: NOW,
+        ack_secret: secret,
+        message_id: secret,
+        body: Body::Ext {
+            kind: crate::content::KIND_REACTION,
+            unknown: UnknownPolicy::Ignore,
+            data: postcard::to_allocvec(&(target, emo(&["❤", "❤\u{FE0F}"]))).unwrap(),
+        },
+    })
+    .unwrap();
+    let pk = forge(&mut p.a, &pt, ack::packet_id_for(&secret), &mut p.rng);
+    let r = deliver(&mut p.b, &pk, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::Quarantined { .. }), "{r:?}");
+}

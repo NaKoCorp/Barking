@@ -48,6 +48,7 @@ impl Core {
     /// Replaces my set of emoji on the message of row `row_id` with
     /// `emojis` (an empty set removes my reaction).
     ///
+    /// The emoji are taken in their canonical spelling (`emoji::canonical`).
     /// Checks, before any write: the set (`TooManyEmoji`, `InvalidEmoji`),
     /// the row (`MessageNotFound`; a received row without a wire identifier
     /// cannot be referred to either), the contact (`ContactBlocked`,
@@ -70,7 +71,8 @@ impl Core {
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<Packet>> {
         self.ensure_active()?;
-        emoji::check_set(emojis)?;
+        // One spelling per emoji ("❤" is "❤\u{FE0F}"), before any comparison.
+        let emojis = &emoji::canonical_set(emojis)?;
         let row = self
             .store
             .message_by_row(row_id)?
