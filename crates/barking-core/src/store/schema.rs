@@ -1,8 +1,8 @@
-//! SQL storage schema (v3) and migrations from v1 and v2.
+//! SQL storage schema (v4) and migrations from v1, v2 and v3.
 
 use rusqlite::{Connection, params};
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Schema v1 (batch 1A), kept for the migration and for its tests: a
 /// v1 database is opened with this schema, then migrated.
@@ -367,5 +367,46 @@ pub(crate) fn migrate_v2_to_v3_hooked(
     mid_way(&tx)?;
     tx.execute_batch(SCHEMA_V3_BACKFILL)?;
     set_version(&tx, 3)?;
+    tx.commit()
+}
+
+/// Columns v4 adds to `messages`, with their definitions.
+const V4_MESSAGE_COLUMNS: [(&str, &str); 4] = [
+    ("wire_id", "BLOB"),
+    ("reply_to", "BLOB"),
+    ("reply_ref", "BLOB"),
+    ("placeholder", "INTEGER NOT NULL DEFAULT 0"),
+];
+
+/// Schema v4 (replies and reactions): the tables.
+const SCHEMA_V4_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS reactions (
+    message_id BLOB NOT NULL, reactor BLOB NOT NULL, contact_fp BLOB NOT NULL,
+    emojis TEXT NOT NULL, clock INTEGER NOT NULL, tie BLOB NOT NULL,
+    PRIMARY KEY (message_id, reactor));
+CREATE INDEX IF NOT EXISTS reactions_contact ON reactions(contact_fp);
+CREATE TABLE IF NOT EXISTS reaction_sends (
+    packet_id BLOB PRIMARY KEY NOT NULL, message_id BLOB NOT NULL,
+    contact_fp BLOB NOT NULL, own INTEGER NOT NULL, expired INTEGER NOT NULL DEFAULT 0);
+";
+
+/// Migrates a v3 database to v4 in a single transaction (DDL only): the new
+/// columns of `messages` (each added only if missing, so a development
+/// database that already has some is not refused), the reaction tables,
+/// then `schema_version` set to 4.
+pub fn migrate_v3_to_v4(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (name, ddl) in V4_MESSAGE_COLUMNS {
+        let present: bool = tx.query_row(
+            "SELECT count(*) > 0 FROM pragma_table_info('messages') WHERE name = ?1",
+            params![name],
+            |r| r.get(0),
+        )?;
+        if !present {
+            tx.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {name} {ddl};"))?;
+        }
+    }
+    tx.execute_batch(SCHEMA_V4_TABLES)?;
+    set_version(&tx, 4)?;
     tx.commit()
 }

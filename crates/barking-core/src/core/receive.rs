@@ -13,6 +13,7 @@ use super::{
     session_ad, session_id, sync,
 };
 use crate::contact::ContactCard;
+use crate::content::{ExtContent, UnknownPolicy};
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
@@ -20,7 +21,7 @@ use crate::identity::{DeviceKeys, DeviceList, DevicePublic, Fingerprint, RootIde
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{ACK_GRACE_SECS, Kind, Packet, PacketId, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
-use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow};
+use crate::store::{Direction, MessageId, MessageInsert, MessageStatus, Queries, SessionRow};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -544,11 +545,22 @@ fn accept(
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
         }
-        // Replies and reactions are not handled yet, from a contact or from
-        // my own devices.
-        (Body::Ext { .. }, _) => {
-            let id = Some(authenticated_id);
-            return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
+        // Extensible contents: replies and reactions, and kinds this version
+        // does not know (`accept_ext`).
+        (
+            Body::Ext {
+                kind,
+                unknown,
+                data,
+            },
+            _,
+        ) => {
+            let ext = Ext {
+                kind: *kind,
+                unknown: *unknown,
+                data,
+            };
+            return accept_ext(q, limiter, packet, o, &env, &ext, from_me, now, rng);
         }
         (_, false) => {
             let id = Some(authenticated_id);
@@ -566,14 +578,18 @@ fn accept(
     // it is: a resend or a retry of it, even one I deleted since, is a
     // duplicate.
     let inserted = !q.inbound_has_message(message_id)?
-        && q.insert_message(
-            row.contact_fp,
-            Direction::In,
-            &text,
-            MessageStatus::Received,
-            now,
+        && q.insert_message_row(&MessageInsert {
+            contact_fp: row.contact_fp,
+            direction: Direction::In,
+            body: text.clone(),
+            status: MessageStatus::Received,
+            at: now,
             message_id,
-        )?;
+            wire_id: Some(env.message_id),
+            reply_to: None,
+            reply_ref: None,
+            placeholder: false,
+        })?;
     // Packet → message: found again through the emitted ack (`delete_contact`).
     q.record_inbound(packet.id, message_id)?;
     route::record(q, packet.id, RouteStep::Opened, now, None)?;
@@ -611,6 +627,137 @@ fn accept(
             alias,
             text,
             ack,
+        },
+        new_prekeys,
+    ))
+}
+
+/// The content of a `Body::Ext`, as received.
+struct Ext<'a> {
+    kind: u16,
+    unknown: UnknownPolicy,
+    data: &'a [u8],
+}
+
+/// `Body::Ext` authenticated by a session. Sender x kind:
+///
+/// | Sender | `Reply` / `Reaction` | `SyncReply` / `SyncReaction` | Unknown |
+/// |---|---|---|---|
+/// | A contact | accepted | `R_NOT_MINE` | `unknown` policy |
+/// | One of my devices | `R_UNEXPECTED` | the sync path | `unknown` policy |
+///
+/// Every `Ext` from my own fingerprint first requires the sending device to
+/// be in my current list. Until the reply and reaction paths exist, the
+/// accepting cells quarantine with `R_UNEXPECTED`. An unknown kind is
+/// acknowledged like a message (the sender stops resending it) and, per its
+/// `unknown` policy, ignored or shown as a placeholder asking for an update
+/// (never for my own devices: they would show it twice).
+#[allow(clippy::too_many_arguments)]
+fn accept_ext(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    ext: &Ext<'_>,
+    from_me: bool,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let id = Some(ack::packet_id_for(&env.ack_secret));
+    if from_me && !sync::sender_is_listed(q, o.row.contact_device)? {
+        return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
+    }
+    let content = match ExtContent::decode(ext.kind, ext.data) {
+        Ok(content) => content,
+        Err(_) => return reject_authenticated(q, limiter, packet, o, now, R_BAD_CONTENT, id),
+    };
+    let Some(content) = content else {
+        return accept_unknown(q, limiter, packet, o, env, ext, from_me, now, rng);
+    };
+    let reason = match (&content, from_me) {
+        (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, false) => sync::R_NOT_MINE,
+        _ => R_UNEXPECTED,
+    };
+    reject_authenticated(q, limiter, packet, o, now, reason, id)
+}
+
+/// Unknown kind of `Body::Ext`: see `accept_ext`.
+#[allow(clippy::too_many_arguments)]
+fn accept_unknown(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    ext: &Ext<'_>,
+    from_me: bool,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let id = Some(ack::packet_id_for(&env.ack_secret));
+    // A blocked contact's content is dropped like its texts.
+    if !from_me && q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+        return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+    }
+    let (row, new_prekeys, _) = commit_session(q, o, now)?;
+    q.mark_seen(packet.id, now)?;
+    // For my own devices `row.contact_fp` is my fingerprint, as in `accept_sync`.
+    let message_id = MessageId::incoming(&row.contact_fp, &env.message_id);
+    let already = q.inbound_has_message(message_id)?;
+    q.record_inbound(packet.id, message_id)?;
+    route::record(q, packet.id, RouteStep::Opened, now, None)?;
+    if already {
+        log_limited(
+            q,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DuplicateIgnored {
+                packet_id: packet.id,
+            },
+        )?;
+        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        return Ok((ReceiveOutcome::Duplicate, new_prekeys));
+    }
+    log(
+        q,
+        now,
+        Some(packet.id),
+        &TransparencyEvent::UnknownContent {
+            packet_id: packet.id,
+            kind: ext.kind,
+        },
+    )?;
+    let show = ext.unknown == UnknownPolicy::ShowUpdate && !from_me;
+    let inserted = show
+        && q.insert_message_row(&MessageInsert {
+            contact_fp: row.contact_fp,
+            direction: Direction::In,
+            body: String::new(),
+            status: MessageStatus::Received,
+            at: now,
+            message_id,
+            wire_id: Some(env.message_id),
+            reply_to: None,
+            reply_ref: None,
+            placeholder: true,
+        })?;
+    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    if !inserted {
+        // Ignored, or a placeholder deleted since (tombstone).
+        let outcome = if show {
+            ReceiveOutcome::Duplicate
+        } else {
+            ReceiveOutcome::Ignored
+        };
+        return Ok((outcome, new_prekeys));
+    }
+    let alias = Core::alias_in(q, row.contact_fp)?;
+    Ok((
+        ReceiveOutcome::NeedsUpdate {
+            from: row.contact_fp,
+            alias,
         },
         new_prekeys,
     ))
@@ -751,13 +898,7 @@ fn accept_sync(
 ) -> Result<RxOut> {
     // The sending device must be in my current list (not just
     // have kept a session from before its removal).
-    let listed = OwnDevices::read(q)?.is_some_and(|own| {
-        own.list
-            .certs
-            .iter()
-            .any(|c| c.device.id() == o.row.contact_device)
-    });
-    if !listed {
+    if !sync::sender_is_listed(q, o.row.contact_device)? {
         let id = Some(ack::packet_id_for(&env.ack_secret));
         return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
     }

@@ -19,6 +19,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use zeroize::Zeroize;
 
+use crate::content::MessageRef;
 use crate::identity::device::DeviceId;
 use crate::identity::root::Fingerprint;
 use crate::packet::{Kind, Packet, PacketId};
@@ -215,6 +216,31 @@ pub struct MessageRow {
     pub status: MessageStatus,
     pub at: u64,
     pub message_id: MessageId,
+    /// Raw envelope identifier of a received message (what a reply or a
+    /// reaction of the other side refers to).
+    pub wire_id: Option<[u8; 16]>,
+    /// Stored identifier of the message this one replies to.
+    pub reply_to: Option<MessageId>,
+    /// The reference a reply carries, sent or received: the original's
+    /// author stays derivable after the original is deleted.
+    pub reply_ref: Option<MessageRef>,
+    /// Stands for content this version cannot read ("needs a newer version").
+    pub placeholder: bool,
+}
+
+/// A message row to insert (`Queries::insert_message_row`).
+#[derive(Clone)]
+pub struct MessageInsert {
+    pub contact_fp: Fingerprint,
+    pub direction: Direction,
+    pub body: String,
+    pub status: MessageStatus,
+    pub at: u64,
+    pub message_id: MessageId,
+    pub wire_id: Option<[u8; 16]>,
+    pub reply_to: Option<MessageId>,
+    pub reply_ref: Option<MessageRef>,
+    pub placeholder: bool,
 }
 
 impl fmt::Debug for MessageRow {
@@ -228,6 +254,8 @@ impl fmt::Debug for MessageRow {
             .field("status", &self.status)
             .field("at", &self.at)
             .field("message_id", &self.message_id)
+            .field("reply_to", &self.reply_to)
+            .field("placeholder", &self.placeholder)
             .finish()
     }
 }
@@ -655,6 +683,9 @@ impl Store {
                 .execute_batch(schema::OUTBOX_ADD_DEPOSIT_TRIED_AT)
                 .map_err(map_err)?;
         }
+        if stored.is_none_or(|v| v < 4) {
+            schema::migrate_v3_to_v4(&self.conn).map_err(map_err)?;
+        }
         Ok(())
     }
 
@@ -892,19 +923,46 @@ pub trait Queries {
         at: u64,
         message_id: MessageId,
     ) -> Result<bool> {
+        self.insert_message_row(&MessageInsert {
+            contact_fp,
+            direction,
+            body: body.to_owned(),
+            status,
+            at,
+            message_id,
+            wire_id: None,
+            reply_to: None,
+            reply_ref: None,
+            placeholder: false,
+        })
+    }
+
+    /// `insert_message` with the reply and wire columns. Same tombstone rule.
+    fn insert_message_row(&self, m: &MessageInsert) -> Result<bool> {
+        let reply_ref = m
+            .reply_ref
+            .as_ref()
+            .map(postcard::to_allocvec)
+            .transpose()
+            .map_err(|_| CoreError::Store("serialization".into()))?;
         let n = self
             .conn()
             .execute(
                 "INSERT OR IGNORE INTO messages(message_id, contact_fp, direction, body, \
-                 status, at) SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE NOT EXISTS \
+                 status, at, wire_id, reply_to, reply_ref, placeholder) \
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 WHERE NOT EXISTS \
                  (SELECT 1 FROM deleted_messages WHERE message_id = ?1)",
                 params![
-                    message_id.0.as_slice(),
-                    contact_fp.0.as_slice(),
-                    direction as i64,
-                    body,
-                    status as i64,
-                    to_i64(at)
+                    m.message_id.0.as_slice(),
+                    m.contact_fp.0.as_slice(),
+                    m.direction as i64,
+                    m.body,
+                    m.status as i64,
+                    to_i64(m.at),
+                    m.wire_id.as_ref().map(<[u8; 16]>::as_slice),
+                    m.reply_to.as_ref().map(|id| id.0.as_slice()),
+                    reply_ref,
+                    i64::from(m.placeholder),
                 ],
             )
             .map_err(map_err)?;
@@ -1205,7 +1263,8 @@ pub trait Queries {
         let mut stmt = self
             .conn()
             .prepare(
-                "SELECT id, contact_fp, direction, body, status, at, message_id \
+                "SELECT id, contact_fp, direction, body, status, at, message_id, \
+                 wire_id, reply_to, reply_ref, placeholder \
                  FROM messages WHERE contact_fp = ?1 ORDER BY at, id",
             )
             .map_err(map_err)?;
@@ -1222,7 +1281,8 @@ pub trait Queries {
         let mut stmt = self
             .conn()
             .prepare(
-                "SELECT id, contact_fp, direction, body, status, at, message_id \
+                "SELECT id, contact_fp, direction, body, status, at, message_id, \
+                 wire_id, reply_to, reply_ref, placeholder \
                  FROM messages ORDER BY id",
             )
             .map_err(map_err)?;
@@ -1384,7 +1444,8 @@ pub trait Queries {
     /// unlike `seen`).
     fn message_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageRow>> {
         const COLS: &str = "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, \
-                            m.message_id FROM messages m";
+                            m.message_id, m.wire_id, m.reply_to, m.reply_ref, m.placeholder \
+                            FROM messages m";
         let out = self
             .conn()
             .query_row(
@@ -2173,7 +2234,19 @@ impl Queries for Tx<'_> {
     }
 }
 
-type MessageRaw = (i64, Vec<u8>, i64, String, i64, i64, Vec<u8>);
+type MessageRaw = (
+    i64,
+    Vec<u8>,
+    i64,
+    String,
+    i64,
+    i64,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    i64,
+);
 
 /// Ids per query of `Queries::deliveries_of`.
 pub const SUMMARY_CHUNK: usize = 200;
@@ -2196,6 +2269,7 @@ fn summaries(
 ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
     let sql = format!(
         "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, m.message_id, \
+         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, \
          count(d.packet_id), coalesce(sum(d.status = 3), 0), \
          coalesce(sum(d.status IN (1, 3)), 0), coalesce(sum(d.status = 0), 0), \
          min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at), \
@@ -2224,16 +2298,16 @@ fn summaries(
             Ok((
                 message_raw(r)?,
                 (
-                    r.get(7)?,
-                    r.get(8)?,
-                    r.get(9)?,
-                    r.get(10)?,
                     r.get(11)?,
                     r.get(12)?,
                     r.get(13)?,
                     r.get(14)?,
                     r.get(15)?,
                     r.get(16)?,
+                    r.get(17)?,
+                    r.get(18)?,
+                    r.get(19)?,
+                    r.get(20)?,
                 ),
             ))
         })
@@ -2285,10 +2359,16 @@ fn message_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRaw> {
         r.get(4)?,
         r.get(5)?,
         r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
     ))
 }
 
-fn message_from_raw((id, fp, dir, body, st, at, mid): MessageRaw) -> Result<MessageRow> {
+fn message_from_raw(
+    (id, fp, dir, body, st, at, mid, wire, reply_to, reply_ref, placeholder): MessageRaw,
+) -> Result<MessageRow> {
     Ok(MessageRow {
         id,
         contact_fp: Fingerprint(arr(fp)?),
@@ -2297,6 +2377,13 @@ fn message_from_raw((id, fp, dir, body, st, at, mid): MessageRaw) -> Result<Mess
         status: MessageStatus::from_i64(st)?,
         at: to_u64(at),
         message_id: MessageId(arr(mid)?),
+        wire_id: wire.map(arr).transpose()?,
+        reply_to: reply_to.map(|b| arr(b).map(MessageId)).transpose()?,
+        reply_ref: reply_ref
+            .map(|b| postcard::from_bytes(&b))
+            .transpose()
+            .map_err(|_| CoreError::Store("invalid reply reference".into()))?,
+        placeholder: placeholder != 0,
     })
 }
 

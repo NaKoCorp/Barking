@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::contact::ContactCard;
+use crate::content::{ExtContent, MessageRef, UnknownPolicy};
 use crate::envelope::{Body, Envelope, SyncOp, Wire, parse_wire};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{
@@ -11,7 +12,7 @@ use crate::identity::{
 use crate::mailbox::day_of;
 use crate::packet::{ACK_GRACE_SECS, DEFAULT_HOPS, Kind, Tier, ack};
 use crate::store::{Direction, MessageId, MessageStatus, SessionRow};
-use crate::transparency::SyncKind;
+use crate::transparency::{SyncKind, TransparencyEvent};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rusqlite::OptionalExtension;
@@ -4915,4 +4916,258 @@ fn watched_days_cover_the_whole_lifetime() {
         .unwrap();
     let (late, _) = &sealed[0];
     assert!(watched.contains(&late.mailbox));
+}
+
+// --- Lot 2, task 2: Ext envelope, unknown kinds, sender x kind matrix.
+
+fn ext(kind: u16, unknown: UnknownPolicy) -> Body {
+    Body::Ext {
+        kind,
+        unknown,
+        data: vec![1, 2, 3],
+    }
+}
+
+fn some_ref() -> MessageRef {
+    MessageRef {
+        id: [9; 16],
+        by_sender: true,
+    }
+}
+
+fn acks_for(c: &mut Core, packet: &Packet) -> usize {
+    c.pending_outbox(NOW)
+        .unwrap()
+        .iter()
+        .map(|b| Packet::decode(b).unwrap())
+        .filter(|q| q.kind == Kind::Ack && q.payload[..16] == packet.id.0)
+        .count()
+}
+
+fn seal_to_b(p: &mut Pair, body: &Body, mid: u8) -> Packet {
+    let target = send::Target::Contact(p.b.fingerprint());
+    seal_body(&mut p.a, &target, body, MessageId([mid; 16]), &mut p.rng)
+        .remove(0)
+        .0
+}
+
+#[test]
+fn unknown_ignore_kind_is_acked_and_invisible() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::Ignore), 0x31);
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Ignored), "{r:?}");
+    assert_eq!(acks_for(&mut p.b, &pk), 1);
+    assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before);
+    let logged =
+        p.b.transparency_log(100)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, e)| matches!(e, TransparencyEvent::UnknownContent { kind: 999, .. }))
+            .count();
+    assert_eq!(logged, 1);
+    // The same content again, in a new packet: a duplicate (still acked).
+    let again = seal_to_b(&mut p, &ext(999, UnknownPolicy::Ignore), 0x31);
+    let r = p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    assert_eq!(acks_for(&mut p.b, &again), 1);
+}
+
+#[test]
+fn unknown_show_update_kind_adds_placeholder_row() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x32);
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    match r {
+        ReceiveOutcome::NeedsUpdate { from, .. } => assert_eq!(from, a_fp),
+        other => panic!("NeedsUpdate expected, got {other:?}"),
+    }
+    let rows = p.b.messages_with(&a_fp).unwrap();
+    assert_eq!(rows.len(), before + 1);
+    let row = rows.last().unwrap();
+    assert!(row.placeholder);
+    assert_eq!(row.body, "");
+    assert_eq!(row.direction, Direction::In);
+    assert_eq!(row.wire_id, Some([0x32; 16]));
+    assert_eq!(acks_for(&mut p.b, &pk), 1);
+    // A resend of it is a duplicate, not a second placeholder.
+    let again = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x32);
+    let r = p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before + 1);
+}
+
+#[test]
+fn unknown_kind_from_blocked_contact_refused() {
+    let mut p = pair();
+    let a = p.b.resolve("alice").unwrap();
+    p.b.block_contact(&a, NOW, &mut p.rng).unwrap();
+    let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x33);
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), "blocked contact");
+    assert_eq!(acks_for(&mut p.b, &pk), 0);
+}
+
+#[test]
+fn known_kind_malformed_is_quarantined() {
+    let mut p = pair();
+    // Sealing refuses a malformed known kind: forged with the session state.
+    let secret = [0x34; 16];
+    let pt = postcard::to_allocvec(&Envelope {
+        sent_at: NOW,
+        ack_secret: secret,
+        message_id: secret,
+        body: Body::Ext {
+            kind: 3,
+            unknown: UnknownPolicy::Ignore,
+            data: vec![0xff],
+        },
+    })
+    .unwrap();
+    let pk = forge(&mut p.a, &pt, ack::packet_id_for(&secret), &mut p.rng);
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), "authenticated but malformed content");
+}
+
+#[test]
+fn received_text_keeps_wire_id() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let b_fp = p.b.fingerprint();
+    let pk =
+        p.a.send_text(&b_fp, "hello", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    let sent = p.a.messages_with(&b_fp).unwrap().pop().unwrap();
+    let got = p.b.messages_with(&a_fp).unwrap().pop().unwrap();
+    assert_eq!(got.body, "hello");
+    assert_eq!(got.wire_id, Some(sent.message_id.0));
+    // Sent rows keep no wire id.
+    assert_eq!(sent.wire_id, None);
+}
+
+#[test]
+fn sync_ext_from_contact_quarantined() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let b_fp = p.b.fingerprint();
+    let bodies = [
+        ExtContent::SyncReply {
+            to: a_fp,
+            text: "faux".into(),
+            reply_to: some_ref(),
+        }
+        .to_body(),
+        ExtContent::SyncReaction {
+            to: a_fp,
+            target: some_ref(),
+            emojis: vec!["👍".into()],
+        }
+        .to_body(),
+    ];
+    let before = p.a.messages_with(&b_fp).unwrap().len();
+    for (i, body) in bodies.iter().enumerate() {
+        let id = MessageId([0x40 + i as u8; 16]);
+        let out = seal_body(&mut p.b, &send::Target::Contact(a_fp), body, id, &mut p.rng);
+        let r =
+            p.a.receive(&out[0].0.encode(), "t", NOW, &mut p.rng)
+                .unwrap();
+        assert_eq!(reason(r), NOT_MINE, "case {i}");
+    }
+    assert_eq!(p.a.messages_with(&b_fp).unwrap().len(), before);
+    let reactions: i64 =
+        p.a.store
+            .conn()
+            .query_row("SELECT count(*) FROM reactions", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(reactions, 0);
+}
+
+#[test]
+fn contact_ext_from_my_device_refused() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let bodies = [
+        ExtContent::Reply {
+            text: "x".into(),
+            reply_to: some_ref(),
+        }
+        .to_body(),
+        ExtContent::Reaction {
+            target: some_ref(),
+            emojis: vec!["👍".into()],
+        }
+        .to_body(),
+    ];
+    for (i, body) in bodies.iter().enumerate() {
+        let out = seal_body(
+            &mut a,
+            &send::Target::OwnDevices,
+            body,
+            MessageId([0x50 + i as u8; 16]),
+            &mut rng,
+        );
+        let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
+        assert_eq!(reason(r), "unexpected content for this mailbox", "case {i}");
+    }
+}
+
+#[test]
+fn unknown_kind_from_unlisted_own_device_refused() {
+    let (_d, mut a, mut t1, mut t2, mut rng) = linked_twice();
+    let card = a.contact_card("").unwrap();
+    let pkt = devices_packet(&mut a, &t1, card, 1, &mut rng);
+    t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap();
+    let t1_id = t1.device.public().id();
+    let body = ext(999, UnknownPolicy::Ignore);
+    // Listed: accepted and set aside (this also opens the session).
+    let out = seal_body(
+        &mut t2,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x61; 16]),
+        &mut rng,
+    );
+    let p = &out.iter().find(|(_, d)| *d == t1_id).unwrap().0;
+    let r = t1.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Ignored), "{r:?}");
+    // T1's reply: T2's session no longer awaits an Initial.
+    let t2_id = t2.device.public().id();
+    let back = seal_body(
+        &mut t1,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x63; 16]),
+        &mut rng,
+    );
+    let p = &back.iter().find(|(_, d)| *d == t2_id).unwrap().0;
+    let r = t2.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Ignored), "{r:?}");
+    // T2 leaves the list (session kept): refused.
+    let root = a.root.as_ref().unwrap();
+    let certs = a
+        .devices
+        .certs
+        .iter()
+        .filter(|c| c.device != t2.device.public())
+        .cloned()
+        .collect();
+    let list = DeviceList::sign(root, a.devices.version + 1, certs).unwrap();
+    t1.store.put_meta(META_DEVICE_LIST, &list).unwrap();
+    let out = seal_body(
+        &mut t2,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x62; 16]),
+        &mut rng,
+    );
+    let p = &out.iter().find(|(_, d)| *d == t1_id).unwrap().0;
+    assert_eq!(
+        reason(t1.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
+        NOT_MINE
+    );
 }

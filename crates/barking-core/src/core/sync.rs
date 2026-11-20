@@ -31,6 +31,13 @@ pub(super) const R_NOT_MINE: &str = "synchronization from a device that is not m
 pub(super) const R_SYNC_REFUSED: &str = "synchronization refused";
 pub(super) const R_DEVICES_REFUSED: &str = "device list refused";
 
+/// The device `device` is in my current list (not just a session kept from
+/// before its removal): required of anything it sends as one of mine.
+pub(super) fn sender_is_listed(q: &impl Queries, device: DeviceId) -> Result<bool> {
+    Ok(OwnDevices::read(q)?
+        .is_some_and(|own| own.list.certs.iter().any(|c| c.device.id() == device)))
+}
+
 /// Seals `body` for each of my other devices; each packet is
 /// recorded as an `own` delivery of `message_id` (its ack does not make
 /// the message `Received`). Without another device, nothing is done.

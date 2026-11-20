@@ -862,6 +862,14 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
         ReceiveOutcome::Removed => {
             println!("{label}: this device was removed from your account");
         }
+        ReceiveOutcome::Ignored => println!("{label}: content this version cannot read, set aside"),
+        ReceiveOutcome::NeedsUpdate { from, alias } => {
+            let who = alias.unwrap_or_else(|| from.to_string());
+            println!(
+                "{label}: {} sent content this version cannot read (update needed)",
+                printable(&who)
+            );
+        }
     }
     Ok(())
 }

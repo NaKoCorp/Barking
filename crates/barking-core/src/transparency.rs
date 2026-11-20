@@ -158,6 +158,12 @@ pub enum TransparencyEvent {
         cancelled: u32,
         already_left: u32,
     },
+    /// An authenticated content of kind `kind`, which this version does not
+    /// know, was acknowledged and set aside. No content. Added last.
+    UnknownContent {
+        packet_id: PacketId,
+        kind: u16,
+    },
 }
 
 /// Why a node was set aside.
@@ -452,6 +458,11 @@ impl TransparencyEvent {
                 "{count} message(s) deleted from this device: {cancelled} cancelled before \
                  leaving it, {already_left} had already left (the contact still receives \
                  them)."
+            ),
+            Self::UnknownContent { packet_id, kind } => format!(
+                "Packet {} carried content this version cannot read (kind {kind}). \
+                 It was acknowledged and set aside.",
+                hex(&packet_id.0[..4])
             ),
         }
     }

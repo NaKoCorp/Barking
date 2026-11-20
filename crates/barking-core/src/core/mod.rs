@@ -168,6 +168,17 @@ pub enum ReceiveOutcome {
     /// A newer list signed by my root no longer contains this device: it is
     /// removed from my account (see `Core::removed`); the ack is queued.
     Removed,
+    /// Content of a kind this version does not know, acknowledged and set
+    /// aside (`UnknownPolicy::Ignore`, or one of my own devices'): nothing
+    /// is added to the conversation.
+    Ignored,
+    /// Content of an unknown kind its sender wants shown
+    /// (`UnknownPolicy::ShowUpdate`): the conversation gains a placeholder
+    /// row asking for a newer version; the ack is queued.
+    NeedsUpdate {
+        from: Fingerprint,
+        alias: Option<String>,
+    },
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -204,6 +215,12 @@ impl fmt::Debug for ReceiveOutcome {
                 .field("alias", alias)
                 .finish(),
             Self::Removed => f.write_str("Removed"),
+            Self::Ignored => f.write_str("Ignored"),
+            Self::NeedsUpdate { from, alias } => f
+                .debug_struct("NeedsUpdate")
+                .field("from", from)
+                .field("alias", alias)
+                .finish(),
         }
     }
 }
