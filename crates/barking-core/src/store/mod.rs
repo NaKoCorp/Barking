@@ -1782,8 +1782,10 @@ pub trait Queries {
     /// Deletes a contact, all its sessions and its packets in the send
     /// queue: my messages for it that never left (no deposit recorded nor
     /// tried: a deposited one stays for its verdict, `confirm_expired`), my
-    /// card updates for its devices and my acknowledgements of its
-    /// messages (the history is kept). The `SyncSent` copies of my
+    /// card updates for its devices, my acknowledgements of its packets
+    /// (messages, reactions, content set aside: the history is kept), and
+    /// my reaction packets about the conversation, to it and to my other
+    /// devices, with their deliveries. The `SyncSent` copies of my
     /// messages for my other devices stay in the queue. Their pending
     /// deliveries are the caller's (`core::contacts::delete_in`).
     fn delete_contact(&self, fp: Fingerprint) -> Result<()> {
