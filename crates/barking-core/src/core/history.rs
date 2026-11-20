@@ -21,7 +21,7 @@
 //! not only the entry: an authentic archive never contains one),
 //! unique message identifiers. Insertion then happens in the
 //! `finish_link` transaction; an already present identifier is ignored
-//! (`insert_message` returns false), so importing twice creates no
+//! (`insert_message_row` returns false), so importing twice creates no
 //! duplicate, and a `SyncSent` copy received later for an archived message
 //! (same raw identifier, outgoing direction) is likewise ignored.
 //!
@@ -46,10 +46,11 @@ use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::content::MessageRef;
 use crate::crypto::aead::{XNONCE_LEN, xopen, xseal};
 use crate::crypto::labels;
 use crate::identity::root::{Fingerprint, RootIdentity, RootPublic};
-use crate::store::{Direction, MessageId, MessageRow, MessageStatus, Queries};
+use crate::store::{Direction, MessageId, MessageInsert, MessageRow, MessageStatus, Queries};
 use crate::{CoreError, Result};
 
 /// Size of a plaintext chunk: 64 KiB (the last one may be shorter).
@@ -134,6 +135,13 @@ pub(super) struct HistoryEntry {
     body: String,
     status: WireStatus,
     at: u64,
+    /// Raw envelope identifier of a received message: a reply or a
+    /// reaction of this device refers to it.
+    wire_id: Option<[u8; 16]>,
+    /// Stored identifier of the message this one replies to.
+    reply_to: Option<[u8; 16]>,
+    reply_ref: Option<MessageRef>,
+    placeholder: bool,
 }
 
 impl Drop for HistoryEntry {
@@ -151,6 +159,7 @@ impl core::fmt::Debug for HistoryEntry {
             .field("body", &format_args!("<{} bytes>", self.body.len()))
             .field("status", &self.status)
             .field("at", &self.at)
+            .field("placeholder", &self.placeholder)
             .finish()
     }
 }
@@ -164,6 +173,10 @@ impl HistoryEntry {
             status,
             at,
             message_id,
+            wire_id,
+            reply_to,
+            reply_ref,
+            placeholder,
             ..
         } = row;
         HistoryEntry {
@@ -181,6 +194,10 @@ impl HistoryEntry {
                 MessageStatus::NotDelivered => WireStatus::Failed,
             },
             at,
+            wire_id,
+            reply_to: reply_to.map(|id| id.0),
+            reply_ref,
+            placeholder,
         }
     }
 
@@ -341,14 +358,18 @@ pub(super) fn check_entries(
 pub(super) fn import(q: &impl Queries, entries: &[HistoryEntry]) -> Result<u32> {
     let mut inserted = 0u32;
     for e in entries {
-        if q.insert_message(
-            e.contact,
-            e.direction(),
-            &e.body,
-            e.status(),
-            e.at,
-            MessageId(e.message_id),
-        )? {
+        if q.insert_message_row(&MessageInsert {
+            contact_fp: e.contact,
+            direction: e.direction(),
+            body: e.body.clone(),
+            status: e.status(),
+            at: e.at,
+            message_id: MessageId(e.message_id),
+            wire_id: e.wire_id,
+            reply_to: e.reply_to.map(MessageId),
+            reply_ref: e.reply_ref,
+            placeholder: e.placeholder,
+        })? {
             inserted = inserted.saturating_add(1);
         }
     }
@@ -376,6 +397,10 @@ mod tests {
             body: body.to_owned(),
             status: WireStatus::Delivered,
             at: u64::from(id),
+            wire_id: None,
+            reply_to: None,
+            reply_ref: None,
+            placeholder: false,
         }
     }
 
@@ -538,6 +563,33 @@ mod tests {
         assert_eq!(check_entries(&ok, &known(&[1])), Err(BAD_HISTORY));
         let dup = vec![entry(1, 1, "a"), entry(1, 1, "b")];
         assert_eq!(check_entries(&dup, &known(&[1])), Err(BAD_HISTORY));
+    }
+
+    #[test]
+    fn history_keeps_wire_and_reply_columns() {
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&d.path().join("db"), &[3u8; 32]).unwrap();
+        let mut rng = rand::rng();
+        let secret = [7u8; 32];
+        let reference = MessageRef {
+            id: [8; 16],
+            by_sender: true,
+        };
+        let mut e = entry(1, 1, "quote");
+        e.wire_id = Some([4; 16]);
+        e.reply_to = Some([5; 16]);
+        e.reply_ref = Some(reference);
+        let mut ph = entry(3, 1, "");
+        ph.placeholder = true;
+        let archive = seal_archive(&secret, &root(1), &[e, ph], &mut rng).unwrap();
+        let opened = open_archive(&secret, &root(1).public(), &archive).unwrap();
+        store.transaction(|tx| import(tx, &opened)).unwrap();
+        let rows = store.messages_with(fp(1)).unwrap();
+        assert_eq!(rows[0].wire_id, Some([4; 16]));
+        assert_eq!(rows[0].reply_to, Some(MessageId([5; 16])));
+        assert_eq!(rows[0].reply_ref, Some(reference));
+        assert!(!rows[0].placeholder);
+        assert!(rows[1].placeholder);
     }
 
     #[test]

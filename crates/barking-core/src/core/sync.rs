@@ -18,11 +18,14 @@ use super::route::{self, RouteStep};
 use super::send::{SealTime, Target, seal_for};
 use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts, load_card, log};
 use crate::contact::ContactCard;
+use crate::content::ExtContent;
 use crate::envelope::{self, Body, Envelope, SyncOp};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint};
 use crate::packet::Packet;
-use crate::store::{BlockState, ContactClock, Direction, MessageId, MessageStatus, Queries};
+use crate::store::{
+    BlockState, ContactClock, Direction, MessageId, MessageInsert, MessageStatus, Queries,
+};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -354,7 +357,34 @@ pub(super) fn apply(
 ) -> Result<core::result::Result<Option<SyncKind>, &'static str>> {
     let me = &device.public();
     match &env.body {
-        Body::Text(_) | Body::CardUpdate(_) | Body::Ext { .. } => Ok(Err(R_SYNC_REFUSED)),
+        Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
+        Body::Ext { kind, data, .. } => {
+            let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
+            // Only `SyncReply` is a sync content; any other kind is refused.
+            let Ok(Some(ExtContent::SyncReply { to, text, reply_to })) =
+                ExtContent::decode(*kind, data)
+            else {
+                return Ok(Err(R_SYNC_REFUSED));
+            };
+            if to == own.list.root.fingerprint() {
+                return Ok(Err(R_SYNC_REFUSED));
+            }
+            // As `SyncSent`, with the quote: `reply_to` is resolved as my
+            // own packet's (I am the sealer's account).
+            q.insert_message_row(&MessageInsert {
+                contact_fp: to,
+                direction: Direction::Out,
+                body: text,
+                status: MessageStatus::OnNetwork,
+                at: env.sent_at,
+                message_id: MessageId(env.message_id),
+                wire_id: None,
+                reply_to: Some(reply_to.resolve(true, &to)),
+                reply_ref: Some(reply_to),
+                placeholder: false,
+            })?;
+            Ok(Ok(Some(SyncKind::Sent)))
+        }
         Body::AdminTransfer { seed, version } => super::admin::apply(q, seed, *version),
         // Handled by the receiver once the session is written (`remove.rs`).
         Body::RemoveMe => Ok(Ok(None)),
@@ -404,6 +434,18 @@ pub(super) fn apply(
             purge_removed_own_sessions(q, &card.devices)?;
             Ok(Ok(Some(SyncKind::Devices)))
         }
+    }
+}
+
+/// The contact a `SyncSent` or `SyncReply` body was sent to.
+pub(super) fn sent_to(body: &Body) -> Option<Fingerprint> {
+    match body {
+        Body::SyncSent { to, .. } => Some(*to),
+        Body::Ext { kind, data, .. } => match ExtContent::decode(*kind, data) {
+            Ok(Some(ExtContent::SyncReply { to, .. })) => Some(to),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

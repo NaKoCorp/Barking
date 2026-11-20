@@ -46,7 +46,7 @@ use crate::identity::{
 use crate::mailbox::{MailboxId, day_of, intro_mailbox, session_mailbox};
 use crate::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId};
 use crate::ratchet::RatchetState;
-use crate::store::{EventClass, MessageRow, MessageStatus, Queries, Store};
+use crate::store::{EventClass, MessageId, MessageRow, MessageStatus, Queries, Store};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
@@ -890,6 +890,13 @@ impl Core {
             return Err(CoreError::Malformed("transport event"));
         }
         log(&self.store, now, None, &event)
+    }
+
+    /// The message `id` of the conversation with `contact`, for a quote.
+    /// `None` if it is absent (not received yet, deleted) or belongs to
+    /// another conversation.
+    pub fn message_in(&self, contact: &Fingerprint, id: MessageId) -> Result<Option<MessageRow>> {
+        self.store.message_in(*contact, id)
     }
 
     /// History with a contact, from oldest to newest.

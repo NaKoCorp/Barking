@@ -5171,3 +5171,291 @@ fn unknown_kind_from_unlisted_own_device_refused() {
         NOT_MINE
     );
 }
+
+// --- Lot 2, task 3: replies.
+
+/// The whole row of the message with this body.
+fn full_row(c: &Core, contact: &Fingerprint, body: &str) -> crate::store::MessageRow {
+    c.messages_with(contact)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+}
+
+/// The envelope of `p` as `to` would read it, without touching `to`.
+fn peek_envelope(to: &Core, p: &Packet) -> Envelope {
+    let row = best_session(to);
+    let mut ratchet = de_state(&row.state).unwrap();
+    let Wire::Normal { msg } = parse_wire(&p.payload).unwrap() else {
+        panic!("Wire::Normal expected");
+    };
+    let pt = ratchet.decrypt(&msg, &row.ad, NOW).unwrap();
+    crate::envelope::decode(&pt).unwrap()
+}
+
+fn deliver(to: &mut Core, p: &Packet, rng: &mut StdRng) -> ReceiveOutcome {
+    to.receive(&p.encode(), "t", NOW, rng).unwrap()
+}
+
+/// `pair` plus Carol, a contact of Alice (and Alice of hers).
+fn with_carol() -> (Pair, TempDir, Core) {
+    let mut p = pair();
+    let (dc, mut c) = party("c", 3);
+    let mut rng = StdRng::seed_from_u64(0);
+    p.a.add_contact(
+        &c.contact_card("Carol").unwrap(),
+        Some("carol"),
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    c.add_contact(
+        &p.a.contact_card("Alice").unwrap(),
+        Some("alice"),
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    (p, dc, c)
+}
+
+#[test]
+fn reply_to_received_message() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = p.a.send_text(&b, "18 h ?", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.b, &pk[0], &mut p.rng);
+    let quoted = full_row(&p.b, &a, "18 h ?");
+    let out =
+        p.b.send_message(&a, "oui", Some(quoted.id), NOW, &mut p.rng)
+            .unwrap();
+    // The sender's row keeps the local id and the reference.
+    let mine = full_row(&p.b, &a, "oui");
+    let wire = quoted.wire_id.unwrap();
+    assert_eq!(mine.reply_to, Some(quoted.message_id));
+    assert_eq!(
+        mine.reply_ref,
+        Some(MessageRef {
+            id: wire,
+            by_sender: false
+        })
+    );
+    assert!(matches!(
+        deliver(&mut p.a, &out[0], &mut p.rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    let original = full_row(&p.a, &b, "18 h ?");
+    let got = full_row(&p.a, &b, "oui");
+    assert_eq!(got.reply_to, Some(original.message_id));
+    assert_eq!(got.reply_ref, mine.reply_ref);
+    assert!(got.wire_id.is_some());
+    let quote = p.a.message_in(&b, got.reply_to.unwrap()).unwrap().unwrap();
+    assert_eq!(quote.body, "18 h ?");
+    // The rows survive a reopening.
+    assert_eq!(
+        p.a.messages_with(&b).unwrap().last().unwrap().reply_ref,
+        got.reply_ref
+    );
+}
+
+#[test]
+fn reply_to_sent_message() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = p.b.send_text(&a, "mine", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.a, &pk[0], &mut p.rng);
+    let own = full_row(&p.b, &a, "mine");
+    let out =
+        p.b.send_message(&a, "re", Some(own.id), NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(
+        full_row(&p.b, &a, "re").reply_ref,
+        Some(MessageRef {
+            id: own.message_id.0,
+            by_sender: true
+        })
+    );
+    deliver(&mut p.a, &out[0], &mut p.rng);
+    let received = full_row(&p.a, &b, "mine");
+    let got = full_row(&p.a, &b, "re");
+    assert_eq!(got.reply_to, Some(received.message_id));
+    assert_eq!(
+        p.a.message_in(&b, got.reply_to.unwrap())
+            .unwrap()
+            .unwrap()
+            .body,
+        "mine"
+    );
+}
+
+#[test]
+fn reply_without_original_resolves_later() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
+    let row = full_row(&p.b, &a, "orig");
+    let reply =
+        p.b.send_message(&a, "re", Some(row.id), NOW, &mut p.rng)
+            .unwrap();
+    // The reply first.
+    deliver(&mut p.a, &reply[0], &mut p.rng);
+    let id = full_row(&p.a, &b, "re").reply_to.unwrap();
+    assert!(p.a.message_in(&b, id).unwrap().is_none());
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    let found = p.a.message_in(&b, id).unwrap().unwrap();
+    assert_eq!((found.body.as_str(), found.message_id), ("orig", id));
+}
+
+#[test]
+fn deleted_original_reads_unavailable() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    let id = full_row(&p.a, &b, "orig");
+    p.a.delete_message(id.id, NOW).unwrap();
+    let row = full_row(&p.b, &a, "orig");
+    let reply =
+        p.b.send_message(&a, "re", Some(row.id), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &reply[0], &mut p.rng);
+    let got = full_row(&p.a, &b, "re");
+    assert_eq!(got.reply_to, Some(id.message_id));
+    assert!(p.a.message_in(&b, id.message_id).unwrap().is_none());
+    // A resend of the original does not bring it back.
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    assert!(p.a.message_in(&b, id.message_id).unwrap().is_none());
+    assert!(
+        p.a.messages_with(&b)
+            .unwrap()
+            .iter()
+            .all(|m| m.body != "orig")
+    );
+}
+
+#[test]
+fn reply_to_other_conversation_is_unavailable() {
+    let (mut p, _dc, mut c) = with_carol();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let c_fp = c.fingerprint();
+    let to_bob = full_row(&p.a, &b, "x");
+    // Carol forges a quote of Alice's message to Bob.
+    let forged = ExtContent::Reply {
+        text: "snoop".into(),
+        reply_to: MessageRef {
+            id: to_bob.message_id.0,
+            by_sender: false,
+        },
+    }
+    .to_body();
+    let out = seal_body(
+        &mut c,
+        &send::Target::Contact(a),
+        &forged,
+        MessageId([0x70; 16]),
+        &mut p.rng,
+    );
+    assert!(matches!(
+        deliver(&mut p.a, &out[0].0, &mut p.rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    let got = full_row(&p.a, &c_fp, "snoop");
+    let resolved = got.reply_to.unwrap();
+    assert_eq!(resolved, to_bob.message_id);
+    assert!(p.a.message_in(&c_fp, resolved).unwrap().is_none());
+    assert!(p.a.message_in(&b, resolved).unwrap().is_some());
+}
+
+#[test]
+fn reply_refuses_bad_target() {
+    let (mut p, _dc, c) = with_carol();
+    let b = p.b.fingerprint();
+    let c_fp = c.fingerprint();
+    let b_row = full_row(&p.a, &b, "x").id;
+    // A received row of this device without a wire identifier.
+    p.a.store
+        .insert_message(
+            b,
+            Direction::In,
+            "bare",
+            MessageStatus::Received,
+            NOW,
+            MessageId([0x71; 16]),
+        )
+        .unwrap();
+    let bare = full_row(&p.a, &b, "bare").id;
+    let outbox = p.a.pending_outbox(NOW).unwrap().len();
+    let rows = p.a.messages_with(&b).unwrap().len();
+    for (to, id) in [(b, -1), (b, 9_999), (c_fp, b_row), (b, bare)] {
+        assert_eq!(
+            p.a.send_message(&to, "nope", Some(id), NOW, &mut p.rng),
+            Err(CoreError::MessageNotFound),
+            "{id}"
+        );
+    }
+    assert_eq!(p.a.messages_with(&b).unwrap().len(), rows);
+    assert!(p.a.messages_with(&c_fp).unwrap().is_empty());
+    assert_eq!(p.a.pending_outbox(NOW).unwrap().len(), outbox);
+}
+
+#[test]
+fn retried_reply_keeps_its_ref() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    let orig = full_row(&p.a, &b, "orig");
+    let sent =
+        p.a.send_message(&b, "re", Some(orig.id), NOW, &mut p.rng)
+            .unwrap();
+    let before = full_row(&p.a, &b, "re");
+    // The delivery fails, the original goes away, the reply is retried.
+    let late = u64::from(sent[0].expires_at) + 1;
+    p.a.expire_due(late).unwrap();
+    assert_eq!(before.status, MessageStatus::Pending);
+    assert_eq!(full_row(&p.a, &b, "re").status, MessageStatus::NotDelivered);
+    p.a.delete_message(orig.id, late).unwrap();
+    let again = p.a.retry_message(before.id, late, &mut p.rng).unwrap();
+    let after = full_row(&p.a, &b, "re");
+    assert_eq!(
+        (after.reply_to, after.reply_ref),
+        (before.reply_to, before.reply_ref)
+    );
+    assert!(after.reply_ref.is_some());
+    let r =
+        p.b.receive(&again[0].encode(), "t", late, &mut p.rng)
+            .unwrap();
+    assert!(matches!(r, ReceiveOutcome::Message { .. }), "{r:?}");
+    let got = full_row(&p.b, &a, "re");
+    let theirs = full_row(&p.b, &a, "orig");
+    assert_eq!(got.reply_to, Some(theirs.message_id));
+    assert!(got.reply_ref.is_some());
+}
+
+#[test]
+fn reply_body_never_contains_quoted_text() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let secret = "quoted-text-that-must-not-travel";
+    let original = p.b.send_text(&a, secret, NOW, &mut p.rng).unwrap();
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    let row = full_row(&p.a, &b, secret);
+    let out =
+        p.a.send_message(&b, "short", Some(row.id), NOW, &mut p.rng)
+            .unwrap();
+    let env = peek_envelope(&p.b, &out[0]);
+    let Body::Ext { kind, data, .. } = &env.body else {
+        panic!("Ext expected, got {:?}", env.body);
+    };
+    assert_eq!(*kind, crate::content::KIND_REPLY);
+    let bytes = postcard::to_allocvec(&env).unwrap();
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+    assert!(!find(&bytes, secret.as_bytes()));
+    assert!(find(data, b"short"));
+    // Without a quote the body is still a plain text.
+    let plain =
+        p.a.send_message(&b, "plain", None, NOW, &mut p.rng)
+            .unwrap();
+    assert!(matches!(peek_envelope(&p.b, &plain[0]).body, Body::Text(_)));
+}

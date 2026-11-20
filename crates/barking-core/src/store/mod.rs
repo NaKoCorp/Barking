@@ -1276,6 +1276,43 @@ pub trait Queries {
         raws.into_iter().map(message_from_raw).collect()
     }
 
+    /// The message with row id `id`, whatever its conversation.
+    fn message_by_row(&self, id: i64) -> Result<Option<MessageRow>> {
+        let raw = self
+            .conn()
+            .query_row(
+                "SELECT id, contact_fp, direction, body, status, at, message_id, \
+                 wire_id, reply_to, reply_ref, placeholder \
+                 FROM messages WHERE id = ?1",
+                params![id],
+                message_raw,
+            )
+            .optional()
+            .map_err(map_err)?;
+        raw.map(message_from_raw).transpose()
+    }
+
+    /// The message `message_id` of the conversation with `contact_fp`; one
+    /// of another conversation reads as absent.
+    fn message_in(
+        &self,
+        contact_fp: Fingerprint,
+        message_id: MessageId,
+    ) -> Result<Option<MessageRow>> {
+        let raw = self
+            .conn()
+            .query_row(
+                "SELECT id, contact_fp, direction, body, status, at, message_id, \
+                 wire_id, reply_to, reply_ref, placeholder \
+                 FROM messages WHERE message_id = ?1 AND contact_fp = ?2",
+                params![message_id.0.as_slice(), contact_fp.0.as_slice()],
+                message_raw,
+            )
+            .optional()
+            .map_err(map_err)?;
+        raw.map(message_from_raw).transpose()
+    }
+
     /// All messages, in insertion order (history archive).
     fn all_messages(&self) -> Result<Vec<MessageRow>> {
         let mut stmt = self

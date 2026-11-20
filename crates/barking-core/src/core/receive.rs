@@ -13,7 +13,7 @@ use super::{
     session_ad, session_id, sync,
 };
 use crate::contact::ContactCard;
-use crate::content::{ExtContent, UnknownPolicy};
+use crate::content::{ExtContent, MessageRef, UnknownPolicy};
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
@@ -560,7 +560,10 @@ fn accept(
                 unknown: *unknown,
                 data,
             };
-            return accept_ext(q, limiter, packet, o, &env, &ext, from_me, now, rng);
+            return accept_ext(
+                q, limiter, packet, o, &env, &ext, from_me, device, admin, my_fp, transport, now,
+                rng,
+            );
         }
         (_, false) => {
             let id = Some(authenticated_id);
@@ -570,6 +573,24 @@ fn accept(
             return accept_sync(q, limiter, packet, o, &env, device, admin, my_fp, now, rng);
         }
     };
+    record_message(q, limiter, packet, o, &env, text, None, transport, now, rng)
+}
+
+/// A text (or a reply, `reply_ref`) from a contact, once accepted: session
+/// written, message recorded, ack emitted.
+#[allow(clippy::too_many_arguments)]
+fn record_message(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    text: String,
+    reply_ref: Option<MessageRef>,
+    transport: &str,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
     let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
     // Before `insert_message` (unique packet identifier).
     q.mark_seen(packet.id, now)?;
@@ -586,8 +607,8 @@ fn accept(
             at: now,
             message_id,
             wire_id: Some(env.message_id),
-            reply_to: None,
-            reply_ref: None,
+            reply_to: reply_ref.map(|r| r.resolve(false, &row.contact_fp)),
+            reply_ref,
             placeholder: false,
         })?;
     // Packet → message: found again through the emitted ack (`delete_contact`).
@@ -647,8 +668,9 @@ struct Ext<'a> {
 /// | One of my devices | `R_UNEXPECTED` | the sync path | `unknown` policy |
 ///
 /// Every `Ext` from my own fingerprint first requires the sending device to
-/// be in my current list. Until the reply and reaction paths exist, the
-/// accepting cells quarantine with `R_UNEXPECTED`. An unknown kind is
+/// be in my current list. A `Reply` is recorded like a text, a `SyncReply`
+/// goes through the sync path (`accept_sync`); until the reaction paths
+/// exist, their cells quarantine with `R_UNEXPECTED`. An unknown kind is
 /// acknowledged like a message (the sender stops resending it) and, per its
 /// `unknown` policy, ignored or shown as a placeholder asking for an update
 /// (never for my own devices: they would show it twice).
@@ -661,6 +683,10 @@ fn accept_ext(
     env: &Envelope,
     ext: &Ext<'_>,
     from_me: bool,
+    device: &DeviceKeys,
+    admin: Option<(&RootIdentity, &PrekeySecrets)>,
+    my_fp: &Fingerprint,
+    transport: &str,
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
@@ -675,7 +701,28 @@ fn accept_ext(
     let Some(content) = content else {
         return accept_unknown(q, limiter, packet, o, env, ext, from_me, now, rng);
     };
-    let reason = match (&content, from_me) {
+    let reason = match (content, from_me) {
+        (ExtContent::Reply { text, reply_to }, false) => {
+            // Blocked: dropped like a text (ratchet kept, no ack).
+            if q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+                return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+            }
+            return record_message(
+                q,
+                limiter,
+                packet,
+                o,
+                env,
+                text,
+                Some(reply_to),
+                transport,
+                now,
+                rng,
+            );
+        }
+        (ExtContent::SyncReply { .. }, true) => {
+            return accept_sync(q, limiter, packet, o, env, device, admin, my_fp, now, rng);
+        }
         (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, false) => sync::R_NOT_MINE,
         _ => R_UNEXPECTED,
     };
@@ -971,7 +1018,7 @@ fn accept_sync(
         Some(kind) => ReceiveOutcome::Synced {
             kind,
             contact: match &env.body {
-                Body::SyncSent { to, .. } if kind == SyncKind::Sent => Some(*to),
+                body if kind == SyncKind::Sent => sync::sent_to(body),
                 _ => None,
             },
         },
