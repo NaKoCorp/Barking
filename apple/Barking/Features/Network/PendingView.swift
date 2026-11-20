@@ -191,7 +191,7 @@ struct PendingContent: View {
                 messageRow(row).card(listed)
             }
         } header: {
-            SectionLabel("Your messages · \(model.messagePackets) packets")
+            SectionLabel("Your messages · \(model.messages.count) messages · \(model.messagePackets) packets")
                 .plain(listed).padding(.vertical, Space.s2)
         }
         if !model.sync.isEmpty {

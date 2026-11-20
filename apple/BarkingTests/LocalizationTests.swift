@@ -418,13 +418,30 @@ final class LocalizationTests: XCTestCase {
         for (key, value) in expected { XCTAssertEqual(fr[key] as? String, value, key) }
         for lang in ["en", "fr"] {
             let plurals = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
-            for key in ["Your messages · %lld packets", "Sync · %lld packets", "Delete %lld messages?", "Cancel %lld messages?",
+            for key in ["Your messages · %lld messages · %lld packets", "Sync · %lld packets", "Delete %lld messages?", "Cancel %lld messages?",
                         "Delete %lld", "Delete (%lld)", "%lld selected", "%lld haven’t left and will be cancelled.",
                         "%lld are already on the network: %@ will still receive it.%lld",
                         "They haven’t left this iPhone. %@ won’t receive them.%lld%lld",
                         "already left for %lld of %lld devices"] {
                 XCTAssertNotNil(plurals[key], "\(lang) plural \(key)")
             }
+        }
+    }
+
+    /// "Pending": the header counts the messages listed and their packets
+    /// (one message leaves as one packet per device), so the two differ.
+    func testPendingHeaderCountsMessagesAndPackets() throws {
+        let key = "Your messages · %lld messages · %lld packets"
+        let cases: [(String, Int, Int, String)] = [
+            ("en", 2, 3, "Your messages · 2 messages · 3 packets"),
+            ("en", 1, 1, "Your messages · 1 message · 1 packet"),
+            ("fr", 2, 3, "Vos messages · 2 messages · 3 paquets"),
+            ("fr", 1, 1, "Vos messages · 1 message · 1 paquet"),
+        ]
+        for (lang, messages, packets, expected) in cases {
+            let path = try XCTUnwrap(Bundle.main.path(forResource: lang, ofType: "lproj"))
+            let format = try XCTUnwrap(Bundle(path: path)).localizedString(forKey: key, value: nil, table: nil)
+            XCTAssertEqual(String.localizedStringWithFormat(format, messages, packets), expected, lang)
         }
     }
 

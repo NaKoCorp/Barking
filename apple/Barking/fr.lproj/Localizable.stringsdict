@@ -360,10 +360,21 @@
 			<string>%lld appareils</string>
 		</dict>
 	</dict>
-	<key>Your messages · %lld packets</key>
+	<key>Your messages · %lld messages · %lld packets</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>
-		<string>%#@n@</string>
+		<string>Vos messages · %1$#@m@ · %2$#@n@</string>
+		<key>m</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld message</string>
+			<key>other</key>
+			<string>%lld messages</string>
+		</dict>
 		<key>n</key>
 		<dict>
 			<key>NSStringFormatSpecTypeKey</key>
@@ -371,9 +382,9 @@
 			<key>NSStringFormatValueTypeKey</key>
 			<string>lld</string>
 			<key>one</key>
-			<string>Vos messages · %lld paquet</string>
+			<string>%lld paquet</string>
 			<key>other</key>
-			<string>Vos messages · %lld paquets</string>
+			<string>%lld paquets</string>
 		</dict>
 	</dict>
 	<key>Sync · %lld packets</key>
