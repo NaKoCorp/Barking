@@ -511,18 +511,41 @@ pub struct PendingPackets {
 
 /// Drops the reaction packets tracked by the `reaction_sends` rows that
 /// match `rows` (a condition on its columns, with `p`): first their queued
-/// packets, then their deliveries (keyed on these packet ids only: cards
-/// and syncs also have deliveries without a message row), then the rows,
-/// which the first two select from.
+/// packets, then their tracking (`forget_reaction_tracking`): their
+/// deliveries (keyed on these packet ids only: cards and syncs also have
+/// deliveries without a message row), then the rows, which the others
+/// select from.
 pub(crate) fn drop_reaction_packets(
     q: &(impl Queries + ?Sized),
     rows: &str,
     p: impl rusqlite::Params + Copy,
 ) -> Result<()> {
-    let selected = format!("SELECT packet_id FROM reaction_sends WHERE {rows}");
+    q.conn()
+        .execute(
+            &format!(
+                "DELETE FROM outbox WHERE packet_id IN \
+                 (SELECT packet_id FROM reaction_sends WHERE {rows})"
+            ),
+            p,
+        )
+        .map_err(map_err)?;
+    forget_reaction_tracking(q, rows, p)
+}
+
+/// Forgets the tracking of the reaction packets of the `reaction_sends`
+/// rows that match `rows` (as `drop_reaction_packets`): their deliveries,
+/// then the rows. Their queued packets stay and still leave: an older set
+/// is a valid state, only no longer followed.
+pub(crate) fn forget_reaction_tracking(
+    q: &(impl Queries + ?Sized),
+    rows: &str,
+    p: impl rusqlite::Params + Copy,
+) -> Result<()> {
     for sql in [
-        format!("DELETE FROM outbox WHERE packet_id IN ({selected})"),
-        format!("DELETE FROM deliveries WHERE packet_id IN ({selected})"),
+        format!(
+            "DELETE FROM deliveries WHERE packet_id IN \
+             (SELECT packet_id FROM reaction_sends WHERE {rows})"
+        ),
         format!("DELETE FROM reaction_sends WHERE {rows}"),
     ] {
         q.conn().execute(&sql, p).map_err(map_err)?;

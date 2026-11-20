@@ -4254,22 +4254,24 @@ fn expired_reaction_scene() -> (TempDir, Core, Net, usize) {
         .set_reactions(row, &["👍".to_owned()], old, &mut rng)
         .unwrap();
     assert!(u64::from(sent[0].expires_at) < NOW);
-    // Expires the old packet (flagged for a resend), leaving the baseline.
+    // Expires the old packet (flagged), leaving the baseline.
     let queued = core.pending_outbox(NOW).unwrap().len();
     (dir, core, net, queued)
 }
 
+/// A send to the contact that expired is left to the manual resend: the
+/// full sync reseals only the copies for my other devices.
 #[tokio::test(start_paused = true)]
-async fn full_sync_resends_expired_reactions() {
+async fn full_sync_does_not_resend_an_expired_contact_reaction() {
     let (_dir, mut core, net, queued) = expired_reaction_scene();
     sync(&mut core, &net, opts()).await;
-    assert_eq!(core.pending_outbox(NOW).unwrap().len(), queued + 1);
+    assert_eq!(core.pending_outbox(NOW).unwrap().len(), queued);
     let pending = core.pending_packets(NOW).unwrap();
     assert!(
         pending
             .sync
             .iter()
-            .any(|s| s.kind == barking_core::store::PendingKind::Reaction && s.packets == 1)
+            .all(|s| s.kind != barking_core::store::PendingKind::Reaction)
     );
 }
 

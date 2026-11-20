@@ -14,9 +14,14 @@
 //! or its Retry.
 //!
 //! Each packet is also tracked in `reaction_sends` (packet, target,
-//! conversation, audience). `expire_due` flags the ones that expired
-//! undeposited, and `resend_reactions` (full sync) reseals my current set
-//! for each such audience with a fresh clock.
+//! conversation, audience). The tracking of the current send toward the
+//! contact (`current_contact_tie`) stays after its packets leave the send
+//! queue, so a late ack still marks it received; a new send that seals for
+//! the contact (`set_reactions`) replaces it, while the older packets still
+//! queued leave anyway, untracked. `expire_due` flags the packets that
+//! expired undeposited: a flagged contact send stays `NotDelivered` until
+//! the user resends it by hand, and `resend_reactions` (full sync) reseals
+//! my current set, with a fresh clock, only for my other devices.
 
 use rand_core::CryptoRng;
 use rusqlite::{OptionalExtension, params};
@@ -28,7 +33,10 @@ use crate::content::{ExtContent, MessageRef};
 use crate::emoji;
 use crate::identity::{DeviceKeys, Fingerprint};
 use crate::packet::Packet;
-use crate::store::{MessageId, Queries, ReactionRow, arr, drop_reaction_packets, map_err, to_i64};
+use crate::store::{
+    MessageId, Queries, ReactionRow, arr, drop_reaction_packets, forget_reaction_tracking, map_err,
+    to_i64,
+};
 use crate::transparency::SyncKind;
 use crate::{CoreError, Result};
 
@@ -73,6 +81,11 @@ impl Core {
     /// mine, dated `clock`, under the tie as message identifier, one
     /// delivery per packet without a message row. A contact device without
     /// a session is skipped: the local write stays, without error.
+    ///
+    /// The tracking of my earlier sends on this target to this contact is
+    /// forgotten first (their queued packets still leave): only this send
+    /// has a state, and a send that seals for no device of the contact
+    /// leaves none.
     pub fn set_reactions(
         &mut self,
         row_id: i64,
@@ -130,29 +143,39 @@ impl Core {
                 tie,
                 time,
             };
+            forget_reaction_tracking(
+                tx,
+                "message_id = ?1 AND contact_fp = ?2",
+                params![row.message_id.0.as_slice(), to.0.as_slice()],
+            )?;
             let (mut out, own) = seal_set(tx, device, &seal, (true, true), rng)?;
             out.extend(own);
             Ok(out)
         })
     }
 
-    /// Resends, after their expiry, the reaction packets that left no node.
+    /// Resends to my other devices, after their expiry, the reaction copies
+    /// that left no node.
     ///
     /// Runs `expire_due(now)` first, which flags each reaction packet that
-    /// expired undeposited. Then, for each `(target, contact)` with a
-    /// flagged audience (the contact's devices, my other devices), reseals
-    /// my *current* set on that target to the flagged audiences: the packets
+    /// expired undeposited (or lost after its deposit: `confirm_expired`).
+    /// Then, for each `(target, contact)` with a flagged copy for my other
+    /// devices, reseals my *current* set on that target to them: the copies
     /// of older sets that expired are not replayed. My row is re-stamped
     /// first (`clock = max(now, clock + 1)`, fresh tie), because the old
-    /// clock would be stale at the receiver (`MAX_AGE_SECS`); the audiences
-    /// of a target share the new clock and tie.
+    /// clock would be stale at the receiver (`MAX_AGE_SECS`). This creates
+    /// copies for my devices only, so the current send toward the contact
+    /// (`current_contact_tie`) stays.
+    ///
+    /// A flagged send toward the contact is never resent here: it stays,
+    /// `NotDelivered`, until the user resends it by hand.
     ///
     /// Only a set that exists is resent, an empty one (a removal) included:
     /// with no row of mine on the target (message deleted here, contact
-    /// erased) there is nothing to say, and the audience is dropped. A
+    /// erased) there is nothing to say, and the copies are dropped. A
     /// contact that is unknown or blocked is skipped and dropped too. The
-    /// flagged rows are removed, with their packets' deliveries. Returns the
-    /// number of audiences resent and of groups that failed.
+    /// flagged rows of my copies are removed, with their deliveries.
+    /// Returns the number of audiences resent and of groups that failed.
     /// The quick sync never calls it.
     ///
     /// It also purges the orphan reactions (`purge_orphans`).
@@ -168,17 +191,9 @@ impl Core {
         }
         let Core { store, device, .. } = self;
         purge_orphans(&*store, now)?;
-        // Rows of packets that left the send queue without failing (deposited
-        // and acknowledged, or purged) have nothing left to resend: their
-        // deliveries go with them.
-        drop_reaction_packets(
-            &*store,
-            "expired = 0 AND packet_id NOT IN (SELECT packet_id FROM outbox)",
-            [],
-        )?;
         let groups = flagged_audiences(&*store)?;
         let mut out = ReactionResend::default();
-        for (to, message, audience) in groups {
+        for (to, message) in groups {
             // A group that fails (its transaction rolled back, its rows
             // still flagged) is retried at the next full sync and does not
             // hold the others back.
@@ -203,17 +218,17 @@ impl Core {
                                 sent_at: clock,
                             },
                         };
-                        let (contact, own) = seal_set(tx, device, &seal, audience, rng)?;
-                        if !contact.is_empty() || !own.is_empty() {
+                        let (_, own) = seal_set(tx, device, &seal, (false, true), rng)?;
+                        if !own.is_empty() {
                             tx.put_reaction_if_newer(&ReactionRow { clock, tie, ..mine })?;
                         }
-                        u32::from(!contact.is_empty()) + u32::from(!own.is_empty())
+                        u32::from(!own.is_empty())
                     }
                     _ => 0,
                 };
                 drop_reaction_packets(
                     tx,
-                    "expired = 1 AND message_id = ?1 AND contact_fp = ?2",
+                    "expired = 1 AND own = 1 AND message_id = ?1 AND contact_fp = ?2",
                     params![message.0.as_slice(), to.0.as_slice()],
                 )?;
                 Ok(sent)
@@ -344,39 +359,68 @@ fn track(q: &impl Queries, packet: &Packet, s: &Seal<'_>, own: bool) -> Result<(
     Ok(())
 }
 
-/// `(contact, target, (contact devices, my devices))`: see `flagged_audiences`.
-type Flagged = (Fingerprint, MessageId, (bool, bool));
+/// `(contact, target)`: see `flagged_audiences`.
+type Flagged = (Fingerprint, MessageId);
 
-/// The audiences with a packet
-/// that expired undeposited, oldest first.
+/// The `(contact, target)` with a copy for my other devices that expired
+/// undeposited, oldest first. A flagged send toward the contact is left to
+/// the manual resend.
 fn flagged_audiences(q: &impl Queries) -> Result<Vec<Flagged>> {
     let mut stmt = q
         .conn()
         .prepare(
-            "SELECT contact_fp, message_id, max(own = 0), max(own = 1) \
-             FROM reaction_sends WHERE expired = 1 \
+            "SELECT contact_fp, message_id FROM reaction_sends \
+             WHERE expired = 1 AND own = 1 \
              GROUP BY contact_fp, message_id ORDER BY min(rowid)",
         )
         .map_err(map_err)?;
     let raw = stmt
         .query_map([], |r| {
-            Ok((
-                r.get::<_, Vec<u8>>(0)?,
-                r.get::<_, Vec<u8>>(1)?,
-                r.get::<_, bool>(2)?,
-                r.get::<_, bool>(3)?,
-            ))
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
         })
         .map_err(map_err)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(map_err)?;
     raw.into_iter()
-        .map(|(c, m, contact, own)| Ok((Fingerprint(arr(c)?), MessageId(arr(m)?), (contact, own))))
+        .map(|(c, m)| Ok((Fingerprint(arr(c)?), MessageId(arr(m)?))))
         .collect()
 }
 
+/// The tie of my current send toward `contact` on `target`: the
+/// `deliveries.message_id` of its `own = 0` packets. `None` without local
+/// tracking (synced from another of my devices, imported, or sent while no
+/// device of the contact had a session). An own-only resend never changes
+/// it: it creates `own = 1` deliveries only.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the reaction delivery state")
+)]
+pub(super) fn current_contact_tie(
+    q: &impl Queries,
+    contact: Fingerprint,
+    target: MessageId,
+) -> Result<Option<MessageId>> {
+    let tie: Option<Vec<u8>> = q
+        .conn()
+        .query_row(
+            "SELECT d.message_id FROM reaction_sends rs \
+             JOIN deliveries d ON d.packet_id = rs.packet_id \
+             WHERE rs.message_id = ?1 AND rs.contact_fp = ?2 AND rs.own = 0 \
+             ORDER BY rs.rowid DESC LIMIT 1",
+            params![target.0.as_slice(), contact.0.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(map_err)?;
+    tie.map(|t| Ok(MessageId(arr(t)?))).transpose()
+}
+
 /// The row of the message `message` in the conversation with `contact`.
-fn row_id_of(q: &impl Queries, contact: Fingerprint, message: MessageId) -> Result<Option<i64>> {
+pub(super) fn row_id_of(
+    q: &impl Queries,
+    contact: Fingerprint,
+    message: MessageId,
+) -> Result<Option<i64>> {
     q.conn()
         .query_row(
             "SELECT id FROM messages WHERE message_id = ?1 AND contact_fp = ?2 LIMIT 1",

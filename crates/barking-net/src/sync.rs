@@ -1503,8 +1503,9 @@ where
         let polled_sessions = self.fetch_stage(&sessions, FetchKind::Sessions).await;
         self.report.polled_all_sessions = polled_sessions;
 
-        // Reaction packets that expired undeposited go out again, with the
-        // current set, in this sync's first deposit.
+        // Copies for my other devices of reaction packets that expired
+        // undeposited go out again, with the current set, in this sync's
+        // first deposit (a send to the contact waits for a manual resend).
         // A failure here never stops the sync: what is left stays flagged
         // for the next one. Logged without any content or identifier.
         match self.core.resend_reactions(now, &mut rand::rng()) {
