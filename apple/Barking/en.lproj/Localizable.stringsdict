@@ -563,5 +563,53 @@
 			<string>%lld mailboxes</string>
 		</dict>
 	</dict>
+	<key>Packets stay there at most %lld days.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Packets stay there at most %1$#@d@.</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld day</string>
+			<key>other</key>
+			<string>%lld days</string>
+		</dict>
+	</dict>
+	<key>None of %@’s devices picked it up within %lld days. The relay erased it on %@.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>None of %1$@’s devices picked it up within %2$#@d@. The relay erased it on %3$@.</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld day</string>
+			<key>other</key>
+			<string>%lld days</string>
+		</dict>
+	</dict>
+	<key>None of %@’s devices picked it up within %lld days. The relay erased it.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>None of %1$@’s devices picked it up within %2$#@d@. The relay erased it.</string>
+		<key>d</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld day</string>
+			<key>other</key>
+			<string>%lld days</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

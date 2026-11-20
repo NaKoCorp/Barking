@@ -17,7 +17,7 @@ final class MessageSheetModel {
         let title: String
         /// nil: "not recorded" on a done step, "not yet" ahead.
         let at: Date?
-        let detail: String?
+        var detail: String?
         let phase: DeliveryTimeline.Phase
         /// The detail says what a relay could see (the purple rule).
         var privacy = false
@@ -55,8 +55,11 @@ final class MessageSheetModel {
 
     typealias Notice = ConversationModel.Notice
 
-    /// Messages expire 24 h after sealing (`DEFAULT_TTL_SECS`, Lot N).
-    static let lifetime: TimeInterval = 86_400
+    /// Messages expire this long after sealing: the core's lifetime
+    /// (`DEFAULT_TTL_SECS`), never a number written here.
+    static let lifetime = TimeInterval(messageLifetimeSecs())
+    /// The lifetime in whole days, for the texts.
+    static var lifetimeDays: Int { Int(messageLifetimeSecs() / 86_400) }
 
     private let core: CoreService
     let messageId: Int64
@@ -306,10 +309,10 @@ final class MessageSheetModel {
                 String(localized: "Expired before a relay accepted it. It never left this iPhone.",
                        bundle: bundle, locale: locale)
             case (true, let on?):
-                String(localized: "None of \(contactName)’s devices picked it up within 24 hours. The relay erased it on \(on).",
+                String(localized: "None of \(contactName)’s devices picked it up within \(lifetimeDays) days. The relay erased it on \(on).",
                        bundle: bundle, locale: locale)
             case (true, nil):
-                String(localized: "None of \(contactName)’s devices picked it up within 24 hours. The relay erased it.",
+                String(localized: "None of \(contactName)’s devices picked it up within \(lifetimeDays) days. The relay erased it.",
                        bundle: bundle, locale: locale)
             }
             out.append(Line(id: "stop", glyph: .notDelivered, title: d.state.wordString(bundle: bundle, locale: locale),
@@ -349,6 +352,12 @@ final class MessageSheetModel {
             if open > 0 {
                 out.append(Line(id: "all", glyph: .received, title: all, at: nil, detail: nil, phase: .ahead))
             }
+        }
+        // On the network: the receipt can come until the packet is erased.
+        if d.state == .onNetwork, let last = out.indices.last, out[last].phase == .ahead {
+            let until = dayAndTime(Date(timeIntervalSince1970: TimeInterval(d.sealedAt) + lifetime),
+                                   bundle: bundle, locale: locale, timeZone: timeZone)
+            out[last].detail = String(localized: "It waits on the relays until \(until).", bundle: bundle, locale: locale)
         }
         return out
     }

@@ -228,6 +228,12 @@ final class TransparencyModelTests: XCTestCase {
         XCTAssertTrue(TransparencyModel.dataRows(protection: "keychain")[0].detail.contains("SQLCipher"))
     }
 
+    /// §5.3: the nodes row gives the core's lifetime.
+    func testNodesRowGivesTheRealLifetime() {
+        let nodes = TransparencyModel.dataRows(protection: "keychain").first { $0.id == "nodes" }
+        XCTAssertEqual(nodes?.detail, "Packets stay there at most 7 days.")
+    }
+
     func testCountsArePlural() {
         let one = LogText.render(LogEntry(id: 1, at: 0, family: "device", key: "log.history_imported",
                                           args: ["1"], security: false), locale: Locale(identifier: "en"))

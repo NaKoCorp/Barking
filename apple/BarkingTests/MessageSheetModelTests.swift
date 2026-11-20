@@ -114,7 +114,7 @@ final class MessageSheetModelTests: XCTestCase {
         XCTAssertEqual(one.last?.phase, .done)
 
         // Not delivered, never deposited: stops on the triangle, nothing after.
-        let expiry = t0 + 86_400
+        let expiry = t0 + messageLifetimeSecs()
         let never = try lines(sheet(delivery(.notDelivered, expired: expiry)))
         XCTAssertEqual(never.map(\.phase), [.done, .stopped])
         XCTAssertEqual(never.last?.glyph, .notDelivered)
@@ -122,22 +122,22 @@ final class MessageSheetModelTests: XCTestCase {
         let on = MessageSheetModel.dayAndTime(Date(timeIntervalSince1970: TimeInterval(expiry)),
                                               bundle: try lang("en").bundle, locale: Locale(identifier: "en"),
                                               timeZone: utc)
-        XCTAssertEqual(on, "Jan 16 at \(clock(expiry, Locale(identifier: "en")))")
+        XCTAssertEqual(on, "Jan 22 at \(clock(expiry, Locale(identifier: "en")))")
         XCTAssertEqual(never.last?.detail, "Expired on \(on) before a relay accepted it. It never left this iPhone.")
         let neverFr = try lines(sheet(delivery(.notDelivered, expired: expiry)), size: 1024, "fr")
         XCTAssertEqual(neverFr.last?.detail,
-                       "Expiré le 16 janv. à \(clock(expiry, Locale(identifier: "fr"))) avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.")
+                       "Expiré le 22 janv. à \(clock(expiry, Locale(identifier: "fr"))) avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.")
 
         // Not delivered after a deposit: the relay stays, then the stop.
         let lost = try lines(sheet(delivery(.notDelivered, deposited: t0 + 34, expired: expiry), relays: [relays[0]]))
         XCTAssertEqual(lost.map(\.title), ["Sealed and saved on this iPhone", "Deposited on relay K7QX2M4A", "Not delivered"])
         XCTAssertEqual(lost.map(\.phase), [.done, .done, .stopped])
         XCTAssertEqual(lost.last?.detail,
-                       "None of Alice’s devices picked it up within 24 hours. The relay erased it on \(on).")
+                       "None of Alice’s devices picked it up within 7 days. The relay erased it on \(on).")
         let lostFr = try lines(sheet(delivery(.notDelivered, deposited: t0 + 34, expired: expiry), relays: [relays[0]]),
                                size: 1024, "fr")
         XCTAssertEqual(lostFr.last?.detail,
-                       "Aucun appareil de Alice ne l’a relevé en 24\u{00A0}h. Le relais l’a effacé le 16 janv. à \(clock(expiry, Locale(identifier: "fr"))).")
+                       "Aucun appareil de Alice ne l’a relevé en 7 jours. Le relais l’a effacé le 22 janv. à \(clock(expiry, Locale(identifier: "fr"))).")
 
         // Expired, verdict pending: still on the network, one line says so.
         let en = try lang("en")
@@ -157,7 +157,7 @@ final class MessageSheetModelTests: XCTestCase {
     /// (let go past the nodes' ack grace, or migrated without a queue row)
     /// never promises a check at the next sync. It stays on the network.
     func testUnconfirmedDeliveryDoesNotPromiseACheck() throws {
-        let expiry = t0 + 86_400
+        let expiry = t0 + messageLifetimeSecs()
         let after = Date(timeIntervalSince1970: TimeInterval(expiry + 60))
         let unconfirmed = delivery(.onNetwork, deposited: t0 + 34, left: 1, awaiting: false)
         let en = try lang("en")
@@ -203,7 +203,7 @@ final class MessageSheetModelTests: XCTestCase {
             XCTAssertEqual(l.map(\.title), ["Sealed and saved on this iPhone", "Deposited on a relay", "Not delivered"])
             XCTAssertEqual(l[1].phase, .done)
             XCTAssertNil(l[1].at)
-            XCTAssertTrue(l[2].detail?.hasPrefix("None of Alice’s devices picked it up within 24 hours.") == true,
+            XCTAssertTrue(l[2].detail?.hasPrefix("None of Alice’s devices picked it up within 7 days.") == true,
                           l[2].detail ?? "")
             XCTAssertFalse(l[2].detail?.contains("never left") == true)
         }
@@ -215,12 +215,45 @@ final class MessageSheetModelTests: XCTestCase {
         XCTAssertEqual(never.last?.detail, "Expired before a relay accepted it. It never left this iPhone.")
         let lost = try lines(sheet(delivery(.notDelivered, deposited: t0 + 34),
                                    relays: [RelayHop(node: "K7QX2M4A", at: t0 + 34, size: 0)]))
-        XCTAssertEqual(lost.last?.detail, "None of Alice’s devices picked it up within 24 hours. The relay erased it.")
+        XCTAssertEqual(lost.last?.detail, "None of Alice’s devices picked it up within 7 days. The relay erased it.")
         let fr = try lines(sheet(delivery(.notDelivered)), size: 1024, "fr")
         XCTAssertEqual(fr.last?.detail, "Expiré avant qu’un relais l’accepte. Il n’a jamais quitté cet iPhone.")
         let lostFr = try lines(sheet(delivery(.notDelivered, deposited: t0 + 34)), size: 1024, "fr")
         XCTAssertEqual(lostFr.last?.detail,
-                       "Aucun appareil de Alice ne l’a relevé en 24\u{00A0}h. Le relais l’a effacé.")
+                       "Aucun appareil de Alice ne l’a relevé en 7 jours. Le relais l’a effacé.")
+    }
+
+    /// §5.3: the stop line gives the lifetime the core exposes, never a
+    /// number written in Swift.
+    func testStopLineGivesTheRealLifetime() throws {
+        let days = messageLifetimeSecs() / 86_400
+        XCTAssertEqual(days, 7)
+        let lost = delivery(.notDelivered, deposited: t0 + 34, expired: t0 + messageLifetimeSecs())
+        let en = try XCTUnwrap(lines(sheet(lost)).last?.detail)
+        XCTAssertTrue(en.contains("7 days"), en)
+        XCTAssertFalse(en.contains("24 hours"), en)
+        let fr = try XCTUnwrap(lines(sheet(lost), size: 1024, "fr").last?.detail)
+        XCTAssertTrue(fr.contains("7 jours"), fr)
+        XCTAssertFalse(fr.contains("24"), fr)
+    }
+
+    /// §5.3: a message on the network says until when it waits: its seal
+    /// time plus the lifetime, formatted like the "erased on" date.
+    func testOnNetworkMessageSaysUntilWhenItWaits() throws {
+        let until = Date(timeIntervalSince1970: TimeInterval(t0 + messageLifetimeSecs()))
+        let relays = [RelayHop(node: "K7QX2M4A", at: t0 + 34, size: 1024)]
+        let md = sheet(delivery(.onNetwork, deposited: t0 + 34, devices: 2, left: 2), relays: relays)
+        for (code, prefix) in [("en", "It waits on the relays until "), ("fr", "Il attend sur les relais jusqu’au ")] {
+            let l = try lang(code)
+            let on = MessageSheetModel.dayAndTime(until, bundle: l.bundle, locale: l.locale, timeZone: utc)
+            let last = try XCTUnwrap(lines(md, size: 1024, code).last)
+            XCTAssertEqual(last.phase, .ahead)
+            XCTAssertEqual(last.detail, "\(prefix)\(on).", code)
+        }
+        // Not on the network: nothing waits yet, or it is over.
+        XCTAssertNil(try lines(sheet(delivery(.pending, pending: 1))).last?.detail)
+        let got = delivery(.received, deposited: t0 + 34, received: t0 + 60, devicesReceived: 1, left: 1)
+        XCTAssertNil(try lines(sheet(got, relays: relays)).last?.detail)
     }
 
     /// §6.4: a sheet left open past the expiry shows the verdict line.
@@ -230,7 +263,9 @@ final class MessageSheetModelTests: XCTestCase {
         d.messageDeliveries[7] = sheet(delivery(.onNetwork, deposited: t0 + 34, left: 1))
         await m.load()
         XCTAssertNil(m.verdict(at: Date(timeIntervalSince1970: TimeInterval(t0 + 3600))))
-        XCTAssertNotNil(m.verdict(at: Date(timeIntervalSince1970: TimeInterval(t0 + 86_400 + 60))))
+        XCTAssertNil(m.verdict(at: Date(timeIntervalSince1970: TimeInterval(t0 + 86_400 + 60))),
+                     "a day later the message still waits on the relays")
+        XCTAssertNotNil(m.verdict(at: Date(timeIntervalSince1970: TimeInterval(t0 + messageLifetimeSecs() + 60))))
     }
 
     // MARK: Delete confirmation
