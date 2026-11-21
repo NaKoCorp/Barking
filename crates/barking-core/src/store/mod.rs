@@ -2369,60 +2369,20 @@ pub trait Queries {
         let Some(state) = self.send_state(tie)? else {
             return Ok(None);
         };
-        type Agg = (
-            i64,
-            i64,
-            i64,
-            i64,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            i64,
-            i64,
-        );
-        let (devices, received, left, pending, sealed, deposited, acked, expired, tried, awaiting): Agg =
-            self.conn()
-                .query_row(
-                    "SELECT count(d.packet_id), coalesce(sum(d.status = 3), 0), \
-                     coalesce(sum(d.status IN (1, 3)), 0), coalesce(sum(d.status = 0), 0), \
-                     min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at), \
-                     coalesce(sum(d.status = 0 AND o.deposit_tried_at IS NOT NULL), 0), \
-                     coalesce(sum(d.status = 1 AND o.packet_id IS NOT NULL), 0) \
-                     FROM deliveries d LEFT JOIN outbox o ON o.packet_id = d.packet_id \
-                     WHERE d.message_id = ?1 AND d.own = 0",
-                    params![tie.0.as_slice()],
-                    |r| {
-                        Ok((
-                            r.get(0)?,
-                            r.get(1)?,
-                            r.get(2)?,
-                            r.get(3)?,
-                            r.get(4)?,
-                            r.get(5)?,
-                            r.get(6)?,
-                            r.get(7)?,
-                            r.get(8)?,
-                            r.get(9)?,
-                        ))
-                    },
-                )
-                .map_err(map_err)?;
-        let count = |n: i64| u32::try_from(n).unwrap_or(u32::MAX);
-        let summary = DeliverySummary {
-            state,
-            sealed_at: sealed.map_or(0, to_u64),
-            deposited_at: deposited.map(to_u64),
-            received_at: acked.map(to_u64),
-            expired_at: expired
-                .filter(|_| state == MessageStatus::NotDelivered)
-                .map(to_u64),
-            devices: count(devices),
-            devices_received: count(received),
-            devices_left: count(left),
-            devices_tried: count(tried),
-            devices_pending: count(pending),
-            awaiting_verdict: awaiting > 0,
+        let agg = self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {SUMMARY_AGG_SQL} FROM deliveries d \
+                     LEFT JOIN outbox o ON o.packet_id = d.packet_id \
+                     WHERE d.message_id = ?1 AND d.own = 0"
+                ),
+                params![tie.0.as_slice()],
+                |r| summary_agg(r, 0),
+            )
+            .map_err(map_err)?;
+        let Some(summary) = summary_from_agg(state, agg) else {
+            return Ok(None);
         };
         let (deliveries, relays, own_copies) = deliveries_and_relays(self.conn(), tie)?;
         Ok(Some((summary, deliveries, relays, own_copies)))
@@ -2670,11 +2630,6 @@ pub const SUMMARY_CHUNK: usize = 200;
 /// `RouteStep::Deposited` as stored (`core::route`).
 const ROUTE_STEP_DEPOSITED: i64 = 1;
 
-/// The delivery summary query of spec §5.8: messages matching `filter`,
-/// each with the aggregate of its deliveries to the contact (`own = 0`;
-/// a received message joins none), grouped per message. `group` lists
-/// columns that identify a message (`m.id` among them); giving the order's
-/// columns lets one sort serve both the grouping and the order.
 /// The deliveries keyed on `message_id` (to the contact, then to my
 /// devices, each group by sealing date), the nodes that accepted its
 /// contact packets, and the count of its copies for my devices
@@ -2775,6 +2730,75 @@ fn deliveries_and_relays(
     Ok((deliveries, relays, own_copies))
 }
 
+/// The aggregate columns of a send's deliveries `d` to the contact
+/// (`own = 0`), with the send queue `o` left-joined on each packet: read
+/// by `summary_agg`, mapped by `summary_from_agg`. Shared by `summaries`
+/// (per message) and `Queries::send_detail` (per reaction tie).
+const SUMMARY_AGG_SQL: &str = "count(d.packet_id), coalesce(sum(d.status = 3), 0), \
+     coalesce(sum(d.status IN (1, 3)), 0), coalesce(sum(d.status = 0), 0), \
+     min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at), \
+     coalesce(sum(d.status = 0 AND o.deposit_tried_at IS NOT NULL), 0), \
+     coalesce(sum(d.status = 1 AND o.packet_id IS NOT NULL), 0)";
+
+/// The values of `SUMMARY_AGG_SQL`, in its order.
+type SummaryAgg = (
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    i64,
+    i64,
+);
+
+/// Reads the `SUMMARY_AGG_SQL` columns of `r` from column `at`.
+fn summary_agg(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<SummaryAgg> {
+    Ok((
+        r.get(at)?,
+        r.get(at + 1)?,
+        r.get(at + 2)?,
+        r.get(at + 3)?,
+        r.get(at + 4)?,
+        r.get(at + 5)?,
+        r.get(at + 6)?,
+        r.get(at + 7)?,
+        r.get(at + 8)?,
+        r.get(at + 9)?,
+    ))
+}
+
+/// The summary of a send in `state` from its aggregate; `None` without
+/// any delivery to the contact. The latest expiry counts only once the
+/// send is `NotDelivered`.
+fn summary_from_agg(state: MessageStatus, agg: SummaryAgg) -> Option<DeliverySummary> {
+    let (devices, received, left, pending, sealed, deposited, acked, expired, tried, awaiting) =
+        agg;
+    let count = |n: i64| u32::try_from(n).unwrap_or(u32::MAX);
+    (devices > 0).then(|| DeliverySummary {
+        state,
+        sealed_at: sealed.map_or(0, to_u64),
+        deposited_at: deposited.map(to_u64),
+        received_at: acked.map(to_u64),
+        expired_at: expired
+            .filter(|_| state == MessageStatus::NotDelivered)
+            .map(to_u64),
+        devices: count(devices),
+        devices_received: count(received),
+        devices_left: count(left),
+        devices_tried: count(tried),
+        devices_pending: count(pending),
+        awaiting_verdict: awaiting > 0,
+    })
+}
+
+/// The delivery summary query of spec §5.8: messages matching `filter`,
+/// each with the aggregate of its deliveries to the contact (`own = 0`;
+/// a received message joins none), grouped per message. `group` lists
+/// columns that identify a message (`m.id` among them); giving the order's
+/// columns lets one sort serve both the grouping and the order.
 fn summaries(
     conn: &Connection,
     filter: &str,
@@ -2785,82 +2809,22 @@ fn summaries(
 ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
     let sql = format!(
         "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, m.message_id, \
-         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, \
-         count(d.packet_id), coalesce(sum(d.status = 3), 0), \
-         coalesce(sum(d.status IN (1, 3)), 0), coalesce(sum(d.status = 0), 0), \
-         min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at), \
-         coalesce(sum(d.status = 0 AND o.deposit_tried_at IS NOT NULL), 0), \
-         coalesce(sum(d.status = 1 AND o.packet_id IS NOT NULL), 0) \
+         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, {SUMMARY_AGG_SQL} \
          FROM messages m \
          LEFT JOIN deliveries d ON d.message_id = m.message_id AND d.own = 0 AND m.direction = 0 \
          LEFT JOIN outbox o ON o.packet_id = d.packet_id \
          WHERE {filter} GROUP BY {group} {having} ORDER BY {order}"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(map_err)?;
-    type Agg = (
-        i64,
-        i64,
-        i64,
-        i64,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        i64,
-        i64,
-    );
     let raws = stmt
-        .query_map(args, |r| {
-            Ok((
-                message_raw(r)?,
-                (
-                    r.get(11)?,
-                    r.get(12)?,
-                    r.get(13)?,
-                    r.get(14)?,
-                    r.get(15)?,
-                    r.get(16)?,
-                    r.get(17)?,
-                    r.get(18)?,
-                    r.get(19)?,
-                    r.get(20)?,
-                ),
-            ))
-        })
+        .query_map(args, |r| Ok((message_raw(r)?, summary_agg(r, 11)?)))
         .map_err(map_err)?
-        .collect::<rusqlite::Result<Vec<(MessageRaw, Agg)>>>()
+        .collect::<rusqlite::Result<Vec<(MessageRaw, SummaryAgg)>>>()
         .map_err(map_err)?;
-    let count = |n: i64| u32::try_from(n).unwrap_or(u32::MAX);
     raws.into_iter()
         .map(|(raw, agg)| {
             let message = message_from_raw(raw)?;
-            let (
-                devices,
-                received,
-                left,
-                pending,
-                sealed,
-                deposited,
-                acked,
-                expired,
-                tried,
-                awaiting,
-            ) = agg;
-            let summary = (devices > 0).then(|| DeliverySummary {
-                state: message.status,
-                sealed_at: sealed.map_or(0, to_u64),
-                deposited_at: deposited.map(to_u64),
-                received_at: acked.map(to_u64),
-                expired_at: expired
-                    .filter(|_| message.status == MessageStatus::NotDelivered)
-                    .map(to_u64),
-                devices: count(devices),
-                devices_received: count(received),
-                devices_left: count(left),
-                devices_tried: count(tried),
-                devices_pending: count(pending),
-                awaiting_verdict: awaiting > 0,
-            });
+            let summary = summary_from_agg(message.status, agg);
             Ok((message, summary))
         })
         .collect()
