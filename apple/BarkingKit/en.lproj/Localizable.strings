@@ -6,3 +6,5 @@
 "REACTED_EMOJI" = "Reacted %@";
 "REACTED_TO" = "Reacted %1$@ to “%2$@”";
 "NEEDS_UPDATE" = "This message needs a newer version of Barking.";
+"EPHEMERAL_MESSAGE" = "Disappearing message";
+"REACTED_EPHEMERAL" = "Reacted to a disappearing message";

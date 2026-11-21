@@ -12,8 +12,12 @@ public enum NotificationContent {
     /// While the app is locked (`locked`) or the preview is `.generic`,
     /// nothing but "New message" shows: no name, no text, no thread (spec §5.4, §6.1).
     /// `.nameOnly` keeps the name and the thread but never the text.
+    /// An ephemeral never shows its text, whatever the preview: "Disappearing
+    /// message", and a reaction to one says so without its emoji (spec
+    /// deletion/ephemeral §5.4). `bundle`: the strings (tests pass French).
     public static func apply(_ summary: SyncSummary?, to content: UNMutableNotificationContent,
-                             preview: PushPreview, locked: Bool) -> String {
+                             preview: PushPreview, locked: Bool,
+                             bundle: Bundle = Bundle(for: Marker.self)) -> String {
         guard let summary else { return "original" }
         let messages = summary.newMessages
         let reactions = summary.newReactions
@@ -27,7 +31,7 @@ public enum NotificationContent {
         }
         if locked || preview == .generic {
             content.title = ""
-            content.body = localized("NEW_MESSAGE", fallback: "New message")
+            content.body = localized("NEW_MESSAGE", fallback: "New message", bundle: bundle)
             content.threadIdentifier = ""
             return "shown"
         }
@@ -36,33 +40,40 @@ public enum NotificationContent {
         if count == 1 {
             if let m = messages.first {
                 content.title = m.name
-                content.body = preview != .nameAndText ? localized("NEW_MESSAGE", fallback: "New message")
-                    : m.needsUpdate ? localized("NEEDS_UPDATE", fallback: "This message needs a newer version of Barking.")
+                content.body = m.ephemeral
+                    ? localized("EPHEMERAL_MESSAGE", fallback: "Disappearing message", bundle: bundle)
+                    : preview != .nameAndText ? localized("NEW_MESSAGE", fallback: "New message", bundle: bundle)
+                    : m.needsUpdate
+                    ? localized("NEEDS_UPDATE", fallback: "This message needs a newer version of Barking.", bundle: bundle)
                     : m.text
             } else if let r = reactions.first {
                 content.title = r.name
-                content.body = reactionBody(r, withText: preview == .nameAndText)
+                content.body = reactionBody(r, withText: preview == .nameAndText, bundle: bundle)
             }
         } else {
             content.title = oneContact ? (messages.first?.name ?? reactions.first?.name ?? "") : ""
-            content.body = String(format: localized("NEW_MESSAGES_COUNT", fallback: "%lld new messages"), Int64(count))
+            content.body = String(format: localized("NEW_MESSAGES_COUNT", fallback: "%lld new messages", bundle: bundle), Int64(count))
         }
         content.threadIdentifier = oneContact ? (contacts.first ?? "") : ""
         return "shown"
     }
 
-    private static func reactionBody(_ r: NewReaction, withText: Bool) -> String {
-        guard withText else { return localized("REACTED", fallback: "Reacted") }
+    private static func reactionBody(_ r: NewReaction, withText: Bool, bundle: Bundle) -> String {
+        // Neither the emoji nor the text of an ephemeral: only that it was one.
+        if r.onEphemeral {
+            return localized("REACTED_EPHEMERAL", fallback: "Reacted to a disappearing message", bundle: bundle)
+        }
+        guard withText else { return localized("REACTED", fallback: "Reacted", bundle: bundle) }
         let emojis = r.emojis.joined()
         if let excerpt = r.excerpt, !excerpt.isEmpty {
-            return String(format: localized("REACTED_TO", fallback: "Reacted %1$@ to “%2$@”"), emojis, excerpt)
+            return String(format: localized("REACTED_TO", fallback: "Reacted %1$@ to “%2$@”", bundle: bundle), emojis, excerpt)
         }
-        return String(format: localized("REACTED_EMOJI", fallback: "Reacted %@"), emojis)
+        return String(format: localized("REACTED_EMOJI", fallback: "Reacted %@", bundle: bundle), emojis)
     }
 
-    private final class Marker {}
+    public final class Marker {}
 
-    static func localized(_ key: String, fallback: String) -> String {
-        NSLocalizedString(key, tableName: nil, bundle: Bundle(for: Marker.self), value: fallback, comment: "")
+    static func localized(_ key: String, fallback: String, bundle: Bundle = Bundle(for: Marker.self)) -> String {
+        NSLocalizedString(key, tableName: nil, bundle: bundle, value: fallback, comment: "")
     }
 }

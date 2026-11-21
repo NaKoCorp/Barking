@@ -219,6 +219,42 @@ struct Bubble: View {
     }
 }
 
+/// What is left of an ephemeral, rounded up (spec deletion/ephemeral §5.5):
+/// "<1 min" under a minute, then minutes ("4 min"), hours ("2 h") under a
+/// day, days ("3 d", « 3 j ») beyond.
+func remainingLabel(seconds: Int, bundle: Bundle = .main, locale: Locale = .current) -> String {
+    func up(_ unit: Int) -> Int { (seconds + unit - 1) / unit }
+    switch seconds {
+    case ..<60: return String(localized: "<1 min", bundle: bundle, locale: locale)
+    case ..<3_600: return String(localized: "\(up(60)) min", bundle: bundle, locale: locale)
+    case ..<86_400: return String(localized: "\(up(3_600)) h", bundle: bundle, locale: locale)
+    default: return String(localized: "\(up(86_400)) d", bundle: bundle, locale: locale)
+    }
+}
+
+/// Under an ephemeral bubble: an hourglass and the time left, read again
+/// each minute. VoiceOver reads it in the bubble's value instead.
+struct EphemeralCountdown: View {
+    /// The seconds left at a date (`ConversationModel.Item.remaining`).
+    let remaining: (Date) -> Int
+    let alignment: HorizontalAlignment
+    @Environment(\.locale) private var locale
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            HStack(spacing: Space.s1) {
+                Image(systemName: "hourglass").font(.bSymbol(11, relativeTo: .caption, weight: .semibold))
+                Text(verbatim: remainingLabel(seconds: remaining(context.date), bundle: .strings(for: locale),
+                                              locale: locale))
+                    .font(.bMeta)
+            }
+            .foregroundStyle(Color.fgSoft)
+            .frame(maxWidth: .infinity, alignment: Alignment(horizontal: alignment, vertical: .center))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
 /// How a chip is drawn: the stroke, its dash, the fill and the width, plus
 /// a ⚠︎ after the count. Only my chips carry the send state of my reaction;
 /// the shape says it as much as the colour (dashed, solid, ⚠︎).

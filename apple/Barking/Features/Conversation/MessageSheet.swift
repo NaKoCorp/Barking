@@ -123,6 +123,7 @@ struct MessageSheetBody: View {
                     sent
                 case .sentElsewhere:
                     QuoteCard(text: model.quote)
+                    ephemeral
                     Text("Sent from another of your devices. Its delivery is tracked there.")
                         .font(.bBodySmall).foregroundStyle(Color.fgMuted)
                         .fixedSize(horizontal: false, vertical: true)
@@ -131,6 +132,7 @@ struct MessageSheetBody: View {
                     danger
                 case .received:
                     QuoteCard(text: model.quote)
+                    ephemeral
                     section("Delivery")
                     if let path = model.path {
                         PathStops(rows: path.rows, notRecorded: path.notRecorded)
@@ -148,6 +150,7 @@ struct MessageSheetBody: View {
 
     @ViewBuilder private var sent: some View {
         QuoteCard(text: model.quote)
+        ephemeral
         if let state = model.delivery?.state {
             DeliveryLegend(current: state).padding(.top, Space.s4)
         }
@@ -184,6 +187,28 @@ struct MessageSheetBody: View {
         }
         PrivacyBlock(contactName: model.contactName).padding(.top, Space.section)
         danger
+    }
+
+    /// An ephemeral's delay and planned erasure, under the quote (§5.5).
+    @ViewBuilder private var ephemeral: some View {
+        TimelineView(.everyMinute) { context in
+            if let details = model.ephemeralDetails(now: context.date, bundle: .strings(for: locale), locale: locale) {
+                FormCard {
+                    detailRow(details.delay, identifier: "sheet.ephemeralDelay")
+                    detailRow(details.erase, identifier: "sheet.ephemeralErase")
+                }
+                .padding(.top, Space.s4)
+            }
+        }
+    }
+
+    private func detailRow(_ row: EphemeralDetails.Row, identifier: String) -> some View {
+        FormRow(title: Text(verbatim: row.title)) {
+            Text(verbatim: row.value).font(BarkingFont.mono(.caption, size: 13)).foregroundStyle(Color.fgMuted)
+        }
+        .frame(minHeight: FormRowMetrics.minHeight(hasSubtitle: false))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(identifier)
     }
 
     /// My reaction's send, under the message's delivery: hidden without one.

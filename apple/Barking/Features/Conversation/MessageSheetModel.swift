@@ -71,6 +71,11 @@ final class MessageSheetModel {
     private(set) var notice: Notice?
     private(set) var quote = ""
     private(set) var outgoing = true
+    /// An ephemeral's delay (seconds), first sighting and planned erasure
+    /// (Unix seconds); nil for a plain message.
+    private(set) var ttl: UInt32?
+    private(set) var seenAt: UInt64?
+    private(set) var expireAt: UInt64?
     private(set) var sheet: MessageDelivery?
     /// My reactions on this message and the send of that set toward the
     /// contact; nil when none is tracked. It covers the contact send only:
@@ -149,6 +154,31 @@ final class MessageSheetModel {
                           contactName: contactName).map(Self.step)
     }
 
+    /// An ephemeral's Details (spec deletion/ephemeral §5.5): its delay, and
+    /// when it is erased; "After reading" while it is not seen (`expireAt`
+    /// is then only the 7-day ceiling). nil for a plain message.
+    func ephemeralDetails(now: Date = .now, bundle: Bundle = .main, locale: Locale = .current,
+                          timeZone: TimeZone = .current) -> EphemeralDetails? {
+        guard let ttl else { return nil }
+        let delay = EphemeralDetails.Row(
+            title: String(localized: "Disappears after", bundle: bundle, locale: locale),
+            value: EphemeralDelay(seconds: ttl).shortLabel(bundle: bundle, locale: locale))
+        let at: String
+        if seenAt != nil, let expireAt {
+            let date = Date(timeIntervalSince1970: TimeInterval(expireAt))
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = timeZone
+            at = calendar.isDate(date, inSameDayAs: now)
+                ? Self.clock(date, locale: locale, timeZone: timeZone)
+                : Self.dayAndTime(date, bundle: bundle, locale: locale, timeZone: timeZone)
+        } else {
+            at = String(localized: "After reading", bundle: bundle, locale: locale)
+        }
+        return EphemeralDetails(delay: delay,
+                                erase: .init(title: String(localized: "Erased at", bundle: bundle, locale: locale),
+                                             value: at))
+    }
+
     /// The reaction's last send did not leave: offer to send it again.
     var canRetryReaction: Bool { reaction?.delivery.state == .notDelivered }
 
@@ -162,6 +192,9 @@ final class MessageSheetModel {
             }
             quote = message.body
             outgoing = message.outgoing
+            ttl = message.ttlSecs
+            seenAt = message.seenAt
+            expireAt = message.expireAt
             await loadReaction()
             otherDevices = ((try? await core.myDevices()) ?? []).filter { !$0.thisDevice }.count
             if !message.outgoing {
@@ -195,6 +228,8 @@ final class MessageSheetModel {
         case .messages(let c) where c == contact:
             if content == .sent { await refresh() } else { await load() }
         case .delivery(let c, let ids) where c == contact && ids.contains(messageId): await refresh()
+        // Its time was up: it left this iPhone like a deletion elsewhere.
+        case .expired(let ids) where ids.contains(messageId): close(.removedElsewhere)
         default: break
         }
     }
@@ -519,4 +554,14 @@ final class MessageSheetModel {
                                      detail: line.detail.map { Text(verbatim: $0) }, phase: line.phase,
                                      privacy: line.privacy)
     }
+}
+
+/// The two lines of an ephemeral's Details: its delay and when it goes.
+struct EphemeralDetails: Equatable {
+    struct Row: Equatable {
+        let title: String
+        let value: String
+    }
+    let delay: Row
+    let erase: Row
 }

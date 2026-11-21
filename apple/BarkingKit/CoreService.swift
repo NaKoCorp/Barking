@@ -249,6 +249,26 @@ public actor CoreService {
         publish(.messages(contact: contact))
         Task { _ = await self.sync(reason: .afterSend) }
     }
+    /// The ephemeral rows `ids` are on screen: seen now. The core ignores
+    /// rows that are not ephemeral or already seen; my other devices hear
+    /// of it at the next sync. Nothing is published: the conversation that
+    /// reported them reloads itself.
+    public func markSeen(_ ids: [Int64]) async throws {
+        guard !ids.isEmpty else { return }
+        try await call("seen") { try $0.markSeen(ids: ids) }
+    }
+    /// When the next ephemeral is due (Unix seconds); nil without any.
+    public func nextExpiry() async throws -> UInt64? {
+        try await call("next-expiry") { try $0.nextExpiry() }
+    }
+    /// Erases the ephemerals due now and publishes their rows (`.expired`).
+    @discardableResult
+    public func expireEphemeral() async throws -> [Int64] {
+        let ids = try await call("expire") { try $0.expireEphemeral() }
+        if !ids.isEmpty { publish(.expired(ids: ids)) }
+        return ids
+    }
+
     // MARK: Delivery
 
     /// Fresh delivery of the messages `ids`, in that order; a deleted or
@@ -401,6 +421,8 @@ public actor CoreService {
         lastSyncAt = Date()
         publish(.network)
         if outcome.received > 0 || outcome.sent > 0 { publish(.contacts) }
+        // It expired first: the rows it erased leave every screen.
+        if !outcome.expired.isEmpty { publish(.expired(ids: outcome.expired)) }
         // A new message (or a copy of one I sent from another device)
         // reloads its conversation whole; the others, whose state alone
         // changed, refresh their rows after the window.

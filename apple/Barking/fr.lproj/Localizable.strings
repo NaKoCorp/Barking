@@ -549,3 +549,9 @@
 "hours" = "heures";
 "minutes" = "minutes";
 "Disappears %1$@ after sending for you, %1$@ after reading for %2$@. %2$@ can take a screenshot." = "S’efface %1$@ après l’envoi chez vous, %1$@ après lecture chez %2$@. %2$@ peut faire une capture d’écran.";
+"<1 min" = "<1 min";
+"Disappearing message" = "Message éphémère";
+", disappearing message, disappears in %@" = ", message éphémère, s’efface dans %@";
+"Disappears after" = "S’efface après";
+"Erased at" = "Effacé à";
+"After reading" = "Après lecture";

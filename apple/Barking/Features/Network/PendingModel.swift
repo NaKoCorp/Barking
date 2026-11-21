@@ -222,7 +222,7 @@ final class PendingModel {
     /// What the core says changed: anything that can alter the queue reads it again.
     func apply(_ change: CoreChange) async {
         switch change {
-        case .network, .messages, .delivery, .contacts, .devices: await load()
+        case .network, .messages, .delivery, .contacts, .devices, .expired: await load()
         case .identity: break
         }
     }

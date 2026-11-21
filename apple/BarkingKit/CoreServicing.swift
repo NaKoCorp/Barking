@@ -97,6 +97,9 @@ public enum CoreChange: Sendable, Equatable {
     case network
     case devices
     case identity
+    /// Ephemeral rows erased (`Message.id`): the expiry names no contact,
+    /// so each screen checks whether it shows one of them.
+    case expired(ids: [Int64])
 }
 
 public enum SyncReason: Sendable {
@@ -128,6 +131,8 @@ public struct SyncOutcome: Sendable, Equatable {
     /// Contacts whose conversation a reaction changed (a contact's, or one of
     /// mine from another device, a removal included): it reloads.
     public var reactionContacts: [String] = []
+    /// Ephemeral rows the sync erased (it expires first).
+    public var expired: [Int64] = []
 
     /// Something came in or went out: what a background wake reports.
     public var changed: Bool { items > 0 || received > 0 || sent > 0 }
@@ -143,7 +148,8 @@ public struct SyncOutcome: Sendable, Equatable {
                            deliveryChanges: s.deliveryChanges,
                            newMessageContacts: s.newMessages.map(\.contact), failed: s.failed,
                            syncedContacts: s.syncedContacts, newMessages: s.newMessages,
-                           newReactions: s.newReactions, reactionContacts: s.reactionContacts)
+                           newReactions: s.newReactions, reactionContacts: s.reactionContacts,
+                           expired: s.expired)
     }
 }
 

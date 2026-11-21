@@ -8,6 +8,9 @@ struct ConversationView: View {
     let core: CoreService
     @State private var model: ConversationModel
     @Environment(\.scenePhase) private var phase
+    /// Its cover hides the conversation: nothing is seen under it (nil in
+    /// previews and renders).
+    @Environment(LockController.self) private var lock: LockController?
     /// Told while this conversation is on screen: syncs every 15 s.
     @Environment(\.syncLoop) private var syncLoop
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -162,6 +165,11 @@ struct ConversationView: View {
         .onChange(of: phase) { _, new in
             if new == .background { Task { await model.saveDraft() } }
         }
+        // Ephemerals: erased when due and seen only while active and unlocked.
+        .onChange(of: phase, initial: true) { _, new in
+            Task { await model.phaseChanged(active: new == .active) }
+        }
+        .onChange(of: lock?.covered ?? false, initial: true) { _, covered in model.covered = covered }
         .onChange(of: model.draft) {
             draftSave?.cancel()
             draftSave = Task {
@@ -222,6 +230,10 @@ struct ConversationView: View {
                 BubbleMeta(state: item.state, at: item.at, alignment: side,
                            retry: item.state == .notDelivered ? { retry(item.id) } : nil)
             }
+            // Not grouped with the time: each ephemeral says how long it has left.
+            if !deleting, item.ttl != nil {
+                EphemeralCountdown(remaining: { item.remaining(at: $0) ?? 0 }, alignment: side)
+            }
         }
         .opacity(deleting ? 0.5 : 1)
         .onAppear { model.bubbleAppeared(item.id) }
@@ -276,7 +288,7 @@ struct ConversationView: View {
                 }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityValue(Text(verbatim: Self.spoken(item)))
+            .accessibilityValue(Text(verbatim: Self.spoken(item, now: .now, bundle: strings, locale: locale)))
             .accessibilityHint(saved ? Text("Opens the message details.") : Text(verbatim: ""))
             .accessibilityActions {
                 if acts {
@@ -294,6 +306,8 @@ struct ConversationView: View {
                     Button("Delete") { confirm(item) }
                 }
             }
+            // Seen once more than half of it is in the visible part of the list.
+            .onScrollVisibilityChange(threshold: 0.5) { model.bubbleVisibility(item.id, shown: $0) }
             .bubbleRow(outgoing: item.outgoing)
     }
 
@@ -327,13 +341,22 @@ struct ConversationView: View {
 
     /// The bubble's VoiceOver value (§7.1): the state sentence of a sent
     /// message, "Sent from another of your devices" without a record, the
-    /// time of a received one.
-    static func spoken(_ item: ConversationModel.Item) -> String {
+    /// time of a received one. An ephemeral adds how long it has left.
+    static func spoken(_ item: ConversationModel.Item, now: Date = .now, bundle: Bundle = .main,
+                       locale: Locale = .current) -> String {
+        let base: String
         if item.outgoing {
-            guard let d = item.delivery else { return BubbleMeta.sentElsewhere() }
-            return d.state.spoken(d)
+            if let d = item.delivery {
+                base = d.state.spoken(d, bundle: bundle, locale: locale)
+            } else {
+                base = BubbleMeta.sentElsewhere(bundle: bundle, locale: locale)
+            }
+        } else {
+            base = item.at.formatted(date: .omitted, time: .shortened)
         }
-        return item.at.formatted(date: .omitted, time: .shortened)
+        guard let left = item.remaining(at: now) else { return base }
+        let label = remainingLabel(seconds: left, bundle: bundle, locale: locale)
+        return base + String(localized: ", disappearing message, disappears in \(label)", bundle: bundle, locale: locale)
     }
 
     /// Opens the delete confirmation once my linked devices are counted.

@@ -12,12 +12,16 @@ struct ChatRow: Identifiable, Equatable {
     let lastAt: Date?
     let lastStatus: DeliveryState?
     let unread: Int
+    /// The last message is ephemeral: its text never shows here (spec
+    /// deletion/ephemeral §5.5).
+    var lastEphemeral = false
 
-    /// The row's second line (U-22): the last message, or, with none, the
-    /// contact's trust (U-20).
-    enum Line: Equatable { case preview(String), trust(Trust) }
+    /// The row's second line (U-22): the last message ("Disappearing
+    /// message" for an ephemeral), or, with none, the contact's trust (U-20).
+    enum Line: Equatable { case preview(String), disappearing, trust(Trust) }
 
     var line: Line {
+        if lastEphemeral { return .disappearing }
         if let lastText, !lastText.isEmpty { return .preview(lastText) }
         return .trust(Trust(verified: verified))
     }
@@ -60,7 +64,8 @@ final class ChatsModel {
                 lastText: last?.body,
                 lastAt: last.map { Date(timeIntervalSince1970: TimeInterval($0.at)) },
                 lastStatus: last?.shownState,
-                unread: Int(s.unread)))
+                unread: Int(s.unread),
+                lastEphemeral: last?.ttlSecs != nil))
         }
         rows = out.sorted { ($0.lastAt ?? .distantPast) > ($1.lastAt ?? .distantPast) }
     }

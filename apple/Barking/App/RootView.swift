@@ -57,7 +57,12 @@ struct MainTabView: View {
         .onChange(of: router.pendingCardLink, initial: true) { _, link in if link != nil { tab = .chats } }
         .onChange(of: router.pendingRelayLink, initial: true) { _, link in if link != nil { tab = .network } }
         .environment(\.syncLoop, loop)
-        .onChange(of: phase, initial: true) { _, now in loop.scenePhaseChanged(to: now) }
+        .onChange(of: phase, initial: true) { _, now in
+            loop.scenePhaseChanged(to: now)
+            // At launch and each return: what fell due meanwhile goes, and
+            // the chat list follows (`.expired`), even with no sync.
+            if now == .active { Task { _ = try? await core.expireEphemeral() } }
+        }
         // The core goes (a reset, a removed device): its syncs go with it.
         .onDisappear { loop.stop() }
     }
