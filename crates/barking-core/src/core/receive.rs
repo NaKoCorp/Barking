@@ -563,8 +563,8 @@ fn accept(
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
         }
-        // Extensible contents: replies and reactions, and kinds this version
-        // does not know (`accept_ext`).
+        // Extensible contents: replies, ephemeral messages and reactions,
+        // and kinds this version does not know (`accept_ext`).
         (
             Body::Ext {
                 kind,

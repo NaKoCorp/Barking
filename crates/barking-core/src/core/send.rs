@@ -261,8 +261,8 @@ impl Core {
     /// Encrypts `text` for each device in the contact's list; one packet
     /// per reachable device. A single message (a randomly drawn
     /// identifier), one delivery per packet. A copy, with the same
-    /// identifier (`SyncSent`, or `SyncReply` for a reply), is also
-    /// encrypted for each of my other devices (packets returned after the
+    /// identifier (`SyncSent`, `SyncReply` for a reply, `SyncMessage` for an
+    /// ephemeral), is also encrypted for each of my other devices (packets returned after the
     /// contact's). Everything is written in a single transaction, including
     /// the advanced ratchet state, before the packets are returned.
     ///
