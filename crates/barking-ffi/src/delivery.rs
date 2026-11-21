@@ -206,6 +206,9 @@ pub enum PendingKind {
     CardUpdate,
     /// A reaction packet (to a contact's device, or a copy for one of mine).
     Reaction,
+    /// One of my messages to a contact whose row is gone (deleted after a
+    /// deposit was tried, or an ephemeral expired): no text to show.
+    ErasedMessage,
 }
 
 /// One of my messages with packets to the contact still waiting here.
@@ -323,6 +326,7 @@ fn kind_of(k: store::PendingKind) -> PendingKind {
         store::PendingKind::DeviceSync => PendingKind::DeviceSync,
         store::PendingKind::CardUpdate => PendingKind::CardUpdate,
         store::PendingKind::Reaction => PendingKind::Reaction,
+        store::PendingKind::ErasedMessage => PendingKind::ErasedMessage,
     }
 }
 

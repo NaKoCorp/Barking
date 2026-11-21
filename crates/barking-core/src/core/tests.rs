@@ -8737,3 +8737,48 @@ fn history_export_skips_ephemerals() {
     assert_eq!(out.reactions.len(), 1);
     assert_eq!(out.reactions[0].target(), y_id);
 }
+
+// --- Task 4, fix 1: an erased message on the Pending screen.
+
+/// The sorts of the "Synchronisation" section but receipts (Alice still
+/// owes Bob one for "y"), with their packets and contacts, read at `now`.
+fn sync_sorts(c: &mut Core, now: u64) -> Vec<(PendingKind, u32, Vec<Fingerprint>)> {
+    c.pending_packets(now)
+        .unwrap()
+        .sync
+        .into_iter()
+        .filter(|s| s.kind != PendingKind::Ack)
+        .map(|s| (s.kind, s.packets, s.contacts))
+        .collect()
+}
+
+#[test]
+fn erased_messages_are_pending_as_such() {
+    // An ephemeral that is due (then erased) before it leaves.
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    p.a.send_message(&bob, "brief", None, Some(60), NOW, &mut p.rng)
+        .unwrap();
+    let erased = vec![(PendingKind::ErasedMessage, 1, vec![bob])];
+    for (now, sweep) in [(NOW + 60, false), (NOW + 61, true)] {
+        if sweep {
+            assert_eq!(p.a.expire_ephemeral(now).unwrap().len(), 1);
+        }
+        let pending = p.a.pending_packets(now).unwrap();
+        assert!(pending.messages.is_empty(), "no row, no text");
+        assert_eq!(sync_sorts(&mut p.a, now), erased, "swept: {sweep}");
+        assert_eq!(pending.packets, p.a.pending_count(now).unwrap());
+    }
+
+    // A plain message deleted after a deposit was tried: it may still go.
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "tried", NOW, &mut p.rng).unwrap();
+    p.a.record_deposit_tried(sent[0].id, NOW + 1).unwrap();
+    p.a.delete_message(row_of(&p.a, &bob, "tried"), NOW + 2, &mut p.rng)
+        .unwrap();
+    assert!(outbox_row(&p.a, sent[0].id).is_some());
+    let pending = p.a.pending_packets(NOW + 3).unwrap();
+    assert!(pending.messages.is_empty());
+    assert_eq!(sync_sorts(&mut p.a, NOW + 3), erased);
+}

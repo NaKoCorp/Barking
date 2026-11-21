@@ -517,6 +517,10 @@ pub enum PendingKind {
     CardUpdate,
     /// A reaction packet (to a contact's device, or a copy for one of mine).
     Reaction,
+    /// One of my messages to a contact whose row is gone: deleted after a
+    /// deposit was tried, or an ephemeral expired (or due) before it left.
+    /// It still goes; no text is left to show. Added last.
+    ErasedMessage,
 }
 
 /// One of my messages with packets to the contact still pending.
@@ -2603,13 +2607,15 @@ pub trait Queries {
             });
         }
         // Every other pending packet, with what classifies it: its kind,
-        // its delivery (`own`), its message row or tombstone, and the
-        // contact it concerns when known.
+        // its delivery (`own`), its shown message row, whether it carries a
+        // message at all (`erased`: a tombstone, or a row due and hidden),
+        // and the contact it concerns when known.
         let mut stmt = self
             .conn()
             .prepare(
                 "SELECT o.kind, d.packet_id IS NOT NULL, d.own, m.contact_fp, \
-                 EXISTS (SELECT 1 FROM deleted_messages t WHERE t.message_id = d.message_id), \
+                 EXISTS (SELECT 1 FROM deleted_messages t WHERE t.message_id = d.message_id) \
+                 OR EXISTS (SELECT 1 FROM messages mx WHERE mx.message_id = d.message_id), \
                  (SELECT mi.contact_fp FROM inbound i \
                   JOIN messages mi ON mi.message_id = i.message_id AND mi.direction = ?3 \
                   WHERE i.packet_id = o.ref LIMIT 1), \
@@ -2663,7 +2669,7 @@ pub trait Queries {
             delivered,
             own,
             row_contact,
-            tombstone,
+            erased,
             ack_contact,
             device_contact,
             reaction,
@@ -2679,11 +2685,15 @@ pub trait Queries {
                 // written so today; counted with my devices' sync.
                 (PendingKind::DeviceSync, None)
             } else if own == Some(true) {
-                if row_contact.is_some() || tombstone == Some(true) {
+                if row_contact.is_some() || erased == Some(true) {
                     (PendingKind::OwnCopy, row_contact)
                 } else {
                     (PendingKind::DeviceSync, None)
                 }
+            } else if erased == Some(true) {
+                // A message to the contact without its row: never shown as
+                // what it is not (a card update), never with a text.
+                (PendingKind::ErasedMessage, device_contact)
             } else {
                 (PendingKind::CardUpdate, device_contact)
             };

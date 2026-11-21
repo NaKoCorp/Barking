@@ -444,6 +444,7 @@
 "Updates for your other devices · %lld" = "Mises à jour pour vos autres appareils · %lld";
 "Your card, for your contacts · %lld" = "Votre carte, pour vos contacts · %lld";
 "Reactions · %lld" = "Réactions · %lld";
+"Erased message · %lld" = "Message effacé · %lld";
 "Receipts tell your contacts their messages arrived. Copies and updates keep your other devices in step; copies hold your messages, encrypted. Barking sends them on its own, and they can’t be deleted here." = "Les accusés disent à vos contacts que leurs messages sont arrivés. Les copies et les mises à jour gardent vos autres appareils à jour ; les copies contiennent vos messages, chiffrés. Barking les envoie seul, ils ne se suppriment pas d’ici.";
 "Cancel all · %lld" = "Tout annuler · %lld";
 "Only your messages. Sync packets stay." = "Seulement vos messages. Les paquets de synchronisation restent.";
