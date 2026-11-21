@@ -365,11 +365,14 @@ impl Core {
                     sent_at: clock,
                 },
             };
-            let (mut out, own) = seal_set(tx, device, &seal, (true, own_again), rng)?;
+            // The contact first: without any device of it to seal for,
+            // no copy of mine is sealed either.
+            let (mut out, _) = seal_set(tx, device, &seal, (true, false), rng)?;
             if out.is_empty() {
                 // Rolls the transaction back: the failed send stays.
                 return Err(CoreError::NoSession);
             }
+            let (_, own) = seal_set(tx, device, &seal, (false, own_again), rng)?;
             tx.put_reaction_if_newer(&ReactionRow { clock, tie, ..mine })?;
             out.extend(own);
             Ok(out)

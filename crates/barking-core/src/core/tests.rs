@@ -7245,3 +7245,32 @@ fn synced_newer_set_forgets_the_local_contact_send() {
     assert_eq!(a.reaction_delivery(row, NOW + 6), Ok(None));
     assert_eq!(contact_tie(&a, fp, target), None);
 }
+
+#[test]
+fn retry_reactions_without_contact_session_seals_no_own_copy() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, target, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let late = u64::from(to_bob.expires_at.max(to_t.expires_at)) + 1;
+    a.expire_due(late).unwrap();
+    let row = row_of(&a, &fp, "m");
+    let before = a.store.reaction(target, ME_REACTOR).unwrap();
+    let rows = |c: &Core| -> i64 {
+        c.store
+            .conn()
+            .query_row("SELECT count(*) FROM reaction_sends", [], |r| r.get(0))
+            .unwrap()
+    };
+    let sends = rows(&a);
+    no_session_with(&a, fp);
+    // My copy for T never left, but no device of Bob can be sealed for.
+    assert_eq!(
+        a.retry_reactions(row, late, &mut rng),
+        Err(CoreError::NoSession)
+    );
+    assert_eq!(rows(&a), sends);
+    assert_eq!(a.store.reaction(target, ME_REACTOR).unwrap(), before);
+    assert_eq!(
+        a.my_reaction_state(row),
+        Ok(Some(MessageStatus::NotDelivered))
+    );
+}
