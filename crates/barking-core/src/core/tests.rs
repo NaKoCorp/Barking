@@ -7177,3 +7177,31 @@ fn retry_reactions_leaves_an_own_copy_that_left() {
     let sent = a.retry_reactions(row, late, &mut rng).unwrap();
     assert_eq!(sent.len(), 1, "Bob only");
 }
+
+#[test]
+fn retry_reactions_resends_a_failed_removal() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    let first = react_y(&mut p, &["❤️"], NOW);
+    deliver(&mut p.b, &first, &mut p.rng);
+    let removal = p.a.set_reactions(row, &[], NOW + 1, &mut p.rng).unwrap();
+    let late = u64::from(removal[0].expires_at) + 1;
+    p.a.expire_due(late).unwrap();
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::NotDelivered))
+    );
+    let sent = p.a.retry_reactions(row, late, &mut p.rng).unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(p.a.my_reaction_state(row), Ok(Some(MessageStatus::Pending)));
+    let detail = p.a.reaction_delivery(row, late).unwrap().expect("tracked");
+    assert!(detail.emojis.is_empty());
+    let a = p.a.fingerprint();
+    let on_b = message_id_of(&p.b, &a, "y");
+    assert!(!p.b.reaction_chips(&a, on_b).unwrap().is_empty());
+    let _ =
+        p.b.receive(&sent[0].encode(), "t", late, &mut p.rng)
+            .unwrap();
+    assert!(p.b.reaction_chips(&a, on_b).unwrap().is_empty());
+}
