@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/NaKoCorp/Barking/compare/v0.2.0...v0.3.0) (2026-11-21)
+
+
+### Features
+
+* block a contact ([#66](https://github.com/NaKoCorp/Barking/issues/66)) ([56333f1](https://github.com/NaKoCorp/Barking/commit/56333f1105f27408333ffcfc27a58c4a9e7eb63a))
+* drafts and a 7-day message lifetime before TestFlight ([#70](https://github.com/NaKoCorp/Barking/issues/70)) ([2e001fa](https://github.com/NaKoCorp/Barking/commit/2e001fad30027a49b4aa3dd12bc84007f0038e20))
+* **ios:** add privacy manifests and declare non-exempt encryption ([#65](https://github.com/NaKoCorp/Barking/issues/65)) ([83c50e3](https://github.com/NaKoCorp/Barking/commit/83c50e3bb4158c416992958291461ad338e493df))
+* **ios:** add relays by QR code and confirm shared Barking links ([#60](https://github.com/NaKoCorp/Barking/issues/60)) ([ab4f70a](https://github.com/NaKoCorp/Barking/commit/ab4f70a76f9f507b2be862ca9c504bce993ac4ef))
+* **ios:** reply with a quote and react with emoji ([#72](https://github.com/NaKoCorp/Barking/issues/72)) ([555d1e7](https://github.com/NaKoCorp/Barking/commit/555d1e7f393c4185eee4747d17e0d04ebcfeefd9))
+
+
+### Bug Fixes
+
+* **deps:** update rust crate rusqlite to 0.43.0 ([#62](https://github.com/NaKoCorp/Barking/issues/62)) ([4867f17](https://github.com/NaKoCorp/Barking/commit/4867f17676a4c281a6830d8836c21b8c12ce12f4))
+* reads no longer wait for a sync in flight ([#68](https://github.com/NaKoCorp/Barking/issues/68)) ([20cbb72](https://github.com/NaKoCorp/Barking/commit/20cbb720d1230b5641de2058610ebf99f8721120))
+
 ## [0.2.0](https://github.com/NaKoCorp/Barking/compare/v0.1.0...v0.2.0) (2026-11-16)
 
 
