@@ -7205,3 +7205,43 @@ fn retry_reactions_resends_a_failed_removal() {
             .unwrap();
     assert!(p.b.reaction_chips(&a, on_b).unwrap().is_empty());
 }
+
+#[test]
+fn synced_newer_set_forgets_the_local_contact_send() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, target, to_bob, _to_t) = react_linked(&mut a, &mut t, &mut rng);
+    a.record_deposit(to_bob.id, NODE, NOW + 1).unwrap();
+    let row = row_of(&a, &fp, "m");
+    assert_eq!(a.my_reaction_state(row), Ok(Some(MessageStatus::OnNetwork)));
+    let t_row = row_of(&t, &fp, "m");
+    // T reacts before it saw A's copy, with an older clock: ignored here.
+    let older = t
+        .set_reactions(t_row, &emo(&["❤️"]), NOW - 10, &mut rng)
+        .unwrap();
+    for p in &older {
+        let _ = a.receive(&p.encode(), "t", NOW + 2, &mut rng).unwrap();
+    }
+    assert_eq!(
+        a.store
+            .reaction(target, ME_REACTOR)
+            .unwrap()
+            .unwrap()
+            .emojis,
+        emo(&["👍"])
+    );
+    assert_eq!(a.my_reaction_state(row), Ok(Some(MessageStatus::OnNetwork)));
+    assert!(a.reaction_delivery(row, NOW + 2).unwrap().is_some());
+    // A newer set from T, the same emoji as A's (it adds nothing here):
+    // A's contact send no longer describes my current set.
+    let newer = t
+        .set_reactions(t_row, &emo(&["👍"]), NOW + 5, &mut rng)
+        .unwrap();
+    for p in &newer {
+        let _ = a.receive(&p.encode(), "t", NOW + 6, &mut rng).unwrap();
+    }
+    let mine = a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    assert_eq!(mine.clock, NOW + 5, "T's set applied");
+    assert_eq!(a.my_reaction_state(row), Ok(None));
+    assert_eq!(a.reaction_delivery(row, NOW + 6), Ok(None));
+    assert_eq!(contact_tie(&a, fp, target), None);
+}

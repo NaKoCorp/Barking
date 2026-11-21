@@ -637,6 +637,8 @@ fn merge_order(old: &[String], new: &[String]) -> Vec<String> {
 /// `contact`, dated `(clock, tie)`. `None`: ignored, nothing written (a
 /// target deleted here, or one of another conversation). `Some(added)`: the
 /// emoji the set adds to the one it replaced, empty if it is not newer.
+/// A newer set of mine (`ME_REACTOR`, synced from another of my devices)
+/// also forgets the tracking of my send toward the contact on the target.
 pub(super) fn apply(
     q: &impl Queries,
     contact: Fingerprint,
@@ -662,6 +664,17 @@ pub(super) fn apply(
     };
     if !q.put_reaction_if_newer(&row)? {
         return Ok(Some(Vec::new()));
+    }
+    if reactor == ME_REACTOR {
+        // My set from another of my devices: my send toward the contact
+        // from here no longer carries my current set, so its state is
+        // forgotten (`my_reaction_state` becomes `None`). My copies' rows
+        // stay.
+        forget_reaction_tracking(
+            q,
+            "message_id = ?1 AND contact_fp = ?2 AND own = 0",
+            params![target.0.as_slice(), contact.0.as_slice()],
+        )?;
     }
     let before = old.map(|o| o.emojis).unwrap_or_default();
     Ok(Some(
