@@ -304,7 +304,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _retryReactionsCalls: [Int64] = []
     /// Message rows given to `retryReactions`, in order.
     var retryReactionsCalls: [Int64] { lock.withLock { _retryReactionsCalls } }
+    /// Thrown by `reactionDelivery` only, when set.
+    var reactionDeliveryError: Error?
     func reactionDelivery(message: Int64) throws -> ReactionDelivery? {
+        if let reactionDeliveryError { throw reactionDeliveryError }
         if let deliveryError { throw deliveryError }
         return reactionDeliveries[message]
     }

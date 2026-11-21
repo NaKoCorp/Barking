@@ -134,7 +134,7 @@ final class MessageSheetModel {
             }
             quote = message.body
             outgoing = message.outgoing
-            reaction = try? await core.reactionDelivery(messageId)
+            await loadReaction()
             if !message.outgoing {
                 let mine = (try? await core.myDevices()) ?? []
                 keepsOwnCopies = mine.contains { !$0.thisDevice }
@@ -179,11 +179,17 @@ final class MessageSheetModel {
             close(.removedElsewhere)
             return
         }
-        reaction = try? await core.reactionDelivery(messageId)
+        await loadReaction()
         guard outgoing, let sheet = try? await core.messageDelivery(messageId) else { return }
         let route = (try? await core.messageRoute(messageId)) ?? []
         show(sheet, route: route)
         content = .sent
+    }
+
+    /// A failed read keeps the previous value (the Resend button must not
+    /// vanish on a transient error); a successful nil clears it.
+    private func loadReaction() async {
+        do { reaction = try await core.reactionDelivery(messageId) } catch {}
     }
 
     private func show(_ sheet: MessageDelivery?, route: [RouteStepInfo]) {

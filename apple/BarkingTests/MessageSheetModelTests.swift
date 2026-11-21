@@ -542,6 +542,41 @@ final class MessageSheetModelTests: XCTestCase {
         XCTAssertEqual(m.reaction?.delivery.state, .pending)
     }
 
+    private func reactionSheet(_ state: DeliveryState) -> ReactionDelivery {
+        ReactionDelivery(messageId: 7, emojis: [], delivery: delivery(state), devices: [], relays: [],
+                         ownCopies: OwnCopies(total: 0, left: 0, waiting: 0))
+    }
+
+    func testRetryReactionFailureKeepsTheReactionAndShowsNotice() async {
+        let d = FakeDevice()
+        let m = make(d, outgoing: false)
+        d.deliveryUpdates[7] = DeliveryUpdate(messageId: 7, delivery: nil, removed: false)
+        d.reactionDeliveries[7] = reactionSheet(.notDelivered)
+        await m.load()
+        d.retryReactionsError = BarkingError.NoSession
+        d.reactionDeliveryError = BarkingError.Locked
+        await m.retryReaction()
+        XCTAssertEqual(m.notice, .reactionFailed)
+        XCTAssertEqual(m.reaction?.delivery.state, .notDelivered, "the Resend button stays")
+    }
+
+    func testReactionReadErrorKeepsThePreviousReaction() async {
+        let d = FakeDevice()
+        let m = make(d, outgoing: false)
+        d.deliveryUpdates[7] = DeliveryUpdate(messageId: 7, delivery: nil, removed: false)
+        d.reactionDeliveries[7] = reactionSheet(.notDelivered)
+        await m.load()
+        d.reactionDeliveryError = BarkingError.Locked
+        await m.refresh()
+        await m.load()
+        XCTAssertNotNil(m.reaction)
+        // A successful nil still clears it.
+        d.reactionDeliveryError = nil
+        d.reactionDeliveries[7] = nil
+        await m.refresh()
+        XCTAssertNil(m.reaction)
+    }
+
     /// §6.4 "Erreur de lecture": a warning, the message unchanged.
     func testReadErrorSaysDetailsUnavailable() async throws {
         let d = FakeDevice()
