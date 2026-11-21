@@ -175,7 +175,7 @@ final class MessageSheetModel {
             at = String(localized: "After reading", bundle: bundle, locale: locale)
         }
         return EphemeralDetails(delay: delay,
-                                erase: .init(title: String(localized: "Erased at", bundle: bundle, locale: locale),
+                                erase: .init(title: String(localized: "Disappears at", bundle: bundle, locale: locale),
                                              value: at))
     }
 

@@ -89,9 +89,62 @@ final class EphemeralDisplayTests: XCTestCase {
         let item = m.items[0]
         let now = Date(timeIntervalSince1970: TimeInterval(t0))
         XCTAssertTrue(ConversationView.spoken(item, now: now, bundle: en.bundle, locale: en.locale)
-            .hasSuffix(", disappearing message, disappears in 4 min"))
+            .hasSuffix(", disappearing message, disappears in 4 minutes"))
         XCTAssertTrue(ConversationView.spoken(item, now: now, bundle: fr.bundle, locale: fr.locale)
-            .hasSuffix(", message éphémère, s’efface dans 4\u{00A0}min"))
+            .hasSuffix(", message éphémère, s’efface dans 4 minutes"))
+    }
+
+    /// Final review 7: VoiceOver speaks the units in full (spec §5.5), with
+    /// the rounding of the visual label, which stays short.
+    func testSpokenRemainingLabel() {
+        let en = { (s: Int) in spokenRemainingLabel(seconds: s, bundle: self.en.bundle, locale: self.en.locale) }
+        let fr = { (s: Int) in spokenRemainingLabel(seconds: s, bundle: self.fr.bundle, locale: self.fr.locale) }
+        XCTAssertEqual(en(30), "less than a minute")
+        XCTAssertEqual(en(-4), "less than a minute")
+        XCTAssertEqual(en(60), "1 minute")
+        XCTAssertEqual(en(240), "4 minutes")
+        XCTAssertEqual(en(3600), "1 hour")
+        XCTAssertEqual(en(3601), "2 hours")
+        XCTAssertEqual(en(86_400), "1 day")
+        XCTAssertEqual(en(90_000), "2 days")
+        XCTAssertEqual(fr(30), "moins d’une minute")
+        XCTAssertEqual(fr(60), "1 minute")
+        XCTAssertEqual(fr(240), "4 minutes")
+        XCTAssertEqual(fr(3601), "2 heures")
+        XCTAssertEqual(fr(90_000), "2 jours")
+        XCTAssertEqual(remainingLabel(seconds: 240, bundle: self.en.bundle, locale: self.en.locale), "4 min",
+                       "the visual label is unchanged")
+    }
+
+    /// Final review 2: Copy is not offered on an ephemeral (the pasteboard
+    /// would outlive it); a plain message keeps it.
+    func testCopyIsNotOfferedOnEphemerals() async {
+        let d = FakeDevice()
+        d.messageList = ["b": [
+            Message(id: 1, outgoing: false, body: "a", at: t0, ttlSecs: 300, expireAt: t0 + 604_800),
+            Message(id: 2, outgoing: false, body: "b", at: t0),
+        ]]
+        let m = make(d)
+        await m.reload()
+        XCTAssertEqual(m.items.map(\.canCopy), [false, true])
+        XCTAssertEqual(m.items.map(\.canReplyOrReact), [true, true], "reply and react stay")
+    }
+
+    /// Final review 3: another of my devices saw an ephemeral shown here
+    /// (the core names its row): the conversation reloads, so the new
+    /// countdown shows and the expiry timer is armed again.
+    func testSeenElsewhereReloadsTheConversation() async throws {
+        let d = FakeDevice()
+        d.messageList = ["b": [Message(id: 1, outgoing: false, body: "a", at: t0, ttlSecs: 300,
+                                       expireAt: t0 + 604_800)]]
+        let m = make(d)
+        await m.reload()
+        XCTAssertNil(m.items[0].seenAt)
+        d.messageList = ["b": [Message(id: 1, outgoing: false, body: "a", at: t0, ttlSecs: 300, seenAt: t0,
+                                       expireAt: t0 + 300)]]
+        await m.refresh([1])
+        XCTAssertEqual(m.items.first?.seenAt, t0, "\(m.items)")
+        XCTAssertEqual(m.items.first?.expireAt, t0 + 300)
     }
 
     // MARK: Seen
@@ -286,10 +339,10 @@ final class EphemeralDisplayTests: XCTestCase {
         let now = Date(timeIntervalSince1970: TimeInterval(t0))
         var rows = try XCTUnwrap(m.ephemeralDetails(now: now, bundle: en.bundle, locale: en.locale, timeZone: utc))
         XCTAssertEqual(rows.delay, EphemeralDetails.Row(title: "Disappears after", value: "5 min"))
-        XCTAssertEqual(rows.erase, EphemeralDetails.Row(title: "Erased at", value: "After reading"))
+        XCTAssertEqual(rows.erase, EphemeralDetails.Row(title: "Disappears at", value: "After reading"))
         rows = try XCTUnwrap(m.ephemeralDetails(now: now, bundle: fr.bundle, locale: fr.locale, timeZone: utc))
         XCTAssertEqual(rows.delay, EphemeralDetails.Row(title: "S’efface après", value: "5\u{00A0}min"))
-        XCTAssertEqual(rows.erase, EphemeralDetails.Row(title: "Effacé à", value: "Après lecture"))
+        XCTAssertEqual(rows.erase, EphemeralDetails.Row(title: "S’efface à", value: "Après lecture"))
 
         d.messageList = ["b": [Message(id: 7, outgoing: false, body: "x", at: t0, ttlSecs: 300, seenAt: t0,
                                        expireAt: t0 + 300)]]

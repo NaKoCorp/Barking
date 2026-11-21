@@ -52,6 +52,10 @@ final class ConversationModel {
         /// replied to, reacted to, nor copied.
         var canReplyOrReact: Bool { !local && !needsUpdate }
 
+        /// Copy is not offered on an ephemeral: the pasteboard would keep
+        /// its text after the message is erased.
+        var canCopy: Bool { canReplyOrReact && ttl == nil }
+
         /// The state under the bubble; nil shows the time only.
         var state: DeliveryState? { outgoing ? delivery?.state : nil }
     }
@@ -391,9 +395,16 @@ final class ConversationModel {
         await armExpiry()
     }
 
-    /// Fresh delivery of the rows `ids` shown here, patched in place.
+    /// Fresh delivery of the rows `ids` shown here, patched in place. An
+    /// ephemeral named (seen on another of my devices: its countdown
+    /// changed) reloads the conversation instead, which arms the expiry
+    /// timer again.
     func refresh(_ ids: [Int64]) async {
         let shown = ids.filter { id in items.contains { $0.id == id } }
+        if items.contains(where: { $0.ttl != nil && shown.contains($0.id) }) {
+            await reload()
+            return
+        }
         guard !shown.isEmpty, let updates = try? await core.deliveriesOf(shown) else { return }
         apply(updates)
     }

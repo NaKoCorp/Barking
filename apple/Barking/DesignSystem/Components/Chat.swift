@@ -232,6 +232,18 @@ func remainingLabel(seconds: Int, bundle: Bundle = .main, locale: Locale = .curr
     }
 }
 
+/// `remainingLabel` for VoiceOver (spec §5.5): the same rounding, the
+/// units spelled out ("4 minutes", "2 days").
+func spokenRemainingLabel(seconds: Int, bundle: Bundle = .main, locale: Locale = .current) -> String {
+    func up(_ unit: Int) -> Int { (seconds + unit - 1) / unit }
+    switch seconds {
+    case ..<60: return String(localized: "less than a minute", bundle: bundle, locale: locale)
+    case ..<3_600: return String(localized: "\(up(60)) minutes", bundle: bundle, locale: locale)
+    case ..<86_400: return String(localized: "\(up(3_600)) hours", bundle: bundle, locale: locale)
+    default: return String(localized: "\(up(86_400)) days", bundle: bundle, locale: locale)
+    }
+}
+
 /// Under an ephemeral bubble: an hourglass and the time left, read again
 /// each minute. VoiceOver reads it in the bubble's value instead.
 struct EphemeralCountdown: View {

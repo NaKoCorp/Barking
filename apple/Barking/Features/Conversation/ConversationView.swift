@@ -278,7 +278,7 @@ struct ConversationView: View {
                 if failed {
                     Button { retry(item.id) } label: { Label("Retry", systemImage: "arrow.clockwise") }
                 }
-                if acts {
+                if item.canCopy {
                     Button { copy(item.text) } label: { Label("Copy", systemImage: "doc.on.doc") }
                 }
                 if saved {
@@ -300,7 +300,7 @@ struct ConversationView: View {
                 }
                 if resendable { Button("Resend reaction") { retryReaction(item.id) } }
                 if failed { Button("Retry") { retry(item.id) } }
-                if acts { Button("Copy") { copy(item.text) } }
+                if item.canCopy { Button("Copy") { copy(item.text) } }
                 if saved {
                     Button("Details") { sheetOf = SheetTarget(id: item.id) }
                     Button("Delete") { confirm(item) }
@@ -355,7 +355,7 @@ struct ConversationView: View {
             base = item.at.formatted(date: .omitted, time: .shortened)
         }
         guard let left = item.remaining(at: now) else { return base }
-        let label = remainingLabel(seconds: left, bundle: bundle, locale: locale)
+        let label = spokenRemainingLabel(seconds: left, bundle: bundle, locale: locale)
         return base + String(localized: ", disappearing message, disappears in \(label)", bundle: bundle, locale: locale)
     }
 
