@@ -3,7 +3,9 @@ import SwiftUI
 
 /// Foreground syncs (spec iOS messaging §4.2): a sync when the app comes to
 /// the front (`.launch` the first time, `.foreground` after), then every
-/// 15 s with a conversation open, 60 s otherwise; stopped in the background.
+/// 15 s with a conversation open, 60 s otherwise; stopped in the background,
+/// after one last sync (`.background`) so that what was just seen or
+/// deleted reaches my other devices before the app is suspended.
 /// One per ready core, owned by `MainTabView`. The notification extension
 /// has its own quick sync and never runs this.
 @MainActor
@@ -59,7 +61,10 @@ final class SyncLoop {
 
     /// Active: syncs now and runs (not again if it already runs: an
     /// inactive spell, such as the app switcher, did not stop it).
-    /// Background: stops, and asks for the next background refresh. Inactive: leaves it as it is.
+    /// Background: stops, runs one last sync if it was running (outside the
+    /// loop: `stop` does not cancel it; each device call holds its own
+    /// background task, `DeviceCall`), and asks for the next background
+    /// refresh. Inactive: leaves it as it is.
     func scenePhaseChanged(to phase: ScenePhase) {
         switch phase {
         case .active:
@@ -67,7 +72,12 @@ final class SyncLoop {
             run(first: started ? .foreground : .launch)
             started = true
         case .background:
+            let wasRunning = isRunning
             stop()
+            if wasRunning {
+                let sync = self.sync
+                Task { await sync(.background) }
+            }
             onBackground?()
         default:
             break

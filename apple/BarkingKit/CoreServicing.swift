@@ -103,7 +103,8 @@ public enum CoreChange: Sendable, Equatable {
 }
 
 public enum SyncReason: Sendable {
-    case launch, foreground, afterSend, timer, pull
+    /// `background`: the last sync as the app leaves the screen.
+    case launch, foreground, afterSend, timer, pull, background
 }
 
 /// A sync's outcome, as the Network screen shows it.

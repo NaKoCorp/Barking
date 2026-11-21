@@ -82,11 +82,14 @@ public actor CoreService {
 
     /// Publishes what a deletion touched: the conversations to reload whole,
     /// the chat list, and the pending count.
+    /// After a deletion: the screens it touched reload; something deleted
+    /// syncs at once, so that my other devices hear of it (`SyncDelete`).
     private func publishDeleted(_ outcome: DeleteOutcome) {
         var seen: Set<String> = []
         for c in outcome.changes where seen.insert(c.contact).inserted { publish(.messages(contact: c.contact)) }
         publish(.contacts)
         publish(.network)
+        if outcome.deleted > 0 { Task { _ = await self.sync(reason: .afterSend) } }
     }
 
     private func call<T: Sendable>(_ name: String, _ body: @escaping @Sendable (any DeviceHandle) throws -> T) async throws -> T {
@@ -250,12 +253,14 @@ public actor CoreService {
         Task { _ = await self.sync(reason: .afterSend) }
     }
     /// The ephemeral rows `ids` are on screen: seen now. The core ignores
-    /// rows that are not ephemeral or already seen; my other devices hear
-    /// of it at the next sync. Nothing is published: the conversation that
-    /// reported them reloads itself.
+    /// rows that are not ephemeral or already seen; a sync starts at once
+    /// so that my other devices start the countdown too (not hours later,
+    /// if the app goes to the background first). Nothing is published: the
+    /// conversation that reported them reloads itself.
     public func markSeen(_ ids: [Int64]) async throws {
         guard !ids.isEmpty else { return }
         try await call("seen") { try $0.markSeen(ids: ids) }
+        Task { _ = await self.sync(reason: .afterSend) }
     }
     /// When the next ephemeral is due (Unix seconds); nil without any.
     public func nextExpiry() async throws -> UInt64? {
