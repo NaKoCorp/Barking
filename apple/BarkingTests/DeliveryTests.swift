@@ -534,11 +534,4 @@ final class TriedDepositConfirmationTests: XCTestCase {
     func testUntriedStaysPending() {
         XCTAssertEqual(DeleteConfirmation(outgoing: true, delivery: delivery(devices: 1, tried: 0, pending: 1)), .pending)
     }
-
-    func testTriedKeepsTheOwnCopies() {
-        let d = delivery(devices: 1, tried: 1, pending: 1)
-        XCTAssertTrue(DeleteConfirmation.keepsOwnCopies(delivery: d, ownCopies: OwnCopies(total: 1, left: 0, waiting: 1)))
-        XCTAssertFalse(DeleteConfirmation.keepsOwnCopies(delivery: delivery(devices: 1, tried: 0, pending: 1),
-                                                         ownCopies: OwnCopies(total: 1, left: 0, waiting: 1)))
-    }
 }

@@ -17,6 +17,7 @@ struct MessageSheet: View {
     private struct Asking: Identifiable {
         let id = UUID()
         let confirmation: DeleteConfirmation
+        let title: String
         let message: String
         let shown: Delivery?
     }
@@ -39,7 +40,7 @@ struct MessageSheet: View {
         }
         .presentationDetents([.large])
         .presentationBackground(Color.surface)
-        .confirmationDialog(asking?.confirmation.title ?? "", isPresented: askingShown,
+        .confirmationDialog(Text(verbatim: asking?.title ?? ""), isPresented: askingShown,
                             titleVisibility: .visible, presenting: asking) { a in
             Button(a.confirmation.button, role: .destructive) {
                 Task { await model.delete(shown: a.shown) }
@@ -67,7 +68,8 @@ struct MessageSheet: View {
     }
 
     private func ask() {
-        asking = Asking(confirmation: model.confirmation, message: model.confirmationMessage(), shown: model.delivery)
+        asking = Asking(confirmation: model.confirmation, title: model.confirmationTitle(),
+                        message: model.confirmationMessage(), shown: model.delivery)
     }
 
     private func retryReaction() {

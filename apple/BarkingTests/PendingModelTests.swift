@@ -356,7 +356,13 @@ final class PendingModelTests: XCTestCase {
         let maybe = await m.askDelete(1)
         let ask = try XCTUnwrap(maybe)
         XCTAssertEqual(ask.confirmation, .mixed(left: 1, total: 2))
-        XCTAssertTrue(ask.message.hasSuffix("\nYour other devices keep their copy."))
+        XCTAssertFalse(ask.message.contains("other devices"))
+        XCTAssertEqual(ask.title, "Delete from this iPhone?", "no linked device")
+        d.devicesList = [MyDeviceInfo(id: "aa", name: "iPhone", issuedAt: 1, thisDevice: true, admin: true),
+                         MyDeviceInfo(id: "bb", name: "iPad", issuedAt: 1, thisDevice: false, admin: false)]
+        let again = await m.askDelete(1)
+        let linked = try XCTUnwrap(again)
+        XCTAssertEqual(linked.title, "Delete from all your devices?")
     }
 
     func testSingleDeletionOfAMessageThatLeftTheListAsksNothing() async {

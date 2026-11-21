@@ -316,3 +316,55 @@ fn pending_packets_and_count() {
     expire_queue(&da);
     assert_eq!(alice.pending_count().unwrap(), 0);
 }
+
+/// Alice with Bob, and a second device linked to her when `linked`; one
+/// message sent. Returns her device, Bob's fingerprint and the row.
+fn alice_deleting(dirs: &[tempfile::TempDir; 3], linked: bool) -> (Arc<Device>, String, i64) {
+    let (alice, fb) = alice_with_bob(&dirs[0], &dirs[1]);
+    if linked {
+        let pending = barking_ffi::begin_link(
+            common::config(&dirs[2], 3),
+            alice.link_offer().unwrap(),
+            "tablet".into(),
+        )
+        .unwrap();
+        alice.link_device(pending.request, false).unwrap();
+    }
+    alice.send_text(fb.clone(), "gone".into(), None).unwrap();
+    let id = id_of(&alice, &fb, "gone");
+    (alice, fb, id)
+}
+
+fn dirs() -> [tempfile::TempDir; 3] {
+    std::array::from_fn(|_| tempfile::tempdir().unwrap())
+}
+
+/// A deletion goes to my other devices (`SyncDelete`): its packet waits in
+/// the queue, whichever call deleted. Without a linked device, nothing waits.
+#[test]
+fn deletion_queues_a_packet_for_my_other_devices() {
+    type Delete = fn(&Device, i64);
+    let calls: [Delete; 3] = [
+        |a, id| {
+            a.delete_message(id).unwrap();
+        },
+        |a, id| {
+            a.delete_messages(vec![id]).unwrap();
+        },
+        |a, _| {
+            a.cancel_all_pending().unwrap();
+        },
+    ];
+    for delete in calls {
+        let d = dirs();
+        let (alice, _, id) = alice_deleting(&d, true);
+        let before = alice.pending_count().unwrap();
+        delete(&alice, id);
+        assert!(alice.pending_count().unwrap() > 0, "queued, was {before}");
+
+        let d = dirs();
+        let (alone, _, id) = alice_deleting(&d, false);
+        delete(&alone, id);
+        assert_eq!(alone.pending_count().unwrap(), 0);
+    }
+}

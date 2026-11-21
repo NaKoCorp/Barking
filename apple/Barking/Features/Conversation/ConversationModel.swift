@@ -456,16 +456,10 @@ final class ConversationModel {
         }
     }
 
-    /// Whether deleting `item` keeps a copy for my other devices: the
-    /// confirmation then says so on its own line (§5.1, §7.4).
-    func keepsOwnCopies(_ item: Item) async -> Bool {
-        guard item.outgoing else {
-            // A received message: my linked devices got their own packet.
-            return ((try? await core.myDevices()) ?? []).contains { !$0.thisDevice }
-        }
-        // Sent from another device: its confirmation already says it.
-        guard item.delivery != nil, let sheet = try? await core.messageDelivery(item.id) else { return false }
-        return DeleteConfirmation.keepsOwnCopies(delivery: sheet.delivery, ownCopies: sheet.ownCopies)
+    /// How many of my other devices are linked: the deletion goes to all of
+    /// them, and the confirmation's title says "all your devices".
+    func otherDevices() async -> Int {
+        ((try? await core.myDevices()) ?? []).filter { !$0.thisDevice }.count
     }
 
     /// After a deletion made in the message sheet: its banner, or none (§6.7).

@@ -31,7 +31,7 @@ struct PendingView: View {
 
         var title: Text {
             switch self {
-            case .one(let ask): Text(ask.confirmation.title)
+            case .one(let ask): Text(verbatim: ask.title)
             case .selection(let c), .all(let c): Text(verbatim: c.title)
             }
         }

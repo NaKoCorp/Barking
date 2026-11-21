@@ -100,6 +100,7 @@ final class PendingModel {
         let id = UUID()
         let messageId: Int64
         let confirmation: DeleteConfirmation
+        let title: String
         let message: String
         /// The delivery the dialog was built from, for the banner (§6.7).
         let shown: Delivery
@@ -245,20 +246,20 @@ final class PendingModel {
     func askDelete(_ id: Int64, bundle: Bundle = .main, locale: Locale = .current) async -> Ask? {
         guard let row = messages.first(where: { $0.id == id }) else { return nil }
         var shown = Self.estimate(of: row)
-        var keepsCopies = false
         do {
             guard let sheet = try await core.messageDelivery(id) else {
                 await load()
                 return nil
             }
             shown = sheet.delivery
-            keepsCopies = DeleteConfirmation.keepsOwnCopies(delivery: sheet.delivery, ownCopies: sheet.ownCopies)
         } catch {
             // Unreadable: the row's own numbers say enough for the case.
         }
         let confirmation = DeleteConfirmation(outgoing: true, delivery: shown)
+        let others = ((try? await core.myDevices()) ?? []).filter { !$0.thisDevice }.count
         return Ask(messageId: id, confirmation: confirmation,
-                   message: confirmation.message(name: row.name, keepsOwnCopies: keepsCopies, bundle: bundle, locale: locale),
+                   title: confirmation.title(otherDevices: others, bundle: bundle, locale: locale),
+                   message: confirmation.message(name: row.name, bundle: bundle, locale: locale),
                    shown: shown)
     }
 

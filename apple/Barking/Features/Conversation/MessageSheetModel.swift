@@ -83,8 +83,9 @@ final class MessageSheetModel {
     /// "Copy for your other devices: left at 14:02." or "…: pending.", nil
     /// without a linked device.
     private(set) var ownCopies: String?
-    /// The confirmation adds "Your other devices keep their copy." (§5.1, §7.4).
-    private(set) var keepsOwnCopies = false
+    /// My other linked devices: the deletion goes to all of them, and the
+    /// confirmation's title says so.
+    private(set) var otherDevices = 0
     /// The received message's path (`PathStops` rows).
     private(set) var path: PathModel?
     private var retrying = false
@@ -111,8 +112,12 @@ final class MessageSheetModel {
         DeleteConfirmation(outgoing: outgoing, delivery: content == .sentElsewhere ? nil : delivery)
     }
 
+    func confirmationTitle(bundle: Bundle = .main, locale: Locale = .current) -> String {
+        confirmation.title(otherDevices: otherDevices, bundle: bundle, locale: locale)
+    }
+
     func confirmationMessage(bundle: Bundle = .main, locale: Locale = .current) -> String {
-        confirmation.message(name: contactName, keepsOwnCopies: keepsOwnCopies, bundle: bundle, locale: locale)
+        confirmation.message(name: contactName, bundle: bundle, locale: locale)
     }
 
     /// "Expired at 11:50. Checking with the relays at the next sync." (or
@@ -158,9 +163,8 @@ final class MessageSheetModel {
             quote = message.body
             outgoing = message.outgoing
             await loadReaction()
+            otherDevices = ((try? await core.myDevices()) ?? []).filter { !$0.thisDevice }.count
             if !message.outgoing {
-                let mine = (try? await core.myDevices()) ?? []
-                keepsOwnCopies = mine.contains { !$0.thisDevice }
                 let path = self.path ?? PathModel(core: core, messageId: messageId, contact: contact,
                                                   contactName: contactName)
                 await path.load()
@@ -222,7 +226,6 @@ final class MessageSheetModel {
             devices = []
             devicesSentence = nil
             ownCopies = nil
-            keepsOwnCopies = false
             return
         }
         let size = route.filter { $0.step == "sealed" && !$0.own }.compactMap(\.size).max()
@@ -232,7 +235,6 @@ final class MessageSheetModel {
         devicesSentence = Self.devicesSentence(sheet.delivery)
         let copyLeft = route.first { $0.own && $0.step == "deposited" }.map { Date(timeIntervalSince1970: TimeInterval($0.at)) }
         ownCopies = Self.ownCopiesLine(sheet.ownCopies, leftAt: copyLeft)
-        keepsOwnCopies = DeleteConfirmation.keepsOwnCopies(delivery: sheet.delivery, ownCopies: sheet.ownCopies)
     }
 
     #if DEBUG

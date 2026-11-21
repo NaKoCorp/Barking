@@ -379,6 +379,8 @@
 "Delete this message?" = "Supprimer ce message ?";
 "Delete from this iPhone?" = "Supprimer de cet iPhone ?";
 "Delete this message from this iPhone?" = "Supprimer ce message de cet iPhone ?";
+"Delete from all your devices?" = "Supprimer de tous vos appareils ?";
+"Delete this message from all your devices?" = "Supprimer ce message de tous vos appareils ?";
 "It hasn’t left this iPhone. %@ won’t receive it." = "Il n’a pas quitté cet iPhone. %@ ne le recevra pas.";
 "It’s already on the network: %@ will still receive it." = "Il est déjà sur le réseau : %@ le recevra quand même.";
 "%@ already received it and keeps it." = "%@ l’a déjà reçu et le garde.";
@@ -393,7 +395,6 @@
 "Couldn't resend the reaction." = "Impossible de renvoyer la réaction.";
 "This contact was removed. Nothing can be sent to them." = "Ce contact a été supprimé. Rien ne peut lui être envoyé.";
 "You" = "Vous";
-"Your other devices keep their copy." = "Vos autres appareils gardent leur copie.";
 
 /* Lot M §6.4, §7.2: the message sheet ("received %@" is shared with the path) */
 "Show all" = "Tout afficher";

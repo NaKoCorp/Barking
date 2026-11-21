@@ -22,8 +22,8 @@ struct ConversationView: View {
     @State private var reactingTo: SheetTarget?
     /// The message the delete confirmation is open for, as it was then.
     @State private var confirming: ConversationModel.Item?
-    /// The confirmation adds "Your other devices keep their copy." (§7.4).
-    @State private var confirmingKeeps = false
+    /// My linked devices when the confirmation opened: its title says "all your devices".
+    @State private var confirmingDevices = 0
     /// The unverified banner's safety code, in a sheet: a
     /// `navigationDestination(isPresented:)` in the chats' path-bound stack
     /// looped SwiftUI's layout at 100 % CPU on the push.
@@ -130,7 +130,8 @@ struct ConversationView: View {
         .sheet(item: $reactingTo) { target in
             EmojiPicker { emoji in react(emoji, on: target.id) }
         }
-        .confirmationDialog(confirmation?.title ?? "", isPresented: confirmingShown,
+        .confirmationDialog(Text(verbatim: confirmation?.title(otherDevices: confirmingDevices) ?? ""),
+                            isPresented: confirmingShown,
                             titleVisibility: .visible, presenting: confirming) { item in
             Button(DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery).button, role: .destructive) {
                 Task { await model.delete(item.id, shown: item.delivery) }
@@ -138,7 +139,7 @@ struct ConversationView: View {
             Button("Keep", role: .cancel) {}
         } message: { item in
             Text(verbatim: DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery)
-                .message(name: model.name, keepsOwnCopies: confirmingKeeps))
+                .message(name: model.name))
         }
         // The message went meanwhile (deleted elsewhere): nothing to confirm (§9).
         .onChange(of: model.items.map(\.id)) { _, ids in
@@ -335,10 +336,10 @@ struct ConversationView: View {
         return item.at.formatted(date: .omitted, time: .shortened)
     }
 
-    /// Opens the delete confirmation once its own-copies line is known.
+    /// Opens the delete confirmation once my linked devices are counted.
     private func confirm(_ item: ConversationModel.Item) {
         Task {
-            confirmingKeeps = await model.keepsOwnCopies(item)
+            confirmingDevices = await model.otherDevices()
             confirming = item
         }
     }
