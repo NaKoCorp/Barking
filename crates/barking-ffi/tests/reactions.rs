@@ -406,6 +406,9 @@ fn placeholder_row_is_unread_and_last() {
             reply_to: None,
             reply_ref: None,
             placeholder: true,
+            ttl_secs: None,
+            seen_at: None,
+            expire_at: None,
         })
         .unwrap();
 

@@ -124,6 +124,7 @@ fn expect_msg(o: ReceiveOutcome) -> (Fingerprint, Option<String>, String, Packet
             alias,
             text,
             ack,
+            ..
         } => (from, alias, text, ack),
         other => panic!("Message expected, got {other:?}"),
     }

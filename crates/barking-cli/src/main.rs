@@ -830,6 +830,7 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
             alias,
             text,
             ack,
+            ..
         } => {
             let who = alias.unwrap_or_else(|| from.to_string());
             print!("{}", render_message(&who, &text));

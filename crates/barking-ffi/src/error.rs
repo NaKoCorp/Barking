@@ -123,6 +123,7 @@ impl From<CoreError> for BarkingError {
             CoreError::InvalidSignature
             | CoreError::Malformed(_)
             | CoreError::TooLarge
+            | CoreError::InvalidTtl
             | CoreError::InvalidPhrase => BarkingError::InvalidInput { detail },
             CoreError::UnknownContact => BarkingError::NotFound,
             CoreError::StoreLocked | CoreError::Store(_) => BarkingError::Storage { detail },

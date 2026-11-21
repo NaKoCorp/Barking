@@ -5257,7 +5257,7 @@ fn reply_to_received_message() {
     deliver(&mut p.b, &pk[0], &mut p.rng);
     let quoted = full_row(&p.b, &a, "18 h ?");
     let out =
-        p.b.send_message(&a, "oui", Some(quoted.id), NOW, &mut p.rng)
+        p.b.send_message(&a, "oui", Some(quoted.id), None, NOW, &mut p.rng)
             .unwrap();
     // The sender's row keeps the local id and the reference.
     let mine = full_row(&p.b, &a, "oui");
@@ -5296,7 +5296,7 @@ fn reply_to_sent_message() {
     deliver(&mut p.a, &pk[0], &mut p.rng);
     let own = full_row(&p.b, &a, "mine");
     let out =
-        p.b.send_message(&a, "re", Some(own.id), NOW, &mut p.rng)
+        p.b.send_message(&a, "re", Some(own.id), None, NOW, &mut p.rng)
             .unwrap();
     assert_eq!(
         full_row(&p.b, &a, "re").reply_ref,
@@ -5325,7 +5325,7 @@ fn reply_without_original_resolves_later() {
     let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
     let row = full_row(&p.b, &a, "orig");
     let reply =
-        p.b.send_message(&a, "re", Some(row.id), NOW, &mut p.rng)
+        p.b.send_message(&a, "re", Some(row.id), None, NOW, &mut p.rng)
             .unwrap();
     // The reply first.
     deliver(&mut p.a, &reply[0], &mut p.rng);
@@ -5346,7 +5346,7 @@ fn deleted_original_reads_unavailable() {
     p.a.delete_message(id.id, NOW, &mut p.rng).unwrap();
     let row = full_row(&p.b, &a, "orig");
     let reply =
-        p.b.send_message(&a, "re", Some(row.id), NOW, &mut p.rng)
+        p.b.send_message(&a, "re", Some(row.id), None, NOW, &mut p.rng)
             .unwrap();
     deliver(&mut p.a, &reply[0], &mut p.rng);
     let got = full_row(&p.a, &b, "re");
@@ -5418,7 +5418,7 @@ fn reply_refuses_bad_target() {
     let rows = p.a.messages_with(&b).unwrap().len();
     for (to, id) in [(b, -1), (b, 9_999), (c_fp, b_row), (b, bare)] {
         assert_eq!(
-            p.a.send_message(&to, "nope", Some(id), NOW, &mut p.rng),
+            p.a.send_message(&to, "nope", Some(id), None, NOW, &mut p.rng),
             Err(CoreError::MessageNotFound),
             "{id}"
         );
@@ -5436,7 +5436,7 @@ fn retried_reply_keeps_its_ref() {
     deliver(&mut p.a, &original[0], &mut p.rng);
     let orig = full_row(&p.a, &b, "orig");
     let sent =
-        p.a.send_message(&b, "re", Some(orig.id), NOW, &mut p.rng)
+        p.a.send_message(&b, "re", Some(orig.id), None, NOW, &mut p.rng)
             .unwrap();
     let before = full_row(&p.a, &b, "re");
     // The delivery fails, the original goes away, the reply is retried.
@@ -5471,7 +5471,7 @@ fn reply_body_never_contains_quoted_text() {
     deliver(&mut p.a, &original[0], &mut p.rng);
     let row = full_row(&p.a, &b, secret);
     let out =
-        p.a.send_message(&b, "short", Some(row.id), NOW, &mut p.rng)
+        p.a.send_message(&b, "short", Some(row.id), None, NOW, &mut p.rng)
             .unwrap();
     let env = peek_envelope(&p.b, &out[0]);
     let Body::Ext { kind, data, .. } = &env.body else {
@@ -5484,7 +5484,7 @@ fn reply_body_never_contains_quoted_text() {
     assert!(find(data, b"short"));
     // Without a quote the body is still a plain text.
     let plain =
-        p.a.send_message(&b, "plain", None, NOW, &mut p.rng)
+        p.a.send_message(&b, "plain", None, None, NOW, &mut p.rng)
             .unwrap();
     assert!(matches!(peek_envelope(&p.b, &plain[0]).body, Body::Text(_)));
 }
@@ -7616,4 +7616,327 @@ fn delete_on_a_removed_device_stays_local() {
     assert_eq!(outcome.deleted, 1);
     assert!(pkts.is_empty());
     assert_eq!(not_acks(&mut t), before);
+}
+
+// --- Deletion and ephemeral, task 3: sending and receiving an ephemeral.
+
+use crate::content::{KIND_MESSAGE, UNSEEN_CEILING_SECS};
+
+/// `ttl_secs`, `seen_at` and `expire_at` of the row with this body.
+fn ephemeral_cols(
+    c: &Core,
+    contact: &Fingerprint,
+    body: &str,
+) -> (Option<u32>, Option<u64>, Option<u64>) {
+    let row = full_row(c, contact, body);
+    (row.ttl_secs, row.seen_at, row.expire_at)
+}
+
+#[test]
+fn send_rejects_ttl_out_of_bounds() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let outbox = p.a.pending_outbox(NOW).unwrap().len();
+    let rows = p.a.messages_with(&b).unwrap().len();
+    for ttl in [0, 59, 604_801, u32::MAX] {
+        assert_eq!(
+            p.a.send_message(&b, "nope", None, Some(ttl), NOW, &mut p.rng),
+            Err(CoreError::InvalidTtl),
+            "{ttl}"
+        );
+    }
+    assert_eq!(p.a.messages_with(&b).unwrap().len(), rows);
+    assert_eq!(p.a.pending_outbox(NOW).unwrap().len(), outbox);
+}
+
+#[test]
+fn ephemeral_text_uses_message_kind_and_plain_uses_text() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let out =
+        p.a.send_message(&b, "secret", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    let Body::Ext { kind, data, .. } = peek_envelope(&p.b, &out[0]).body else {
+        panic!("Ext expected");
+    };
+    assert_eq!(kind, KIND_MESSAGE);
+    assert_eq!(
+        ExtContent::decode(kind, &data).unwrap(),
+        Some(ExtContent::Message {
+            text: "secret".into(),
+            reply_to: None,
+            ttl_secs: Some(300),
+        })
+    );
+    let plain =
+        p.a.send_message(&b, "plain", None, None, NOW, &mut p.rng)
+            .unwrap();
+    assert!(matches!(peek_envelope(&p.b, &plain[0]).body, Body::Text(_)));
+    assert_eq!(ephemeral_cols(&p.a, &b, "plain"), (None, None, None));
+}
+
+#[test]
+fn received_ephemeral_has_ceiling() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let out =
+        p.b.send_message(&a, "poof", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    // Received later than sent: the ceiling counts from the insertion.
+    let r = NOW + 7;
+    let got = p.a.receive(&out[0].encode(), "t", r, &mut p.rng).unwrap();
+    assert!(
+        matches!(got, ReceiveOutcome::Message { ref text, ephemeral: true, .. } if text == "poof"),
+        "{got:?}"
+    );
+    assert_eq!(
+        ephemeral_cols(&p.a, &b, "poof"),
+        (Some(300), None, Some(r + UNSEEN_CEILING_SECS))
+    );
+    // A plain text is not ephemeral.
+    let plain = p.b.send_text(&a, "stays", NOW, &mut p.rng).unwrap();
+    let got = p.a.receive(&plain[0].encode(), "t", r, &mut p.rng).unwrap();
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Message {
+                ephemeral: false,
+                ..
+            }
+        ),
+        "{got:?}"
+    );
+    assert_eq!(ephemeral_cols(&p.a, &b, "stays"), (None, None, None));
+}
+
+#[test]
+fn received_message_without_ttl_is_a_plain_text() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let body = ExtContent::Message {
+        text: "v2".into(),
+        reply_to: None,
+        ttl_secs: None,
+    }
+    .to_body();
+    let out = seal_body(
+        &mut p.b,
+        &send::Target::Contact(a),
+        &body,
+        MessageId([0x61; 16]),
+        &mut p.rng,
+    );
+    let got = deliver(&mut p.a, &out[0].0, &mut p.rng);
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Message {
+                ephemeral: false,
+                ..
+            }
+        ),
+        "{got:?}"
+    );
+    assert_eq!(ephemeral_cols(&p.a, &b, "v2"), (None, None, None));
+}
+
+#[test]
+fn sent_ephemeral_is_seen_at_send() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let now = NOW + 3;
+    p.a.send_message(&b, "mine", None, Some(300), now, &mut p.rng)
+        .unwrap();
+    assert_eq!(
+        ephemeral_cols(&p.a, &b, "mine"),
+        (Some(300), Some(now), Some(now + 300))
+    );
+}
+
+#[test]
+fn ephemeral_reply_carries_reference() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = p.a.send_text(&b, "18 h ?", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.b, &pk[0], &mut p.rng);
+    let quoted = full_row(&p.b, &a, "18 h ?");
+    let out =
+        p.b.send_message(&a, "oui", Some(quoted.id), Some(60), NOW, &mut p.rng)
+            .unwrap();
+    let mine = full_row(&p.b, &a, "oui");
+    assert_eq!(mine.reply_to, Some(quoted.message_id));
+    assert_eq!(
+        mine.reply_ref,
+        Some(MessageRef {
+            id: quoted.wire_id.unwrap(),
+            by_sender: false
+        })
+    );
+    assert_eq!(mine.ttl_secs, Some(60));
+    let got = deliver(&mut p.a, &out[0], &mut p.rng);
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Message {
+                ephemeral: true,
+                ..
+            }
+        ),
+        "{got:?}"
+    );
+    let original = full_row(&p.a, &b, "18 h ?");
+    let reply = full_row(&p.a, &b, "oui");
+    assert_eq!(reply.reply_to, Some(original.message_id));
+    assert_eq!(reply.reply_ref, mine.reply_ref);
+    assert_eq!(reply.ttl_secs, Some(60));
+    assert_eq!(
+        p.a.message_in(&b, reply.reply_to.unwrap())
+            .unwrap()
+            .unwrap()
+            .body,
+        "18 h ?"
+    );
+}
+
+#[test]
+fn tablet_gets_sync_message_with_ttl() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let first = b.send_text(&alice, "q", NOW, &mut rng).unwrap();
+    deliver_each(&first, &mut [&mut a, &mut t], &mut rng);
+    let quoted = full_row(&a, &bob, "q");
+    let sent = a
+        .send_message(&bob, "e", Some(quoted.id), Some(300), NOW, &mut rng)
+        .unwrap();
+    assert_eq!(sent.len(), 2, "one for Bob, one copy for the tablet");
+    let r = NOW + 9;
+    let got = t.receive(&sent[1].encode(), "t", r, &mut rng).unwrap();
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Sent,
+                contact: Some(c)
+            } if c == bob
+        ),
+        "{got:?}"
+    );
+    let row = full_row(&t, &bob, "e");
+    assert_eq!(row.direction, Direction::Out);
+    assert_eq!(row.at, NOW);
+    assert_eq!(
+        (row.ttl_secs, row.seen_at, row.expire_at),
+        (Some(300), None, Some(r + UNSEEN_CEILING_SECS))
+    );
+    assert_eq!(row.reply_to, Some(full_row(&t, &bob, "q").message_id));
+    assert_eq!(row.reply_ref, full_row(&a, &bob, "e").reply_ref);
+    // Bob's side: an ephemeral from Alice.
+    let at_bob = deliver(&mut b, &sent[0], &mut rng);
+    assert!(
+        matches!(
+            at_bob,
+            ReceiveOutcome::Message {
+                ephemeral: true,
+                ..
+            }
+        ),
+        "{at_bob:?}"
+    );
+}
+
+#[test]
+fn sync_message_from_contact_and_message_from_my_device_refused() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let body = ExtContent::SyncMessage {
+        to: a,
+        text: "faux".into(),
+        reply_to: None,
+        ttl_secs: Some(300),
+    }
+    .to_body();
+    let out = seal_body(
+        &mut p.b,
+        &send::Target::Contact(a),
+        &body,
+        MessageId([0x62; 16]),
+        &mut p.rng,
+    );
+    assert_eq!(reason(deliver(&mut p.a, &out[0].0, &mut p.rng)), NOT_MINE);
+
+    let (_d, mut a, mut t, mut rng) = linked();
+    let body = ExtContent::Message {
+        text: "x".into(),
+        reply_to: None,
+        ttl_secs: Some(300),
+    }
+    .to_body();
+    let out = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x63; 16]),
+        &mut rng,
+    );
+    let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(r), "unexpected content for this mailbox");
+}
+
+#[test]
+fn ephemeral_from_blocked_contact_dropped() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let bob = p.a.resolve("bob").unwrap();
+    let out =
+        p.b.send_message(&a, "blocked", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    p.a.block_contact(&bob, NOW, &mut p.rng).unwrap();
+    let r = p.a.receive(&out[0].encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), "blocked contact");
+    assert_eq!(acks_for(&mut p.a, &out[0]), 0);
+    assert!(
+        p.a.messages_with(&bob)
+            .unwrap()
+            .iter()
+            .all(|m| m.body != "blocked")
+    );
+}
+
+#[test]
+fn resend_of_not_delivered_ephemeral_keeps_ttl() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let sent =
+        p.a.send_message(&b, "again", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    let before = full_row(&p.a, &b, "again");
+    let late = u64::from(sent[0].expires_at) + 1;
+    p.a.expire_due(late).unwrap();
+    assert_eq!(
+        full_row(&p.a, &b, "again").status,
+        MessageStatus::NotDelivered
+    );
+    let again = p.a.retry_message(before.id, late, &mut p.rng).unwrap();
+    let after = full_row(&p.a, &b, "again");
+    assert_eq!(
+        (after.ttl_secs, after.seen_at, after.expire_at),
+        (before.ttl_secs, before.seen_at, before.expire_at)
+    );
+    let r =
+        p.b.receive(&again[0].encode(), "t", late, &mut p.rng)
+            .unwrap();
+    assert!(
+        matches!(
+            r,
+            ReceiveOutcome::Message {
+                ephemeral: true,
+                ..
+            }
+        ),
+        "{r:?}"
+    );
+    assert_eq!(
+        ephemeral_cols(&p.b, &a, "again"),
+        (Some(300), None, Some(late + UNSEEN_CEILING_SECS))
+    );
 }

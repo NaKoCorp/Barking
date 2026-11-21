@@ -2574,7 +2574,7 @@ fn reply_from_tablet_resolves_on_admin_and_contact() {
     let quoted = row_of(&t.core, &bob_fp, "ping");
     let pkts = t
         .core
-        .send_message(&bob_fp, "pong", Some(quoted.id), NOW, &mut rng)
+        .send_message(&bob_fp, "pong", Some(quoted.id), None, NOW, &mut rng)
         .unwrap();
     assert_eq!(pkts.len(), 2);
     let at_bob = offer(&mut bob, &pkts, &mut rng);
@@ -2649,7 +2649,7 @@ fn linked_device_quotes_imported_message() {
 
     let pkts = t
         .core
-        .send_message(&bob_fp, "re x", Some(imported.id), NOW + 32, &mut rng)
+        .send_message(&bob_fp, "re x", Some(imported.id), None, NOW + 32, &mut rng)
         .unwrap();
     let at_bob: Vec<_> = pkts
         .iter()

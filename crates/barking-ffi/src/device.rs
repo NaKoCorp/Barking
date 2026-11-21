@@ -363,7 +363,7 @@ impl Device {
         guard(|| {
             self.with_core(|core| {
                 let fp = core.resolve(&contact)?;
-                core.send_message(&fp, &text, reply_to, now(), &mut rand::rng())?;
+                core.send_message(&fp, &text, reply_to, None, now(), &mut rand::rng())?;
                 Ok(())
             })
         })

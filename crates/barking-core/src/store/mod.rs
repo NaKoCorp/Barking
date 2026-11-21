@@ -226,6 +226,13 @@ pub struct MessageRow {
     pub reply_ref: Option<MessageRef>,
     /// Stands for content this version cannot read ("needs a newer version").
     pub placeholder: bool,
+    /// Delay after which an ephemeral message is erased once seen; `None`
+    /// for a message that is not ephemeral.
+    pub ttl_secs: Option<u32>,
+    /// When one of my devices first showed this ephemeral message.
+    pub seen_at: Option<u64>,
+    /// When this ephemeral message is erased from this device.
+    pub expire_at: Option<u64>,
 }
 
 /// A message row to insert (`Queries::insert_message_row`). Its body is
@@ -242,6 +249,9 @@ pub struct MessageInsert {
     pub reply_to: Option<MessageId>,
     pub reply_ref: Option<MessageRef>,
     pub placeholder: bool,
+    pub ttl_secs: Option<u32>,
+    pub seen_at: Option<u64>,
+    pub expire_at: Option<u64>,
 }
 
 impl Drop for MessageInsert {
@@ -354,6 +364,9 @@ impl fmt::Debug for MessageRow {
             .field("message_id", &self.message_id)
             .field("reply_to", &self.reply_to)
             .field("placeholder", &self.placeholder)
+            .field("ttl_secs", &self.ttl_secs)
+            .field("seen_at", &self.seen_at)
+            .field("expire_at", &self.expire_at)
             .finish()
     }
 }
@@ -911,6 +924,9 @@ impl Store {
         self.conn
             .execute_batch(schema::REACTION_SENDS_TARGET_INDEX)
             .map_err(map_err)?;
+        if stored.is_none_or(|v| v < 5) {
+            schema::migrate_v4_to_v5(&self.conn).map_err(map_err)?;
+        }
         Ok(())
     }
 
@@ -1159,10 +1175,14 @@ pub trait Queries {
             reply_to: None,
             reply_ref: None,
             placeholder: false,
+            ttl_secs: None,
+            seen_at: None,
+            expire_at: None,
         })
     }
 
-    /// `insert_message` with the reply and wire columns. Same tombstone rule.
+    /// `insert_message` with the reply, wire and ephemeral columns. Same
+    /// tombstone rule.
     fn insert_message_row(&self, m: &MessageInsert) -> Result<bool> {
         let reply_ref = m
             .reply_ref
@@ -1174,8 +1194,9 @@ pub trait Queries {
             .conn()
             .execute(
                 "INSERT OR IGNORE INTO messages(message_id, contact_fp, direction, body, \
-                 status, at, wire_id, reply_to, reply_ref, placeholder) \
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 WHERE NOT EXISTS \
+                 status, at, wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, \
+                 expire_at) \
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13 WHERE NOT EXISTS \
                  (SELECT 1 FROM deleted_messages WHERE message_id = ?1)",
                 params![
                     m.message_id.0.as_slice(),
@@ -1188,6 +1209,9 @@ pub trait Queries {
                     m.reply_to.as_ref().map(|id| id.0.as_slice()),
                     reply_ref,
                     i64::from(m.placeholder),
+                    m.ttl_secs,
+                    m.seen_at.map(to_i64),
+                    m.expire_at.map(to_i64),
                 ],
             )
             .map_err(map_err)?;
@@ -1619,7 +1643,7 @@ pub trait Queries {
             .conn()
             .prepare(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder \
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
                  FROM messages WHERE contact_fp = ?1 ORDER BY at, id",
             )
             .map_err(map_err)?;
@@ -1637,7 +1661,7 @@ pub trait Queries {
             .conn()
             .query_row(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder \
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
                  FROM messages WHERE id = ?1",
                 params![id],
                 message_raw,
@@ -1658,7 +1682,7 @@ pub trait Queries {
             .conn()
             .query_row(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder \
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
                  FROM messages WHERE message_id = ?1 AND contact_fp = ?2",
                 params![message_id.0.as_slice(), contact_fp.0.as_slice()],
                 message_raw,
@@ -1674,7 +1698,7 @@ pub trait Queries {
             .conn()
             .prepare(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder \
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
                  FROM messages ORDER BY id",
             )
             .map_err(map_err)?;
@@ -1836,7 +1860,8 @@ pub trait Queries {
     /// unlike `seen`).
     fn message_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageRow>> {
         const COLS: &str = "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, \
-                            m.message_id, m.wire_id, m.reply_to, m.reply_ref, m.placeholder \
+                            m.message_id, m.wire_id, m.reply_to, m.reply_ref, m.placeholder, \
+                            m.ttl_secs, m.seen_at, m.expire_at \
                             FROM messages m";
         let out = self
             .conn()
@@ -2627,7 +2652,14 @@ type MessageRaw = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     i64,
+    Option<u32>,
+    Option<i64>,
+    Option<i64>,
 );
+
+/// Columns `message_raw` reads, in order; the next one is the first after
+/// them.
+const MESSAGE_COLUMNS: usize = 14;
 
 /// Ids per query of `Queries::deliveries_of`.
 pub const SUMMARY_CHUNK: usize = 200;
@@ -2814,7 +2846,8 @@ fn summaries(
 ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
     let sql = format!(
         "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, m.message_id, \
-         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, {SUMMARY_AGG_SQL} \
+         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, m.ttl_secs, m.seen_at, m.expire_at, \
+         {SUMMARY_AGG_SQL} \
          FROM messages m \
          LEFT JOIN deliveries d ON d.message_id = m.message_id AND d.own = 0 AND m.direction = 0 \
          LEFT JOIN outbox o ON o.packet_id = d.packet_id \
@@ -2822,7 +2855,9 @@ fn summaries(
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(map_err)?;
     let raws = stmt
-        .query_map(args, |r| Ok((message_raw(r)?, summary_agg(r, 11)?)))
+        .query_map(args, |r| {
+            Ok((message_raw(r)?, summary_agg(r, MESSAGE_COLUMNS)?))
+        })
         .map_err(map_err)?
         .collect::<rusqlite::Result<Vec<(MessageRaw, SummaryAgg)>>>()
         .map_err(map_err)?;
@@ -2848,11 +2883,14 @@ fn message_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRaw> {
         r.get(8)?,
         r.get(9)?,
         r.get(10)?,
+        r.get(11)?,
+        r.get(12)?,
+        r.get(13)?,
     ))
 }
 
 fn message_from_raw(
-    (id, fp, dir, body, st, at, mid, wire, reply_to, reply_ref, placeholder): MessageRaw,
+    (id, fp, dir, body, st, at, mid, wire, reply_to, reply_ref, placeholder, ttl, seen, expire): MessageRaw,
 ) -> Result<MessageRow> {
     Ok(MessageRow {
         id,
@@ -2869,6 +2907,9 @@ fn message_from_raw(
             .transpose()
             .map_err(|_| CoreError::Store("invalid reply reference".into()))?,
         placeholder: placeholder != 0,
+        ttl_secs: ttl,
+        seen_at: seen.map(to_u64),
+        expire_at: expire.map(to_u64),
     })
 }
 

@@ -410,6 +410,9 @@ pub(super) fn import(q: &impl Queries, history: &History) -> Result<u32> {
             reply_to: e.reply_to.map(MessageId),
             reply_ref: e.reply_ref,
             placeholder: e.placeholder,
+            ttl_secs: None,
+            seen_at: None,
+            expire_at: None,
         })? {
             inserted = inserted.saturating_add(1);
         }

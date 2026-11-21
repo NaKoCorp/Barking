@@ -1,5 +1,6 @@
 //! Synchronization between my own devices: copies of my sent
-//! messages (`SyncSent`), operations on contacts (`SyncContact`),
+//! messages (`SyncSent`, `SyncReply`, `SyncMessage`), operations on
+//! contacts (`SyncContact`),
 //! new device list (`SyncDevices`), and my deletions (`SyncDelete`).
 //!
 //! Sending: through the double ratchet sessions with my other devices
@@ -18,7 +19,7 @@ use super::route::{self, RouteStep};
 use super::send::{SealTime, Target, seal_for};
 use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts, load_card, log};
 use crate::contact::ContactCard;
-use crate::content::ExtContent;
+use crate::content::{ExtContent, UNSEEN_CEILING_SECS};
 use crate::envelope::{self, Body, Envelope, SyncOp};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint};
@@ -393,10 +394,18 @@ pub(super) fn apply(
         Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
         Body::Ext { kind, data, .. } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
-            // Only `SyncReply`, `SyncReaction` and `SyncDelete` are sync
-            // contents; any other kind is refused.
-            let (to, text, reply_to) = match ExtContent::decode(*kind, data) {
-                Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => (to, text, reply_to),
+            // Only `SyncReply`, `SyncMessage`, `SyncReaction` and
+            // `SyncDelete` are sync contents; any other kind is refused.
+            let (to, text, reply_to, ttl_secs) = match ExtContent::decode(*kind, data) {
+                Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => {
+                    (to, text, Some(reply_to), None)
+                }
+                Ok(Some(ExtContent::SyncMessage {
+                    to,
+                    text,
+                    reply_to,
+                    ttl_secs,
+                })) => (to, text, reply_to, ttl_secs),
                 Ok(Some(ExtContent::SyncDelete { ids })) => {
                     // As a deletion here, without sending it on: each
                     // identifier is tombstoned even with no row yet.
@@ -444,7 +453,9 @@ pub(super) fn apply(
                 return Ok(Err(R_SYNC_REFUSED));
             }
             // As `SyncSent`, with the quote: `reply_to` is resolved as my
-            // own packet's (I am the sealer's account).
+            // own packet's (I am the sealer's account). An ephemeral copy is
+            // not seen on this device yet: erased `UNSEEN_CEILING_SECS` after
+            // its arrival here, unless shown first.
             q.insert_message_row(&MessageInsert {
                 contact_fp: to,
                 direction: Direction::Out,
@@ -453,9 +464,12 @@ pub(super) fn apply(
                 at: env.sent_at,
                 message_id: MessageId(env.message_id),
                 wire_id: None,
-                reply_to: Some(reply_to.resolve(true, &to)),
-                reply_ref: Some(reply_to),
+                reply_to: reply_to.map(|r| r.resolve(true, &to)),
+                reply_ref: reply_to,
                 placeholder: false,
+                ttl_secs,
+                seen_at: None,
+                expire_at: ttl_secs.map(|_| now.saturating_add(UNSEEN_CEILING_SECS)),
             })?;
             Ok(Ok(Some(SyncKind::Sent)))
         }
@@ -511,15 +525,18 @@ pub(super) fn apply(
     }
 }
 
-/// The contact a `SyncSent`, `SyncReply` or `SyncReaction` body was sent to.
+/// The contact a `SyncSent`, `SyncReply`, `SyncMessage` or `SyncReaction`
+/// body was sent to.
 /// `None` for a `SyncDelete`: its messages may be of several contacts.
 pub(super) fn sent_to(body: &Body) -> Option<Fingerprint> {
     match body {
         Body::SyncSent { to, .. } => Some(*to),
         Body::Ext { kind, data, .. } => match ExtContent::decode(*kind, data) {
-            Ok(Some(ExtContent::SyncReply { to, .. } | ExtContent::SyncReaction { to, .. })) => {
-                Some(to)
-            }
+            Ok(Some(
+                ExtContent::SyncReply { to, .. }
+                | ExtContent::SyncMessage { to, .. }
+                | ExtContent::SyncReaction { to, .. },
+            )) => Some(to),
             Ok(Some(ExtContent::SyncDelete { .. })) => None,
             _ => None,
         },

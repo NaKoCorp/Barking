@@ -454,6 +454,9 @@ mod tests {
                 reply_to: None,
                 reply_ref: None,
                 placeholder: false,
+                ttl_secs: None,
+                seen_at: None,
+                expire_at: None,
             })
             .unwrap();
         let core = Core::open(&pa, &key, 2_000).unwrap();

@@ -9,7 +9,7 @@ use super::{
     Core, OwnDevices, de_init, de_state, delivery, load_card, log, route, ser_init, ser_state,
     session_ad, session_id, sync,
 };
-use crate::content::{ExtContent, MessageRef};
+use crate::content::{self, ExtContent, MessageRef};
 use crate::envelope::{self, Body, Envelope, MAX_TEXT_LEN};
 use crate::handshake::{PrekeyBundle, pqxdh};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
@@ -247,7 +247,7 @@ pub(super) fn seal_for(
 }
 
 impl Core {
-    /// `send_message` without a quote.
+    /// `send_message` without a quote or a delay.
     pub fn send_text(
         &mut self,
         to: &Fingerprint,
@@ -255,7 +255,7 @@ impl Core {
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<Packet>> {
-        self.send_message(to, text, None, now, rng)
+        self.send_message(to, text, None, None, now, rng)
     }
 
     /// Encrypts `text` for each device in the contact's list; one packet
@@ -271,17 +271,26 @@ impl Core {
     /// text); a missing row, one of another conversation or a received one
     /// without a wire identifier gives `MessageNotFound`, writing nothing.
     /// Without `reply_to` the body stays a plain text.
+    ///
+    /// `ttl_secs`: an ephemeral message, erased that long after it is seen
+    /// (`MIN_TTL_SECS..=MAX_TTL_SECS`, else `InvalidTtl`, writing nothing).
+    /// It travels as a `Message` (`SyncMessage` for my devices), with or
+    /// without a quote; it is seen here as it is sent.
     pub fn send_message(
         &mut self,
         to: &Fingerprint,
         text: &str,
         reply_to: Option<i64>,
+        ttl_secs: Option<u32>,
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<Packet>> {
         self.ensure_active()?;
         if text.len() > MAX_TEXT_LEN {
             return Err(CoreError::TooLarge);
+        }
+        if !content::ttl_in_bounds(ttl_secs) {
+            return Err(CoreError::InvalidTtl);
         }
         if self.store.block_state(*to)?.blocked {
             return Err(CoreError::ContactBlocked);
@@ -290,21 +299,14 @@ impl Core {
         store.transaction(|tx| {
             let reference = reply_to.map(|id| quote_ref(tx, to, id)).transpose()?;
             let message_id = new_message_id(rng);
-            let (body, copy) = match reference {
-                None => (
-                    Body::Text(text.to_owned()),
-                    Body::SyncSent {
-                        to: *to,
-                        text: text.to_owned(),
-                    },
-                ),
-                Some(reply_to) => reply_bodies(*to, text, reply_to),
-            };
+            let (body, copy) = bodies(*to, text, reference, ttl_secs);
+            let (body, copy) = (Plain(body), Plain(copy));
+            let (body, copy) = (&body.0, &copy.0);
             let sealed = seal_for(
                 tx,
                 device,
                 &Target::Contact(*to),
-                &body,
+                body,
                 message_id,
                 SealTime::at(now),
                 rng,
@@ -324,6 +326,9 @@ impl Core {
                 reply_to: reference.map(|r| r.resolve(true, to)),
                 reply_ref: reference,
                 placeholder: false,
+                ttl_secs,
+                seen_at: ttl_secs.map(|_| now),
+                expire_at: ttl_secs.map(|t| now.saturating_add(u64::from(t))),
             })? {
                 return Err(CoreError::Store("duplicate message identifier".into()));
             }
@@ -336,7 +341,7 @@ impl Core {
             let mine = sync::seal_to_own(
                 tx,
                 device,
-                &copy,
+                copy,
                 SyncKind::Sent,
                 message_id,
                 SealTime::at(now),
@@ -370,22 +375,60 @@ pub(super) fn quote_ref(q: &impl Queries, to: &Fingerprint, row_id: i64) -> Resu
     }
 }
 
-/// The contact's `Reply` and my devices' `SyncReply` for a text quoting
-/// `reply_to`.
-fn reply_bodies(to: Fingerprint, text: &str, reply_to: MessageRef) -> (Body, Body) {
-    let mut reply = ExtContent::Reply {
-        text: text.to_owned(),
-        reply_to,
-    };
-    let mut copy = ExtContent::SyncReply {
-        to,
-        text: text.to_owned(),
-        reply_to,
-    };
-    let out = (reply.to_body(), copy.to_body());
-    // The encoded bodies are the only copies left.
-    for c in [&mut reply, &mut copy] {
-        if let ExtContent::Reply { text, .. } | ExtContent::SyncReply { text, .. } = c {
+/// The contact's body and my devices' copy for `text`: `Text` and
+/// `SyncSent`; `Reply` and `SyncReply` with a quote; `Message` and
+/// `SyncMessage` with a delay, quoting or not.
+fn bodies(
+    to: Fingerprint,
+    text: &str,
+    reply_to: Option<MessageRef>,
+    ttl_secs: Option<u32>,
+) -> (Body, Body) {
+    match (reply_to, ttl_secs) {
+        (None, None) => (
+            Body::Text(text.to_owned()),
+            Body::SyncSent {
+                to,
+                text: text.to_owned(),
+            },
+        ),
+        (Some(reply_to), None) => ext_bodies(
+            ExtContent::Reply {
+                text: text.to_owned(),
+                reply_to,
+            },
+            ExtContent::SyncReply {
+                to,
+                text: text.to_owned(),
+                reply_to,
+            },
+        ),
+        (_, Some(_)) => ext_bodies(
+            ExtContent::Message {
+                text: text.to_owned(),
+                reply_to,
+                ttl_secs,
+            },
+            ExtContent::SyncMessage {
+                to,
+                text: text.to_owned(),
+                reply_to,
+                ttl_secs,
+            },
+        ),
+    }
+}
+
+/// The `Body::Ext` of `ext` and of `copy`, their texts wiped: the
+/// encoded bodies are the only copies left.
+fn ext_bodies(mut ext: ExtContent, mut copy: ExtContent) -> (Body, Body) {
+    let out = (ext.to_body(), copy.to_body());
+    for c in [&mut ext, &mut copy] {
+        if let ExtContent::Reply { text, .. }
+        | ExtContent::SyncReply { text, .. }
+        | ExtContent::Message { text, .. }
+        | ExtContent::SyncMessage { text, .. } = c
+        {
             text.zeroize();
         }
     }
@@ -515,22 +558,11 @@ fn reseal(
     };
     let contact = row.contact_fp;
     let message_id = row.message_id;
-    // A reply keeps its reference: the original may be deleted since. The
-    // stored text ends up in the two bodies only, both wiped on return.
-    let (body, copy) = match row.reply_ref {
-        None => (
-            Body::Text(row.body.clone()),
-            Body::SyncSent {
-                to: contact,
-                text: core::mem::take(&mut row.body),
-            },
-        ),
-        Some(reply_to) => {
-            let bodies = reply_bodies(contact, &row.body, reply_to);
-            row.body.zeroize();
-            bodies
-        }
-    };
+    // A reply keeps its reference (the original may be deleted since), an
+    // ephemeral its delay. The stored text ends up in the two bodies only,
+    // both wiped on return.
+    let (body, copy) = bodies(contact, &row.body, row.reply_ref, row.ttl_secs);
+    row.body.zeroize();
     let (body, copy) = (Plain(body), Plain(copy));
     let (body, copy) = (&body.0, &copy.0);
     // Failed contact deliveries, as (packet, device).
@@ -631,16 +663,17 @@ mod wipe_tests {
             id: [1; 16],
             by_sender: true,
         };
-        let (reply, copy) = reply_bodies(to, "secret", reply_to);
-        for mut b in [
-            Body::Text("secret".into()),
-            Body::SyncSent {
-                to,
-                text: "secret".into(),
-            },
-            reply,
-            copy,
+        let mut all = Vec::new();
+        for (reply_to, ttl) in [
+            (None, None),
+            (Some(reply_to), None),
+            (None, Some(300)),
+            (Some(reply_to), Some(300)),
         ] {
+            let (body, copy) = bodies(to, "secret", reply_to, ttl);
+            all.extend([body, copy]);
+        }
+        for mut b in all {
             wipe_body(&mut b);
             match b {
                 Body::Text(t) | Body::SyncSent { text: t, .. } => assert!(t.is_empty()),

@@ -23,7 +23,7 @@ fn reopen_persists() {
         store.get_meta::<Vec<u8>>("hello").unwrap(),
         Some(vec![1, 2, 3])
     );
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
     assert_eq!(store.get_meta::<u32>("absent").unwrap(), None);
 }
 
@@ -683,7 +683,7 @@ fn insert_message_duplicate_id_returns_false() {
 #[test]
 fn newer_schema_refused() {
     let (_d, path, store) = open_tmp();
-    store.put_meta("schema_version", &5u32).unwrap();
+    store.put_meta("schema_version", &6u32).unwrap();
     drop(store);
     assert!(matches!(
         Store::open(&path, &KEY),
@@ -738,7 +738,7 @@ fn migration_v1_keeps_history_and_acks() {
         .unwrap();
     }
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
     let m = store.messages_with(fp).unwrap();
     let bodies: Vec<_> = m
         .iter()
@@ -808,7 +808,7 @@ fn migration_from_pre_1a_database() {
         .unwrap();
     }
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
     let m = store.messages_with(fp).unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(
@@ -879,7 +879,7 @@ fn v2_database_without_inbound_gets_it() {
         .execute_batch("DROP TABLE inbound;")
         .unwrap();
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
     let fp = Fingerprint([4; 32]);
     let mid = MessageId::incoming(&fp, &[1; 16]);
     store
@@ -953,7 +953,7 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
     .unwrap();
     drop(raw);
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
     store.add_delivery(mid, to_me, mine, true, 5, 1024).unwrap();
     // Column `writer` added: unknown author (null) for the old row.
     let zero = crate::identity::device::DeviceId([0; 16]);
@@ -1213,7 +1213,7 @@ fn has_object(conn: &Connection, kind: &str, name: &str) -> bool {
 fn migrate_v2_to_v3_backfills_from_route_steps() {
     let (_d, path) = v2_fixture_copy();
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
     let c = store.conn();
     let node = Some(FX_NODE.to_owned());
     // Acked: first deposit (min(at)) and its node, Sealed size, AckVerified time.
@@ -1272,7 +1272,7 @@ fn migrate_v2_to_v3_backfills_from_route_steps() {
     // Reopening: the migration is not replayed.
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
     assert_eq!(delivery_cols(store.conn(), 0xA2).0, 0);
     assert_eq!(message_status(store.conn(), 0x22), 0);
 }
@@ -1300,7 +1300,7 @@ fn migration_is_one_transaction() {
     }
     // The untouched v2 database still migrates on the next open.
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
     assert_eq!(delivery_cols(store.conn(), 0xA2).0, 0);
 }
 
@@ -1326,7 +1326,7 @@ fn v3_database_without_deposit_tried_at_gets_it() {
     }
     let store = Store::open(&path, &KEY).unwrap();
     assert!(has_column(store.conn(), "outbox", "deposit_tried_at"));
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
 }
 
 #[test]
@@ -1382,7 +1382,7 @@ fn v3_database_upgrades_to_v4() {
         CoreError::Store("database schema not current".into())
     );
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
     let cols: Vec<String> = store
         .conn()
         .prepare("SELECT name FROM pragma_table_info('messages')")
@@ -1399,6 +1399,106 @@ fn v3_database_upgrades_to_v4() {
     }
     drop(store);
     Store::open_read(&path, &KEY).unwrap();
+}
+
+#[test]
+fn migrates_v4_to_v5() {
+    let (_d, path, store) = open_tmp();
+    // Turn the fresh database back into a v4 one.
+    store
+        .conn()
+        .execute_batch(
+            "DROP INDEX messages_expire; DROP TABLE pending_seen; \
+             ALTER TABLE messages DROP COLUMN ttl_secs; \
+             ALTER TABLE messages DROP COLUMN seen_at; \
+             ALTER TABLE messages DROP COLUMN expire_at;",
+        )
+        .unwrap();
+    store.put_meta("schema_version", &4u32).unwrap();
+    drop(store);
+    assert_eq!(
+        Store::open_read(&path, &KEY).err().unwrap(),
+        CoreError::Store("database schema not current".into())
+    );
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
+    for c in ["ttl_secs", "seen_at", "expire_at"] {
+        assert!(has_column(store.conn(), "messages", c), "{c} missing");
+    }
+    for (kind, name) in [
+        ("table", "pending_seen"),
+        ("index", "pending_seen_contact"),
+        ("index", "messages_expire"),
+    ] {
+        assert!(has_object(store.conn(), kind, name), "{name} missing");
+    }
+    for c in ["message_id", "contact_fp", "seen_at", "received_at"] {
+        assert!(has_column(store.conn(), "pending_seen", c), "{c} missing");
+    }
+    drop(store);
+    Store::open_read(&path, &KEY).unwrap();
+}
+
+#[test]
+fn v5_migration_adds_only_missing_columns() {
+    let (_d, path, store) = open_tmp();
+    // A database with some of the v5 columns already (a development build).
+    store
+        .conn()
+        .execute_batch("DROP INDEX messages_expire; ALTER TABLE messages DROP COLUMN expire_at;")
+        .unwrap();
+    store.put_meta("schema_version", &4u32).unwrap();
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert!(has_column(store.conn(), "messages", "expire_at"));
+    assert!(has_object(store.conn(), "index", "messages_expire"));
+}
+
+#[test]
+fn ephemeral_columns_round_trip() {
+    let (_d, _path, store) = open_tmp();
+    let fp = Fingerprint([4; 32]);
+    let insert = |id: u8, ttl: Option<u32>, seen: Option<u64>, expire: Option<u64>| {
+        assert!(
+            store
+                .insert_message_row(&MessageInsert {
+                    contact_fp: fp,
+                    direction: Direction::In,
+                    body: format!("m{id}"),
+                    status: MessageStatus::Received,
+                    at: 100 + u64::from(id),
+                    message_id: MessageId([id; 16]),
+                    wire_id: None,
+                    reply_to: None,
+                    reply_ref: None,
+                    placeholder: false,
+                    ttl_secs: ttl,
+                    seen_at: seen,
+                    expire_at: expire,
+                })
+                .unwrap()
+        );
+    };
+    insert(1, None, None, None);
+    insert(2, Some(300), None, Some(604_900));
+    insert(3, Some(60), Some(150), Some(210));
+    let got: Vec<_> = store
+        .messages_with(fp)
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.ttl_secs, m.seen_at, m.expire_at))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (None, None, None),
+            (Some(300), None, Some(604_900)),
+            (Some(60), Some(150), Some(210)),
+        ]
+    );
+    let row = store.messages_with(fp).unwrap()[2].clone();
+    assert_eq!(store.message_by_row(row.id).unwrap(), Some(row.clone()));
+    assert_eq!(store.message_in(fp, row.message_id).unwrap(), Some(row));
 }
 
 /// A message row to insert carries plaintext: dropped, it is wiped
