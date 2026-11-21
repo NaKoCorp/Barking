@@ -331,6 +331,23 @@ final class EphemeralDisplayTests: XCTestCase {
         XCTAssertEqual(calls, [[1, 2]], "at once, without waiting out the window")
     }
 
+    /// Leave mid-window, come back: new sightings open a window again.
+    func testSeenTrackerReportsAgainAfterReturning() async throws {
+        let gate = Gate()
+        var calls: [[Int64]] = []
+        let tracker = SeenTracker(sleep: { try await gate.wait($0) }) { calls.append($0); return true }
+        tracker.saw([1])
+        try await waitUntil { await gate.waiting() == 1 }
+        tracker.finish()
+        await tracker.waitForFlush()
+        tracker.saw([3])
+        XCTAssertNotNil(tracker.flushTask, "a window opens after the return")
+        try await waitUntil { await gate.waiting() == 2 }
+        await gate.open()
+        await tracker.waitForFlush()
+        XCTAssertEqual(calls, [[1], [3]])
+    }
+
     func testLeavingTheConversationMarksSeen() async throws {
         let d = FakeDevice()
         d.messageList = ["b": [Message(id: 2, outgoing: false, body: "new", at: t0, ttlSecs: 300,

@@ -676,6 +676,9 @@ final class SeenTracker {
     private var reported: Set<Int64> = []
     /// The window open now, if any.
     private(set) var flushTask: Task<Void, Never>?
+    /// The report made on leaving, apart from the windows: a return to the
+    /// conversation opens new ones at once.
+    private(set) var leaveTask: Task<Void, Never>?
 
     init(sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
          report: @escaping @MainActor ([Int64]) async -> Bool = { _ in true }) {
@@ -714,9 +717,12 @@ final class SeenTracker {
         reported = []
         guard !ids.isEmpty else { return }
         let report = self.report
-        flushTask = Task { _ = await report(ids) }
+        leaveTask = Task { _ = await report(ids) }
     }
 
-    /// Tests: waits for the window open now to report.
-    func waitForFlush() async { await flushTask?.value }
+    /// Tests: waits for the window open now, and the leave report, to report.
+    func waitForFlush() async {
+        await leaveTask?.value
+        await flushTask?.value
+    }
 }
