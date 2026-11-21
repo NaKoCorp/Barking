@@ -166,7 +166,8 @@ pub(super) fn seal_seen(
 /// - a tombstoned identifier (deleted or expired here) is ignored;
 /// - a stored ephemeral of that conversation gets
 ///   `seen_at = min(seen_at, T')` and `expire_at = min(expire_at, T' + ttl)`;
-///   a plain message, or one of another conversation, is left alone;
+///   a plain message, or one of another conversation, is left alone; a
+///   row this lowers is noted (`Queries::note_change`) for the app;
 /// - an unknown one is kept in `pending_seen` (the smallest date wins),
 ///   applied when the message is inserted (`insert_message_row`), unless
 ///   its contact is blocked or was removed here.
@@ -196,13 +197,23 @@ pub(super) fn apply_seen(q: &impl Queries, seen: &[SeenEntry], now: u64) -> Resu
             .map_err(map_err)?;
         match row {
             Some((contact, Some(ttl))) if contact == e.contact.0 => {
-                q.conn()
-                    .execute(
+                // Only a row this lowers: its countdown changes, so the
+                // conversation showing it reloads (`take_delivery_changes`).
+                let changed: Option<i64> = q
+                    .conn()
+                    .query_row(
                         "UPDATE messages SET seen_at = min(coalesce(seen_at, ?2), ?2), \
-                         expire_at = min(coalesce(expire_at, ?3), ?3) WHERE message_id = ?1",
+                         expire_at = min(coalesce(expire_at, ?3), ?3) WHERE message_id = ?1 \
+                         AND (seen_at IS NULL OR seen_at > ?2 \
+                              OR expire_at IS NULL OR expire_at > ?3) RETURNING id",
                         params![id, to_i64(at), to_i64(at.saturating_add(u64::from(ttl)))],
+                        |r| r.get(0),
                     )
+                    .optional()
                     .map_err(map_err)?;
+                if let Some(row) = changed {
+                    q.note_change(e.contact, row);
+                }
             }
             Some(_) => {}
             None => {
@@ -253,6 +264,26 @@ pub(crate) fn sweep(q: &impl Queries, now: u64) -> Result<Vec<i64>> {
         )
         .map_err(map_err)?;
     Ok(erased)
+}
+
+/// Erases the stored message `message_id` if it is already due at `now`
+/// (`erase_row`): an ephemeral born due. True when it was erased.
+pub(super) fn erase_if_due(q: &impl Queries, message_id: MessageId, now: u64) -> Result<bool> {
+    let row: Option<(i64, Option<i64>)> = q
+        .conn()
+        .query_row(
+            "SELECT id, expire_at FROM messages WHERE message_id = ?1",
+            params![message_id.0.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(map_err)?;
+    match row {
+        Some((row_id, expire_at)) if !is_live(expire_at.map(to_u64), now) => {
+            Ok(erase_row(q, row_id, now)?.is_some())
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Erases the message of row `row_id`: the row (its freed cells zeroed by

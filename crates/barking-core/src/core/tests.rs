@@ -8782,3 +8782,82 @@ fn erased_messages_are_pending_as_such() {
     assert!(pending.messages.is_empty());
     assert_eq!(sync_sorts(&mut p.a, NOW + 3), erased);
 }
+
+// --- Final review fixes: a "seen" from another device, a message born due.
+
+/// A "seen" from another of my devices changes the countdown of a row this
+/// device shows: the row is noted (`take_delivery_changes`) so the open
+/// conversation reloads. A repeat that lowers nothing notes nothing.
+#[test]
+fn sync_seen_notes_the_row_it_changes() {
+    let (_d, mut a, mut t, b, mut rng) = ephemeral_on_both(300);
+    let bob = b.fingerprint();
+    let on_t = row_of(&t, &bob, "e");
+    t.take_delivery_changes();
+    let pkts = a
+        .mark_seen(&[row_of(&a, &bob, "e")], NOW + 10, &mut rng)
+        .unwrap();
+    for p in &pkts {
+        synced_seen(&t.receive(&p.encode(), "t", NOW + 10, &mut rng).unwrap());
+    }
+    assert_eq!(t.take_delivery_changes(), vec![(bob, on_t)]);
+
+    // The same date again (or a later one) lowers nothing.
+    let id = message_id_of(&t, &bob, "e");
+    let again = seal_seen_pkt(
+        &mut a,
+        vec![SeenEntry {
+            id,
+            contact: bob,
+            at: NOW + 40,
+        }],
+        0x57,
+        &mut rng,
+    );
+    synced_seen(&t.receive(&again.encode(), "t", NOW + 50, &mut rng).unwrap());
+    assert!(t.take_delivery_changes().is_empty());
+}
+
+/// An ephemeral whose earlier "seen" (from another of my devices) already
+/// ran out when it arrives is never shown nor notified: acked, erased and
+/// tombstoned at once, as the sweep would.
+#[test]
+fn message_born_due_is_not_surfaced() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = b
+        .send_message(&alice, "gone", None, Some(60), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&sent, &mut [&mut a], &mut rng);
+    let pkts = a
+        .mark_seen(&[row_of(&a, &bob, "gone")], NOW + 1, &mut rng)
+        .unwrap();
+    for p in &pkts {
+        synced_seen(&t.receive(&p.encode(), "t", NOW + 1, &mut rng).unwrap());
+    }
+    assert_eq!(pending_seen_rows(&t), 1);
+    let id = message_id_of(&a, &bob, "gone");
+    let mut opened = 0;
+    for p in &sent {
+        let got = t.receive(&p.encode(), "t", NOW + 100, &mut rng).unwrap();
+        if matches!(got, ReceiveOutcome::NotForUs) {
+            continue;
+        }
+        assert!(matches!(got, ReceiveOutcome::Ignored), "born due: {got:?}");
+        assert_eq!(acks_for(&mut t, p), 1, "acked all the same");
+        opened += 1;
+    }
+    assert_eq!(opened, 1);
+    assert_eq!(stored_rows(&t, "gone"), 0, "erased at once");
+    assert!(is_tombstoned(&t, id));
+    assert_eq!(pending_seen_rows(&t), 0);
+    assert!(t.expire_ephemeral(NOW + 100).unwrap().is_empty());
+    // A resend is a plain duplicate: nothing to wake for.
+    for p in &sent {
+        let again = t.receive(&p.encode(), "t", NOW + 101, &mut rng).unwrap();
+        assert!(
+            matches!(again, ReceiveOutcome::Duplicate | ReceiveOutcome::NotForUs),
+            "{again:?}"
+        );
+    }
+}

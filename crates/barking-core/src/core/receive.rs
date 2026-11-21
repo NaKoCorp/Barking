@@ -9,8 +9,8 @@ use super::log_limit::{LogLimiter, log_limited};
 use super::route::{self, RouteStep};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
-    SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, reactions, remove, removed,
-    ser_state, session_ad, session_id, sync,
+    SEEN_RETENTION_SECS, admin, contacts, de_state, ephemeral, load_card, log, reactions, remove,
+    removed, ser_state, session_ad, session_id, sync,
 };
 use crate::contact::ContactCard;
 use crate::content::{ExtContent, MessageRef, UNSEEN_CEILING_SECS, UnknownPolicy};
@@ -667,6 +667,12 @@ fn record_message(
     let alias = Core::alias_in(q, row.contact_fp)?;
     if !inserted {
         return Ok((repeat_outcome(q, packet.id)?, new_prekeys));
+    }
+    // An ephemeral born due (an earlier "seen" from another of my devices,
+    // `pending_seen`, already ran out): never openable, so never notified.
+    // Erased and tombstoned at once, as the sweep would; acked all the same.
+    if ttl_secs.is_some() && ephemeral::erase_if_due(q, message_id, now)? {
+        return Ok((ReceiveOutcome::Ignored, new_prekeys));
     }
     Ok((
         ReceiveOutcome::Message {
