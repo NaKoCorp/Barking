@@ -334,8 +334,8 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func setDisplayName(name: String) throws { try device.setDisplayName(name: name) }
     func contacts() throws -> [Contact] { try device.contacts() }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { try device.messageRoute(messageId: messageId) }
-    func sendText(contact: String, text: String, replyTo: Int64?) throws {
-        try device.sendText(contact: contact, text: text, replyTo: replyTo)
+    func sendText(contact: String, text: String, replyTo: Int64?, ttlSecs: UInt32?) throws {
+        try device.sendText(contact: contact, text: text, replyTo: replyTo, ttlSecs: ttlSecs)
     }
     func setReactions(message: Int64, emojis: [String]) throws {
         // A new set is a new send: it shows the forced state again.
@@ -389,6 +389,9 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func setPreview(preview: PushPreview) throws { try device.setPreview(preview: preview) }
     func noteWake(atSecs: UInt64) throws { try device.noteWake(atSecs: atSecs) }
     func wakeStatus() throws -> WakeStatus { try device.wakeStatus() }
+    func markSeen(ids: [Int64]) throws { try device.markSeen(ids: ids) }
+    func nextExpiry() throws -> UInt64? { try device.nextExpiry() }
+    func expireEphemeral() throws -> [Int64] { try device.expireEphemeral() }
     func myDevices() throws -> [MyDeviceInfo] { try device.myDevices() }
     func linkOffer() throws -> Data { try device.linkOffer() }
     func linkDevice(request: Data, withHistory: Bool) throws -> Data {

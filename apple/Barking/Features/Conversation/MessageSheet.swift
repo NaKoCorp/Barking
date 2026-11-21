@@ -340,7 +340,7 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func contacts() throws -> [Contact] { throw Never() }
     func messagesWith(contact: String) throws -> [Message] { throw Never() }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { throw Never() }
-    func sendText(contact: String, text: String, replyTo: Int64?) throws { throw Never() }
+    func sendText(contact: String, text: String, replyTo: Int64?, ttlSecs: UInt32?) throws { throw Never() }
     func setReactions(message: Int64, emojis: [String]) throws { throw Never() }
     func addContactBytes(card: Data, alias: String?) throws -> String { throw Never() }
     func addContact(card: String, alias: String?) throws -> String { throw Never() }
@@ -398,5 +398,8 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func setPreview(preview: PushPreview) throws { throw Never() }
     func noteWake(atSecs: UInt64) throws { throw Never() }
     func wakeStatus() throws -> WakeStatus { throw Never() }
+    func markSeen(ids: [Int64]) throws { throw Never() }
+    func nextExpiry() throws -> UInt64? { throw Never() }
+    func expireEphemeral() throws -> [Int64] { throw Never() }
 }
 #endif

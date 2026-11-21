@@ -139,6 +139,34 @@ impl Device {
         })
     }
 
+    /// The ephemeral messages of rows `ids` are on screen: seen now. Their
+    /// erasure is set (`seen_at + ttl_secs`) and the "seen" goes to my other
+    /// devices with the next sync, so that they erase them at the same
+    /// time. A row unknown, plain, already seen or already due is ignored.
+    pub fn mark_seen(&self, ids: Vec<i64>) -> Result<(), BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                // The packets are queued by the core in its transaction.
+                core.mark_seen(&ids, now(), &mut rand::rng())?;
+                Ok(())
+            })
+        })
+    }
+
+    /// When the next ephemeral is due (Unix seconds, possibly already
+    /// past): when the app's timer calls `expire_ephemeral`. `None` without
+    /// any ephemeral.
+    pub fn next_expiry(&self) -> Result<Option<u64>, BarkingError> {
+        guard(|| self.with_core_read(|core| Ok(core.next_expiry()?)))
+    }
+
+    /// Erases the ephemeral messages due now; returns their rows, for the
+    /// screens to drop. Sends nothing. Every sync runs it first too
+    /// (`SyncSummary::expired`).
+    pub fn expire_ephemeral(&self) -> Result<Vec<i64>, BarkingError> {
+        guard(|| self.with_core(|core| Ok(core.expire_ephemeral(now())?)))
+    }
+
     /// Contact key changes logged after `since` (Unix seconds).
     pub fn key_changes(&self, since: u64) -> Result<Vec<KeyChange>, BarkingError> {
         guard(|| {

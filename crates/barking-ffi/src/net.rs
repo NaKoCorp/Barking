@@ -62,6 +62,10 @@ pub struct SyncSummary {
     /// came for it has nothing to say (`nothing_to_show`).
     #[uniffi(default = false)]
     pub nothing_to_show: bool,
+    /// Ephemeral messages the sync erased, as it started (they were due):
+    /// the rows to drop (`Message::id`).
+    #[uniffi(default = [])]
+    pub expired: Vec<i64>,
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -70,12 +74,17 @@ pub struct NewMessage {
     pub contact: String,
     /// Alias, otherwise display name, otherwise the start of the fingerprint.
     pub name: String,
-    /// Empty for a message this version cannot read (`needs_update`).
+    /// Empty for a message this version cannot read (`needs_update`), and
+    /// for an ephemeral one (`ephemeral`).
     pub text: String,
     /// Content of a kind this version does not know, shown as a line that
     /// asks for a newer version of the app.
     #[uniffi(default = false)]
     pub needs_update: bool,
+    /// An ephemeral message: its notification never carries the text,
+    /// whatever the preview setting.
+    #[uniffi(default = false)]
+    pub ephemeral: bool,
 }
 
 /// Where the request to be removed stands (`Device::leave_state`).
@@ -142,8 +151,9 @@ fn block_on<F: Future>(f: F) -> Result<F::Output, BarkingError> {
 }
 
 /// What the apps show of `report`, with the delivery changes noted by
-/// `core` during the sync (the same core: they live in memory only).
-fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
+/// `core` during the sync (the same core: they live in memory only) and the
+/// rows the sync's expiry erased first (`expired`).
+fn summary(core: &mut Core, mut report: SyncReport, expired: Vec<i64>) -> SyncSummary {
     let contacts = core.contacts().unwrap_or_default();
     let received = std::mem::take(&mut report.received);
     let synced_contacts = synced_contacts(&received);
@@ -164,13 +174,19 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
     let mut repeats = 0usize;
     for outcome in received {
         match outcome {
+            // The text of an ephemeral never leaves for a notification.
             ReceiveOutcome::Message {
-                from, alias, text, ..
+                from,
+                alias,
+                text,
+                ephemeral,
+                ..
             } => new_messages.push(NewMessage {
                 contact: from.to_string(),
                 name: name_of(&from, alias),
-                text,
+                text: if ephemeral { String::new() } else { text },
                 needs_update: false,
+                ephemeral,
             }),
             // A placeholder row in the conversation: a line that asks for
             // a newer version, with no text.
@@ -179,6 +195,7 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
                 name: name_of(&from, alias),
                 text: String::new(),
                 needs_update: true,
+                ephemeral: false,
             }),
             // Only what a contact adds is worth a notification; a removal
             // or a superseded set just reloads the conversation.
@@ -188,16 +205,19 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
                 target,
                 added,
             } if !added.is_empty() => {
-                let excerpt = core
-                    .message_in(&from, target, now())
-                    .ok()
-                    .flatten()
+                let target = core.message_in(&from, target, now()).ok().flatten();
+                // An ephemeral target gives no excerpt: its text never
+                // leaves for a notification.
+                let on_ephemeral = target.as_ref().is_some_and(|r| r.ttl_secs.is_some());
+                let excerpt = target
+                    .filter(|_| !on_ephemeral)
                     .map(|row| excerpt(&row.body, NOTIFICATION_CHARS));
                 new_reactions.push(NewReaction {
                     contact: from.to_string(),
                     name: name_of(&from, alias),
                     emojis: added,
                     excerpt,
+                    on_ephemeral,
                 });
             }
             // A message already in its conversation, received again: no
@@ -225,6 +245,7 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
         new_reactions,
         reaction_contacts,
         nothing_to_show,
+        expired,
     }
 }
 
@@ -387,10 +408,12 @@ impl Device {
     /// Full sync, for at most `deadline_ms`, with the wake-up settings last
     /// given to `set_push`. It also follows the stored notification
     /// preferences: with instant notifications off, it holds no subscriptions.
+    /// It first erases the ephemeral messages due (`SyncSummary::expired`).
     pub fn sync(&self, deadline_ms: u64) -> Result<SyncSummary, BarkingError> {
         guard(|| {
             let opts_private = self.allow_private();
             self.with_core_sync(|core| {
+                let expired = core.expire_ephemeral(now())?;
                 let opts = SyncOptions {
                     deadline: Duration::from_millis(deadline_ms),
                     allow_private: opts_private,
@@ -399,12 +422,15 @@ impl Device {
                 };
                 let report = block_on(barking_net::sync(core, &QuicDialer, opts))?;
                 note_leave_deposits(core, now(), opts_private)?;
-                Ok(summary(core, report))
+                Ok(summary(core, report, expired))
             })
         })
     }
 
     /// Quick sync of the notification extension, for at most `deadline_ms`.
+    /// It first erases the ephemeral messages due (`SyncSummary::expired`):
+    /// a sweep that reads ids only, never a text, within the extension's
+    /// memory budget.
     pub fn quick_sync(&self, deadline_ms: u64) -> Result<SyncSummary, BarkingError> {
         guard(|| {
             let opts_private = self.allow_private();
@@ -414,9 +440,10 @@ impl Device {
                 ..QuickOptions::default()
             };
             self.with_core_sync(|core| {
+                let expired = core.expire_ephemeral(now())?;
                 let report = block_on(barking_net::quick_sync(core, &QuicDialer, opts))?;
                 note_leave_deposits(core, now(), opts_private)?;
-                Ok(summary(core, report))
+                Ok(summary(core, report, expired))
             })
         })
     }
@@ -482,7 +509,7 @@ mod tests {
             received: vec![reaction(bob, &["👍", "❤️"])],
             ..SyncReport::default()
         };
-        let s = summary(&mut core, report);
+        let s = summary(&mut core, report, Vec::new());
         assert_eq!(
             s.new_reactions,
             vec![NewReaction {
@@ -491,12 +518,58 @@ mod tests {
                 emojis: vec!["👍".into(), "❤️".into()],
                 // The message reacted to, cut at 40 characters: this one fits.
                 excerpt: Some("good morning, how are you today?".into()),
+                on_ephemeral: false,
             }]
         );
         assert_eq!(s.reaction_contacts, vec![bob.to_string()]);
         assert!(s.new_messages.is_empty());
         // A notification to show.
         assert!(!s.nothing_to_show);
+    }
+
+    /// A reaction to a live ephemeral says so, without a word of it.
+    #[test]
+    fn reaction_on_ephemeral_has_no_excerpt() {
+        let (dir, mut core, bob) = core_with_bob_message();
+        drop(core);
+        let path = dir.path().join("a.db");
+        Store::open(&path, &[1u8; 32])
+            .unwrap()
+            .insert_message_row(&MessageInsert {
+                contact_fp: bob,
+                direction: Direction::In,
+                body: "burn after reading".into(),
+                status: MessageStatus::Received,
+                at: 1_600,
+                message_id: MessageId([6; 16]),
+                wire_id: Some([6; 16]),
+                reply_to: None,
+                reply_ref: None,
+                placeholder: false,
+                ttl_secs: Some(300),
+                seen_at: None,
+                expire_at: Some(u64::from(u32::MAX) * 2),
+            })
+            .unwrap();
+        core = Core::open(&path, &[1u8; 32], 2_000).unwrap();
+        let on = |target: u8| ReceiveOutcome::Reaction {
+            from: bob,
+            alias: Some("bob".into()),
+            target: MessageId([target; 16]),
+            added: vec!["👍".into()],
+        };
+        let report = SyncReport {
+            received: vec![on(6), on(5)],
+            ..SyncReport::default()
+        };
+        let s = summary(&mut core, report, Vec::new());
+        assert_eq!(s.new_reactions.len(), 2);
+        let (eph, plain) = (&s.new_reactions[0], &s.new_reactions[1]);
+        assert_eq!((eph.excerpt.as_deref(), eph.on_ephemeral), (None, true));
+        assert_eq!(
+            (plain.excerpt.as_deref(), plain.on_ephemeral),
+            (Some("good morning, how are you today?"), false)
+        );
     }
 
     #[test]
@@ -513,7 +586,7 @@ mod tests {
             received: vec![gone],
             ..SyncReport::default()
         };
-        let s = summary(&mut core, report);
+        let s = summary(&mut core, report, Vec::new());
         assert_eq!(s.new_reactions.len(), 1);
         assert_eq!(s.new_reactions[0].excerpt, None);
         // No alias: the contact's display name (set by its card).
@@ -543,7 +616,7 @@ mod tests {
             ],
             ..SyncReport::default()
         };
-        let s = summary(&mut core, report);
+        let s = summary(&mut core, report, Vec::new());
         assert!(s.new_reactions.is_empty());
         assert_eq!(s.reaction_contacts, vec![bob.to_string(), sam.to_string()]);
         // Items came, nothing shows: the wake-up has nothing to say.
@@ -563,7 +636,7 @@ mod tests {
             }],
             ..SyncReport::default()
         };
-        let s = summary(&mut core, report);
+        let s = summary(&mut core, report, Vec::new());
         assert_eq!(s.new_messages.len(), 1);
         let m = &s.new_messages[0];
         assert_eq!((m.text.as_str(), m.needs_update), ("", true));
@@ -580,7 +653,7 @@ mod tests {
             received: vec![ReceiveOutcome::Ignored],
             ..SyncReport::default()
         };
-        let s = summary(&mut core, ignored);
+        let s = summary(&mut core, ignored, Vec::new());
         assert!(s.new_messages.is_empty() && s.nothing_to_show);
     }
 
@@ -601,12 +674,14 @@ mod tests {
         let s = summary(
             &mut core,
             report(vec![ReceiveOutcome::DuplicateMessage, reaction(bob, &[])]),
+            Vec::new(),
         );
         assert!(s.new_messages.is_empty() && s.new_reactions.is_empty());
         assert!(!s.nothing_to_show);
         let s = summary(
             &mut core,
             report(vec![ReceiveOutcome::Duplicate, reaction(bob, &[])]),
+            Vec::new(),
         );
         assert!(s.nothing_to_show);
     }

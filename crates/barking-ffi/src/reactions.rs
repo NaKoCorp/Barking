@@ -59,9 +59,13 @@ pub struct NewReaction {
     /// The emoji added, in the order of the reactor's set.
     pub emojis: Vec<String>,
     /// Start of the message reacted to (`excerpt`, 40 characters); `None` if
-    /// it is gone.
+    /// it is gone, or ephemeral (`on_ephemeral`).
     #[uniffi(default = None)]
     pub excerpt: Option<String>,
+    /// The message reacted to is ephemeral: the notification never shows a
+    /// word of it.
+    #[uniffi(default = false)]
+    pub on_ephemeral: bool,
 }
 
 /// The first `max_chars` characters of `text`, then "…" when it was cut.

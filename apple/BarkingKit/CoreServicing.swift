@@ -9,7 +9,8 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func contacts() throws -> [Contact]
     func messagesWith(contact: String) throws -> [Message]
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo]
-    func sendText(contact: String, text: String, replyTo: Int64?) throws
+    /// `ttlSecs`: an ephemeral message (60 to 604 800 seconds); nil: a plain one.
+    func sendText(contact: String, text: String, replyTo: Int64?, ttlSecs: UInt32?) throws
     func setReactions(message: Int64, emojis: [String]) throws
     func addContactBytes(card: Data, alias: String?) throws -> String
     func addContact(card: String, alias: String?) throws -> String
@@ -67,6 +68,12 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func setPreview(preview: PushPreview) throws
     func noteWake(atSecs: UInt64) throws
     func wakeStatus() throws -> WakeStatus
+    /// Ephemeral messages of rows `ids` are on screen: seen now.
+    func markSeen(ids: [Int64]) throws
+    /// When the next ephemeral is due (Unix seconds); nil without any.
+    func nextExpiry() throws -> UInt64?
+    /// Erases the ephemeral messages due now; their rows.
+    func expireEphemeral() throws -> [Int64]
 }
 
 extension Device: DeviceHandle {}

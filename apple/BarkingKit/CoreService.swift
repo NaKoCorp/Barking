@@ -232,8 +232,13 @@ public actor CoreService {
     }
     /// Queues `text` for `contact`; `replyTo`: the `Message.id` it answers
     /// (`BarkingError.MessageNotFound` if that row is gone or not quotable).
-    public func send(_ text: String, to contact: String, replyTo: Int64? = nil) async throws {
-        try await call("send") { try $0.sendText(contact: contact, text: text, replyTo: replyTo) }
+    /// `ttlSecs`: an ephemeral message, erased that long after it is seen
+    /// (60 to 604 800 seconds, else `BarkingError.InvalidInput`); nil: a
+    /// plain one.
+    public func send(_ text: String, to contact: String, replyTo: Int64? = nil, ttlSecs: UInt32? = nil) async throws {
+        try await call("send") {
+            try $0.sendText(contact: contact, text: text, replyTo: replyTo, ttlSecs: ttlSecs)
+        }
         publish(.messages(contact: contact))
         Task { _ = await self.sync(reason: .afterSend) }
     }
