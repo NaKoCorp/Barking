@@ -316,4 +316,66 @@ final class EphemeralDisplayTests: XCTestCase {
         await m.handle(.expired(ids: [7]))
         XCTAssertEqual(m.exit, .removedElsewhere)
     }
+
+    // MARK: Leaving and the app-level timer
+
+    /// Leaving within the second still reports what was seen.
+    func testSeenTrackerReportsOnLeave() async throws {
+        let gate = Gate()
+        var calls: [[Int64]] = []
+        let tracker = SeenTracker(sleep: { try await gate.wait($0) }) { calls.append($0); return true }
+        tracker.saw([1, 2])
+        try await waitUntil { await gate.waiting() == 1 }
+        tracker.finish()
+        await tracker.waitForFlush()
+        XCTAssertEqual(calls, [[1, 2]], "at once, without waiting out the window")
+    }
+
+    func testLeavingTheConversationMarksSeen() async throws {
+        let d = FakeDevice()
+        d.messageList = ["b": [Message(id: 2, outgoing: false, body: "new", at: t0, ttlSecs: 300,
+                                       expireAt: t0 + 604_800)]]
+        let gate = Gate()
+        let m = make(d)
+        m.seenSleep = { try await gate.wait($0) }
+        await m.onAppear()
+        await m.phaseChanged(active: true)
+        m.bubbleVisibility(2, shown: true)
+        try await waitUntil { await gate.waiting() == 1 }
+        m.onDisappear()
+        await m.seen.waitForFlush()
+        XCTAssertEqual(d.seen, [[2]])
+    }
+
+    /// Whatever the screen: active, it expires, sleeps to the next expiry,
+    /// expires again and re-arms; inactive, nothing waits.
+    func testAppExpiryTimer() async throws {
+        let gate = Gate()
+        var due: UInt64? = t0 + 30
+        var expired = 0
+        let timer = ExpiryTimer(nextExpiry: { due }, expire: { expired += 1 }, sleep: { try await gate.wait($0) })
+        let at = TimeInterval(t0)
+        timer.now = { Date(timeIntervalSince1970: at) }
+        await timer.arm()
+        XCTAssertNil(timer.task, "not armed before the app is active")
+        await timer.phaseChanged(active: true)
+        XCTAssertEqual(expired, 1)
+        try await waitUntil { await gate.waiting() == 1 }
+        var waits = await gate.waits
+        XCTAssertEqual(waits, [.seconds(30)])
+        due = nil
+        await gate.open()
+        try await waitUntil { expired == 2 }
+        try await waitUntil { timer.task == nil }
+        due = t0 - 2
+        await timer.arm()
+        try await waitUntil { await gate.waiting() == 1 }
+        waits = await gate.waits
+        XCTAssertEqual(waits.last, ExpiryTimer.pastDueWait)
+        await timer.phaseChanged(active: false)
+        XCTAssertNil(timer.task)
+        await timer.arm()
+        XCTAssertNil(timer.task, "inactive: nothing waits")
+        XCTAssertEqual(expired, 2)
+    }
 }

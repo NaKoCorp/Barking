@@ -274,7 +274,8 @@ final class ConversationModel {
         ttl = nil
         onScreen = []
         visibleBubbles = []
-        seen.reset()
+        // What was seen in the last second is still told, not dropped.
+        seen.finish()
         expiryTimer?.cancel()
         expiryTimer = nil
     }
@@ -663,7 +664,8 @@ struct DeliveryAnnouncements {
 /// second (spec deletion/ephemeral §5.5): the first sighting opens a
 /// one-second window, the next ones join it, and its end reports them all
 /// in one call. An id is reported once; a failed report forgets its ids,
-/// so the next sighting tries again.
+/// so the next sighting tries again. Leaving (`finish`) reports what waits
+/// at once.
 @MainActor
 final class SeenTracker {
     static let interval: Duration = .seconds(1)
@@ -701,12 +703,18 @@ final class SeenTracker {
         if !(await report(ids)) { reported.subtract(ids) }
     }
 
-    /// The conversation left: nothing waits, nothing is remembered.
-    func reset() {
+    /// The conversation left: what waits in the window is reported now
+    /// (leaving within the second must not lose it), then nothing is
+    /// remembered.
+    func finish() {
         flushTask?.cancel()
         flushTask = nil
+        let ids = waiting
         waiting = []
         reported = []
+        guard !ids.isEmpty else { return }
+        let report = self.report
+        flushTask = Task { _ = await report(ids) }
     }
 
     /// Tests: waits for the window open now to report.

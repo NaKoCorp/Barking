@@ -217,7 +217,7 @@ final class ChatUITests: XCTestCase {
     }
 
     /// An ephemeral of 60 s which, once the app reports it seen, counts as
-    /// seen 59 s ago: the seen report, the reload and the timer erase it
+    /// seen 55 s ago: the seen report, the reload and the timer erase it
     /// while the conversation is open, without a sync (spec deletion/
     /// ephemeral §5.3, §5.5). Faked: no second device in UI tests.
     func testEphemeralDisappears() throws {
@@ -229,7 +229,7 @@ final class ChatUITests: XCTestCase {
         sam.tap()
         let bubble = app.staticTexts["This one disappears"]
         XCTAssertTrue(bubble.waitForExistence(timeout: 5), "the ephemeral shows first")
-        XCTAssertTrue(bubble.waitUntil({ !$0.exists }, timeout: 5), "gone within 5 s")
+        XCTAssertTrue(bubble.waitUntil({ !$0.exists }, timeout: 15), "gone within 15 s")
     }
 
 }

@@ -23,9 +23,9 @@ import Foundation
 ///   works with or without the seed.
 ///
 /// - `-BarkingUITestEphemeral`: one received ephemeral of 60 s from Sam.
-///   When the app reports it seen (`markSeen`), it counts as seen 59 s
+///   When the app reports it seen (`markSeen`), it counts as seen 55 s
 ///   earlier: `nextExpiry` and `expireEphemeral` answer for it, so the
-///   app's timer erases it a second later. It stays in every read until
+///   app's timer erases it five seconds later. It stays in every read until
 ///   `expireEphemeral` hands it back.
 ///
 /// Never compiled into Release.
@@ -241,8 +241,8 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
 
     // MARK: The faked ephemeral
 
-    /// 60 s, not seen until the app reports it; then seen 59 s before that
-    /// report, so one second is left.
+    /// 60 s, not seen until the app reports it; then seen 55 s before that
+    /// report, so five seconds are left.
     private func fakeEphemeral(now: UInt64) -> Message? {
         guard ephemeral else { return nil }
         let state: (read: UInt64, seen: UInt64?)? = lock.withLock {
@@ -251,15 +251,15 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             return ephemeralRead.map { ($0, ephemeralSeen) }
         }
         guard let state else { return nil }
-        let seenAt = state.seen.map { $0 - 59 }
+        let seenAt = state.seen.map { $0 - 55 }
         return Message(id: Self.ephemeralId, outgoing: false, body: Self.ephemeralText, at: state.read,
                        delivery: nil, ttlSecs: 60, seenAt: seenAt,
-                       expireAt: state.seen.map { $0 + 1 } ?? state.read + 604_800)
+                       expireAt: state.seen.map { $0 + 5 } ?? state.read + 604_800)
     }
 
     /// When the faked ephemeral is due, once seen and while shown.
     private func fakeExpiry() -> UInt64? {
-        lock.withLock { ephemeralGone ? nil : ephemeralSeen.map { $0 + 1 } }
+        lock.withLock { ephemeralGone ? nil : ephemeralSeen.map { $0 + 5 } }
     }
 
     func nextExpiry() throws -> UInt64? {
@@ -272,7 +272,7 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         var ids = try device.expireEphemeral()
         let now = UInt64(Date().timeIntervalSince1970)
         let due = lock.withLock { () -> Bool in
-            guard let seen = ephemeralSeen, !ephemeralGone, now >= seen + 1 else { return false }
+            guard let seen = ephemeralSeen, !ephemeralGone, now >= seen + 5 else { return false }
             ephemeralGone = true
             return true
         }
@@ -280,7 +280,7 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         return ids
     }
 
-    /// The app saw the faked one: its countdown starts, one second left.
+    /// The app saw the faked one: its countdown starts, five seconds left.
     func markSeen(ids: [Int64]) throws {
         if ids.contains(Self.ephemeralId) {
             let now = UInt64(Date().timeIntervalSince1970)
