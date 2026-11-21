@@ -15,6 +15,7 @@
 mod admin;
 mod contacts;
 pub(crate) mod delivery;
+pub(crate) mod ephemeral;
 mod frames;
 mod history;
 mod link;
@@ -134,11 +135,14 @@ const SEEN_RETENTION_SECS: u64 = MAX_AGE_SECS + MAX_FUTURE_SECS;
 /// Result of receiving bytes from outside.
 pub enum ReceiveOutcome {
     /// Decrypted message. `ack` is the receipt acknowledgement to send back.
+    /// `ephemeral`: the message carries a delay (its notification must not
+    /// show the text).
     Message {
         from: Fingerprint,
         alias: Option<String>,
         text: String,
         ack: Packet,
+        ephemeral: bool,
     },
     /// Verified ack for one of my packets, its delivery now `Received`.
     AckReceived {
@@ -203,12 +207,17 @@ impl fmt::Debug for ReceiveOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Message {
-                from, alias, text, ..
+                from,
+                alias,
+                text,
+                ephemeral,
+                ..
             } => f
                 .debug_struct("Message")
                 .field("from", from)
                 .field("alias", alias)
                 .field("text", &format_args!("<{} bytes>", text.len()))
+                .field("ephemeral", ephemeral)
                 .finish_non_exhaustive(),
             Self::AckReceived { packet_id } => f
                 .debug_struct("AckReceived")
@@ -925,15 +934,21 @@ impl Core {
     }
 
     /// The message `id` of the conversation with `contact`, for a quote.
-    /// `None` if it is absent (not received yet, deleted) or belongs to
-    /// another conversation.
-    pub fn message_in(&self, contact: &Fingerprint, id: MessageId) -> Result<Option<MessageRow>> {
-        self.store.message_in(*contact, id)
+    /// `None` if it is absent (not received yet, deleted, an ephemeral due
+    /// at `now`) or belongs to another conversation.
+    pub fn message_in(
+        &self,
+        contact: &Fingerprint,
+        id: MessageId,
+        now: u64,
+    ) -> Result<Option<MessageRow>> {
+        self.store.message_in(*contact, id, now)
     }
 
-    /// History with a contact, from oldest to newest.
-    pub fn messages_with(&self, contact: &Fingerprint) -> Result<Vec<MessageRow>> {
-        self.store.messages_with(*contact)
+    /// History with a contact shown at `now`, from oldest to newest: an
+    /// ephemeral due is left out even before `expire_ephemeral` erases it.
+    pub fn messages_with(&self, contact: &Fingerprint, now: u64) -> Result<Vec<MessageRow>> {
+        self.store.messages_with(*contact, now)
     }
 }
 

@@ -85,7 +85,12 @@ struct ChatsView: View {
         .task {
             await model.reload()
             for await change in await core.changes {
-                if change == .contacts || change == .network || { if case .messages = change { true } else if case .delivery = change { true } else { false } }() {
+                if change == .contacts || change == .network || {
+                    switch change {
+                    case .messages, .delivery, .expired: true
+                    default: false
+                    }
+                }() {
                     await model.reload()
                 }
                 if change == .contacts { await closeBlocked() }
@@ -177,7 +182,7 @@ struct ChatRowView: View {
                     Text(row.name).font(BarkingFont.sans(.headline, size: 16, weight: .semibold))
                         .foregroundStyle(Color.fg).lineLimit(1)
                     // Verified stays visible when the second line is a message.
-                    if row.verified, case .preview = row.line {
+                    if row.verified, row.line != .trust(.verified) {
                         Text(verbatim: "✓").font(.bSymbol(13, relativeTo: .footnote, weight: .bold))
                             .foregroundStyle(Color.ok)
                             .accessibilityLabel(Text("verified"))
@@ -193,6 +198,11 @@ struct ChatRowView: View {
                     case .preview(let text):
                         if let s = row.lastStatus { DeliveryGlyph(s) }
                         Text(text).font(.bBodySmall).foregroundStyle(Color.fgMuted).lineLimit(1)
+                    case .disappearing:
+                        if let s = row.lastStatus { DeliveryGlyph(s) }
+                        Image(systemName: "hourglass").font(.bSymbol(12, relativeTo: .footnote, weight: .semibold))
+                            .foregroundStyle(Color.fgMuted).accessibilityHidden(true)
+                        Text("Disappearing message").font(.bBodySmall).foregroundStyle(Color.fgMuted).lineLimit(1)
                     case .trust(let trust):
                         TrustLine(trust: trust)
                     }

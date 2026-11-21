@@ -98,8 +98,12 @@ fn messages_have_ids() {
     let fb = alice
         .add_contact_bytes(bob.contact_card_bytes().unwrap(), None)
         .unwrap();
-    alice.send_text(fb.clone(), "one".into(), None).unwrap();
-    alice.send_text(fb.clone(), "two".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "one".into(), None, None)
+        .unwrap();
+    alice
+        .send_text(fb.clone(), "two".into(), None, None)
+        .unwrap();
     let m = alice.messages_with(fb).unwrap();
     assert!(m[0].id < m[1].id);
     assert!(m[0].delivery.is_some());
@@ -113,8 +117,12 @@ fn chat_summaries_in_one_call() {
     let fb = alice
         .add_contact_bytes(bob.contact_card_bytes().unwrap(), Some("bob".into()))
         .unwrap();
-    alice.send_text(fb.clone(), "first".into(), None).unwrap();
-    alice.send_text(fb.clone(), "last".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "first".into(), None, None)
+        .unwrap();
+    alice
+        .send_text(fb.clone(), "last".into(), None, None)
+        .unwrap();
     let s = alice.chat_summaries().unwrap();
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].contact.fingerprint, fb);
@@ -132,7 +140,9 @@ fn block_hides_the_contact_and_unblock_restores_it() {
     let fb = alice
         .add_contact_bytes(card.clone(), Some("bob".into()))
         .unwrap();
-    alice.send_text(fb.clone(), "hi".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "hi".into(), None, None)
+        .unwrap();
     alice.block_contact(fb.clone()).unwrap();
     assert!(alice.contacts().unwrap().is_empty());
     assert!(alice.chat_summaries().unwrap().is_empty());
@@ -140,7 +150,7 @@ fn block_hides_the_contact_and_unblock_restores_it() {
     assert_eq!(blocked.len(), 1);
     assert!(blocked[0].blocked && blocked[0].fingerprint == fb);
     assert!(matches!(
-        alice.send_text(fb.clone(), "no".into(), None),
+        alice.send_text(fb.clone(), "no".into(), None, None),
         Err(BarkingError::ContactBlocked)
     ));
     // The history stays stored.

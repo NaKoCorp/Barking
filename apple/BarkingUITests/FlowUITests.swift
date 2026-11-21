@@ -216,6 +216,22 @@ final class ChatUITests: XCTestCase {
         XCTAssertTrue(app.buttons["sheet.delete"].exists)
     }
 
+    /// An ephemeral of 60 s which, once the app reports it seen, counts as
+    /// seen 55 s ago: the seen report, the reload and the timer erase it
+    /// while the conversation is open, without a sync (spec deletion/
+    /// ephemeral §5.3, §5.5). Faked: no second device in UI tests.
+    func testEphemeralDisappears() throws {
+        let app = XCUIApplication.seeded(extra: ["-BarkingUITestEphemeral"])
+        app.launch()
+        // Not `openSamChat`: its wait for the field can outlast the bubble.
+        let sam = app.staticTexts["Sam"].firstMatch
+        XCTAssertTrue(sam.waitForExistence(timeout: 10), "Sam is not in the chats")
+        sam.tap()
+        let bubble = app.staticTexts["This one disappears"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: 5), "the ephemeral shows first")
+        XCTAssertTrue(bubble.waitUntil({ !$0.exists }, timeout: 15), "gone within 15 s")
+    }
+
 }
 
 @MainActor

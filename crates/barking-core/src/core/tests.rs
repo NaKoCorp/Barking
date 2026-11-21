@@ -134,7 +134,7 @@ fn authenticated_malformed_envelope_keeps_ratchet_and_quarantines() {
         "decryption impossible"
     );
     // Nothing appears in the history, and the conversation continues.
-    assert_eq!(p.b.messages_with(&p.a.fingerprint()).unwrap().len(), 2);
+    assert_eq!(p.b.messages_with(&p.a.fingerprint(), NOW).unwrap().len(), 2);
     let next =
         p.a.send_text(&p.b.fingerprint(), "suite", NOW, &mut p.rng)
             .unwrap();
@@ -423,7 +423,11 @@ fn ambiguous_sender_never_misattributed() {
         reason(b.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap()),
         "ambiguous sender"
     );
-    assert!(b.messages_with(&card.fingerprint()).unwrap().is_empty());
+    assert!(
+        b.messages_with(&card.fingerprint(), NOW)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -480,7 +484,7 @@ fn session_to_mixed_device_fails_at_its_real_owner() {
     );
     assert!(
         alice
-            .messages_with(&carol.fingerprint())
+            .messages_with(&carol.fingerprint(), NOW)
             .unwrap()
             .is_empty()
     );
@@ -491,13 +495,13 @@ fn remove_contact_deletes_contact_card_and_sessions_but_keeps_history() {
     let mut p = pair();
     let bob = p.a.resolve("bob").unwrap();
     assert!(!p.a.store.all_sessions().unwrap().is_empty());
-    assert!(!p.a.messages_with(&bob).unwrap().is_empty());
+    assert!(!p.a.messages_with(&bob, NOW).unwrap().is_empty());
     p.a.remove_contact(&bob, NOW, &mut p.rng).unwrap();
     assert!(p.a.contacts().unwrap().is_empty());
     assert_eq!(p.a.resolve("bob"), Err(CoreError::UnknownContact));
     assert!(p.a.store.get_contact(bob).unwrap().is_none());
     assert!(p.a.store.all_sessions().unwrap().is_empty());
-    assert!(!p.a.messages_with(&bob).unwrap().is_empty());
+    assert!(!p.a.messages_with(&bob, NOW).unwrap().is_empty());
     // Unknown: error, nothing is broken.
     assert_eq!(
         p.a.remove_contact(&bob, NOW, &mut p.rng),
@@ -990,8 +994,8 @@ fn own_devices_open_sessions() {
     assert_eq!(back[0].1, a.device.public().id());
     let r = a.receive(&back[0].0.encode(), "t", NOW, &mut rng).unwrap();
     assert_eq!(reason(r), "unexpected content for this mailbox");
-    assert!(t.messages_with(&me).unwrap().is_empty());
-    assert!(a.messages_with(&me).unwrap().is_empty());
+    assert!(t.messages_with(&me, NOW).unwrap().is_empty());
+    assert!(a.messages_with(&me, NOW).unwrap().is_empty());
 }
 
 #[test]
@@ -1025,8 +1029,13 @@ fn message_id_dedups_resend() {
         p.b.receive(&first.encode(), "t", NOW, &mut p.rng).unwrap(),
         ReceiveOutcome::Message { .. }
     ));
-    let mid = p.a.messages_with(&b_fp).unwrap().last().unwrap().message_id;
-    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let mid =
+        p.a.messages_with(&b_fp, NOW)
+            .unwrap()
+            .last()
+            .unwrap()
+            .message_id;
+    let before = p.b.messages_with(&a_fp, NOW).unwrap().len();
     let again = seal_body(
         &mut p.a,
         &send::Target::Contact(b_fp),
@@ -1041,7 +1050,7 @@ fn message_id_dedups_resend() {
         p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap(),
         ReceiveOutcome::DuplicateMessage
     ));
-    assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before);
+    assert_eq!(p.b.messages_with(&a_fp, NOW).unwrap().len(), before);
     // The duplicate is still acked: the sender stops resending it.
     let acks: Vec<Packet> =
         p.b.pending_outbox(NOW)
@@ -1076,7 +1085,7 @@ fn message_ids_scoped_to_sender() {
     )
     .unwrap();
     // Identifier of a message received by Bob (from Alice), and of a message from Bob.
-    let from_a = p.b.messages_with(&a_fp).unwrap();
+    let from_a = p.b.messages_with(&a_fp, NOW).unwrap();
     let in_id = from_a
         .iter()
         .find(|m| m.direction == Direction::In)
@@ -1085,7 +1094,7 @@ fn message_ids_scoped_to_sender() {
         .iter()
         .find(|m| m.direction == Direction::Out)
         .unwrap();
-    let a_mid = p.a.messages_with(&b_fp).unwrap()[0].message_id;
+    let a_mid = p.a.messages_with(&b_fp, NOW).unwrap()[0].message_id;
     for (i, mid) in [a_mid, in_id.message_id, out_id.message_id]
         .into_iter()
         .enumerate()
@@ -1104,8 +1113,8 @@ fn message_ids_scoped_to_sender() {
             ReceiveOutcome::Message { .. }
         ));
     }
-    assert_eq!(p.b.messages_with(&a_fp).unwrap(), from_a);
-    assert_eq!(p.b.messages_with(&c.fingerprint()).unwrap().len(), 3);
+    assert_eq!(p.b.messages_with(&a_fp, NOW).unwrap(), from_a);
+    assert_eq!(p.b.messages_with(&c.fingerprint(), NOW).unwrap().len(), 3);
 }
 
 /// Quarantine reason of a synchronization coming from somewhere other than my devices.
@@ -1132,7 +1141,7 @@ fn sync_from_contact_quarantined() {
             card: Box::new(card),
         },
     ];
-    let before = p.a.messages_with(&b_fp).unwrap().len();
+    let before = p.a.messages_with(&b_fp, NOW).unwrap().len();
     for (i, body) in bodies.iter().enumerate() {
         let id = MessageId([i as u8 + 1; 16]);
         let out = seal_body(&mut p.b, &send::Target::Contact(a_fp), body, id, &mut p.rng);
@@ -1141,7 +1150,7 @@ fn sync_from_contact_quarantined() {
                 .unwrap();
         assert_eq!(reason(r), NOT_MINE, "case {i}");
     }
-    assert_eq!(p.a.messages_with(&b_fp).unwrap().len(), before);
+    assert_eq!(p.a.messages_with(&b_fp, NOW).unwrap().len(), before);
     let c = p.a.contacts().unwrap();
     assert_eq!(c.len(), 1);
     assert_eq!(
@@ -2016,7 +2025,7 @@ fn sync_sent_matching_imported_history_message_not_duplicated() {
         )
         .unwrap();
     let packets = a.send_text(&bob_fp, "hello", NOW + 1, &mut rng).unwrap();
-    let sent = a.messages_with(&bob_fp).unwrap();
+    let sent = a.messages_with(&bob_fp, NOW).unwrap();
     assert_eq!(sent.len(), 1);
     // T already has this message (imported with the history), same identifier.
     let inserted = t
@@ -2040,7 +2049,7 @@ fn sync_sent_matching_imported_history_message_not_duplicated() {
         }
     }
     assert_eq!(synced, 1);
-    assert_eq!(t.messages_with(&bob_fp).unwrap().len(), 1);
+    assert_eq!(t.messages_with(&bob_fp, NOW).unwrap().len(), 1);
 }
 
 #[test]
@@ -2745,7 +2754,7 @@ fn route_of_sent_and_received_message() {
     ));
 
     // Sender: Sealed towards B and B2, Deposited on the node, AckVerified.
-    let row = a.messages_with(&b.fingerprint()).unwrap()[0].id;
+    let row = a.messages_with(&b.fingerprint(), NOW).unwrap()[0].id;
     let route = a.message_route(row).unwrap();
     let steps: Vec<RouteStep> = route.iter().map(|e| e.step).collect();
     assert_eq!(
@@ -2775,7 +2784,7 @@ fn route_of_sent_and_received_message() {
     assert_eq!(route[4].at, NOW + 3);
 
     // Recipient: Opened.
-    let row = b.messages_with(&a.fingerprint()).unwrap()[0].id;
+    let row = b.messages_with(&a.fingerprint(), NOW).unwrap()[0].id;
     let route = b.message_route(row).unwrap();
     assert_eq!(route.len(), 1);
     assert_eq!(route[0].step, RouteStep::Opened);
@@ -2786,7 +2795,7 @@ fn route_of_sent_and_received_message() {
     b.send_text(&a.fingerprint(), "re", NOW + 4, &mut rng)
         .unwrap();
     let reply = b
-        .messages_with(&a.fingerprint())
+        .messages_with(&a.fingerprint(), NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.direction == Direction::Out)
@@ -2840,7 +2849,7 @@ fn route_steps_purged_after_30_days() {
         p.a.send_text(&p.b.fingerprint(), "z", NOW, &mut p.rng)
             .unwrap();
     let row =
-        p.a.messages_with(&p.b.fingerprint())
+        p.a.messages_with(&p.b.fingerprint(), NOW)
             .unwrap()
             .into_iter()
             .rfind(|m| m.direction == Direction::Out)
@@ -2879,7 +2888,7 @@ fn repeated_transport_steps_are_recorded_once_per_node() {
     let transport =
         |c: &Core, contact: &crate::identity::root::Fingerprint| -> Vec<(RouteStep, String, u64)> {
             // The last message of the conversation: "z".
-            let row = c.messages_with(contact).unwrap().last().unwrap().id;
+            let row = c.messages_with(contact, NOW).unwrap().last().unwrap().id;
             c.message_route(row)
                 .unwrap()
                 .into_iter()
@@ -3000,7 +3009,7 @@ fn send_is_pending_until_deposit() {
     let sent =
         p.a.send_text(&p.b.fingerprint(), "pending", NOW + 10, &mut p.rng)
             .unwrap();
-    let rows = p.a.messages_with(&p.b.fingerprint()).unwrap();
+    let rows = p.a.messages_with(&p.b.fingerprint(), NOW).unwrap();
     let row = rows.iter().find(|m| m.body == "pending").unwrap();
     assert_eq!(row.status, MessageStatus::Pending);
     let size = i64::try_from(sent[0].tier.size()).unwrap();
@@ -3028,7 +3037,7 @@ fn ack_sets_received_and_acked_at() {
             .unwrap(),
         ReceiveOutcome::AckReceived { .. }
     ));
-    let rows = p.a.messages_with(&p.b.fingerprint()).unwrap();
+    let rows = p.a.messages_with(&p.b.fingerprint(), NOW).unwrap();
     let row = rows.iter().find(|m| m.body == "ack-me").unwrap();
     assert_eq!(row.status, MessageStatus::Received);
     let (status, _, _, acked_at) = delivery_of(&p.a, sent[0].id);
@@ -3064,7 +3073,7 @@ fn own_copy_ack_does_not_make_received() {
         ReceiveOutcome::AckReceived { .. }
     ));
     assert_eq!(delivery_of(&a, copy.id).0, 3);
-    let rows = a.messages_with(&b.fingerprint()).unwrap();
+    let rows = a.messages_with(&b.fingerprint(), NOW).unwrap();
     assert_eq!(rows[0].status, MessageStatus::Pending);
 }
 
@@ -3140,7 +3149,7 @@ fn deposited_steps(c: &Core, packet: PacketId) -> Vec<(i64, Option<String>)> {
 }
 
 fn status_of(c: &Core, contact: &Fingerprint, body: &str) -> MessageStatus {
-    c.messages_with(contact)
+    c.messages_with(contact, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == body)
@@ -3149,7 +3158,7 @@ fn status_of(c: &Core, contact: &Fingerprint, body: &str) -> MessageStatus {
 }
 
 fn row_of(c: &Core, contact: &Fingerprint, body: &str) -> i64 {
-    c.messages_with(contact)
+    c.messages_with(contact, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == body)
@@ -3493,7 +3502,7 @@ fn dropped_packet_already_on_the_network_awaits_its_verdict() {
 fn recompute_with(p: &mut Pair, body: &str, rows: &[(i64, i64)]) -> MessageStatus {
     let bob = p.b.fingerprint();
     let mid =
-        p.a.messages_with(&bob)
+        p.a.messages_with(&bob, NOW)
             .unwrap()
             .into_iter()
             .find(|m| m.body == body)
@@ -3654,7 +3663,7 @@ fn deliveries_of(c: &Core, message_id: MessageId) -> Vec<(i64, i64)> {
 }
 
 fn message_id_of(c: &Core, contact: &Fingerprint, body: &str) -> MessageId {
-    c.messages_with(contact)
+    c.messages_with(contact, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == body)
@@ -3663,7 +3672,7 @@ fn message_id_of(c: &Core, contact: &Fingerprint, body: &str) -> MessageId {
 }
 
 fn has_message(c: &Core, contact: &Fingerprint, body: &str) -> bool {
-    c.messages_with(contact)
+    c.messages_with(contact, NOW)
         .unwrap()
         .iter()
         .any(|m| m.body == body)
@@ -3697,7 +3706,7 @@ fn delete_pending_cancels_and_drops_own_copies() {
     let mid = message_id_of(&a, &bob, "never");
     let row = row_of(&a, &bob, "never");
     assert_eq!(route_steps_of(&a, sent[0].id), 1);
-    let outcome = a.delete_message(row, NOW + 5).unwrap();
+    let outcome = a.delete_message(row, NOW + 5, &mut rng).unwrap().0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3727,7 +3736,10 @@ fn delete_after_deposit_reports_already_left() {
     let sent = a.send_text(&bob, "gone", NOW, &mut rng).unwrap();
     let mid = message_id_of(&a, &bob, "gone");
     a.record_deposit(sent[0].id, NODE, NOW + 1).unwrap();
-    let outcome = a.delete_message(row_of(&a, &bob, "gone"), NOW + 5).unwrap();
+    let outcome = a
+        .delete_message(row_of(&a, &bob, "gone"), NOW + 5, &mut rng)
+        .unwrap()
+        .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3760,7 +3772,13 @@ fn kept_delivery_of_a_deleted_message_settles() {
         p.a.record_deposit(s[0].id, NODE, NOW).unwrap();
     }
     let rows = [row_of(&p.a, &bob, "acked"), row_of(&p.a, &bob, "lost")];
-    assert_eq!(p.a.delete_messages(&rows, NOW + 1).unwrap().already_left, 2);
+    assert_eq!(
+        p.a.delete_messages(&rows, NOW + 1, &mut p.rng)
+            .unwrap()
+            .0
+            .already_left,
+        2
+    );
     // The ack still clears its packet from the queue.
     let ack = match p
         .b
@@ -3800,8 +3818,9 @@ fn delete_mixed_devices_is_partly_cancelled() {
     let mid = message_id_of(&b, &alice, "half");
     b.record_deposit(sent[0].id, NODE, NOW).unwrap();
     let outcome = b
-        .delete_message(row_of(&b, &alice, "half"), NOW + 5)
-        .unwrap();
+        .delete_message(row_of(&b, &alice, "half"), NOW + 5, &mut rng)
+        .unwrap()
+        .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3827,7 +3846,10 @@ fn delete_not_delivered_drops_its_deliveries() {
     p.a.expire_due(u64::from(sent[0].expires_at) + 1).unwrap();
     assert_eq!(status_of(&p.a, &bob, "late"), MessageStatus::NotDelivered);
     let row = row_of(&p.a, &bob, "late");
-    let outcome = p.a.delete_message(row, NOW + DAY_SECS).unwrap();
+    let outcome =
+        p.a.delete_message(row, NOW + DAY_SECS, &mut p.rng)
+            .unwrap()
+            .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3838,7 +3860,9 @@ fn delete_not_delivered_drops_its_deliveries() {
     assert!(deliveries_of(&p.a, mid).is_empty());
     // Gone already: nothing more.
     assert_eq!(
-        p.a.delete_message(row, NOW + DAY_SECS).unwrap(),
+        p.a.delete_message(row, NOW + DAY_SECS, &mut p.rng)
+            .unwrap()
+            .0,
         DeleteOutcome::default()
     );
 }
@@ -3859,7 +3883,7 @@ fn delete_received_message_keeps_inbound() {
         o => panic!("{o:?}"),
     };
     let row = row_of(&p.b, &a_fp, "read-me");
-    let outcome = p.b.delete_message(row, NOW + 1).unwrap();
+    let outcome = p.b.delete_message(row, NOW + 1, &mut p.rng).unwrap().0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3914,8 +3938,8 @@ fn cancel_all_pending_touches_only_pending_messages() {
         o => panic!("{o:?}"),
     };
     p.a.receive(&ack.encode(), "t", NOW, &mut p.rng).unwrap();
-    let before = p.a.messages_with(&bob).unwrap().len();
-    let outcome = p.a.cancel_all_pending(NOW + 10).unwrap();
+    let before = p.a.messages_with(&bob, NOW).unwrap().len();
+    let outcome = p.a.cancel_all_pending(NOW + 10, &mut p.rng).unwrap().0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3925,7 +3949,7 @@ fn cancel_all_pending_touches_only_pending_messages() {
         }
     );
     let left: Vec<String> =
-        p.a.messages_with(&bob)
+        p.a.messages_with(&bob, NOW)
             .unwrap()
             .into_iter()
             .map(|m| m.body)
@@ -3937,7 +3961,7 @@ fn cancel_all_pending_touches_only_pending_messages() {
     }
     // Nothing more to cancel.
     assert_eq!(
-        p.a.cancel_all_pending(NOW + 10).unwrap(),
+        p.a.cancel_all_pending(NOW + 10, &mut p.rng).unwrap().0,
         DeleteOutcome::default()
     );
 }
@@ -3952,7 +3976,7 @@ fn tombstones_kept_for_good() {
             .unwrap()
             .remove(0);
     p.b.receive(&first.encode(), "t", NOW, &mut p.rng).unwrap();
-    p.b.delete_message(row_of(&p.b, &a_fp, "brief"), NOW)
+    p.b.delete_message(row_of(&p.b, &a_fp, "brief"), NOW, &mut p.rng)
         .unwrap();
     assert_eq!(tombstones(&p.b), 1);
     // Weeks of log activity (the log's purge clock advances by two days
@@ -3986,8 +4010,9 @@ fn delete_after_unconfirmed_deposit_reports_already_left() {
     assert_eq!(tried, Some(i(NOW + 1)));
     assert_eq!(delivery_state(&a, sent[0].id).0, 0);
     let outcome = a
-        .delete_message(row_of(&a, &bob, "maybe"), NOW + 5)
-        .unwrap();
+        .delete_message(row_of(&a, &bob, "maybe"), NOW + 5, &mut rng)
+        .unwrap()
+        .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -4016,8 +4041,9 @@ fn tried_own_copy_is_kept_when_nobody_receives() {
     let sent = a.send_text(&bob, "copy tried", NOW, &mut rng).unwrap();
     a.record_deposit_tried(sent[1].id, NOW + 1).unwrap();
     let outcome = a
-        .delete_message(row_of(&a, &bob, "copy tried"), NOW + 5)
-        .unwrap();
+        .delete_message(row_of(&a, &bob, "copy tried"), NOW + 5, &mut rng)
+        .unwrap()
+        .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -4070,7 +4096,7 @@ fn delete_event_has_no_content() {
         row_of(&p.a, &bob, "secret words"),
         row_of(&p.a, &bob, "other words"),
     ];
-    p.a.delete_messages(&rows, NOW + 1).unwrap();
+    p.a.delete_messages(&rows, NOW + 1, &mut p.rng).unwrap();
     let (_, last) = p.a.transparency_log(1).unwrap().remove(0);
     assert_eq!(
         last,
@@ -4078,6 +4104,7 @@ fn delete_event_has_no_content() {
             count: 2,
             cancelled: 1,
             already_left: 1,
+            from_other_device: false,
         }
     );
     assert!(!last.is_security());
@@ -4096,7 +4123,7 @@ fn delete_event_has_no_content() {
     assert!(!bytes.windows(32).any(|w| w == bob.0.as_slice()));
     // Nothing deleted, nothing logged.
     let n = p.a.transparency_log(10_000).unwrap().len();
-    p.a.delete_messages(&rows, NOW + 2).unwrap();
+    p.a.delete_messages(&rows, NOW + 2, &mut p.rng).unwrap();
     assert_eq!(p.a.transparency_log(10_000).unwrap().len(), n);
 }
 
@@ -4435,7 +4462,12 @@ fn pending_scene() -> (TempDir, Core, Fingerprint, Vec<Packet>, StdRng) {
     let kept = a.send_text(&bob, "kept", NOW, &mut rng).unwrap();
     a.record_deposit(kept[0].id, NODE, NOW).unwrap();
     let row = row_of(&a, &bob, "kept");
-    assert!(a.delete_message(row, NOW).unwrap().own_copies_kept);
+    assert!(
+        a.delete_message(row, NOW, &mut rng)
+            .unwrap()
+            .0
+            .own_copies_kept
+    );
     (d, a, bob, sent, rng)
 }
 
@@ -4472,9 +4504,10 @@ fn pending_kinds_are_classified() {
                 packets: 2,
                 contacts: vec![bob],
             },
+            // The verification, and the deletion of "kept" for my tablet.
             PendingSync {
                 kind: PendingKind::DeviceSync,
-                packets: 1,
+                packets: 2,
                 contacts: vec![],
             },
             // The card update sent to Bob when the tablet was linked.
@@ -4485,7 +4518,7 @@ fn pending_kinds_are_classified() {
             },
         ]
     );
-    assert_eq!(pending.packets, 7);
+    assert_eq!(pending.packets, 8);
 }
 
 #[test]
@@ -4581,7 +4614,7 @@ fn every_state_change_is_noted_once() {
     assert!(p.a.drop_outbox_packet(&s4[0].encode(), e2).unwrap());
     assert_eq!(p.a.take_delivery_changes(), vec![(bob, r4)]);
     // Deletions: one change per deleted message.
-    p.a.delete_messages(&[r1, r2, r4], e2).unwrap();
+    p.a.delete_messages(&[r1, r2, r4], e2, &mut p.rng).unwrap();
     assert_eq!(
         p.a.take_delivery_changes(),
         vec![(bob, r1), (bob, r2), (bob, r4)]
@@ -4607,7 +4640,7 @@ fn every_state_change_is_noted_once() {
         p.a.record_deposit(s[0].id, NODE, e6).unwrap();
     }
     let rows = [row_of(&p.a, &bob, "s7"), row_of(&p.a, &bob, "s8")];
-    p.a.delete_messages(&rows, e6).unwrap();
+    p.a.delete_messages(&rows, e6, &mut p.rng).unwrap();
     assert_eq!(
         p.a.take_delivery_changes(),
         vec![(bob, rows[0]), (bob, rows[1])]
@@ -4629,7 +4662,12 @@ fn own_copy_of_a_deleted_message_notes_nothing() {
     let sent = a.send_text(&bob, "kept", NOW, &mut rng).unwrap();
     a.record_deposit(sent[0].id, NODE, NOW).unwrap();
     let row = row_of(&a, &bob, "kept");
-    assert!(a.delete_message(row, NOW).unwrap().own_copies_kept);
+    assert!(
+        a.delete_message(row, NOW, &mut rng)
+            .unwrap()
+            .0
+            .own_copies_kept
+    );
     assert_eq!(a.take_delivery_changes(), vec![(bob, row)]);
     // The copy for my tablet expires undeposited: no row, no change.
     a.expire_due(u64::from(sent[1].expires_at) + 1).unwrap();
@@ -4955,12 +4993,12 @@ fn seal_to_b(p: &mut Pair, body: &Body, mid: u8) -> Packet {
 fn unknown_ignore_kind_is_acked_and_invisible() {
     let mut p = pair();
     let a_fp = p.a.fingerprint();
-    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let before = p.b.messages_with(&a_fp, NOW).unwrap().len();
     let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::Ignore), 0x31);
     let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
     assert!(matches!(r, ReceiveOutcome::Ignored), "{r:?}");
     assert_eq!(acks_for(&mut p.b, &pk), 1);
-    assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before);
+    assert_eq!(p.b.messages_with(&a_fp, NOW).unwrap().len(), before);
     let logged =
         p.b.transparency_log(100)
             .unwrap()
@@ -4979,14 +5017,14 @@ fn unknown_ignore_kind_is_acked_and_invisible() {
 fn unknown_show_update_kind_adds_placeholder_row() {
     let mut p = pair();
     let a_fp = p.a.fingerprint();
-    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let before = p.b.messages_with(&a_fp, NOW).unwrap().len();
     let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x32);
     let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
     match r {
         ReceiveOutcome::NeedsUpdate { from, .. } => assert_eq!(from, a_fp),
         other => panic!("NeedsUpdate expected, got {other:?}"),
     }
-    let rows = p.b.messages_with(&a_fp).unwrap();
+    let rows = p.b.messages_with(&a_fp, NOW).unwrap();
     assert_eq!(rows.len(), before + 1);
     let row = rows.last().unwrap();
     assert!(row.placeholder);
@@ -4998,7 +5036,7 @@ fn unknown_show_update_kind_adds_placeholder_row() {
     let again = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x32);
     let r = p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap();
     assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
-    assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before + 1);
+    assert_eq!(p.b.messages_with(&a_fp, NOW).unwrap().len(), before + 1);
 }
 
 #[test]
@@ -5043,8 +5081,8 @@ fn received_text_keeps_wire_id() {
             .unwrap()
             .remove(0);
     p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
-    let sent = p.a.messages_with(&b_fp).unwrap().pop().unwrap();
-    let got = p.b.messages_with(&a_fp).unwrap().pop().unwrap();
+    let sent = p.a.messages_with(&b_fp, NOW).unwrap().pop().unwrap();
+    let got = p.b.messages_with(&a_fp, NOW).unwrap().pop().unwrap();
     assert_eq!(got.body, "hello");
     assert_eq!(got.wire_id, Some(sent.message_id.0));
     // Sent rows keep no wire id.
@@ -5070,7 +5108,7 @@ fn sync_ext_from_contact_quarantined() {
         }
         .to_body(),
     ];
-    let before = p.a.messages_with(&b_fp).unwrap().len();
+    let before = p.a.messages_with(&b_fp, NOW).unwrap().len();
     for (i, body) in bodies.iter().enumerate() {
         let id = MessageId([0x40 + i as u8; 16]);
         let out = seal_body(&mut p.b, &send::Target::Contact(a_fp), body, id, &mut p.rng);
@@ -5079,7 +5117,7 @@ fn sync_ext_from_contact_quarantined() {
                 .unwrap();
         assert_eq!(reason(r), NOT_MINE, "case {i}");
     }
-    assert_eq!(p.a.messages_with(&b_fp).unwrap().len(), before);
+    assert_eq!(p.a.messages_with(&b_fp, NOW).unwrap().len(), before);
     let reactions: i64 =
         p.a.store
             .conn()
@@ -5176,7 +5214,7 @@ fn unknown_kind_from_unlisted_own_device_refused() {
 
 /// The whole row of the message with this body.
 fn full_row(c: &Core, contact: &Fingerprint, body: &str) -> crate::store::MessageRow {
-    c.messages_with(contact)
+    c.messages_with(contact, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == body)
@@ -5228,7 +5266,7 @@ fn reply_to_received_message() {
     deliver(&mut p.b, &pk[0], &mut p.rng);
     let quoted = full_row(&p.b, &a, "18 h ?");
     let out =
-        p.b.send_message(&a, "oui", Some(quoted.id), NOW, &mut p.rng)
+        p.b.send_message(&a, "oui", Some(quoted.id), None, NOW, &mut p.rng)
             .unwrap();
     // The sender's row keeps the local id and the reference.
     let mine = full_row(&p.b, &a, "oui");
@@ -5250,11 +5288,18 @@ fn reply_to_received_message() {
     assert_eq!(got.reply_to, Some(original.message_id));
     assert_eq!(got.reply_ref, mine.reply_ref);
     assert!(got.wire_id.is_some());
-    let quote = p.a.message_in(&b, got.reply_to.unwrap()).unwrap().unwrap();
+    let quote =
+        p.a.message_in(&b, got.reply_to.unwrap(), NOW)
+            .unwrap()
+            .unwrap();
     assert_eq!(quote.body, "18 h ?");
     // The rows survive a reopening.
     assert_eq!(
-        p.a.messages_with(&b).unwrap().last().unwrap().reply_ref,
+        p.a.messages_with(&b, NOW)
+            .unwrap()
+            .last()
+            .unwrap()
+            .reply_ref,
         got.reply_ref
     );
 }
@@ -5267,7 +5312,7 @@ fn reply_to_sent_message() {
     deliver(&mut p.a, &pk[0], &mut p.rng);
     let own = full_row(&p.b, &a, "mine");
     let out =
-        p.b.send_message(&a, "re", Some(own.id), NOW, &mut p.rng)
+        p.b.send_message(&a, "re", Some(own.id), None, NOW, &mut p.rng)
             .unwrap();
     assert_eq!(
         full_row(&p.b, &a, "re").reply_ref,
@@ -5281,7 +5326,7 @@ fn reply_to_sent_message() {
     let got = full_row(&p.a, &b, "re");
     assert_eq!(got.reply_to, Some(received.message_id));
     assert_eq!(
-        p.a.message_in(&b, got.reply_to.unwrap())
+        p.a.message_in(&b, got.reply_to.unwrap(), NOW)
             .unwrap()
             .unwrap()
             .body,
@@ -5296,14 +5341,14 @@ fn reply_without_original_resolves_later() {
     let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
     let row = full_row(&p.b, &a, "orig");
     let reply =
-        p.b.send_message(&a, "re", Some(row.id), NOW, &mut p.rng)
+        p.b.send_message(&a, "re", Some(row.id), None, NOW, &mut p.rng)
             .unwrap();
     // The reply first.
     deliver(&mut p.a, &reply[0], &mut p.rng);
     let id = full_row(&p.a, &b, "re").reply_to.unwrap();
-    assert!(p.a.message_in(&b, id).unwrap().is_none());
+    assert!(p.a.message_in(&b, id, NOW).unwrap().is_none());
     deliver(&mut p.a, &original[0], &mut p.rng);
-    let found = p.a.message_in(&b, id).unwrap().unwrap();
+    let found = p.a.message_in(&b, id, NOW).unwrap().unwrap();
     assert_eq!((found.body.as_str(), found.message_id), ("orig", id));
 }
 
@@ -5314,20 +5359,20 @@ fn deleted_original_reads_unavailable() {
     let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
     deliver(&mut p.a, &original[0], &mut p.rng);
     let id = full_row(&p.a, &b, "orig");
-    p.a.delete_message(id.id, NOW).unwrap();
+    p.a.delete_message(id.id, NOW, &mut p.rng).unwrap();
     let row = full_row(&p.b, &a, "orig");
     let reply =
-        p.b.send_message(&a, "re", Some(row.id), NOW, &mut p.rng)
+        p.b.send_message(&a, "re", Some(row.id), None, NOW, &mut p.rng)
             .unwrap();
     deliver(&mut p.a, &reply[0], &mut p.rng);
     let got = full_row(&p.a, &b, "re");
     assert_eq!(got.reply_to, Some(id.message_id));
-    assert!(p.a.message_in(&b, id.message_id).unwrap().is_none());
+    assert!(p.a.message_in(&b, id.message_id, NOW).unwrap().is_none());
     // A resend of the original does not bring it back.
     deliver(&mut p.a, &original[0], &mut p.rng);
-    assert!(p.a.message_in(&b, id.message_id).unwrap().is_none());
+    assert!(p.a.message_in(&b, id.message_id, NOW).unwrap().is_none());
     assert!(
-        p.a.messages_with(&b)
+        p.a.messages_with(&b, NOW)
             .unwrap()
             .iter()
             .all(|m| m.body != "orig")
@@ -5363,8 +5408,8 @@ fn reply_to_other_conversation_is_unavailable() {
     let got = full_row(&p.a, &c_fp, "snoop");
     let resolved = got.reply_to.unwrap();
     assert_eq!(resolved, to_bob.message_id);
-    assert!(p.a.message_in(&c_fp, resolved).unwrap().is_none());
-    assert!(p.a.message_in(&b, resolved).unwrap().is_some());
+    assert!(p.a.message_in(&c_fp, resolved, NOW).unwrap().is_none());
+    assert!(p.a.message_in(&b, resolved, NOW).unwrap().is_some());
 }
 
 #[test]
@@ -5386,16 +5431,16 @@ fn reply_refuses_bad_target() {
         .unwrap();
     let bare = full_row(&p.a, &b, "bare").id;
     let outbox = p.a.pending_outbox(NOW).unwrap().len();
-    let rows = p.a.messages_with(&b).unwrap().len();
+    let rows = p.a.messages_with(&b, NOW).unwrap().len();
     for (to, id) in [(b, -1), (b, 9_999), (c_fp, b_row), (b, bare)] {
         assert_eq!(
-            p.a.send_message(&to, "nope", Some(id), NOW, &mut p.rng),
+            p.a.send_message(&to, "nope", Some(id), None, NOW, &mut p.rng),
             Err(CoreError::MessageNotFound),
             "{id}"
         );
     }
-    assert_eq!(p.a.messages_with(&b).unwrap().len(), rows);
-    assert!(p.a.messages_with(&c_fp).unwrap().is_empty());
+    assert_eq!(p.a.messages_with(&b, NOW).unwrap().len(), rows);
+    assert!(p.a.messages_with(&c_fp, NOW).unwrap().is_empty());
     assert_eq!(p.a.pending_outbox(NOW).unwrap().len(), outbox);
 }
 
@@ -5407,7 +5452,7 @@ fn retried_reply_keeps_its_ref() {
     deliver(&mut p.a, &original[0], &mut p.rng);
     let orig = full_row(&p.a, &b, "orig");
     let sent =
-        p.a.send_message(&b, "re", Some(orig.id), NOW, &mut p.rng)
+        p.a.send_message(&b, "re", Some(orig.id), None, NOW, &mut p.rng)
             .unwrap();
     let before = full_row(&p.a, &b, "re");
     // The delivery fails, the original goes away, the reply is retried.
@@ -5415,7 +5460,7 @@ fn retried_reply_keeps_its_ref() {
     p.a.expire_due(late).unwrap();
     assert_eq!(before.status, MessageStatus::Pending);
     assert_eq!(full_row(&p.a, &b, "re").status, MessageStatus::NotDelivered);
-    p.a.delete_message(orig.id, late).unwrap();
+    p.a.delete_message(orig.id, late, &mut p.rng).unwrap();
     let again = p.a.retry_message(before.id, late, &mut p.rng).unwrap();
     let after = full_row(&p.a, &b, "re");
     assert_eq!(
@@ -5442,7 +5487,7 @@ fn reply_body_never_contains_quoted_text() {
     deliver(&mut p.a, &original[0], &mut p.rng);
     let row = full_row(&p.a, &b, secret);
     let out =
-        p.a.send_message(&b, "short", Some(row.id), NOW, &mut p.rng)
+        p.a.send_message(&b, "short", Some(row.id), None, NOW, &mut p.rng)
             .unwrap();
     let env = peek_envelope(&p.b, &out[0]);
     let Body::Ext { kind, data, .. } = &env.body else {
@@ -5455,7 +5500,7 @@ fn reply_body_never_contains_quoted_text() {
     assert!(find(data, b"short"));
     // Without a quote the body is still a plain text.
     let plain =
-        p.a.send_message(&b, "plain", None, NOW, &mut p.rng)
+        p.a.send_message(&b, "plain", None, None, NOW, &mut p.rng)
             .unwrap();
     assert!(matches!(peek_envelope(&p.b, &plain[0]).body, Body::Text(_)));
 }
@@ -5642,7 +5687,7 @@ fn reaction_on_deleted_message_ignored() {
     let mut p = pair();
     let a = p.a.fingerprint();
     let row = row_of(&p.b, &a, "x");
-    p.b.delete_message(row, NOW).unwrap();
+    p.b.delete_message(row, NOW, &mut p.rng).unwrap();
     let pk = react_x(&mut p, &["👍"], NOW);
     assert!(matches!(
         deliver(&mut p.b, &pk, &mut p.rng),
@@ -5719,7 +5764,8 @@ fn reactions_erased_with_message_contact_and_block() {
     let b = p.b.fingerprint();
     both_react(&mut p);
     let x = message_id_of(&p.a, &b, "x");
-    p.a.delete_message(row_of(&p.a, &b, "x"), NOW).unwrap();
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW, &mut p.rng)
+        .unwrap();
     assert!(p.a.store.reaction(x, ME_REACTOR).unwrap().is_none());
     assert_eq!(reaction_rows(&p.a), 1);
     // Removing the contact erases every row of the conversation.
@@ -5777,7 +5823,7 @@ type ConversationView = (
 );
 
 fn conversation_view(c: &mut Core, contact: &Fingerprint) -> ConversationView {
-    let rows = c.messages_with(contact).unwrap();
+    let rows = c.messages_with(contact, NOW).unwrap();
     let last = c
         .messages_with_delivery(contact, NOW)
         .unwrap()
@@ -5853,7 +5899,7 @@ fn reaction_leaves_target_delivery_alone() {
     assert_eq!(p.a.retry_all(&b, late, &mut p.rng), Ok(0));
     assert!(
         p.a.store
-            .messages_with(b)
+            .messages_with(b, NOW)
             .unwrap()
             .iter()
             .all(|m| m.message_id.0 != tie)
@@ -6077,7 +6123,8 @@ fn expired_reaction_without_my_row_is_dropped_not_resent() {
     let b = p.b.fingerprint();
     let pk = react_x(&mut p, &["👍"], NOW);
     // The message goes (its reactions with it) before the packet expires.
-    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1).unwrap();
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1, &mut p.rng)
+        .unwrap();
     let late = u64::from(pk.expires_at) + 1;
     assert_eq!(
         p.a.resend_reactions(late, &mut p.rng).map(|r| r.resent),
@@ -6147,7 +6194,8 @@ fn deleting_the_message_drops_its_reaction_sends() {
     let pk = react_x(&mut p, &["👍"], NOW);
     p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
     assert_eq!(sends_where(&p.a, "1"), 1);
-    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 2).unwrap();
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 2, &mut p.rng)
+        .unwrap();
     assert_eq!(sends_where(&p.a, "1"), 0, "no link to the deleted message");
 }
 
@@ -6294,7 +6342,12 @@ fn repeat_of_a_stored_message_is_a_visible_duplicate() {
     let r = deliver(&mut p.b, &m, &mut p.rng);
     assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
     // The same message in a new packet (a resend).
-    let mid = p.a.messages_with(&b).unwrap().last().unwrap().message_id;
+    let mid =
+        p.a.messages_with(&b, NOW)
+            .unwrap()
+            .last()
+            .unwrap()
+            .message_id;
     let again = seal_body(
         &mut p.a,
         &send::Target::Contact(b),
@@ -6320,7 +6373,7 @@ fn repeat_of_a_stored_message_is_a_visible_duplicate() {
 
     // Deleted here since: nothing of it shows, a plain duplicate.
     let row = row_of(&p.b, &a, "seen");
-    p.b.delete_message(row, NOW).unwrap();
+    p.b.delete_message(row, NOW, &mut p.rng).unwrap();
     for pk in [&m, &again] {
         let r = deliver(&mut p.b, pk, &mut p.rng);
         assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
@@ -6378,11 +6431,11 @@ fn future_policy_shows_an_update_placeholder() {
     let secret = [0x51; 16];
     let pt = ext_with_policy_byte(secret, 7);
     let pk = forge(&mut p.a, &pt, ack::packet_id_for(&secret), &mut p.rng);
-    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let before = p.b.messages_with(&a_fp, NOW).unwrap().len();
     let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
     assert!(matches!(r, ReceiveOutcome::NeedsUpdate { .. }), "{r:?}");
     assert_eq!(acks_for(&mut p.b, &pk), 1);
-    let rows = p.b.messages_with(&a_fp).unwrap();
+    let rows = p.b.messages_with(&a_fp, NOW).unwrap();
     assert_eq!(rows.len(), before + 1);
     assert!(rows.last().unwrap().placeholder);
 }
@@ -6552,7 +6605,8 @@ fn deleting_the_message_drops_its_queued_reaction_packets() {
     let mut p = pair();
     let b = p.b.fingerprint();
     let pk = react_x(&mut p, &["👍"], NOW);
-    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1).unwrap();
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1, &mut p.rng)
+        .unwrap();
     assert!(gone(&p.a, pk.id));
     assert!(
         p.a.pending_packets(NOW + 1)
@@ -7273,4 +7327,1537 @@ fn retry_reactions_without_contact_session_seals_no_own_copy() {
         a.my_reaction_state(row),
         Ok(Some(MessageStatus::NotDelivered))
     );
+}
+
+// --- Deletion and ephemeral, task 1: `SyncDelete` to my other devices.
+
+/// Gives each packet to each of `cores`, ignoring those not for it.
+fn deliver_each(pkts: &[Packet], cores: &mut [&mut Core], rng: &mut StdRng) {
+    for p in pkts {
+        for c in cores.iter_mut() {
+            c.receive(&p.encode(), "t", NOW, rng).unwrap();
+        }
+    }
+}
+
+fn not_acks(c: &mut Core) -> usize {
+    c.pending_outbox(NOW)
+        .unwrap()
+        .iter()
+        .filter(|b| Packet::decode(b).unwrap().kind != Kind::Ack)
+        .count()
+}
+
+fn is_tombstoned(c: &Core, id: MessageId) -> bool {
+    c.store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM deleted_messages WHERE message_id = ?1",
+            rusqlite::params![id.0.as_slice()],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+        == 1
+}
+
+fn synced_delete(o: ReceiveOutcome) {
+    assert!(
+        matches!(
+            o,
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Delete,
+                contact: None
+            }
+        ),
+        "{o:?}"
+    );
+}
+
+/// `ids` deleted identifiers, as a `SyncDelete` from `from` to its other
+/// device (one packet).
+fn seal_delete(from: &mut Core, ids: usize, mid: u8, rng: &mut StdRng) -> Packet {
+    let ids = (0..ids)
+        .map(|i| MessageId([0x80 | u8::try_from(i).unwrap(); 16]))
+        .collect();
+    let body = ExtContent::SyncDelete { ids }.to_body();
+    assert!(crate::envelope::fits_in_packet(&body));
+    let mut sealed = seal_body(
+        from,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([mid; 16]),
+        rng,
+    );
+    assert_eq!(sealed.len(), 1);
+    sealed.remove(0).0
+}
+
+#[test]
+fn sync_delete_of_32_ids_fits_tier_m() {
+    let (_d, mut a, mut t, _b, _v1, mut rng) = alice_tablet_bob();
+    // The session between the phone and the tablet is opened and answered
+    // first: an opening packet carries the session keys (tier L whatever
+    // it holds).
+    let first = seal_delete(&mut a, 1, 0x40, &mut rng);
+    synced_delete(deliver(&mut t, &first, &mut rng));
+    let answer = seal_delete(&mut t, 1, 0x41, &mut rng);
+    synced_delete(deliver(&mut a, &answer, &mut rng));
+    let full = seal_delete(&mut a, crate::content::MAX_SYNC_DELETE_IDS, 0x42, &mut rng);
+    assert_eq!(full.tier, Tier::M);
+}
+
+#[test]
+fn delete_on_phone_removes_message_on_tablet() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = b.send_text(&alice, "hi", NOW, &mut rng).unwrap();
+    deliver_each(&sent, &mut [&mut a, &mut t], &mut rng);
+    let react = b
+        .set_reactions(row_of(&b, &alice, "hi"), &emo(&["👍"]), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&react, &mut [&mut a, &mut t], &mut rng);
+    assert_eq!(reaction_rows(&t), 1);
+    let id = message_id_of(&t, &bob, "hi");
+    let (outcome, pkts) = a
+        .delete_message(row_of(&a, &bob, "hi"), NOW + 5, &mut rng)
+        .unwrap();
+    assert_eq!(outcome.deleted, 1);
+    assert_eq!(pkts.len(), 1, "one copy for the tablet");
+    synced_delete(deliver(&mut t, &pkts[0], &mut rng));
+    assert_eq!(acks_for(&mut t, &pkts[0]), 1);
+    assert!(t.messages_with(&bob, NOW).unwrap().is_empty());
+    assert!(is_tombstoned(&t, id));
+    assert_eq!(reaction_rows(&t), 0);
+    // Logged as coming from another of my devices; the phone's own entry
+    // is not.
+    let deleted = |c: &Core| {
+        c.transparency_log(100)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                TransparencyEvent::MessagesDeleted {
+                    count,
+                    from_other_device,
+                    ..
+                } => Some((count, from_other_device)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(deleted(&t), [(1, true)]);
+    assert_eq!(deleted(&a), [(1, false)]);
+    // The same copy again: a duplicate, nothing more.
+    let again = t.receive(&pkts[0].encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(again, ReceiveOutcome::Duplicate), "{again:?}");
+}
+
+#[test]
+fn sync_delete_before_message_blocks_it_forever() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = b.send_text(&alice, "hi", NOW, &mut rng).unwrap();
+    deliver_each(&sent, &mut [&mut a], &mut rng);
+    let (_, pkts) = a
+        .delete_message(row_of(&a, &bob, "hi"), NOW + 5, &mut rng)
+        .unwrap();
+    // The tablet gets the deletion first, then Bob's packet.
+    synced_delete(deliver(&mut t, &pkts[0], &mut rng));
+    deliver_each(&sent, &mut [&mut t], &mut rng);
+    assert!(t.messages_with(&bob, NOW).unwrap().is_empty());
+    let react = b
+        .set_reactions(row_of(&b, &alice, "hi"), &emo(&["👍"]), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&react, &mut [&mut t], &mut rng);
+    assert!(t.messages_with(&bob, NOW).unwrap().is_empty());
+    assert_eq!(reaction_rows(&t), 0);
+}
+
+/// The phone sends "x" to Bob, the tablet gets its copy and deletes it;
+/// `tried`: a deposit of Bob's packet was tried first. Returns the phone,
+/// Bob's packet and the message.
+fn delete_on_tablet(tried: bool) -> (TempDir, Core, Packet, MessageId) {
+    let (d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "x", NOW, &mut rng).unwrap();
+    assert_eq!(sent.len(), 2, "Bob's device, then my tablet");
+    let mid = message_id_of(&a, &bob, "x");
+    deliver(&mut t, &sent[1], &mut rng);
+    if tried {
+        a.record_deposit_tried(sent[0].id, NOW + 1).unwrap();
+    }
+    let (_, pkts) = t
+        .delete_message(row_of(&t, &bob, "x"), NOW + 5, &mut rng)
+        .unwrap();
+    assert_eq!(pkts.len(), 1, "one copy for the phone");
+    synced_delete(deliver(&mut a, &pkts[0], &mut rng));
+    assert!(!has_message(&a, &bob, "x"));
+    (d, a, sent[0].clone(), mid)
+}
+
+#[test]
+fn sync_delete_cancels_untried_pending_packet_on_sealer() {
+    let (_d, a, to_bob, mid) = delete_on_tablet(false);
+    assert_eq!(outbox_row(&a, to_bob.id), None);
+    assert!(deliveries_of(&a, mid).is_empty());
+    // Tried: a node may hold it, it is kept.
+    let (_d, a, to_bob, mid) = delete_on_tablet(true);
+    assert_eq!(outbox_row(&a, to_bob.id), Some(None));
+    assert!(
+        deliveries_of(&a, mid).contains(&(0, MessageStatus::Pending as i64)),
+        "{:?}",
+        deliveries_of(&a, mid)
+    );
+}
+
+#[test]
+fn seventy_ids_make_three_sync_packets() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let mut rows = Vec::new();
+    for i in 0..70u8 {
+        let body = format!("m{i}");
+        a.store
+            .insert_message(
+                bob,
+                Direction::Out,
+                &body,
+                MessageStatus::OnNetwork,
+                NOW,
+                MessageId([i; 16]),
+            )
+            .unwrap();
+        rows.push(row_of(&a, &bob, &body));
+    }
+    let (outcome, pkts) = a.delete_messages(&rows, NOW + 5, &mut rng).unwrap();
+    assert_eq!(outcome.deleted, 70);
+    assert_eq!(pkts.len(), 3, "32 + 32 + 6 ids");
+    let before = tombstones(&t);
+    for p in &pkts {
+        synced_delete(deliver(&mut t, p, &mut rng));
+    }
+    assert_eq!(tombstones(&t) - before, 70);
+}
+
+#[test]
+fn received_sync_delete_sends_nothing() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = b.send_text(&alice, "hi", NOW, &mut rng).unwrap();
+    deliver_each(&sent, &mut [&mut a, &mut t], &mut rng);
+    let (_, pkts) = a
+        .delete_message(row_of(&a, &bob, "hi"), NOW + 5, &mut rng)
+        .unwrap();
+    let before = not_acks(&mut t);
+    synced_delete(deliver(&mut t, &pkts[0], &mut rng));
+    assert_eq!(not_acks(&mut t), before);
+    assert_eq!(acks_for(&mut t, &pkts[0]), 1);
+}
+
+#[test]
+fn sync_delete_from_contact_is_refused() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let b_fp = p.b.fingerprint();
+    let before = p.a.messages_with(&b_fp, NOW).unwrap();
+    let ids = before.iter().map(|m| m.message_id).collect();
+    let body = ExtContent::SyncDelete { ids }.to_body();
+    let out = seal_body(
+        &mut p.b,
+        &send::Target::Contact(a_fp),
+        &body,
+        MessageId([0x44; 16]),
+        &mut p.rng,
+    );
+    let r =
+        p.a.receive(&out[0].0.encode(), "t", NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(reason(r), NOT_MINE);
+    assert_eq!(p.a.messages_with(&b_fp, NOW).unwrap(), before);
+    assert_eq!(tombstones(&p.a), 0);
+}
+
+#[test]
+fn sync_delete_for_unknown_contact_only_tombstones() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let id = MessageId::incoming(&Fingerprint([7; 32]), &[1; 16]);
+    let body = ExtContent::SyncDelete { ids: vec![id] }.to_body();
+    let sealed = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x45; 16]),
+        &mut rng,
+    );
+    let pkt = &sealed[0].0;
+    synced_delete(deliver(&mut t, pkt, &mut rng));
+    assert_eq!(acks_for(&mut t, pkt), 1);
+    assert!(is_tombstoned(&t, id));
+}
+
+#[test]
+fn cancel_all_pending_syncs_its_deletions() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    for text in ["one", "two"] {
+        let sent = a.send_text(&bob, text, NOW, &mut rng).unwrap();
+        deliver(&mut t, &sent[1], &mut rng);
+    }
+    assert_eq!(t.messages_with(&bob, NOW).unwrap().len(), 2);
+    let (outcome, pkts) = a.cancel_all_pending(NOW + 5, &mut rng).unwrap();
+    assert_eq!(outcome.deleted, 2);
+    assert_eq!(pkts.len(), 1);
+    synced_delete(deliver(&mut t, &pkts[0], &mut rng));
+    assert!(t.messages_with(&bob, NOW).unwrap().is_empty());
+}
+
+#[test]
+fn delete_without_another_device_seals_nothing() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "x");
+    let (outcome, pkts) = p.a.delete_message(row, NOW + 5, &mut p.rng).unwrap();
+    assert_eq!(outcome.deleted, 1);
+    assert!(pkts.is_empty());
+}
+
+#[test]
+fn delete_on_a_removed_device_stays_local() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "x", NOW, &mut rng).unwrap();
+    deliver(&mut t, &sent[1], &mut rng);
+    let t_id = t.device.public().id();
+    let removal = a.remove_device(t_id, NOW, &mut rng).unwrap();
+    deliver_each(&removal, &mut [&mut t], &mut rng);
+    assert!(t.removed().unwrap().is_some());
+    let before = not_acks(&mut t);
+    let (outcome, pkts) = t
+        .delete_message(row_of(&t, &bob, "x"), NOW + 5, &mut rng)
+        .unwrap();
+    assert_eq!(outcome.deleted, 1);
+    assert!(pkts.is_empty());
+    assert_eq!(not_acks(&mut t), before);
+}
+
+// --- Deletion and ephemeral, task 3: sending and receiving an ephemeral.
+
+use crate::content::{KIND_MESSAGE, UNSEEN_CEILING_SECS};
+
+/// `ttl_secs`, `seen_at` and `expire_at` of the row with this body.
+fn ephemeral_cols(
+    c: &Core,
+    contact: &Fingerprint,
+    body: &str,
+) -> (Option<u32>, Option<u64>, Option<u64>) {
+    let row = full_row(c, contact, body);
+    (row.ttl_secs, row.seen_at, row.expire_at)
+}
+
+#[test]
+fn send_rejects_ttl_out_of_bounds() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let outbox = p.a.pending_outbox(NOW).unwrap().len();
+    let rows = p.a.messages_with(&b, NOW).unwrap().len();
+    for ttl in [0, 59, 604_801, u32::MAX] {
+        assert_eq!(
+            p.a.send_message(&b, "nope", None, Some(ttl), NOW, &mut p.rng),
+            Err(CoreError::InvalidTtl),
+            "{ttl}"
+        );
+    }
+    assert_eq!(p.a.messages_with(&b, NOW).unwrap().len(), rows);
+    assert_eq!(p.a.pending_outbox(NOW).unwrap().len(), outbox);
+}
+
+#[test]
+fn ephemeral_text_uses_message_kind_and_plain_uses_text() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let out =
+        p.a.send_message(&b, "secret", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    let Body::Ext { kind, data, .. } = peek_envelope(&p.b, &out[0]).body else {
+        panic!("Ext expected");
+    };
+    assert_eq!(kind, KIND_MESSAGE);
+    assert_eq!(
+        ExtContent::decode(kind, &data).unwrap(),
+        Some(ExtContent::Message {
+            text: "secret".into(),
+            reply_to: None,
+            ttl_secs: Some(300),
+        })
+    );
+    let plain =
+        p.a.send_message(&b, "plain", None, None, NOW, &mut p.rng)
+            .unwrap();
+    assert!(matches!(peek_envelope(&p.b, &plain[0]).body, Body::Text(_)));
+    assert_eq!(ephemeral_cols(&p.a, &b, "plain"), (None, None, None));
+}
+
+#[test]
+fn received_ephemeral_has_ceiling() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let out =
+        p.b.send_message(&a, "poof", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    // Received later than sent: the ceiling counts from the insertion.
+    let r = NOW + 7;
+    let got = p.a.receive(&out[0].encode(), "t", r, &mut p.rng).unwrap();
+    assert!(
+        matches!(got, ReceiveOutcome::Message { ref text, ephemeral: true, .. } if text == "poof"),
+        "{got:?}"
+    );
+    assert_eq!(
+        ephemeral_cols(&p.a, &b, "poof"),
+        (Some(300), None, Some(r + UNSEEN_CEILING_SECS))
+    );
+    // A plain text is not ephemeral.
+    let plain = p.b.send_text(&a, "stays", NOW, &mut p.rng).unwrap();
+    let got = p.a.receive(&plain[0].encode(), "t", r, &mut p.rng).unwrap();
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Message {
+                ephemeral: false,
+                ..
+            }
+        ),
+        "{got:?}"
+    );
+    assert_eq!(ephemeral_cols(&p.a, &b, "stays"), (None, None, None));
+}
+
+#[test]
+fn received_message_without_ttl_is_a_plain_text() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let body = ExtContent::Message {
+        text: "v2".into(),
+        reply_to: None,
+        ttl_secs: None,
+    }
+    .to_body();
+    let out = seal_body(
+        &mut p.b,
+        &send::Target::Contact(a),
+        &body,
+        MessageId([0x61; 16]),
+        &mut p.rng,
+    );
+    let got = deliver(&mut p.a, &out[0].0, &mut p.rng);
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Message {
+                ephemeral: false,
+                ..
+            }
+        ),
+        "{got:?}"
+    );
+    assert_eq!(ephemeral_cols(&p.a, &b, "v2"), (None, None, None));
+}
+
+#[test]
+fn sent_ephemeral_is_seen_at_send() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let now = NOW + 3;
+    p.a.send_message(&b, "mine", None, Some(300), now, &mut p.rng)
+        .unwrap();
+    assert_eq!(
+        ephemeral_cols(&p.a, &b, "mine"),
+        (Some(300), Some(now), Some(now + 300))
+    );
+}
+
+#[test]
+fn ephemeral_reply_carries_reference() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = p.a.send_text(&b, "18 h ?", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.b, &pk[0], &mut p.rng);
+    let quoted = full_row(&p.b, &a, "18 h ?");
+    let out =
+        p.b.send_message(&a, "oui", Some(quoted.id), Some(60), NOW, &mut p.rng)
+            .unwrap();
+    let mine = full_row(&p.b, &a, "oui");
+    assert_eq!(mine.reply_to, Some(quoted.message_id));
+    assert_eq!(
+        mine.reply_ref,
+        Some(MessageRef {
+            id: quoted.wire_id.unwrap(),
+            by_sender: false
+        })
+    );
+    assert_eq!(mine.ttl_secs, Some(60));
+    let got = deliver(&mut p.a, &out[0], &mut p.rng);
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Message {
+                ephemeral: true,
+                ..
+            }
+        ),
+        "{got:?}"
+    );
+    let original = full_row(&p.a, &b, "18 h ?");
+    let reply = full_row(&p.a, &b, "oui");
+    assert_eq!(reply.reply_to, Some(original.message_id));
+    assert_eq!(reply.reply_ref, mine.reply_ref);
+    assert_eq!(reply.ttl_secs, Some(60));
+    assert_eq!(
+        p.a.message_in(&b, reply.reply_to.unwrap(), NOW)
+            .unwrap()
+            .unwrap()
+            .body,
+        "18 h ?"
+    );
+}
+
+#[test]
+fn tablet_gets_sync_message_with_ttl() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let first = b.send_text(&alice, "q", NOW, &mut rng).unwrap();
+    deliver_each(&first, &mut [&mut a, &mut t], &mut rng);
+    let quoted = full_row(&a, &bob, "q");
+    let sent = a
+        .send_message(&bob, "e", Some(quoted.id), Some(300), NOW, &mut rng)
+        .unwrap();
+    assert_eq!(
+        sent.len(),
+        3,
+        "one for Bob, one copy and its \"seen\" for the tablet"
+    );
+    let r = NOW + 9;
+    let got = t.receive(&sent[1].encode(), "t", r, &mut rng).unwrap();
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Sent,
+                contact: Some(c)
+            } if c == bob
+        ),
+        "{got:?}"
+    );
+    let row = full_row(&t, &bob, "e");
+    assert_eq!(row.direction, Direction::Out);
+    assert_eq!(row.at, NOW);
+    assert_eq!(
+        (row.ttl_secs, row.seen_at, row.expire_at),
+        (Some(300), None, Some(r + UNSEEN_CEILING_SECS))
+    );
+    assert_eq!(row.reply_to, Some(full_row(&t, &bob, "q").message_id));
+    assert_eq!(row.reply_ref, full_row(&a, &bob, "e").reply_ref);
+    // Bob's side: an ephemeral from Alice.
+    let at_bob = deliver(&mut b, &sent[0], &mut rng);
+    assert!(
+        matches!(
+            at_bob,
+            ReceiveOutcome::Message {
+                ephemeral: true,
+                ..
+            }
+        ),
+        "{at_bob:?}"
+    );
+}
+
+#[test]
+fn sync_message_from_contact_and_message_from_my_device_refused() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let body = ExtContent::SyncMessage {
+        to: a,
+        text: "faux".into(),
+        reply_to: None,
+        ttl_secs: Some(300),
+    }
+    .to_body();
+    let out = seal_body(
+        &mut p.b,
+        &send::Target::Contact(a),
+        &body,
+        MessageId([0x62; 16]),
+        &mut p.rng,
+    );
+    assert_eq!(reason(deliver(&mut p.a, &out[0].0, &mut p.rng)), NOT_MINE);
+
+    let (_d, mut a, mut t, mut rng) = linked();
+    let body = ExtContent::Message {
+        text: "x".into(),
+        reply_to: None,
+        ttl_secs: Some(300),
+    }
+    .to_body();
+    let out = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x63; 16]),
+        &mut rng,
+    );
+    let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(r), "unexpected content for this mailbox");
+}
+
+#[test]
+fn ephemeral_from_blocked_contact_dropped() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let bob = p.a.resolve("bob").unwrap();
+    let out =
+        p.b.send_message(&a, "blocked", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    p.a.block_contact(&bob, NOW, &mut p.rng).unwrap();
+    let r = p.a.receive(&out[0].encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), "blocked contact");
+    assert_eq!(acks_for(&mut p.a, &out[0]), 0);
+    assert!(
+        p.a.messages_with(&bob, NOW)
+            .unwrap()
+            .iter()
+            .all(|m| m.body != "blocked")
+    );
+}
+
+#[test]
+fn resend_of_not_delivered_ephemeral_keeps_ttl() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let sent =
+        p.a.send_message(&b, "again", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    let before = full_row(&p.a, &b, "again");
+    // Refused by a node: not delivered while the message is still shown
+    // here (a resend needs its text, erased at `NOW + 300`).
+    let late = NOW + 4;
+    assert!(p.a.drop_outbox_packet(&sent[0].encode(), late).unwrap());
+    assert_eq!(
+        full_row(&p.a, &b, "again").status,
+        MessageStatus::NotDelivered
+    );
+    let again = p.a.retry_message(before.id, late, &mut p.rng).unwrap();
+    let after = full_row(&p.a, &b, "again");
+    assert_eq!(
+        (after.ttl_secs, after.seen_at, after.expire_at),
+        (before.ttl_secs, before.seen_at, before.expire_at)
+    );
+    let r =
+        p.b.receive(&again[0].encode(), "t", late, &mut p.rng)
+            .unwrap();
+    assert!(
+        matches!(
+            r,
+            ReceiveOutcome::Message {
+                ephemeral: true,
+                ..
+            }
+        ),
+        "{r:?}"
+    );
+    assert_eq!(
+        ephemeral_cols(&p.b, &a, "again"),
+        (Some(300), None, Some(late + UNSEEN_CEILING_SECS))
+    );
+}
+
+// --- Deletion and ephemeral, task 4: seen, `SyncSeen`, expiry, erasure.
+
+use crate::content::{KIND_SYNC_SEEN, MAX_SYNC_SEEN, SeenEntry};
+
+/// `entries` as a `SyncSeen` from `from` to its other device (one packet).
+fn seal_seen_pkt(from: &mut Core, entries: Vec<SeenEntry>, mid: u8, rng: &mut StdRng) -> Packet {
+    let body = ExtContent::SyncSeen { seen: entries }.to_body();
+    let mut sealed = seal_body(
+        from,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([mid; 16]),
+        rng,
+    );
+    assert_eq!(sealed.len(), 1);
+    sealed.remove(0).0
+}
+
+fn synced_seen(o: &ReceiveOutcome) {
+    assert!(
+        matches!(
+            o,
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Seen,
+                contact: None
+            }
+        ),
+        "{o:?}"
+    );
+}
+
+/// The phone–tablet session opened and answered: their packets are no
+/// longer openings (tier L whatever they hold).
+fn answer_own_session(a: &mut Core, t: &mut Core, rng: &mut StdRng) {
+    let first = seal_delete(a, 1, 0x40, rng);
+    synced_delete(deliver(t, &first, rng));
+    let answer = seal_delete(t, 1, 0x41, rng);
+    synced_delete(deliver(a, &answer, rng));
+}
+
+/// `(seen_at, expire_at)` of the row with this body, read at `now`.
+fn seen_cols(c: &Core, contact: &Fingerprint, body: &str) -> (Option<u64>, Option<u64>) {
+    let row = full_row(c, contact, body);
+    (row.seen_at, row.expire_at)
+}
+
+/// Rows stored with this body, shown or not.
+fn stored_rows(c: &Core, body: &str) -> i64 {
+    c.store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM messages WHERE body = ?1",
+            rusqlite::params![body],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn pending_seen_rows(c: &Core) -> i64 {
+    c.store
+        .conn()
+        .query_row("SELECT count(*) FROM pending_seen", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// Alice's phone and tablet, and Bob; Bob's ephemeral "e" (`ttl`)
+/// received by both of Alice's devices at `NOW`.
+fn ephemeral_on_both(ttl: u32) -> (TempDir, Core, Core, Core, StdRng) {
+    let (d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let alice = a.fingerprint();
+    let sent = b
+        .send_message(&alice, "e", None, Some(ttl), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&sent, &mut [&mut a, &mut t], &mut rng);
+    (d, a, t, b, rng)
+}
+
+#[test]
+fn sync_seen_cap_fits_tier_m() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    answer_own_session(&mut a, &mut t, &mut rng);
+    let entries = |n: usize, at: u64| -> Vec<SeenEntry> {
+        (0..n)
+            .map(|i| SeenEntry {
+                id: MessageId([0x90 | u8::try_from(i).unwrap(); 16]),
+                contact: b.fingerprint(),
+                at,
+            })
+            .collect()
+    };
+    // A realistic date and the longest one (`u64::MAX`, ten bytes).
+    for (mid, at) in [(0x50, NOW), (0x51, u64::MAX)] {
+        let full = seal_seen_pkt(&mut a, entries(MAX_SYNC_SEEN, at), mid, &mut rng);
+        assert_eq!(full.tier, Tier::M, "{MAX_SYNC_SEEN} entries dated {at}");
+    }
+    // One more is refused on decode.
+    let raw: Vec<([u8; 16], Fingerprint, u64)> = entries(MAX_SYNC_SEEN + 1, NOW)
+        .iter()
+        .map(|e| (e.id.0, e.contact, e.at))
+        .collect();
+    let data = postcard::to_allocvec(&raw).unwrap();
+    assert!(matches!(
+        ExtContent::decode(KIND_SYNC_SEEN, &data),
+        Err(CoreError::Malformed(_))
+    ));
+    let empty = postcard::to_allocvec(&Vec::<([u8; 16], Fingerprint, u64)>::new()).unwrap();
+    assert!(matches!(
+        ExtContent::decode(KIND_SYNC_SEEN, &empty),
+        Err(CoreError::Malformed(_))
+    ));
+}
+
+#[test]
+fn sync_seen_round_trips() {
+    let seen = vec![SeenEntry {
+        id: MessageId([1; 16]),
+        contact: Fingerprint([2; 32]),
+        at: NOW,
+    }];
+    let content = ExtContent::SyncSeen { seen };
+    let Body::Ext {
+        kind,
+        unknown,
+        data,
+    } = content.to_body()
+    else {
+        panic!("Ext expected");
+    };
+    assert_eq!((kind, unknown), (KIND_SYNC_SEEN, UnknownPolicy::Ignore));
+    assert_eq!(ExtContent::decode(kind, &data).unwrap(), Some(content));
+    let mut trailing = data;
+    trailing.push(0);
+    assert!(ExtContent::decode(kind, &trailing).is_err());
+}
+
+#[test]
+fn seen_on_phone_expires_on_tablet_at_same_time() {
+    let (_d, mut a, mut t, b, mut rng) = ephemeral_on_both(300);
+    let bob = b.fingerprint();
+    let seen_at = NOW + 10;
+    let row = row_of(&a, &bob, "e");
+    let pkts = a.mark_seen(&[row], seen_at, &mut rng).unwrap();
+    assert_eq!(pkts.len(), 1, "one SyncSeen for the tablet");
+    for p in &pkts {
+        let got = t.receive(&p.encode(), "t", seen_at, &mut rng).unwrap();
+        synced_seen(&got);
+    }
+    for c in [&a, &t] {
+        assert_eq!(
+            seen_cols(c, &bob, "e"),
+            (Some(seen_at), Some(seen_at + 300))
+        );
+        assert_eq!(c.next_expiry().unwrap(), Some(seen_at + 300));
+    }
+    for c in [&mut a, &mut t] {
+        assert!(c.expire_ephemeral(seen_at + 299).unwrap().is_empty());
+        assert_eq!(stored_rows(c, "e"), 1);
+    }
+    let on_t = row_of(&t, &bob, "e");
+    assert_eq!(a.expire_ephemeral(seen_at + 300).unwrap(), [row]);
+    assert_eq!(t.expire_ephemeral(seen_at + 300).unwrap(), [on_t]);
+    for c in [&a, &t] {
+        assert_eq!(stored_rows(c, "e"), 0);
+        assert_eq!(c.next_expiry().unwrap(), None);
+    }
+}
+
+#[test]
+fn earliest_seen_wins() {
+    let (_d, mut a, mut t, b, mut rng) = ephemeral_on_both(300);
+    let bob = b.fingerprint();
+    let id = message_id_of(&t, &bob, "e");
+    let entry = |at| {
+        vec![SeenEntry {
+            id,
+            contact: bob,
+            at,
+        }]
+    };
+    let late = seal_seen_pkt(&mut a, entry(NOW + 100), 0x52, &mut rng);
+    let early = seal_seen_pkt(&mut a, entry(NOW + 50), 0x53, &mut rng);
+    let later_again = seal_seen_pkt(&mut a, entry(NOW + 70), 0x54, &mut rng);
+    for p in [&late, &early, &later_again] {
+        synced_seen(&t.receive(&p.encode(), "t", NOW + 200, &mut rng).unwrap());
+    }
+    assert_eq!(seen_cols(&t, &bob, "e"), (Some(NOW + 50), Some(NOW + 350)));
+}
+
+#[test]
+fn future_seen_is_clamped_to_now() {
+    let (_d, mut a, mut t, b, mut rng) = ephemeral_on_both(300);
+    let bob = b.fingerprint();
+    let id = message_id_of(&t, &bob, "e");
+    let ahead = seal_seen_pkt(
+        &mut a,
+        vec![SeenEntry {
+            id,
+            contact: bob,
+            at: NOW + 3600,
+        }],
+        0x55,
+        &mut rng,
+    );
+    synced_seen(&deliver(&mut t, &ahead, &mut rng));
+    assert_eq!(seen_cols(&t, &bob, "e"), (Some(NOW), Some(NOW + 300)));
+}
+
+/// A "seen" dated in the past is honoured: an ephemeral whose delay is
+/// already over is hidden at once and erased by the next sweep.
+#[test]
+fn past_seen_expires_at_once() {
+    let (_d, mut a, mut t, b, mut rng) = ephemeral_on_both(300);
+    let bob = b.fingerprint();
+    let id = message_id_of(&t, &bob, "e");
+    let past = seal_seen_pkt(
+        &mut a,
+        vec![SeenEntry {
+            id,
+            contact: bob,
+            at: NOW - 1000,
+        }],
+        0x56,
+        &mut rng,
+    );
+    synced_seen(&deliver(&mut t, &past, &mut rng));
+    assert!(!has_message(&t, &bob, "e"));
+    assert_eq!(stored_rows(&t, "e"), 1, "hidden, not erased yet");
+    assert_eq!(t.expire_ephemeral(NOW).unwrap().len(), 1);
+    assert_eq!(stored_rows(&t, "e"), 0);
+}
+
+#[test]
+fn seen_before_message_is_applied_on_arrival() {
+    // A received ephemeral: the phone shows it, the tablet gets the "seen"
+    // before Bob's packet.
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = b
+        .send_message(&alice, "e", None, Some(300), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&sent, &mut [&mut a], &mut rng);
+    let seen_at = NOW + 20;
+    let pkts = a
+        .mark_seen(&[row_of(&a, &bob, "e")], seen_at, &mut rng)
+        .unwrap();
+    for p in &pkts {
+        synced_seen(&t.receive(&p.encode(), "t", seen_at, &mut rng).unwrap());
+    }
+    assert_eq!(pending_seen_rows(&t), 1);
+    for p in &sent {
+        t.receive(&p.encode(), "t", seen_at + 5, &mut rng).unwrap();
+    }
+    assert_eq!(
+        seen_cols(&t, &bob, "e"),
+        (Some(seen_at), Some(seen_at + 300))
+    );
+    assert_eq!(pending_seen_rows(&t), 0);
+
+    // One I send: its "seen" leaves with it, and reaches the tablet first.
+    let mine = a
+        .send_message(&bob, "m", None, Some(120), NOW + 30, &mut rng)
+        .unwrap();
+    assert_eq!(mine.len(), 3, "Bob, the copy, its \"seen\"");
+    synced_seen(
+        &t.receive(&mine[2].encode(), "t", NOW + 31, &mut rng)
+            .unwrap(),
+    );
+    assert_eq!(pending_seen_rows(&t), 1);
+    t.receive(&mine[1].encode(), "t", NOW + 32, &mut rng)
+        .unwrap();
+    assert_eq!(seen_cols(&t, &bob, "m"), (Some(NOW + 30), Some(NOW + 150)));
+    assert_eq!(seen_cols(&a, &bob, "m"), (Some(NOW + 30), Some(NOW + 150)));
+    assert_eq!(pending_seen_rows(&t), 0);
+}
+
+/// A "seen" for an unknown message of Bob's, given to the tablet at `NOW`.
+fn pending_for_bob(a: &mut Core, t: &mut Core, bob: Fingerprint, mid: u8, rng: &mut StdRng) {
+    let p = seal_seen_pkt(
+        a,
+        vec![SeenEntry {
+            id: MessageId([mid; 16]),
+            contact: bob,
+            at: NOW,
+        }],
+        mid,
+        rng,
+    );
+    synced_seen(&deliver(t, &p, rng));
+}
+
+#[test]
+fn pending_seen_purged_after_8_days() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    pending_for_bob(&mut a, &mut t, b.fingerprint(), 0x57, &mut rng);
+    assert_eq!(pending_seen_rows(&t), 1);
+    let days8 = crate::core::ephemeral::PENDING_SEEN_RETENTION_SECS;
+    assert_eq!(days8, 8 * 86_400);
+    t.expire_ephemeral(NOW + days8).unwrap();
+    assert_eq!(pending_seen_rows(&t), 1);
+    t.expire_ephemeral(NOW + days8 + 1).unwrap();
+    assert_eq!(pending_seen_rows(&t), 0);
+}
+
+#[test]
+fn pending_seen_dropped_on_block_and_delete() {
+    // On the tablet itself: a block, then a removal.
+    for remove in [false, true] {
+        let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+        let bob = b.fingerprint();
+        pending_for_bob(&mut a, &mut t, bob, 0x58, &mut rng);
+        assert_eq!(pending_seen_rows(&t), 1);
+        if remove {
+            t.remove_contact(&bob, NOW + 1, &mut rng).unwrap();
+        } else {
+            t.block_contact(&bob, NOW + 1, &mut rng).unwrap();
+        }
+        assert_eq!(pending_seen_rows(&t), 0, "local, remove: {remove}");
+        // A late "seen" for that contact is not kept either.
+        pending_for_bob(&mut a, &mut t, bob, 0x59, &mut rng);
+        assert_eq!(pending_seen_rows(&t), 0, "late, remove: {remove}");
+    }
+    // From the phone, through `SyncContact`.
+    for remove in [false, true] {
+        let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+        let bob = b.fingerprint();
+        pending_for_bob(&mut a, &mut t, bob, 0x5a, &mut rng);
+        assert_eq!(pending_seen_rows(&t), 1);
+        if remove {
+            a.remove_contact(&bob, NOW + 5, &mut rng).unwrap();
+        } else {
+            a.block_contact(&bob, NOW + 5, &mut rng).unwrap();
+        }
+        deliver_all(&mut a, &mut t, &mut rng);
+        assert_eq!(pending_seen_rows(&t), 0, "synced, remove: {remove}");
+    }
+}
+
+#[test]
+fn never_seen_ephemeral_expires_after_7_days() {
+    let (_d, mut a, mut t, b, _rng) = ephemeral_on_both(300);
+    let bob = b.fingerprint();
+    for c in [&mut a, &mut t] {
+        assert_eq!(seen_cols(c, &bob, "e"), (None, Some(NOW + 604_800)));
+        assert!(c.expire_ephemeral(NOW + 604_800 - 1).unwrap().is_empty());
+        assert_eq!(c.expire_ephemeral(NOW + 604_800).unwrap().len(), 1);
+        assert_eq!(stored_rows(c, "e"), 0);
+    }
+}
+
+#[test]
+fn expired_row_is_hidden_before_sweep() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let kept = p.b.send_text(&a, "kept", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.a, &kept[0], &mut p.rng);
+    let gone =
+        p.b.send_message(&a, "gone", None, Some(60), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &gone[0], &mut p.rng);
+    let row = row_of(&p.a, &b, "gone");
+    let id = message_id_of(&p.a, &b, "gone");
+    p.a.mark_seen(&[row], NOW, &mut p.rng).unwrap();
+    // Bob quotes it while it is still shown on his side.
+    let bob_row = full_row(&p.b, &a, "gone").id;
+    let reply =
+        p.b.send_message(&a, "re", Some(bob_row), None, NOW, &mut p.rng)
+            .unwrap();
+    let due = NOW + 60;
+    // Still shown one second before.
+    assert!(
+        p.a.messages_with(&b, due - 1)
+            .unwrap()
+            .iter()
+            .any(|m| m.id == row)
+    );
+    assert!(p.a.message_in(&b, id, due - 1).unwrap().is_some());
+    // Due, never swept: the row is stored but no read returns it.
+    assert!(
+        p.a.messages_with(&b, due)
+            .unwrap()
+            .iter()
+            .all(|m| m.id != row)
+    );
+    let with_delivery = p.a.messages_with_delivery(&b, due).unwrap();
+    assert!(with_delivery.iter().all(|(m, _)| m.id != row));
+    // The chat list's last message is the one before.
+    assert_eq!(with_delivery.last().unwrap().0.body, "kept");
+    assert!(p.a.deliveries_of(&[row], due).unwrap().is_empty());
+    assert!(p.a.message_in(&b, id, due).unwrap().is_none());
+    // A reply quoting it shows the original as unavailable.
+    p.a.receive(&reply[0].encode(), "t", due, &mut p.rng)
+        .unwrap();
+    let re =
+        p.a.messages_with(&b, due)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.body == "re")
+            .unwrap();
+    assert_eq!(re.reply_to, Some(id));
+    assert!(p.a.message_in(&b, id, due).unwrap().is_none());
+    // Nor can it be quoted or reacted to any more.
+    assert_eq!(
+        p.a.send_message(&b, "late", Some(row), None, due, &mut p.rng),
+        Err(CoreError::MessageNotFound)
+    );
+    assert_eq!(
+        p.a.set_reactions(row, &emo(&["👍"]), due, &mut p.rng),
+        Err(CoreError::MessageNotFound)
+    );
+    assert_eq!(stored_rows(&p.a, "gone"), 1);
+}
+
+/// A due ephemeral of mine is left out of the delivery screens too.
+#[test]
+fn expired_send_is_hidden_from_delivery_screens() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent =
+        p.a.send_message(&bob, "brief", None, Some(60), NOW, &mut p.rng)
+            .unwrap();
+    let row = row_of(&p.a, &bob, "brief");
+    let due = NOW + 60;
+    let listed = |c: &mut Core, now: u64| {
+        c.pending_packets(now)
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.row_id == row)
+    };
+    assert!(listed(&mut p.a, due - 1));
+    assert!(!listed(&mut p.a, due));
+    // "x", Alice's first message, stays counted as received.
+    assert_eq!(p.a.delivery_counts(&bob, due - 1).unwrap(), [1, 0, 1, 0]);
+    assert_eq!(p.a.delivery_counts(&bob, due).unwrap(), [0, 0, 1, 0]);
+    assert!(p.a.message_delivery(row, due - 1).unwrap().is_some());
+    assert!(p.a.message_delivery(row, due).unwrap().is_none());
+    assert!(
+        p.a.delivery_page(&bob, MessageStatus::Pending, 10, 0, due)
+            .unwrap()
+            .is_empty()
+    );
+    // The packet itself still waits to leave.
+    assert!(outbox_row(&p.a, sent[0].id).is_some());
+}
+
+#[test]
+fn expiry_keeps_the_send_going() {
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent =
+        p.a.send_message(&bob, "brief", None, Some(60), NOW, &mut p.rng)
+            .unwrap();
+    let packet = sent[0].clone();
+    let row = row_of(&p.a, &bob, "brief");
+    let mid = message_id_of(&p.a, &bob, "brief");
+    let later = NOW + 61;
+    assert_eq!(p.a.expire_ephemeral(later).unwrap(), [row]);
+    assert_eq!(stored_rows(&p.a, "brief"), 0);
+    assert!(is_tombstoned(&p.a, mid));
+    // The packet is still queued, its delivery `Pending`.
+    assert_eq!(outbox_row(&p.a, packet.id), Some(None));
+    assert_eq!(
+        delivery_state(&p.a, packet.id).0,
+        MessageStatus::Pending as i64
+    );
+    // The Pending screen and its count read it without the row.
+    let pending = p.a.pending_packets(later).unwrap();
+    assert!(pending.messages.iter().all(|m| m.row_id != row));
+    assert_eq!(pending.packets, p.a.pending_count(later).unwrap());
+    assert!(pending.packets >= 1);
+    assert!(
+        p.a.pending_outbox(later)
+            .unwrap()
+            .iter()
+            .any(|b| Packet::decode(b).unwrap().id == packet.id)
+    );
+    // It leaves, Bob gets the whole delay, and the ack settles it.
+    p.a.record_deposit(packet.id, NODE, later + 1).unwrap();
+    assert_eq!(
+        delivery_state(&p.a, packet.id).0,
+        MessageStatus::OnNetwork as i64
+    );
+    let ack = match p.b.receive(&packet.encode(), "t", later + 2, &mut p.rng) {
+        Ok(ReceiveOutcome::Message {
+            ack,
+            ephemeral: true,
+            ..
+        }) => ack,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        ephemeral_cols(&p.b, &p.a.fingerprint(), "brief"),
+        (Some(60), None, Some(later + 2 + UNSEEN_CEILING_SECS))
+    );
+    let r =
+        p.a.receive(&ack.encode(), "t", later + 3, &mut p.rng)
+            .unwrap();
+    assert!(matches!(r, ReceiveOutcome::AckReceived { .. }), "{r:?}");
+    assert_eq!(
+        delivery_state(&p.a, packet.id).0,
+        MessageStatus::Received as i64
+    );
+    assert_eq!(outbox_row(&p.a, packet.id), None);
+    assert!(p.a.deliveries_of(&[row], later + 3).unwrap().is_empty());
+    assert!(p.a.message_delivery(row, later + 3).unwrap().is_none());
+    p.a.take_delivery_changes();
+    assert!(p.a.take_failed_notices().is_empty());
+    assert_eq!(stored_rows(&p.a, "brief"), 0);
+}
+
+#[test]
+fn expiry_erases_reactions_and_tombstones() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = a
+        .send_message(&bob, "e", None, Some(60), NOW, &mut rng)
+        .unwrap();
+    // The tablet gets the copy, not the "seen": shown there, it is seen.
+    t.receive(&sent[1].encode(), "t", NOW, &mut rng).unwrap();
+    let on_t = row_of(&t, &bob, "e");
+    t.mark_seen(&[on_t], NOW, &mut rng).unwrap();
+    deliver(&mut b, &sent[0], &mut rng);
+    let react = b
+        .set_reactions(row_of(&b, &alice, "e"), &emo(&["👍"]), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&react, &mut [&mut a, &mut t], &mut rng);
+    assert_eq!(reaction_rows(&a), 1);
+    assert_eq!(reaction_rows(&t), 1);
+    let id = message_id_of(&t, &bob, "e");
+    for c in [&mut a, &mut t] {
+        assert_eq!(c.expire_ephemeral(NOW + 60).unwrap().len(), 1);
+        assert_eq!(reaction_rows(c), 0);
+        assert!(is_tombstoned(c, id));
+    }
+    // A late copy of it (a new packet, same message, from the tablet: the
+    // phone never received it, only the tombstone can refuse it).
+    let copy = ExtContent::SyncMessage {
+        to: bob,
+        text: "e".into(),
+        reply_to: None,
+        ttl_secs: Some(60),
+    }
+    .to_body();
+    let late = seal_body(&mut t, &send::Target::OwnDevices, &copy, id, &mut rng);
+    let got = a
+        .receive(&late[0].0.encode(), "t", NOW + 61, &mut rng)
+        .unwrap();
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Sent,
+                ..
+            }
+        ),
+        "{got:?}"
+    );
+    assert_eq!(stored_rows(&a, "e"), 0);
+    // So is a late "seen" for it: nothing waits for it.
+    let seen = seal_seen_pkt(
+        &mut a,
+        vec![SeenEntry {
+            id,
+            contact: bob,
+            at: NOW,
+        }],
+        0x5b,
+        &mut rng,
+    );
+    synced_seen(&t.receive(&seen.encode(), "t", NOW + 61, &mut rng).unwrap());
+    assert_eq!(pending_seen_rows(&t), 0);
+}
+
+#[test]
+fn expiry_sends_nothing() {
+    let (_d, mut a, mut t, b, mut rng) = ephemeral_on_both(300);
+    let bob = b.fingerprint();
+    a.mark_seen(&[row_of(&a, &bob, "e")], NOW, &mut rng)
+        .unwrap();
+    let queued = |c: &mut Core| c.pending_outbox(NOW).unwrap().len();
+    let (before_a, before_t) = (queued(&mut a), queued(&mut t));
+    assert_eq!(a.expire_ephemeral(NOW + 300).unwrap().len(), 1);
+    assert_eq!(t.expire_ephemeral(NOW + 604_800).unwrap().len(), 1);
+    assert_eq!(queued(&mut a), before_a);
+    assert_eq!(queued(&mut t), before_t);
+    let deleted = |c: &Core| {
+        count_events(c, |e| {
+            matches!(
+                e,
+                TransparencyEvent::MessagesDeleted { .. } | TransparencyEvent::SyncSkipped { .. }
+            )
+        })
+    };
+    assert_eq!(deleted(&a), 0);
+    assert_eq!(deleted(&t), 0);
+}
+
+#[test]
+fn mark_seen_ignores_plain_and_already_seen() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let plain = b.send_text(&alice, "plain", NOW, &mut rng).unwrap();
+    let eph = b
+        .send_message(&alice, "e", None, Some(300), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&plain, &mut [&mut a], &mut rng);
+    deliver_each(&eph, &mut [&mut a], &mut rng);
+    let (p_row, e_row) = (row_of(&a, &bob, "plain"), row_of(&a, &bob, "e"));
+    assert!(
+        a.mark_seen(&[p_row, 9_999], NOW, &mut rng)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(seen_cols(&a, &bob, "plain"), (None, None));
+    let first = a.mark_seen(&[e_row, e_row], NOW + 1, &mut rng).unwrap();
+    assert_eq!(first.len(), 1, "one entry, one packet");
+    synced_seen(
+        &t.receive(&first[0].encode(), "t", NOW + 1, &mut rng)
+            .unwrap(),
+    );
+    // The tablet stores it for the message to come.
+    assert_eq!(pending_seen_rows(&t), 1);
+    // Already seen: nothing changes, nothing is sent.
+    assert!(
+        a.mark_seen(&[e_row], NOW + 50, &mut rng)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(seen_cols(&a, &bob, "e"), (Some(NOW + 1), Some(NOW + 301)));
+    // Never shown and due (its ceiling passed): not marked.
+    let unseen = b
+        .send_message(&alice, "unseen", None, Some(300), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&unseen, &mut [&mut a], &mut rng);
+    let u_row = row_of(&a, &bob, "unseen");
+    let ceiling = NOW + UNSEEN_CEILING_SECS;
+    assert!(a.mark_seen(&[u_row], ceiling, &mut rng).unwrap().is_empty());
+    assert_eq!(seen_cols(&a, &bob, "unseen"), (None, Some(ceiling)));
+}
+
+#[test]
+fn mark_seen_without_another_device_stays_local() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let a = p.a.fingerprint();
+    let out =
+        p.b.send_message(&a, "e", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &out[0], &mut p.rng);
+    let row = row_of(&p.a, &b, "e");
+    assert!(
+        p.a.mark_seen(&[row], NOW + 3, &mut p.rng)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(seen_cols(&p.a, &b, "e"), (Some(NOW + 3), Some(NOW + 303)));
+}
+
+#[test]
+fn next_expiry_is_the_earliest() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    assert_eq!(p.a.next_expiry().unwrap(), None);
+    for (body, ttl) in [("e1", 300), ("e2", 60)] {
+        let out =
+            p.b.send_message(&a, body, None, Some(ttl), NOW, &mut p.rng)
+                .unwrap();
+        deliver(&mut p.a, &out[0], &mut p.rng);
+    }
+    assert_eq!(p.a.next_expiry().unwrap(), Some(NOW + 604_800));
+    p.a.mark_seen(&[row_of(&p.a, &b, "e1")], NOW + 5, &mut p.rng)
+        .unwrap();
+    assert_eq!(p.a.next_expiry().unwrap(), Some(NOW + 305));
+    p.a.mark_seen(&[row_of(&p.a, &b, "e2")], NOW + 10, &mut p.rng)
+        .unwrap();
+    assert_eq!(p.a.next_expiry().unwrap(), Some(NOW + 70));
+    p.a.send_message(&b, "mine", None, Some(120), NOW, &mut p.rng)
+        .unwrap();
+    assert_eq!(p.a.next_expiry().unwrap(), Some(NOW + 70));
+    p.a.expire_ephemeral(NOW + 70).unwrap();
+    assert_eq!(p.a.next_expiry().unwrap(), Some(NOW + 120));
+}
+
+#[test]
+fn expired_ephemeral_is_not_resent() {
+    let mut p = settled_pair();
+    let b = p.b.fingerprint();
+    let sent =
+        p.a.send_message(&b, "short", None, Some(60), NOW, &mut p.rng)
+            .unwrap();
+    assert!(p.a.drop_outbox_packet(&sent[0].encode(), NOW + 1).unwrap());
+    let row = row_of(&p.a, &b, "short");
+    assert_eq!(status_of(&p.a, &b, "short"), MessageStatus::NotDelivered);
+    let outbox = p.a.pending_outbox(NOW + 60).unwrap().len();
+    // Due, not swept yet: nothing is sealed again.
+    assert_eq!(
+        p.a.retry_message(row, NOW + 60, &mut p.rng),
+        Err(CoreError::NothingToRetry)
+    );
+    assert_eq!(p.a.retry_all(&b, NOW + 60, &mut p.rng), Ok(0));
+    assert_eq!(p.a.pending_outbox(NOW + 60).unwrap().len(), outbox);
+    // Swept: the row is gone.
+    p.a.expire_ephemeral(NOW + 60).unwrap();
+    assert_eq!(
+        p.a.retry_message(row, NOW + 60, &mut p.rng),
+        Err(CoreError::NothingToRetry)
+    );
+    // Before it is due, the resend works.
+    let other =
+        p.a.send_message(&b, "other", None, Some(60), NOW + 100, &mut p.rng)
+            .unwrap();
+    assert!(
+        p.a.drop_outbox_packet(&other[0].encode(), NOW + 101)
+            .unwrap()
+    );
+    let again =
+        p.a.retry_message(row_of(&p.a, &b, "other"), NOW + 102, &mut p.rng)
+            .unwrap();
+    assert!(!again.is_empty());
+}
+
+#[test]
+fn sync_seen_from_contact_is_refused() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let body = ExtContent::SyncSeen {
+        seen: vec![SeenEntry {
+            id: MessageId([1; 16]),
+            contact: a,
+            at: NOW,
+        }],
+    }
+    .to_body();
+    let out = seal_body(
+        &mut p.b,
+        &send::Target::Contact(a),
+        &body,
+        MessageId([0x64; 16]),
+        &mut p.rng,
+    );
+    assert_eq!(reason(deliver(&mut p.a, &out[0].0, &mut p.rng)), NOT_MINE);
+    assert_eq!(pending_seen_rows(&p.a), 0);
+}
+
+#[test]
+fn history_export_skips_ephemerals() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let eph =
+        p.b.send_message(&a, "eph", None, Some(300), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &eph[0], &mut p.rng);
+    p.a.send_message(&b, "mine", None, Some(300), NOW, &mut p.rng)
+        .unwrap();
+    p.a.set_reactions(row_of(&p.a, &b, "eph"), &emo(&["👍"]), NOW, &mut p.rng)
+        .unwrap();
+    p.a.set_reactions(row_of(&p.a, &b, "y"), &emo(&["👍"]), NOW, &mut p.rng)
+        .unwrap();
+    let contacts = std::collections::HashSet::from([b]);
+    let out = history::export(&p.a.store, &contacts).unwrap();
+    let bodies: Vec<String> = out.entries.iter().map(|e| format!("{e:?}")).collect();
+    // "x" (sent) and "y" (received): the plain messages only.
+    assert_eq!(out.entries.len(), 2, "{bodies:?}");
+    let eph_id = message_id_of(&p.a, &b, "eph");
+    let y_id = message_id_of(&p.a, &b, "y");
+    assert!(bodies.iter().all(|e| !e.contains(&format!("{eph_id:?}"))));
+    assert_eq!(out.reactions.len(), 1);
+    assert_eq!(out.reactions[0].target(), y_id);
+}
+
+// --- Task 4, fix 1: an erased message on the Pending screen.
+
+/// The sorts of the "Synchronisation" section but receipts (Alice still
+/// owes Bob one for "y"), with their packets and contacts, read at `now`.
+fn sync_sorts(c: &mut Core, now: u64) -> Vec<(PendingKind, u32, Vec<Fingerprint>)> {
+    c.pending_packets(now)
+        .unwrap()
+        .sync
+        .into_iter()
+        .filter(|s| s.kind != PendingKind::Ack)
+        .map(|s| (s.kind, s.packets, s.contacts))
+        .collect()
+}
+
+#[test]
+fn erased_messages_are_pending_as_such() {
+    // An ephemeral that is due (then erased) before it leaves.
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    p.a.send_message(&bob, "brief", None, Some(60), NOW, &mut p.rng)
+        .unwrap();
+    let erased = vec![(PendingKind::ErasedMessage, 1, vec![bob])];
+    for (now, sweep) in [(NOW + 60, false), (NOW + 61, true)] {
+        if sweep {
+            assert_eq!(p.a.expire_ephemeral(now).unwrap().len(), 1);
+        }
+        let pending = p.a.pending_packets(now).unwrap();
+        assert!(pending.messages.is_empty(), "no row, no text");
+        assert_eq!(sync_sorts(&mut p.a, now), erased, "swept: {sweep}");
+        assert_eq!(pending.packets, p.a.pending_count(now).unwrap());
+    }
+
+    // A plain message deleted after a deposit was tried: it may still go.
+    let mut p = settled_pair();
+    let bob = p.b.fingerprint();
+    let sent = p.a.send_text(&bob, "tried", NOW, &mut p.rng).unwrap();
+    p.a.record_deposit_tried(sent[0].id, NOW + 1).unwrap();
+    p.a.delete_message(row_of(&p.a, &bob, "tried"), NOW + 2, &mut p.rng)
+        .unwrap();
+    assert!(outbox_row(&p.a, sent[0].id).is_some());
+    let pending = p.a.pending_packets(NOW + 3).unwrap();
+    assert!(pending.messages.is_empty());
+    assert_eq!(sync_sorts(&mut p.a, NOW + 3), erased);
+}
+
+// --- Final review fixes: a "seen" from another device, a message born due.
+
+/// A "seen" from another of my devices changes the countdown of a row this
+/// device shows: the row is noted (`take_delivery_changes`) so the open
+/// conversation reloads. A repeat that lowers nothing notes nothing.
+#[test]
+fn sync_seen_notes_the_row_it_changes() {
+    let (_d, mut a, mut t, b, mut rng) = ephemeral_on_both(300);
+    let bob = b.fingerprint();
+    let on_t = row_of(&t, &bob, "e");
+    t.take_delivery_changes();
+    let pkts = a
+        .mark_seen(&[row_of(&a, &bob, "e")], NOW + 10, &mut rng)
+        .unwrap();
+    for p in &pkts {
+        synced_seen(&t.receive(&p.encode(), "t", NOW + 10, &mut rng).unwrap());
+    }
+    assert_eq!(t.take_delivery_changes(), vec![(bob, on_t)]);
+
+    // The same date again (or a later one) lowers nothing.
+    let id = message_id_of(&t, &bob, "e");
+    let again = seal_seen_pkt(
+        &mut a,
+        vec![SeenEntry {
+            id,
+            contact: bob,
+            at: NOW + 40,
+        }],
+        0x57,
+        &mut rng,
+    );
+    synced_seen(&t.receive(&again.encode(), "t", NOW + 50, &mut rng).unwrap());
+    assert!(t.take_delivery_changes().is_empty());
+}
+
+/// An ephemeral whose earlier "seen" (from another of my devices) already
+/// ran out when it arrives is never shown nor notified: acked, erased and
+/// tombstoned at once, as the sweep would.
+#[test]
+fn message_born_due_is_not_surfaced() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = b
+        .send_message(&alice, "gone", None, Some(60), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&sent, &mut [&mut a], &mut rng);
+    let pkts = a
+        .mark_seen(&[row_of(&a, &bob, "gone")], NOW + 1, &mut rng)
+        .unwrap();
+    for p in &pkts {
+        synced_seen(&t.receive(&p.encode(), "t", NOW + 1, &mut rng).unwrap());
+    }
+    assert_eq!(pending_seen_rows(&t), 1);
+    let id = message_id_of(&a, &bob, "gone");
+    let mut opened = 0;
+    for p in &sent {
+        let got = t.receive(&p.encode(), "t", NOW + 100, &mut rng).unwrap();
+        if matches!(got, ReceiveOutcome::NotForUs) {
+            continue;
+        }
+        assert!(matches!(got, ReceiveOutcome::Ignored), "born due: {got:?}");
+        assert_eq!(acks_for(&mut t, p), 1, "acked all the same");
+        opened += 1;
+    }
+    assert_eq!(opened, 1);
+    assert_eq!(stored_rows(&t, "gone"), 0, "erased at once");
+    assert!(is_tombstoned(&t, id));
+    assert_eq!(pending_seen_rows(&t), 0);
+    assert!(t.expire_ephemeral(NOW + 100).unwrap().is_empty());
+    // A resend is a plain duplicate: nothing to wake for.
+    for p in &sent {
+        let again = t.receive(&p.encode(), "t", NOW + 101, &mut rng).unwrap();
+        assert!(
+            matches!(again, ReceiveOutcome::Duplicate | ReceiveOutcome::NotForUs),
+            "{again:?}"
+        );
+    }
 }

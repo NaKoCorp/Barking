@@ -15,11 +15,13 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use rand_core::CryptoRng;
 use rusqlite::{OptionalExtension, params};
 
 use super::Core;
-use super::{reactions, route};
+use super::{ephemeral, reactions, route, sync};
 use crate::Result;
+use crate::content::{ExtContent, MAX_SYNC_DELETE_IDS};
 use crate::identity::Fingerprint;
 use crate::mailbox::MailboxId;
 use crate::packet::{Packet, PacketId};
@@ -27,7 +29,7 @@ use crate::store::{
     DeliverySummary, Direction, MessageDeliveryDetail, MessageId, MessageRow, MessageStatus,
     PendingPackets, Queries, SEND_STATE_SQL, arr, map_err, to_i64, to_u64,
 };
-use crate::transparency::TransparencyEvent;
+use crate::transparency::{SyncKind, TransparencyEvent};
 
 /// Recomputes the state of the outgoing message `message_id` from its
 /// deliveries to the contact's devices (`own = 0`): `Received` if one is
@@ -595,28 +597,70 @@ impl Core {
     /// Each deleted message leaves a tombstone (`insert_message` refuses
     /// its identifier for good) and the batch one `MessagesDeleted`
     /// log entry, without content nor contact.
-    pub fn delete_messages(&mut self, row_ids: &[i64], now: u64) -> Result<DeleteOutcome> {
-        let (outcome, changes) = self.store.transaction(|tx| delete_rows(tx, row_ids, now))?;
+    ///
+    /// The identifiers of the deleted messages go to my other devices, in
+    /// the same transaction (`SyncDelete`, at most `MAX_SYNC_DELETE_IDS`
+    /// per packet): those packets are returned. None on a device awaiting
+    /// its link or removed from my account: the deletion stays local.
+    pub fn delete_messages(
+        &mut self,
+        row_ids: &[i64],
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<(DeleteOutcome, Vec<Packet>)> {
+        let sync = self.syncs_deletions()?;
+        let Core { store, device, .. } = self;
+        let (outcome, changes, packets) = store.transaction(|tx| {
+            let (outcome, changes, ids) = delete_rows(tx, row_ids, now)?;
+            let packets = if sync {
+                seal_deletions(tx, device, &ids, now, rng)?
+            } else {
+                Vec::new()
+            };
+            Ok((outcome, changes, packets))
+        })?;
         // A failure notice for a message that no longer exists is moot.
         self.failed_notices
             .retain(|(_, row)| !row_ids.contains(row));
         self.note_changes(changes);
-        Ok(outcome)
+        Ok((outcome, packets))
     }
 
     /// `delete_messages` for one message.
-    pub fn delete_message(&mut self, row_id: i64, now: u64) -> Result<DeleteOutcome> {
-        self.delete_messages(&[row_id], now)
+    pub fn delete_message(
+        &mut self,
+        row_id: i64,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<(DeleteOutcome, Vec<Packet>)> {
+        self.delete_messages(&[row_id], now, rng)
+    }
+
+    /// A deletion (or a "seen") here goes to my other devices: this device
+    /// is linked and still in my account.
+    pub(super) fn syncs_deletions(&self) -> Result<bool> {
+        match self.ensure_active() {
+            Ok(()) => Ok(true),
+            Err(crate::CoreError::LinkPending | crate::CoreError::DeviceRemoved) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Deletes every sent message still `Pending` (none of its packets to
     /// the contact accepted by a node), all contacts: "Cancel all". The
     /// packets that expired undeposited are failed first (`expire_due`):
     /// their messages are `NotDelivered`, not cancelled. The list is read
-    /// in the deletion's transaction.
-    pub fn cancel_all_pending(&mut self, now: u64) -> Result<DeleteOutcome> {
+    /// in the deletion's transaction. The deletions go to my other devices
+    /// as for `delete_messages`, whose packets are returned.
+    pub fn cancel_all_pending(
+        &mut self,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<(DeleteOutcome, Vec<Packet>)> {
         self.expire_due(now)?;
-        let (outcome, rows) = self.store.transaction(|tx| {
+        let sync = self.syncs_deletions()?;
+        let Core { store, device, .. } = self;
+        let (outcome, rows) = store.transaction(|tx| {
             let rows: Vec<i64> = {
                 let mut stmt = tx
                     .conn()
@@ -634,24 +678,53 @@ impl Core {
                 .collect::<rusqlite::Result<_>>()
                 .map_err(map_err)?
             };
-            Ok((delete_rows(tx, &rows, now)?, rows))
+            let (outcome, changes, ids) = delete_rows(tx, &rows, now)?;
+            let packets = if sync {
+                seal_deletions(tx, device, &ids, now, rng)?
+            } else {
+                Vec::new()
+            };
+            Ok(((outcome, changes, packets), rows))
         })?;
-        let (outcome, changes) = outcome;
+        let (outcome, changes, packets) = outcome;
         self.failed_notices.retain(|(_, row)| !rows.contains(row));
         self.note_changes(changes);
-        Ok(outcome)
+        Ok((outcome, packets))
     }
 }
 
+/// Seals the identifiers `ids` of messages deleted here for my other
+/// devices (`SyncDelete`).
+fn seal_deletions(
+    q: &impl Queries,
+    device: &crate::identity::DeviceKeys,
+    ids: &[MessageId],
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Packet>> {
+    sync::seal_sync_chunks(
+        q,
+        device,
+        ids,
+        MAX_SYNC_DELETE_IDS,
+        |ids| ExtContent::SyncDelete { ids },
+        SyncKind::Delete,
+        now,
+        rng,
+    )
+}
+
 /// The deletion of `delete_messages`, inside the caller's transaction,
-/// with one change per deleted message.
+/// with one change and the identifier of each deleted message.
 fn delete_rows(
     q: &impl Queries,
     row_ids: &[i64],
     now: u64,
-) -> Result<(DeleteOutcome, Vec<Change>)> {
+) -> Result<(DeleteOutcome, Vec<Change>, Vec<MessageId>)> {
     let mut out = DeleteOutcome::default();
     let mut changes = Vec::new();
+    let mut ids = Vec::new();
+    let single = row_ids.len() == 1;
     for &row in row_ids {
         let found: Option<(Vec<u8>, i64, Vec<u8>)> = q
             .conn()
@@ -665,48 +738,126 @@ fn delete_rows(
         let Some((contact, direction, message)) = found else {
             continue;
         };
-        let contact = Fingerprint(arr(contact)?);
+        let stored = Stored {
+            row,
+            contact: Fingerprint(arr(contact)?),
+            direction,
+        };
         let message = MessageId(arr(message)?);
-        if direction == Direction::Out as i64 {
-            let gone = drop_deliveries(q, message)?;
-            match (gone.cancelled > 0, gone.left > 0) {
-                (true, false) => out.cancelled += 1,
-                (true, true) => out.partly_cancelled += 1,
-                (false, true) => out.already_left += 1,
-                (false, false) => {}
-            }
-            if gone.left > 0 && !out.still_receiving.contains(&contact) {
-                out.still_receiving.push(contact);
-            }
-            out.own_copies_kept |= gone.own_kept;
-            if row_ids.len() == 1 {
-                // "Part of it had already left: Alice will receive it on
-                // 1 of their 2 devices" (spec §6.7), from this transaction.
-                out.devices_left = gone.left;
-                out.devices_total = gone.left + gone.cancelled;
-            }
-        }
-        q.conn()
-            .execute("DELETE FROM messages WHERE id = ?1", params![row])
-            .map_err(map_err)?;
+        changes.push(delete_stored(q, &mut out, single, &stored, message, now)?);
+        ids.push(message);
+    }
+    log_deleted(q, &out, false, now)?;
+    Ok((out, changes, ids))
+}
+
+/// The deletion of the messages `ids` on another of my devices
+/// (`SyncDelete`), inside the caller's transaction: each identifier is
+/// tombstoned (a message arriving later is refused) and its reactions
+/// erased, then its row, if stored here, deleted as `delete_messages`
+/// does, with the same rules on its packets. One change per deleted row.
+/// Logs nothing: the caller does (`log_deleted`).
+pub(super) fn delete_by_message_ids(
+    q: &impl Queries,
+    ids: &[MessageId],
+    now: u64,
+) -> Result<(DeleteOutcome, Vec<Change>)> {
+    let mut out = DeleteOutcome::default();
+    let mut changes = Vec::new();
+    let single = ids.len() == 1;
+    for &message in ids {
         q.add_tombstone(message, now)?;
         q.delete_reactions_of(message)?;
-        out.deleted += 1;
-        changes.push((contact, row));
-    }
-    if out.deleted > 0 {
-        super::log(
-            q,
-            now,
-            None,
-            &TransparencyEvent::MessagesDeleted {
-                count: out.deleted,
-                cancelled: out.cancelled,
-                already_left: out.already_left + out.partly_cancelled,
-            },
-        )?;
+        let found: Option<(i64, Vec<u8>, i64)> = q
+            .conn()
+            .query_row(
+                "SELECT id, contact_fp, direction FROM messages WHERE message_id = ?1",
+                params![message.0.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(map_err)?;
+        let Some((row, contact, direction)) = found else {
+            continue;
+        };
+        let stored = Stored {
+            row,
+            contact: Fingerprint(arr(contact)?),
+            direction,
+        };
+        changes.push(delete_stored(q, &mut out, single, &stored, message, now)?);
     }
     Ok((out, changes))
+}
+
+/// The `MessagesDeleted` entry of a deletion that removed a row.
+/// `from_other_device`: applied from a `SyncDelete`.
+pub(super) fn log_deleted(
+    q: &impl Queries,
+    out: &DeleteOutcome,
+    from_other_device: bool,
+    now: u64,
+) -> Result<()> {
+    if out.deleted == 0 {
+        return Ok(());
+    }
+    super::log(
+        q,
+        now,
+        None,
+        &TransparencyEvent::MessagesDeleted {
+            count: out.deleted,
+            cancelled: out.cancelled,
+            already_left: out.already_left + out.partly_cancelled,
+            from_other_device,
+        },
+    )
+}
+
+/// A stored message row.
+struct Stored {
+    row: i64,
+    contact: Fingerprint,
+    direction: i64,
+}
+
+/// Deletes the stored message `message` (row `s`), counted in `out`: its
+/// packets (a sent message, spec §5.5), its row, its reactions, and a
+/// tombstone. `single`: the only message of the deletion. Returns its
+/// change.
+fn delete_stored(
+    q: &impl Queries,
+    out: &mut DeleteOutcome,
+    single: bool,
+    s: &Stored,
+    message: MessageId,
+    now: u64,
+) -> Result<Change> {
+    if s.direction == Direction::Out as i64 {
+        let gone = drop_deliveries(q, message)?;
+        match (gone.cancelled > 0, gone.left > 0) {
+            (true, false) => out.cancelled += 1,
+            (true, true) => out.partly_cancelled += 1,
+            (false, true) => out.already_left += 1,
+            (false, false) => {}
+        }
+        if gone.left > 0 && !out.still_receiving.contains(&s.contact) {
+            out.still_receiving.push(s.contact);
+        }
+        out.own_copies_kept |= gone.own_kept;
+        if single {
+            // "Part of it had already left: Alice will receive it on
+            // 1 of their 2 devices" (spec §6.7), from this transaction.
+            out.devices_left = gone.left;
+            out.devices_total = gone.left + gone.cancelled;
+        }
+    }
+    // The row, its reactions and its tombstone, as an expiry erases them;
+    // then the queued reaction packets about it, which an expiry keeps.
+    ephemeral::erase_row(q, s.row, now)?;
+    crate::store::drop_reaction_packets(q, "message_id = ?1", params![message.0.as_slice()])?;
+    out.deleted += 1;
+    Ok((s.contact, s.row))
 }
 
 /// What the deletion of a sent message did to its deliveries.
@@ -809,7 +960,7 @@ impl Core {
         now: u64,
     ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
         self.expire_due(now)?;
-        self.store.messages_with_delivery(*contact)
+        self.store.messages_with_delivery(*contact, now)
     }
 
     /// Delivery summaries of the messages `ids` that still exist, in the
@@ -825,7 +976,7 @@ impl Core {
         self.expire_due(now)?;
         let found: std::collections::HashMap<i64, Option<DeliverySummary>> = self
             .store
-            .deliveries_of(ids)?
+            .deliveries_of(ids, now)?
             .into_iter()
             .map(|(m, s)| (m.id, s))
             .collect();
@@ -844,7 +995,7 @@ impl Core {
         now: u64,
     ) -> Result<Option<MessageDeliveryDetail>> {
         self.expire_due(now)?;
-        self.store.message_delivery(row_id)
+        self.store.message_delivery(row_id, now)
     }
 
     /// Sent messages to `contact` with a delivery to the contact, per
@@ -852,7 +1003,7 @@ impl Core {
     /// due packets first.
     pub fn delivery_counts(&mut self, contact: &Fingerprint, now: u64) -> Result<[u32; 4]> {
         self.expire_due(now)?;
-        self.store.delivery_counts(*contact)
+        self.store.delivery_counts(*contact, now)
     }
 
     /// One page of the sent messages to `contact` in `state` with a
@@ -866,7 +1017,8 @@ impl Core {
         now: u64,
     ) -> Result<Vec<(MessageRow, DeliverySummary)>> {
         self.expire_due(now)?;
-        self.store.delivery_page(*contact, state, limit, offset)
+        self.store
+            .delivery_page(*contact, state, limit, offset, now)
     }
 
     /// Packets no node accepted yet that have not expired, classified

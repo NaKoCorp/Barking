@@ -118,4 +118,55 @@ final class CoreServiceTests: XCTestCase {
         let up = await core.sync(reason: .pull)
         XCTAssertEqual(up.lines, ["$ barking sync", "internet: 3 messages received, 1 sent"])
     }
+
+    // MARK: Final review 1: seen and deletions leave at once
+
+    /// Polls `device.syncEvents` until a sync started, or gives up after `timeout`.
+    private func syncStarted(_ device: FakeDevice, timeout: Duration = .seconds(5)) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if device.syncEvents.contains("sync") { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
+    /// An ephemeral seen here: my other devices must start its countdown
+    /// now, not at the next timer sync (the app may go to the background).
+    func testMarkSeenStartsASync() async throws {
+        let device = FakeDevice()
+        let core = CoreService(device: device, runner: DirectRunner())
+        try await core.markSeen([])
+        let none = await syncStarted(device, timeout: .milliseconds(300))
+        XCTAssertFalse(none, "nothing reported, nothing to send")
+        try await core.markSeen([7])
+        XCTAssertEqual(device.seen, [[7]])
+        let started = await syncStarted(device)
+        XCTAssertTrue(started, "\(device.syncEvents)")
+    }
+
+    /// A deletion that deleted something syncs at once (its `SyncDelete`
+    /// leaves for my other devices); one that deleted nothing does not.
+    func testDeletionStartsASyncWhenSomethingWasDeleted() async throws {
+        let deleted = DeleteOutcome(deleted: 1, cancelled: 0, partlyCancelled: 0, alreadyLeft: 1,
+                                    stillReceiving: [], ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0,
+                                    changes: [DeliveryChange(contact: "FP1", messageId: 7)])
+        let calls: [(String, (CoreService) async throws -> DeleteOutcome)] = [
+            ("one", { try await $0.deleteMessage(7) }),
+            ("several", { try await $0.deleteMessages([7, 8]) }),
+            ("cancel all", { try await $0.cancelAllPending() }),
+        ]
+        for (name, call) in calls {
+            let idle = FakeDevice()
+            _ = try await call(CoreService(device: idle, runner: DirectRunner()))
+            let none = await syncStarted(idle, timeout: .milliseconds(300))
+            XCTAssertFalse(none, "\(name): nothing deleted, no sync")
+
+            let device = FakeDevice()
+            device.deleteResult = deleted
+            _ = try await call(CoreService(device: device, runner: DirectRunner()))
+            let started = await syncStarted(device)
+            XCTAssertTrue(started, "\(name): \(device.syncEvents)")
+        }
+    }
 }

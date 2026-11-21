@@ -9,11 +9,11 @@ use super::log_limit::{LogLimiter, log_limited};
 use super::route::{self, RouteStep};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
-    SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, reactions, remove, removed,
-    ser_state, session_ad, session_id, sync,
+    SEEN_RETENTION_SECS, admin, contacts, de_state, ephemeral, load_card, log, reactions, remove,
+    removed, ser_state, session_ad, session_id, sync,
 };
 use crate::contact::ContactCard;
-use crate::content::{ExtContent, MessageRef, UnknownPolicy};
+use crate::content::{ExtContent, MessageRef, UNSEEN_CEILING_SECS, UnknownPolicy};
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
@@ -563,8 +563,8 @@ fn accept(
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
         }
-        // Extensible contents: replies and reactions, and kinds this version
-        // does not know (`accept_ext`).
+        // Extensible contents: replies, ephemeral messages and reactions,
+        // and kinds this version does not know (`accept_ext`).
         (
             Body::Ext {
                 kind,
@@ -591,11 +591,15 @@ fn accept(
             return accept_sync(q, limiter, packet, o, &env, device, admin, my_fp, now, rng);
         }
     };
-    record_message(q, limiter, packet, o, &env, text, None, transport, now, rng)
+    record_message(
+        q, limiter, packet, o, &env, text, None, None, transport, now, rng,
+    )
 }
 
-/// A text (or a reply, `reply_ref`) from a contact, once accepted: session
-/// written, message recorded, ack emitted.
+/// A text (or a reply, `reply_ref`, or an ephemeral, `ttl_secs`) from a
+/// contact, once accepted: session written, message recorded, ack emitted.
+/// An ephemeral is not seen yet: it is erased `UNSEEN_CEILING_SECS` after
+/// `now` unless one of my devices shows it first.
 #[allow(clippy::too_many_arguments)]
 fn record_message(
     q: &impl Queries,
@@ -605,6 +609,7 @@ fn record_message(
     env: &Envelope,
     text: String,
     reply_ref: Option<MessageRef>,
+    ttl_secs: Option<u32>,
     transport: &str,
     now: u64,
     rng: &mut impl CryptoRng,
@@ -628,6 +633,9 @@ fn record_message(
             reply_to: reply_ref.map(|r| r.resolve(false, &row.contact_fp)),
             reply_ref,
             placeholder: false,
+            ttl_secs,
+            seen_at: None,
+            expire_at: ttl_secs.map(|_| now.saturating_add(UNSEEN_CEILING_SECS)),
         })?;
     // Packet → message: found again through the emitted ack (`delete_contact`).
     q.record_inbound(packet.id, message_id, row.contact_fp)?;
@@ -660,12 +668,19 @@ fn record_message(
     if !inserted {
         return Ok((repeat_outcome(q, packet.id)?, new_prekeys));
     }
+    // An ephemeral born due (an earlier "seen" from another of my devices,
+    // `pending_seen`, already ran out): never openable, so never notified.
+    // Erased and tombstoned at once, as the sweep would; acked all the same.
+    if ttl_secs.is_some() && ephemeral::erase_if_due(q, message_id, now)? {
+        return Ok((ReceiveOutcome::Ignored, new_prekeys));
+    }
     Ok((
         ReceiveOutcome::Message {
             from: row.contact_fp,
             alias,
             text,
             ack,
+            ephemeral: ttl_secs.is_some(),
         },
         new_prekeys,
     ))
@@ -680,18 +695,21 @@ struct Ext<'a> {
 
 /// `Body::Ext` authenticated by a session. Sender x kind:
 ///
-/// | Sender | `Reply` / `Reaction` | `SyncReply` / `SyncReaction` | Unknown |
+/// | Sender | `Reply` / `Message` / `Reaction` | `SyncReply` / `SyncMessage` / `SyncReaction` / `SyncDelete` / `SyncSeen` | Unknown |
 /// |---|---|---|---|
 /// | A contact | accepted | `R_NOT_MINE` | `unknown` policy |
 /// | One of my devices | `R_UNEXPECTED` | the sync path | `unknown` policy |
 ///
 /// Every `Ext` from my own fingerprint first requires the sending device to
-/// be in my current list. A `Reply` is recorded like a text, a `Reaction`
-/// applied as the contact's (`accept_reaction`); `SyncReply` and
-/// `SyncReaction` go through the sync path (`accept_sync`). An unknown kind is
-/// acknowledged like a message (the sender stops resending it) and, per its
-/// `unknown` policy, ignored or shown as a placeholder asking for an update
-/// (never for my own devices: they would show it twice).
+/// be in my current list. A `Reply` or a `Message` is recorded like a text,
+/// a `Reaction` applied as the contact's (`accept_reaction`); `SyncReply`,
+/// `SyncMessage`, `SyncReaction`, `SyncDelete` and `SyncSeen` go through
+/// the sync path
+/// (`accept_sync`).
+/// An unknown kind is acknowledged like a message (the sender stops
+/// resending it) and, per its `unknown` policy, ignored or shown as a
+/// placeholder asking for an update (never for my own devices: they would
+/// show it twice).
 #[allow(clippy::too_many_arguments)]
 fn accept_ext(
     q: &impl Queries,
@@ -733,9 +751,26 @@ fn accept_ext(
                 env,
                 text,
                 Some(reply_to),
+                None,
                 transport,
                 now,
                 rng,
+            );
+        }
+        (
+            ExtContent::Message {
+                text,
+                reply_to,
+                ttl_secs,
+            },
+            false,
+        ) => {
+            // Blocked: dropped like a text (ratchet kept, no ack).
+            if q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+                return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+            }
+            return record_message(
+                q, limiter, packet, o, env, text, reply_to, ttl_secs, transport, now, rng,
             );
         }
         (ExtContent::Reaction { target, emojis }, false) => {
@@ -747,10 +782,24 @@ fn accept_ext(
                 q, limiter, packet, o, env, target, emojis, transport, now, rng,
             );
         }
-        (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, true) => {
+        (
+            ExtContent::SyncReply { .. }
+            | ExtContent::SyncMessage { .. }
+            | ExtContent::SyncReaction { .. }
+            | ExtContent::SyncDelete { .. }
+            | ExtContent::SyncSeen { .. },
+            true,
+        ) => {
             return accept_sync(q, limiter, packet, o, env, device, admin, my_fp, now, rng);
         }
-        (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, false) => sync::R_NOT_MINE,
+        (
+            ExtContent::SyncReply { .. }
+            | ExtContent::SyncMessage { .. }
+            | ExtContent::SyncReaction { .. }
+            | ExtContent::SyncDelete { .. }
+            | ExtContent::SyncSeen { .. },
+            false,
+        ) => sync::R_NOT_MINE,
         _ => R_UNEXPECTED,
     };
     reject_authenticated(q, limiter, packet, o, now, reason, id)
@@ -883,6 +932,9 @@ fn accept_unknown(
             reply_to: None,
             reply_ref: None,
             placeholder: true,
+            ttl_secs: None,
+            seen_at: None,
+            expire_at: None,
         })?;
     emit_ack(q, packet, env.ack_secret, now, rng)?;
     if !inserted {

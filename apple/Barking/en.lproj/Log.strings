@@ -24,7 +24,7 @@
 "log.this_device_removed" = "This device was removed from your account by a newer device list (version %1$@). It can no longer send; its root key, if it had one, was erased.";
 "log.device_removed" = "Your device “%1$@” (%2$@) was removed from your account. Your other devices and your contacts will no longer encrypt anything for it once they receive the new device list.";
 "log.remove_requested" = "Your device “%1$@” (%2$@) asked to leave your account and was removed from your device list.";
-"log.messages_deleted" = "Messages deleted from this device: %1$@. Cancelled before leaving it: %2$@. Already gone (the contact still receives them): %3$@.";
+"log.messages_deleted" = "Messages deleted from this device (%4$@): %1$@. Cancelled before leaving it: %2$@. Already gone (the contact still receives them): %3$@.";
 "log.unknown_content" = "Received content this version can’t read (kind %1$@). Acknowledged and set aside.";
 "log.arg.initiator" = "you opened it";
 "log.arg.responder" = "your contact opened it";
@@ -38,6 +38,10 @@
 "log.arg.sync_devices" = "device list";
 "log.arg.sync_admin" = "admin key";
 "log.arg.sync_reaction" = "reaction";
+"log.arg.sync_deletion" = "deletion";
+"log.arg.sync_seen" = "seen";
+"log.arg.deleted_here" = "asked on this device";
+"log.arg.deleted_elsewhere" = "asked from another of your devices";
 "log.arg.node_lost" = "a message deposited there was lost";
 "log.arg.node_unreachable" = "it kept failing to answer";
 "log.arg.intro_mailbox" = "First message of a session: its mailbox is computed from the public keys (signing and key agreement) of the recipient's device and the day.";

@@ -1,6 +1,8 @@
 //! Synchronization between my own devices: copies of my sent
-//! messages (`SyncSent`), operations on contacts (`SyncContact`) and
-//! new device list (`SyncDevices`).
+//! messages (`SyncSent`, `SyncReply`, `SyncMessage`), operations on
+//! contacts (`SyncContact`),
+//! new device list (`SyncDevices`), my deletions (`SyncDelete`), and the
+//! ephemeral messages I saw (`SyncSeen`).
 //!
 //! Sending: through the double ratchet sessions with my other devices
 //! (`Target::OwnDevices`), one delivery per packet so that their acks
@@ -18,7 +20,7 @@ use super::route::{self, RouteStep};
 use super::send::{SealTime, Target, seal_for};
 use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts, load_card, log};
 use crate::contact::ContactCard;
-use crate::content::ExtContent;
+use crate::content::{ExtContent, UNSEEN_CEILING_SECS};
 use crate::envelope::{self, Body, Envelope, SyncOp};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint};
@@ -78,6 +80,39 @@ pub(super) fn seal_to_own(
         route::record(q, packet.id, RouteStep::OwnCopy, time.now, None)?;
     }
     Ok(sealed.into_iter().map(|(p, _)| p).collect())
+}
+
+/// Seals `items` for my other devices in chunks of at most `cap`, each
+/// chunk's content made by `make`: one `seal_to_own` per chunk, under a
+/// fresh random message identifier, dated `now`. Without another device,
+/// nothing is sealed.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn seal_sync_chunks<T: Clone>(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    items: &[T],
+    cap: usize,
+    make: impl Fn(Vec<T>) -> ExtContent,
+    kind: SyncKind,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Packet>> {
+    let mut out = Vec::new();
+    for chunk in items.chunks(cap.max(1)) {
+        let mut id = [0u8; 16];
+        rng.fill_bytes(&mut id);
+        let body = make(chunk.to_vec()).to_body();
+        out.extend(seal_to_own(
+            q,
+            device,
+            &body,
+            kind,
+            MessageId(id),
+            SealTime::at(now),
+            rng,
+        )?);
+    }
+    Ok(out)
 }
 
 /// Queues my new card (`CardUpdate`) for each reachable device
@@ -360,10 +395,34 @@ pub(super) fn apply(
         Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
         Body::Ext { kind, data, .. } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
-            // Only `SyncReply` and `SyncReaction` are sync contents; any
-            // other kind is refused.
-            let (to, text, reply_to) = match ExtContent::decode(*kind, data) {
-                Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => (to, text, reply_to),
+            // Only `SyncReply`, `SyncMessage`, `SyncReaction`,
+            // `SyncDelete` and `SyncSeen` are sync contents; any other kind
+            // is refused.
+            let (to, text, reply_to, ttl_secs) = match ExtContent::decode(*kind, data) {
+                Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => {
+                    (to, text, Some(reply_to), None)
+                }
+                Ok(Some(ExtContent::SyncMessage {
+                    to,
+                    text,
+                    reply_to,
+                    ttl_secs,
+                })) => (to, text, reply_to, ttl_secs),
+                Ok(Some(ExtContent::SyncDelete { ids })) => {
+                    // As a deletion here, without sending it on: each
+                    // identifier is tombstoned even with no row yet.
+                    let (out, changes) = delivery::delete_by_message_ids(q, &ids, now)?;
+                    delivery::log_deleted(q, &out, true, now)?;
+                    for (contact, row) in changes {
+                        q.note_change(contact, row);
+                    }
+                    return Ok(Ok(Some(SyncKind::Delete)));
+                }
+                Ok(Some(ExtContent::SyncSeen { seen })) => {
+                    // Never sent on either: each device erases on its own.
+                    super::ephemeral::apply_seen(q, &seen, now)?;
+                    return Ok(Ok(Some(SyncKind::Seen)));
+                }
                 Ok(Some(ExtContent::SyncReaction { to, target, emojis }))
                     if to != own.list.root.fingerprint() =>
                 {
@@ -401,7 +460,9 @@ pub(super) fn apply(
                 return Ok(Err(R_SYNC_REFUSED));
             }
             // As `SyncSent`, with the quote: `reply_to` is resolved as my
-            // own packet's (I am the sealer's account).
+            // own packet's (I am the sealer's account). An ephemeral copy is
+            // not seen on this device yet: erased `UNSEEN_CEILING_SECS` after
+            // its arrival here, unless shown first.
             q.insert_message_row(&MessageInsert {
                 contact_fp: to,
                 direction: Direction::Out,
@@ -410,9 +471,12 @@ pub(super) fn apply(
                 at: env.sent_at,
                 message_id: MessageId(env.message_id),
                 wire_id: None,
-                reply_to: Some(reply_to.resolve(true, &to)),
-                reply_ref: Some(reply_to),
+                reply_to: reply_to.map(|r| r.resolve(true, &to)),
+                reply_ref: reply_to,
                 placeholder: false,
+                ttl_secs,
+                seen_at: None,
+                expire_at: ttl_secs.map(|_| now.saturating_add(UNSEEN_CEILING_SECS)),
             })?;
             Ok(Ok(Some(SyncKind::Sent)))
         }
@@ -468,14 +532,20 @@ pub(super) fn apply(
     }
 }
 
-/// The contact a `SyncSent`, `SyncReply` or `SyncReaction` body was sent to.
+/// The contact a `SyncSent`, `SyncReply`, `SyncMessage` or `SyncReaction`
+/// body was sent to.
+/// `None` for a `SyncDelete` or a `SyncSeen`: its messages may be of
+/// several contacts.
 pub(super) fn sent_to(body: &Body) -> Option<Fingerprint> {
     match body {
         Body::SyncSent { to, .. } => Some(*to),
         Body::Ext { kind, data, .. } => match ExtContent::decode(*kind, data) {
-            Ok(Some(ExtContent::SyncReply { to, .. } | ExtContent::SyncReaction { to, .. })) => {
-                Some(to)
-            }
+            Ok(Some(
+                ExtContent::SyncReply { to, .. }
+                | ExtContent::SyncMessage { to, .. }
+                | ExtContent::SyncReaction { to, .. },
+            )) => Some(to),
+            Ok(Some(ExtContent::SyncDelete { .. } | ExtContent::SyncSeen { .. })) => None,
             _ => None,
         },
         _ => None,

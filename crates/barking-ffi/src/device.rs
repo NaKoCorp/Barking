@@ -105,6 +105,19 @@ pub struct Message {
     /// the row asks for a newer version of the app.
     #[uniffi(default = false)]
     pub needs_update: bool,
+    /// Delay of an ephemeral message, in seconds: it is erased that long
+    /// after it is seen. `None` for a plain message.
+    #[uniffi(default = None)]
+    pub ttl_secs: Option<u32>,
+    /// Unix seconds an ephemeral was first seen on one of my devices;
+    /// `None` while it was never shown (or for a plain message). Until it
+    /// is set, `expire_at` is only the "never shown" ceiling.
+    #[uniffi(default = None)]
+    pub seen_at: Option<u64>,
+    /// Unix seconds an ephemeral is erased at (`seen_at + ttl_secs`, or the
+    /// "never shown" ceiling); `None` for a plain message.
+    #[uniffi(default = None)]
+    pub expire_at: Option<u64>,
 }
 
 #[derive(uniffi::Object)]
@@ -354,16 +367,22 @@ impl Device {
     /// `reply_to`: the row (`Message::id`) of a message of this conversation
     /// the text answers; `MessageNotFound` if it is not one (or is not
     /// quotable), nothing queued.
+    /// `ttl_secs`: an ephemeral message, erased that long after it is seen
+    /// (60 to 604 800 seconds, else `InvalidInput`, nothing queued); `None`
+    /// for a plain one.
+    #[uniffi::method(default(ttl_secs = None))]
     pub fn send_text(
         &self,
         contact: String,
         text: String,
         reply_to: Option<i64>,
+        ttl_secs: Option<u32>,
     ) -> Result<(), BarkingError> {
         guard(|| {
             self.with_core(|core| {
                 let fp = core.resolve(&contact)?;
-                core.send_message(&fp, &text, reply_to, now(), &mut rand::rng())?;
+                // The packets are queued by the core in its transaction.
+                core.send_message(&fp, &text, reply_to, ttl_secs, now(), &mut rand::rng())?;
                 Ok(())
             })
         })
@@ -403,6 +422,9 @@ pub(crate) fn message_of(
         reactions: chips_of(core, &m)?,
         my_reaction_state: core.my_reaction_state(m.id)?.map(state_of),
         needs_update: m.placeholder,
+        ttl_secs: m.ttl_secs,
+        seen_at: m.seen_at,
+        expire_at: m.expire_at,
         id: m.id,
         outgoing: m.direction == Direction::Out,
         body: m.body,

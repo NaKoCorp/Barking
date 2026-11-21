@@ -57,11 +57,17 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         }
     }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { routes[messageId] ?? [] }
-    func sendText(contact: String, text: String, replyTo: Int64?) throws {
+    func sendText(contact: String, text: String, replyTo: Int64?, ttlSecs: UInt32?) throws {
         if let sendError { throw sendError }
         Thread.sleep(forTimeInterval: syncDelay)
-        lock.withLock { _sent.append((contact, text, replyTo)) }
+        lock.withLock {
+            _sent.append((contact, text, replyTo))
+            _sentTtls.append(ttlSecs)
+        }
     }
+    private var _sentTtls: [UInt32?] = []
+    /// The delay of each `sendText`, in the order of `sent`.
+    var sentTtls: [UInt32?] { lock.withLock { _sentTtls } }
     func setReactions(message: Int64, emojis: [String]) throws {
         if let sendError { throw sendError }
         lock.withLock { _reactions[message] = emojis }
@@ -395,6 +401,29 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func pendingPackets() throws -> PendingPackets {
         if let deliveryError { throw deliveryError }
         return pendingInfo
+    }
+
+    // MARK: Ephemeral messages
+
+    private var _seen: [[Int64]] = []
+    /// The ids of each `markSeen` call, in order.
+    var seen: [[Int64]] { lock.withLock { _seen } }
+    func markSeen(ids: [Int64]) throws {
+        lock.withLock { _seen.append(ids) }
+    }
+    /// What `nextExpiry` returns.
+    var nextExpiryValue: UInt64?
+    func nextExpiry() throws -> UInt64? { lock.withLock { nextExpiryValue } }
+    /// What the next `expireEphemeral` returns (then empty).
+    var expiring: [Int64] = []
+    private var _expireCalls = 0
+    var expireCalls: Int { lock.withLock { _expireCalls } }
+    func expireEphemeral() throws -> [Int64] {
+        lock.withLock {
+            _expireCalls += 1
+            defer { expiring = [] }
+            return expiring
+        }
     }
 }
 

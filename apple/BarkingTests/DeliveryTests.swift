@@ -216,6 +216,9 @@ final class DeliveryCoreTests: XCTestCase {
         let seen = Seen(await core.changes)
         d.summary = summary(deliveryChanges: changes(("b", 1), ("c", 2)))
         _ = await core.sync(reason: .pull)
+        // The deletion starts a sync of its own: the fake must not hand
+        // the same changes again.
+        d.summary = summary(deliveryChanges: [])
         d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 1, partlyCancelled: 0, alreadyLeft: 0, stillReceiving: [],
                                        ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: changes(("b", 1)))
         _ = try await core.deleteMessage(1)
@@ -533,12 +536,5 @@ final class TriedDepositConfirmationTests: XCTestCase {
 
     func testUntriedStaysPending() {
         XCTAssertEqual(DeleteConfirmation(outgoing: true, delivery: delivery(devices: 1, tried: 0, pending: 1)), .pending)
-    }
-
-    func testTriedKeepsTheOwnCopies() {
-        let d = delivery(devices: 1, tried: 1, pending: 1)
-        XCTAssertTrue(DeleteConfirmation.keepsOwnCopies(delivery: d, ownCopies: OwnCopies(total: 1, left: 0, waiting: 1)))
-        XCTAssertFalse(DeleteConfirmation.keepsOwnCopies(delivery: delivery(devices: 1, tried: 0, pending: 1),
-                                                         ownCopies: OwnCopies(total: 1, left: 0, waiting: 1)))
     }
 }

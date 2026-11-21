@@ -160,6 +160,14 @@ pub(super) struct HistoryReaction {
     first_tie: [u8; 16],
 }
 
+#[cfg(test)]
+impl HistoryReaction {
+    /// The message the reaction is on.
+    pub(super) fn target(&self) -> MessageId {
+        MessageId(self.message_id)
+    }
+}
+
 /// The plaintext of an archive (before hash and signature): the messages,
 /// then the reactions of the same contacts.
 #[derive(Serialize, Deserialize, Default)]
@@ -259,10 +267,17 @@ fn chunk_ad(index: usize, count: usize) -> Result<[u8; 8]> {
 /// A's messages to archive: those of the `contacts` (copied into the
 /// link packet), in insertion order; then every reaction of those
 /// conversations, its target received or not.
+///
+/// Ephemeral messages are left out, with the reactions on them: the
+/// archive has no delay, so the new device would keep them for good.
 pub(super) fn export(q: &impl Queries, contacts: &HashSet<Fingerprint>) -> Result<History> {
     let mut out = History::default();
+    let mut ephemerals = HashSet::new();
     for mut row in q.all_messages()? {
-        if contacts.contains(&row.contact_fp) {
+        if row.ttl_secs.is_some() {
+            ephemerals.insert(row.message_id);
+            row.body.zeroize();
+        } else if contacts.contains(&row.contact_fp) {
             out.entries.push(HistoryEntry::from_row(row));
         } else {
             row.body.zeroize();
@@ -272,6 +287,9 @@ pub(super) fn export(q: &impl Queries, contacts: &HashSet<Fingerprint>) -> Resul
     sorted.sort_by_key(|fp| fp.0);
     for fp in sorted {
         for r in q.reactions_with(*fp)? {
+            if ephemerals.contains(&r.message_id) {
+                continue;
+            }
             out.reactions.push(HistoryReaction {
                 message_id: r.message_id.0,
                 contact: r.contact_fp,
@@ -410,6 +428,9 @@ pub(super) fn import(q: &impl Queries, history: &History) -> Result<u32> {
             reply_to: e.reply_to.map(MessageId),
             reply_ref: e.reply_ref,
             placeholder: e.placeholder,
+            ttl_secs: None,
+            seen_at: None,
+            expire_at: None,
         })? {
             inserted = inserted.saturating_add(1);
         }
@@ -652,7 +673,7 @@ mod tests {
         let archive = seal_archive(&secret, &root(1), &of(vec![e, ph]), &mut rng).unwrap();
         let opened = open_archive(&secret, &root(1).public(), &archive).unwrap();
         store.transaction(|tx| import(tx, &opened)).unwrap();
-        let rows = store.messages_with(fp(1)).unwrap();
+        let rows = store.messages_with(fp(1), 0).unwrap();
         assert_eq!(rows[0].wire_id, Some([4; 16]));
         assert_eq!(rows[0].reply_to, Some(MessageId([5; 16])));
         assert_eq!(rows[0].reply_ref, Some(reference));
@@ -674,9 +695,9 @@ mod tests {
         let again = open_archive(&secret, &root(1).public(), &archive).unwrap();
         let n = store.transaction(|tx| import(tx, &again)).unwrap();
         assert_eq!(n, 0);
-        assert_eq!(store.messages_with(fp(1)).unwrap().len(), 2);
-        assert_eq!(store.messages_with(fp(2)).unwrap().len(), 1);
-        let m = &store.messages_with(fp(1)).unwrap()[0];
+        assert_eq!(store.messages_with(fp(1), 0).unwrap().len(), 2);
+        assert_eq!(store.messages_with(fp(2), 0).unwrap().len(), 1);
+        let m = &store.messages_with(fp(1), 0).unwrap()[0];
         assert_eq!(
             (m.message_id, m.direction, m.status, m.at, m.body.as_str()),
             (

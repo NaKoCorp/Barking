@@ -379,6 +379,8 @@
 "Delete this message?" = "Supprimer ce message ?";
 "Delete from this iPhone?" = "Supprimer de cet iPhone ?";
 "Delete this message from this iPhone?" = "Supprimer ce message de cet iPhone ?";
+"Delete from all your devices?" = "Supprimer de tous vos appareils ?";
+"Delete this message from all your devices?" = "Supprimer ce message de tous vos appareils ?";
 "It hasn’t left this iPhone. %@ won’t receive it." = "Il n’a pas quitté cet iPhone. %@ ne le recevra pas.";
 "It’s already on the network: %@ will still receive it." = "Il est déjà sur le réseau : %@ le recevra quand même.";
 "%@ already received it and keeps it." = "%@ l’a déjà reçu et le garde.";
@@ -393,7 +395,6 @@
 "Couldn't resend the reaction." = "Impossible de renvoyer la réaction.";
 "This contact was removed. Nothing can be sent to them." = "Ce contact a été supprimé. Rien ne peut lui être envoyé.";
 "You" = "Vous";
-"Your other devices keep their copy." = "Vos autres appareils gardent leur copie.";
 
 /* Lot M §6.4, §7.2: the message sheet ("received %@" is shared with the path) */
 "Show all" = "Tout afficher";
@@ -443,6 +444,7 @@
 "Updates for your other devices · %lld" = "Mises à jour pour vos autres appareils · %lld";
 "Your card, for your contacts · %lld" = "Votre carte, pour vos contacts · %lld";
 "Reactions · %lld" = "Réactions · %lld";
+"Erased message · %lld" = "Message effacé · %lld";
 "Receipts tell your contacts their messages arrived. Copies and updates keep your other devices in step; copies hold your messages, encrypted. Barking sends them on its own, and they can’t be deleted here." = "Les accusés disent à vos contacts que leurs messages sont arrivés. Les copies et les mises à jour gardent vos autres appareils à jour ; les copies contiennent vos messages, chiffrés. Barking les envoie seul, ils ne se suppriment pas d’ici.";
 "Cancel all · %lld" = "Tout annuler · %lld";
 "Only your messages. Sync packets stay." = "Seulement vos messages. Les paquets de synchronisation restent.";
@@ -534,3 +536,23 @@
 "Resend reaction" = "Renvoyer la réaction";
 "Your reaction · %@" = "Votre réaction · %@";
 "Your reaction · removed" = "Votre réaction · retirée";
+"No delay" = "Aucun délai";
+"1 hour" = "1 heure";
+"1 day" = "1 jour";
+"1 week" = "1 semaine";
+"Custom…" = "Personnalisé…";
+"Custom delay" = "Délai personnalisé";
+"Set" = "Choisir";
+"Disappearing delay" = "Délai d’effacement";
+"%lld d" = "%lld j";
+"days" = "jours";
+"hours" = "heures";
+"minutes" = "minutes";
+"Disappears %1$@ after sending for you, %1$@ after reading for %2$@. %2$@ can take a screenshot." = "S’efface %1$@ après l’envoi chez vous, %1$@ après lecture chez %2$@. %2$@ peut faire une capture d’écran.";
+"<1 min" = "<1 min";
+"Disappearing message" = "Message éphémère";
+", disappearing message, disappears in %@" = ", message éphémère, s’efface dans %@";
+"Disappears after" = "S’efface après";
+"Disappears at" = "S’efface à";
+"less than a minute" = "moins d’une minute";
+"After reading" = "Après lecture";

@@ -1,4 +1,5 @@
-//! Contents carried by `Body::Ext`: replies and reactions.
+//! Contents carried by `Body::Ext`: replies, reactions, deletions synced
+//! to my other devices, and ephemeral messages.
 //!
 //! `Body::Ext { kind, unknown, data }` is the extensible envelope: `data` is
 //! the postcard of the kind's fields. A receiver that does not know a kind
@@ -24,6 +25,33 @@ pub const KIND_SYNC_REPLY: u16 = 2;
 pub const KIND_REACTION: u16 = 3;
 /// Kind number of [`ExtContent::SyncReaction`].
 pub const KIND_SYNC_REACTION: u16 = 4;
+/// Kind number of [`ExtContent::SyncDelete`].
+pub const KIND_SYNC_DELETE: u16 = 5;
+/// Kind number of [`ExtContent::Message`].
+pub const KIND_MESSAGE: u16 = 6;
+/// Kind number of [`ExtContent::SyncMessage`].
+pub const KIND_SYNC_MESSAGE: u16 = 7;
+/// Kind number of [`ExtContent::SyncSeen`].
+pub const KIND_SYNC_SEEN: u16 = 8;
+
+/// Shortest ephemeral delay: one minute.
+pub const MIN_TTL_SECS: u32 = 60;
+/// Longest ephemeral delay: seven days.
+pub const MAX_TTL_SECS: u32 = 604_800;
+/// An ephemeral never shown on a device is erased this long after it was
+/// inserted there (seven days).
+pub const UNSEEN_CEILING_SECS: u64 = 604_800;
+
+/// Most identifiers in one `SyncDelete`: 32 × 16 bytes keep it in tier M
+/// (1 024 bytes). A larger deletion goes in several packets.
+pub const MAX_SYNC_DELETE_IDS: usize = 32;
+
+/// Most entries in one `SyncSeen`: each takes 49 bytes plus its date (5
+/// bytes today, 10 at most: identifier, contact, date), and 14 keep the
+/// packet in tier M (1 024 bytes) whatever the dates
+/// (`sync_seen_cap_fits_tier_m`); 15 fit only with today's dates, 16 never.
+/// More go in several packets.
+pub const MAX_SYNC_SEEN: usize = 14;
 
 /// What a receiver does with a kind it does not know.
 ///
@@ -92,6 +120,18 @@ impl MessageRef {
     }
 }
 
+/// One ephemeral message shown on one of my devices (`SyncSeen`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SeenEntry {
+    /// Stored identifier of the message, the same on all my devices.
+    pub id: MessageId,
+    /// The conversation it belongs to: a block or a removal of this contact
+    /// drops the entries still waiting for their message (`pending_seen`).
+    pub contact: Fingerprint,
+    /// When it was first shown, on the sealer's clock.
+    pub at: u64,
+}
+
 /// A known content of `Body::Ext`.
 ///
 /// A kind never gains fields: its `data` is parsed with no trailing byte
@@ -118,6 +158,28 @@ pub enum ExtContent {
         target: MessageRef,
         emojis: Vec<String>,
     },
+    /// Messages I deleted on another of my devices (kind 5): 1 to
+    /// [`MAX_SYNC_DELETE_IDS`] identifiers, the same on all my devices.
+    SyncDelete { ids: Vec<MessageId> },
+    /// A text, answering `reply_to` or not, erased `ttl_secs` after it is
+    /// seen when that is set (kind 6). Only ephemeral sends use it: plain
+    /// texts and replies keep `Text` and `Reply`.
+    Message {
+        text: String,
+        reply_to: Option<MessageRef>,
+        ttl_secs: Option<u32>,
+    },
+    /// Copy of a `Message` I sent to `to` from another of my devices
+    /// (kind 7).
+    SyncMessage {
+        to: Fingerprint,
+        text: String,
+        reply_to: Option<MessageRef>,
+        ttl_secs: Option<u32>,
+    },
+    /// Ephemeral messages shown on another of my devices (kind 8): 1 to
+    /// [`MAX_SYNC_SEEN`] entries.
+    SyncSeen { seen: Vec<SeenEntry> },
 }
 
 impl fmt::Debug for ExtContent {
@@ -130,6 +192,12 @@ impl fmt::Debug for ExtContent {
             ExtContent::SyncReaction { emojis, .. } => {
                 write!(f, "SyncReaction(<{} emoji>)", emojis.len())
             }
+            ExtContent::SyncDelete { ids } => write!(f, "SyncDelete(<{} ids>)", ids.len()),
+            ExtContent::Message { text, .. } => write!(f, "Message(<{} bytes>)", text.len()),
+            ExtContent::SyncMessage { text, .. } => {
+                write!(f, "SyncMessage(<{} bytes>)", text.len())
+            }
+            ExtContent::SyncSeen { seen } => write!(f, "SyncSeen(<{} entries>)", seen.len()),
         }
     }
 }
@@ -161,6 +229,12 @@ fn check_text(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// `ttl_secs` is absent or within `MIN_TTL_SECS..=MAX_TTL_SECS`.
+#[must_use]
+pub fn ttl_in_bounds(ttl_secs: Option<u32>) -> bool {
+    ttl_secs.is_none_or(|t| (MIN_TTL_SECS..=MAX_TTL_SECS).contains(&t))
+}
+
 impl ExtContent {
     /// The `Body::Ext` carrying this content.
     #[must_use]
@@ -186,6 +260,42 @@ impl ExtContent {
                 UnknownPolicy::Ignore,
                 encode(&(to, target, emojis)),
             ),
+            ExtContent::SyncDelete { ids } => (
+                KIND_SYNC_DELETE,
+                UnknownPolicy::Ignore,
+                encode(&ids.iter().map(|id| id.0).collect::<Vec<_>>()),
+            ),
+            ExtContent::Message {
+                text,
+                reply_to,
+                ttl_secs,
+            } => (
+                KIND_MESSAGE,
+                UnknownPolicy::ShowUpdate,
+                encode(&(text, reply_to, ttl_secs)),
+            ),
+            // `Ignore` like `SyncReply`: an unknown kind from my own devices
+            // is never shown.
+            ExtContent::SyncMessage {
+                to,
+                text,
+                reply_to,
+                ttl_secs,
+            } => (
+                KIND_SYNC_MESSAGE,
+                UnknownPolicy::Ignore,
+                encode(&(to, text, reply_to, ttl_secs)),
+            ),
+            ExtContent::SyncSeen { seen } => (
+                KIND_SYNC_SEEN,
+                UnknownPolicy::Ignore,
+                encode(
+                    &seen
+                        .iter()
+                        .map(|e| (e.id.0, e.contact, e.at))
+                        .collect::<Vec<_>>(),
+                ),
+            ),
         };
         Body::Ext {
             kind,
@@ -200,7 +310,10 @@ impl ExtContent {
     /// one emoji in a set are a duplicate.
     ///
     /// # Errors
-    /// `Malformed` on bad or trailing bytes, `TooLarge` for a long text,
+    /// `Malformed` on bad or trailing bytes, for a `SyncDelete` without
+    /// identifier or with too many, for a `SyncSeen` without entry or with
+    /// too many, and for a delay out of
+    /// `MIN_TTL_SECS..=MAX_TTL_SECS`, `TooLarge` for a long text,
     /// `TooManyEmoji` or `InvalidEmoji` for a bad emoji set.
     pub fn decode(kind: u16, data: &[u8]) -> Result<Option<ExtContent>> {
         let content = match kind {
@@ -227,6 +340,42 @@ impl ExtContent {
                     emojis: canonical(&emojis),
                 }
             }
+            KIND_SYNC_DELETE => {
+                let ids: Vec<[u8; 16]> = parse(data)?;
+                ExtContent::SyncDelete {
+                    ids: ids.into_iter().map(MessageId).collect(),
+                }
+            }
+            KIND_MESSAGE => {
+                let (text, reply_to, ttl_secs) = parse(data)?;
+                ExtContent::Message {
+                    text,
+                    reply_to,
+                    ttl_secs,
+                }
+            }
+            KIND_SYNC_MESSAGE => {
+                let (to, text, reply_to, ttl_secs) = parse(data)?;
+                ExtContent::SyncMessage {
+                    to,
+                    text,
+                    reply_to,
+                    ttl_secs,
+                }
+            }
+            KIND_SYNC_SEEN => {
+                let seen: Vec<([u8; 16], Fingerprint, u64)> = parse(data)?;
+                ExtContent::SyncSeen {
+                    seen: seen
+                        .into_iter()
+                        .map(|(id, contact, at)| SeenEntry {
+                            id: MessageId(id),
+                            contact,
+                            at,
+                        })
+                        .collect(),
+                }
+            }
             _ => return Ok(None),
         };
         content.validate()?;
@@ -238,6 +387,29 @@ impl ExtContent {
             ExtContent::Reply { text, .. } | ExtContent::SyncReply { text, .. } => check_text(text),
             ExtContent::Reaction { emojis, .. } | ExtContent::SyncReaction { emojis, .. } => {
                 emoji::check_set(emojis)
+            }
+            ExtContent::SyncDelete { ids } => {
+                if (1..=MAX_SYNC_DELETE_IDS).contains(&ids.len()) {
+                    Ok(())
+                } else {
+                    Err(CoreError::Malformed("number of deleted messages"))
+                }
+            }
+            ExtContent::Message { text, ttl_secs, .. }
+            | ExtContent::SyncMessage { text, ttl_secs, .. } => {
+                check_text(text)?;
+                if ttl_in_bounds(*ttl_secs) {
+                    Ok(())
+                } else {
+                    Err(CoreError::Malformed("ephemeral delay"))
+                }
+            }
+            ExtContent::SyncSeen { seen } => {
+                if (1..=MAX_SYNC_SEEN).contains(&seen.len()) {
+                    Ok(())
+                } else {
+                    Err(CoreError::Malformed("number of seen messages"))
+                }
             }
         }
     }
@@ -260,5 +432,165 @@ mod tests {
         for b in [2, 7, 0x7f, 0x80, 0xff] {
             assert_eq!(read(b), UnknownPolicy::ShowUpdate, "{b}");
         }
+    }
+
+    fn ids(n: usize) -> Vec<MessageId> {
+        (0..n)
+            .map(|i| MessageId([u8::try_from(i).unwrap(); 16]))
+            .collect()
+    }
+
+    #[test]
+    fn message_kinds_round_trip() {
+        let to = Fingerprint([3; 32]);
+        let quote = MessageRef {
+            id: [1; 16],
+            by_sender: false,
+        };
+        for reply_to in [None, Some(quote)] {
+            for ttl_secs in [None, Some(MIN_TTL_SECS), Some(300), Some(MAX_TTL_SECS)] {
+                let message = ExtContent::Message {
+                    text: "hi".into(),
+                    reply_to,
+                    ttl_secs,
+                };
+                let copy = ExtContent::SyncMessage {
+                    to,
+                    text: "hi".into(),
+                    reply_to,
+                    ttl_secs,
+                };
+                for (content, kind, policy) in [
+                    (message, KIND_MESSAGE, UnknownPolicy::ShowUpdate),
+                    (copy, KIND_SYNC_MESSAGE, UnknownPolicy::Ignore),
+                ] {
+                    let Body::Ext {
+                        kind: k,
+                        unknown,
+                        data,
+                    } = content.to_body()
+                    else {
+                        panic!("Ext expected");
+                    };
+                    assert_eq!((k, unknown), (kind, policy));
+                    assert_eq!(ExtContent::decode(k, &data).unwrap(), Some(content));
+                    let mut trailing = data.clone();
+                    trailing.push(0);
+                    assert!(matches!(
+                        ExtContent::decode(k, &trailing),
+                        Err(CoreError::Malformed(_))
+                    ));
+                }
+            }
+        }
+        let long = ExtContent::Message {
+            text: "a".repeat(MAX_TEXT_LEN + 1),
+            reply_to: None,
+            ttl_secs: Some(300),
+        };
+        let Body::Ext { kind, data, .. } = long.to_body() else {
+            panic!("Ext expected");
+        };
+        assert_eq!(ExtContent::decode(kind, &data), Err(CoreError::TooLarge));
+        assert_eq!(
+            format!("{long:?}"),
+            format!("Message(<{} bytes>)", MAX_TEXT_LEN + 1)
+        );
+    }
+
+    #[test]
+    fn ttl_bounds_on_decode() {
+        let to = Fingerprint([3; 32]);
+        let raw = |ttl: u32| {
+            let message = postcard::to_allocvec(&("hi", None::<MessageRef>, Some(ttl))).unwrap();
+            let copy = postcard::to_allocvec(&(to, "hi", None::<MessageRef>, Some(ttl))).unwrap();
+            [(KIND_MESSAGE, message), (KIND_SYNC_MESSAGE, copy)]
+        };
+        for ttl in [59, 604_801, 0, u32::MAX] {
+            for (kind, data) in raw(ttl) {
+                assert!(
+                    matches!(
+                        ExtContent::decode(kind, &data),
+                        Err(CoreError::Malformed(_))
+                    ),
+                    "{kind} {ttl}"
+                );
+            }
+        }
+        for ttl in [60, 604_800] {
+            for (kind, data) in raw(ttl) {
+                assert!(
+                    ExtContent::decode(kind, &data).unwrap().is_some(),
+                    "{kind} {ttl}"
+                );
+            }
+        }
+    }
+
+    /// The largest message and its copy (longest text, a quote, the longest
+    /// delay) still fit in a packet.
+    #[test]
+    fn largest_message_fits_in_a_packet() {
+        let reply_to = Some(MessageRef {
+            id: [1; 16],
+            by_sender: true,
+        });
+        let text = "a".repeat(MAX_TEXT_LEN);
+        let ttl_secs = Some(MAX_TTL_SECS);
+        for content in [
+            ExtContent::Message {
+                text: text.clone(),
+                reply_to,
+                ttl_secs,
+            },
+            ExtContent::SyncMessage {
+                to: Fingerprint([3; 32]),
+                text: text.clone(),
+                reply_to,
+                ttl_secs,
+            },
+        ] {
+            assert!(crate::envelope::fits_in_packet(&content.to_body()));
+        }
+    }
+
+    #[test]
+    fn sync_delete_round_trips_and_refuses_bad_sizes() {
+        let full = ExtContent::SyncDelete {
+            ids: ids(MAX_SYNC_DELETE_IDS),
+        };
+        let Body::Ext {
+            kind,
+            unknown,
+            data,
+        } = full.to_body()
+        else {
+            panic!("Ext expected");
+        };
+        assert_eq!((kind, unknown), (KIND_SYNC_DELETE, UnknownPolicy::Ignore));
+        assert_eq!(ExtContent::decode(kind, &data).unwrap(), Some(full));
+        assert_eq!(
+            format!("{:?}", ExtContent::SyncDelete { ids: ids(3) }),
+            "SyncDelete(<3 ids>)"
+        );
+        let raw = |n: usize| {
+            let ids: Vec<[u8; 16]> = ids(n).iter().map(|m| m.0).collect();
+            postcard::to_allocvec(&ids).unwrap()
+        };
+        for n in [0, MAX_SYNC_DELETE_IDS + 1] {
+            assert!(
+                matches!(
+                    ExtContent::decode(KIND_SYNC_DELETE, &raw(n)),
+                    Err(CoreError::Malformed(_))
+                ),
+                "{n} ids"
+            );
+        }
+        let mut trailing = raw(1);
+        trailing.push(0);
+        assert!(matches!(
+            ExtContent::decode(KIND_SYNC_DELETE, &trailing),
+            Err(CoreError::Malformed(_))
+        ));
     }
 }

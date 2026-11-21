@@ -159,4 +159,44 @@ final class NotificationContentTests: XCTestCase {
         _ = NotificationContent.apply(summary([m]), to: n, preview: .nameOnly, locked: false)
         XCTAssertEqual(n.body, "New message")
     }
+
+    private func french() throws -> Bundle {
+        let kit = Bundle(for: FailureNotifier.Marker.self)
+        return try XCTUnwrap(kit.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+    }
+
+    /// An ephemeral never shows its text (spec §5.4): « Message éphémère »
+    /// with the name and with the name only; generic and locked keep "New message".
+    func testEphemeralNotificationHidesTextForAllPreviews() throws {
+        let fr = try french()
+        let m = NewMessage(contact: "FP1", name: "Alice", text: "", ephemeral: true)
+        for preview in [PushPreview.nameAndText, .nameOnly] {
+            let c = original()
+            XCTAssertEqual(NotificationContent.apply(summary([m]), to: c, preview: preview, locked: false, bundle: fr), "shown")
+            XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["Alice", "Message éphémère", "FP1"])
+            let en = original()
+            _ = NotificationContent.apply(summary([m]), to: en, preview: preview, locked: false)
+            XCTAssertEqual(en.body, "Disappearing message")
+        }
+        for (preview, locked) in [(PushPreview.generic, false), (.nameAndText, true)] {
+            let c = original()
+            _ = NotificationContent.apply(summary([m]), to: c, preview: preview, locked: locked)
+            XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "New message", ""])
+        }
+    }
+
+    /// A reaction to an ephemeral says so, without the emoji or any excerpt.
+    func testReactionOnEphemeralHidesEmoji() throws {
+        let r = NewReaction(contact: "FP1", name: "Alice", emojis: ["👍"], excerpt: nil, onEphemeral: true)
+        for preview in [PushPreview.nameAndText, .nameOnly] {
+            let c = original()
+            _ = NotificationContent.apply(summary([], reactions: [r]), to: c, preview: preview, locked: false)
+            XCTAssertEqual([c.title, c.body], ["Alice", "Reacted to a disappearing message"])
+            XCTAssertFalse(c.body.contains("👍"))
+            let fr = original()
+            _ = NotificationContent.apply(summary([], reactions: [r]), to: fr, preview: preview, locked: false,
+                                          bundle: try french())
+            XCTAssertEqual(fr.body, "A réagi à un message éphémère")
+        }
+    }
 }

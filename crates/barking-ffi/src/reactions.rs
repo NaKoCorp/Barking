@@ -59,9 +59,13 @@ pub struct NewReaction {
     /// The emoji added, in the order of the reactor's set.
     pub emojis: Vec<String>,
     /// Start of the message reacted to (`excerpt`, 40 characters); `None` if
-    /// it is gone.
+    /// it is gone, or ephemeral (`on_ephemeral`).
     #[uniffi(default = None)]
     pub excerpt: Option<String>,
+    /// The message reacted to is ephemeral: the notification never shows a
+    /// word of it.
+    #[uniffi(default = false)]
+    pub on_ephemeral: bool,
 }
 
 /// The first `max_chars` characters of `text`, then "…" when it was cut.
@@ -85,7 +89,7 @@ pub(crate) fn quote_of(core: &Core, m: &MessageRow) -> Result<Option<Quote>, Bar
     let Some(original) = m.reply_to else {
         return Ok(None);
     };
-    let found = core.message_in(&m.contact_fp, original)?;
+    let found = core.message_in(&m.contact_fp, original, now())?;
     let sealed_by_me = m.direction == Direction::Out;
     let author_is_me = match (&m.reply_ref, &found) {
         (Some(r), _) => r.by_sender == sealed_by_me,

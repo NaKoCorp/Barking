@@ -8,6 +8,9 @@ struct ConversationView: View {
     let core: CoreService
     @State private var model: ConversationModel
     @Environment(\.scenePhase) private var phase
+    /// Its cover hides the conversation: nothing is seen under it (nil in
+    /// previews and renders).
+    @Environment(LockController.self) private var lock: LockController?
     /// Told while this conversation is on screen: syncs every 15 s.
     @Environment(\.syncLoop) private var syncLoop
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -22,8 +25,8 @@ struct ConversationView: View {
     @State private var reactingTo: SheetTarget?
     /// The message the delete confirmation is open for, as it was then.
     @State private var confirming: ConversationModel.Item?
-    /// The confirmation adds "Your other devices keep their copy." (§7.4).
-    @State private var confirmingKeeps = false
+    /// My linked devices when the confirmation opened: its title says "all your devices".
+    @State private var confirmingDevices = 0
     /// The unverified banner's safety code, in a sheet: a
     /// `navigationDestination(isPresented:)` in the chats' path-bound stack
     /// looped SwiftUI's layout at 100 % CPU on the push.
@@ -130,7 +133,8 @@ struct ConversationView: View {
         .sheet(item: $reactingTo) { target in
             EmojiPicker { emoji in react(emoji, on: target.id) }
         }
-        .confirmationDialog(confirmation?.title ?? "", isPresented: confirmingShown,
+        .confirmationDialog(Text(verbatim: confirmation?.title(otherDevices: confirmingDevices) ?? ""),
+                            isPresented: confirmingShown,
                             titleVisibility: .visible, presenting: confirming) { item in
             Button(DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery).button, role: .destructive) {
                 Task { await model.delete(item.id, shown: item.delivery) }
@@ -138,7 +142,7 @@ struct ConversationView: View {
             Button("Keep", role: .cancel) {}
         } message: { item in
             Text(verbatim: DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery)
-                .message(name: model.name, keepsOwnCopies: confirmingKeeps))
+                .message(name: model.name))
         }
         // The message went meanwhile (deleted elsewhere): nothing to confirm (§9).
         .onChange(of: model.items.map(\.id)) { _, ids in
@@ -161,6 +165,11 @@ struct ConversationView: View {
         .onChange(of: phase) { _, new in
             if new == .background { Task { await model.saveDraft() } }
         }
+        // Ephemerals: erased when due and seen only while active and unlocked.
+        .onChange(of: phase, initial: true) { _, new in
+            Task { await model.phaseChanged(active: new == .active) }
+        }
+        .onChange(of: lock?.covered ?? false, initial: true) { _, covered in model.covered = covered }
         .onChange(of: model.draft) {
             draftSave?.cancel()
             draftSave = Task {
@@ -221,6 +230,10 @@ struct ConversationView: View {
                 BubbleMeta(state: item.state, at: item.at, alignment: side,
                            retry: item.state == .notDelivered ? { retry(item.id) } : nil)
             }
+            // Not grouped with the time: each ephemeral says how long it has left.
+            if !deleting, item.ttl != nil {
+                EphemeralCountdown(remaining: { item.remaining(at: $0) ?? 0 }, alignment: side)
+            }
         }
         .opacity(deleting ? 0.5 : 1)
         .onAppear { model.bubbleAppeared(item.id) }
@@ -265,7 +278,7 @@ struct ConversationView: View {
                 if failed {
                     Button { retry(item.id) } label: { Label("Retry", systemImage: "arrow.clockwise") }
                 }
-                if acts {
+                if item.canCopy {
                     Button { copy(item.text) } label: { Label("Copy", systemImage: "doc.on.doc") }
                 }
                 if saved {
@@ -275,7 +288,7 @@ struct ConversationView: View {
                 }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityValue(Text(verbatim: Self.spoken(item)))
+            .accessibilityValue(Text(verbatim: Self.spoken(item, now: .now, bundle: strings, locale: locale)))
             .accessibilityHint(saved ? Text("Opens the message details.") : Text(verbatim: ""))
             .accessibilityActions {
                 if acts {
@@ -287,12 +300,14 @@ struct ConversationView: View {
                 }
                 if resendable { Button("Resend reaction") { retryReaction(item.id) } }
                 if failed { Button("Retry") { retry(item.id) } }
-                if acts { Button("Copy") { copy(item.text) } }
+                if item.canCopy { Button("Copy") { copy(item.text) } }
                 if saved {
                     Button("Details") { sheetOf = SheetTarget(id: item.id) }
                     Button("Delete") { confirm(item) }
                 }
             }
+            // Seen once more than half of it is in the visible part of the list.
+            .onScrollVisibilityChange(threshold: 0.5) { model.bubbleVisibility(item.id, shown: $0) }
             .bubbleRow(outgoing: item.outgoing)
     }
 
@@ -326,19 +341,28 @@ struct ConversationView: View {
 
     /// The bubble's VoiceOver value (§7.1): the state sentence of a sent
     /// message, "Sent from another of your devices" without a record, the
-    /// time of a received one.
-    static func spoken(_ item: ConversationModel.Item) -> String {
+    /// time of a received one. An ephemeral adds how long it has left.
+    static func spoken(_ item: ConversationModel.Item, now: Date = .now, bundle: Bundle = .main,
+                       locale: Locale = .current) -> String {
+        let base: String
         if item.outgoing {
-            guard let d = item.delivery else { return BubbleMeta.sentElsewhere() }
-            return d.state.spoken(d)
+            if let d = item.delivery {
+                base = d.state.spoken(d, bundle: bundle, locale: locale)
+            } else {
+                base = BubbleMeta.sentElsewhere(bundle: bundle, locale: locale)
+            }
+        } else {
+            base = item.at.formatted(date: .omitted, time: .shortened)
         }
-        return item.at.formatted(date: .omitted, time: .shortened)
+        guard let left = item.remaining(at: now) else { return base }
+        let label = spokenRemainingLabel(seconds: left, bundle: bundle, locale: locale)
+        return base + String(localized: ", disappearing message, disappears in \(label)", bundle: bundle, locale: locale)
     }
 
-    /// Opens the delete confirmation once its own-copies line is known.
+    /// Opens the delete confirmation once my linked devices are counted.
     private func confirm(_ item: ConversationModel.Item) {
         Task {
-            confirmingKeeps = await model.keepsOwnCopies(item)
+            confirmingDevices = await model.otherDevices()
             confirming = item
         }
     }
@@ -393,12 +417,16 @@ struct ComposerView: View {
             if let banner = model.replyBanner(bundle: .strings(for: locale), locale: locale) {
                 replyBanner(banner)
             }
+            if let warning = model.ephemeralBanner(bundle: .strings(for: locale), locale: locale) {
+                ephemeralBanner(warning)
+            }
             if model.showsCounter {
                 Text(verbatim: "\(model.byteCount) / \(ConversationModel.maxBytes)")
                     .font(BarkingFont.mono(.caption2, size: 11))
                     .foregroundStyle(model.byteCount > ConversationModel.maxBytes ? Color.danger : Color.fgSoft)
             }
             HStack(spacing: 8) {
+                EphemeralMenu(model: model)
                 TextField("Message", text: $model.draft, axis: .vertical)
                     .lineLimit(1...5)
                     .padding(.horizontal, 14).padding(.vertical, 10)
@@ -425,6 +453,21 @@ struct ComposerView: View {
 }
 
 extension ComposerView {
+    /// When a delay is set: when the message erases for you and for the
+    /// contact, and that a screenshot stays possible (§5.5).
+    fileprivate func ephemeralBanner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "hourglass").font(.bSymbol(13, weight: .semibold, maximum: 20))
+                .foregroundStyle(Color.accent)
+            Text(verbatim: text).font(BarkingFont.sans(.footnote, size: 13))
+                .foregroundStyle(Color.fgMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("composer.delayBanner")
+    }
+
     /// "Replying to Sam", the start of the original, and an ✕ (§5.6). Not
     /// part of the draft.
     fileprivate func replyBanner(_ banner: (name: String, excerpt: String)) -> some View {

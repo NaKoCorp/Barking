@@ -226,6 +226,13 @@ pub struct MessageRow {
     pub reply_ref: Option<MessageRef>,
     /// Stands for content this version cannot read ("needs a newer version").
     pub placeholder: bool,
+    /// Delay after which an ephemeral message is erased once seen; `None`
+    /// for a message that is not ephemeral.
+    pub ttl_secs: Option<u32>,
+    /// When one of my devices first showed this ephemeral message.
+    pub seen_at: Option<u64>,
+    /// When this ephemeral message is erased from this device.
+    pub expire_at: Option<u64>,
 }
 
 /// A message row to insert (`Queries::insert_message_row`). Its body is
@@ -242,6 +249,9 @@ pub struct MessageInsert {
     pub reply_to: Option<MessageId>,
     pub reply_ref: Option<MessageRef>,
     pub placeholder: bool,
+    pub ttl_secs: Option<u32>,
+    pub seen_at: Option<u64>,
+    pub expire_at: Option<u64>,
 }
 
 impl Drop for MessageInsert {
@@ -354,6 +364,9 @@ impl fmt::Debug for MessageRow {
             .field("message_id", &self.message_id)
             .field("reply_to", &self.reply_to)
             .field("placeholder", &self.placeholder)
+            .field("ttl_secs", &self.ttl_secs)
+            .field("seen_at", &self.seen_at)
+            .field("expire_at", &self.expire_at)
             .finish()
     }
 }
@@ -504,6 +517,10 @@ pub enum PendingKind {
     CardUpdate,
     /// A reaction packet (to a contact's device, or a copy for one of mine).
     Reaction,
+    /// One of my messages to a contact whose row is gone: deleted after a
+    /// deposit was tried, or an ephemeral expired (or due) before it left.
+    /// It still goes; no text is left to show. Added last.
+    ErasedMessage,
 }
 
 /// One of my messages with packets to the contact still pending.
@@ -703,6 +720,12 @@ impl Store {
         hex.zeroize();
         pragma.zeroize();
         r.map_err(map_err)?;
+        Self::keyed(conn)
+    }
+
+    /// The end of `open`, once the key is set: checks it, turns
+    /// `secure_delete` on and brings the schema up to date.
+    fn keyed(conn: Connection) -> Result<Store> {
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
             r.get::<_, i64>(0)
         })
@@ -716,6 +739,14 @@ impl Store {
         };
         store.apply_schema()?;
         Ok(store)
+    }
+
+    /// `open` without the key step: an unencrypted database, with the same
+    /// schema and `secure_delete`, whose raw pages a test can read.
+    #[cfg(test)]
+    pub(crate) fn open_unencrypted(path: &Path) -> Result<Store> {
+        let conn = Connection::open(path).map_err(map_err)?;
+        Self::keyed(conn)
     }
 
     /// Opened by `open_read`: every write fails.
@@ -911,6 +942,9 @@ impl Store {
         self.conn
             .execute_batch(schema::REACTION_SENDS_TARGET_INDEX)
             .map_err(map_err)?;
+        if stored.is_none_or(|v| v < 5) {
+            schema::migrate_v4_to_v5(&self.conn).map_err(map_err)?;
+        }
         Ok(())
     }
 
@@ -1159,10 +1193,17 @@ pub trait Queries {
             reply_to: None,
             reply_ref: None,
             placeholder: false,
+            ttl_secs: None,
+            seen_at: None,
+            expire_at: None,
         })
     }
 
-    /// `insert_message` with the reply and wire columns. Same tombstone rule.
+    /// `insert_message` with the reply, wire and ephemeral columns. Same
+    /// tombstone rule. An ephemeral inserted takes the "seen" another of my
+    /// devices sent before it arrived (`pending_seen`, same conversation):
+    /// `seen_at` and `expire_at` lowered as `SyncSeen` does, the pending
+    /// row deleted.
     fn insert_message_row(&self, m: &MessageInsert) -> Result<bool> {
         let reply_ref = m
             .reply_ref
@@ -1174,8 +1215,9 @@ pub trait Queries {
             .conn()
             .execute(
                 "INSERT OR IGNORE INTO messages(message_id, contact_fp, direction, body, \
-                 status, at, wire_id, reply_to, reply_ref, placeholder) \
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 WHERE NOT EXISTS \
+                 status, at, wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, \
+                 expire_at) \
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13 WHERE NOT EXISTS \
                  (SELECT 1 FROM deleted_messages WHERE message_id = ?1)",
                 params![
                     m.message_id.0.as_slice(),
@@ -1188,10 +1230,69 @@ pub trait Queries {
                     m.reply_to.as_ref().map(|id| id.0.as_slice()),
                     reply_ref,
                     i64::from(m.placeholder),
+                    m.ttl_secs,
+                    m.seen_at.map(to_i64),
+                    m.expire_at.map(to_i64),
                 ],
             )
             .map_err(map_err)?;
+        if n == 1
+            && let Some(ttl) = m.ttl_secs
+        {
+            self.take_pending_seen(m.message_id, m.contact_fp, ttl)?;
+        }
         Ok(n == 1)
+    }
+
+    /// Applies and deletes the `pending_seen` row of the ephemeral
+    /// `message_id` just inserted (`insert_message_row`). A row of another
+    /// conversation is only deleted.
+    fn take_pending_seen(
+        &self,
+        message_id: MessageId,
+        contact_fp: Fingerprint,
+        ttl_secs: u32,
+    ) -> Result<()> {
+        let pending: Option<(Vec<u8>, i64)> = self
+            .conn()
+            .query_row(
+                "DELETE FROM pending_seen WHERE message_id = ?1 RETURNING contact_fp, seen_at",
+                params![message_id.0.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(map_err)?;
+        let Some((contact, seen_at)) = pending else {
+            return Ok(());
+        };
+        if contact != contact_fp.0 {
+            return Ok(());
+        }
+        let seen_at = to_u64(seen_at);
+        self.conn()
+            .execute(
+                "UPDATE messages SET seen_at = min(coalesce(seen_at, ?2), ?2), \
+                 expire_at = min(coalesce(expire_at, ?3), ?3) WHERE message_id = ?1",
+                params![
+                    message_id.0.as_slice(),
+                    to_i64(seen_at),
+                    to_i64(seen_at.saturating_add(u64::from(ttl_secs)))
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Drops the "seen" entries waiting for a message of the conversation
+    /// with `contact` (`pending_seen`): on its removal or its block.
+    fn delete_pending_seen_with(&self, contact: Fingerprint) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM pending_seen WHERE contact_fp = ?1",
+                params![contact.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(())
     }
 
     /// Tombstone of the message `message_id`, deleted at `at`:
@@ -1613,18 +1714,20 @@ pub trait Queries {
         Ok(n > 0)
     }
 
-    /// Messages of a contact, from oldest to newest.
-    fn messages_with(&self, contact_fp: Fingerprint) -> Result<Vec<MessageRow>> {
+    /// Messages of a contact shown at `now` (an ephemeral due is left
+    /// out, `live_sql`), from oldest to newest.
+    fn messages_with(&self, contact_fp: Fingerprint, now: u64) -> Result<Vec<MessageRow>> {
         let mut stmt = self
             .conn()
-            .prepare(
+            .prepare(&format!(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder \
-                 FROM messages WHERE contact_fp = ?1 ORDER BY at, id",
-            )
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
+                 FROM messages m WHERE contact_fp = ?1 AND {} ORDER BY at, id",
+                live_sql(2)
+            ))
             .map_err(map_err)?;
         let raws = stmt
-            .query_map(params![contact_fp.0.as_slice()], message_raw)
+            .query_map(params![contact_fp.0.as_slice(), to_i64(now)], message_raw)
             .map_err(map_err)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map_err)?;
@@ -1637,7 +1740,7 @@ pub trait Queries {
             .conn()
             .query_row(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder \
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
                  FROM messages WHERE id = ?1",
                 params![id],
                 message_raw,
@@ -1647,20 +1750,29 @@ pub trait Queries {
         raw.map(message_from_raw).transpose()
     }
 
-    /// The message `message_id` of the conversation with `contact_fp`; one
-    /// of another conversation reads as absent.
+    /// The message `message_id` of the conversation with `contact_fp`,
+    /// shown at `now`; one of another conversation, or an ephemeral due,
+    /// reads as absent.
     fn message_in(
         &self,
         contact_fp: Fingerprint,
         message_id: MessageId,
+        now: u64,
     ) -> Result<Option<MessageRow>> {
         let raw = self
             .conn()
             .query_row(
-                "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder \
-                 FROM messages WHERE message_id = ?1 AND contact_fp = ?2",
-                params![message_id.0.as_slice(), contact_fp.0.as_slice()],
+                &format!(
+                    "SELECT id, contact_fp, direction, body, status, at, message_id, \
+                     wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
+                     FROM messages m WHERE message_id = ?1 AND contact_fp = ?2 AND {}",
+                    live_sql(3)
+                ),
+                params![
+                    message_id.0.as_slice(),
+                    contact_fp.0.as_slice(),
+                    to_i64(now)
+                ],
                 message_raw,
             )
             .optional()
@@ -1674,7 +1786,7 @@ pub trait Queries {
             .conn()
             .prepare(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder \
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
                  FROM messages ORDER BY id",
             )
             .map_err(map_err)?;
@@ -1836,7 +1948,8 @@ pub trait Queries {
     /// unlike `seen`).
     fn message_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageRow>> {
         const COLS: &str = "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, \
-                            m.message_id, m.wire_id, m.reply_to, m.reply_ref, m.placeholder \
+                            m.message_id, m.wire_id, m.reply_to, m.reply_ref, m.placeholder, \
+                            m.ttl_secs, m.seen_at, m.expire_at \
                             FROM messages m";
         let out = self
             .conn()
@@ -1874,7 +1987,8 @@ pub trait Queries {
     /// card updates for its devices, my acknowledgements of its packets
     /// (messages, reactions, content set aside: the history is kept), and
     /// my reaction packets about the conversation, to it and to my other
-    /// devices, with their deliveries. The `SyncSent` copies of my
+    /// devices, with their deliveries, and the "seen" entries waiting for
+    /// one of its messages (`pending_seen`). The `SyncSent` copies of my
     /// messages for my other devices stay in the queue. Their pending
     /// deliveries are the caller's (`core::contacts::delete_in`).
     fn delete_contact(&self, fp: Fingerprint) -> Result<()> {
@@ -1962,6 +2076,7 @@ pub trait Queries {
         self.delete_draft(fp)?;
         self.delete_reactions_with(fp)?;
         self.drop_reaction_packets_with(fp)?;
+        self.delete_pending_seen_with(fp)?;
         self.conn()
             .execute(
                 "DELETE FROM contacts WHERE fp = ?1",
@@ -2233,6 +2348,7 @@ pub trait Queries {
     fn messages_with_delivery(
         &self,
         contact_fp: Fingerprint,
+        now: u64,
     ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
         summaries(
             self.conn(),
@@ -2241,12 +2357,17 @@ pub trait Queries {
             "",
             "m.at, m.id",
             &[&contact_fp.0.as_slice()],
+            now,
         )
     }
 
     /// `messages_with_delivery` for the rows `ids` (any contact), at most
     /// `SUMMARY_CHUNK` per query: the rows found, in no given order.
-    fn deliveries_of(&self, ids: &[i64]) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
+    fn deliveries_of(
+        &self,
+        ids: &[i64],
+        now: u64,
+    ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
         let mut out = Vec::with_capacity(ids.len());
         for chunk in ids.chunks(SUMMARY_CHUNK) {
             let marks = vec!["?"; chunk.len()].join(", ");
@@ -2259,6 +2380,7 @@ pub trait Queries {
                 "",
                 "m.id",
                 &args,
+                now,
             )?);
         }
         Ok(out)
@@ -2266,19 +2388,20 @@ pub trait Queries {
 
     /// Sent messages to `contact` with a delivery to the contact, per
     /// state: `[pending, on_network, received, not_delivered]`.
-    fn delivery_counts(&self, contact_fp: Fingerprint) -> Result<[u32; 4]> {
+    fn delivery_counts(&self, contact_fp: Fingerprint, now: u64) -> Result<[u32; 4]> {
         let mut stmt = self
             .conn()
-            .prepare(
+            .prepare(&format!(
                 "SELECT m.status, count(*) FROM messages m \
-                 WHERE m.contact_fp = ?1 AND m.direction = ?2 AND EXISTS ( \
+                 WHERE m.contact_fp = ?1 AND m.direction = ?2 AND {} AND EXISTS ( \
                  SELECT 1 FROM deliveries d WHERE d.message_id = m.message_id AND d.own = 0) \
                  GROUP BY m.status",
-            )
+                live_sql(3)
+            ))
             .map_err(map_err)?;
         let rows = stmt
             .query_map(
-                params![contact_fp.0.as_slice(), Direction::Out as i64],
+                params![contact_fp.0.as_slice(), Direction::Out as i64, to_i64(now)],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
             )
             .map_err(map_err)?
@@ -2305,6 +2428,7 @@ pub trait Queries {
         state: MessageStatus,
         limit: u32,
         offset: u32,
+        now: u64,
     ) -> Result<Vec<(MessageRow, DeliverySummary)>> {
         let rows = summaries(
             self.conn(),
@@ -2318,6 +2442,7 @@ pub trait Queries {
                 &i64::from(limit),
                 &i64::from(offset),
             ],
+            now,
         )?;
         Ok(rows
             .into_iter()
@@ -2329,10 +2454,17 @@ pub trait Queries {
     /// the contact, then to my devices) and the nodes that accepted its
     /// contact packets. `None` if unknown, received, or without any
     /// delivery to the contact.
-    fn message_delivery(&self, row_id: i64) -> Result<Option<MessageDeliveryDetail>> {
-        let Some((message, Some(summary))) =
-            summaries(self.conn(), "m.id = ?1", "m.id", "", "m.id", &[&row_id])?.pop()
-        else {
+    fn message_delivery(&self, row_id: i64, now: u64) -> Result<Option<MessageDeliveryDetail>> {
+        let Some((message, Some(summary))) = summaries(
+            self.conn(),
+            "m.id = ?1",
+            "m.id",
+            "",
+            "m.id",
+            &[&row_id],
+            now,
+        )?
+        .pop() else {
             return Ok(None);
         };
         let (deliveries, relays, own_copies) =
@@ -2426,6 +2558,7 @@ pub trait Queries {
                  FROM outbox o \
                  JOIN deliveries d ON d.packet_id = o.packet_id AND d.own = 0 \
                  JOIN messages m ON m.message_id = d.message_id AND m.direction = ?4 \
+                 AND (m.expire_at IS NULL OR m.expire_at > ?1) \
                  WHERE o.deposited_at IS NULL AND o.expires_at >= ?1 \
                  GROUP BY m.id ORDER BY min(o.expires_at), m.id",
             )
@@ -2474,13 +2607,15 @@ pub trait Queries {
             });
         }
         // Every other pending packet, with what classifies it: its kind,
-        // its delivery (`own`), its message row or tombstone, and the
-        // contact it concerns when known.
+        // its delivery (`own`), its shown message row, whether it carries a
+        // message at all (`erased`: a tombstone, or a row due and hidden),
+        // and the contact it concerns when known.
         let mut stmt = self
             .conn()
             .prepare(
                 "SELECT o.kind, d.packet_id IS NOT NULL, d.own, m.contact_fp, \
-                 EXISTS (SELECT 1 FROM deleted_messages t WHERE t.message_id = d.message_id), \
+                 EXISTS (SELECT 1 FROM deleted_messages t WHERE t.message_id = d.message_id) \
+                 OR EXISTS (SELECT 1 FROM messages mx WHERE mx.message_id = d.message_id), \
                  (SELECT mi.contact_fp FROM inbound i \
                   JOIN messages mi ON mi.message_id = i.message_id AND mi.direction = ?3 \
                   WHERE i.packet_id = o.ref LIMIT 1), \
@@ -2491,6 +2626,7 @@ pub trait Queries {
                  LEFT JOIN reaction_sends rs ON rs.packet_id = o.packet_id \
                  LEFT JOIN deliveries d ON d.packet_id = o.packet_id \
                  LEFT JOIN messages m ON m.message_id = d.message_id AND m.direction = ?2 \
+                 AND (m.expire_at IS NULL OR m.expire_at > ?1) \
                  WHERE o.deposited_at IS NULL AND o.expires_at >= ?1 \
                  AND NOT (d.own = 0 AND m.id IS NOT NULL)",
             )
@@ -2533,7 +2669,7 @@ pub trait Queries {
             delivered,
             own,
             row_contact,
-            tombstone,
+            erased,
             ack_contact,
             device_contact,
             reaction,
@@ -2549,11 +2685,15 @@ pub trait Queries {
                 // written so today; counted with my devices' sync.
                 (PendingKind::DeviceSync, None)
             } else if own == Some(true) {
-                if row_contact.is_some() || tombstone == Some(true) {
+                if row_contact.is_some() || erased == Some(true) {
                     (PendingKind::OwnCopy, row_contact)
                 } else {
                     (PendingKind::DeviceSync, None)
                 }
+            } else if erased == Some(true) {
+                // A message to the contact without its row: never shown as
+                // what it is not (a card update), never with a text.
+                (PendingKind::ErasedMessage, device_contact)
             } else {
                 (PendingKind::CardUpdate, device_contact)
             };
@@ -2627,7 +2767,14 @@ type MessageRaw = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     i64,
+    Option<u32>,
+    Option<i64>,
+    Option<i64>,
 );
+
+/// Columns `message_raw` reads, in order; the next one is the first after
+/// them.
+const MESSAGE_COLUMNS: usize = 14;
 
 /// Ids per query of `Queries::deliveries_of`.
 pub const SUMMARY_CHUNK: usize = 200;
@@ -2799,6 +2946,13 @@ fn summary_from_agg(state: MessageStatus, agg: SummaryAgg) -> Option<DeliverySum
     })
 }
 
+/// The condition, on `messages m`, that a row is shown at the date bound
+/// to parameter `?{index}`: not ephemeral, or not due yet. A due row is
+/// hidden before the sweep erases it (`core::ephemeral`).
+fn live_sql(index: usize) -> String {
+    format!("(m.expire_at IS NULL OR m.expire_at > ?{index})")
+}
+
 /// The delivery summary query of spec §5.8: messages matching `filter`,
 /// each with the aggregate of its deliveries to the contact (`own = 0`;
 /// a received message joins none), grouped per message. `group` lists
@@ -2811,18 +2965,27 @@ fn summaries(
     having: &str,
     order: &str,
     args: &[&dyn rusqlite::ToSql],
+    now: u64,
 ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
+    // `now` binds after `args`: numbered past them.
+    let live = live_sql(args.len() + 1);
+    let now = to_i64(now);
+    let mut all: Vec<&dyn rusqlite::ToSql> = args.to_vec();
+    all.push(&now);
     let sql = format!(
         "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, m.message_id, \
-         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, {SUMMARY_AGG_SQL} \
+         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, m.ttl_secs, m.seen_at, m.expire_at, \
+         {SUMMARY_AGG_SQL} \
          FROM messages m \
          LEFT JOIN deliveries d ON d.message_id = m.message_id AND d.own = 0 AND m.direction = 0 \
          LEFT JOIN outbox o ON o.packet_id = d.packet_id \
-         WHERE {filter} GROUP BY {group} {having} ORDER BY {order}"
+         WHERE ({filter}) AND {live} GROUP BY {group} {having} ORDER BY {order}"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(map_err)?;
     let raws = stmt
-        .query_map(args, |r| Ok((message_raw(r)?, summary_agg(r, 11)?)))
+        .query_map(all.as_slice(), |r| {
+            Ok((message_raw(r)?, summary_agg(r, MESSAGE_COLUMNS)?))
+        })
         .map_err(map_err)?
         .collect::<rusqlite::Result<Vec<(MessageRaw, SummaryAgg)>>>()
         .map_err(map_err)?;
@@ -2848,11 +3011,14 @@ fn message_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRaw> {
         r.get(8)?,
         r.get(9)?,
         r.get(10)?,
+        r.get(11)?,
+        r.get(12)?,
+        r.get(13)?,
     ))
 }
 
 fn message_from_raw(
-    (id, fp, dir, body, st, at, mid, wire, reply_to, reply_ref, placeholder): MessageRaw,
+    (id, fp, dir, body, st, at, mid, wire, reply_to, reply_ref, placeholder, ttl, seen, expire): MessageRaw,
 ) -> Result<MessageRow> {
     Ok(MessageRow {
         id,
@@ -2869,6 +3035,9 @@ fn message_from_raw(
             .transpose()
             .map_err(|_| CoreError::Store("invalid reply reference".into()))?,
         placeholder: placeholder != 0,
+        ttl_secs: ttl,
+        seen_at: seen.map(to_u64),
+        expire_at: expire.map(to_u64),
     })
 }
 

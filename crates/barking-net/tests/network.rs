@@ -506,7 +506,7 @@ fn assert_positions_kept(
 /// Incoming messages of `c` from `from`, in order.
 fn inbox(c: &Client, from: &Fingerprint) -> Vec<String> {
     c.core
-        .messages_with(from)
+        .messages_with(from, now())
         .unwrap()
         .into_iter()
         .filter(|m| m.direction == barking_core::store::Direction::In)
@@ -960,7 +960,7 @@ async fn deposit_and_fetch_record_route() {
     }
     assert_eq!(got, ["route"]);
 
-    let sent = alice.core.messages_with(&fb).unwrap()[0].id;
+    let sent = alice.core.messages_with(&fb, now()).unwrap()[0].id;
     let route = alice.core.message_route(sent).unwrap();
     assert!(
         route
@@ -968,7 +968,7 @@ async fn deposit_and_fetch_record_route() {
             .any(|e| e.step == RouteStep::Deposited && e.node.as_deref() == Some(node.as_str())),
         "{route:?}"
     );
-    let received = bob.core.messages_with(&fa).unwrap()[0].id;
+    let received = bob.core.messages_with(&fa, now()).unwrap()[0].id;
     let route = bob.core.message_route(received).unwrap();
     assert!(
         route
@@ -1017,7 +1017,7 @@ async fn sync_later(c: &mut Client, boot: (NodeId, SocketAddr), offset: u64) -> 
 
 fn status_of(c: &Client, contact: &Fingerprint, body: &str) -> MessageStatus {
     c.core
-        .messages_with(contact)
+        .messages_with(contact, now())
         .unwrap()
         .into_iter()
         .find(|m| m.body == body)
@@ -1061,7 +1061,7 @@ async fn sender_sees_not_delivered_after_relay_purge() {
     assert_eq!(status_of(&alice, &fb, "lost"), MessageStatus::NotDelivered);
     let row = alice
         .core
-        .messages_with(&fb)
+        .messages_with(&fb, now())
         .unwrap()
         .into_iter()
         .find(|m| m.body == "lost")

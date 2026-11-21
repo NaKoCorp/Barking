@@ -63,6 +63,9 @@ pub enum CoreError {
     /// Added last.
     #[error("message not found")]
     MessageNotFound,
+    /// An ephemeral delay outside `MIN_TTL_SECS..=MAX_TTL_SECS`. Added last.
+    #[error("invalid ephemeral delay")]
+    InvalidTtl,
 }
 
 impl From<barking_packet::PacketError> for CoreError {

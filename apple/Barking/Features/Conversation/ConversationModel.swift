@@ -28,10 +28,33 @@ final class ConversationModel {
         /// Send state of my reactions toward the contact; nil without a
         /// tracked send (the chip then keeps the neutral look).
         var myReactionState: DeliveryState?
+        /// The delay of an ephemeral, in seconds; nil for a plain message.
+        var ttl: UInt32?
+        /// When it was first seen (Unix seconds); nil while it waits.
+        var seenAt: UInt64?
+        /// When the core erases it (Unix seconds). While unseen, only the
+        /// 7-day ceiling.
+        var expireAt: UInt64?
+
+        /// Seconds left before it disappears at `now`: the whole delay while
+        /// unseen (the countdown has not started), else until `expireAt`.
+        /// nil for a plain message.
+        func remaining(at now: Date) -> Int? {
+            guard let ttl else { return nil }
+            guard seenAt != nil, let expireAt else { return Int(ttl) }
+            return Int(expireAt) - Int(now.timeIntervalSince1970.rounded(.down))
+        }
+
+        /// An ephemeral not seen yet: reported once on screen.
+        var awaitsSeen: Bool { ttl != nil && seenAt == nil && !local }
 
         /// A local row (not in the core yet) or a placeholder can be neither
         /// replied to, reacted to, nor copied.
         var canReplyOrReact: Bool { !local && !needsUpdate }
+
+        /// Copy is not offered on an ephemeral: the pasteboard would keep
+        /// its text after the message is erased.
+        var canCopy: Bool { canReplyOrReact && ttl == nil }
 
         /// The state under the bubble; nil shows the time only.
         var state: DeliveryState? { outgoing ? delivery?.state : nil }
@@ -120,6 +143,10 @@ final class ConversationModel {
     /// The message the next send answers. Not part of the draft (spec §5.6):
     /// it is kept when a send fails and dropped when its row is gone.
     private(set) var replyingTo: Item?
+    /// The disappearing delay of the next send, in seconds (spec §5.5). Never
+    /// part of the draft: it goes back to nil after a send and when the
+    /// conversation disappears; a failed send keeps it with the draft.
+    var ttl: UInt32?
     /// The row a tapped quote jumped to, lit for `highlightDuration`.
     private(set) var highlighted: Int64?
     var highlightDuration: Duration = .milliseconds(1500)
@@ -141,9 +168,36 @@ final class ConversationModel {
     var announce: (String) -> Void = { AccessibilityNotification.Announcement($0).post() }
     var now: () -> Date = Date.init
 
+    // MARK: Ephemerals (spec deletion/ephemeral §5.3, §5.5)
+
+    /// The scene is active: seen and the expiry timer only count then.
+    private var active = false
+    /// The app's lock screen is up: nothing on screen is seen.
+    var covered = false {
+        didSet { if covered != oldValue { reportSeen() } }
+    }
+    /// Bubbles more than half inside the visible part of the list.
+    private var visibleBubbles: Set<Int64> = []
+    /// Gathers what is seen and calls the core at most once a second.
+    let seen: SeenTracker
+    /// How the seen tracker waits (tests end the wait by hand).
+    var seenSleep: @Sendable (Duration) async throws -> Void {
+        get { seen.sleep }
+        set { seen.sleep = newValue }
+    }
+    /// How the expiry timer waits (tests end the wait by hand).
+    var expirySleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    /// Sleeps until the next ephemeral is due, then erases it; one at a time.
+    private(set) var expiryTimer: Task<Void, Never>?
+    /// A due time already past (the core's clock and this one differ):
+    /// wait this long rather than spin.
+    static let pastDueWait: Duration = .seconds(1)
+
     init(contact: String, core: CoreService) {
         self.contact = contact
         self.core = core
+        seen = SeenTracker()
+        seen.report = { [weak self] ids in await self?.markSeen(ids) ?? false }
     }
 
     /// The banner above the field while replying: who is quoted and the
@@ -157,6 +211,17 @@ final class ConversationModel {
         let line = item.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         return (item.outgoing ? String(localized: "You", bundle: bundle, locale: locale) : name,
                 String(line.prefix(Self.bannerChars)))
+    }
+
+    /// The warning above the field while a delay is set: when it erases here
+    /// and there, and that the contact can still take a screenshot.
+    func ephemeralBanner(bundle: Bundle = .main, locale: Locale = .current) -> String? {
+        guard let ttl else { return nil }
+        let delay = EphemeralDelay(seconds: ttl).longLabel(bundle: bundle, locale: locale)
+        let format = bundle.localizedString(
+            forKey: "Disappears %1$@ after sending for you, %1$@ after reading for %2$@. %2$@ can take a screenshot.",
+            value: nil, table: nil)
+        return String(format: format, locale: locale, delay, name)
     }
 
     /// What the quote of `item` shows: its author ("You" or the contact) and
@@ -210,7 +275,79 @@ final class ConversationModel {
 
     func onDisappear() {
         visible = false
+        ttl = nil
         onScreen = []
+        visibleBubbles = []
+        // What was seen in the last second is still told, not dropped.
+        seen.finish()
+        expiryTimer?.cancel()
+        expiryTimer = nil
+    }
+
+    /// The scene became active or left it. Active: erases what is due,
+    /// reloads (which arms the timer) and reports what is on screen. Not
+    /// active: the timer stops and nothing more is seen.
+    func phaseChanged(active: Bool) async {
+        self.active = active
+        guard active else {
+            expiryTimer?.cancel()
+            expiryTimer = nil
+            return
+        }
+        await expireDue()
+    }
+
+    /// A bubble is now more (or no longer more) than half on screen.
+    func bubbleVisibility(_ id: Int64, shown: Bool) {
+        if shown { visibleBubbles.insert(id) } else { visibleBubbles.remove(id) }
+        if shown { reportSeen() }
+    }
+
+    /// Hands the ephemerals on screen, not seen yet, to the tracker: only
+    /// with the conversation shown, the app active and its lock down.
+    private func reportSeen() {
+        guard visible, active, !covered else { return }
+        let ids = items.filter { $0.awaitsSeen && visibleBubbles.contains($0.id) }.map(\.id)
+        if !ids.isEmpty { seen.saw(ids) }
+    }
+
+    /// Tells the core, then reloads: the countdown starts and the next
+    /// expiry may come sooner.
+    private func markSeen(_ ids: [Int64]) async -> Bool {
+        do {
+            try await core.markSeen(ids)
+        } catch {
+            return false
+        }
+        await reload()
+        return true
+    }
+
+    /// Erases what is due now, then reloads (and arms the timer again).
+    private func expireDue() async {
+        _ = try? await core.expireEphemeral()
+        await reload()
+    }
+
+    /// One timer, to the next expiry, while the conversation is shown and
+    /// the app active. Called again after each reload.
+    private func armExpiry() async {
+        expiryTimer?.cancel()
+        expiryTimer = nil
+        guard visible, active, let due = (try? await core.nextExpiry()) ?? nil else { return }
+        // Another reload may have armed one meanwhile: this one replaces it.
+        expiryTimer?.cancel()
+        guard visible, active else { expiryTimer = nil; return }
+        let left = Double(due) - now().timeIntervalSince1970
+        let wait: Duration = left > 0 ? .milliseconds(Int64((left * 1000).rounded(.up))) : Self.pastDueWait
+        let sleep = expirySleep
+        expiryTimer = Task { [weak self] in
+            do { try await sleep(wait) } catch { return }
+            guard !Task.isCancelled, let self else { return }
+            // Its own reload arms the next one: nothing to cancel here.
+            self.expiryTimer = nil
+            await self.expireDue()
+        }
     }
 
     /// What a change of the core means here: `.messages` of this contact
@@ -221,6 +358,7 @@ final class ConversationModel {
         case .messages(let c) where c == contact: await reload()
         case .delivery(let c, let ids) where c == contact: await refresh(ids)
         case .contacts: await refreshContact()
+        case .expired(let ids) where items.contains(where: { ids.contains($0.id) }): await reload()
         default: break
         }
     }
@@ -245,7 +383,7 @@ final class ConversationModel {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)), delivery: $0.delivery,
                  quote: $0.replyTo, reactions: $0.reactions, needsUpdate: $0.needsUpdate,
-                 myReactionState: $0.myReactionState)
+                 myReactionState: $0.myReactionState, ttl: $0.ttlSecs, seenAt: $0.seenAt, expireAt: $0.expireAt)
         } + [shownAtSend].compactMap { $0 }
         // The row being answered left (deleted): nothing to answer any more.
         if let target = replyingTo, !items.contains(where: { $0.id == target.id }) { replyingTo = nil }
@@ -253,13 +391,19 @@ final class ConversationModel {
         if visible, let last = items.last(where: { !$0.outgoing }) {
             try? await core.markRead(contact, upTo: last.id)
         }
+        reportSeen()
+        await armExpiry()
     }
 
-    /// Fresh delivery of the rows `ids` shown here, patched in place.
+    /// Fresh delivery of the rows `ids` shown here, patched in place (and
+    /// announced, §8). An ephemeral named (seen on another of my devices:
+    /// its countdown changed) then reloads the conversation, which arms the
+    /// expiry timer again.
     func refresh(_ ids: [Int64]) async {
         let shown = ids.filter { id in items.contains { $0.id == id } }
-        guard !shown.isEmpty, let updates = try? await core.deliveriesOf(shown) else { return }
-        apply(updates)
+        let ephemeral = items.contains { $0.ttl != nil && shown.contains($0.id) }
+        if !shown.isEmpty, let updates = try? await core.deliveriesOf(shown) { apply(updates) }
+        if ephemeral { await reload() }
     }
 
     /// Replaces the delivery of the rows named (identity by message id);
@@ -314,6 +458,7 @@ final class ConversationModel {
         notice = nil
         let at = now()
         let replyId = replyingTo?.id
+        let delay = ttl
         let shown = Item(id: nextLocalId, outgoing: true, text: text, at: at,
                          delivery: Delivery(state: .pending, sealedAt: UInt64(at.timeIntervalSince1970),
                                             depositedAt: nil, receivedAt: nil, expiredAt: nil, devices: 0,
@@ -323,8 +468,9 @@ final class ConversationModel {
         shownAtSend = shown
         items.append(shown)
         do {
-            try await core.send(text, to: contact, replyTo: replyId)
+            try await core.send(text, to: contact, replyTo: replyId, ttlSecs: delay)
             replyingTo = nil
+            ttl = nil
             // Sent: the stored draft goes too. Not before, so a failure keeps it.
             if (try? await core.setDraft(contact, text: "")) != nil { lastSaved = "" }
         } catch {
@@ -456,16 +602,10 @@ final class ConversationModel {
         }
     }
 
-    /// Whether deleting `item` keeps a copy for my other devices: the
-    /// confirmation then says so on its own line (§5.1, §7.4).
-    func keepsOwnCopies(_ item: Item) async -> Bool {
-        guard item.outgoing else {
-            // A received message: my linked devices got their own packet.
-            return ((try? await core.myDevices()) ?? []).contains { !$0.thisDevice }
-        }
-        // Sent from another device: its confirmation already says it.
-        guard item.delivery != nil, let sheet = try? await core.messageDelivery(item.id) else { return false }
-        return DeleteConfirmation.keepsOwnCopies(delivery: sheet.delivery, ownCopies: sheet.ownCopies)
+    /// How many of my other devices are linked: the deletion goes to all of
+    /// them, and the confirmation's title says "all your devices".
+    func otherDevices() async -> Int {
+        ((try? await core.myDevices()) ?? []).filter { !$0.thisDevice }.count
     }
 
     /// After a deletion made in the message sheet: its banner, or none (§6.7).
@@ -525,5 +665,72 @@ struct DeliveryAnnouncements {
         notDelivered = 0
         lastAt = now
         return parts.joined(separator: " ")
+    }
+}
+
+/// Gathers the ephemerals seen on screen and tells the core at most once a
+/// second (spec deletion/ephemeral §5.5): the first sighting opens a
+/// one-second window, the next ones join it, and its end reports them all
+/// in one call. An id is reported once; a failed report forgets its ids,
+/// so the next sighting tries again. Leaving (`finish`) reports what waits
+/// at once.
+@MainActor
+final class SeenTracker {
+    static let interval: Duration = .seconds(1)
+    /// Tells the core; true when it took them.
+    var report: @MainActor ([Int64]) async -> Bool
+    var sleep: @Sendable (Duration) async throws -> Void
+    private var waiting: [Int64] = []
+    private var reported: Set<Int64> = []
+    /// The window open now, if any.
+    private(set) var flushTask: Task<Void, Never>?
+    /// The report made on leaving, apart from the windows: a return to the
+    /// conversation opens new ones at once.
+    private(set) var leaveTask: Task<Void, Never>?
+
+    init(sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+         report: @escaping @MainActor ([Int64]) async -> Bool = { _ in true }) {
+        self.sleep = sleep
+        self.report = report
+    }
+
+    /// These ids are on screen now.
+    func saw(_ ids: [Int64]) {
+        for id in ids where !reported.contains(id) && !waiting.contains(id) { waiting.append(id) }
+        guard !waiting.isEmpty, flushTask == nil else { return }
+        let sleep = self.sleep
+        flushTask = Task { [weak self] in
+            do { try await sleep(Self.interval) } catch { return }
+            await self?.flush()
+        }
+    }
+
+    private func flush() async {
+        let ids = waiting
+        waiting = []
+        flushTask = nil
+        guard !ids.isEmpty else { return }
+        reported.formUnion(ids)
+        if !(await report(ids)) { reported.subtract(ids) }
+    }
+
+    /// The conversation left: what waits in the window is reported now
+    /// (leaving within the second must not lose it), then nothing is
+    /// remembered.
+    func finish() {
+        flushTask?.cancel()
+        flushTask = nil
+        let ids = waiting
+        waiting = []
+        reported = []
+        guard !ids.isEmpty else { return }
+        let report = self.report
+        leaveTask = Task { _ = await report(ids) }
+    }
+
+    /// Tests: waits for the window open now, and the leave report, to report.
+    func waitForFlush() async {
+        await leaveTask?.value
+        await flushTask?.value
     }
 }

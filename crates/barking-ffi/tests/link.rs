@@ -25,7 +25,9 @@ fn link_two_devices_with_history() {
     let fb = alice
         .add_contact_bytes(bob.contact_card_bytes().unwrap(), Some("bob".into()))
         .unwrap();
-    alice.send_text(fb.clone(), "hello".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "hello".into(), None, None)
+        .unwrap();
     let offer = alice.link_offer().unwrap();
     assert!(offer.len() < 100);
     let pending = begin_link(config(&dt, 3), offer, "tablet".into()).unwrap();

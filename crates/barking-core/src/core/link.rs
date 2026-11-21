@@ -1114,7 +1114,7 @@ mod tests {
         );
         assert_still_pending(&mut t, &mut rng);
         t.finish_link(&bundle, None, NOW).unwrap();
-        assert!(t.messages_with(&c1).unwrap().is_empty());
+        assert!(t.messages_with(&c1, NOW).unwrap().is_empty());
     }
 
     #[test]

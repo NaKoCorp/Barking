@@ -158,6 +158,21 @@ final class ChatsModelTests: XCTestCase {
         XCTAssertEqual(Trust(verified: true), .verified)
     }
 
+    /// The last message is ephemeral: the list never shows its text
+    /// (spec §5.5), only that it disappears.
+    func testChatRowShowsDisappearingPreview() async {
+        let d = FakeDevice()
+        d.contactList = [contact("a", "Léa")]
+        d.messageList = ["a": [Message(id: 1, outgoing: false, body: "plain", at: 100),
+                               Message(id: 2, outgoing: false, body: "secret", at: 200, ttlSecs: 300)]]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        XCTAssertEqual(m.rows.first?.line, .disappearing)
+        d.messageList = ["a": [Message(id: 1, outgoing: false, body: "plain", at: 100)]]
+        await m.reload()
+        XCTAssertEqual(m.rows.first?.line, .preview("plain"), "after the expiry, the message before")
+    }
+
     /// B4 carry: the conversation title stays inside the bar at AX sizes.
     func testChatTitleIsCappedForTheBar() {
         let ax5 = UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge)

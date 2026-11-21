@@ -306,65 +306,57 @@ final class MessageSheetModelTests: XCTestCase {
         await received.load()
         XCTAssertEqual(received.content, .received)
         XCTAssertEqual(received.confirmation, .receivedMessage)
-        XCTAssertEqual(received.confirmation.title, "Delete this message from this iPhone?")
+        XCTAssertEqual(received.confirmation.title(otherDevices: 0, bundle: try lang("en").bundle, locale: Locale(identifier: "en")),
+                       "Delete this message from this iPhone?")
     }
 
-    /// §5.1 and §7.4: "Your other devices keep their copy." only when
-    /// devices are linked and the deletion keeps a copy for them.
-    func testOwnCopiesSentenceOnlyWhenKept() async throws {
+    /// The copies line follows §5.1; the confirmation counts my linked
+    /// devices (the deletion goes to all of them) and never says they keep a copy.
+    func testOwnCopiesLineAndLinkedDevicesTitle() async throws {
         let none = OwnCopies(total: 0, left: 0, waiting: 0)
         let waiting = OwnCopies(total: 1, left: 0, waiting: 1)
         let gone = OwnCopies(total: 1, left: 1, waiting: 0)
         let pending = delivery(.pending, pending: 1)
         let onNetwork = delivery(.onNetwork, deposited: t0 + 1, left: 1)
-        XCTAssertFalse(DeleteConfirmation.keepsOwnCopies(delivery: onNetwork, ownCopies: none), "no linked device")
-        XCTAssertFalse(DeleteConfirmation.keepsOwnCopies(delivery: pending, ownCopies: waiting),
-                       "nobody receives it: the copy is cancelled too")
-        XCTAssertTrue(DeleteConfirmation.keepsOwnCopies(delivery: pending, ownCopies: gone),
-                      "a copy that left cannot be recalled")
-        XCTAssertTrue(DeleteConfirmation.keepsOwnCopies(delivery: onNetwork, ownCopies: waiting))
-        XCTAssertTrue(DeleteConfirmation.keepsOwnCopies(delivery: onNetwork, ownCopies: gone))
-
         let en = try lang("en")
-        XCTAssertEqual(DeleteConfirmation.onNetwork.message(name: "Alice", keepsOwnCopies: true,
-                                                            bundle: en.bundle, locale: en.locale),
-                       "It’s already on the network: Alice will still receive it.\nYour other devices keep their copy.")
-        XCTAssertEqual(DeleteConfirmation.onNetwork.message(name: "Alice", keepsOwnCopies: false,
-                                                            bundle: en.bundle, locale: en.locale),
-                       "It’s already on the network: Alice will still receive it.")
-        XCTAssertEqual(DeleteConfirmation.sentElsewhere.message(name: "Alice", keepsOwnCopies: true,
-                                                                bundle: en.bundle, locale: en.locale),
-                       "Your other devices keep their copy.", "said once")
 
-        // The sheet: copies line and the confirmation follow the same rule.
         let d = FakeDevice()
         let m = make(d)
         d.messageDeliveries[7] = sheet(pending, own: waiting)
         await m.load()
-        XCTAssertFalse(m.keepsOwnCopies)
         XCTAssertEqual(m.ownCopies, "Copy for your other devices: pending.")
         d.messageDeliveries[7] = sheet(onNetwork, own: gone)
         d.routes[7] = [RouteStepInfo(at: t0 + 5, step: "deposited", node: "K7QX2M4A", size: nil, deviceName: nil, own: true)]
         await m.load()
-        XCTAssertTrue(m.keepsOwnCopies)
         let left = Date(timeIntervalSince1970: TimeInterval(t0 + 5)).formatted(.dateTime.hour().minute())
         XCTAssertEqual(m.ownCopies, "Copy for your other devices: left at \(left).")
         d.messageDeliveries[7] = sheet(onNetwork, own: none)
         await m.load()
         XCTAssertNil(m.ownCopies, "absent without a linked device")
-        XCTAssertFalse(m.keepsOwnCopies)
+        XCTAssertEqual(m.otherDevices, 0)
+        XCTAssertEqual(m.confirmationTitle(bundle: en.bundle, locale: en.locale), "Delete from this iPhone?")
+        XCTAssertEqual(m.confirmationMessage(bundle: en.bundle, locale: en.locale),
+                       "It’s already on the network: Alice will still receive it.")
 
-        // A received message: my linked devices got their own packet.
+        // A linked device, even for a message sent before the link (no own copy).
+        d.devicesList = [MyDeviceInfo(id: "aa", name: "iPhone", issuedAt: 1, thisDevice: true, admin: true),
+                         MyDeviceInfo(id: "bb", name: "iPad", issuedAt: 1, thisDevice: false, admin: false)]
+        await m.load()
+        XCTAssertEqual(m.otherDevices, 1)
+        XCTAssertEqual(m.confirmationTitle(bundle: en.bundle, locale: en.locale), "Delete from all your devices?")
+
+        // A received message.
         let r = FakeDevice()
         let received = make(r, outgoing: false)
         r.devicesList = [MyDeviceInfo(id: "aa", name: "iPhone", issuedAt: 1, thisDevice: true, admin: true)]
         await received.load()
-        XCTAssertFalse(received.keepsOwnCopies)
+        XCTAssertEqual(received.otherDevices, 0)
         r.devicesList.append(MyDeviceInfo(id: "bb", name: "iPad", issuedAt: 1, thisDevice: false, admin: false))
         await received.load()
-        XCTAssertTrue(received.keepsOwnCopies)
-        XCTAssertEqual(received.confirmationMessage(bundle: en.bundle, locale: en.locale),
-                       "Alice keeps their copy.\nYour other devices keep their copy.")
+        XCTAssertEqual(received.otherDevices, 1)
+        XCTAssertEqual(received.confirmationTitle(bundle: en.bundle, locale: en.locale),
+                       "Delete this message from all your devices?")
+        XCTAssertEqual(received.confirmationMessage(bundle: en.bundle, locale: en.locale), "Alice keeps their copy.")
     }
 
     // MARK: Devices

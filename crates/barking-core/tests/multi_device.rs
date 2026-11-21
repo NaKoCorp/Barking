@@ -545,7 +545,7 @@ fn sent_on_a_appears_on_t() {
     // One packet for Bob, one `SyncSent` for T, the same identifier.
     let pkts = a.core.send_text(&bob_fp, "hello", NOW, &mut rng).unwrap();
     assert_eq!(pkts.len(), 2);
-    let sent = a.core.messages_with(&bob_fp).unwrap();
+    let sent = a.core.messages_with(&bob_fp, NOW).unwrap();
     assert_eq!(sent.len(), 1);
     let mut on_t = Vec::new();
     for p in &pkts {
@@ -561,7 +561,7 @@ fn sent_on_a_appears_on_t() {
     }
     assert_eq!(on_t.len(), 1);
     assert_eq!(on_t[0].0, SyncKind::Sent);
-    let rows = t.core.messages_with(&bob_fp).unwrap();
+    let rows = t.core.messages_with(&bob_fp, NOW).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         (
@@ -583,7 +583,7 @@ fn sent_on_a_appears_on_t() {
             ReceiveOutcome::Duplicate | ReceiveOutcome::NotForUs
         ));
     }
-    assert_eq!(t.core.messages_with(&bob_fp).unwrap().len(), 1);
+    assert_eq!(t.core.messages_with(&bob_fp, NOW).unwrap().len(), 1);
 
     // T's ack removes the `SyncSent` from A's queue, but the message
     // for Bob is not delivered for all that.
@@ -600,7 +600,7 @@ fn sent_on_a_appears_on_t() {
     assert_eq!(a.core.pending_outbox(NOW).unwrap().len(), 1);
     // Bob's packet never reached a node: still pending.
     assert_eq!(
-        a.core.messages_with(&bob_fp).unwrap()[0].status,
+        a.core.messages_with(&bob_fp, NOW).unwrap()[0].status,
         MessageStatus::Pending
     );
     // Bob's ack, on the other hand, marks it delivered.
@@ -615,7 +615,7 @@ fn sent_on_a_appears_on_t() {
         a.core.receive(&bytes, T, NOW, &mut rng).unwrap();
     }
     assert_eq!(
-        a.core.messages_with(&bob_fp).unwrap()[0].status,
+        a.core.messages_with(&bob_fp, NOW).unwrap()[0].status,
         MessageStatus::Received
     );
     assert!(a.core.pending_outbox(NOW).unwrap().is_empty());
@@ -648,7 +648,7 @@ fn sent_on_t_reaches_bob_and_a() {
         .send_text(&bob_fp, "from the tablet", NOW, &mut rng)
         .unwrap();
     assert_eq!(pkts.len(), 2);
-    let sent = t.core.messages_with(&bob_fp).unwrap();
+    let sent = t.core.messages_with(&bob_fp, NOW).unwrap();
     assert_eq!(sent.len(), 1);
     let (mut at_bob, mut at_a) = (0, 0);
     for p in &pkts {
@@ -670,7 +670,7 @@ fn sent_on_t_reaches_bob_and_a() {
         }
     }
     assert_eq!((at_bob, at_a), (1, 1));
-    let on_a = a.core.messages_with(&bob_fp).unwrap();
+    let on_a = a.core.messages_with(&bob_fp, NOW).unwrap();
     assert_eq!(on_a.len(), 1);
     assert_eq!(
         (on_a[0].direction, on_a[0].body.as_str(), on_a[0].message_id),
@@ -702,7 +702,7 @@ fn sent_on_t_reaches_bob_and_a() {
         assert_eq!(unacked(dev), 0);
     }
     assert_eq!(
-        t.core.messages_with(&bob_fp).unwrap()[0].status,
+        t.core.messages_with(&bob_fp, NOW).unwrap()[0].status,
         MessageStatus::Received
     );
     // On A, the copy stays "sent": only T receives Bob's ack.
@@ -1280,7 +1280,7 @@ fn card_updates_in_reverse_order_converge() {
 type MsgView = Vec<([u8; 16], Direction, String, MessageStatus, u64)>;
 
 fn conversation(core: &Core, fp: &Fingerprint) -> MsgView {
-    core.messages_with(fp)
+    core.messages_with(fp, NOW)
         .unwrap()
         .into_iter()
         .map(|m| (m.message_id.0, m.direction, m.body, m.status, m.at))
@@ -1350,7 +1350,7 @@ fn history_setup(
 fn assert_still_pending(t: &mut Dev, fps: &[Fingerprint], rng: &mut StdRng) {
     assert!(t.core.contacts().unwrap().is_empty());
     for fp in fps {
-        assert!(t.core.messages_with(fp).unwrap().is_empty());
+        assert!(t.core.messages_with(fp, NOW).unwrap().is_empty());
     }
     assert!(events(&t.core).is_empty());
     assert!(matches!(
@@ -2418,14 +2418,21 @@ fn retried_copy_comes_back(wait: u64, seed: u64) -> bool {
         .finish_link(&out.bundle, out.history.as_ref(), NOW + 31)
         .unwrap();
     let row = |c: &Core| {
-        c.messages_with(&bob_fp)
+        c.messages_with(&bob_fp, NOW)
             .unwrap()
             .into_iter()
             .find(|m| m.body == "gone")
             .map(|m| m.id)
     };
     let on_t = row(&t.core).expect("imported");
-    assert_eq!(t.core.delete_message(on_t, NOW + 40).unwrap().deleted, 1);
+    assert_eq!(
+        t.core
+            .delete_message(on_t, NOW + 40, &mut rng)
+            .unwrap()
+            .0
+            .deleted,
+        1
+    );
     // On A, the message never left; retried, it now also goes to T.
     let after = u64::from(sent[0].expires_at) + 1 + wait;
     a.core.expire_due(after).unwrap();
@@ -2522,7 +2529,7 @@ fn a_new_device_receives_the_blocks() {
 // --- Lot 2, task 3: replies from linked devices.
 
 fn row_of(core: &Core, contact: &Fingerprint, body: &str) -> barking_core::store::MessageRow {
-    core.messages_with(contact)
+    core.messages_with(contact, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == body)
@@ -2567,7 +2574,7 @@ fn reply_from_tablet_resolves_on_admin_and_contact() {
     let quoted = row_of(&t.core, &bob_fp, "ping");
     let pkts = t
         .core
-        .send_message(&bob_fp, "pong", Some(quoted.id), NOW, &mut rng)
+        .send_message(&bob_fp, "pong", Some(quoted.id), None, NOW, &mut rng)
         .unwrap();
     assert_eq!(pkts.len(), 2);
     let at_bob = offer(&mut bob, &pkts, &mut rng);
@@ -2586,7 +2593,7 @@ fn reply_from_tablet_resolves_on_admin_and_contact() {
     assert_eq!(on_bob.reply_to, Some(bobs_ping.message_id));
     assert_eq!(
         bob.core
-            .message_in(&a_fp, on_bob.reply_to.unwrap())
+            .message_in(&a_fp, on_bob.reply_to.unwrap(), NOW)
             .unwrap()
             .unwrap()
             .body,
@@ -2642,7 +2649,7 @@ fn linked_device_quotes_imported_message() {
 
     let pkts = t
         .core
-        .send_message(&bob_fp, "re x", Some(imported.id), NOW + 32, &mut rng)
+        .send_message(&bob_fp, "re x", Some(imported.id), None, NOW + 32, &mut rng)
         .unwrap();
     let at_bob: Vec<_> = pkts
         .iter()

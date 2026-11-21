@@ -338,27 +338,20 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(m.notice, .deleted(.partlyLeft(name: "bob", left: 1, total: 2)))
     }
 
-    /// Spec §7.4: the long-press confirmation adds "Your other devices keep
-    /// their copy." by the same rule as the sheet (§5.1); and a deletion
-    /// made in the sheet shows its banner here (§6.7).
-    func testConfirmationKnowsTheOwnCopiesAndTheSheetsBanner() async {
+    /// Spec "Suppression sur tous mes appareils": the long-press confirmation
+    /// counts my linked devices for its title, whatever the message; and a
+    /// deletion made in the sheet shows its banner here (§6.7).
+    func testConfirmationKnowsMyDevicesAndTheSheetsBanner() async {
         let d = FakeDevice()
         d.messageList = ["b": [sent(7, .onNetwork), Message(id: 8, outgoing: false, body: "x", at: 2)]]
         let m = make(d)
         await m.onAppear()
-        let sent = m.items[0], received = m.items[1]
-        let none = await m.keepsOwnCopies(sent)
-        XCTAssertFalse(none, "no sheet data: no copy")
-        d.messageDeliveries[7] = MessageDelivery(messageId: 7, delivery: .state(.onNetwork), devices: [], relays: [],
-                                                 ownCopies: OwnCopies(total: 1, left: 0, waiting: 1))
-        let kept = await m.keepsOwnCopies(sent)
-        XCTAssertTrue(kept)
-        let alone = await m.keepsOwnCopies(received)
-        XCTAssertFalse(alone)
+        let alone = await m.otherDevices()
+        XCTAssertEqual(alone, 0)
         d.devicesList = [MyDeviceInfo(id: "aa", name: "iPhone", issuedAt: 1, thisDevice: true, admin: true),
                          MyDeviceInfo(id: "bb", name: "iPad", issuedAt: 1, thisDevice: false, admin: false)]
-        let linked = await m.keepsOwnCopies(received)
-        XCTAssertTrue(linked, "my linked devices got their own packet")
+        let linked = await m.otherDevices()
+        XCTAssertEqual(linked, 1, "the deletion goes to my linked devices")
 
         m.showDeleted(.alreadyLeft(name: "bob"))
         XCTAssertEqual(m.notice, .deleted(.alreadyLeft(name: "bob")))
@@ -401,6 +394,37 @@ final class ConversationModelTests: XCTestCase {
         // delivered keeps its Retry; time-only messages burst too.
         XCTAssertEqual(shown, [2, 3, 4, 5, 6, 7, 8, 10])
         XCTAssertEqual(ConversationModel.metaShown(items, accessibilitySize: true), Set(items.map(\.id)))
+    }
+
+    /// Spec §8: a receipt of my disappearing message is announced like any
+    /// other, alone or with a plain one in the same batch (the reload an
+    /// ephemeral row brings must not swallow it).
+    func testReceiptsOfMyEphemeralsAreAnnounced() async {
+        func eph(_ id: Int64, _ state: DeliveryState) -> Message {
+            Message(id: id, outgoing: true, body: "e\(id)", at: 1, delivery: .state(state),
+                    ttlSecs: 300, seenAt: 1, expireAt: 301)
+        }
+        let d = FakeDevice()
+        d.messageList = ["b": [eph(7, .onNetwork), sent(8, .onNetwork)]]
+        let m = make(d)
+        var said: [String] = []
+        var clock = Date(timeIntervalSince1970: 1_000)
+        m.announce = { said.append($0) }
+        m.now = { clock }
+        await m.onAppear()
+        for id: Int64 in [7, 8] { m.bubbleAppeared(id) }
+        d.messageList = ["b": [eph(7, .received), sent(8, .onNetwork)]]
+        d.deliveryUpdates[7] = update(7, .received)
+        await m.refresh([7])
+        XCTAssertEqual(said.count, 1, "my ephemeral received: \(said)")
+        XCTAssertEqual(m.items.first { $0.id == 7 }?.state, .received)
+
+        clock += 10
+        d.messageList = ["b": [eph(7, .received), sent(8, .received)]]
+        d.deliveryUpdates[8] = update(8, .received)
+        d.deliveryUpdates[7] = update(7, .received)
+        await m.refresh([7, 8])
+        XCTAssertEqual(said.count, 2, "the plain one of a mixed batch: \(said)")
     }
 
     /// Spec §8: only Received and Not delivered, only for a bubble on
@@ -470,9 +494,9 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(DeleteConfirmation.mixed(left: 1, total: 2).message(name: "Alice", bundle: fr.bundle, locale: fr.locale),
                        "Il est déjà parti vers 1 de ses 2 appareils\u{00A0}: Alice le garde sur celui-ci. Le reste est annulé.")
         XCTAssertEqual(DeleteConfirmation.sentElsewhere.message(name: "Alice", bundle: en.bundle, locale: en.locale),
-                       "Your other devices keep their copy.")
+                       "Alice keeps their copy.")
         XCTAssertEqual(DeleteConfirmation.sentElsewhere.message(name: "Alice", bundle: fr.bundle, locale: fr.locale),
-                       "Vos autres appareils gardent leur copie.")
+                       "Alice garde sa copie.")
         XCTAssertEqual(DeleteConfirmation.pending.message(name: "Alice", bundle: fr.bundle, locale: fr.locale),
                        "Il n’a pas quitté cet iPhone. Alice ne le recevra pas.")
         var a = DeliveryAnnouncements()
@@ -813,5 +837,55 @@ final class ConversationModelTests: XCTestCase {
     func testHighlightDefaultsToOneAndAHalfSeconds() async {
         let (_, m) = await loaded([])
         XCTAssertEqual(m.highlightDuration, .milliseconds(1500))
+    }
+
+    /// With linked devices the deletion goes to all of them: the title says so.
+    /// Alone, the "this iPhone" titles stay.
+    func testDeleteTitlesSayAllDevicesWhenLinked() throws {
+        let fr = try bundle("fr"), en = try bundle("en")
+        let all: [DeleteConfirmation] = [.onNetwork, .received, .mixed(left: 1, total: 2)]
+        let one: [DeleteConfirmation] = [.receivedMessage, .sentElsewhere]
+        for c in all {
+            XCTAssertEqual(c.title(otherDevices: 1, bundle: en.bundle, locale: en.locale), "Delete from all your devices?")
+            XCTAssertEqual(c.title(otherDevices: 2, bundle: fr.bundle, locale: fr.locale), "Supprimer de tous vos appareils\u{202F}?")
+            XCTAssertEqual(c.title(otherDevices: 0, bundle: en.bundle, locale: en.locale), "Delete from this iPhone?")
+            XCTAssertEqual(c.title(otherDevices: 0, bundle: fr.bundle, locale: fr.locale), "Supprimer de cet iPhone\u{202F}?")
+        }
+        for c in one {
+            XCTAssertEqual(c.title(otherDevices: 1, bundle: en.bundle, locale: en.locale),
+                           "Delete this message from all your devices?")
+            XCTAssertEqual(c.title(otherDevices: 1, bundle: fr.bundle, locale: fr.locale),
+                           "Supprimer ce message de tous vos appareils\u{202F}?")
+            XCTAssertEqual(c.title(otherDevices: 0, bundle: en.bundle, locale: en.locale),
+                           "Delete this message from this iPhone?")
+            XCTAssertEqual(c.title(otherDevices: 0, bundle: fr.bundle, locale: fr.locale),
+                           "Supprimer ce message de cet iPhone\u{202F}?")
+        }
+        for c in [DeleteConfirmation.pending, .notDelivered] {
+            XCTAssertEqual(c.title(otherDevices: 1, bundle: en.bundle, locale: en.locale), "Delete this message?")
+        }
+    }
+
+    /// No case tells "Your other devices keep their copy.": the deletion
+    /// reaches them. Only the contact's copy is mentioned.
+    func testNoOtherDevicesKeepCopyLine() throws {
+        let cases: [DeleteConfirmation] = [.pending, .onNetwork, .received, .notDelivered,
+                                           .mixed(left: 1, total: 2), .receivedMessage, .sentElsewhere]
+        for code in ["en", "fr"] {
+            let l = try bundle(code)
+            for c in cases {
+                let text = c.message(name: "Alice", bundle: l.bundle, locale: l.locale)
+                XCTAssertFalse(text.contains("other devices"), text)
+                XCTAssertFalse(text.contains("autres appareils"), text)
+            }
+        }
+        let en = try bundle("en")
+        XCTAssertEqual(DeleteConfirmation.sentElsewhere.message(name: "Alice", bundle: en.bundle, locale: en.locale),
+                       "Alice keeps their copy.")
+    }
+
+    private func bundle(_ code: String) throws -> (bundle: Bundle, locale: Locale) {
+        let path = try XCTUnwrap(Bundle.main.path(forResource: code, ofType: "lproj"))
+        return (try XCTUnwrap(Bundle(path: path)), Locale(identifier: code))
     }
 }

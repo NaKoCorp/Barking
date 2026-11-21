@@ -35,12 +35,15 @@ struct MainTabView: View {
     @State private var tab = Tabs.chats
     /// Syncs while the app is in front (spec iOS messaging §4.2).
     @State private var loop: SyncLoop
+    /// Erases ephemerals as they fall due while the app is in front.
+    @State private var expiry: ExpiryTimer
     @Environment(AppRouter.self) private var router
     @Environment(\.scenePhase) private var phase
 
     init(core: CoreService) {
         self.core = core
         _loop = State(initialValue: SyncLoop(core: core))
+        _expiry = State(initialValue: ExpiryTimer(core: core))
     }
 
     var body: some View {
@@ -57,9 +60,26 @@ struct MainTabView: View {
         .onChange(of: router.pendingCardLink, initial: true) { _, link in if link != nil { tab = .chats } }
         .onChange(of: router.pendingRelayLink, initial: true) { _, link in if link != nil { tab = .network } }
         .environment(\.syncLoop, loop)
-        .onChange(of: phase, initial: true) { _, now in loop.scenePhaseChanged(to: now) }
+        .onChange(of: phase, initial: true) { _, now in
+            loop.scenePhaseChanged(to: now)
+            // At launch and each return: what fell due meanwhile goes (the
+            // chat list follows `.expired`), then a timer to the next one.
+            Task { await expiry.phaseChanged(active: now == .active) }
+        }
+        // An expiry, a sync or a send can move the next expiry.
+        .task {
+            for await change in await core.changes {
+                switch change {
+                case .expired, .network, .messages: await expiry.arm()
+                default: break
+                }
+            }
+        }
         // The core goes (a reset, a removed device): its syncs go with it.
-        .onDisappear { loop.stop() }
+        .onDisappear {
+            loop.stop()
+            expiry.stop()
+        }
     }
 }
 

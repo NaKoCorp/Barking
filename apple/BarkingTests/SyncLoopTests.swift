@@ -5,7 +5,7 @@ import XCTest
 
 /// The foreground sync loop (spec iOS messaging §4.2): a sync when the app
 /// comes to the front, then one every 15 s with a conversation open, 60 s
-/// otherwise; nothing in the background.
+/// otherwise; one last sync as it goes to the background, then nothing.
 @MainActor
 final class SyncLoopTests: XCTestCase {
     /// Records the syncs and the waits; a wait ends when the test ticks it,
@@ -104,10 +104,12 @@ final class SyncLoopTests: XCTestCase {
         loop.scenePhaseChanged(to: .active)   // launch: the guard runs before its sync too
         await until({ await clock.isWaiting }, "launch wait")
         loop.scenePhaseChanged(to: .background)
+        await until({ await clock.reasons.count == 2 }, "background sync")
         loop.scenePhaseChanged(to: .active)
-        await until({ await clock.waiting(afterSyncs: 2) }, "foreground sync")
+        await until({ await clock.waiting(afterSyncs: 3) }, "foreground sync")
         let events = await clock.events
-        XCTAssertEqual(events, ["apply", "sync(launch)", "apply", "sync(foreground)"])
+        // The background's last sync has no guard: it starts no run.
+        XCTAssertEqual(events, ["apply", "sync(launch)", "sync(background)", "apply", "sync(foreground)"])
         loop.stop()
     }
 
@@ -154,7 +156,9 @@ final class SyncLoopTests: XCTestCase {
         loop.stop()
     }
 
-    /// The background stops it; coming back syncs at once, as a foreground.
+    /// The background stops it after one last sync (what was just seen or
+    /// deleted leaves for my other devices); coming back syncs at once, as
+    /// a foreground.
     func testBackgroundStopsAndForegroundSyncsAgain() async {
         let (loop, clock) = makeLoop()
         loop.scenePhaseChanged(to: .active)
@@ -162,13 +166,36 @@ final class SyncLoopTests: XCTestCase {
         loop.scenePhaseChanged(to: .background)
         XCTAssertFalse(loop.isRunning)
         await until({ await !clock.isWaiting }, "wait cancelled")
+        await until({ await clock.reasons == [.launch, .background] }, "background sync")
         loop.scenePhaseChanged(to: .inactive)
         XCTAssertFalse(loop.isRunning, "inactive starts nothing")
         loop.scenePhaseChanged(to: .active)
-        await until({ await clock.waiting(afterSyncs: 2) }, "foreground sync")
+        await until({ await clock.waiting(afterSyncs: 3) }, "foreground sync")
         let reasons = await clock.reasons
-        XCTAssertEqual(reasons, [.launch, .foreground])
+        XCTAssertEqual(reasons, [.launch, .background, .foreground])
         loop.stop()
+    }
+
+    /// Final review 1: one last sync as the app goes to the background,
+    /// once, and only from a running loop (a background launch never
+    /// started it: the background refresh syncs then).
+    func testBackgroundRunsOneLastSyncOnlyWhenRunning() async {
+        let (idle, idleClock) = makeLoop()
+        idle.scenePhaseChanged(to: .background)
+        try? await Task.sleep(for: .milliseconds(200))
+        let none = await idleClock.reasons
+        XCTAssertEqual(none, [], "never started: no sync")
+
+        let (loop, clock) = makeLoop()
+        loop.scenePhaseChanged(to: .active)
+        await until({ await clock.isWaiting }, "first wait")
+        loop.scenePhaseChanged(to: .background)
+        await until({ await clock.reasons.count == 2 }, "background sync")
+        loop.scenePhaseChanged(to: .background)
+        try? await Task.sleep(for: .milliseconds(200))
+        let reasons = await clock.reasons
+        XCTAssertEqual(reasons, [.launch, .background])
+        XCTAssertFalse(loop.isRunning)
     }
 
     /// Inactive (a call, the app switcher) keeps the loop as it is.

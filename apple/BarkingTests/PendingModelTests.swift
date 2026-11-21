@@ -143,6 +143,24 @@ final class PendingModelTests: XCTestCase {
         XCTAssertFalse(m.sync[1].symbol.isEmpty)
     }
 
+    /// One of my messages whose row is gone (an ephemeral expired, a
+    /// message deleted after a tried deposit) is counted as such, with no
+    /// preview, never as a card update.
+    func testErasedMessagesHaveTheirOwnRow() async throws {
+        let d = FakeDevice()
+        d.pendingInfo = info([], sync: [
+            PendingSync(kind: .erasedMessage, packets: 1, names: ["Alice"]),
+            PendingSync(kind: .reaction, packets: 1, names: ["Alice"]),
+        ])
+        let m = make(d)
+        await m.load()
+        XCTAssertEqual(m.sync.map(\.kind), [.reaction, .erasedMessage])
+        let en = try lang("en"), fr = try lang("fr")
+        XCTAssertEqual(PendingModel.title(of: m.sync[1], bundle: en.bundle, locale: en.locale), "Erased message · 1")
+        XCTAssertEqual(PendingModel.title(of: m.sync[1], bundle: fr.bundle, locale: fr.locale), "Message effacé · 1")
+        XCTAssertFalse(m.sync[1].symbol.isEmpty)
+    }
+
     func testEmptyAndSyncOnlyStates() async {
         let d = FakeDevice()
         let m = make(d)
@@ -356,7 +374,13 @@ final class PendingModelTests: XCTestCase {
         let maybe = await m.askDelete(1)
         let ask = try XCTUnwrap(maybe)
         XCTAssertEqual(ask.confirmation, .mixed(left: 1, total: 2))
-        XCTAssertTrue(ask.message.hasSuffix("\nYour other devices keep their copy."))
+        XCTAssertFalse(ask.message.contains("other devices"))
+        XCTAssertEqual(ask.title, "Delete from this iPhone?", "no linked device")
+        d.devicesList = [MyDeviceInfo(id: "aa", name: "iPhone", issuedAt: 1, thisDevice: true, admin: true),
+                         MyDeviceInfo(id: "bb", name: "iPad", issuedAt: 1, thisDevice: false, admin: false)]
+        let again = await m.askDelete(1)
+        let linked = try XCTUnwrap(again)
+        XCTAssertEqual(linked.title, "Delete from all your devices?")
     }
 
     func testSingleDeletionOfAMessageThatLeftTheListAsksNothing() async {

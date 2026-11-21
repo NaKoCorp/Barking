@@ -22,6 +22,12 @@ import Foundation
 ///   mine (`messagesWith`, `deliveriesOf`); a manual resend drops it. It
 ///   works with or without the seed.
 ///
+/// - `-BarkingUITestEphemeral`: one received ephemeral of 60 s from Sam.
+///   When the app reports it seen (`markSeen`), it counts as seen 55 s
+///   earlier: `nextExpiry` and `expireEphemeral` answer for it, so the
+///   app's timer erases it five seconds later. It stays in every read until
+///   `expireEphemeral` hands it back.
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -67,6 +73,15 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private let device: any DeviceHandle
     private let seed: Seed?
     private let fakeReceived: Bool
+    /// `-BarkingUITestEphemeral`: the faked ephemeral, until it expires.
+    private let ephemeral: Bool
+    /// When the conversation first read it (its date).
+    private var ephemeralRead: UInt64?
+    /// When the app reported it seen.
+    private var ephemeralSeen: UInt64?
+    private var ephemeralGone = false
+    static let ephemeralId: Int64 = 900_002
+    static let ephemeralText = "This one disappears"
     /// `-BarkingUITestReactionState`: the state shown on my reactions.
     private let reactionState: DeliveryState?
     private let lock = NSLock()
@@ -79,8 +94,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// Shown time by message (kept after a retry: the message keeps its date).
     private let shownAt: [Int64: UInt64]
 
-    init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil) {
+    init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
+         ephemeral: Bool = false) {
         self.device = device
+        self.ephemeral = ephemeral
         self.reactionState = reactionState
         self.seed = seed
         self.fakeReceived = fakeReceived
@@ -113,9 +130,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             default: nil
             }
         }
-        guard seeded || fakeReceived || reactionState != nil else { return device }
+        let ephemeral = arguments.contains("-BarkingUITestEphemeral")
+        guard seeded || fakeReceived || reactionState != nil || ephemeral else { return device }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
-                                reactionState: reactionState)
+                                reactionState: reactionState, ephemeral: ephemeral)
     }
 
     // MARK: The forced states
@@ -217,7 +235,59 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             messages.append(Message(id: 900_001, outgoing: false, body: "hi from Sam", at: at,
                                     delivery: nil, route: "internet:1"))
         }
+        if let m = fakeEphemeral(now: UInt64(Date().timeIntervalSince1970)) { messages.append(m) }
         return messages
+    }
+
+    // MARK: The faked ephemeral
+
+    /// 60 s, not seen until the app reports it; then seen 55 s before that
+    /// report, so five seconds are left.
+    private func fakeEphemeral(now: UInt64) -> Message? {
+        guard ephemeral else { return nil }
+        let state: (read: UInt64, seen: UInt64?)? = lock.withLock {
+            guard !ephemeralGone else { return nil }
+            if ephemeralRead == nil { ephemeralRead = now }
+            return ephemeralRead.map { ($0, ephemeralSeen) }
+        }
+        guard let state else { return nil }
+        let seenAt = state.seen.map { $0 - 55 }
+        return Message(id: Self.ephemeralId, outgoing: false, body: Self.ephemeralText, at: state.read,
+                       delivery: nil, ttlSecs: 60, seenAt: seenAt,
+                       expireAt: state.seen.map { $0 + 5 } ?? state.read + 604_800)
+    }
+
+    /// When the faked ephemeral is due, once seen and while shown.
+    private func fakeExpiry() -> UInt64? {
+        lock.withLock { ephemeralGone ? nil : ephemeralSeen.map { $0 + 5 } }
+    }
+
+    func nextExpiry() throws -> UInt64? {
+        let real = try device.nextExpiry()
+        guard let fake = fakeExpiry() else { return real }
+        return min(real ?? fake, fake)
+    }
+
+    func expireEphemeral() throws -> [Int64] {
+        var ids = try device.expireEphemeral()
+        let now = UInt64(Date().timeIntervalSince1970)
+        let due = lock.withLock { () -> Bool in
+            guard let seen = ephemeralSeen, !ephemeralGone, now >= seen + 5 else { return false }
+            ephemeralGone = true
+            return true
+        }
+        if due { ids.append(Self.ephemeralId) }
+        return ids
+    }
+
+    /// The app saw the faked one: its countdown starts, five seconds left.
+    func markSeen(ids: [Int64]) throws {
+        if ids.contains(Self.ephemeralId) {
+            let now = UInt64(Date().timeIntervalSince1970)
+            lock.withLock { if ephemeralSeen == nil { ephemeralSeen = now } }
+        }
+        let real = ids.filter { $0 != Self.ephemeralId }
+        if !real.isEmpty { try device.markSeen(ids: real) }
     }
 
     func deliveriesOf(ids: [Int64]) throws -> [DeliveryUpdate] {
@@ -334,8 +404,8 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func setDisplayName(name: String) throws { try device.setDisplayName(name: name) }
     func contacts() throws -> [Contact] { try device.contacts() }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { try device.messageRoute(messageId: messageId) }
-    func sendText(contact: String, text: String, replyTo: Int64?) throws {
-        try device.sendText(contact: contact, text: text, replyTo: replyTo)
+    func sendText(contact: String, text: String, replyTo: Int64?, ttlSecs: UInt32?) throws {
+        try device.sendText(contact: contact, text: text, replyTo: replyTo, ttlSecs: ttlSecs)
     }
     func setReactions(message: Int64, emojis: [String]) throws {
         // A new set is a new send: it shows the forced state again.

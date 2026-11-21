@@ -127,6 +127,10 @@ const TOKENS: &[&str] = &[
     "sync_devices",
     "sync_admin",
     "sync_reaction",
+    "sync_deletion",
+    "sync_seen",
+    "deleted_here",
+    "deleted_elsewhere",
     "node_lost",
     "node_unreachable",
     "intro_mailbox",
@@ -208,6 +212,8 @@ fn sync_token(k: SyncKind) -> String {
         SyncKind::Devices => "sync_devices",
         SyncKind::Admin => "sync_admin",
         SyncKind::Reaction => "sync_reaction",
+        SyncKind::Delete => "sync_deletion",
+        SyncKind::Seen => "sync_seen",
     })
 }
 
@@ -345,7 +351,20 @@ fn parts(e: &TransparencyEvent, name: &dyn Fn(&Fingerprint) -> String) -> (Strin
             count,
             cancelled,
             already_left,
-        } => ("packet", vec![n(*count), n(*cancelled), n(*already_left)]),
+            from_other_device,
+        } => (
+            "packet",
+            vec![
+                n(*count),
+                n(*cancelled),
+                n(*already_left),
+                token(if *from_other_device {
+                    "deleted_elsewhere"
+                } else {
+                    "deleted_here"
+                }),
+            ],
+        ),
         E::UnknownContent { kind, .. } => ("packet", vec![kind.to_string()]),
     };
     (family.to_owned(), args)
@@ -523,6 +542,7 @@ mod tests {
                 count: 3,
                 cancelled: 2,
                 already_left: 1,
+                from_other_device: false,
             },
             E::UnknownContent {
                 packet_id: pid,
@@ -561,6 +581,21 @@ mod tests {
             for a in entry.args.iter().filter(|a| a.starts_with('@')) {
                 assert!(tokens.contains(a), "token {a} not listed");
             }
+        }
+    }
+
+    /// Spec §5.1: the log says a deletion came from another of my devices.
+    #[test]
+    fn deletion_says_where_it_was_asked() {
+        let names = HashMap::new();
+        for (from_other_device, token) in [(false, "@deleted_here"), (true, "@deleted_elsewhere")] {
+            let e = TransparencyEvent::MessagesDeleted {
+                count: 3,
+                cancelled: 2,
+                already_left: 1,
+                from_other_device,
+            };
+            assert_eq!(entry_of(1, 1, &e, &names).args, ["3", "2", "1", token]);
         }
     }
 

@@ -14,7 +14,7 @@ fn transparency_log_pages_and_filters() {
         .unwrap();
     for i in 0..3 {
         alice
-            .send_text(fb.clone(), format!("hello {i}"), None)
+            .send_text(fb.clone(), format!("hello {i}"), None, None)
             .unwrap();
     }
     let all = alice.transparency_log(100, None, false).unwrap();
@@ -30,7 +30,7 @@ fn transparency_log_pages_and_filters() {
     // An event arrives between the pages: the next page neither repeats nor
     // skips an entry.
     alice
-        .send_text(fb.clone(), "one more".into(), None)
+        .send_text(fb.clone(), "one more".into(), None, None)
         .unwrap();
     let second = alice.transparency_log(2, Some(first[1].id), false).unwrap();
     assert_eq!(second[0].id, all[2].id);

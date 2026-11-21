@@ -206,6 +206,9 @@ pub enum PendingKind {
     CardUpdate,
     /// A reaction packet (to a contact's device, or a copy for one of mine).
     Reaction,
+    /// One of my messages to a contact whose row is gone (deleted after a
+    /// deposit was tried, or an ephemeral expired): no text to show.
+    ErasedMessage,
 }
 
 /// One of my messages with packets to the contact still waiting here.
@@ -323,6 +326,7 @@ fn kind_of(k: store::PendingKind) -> PendingKind {
         store::PendingKind::DeviceSync => PendingKind::DeviceSync,
         store::PendingKind::CardUpdate => PendingKind::CardUpdate,
         store::PendingKind::Reaction => PendingKind::Reaction,
+        store::PendingKind::ErasedMessage => PendingKind::ErasedMessage,
     }
 }
 
@@ -608,7 +612,9 @@ impl Device {
     pub fn delete_message(&self, message_id: i64) -> Result<DeleteOutcome, BarkingError> {
         guard(|| {
             self.with_core(|core| {
-                let o = core.delete_message(message_id, now())?;
+                // The packets for my other devices are queued by the core, in the
+                // deletion's transaction: they leave with the next sync.
+                let (o, _) = core.delete_message(message_id, now(), &mut rand::rng())?;
                 outcome_of(core, o)
             })
         })
@@ -618,7 +624,9 @@ impl Device {
     pub fn delete_messages(&self, ids: Vec<i64>) -> Result<DeleteOutcome, BarkingError> {
         guard(|| {
             self.with_core(|core| {
-                let o = core.delete_messages(&ids, now())?;
+                // The packets for my other devices are queued by the core, in the
+                // deletion's transaction: they leave with the next sync.
+                let (o, _) = core.delete_messages(&ids, now(), &mut rand::rng())?;
                 outcome_of(core, o)
             })
         })
@@ -628,7 +636,9 @@ impl Device {
     pub fn cancel_all_pending(&self) -> Result<DeleteOutcome, BarkingError> {
         guard(|| {
             self.with_core(|core| {
-                let o = core.cancel_all_pending(now())?;
+                // The packets for my other devices are queued by the core, in the
+                // deletion's transaction: they leave with the next sync.
+                let (o, _) = core.cancel_all_pending(now(), &mut rand::rng())?;
                 outcome_of(core, o)
             })
         })

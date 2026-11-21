@@ -17,6 +17,7 @@ struct MessageSheet: View {
     private struct Asking: Identifiable {
         let id = UUID()
         let confirmation: DeleteConfirmation
+        let title: String
         let message: String
         let shown: Delivery?
     }
@@ -39,7 +40,7 @@ struct MessageSheet: View {
         }
         .presentationDetents([.large])
         .presentationBackground(Color.surface)
-        .confirmationDialog(asking?.confirmation.title ?? "", isPresented: askingShown,
+        .confirmationDialog(Text(verbatim: asking?.title ?? ""), isPresented: askingShown,
                             titleVisibility: .visible, presenting: asking) { a in
             Button(a.confirmation.button, role: .destructive) {
                 Task { await model.delete(shown: a.shown) }
@@ -67,7 +68,8 @@ struct MessageSheet: View {
     }
 
     private func ask() {
-        asking = Asking(confirmation: model.confirmation, message: model.confirmationMessage(), shown: model.delivery)
+        asking = Asking(confirmation: model.confirmation, title: model.confirmationTitle(),
+                        message: model.confirmationMessage(), shown: model.delivery)
     }
 
     private func retryReaction() {
@@ -121,6 +123,7 @@ struct MessageSheetBody: View {
                     sent
                 case .sentElsewhere:
                     QuoteCard(text: model.quote)
+                    ephemeral
                     Text("Sent from another of your devices. Its delivery is tracked there.")
                         .font(.bBodySmall).foregroundStyle(Color.fgMuted)
                         .fixedSize(horizontal: false, vertical: true)
@@ -129,6 +132,7 @@ struct MessageSheetBody: View {
                     danger
                 case .received:
                     QuoteCard(text: model.quote)
+                    ephemeral
                     section("Delivery")
                     if let path = model.path {
                         PathStops(rows: path.rows, notRecorded: path.notRecorded)
@@ -146,6 +150,7 @@ struct MessageSheetBody: View {
 
     @ViewBuilder private var sent: some View {
         QuoteCard(text: model.quote)
+        ephemeral
         if let state = model.delivery?.state {
             DeliveryLegend(current: state).padding(.top, Space.s4)
         }
@@ -182,6 +187,28 @@ struct MessageSheetBody: View {
         }
         PrivacyBlock(contactName: model.contactName).padding(.top, Space.section)
         danger
+    }
+
+    /// An ephemeral's delay and planned erasure, under the quote (§5.5).
+    @ViewBuilder private var ephemeral: some View {
+        TimelineView(.everyMinute) { context in
+            if let details = model.ephemeralDetails(now: context.date, bundle: .strings(for: locale), locale: locale) {
+                FormCard {
+                    detailRow(details.delay, identifier: "sheet.ephemeralDelay")
+                    detailRow(details.erase, identifier: "sheet.ephemeralErase")
+                }
+                .padding(.top, Space.s4)
+            }
+        }
+    }
+
+    private func detailRow(_ row: EphemeralDetails.Row, identifier: String) -> some View {
+        FormRow(title: Text(verbatim: row.title)) {
+            Text(verbatim: row.value).font(BarkingFont.mono(.caption, size: 13)).foregroundStyle(Color.fgMuted)
+        }
+        .frame(minHeight: FormRowMetrics.minHeight(hasSubtitle: false))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(identifier)
     }
 
     /// My reaction's send, under the message's delivery: hidden without one.
@@ -338,7 +365,7 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func contacts() throws -> [Contact] { throw Never() }
     func messagesWith(contact: String) throws -> [Message] { throw Never() }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { throw Never() }
-    func sendText(contact: String, text: String, replyTo: Int64?) throws { throw Never() }
+    func sendText(contact: String, text: String, replyTo: Int64?, ttlSecs: UInt32?) throws { throw Never() }
     func setReactions(message: Int64, emojis: [String]) throws { throw Never() }
     func addContactBytes(card: Data, alias: String?) throws -> String { throw Never() }
     func addContact(card: String, alias: String?) throws -> String { throw Never() }
@@ -396,5 +423,8 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func setPreview(preview: PushPreview) throws { throw Never() }
     func noteWake(atSecs: UInt64) throws { throw Never() }
     func wakeStatus() throws -> WakeStatus { throw Never() }
+    func markSeen(ids: [Int64]) throws { throw Never() }
+    func nextExpiry() throws -> UInt64? { throw Never() }
+    func expireEphemeral() throws -> [Int64] { throw Never() }
 }
 #endif

@@ -95,7 +95,9 @@ fn cards_contacts_and_outgoing_message() {
     assert_eq!(contacts.len(), 1);
     assert_eq!(contacts[0].display_name, "Bob");
     assert_eq!(contacts[0].fingerprint, fp_b);
-    alice.send_text("bob".into(), "salut".into(), None).unwrap();
+    alice
+        .send_text("bob".into(), "salut".into(), None, None)
+        .unwrap();
     let msgs = alice.messages_with(fp_b).unwrap();
     assert_eq!(msgs.len(), 1);
     assert!(msgs[0].outgoing);
@@ -112,7 +114,7 @@ fn unknown_contact_is_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let alice = Device::create(config(&dir, 1), "a".into()).unwrap().device;
     assert!(matches!(
-        alice.send_text("nobody".into(), "x".into(), None),
+        alice.send_text("nobody".into(), "x".into(), None, None),
         Err(BarkingError::NotFound)
     ));
 }

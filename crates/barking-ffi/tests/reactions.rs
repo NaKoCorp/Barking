@@ -107,7 +107,9 @@ fn excerpt_cuts_by_char() {
 fn set_reactions_shows_chips() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, _bob, fb, _fa) = paired(&da, &db);
-    alice.send_text(fb.clone(), "hello".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "hello".into(), None, None)
+        .unwrap();
     let id = row_of(&alice, &fb, "hello");
     assert!(
         alice.messages_with(fb.clone()).unwrap()[0]
@@ -146,7 +148,9 @@ fn set_reactions_shows_chips() {
 fn set_reactions_errors_are_typed() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, _bob, fb, _fa) = paired(&da, &db);
-    alice.send_text(fb.clone(), "hello".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "hello".into(), None, None)
+        .unwrap();
     let id = row_of(&alice, &fb, "hello");
 
     let too_many: Vec<String> = ["😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃"]
@@ -177,11 +181,11 @@ fn set_reactions_errors_are_typed() {
         Err(BarkingError::MessageNotFound)
     ));
     assert!(matches!(
-        alice.send_text(fb.clone(), "re".into(), Some(-1)),
+        alice.send_text(fb.clone(), "re".into(), Some(-1), None),
         Err(BarkingError::MessageNotFound)
     ));
     assert!(matches!(
-        alice.send_text(fb.clone(), "re".into(), Some(id + 1000)),
+        alice.send_text(fb.clone(), "re".into(), Some(id + 1000), None),
         Err(BarkingError::MessageNotFound)
     ));
     // Nothing was queued by the refused reply.
@@ -213,7 +217,7 @@ async fn reply_shows_quote() {
     let a = alice.clone();
     let fb2 = fb.clone();
     step(move || {
-        a.send_text(fb2, "salut".into(), None).unwrap();
+        a.send_text(fb2, "salut".into(), None, None).unwrap();
         a.sync(30_000).unwrap();
     })
     .await;
@@ -223,7 +227,7 @@ async fn reply_shows_quote() {
         let s = b.sync(30_000).unwrap();
         assert_eq!(s.new_messages.len(), 1, "{s:?}");
         let original = row_of(&b, &fa2, "salut");
-        b.send_text(fa2.clone(), "re: salut".into(), Some(original))
+        b.send_text(fa2.clone(), "re: salut".into(), Some(original), None)
             .unwrap();
         // Bob sees his own reply quoting Alice's message.
         let reply = b
@@ -301,7 +305,7 @@ async fn received_reaction_is_a_chip_not_a_message() {
 
     let (a, fb2) = (alice.clone(), fb.clone());
     step(move || {
-        a.send_text(fb2, "salut".into(), None).unwrap();
+        a.send_text(fb2, "salut".into(), None, None).unwrap();
         a.sync(30_000).unwrap();
     })
     .await;
@@ -384,7 +388,9 @@ async fn received_reaction_is_a_chip_not_a_message() {
 fn placeholder_row_is_unread_and_last() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, _bob, fb, _fa) = paired(&da, &db);
-    alice.send_text(fb.clone(), "hello".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "hello".into(), None, None)
+        .unwrap();
 
     let path = da.path().join("barking.db");
     let contact = Core::open(&path, &[1; 32], 1_000)
@@ -406,6 +412,9 @@ fn placeholder_row_is_unread_and_last() {
             reply_to: None,
             reply_ref: None,
             placeholder: true,
+            ttl_secs: None,
+            seen_at: None,
+            expire_at: None,
         })
         .unwrap();
 
@@ -426,8 +435,12 @@ fn placeholder_row_is_unread_and_last() {
 fn message_carries_my_reaction_state() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, _bob, fb, _fa) = paired(&da, &db);
-    alice.send_text(fb.clone(), "one".into(), None).unwrap();
-    alice.send_text(fb.clone(), "two".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "one".into(), None, None)
+        .unwrap();
+    alice
+        .send_text(fb.clone(), "two".into(), None, None)
+        .unwrap();
     let id = row_of(&alice, &fb, "one");
     alice.set_reactions(id, vec!["❤️".into()]).unwrap();
     for m in alice.messages_with(fb.clone()).unwrap() {
@@ -443,8 +456,12 @@ fn message_carries_my_reaction_state() {
 fn delivery_update_carries_my_reaction_state() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, _bob, fb, _fa) = paired(&da, &db);
-    alice.send_text(fb.clone(), "one".into(), None).unwrap();
-    alice.send_text(fb.clone(), "two".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "one".into(), None, None)
+        .unwrap();
+    alice
+        .send_text(fb.clone(), "two".into(), None, None)
+        .unwrap();
     let id = row_of(&alice, &fb, "one");
     let other = row_of(&alice, &fb, "two");
     alice.set_reactions(id, vec!["❤️".into()]).unwrap();
@@ -459,7 +476,9 @@ fn delivery_update_carries_my_reaction_state() {
 fn reaction_delivery_matches_the_core() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, _bob, fb, _fa) = paired(&da, &db);
-    alice.send_text(fb.clone(), "one".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "one".into(), None, None)
+        .unwrap();
     let id = row_of(&alice, &fb, "one");
     assert!(alice.reaction_delivery(id).unwrap().is_none());
     alice.set_reactions(id, vec!["❤️".into()]).unwrap();
@@ -474,7 +493,9 @@ fn reaction_delivery_matches_the_core() {
 fn retry_reactions_maps_nothing_to_retry() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (alice, _bob, fb, _fa) = paired(&da, &db);
-    alice.send_text(fb.clone(), "one".into(), None).unwrap();
+    alice
+        .send_text(fb.clone(), "one".into(), None, None)
+        .unwrap();
     let id = row_of(&alice, &fb, "one");
     alice.set_reactions(id, vec!["❤️".into()]).unwrap();
     assert!(matches!(

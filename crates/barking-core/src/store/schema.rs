@@ -1,8 +1,8 @@
-//! SQL storage schema (v4) and migrations from v1, v2 and v3.
+//! SQL storage schema (v5) and migrations from v1, v2, v3 and v4.
 
 use rusqlite::{Connection, params};
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Schema v1 (batch 1A), kept for the migration and for its tests: a
 /// v1 database is opened with this schema, then migrated.
@@ -418,17 +418,61 @@ CREATE INDEX IF NOT EXISTS reaction_sends_target ON reaction_sends(message_id, c
 /// then `schema_version` set to 4.
 pub fn migrate_v3_to_v4(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
-    for (name, ddl) in V4_MESSAGE_COLUMNS {
-        let present: bool = tx.query_row(
-            "SELECT count(*) > 0 FROM pragma_table_info('messages') WHERE name = ?1",
-            params![name],
-            |r| r.get(0),
-        )?;
-        if !present {
-            tx.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {name} {ddl};"))?;
-        }
-    }
+    add_missing_columns(&tx, "messages", &V4_MESSAGE_COLUMNS)?;
     tx.execute_batch(SCHEMA_V4_TABLES)?;
     set_version(&tx, 4)?;
     tx.commit()
+}
+
+/// Columns v5 adds to `messages` (ephemeral messages), with their
+/// definitions. `ttl_secs` and `expire_at` are NULL for a message that is
+/// not ephemeral; `seen_at` is the first time one of my devices showed it.
+const V5_MESSAGE_COLUMNS: [(&str, &str); 3] = [
+    ("ttl_secs", "INTEGER"),
+    ("seen_at", "INTEGER"),
+    ("expire_at", "INTEGER"),
+];
+
+/// Schema v5 (ephemeral messages): a "seen" from another of my devices for
+/// a message not arrived yet (`pending_seen`), and the index the expiry
+/// walks.
+const SCHEMA_V5_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS pending_seen (
+    message_id BLOB PRIMARY KEY NOT NULL,
+    contact_fp BLOB NOT NULL,
+    seen_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pending_seen_contact ON pending_seen(contact_fp);
+CREATE INDEX IF NOT EXISTS messages_expire ON messages(expire_at) WHERE expire_at IS NOT NULL;
+";
+
+/// Migrates a v4 database to v5 in a single transaction (DDL only): the new
+/// columns of `messages`, each added only if missing, the `pending_seen`
+/// table and the indexes, then `schema_version` set to 5.
+pub fn migrate_v4_to_v5(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    add_missing_columns(&tx, "messages", &V5_MESSAGE_COLUMNS)?;
+    tx.execute_batch(SCHEMA_V5_TABLES)?;
+    set_version(&tx, 5)?;
+    tx.commit()
+}
+
+/// Adds each of `columns` to `table` unless it is already there.
+fn add_missing_columns(
+    conn: &Connection,
+    table: &str,
+    columns: &[(&str, &str)],
+) -> rusqlite::Result<()> {
+    for (name, ddl) in columns {
+        let present: bool = conn.query_row(
+            "SELECT count(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
+            params![table, name],
+            |r| r.get(0),
+        )?;
+        if !present {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {ddl};"))?;
+        }
+    }
+    Ok(())
 }

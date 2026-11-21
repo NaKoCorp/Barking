@@ -109,7 +109,7 @@ impl Core {
         self.store
             .get_contact(to)?
             .ok_or(CoreError::UnknownContact)?;
-        let target = quote_ref(&self.store, &to, row_id)?;
+        let target = quote_ref(&self.store, &to, row_id, now)?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             let mine = tx.reaction(row.message_id, ME_REACTOR)?;
@@ -203,8 +203,8 @@ impl Core {
             let Ok(sent) = store.transaction(|tx| {
                 let usable = tx.get_contact(to)?.is_some() && !tx.block_state(to)?.blocked;
                 let mine = tx.reaction(message, ME_REACTOR)?;
-                let target =
-                    row_id_of(tx, to, message)?.and_then(|row_id| quote_ref(tx, &to, row_id).ok());
+                let target = row_id_of(tx, to, message)?
+                    .and_then(|row_id| quote_ref(tx, &to, row_id, now).ok());
                 let sent = match (usable, mine, target) {
                     (true, Some(mine), Some(target)) => {
                         let clock = now.max(mine.clock.saturating_add(1));
@@ -342,7 +342,7 @@ impl Core {
             let mine = tx
                 .reaction(row.message_id, ME_REACTOR)?
                 .ok_or(CoreError::NothingToRetry)?;
-            let target = quote_ref(tx, &to, row_id)?;
+            let target = quote_ref(tx, &to, row_id, now)?;
             // Decided before the tracking (my copies' included) is
             // forgotten.
             let own_again = own_copy_never_left(tx, to, row.message_id)?;

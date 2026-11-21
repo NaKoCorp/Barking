@@ -422,7 +422,7 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Messages { contact } => {
             let core = open_core(&home)?;
             let fp = resolve(&core, &contact)?;
-            for m in core.messages_with(&fp)? {
+            for m in core.messages_with(&fp, now())? {
                 println!("{}", render_row(m.at, m.direction, m.status, &m.body));
             }
         }
@@ -830,6 +830,7 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
             alias,
             text,
             ack,
+            ..
         } => {
             let who = alias.unwrap_or_else(|| from.to_string());
             print!("{}", render_message(&who, &text));
