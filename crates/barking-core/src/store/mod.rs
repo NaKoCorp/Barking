@@ -450,6 +450,43 @@ pub struct MessageDeliveryDetail {
     pub own_copies: OwnCopies,
 }
 
+/// Delivery detail of my current reaction send toward the contact on a
+/// message (the reaction sheet): the same fields as `MessageDeliveryDetail`,
+/// over the deliveries of that send's tie.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactionDeliveryDetail {
+    /// The target message's row.
+    pub row_id: i64,
+    pub contact: Fingerprint,
+    /// My current set on the target; empty for a removal.
+    pub emojis: Vec<String>,
+    pub summary: DeliverySummary,
+    /// Deliveries to the contact's devices, then the copies for mine.
+    pub deliveries: Vec<DeviceDeliveryRow>,
+    pub relays: Vec<RelayHop>,
+    pub own_copies: OwnCopies,
+}
+
+/// The summary, deliveries (contact devices first), relays and copies
+/// for my devices of one send (`Queries::send_detail`).
+pub type SendDetail = (
+    DeliverySummary,
+    Vec<DeviceDeliveryRow>,
+    Vec<RelayHop>,
+    OwnCopies,
+);
+
+/// The state of a send from its deliveries `d` to the contact's devices,
+/// as an SQL aggregate: `Received` (3) if one is received, else
+/// `OnNetwork` (1) if one is on the network, else `Pending` (0) if one is
+/// pending, else `NotDelivered` (5). Shared by the message state
+/// (`recompute_message_status`) and the reaction state.
+pub(crate) const SEND_STATE_SQL: &str = "CASE \
+    WHEN sum(d.status = 3) > 0 THEN 3 \
+    WHEN sum(d.status = 1) > 0 THEN 1 \
+    WHEN sum(d.status = 0) > 0 THEN 0 \
+    ELSE 5 END";
+
 /// Sort of a pending packet that is not one of my messages to a contact
 /// (spec §5.7): the "Synchronisation" section, read only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2293,97 +2330,8 @@ pub trait Queries {
         else {
             return Ok(None);
         };
-        let mid = message.message_id.0;
-        let mut stmt = self
-            .conn()
-            .prepare(
-                "SELECT device, own, status, sealed_at, deposited_at, node, acked_at, \
-                 expired_at, size FROM deliveries WHERE message_id = ?1 \
-                 ORDER BY own, sealed_at, rowid",
-            )
-            .map_err(map_err)?;
-        type Raw = (
-            Vec<u8>,
-            bool,
-            i64,
-            i64,
-            Option<i64>,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-        );
-        let raws = stmt
-            .query_map(params![mid.as_slice()], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                ))
-            })
-            .map_err(map_err)?
-            .collect::<rusqlite::Result<Vec<Raw>>>()
-            .map_err(map_err)?;
-        let mut deliveries = Vec::with_capacity(raws.len());
-        let mut own_copies = OwnCopies::default();
-        for (device, own, status, sealed, deposited, node, acked, expired, size) in raws {
-            let state = MessageStatus::from_i64(status)?;
-            if own {
-                own_copies.total += 1;
-                match state {
-                    MessageStatus::Pending => own_copies.waiting += 1,
-                    MessageStatus::OnNetwork | MessageStatus::Received => own_copies.left += 1,
-                    MessageStatus::NotDelivered => {}
-                }
-            }
-            deliveries.push(DeviceDeliveryRow {
-                device: DeviceId(arr(device)?),
-                own,
-                state,
-                sealed_at: to_u64(sealed),
-                deposited_at: deposited.map(to_u64),
-                node,
-                received_at: acked.map(to_u64),
-                expired_at: expired.map(to_u64),
-                size: size.map(|s| u32::try_from(s).unwrap_or(u32::MAX)),
-            });
-        }
-        // Relays: the `Deposited` steps of the contact packets, or, for a
-        // packet whose steps are purged, its delivery's first node.
-        let mut stmt = self
-            .conn()
-            .prepare(
-                "SELECT node, min(at), max(size) FROM ( \
-                 SELECT r.node AS node, r.at AS at, d.size AS size FROM deliveries d \
-                 JOIN route_steps r ON r.packet_id = d.packet_id AND r.step = ?2 \
-                 WHERE d.message_id = ?1 AND d.own = 0 AND r.node IS NOT NULL \
-                 UNION ALL \
-                 SELECT d.node, d.deposited_at, d.size FROM deliveries d \
-                 WHERE d.message_id = ?1 AND d.own = 0 AND d.node IS NOT NULL \
-                 AND d.deposited_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM route_steps r \
-                 WHERE r.packet_id = d.packet_id AND r.step = ?2)) \
-                 GROUP BY node ORDER BY min(at), node",
-            )
-            .map_err(map_err)?;
-        let relays = stmt
-            .query_map(params![mid.as_slice(), ROUTE_STEP_DEPOSITED], |r| {
-                Ok(RelayHop {
-                    node: r.get(0)?,
-                    at: to_u64(r.get(1)?),
-                    size: r
-                        .get::<_, Option<i64>>(2)?
-                        .map_or(0, |s| u32::try_from(s).unwrap_or(u32::MAX)),
-                })
-            })
-            .map_err(map_err)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(map_err)?;
+        let (deliveries, relays, own_copies) =
+            deliveries_and_relays(self.conn(), message.message_id)?;
         Ok(Some(MessageDeliveryDetail {
             row_id,
             contact: message.contact_fp,
@@ -2392,6 +2340,92 @@ pub trait Queries {
             relays,
             own_copies,
         }))
+    }
+
+    /// The state of the send whose packets carry `tie` as message
+    /// identifier, from its deliveries to the contact (`SEND_STATE_SQL`);
+    /// `None` without any.
+    fn send_state(&self, tie: MessageId) -> Result<Option<MessageStatus>> {
+        let state: Option<i64> = self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {SEND_STATE_SQL} FROM deliveries d \
+                     WHERE d.message_id = ?1 AND d.own = 0 HAVING count(*) > 0"
+                ),
+                params![tie.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(map_err)?;
+        state.map(MessageStatus::from_i64).transpose()
+    }
+
+    /// The summary, deliveries and relays of the send whose packets carry
+    /// `tie`, computed as `message_delivery` computes them for a message
+    /// (its state from `send_state`). `None` without a delivery to the
+    /// contact.
+    fn send_detail(&self, tie: MessageId) -> Result<Option<SendDetail>> {
+        let Some(state) = self.send_state(tie)? else {
+            return Ok(None);
+        };
+        type Agg = (
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            i64,
+            i64,
+        );
+        let (devices, received, left, pending, sealed, deposited, acked, expired, tried, awaiting): Agg =
+            self.conn()
+                .query_row(
+                    "SELECT count(d.packet_id), coalesce(sum(d.status = 3), 0), \
+                     coalesce(sum(d.status IN (1, 3)), 0), coalesce(sum(d.status = 0), 0), \
+                     min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at), \
+                     coalesce(sum(d.status = 0 AND o.deposit_tried_at IS NOT NULL), 0), \
+                     coalesce(sum(d.status = 1 AND o.packet_id IS NOT NULL), 0) \
+                     FROM deliveries d LEFT JOIN outbox o ON o.packet_id = d.packet_id \
+                     WHERE d.message_id = ?1 AND d.own = 0",
+                    params![tie.0.as_slice()],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
+                            r.get(9)?,
+                        ))
+                    },
+                )
+                .map_err(map_err)?;
+        let count = |n: i64| u32::try_from(n).unwrap_or(u32::MAX);
+        let summary = DeliverySummary {
+            state,
+            sealed_at: sealed.map_or(0, to_u64),
+            deposited_at: deposited.map(to_u64),
+            received_at: acked.map(to_u64),
+            expired_at: expired
+                .filter(|_| state == MessageStatus::NotDelivered)
+                .map(to_u64),
+            devices: count(devices),
+            devices_received: count(received),
+            devices_left: count(left),
+            devices_tried: count(tried),
+            devices_pending: count(pending),
+            awaiting_verdict: awaiting > 0,
+        };
+        let (deliveries, relays, own_copies) = deliveries_and_relays(self.conn(), tie)?;
+        Ok(Some((summary, deliveries, relays, own_copies)))
     }
 
     /// Number of packets in the send queue that no node accepted yet and
@@ -2641,6 +2675,106 @@ const ROUTE_STEP_DEPOSITED: i64 = 1;
 /// a received message joins none), grouped per message. `group` lists
 /// columns that identify a message (`m.id` among them); giving the order's
 /// columns lets one sort serve both the grouping and the order.
+/// The deliveries keyed on `message_id` (to the contact, then to my
+/// devices, each group by sealing date), the nodes that accepted its
+/// contact packets, and the count of its copies for my devices
+/// (`Queries::message_delivery`, `Queries::send_detail`).
+fn deliveries_and_relays(
+    conn: &Connection,
+    message_id: MessageId,
+) -> Result<(Vec<DeviceDeliveryRow>, Vec<RelayHop>, OwnCopies)> {
+    let mid = message_id.0;
+    let mut stmt = conn
+        .prepare(
+            "SELECT device, own, status, sealed_at, deposited_at, node, acked_at, \
+             expired_at, size FROM deliveries WHERE message_id = ?1 \
+             ORDER BY own, sealed_at, rowid",
+        )
+        .map_err(map_err)?;
+    type Raw = (
+        Vec<u8>,
+        bool,
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    );
+    let raws = stmt
+        .query_map(params![mid.as_slice()], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<Vec<Raw>>>()
+        .map_err(map_err)?;
+    let mut deliveries = Vec::with_capacity(raws.len());
+    let mut own_copies = OwnCopies::default();
+    for (device, own, status, sealed, deposited, node, acked, expired, size) in raws {
+        let state = MessageStatus::from_i64(status)?;
+        if own {
+            own_copies.total += 1;
+            match state {
+                MessageStatus::Pending => own_copies.waiting += 1,
+                MessageStatus::OnNetwork | MessageStatus::Received => own_copies.left += 1,
+                MessageStatus::NotDelivered => {}
+            }
+        }
+        deliveries.push(DeviceDeliveryRow {
+            device: DeviceId(arr(device)?),
+            own,
+            state,
+            sealed_at: to_u64(sealed),
+            deposited_at: deposited.map(to_u64),
+            node,
+            received_at: acked.map(to_u64),
+            expired_at: expired.map(to_u64),
+            size: size.map(|s| u32::try_from(s).unwrap_or(u32::MAX)),
+        });
+    }
+    // Relays: the `Deposited` steps of the contact packets, or, for a
+    // packet whose steps are purged, its delivery's first node.
+    let mut stmt = conn
+        .prepare(
+            "SELECT node, min(at), max(size) FROM ( \
+             SELECT r.node AS node, r.at AS at, d.size AS size FROM deliveries d \
+             JOIN route_steps r ON r.packet_id = d.packet_id AND r.step = ?2 \
+             WHERE d.message_id = ?1 AND d.own = 0 AND r.node IS NOT NULL \
+             UNION ALL \
+             SELECT d.node, d.deposited_at, d.size FROM deliveries d \
+             WHERE d.message_id = ?1 AND d.own = 0 AND d.node IS NOT NULL \
+             AND d.deposited_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM route_steps r \
+             WHERE r.packet_id = d.packet_id AND r.step = ?2)) \
+             GROUP BY node ORDER BY min(at), node",
+        )
+        .map_err(map_err)?;
+    let relays = stmt
+        .query_map(params![mid.as_slice(), ROUTE_STEP_DEPOSITED], |r| {
+            Ok(RelayHop {
+                node: r.get(0)?,
+                at: to_u64(r.get(1)?),
+                size: r
+                    .get::<_, Option<i64>>(2)?
+                    .map_or(0, |s| u32::try_from(s).unwrap_or(u32::MAX)),
+            })
+        })
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map_err)?;
+    Ok((deliveries, relays, own_copies))
+}
+
 fn summaries(
     conn: &Connection,
     filter: &str,

@@ -6973,3 +6973,207 @@ fn acked_superseded_reaction_leaves_the_queue() {
         vec![MessageStatus::Pending as i64]
     );
 }
+
+// --- Lot 2 bis, task 2: reaction state, sheet read and manual retry.
+
+#[test]
+fn my_reaction_state_follows_the_contact_send() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    let pk = react_y(&mut p, &["👍"], NOW);
+    assert_eq!(p.a.my_reaction_state(row), Ok(Some(MessageStatus::Pending)));
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::OnNetwork))
+    );
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let ack = ack_bytes(&mut p.b, &pk, NOW);
+    p.a.receive(&ack, "t", NOW + 2, &mut p.rng).unwrap();
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::Received))
+    );
+    assert_eq!(p.a.my_reaction_state(row_of(&p.a, &b, "x")), Ok(None));
+}
+
+#[test]
+fn my_reaction_state_is_none_for_a_synced_reaction() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, _target, _to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let _ = t.receive(&to_t.encode(), "t", NOW, &mut rng).unwrap();
+    let row = row_of(&t, &fp, "m");
+    assert!(
+        !t.reaction_chips(&fp, MessageId([0x73; 16]))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(t.my_reaction_state(row), Ok(None));
+}
+
+#[test]
+fn reaction_delivery_reports_a_removal() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    react_y(&mut p, &["❤️"], NOW);
+    let sent = p.a.set_reactions(row, &[], NOW + 1, &mut p.rng).unwrap();
+    assert_eq!(sent.len(), 1);
+    let detail =
+        p.a.reaction_delivery(row, NOW + 2)
+            .unwrap()
+            .expect("tracked");
+    assert!(detail.emojis.is_empty());
+    assert_eq!(detail.summary.state, MessageStatus::Pending);
+    assert_eq!((detail.row_id, detail.contact), (row, b));
+}
+
+#[test]
+fn reaction_delivery_lists_devices_and_relays() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, _target, to_bob, _to_t) = react_linked(&mut a, &mut t, &mut rng);
+    a.record_deposit(to_bob.id, "K7QX2M4A", NOW + 1).unwrap();
+    let row = row_of(&a, &fp, "m");
+    let detail = a.reaction_delivery(row, NOW + 2).unwrap().expect("tracked");
+    assert_eq!(detail.emojis, emo(&["👍"]));
+    assert_eq!(detail.summary.state, MessageStatus::OnNetwork);
+    assert_eq!(detail.relays[0].node, "K7QX2M4A");
+    let own: Vec<bool> = detail.deliveries.iter().map(|d| d.own).collect();
+    assert_eq!(own, vec![false, true], "contact devices first");
+    assert_eq!(detail.own_copies.total, 1);
+    assert_eq!(detail.summary.devices, 1);
+}
+
+/// Alice reacts 👍 on "y"; the packet expires undeposited: `(row, late,
+/// old tie)`.
+fn failed_reaction_on_y(p: &mut Pair) -> (i64, u64, MessageId) {
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    let pk = react_y(p, &["👍"], NOW);
+    let late = u64::from(pk.expires_at) + 1;
+    p.a.expire_due(late).unwrap();
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::NotDelivered))
+    );
+    (row, late, tie_of(&p.a, pk.id))
+}
+
+#[test]
+fn retry_reactions_reseals_the_current_set() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "y");
+    let (row, late, old_tie) = failed_reaction_on_y(&mut p);
+    let before = p.a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    p.a.take_delivery_changes();
+    let sent = p.a.retry_reactions(row, late, &mut p.rng).unwrap();
+    assert_eq!(sent.len(), 1, "one packet for Bob's only device");
+    assert_eq!(p.a.my_reaction_state(row), Ok(Some(MessageStatus::Pending)));
+    let tie = contact_tie(&p.a, b, target).expect("tracked");
+    assert_ne!(tie, old_tie);
+    assert_eq!(tie, tie_of(&p.a, sent[0].id));
+    let after = p.a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    assert!(after.clock > before.clock);
+    assert_eq!(after.emojis, before.emojis);
+    assert!(p.a.take_delivery_changes().contains(&(b, row)));
+    // Bob gets the set, on his own row of "y".
+    let a = p.a.fingerprint();
+    let on_b = message_id_of(&p.b, &a, "y");
+    let got = p.b.receive(&sent[0].encode(), "t", late, &mut p.rng);
+    assert!(
+        matches!(got, Ok(ReceiveOutcome::Reaction { .. })),
+        "{got:?}"
+    );
+    assert_eq!(counts(&p.b, &a, on_b), vec![("👍".to_owned(), 1)]);
+}
+
+#[test]
+fn retry_reactions_refuses_when_not_failed() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    react_y(&mut p, &["👍"], NOW);
+    assert_eq!(
+        p.a.retry_reactions(row, NOW + 1, &mut p.rng),
+        Err(CoreError::NothingToRetry)
+    );
+    // No reaction of mine at all.
+    assert_eq!(
+        p.a.retry_reactions(row_of(&p.a, &b, "x"), NOW + 1, &mut p.rng),
+        Err(CoreError::NothingToRetry)
+    );
+    assert_eq!(
+        p.a.retry_reactions(i64::MAX, NOW + 1, &mut p.rng),
+        Err(CoreError::MessageNotFound)
+    );
+}
+
+#[test]
+fn retry_reactions_without_session_changes_nothing() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "y");
+    let (row, late, old_tie) = failed_reaction_on_y(&mut p);
+    let before = p.a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    no_session_with(&p.a, b);
+    assert_eq!(
+        p.a.retry_reactions(row, late, &mut p.rng),
+        Err(CoreError::NoSession)
+    );
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::NotDelivered))
+    );
+    assert_eq!(contact_tie(&p.a, b, target), Some(old_tie));
+    assert_eq!(
+        tie_states(&p.a, old_tie, false),
+        vec![MessageStatus::NotDelivered as i64]
+    );
+    assert_eq!(
+        p.a.store.reaction(target, ME_REACTOR).unwrap(),
+        Some(before)
+    );
+}
+
+#[test]
+fn retry_reactions_refuses_a_blocked_contact() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let (row, late, _) = failed_reaction_on_y(&mut p);
+    p.a.block_contact(&b, late, &mut p.rng).unwrap();
+    assert_eq!(
+        p.a.retry_reactions(row, late, &mut p.rng),
+        Err(CoreError::ContactBlocked)
+    );
+}
+
+#[test]
+fn retry_reactions_reseals_an_own_copy_that_never_left() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, target, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let late = u64::from(to_bob.expires_at.max(to_t.expires_at)) + 1;
+    a.expire_due(late).unwrap();
+    let row = row_of(&a, &fp, "m");
+    let sent = a.retry_reactions(row, late, &mut rng).unwrap();
+    assert_eq!(sent.len(), 2, "one for Bob, one for T");
+    let mine = a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    for p in &sent {
+        let _ = t.receive(&p.encode(), "t", late, &mut rng);
+    }
+    let on_t = t.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    assert_eq!((on_t.clock, on_t.emojis), (mine.clock, emo(&["👍"])));
+}
+
+#[test]
+fn retry_reactions_leaves_an_own_copy_that_left() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, _target, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    a.record_deposit(to_t.id, NODE, NOW + 1).unwrap();
+    let late = u64::from(to_bob.expires_at) + 1;
+    a.expire_due(late).unwrap();
+    let row = row_of(&a, &fp, "m");
+    let sent = a.retry_reactions(row, late, &mut rng).unwrap();
+    assert_eq!(sent.len(), 1, "Bob only");
+}

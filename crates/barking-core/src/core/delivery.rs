@@ -25,7 +25,7 @@ use crate::mailbox::MailboxId;
 use crate::packet::{Packet, PacketId};
 use crate::store::{
     DeliverySummary, Direction, MessageDeliveryDetail, MessageId, MessageRow, MessageStatus,
-    PendingPackets, Queries, arr, map_err, to_i64, to_u64,
+    PendingPackets, Queries, SEND_STATE_SQL, arr, map_err, to_i64, to_u64,
 };
 use crate::transparency::TransparencyEvent;
 
@@ -39,15 +39,13 @@ use crate::transparency::TransparencyEvent;
 pub(crate) fn recompute_message_status(q: &impl Queries, message_id: MessageId) -> Result<()> {
     q.conn()
         .execute(
-            "UPDATE messages SET status = (
-                SELECT CASE
-                    WHEN sum(d.status = 3) > 0 THEN 3
-                    WHEN sum(d.status = 1) > 0 THEN 1
-                    WHEN sum(d.status = 0) > 0 THEN 0
-                    ELSE 5 END
-                FROM deliveries d WHERE d.message_id = messages.message_id AND d.own = 0)
-            WHERE message_id = ?1 AND direction = 0
-              AND EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = ?1 AND d.own = 0)",
+            &format!(
+                "UPDATE messages SET status = (
+                    SELECT {SEND_STATE_SQL}
+                    FROM deliveries d WHERE d.message_id = messages.message_id AND d.own = 0)
+                WHERE message_id = ?1 AND direction = 0
+                  AND EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = ?1 AND d.own = 0)"
+            ),
             params![message_id.0.as_slice()],
         )
         .map_err(map_err)?;

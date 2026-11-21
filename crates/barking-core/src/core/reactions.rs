@@ -36,8 +36,8 @@ use crate::emoji;
 use crate::identity::{DeviceKeys, Fingerprint};
 use crate::packet::{Packet, PacketId};
 use crate::store::{
-    MessageId, Queries, ReactionRow, arr, drop_reaction_packets, forget_reaction_tracking, map_err,
-    to_i64,
+    MessageId, MessageStatus, Queries, ReactionDeliveryDetail, ReactionRow, arr,
+    drop_reaction_packets, forget_reaction_tracking, map_err, to_i64,
 };
 use crate::transparency::SyncKind;
 use crate::{CoreError, Result};
@@ -244,6 +244,140 @@ impl Core {
         Ok(out)
     }
 
+    /// The state of my current send toward the contact on the message of
+    /// row `row_id` (`current_contact_tie`), by the rule of a message's
+    /// state over its contact deliveries. `None` without local tracking
+    /// (no reaction of mine, synced from another of my devices, imported,
+    /// sent while no device of the contact had a session) or for an
+    /// unknown row.
+    pub fn my_reaction_state(&self, row_id: i64) -> Result<Option<MessageStatus>> {
+        let Some(row) = self.store.message_by_row(row_id)? else {
+            return Ok(None);
+        };
+        match current_contact_tie(&self.store, row.contact_fp, row.message_id)? {
+            Some(tie) => self.store.send_state(tie),
+            None => Ok(None),
+        }
+    }
+
+    /// Delivery detail of my current send toward the contact on the
+    /// message of row `row_id` (the reaction sheet): my current set (empty
+    /// for a removal), then the summary, deliveries and relays of that
+    /// send, as `message_delivery` gives them for a message. `None` when
+    /// `my_reaction_state` is. Expires the due packets first.
+    pub fn reaction_delivery(
+        &mut self,
+        row_id: i64,
+        now: u64,
+    ) -> Result<Option<ReactionDeliveryDetail>> {
+        self.expire_due(now)?;
+        let Some(row) = self.store.message_by_row(row_id)? else {
+            return Ok(None);
+        };
+        let Some(tie) = current_contact_tie(&self.store, row.contact_fp, row.message_id)? else {
+            return Ok(None);
+        };
+        let Some((summary, deliveries, relays, own_copies)) = self.store.send_detail(tie)? else {
+            return Ok(None);
+        };
+        let emojis = self
+            .store
+            .reaction(row.message_id, ME_REACTOR)?
+            .map(|m| m.emojis)
+            .unwrap_or_default();
+        Ok(Some(ReactionDeliveryDetail {
+            row_id,
+            contact: row.contact_fp,
+            emojis,
+            summary,
+            deliveries,
+            relays,
+            own_copies,
+        }))
+    }
+
+    /// Resends by hand my current set on the message of row `row_id` to
+    /// the contact, after my current send toward it failed.
+    ///
+    /// Checks, before any write: the row (`MessageNotFound`), the contact
+    /// (`ContactBlocked`, `UnknownContact`), the state of the current send
+    /// (`NothingToRetry` unless `NotDelivered`, or without one). Then, in
+    /// one transaction, as `resend_reactions` re-stamps: my row gets
+    /// `clock = max(now, clock + 1)` and a fresh tie, the tracking of the
+    /// earlier sends on this target to this contact is forgotten, and my
+    /// current set is sealed for each current device of the contact. My
+    /// other devices get it again too if the last copy for them never left
+    /// (`Pending` or `NotDelivered`). If no device of the contact can be
+    /// sealed for, `NoSession` and nothing changes: the failed send and its
+    /// state stay. The change is noted for `take_delivery_changes`; the
+    /// sealings are logged as every sealing.
+    pub fn retry_reactions(
+        &mut self,
+        row_id: i64,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Packet>> {
+        self.ensure_active()?;
+        let row = self
+            .store
+            .message_by_row(row_id)?
+            .ok_or(CoreError::MessageNotFound)?;
+        let to = row.contact_fp;
+        if self.store.block_state(to)?.blocked {
+            return Err(CoreError::ContactBlocked);
+        }
+        self.store
+            .get_contact(to)?
+            .ok_or(CoreError::UnknownContact)?;
+        let Core { store, device, .. } = self;
+        let packets = store.transaction(|tx| {
+            let tie = current_contact_tie(tx, to, row.message_id)?;
+            let state = match tie {
+                Some(tie) => tx.send_state(tie)?,
+                None => None,
+            };
+            if state != Some(MessageStatus::NotDelivered) {
+                return Err(CoreError::NothingToRetry);
+            }
+            let mine = tx
+                .reaction(row.message_id, ME_REACTOR)?
+                .ok_or(CoreError::NothingToRetry)?;
+            let target = quote_ref(tx, &to, row_id)?;
+            // Decided before the tracking (my copies' included) is
+            // forgotten.
+            let own_again = own_copy_never_left(tx, to, row.message_id)?;
+            forget_reaction_tracking(
+                tx,
+                "message_id = ?1 AND contact_fp = ?2",
+                params![row.message_id.0.as_slice(), to.0.as_slice()],
+            )?;
+            let clock = now.max(mine.clock.saturating_add(1));
+            let mut tie = [0u8; 16];
+            rng.fill_bytes(&mut tie);
+            let seal = Seal {
+                to,
+                message: row.message_id,
+                target,
+                emojis: &mine.emojis,
+                tie,
+                time: SealTime {
+                    now,
+                    sent_at: clock,
+                },
+            };
+            let (mut out, own) = seal_set(tx, device, &seal, (true, own_again), rng)?;
+            if out.is_empty() {
+                // Rolls the transaction back: the failed send stays.
+                return Err(CoreError::NoSession);
+            }
+            tx.put_reaction_if_newer(&ReactionRow { clock, tie, ..mine })?;
+            out.extend(own);
+            Ok(out)
+        })?;
+        self.note_changes([(to, row_id)]);
+        Ok(packets)
+    }
+
     /// The chips under `message` of the conversation with `contact`: rows in
     /// first-seen order, `(first_seen, first_tie)` (a replaced row keeps its
     /// place, the same on both sides), each row's emoji in
@@ -425,10 +559,6 @@ fn flagged_audiences(q: &impl Queries) -> Result<Vec<Flagged>> {
 /// tracking (synced from another of my devices, imported, or sent while no
 /// device of the contact had a session). An own-only resend never changes
 /// it: it creates `own = 1` deliveries only.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the reaction delivery state")
-)]
 pub(super) fn current_contact_tie(
     q: &impl Queries,
     contact: Fingerprint,
@@ -448,6 +578,28 @@ pub(super) fn current_contact_tie(
         .optional()
         .map_err(map_err)?;
     tie.map(|t| Ok(MessageId(arr(t)?))).transpose()
+}
+
+/// The last copy of my set on `target` for my other devices (to the
+/// conversation with `contact`) never left this device: its delivery is
+/// `Pending` or `NotDelivered`. False without any such copy.
+fn own_copy_never_left(q: &impl Queries, contact: Fingerprint, target: MessageId) -> Result<bool> {
+    let status: Option<i64> = q
+        .conn()
+        .query_row(
+            "SELECT d.status FROM reaction_sends rs \
+             JOIN deliveries d ON d.packet_id = rs.packet_id \
+             WHERE rs.message_id = ?1 AND rs.contact_fp = ?2 AND rs.own = 1 \
+             AND rs.superseded = 0 \
+             ORDER BY rs.rowid DESC LIMIT 1",
+            params![target.0.as_slice(), contact.0.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(map_err)?;
+    Ok(status.is_some_and(|s| {
+        s == MessageStatus::Pending as i64 || s == MessageStatus::NotDelivered as i64
+    }))
 }
 
 /// The row of the message `message` in the conversation with `contact`.
