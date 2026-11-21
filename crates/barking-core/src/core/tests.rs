@@ -3697,7 +3697,7 @@ fn delete_pending_cancels_and_drops_own_copies() {
     let mid = message_id_of(&a, &bob, "never");
     let row = row_of(&a, &bob, "never");
     assert_eq!(route_steps_of(&a, sent[0].id), 1);
-    let outcome = a.delete_message(row, NOW + 5).unwrap();
+    let outcome = a.delete_message(row, NOW + 5, &mut rng).unwrap().0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3727,7 +3727,10 @@ fn delete_after_deposit_reports_already_left() {
     let sent = a.send_text(&bob, "gone", NOW, &mut rng).unwrap();
     let mid = message_id_of(&a, &bob, "gone");
     a.record_deposit(sent[0].id, NODE, NOW + 1).unwrap();
-    let outcome = a.delete_message(row_of(&a, &bob, "gone"), NOW + 5).unwrap();
+    let outcome = a
+        .delete_message(row_of(&a, &bob, "gone"), NOW + 5, &mut rng)
+        .unwrap()
+        .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3760,7 +3763,13 @@ fn kept_delivery_of_a_deleted_message_settles() {
         p.a.record_deposit(s[0].id, NODE, NOW).unwrap();
     }
     let rows = [row_of(&p.a, &bob, "acked"), row_of(&p.a, &bob, "lost")];
-    assert_eq!(p.a.delete_messages(&rows, NOW + 1).unwrap().already_left, 2);
+    assert_eq!(
+        p.a.delete_messages(&rows, NOW + 1, &mut p.rng)
+            .unwrap()
+            .0
+            .already_left,
+        2
+    );
     // The ack still clears its packet from the queue.
     let ack = match p
         .b
@@ -3800,8 +3809,9 @@ fn delete_mixed_devices_is_partly_cancelled() {
     let mid = message_id_of(&b, &alice, "half");
     b.record_deposit(sent[0].id, NODE, NOW).unwrap();
     let outcome = b
-        .delete_message(row_of(&b, &alice, "half"), NOW + 5)
-        .unwrap();
+        .delete_message(row_of(&b, &alice, "half"), NOW + 5, &mut rng)
+        .unwrap()
+        .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3827,7 +3837,10 @@ fn delete_not_delivered_drops_its_deliveries() {
     p.a.expire_due(u64::from(sent[0].expires_at) + 1).unwrap();
     assert_eq!(status_of(&p.a, &bob, "late"), MessageStatus::NotDelivered);
     let row = row_of(&p.a, &bob, "late");
-    let outcome = p.a.delete_message(row, NOW + DAY_SECS).unwrap();
+    let outcome =
+        p.a.delete_message(row, NOW + DAY_SECS, &mut p.rng)
+            .unwrap()
+            .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3838,7 +3851,9 @@ fn delete_not_delivered_drops_its_deliveries() {
     assert!(deliveries_of(&p.a, mid).is_empty());
     // Gone already: nothing more.
     assert_eq!(
-        p.a.delete_message(row, NOW + DAY_SECS).unwrap(),
+        p.a.delete_message(row, NOW + DAY_SECS, &mut p.rng)
+            .unwrap()
+            .0,
         DeleteOutcome::default()
     );
 }
@@ -3859,7 +3874,7 @@ fn delete_received_message_keeps_inbound() {
         o => panic!("{o:?}"),
     };
     let row = row_of(&p.b, &a_fp, "read-me");
-    let outcome = p.b.delete_message(row, NOW + 1).unwrap();
+    let outcome = p.b.delete_message(row, NOW + 1, &mut p.rng).unwrap().0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3915,7 +3930,7 @@ fn cancel_all_pending_touches_only_pending_messages() {
     };
     p.a.receive(&ack.encode(), "t", NOW, &mut p.rng).unwrap();
     let before = p.a.messages_with(&bob).unwrap().len();
-    let outcome = p.a.cancel_all_pending(NOW + 10).unwrap();
+    let outcome = p.a.cancel_all_pending(NOW + 10, &mut p.rng).unwrap().0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -3937,7 +3952,7 @@ fn cancel_all_pending_touches_only_pending_messages() {
     }
     // Nothing more to cancel.
     assert_eq!(
-        p.a.cancel_all_pending(NOW + 10).unwrap(),
+        p.a.cancel_all_pending(NOW + 10, &mut p.rng).unwrap().0,
         DeleteOutcome::default()
     );
 }
@@ -3952,7 +3967,7 @@ fn tombstones_kept_for_good() {
             .unwrap()
             .remove(0);
     p.b.receive(&first.encode(), "t", NOW, &mut p.rng).unwrap();
-    p.b.delete_message(row_of(&p.b, &a_fp, "brief"), NOW)
+    p.b.delete_message(row_of(&p.b, &a_fp, "brief"), NOW, &mut p.rng)
         .unwrap();
     assert_eq!(tombstones(&p.b), 1);
     // Weeks of log activity (the log's purge clock advances by two days
@@ -3986,8 +4001,9 @@ fn delete_after_unconfirmed_deposit_reports_already_left() {
     assert_eq!(tried, Some(i(NOW + 1)));
     assert_eq!(delivery_state(&a, sent[0].id).0, 0);
     let outcome = a
-        .delete_message(row_of(&a, &bob, "maybe"), NOW + 5)
-        .unwrap();
+        .delete_message(row_of(&a, &bob, "maybe"), NOW + 5, &mut rng)
+        .unwrap()
+        .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -4016,8 +4032,9 @@ fn tried_own_copy_is_kept_when_nobody_receives() {
     let sent = a.send_text(&bob, "copy tried", NOW, &mut rng).unwrap();
     a.record_deposit_tried(sent[1].id, NOW + 1).unwrap();
     let outcome = a
-        .delete_message(row_of(&a, &bob, "copy tried"), NOW + 5)
-        .unwrap();
+        .delete_message(row_of(&a, &bob, "copy tried"), NOW + 5, &mut rng)
+        .unwrap()
+        .0;
     assert_eq!(
         outcome,
         DeleteOutcome {
@@ -4070,7 +4087,7 @@ fn delete_event_has_no_content() {
         row_of(&p.a, &bob, "secret words"),
         row_of(&p.a, &bob, "other words"),
     ];
-    p.a.delete_messages(&rows, NOW + 1).unwrap();
+    p.a.delete_messages(&rows, NOW + 1, &mut p.rng).unwrap();
     let (_, last) = p.a.transparency_log(1).unwrap().remove(0);
     assert_eq!(
         last,
@@ -4078,6 +4095,7 @@ fn delete_event_has_no_content() {
             count: 2,
             cancelled: 1,
             already_left: 1,
+            from_other_device: false,
         }
     );
     assert!(!last.is_security());
@@ -4096,7 +4114,7 @@ fn delete_event_has_no_content() {
     assert!(!bytes.windows(32).any(|w| w == bob.0.as_slice()));
     // Nothing deleted, nothing logged.
     let n = p.a.transparency_log(10_000).unwrap().len();
-    p.a.delete_messages(&rows, NOW + 2).unwrap();
+    p.a.delete_messages(&rows, NOW + 2, &mut p.rng).unwrap();
     assert_eq!(p.a.transparency_log(10_000).unwrap().len(), n);
 }
 
@@ -4435,7 +4453,12 @@ fn pending_scene() -> (TempDir, Core, Fingerprint, Vec<Packet>, StdRng) {
     let kept = a.send_text(&bob, "kept", NOW, &mut rng).unwrap();
     a.record_deposit(kept[0].id, NODE, NOW).unwrap();
     let row = row_of(&a, &bob, "kept");
-    assert!(a.delete_message(row, NOW).unwrap().own_copies_kept);
+    assert!(
+        a.delete_message(row, NOW, &mut rng)
+            .unwrap()
+            .0
+            .own_copies_kept
+    );
     (d, a, bob, sent, rng)
 }
 
@@ -4472,9 +4495,10 @@ fn pending_kinds_are_classified() {
                 packets: 2,
                 contacts: vec![bob],
             },
+            // The verification, and the deletion of "kept" for my tablet.
             PendingSync {
                 kind: PendingKind::DeviceSync,
-                packets: 1,
+                packets: 2,
                 contacts: vec![],
             },
             // The card update sent to Bob when the tablet was linked.
@@ -4485,7 +4509,7 @@ fn pending_kinds_are_classified() {
             },
         ]
     );
-    assert_eq!(pending.packets, 7);
+    assert_eq!(pending.packets, 8);
 }
 
 #[test]
@@ -4581,7 +4605,7 @@ fn every_state_change_is_noted_once() {
     assert!(p.a.drop_outbox_packet(&s4[0].encode(), e2).unwrap());
     assert_eq!(p.a.take_delivery_changes(), vec![(bob, r4)]);
     // Deletions: one change per deleted message.
-    p.a.delete_messages(&[r1, r2, r4], e2).unwrap();
+    p.a.delete_messages(&[r1, r2, r4], e2, &mut p.rng).unwrap();
     assert_eq!(
         p.a.take_delivery_changes(),
         vec![(bob, r1), (bob, r2), (bob, r4)]
@@ -4607,7 +4631,7 @@ fn every_state_change_is_noted_once() {
         p.a.record_deposit(s[0].id, NODE, e6).unwrap();
     }
     let rows = [row_of(&p.a, &bob, "s7"), row_of(&p.a, &bob, "s8")];
-    p.a.delete_messages(&rows, e6).unwrap();
+    p.a.delete_messages(&rows, e6, &mut p.rng).unwrap();
     assert_eq!(
         p.a.take_delivery_changes(),
         vec![(bob, rows[0]), (bob, rows[1])]
@@ -4629,7 +4653,12 @@ fn own_copy_of_a_deleted_message_notes_nothing() {
     let sent = a.send_text(&bob, "kept", NOW, &mut rng).unwrap();
     a.record_deposit(sent[0].id, NODE, NOW).unwrap();
     let row = row_of(&a, &bob, "kept");
-    assert!(a.delete_message(row, NOW).unwrap().own_copies_kept);
+    assert!(
+        a.delete_message(row, NOW, &mut rng)
+            .unwrap()
+            .0
+            .own_copies_kept
+    );
     assert_eq!(a.take_delivery_changes(), vec![(bob, row)]);
     // The copy for my tablet expires undeposited: no row, no change.
     a.expire_due(u64::from(sent[1].expires_at) + 1).unwrap();
@@ -5314,7 +5343,7 @@ fn deleted_original_reads_unavailable() {
     let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
     deliver(&mut p.a, &original[0], &mut p.rng);
     let id = full_row(&p.a, &b, "orig");
-    p.a.delete_message(id.id, NOW).unwrap();
+    p.a.delete_message(id.id, NOW, &mut p.rng).unwrap();
     let row = full_row(&p.b, &a, "orig");
     let reply =
         p.b.send_message(&a, "re", Some(row.id), NOW, &mut p.rng)
@@ -5415,7 +5444,7 @@ fn retried_reply_keeps_its_ref() {
     p.a.expire_due(late).unwrap();
     assert_eq!(before.status, MessageStatus::Pending);
     assert_eq!(full_row(&p.a, &b, "re").status, MessageStatus::NotDelivered);
-    p.a.delete_message(orig.id, late).unwrap();
+    p.a.delete_message(orig.id, late, &mut p.rng).unwrap();
     let again = p.a.retry_message(before.id, late, &mut p.rng).unwrap();
     let after = full_row(&p.a, &b, "re");
     assert_eq!(
@@ -5642,7 +5671,7 @@ fn reaction_on_deleted_message_ignored() {
     let mut p = pair();
     let a = p.a.fingerprint();
     let row = row_of(&p.b, &a, "x");
-    p.b.delete_message(row, NOW).unwrap();
+    p.b.delete_message(row, NOW, &mut p.rng).unwrap();
     let pk = react_x(&mut p, &["👍"], NOW);
     assert!(matches!(
         deliver(&mut p.b, &pk, &mut p.rng),
@@ -5719,7 +5748,8 @@ fn reactions_erased_with_message_contact_and_block() {
     let b = p.b.fingerprint();
     both_react(&mut p);
     let x = message_id_of(&p.a, &b, "x");
-    p.a.delete_message(row_of(&p.a, &b, "x"), NOW).unwrap();
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW, &mut p.rng)
+        .unwrap();
     assert!(p.a.store.reaction(x, ME_REACTOR).unwrap().is_none());
     assert_eq!(reaction_rows(&p.a), 1);
     // Removing the contact erases every row of the conversation.
@@ -6077,7 +6107,8 @@ fn expired_reaction_without_my_row_is_dropped_not_resent() {
     let b = p.b.fingerprint();
     let pk = react_x(&mut p, &["👍"], NOW);
     // The message goes (its reactions with it) before the packet expires.
-    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1).unwrap();
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1, &mut p.rng)
+        .unwrap();
     let late = u64::from(pk.expires_at) + 1;
     assert_eq!(
         p.a.resend_reactions(late, &mut p.rng).map(|r| r.resent),
@@ -6147,7 +6178,8 @@ fn deleting_the_message_drops_its_reaction_sends() {
     let pk = react_x(&mut p, &["👍"], NOW);
     p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
     assert_eq!(sends_where(&p.a, "1"), 1);
-    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 2).unwrap();
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 2, &mut p.rng)
+        .unwrap();
     assert_eq!(sends_where(&p.a, "1"), 0, "no link to the deleted message");
 }
 
@@ -6320,7 +6352,7 @@ fn repeat_of_a_stored_message_is_a_visible_duplicate() {
 
     // Deleted here since: nothing of it shows, a plain duplicate.
     let row = row_of(&p.b, &a, "seen");
-    p.b.delete_message(row, NOW).unwrap();
+    p.b.delete_message(row, NOW, &mut p.rng).unwrap();
     for pk in [&m, &again] {
         let r = deliver(&mut p.b, pk, &mut p.rng);
         assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
@@ -6552,7 +6584,8 @@ fn deleting_the_message_drops_its_queued_reaction_packets() {
     let mut p = pair();
     let b = p.b.fingerprint();
     let pk = react_x(&mut p, &["👍"], NOW);
-    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1).unwrap();
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1, &mut p.rng)
+        .unwrap();
     assert!(gone(&p.a, pk.id));
     assert!(
         p.a.pending_packets(NOW + 1)
@@ -7273,4 +7306,314 @@ fn retry_reactions_without_contact_session_seals_no_own_copy() {
         a.my_reaction_state(row),
         Ok(Some(MessageStatus::NotDelivered))
     );
+}
+
+// --- Deletion and ephemeral, task 1: `SyncDelete` to my other devices.
+
+/// Gives each packet to each of `cores`, ignoring those not for it.
+fn deliver_each(pkts: &[Packet], cores: &mut [&mut Core], rng: &mut StdRng) {
+    for p in pkts {
+        for c in cores.iter_mut() {
+            c.receive(&p.encode(), "t", NOW, rng).unwrap();
+        }
+    }
+}
+
+fn not_acks(c: &mut Core) -> usize {
+    c.pending_outbox(NOW)
+        .unwrap()
+        .iter()
+        .filter(|b| Packet::decode(b).unwrap().kind != Kind::Ack)
+        .count()
+}
+
+fn is_tombstoned(c: &Core, id: MessageId) -> bool {
+    c.store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM deleted_messages WHERE message_id = ?1",
+            rusqlite::params![id.0.as_slice()],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+        == 1
+}
+
+fn synced_delete(o: ReceiveOutcome) {
+    assert!(
+        matches!(
+            o,
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Delete,
+                contact: None
+            }
+        ),
+        "{o:?}"
+    );
+}
+
+/// `ids` deleted identifiers, as a `SyncDelete` from `from` to its other
+/// device (one packet).
+fn seal_delete(from: &mut Core, ids: usize, mid: u8, rng: &mut StdRng) -> Packet {
+    let ids = (0..ids)
+        .map(|i| MessageId([0x80 | u8::try_from(i).unwrap(); 16]))
+        .collect();
+    let body = ExtContent::SyncDelete { ids }.to_body();
+    assert!(crate::envelope::fits_in_packet(&body));
+    let mut sealed = seal_body(
+        from,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([mid; 16]),
+        rng,
+    );
+    assert_eq!(sealed.len(), 1);
+    sealed.remove(0).0
+}
+
+#[test]
+fn sync_delete_of_32_ids_fits_tier_m() {
+    let (_d, mut a, mut t, _b, _v1, mut rng) = alice_tablet_bob();
+    // The session between the phone and the tablet is opened and answered
+    // first: an opening packet carries the session keys (tier L whatever
+    // it holds).
+    let first = seal_delete(&mut a, 1, 0x40, &mut rng);
+    synced_delete(deliver(&mut t, &first, &mut rng));
+    let answer = seal_delete(&mut t, 1, 0x41, &mut rng);
+    synced_delete(deliver(&mut a, &answer, &mut rng));
+    let full = seal_delete(&mut a, crate::content::MAX_SYNC_DELETE_IDS, 0x42, &mut rng);
+    assert_eq!(full.tier, Tier::M);
+}
+
+#[test]
+fn delete_on_phone_removes_message_on_tablet() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = b.send_text(&alice, "hi", NOW, &mut rng).unwrap();
+    deliver_each(&sent, &mut [&mut a, &mut t], &mut rng);
+    let react = b
+        .set_reactions(row_of(&b, &alice, "hi"), &emo(&["👍"]), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&react, &mut [&mut a, &mut t], &mut rng);
+    assert_eq!(reaction_rows(&t), 1);
+    let id = message_id_of(&t, &bob, "hi");
+    let (outcome, pkts) = a
+        .delete_message(row_of(&a, &bob, "hi"), NOW + 5, &mut rng)
+        .unwrap();
+    assert_eq!(outcome.deleted, 1);
+    assert_eq!(pkts.len(), 1, "one copy for the tablet");
+    synced_delete(deliver(&mut t, &pkts[0], &mut rng));
+    assert_eq!(acks_for(&mut t, &pkts[0]), 1);
+    assert!(t.messages_with(&bob).unwrap().is_empty());
+    assert!(is_tombstoned(&t, id));
+    assert_eq!(reaction_rows(&t), 0);
+    // Logged as coming from another of my devices; the phone's own entry
+    // is not.
+    let deleted = |c: &Core| {
+        c.transparency_log(100)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                TransparencyEvent::MessagesDeleted {
+                    count,
+                    from_other_device,
+                    ..
+                } => Some((count, from_other_device)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(deleted(&t), [(1, true)]);
+    assert_eq!(deleted(&a), [(1, false)]);
+    // The same copy again: a duplicate, nothing more.
+    let again = t.receive(&pkts[0].encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(again, ReceiveOutcome::Duplicate), "{again:?}");
+}
+
+#[test]
+fn sync_delete_before_message_blocks_it_forever() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = b.send_text(&alice, "hi", NOW, &mut rng).unwrap();
+    deliver_each(&sent, &mut [&mut a], &mut rng);
+    let (_, pkts) = a
+        .delete_message(row_of(&a, &bob, "hi"), NOW + 5, &mut rng)
+        .unwrap();
+    // The tablet gets the deletion first, then Bob's packet.
+    synced_delete(deliver(&mut t, &pkts[0], &mut rng));
+    deliver_each(&sent, &mut [&mut t], &mut rng);
+    assert!(t.messages_with(&bob).unwrap().is_empty());
+    let react = b
+        .set_reactions(row_of(&b, &alice, "hi"), &emo(&["👍"]), NOW, &mut rng)
+        .unwrap();
+    deliver_each(&react, &mut [&mut t], &mut rng);
+    assert!(t.messages_with(&bob).unwrap().is_empty());
+    assert_eq!(reaction_rows(&t), 0);
+}
+
+/// The phone sends "x" to Bob, the tablet gets its copy and deletes it;
+/// `tried`: a deposit of Bob's packet was tried first. Returns the phone,
+/// Bob's packet and the message.
+fn delete_on_tablet(tried: bool) -> (TempDir, Core, Packet, MessageId) {
+    let (d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "x", NOW, &mut rng).unwrap();
+    assert_eq!(sent.len(), 2, "Bob's device, then my tablet");
+    let mid = message_id_of(&a, &bob, "x");
+    deliver(&mut t, &sent[1], &mut rng);
+    if tried {
+        a.record_deposit_tried(sent[0].id, NOW + 1).unwrap();
+    }
+    let (_, pkts) = t
+        .delete_message(row_of(&t, &bob, "x"), NOW + 5, &mut rng)
+        .unwrap();
+    assert_eq!(pkts.len(), 1, "one copy for the phone");
+    synced_delete(deliver(&mut a, &pkts[0], &mut rng));
+    assert!(!has_message(&a, &bob, "x"));
+    (d, a, sent[0].clone(), mid)
+}
+
+#[test]
+fn sync_delete_cancels_untried_pending_packet_on_sealer() {
+    let (_d, a, to_bob, mid) = delete_on_tablet(false);
+    assert_eq!(outbox_row(&a, to_bob.id), None);
+    assert!(deliveries_of(&a, mid).is_empty());
+    // Tried: a node may hold it, it is kept.
+    let (_d, a, to_bob, mid) = delete_on_tablet(true);
+    assert_eq!(outbox_row(&a, to_bob.id), Some(None));
+    assert!(
+        deliveries_of(&a, mid).contains(&(0, MessageStatus::Pending as i64)),
+        "{:?}",
+        deliveries_of(&a, mid)
+    );
+}
+
+#[test]
+fn seventy_ids_make_three_sync_packets() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let mut rows = Vec::new();
+    for i in 0..70u8 {
+        let body = format!("m{i}");
+        a.store
+            .insert_message(
+                bob,
+                Direction::Out,
+                &body,
+                MessageStatus::OnNetwork,
+                NOW,
+                MessageId([i; 16]),
+            )
+            .unwrap();
+        rows.push(row_of(&a, &bob, &body));
+    }
+    let (outcome, pkts) = a.delete_messages(&rows, NOW + 5, &mut rng).unwrap();
+    assert_eq!(outcome.deleted, 70);
+    assert_eq!(pkts.len(), 3, "32 + 32 + 6 ids");
+    let before = tombstones(&t);
+    for p in &pkts {
+        synced_delete(deliver(&mut t, p, &mut rng));
+    }
+    assert_eq!(tombstones(&t) - before, 70);
+}
+
+#[test]
+fn received_sync_delete_sends_nothing() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let sent = b.send_text(&alice, "hi", NOW, &mut rng).unwrap();
+    deliver_each(&sent, &mut [&mut a, &mut t], &mut rng);
+    let (_, pkts) = a
+        .delete_message(row_of(&a, &bob, "hi"), NOW + 5, &mut rng)
+        .unwrap();
+    let before = not_acks(&mut t);
+    synced_delete(deliver(&mut t, &pkts[0], &mut rng));
+    assert_eq!(not_acks(&mut t), before);
+    assert_eq!(acks_for(&mut t, &pkts[0]), 1);
+}
+
+#[test]
+fn sync_delete_from_contact_is_refused() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let b_fp = p.b.fingerprint();
+    let before = p.a.messages_with(&b_fp).unwrap();
+    let ids = before.iter().map(|m| m.message_id).collect();
+    let body = ExtContent::SyncDelete { ids }.to_body();
+    let out = seal_body(
+        &mut p.b,
+        &send::Target::Contact(a_fp),
+        &body,
+        MessageId([0x44; 16]),
+        &mut p.rng,
+    );
+    let r =
+        p.a.receive(&out[0].0.encode(), "t", NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(reason(r), NOT_MINE);
+    assert_eq!(p.a.messages_with(&b_fp).unwrap(), before);
+    assert_eq!(tombstones(&p.a), 0);
+}
+
+#[test]
+fn sync_delete_for_unknown_contact_only_tombstones() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let id = MessageId::incoming(&Fingerprint([7; 32]), &[1; 16]);
+    let body = ExtContent::SyncDelete { ids: vec![id] }.to_body();
+    let sealed = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x45; 16]),
+        &mut rng,
+    );
+    let pkt = &sealed[0].0;
+    synced_delete(deliver(&mut t, pkt, &mut rng));
+    assert_eq!(acks_for(&mut t, pkt), 1);
+    assert!(is_tombstoned(&t, id));
+}
+
+#[test]
+fn cancel_all_pending_syncs_its_deletions() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    for text in ["one", "two"] {
+        let sent = a.send_text(&bob, text, NOW, &mut rng).unwrap();
+        deliver(&mut t, &sent[1], &mut rng);
+    }
+    assert_eq!(t.messages_with(&bob).unwrap().len(), 2);
+    let (outcome, pkts) = a.cancel_all_pending(NOW + 5, &mut rng).unwrap();
+    assert_eq!(outcome.deleted, 2);
+    assert_eq!(pkts.len(), 1);
+    synced_delete(deliver(&mut t, &pkts[0], &mut rng));
+    assert!(t.messages_with(&bob).unwrap().is_empty());
+}
+
+#[test]
+fn delete_without_another_device_seals_nothing() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "x");
+    let (outcome, pkts) = p.a.delete_message(row, NOW + 5, &mut p.rng).unwrap();
+    assert_eq!(outcome.deleted, 1);
+    assert!(pkts.is_empty());
+}
+
+#[test]
+fn delete_on_a_removed_device_stays_local() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a.send_text(&bob, "x", NOW, &mut rng).unwrap();
+    deliver(&mut t, &sent[1], &mut rng);
+    let t_id = t.device.public().id();
+    let removal = a.remove_device(t_id, NOW, &mut rng).unwrap();
+    deliver_each(&removal, &mut [&mut t], &mut rng);
+    assert!(t.removed().unwrap().is_some());
+    let before = not_acks(&mut t);
+    let (outcome, pkts) = t
+        .delete_message(row_of(&t, &bob, "x"), NOW + 5, &mut rng)
+        .unwrap();
+    assert_eq!(outcome.deleted, 1);
+    assert!(pkts.is_empty());
+    assert_eq!(not_acks(&mut t), before);
 }

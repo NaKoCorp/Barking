@@ -2425,7 +2425,14 @@ fn retried_copy_comes_back(wait: u64, seed: u64) -> bool {
             .map(|m| m.id)
     };
     let on_t = row(&t.core).expect("imported");
-    assert_eq!(t.core.delete_message(on_t, NOW + 40).unwrap().deleted, 1);
+    assert_eq!(
+        t.core
+            .delete_message(on_t, NOW + 40, &mut rng)
+            .unwrap()
+            .0
+            .deleted,
+        1
+    );
     // On A, the message never left; retried, it now also goes to T.
     let after = u64::from(sent[0].expires_at) + 1 + wait;
     a.core.expire_due(after).unwrap();

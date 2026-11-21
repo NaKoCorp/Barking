@@ -680,18 +680,19 @@ struct Ext<'a> {
 
 /// `Body::Ext` authenticated by a session. Sender x kind:
 ///
-/// | Sender | `Reply` / `Reaction` | `SyncReply` / `SyncReaction` | Unknown |
+/// | Sender | `Reply` / `Reaction` | `SyncReply` / `SyncReaction` / `SyncDelete` | Unknown |
 /// |---|---|---|---|
 /// | A contact | accepted | `R_NOT_MINE` | `unknown` policy |
 /// | One of my devices | `R_UNEXPECTED` | the sync path | `unknown` policy |
 ///
 /// Every `Ext` from my own fingerprint first requires the sending device to
 /// be in my current list. A `Reply` is recorded like a text, a `Reaction`
-/// applied as the contact's (`accept_reaction`); `SyncReply` and
-/// `SyncReaction` go through the sync path (`accept_sync`). An unknown kind is
-/// acknowledged like a message (the sender stops resending it) and, per its
-/// `unknown` policy, ignored or shown as a placeholder asking for an update
-/// (never for my own devices: they would show it twice).
+/// applied as the contact's (`accept_reaction`); `SyncReply`,
+/// `SyncReaction` and `SyncDelete` go through the sync path (`accept_sync`).
+/// An unknown kind is acknowledged like a message (the sender stops
+/// resending it) and, per its `unknown` policy, ignored or shown as a
+/// placeholder asking for an update (never for my own devices: they would
+/// show it twice).
 #[allow(clippy::too_many_arguments)]
 fn accept_ext(
     q: &impl Queries,
@@ -747,10 +748,20 @@ fn accept_ext(
                 q, limiter, packet, o, env, target, emojis, transport, now, rng,
             );
         }
-        (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, true) => {
+        (
+            ExtContent::SyncReply { .. }
+            | ExtContent::SyncReaction { .. }
+            | ExtContent::SyncDelete { .. },
+            true,
+        ) => {
             return accept_sync(q, limiter, packet, o, env, device, admin, my_fp, now, rng);
         }
-        (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, false) => sync::R_NOT_MINE,
+        (
+            ExtContent::SyncReply { .. }
+            | ExtContent::SyncReaction { .. }
+            | ExtContent::SyncDelete { .. },
+            false,
+        ) => sync::R_NOT_MINE,
         _ => R_UNEXPECTED,
     };
     reject_authenticated(q, limiter, packet, o, now, reason, id)

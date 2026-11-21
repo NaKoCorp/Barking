@@ -608,7 +608,7 @@ impl Device {
     pub fn delete_message(&self, message_id: i64) -> Result<DeleteOutcome, BarkingError> {
         guard(|| {
             self.with_core(|core| {
-                let o = core.delete_message(message_id, now())?;
+                let (o, _) = core.delete_message(message_id, now(), &mut rand::rng())?;
                 outcome_of(core, o)
             })
         })
@@ -618,7 +618,7 @@ impl Device {
     pub fn delete_messages(&self, ids: Vec<i64>) -> Result<DeleteOutcome, BarkingError> {
         guard(|| {
             self.with_core(|core| {
-                let o = core.delete_messages(&ids, now())?;
+                let (o, _) = core.delete_messages(&ids, now(), &mut rand::rng())?;
                 outcome_of(core, o)
             })
         })
@@ -628,7 +628,7 @@ impl Device {
     pub fn cancel_all_pending(&self) -> Result<DeleteOutcome, BarkingError> {
         guard(|| {
             self.with_core(|core| {
-                let o = core.cancel_all_pending(now())?;
+                let (o, _) = core.cancel_all_pending(now(), &mut rand::rng())?;
                 outcome_of(core, o)
             })
         })

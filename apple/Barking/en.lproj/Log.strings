@@ -38,6 +38,7 @@
 "log.arg.sync_devices" = "device list";
 "log.arg.sync_admin" = "admin key";
 "log.arg.sync_reaction" = "reaction";
+"log.arg.sync_deletion" = "deletion";
 "log.arg.node_lost" = "a message deposited there was lost";
 "log.arg.node_unreachable" = "it kept failing to answer";
 "log.arg.intro_mailbox" = "First message of a session: its mailbox is computed from the public keys (signing and key agreement) of the recipient's device and the day.";

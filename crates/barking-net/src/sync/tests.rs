@@ -1440,7 +1440,13 @@ fn delete_hi(core: &mut Core) -> barking_core::DeleteOutcome {
         .find(|m| m.body == "hi")
         .unwrap()
         .id;
-    core.delete_messages(&[row], NOW).unwrap()
+    core.delete_messages(
+        &[row],
+        NOW,
+        &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
+    )
+    .unwrap()
+    .0
 }
 
 /// Scores of `nodes` after a sync over `net` of a fresh subject whose
@@ -4225,7 +4231,14 @@ async fn unanswered_deposit_is_not_cancelled_by_a_delete() {
     assert!(cut.is_err());
     assert_eq!(reply(&core).status, MessageStatus::Pending);
     // The node may hold it: deleting it does not claim Alice won't get it.
-    let outcome = core.delete_message(reply(&core).id, NOW).unwrap();
+    let outcome = core
+        .delete_message(
+            reply(&core).id,
+            NOW,
+            &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0),
+        )
+        .unwrap()
+        .0;
     assert_eq!((outcome.cancelled, outcome.already_left), (0, 1));
     assert_eq!(outcome.still_receiving, vec![alice]);
     assert!(

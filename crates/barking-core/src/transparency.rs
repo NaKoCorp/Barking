@@ -157,6 +157,11 @@ pub enum TransparencyEvent {
         count: u32,
         cancelled: u32,
         already_left: u32,
+        /// Deleted on another of my devices (`SyncDelete`). Added after the
+        /// other fields: an entry stored before it ends there and reads as
+        /// `false` (`trailing_flag`).
+        #[serde(deserialize_with = "trailing_flag")]
+        from_other_device: bool,
     },
     /// An authenticated content of kind `kind`, which this version does not
     /// know, was acknowledged and set aside. No content. Added last.
@@ -164,6 +169,13 @@ pub enum TransparencyEvent {
         packet_id: PacketId,
         kind: u16,
     },
+}
+
+/// A `bool` added at the end of a stored variant. The log stores postcard,
+/// which is positional: an entry written before the field was added has no
+/// byte left for it and reads as `false`, so old rows stay readable.
+fn trailing_flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(bool::deserialize(d).unwrap_or(false))
 }
 
 /// Why a node was set aside.
@@ -185,6 +197,8 @@ pub enum SyncKind {
     Admin,
     /// My emoji reactions on a message. Added last.
     Reaction,
+    /// Messages I deleted on another device (`SyncDelete`). Added last.
+    Delete,
 }
 
 impl SyncKind {
@@ -196,6 +210,7 @@ impl SyncKind {
             SyncKind::Devices => "device list",
             SyncKind::Admin => "admin key",
             SyncKind::Reaction => "reaction",
+            SyncKind::Delete => "deletion",
         }
     }
 }
@@ -457,10 +472,16 @@ impl TransparencyEvent {
                 count,
                 cancelled,
                 already_left,
+                from_other_device,
             } => format!(
-                "{count} message(s) deleted from this device: {cancelled} cancelled before \
+                "{count} message(s) deleted from this device{}: {cancelled} cancelled before \
                  leaving it, {already_left} had already left (the contact still receives \
-                 them)."
+                 them).",
+                if *from_other_device {
+                    ", as on another of your devices"
+                } else {
+                    ""
+                }
             ),
             Self::UnknownContent { packet_id, kind } => format!(
                 "Packet {} carried content this version cannot read (kind {kind}). \
@@ -649,7 +670,69 @@ mod tests {
                 device: DeviceId([12; 16]),
                 name: "iPad".to_owned(),
             },
+            TransparencyEvent::MessagesDeleted {
+                count: 3,
+                cancelled: 2,
+                already_left: 1,
+                from_other_device: true,
+            },
+            TransparencyEvent::SyncApplied {
+                kind: SyncKind::Delete,
+            },
         ]
+    }
+
+    #[test]
+    fn messages_deleted_stored_before_its_flag_still_reads() {
+        #[derive(Serialize)]
+        enum Old {
+            MessagesDeleted {
+                count: u32,
+                cancelled: u32,
+                already_left: u32,
+            },
+        }
+        // Same variant index as today's `MessagesDeleted`.
+        let index = postcard::to_allocvec(&TransparencyEvent::MessagesDeleted {
+            count: 0,
+            cancelled: 0,
+            already_left: 0,
+            from_other_device: false,
+        })
+        .unwrap()[0];
+        let mut old = postcard::to_allocvec(&Old::MessagesDeleted {
+            count: 5,
+            cancelled: 4,
+            already_left: 1,
+        })
+        .unwrap();
+        old[0] = index;
+        assert_eq!(
+            postcard::from_bytes::<TransparencyEvent>(&old).unwrap(),
+            TransparencyEvent::MessagesDeleted {
+                count: 5,
+                cancelled: 4,
+                already_left: 1,
+                from_other_device: false,
+            }
+        );
+        let e = |from_other_device| TransparencyEvent::MessagesDeleted {
+            count: 2,
+            cancelled: 1,
+            already_left: 1,
+            from_other_device,
+        };
+        assert_eq!(
+            e(false).describe(),
+            "2 message(s) deleted from this device: 1 cancelled before leaving it, \
+             1 had already left (the contact still receives them)."
+        );
+        assert_eq!(
+            e(true).describe(),
+            "2 message(s) deleted from this device, as on another of your devices: \
+             1 cancelled before leaving it, 1 had already left (the contact still \
+             receives them)."
+        );
     }
 
     /// Logged before the `CardUpdate` leaves: the contacts stop encrypting
@@ -712,6 +795,10 @@ mod tests {
         assert_eq!(
             d(SyncKind::Reaction),
             "Synchronized from one of your devices: reaction."
+        );
+        assert_eq!(
+            d(SyncKind::Delete),
+            "Synchronized from one of your devices: deletion."
         );
         assert!(
             !TransparencyEvent::SyncApplied {

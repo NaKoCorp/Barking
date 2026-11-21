@@ -1,4 +1,5 @@
-//! Contents carried by `Body::Ext`: replies and reactions.
+//! Contents carried by `Body::Ext`: replies, reactions and deletions synced
+//! to my other devices.
 //!
 //! `Body::Ext { kind, unknown, data }` is the extensible envelope: `data` is
 //! the postcard of the kind's fields. A receiver that does not know a kind
@@ -24,6 +25,12 @@ pub const KIND_SYNC_REPLY: u16 = 2;
 pub const KIND_REACTION: u16 = 3;
 /// Kind number of [`ExtContent::SyncReaction`].
 pub const KIND_SYNC_REACTION: u16 = 4;
+/// Kind number of [`ExtContent::SyncDelete`].
+pub const KIND_SYNC_DELETE: u16 = 5;
+
+/// Most identifiers in one `SyncDelete`: 32 × 16 bytes keep it in tier M
+/// (1 024 bytes). A larger deletion goes in several packets.
+pub const MAX_SYNC_DELETE_IDS: usize = 32;
 
 /// What a receiver does with a kind it does not know.
 ///
@@ -118,6 +125,9 @@ pub enum ExtContent {
         target: MessageRef,
         emojis: Vec<String>,
     },
+    /// Messages I deleted on another of my devices (kind 5): 1 to
+    /// [`MAX_SYNC_DELETE_IDS`] identifiers, the same on all my devices.
+    SyncDelete { ids: Vec<MessageId> },
 }
 
 impl fmt::Debug for ExtContent {
@@ -130,6 +140,7 @@ impl fmt::Debug for ExtContent {
             ExtContent::SyncReaction { emojis, .. } => {
                 write!(f, "SyncReaction(<{} emoji>)", emojis.len())
             }
+            ExtContent::SyncDelete { ids } => write!(f, "SyncDelete(<{} ids>)", ids.len()),
         }
     }
 }
@@ -186,6 +197,11 @@ impl ExtContent {
                 UnknownPolicy::Ignore,
                 encode(&(to, target, emojis)),
             ),
+            ExtContent::SyncDelete { ids } => (
+                KIND_SYNC_DELETE,
+                UnknownPolicy::Ignore,
+                encode(&ids.iter().map(|id| id.0).collect::<Vec<_>>()),
+            ),
         };
         Body::Ext {
             kind,
@@ -200,7 +216,8 @@ impl ExtContent {
     /// one emoji in a set are a duplicate.
     ///
     /// # Errors
-    /// `Malformed` on bad or trailing bytes, `TooLarge` for a long text,
+    /// `Malformed` on bad or trailing bytes and for a `SyncDelete` without
+    /// identifier or with too many, `TooLarge` for a long text,
     /// `TooManyEmoji` or `InvalidEmoji` for a bad emoji set.
     pub fn decode(kind: u16, data: &[u8]) -> Result<Option<ExtContent>> {
         let content = match kind {
@@ -227,6 +244,12 @@ impl ExtContent {
                     emojis: canonical(&emojis),
                 }
             }
+            KIND_SYNC_DELETE => {
+                let ids: Vec<[u8; 16]> = parse(data)?;
+                ExtContent::SyncDelete {
+                    ids: ids.into_iter().map(MessageId).collect(),
+                }
+            }
             _ => return Ok(None),
         };
         content.validate()?;
@@ -238,6 +261,13 @@ impl ExtContent {
             ExtContent::Reply { text, .. } | ExtContent::SyncReply { text, .. } => check_text(text),
             ExtContent::Reaction { emojis, .. } | ExtContent::SyncReaction { emojis, .. } => {
                 emoji::check_set(emojis)
+            }
+            ExtContent::SyncDelete { ids } => {
+                if (1..=MAX_SYNC_DELETE_IDS).contains(&ids.len()) {
+                    Ok(())
+                } else {
+                    Err(CoreError::Malformed("number of deleted messages"))
+                }
             }
         }
     }
@@ -260,5 +290,51 @@ mod tests {
         for b in [2, 7, 0x7f, 0x80, 0xff] {
             assert_eq!(read(b), UnknownPolicy::ShowUpdate, "{b}");
         }
+    }
+
+    fn ids(n: usize) -> Vec<MessageId> {
+        (0..n)
+            .map(|i| MessageId([u8::try_from(i).unwrap(); 16]))
+            .collect()
+    }
+
+    #[test]
+    fn sync_delete_round_trips_and_refuses_bad_sizes() {
+        let full = ExtContent::SyncDelete {
+            ids: ids(MAX_SYNC_DELETE_IDS),
+        };
+        let Body::Ext {
+            kind,
+            unknown,
+            data,
+        } = full.to_body()
+        else {
+            panic!("Ext expected");
+        };
+        assert_eq!((kind, unknown), (KIND_SYNC_DELETE, UnknownPolicy::Ignore));
+        assert_eq!(ExtContent::decode(kind, &data).unwrap(), Some(full));
+        assert_eq!(
+            format!("{:?}", ExtContent::SyncDelete { ids: ids(3) }),
+            "SyncDelete(<3 ids>)"
+        );
+        let raw = |n: usize| {
+            let ids: Vec<[u8; 16]> = ids(n).iter().map(|m| m.0).collect();
+            postcard::to_allocvec(&ids).unwrap()
+        };
+        for n in [0, MAX_SYNC_DELETE_IDS + 1] {
+            assert!(
+                matches!(
+                    ExtContent::decode(KIND_SYNC_DELETE, &raw(n)),
+                    Err(CoreError::Malformed(_))
+                ),
+                "{n} ids"
+            );
+        }
+        let mut trailing = raw(1);
+        trailing.push(0);
+        assert!(matches!(
+            ExtContent::decode(KIND_SYNC_DELETE, &trailing),
+            Err(CoreError::Malformed(_))
+        ));
     }
 }

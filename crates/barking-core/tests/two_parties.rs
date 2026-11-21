@@ -1691,7 +1691,14 @@ fn retry_days_after_delete_stays_deleted_on_the_contact() {
     // The packet did reach Bob, who deleted it; its ack never came back.
     expect_msg(b.recv(&old[0], NOW + 10, &mut rng));
     let row = row_of(&b.core, &a.fp(), "unwanted");
-    assert_eq!(b.core.delete_message(row, NOW + 20).unwrap().deleted, 1);
+    assert_eq!(
+        b.core
+            .delete_message(row, NOW + 20, &mut rng)
+            .unwrap()
+            .0
+            .deleted,
+        1
+    );
     // Days of activity on Bob's side.
     for k in 1..=3 {
         b.send(&a.fp(), "news", NOW + k * DAY, &mut rng);

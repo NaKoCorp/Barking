@@ -127,6 +127,7 @@ const TOKENS: &[&str] = &[
     "sync_devices",
     "sync_admin",
     "sync_reaction",
+    "sync_deletion",
     "node_lost",
     "node_unreachable",
     "intro_mailbox",
@@ -208,6 +209,7 @@ fn sync_token(k: SyncKind) -> String {
         SyncKind::Devices => "sync_devices",
         SyncKind::Admin => "sync_admin",
         SyncKind::Reaction => "sync_reaction",
+        SyncKind::Delete => "sync_deletion",
     })
 }
 
@@ -345,6 +347,7 @@ fn parts(e: &TransparencyEvent, name: &dyn Fn(&Fingerprint) -> String) -> (Strin
             count,
             cancelled,
             already_left,
+            ..
         } => ("packet", vec![n(*count), n(*cancelled), n(*already_left)]),
         E::UnknownContent { kind, .. } => ("packet", vec![kind.to_string()]),
     };
@@ -523,6 +526,7 @@ mod tests {
                 count: 3,
                 cancelled: 2,
                 already_left: 1,
+                from_other_device: false,
             },
             E::UnknownContent {
                 packet_id: pid,
