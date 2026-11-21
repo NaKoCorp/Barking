@@ -11,7 +11,7 @@ use barking_core::store::{DeliverySummary, Direction};
 use barking_core::{Core, CoreError};
 use zeroize::Zeroize;
 
-use crate::delivery::{Delivery, delivery_of};
+use crate::delivery::{Delivery, DeliveryState, delivery_of, state_of};
 use crate::lock::DbLock;
 use crate::reactions::{Quote, ReactionChip, chips_of, quote_of};
 use crate::{BarkingError, guard};
@@ -97,6 +97,10 @@ pub struct Message {
     /// The emoji under it, in first-seen order (spec reply/reactions §5.4).
     #[uniffi(default = [])]
     pub reactions: Vec<ReactionChip>,
+    /// Send state of my reactions toward the contact; `None` when I have no
+    /// tracked send (nothing sent, or no session when I last changed them).
+    #[uniffi(default = None)]
+    pub my_reaction_state: Option<DeliveryState>,
     /// A placeholder for content this version cannot read (`body` is empty):
     /// the row asks for a newer version of the app.
     #[uniffi(default = false)]
@@ -397,6 +401,7 @@ pub(crate) fn message_of(
         route: crate::route::route_hint(core, m.id)?,
         reply_to: quote_of(core, &m)?,
         reactions: chips_of(core, &m)?,
+        my_reaction_state: core.my_reaction_state(m.id)?.map(state_of),
         needs_update: m.placeholder,
         id: m.id,
         outgoing: m.direction == Direction::Out,

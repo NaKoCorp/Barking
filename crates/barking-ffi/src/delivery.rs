@@ -148,6 +148,25 @@ pub struct DeliveryUpdate {
     /// The message no longer exists (deleted, or an unknown id): the app
     /// drops its row.
     pub removed: bool,
+    /// Send state of my reactions toward the contact; `None` when I have no
+    /// tracked send (or the message is gone). Filled for received messages
+    /// too, since I can react to those.
+    #[uniffi(default = None)]
+    pub my_reaction_state: Option<DeliveryState>,
+}
+
+/// The reaction sheet: my current set on a message and the delivery of its
+/// send toward the contact (same mapping as `MessageDelivery`).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ReactionDelivery {
+    /// Row of the message reacted to.
+    pub message_id: i64,
+    /// My current set; empty for a removal.
+    pub emojis: Vec<String>,
+    pub delivery: Delivery,
+    pub devices: Vec<DeviceDelivery>,
+    pub relays: Vec<RelayHop>,
+    pub own_copies: OwnCopies,
 }
 
 /// What a deletion really did (spec §5.5).
@@ -329,18 +348,30 @@ fn outcome_of(
     })
 }
 
-fn detail_of(
+/// The mapped parts of a delivery detail, shared by the message sheet and
+/// the reaction sheet.
+struct DetailParts {
+    delivery: Delivery,
+    devices: Vec<DeviceDelivery>,
+    relays: Vec<RelayHop>,
+    own_copies: OwnCopies,
+}
+
+fn parts_of(
     core: &Core,
-    d: store::MessageDeliveryDetail,
-) -> Result<MessageDelivery, BarkingError> {
+    contact: &Fingerprint,
+    summary: DeliverySummary,
+    deliveries: Vec<store::DeviceDeliveryRow>,
+    relays: Vec<store::RelayHop>,
+    own_copies: store::OwnCopies,
+) -> Result<DetailParts, BarkingError> {
     // A contact removed since keeps its rows: its devices have no name.
-    let names = match core.contact_devices(&d.contact) {
+    let names = match core.contact_devices(contact) {
         Ok(devices) => devices,
         Err(CoreError::UnknownContact) => Vec::new(),
         Err(e) => return Err(e.into()),
     };
-    let devices = d
-        .deliveries
+    let devices = deliveries
         .into_iter()
         .filter(|r| !r.own)
         .map(|r| DeviceDelivery {
@@ -358,12 +389,10 @@ fn detail_of(
             expired_at: r.expired_at,
         })
         .collect();
-    Ok(MessageDelivery {
-        message_id: d.row_id,
-        delivery: delivery_of(d.summary),
+    Ok(DetailParts {
+        delivery: delivery_of(summary),
         devices,
-        relays: d
-            .relays
+        relays: relays
             .into_iter()
             .map(|h| RelayHop {
                 node: h.node,
@@ -372,10 +401,53 @@ fn detail_of(
             })
             .collect(),
         own_copies: OwnCopies {
-            total: d.own_copies.total,
-            left: d.own_copies.left,
-            waiting: d.own_copies.waiting,
+            total: own_copies.total,
+            left: own_copies.left,
+            waiting: own_copies.waiting,
         },
+    })
+}
+
+fn detail_of(
+    core: &Core,
+    d: store::MessageDeliveryDetail,
+) -> Result<MessageDelivery, BarkingError> {
+    let p = parts_of(
+        core,
+        &d.contact,
+        d.summary,
+        d.deliveries,
+        d.relays,
+        d.own_copies,
+    )?;
+    Ok(MessageDelivery {
+        message_id: d.row_id,
+        delivery: p.delivery,
+        devices: p.devices,
+        relays: p.relays,
+        own_copies: p.own_copies,
+    })
+}
+
+fn reaction_detail_of(
+    core: &Core,
+    d: store::ReactionDeliveryDetail,
+) -> Result<ReactionDelivery, BarkingError> {
+    let p = parts_of(
+        core,
+        &d.contact,
+        d.summary,
+        d.deliveries,
+        d.relays,
+        d.own_copies,
+    )?;
+    Ok(ReactionDelivery {
+        message_id: d.row_id,
+        emojis: d.emojis,
+        delivery: p.delivery,
+        devices: p.devices,
+        relays: p.relays,
+        own_copies: p.own_copies,
     })
 }
 
@@ -425,21 +497,22 @@ impl Device {
             self.with_core_read(|core| {
                 let found = core.deliveries_of(&ids, now())?;
                 let mut found = found.into_iter().peekable();
-                Ok(ids
-                    .iter()
+                ids.iter()
                     .map(|id| match found.next_if(|(f, _)| f == id) {
-                        Some((_, s)) => DeliveryUpdate {
+                        Some((_, s)) => Ok(DeliveryUpdate {
                             message_id: *id,
                             delivery: s.map(delivery_of),
                             removed: false,
-                        },
-                        None => DeliveryUpdate {
+                            my_reaction_state: core.my_reaction_state(*id)?.map(state_of),
+                        }),
+                        None => Ok(DeliveryUpdate {
                             message_id: *id,
                             delivery: None,
                             removed: true,
-                        },
+                            my_reaction_state: None,
+                        }),
                     })
-                    .collect())
+                    .collect()
             })
         })
     }
@@ -455,6 +528,36 @@ impl Device {
                 core.message_delivery(message_id, now())?
                     .map(|d| detail_of(core, d))
                     .transpose()
+            })
+        })
+    }
+
+    /// The reaction sheet of the message of row `message`; `None` if I have
+    /// no tracked send of my reactions toward the contact on it.
+    pub fn reaction_delivery(
+        &self,
+        message: i64,
+    ) -> Result<Option<ReactionDelivery>, BarkingError> {
+        guard(|| {
+            self.with_core_read(|core| {
+                core.reaction_delivery(message, now())?
+                    .map(|d| reaction_detail_of(core, d))
+                    .transpose()
+            })
+        })
+    }
+
+    /// Sends my reactions on the message of row `message` to the contact
+    /// again (a manual resend; the next sync deposits them).
+    /// `NothingToRetry`, `NoSession`, `ContactBlocked`, `MessageNotFound`.
+    /// The due packets expire first, as for a read.
+    pub fn retry_reactions(&self, message: i64) -> Result<(), BarkingError> {
+        guard(|| {
+            self.with_core(|core| {
+                let t = now();
+                core.expire_due(t)?;
+                core.retry_reactions(message, t, &mut rand::rng())?;
+                Ok(())
             })
         })
     }

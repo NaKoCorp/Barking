@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use barking_core::Core;
 use barking_core::store::{Direction, MessageId, MessageInsert, MessageStatus, Queries, Store};
-use barking_ffi::{BarkingError, Device, Quote, ReactionChip, excerpt};
+use barking_ffi::{BarkingError, DeliveryState, Device, Quote, ReactionChip, excerpt};
 use barking_node::testing::{TestNode, network, stop_all, wait_packets};
 use common::device;
 
@@ -420,4 +420,69 @@ fn placeholder_row_is_unread_and_last() {
         thread.iter().map(|m| m.needs_update).collect::<Vec<_>>(),
         vec![false, true]
     );
+}
+
+#[test]
+fn message_carries_my_reaction_state() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (alice, _bob, fb, _fa) = paired(&da, &db);
+    alice.send_text(fb.clone(), "one".into(), None).unwrap();
+    alice.send_text(fb.clone(), "two".into(), None).unwrap();
+    let id = row_of(&alice, &fb, "one");
+    alice.set_reactions(id, vec!["❤️".into()]).unwrap();
+    for m in alice.messages_with(fb.clone()).unwrap() {
+        if m.id == id {
+            assert_eq!(m.my_reaction_state, Some(DeliveryState::Pending));
+        } else {
+            assert_eq!(m.my_reaction_state, None);
+        }
+    }
+}
+
+#[test]
+fn delivery_update_carries_my_reaction_state() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (alice, _bob, fb, _fa) = paired(&da, &db);
+    alice.send_text(fb.clone(), "one".into(), None).unwrap();
+    alice.send_text(fb.clone(), "two".into(), None).unwrap();
+    let id = row_of(&alice, &fb, "one");
+    let other = row_of(&alice, &fb, "two");
+    alice.set_reactions(id, vec!["❤️".into()]).unwrap();
+    let ups = alice.deliveries_of(vec![id, other, id + 1000]).unwrap();
+    assert_eq!(ups[0].my_reaction_state, Some(DeliveryState::Pending));
+    assert_eq!(ups[1].my_reaction_state, None);
+    assert!(ups[2].removed);
+    assert_eq!(ups[2].my_reaction_state, None);
+}
+
+#[test]
+fn reaction_delivery_matches_the_core() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (alice, _bob, fb, _fa) = paired(&da, &db);
+    alice.send_text(fb.clone(), "one".into(), None).unwrap();
+    let id = row_of(&alice, &fb, "one");
+    assert!(alice.reaction_delivery(id).unwrap().is_none());
+    alice.set_reactions(id, vec!["❤️".into()]).unwrap();
+    let d = alice.reaction_delivery(id).unwrap().unwrap();
+    assert_eq!(d.message_id, id);
+    assert_eq!(d.emojis, vec!["❤️".to_owned()]);
+    assert_eq!(d.delivery.state, DeliveryState::Pending);
+    assert!(!d.devices.is_empty());
+}
+
+#[test]
+fn retry_reactions_maps_nothing_to_retry() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (alice, _bob, fb, _fa) = paired(&da, &db);
+    alice.send_text(fb.clone(), "one".into(), None).unwrap();
+    let id = row_of(&alice, &fb, "one");
+    alice.set_reactions(id, vec!["❤️".into()]).unwrap();
+    assert!(matches!(
+        alice.retry_reactions(id),
+        Err(BarkingError::NothingToRetry)
+    ));
+    assert!(matches!(
+        alice.retry_reactions(id + 1000),
+        Err(BarkingError::MessageNotFound)
+    ));
 }

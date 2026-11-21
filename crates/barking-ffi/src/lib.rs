@@ -23,7 +23,7 @@ pub use contacts::{CardPreview, inspect_card, inspect_card_text};
 pub use delivery::{
     DeleteOutcome, Delivery, DeliveryChange, DeliveryCounts, DeliveryRowInfo, DeliveryState,
     DeliveryUpdate, DeviceDelivery, MessageDelivery, OwnCopies, PendingKind, PendingMessage,
-    PendingPackets, PendingSync, RelayHop,
+    PendingPackets, PendingSync, ReactionDelivery, RelayHop,
 };
 pub use device::{
     Contact, CreatedDevice, Device, DeviceConfig, Message, create_device, device_exists,
