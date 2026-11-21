@@ -395,18 +395,15 @@ final class ConversationModel {
         await armExpiry()
     }
 
-    /// Fresh delivery of the rows `ids` shown here, patched in place. An
-    /// ephemeral named (seen on another of my devices: its countdown
-    /// changed) reloads the conversation instead, which arms the expiry
-    /// timer again.
+    /// Fresh delivery of the rows `ids` shown here, patched in place (and
+    /// announced, §8). An ephemeral named (seen on another of my devices:
+    /// its countdown changed) then reloads the conversation, which arms the
+    /// expiry timer again.
     func refresh(_ ids: [Int64]) async {
         let shown = ids.filter { id in items.contains { $0.id == id } }
-        if items.contains(where: { $0.ttl != nil && shown.contains($0.id) }) {
-            await reload()
-            return
-        }
-        guard !shown.isEmpty, let updates = try? await core.deliveriesOf(shown) else { return }
-        apply(updates)
+        let ephemeral = items.contains { $0.ttl != nil && shown.contains($0.id) }
+        if !shown.isEmpty, let updates = try? await core.deliveriesOf(shown) { apply(updates) }
+        if ephemeral { await reload() }
     }
 
     /// Replaces the delivery of the rows named (identity by message id);

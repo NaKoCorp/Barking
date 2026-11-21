@@ -396,6 +396,37 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(ConversationModel.metaShown(items, accessibilitySize: true), Set(items.map(\.id)))
     }
 
+    /// Spec §8: a receipt of my disappearing message is announced like any
+    /// other, alone or with a plain one in the same batch (the reload an
+    /// ephemeral row brings must not swallow it).
+    func testReceiptsOfMyEphemeralsAreAnnounced() async {
+        func eph(_ id: Int64, _ state: DeliveryState) -> Message {
+            Message(id: id, outgoing: true, body: "e\(id)", at: 1, delivery: .state(state),
+                    ttlSecs: 300, seenAt: 1, expireAt: 301)
+        }
+        let d = FakeDevice()
+        d.messageList = ["b": [eph(7, .onNetwork), sent(8, .onNetwork)]]
+        let m = make(d)
+        var said: [String] = []
+        var clock = Date(timeIntervalSince1970: 1_000)
+        m.announce = { said.append($0) }
+        m.now = { clock }
+        await m.onAppear()
+        for id: Int64 in [7, 8] { m.bubbleAppeared(id) }
+        d.messageList = ["b": [eph(7, .received), sent(8, .onNetwork)]]
+        d.deliveryUpdates[7] = update(7, .received)
+        await m.refresh([7])
+        XCTAssertEqual(said.count, 1, "my ephemeral received: \(said)")
+        XCTAssertEqual(m.items.first { $0.id == 7 }?.state, .received)
+
+        clock += 10
+        d.messageList = ["b": [eph(7, .received), sent(8, .received)]]
+        d.deliveryUpdates[8] = update(8, .received)
+        d.deliveryUpdates[7] = update(7, .received)
+        await m.refresh([7, 8])
+        XCTAssertEqual(said.count, 2, "the plain one of a mixed batch: \(said)")
+    }
+
     /// Spec §8: only Received and Not delivered, only for a bubble on
     /// screen, at most one every 3 s, grouped.
     func testAnnouncementsOnlyForVisibleReceivedOrNotDelivered() async {
