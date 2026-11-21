@@ -25,6 +25,9 @@ final class ConversationModel {
         var reactions: [ReactionChip] = []
         /// A placeholder for content this version cannot read.
         var needsUpdate = false
+        /// Send state of my reactions toward the contact; nil without a
+        /// tracked send (the chip then keeps the neutral look).
+        var myReactionState: DeliveryState?
 
         /// A local row (not in the core yet) or a placeholder can be neither
         /// replied to, reacted to, nor copied.
@@ -97,6 +100,8 @@ final class ConversationModel {
     private var nextLocalId: Int64 = -1
     /// Rows whose retry is running: a second tap on one does nothing.
     private var retrying: Set<Int64> = []
+    /// Rows whose manual reaction resend is running.
+    private var retryingReaction: Set<Int64> = []
     private var visible = false
     private(set) var sendError: String?
     /// Said to VoiceOver when it appears: the banner itself is not focused.
@@ -235,7 +240,8 @@ final class ConversationModel {
         items = messages.filter { !resent.contains($0.id) }.map {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)), delivery: $0.delivery,
-                 quote: $0.replyTo, reactions: $0.reactions, needsUpdate: $0.needsUpdate)
+                 quote: $0.replyTo, reactions: $0.reactions, needsUpdate: $0.needsUpdate,
+                 myReactionState: $0.myReactionState)
         } + [shownAtSend].compactMap { $0 }
         // The row being answered left (deleted): nothing to answer any more.
         if let target = replyingTo, !items.contains(where: { $0.id == target.id }) { replyingTo = nil }
@@ -265,6 +271,7 @@ final class ConversationModel {
             }
             let before = items[i].state
             items[i].delivery = u.delivery
+            items[i].myReactionState = u.myReactionState
             let after = items[i].state
             guard visible, onScreen.contains(u.messageId), after != before else { continue }
             if after == .received { received += 1 }
@@ -399,6 +406,22 @@ final class ConversationModel {
         } catch {
             // NothingToRetry: it left or was received meanwhile; the row
             // below shows where it is.
+        }
+        await refresh([id])
+    }
+
+    /// Sends my reactions on the row `id` to the contact again (a manual
+    /// resend), then patches the row. Whatever the error, the banner says the
+    /// reaction was not saved.
+    func retryReaction(_ id: Int64) async {
+        guard !retryingReaction.contains(id), items.contains(where: { $0.id == id }) else { return }
+        retryingReaction.insert(id)
+        defer { retryingReaction.remove(id) }
+        notice = nil
+        do {
+            try await core.retryReactions(id, contact: contact)
+        } catch {
+            notice = .reactionFailed
         }
         await refresh([id])
     }

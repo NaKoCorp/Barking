@@ -52,6 +52,8 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func leaveState() throws -> LeaveState
     func deliveriesOf(ids: [Int64]) throws -> [DeliveryUpdate]
     func messageDelivery(messageId: Int64) throws -> MessageDelivery?
+    func reactionDelivery(message: Int64) throws -> ReactionDelivery?
+    func retryReactions(message: Int64) throws
     func deliveryCounts(contact: String) throws -> DeliveryCounts
     func deliveryPage(contact: String, state: DeliveryState, limit: UInt32, offset: UInt32) throws -> [DeliveryRowInfo]
     func deleteMessage(messageId: Int64) throws -> DeleteOutcome

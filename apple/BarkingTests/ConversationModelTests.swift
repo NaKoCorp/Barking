@@ -715,6 +715,46 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(ConversationModel.maxReactions, 20)
     }
 
+    func testItemKeepsMyReactionState() async {
+        let d = FakeDevice()
+        d.messageList = ["b": [Message(id: 5, outgoing: false, body: "salut", at: 1, reactions: chips(["❤️"]),
+                                       myReactionState: .pending)]]
+        let m = make(d)
+        await m.onAppear()
+        XCTAssertEqual(m.items[0].myReactionState, .pending)
+        m.apply([DeliveryUpdate(messageId: 5, delivery: nil, removed: false, myReactionState: .received)])
+        XCTAssertEqual(m.items[0].myReactionState, .received)
+        // A change of the set with no tracked send clears it.
+        m.apply([DeliveryUpdate(messageId: 5, delivery: nil, removed: false, myReactionState: nil)])
+        XCTAssertNil(m.items[0].myReactionState)
+    }
+
+    func testRetryReactionCallsTheCoreAndReloads() async {
+        let d = FakeDevice()
+        d.messageList = ["b": [Message(id: 7, outgoing: false, body: "salut", at: 1, reactions: chips(["❤️"]),
+                                       myReactionState: .notDelivered)]]
+        let m = make(d)
+        await m.onAppear()
+        d.deliveryUpdates[7] = DeliveryUpdate(messageId: 7, delivery: nil, removed: false, myReactionState: .pending)
+        await m.retryReaction(7)
+        XCTAssertEqual(d.retryReactionsCalls, [7])
+        XCTAssertEqual(m.items[0].myReactionState, .pending)
+        XCTAssertNil(m.notice)
+    }
+
+    func testRetryReactionFailureShowsNotice() async {
+        let d = FakeDevice()
+        d.messageList = ["b": [Message(id: 7, outgoing: false, body: "salut", at: 1, reactions: chips(["❤️"]),
+                                       myReactionState: .notDelivered)]]
+        let m = make(d)
+        await m.onAppear()
+        d.retryReactionsError = BarkingError.NoSession
+        d.deliveryUpdates[7] = DeliveryUpdate(messageId: 7, delivery: nil, removed: false, myReactionState: .notDelivered)
+        await m.retryReaction(7)
+        XCTAssertEqual(m.notice, .reactionFailed)
+        XCTAssertEqual(m.items[0].myReactionState, .notDelivered)
+    }
+
     /// A reaction the core refused is said, never swallowed; the chips reload.
     func testReactionErrorsSurfaceAsNotices() async {
         let (d, m) = await loaded([Message(id: 5, outgoing: false, body: "salut", at: 1)])

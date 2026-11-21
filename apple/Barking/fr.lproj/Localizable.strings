@@ -526,3 +526,10 @@
 "20 reactions at most on a message." = "20 réactions au plus sur un message.";
 "This message needs a newer version of Barking." = "Ce message nécessite une version plus récente de Barking.";
 "Show original" = "Afficher l’original";
+"reaction pending" = "en attente";
+"reaction on the network" = "sur le réseau";
+"reaction received" = "reçue";
+"reaction not delivered" = "non distribuée";
+"Resend reaction" = "Renvoyer la réaction";
+"Your reaction · %@" = "Votre réaction · %@";
+"Your reaction · removed" = "Votre réaction · retirée";

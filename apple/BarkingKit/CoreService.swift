@@ -255,6 +255,21 @@ public actor CoreService {
     public func messageDelivery(_ id: Int64) async throws -> MessageDelivery? {
         try await call("delivery") { try $0.messageDelivery(messageId: id) }
     }
+    /// The send of my reactions on the message `id` toward its contact (nil:
+    /// none tracked). It covers the contact send only: `ownCopies.total` can
+    /// be 0 after a retry, which does not mean "no copies".
+    public func reactionDelivery(_ id: Int64) async throws -> ReactionDelivery? {
+        try await call("reaction-delivery") { try $0.reactionDelivery(message: id) }
+    }
+    /// Sends my reactions on the message `id` to `contact` again (a manual
+    /// resend; a sync deposits them). The row is named here so every screen
+    /// showing it updates, even offline.
+    public func retryReactions(_ id: Int64, contact: String) async throws {
+        try await call("retry-reactions") { try $0.retryReactions(message: id) }
+        noteDelivery([DeliveryChange(contact: contact, messageId: id)])
+        publish(.network)
+        Task { _ = await self.sync(reason: .afterSend) }
+    }
     /// Sent messages to `contact` per state (the "Sent" group titles).
     public func deliveryCounts(contact: String) async throws -> DeliveryCounts {
         try await call("delivery-counts") { try $0.deliveryCounts(contact: contact) }

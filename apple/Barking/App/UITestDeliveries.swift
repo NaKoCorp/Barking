@@ -17,6 +17,11 @@ import Foundation
 /// - `-BarkingUITestFakeReceived`: one received message from Sam (its route
 ///   is given by `-BarkingUITestFakeRoute`).
 ///
+/// - `-BarkingUITestReactionState pending|onNetwork|received|notDelivered`:
+///   forces the send state of my reactions on every message that has one of
+///   mine (`messagesWith`, `deliveriesOf`); a manual resend drops it. It
+///   works with or without the seed.
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -62,14 +67,21 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private let device: any DeviceHandle
     private let seed: Seed?
     private let fakeReceived: Bool
+    /// `-BarkingUITestReactionState`: the state shown on my reactions.
+    private let reactionState: DeliveryState?
     private let lock = NSLock()
     /// Forced state by message; a retry removes its entry.
     private var forced: [Int64: DeliveryState]
+    /// Messages seen with a reaction of mine, whose forced reaction state a
+    /// manual resend has not dropped.
+    private var reacted: Set<Int64> = []
+    private var reactionResent: Set<Int64> = []
     /// Shown time by message (kept after a retry: the message keeps its date).
     private let shownAt: [Int64: UInt64]
 
-    init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool) {
+    init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil) {
         self.device = device
+        self.reactionState = reactionState
         self.seed = seed
         self.fakeReceived = fakeReceived
         var forced: [Int64: DeliveryState] = [:]
@@ -91,14 +103,30 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             $0 + 1 < arguments.count && arguments[$0 + 1] == "deliveries"
         } ?? false
         let fakeReceived = arguments.contains("-BarkingUITestFakeReceived")
-        guard seeded || fakeReceived else { return device }
-        return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived)
+        let reactionState = arguments.firstIndex(of: "-BarkingUITestReactionState").flatMap { i -> DeliveryState? in
+            guard i + 1 < arguments.count else { return nil }
+            return switch arguments[i + 1] {
+            case "pending": .pending
+            case "onNetwork": .onNetwork
+            case "received": .received
+            case "notDelivered": .notDelivered
+            default: nil
+            }
+        }
+        guard seeded || fakeReceived || reactionState != nil else { return device }
+        return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
+                                reactionState: reactionState)
     }
 
     // MARK: The forced states
 
     private func state(of id: Int64) -> DeliveryState? {
         lock.withLock { forced[id] }
+    }
+
+    /// The forced reaction state, unless a manual resend dropped it for `id`.
+    private func reactionShown(_ id: Int64) -> DeliveryState? {
+        lock.withLock { reactionResent.contains(id) ? nil : reactionState }
     }
 
     private func at(_ id: Int64) -> UInt64? { shownAt[id] }
@@ -176,6 +204,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             var m = m
             if let t = at(m.id) { m.at = t }
             m.delivery = decorate(m.delivery, id: m.id)
+            if m.reactions.contains(where: \.mine) {
+                lock.withLock { _ = reacted.insert(m.id) }
+                m.myReactionState = reactionShown(m.id) ?? m.myReactionState
+            }
             return m
         }
         if fakeReceived {
@@ -191,7 +223,12 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func deliveriesOf(ids: [Int64]) throws -> [DeliveryUpdate] {
         try device.deliveriesOf(ids: ids).map { u in
             var u = u
-            if !u.removed { u.delivery = decorate(u.delivery, id: u.messageId) }
+            if !u.removed {
+                u.delivery = decorate(u.delivery, id: u.messageId)
+                if u.myReactionState != nil || lock.withLock({ reacted.contains(u.messageId) }) {
+                    u.myReactionState = reactionShown(u.messageId) ?? u.myReactionState
+                }
+            }
             return u
         }
     }
@@ -300,7 +337,16 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func sendText(contact: String, text: String, replyTo: Int64?) throws {
         try device.sendText(contact: contact, text: text, replyTo: replyTo)
     }
-    func setReactions(message: Int64, emojis: [String]) throws { try device.setReactions(message: message, emojis: emojis) }
+    func setReactions(message: Int64, emojis: [String]) throws {
+        // A new set is a new send: it shows the forced state again.
+        lock.withLock { _ = reactionResent.remove(message) }
+        try device.setReactions(message: message, emojis: emojis)
+    }
+    func reactionDelivery(message: Int64) throws -> ReactionDelivery? { try device.reactionDelivery(message: message) }
+    func retryReactions(message: Int64) throws {
+        lock.withLock { _ = reactionResent.insert(message) }
+        try device.retryReactions(message: message)
+    }
     func addContactBytes(card: Data, alias: String?) throws -> String { try device.addContactBytes(card: card, alias: alias) }
     func addContact(card: String, alias: String?) throws -> String { try device.addContact(card: card, alias: alias) }
     func contactCardBytes() throws -> Data { try device.contactCardBytes() }

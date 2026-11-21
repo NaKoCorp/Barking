@@ -116,6 +116,20 @@ extension ReactionChip {
             ? String(localized: "\(emoji), \(n) reactions, including yours", bundle: bundle, locale: locale)
             : String(localized: "\(emoji), \(n) reactions", bundle: bundle, locale: locale)
     }
+
+    /// The same, with the send state of my reaction after it ("…, reaction
+    /// pending"); other people's chips and an untracked one say no state.
+    func label(state: DeliveryState?, bundle: Bundle = .main, locale: Locale = .current) -> String {
+        let base = label(bundle: bundle, locale: locale)
+        guard mine, let state else { return base }
+        let word: String = switch state {
+        case .pending: String(localized: "reaction pending", bundle: bundle, locale: locale)
+        case .onNetwork: String(localized: "reaction on the network", bundle: bundle, locale: locale)
+        case .received: String(localized: "reaction received", bundle: bundle, locale: locale)
+        case .notDelivered: String(localized: "reaction not delivered", bundle: bundle, locale: locale)
+        }
+        return "\(base), \(word)"
+    }
 }
 
 /// The quote inside a bubble: a 3 pt bar, the author, two lines of the

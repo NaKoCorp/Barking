@@ -72,6 +72,10 @@ final class MessageSheetModel {
     private(set) var quote = ""
     private(set) var outgoing = true
     private(set) var sheet: MessageDelivery?
+    /// My reactions on this message and the send of that set toward the
+    /// contact; nil when none is tracked. It covers the contact send only:
+    /// `ownCopies.total` can be 0 after a retry, which is not "no copies".
+    private(set) var reaction: ReactionDelivery?
     private(set) var lines: [Line] = []
     private(set) var devices: [DeviceRow] = []
     /// "Received on 1 of 2 devices." above the device rows.
@@ -84,6 +88,7 @@ final class MessageSheetModel {
     /// The received message's path (`PathStops` rows).
     private(set) var path: PathModel?
     private var retrying = false
+    private var retryingReaction = false
     private var deleting = false
 
     init(core: CoreService, messageId: Int64, contact: String, contactName: String) {
@@ -129,6 +134,7 @@ final class MessageSheetModel {
             }
             quote = message.body
             outgoing = message.outgoing
+            reaction = try? await core.reactionDelivery(messageId)
             if !message.outgoing {
                 let mine = (try? await core.myDevices()) ?? []
                 keepsOwnCopies = mine.contains { !$0.thisDevice }
@@ -173,6 +179,7 @@ final class MessageSheetModel {
             close(.removedElsewhere)
             return
         }
+        reaction = try? await core.reactionDelivery(messageId)
         guard outgoing, let sheet = try? await core.messageDelivery(messageId) else { return }
         let route = (try? await core.messageRoute(messageId)) ?? []
         show(sheet, route: route)
@@ -227,6 +234,21 @@ final class MessageSheetModel {
             notice = .noReachableDevice(name: contactName)
         } catch {
             // NothingToRetry: it moved meanwhile; the refresh shows where.
+        }
+        await refresh()
+    }
+
+    /// Sends my reactions on this message to the contact again; the sheet
+    /// follows at once. Whatever the error, the banner says it was not saved.
+    func retryReaction() async {
+        guard !retryingReaction else { return }
+        retryingReaction = true
+        defer { retryingReaction = false }
+        notice = nil
+        do {
+            try await core.retryReactions(messageId, contact: contact)
+        } catch {
+            notice = .reactionFailed
         }
         await refresh()
     }

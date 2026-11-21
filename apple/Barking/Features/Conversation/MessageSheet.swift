@@ -357,6 +357,8 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func leaveState() throws -> LeaveState { throw Never() }
     func deliveriesOf(ids: [Int64]) throws -> [DeliveryUpdate] { throw Never() }
     func messageDelivery(messageId: Int64) throws -> MessageDelivery? { throw Never() }
+    func reactionDelivery(message: Int64) throws -> ReactionDelivery? { throw Never() }
+    func retryReactions(message: Int64) throws { throw Never() }
     func deliveryCounts(contact: String) throws -> DeliveryCounts { throw Never() }
     func deliveryPage(contact: String, state: DeliveryState, limit: UInt32, offset: UInt32) throws -> [DeliveryRowInfo] { throw Never() }
     func deleteMessage(messageId: Int64) throws -> DeleteOutcome { throw Never() }

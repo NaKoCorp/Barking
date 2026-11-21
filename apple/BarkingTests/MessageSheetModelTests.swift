@@ -525,6 +525,23 @@ final class MessageSheetModelTests: XCTestCase {
         XCTAssertEqual(m.notice, .noReachableDevice(name: "Alice"))
     }
 
+    func testLoadsTheReactionDelivery() async {
+        let d = FakeDevice()
+        let m = make(d, outgoing: false)
+        d.deliveryUpdates[7] = DeliveryUpdate(messageId: 7, delivery: nil, removed: false)
+        d.reactionDeliveries[7] = ReactionDelivery(messageId: 7, emojis: ["❤️"], delivery: delivery(.notDelivered),
+                                                   devices: [], relays: [],
+                                                   ownCopies: OwnCopies(total: 0, left: 0, waiting: 0))
+        await m.load()
+        XCTAssertEqual(m.reaction?.emojis, ["❤️"])
+        d.reactionDeliveries[7] = ReactionDelivery(messageId: 7, emojis: ["❤️"], delivery: delivery(.pending, pending: 1),
+                                                   devices: [], relays: [],
+                                                   ownCopies: OwnCopies(total: 0, left: 0, waiting: 0))
+        await m.retryReaction()
+        XCTAssertEqual(d.retryReactionsCalls, [7])
+        XCTAssertEqual(m.reaction?.delivery.state, .pending)
+    }
+
     /// §6.4 "Erreur de lecture": a warning, the message unchanged.
     func testReadErrorSaysDetailsUnavailable() async throws {
         let d = FakeDevice()

@@ -1,4 +1,5 @@
 import XCTest
+@testable import Barking
 @testable import BarkingKit
 
 final class LocalizationTests: XCTestCase {
@@ -317,6 +318,29 @@ final class LocalizationTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testReactionStateLabels() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let keys = ["reaction pending": "en attente", "reaction on the network": "sur le réseau",
+                    "reaction received": "reçue", "reaction not delivered": "non distribuée",
+                    "Resend reaction": "Renvoyer la réaction", "Your reaction · %@": "Votre réaction · %@",
+                    "Your reaction · removed": "Votre réaction · retirée"]
+        let en = Bundle.strings(for: Locale(identifier: "en"))
+        for (key, french) in keys {
+            XCTAssertEqual(fr[key] as? String, french, key)
+            XCTAssertEqual(en.localizedString(forKey: key, value: nil, table: nil), key, "English is the key for \(key)")
+        }
+        let locale = Locale(identifier: "fr")
+        let bundle = Bundle.strings(for: locale)
+        let chip = ReactionChip(emoji: "❤️", count: 1, mine: true)
+        XCTAssertTrue(chip.label(state: .pending, bundle: bundle, locale: locale).hasSuffix(", en attente"))
+        XCTAssertEqual(chip.label(state: nil, bundle: bundle, locale: locale), chip.label(bundle: bundle, locale: locale))
+        let other = ReactionChip(emoji: "❤️", count: 1, mine: false)
+        XCTAssertEqual(other.label(state: .pending, bundle: bundle, locale: locale), other.label(bundle: bundle, locale: locale))
+        let english = Locale(identifier: "en")
+        XCTAssertTrue(chip.label(state: .notDelivered, bundle: .strings(for: english), locale: english)
+            .hasSuffix(", reaction not delivered"))
     }
 
     /// Spec Lot M §7.1: the bubble's states, menu, VoiceOver values and
