@@ -906,6 +906,11 @@ impl Store {
                 .execute_batch(schema::REACTION_SENDS_ADD_SUPERSEDED)
                 .map_err(map_err)?;
         }
+        // `reaction_sends_target`, added to v4 before its release
+        // (idempotent).
+        self.conn
+            .execute_batch(schema::REACTION_SENDS_TARGET_INDEX)
+            .map_err(map_err)?;
         Ok(())
     }
 

@@ -1346,6 +1346,22 @@ fn v4_database_without_superseded_gets_it() {
 }
 
 #[test]
+fn v4_database_without_reaction_sends_target_gets_it() {
+    let (_d, path, store) = open_tmp();
+    assert!(has_object(store.conn(), "index", "reaction_sends_target"));
+    // A development database at v4 before the index existed.
+    store
+        .conn()
+        .execute_batch("DROP INDEX IF EXISTS reaction_sends_target;")
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert!(has_object(store.conn(), "index", "reaction_sends_target"));
+    drop(store);
+    Store::open(&path, &KEY).unwrap();
+}
+
+#[test]
 fn v3_database_upgrades_to_v4() {
     let (_d, path, store) = open_tmp();
     // Turn the fresh database back into a v3 one.

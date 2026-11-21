@@ -310,6 +310,12 @@ pub const INBOUND_ADD_CONTACT_FP: &str = "ALTER TABLE inbound ADD COLUMN contact
 pub const REACTION_SENDS_ADD_SUPERSEDED: &str =
     "ALTER TABLE reaction_sends ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0;";
 
+/// The index of `reaction_sends` by target and conversation, added to v4
+/// before its release: the rows live as long as their target, and the
+/// current send toward the contact is looked up per message. Idempotent.
+pub const REACTION_SENDS_TARGET_INDEX: &str = "CREATE INDEX IF NOT EXISTS reaction_sends_target \
+     ON reaction_sends(message_id, contact_fp);";
+
 /// Backfill of v3 from the route log (`route_steps`, `RouteStep` as stored:
 /// Sealed 0, Deposited 1, AckVerified 4, OwnCopy 5), in the order of §5.3:
 /// 1. `sealed_at`: the `Sealed` or `OwnCopy` step, else the message's
@@ -403,6 +409,7 @@ CREATE TABLE IF NOT EXISTS reaction_sends (
     packet_id BLOB PRIMARY KEY NOT NULL, message_id BLOB NOT NULL,
     contact_fp BLOB NOT NULL, own INTEGER NOT NULL, expired INTEGER NOT NULL DEFAULT 0,
     superseded INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS reaction_sends_target ON reaction_sends(message_id, contact_fp);
 ";
 
 /// Migrates a v3 database to v4 in a single transaction (DDL only): the new
