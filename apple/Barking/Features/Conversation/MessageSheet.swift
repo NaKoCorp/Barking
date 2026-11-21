@@ -32,7 +32,7 @@ struct MessageSheet: View {
 
     var body: some View {
         NavigationStack {
-            MessageSheetContent(model: model, ask: ask, retry: retry)
+            MessageSheetContent(model: model, ask: ask, retry: retry, retryReaction: retryReaction)
                 .navigationTitle(Text("Message"))
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
@@ -70,6 +70,11 @@ struct MessageSheet: View {
         asking = Asking(confirmation: model.confirmation, message: model.confirmationMessage(), shown: model.delivery)
     }
 
+    private func retryReaction() {
+        Haptic.send.play()
+        Task { await model.retryReaction() }
+    }
+
     private func retry() {
         // The send haptic: a retry sends (§8); no new haptic.
         Haptic.send.play()
@@ -82,10 +87,11 @@ struct MessageSheetContent: View {
     let model: MessageSheetModel
     let ask: () -> Void
     let retry: () -> Void
+    var retryReaction: () -> Void = {}
 
     var body: some View {
         ScrollView {
-            MessageSheetBody(model: model, ask: ask, retry: retry)
+            MessageSheetBody(model: model, ask: ask, retry: retry, retryReaction: retryReaction)
         }
         .background(Color.surface)
     }
@@ -96,6 +102,8 @@ struct MessageSheetBody: View {
     let model: MessageSheetModel
     let ask: () -> Void
     let retry: () -> Void
+    var retryReaction: () -> Void = {}
+    @Environment(\.locale) private var locale
 
     var body: some View {
             VStack(alignment: .leading, spacing: 0) {
@@ -117,6 +125,7 @@ struct MessageSheetBody: View {
                         .font(.bBodySmall).foregroundStyle(Color.fgMuted)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, Space.s4)
+                    reaction
                     danger
                 case .received:
                     QuoteCard(text: model.quote)
@@ -124,6 +133,7 @@ struct MessageSheetBody: View {
                     if let path = model.path {
                         PathStops(rows: path.rows, notRecorded: path.notRecorded)
                     }
+                    reaction
                     PrivacyBlock(contactName: model.contactName).padding(.top, Space.section)
                     danger
                 }
@@ -153,6 +163,7 @@ struct MessageSheetBody: View {
         if model.canRetry {
             PrimaryButton("Retry", identifier: "sheet.retry", action: retry).padding(.top, Space.s4)
         }
+        reaction
         if model.showsDevices {
             section("\(model.contactName)’s devices")
             if let sentence = model.devicesSentence {
@@ -171,6 +182,19 @@ struct MessageSheetBody: View {
         }
         PrivacyBlock(contactName: model.contactName).padding(.top, Space.section)
         danger
+    }
+
+    /// My reaction's send, under the message's delivery: hidden without one.
+    @ViewBuilder private var reaction: some View {
+        if let title = model.reactionTitle(bundle: .strings(for: locale), locale: locale) {
+            SectionLabel(verbatim: title).padding(.top, Space.section).padding(.bottom, Space.s2)
+            DeliveryTimeline(steps: model.reactionSteps)
+                .accessibilityIdentifier("sheet.reactionTimeline")
+            if model.canRetryReaction {
+                PrimaryButton("Resend reaction", identifier: "sheet.resendReaction", action: retryReaction)
+                    .padding(.top, Space.s4)
+            }
+        }
     }
 
     /// 24 pt above a section title, 8 below (§6.4).

@@ -219,31 +219,68 @@ struct Bubble: View {
     }
 }
 
-/// The emoji under a bubble: `emoji count` in a capsule, outlined in the
-/// accent when mine; a tap toggles mine. Each chip is one VoiceOver element.
+/// How a chip is drawn: the stroke, its dash, the fill and the width, plus
+/// a ⚠︎ after the count. Only my chips carry the send state of my reaction;
+/// the shape says it as much as the colour (dashed, solid, ⚠︎).
+struct ReactionChipLook: Equatable {
+    let stroke: Color
+    let dashed: Bool
+    let fill: Color
+    let lineWidth: CGFloat
+    let warning: Bool
+
+    static func of(mine: Bool, state: DeliveryState?) -> ReactionChipLook {
+        guard mine else {
+            return ReactionChipLook(stroke: .border, dashed: false, fill: .surfaceCard, lineWidth: 1, warning: false)
+        }
+        switch state {
+        case .pending?:
+            return ReactionChipLook(stroke: .borderStrong, dashed: true, fill: .surfaceAlt, lineWidth: 1, warning: false)
+        case .received?:
+            return ReactionChipLook(stroke: .accentFill, dashed: false, fill: Color.accentFill.opacity(0.12),
+                                    lineWidth: 1.5, warning: false)
+        case .notDelivered?:
+            return ReactionChipLook(stroke: .warnBorder, dashed: false, fill: .warnBg, lineWidth: 1, warning: true)
+        case .onNetwork?, nil:
+            return ReactionChipLook(stroke: .accent, dashed: false, fill: .surfaceCard, lineWidth: 1, warning: false)
+        }
+    }
+}
+
+/// The emoji under a bubble: `emoji count` in a capsule; mine are outlined
+/// by the send state of my latest reaction (`myState`); a tap toggles mine.
+/// Each chip is one VoiceOver element.
 struct ReactionChips: View {
     let chips: [ReactionChip]
     let outgoing: Bool
+    var myState: DeliveryState?
     let toggle: (String) -> Void
     @Environment(\.locale) private var locale
 
     var body: some View {
         FlowLayout(spacing: 4) {
             ForEach(chips, id: \.emoji) { chip in
+                let look = ReactionChipLook.of(mine: chip.mine, state: myState)
                 Button { toggle(chip.emoji) } label: {
-                    Text(verbatim: "\(chip.emoji) \(chip.count)")
-                        .font(BarkingFont.sans(.footnote, size: 13))
-                        .foregroundStyle(Color.fg)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .frame(minHeight: 28)
-                        .background(chip.mine ? Color.accentFill.opacity(0.12) : Color.surfaceCard, in: .capsule)
-                        .overlay(Capsule().stroke(chip.mine ? Color.accentFill : Color.border,
-                                                  lineWidth: chip.mine ? 1.5 : 1))
-                        .contentShape(.capsule)
+                    HStack(spacing: 3) {
+                        Text(verbatim: "\(chip.emoji) \(chip.count)")
+                        if look.warning {
+                            Text(verbatim: "\u{26A0}\u{FE0E}").foregroundStyle(Color.warnFg)
+                        }
+                    }
+                    .font(BarkingFont.sans(.footnote, size: 13))
+                    .foregroundStyle(Color.fg)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .frame(minHeight: 28)
+                    .background(look.fill, in: .capsule)
+                    .overlay(Capsule().stroke(look.stroke, style: StrokeStyle(lineWidth: look.lineWidth,
+                                                                              dash: look.dashed ? [3, 2] : [])))
+                    .contentShape(.capsule)
                 }
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(Text(verbatim: chip.label(bundle: .strings(for: locale), locale: locale)))
+                .accessibilityLabel(Text(verbatim: chip.label(state: myState, bundle: .strings(for: locale),
+                                                              locale: locale)))
                 .accessibilityAddTraits(chip.mine ? .isSelected : [])
             }
         }

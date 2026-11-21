@@ -385,6 +385,30 @@ final class ComponentTests: XCTestCase {
                        "😮, 2 réactions")
     }
 
+    /// Each row of the chip look table; only my chips take the state.
+    func testReactionChipLookPerState() {
+        let pending = ReactionChipLook.of(mine: true, state: .pending)
+        XCTAssertEqual(pending, ReactionChipLook(stroke: .borderStrong, dashed: true, fill: .surfaceAlt,
+                                                 lineWidth: 1, warning: false))
+        let network = ReactionChipLook.of(mine: true, state: .onNetwork)
+        XCTAssertEqual(network, ReactionChipLook(stroke: .accent, dashed: false, fill: .surfaceCard,
+                                                 lineWidth: 1, warning: false))
+        // Received is today's "mine" look.
+        let received = ReactionChipLook.of(mine: true, state: .received)
+        XCTAssertEqual(received, ReactionChipLook(stroke: .accentFill, dashed: false,
+                                                  fill: Color.accentFill.opacity(0.12), lineWidth: 1.5, warning: false))
+        let failed = ReactionChipLook.of(mine: true, state: .notDelivered)
+        XCTAssertEqual(failed, ReactionChipLook(stroke: .warnBorder, dashed: false, fill: .warnBg,
+                                                lineWidth: 1, warning: true))
+        XCTAssertTrue(failed.warning)
+        XCTAssertEqual(ReactionChipLook.of(mine: true, state: nil), network, "no local tracking looks like on the network")
+        for state in [nil, DeliveryState.pending, .onNetwork, .received, .notDelivered] {
+            let other = ReactionChipLook.of(mine: false, state: state)
+            XCTAssertEqual(other, ReactionChipLook(stroke: .border, dashed: false, fill: .surfaceCard,
+                                                   lineWidth: 1, warning: false), "not mine: neutral for \(String(describing: state))")
+        }
+    }
+
     /// The quote reads "Reply to Sam: …", or that the original is gone.
     func testQuoteLineSpeech() {
         let fr = (bundle: Bundle.strings(for: Locale(identifier: "fr")), locale: Locale(identifier: "fr"))

@@ -124,6 +124,29 @@ final class MessageSheetModel {
 
     var canRetry: Bool { content == .sent && delivery?.state == .notDelivered }
 
+    /// "Your reaction · ❤️ 👍", or "Your reaction · removed" for an empty set.
+    func reactionTitle(bundle: Bundle = .main, locale: Locale = .current) -> String? {
+        guard let reaction else { return nil }
+        if reaction.emojis.isEmpty {
+            return String(localized: "Your reaction · removed", bundle: bundle, locale: locale)
+        }
+        let emojis = reaction.emojis.joined(separator: " ")
+        return String(localized: "Your reaction · \(emojis)", bundle: bundle, locale: locale)
+    }
+
+    /// The send of my reaction as the message's own step rows (sealed,
+    /// deposited, received on n of m devices, or the not-delivered stop).
+    var reactionSteps: [DeliveryTimeline.Step] {
+        guard let reaction else { return [] }
+        let md = MessageDelivery(messageId: reaction.messageId, delivery: reaction.delivery,
+                                 devices: reaction.devices, relays: reaction.relays, ownCopies: reaction.ownCopies)
+        return Self.lines(for: md, sealedSize: reaction.relays.map(\.size).filter { $0 > 0 }.max(),
+                          contactName: contactName).map(Self.step)
+    }
+
+    /// The reaction's last send did not leave: offer to send it again.
+    var canRetryReaction: Bool { reaction?.delivery.state == .notDelivered }
+
     // MARK: Loading
 
     func load() async {

@@ -11,8 +11,8 @@ final class DeliveryUITests: XCTestCase {
     // MARK: Helpers
 
     /// The app on Sam's conversation, the four messages shown.
-    private func openDeliveries(file: StaticString = #filePath, line: UInt = #line) -> XCUIApplication {
-        let app = XCUIApplication.seeded("deliveries")
+    private func openDeliveries(extra: [String] = [], file: StaticString = #filePath, line: UInt = #line) -> XCUIApplication {
+        let app = XCUIApplication.seeded("deliveries", extra: extra)
         app.launch()
         openSamChat(app, file: file, line: line)
         XCTAssertTrue(bubble(app, Seeded.pending).waitForExistence(timeout: 10), "the seeded messages", file: file, line: line)
@@ -103,6 +103,36 @@ final class DeliveryUITests: XCTestCase {
         menu(app, of: Seeded.received)
         app.buttons["👍"].tap()
         XCTAssertTrue(chip.waitUntil({ !$0.exists }, timeout: 10), "the chip goes with my reaction")
+    }
+
+    /// Reacts ❤️ on the received message from its menu; returns once the chip shows.
+    private func react(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        menu(app, of: Seeded.received)
+        app.buttons["❤️"].tap()
+        XCTAssertTrue(any(app, containing: "❤️, 1 reaction, including yours").waitForExistence(timeout: 10),
+                      "the chip of my reaction", file: file, line: line)
+    }
+
+    /// A reaction that did not leave is resent from the menu and from the
+    /// sheet, which says what was sent (a removal has no chip to read).
+    func testNotDeliveredReactionOffersResend() throws {
+        let app = openDeliveries(extra: ["-BarkingUITestReactionState", "notDelivered"])
+        react(app)
+        menu(app, of: Seeded.received)
+        XCTAssertTrue(app.buttons["Resend reaction"].exists, "Resend reaction is in the menu")
+        app.buttons["Details"].tap()
+        XCTAssertTrue(app.staticTexts["Your reaction · ❤️"].waitForExistence(timeout: 10), "the reaction section")
+        XCTAssertTrue(app.buttons["Resend reaction"].waitForExistence(timeout: 5), "the sheet's Resend reaction")
+    }
+
+    /// The chip says its state to VoiceOver.
+    func testPendingReactionChipSaysSo() throws {
+        let app = openDeliveries(extra: ["-BarkingUITestReactionState", "pending"])
+        react(app)
+        let chip = any(app, containing: "❤️, 1 reaction, including yours")
+        XCTAssertTrue(chip.label.hasSuffix(", reaction pending"), chip.label)
+        menu(app, of: Seeded.received)
+        XCTAssertFalse(app.buttons["Resend reaction"].exists, "nothing to resend while pending")
     }
 
     /// Reply from the menu shows who is answered above the field; Cancel

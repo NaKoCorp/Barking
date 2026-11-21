@@ -209,7 +209,7 @@ struct ConversationView: View {
         VStack(alignment: side, spacing: 4) {
             bubble(item)
             if !item.reactions.isEmpty {
-                ReactionChips(chips: item.reactions, outgoing: item.outgoing) { react($0, on: item.id) }
+                ReactionChips(chips: item.reactions, outgoing: item.outgoing, myState: item.myReactionState) { react($0, on: item.id) }
                     .disabled(deleting)
                     .bubbleRow(outgoing: item.outgoing)
             }
@@ -231,6 +231,8 @@ struct ConversationView: View {
     /// swipe to the right answers it.
     private func bubble(_ item: ConversationModel.Item) -> some View {
         let failed = item.state == .notDelivered
+        // My latest reaction did not leave: offered even without a chip (a removal).
+        let resendable = item.myReactionState == .notDelivered
         // Still being sent: the core has no row to open or delete yet.
         let saved = !item.local
         // Not for a local row (not in the core yet) or a placeholder (§5.6).
@@ -252,6 +254,11 @@ struct ConversationView: View {
                     emojiRow(item)
                     Button { model.startReply(item.id) } label: {
                         Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                }
+                if resendable {
+                    Button { retryReaction(item.id) } label: {
+                        Label("Resend reaction", systemImage: "arrow.clockwise")
                     }
                 }
                 if failed {
@@ -277,6 +284,7 @@ struct ConversationView: View {
                 if let quote = item.quote, quote.id != nil, quote.excerpt != nil {
                     Button("Show original") { scrollTarget = model.jump(to: quote) }
                 }
+                if resendable { Button("Resend reaction") { retryReaction(item.id) } }
                 if failed { Button("Retry") { retry(item.id) } }
                 if acts { Button("Copy") { copy(item.text) } }
                 if saved {
@@ -332,6 +340,11 @@ struct ConversationView: View {
             confirmingKeeps = await model.keepsOwnCopies(item)
             confirming = item
         }
+    }
+
+    private func retryReaction(_ id: Int64) {
+        Haptic.send.play()
+        Task { await model.retryReaction(id) }
     }
 
     private func retry(_ id: Int64) {

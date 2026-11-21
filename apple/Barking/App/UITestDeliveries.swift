@@ -342,10 +342,16 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         lock.withLock { _ = reactionResent.remove(message) }
         try device.setReactions(message: message, emojis: emojis)
     }
-    func reactionDelivery(message: Int64) throws -> ReactionDelivery? { try device.reactionDelivery(message: message) }
+    /// The real detail, its state replaced by the forced one while forcing applies.
+    func reactionDelivery(message: Int64) throws -> ReactionDelivery? {
+        guard var real = try device.reactionDelivery(message: message) else { return nil }
+        if let forced = reactionShown(message) { real.delivery.state = forced }
+        return real
+    }
+    /// The forced state goes only once the real resend has succeeded.
     func retryReactions(message: Int64) throws {
-        lock.withLock { _ = reactionResent.insert(message) }
         try device.retryReactions(message: message)
+        lock.withLock { _ = reactionResent.insert(message) }
     }
     func addContactBytes(card: Data, alias: String?) throws -> String { try device.addContactBytes(card: card, alias: alias) }
     func addContact(card: String, alias: String?) throws -> String { try device.addContact(card: card, alias: alias) }
