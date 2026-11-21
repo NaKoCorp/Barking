@@ -216,6 +216,9 @@ final class DeliveryCoreTests: XCTestCase {
         let seen = Seen(await core.changes)
         d.summary = summary(deliveryChanges: changes(("b", 1), ("c", 2)))
         _ = await core.sync(reason: .pull)
+        // The deletion starts a sync of its own: the fake must not hand
+        // the same changes again.
+        d.summary = summary(deliveryChanges: [])
         d.deleteResult = DeleteOutcome(deleted: 1, cancelled: 1, partlyCancelled: 0, alreadyLeft: 0, stillReceiving: [],
                                        ownCopiesKept: false, devicesLeft: 0, devicesTotal: 0, changes: changes(("b", 1)))
         _ = try await core.deleteMessage(1)
