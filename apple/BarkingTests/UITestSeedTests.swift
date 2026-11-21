@@ -108,6 +108,24 @@ final class UITestSeedTests: XCTestCase {
         XCTAssertEqual(try device.pendingCount(), left.packets)
     }
 
+    func testForcedReactionState() throws {
+        let args = deliveriesArgs + ["-BarkingUITestSeedCard", samCardForTests,
+                                     "-BarkingUITestReactionState", "notDelivered"]
+        try UITestSeed.apply(args)
+        let real = try XCTUnwrap(DeviceFactory.openExisting(lockTimeoutMs: 1_000))
+        let device = UITestDeliveries.wrap(real, arguments: args)
+        XCTAssertTrue(device is UITestDeliveries)
+        let seed = try XCTUnwrap(UITestDeliveries.Seed.load())
+        let (sam, ids) = (seed.contact, seed.ids)
+        try device.setReactions(message: ids[1], emojis: ["❤️"])
+        let sent = try device.messagesWith(contact: sam)
+        let reacted = try XCTUnwrap(sent.first { $0.id == ids[1] })
+        XCTAssertEqual(reacted.myReactionState, .notDelivered)
+        XCTAssertNil(try XCTUnwrap(sent.first { $0.id == ids[2] }).myReactionState, "no reaction of mine, no state")
+        XCTAssertEqual(try device.deliveriesOf(ids: [ids[1]]).first?.myReactionState, .notDelivered)
+        XCTAssertNil(try device.deliveriesOf(ids: [ids[2]]).first?.myReactionState)
+    }
+
     func testNoDecoratorWithoutItsArguments() throws {
         try UITestSeed.apply(["-BarkingUITestReset", "-BarkingUITestSeed", "ready", "-BarkingUITestSeedCard", samCardForTests])
         let real = try XCTUnwrap(DeviceFactory.openExisting(lockTimeoutMs: 1_000))

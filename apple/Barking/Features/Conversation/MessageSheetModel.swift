@@ -72,6 +72,10 @@ final class MessageSheetModel {
     private(set) var quote = ""
     private(set) var outgoing = true
     private(set) var sheet: MessageDelivery?
+    /// My reactions on this message and the send of that set toward the
+    /// contact; nil when none is tracked. It covers the contact send only:
+    /// `ownCopies.total` can be 0 after a retry, which is not "no copies".
+    private(set) var reaction: ReactionDelivery?
     private(set) var lines: [Line] = []
     private(set) var devices: [DeviceRow] = []
     /// "Received on 1 of 2 devices." above the device rows.
@@ -84,6 +88,7 @@ final class MessageSheetModel {
     /// The received message's path (`PathStops` rows).
     private(set) var path: PathModel?
     private var retrying = false
+    private var retryingReaction = false
     private var deleting = false
 
     init(core: CoreService, messageId: Int64, contact: String, contactName: String) {
@@ -119,6 +124,29 @@ final class MessageSheetModel {
 
     var canRetry: Bool { content == .sent && delivery?.state == .notDelivered }
 
+    /// "Your reaction · ❤️ 👍", or "Your reaction · removed" for an empty set.
+    func reactionTitle(bundle: Bundle = .main, locale: Locale = .current) -> String? {
+        guard let reaction else { return nil }
+        if reaction.emojis.isEmpty {
+            return String(localized: "Your reaction · removed", bundle: bundle, locale: locale)
+        }
+        let emojis = reaction.emojis.joined(separator: " ")
+        return String(localized: "Your reaction · \(emojis)", bundle: bundle, locale: locale)
+    }
+
+    /// The send of my reaction as the message's own step rows (sealed,
+    /// deposited, received on n of m devices, or the not-delivered stop).
+    var reactionSteps: [DeliveryTimeline.Step] {
+        guard let reaction else { return [] }
+        let md = MessageDelivery(messageId: reaction.messageId, delivery: reaction.delivery,
+                                 devices: reaction.devices, relays: reaction.relays, ownCopies: reaction.ownCopies)
+        return Self.lines(for: md, sealedSize: reaction.relays.map(\.size).filter { $0 > 0 }.max(),
+                          contactName: contactName).map(Self.step)
+    }
+
+    /// The reaction's last send did not leave: offer to send it again.
+    var canRetryReaction: Bool { reaction?.delivery.state == .notDelivered }
+
     // MARK: Loading
 
     func load() async {
@@ -129,6 +157,7 @@ final class MessageSheetModel {
             }
             quote = message.body
             outgoing = message.outgoing
+            await loadReaction()
             if !message.outgoing {
                 let mine = (try? await core.myDevices()) ?? []
                 keepsOwnCopies = mine.contains { !$0.thisDevice }
@@ -173,10 +202,17 @@ final class MessageSheetModel {
             close(.removedElsewhere)
             return
         }
+        await loadReaction()
         guard outgoing, let sheet = try? await core.messageDelivery(messageId) else { return }
         let route = (try? await core.messageRoute(messageId)) ?? []
         show(sheet, route: route)
         content = .sent
+    }
+
+    /// A failed read keeps the previous value (the Resend button must not
+    /// vanish on a transient error); a successful nil clears it.
+    private func loadReaction() async {
+        do { reaction = try await core.reactionDelivery(messageId) } catch {}
     }
 
     private func show(_ sheet: MessageDelivery?, route: [RouteStepInfo]) {
@@ -227,6 +263,22 @@ final class MessageSheetModel {
             notice = .noReachableDevice(name: contactName)
         } catch {
             // NothingToRetry: it moved meanwhile; the refresh shows where.
+        }
+        await refresh()
+    }
+
+    /// Sends my reactions on this message to the contact again; the sheet
+    /// follows at once. Whatever the error, the banner says the resend failed
+    /// (the reaction itself stays saved).
+    func retryReaction() async {
+        guard !retryingReaction else { return }
+        retryingReaction = true
+        defer { retryingReaction = false }
+        notice = nil
+        do {
+            try await core.retryReactions(messageId, contact: contact)
+        } catch {
+            notice = .reactionResendFailed
         }
         await refresh()
     }

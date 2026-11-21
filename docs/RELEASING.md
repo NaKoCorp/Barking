@@ -120,6 +120,10 @@ Before the first release, and after any change to the release workflows, rehears
 
 Check the version that the next release pull request proposes, and set it with `Release-As:` if it is not the one you want.
 
+## Notification filtering
+
+The NotificationService extension carries the `com.apple.developer.usernotifications.filtering` entitlement: it lets the extension drop a wake-up that has nothing to show (a removed reaction, content set aside, a copy of my own message). Apple grants it per team, on request. Until it is granted to the team, no signed TestFlight or App Store build can be produced (the provisioning profile would not carry it). Merging before is fine. The code does not branch on the entitlement.
+
 ## Protocol 4
 
 The client lifetime of a packet goes from 24 hours to 7 days (`DEFAULT_TTL_SECS`, issue #21). Only a node that speaks protocol 4 accepts such an expiry: the client deposits a 7-day packet on protocol 4 responsibles only, passing over protocol 3 ones, so such a packet lives only on protocol 4 nodes.

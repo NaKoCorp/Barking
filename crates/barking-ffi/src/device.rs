@@ -11,8 +11,9 @@ use barking_core::store::{DeliverySummary, Direction};
 use barking_core::{Core, CoreError};
 use zeroize::Zeroize;
 
-use crate::delivery::{Delivery, delivery_of};
+use crate::delivery::{Delivery, DeliveryState, delivery_of, state_of};
 use crate::lock::DbLock;
+use crate::reactions::{Quote, ReactionChip, chips_of, quote_of};
 use crate::{BarkingError, guard};
 
 /// Where the database lives and how to open it.
@@ -90,6 +91,20 @@ pub struct Message {
     /// none is recorded.
     #[uniffi(default = None)]
     pub route: Option<String>,
+    /// What this message answers, if it is a reply.
+    #[uniffi(default = None)]
+    pub reply_to: Option<Quote>,
+    /// The emoji under it, in first-seen order (spec reply/reactions §5.4).
+    #[uniffi(default = [])]
+    pub reactions: Vec<ReactionChip>,
+    /// Send state of my reactions toward the contact; `None` when I have no
+    /// tracked send (nothing sent, or no session when I last changed them).
+    #[uniffi(default = None)]
+    pub my_reaction_state: Option<DeliveryState>,
+    /// A placeholder for content this version cannot read (`body` is empty):
+    /// the row asks for a newer version of the app.
+    #[uniffi(default = false)]
+    pub needs_update: bool,
 }
 
 #[derive(uniffi::Object)]
@@ -336,11 +351,19 @@ impl Device {
     }
 
     /// Queues a text for `contact` (fingerprint or alias); the next sync sends it.
-    pub fn send_text(&self, contact: String, text: String) -> Result<(), BarkingError> {
+    /// `reply_to`: the row (`Message::id`) of a message of this conversation
+    /// the text answers; `MessageNotFound` if it is not one (or is not
+    /// quotable), nothing queued.
+    pub fn send_text(
+        &self,
+        contact: String,
+        text: String,
+        reply_to: Option<i64>,
+    ) -> Result<(), BarkingError> {
         guard(|| {
             self.with_core(|core| {
                 let fp = core.resolve(&contact)?;
-                core.send_text(&fp, &text, now(), &mut rand::rng())?;
+                core.send_message(&fp, &text, reply_to, now(), &mut rand::rng())?;
                 Ok(())
             })
         })
@@ -376,6 +399,10 @@ pub(crate) fn message_of(
 ) -> Result<Message, BarkingError> {
     Ok(Message {
         route: crate::route::route_hint(core, m.id)?,
+        reply_to: quote_of(core, &m)?,
+        reactions: chips_of(core, &m)?,
+        my_reaction_state: core.my_reaction_state(m.id)?.map(state_of),
+        needs_update: m.placeholder,
         id: m.id,
         outgoing: m.direction == Direction::Out,
         body: m.body,

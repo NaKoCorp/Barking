@@ -15,6 +15,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::contact::ContactCard;
+use crate::content::{ExtContent, UnknownPolicy};
 use crate::crypto::aead;
 use crate::crypto::kdf::hkdf_sha256;
 use crate::crypto::labels;
@@ -30,6 +31,11 @@ pub const MAX_TEXT_LEN: usize = 4000;
 
 /// Content of a message. New variants: always at the end (postcard
 /// format, variant index).
+///
+/// **Frozen after `Ext`**: no variant is ever added after it. Everything new
+/// goes through `Ext` kinds (see `content.rs`), which an older version can
+/// ignore or flag instead of refusing the packet. `body_has_no_variant_after_ext`
+/// fails if one is added.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Body {
     Text(String),
@@ -61,6 +67,14 @@ pub enum Body {
     /// Request of one of my devices to leave my account, handled by the
     /// administrator (`core/remove.rs`), ignored elsewhere. Added last.
     RemoveMe,
+    /// Extensible content: `data` is the postcard of the fields of `kind`
+    /// (see `content::ExtContent`). `unknown` tells a version that does not
+    /// know `kind` what to do. Last variant: the enum is frozen after it.
+    Ext {
+        kind: u16,
+        unknown: UnknownPolicy,
+        data: Vec<u8>,
+    },
 }
 
 /// State of a contact, replayed on my other devices. Idempotent: the same
@@ -126,6 +140,9 @@ impl fmt::Debug for Body {
             }
             Body::AdminTransfer { .. } => f.write_str("AdminTransfer(<secret>)"),
             Body::RemoveMe => f.write_str("RemoveMe"),
+            Body::Ext { kind, data, .. } => {
+                write!(f, "Ext(kind {kind}, <{} bytes>)", data.len())
+            }
         }
     }
 }
@@ -169,12 +186,14 @@ pub enum Wire {
 }
 
 impl Body {
-    /// Rejects a text longer than [`MAX_TEXT_LEN`] bytes.
+    /// Rejects a text longer than [`MAX_TEXT_LEN`] bytes, and an `Ext` of a
+    /// known kind that does not decode or validate (an unknown kind passes).
     fn check(&self) -> Result<()> {
         match self {
             Body::Text(t) | Body::SyncSent { text: t, .. } if t.len() > MAX_TEXT_LEN => {
                 Err(CoreError::TooLarge)
             }
+            Body::Ext { kind, data, .. } => ExtContent::decode(*kind, data).map(|_| ()),
             _ => Ok(()),
         }
     }
@@ -361,10 +380,12 @@ pub fn decode(pt: &[u8]) -> Result<Envelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content::{ExtContent, MessageRef};
     use crate::handshake::pqxdh::{SessionSecrets, initiate, respond};
     use crate::handshake::prekeys::PrekeySecrets;
     use crate::identity::RootIdentity;
     use crate::packet::DEFAULT_TTL_SECS;
+    use crate::store::MessageId;
     use chacha20::ChaCha20Rng;
     use proptest::prelude::*;
     use rand_core::SeedableRng;
@@ -696,6 +717,190 @@ mod tests {
         assert!(matches!(parse_wire(&bytes), Err(CoreError::Malformed(_))));
         assert!(matches!(parse_wire(&[]), Err(CoreError::Malformed(_))));
         assert!(matches!(parse_wire(&[7]), Err(CoreError::Malformed(_))));
+    }
+
+    fn mref(n: u8, by_sender: bool) -> MessageRef {
+        MessageRef {
+            id: [n; 16],
+            by_sender,
+        }
+    }
+
+    #[test]
+    fn ext_roundtrip_each_kind() {
+        let to = Fingerprint([5; 32]);
+        let cases = [
+            (
+                ExtContent::Reply {
+                    text: "re".to_owned(),
+                    reply_to: mref(1, true),
+                },
+                1u16,
+                UnknownPolicy::ShowUpdate,
+            ),
+            (
+                ExtContent::SyncReply {
+                    to,
+                    text: "re".to_owned(),
+                    reply_to: mref(2, false),
+                },
+                2,
+                UnknownPolicy::Ignore,
+            ),
+            (
+                ExtContent::Reaction {
+                    target: mref(3, true),
+                    emojis: vec!["👍".to_owned(), "❤\u{FE0F}".to_owned()],
+                },
+                3,
+                UnknownPolicy::Ignore,
+            ),
+            (
+                ExtContent::SyncReaction {
+                    to,
+                    target: mref(4, false),
+                    emojis: vec![],
+                },
+                4,
+                UnknownPolicy::Ignore,
+            ),
+        ];
+        for (content, want_kind, want_policy) in cases {
+            let body = content.to_body();
+            let Body::Ext {
+                kind,
+                unknown,
+                ref data,
+            } = body
+            else {
+                panic!("Ext expected");
+            };
+            assert_eq!((kind, unknown), (want_kind, want_policy));
+            assert!(!data.is_empty());
+            let e = Envelope {
+                sent_at: NOW,
+                ack_secret: [1; 16],
+                message_id: [7; 16],
+                body: body.clone(),
+            };
+            let pt = postcard::to_allocvec(&e).unwrap();
+            let back = decode(&pt).unwrap();
+            assert_eq!(back.body, body);
+            let Body::Ext { kind, data, .. } = back.body else {
+                panic!("Ext expected");
+            };
+            assert_eq!(ExtContent::decode(kind, &data).unwrap(), Some(content));
+        }
+    }
+
+    #[test]
+    fn unknown_kind_passes_check() {
+        let e = Envelope {
+            sent_at: NOW,
+            ack_secret: [1; 16],
+            message_id: [7; 16],
+            body: Body::Ext {
+                kind: 999,
+                unknown: UnknownPolicy::Ignore,
+                data: vec![1, 2, 3],
+            },
+        };
+        let pt = postcard::to_allocvec(&e).unwrap();
+        assert_eq!(decode(&pt).unwrap(), e);
+        assert_eq!(ExtContent::decode(999, &[1, 2, 3]), Ok(None));
+    }
+
+    fn decode_ext(kind: u16, data: Vec<u8>) -> Result<Envelope> {
+        let e = Envelope {
+            sent_at: NOW,
+            ack_secret: [1; 16],
+            message_id: [7; 16],
+            body: Body::Ext {
+                kind,
+                unknown: UnknownPolicy::Ignore,
+                data,
+            },
+        };
+        decode(&postcard::to_allocvec(&e).unwrap())
+    }
+
+    #[test]
+    fn known_kind_malformed_refused() {
+        assert!(matches!(
+            decode_ext(3, vec![0xff]),
+            Err(CoreError::Malformed(_))
+        ));
+        // Trailing bytes after a valid payload.
+        let Body::Ext { mut data, .. } = (ExtContent::Reaction {
+            target: mref(1, true),
+            emojis: vec![],
+        })
+        .to_body() else {
+            panic!("Ext expected");
+        };
+        data.push(0);
+        assert!(matches!(decode_ext(3, data), Err(CoreError::Malformed(_))));
+        let many = ExtContent::Reaction {
+            target: mref(1, true),
+            emojis: (0..21)
+                .map(|i| char::from_u32(0x1F600 + i).unwrap().to_string())
+                .collect(),
+        };
+        let Body::Ext { data, .. } = many.to_body() else {
+            panic!("Ext expected");
+        };
+        assert_eq!(decode_ext(3, data).unwrap_err(), CoreError::TooManyEmoji);
+        let big = ExtContent::Reply {
+            text: "a".repeat(MAX_TEXT_LEN + 1),
+            reply_to: mref(1, true),
+        };
+        let Body::Ext { data, .. } = big.to_body() else {
+            panic!("Ext expected");
+        };
+        assert_eq!(decode_ext(1, data).unwrap_err(), CoreError::TooLarge);
+    }
+
+    #[test]
+    fn body_has_no_variant_after_ext() {
+        // No wildcard arm: adding a variant breaks this compile, and must
+        // not happen after `Ext` (see the comment on `Body`).
+        fn index(b: &Body) -> u8 {
+            match b {
+                Body::Text(_) => 0,
+                Body::SyncSent { .. } => 1,
+                Body::SyncContact(_) => 2,
+                Body::SyncDevices { .. } => 3,
+                Body::CardUpdate(_) => 4,
+                Body::AdminTransfer { .. } => 5,
+                Body::RemoveMe => 6,
+                Body::Ext { .. } => 7,
+            }
+        }
+        let ext = Body::Ext {
+            kind: 1,
+            unknown: UnknownPolicy::Ignore,
+            data: vec![],
+        };
+        assert_eq!(index(&ext), 7);
+        assert_eq!(postcard::to_allocvec(&ext).unwrap()[0], 7);
+    }
+
+    #[test]
+    fn message_ref_resolves_both_ways() {
+        let c = Fingerprint([9; 32]);
+        let id = [3; 16];
+        let by_sender = MessageRef {
+            id,
+            by_sender: true,
+        };
+        let by_receiver = MessageRef {
+            id,
+            by_sender: false,
+        };
+        assert!(by_sender.resolve(true, &c) == MessageId(id));
+        assert!(by_receiver.resolve(false, &c) == MessageId(id));
+        assert!(by_sender.resolve(false, &c) == MessageId::incoming(&c, &id));
+        assert!(by_receiver.resolve(true, &c) == MessageId::incoming(&c, &id));
     }
 
     proptest! {

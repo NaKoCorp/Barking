@@ -2,3 +2,7 @@
 "NEW_MESSAGE" = "Nouveau message";
 "FAILED_MESSAGE" = "Un message n’a pas pu être distribué.";
 "FAILED_MESSAGES_COUNT" = "%lld messages n’ont pas pu être distribués.";
+"REACTED" = "A réagi";
+"REACTED_EMOJI" = "A réagi %@";
+"REACTED_TO" = "A réagi %1$@ à « %2$@ »";
+"NEEDS_UPDATE" = "Ce message nécessite une version plus récente de Barking.";

@@ -349,10 +349,21 @@
 			<string>%lld devices</string>
 		</dict>
 	</dict>
-	<key>Your messages · %lld packets</key>
+	<key>Your messages · %lld messages · %lld packets</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>
-		<string>%#@n@</string>
+		<string>Your messages · %1$#@m@ · %2$#@n@</string>
+		<key>m</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld message</string>
+			<key>other</key>
+			<string>%lld messages</string>
+		</dict>
 		<key>n</key>
 		<dict>
 			<key>NSStringFormatSpecTypeKey</key>
@@ -360,9 +371,9 @@
 			<key>NSStringFormatValueTypeKey</key>
 			<string>lld</string>
 			<key>one</key>
-			<string>Your messages · %lld packet</string>
+			<string>%lld packet</string>
 			<key>other</key>
-			<string>Your messages · %lld packets</string>
+			<string>%lld packets</string>
 		</dict>
 	</dict>
 	<key>Sync · %lld packets</key>
@@ -609,6 +620,38 @@
 			<string>%lld day</string>
 			<key>other</key>
 			<string>%lld days</string>
+		</dict>
+	</dict>
+	<key>%@, %lld reactions, including yours</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$@, %2$#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld reaction, including yours</string>
+			<key>other</key>
+			<string>%lld reactions, including yours</string>
+		</dict>
+	</dict>
+	<key>%@, %lld reactions</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$@, %2$#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld reaction</string>
+			<key>other</key>
+			<string>%lld reactions</string>
 		</dict>
 	</dict>
 </dict>

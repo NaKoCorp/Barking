@@ -4,8 +4,13 @@ import XCTest
 
 final class NotificationContentTests: XCTestCase {
     func msg(_ c: String, _ n: String, _ t: String) -> NewMessage { NewMessage(contact: c, name: n, text: t) }
-    func summary(_ m: [NewMessage]) -> SyncSummary {
-        SyncSummary(itemsReceived: UInt32(m.count), sent: 0, newMessages: m, networkUp: true, error: nil)
+    func summary(_ m: [NewMessage], reactions: [NewReaction] = [], nothingToShow: Bool = false,
+                 networkUp: Bool = true, error: String? = nil) -> SyncSummary {
+        SyncSummary(itemsReceived: UInt32(m.count + reactions.count), sent: 0, newMessages: m, networkUp: networkUp,
+                    error: error, newReactions: reactions, nothingToShow: nothingToShow)
+    }
+    func reaction(_ c: String = "FP1", _ n: String = "Alice", _ e: [String] = ["👍"], _ x: String? = "On se voit…") -> NewReaction {
+        NewReaction(contact: c, name: n, emojis: e, excerpt: x)
     }
     func original() -> UNMutableNotificationContent {
         let c = UNMutableNotificationContent()
@@ -95,5 +100,63 @@ final class NotificationContentTests: XCTestCase {
         let c = original()
         _ = NotificationContent.apply(summary([msg("FP1", "Alice", "a"), msg("FP2", "Bob", "b")]), to: c, preview: .generic, locked: false)
         XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "New message", ""])
+    }
+
+    func testOneReactionNameAndText() {
+        let c = original()
+        XCTAssertEqual(NotificationContent.apply(summary([], reactions: [reaction()]), to: c, preview: .nameAndText, locked: false), "shown")
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["Alice", "Reacted 👍 to “On se voit…”", "FP1"])
+    }
+
+    func testReactionWithoutExcerpt() {
+        let c = original()
+        _ = NotificationContent.apply(summary([], reactions: [reaction("FP1", "Alice", ["👍"], nil)]), to: c, preview: .nameAndText, locked: false)
+        XCTAssertEqual(c.body, "Reacted 👍")
+    }
+
+    func testOneReactionNameOnly() {
+        let c = original()
+        _ = NotificationContent.apply(summary([], reactions: [reaction()]), to: c, preview: .nameOnly, locked: false)
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["Alice", "Reacted", "FP1"])
+    }
+
+    func testReactionLockedAndGeneric() {
+        for (preview, locked) in [(PushPreview.nameAndText, true), (.generic, false)] {
+            let c = original()
+            XCTAssertEqual(NotificationContent.apply(summary([], reactions: [reaction()]), to: c, preview: preview, locked: locked), "shown")
+            XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "New message", ""])
+        }
+    }
+
+    func testMessageAndReactionCount() {
+        let c = original()
+        _ = NotificationContent.apply(summary([msg("FP1", "Alice", "a")], reactions: [reaction()]), to: c, preview: .nameAndText, locked: false)
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["Alice", "2 new messages", "FP1"])
+    }
+
+    func testNothingToShowSuppresses() {
+        let c = original()
+        c.title = "x"
+        c.threadIdentifier = "t"
+        XCTAssertEqual(NotificationContent.apply(summary([], nothingToShow: true), to: c, preview: .nameAndText, locked: false), "suppressed")
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "", ""])
+    }
+
+    func testFailedOrOfflineSyncNeverSuppresses() {
+        for s in [summary([], networkUp: false), summary([], error: "x")] {
+            let c = original()
+            XCTAssertEqual(NotificationContent.apply(s, to: c, preview: .nameAndText, locked: false), "original")
+            XCTAssertEqual(c.body, "New message")
+        }
+    }
+
+    func testNeedsUpdateMessage() {
+        let c = original()
+        let m = NewMessage(contact: "FP1", name: "Alice", text: "", needsUpdate: true)
+        XCTAssertEqual(NotificationContent.apply(summary([m]), to: c, preview: .nameAndText, locked: false), "shown")
+        XCTAssertEqual([c.title, c.body], ["Alice", "This message needs a newer version of Barking."])
+        let n = original()
+        _ = NotificationContent.apply(summary([m]), to: n, preview: .nameOnly, locked: false)
+        XCTAssertEqual(n.body, "New message")
     }
 }

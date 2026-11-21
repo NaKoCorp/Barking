@@ -1,4 +1,5 @@
 import XCTest
+@testable import Barking
 @testable import BarkingKit
 
 final class LocalizationTests: XCTestCase {
@@ -285,6 +286,67 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
+    /// Spec reply and reactions §5.6: the menu, the quote, the banner, the
+    /// chips and the update row in French, with the plurals in both languages.
+    func testReplyReactionStringsInFrench() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let keys = ["Reply", "React", "You", "Original message unavailable", "Replying to %@", "Cancel reply",
+                    "Reply to %@: %@", "More emoji", "20 reactions at most on a message.",
+                    "This message needs a newer version of Barking.", "Show original"]
+        for key in keys {
+            let value = fr[key] as? String ?? ""
+            XCTAssertFalse(value.isEmpty, "missing French for \(key)")
+            XCTAssertNotEqual(value, key, "French is English for \(key)")
+        }
+        XCTAssertEqual(fr["Reply"] as? String, "Répondre")
+        XCTAssertEqual(fr["React"] as? String, "Réagir")
+        XCTAssertEqual(fr["Reply to %@: %@"] as? String, "Réponse à %1$@\u{00A0}: %2$@")
+        XCTAssertEqual(fr["Replying to %@"] as? String, "Réponse à %@")
+        XCTAssertEqual(fr["More emoji"] as? String, "Plus d’emoji")
+        let plurals = ["%@, %lld reactions, including yours": ("réaction, dont la vôtre", "réactions, dont la vôtre"),
+                       "%@, %lld reactions": ("réaction", "réactions")]
+        for lang in ["en", "fr"] {
+            let table = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
+            for (key, french) in plurals {
+                let rule = try XCTUnwrap((table[key] as? NSDictionary)?["n"] as? NSDictionary, "\(lang) \(key)")
+                let one = try XCTUnwrap(rule["one"] as? String, "\(lang) \(key) one")
+                let other = try XCTUnwrap(rule["other"] as? String, "\(lang) \(key) other")
+                if lang == "fr" {
+                    XCTAssertTrue(one.hasSuffix(french.0) && other.hasSuffix(french.1), "\(key): \(one) / \(other)")
+                } else {
+                    XCTAssertTrue(one.contains("reaction") && other.contains("reactions"), "\(key): \(one) / \(other)")
+                }
+            }
+        }
+    }
+
+    func testReactionStateLabels() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let keys = ["reaction pending": "en attente", "reaction on the network": "sur le réseau",
+                    "reaction received": "reçue", "reaction not delivered": "non distribuée",
+                    "Resend reaction": "Renvoyer la réaction", "Your reaction · %@": "Votre réaction · %@",
+                    "Your reaction · removed": "Votre réaction · retirée",
+                    "Couldn't resend the reaction.": "Impossible de renvoyer la réaction."]
+        let en = Bundle.strings(for: Locale(identifier: "en"))
+        for (key, french) in keys {
+            XCTAssertEqual(fr[key] as? String, french, key)
+            XCTAssertEqual(en.localizedString(forKey: key, value: nil, table: nil), key, "English is the key for \(key)")
+        }
+        let locale = Locale(identifier: "fr")
+        let bundle = Bundle.strings(for: locale)
+        let chip = ReactionChip(emoji: "❤️", count: 1, mine: true)
+        XCTAssertTrue(chip.label(state: .pending, bundle: bundle, locale: locale).hasSuffix(", en attente"))
+        XCTAssertEqual(chip.label(state: nil, bundle: bundle, locale: locale), chip.label(bundle: bundle, locale: locale))
+        let other = ReactionChip(emoji: "❤️", count: 1, mine: false)
+        XCTAssertEqual(other.label(state: .pending, bundle: bundle, locale: locale), other.label(bundle: bundle, locale: locale))
+        let english = Locale(identifier: "en")
+        XCTAssertTrue(chip.label(state: .notDelivered, bundle: .strings(for: english), locale: english)
+            .hasSuffix(", reaction not delivered"))
+        let notice = ConversationModel.Notice.reactionResendFailed
+        XCTAssertEqual(notice.text(bundle: bundle, locale: locale), "Impossible de renvoyer la réaction.")
+        XCTAssertEqual(notice.text(bundle: .strings(for: english), locale: english), "Couldn't resend the reaction.")
+    }
+
     /// Spec Lot M §7.1: the bubble's states, menu, VoiceOver values and
     /// announcements, in both languages.
     func testDeliveryBubbleStrings() throws {
@@ -384,13 +446,30 @@ final class LocalizationTests: XCTestCase {
         for (key, value) in expected { XCTAssertEqual(fr[key] as? String, value, key) }
         for lang in ["en", "fr"] {
             let plurals = try XCTUnwrap(table(lang, "Localizable", "stringsdict"))
-            for key in ["Your messages · %lld packets", "Sync · %lld packets", "Delete %lld messages?", "Cancel %lld messages?",
+            for key in ["Your messages · %lld messages · %lld packets", "Sync · %lld packets", "Delete %lld messages?", "Cancel %lld messages?",
                         "Delete %lld", "Delete (%lld)", "%lld selected", "%lld haven’t left and will be cancelled.",
                         "%lld are already on the network: %@ will still receive it.%lld",
                         "They haven’t left this iPhone. %@ won’t receive them.%lld%lld",
                         "already left for %lld of %lld devices"] {
                 XCTAssertNotNil(plurals[key], "\(lang) plural \(key)")
             }
+        }
+    }
+
+    /// "Pending": the header counts the messages listed and their packets
+    /// (one message leaves as one packet per device), so the two differ.
+    func testPendingHeaderCountsMessagesAndPackets() throws {
+        let key = "Your messages · %lld messages · %lld packets"
+        let cases: [(String, Int, Int, String)] = [
+            ("en", 2, 3, "Your messages · 2 messages · 3 packets"),
+            ("en", 1, 1, "Your messages · 1 message · 1 packet"),
+            ("fr", 2, 3, "Vos messages · 2 messages · 3 paquets"),
+            ("fr", 1, 1, "Vos messages · 1 message · 1 paquet"),
+        ]
+        for (lang, messages, packets, expected) in cases {
+            let path = try XCTUnwrap(Bundle.main.path(forResource: lang, ofType: "lproj"))
+            let format = try XCTUnwrap(Bundle(path: path)).localizedString(forKey: key, value: nil, table: nil)
+            XCTAssertEqual(String.localizedStringWithFormat(format, messages, packets), expected, lang)
         }
     }
 

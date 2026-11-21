@@ -11,8 +11,8 @@ final class DeliveryUITests: XCTestCase {
     // MARK: Helpers
 
     /// The app on Sam's conversation, the four messages shown.
-    private func openDeliveries(file: StaticString = #filePath, line: UInt = #line) -> XCUIApplication {
-        let app = XCUIApplication.seeded("deliveries")
+    private func openDeliveries(extra: [String] = [], file: StaticString = #filePath, line: UInt = #line) -> XCUIApplication {
+        let app = XCUIApplication.seeded("deliveries", extra: extra)
         app.launch()
         openSamChat(app, file: file, line: line)
         XCTAssertTrue(bubble(app, Seeded.pending).waitForExistence(timeout: 10), "the seeded messages", file: file, line: line)
@@ -90,6 +90,66 @@ final class DeliveryUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Copy"].exists)
         XCTAssertEqual(buttons(app, "Retry"), retries + 1, "Retry is in the menu of the not delivered message")
         closeMenu(app)
+        // §5.6: the quick emoji row and Reply come with the usual entries.
+        menu(app, of: Seeded.received)
+        for label in ["👍", "Reply", "Copy", "Details", "Delete"] {
+            XCTAssertTrue(app.buttons[label].exists, "\(label) is in the menu of the received message")
+        }
+        app.buttons["👍"].tap()
+        XCTAssertTrue(app.buttons["Details"].waitUntil({ !$0.exists }, timeout: 5), "choosing an emoji closes the menu")
+        let chip = any(app, containing: "👍, 1 reaction, including yours")
+        XCTAssertTrue(chip.waitForExistence(timeout: 10), "the chip of my reaction")
+        // The same emoji again takes it back.
+        menu(app, of: Seeded.received)
+        app.buttons["👍"].tap()
+        XCTAssertTrue(chip.waitUntil({ !$0.exists }, timeout: 10), "the chip goes with my reaction")
+    }
+
+    /// Reacts ❤️ on the received message from its menu; returns once the chip shows.
+    private func react(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        menu(app, of: Seeded.received)
+        app.buttons["❤️"].tap()
+        XCTAssertTrue(any(app, containing: "❤️, 1 reaction, including yours").waitForExistence(timeout: 10),
+                      "the chip of my reaction", file: file, line: line)
+    }
+
+    /// A reaction that did not leave is resent from the menu and from the
+    /// sheet, which says what was sent (a removal has no chip to read).
+    func testNotDeliveredReactionOffersResend() throws {
+        let app = openDeliveries(extra: ["-BarkingUITestReactionState", "notDelivered"])
+        react(app)
+        menu(app, of: Seeded.received)
+        XCTAssertTrue(app.buttons["Resend reaction"].exists, "Resend reaction is in the menu")
+        app.buttons["Details"].tap()
+        XCTAssertTrue(app.staticTexts["Your reaction · ❤️"].waitForExistence(timeout: 10), "the reaction section")
+        XCTAssertTrue(app.buttons["Resend reaction"].waitForExistence(timeout: 5), "the sheet's Resend reaction")
+    }
+
+    /// The chip says its state to VoiceOver.
+    func testPendingReactionChipSaysSo() throws {
+        let app = openDeliveries(extra: ["-BarkingUITestReactionState", "pending"])
+        react(app)
+        let chip = any(app, containing: "❤️, 1 reaction, including yours")
+        XCTAssertTrue(chip.label.hasSuffix(", reaction pending"), chip.label)
+        menu(app, of: Seeded.received)
+        XCTAssertFalse(app.buttons["Resend reaction"].exists, "nothing to resend while pending")
+    }
+
+    /// Reply from the menu shows who is answered above the field; Cancel
+    /// reply takes it away (§5.6). The one message from Sam is the faked one:
+    /// the seeded four are mine.
+    func testReplyBannerAndCancel() throws {
+        let app = XCUIApplication.seeded("deliveries", extra: ["-BarkingUITestFakeReceived"])
+        app.launch()
+        openSamChat(app)
+        let received = bubble(app, "hi from Sam")
+        XCTAssertTrue(received.waitForExistence(timeout: 10), "the message from Sam")
+        menu(app, of: "hi from Sam")
+        app.buttons["Reply"].tap()
+        let banner = app.staticTexts["Replying to Sam"]
+        XCTAssertTrue(banner.waitForExistence(timeout: 5), "the reply banner")
+        app.buttons["Cancel reply"].tap()
+        XCTAssertTrue(banner.waitUntil({ !$0.exists }, timeout: 5), "Cancel reply removes the banner")
     }
 
     /// Retry under a not delivered bubble sends it again: pending, no Retry left.

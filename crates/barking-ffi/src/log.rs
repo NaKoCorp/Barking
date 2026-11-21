@@ -40,7 +40,7 @@ pub struct LogEntry {
 
 /// Number of variants of `TransparencyEvent`: one more than the last
 /// position `index` gives.
-const VARIANTS: usize = 27;
+const VARIANTS: usize = 28;
 
 /// Every key `LogEntry::key` can take, one per `TransparencyEvent` variant,
 /// in the order of `index`. The key of an event is `KEYS[index(event)]`: there
@@ -73,6 +73,7 @@ const KEYS: [&str; VARIANTS] = [
     "log.device_removed",
     "log.remove_requested",
     "log.messages_deleted",
+    "log.unknown_content",
 ];
 
 /// Position of a variant in `KEYS`. No wildcard: a new variant does not
@@ -107,6 +108,7 @@ fn index(e: &TransparencyEvent) -> usize {
         E::DeviceRemoved { .. } => 24,
         E::RemoveRequested { .. } => 25,
         E::MessagesDeleted { .. } => 26,
+        E::UnknownContent { .. } => 27,
     }
 }
 
@@ -124,6 +126,7 @@ const TOKENS: &[&str] = &[
     "sync_contact",
     "sync_devices",
     "sync_admin",
+    "sync_reaction",
     "node_lost",
     "node_unreachable",
     "intro_mailbox",
@@ -204,6 +207,7 @@ fn sync_token(k: SyncKind) -> String {
         SyncKind::Contact => "sync_contact",
         SyncKind::Devices => "sync_devices",
         SyncKind::Admin => "sync_admin",
+        SyncKind::Reaction => "sync_reaction",
     })
 }
 
@@ -342,6 +346,7 @@ fn parts(e: &TransparencyEvent, name: &dyn Fn(&Fingerprint) -> String) -> (Strin
             cancelled,
             already_left,
         } => ("packet", vec![n(*count), n(*cancelled), n(*already_left)]),
+        E::UnknownContent { kind, .. } => ("packet", vec![kind.to_string()]),
     };
     (family.to_owned(), args)
 }
@@ -518,6 +523,10 @@ mod tests {
                 count: 3,
                 cancelled: 2,
                 already_left: 1,
+            },
+            E::UnknownContent {
+                packet_id: pid,
+                kind: 999,
             },
         ]
     }

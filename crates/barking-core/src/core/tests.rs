@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::contact::ContactCard;
+use crate::content::{ExtContent, MessageRef, UnknownPolicy};
 use crate::envelope::{Body, Envelope, SyncOp, Wire, parse_wire};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{
@@ -10,8 +11,8 @@ use crate::identity::{
 };
 use crate::mailbox::day_of;
 use crate::packet::{ACK_GRACE_SECS, DEFAULT_HOPS, Kind, Tier, ack};
-use crate::store::{Direction, MessageId, MessageStatus, SessionRow};
-use crate::transparency::SyncKind;
+use crate::store::{Direction, MessageId, MessageStatus, ReactionRow, SessionRow};
+use crate::transparency::{SyncKind, TransparencyEvent};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rusqlite::OptionalExtension;
@@ -845,7 +846,7 @@ fn replayed_packets_and_acks_are_coalesced() {
         let now = NOW + i / 10;
         assert!(matches!(
             p.b.receive(&m.encode(), "t", now, &mut p.rng).unwrap(),
-            ReceiveOutcome::Duplicate
+            ReceiveOutcome::DuplicateMessage
         ));
         assert!(matches!(
             p.a.receive(&ack.encode(), "t", now, &mut p.rng).unwrap(),
@@ -1038,7 +1039,7 @@ fn message_id_dedups_resend() {
     assert_ne!(again.id, first.id);
     assert!(matches!(
         p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap(),
-        ReceiveOutcome::Duplicate
+        ReceiveOutcome::DuplicateMessage
     ));
     assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before);
     // The duplicate is still acked: the sender stops resending it.
@@ -4915,4 +4916,2361 @@ fn watched_days_cover_the_whole_lifetime() {
         .unwrap();
     let (late, _) = &sealed[0];
     assert!(watched.contains(&late.mailbox));
+}
+
+// --- Lot 2, task 2: Ext envelope, unknown kinds, sender x kind matrix.
+
+fn ext(kind: u16, unknown: UnknownPolicy) -> Body {
+    Body::Ext {
+        kind,
+        unknown,
+        data: vec![1, 2, 3],
+    }
+}
+
+fn some_ref() -> MessageRef {
+    MessageRef {
+        id: [9; 16],
+        by_sender: true,
+    }
+}
+
+fn acks_for(c: &mut Core, packet: &Packet) -> usize {
+    c.pending_outbox(NOW)
+        .unwrap()
+        .iter()
+        .map(|b| Packet::decode(b).unwrap())
+        .filter(|q| q.kind == Kind::Ack && q.payload[..16] == packet.id.0)
+        .count()
+}
+
+fn seal_to_b(p: &mut Pair, body: &Body, mid: u8) -> Packet {
+    let target = send::Target::Contact(p.b.fingerprint());
+    seal_body(&mut p.a, &target, body, MessageId([mid; 16]), &mut p.rng)
+        .remove(0)
+        .0
+}
+
+#[test]
+fn unknown_ignore_kind_is_acked_and_invisible() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::Ignore), 0x31);
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Ignored), "{r:?}");
+    assert_eq!(acks_for(&mut p.b, &pk), 1);
+    assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before);
+    let logged =
+        p.b.transparency_log(100)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, e)| matches!(e, TransparencyEvent::UnknownContent { kind: 999, .. }))
+            .count();
+    assert_eq!(logged, 1);
+    // The same content again, in a new packet: a duplicate (still acked).
+    let again = seal_to_b(&mut p, &ext(999, UnknownPolicy::Ignore), 0x31);
+    let r = p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    assert_eq!(acks_for(&mut p.b, &again), 1);
+}
+
+#[test]
+fn unknown_show_update_kind_adds_placeholder_row() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x32);
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    match r {
+        ReceiveOutcome::NeedsUpdate { from, .. } => assert_eq!(from, a_fp),
+        other => panic!("NeedsUpdate expected, got {other:?}"),
+    }
+    let rows = p.b.messages_with(&a_fp).unwrap();
+    assert_eq!(rows.len(), before + 1);
+    let row = rows.last().unwrap();
+    assert!(row.placeholder);
+    assert_eq!(row.body, "");
+    assert_eq!(row.direction, Direction::In);
+    assert_eq!(row.wire_id, Some([0x32; 16]));
+    assert_eq!(acks_for(&mut p.b, &pk), 1);
+    // A resend of it is a duplicate, not a second placeholder.
+    let again = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x32);
+    let r = p.b.receive(&again.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
+    assert_eq!(p.b.messages_with(&a_fp).unwrap().len(), before + 1);
+}
+
+#[test]
+fn unknown_kind_from_blocked_contact_refused() {
+    let mut p = pair();
+    let a = p.b.resolve("alice").unwrap();
+    p.b.block_contact(&a, NOW, &mut p.rng).unwrap();
+    let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x33);
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), "blocked contact");
+    assert_eq!(acks_for(&mut p.b, &pk), 0);
+}
+
+#[test]
+fn known_kind_malformed_is_quarantined() {
+    let mut p = pair();
+    // Sealing refuses a malformed known kind: forged with the session state.
+    let secret = [0x34; 16];
+    let pt = postcard::to_allocvec(&Envelope {
+        sent_at: NOW,
+        ack_secret: secret,
+        message_id: secret,
+        body: Body::Ext {
+            kind: 3,
+            unknown: UnknownPolicy::Ignore,
+            data: vec![0xff],
+        },
+    })
+    .unwrap();
+    let pk = forge(&mut p.a, &pt, ack::packet_id_for(&secret), &mut p.rng);
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), "authenticated but malformed content");
+}
+
+#[test]
+fn received_text_keeps_wire_id() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let b_fp = p.b.fingerprint();
+    let pk =
+        p.a.send_text(&b_fp, "hello", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    let sent = p.a.messages_with(&b_fp).unwrap().pop().unwrap();
+    let got = p.b.messages_with(&a_fp).unwrap().pop().unwrap();
+    assert_eq!(got.body, "hello");
+    assert_eq!(got.wire_id, Some(sent.message_id.0));
+    // Sent rows keep no wire id.
+    assert_eq!(sent.wire_id, None);
+}
+
+#[test]
+fn sync_ext_from_contact_quarantined() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let b_fp = p.b.fingerprint();
+    let bodies = [
+        ExtContent::SyncReply {
+            to: a_fp,
+            text: "faux".into(),
+            reply_to: some_ref(),
+        }
+        .to_body(),
+        ExtContent::SyncReaction {
+            to: a_fp,
+            target: some_ref(),
+            emojis: vec!["👍".into()],
+        }
+        .to_body(),
+    ];
+    let before = p.a.messages_with(&b_fp).unwrap().len();
+    for (i, body) in bodies.iter().enumerate() {
+        let id = MessageId([0x40 + i as u8; 16]);
+        let out = seal_body(&mut p.b, &send::Target::Contact(a_fp), body, id, &mut p.rng);
+        let r =
+            p.a.receive(&out[0].0.encode(), "t", NOW, &mut p.rng)
+                .unwrap();
+        assert_eq!(reason(r), NOT_MINE, "case {i}");
+    }
+    assert_eq!(p.a.messages_with(&b_fp).unwrap().len(), before);
+    let reactions: i64 =
+        p.a.store
+            .conn()
+            .query_row("SELECT count(*) FROM reactions", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(reactions, 0);
+}
+
+#[test]
+fn contact_ext_from_my_device_refused() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let bodies = [
+        ExtContent::Reply {
+            text: "x".into(),
+            reply_to: some_ref(),
+        }
+        .to_body(),
+        ExtContent::Reaction {
+            target: some_ref(),
+            emojis: vec!["👍".into()],
+        }
+        .to_body(),
+    ];
+    for (i, body) in bodies.iter().enumerate() {
+        let out = seal_body(
+            &mut a,
+            &send::Target::OwnDevices,
+            body,
+            MessageId([0x50 + i as u8; 16]),
+            &mut rng,
+        );
+        let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
+        assert_eq!(reason(r), "unexpected content for this mailbox", "case {i}");
+    }
+}
+
+#[test]
+fn unknown_kind_from_unlisted_own_device_refused() {
+    let (_d, mut a, mut t1, mut t2, mut rng) = linked_twice();
+    let card = a.contact_card("").unwrap();
+    let pkt = devices_packet(&mut a, &t1, card, 1, &mut rng);
+    t1.receive(&pkt.encode(), "t", NOW, &mut rng).unwrap();
+    let t1_id = t1.device.public().id();
+    let body = ext(999, UnknownPolicy::Ignore);
+    // Listed: accepted and set aside (this also opens the session).
+    let out = seal_body(
+        &mut t2,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x61; 16]),
+        &mut rng,
+    );
+    let p = &out.iter().find(|(_, d)| *d == t1_id).unwrap().0;
+    let r = t1.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Ignored), "{r:?}");
+    // T1's reply: T2's session no longer awaits an Initial.
+    let t2_id = t2.device.public().id();
+    let back = seal_body(
+        &mut t1,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x63; 16]),
+        &mut rng,
+    );
+    let p = &back.iter().find(|(_, d)| *d == t2_id).unwrap().0;
+    let r = t2.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::Ignored), "{r:?}");
+    // T2 leaves the list (session kept): refused.
+    let root = a.root.as_ref().unwrap();
+    let certs = a
+        .devices
+        .certs
+        .iter()
+        .filter(|c| c.device != t2.device.public())
+        .cloned()
+        .collect();
+    let list = DeviceList::sign(root, a.devices.version + 1, certs).unwrap();
+    t1.store.put_meta(META_DEVICE_LIST, &list).unwrap();
+    let out = seal_body(
+        &mut t2,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x62; 16]),
+        &mut rng,
+    );
+    let p = &out.iter().find(|(_, d)| *d == t1_id).unwrap().0;
+    assert_eq!(
+        reason(t1.receive(&p.encode(), "t", NOW, &mut rng).unwrap()),
+        NOT_MINE
+    );
+}
+
+// --- Lot 2, task 3: replies.
+
+/// The whole row of the message with this body.
+fn full_row(c: &Core, contact: &Fingerprint, body: &str) -> crate::store::MessageRow {
+    c.messages_with(contact)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+}
+
+/// The envelope of `p` as `to` would read it, without touching `to`.
+fn peek_envelope(to: &Core, p: &Packet) -> Envelope {
+    let row = best_session(to);
+    let mut ratchet = de_state(&row.state).unwrap();
+    let Wire::Normal { msg } = parse_wire(&p.payload).unwrap() else {
+        panic!("Wire::Normal expected");
+    };
+    let pt = ratchet.decrypt(&msg, &row.ad, NOW).unwrap();
+    crate::envelope::decode(&pt).unwrap()
+}
+
+fn deliver(to: &mut Core, p: &Packet, rng: &mut StdRng) -> ReceiveOutcome {
+    to.receive(&p.encode(), "t", NOW, rng).unwrap()
+}
+
+/// `pair` plus Carol, a contact of Alice (and Alice of hers).
+fn with_carol() -> (Pair, TempDir, Core) {
+    let mut p = pair();
+    let (dc, mut c) = party("c", 3);
+    let mut rng = StdRng::seed_from_u64(0);
+    p.a.add_contact(
+        &c.contact_card("Carol").unwrap(),
+        Some("carol"),
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    c.add_contact(
+        &p.a.contact_card("Alice").unwrap(),
+        Some("alice"),
+        NOW,
+        &mut rng,
+    )
+    .unwrap();
+    (p, dc, c)
+}
+
+#[test]
+fn reply_to_received_message() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = p.a.send_text(&b, "18 h ?", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.b, &pk[0], &mut p.rng);
+    let quoted = full_row(&p.b, &a, "18 h ?");
+    let out =
+        p.b.send_message(&a, "oui", Some(quoted.id), NOW, &mut p.rng)
+            .unwrap();
+    // The sender's row keeps the local id and the reference.
+    let mine = full_row(&p.b, &a, "oui");
+    let wire = quoted.wire_id.unwrap();
+    assert_eq!(mine.reply_to, Some(quoted.message_id));
+    assert_eq!(
+        mine.reply_ref,
+        Some(MessageRef {
+            id: wire,
+            by_sender: false
+        })
+    );
+    assert!(matches!(
+        deliver(&mut p.a, &out[0], &mut p.rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    let original = full_row(&p.a, &b, "18 h ?");
+    let got = full_row(&p.a, &b, "oui");
+    assert_eq!(got.reply_to, Some(original.message_id));
+    assert_eq!(got.reply_ref, mine.reply_ref);
+    assert!(got.wire_id.is_some());
+    let quote = p.a.message_in(&b, got.reply_to.unwrap()).unwrap().unwrap();
+    assert_eq!(quote.body, "18 h ?");
+    // The rows survive a reopening.
+    assert_eq!(
+        p.a.messages_with(&b).unwrap().last().unwrap().reply_ref,
+        got.reply_ref
+    );
+}
+
+#[test]
+fn reply_to_sent_message() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = p.b.send_text(&a, "mine", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.a, &pk[0], &mut p.rng);
+    let own = full_row(&p.b, &a, "mine");
+    let out =
+        p.b.send_message(&a, "re", Some(own.id), NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(
+        full_row(&p.b, &a, "re").reply_ref,
+        Some(MessageRef {
+            id: own.message_id.0,
+            by_sender: true
+        })
+    );
+    deliver(&mut p.a, &out[0], &mut p.rng);
+    let received = full_row(&p.a, &b, "mine");
+    let got = full_row(&p.a, &b, "re");
+    assert_eq!(got.reply_to, Some(received.message_id));
+    assert_eq!(
+        p.a.message_in(&b, got.reply_to.unwrap())
+            .unwrap()
+            .unwrap()
+            .body,
+        "mine"
+    );
+}
+
+#[test]
+fn reply_without_original_resolves_later() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
+    let row = full_row(&p.b, &a, "orig");
+    let reply =
+        p.b.send_message(&a, "re", Some(row.id), NOW, &mut p.rng)
+            .unwrap();
+    // The reply first.
+    deliver(&mut p.a, &reply[0], &mut p.rng);
+    let id = full_row(&p.a, &b, "re").reply_to.unwrap();
+    assert!(p.a.message_in(&b, id).unwrap().is_none());
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    let found = p.a.message_in(&b, id).unwrap().unwrap();
+    assert_eq!((found.body.as_str(), found.message_id), ("orig", id));
+}
+
+#[test]
+fn deleted_original_reads_unavailable() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    let id = full_row(&p.a, &b, "orig");
+    p.a.delete_message(id.id, NOW).unwrap();
+    let row = full_row(&p.b, &a, "orig");
+    let reply =
+        p.b.send_message(&a, "re", Some(row.id), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &reply[0], &mut p.rng);
+    let got = full_row(&p.a, &b, "re");
+    assert_eq!(got.reply_to, Some(id.message_id));
+    assert!(p.a.message_in(&b, id.message_id).unwrap().is_none());
+    // A resend of the original does not bring it back.
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    assert!(p.a.message_in(&b, id.message_id).unwrap().is_none());
+    assert!(
+        p.a.messages_with(&b)
+            .unwrap()
+            .iter()
+            .all(|m| m.body != "orig")
+    );
+}
+
+#[test]
+fn reply_to_other_conversation_is_unavailable() {
+    let (mut p, _dc, mut c) = with_carol();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let c_fp = c.fingerprint();
+    let to_bob = full_row(&p.a, &b, "x");
+    // Carol forges a quote of Alice's message to Bob.
+    let forged = ExtContent::Reply {
+        text: "snoop".into(),
+        reply_to: MessageRef {
+            id: to_bob.message_id.0,
+            by_sender: false,
+        },
+    }
+    .to_body();
+    let out = seal_body(
+        &mut c,
+        &send::Target::Contact(a),
+        &forged,
+        MessageId([0x70; 16]),
+        &mut p.rng,
+    );
+    assert!(matches!(
+        deliver(&mut p.a, &out[0].0, &mut p.rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    let got = full_row(&p.a, &c_fp, "snoop");
+    let resolved = got.reply_to.unwrap();
+    assert_eq!(resolved, to_bob.message_id);
+    assert!(p.a.message_in(&c_fp, resolved).unwrap().is_none());
+    assert!(p.a.message_in(&b, resolved).unwrap().is_some());
+}
+
+#[test]
+fn reply_refuses_bad_target() {
+    let (mut p, _dc, c) = with_carol();
+    let b = p.b.fingerprint();
+    let c_fp = c.fingerprint();
+    let b_row = full_row(&p.a, &b, "x").id;
+    // A received row of this device without a wire identifier.
+    p.a.store
+        .insert_message(
+            b,
+            Direction::In,
+            "bare",
+            MessageStatus::Received,
+            NOW,
+            MessageId([0x71; 16]),
+        )
+        .unwrap();
+    let bare = full_row(&p.a, &b, "bare").id;
+    let outbox = p.a.pending_outbox(NOW).unwrap().len();
+    let rows = p.a.messages_with(&b).unwrap().len();
+    for (to, id) in [(b, -1), (b, 9_999), (c_fp, b_row), (b, bare)] {
+        assert_eq!(
+            p.a.send_message(&to, "nope", Some(id), NOW, &mut p.rng),
+            Err(CoreError::MessageNotFound),
+            "{id}"
+        );
+    }
+    assert_eq!(p.a.messages_with(&b).unwrap().len(), rows);
+    assert!(p.a.messages_with(&c_fp).unwrap().is_empty());
+    assert_eq!(p.a.pending_outbox(NOW).unwrap().len(), outbox);
+}
+
+#[test]
+fn retried_reply_keeps_its_ref() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let original = p.b.send_text(&a, "orig", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    let orig = full_row(&p.a, &b, "orig");
+    let sent =
+        p.a.send_message(&b, "re", Some(orig.id), NOW, &mut p.rng)
+            .unwrap();
+    let before = full_row(&p.a, &b, "re");
+    // The delivery fails, the original goes away, the reply is retried.
+    let late = u64::from(sent[0].expires_at) + 1;
+    p.a.expire_due(late).unwrap();
+    assert_eq!(before.status, MessageStatus::Pending);
+    assert_eq!(full_row(&p.a, &b, "re").status, MessageStatus::NotDelivered);
+    p.a.delete_message(orig.id, late).unwrap();
+    let again = p.a.retry_message(before.id, late, &mut p.rng).unwrap();
+    let after = full_row(&p.a, &b, "re");
+    assert_eq!(
+        (after.reply_to, after.reply_ref),
+        (before.reply_to, before.reply_ref)
+    );
+    assert!(after.reply_ref.is_some());
+    let r =
+        p.b.receive(&again[0].encode(), "t", late, &mut p.rng)
+            .unwrap();
+    assert!(matches!(r, ReceiveOutcome::Message { .. }), "{r:?}");
+    let got = full_row(&p.b, &a, "re");
+    let theirs = full_row(&p.b, &a, "orig");
+    assert_eq!(got.reply_to, Some(theirs.message_id));
+    assert!(got.reply_ref.is_some());
+}
+
+#[test]
+fn reply_body_never_contains_quoted_text() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let secret = "quoted-text-that-must-not-travel";
+    let original = p.b.send_text(&a, secret, NOW, &mut p.rng).unwrap();
+    deliver(&mut p.a, &original[0], &mut p.rng);
+    let row = full_row(&p.a, &b, secret);
+    let out =
+        p.a.send_message(&b, "short", Some(row.id), NOW, &mut p.rng)
+            .unwrap();
+    let env = peek_envelope(&p.b, &out[0]);
+    let Body::Ext { kind, data, .. } = &env.body else {
+        panic!("Ext expected, got {:?}", env.body);
+    };
+    assert_eq!(*kind, crate::content::KIND_REPLY);
+    let bytes = postcard::to_allocvec(&env).unwrap();
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+    assert!(!find(&bytes, secret.as_bytes()));
+    assert!(find(data, b"short"));
+    // Without a quote the body is still a plain text.
+    let plain =
+        p.a.send_message(&b, "plain", None, NOW, &mut p.rng)
+            .unwrap();
+    assert!(matches!(peek_envelope(&p.b, &plain[0]).body, Body::Text(_)));
+}
+
+// --- Lot 2, task 4: reactions.
+
+fn emo(list: &[&str]) -> Vec<String> {
+    list.iter().map(|e| (*e).to_owned()).collect()
+}
+
+/// Chips as `(emoji, count)`: `mine` differs between the two sides.
+fn counts(c: &Core, contact: &Fingerprint, message: MessageId) -> Vec<(String, u32)> {
+    c.reaction_chips(contact, message)
+        .unwrap()
+        .into_iter()
+        .map(|chip| (chip.emoji, chip.count))
+        .collect()
+}
+
+fn reaction_rows(c: &Core) -> i64 {
+    c.store
+        .conn()
+        .query_row("SELECT count(*) FROM reactions", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn added_of(o: ReceiveOutcome) -> Vec<String> {
+    match o {
+        ReceiveOutcome::Reaction { added, .. } => added,
+        other => panic!("Reaction expected, got {other:?}"),
+    }
+}
+
+/// Alice reacts on her message "x" to Bob; returns the packet for Bob.
+fn react_x(p: &mut Pair, set: &[&str], now: u64) -> Packet {
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "x");
+    let mut out = p.a.set_reactions(row, &emo(set), now, &mut p.rng).unwrap();
+    assert_eq!(out.len(), 1, "one packet for Bob's only device");
+    out.remove(0)
+}
+
+#[test]
+fn reaction_add_remove_replace() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let on_a = message_id_of(&p.a, &b, "x");
+    let on_b = message_id_of(&p.b, &a, "x");
+    for (i, set) in [&["👍"][..], &["👍", "😂"], &[]].iter().enumerate() {
+        let pk = react_x(&mut p, set, NOW + i as u64);
+        deliver(&mut p.b, &pk, &mut p.rng);
+        let mine = p.a.reaction_chips(&b, on_a).unwrap();
+        assert!(mine.iter().all(|c| c.mine && c.count == 1));
+        assert_eq!(counts(&p.b, &a, on_b), counts(&p.a, &b, on_a), "step {i}");
+        assert_eq!(counts(&p.b, &a, on_b).len(), set.len());
+    }
+    assert!(counts(&p.a, &b, on_a).is_empty());
+    assert!(counts(&p.b, &a, on_b).is_empty());
+}
+
+#[test]
+fn reaction_out_of_order_and_duplicate_converge() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let on_b = message_id_of(&p.b, &a, "x");
+    let p1 = react_x(&mut p, &["👍"], NOW);
+    let p2 = react_x(&mut p, &["👍", "❤️"], NOW + 1);
+    let p3 = react_x(&mut p, &["🎉"], NOW + 2);
+    assert_eq!(added_of(deliver(&mut p.b, &p3, &mut p.rng)), emo(&["🎉"]));
+    assert!(added_of(deliver(&mut p.b, &p2, &mut p.rng)).is_empty());
+    assert!(added_of(deliver(&mut p.b, &p1, &mut p.rng)).is_empty());
+    assert!(matches!(
+        deliver(&mut p.b, &p1, &mut p.rng),
+        ReceiveOutcome::Duplicate
+    ));
+    assert_eq!(counts(&p.b, &a, on_b), vec![("🎉".to_owned(), 1)]);
+}
+
+#[test]
+fn reaction_clock_tie_breaks_on_message_id() {
+    let body = |set: &[&str], p: &Pair| {
+        ExtContent::Reaction {
+            target: MessageRef {
+                id: message_id_of(&p.a, &p.b.fingerprint(), "x").0,
+                by_sender: true,
+            },
+            emojis: emo(set),
+        }
+        .to_body()
+    };
+    for reverse in [false, true] {
+        // `pair` is seeded: each run gives the same fresh Bob.
+        let mut p = pair();
+        let a = p.a.fingerprint();
+        let low = body(&["👍"], &p);
+        let high = body(&["❤️"], &p);
+        let low = seal_to_b(&mut p, &low, 0x10);
+        let high = seal_to_b(&mut p, &high, 0x20);
+        let order = if reverse {
+            [&high, &low]
+        } else {
+            [&low, &high]
+        };
+        for pk in order {
+            assert!(matches!(
+                deliver(&mut p.b, pk, &mut p.rng),
+                ReceiveOutcome::Reaction { .. }
+            ));
+        }
+        let on_b = message_id_of(&p.b, &a, "x");
+        assert_eq!(
+            counts(&p.b, &a, on_b),
+            vec![("❤️".to_owned(), 1)],
+            "reverse: {reverse}"
+        );
+    }
+}
+
+#[test]
+fn same_second_toggles_keep_their_order() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let on = react_x(&mut p, &["👍"], NOW);
+    let off = react_x(&mut p, &[], NOW);
+    let mine =
+        p.a.store
+            .reaction(message_id_of(&p.a, &b, "x"), ME_REACTOR)
+            .unwrap()
+            .unwrap();
+    assert_eq!(mine.clock, NOW + 1);
+    assert!(mine.emojis.is_empty());
+    assert_eq!(peek_envelope(&p.b, &off).sent_at, NOW + 1);
+    deliver(&mut p.b, &off, &mut p.rng);
+    deliver(&mut p.b, &on, &mut p.rng);
+    assert!(counts(&p.b, &a, message_id_of(&p.b, &a, "x")).is_empty());
+}
+
+#[test]
+fn reaction_limits() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "x");
+    let many: Vec<String> = "😀😁😂🤣😃😄😅😆😉😊😋😎😍😘🥰😗😙😚🙂🤗🤩"
+        .chars()
+        .map(String::from)
+        .collect();
+    assert_eq!(many.len(), 21);
+    let outbox = p.a.pending_outbox(NOW).unwrap().len();
+    let cases: [(i64, Vec<String>, CoreError); 3] = [
+        (row, many, CoreError::TooManyEmoji),
+        (row, emo(&["a"]), CoreError::InvalidEmoji),
+        (-1, emo(&["👍"]), CoreError::MessageNotFound),
+    ];
+    for (id, set, err) in cases {
+        assert_eq!(p.a.set_reactions(id, &set, NOW, &mut p.rng), Err(err));
+    }
+    p.a.block_contact(&b, NOW, &mut p.rng).unwrap();
+    let outbox_blocked = p.a.pending_outbox(NOW).unwrap().len();
+    assert_eq!(
+        p.a.set_reactions(row, &emo(&["👍"]), NOW, &mut p.rng),
+        Err(CoreError::ContactBlocked)
+    );
+    assert_eq!(reaction_rows(&p.a), 0);
+    assert_eq!(outbox_blocked, outbox);
+    assert_eq!(p.a.pending_outbox(NOW).unwrap().len(), outbox);
+}
+
+#[test]
+fn reaction_from_blocked_contact_refused() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    p.b.block_contact(&a, NOW, &mut p.rng).unwrap();
+    let pk = react_x(&mut p, &["👍"], NOW + 1);
+    assert_eq!(
+        reason(deliver(&mut p.b, &pk, &mut p.rng)),
+        "blocked contact"
+    );
+    assert_eq!(reaction_rows(&p.b), 0);
+    assert_eq!(acks_for(&mut p.b, &pk), 0);
+}
+
+#[test]
+fn reaction_on_deleted_message_ignored() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let row = row_of(&p.b, &a, "x");
+    p.b.delete_message(row, NOW).unwrap();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    assert!(matches!(
+        deliver(&mut p.b, &pk, &mut p.rng),
+        ReceiveOutcome::Ignored
+    ));
+    assert_eq!(reaction_rows(&p.b), 0);
+    assert_eq!(acks_for(&mut p.b, &pk), 1);
+}
+
+#[test]
+fn reaction_before_its_message_shows_on_arrival() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let late = p.a.send_text(&b, "late", NOW, &mut p.rng).unwrap();
+    let row = row_of(&p.a, &b, "late");
+    let r =
+        p.a.set_reactions(row, &emo(&["👀"]), NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(added_of(deliver(&mut p.b, &r[0], &mut p.rng)), emo(&["👀"]));
+    assert!(!has_message(&p.b, &a, "late"));
+    deliver(&mut p.b, &late[0], &mut p.rng);
+    let on_b = message_id_of(&p.b, &a, "late");
+    assert_eq!(counts(&p.b, &a, on_b), vec![("👀".to_owned(), 1)]);
+}
+
+#[test]
+fn reaction_cannot_reach_another_conversation() {
+    let (mut p, _dc, mut c) = with_carol();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let to_bob = full_row(&p.a, &b, "x");
+    let forged = ExtContent::Reaction {
+        target: MessageRef {
+            id: to_bob.message_id.0,
+            by_sender: false,
+        },
+        emojis: emo(&["💩"]),
+    }
+    .to_body();
+    let out = seal_body(
+        &mut c,
+        &send::Target::Contact(a),
+        &forged,
+        MessageId([0x72; 16]),
+        &mut p.rng,
+    );
+    assert!(matches!(
+        deliver(&mut p.a, &out[0].0, &mut p.rng),
+        ReceiveOutcome::Ignored
+    ));
+    assert!(
+        p.a.reaction_chips(&b, to_bob.message_id)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(reaction_rows(&p.a), 0);
+}
+
+/// Alice holds her reaction on "x" and Bob's on "y".
+fn both_react(p: &mut Pair) {
+    let a = p.a.fingerprint();
+    react_x(p, &["👍"], NOW);
+    let y = row_of(&p.b, &a, "y");
+    let pk =
+        p.b.set_reactions(y, &emo(&["❤️"]), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &pk[0], &mut p.rng);
+    assert_eq!(reaction_rows(&p.a), 2);
+}
+
+#[test]
+fn reactions_erased_with_message_contact_and_block() {
+    // Deleting a message erases its reactions only.
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    both_react(&mut p);
+    let x = message_id_of(&p.a, &b, "x");
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW).unwrap();
+    assert!(p.a.store.reaction(x, ME_REACTOR).unwrap().is_none());
+    assert_eq!(reaction_rows(&p.a), 1);
+    // Removing the contact erases every row of the conversation.
+    p.a.remove_contact(&b, NOW, &mut p.rng).unwrap();
+    assert_eq!(reaction_rows(&p.a), 0);
+    // Blocking does too, mine included.
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    both_react(&mut p);
+    p.a.block_contact(&b, NOW, &mut p.rng).unwrap();
+    assert_eq!(reaction_rows(&p.a), 0);
+
+    // The same, received from my other device.
+    for block in [false, true] {
+        let (_d, mut a, mut t, mut rng) = linked();
+        let (_db, bob) = party("bob", 5);
+        let fp = a
+            .add_contact(
+                &bob.contact_card("Bob").unwrap(),
+                Some("bob"),
+                NOW,
+                &mut rng,
+            )
+            .unwrap();
+        deliver_all(&mut a, &mut t, &mut rng);
+        t.store
+            .insert_message(
+                fp,
+                Direction::Out,
+                "m",
+                MessageStatus::OnNetwork,
+                NOW,
+                MessageId([0x61; 16]),
+            )
+            .unwrap();
+        let row = row_of(&t, &fp, "m");
+        t.set_reactions(row, &emo(&["👍"]), NOW, &mut rng).unwrap();
+        assert_eq!(reaction_rows(&t), 1);
+        if block {
+            a.block_contact(&fp, NOW + 5, &mut rng).unwrap();
+        } else {
+            a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
+        }
+        deliver_all(&mut a, &mut t, &mut rng);
+        assert_eq!(reaction_rows(&t), 0, "block: {block}");
+    }
+}
+
+/// What the chat list reads of a conversation: its rows, its last message
+/// (with delivery) and the received rows (the unread count's input).
+type ConversationView = (
+    Vec<MessageRow>,
+    Option<(MessageRow, Option<crate::store::DeliverySummary>)>,
+    usize,
+);
+
+fn conversation_view(c: &mut Core, contact: &Fingerprint) -> ConversationView {
+    let rows = c.messages_with(contact).unwrap();
+    let last = c
+        .messages_with_delivery(contact, NOW)
+        .unwrap()
+        .into_iter()
+        .last();
+    let received = rows.iter().filter(|m| m.direction == Direction::In).count();
+    (rows, last, received)
+}
+
+#[test]
+fn reaction_is_never_a_message() {
+    let mut p = settled_pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    // Every receipt of the two messages back home first.
+    deliver_all(&mut p.b, &mut p.a, &mut p.rng);
+    deliver_all(&mut p.a, &mut p.b, &mut p.rng);
+    let before_a = conversation_view(&mut p.a, &b);
+    let before_b = conversation_view(&mut p.b, &a);
+    let pk = react_x(&mut p, &["👍"], NOW);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let y = row_of(&p.b, &a, "y");
+    let back =
+        p.b.set_reactions(y, &emo(&["🎉"]), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &back[0], &mut p.rng);
+    // The receipts go back too.
+    deliver_all(&mut p.b, &mut p.a, &mut p.rng);
+    deliver_all(&mut p.a, &mut p.b, &mut p.rng);
+    assert_eq!(reaction_rows(&p.a), 2);
+    assert_eq!(reaction_rows(&p.b), 2);
+    assert_eq!(conversation_view(&mut p.a, &b), before_a);
+    assert_eq!(conversation_view(&mut p.b, &a), before_b);
+    assert_eq!(before_a.0.len(), 2);
+    assert_eq!(before_a.2, 1);
+}
+
+#[test]
+fn reaction_outcome_lists_added_only() {
+    let mut p = pair();
+    let steps: [(&[&str], &[&str]); 3] =
+        [(&["👍"], &["👍"]), (&["👍", "❤️"], &["❤️"]), (&["❤️"], &[])];
+    for (i, (set, added)) in steps.into_iter().enumerate() {
+        let pk = react_x(&mut p, set, NOW + i as u64);
+        assert_eq!(added_of(deliver(&mut p.b, &pk, &mut p.rng)), emo(added));
+    }
+}
+
+#[test]
+fn reaction_leaves_target_delivery_alone() {
+    let mut p = settled_pair();
+    let b = p.b.fingerprint();
+    let x = message_id_of(&p.a, &b, "x");
+    let row = row_of(&p.a, &b, "x");
+    let status = status_of(&p.a, &b, "x");
+    assert_eq!(status, MessageStatus::Received);
+    let deliveries = deliveries_of(&p.a, x);
+    let pk = react_x(&mut p, &["👍"], NOW);
+    // The reaction packet has its own delivery, keyed on its own id.
+    let tie = p.a.store.reaction(x, ME_REACTOR).unwrap().unwrap().tie;
+    assert_eq!(deliveries_of(&p.a, MessageId(tie)), vec![(0, 0)]);
+    assert_eq!(deliveries_of(&p.a, x), deliveries);
+    // It expires undeposited: the target is not touched.
+    let late = u64::from(pk.expires_at) + 1;
+    p.a.expire_due(late).unwrap();
+    assert_eq!(deliveries_of(&p.a, MessageId(tie)), vec![(0, 5)]);
+    assert_eq!(status_of(&p.a, &b, "x"), status);
+    assert_eq!(deliveries_of(&p.a, x), deliveries);
+    assert!(p.a.take_failed_notices().is_empty());
+    assert_eq!(
+        p.a.retry_message(row, late, &mut p.rng),
+        Err(CoreError::NothingToRetry)
+    );
+    assert_eq!(p.a.retry_all(&b, late, &mut p.rng), Ok(0));
+    assert!(
+        p.a.store
+            .messages_with(b)
+            .unwrap()
+            .iter()
+            .all(|m| m.message_id.0 != tie)
+    );
+}
+
+#[test]
+fn reaction_chips_keep_first_seen_order() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = react_x(&mut p, &["👍"], NOW);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let x_on_b = row_of(&p.b, &a, "x");
+    let back =
+        p.b.set_reactions(x_on_b, &emo(&["❤️"]), NOW + 1, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &back[0], &mut p.rng);
+    // Alice updates hers last: her chips stay first.
+    let pk = react_x(&mut p, &["👍", "😂"], NOW + 2);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let order = |c: &Core, contact: &Fingerprint, body: &str| -> Vec<String> {
+        c.reaction_chips(contact, message_id_of(c, contact, body))
+            .unwrap()
+            .into_iter()
+            .map(|chip| chip.emoji)
+            .collect()
+    };
+    assert_eq!(order(&p.a, &b, "x"), emo(&["👍", "😂", "❤️"]));
+    assert_eq!(order(&p.b, &a, "x"), emo(&["👍", "😂", "❤️"]));
+    // Alice drops 👍 and adds it back: it goes to the end of her list.
+    let pk = react_x(&mut p, &["😂"], NOW + 3);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let pk = react_x(&mut p, &["😂", "👍"], NOW + 4);
+    deliver(&mut p.b, &pk, &mut p.rng);
+    assert_eq!(order(&p.b, &a, "x"), emo(&["😂", "👍", "❤️"]));
+    let mine =
+        p.a.reaction_chips(&b, message_id_of(&p.a, &b, "x"))
+            .unwrap();
+    assert_eq!(
+        mine.iter().map(|c| c.mine).collect::<Vec<_>>(),
+        [true, true, false]
+    );
+}
+
+#[test]
+fn reaction_sync_crossing_a_block_is_dropped() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    t.store
+        .insert_message(
+            fp,
+            Direction::Out,
+            "m",
+            MessageStatus::OnNetwork,
+            NOW,
+            MessageId([0x62; 16]),
+        )
+        .unwrap();
+    a.store
+        .insert_message(
+            fp,
+            Direction::Out,
+            "m",
+            MessageStatus::OnNetwork,
+            NOW,
+            MessageId([0x62; 16]),
+        )
+        .unwrap();
+    // T reacts; its copy is held back while A blocks Bob.
+    let row = row_of(&t, &fp, "m");
+    let pkts = t.set_reactions(row, &emo(&["👍"]), NOW, &mut rng).unwrap();
+    a.block_contact(&fp, NOW + 1, &mut rng).unwrap();
+    let mut seen = 0;
+    for p in &pkts {
+        match a.receive(&p.encode(), "t", NOW, &mut rng).unwrap() {
+            ReceiveOutcome::NotForUs => {}
+            o => {
+                assert!(matches!(o, ReceiveOutcome::Duplicate), "{o:?}");
+                assert_eq!(acks_for(&mut a, p), 1);
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(seen, 1);
+    assert_eq!(reaction_rows(&a), 0);
+}
+
+#[test]
+fn reaction_sync_after_a_removal_does_not_resurrect() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    t.store
+        .insert_message(
+            fp,
+            Direction::Out,
+            "m",
+            MessageStatus::OnNetwork,
+            NOW,
+            MessageId([0x63; 16]),
+        )
+        .unwrap();
+    let row = row_of(&t, &fp, "m");
+    // Sealed at NOW, held back while A removes Bob at NOW + 5.
+    let early = t.set_reactions(row, &emo(&["👍"]), NOW, &mut rng).unwrap();
+    a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
+    for p in &early {
+        let _ = a.receive(&p.encode(), "t", NOW + 9, &mut rng).unwrap();
+    }
+    assert_eq!(reaction_rows(&a), 0);
+    // A copy sealed after the removal still applies (last writer wins).
+    let late = t
+        .set_reactions(row, &emo(&["🎉"]), NOW + 6, &mut rng)
+        .unwrap();
+    for p in &late {
+        let _ = a.receive(&p.encode(), "t", NOW + 9, &mut rng).unwrap();
+    }
+    assert_eq!(reaction_rows(&a), 1);
+}
+
+#[test]
+fn reaction_chips_same_order_on_both_phones() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    // Both react in the same second, each before seeing the other's.
+    let from_a = react_x(&mut p, &["👍"], NOW);
+    let x_on_b = row_of(&p.b, &a, "x");
+    let from_b =
+        p.b.set_reactions(x_on_b, &emo(&["❤️"]), NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.b, &from_a, &mut p.rng);
+    deliver(&mut p.a, &from_b[0], &mut p.rng);
+    let order = |c: &Core, contact: &Fingerprint| -> Vec<String> {
+        c.reaction_chips(contact, message_id_of(c, contact, "x"))
+            .unwrap()
+            .into_iter()
+            .map(|chip| chip.emoji)
+            .collect()
+    };
+    assert_eq!(order(&p.a, &b).len(), 2);
+    assert_eq!(order(&p.a, &b), order(&p.b, &a));
+}
+
+// --- Lot 2, task 5: reaction packets tracked and resent after expiry.
+
+#[test]
+fn expired_reaction_waits_for_a_manual_resend() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "x");
+    let first = react_x(&mut p, &["👍"], NOW);
+    let last = react_x(&mut p, &["👍", "❤️"], NOW + 1);
+    // Both packets expire undeposited: the full sync resends neither.
+    let late = u64::from(last.expires_at) + 1;
+    for now in [late, late + 1] {
+        assert_eq!(
+            p.a.resend_reactions(now, &mut p.rng).map(|r| r.resent),
+            Ok(0)
+        );
+        assert!(p.a.pending_outbox(now).unwrap().is_empty());
+    }
+    // Only the last send is tracked, and it failed.
+    assert!(gone(&p.a, first.id));
+    assert_eq!(contact_tie(&p.a, b, target), Some(tie_of(&p.a, last.id)));
+    assert_eq!(
+        tie_states(&p.a, tie_of(&p.a, last.id), false),
+        vec![MessageStatus::NotDelivered as i64]
+    );
+}
+
+#[test]
+fn expired_reaction_resent_to_my_other_devices_only() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, _fp, target, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let late = u64::from(to_bob.expires_at.max(to_t.expires_at)) + 1;
+    assert_eq!(a.resend_reactions(late, &mut rng).map(|r| r.resent), Ok(1));
+    let queued = a.pending_outbox(late).unwrap();
+    assert_eq!(queued.len(), 1, "for T only");
+    // My row carries the new clock.
+    let mine = a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    assert_eq!(mine.clock, late);
+    for bytes in &queued {
+        let _ = t.receive(bytes, "t", late, &mut rng).unwrap();
+    }
+    let on_t = t.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    assert_eq!((on_t.clock, on_t.emojis), (late, emo(&["👍"])));
+}
+
+#[test]
+fn deposited_reaction_not_resent() {
+    let mut p = pair();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    let late = u64::from(pk.expires_at) + 1;
+    assert_eq!(
+        p.a.resend_reactions(late, &mut p.rng).map(|r| r.resent),
+        Ok(0)
+    );
+}
+
+#[test]
+fn expired_reaction_without_my_row_is_dropped_not_resent() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    // The message goes (its reactions with it) before the packet expires.
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1).unwrap();
+    let late = u64::from(pk.expires_at) + 1;
+    assert_eq!(
+        p.a.resend_reactions(late, &mut p.rng).map(|r| r.resent),
+        Ok(0)
+    );
+    assert!(p.a.pending_outbox(late).unwrap().is_empty());
+    let left: i64 =
+        p.a.store
+            .conn()
+            .query_row("SELECT count(*) FROM reaction_sends", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn removed_set_is_resent_as_empty() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, target, _, _) = react_linked(&mut a, &mut t, &mut rng);
+    let row = row_of(&a, &fp, "m");
+    let last = a.set_reactions(row, &[], NOW + 1, &mut rng).unwrap();
+    let late = last.iter().map(|p| u64::from(p.expires_at)).max().unwrap() + 1;
+    assert_eq!(a.resend_reactions(late, &mut rng).map(|r| r.resent), Ok(1));
+    let queued = a.pending_outbox(late).unwrap();
+    assert_eq!(queued.len(), 1);
+    let _ = t.receive(&queued[0], "t", late, &mut rng).unwrap();
+    assert!(t.reaction_chips(&fp, target).unwrap().is_empty());
+    assert!(a.reaction_chips(&fp, target).unwrap().is_empty());
+}
+
+#[test]
+fn pending_reaction_listed_as_reaction() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    react_x(&mut p, &["👍"], NOW);
+    let pending = p.a.pending_packets(NOW + 1).unwrap();
+    let reactions: Vec<_> = pending
+        .sync
+        .iter()
+        .filter(|s| s.kind == PendingKind::Reaction)
+        .collect();
+    assert_eq!(reactions.len(), 1);
+    assert_eq!(reactions[0].packets, 1);
+    assert_eq!(reactions[0].contacts, vec![b]);
+    assert!(
+        pending
+            .sync
+            .iter()
+            .all(|s| s.kind != PendingKind::CardUpdate)
+    );
+}
+
+fn sends_where(c: &Core, clause: &str) -> i64 {
+    c.store
+        .conn()
+        .query_row(
+            &format!("SELECT count(*) FROM reaction_sends WHERE {clause}"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn deleting_the_message_drops_its_reaction_sends() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    assert_eq!(sends_where(&p.a, "1"), 1);
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 2).unwrap();
+    assert_eq!(sends_where(&p.a, "1"), 0, "no link to the deleted message");
+}
+
+#[test]
+fn rows_of_packets_that_left_the_queue_are_kept() {
+    let mut p = pair();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    p.a.store.outbox_remove(pk.id).unwrap();
+    assert_eq!(
+        p.a.resend_reactions(NOW + 1, &mut p.rng).map(|r| r.resent),
+        Ok(0)
+    );
+    assert_eq!(packet_rows(&p.a, "reaction_sends", pk.id), 1);
+    assert_eq!(packet_rows(&p.a, "deliveries", pk.id), 1);
+}
+
+#[test]
+fn a_failing_group_does_not_block_the_others() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let (_dc, carol) = party("carol", 6);
+    let mut fps = Vec::new();
+    for (card, alias) in [
+        (bob.contact_card("Bob").unwrap(), "bob"),
+        (carol.contact_card("Carol").unwrap(), "carol"),
+    ] {
+        fps.push(a.add_contact(&card, Some(alias), NOW, &mut rng).unwrap());
+    }
+    deliver_all(&mut a, &mut t, &mut rng);
+    // Bob's group is first, then Carol's.
+    let mut sent = Vec::new();
+    for (i, fp) in fps.iter().enumerate() {
+        let id = MessageId([0x75 + i as u8; 16]);
+        for c in [&mut a, &mut t] {
+            c.store
+                .insert_message(*fp, Direction::Out, "m", MessageStatus::OnNetwork, NOW, id)
+                .unwrap();
+        }
+        let row = row_of(&a, fp, "m");
+        sent.extend(a.set_reactions(row, &emo(&["👍"]), NOW, &mut rng).unwrap());
+    }
+    let late = sent.iter().map(|p| u64::from(p.expires_at)).max().unwrap() + 1;
+    // Bob's stored contact row became unreadable: his group fails.
+    a.store
+        .conn()
+        .execute(
+            "UPDATE contacts SET verified = 'x' WHERE fp = ?1",
+            [fps[0].0.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        a.resend_reactions(late, &mut rng),
+        Ok(ReactionResend {
+            resent: 1,
+            failed: 1
+        })
+    );
+    assert_eq!(
+        sends_where(&a, "expired = 1 AND own = 1"),
+        1,
+        "Bob's stays flagged"
+    );
+    assert_eq!(a.pending_outbox(late).unwrap().len(), 1, "Carol's went");
+}
+
+#[test]
+fn blocked_or_unknown_contact_audience_is_skipped() {
+    for block in [true, false] {
+        let (_d, mut a, mut t, mut rng) = linked();
+        let (_db, fp, _, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+        if block {
+            a.block_contact(&fp, NOW + 1, &mut rng).unwrap();
+        } else {
+            a.store
+                .conn()
+                .execute("DELETE FROM contacts WHERE fp = ?1", [fp.0.as_slice()])
+                .unwrap();
+        }
+        let late = u64::from(to_bob.expires_at.max(to_t.expires_at)) + 1;
+        assert_eq!(
+            a.resend_reactions(late, &mut rng).map(|r| r.resent),
+            Ok(0),
+            "block {block}"
+        );
+        // My copies are dropped, nothing new is sealed.
+        assert_eq!(sends_where(&a, "own = 1"), 0, "block {block}");
+        assert_eq!(sends_where(&a, "expired = 0"), 0, "block {block}");
+    }
+}
+
+#[test]
+fn reaction_lost_after_deposit_stays_not_delivered() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "x");
+    let pk = react_x(&mut p, &["👍"], NOW);
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    let expiry = u64::from(pk.expires_at);
+    // The network confirms it gone: the full sync does not resend it.
+    assert_eq!(p.a.confirm_expired(pk.id, expiry + 1), Ok(true));
+    assert_eq!(
+        p.a.resend_reactions(expiry + 2, &mut p.rng)
+            .map(|r| r.resent),
+        Ok(0)
+    );
+    assert!(p.a.pending_outbox(expiry + 2).unwrap().is_empty());
+    let tie = contact_tie(&p.a, b, target).expect("still tracked");
+    assert_eq!(
+        tie_states(&p.a, tie, false),
+        vec![MessageStatus::NotDelivered as i64]
+    );
+}
+
+#[test]
+fn removing_a_contact_drops_its_reaction_sends() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    react_x(&mut p, &["👍"], NOW);
+    p.a.remove_contact(&b, NOW + 1, &mut p.rng).unwrap();
+    let left: i64 =
+        p.a.store
+            .conn()
+            .query_row("SELECT count(*) FROM reaction_sends", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(left, 0);
+}
+
+// --- Final review: a repeat of a visible message is told apart.
+
+#[test]
+fn repeat_of_a_stored_message_is_a_visible_duplicate() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let b = p.b.fingerprint();
+    let m =
+        p.a.send_text(&b, "seen", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    assert!(matches!(
+        deliver(&mut p.b, &m, &mut p.rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    // The same packet again (another node serves it): already seen.
+    let r = deliver(&mut p.b, &m, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
+    // The same message in a new packet (a resend).
+    let mid = p.a.messages_with(&b).unwrap().last().unwrap().message_id;
+    let again = seal_body(
+        &mut p.a,
+        &send::Target::Contact(b),
+        &Body::Text("seen".into()),
+        mid,
+        &mut p.rng,
+    )
+    .remove(0)
+    .0;
+    let r = deliver(&mut p.b, &again, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
+    // An update placeholder received again is visible too.
+    let pk = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x41);
+    assert!(matches!(
+        deliver(&mut p.b, &pk, &mut p.rng),
+        ReceiveOutcome::NeedsUpdate { .. }
+    ));
+    let r = deliver(&mut p.b, &pk, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
+    let pk2 = seal_to_b(&mut p, &ext(999, UnknownPolicy::ShowUpdate), 0x41);
+    let r = deliver(&mut p.b, &pk2, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::DuplicateMessage), "{r:?}");
+
+    // Deleted here since: nothing of it shows, a plain duplicate.
+    let row = row_of(&p.b, &a, "seen");
+    p.b.delete_message(row, NOW).unwrap();
+    for pk in [&m, &again] {
+        let r = deliver(&mut p.b, pk, &mut p.rng);
+        assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    }
+    // A reaction received twice, an ignored kind, an ack: plain duplicates.
+    let rx = react_x(&mut p, &["👍"], NOW);
+    deliver(&mut p.b, &rx, &mut p.rng);
+    let r = deliver(&mut p.b, &rx, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    let ig = seal_to_b(&mut p, &ext(999, UnknownPolicy::Ignore), 0x42);
+    deliver(&mut p.b, &ig, &mut p.rng);
+    let r = deliver(&mut p.b, &ig, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+    let n =
+        p.a.send_text(&b, "acked", NOW, &mut p.rng)
+            .unwrap()
+            .remove(0);
+    let ReceiveOutcome::Message { ack, .. } = deliver(&mut p.b, &n, &mut p.rng) else {
+        panic!("message expected");
+    };
+    deliver(&mut p.a, &ack, &mut p.rng);
+    let r = deliver(&mut p.a, &ack, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::Duplicate), "{r:?}");
+}
+
+// --- Final review: a policy this version does not know.
+
+/// The plaintext of an `Ext` of unknown kind whose policy byte is `policy`,
+/// found as the one byte that differs between the two known policies.
+fn ext_with_policy_byte(secret: [u8; 16], policy: u8) -> Vec<u8> {
+    let pt = |unknown| {
+        postcard::to_allocvec(&Envelope {
+            sent_at: NOW,
+            ack_secret: secret,
+            message_id: secret,
+            body: ext(999, unknown),
+        })
+        .unwrap()
+    };
+    let (ignore, show) = (pt(UnknownPolicy::Ignore), pt(UnknownPolicy::ShowUpdate));
+    let diff: Vec<usize> = (0..ignore.len())
+        .filter(|&i| ignore[i] != show[i])
+        .collect();
+    assert_eq!(diff.len(), 1, "one policy byte");
+    assert_eq!((ignore[diff[0]], show[diff[0]]), (0, 1));
+    let mut out = ignore;
+    out[diff[0]] = policy;
+    out
+}
+
+#[test]
+fn future_policy_shows_an_update_placeholder() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let secret = [0x51; 16];
+    let pt = ext_with_policy_byte(secret, 7);
+    let pk = forge(&mut p.a, &pt, ack::packet_id_for(&secret), &mut p.rng);
+    let before = p.b.messages_with(&a_fp).unwrap().len();
+    let r = p.b.receive(&pk.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert!(matches!(r, ReceiveOutcome::NeedsUpdate { .. }), "{r:?}");
+    assert_eq!(acks_for(&mut p.b, &pk), 1);
+    let rows = p.b.messages_with(&a_fp).unwrap();
+    assert_eq!(rows.len(), before + 1);
+    assert!(rows.last().unwrap().placeholder);
+}
+
+// --- Final review: one emoji, one spelling (U+FE0F).
+
+#[test]
+fn heart_with_or_without_fe0f_is_one_emoji_on_send() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "x");
+    let on_a = message_id_of(&p.a, &b, "x");
+    // Both spellings in one set: a duplicate.
+    assert_eq!(
+        p.a.set_reactions(row, &emo(&["❤", "❤\u{FE0F}"]), NOW, &mut p.rng),
+        Err(CoreError::InvalidEmoji)
+    );
+    // The bare heart is stored and sent fully qualified.
+    let sent =
+        p.a.set_reactions(row, &emo(&["❤"]), NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(counts(&p.a, &b, on_a), vec![("❤\u{FE0F}".to_owned(), 1)]);
+    let Body::Ext { kind, data, .. } = peek_envelope(&p.b, &sent[0]).body else {
+        panic!("Ext expected");
+    };
+    let Some(ExtContent::Reaction { emojis, .. }) = ExtContent::decode(kind, &data).unwrap() else {
+        panic!("Reaction expected");
+    };
+    assert_eq!(emojis, emo(&["❤\u{FE0F}"]));
+    // The other spelling is the same set: nothing to send.
+    assert!(
+        p.a.set_reactions(row, &emo(&["❤\u{FE0F}"]), NOW + 1, &mut p.rng)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn heart_with_or_without_fe0f_is_one_emoji_on_receive() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let on_a = message_id_of(&p.a, &b, "x");
+    let on_b = message_id_of(&p.b, &a, "x");
+    let target = MessageRef {
+        id: on_a.0,
+        by_sender: true,
+    };
+    // A peer that sends the bare heart: stored in the canonical spelling.
+    let bare = ExtContent::Reaction {
+        target,
+        emojis: emo(&["❤"]),
+    }
+    .to_body();
+    let pk = seal_to_b(&mut p, &bare, 0x61);
+    let added = added_of(deliver(&mut p.b, &pk, &mut p.rng));
+    assert_eq!(added, emo(&["❤\u{FE0F}"]));
+    assert_eq!(counts(&p.b, &a, on_b), vec![("❤\u{FE0F}".to_owned(), 1)]);
+    // Bob's own fully-qualified heart counts with it, as one chip.
+    let row = row_of(&p.b, &a, "x");
+    p.b.set_reactions(row, &emo(&["❤\u{FE0F}"]), NOW, &mut p.rng)
+        .unwrap();
+    assert_eq!(counts(&p.b, &a, on_b), vec![("❤\u{FE0F}".to_owned(), 2)]);
+    // Both spellings in one received set: a duplicate, refused (sealing
+    // refuses it too: forged with the session state).
+    let secret = [0x62; 16];
+    let pt = postcard::to_allocvec(&Envelope {
+        sent_at: NOW,
+        ack_secret: secret,
+        message_id: secret,
+        body: Body::Ext {
+            kind: crate::content::KIND_REACTION,
+            unknown: UnknownPolicy::Ignore,
+            data: postcard::to_allocvec(&(target, emo(&["❤", "❤\u{FE0F}"]))).unwrap(),
+        },
+    })
+    .unwrap();
+    let pk = forge(&mut p.a, &pt, ack::packet_id_for(&secret), &mut p.rng);
+    let r = deliver(&mut p.b, &pk, &mut p.rng);
+    assert!(matches!(r, ReceiveOutcome::Quarantined { .. }), "{r:?}");
+}
+
+// --- Final review: no reaction leftovers.
+
+/// Rows of `table` about the packet `id` (`deliveries`, `outbox`).
+fn packet_rows(c: &Core, table: &str, id: PacketId) -> i64 {
+    c.store
+        .conn()
+        .query_row(
+            &format!("SELECT count(*) FROM {table} WHERE packet_id = ?1"),
+            [id.0.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// Neither queued, nor tracked, nor kept as a delivery.
+fn gone(c: &Core, id: PacketId) -> bool {
+    packet_rows(c, "outbox", id) == 0
+        && packet_rows(c, "deliveries", id) == 0
+        && packet_rows(c, "reaction_sends", id) == 0
+}
+
+#[test]
+fn blocking_drops_queued_reaction_packets() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    assert!(!gone(&p.a, pk.id));
+    p.a.block_contact(&b, NOW + 1, &mut p.rng).unwrap();
+    assert!(gone(&p.a, pk.id));
+}
+
+#[test]
+fn block_from_my_other_device_drops_queued_reaction_packets() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    t.store
+        .insert_message(
+            fp,
+            Direction::Out,
+            "m",
+            MessageStatus::OnNetwork,
+            NOW,
+            MessageId([0x81; 16]),
+        )
+        .unwrap();
+    let row = row_of(&t, &fp, "m");
+    let sent = t.set_reactions(row, &emo(&["👍"]), NOW, &mut rng).unwrap();
+    // Only what T sends to Bob, kept apart from the sync for A.
+    let to_bob: Vec<PacketId> = sent
+        .iter()
+        .map(|p| p.id)
+        .filter(|id| {
+            t.store
+                .conn()
+                .query_row(
+                    "SELECT own = 0 FROM reaction_sends WHERE packet_id = ?1",
+                    [id.0.as_slice()],
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(to_bob.len(), 1);
+    a.block_contact(&fp, NOW + 5, &mut rng).unwrap();
+    // A's block reaches T: only the block sync, not T's packets back to A.
+    let block: Vec<Vec<u8>> = a.pending_outbox(NOW + 5).unwrap();
+    for bytes in &block {
+        let _ = t.receive(bytes, "t", NOW + 5, &mut rng);
+    }
+    assert!(t.store.block_state(fp).unwrap().blocked);
+    assert!(gone(&t, to_bob[0]));
+}
+
+#[test]
+fn deleting_the_message_drops_its_queued_reaction_packets() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let pk = react_x(&mut p, &["👍"], NOW);
+    p.a.delete_message(row_of(&p.a, &b, "x"), NOW + 1).unwrap();
+    assert!(gone(&p.a, pk.id));
+    assert!(
+        p.a.pending_packets(NOW + 1)
+            .unwrap()
+            .sync
+            .iter()
+            .all(|s| s.kind != PendingKind::CardUpdate && s.kind != PendingKind::Reaction)
+    );
+}
+
+#[test]
+fn pruned_reaction_rows_take_their_deliveries() {
+    // A copy for my device that expired undeposited and was resent: the old
+    // packet's delivery goes with its row.
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, _, _, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let late = u64::from(to_bob.expires_at.max(to_t.expires_at)) + 1;
+    assert_eq!(a.resend_reactions(late, &mut rng).unwrap().resent, 1);
+    assert!(gone(&a, to_t.id));
+    // The send to Bob is kept: it waits for the manual resend.
+    assert_eq!(packet_rows(&a, "deliveries", to_bob.id), 1);
+    assert_eq!(packet_rows(&a, "reaction_sends", to_bob.id), 1);
+}
+
+#[test]
+fn removing_a_contact_drops_acks_of_its_reactions_and_ignored_content() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let rx = react_x(&mut p, &["👍"], NOW);
+    deliver(&mut p.b, &rx, &mut p.rng);
+    let ig = seal_to_b(&mut p, &ext(999, UnknownPolicy::Ignore), 0x71);
+    assert!(matches!(
+        deliver(&mut p.b, &ig, &mut p.rng),
+        ReceiveOutcome::Ignored
+    ));
+    assert_eq!(acks_for(&mut p.b, &rx), 1);
+    assert_eq!(acks_for(&mut p.b, &ig), 1);
+    p.b.remove_contact(&a, NOW + 1, &mut p.rng).unwrap();
+    assert_eq!(acks_for(&mut p.b, &rx), 0);
+    assert_eq!(acks_for(&mut p.b, &ig), 0);
+}
+
+/// A reaction row on `target`, first seen at `first_seen`.
+fn put_reaction(c: &Core, contact: Fingerprint, target: MessageId, first_seen: u64) {
+    c.store
+        .put_reaction_if_newer(&ReactionRow {
+            message_id: target,
+            reactor: contact.0,
+            contact_fp: contact,
+            emojis: emo(&["👍"]),
+            clock: first_seen,
+            tie: [1; 16],
+            first_seen,
+            first_tie: [1; 16],
+        })
+        .unwrap();
+}
+
+#[test]
+fn orphan_reactions_are_purged_once_their_target_cannot_come() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let stored = message_id_of(&p.a, &b, "x");
+    let late = NOW + MAX_AGE_SECS + 10;
+    put_reaction(&p.a, b, MessageId([0x91; 16]), NOW); // orphan, too old
+    put_reaction(&p.a, b, MessageId([0x92; 16]), late - 5); // orphan, young
+    put_reaction(&p.a, b, stored, NOW); // old, on a stored message
+    p.a.resend_reactions(late, &mut p.rng).unwrap();
+    let left = |id: MessageId| p.a.store.reaction(id, b.0).unwrap().is_some();
+    assert!(!left(MessageId([0x91; 16])));
+    assert!(left(MessageId([0x92; 16])));
+    assert!(left(stored));
+}
+
+// --- Lot 2 bis, task 1: the tracking of the current reaction send.
+
+/// Alice reacts on Bob's message "y"; returns the packet for Bob.
+fn react_y(p: &mut Pair, set: &[&str], now: u64) -> Packet {
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    let mut out = p.a.set_reactions(row, &emo(set), now, &mut p.rng).unwrap();
+    assert_eq!(out.len(), 1, "one packet for Bob's only device");
+    out.remove(0)
+}
+
+fn contact_tie(c: &Core, contact: Fingerprint, target: MessageId) -> Option<MessageId> {
+    reactions::current_contact_tie(&c.store, contact, target).unwrap()
+}
+
+/// The states of the `own` deliveries keyed on `tie`.
+fn tie_states(c: &Core, tie: MessageId, own: bool) -> Vec<i64> {
+    let mut stmt = c
+        .store
+        .conn()
+        .prepare("SELECT status FROM deliveries WHERE message_id = ?1 AND own = ?2")
+        .unwrap();
+    stmt.query_map(rusqlite::params![tie.0.as_slice(), own], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// The delivery tie of `packet`.
+fn tie_of(c: &Core, packet: PacketId) -> MessageId {
+    let tie: Vec<u8> = c
+        .store
+        .conn()
+        .query_row(
+            "SELECT message_id FROM deliveries WHERE packet_id = ?1",
+            [packet.0.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    MessageId(tie.try_into().unwrap())
+}
+
+/// The ack `c` queued for `packet`.
+fn ack_bytes(c: &mut Core, packet: &Packet, now: u64) -> Vec<u8> {
+    c.pending_outbox(now)
+        .unwrap()
+        .into_iter()
+        .find(|b| {
+            let q = Packet::decode(b).unwrap();
+            q.kind == Kind::Ack && q.payload[..16] == packet.id.0
+        })
+        .expect("an ack")
+}
+
+/// Leaves `c` with no session with `contact`'s devices and no key packet
+/// to open one: a send to the contact seals nothing.
+fn no_session_with(c: &Core, contact: Fingerprint) {
+    let stored = c.store.get_contact(contact).unwrap().unwrap();
+    let mut card = ContactCard::decode(&stored.card).unwrap();
+    card.bundles.clear();
+    let conn = c.store.conn();
+    conn.execute(
+        "UPDATE contacts SET card = ?2 WHERE fp = ?1",
+        rusqlite::params![contact.0.as_slice(), card.encode()],
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM sessions WHERE contact_fp = ?1",
+        [contact.0.as_slice()],
+    )
+    .unwrap();
+}
+
+/// A linked to T, with Bob as a contact and an outgoing message "m" to
+/// him on both; A reacts on it: `(Bob, target, Bob's packet, T's packet)`.
+fn react_linked(
+    a: &mut Core,
+    t: &mut Core,
+    rng: &mut StdRng,
+) -> (TempDir, Fingerprint, MessageId, Packet, Packet) {
+    let (db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(&bob.contact_card("Bob").unwrap(), Some("bob"), NOW, rng)
+        .unwrap();
+    deliver_all(a, t, rng);
+    let target = MessageId([0x73; 16]);
+    for c in [&mut *a, &mut *t] {
+        c.store
+            .insert_message(
+                fp,
+                Direction::Out,
+                "m",
+                MessageStatus::OnNetwork,
+                NOW,
+                target,
+            )
+            .unwrap();
+    }
+    let row = row_of(a, &fp, "m");
+    let sent = a.set_reactions(row, &emo(&["👍"]), NOW, rng).unwrap();
+    assert_eq!(sent.len(), 2, "one for Bob, one for T");
+    let own = |p: &Packet| {
+        a.store
+            .conn()
+            .query_row(
+                "SELECT own FROM reaction_sends WHERE packet_id = ?1",
+                [p.id.0.as_slice()],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+    };
+    let (mine, theirs): (Vec<Packet>, Vec<Packet>) = sent.into_iter().partition(own);
+    drop(bob);
+    (db, fp, target, theirs[0].clone(), mine[0].clone())
+}
+
+#[test]
+fn reaction_send_tracking_survives_leaving_the_queue() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "y");
+    let pk = react_y(&mut p, &["👍"], NOW);
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    // It leaves the send queue (purged past the ack grace, say).
+    p.a.store.outbox_remove(pk.id).unwrap();
+    p.a.resend_reactions(NOW + 2, &mut p.rng).unwrap();
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let ack = ack_bytes(&mut p.b, &pk, NOW);
+    p.a.receive(&ack, "t", NOW + 3, &mut p.rng).unwrap();
+    let tie = contact_tie(&p.a, b, target).expect("tracked");
+    assert_eq!(
+        tie_states(&p.a, tie, false),
+        vec![MessageStatus::Received as i64]
+    );
+    assert_eq!(packet_rows(&p.a, "reaction_sends", pk.id), 1);
+}
+
+#[test]
+fn own_copy_ack_does_not_make_the_reaction_received() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, target, _to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let _ = t.receive(&to_t.encode(), "t", NOW, &mut rng).unwrap();
+    let ack = ack_bytes(&mut t, &to_t, NOW);
+    a.receive(&ack, "t", NOW + 1, &mut rng).unwrap();
+    let tie = contact_tie(&a, fp, target).expect("tracked");
+    assert_eq!(
+        tie_states(&a, tie, true),
+        vec![MessageStatus::Received as i64]
+    );
+    assert_eq!(
+        tie_states(&a, tie, false),
+        vec![MessageStatus::Pending as i64]
+    );
+}
+
+#[test]
+fn new_reaction_send_replaces_the_previous_tracking() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "x");
+    let first = react_x(&mut p, &["👍"], NOW);
+    let second = react_x(&mut p, &["👍", "❤️"], NOW + 1);
+    assert_eq!(packet_rows(&p.a, "deliveries", first.id), 0);
+    assert_eq!(superseded(&p.a, first.id), Some(true), "kept, untracked");
+    assert_eq!(packet_rows(&p.a, "outbox", first.id), 1, "it still leaves");
+    assert_eq!(superseded(&p.a, second.id), Some(false));
+    assert_eq!(packet_rows(&p.a, "deliveries", second.id), 1);
+    assert_eq!(packet_rows(&p.a, "reaction_sends", second.id), 1);
+    assert_eq!(contact_tie(&p.a, b, target), Some(tie_of(&p.a, second.id)));
+}
+
+#[test]
+fn reaction_set_without_contact_session_forgets_the_older_send() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "x");
+    react_x(&mut p, &["👍"], NOW);
+    assert!(contact_tie(&p.a, b, target).is_some());
+    no_session_with(&p.a, b);
+    let row = row_of(&p.a, &b, "x");
+    let sent =
+        p.a.set_reactions(row, &emo(&["❤️"]), NOW + 1, &mut p.rng)
+            .unwrap();
+    assert!(sent.is_empty(), "no device of Bob to seal for");
+    assert_eq!(contact_tie(&p.a, b, target), None);
+}
+
+#[test]
+fn expired_contact_reaction_stays_not_delivered_after_full_sync() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    // On Bob's message: no message packet of its own to change with it.
+    let target = message_id_of(&p.a, &b, "y");
+    let row = row_of(&p.a, &b, "y");
+    let pk = react_y(&mut p, &["👍"], NOW);
+    let late = u64::from(pk.expires_at) + 1;
+    p.a.take_delivery_changes();
+    p.a.expire_due(late).unwrap();
+    assert!(
+        p.a.take_delivery_changes().contains(&(b, row)),
+        "the expiry refreshes the target"
+    );
+    assert_eq!(
+        p.a.resend_reactions(late, &mut p.rng).map(|r| r.resent),
+        Ok(0)
+    );
+    assert!(p.a.pending_outbox(late).unwrap().is_empty());
+    let tie = contact_tie(&p.a, b, target).expect("still tracked");
+    assert_eq!(tie, tie_of(&p.a, pk.id));
+    assert_eq!(
+        tie_states(&p.a, tie, false),
+        vec![MessageStatus::NotDelivered as i64]
+    );
+    assert_eq!(packet_rows(&p.a, "reaction_sends", pk.id), 1);
+}
+
+#[test]
+fn expired_own_copy_is_still_resent() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, target, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let before = contact_tie(&a, fp, target).expect("tracked");
+    let late = u64::from(to_bob.expires_at.max(to_t.expires_at)) + 1;
+    a.expire_due(late).unwrap();
+    assert_eq!(a.resend_reactions(late, &mut rng).map(|r| r.resent), Ok(1));
+    // Only the copy for T is resealed.
+    let queued = a.pending_outbox(late).unwrap();
+    assert_eq!(queued.len(), 1);
+    let resent = Packet::decode(&queued[0]).unwrap();
+    let own: bool = a
+        .store
+        .conn()
+        .query_row(
+            "SELECT own FROM reaction_sends WHERE packet_id = ?1",
+            [resent.id.0.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(own);
+    assert_eq!(contact_tie(&a, fp, target), Some(before));
+    assert_eq!(
+        tie_states(&a, before, false),
+        vec![MessageStatus::NotDelivered as i64]
+    );
+    assert_eq!(packet_rows(&a, "reaction_sends", to_t.id), 0, "resent");
+}
+
+#[test]
+fn reaction_delivery_change_names_the_target_row() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let pk = react_y(&mut p, &["👍"], NOW);
+    p.a.take_delivery_changes();
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    assert!(
+        p.a.take_delivery_changes()
+            .contains(&(b, row_of(&p.a, &b, "y")))
+    );
+}
+
+/// `reaction_sends.superseded` of `packet`, `None` without a row.
+fn superseded(c: &Core, packet: PacketId) -> Option<bool> {
+    c.store
+        .conn()
+        .query_row(
+            "SELECT superseded FROM reaction_sends WHERE packet_id = ?1",
+            [packet.0.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+#[test]
+fn superseded_queued_reaction_still_counts_as_reaction() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    // Offline: both sets stay queued.
+    react_x(&mut p, &["👍"], NOW);
+    react_x(&mut p, &["👍", "❤️"], NOW + 1);
+    let pending = p.a.pending_packets(NOW + 2).unwrap();
+    let reaction: Vec<_> = pending
+        .sync
+        .iter()
+        .filter(|s| s.kind == PendingKind::Reaction)
+        .collect();
+    assert_eq!(reaction.len(), 1);
+    assert_eq!(
+        (reaction[0].packets, reaction[0].contacts.clone()),
+        (2, vec![b])
+    );
+    assert!(
+        pending
+            .sync
+            .iter()
+            .all(|s| s.kind != PendingKind::DeviceSync),
+        "{pending:?}"
+    );
+}
+
+#[test]
+fn superseded_rows_go_once_the_packet_leaves() {
+    let mut p = pair();
+    let first = react_x(&mut p, &["👍"], NOW);
+    // Sent just before the first expires (expiries are coarse).
+    let later = u64::from(first.expires_at) - 10;
+    let second = react_x(&mut p, &["👍", "❤️"], later);
+    assert_eq!(superseded(&p.a, first.id), Some(true));
+    // The first packet expires and leaves the queue; the second is still
+    // queued.
+    let late = u64::from(first.expires_at) + 1;
+    assert!(u64::from(second.expires_at) >= late);
+    p.a.resend_reactions(late, &mut p.rng).unwrap();
+    assert!(gone(&p.a, first.id));
+    assert_eq!(sends_where(&p.a, "superseded = 1"), 0);
+    assert_eq!(superseded(&p.a, second.id), Some(false));
+}
+
+#[test]
+fn acked_superseded_reaction_leaves_the_queue() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "x");
+    let first = react_x(&mut p, &["👍"], NOW);
+    let second = react_x(&mut p, &["👍", "❤️"], NOW + 1);
+    p.a.record_deposit(first.id, NODE, NOW + 2).unwrap();
+    deliver(&mut p.b, &first, &mut p.rng);
+    let ack = ack_bytes(&mut p.b, &first, NOW);
+    p.a.receive(&ack, "t", NOW + 3, &mut p.rng).unwrap();
+    assert_eq!(packet_rows(&p.a, "outbox", first.id), 0, "left the queue");
+    assert_eq!(superseded(&p.a, first.id), None);
+    let pending = p.a.pending_packets(NOW + 3).unwrap();
+    let reaction: Vec<_> = pending
+        .sync
+        .iter()
+        .filter(|s| s.kind == PendingKind::Reaction)
+        .collect();
+    assert_eq!(reaction.len(), 1);
+    assert_eq!(reaction[0].packets, 1, "only the current send");
+    // The current send is untouched.
+    let tie = tie_of(&p.a, second.id);
+    assert_eq!(contact_tie(&p.a, b, target), Some(tie));
+    assert_eq!(
+        tie_states(&p.a, tie, false),
+        vec![MessageStatus::Pending as i64]
+    );
+}
+
+// --- Lot 2 bis, task 2: reaction state, sheet read and manual retry.
+
+#[test]
+fn my_reaction_state_follows_the_contact_send() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    let pk = react_y(&mut p, &["👍"], NOW);
+    assert_eq!(p.a.my_reaction_state(row), Ok(Some(MessageStatus::Pending)));
+    p.a.record_deposit(pk.id, NODE, NOW + 1).unwrap();
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::OnNetwork))
+    );
+    deliver(&mut p.b, &pk, &mut p.rng);
+    let ack = ack_bytes(&mut p.b, &pk, NOW);
+    p.a.receive(&ack, "t", NOW + 2, &mut p.rng).unwrap();
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::Received))
+    );
+    assert_eq!(p.a.my_reaction_state(row_of(&p.a, &b, "x")), Ok(None));
+}
+
+#[test]
+fn my_reaction_state_is_none_for_a_synced_reaction() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, _target, _to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let _ = t.receive(&to_t.encode(), "t", NOW, &mut rng).unwrap();
+    let row = row_of(&t, &fp, "m");
+    assert!(
+        !t.reaction_chips(&fp, MessageId([0x73; 16]))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(t.my_reaction_state(row), Ok(None));
+}
+
+#[test]
+fn reaction_delivery_reports_a_removal() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    react_y(&mut p, &["❤️"], NOW);
+    let sent = p.a.set_reactions(row, &[], NOW + 1, &mut p.rng).unwrap();
+    assert_eq!(sent.len(), 1);
+    let detail =
+        p.a.reaction_delivery(row, NOW + 2)
+            .unwrap()
+            .expect("tracked");
+    assert!(detail.emojis.is_empty());
+    assert_eq!(detail.summary.state, MessageStatus::Pending);
+    assert_eq!((detail.row_id, detail.contact), (row, b));
+}
+
+#[test]
+fn reaction_delivery_lists_devices_and_relays() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, _target, to_bob, _to_t) = react_linked(&mut a, &mut t, &mut rng);
+    a.record_deposit(to_bob.id, "K7QX2M4A", NOW + 1).unwrap();
+    let row = row_of(&a, &fp, "m");
+    let detail = a.reaction_delivery(row, NOW + 2).unwrap().expect("tracked");
+    assert_eq!(detail.emojis, emo(&["👍"]));
+    assert_eq!(detail.summary.state, MessageStatus::OnNetwork);
+    assert_eq!(detail.relays[0].node, "K7QX2M4A");
+    let own: Vec<bool> = detail.deliveries.iter().map(|d| d.own).collect();
+    assert_eq!(own, vec![false, true], "contact devices first");
+    assert_eq!(detail.own_copies.total, 1);
+    assert_eq!(detail.summary.devices, 1);
+}
+
+/// Alice reacts 👍 on "y"; the packet expires undeposited: `(row, late,
+/// old tie)`.
+fn failed_reaction_on_y(p: &mut Pair) -> (i64, u64, MessageId) {
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    let pk = react_y(p, &["👍"], NOW);
+    let late = u64::from(pk.expires_at) + 1;
+    p.a.expire_due(late).unwrap();
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::NotDelivered))
+    );
+    (row, late, tie_of(&p.a, pk.id))
+}
+
+#[test]
+fn retry_reactions_reseals_the_current_set() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "y");
+    let (row, late, old_tie) = failed_reaction_on_y(&mut p);
+    let before = p.a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    p.a.take_delivery_changes();
+    let sent = p.a.retry_reactions(row, late, &mut p.rng).unwrap();
+    assert_eq!(sent.len(), 1, "one packet for Bob's only device");
+    assert_eq!(p.a.my_reaction_state(row), Ok(Some(MessageStatus::Pending)));
+    let tie = contact_tie(&p.a, b, target).expect("tracked");
+    assert_ne!(tie, old_tie);
+    assert_eq!(tie, tie_of(&p.a, sent[0].id));
+    let after = p.a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    assert!(after.clock > before.clock);
+    assert_eq!(after.emojis, before.emojis);
+    assert!(p.a.take_delivery_changes().contains(&(b, row)));
+    // Bob gets the set, on his own row of "y".
+    let a = p.a.fingerprint();
+    let on_b = message_id_of(&p.b, &a, "y");
+    let got = p.b.receive(&sent[0].encode(), "t", late, &mut p.rng);
+    assert!(
+        matches!(got, Ok(ReceiveOutcome::Reaction { .. })),
+        "{got:?}"
+    );
+    assert_eq!(counts(&p.b, &a, on_b), vec![("👍".to_owned(), 1)]);
+}
+
+#[test]
+fn retry_reactions_refuses_when_not_failed() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    react_y(&mut p, &["👍"], NOW);
+    assert_eq!(
+        p.a.retry_reactions(row, NOW + 1, &mut p.rng),
+        Err(CoreError::NothingToRetry)
+    );
+    // No reaction of mine at all.
+    assert_eq!(
+        p.a.retry_reactions(row_of(&p.a, &b, "x"), NOW + 1, &mut p.rng),
+        Err(CoreError::NothingToRetry)
+    );
+    assert_eq!(
+        p.a.retry_reactions(i64::MAX, NOW + 1, &mut p.rng),
+        Err(CoreError::MessageNotFound)
+    );
+}
+
+#[test]
+fn retry_reactions_without_session_changes_nothing() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let target = message_id_of(&p.a, &b, "y");
+    let (row, late, old_tie) = failed_reaction_on_y(&mut p);
+    let before = p.a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    no_session_with(&p.a, b);
+    assert_eq!(
+        p.a.retry_reactions(row, late, &mut p.rng),
+        Err(CoreError::NoSession)
+    );
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::NotDelivered))
+    );
+    assert_eq!(contact_tie(&p.a, b, target), Some(old_tie));
+    assert_eq!(
+        tie_states(&p.a, old_tie, false),
+        vec![MessageStatus::NotDelivered as i64]
+    );
+    assert_eq!(
+        p.a.store.reaction(target, ME_REACTOR).unwrap(),
+        Some(before)
+    );
+}
+
+#[test]
+fn retry_reactions_refuses_a_blocked_contact() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let (row, late, _) = failed_reaction_on_y(&mut p);
+    p.a.block_contact(&b, late, &mut p.rng).unwrap();
+    assert_eq!(
+        p.a.retry_reactions(row, late, &mut p.rng),
+        Err(CoreError::ContactBlocked)
+    );
+}
+
+#[test]
+fn retry_reactions_reseals_an_own_copy_that_never_left() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, target, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let late = u64::from(to_bob.expires_at.max(to_t.expires_at)) + 1;
+    a.expire_due(late).unwrap();
+    let row = row_of(&a, &fp, "m");
+    let sent = a.retry_reactions(row, late, &mut rng).unwrap();
+    assert_eq!(sent.len(), 2, "one for Bob, one for T");
+    let mine = a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    for p in &sent {
+        let _ = t.receive(&p.encode(), "t", late, &mut rng);
+    }
+    let on_t = t.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    assert_eq!((on_t.clock, on_t.emojis), (mine.clock, emo(&["👍"])));
+}
+
+#[test]
+fn retry_reactions_leaves_an_own_copy_that_left() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, _target, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    a.record_deposit(to_t.id, NODE, NOW + 1).unwrap();
+    let late = u64::from(to_bob.expires_at) + 1;
+    a.expire_due(late).unwrap();
+    let row = row_of(&a, &fp, "m");
+    let sent = a.retry_reactions(row, late, &mut rng).unwrap();
+    assert_eq!(sent.len(), 1, "Bob only");
+}
+
+#[test]
+fn retry_reactions_resends_a_failed_removal() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let row = row_of(&p.a, &b, "y");
+    let first = react_y(&mut p, &["❤️"], NOW);
+    deliver(&mut p.b, &first, &mut p.rng);
+    let removal = p.a.set_reactions(row, &[], NOW + 1, &mut p.rng).unwrap();
+    let late = u64::from(removal[0].expires_at) + 1;
+    p.a.expire_due(late).unwrap();
+    assert_eq!(
+        p.a.my_reaction_state(row),
+        Ok(Some(MessageStatus::NotDelivered))
+    );
+    let sent = p.a.retry_reactions(row, late, &mut p.rng).unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(p.a.my_reaction_state(row), Ok(Some(MessageStatus::Pending)));
+    let detail = p.a.reaction_delivery(row, late).unwrap().expect("tracked");
+    assert!(detail.emojis.is_empty());
+    let a = p.a.fingerprint();
+    let on_b = message_id_of(&p.b, &a, "y");
+    assert!(!p.b.reaction_chips(&a, on_b).unwrap().is_empty());
+    let _ =
+        p.b.receive(&sent[0].encode(), "t", late, &mut p.rng)
+            .unwrap();
+    assert!(p.b.reaction_chips(&a, on_b).unwrap().is_empty());
+}
+
+#[test]
+fn synced_newer_set_forgets_the_local_contact_send() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, target, to_bob, _to_t) = react_linked(&mut a, &mut t, &mut rng);
+    a.record_deposit(to_bob.id, NODE, NOW + 1).unwrap();
+    let row = row_of(&a, &fp, "m");
+    assert_eq!(a.my_reaction_state(row), Ok(Some(MessageStatus::OnNetwork)));
+    let t_row = row_of(&t, &fp, "m");
+    // T reacts before it saw A's copy, with an older clock: ignored here.
+    let older = t
+        .set_reactions(t_row, &emo(&["❤️"]), NOW - 10, &mut rng)
+        .unwrap();
+    for p in &older {
+        let _ = a.receive(&p.encode(), "t", NOW + 2, &mut rng).unwrap();
+    }
+    assert_eq!(
+        a.store
+            .reaction(target, ME_REACTOR)
+            .unwrap()
+            .unwrap()
+            .emojis,
+        emo(&["👍"])
+    );
+    assert_eq!(a.my_reaction_state(row), Ok(Some(MessageStatus::OnNetwork)));
+    assert!(a.reaction_delivery(row, NOW + 2).unwrap().is_some());
+    // A newer set from T, the same emoji as A's (it adds nothing here):
+    // A's contact send no longer describes my current set.
+    let newer = t
+        .set_reactions(t_row, &emo(&["👍"]), NOW + 5, &mut rng)
+        .unwrap();
+    for p in &newer {
+        let _ = a.receive(&p.encode(), "t", NOW + 6, &mut rng).unwrap();
+    }
+    let mine = a.store.reaction(target, ME_REACTOR).unwrap().unwrap();
+    assert_eq!(mine.clock, NOW + 5, "T's set applied");
+    assert_eq!(a.my_reaction_state(row), Ok(None));
+    assert_eq!(a.reaction_delivery(row, NOW + 6), Ok(None));
+    assert_eq!(contact_tie(&a, fp, target), None);
+}
+
+#[test]
+fn retry_reactions_without_contact_session_seals_no_own_copy() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, fp, target, to_bob, to_t) = react_linked(&mut a, &mut t, &mut rng);
+    let late = u64::from(to_bob.expires_at.max(to_t.expires_at)) + 1;
+    a.expire_due(late).unwrap();
+    let row = row_of(&a, &fp, "m");
+    let before = a.store.reaction(target, ME_REACTOR).unwrap();
+    let rows = |c: &Core| -> i64 {
+        c.store
+            .conn()
+            .query_row("SELECT count(*) FROM reaction_sends", [], |r| r.get(0))
+            .unwrap()
+    };
+    let sends = rows(&a);
+    no_session_with(&a, fp);
+    // My copy for T never left, but no device of Bob can be sealed for.
+    assert_eq!(
+        a.retry_reactions(row, late, &mut rng),
+        Err(CoreError::NoSession)
+    );
+    assert_eq!(rows(&a), sends);
+    assert_eq!(a.store.reaction(target, ME_REACTOR).unwrap(), before);
+    assert_eq!(
+        a.my_reaction_state(row),
+        Ok(Some(MessageStatus::NotDelivered))
+    );
 }

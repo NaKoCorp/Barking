@@ -2,19 +2,23 @@
 //! for each of my other devices.
 
 use rand_core::CryptoRng;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
+use zeroize::Zeroize;
 
 use super::{
     Core, OwnDevices, de_init, de_state, delivery, load_card, log, route, ser_init, ser_state,
     session_ad, session_id, sync,
 };
+use crate::content::{ExtContent, MessageRef};
 use crate::envelope::{self, Body, Envelope, MAX_TEXT_LEN};
 use crate::handshake::{PrekeyBundle, pqxdh};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{Packet, PacketId, ack};
 use crate::ratchet::RatchetState;
-use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow, arr, map_err};
+use crate::store::{
+    Direction, MessageId, MessageInsert, MessageStatus, Queries, SessionRow, arr, map_err,
+};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -243,17 +247,35 @@ pub(super) fn seal_for(
 }
 
 impl Core {
-    /// Encrypts `text` for each device in the contact's list; one packet
-    /// per reachable device. A single message (a randomly drawn
-    /// identifier), one delivery per packet. A `SyncSent` copy, with the same
-    /// identifier, is also encrypted for each of my other devices
-    /// (packets returned after the contact's). Everything is written in a single
-    /// transaction, including the advanced ratchet state, before the packets
-    /// are returned.
+    /// `send_message` without a quote.
     pub fn send_text(
         &mut self,
         to: &Fingerprint,
         text: &str,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Packet>> {
+        self.send_message(to, text, None, now, rng)
+    }
+
+    /// Encrypts `text` for each device in the contact's list; one packet
+    /// per reachable device. A single message (a randomly drawn
+    /// identifier), one delivery per packet. A copy, with the same
+    /// identifier (`SyncSent`, or `SyncReply` for a reply), is also
+    /// encrypted for each of my other devices (packets returned after the
+    /// contact's). Everything is written in a single transaction, including
+    /// the advanced ratchet state, before the packets are returned.
+    ///
+    /// `reply_to`: row id of a message of the conversation with `to`, which
+    /// the text answers. The envelope carries a reference to it (never its
+    /// text); a missing row, one of another conversation or a received one
+    /// without a wire identifier gives `MessageNotFound`, writing nothing.
+    /// Without `reply_to` the body stays a plain text.
+    pub fn send_message(
+        &mut self,
+        to: &Fingerprint,
+        text: &str,
+        reply_to: Option<i64>,
         now: u64,
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<Packet>> {
@@ -266,8 +288,18 @@ impl Core {
         }
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
+            let reference = reply_to.map(|id| quote_ref(tx, to, id)).transpose()?;
             let message_id = new_message_id(rng);
-            let body = Body::Text(text.to_owned());
+            let (body, copy) = match reference {
+                None => (
+                    Body::Text(text.to_owned()),
+                    Body::SyncSent {
+                        to: *to,
+                        text: text.to_owned(),
+                    },
+                ),
+                Some(reply_to) => reply_bodies(*to, text, reply_to),
+            };
             let sealed = seal_for(
                 tx,
                 device,
@@ -281,14 +313,18 @@ impl Core {
                 return Err(CoreError::NoSession);
             }
             // Identifier drawn on 128 bits: a collision is a local failure.
-            if !tx.insert_message(
-                *to,
-                Direction::Out,
-                text,
-                MessageStatus::Pending,
-                now,
+            if !tx.insert_message_row(&MessageInsert {
+                contact_fp: *to,
+                direction: Direction::Out,
+                body: text.to_owned(),
+                status: MessageStatus::Pending,
+                at: now,
                 message_id,
-            )? {
+                wire_id: None,
+                reply_to: reference.map(|r| r.resolve(true, to)),
+                reply_ref: reference,
+                placeholder: false,
+            })? {
                 return Err(CoreError::Store("duplicate message identifier".into()));
             }
             for (packet, peer_id) in &sealed {
@@ -297,10 +333,6 @@ impl Core {
                 route::record_sealed(tx, packet, now)?;
             }
             delivery::recompute_message_status(tx, message_id)?;
-            let copy = Body::SyncSent {
-                to: *to,
-                text: text.to_owned(),
-            };
             let mine = sync::seal_to_own(
                 tx,
                 device,
@@ -314,6 +346,67 @@ impl Core {
             out.extend(mine);
             Ok(out)
         })
+    }
+}
+
+/// Reference to the message of row `row_id` in the conversation with `to`:
+/// `MessageNotFound` if it is not there, belongs to another conversation, or
+/// is a received message without a wire identifier (nothing to refer to).
+pub(super) fn quote_ref(q: &impl Queries, to: &Fingerprint, row_id: i64) -> Result<MessageRef> {
+    let row = q
+        .message_by_row(row_id)?
+        .filter(|m| m.contact_fp == *to)
+        .ok_or(CoreError::MessageNotFound)?;
+    match (row.direction, row.wire_id) {
+        (Direction::Out, _) => Ok(MessageRef {
+            id: row.message_id.0,
+            by_sender: true,
+        }),
+        (Direction::In, Some(id)) => Ok(MessageRef {
+            id,
+            by_sender: false,
+        }),
+        (Direction::In, None) => Err(CoreError::MessageNotFound),
+    }
+}
+
+/// The contact's `Reply` and my devices' `SyncReply` for a text quoting
+/// `reply_to`.
+fn reply_bodies(to: Fingerprint, text: &str, reply_to: MessageRef) -> (Body, Body) {
+    let mut reply = ExtContent::Reply {
+        text: text.to_owned(),
+        reply_to,
+    };
+    let mut copy = ExtContent::SyncReply {
+        to,
+        text: text.to_owned(),
+        reply_to,
+    };
+    let out = (reply.to_body(), copy.to_body());
+    // The encoded bodies are the only copies left.
+    for c in [&mut reply, &mut copy] {
+        if let ExtContent::Reply { text, .. } | ExtContent::SyncReply { text, .. } = c {
+            text.zeroize();
+        }
+    }
+    out
+}
+
+/// Wipes the plaintext a body carries (text, or encoded `Ext` content).
+fn wipe_body(body: &mut Body) {
+    match body {
+        Body::Text(t) | Body::SyncSent { text: t, .. } => t.zeroize(),
+        Body::Ext { data, .. } => data.zeroize(),
+        _ => {}
+    }
+}
+
+/// A body built from stored plaintext, wiped when dropped (`reseal`).
+struct Plain(Body);
+
+impl Drop for Plain {
+    fn drop(&mut self) {
+        wipe_body(&mut self.0);
     }
 }
 
@@ -414,20 +507,32 @@ fn reseal(
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<(Vec<Packet>, delivery::Change)> {
-    let found: Option<(Vec<u8>, String, Vec<u8>)> = q
-        .conn()
-        .query_row(
-            "SELECT contact_fp, body, message_id FROM messages WHERE id = ?1 AND direction = ?2",
-            params![row_id, Direction::Out as i64],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()
-        .map_err(map_err)?;
-    let Some((contact, text, message)) = found else {
+    let Some(mut row) = q
+        .message_by_row(row_id)?
+        .filter(|m| m.direction == Direction::Out)
+    else {
         return Err(CoreError::NothingToRetry);
     };
-    let contact = Fingerprint(arr(contact)?);
-    let message_id = MessageId(arr(message)?);
+    let contact = row.contact_fp;
+    let message_id = row.message_id;
+    // A reply keeps its reference: the original may be deleted since. The
+    // stored text ends up in the two bodies only, both wiped on return.
+    let (body, copy) = match row.reply_ref {
+        None => (
+            Body::Text(row.body.clone()),
+            Body::SyncSent {
+                to: contact,
+                text: core::mem::take(&mut row.body),
+            },
+        ),
+        Some(reply_to) => {
+            let bodies = reply_bodies(contact, &row.body, reply_to);
+            row.body.zeroize();
+            bodies
+        }
+    };
+    let (body, copy) = (Plain(body), Plain(copy));
+    let (body, copy) = (&body.0, &copy.0);
     // Failed contact deliveries, as (packet, device).
     let failed: Vec<(PacketId, DeviceId)> = {
         let mut stmt = q
@@ -458,7 +563,7 @@ fn reseal(
         q,
         device,
         &Target::ContactDevices(contact, devices),
-        &Body::Text(text.clone()),
+        body,
         message_id,
         SealTime::at(now),
         rng,
@@ -499,11 +604,10 @@ fn reseal(
         for (packet, _, _) in own {
             delivery::remove_delivery(q, PacketId(arr(packet)?))?;
         }
-        let copy = Body::SyncSent { to: contact, text };
         out.extend(sync::seal_to_own(
             q,
             device,
-            &copy,
+            copy,
             SyncKind::Sent,
             message_id,
             SealTime::at(now),
@@ -512,4 +616,37 @@ fn reseal(
     }
     delivery::recompute_message_status(q, message_id)?;
     Ok((out, (contact, row_id)))
+}
+
+#[cfg(test)]
+mod wipe_tests {
+    use super::*;
+
+    /// The bodies a retry builds from the stored text are wiped once
+    /// sealed (`reseal`): no plaintext copy outlives it.
+    #[test]
+    fn plain_bodies_are_wiped() {
+        let to = Fingerprint([3; 32]);
+        let reply_to = MessageRef {
+            id: [1; 16],
+            by_sender: true,
+        };
+        let (reply, copy) = reply_bodies(to, "secret", reply_to);
+        for mut b in [
+            Body::Text("secret".into()),
+            Body::SyncSent {
+                to,
+                text: "secret".into(),
+            },
+            reply,
+            copy,
+        ] {
+            wipe_body(&mut b);
+            match b {
+                Body::Text(t) | Body::SyncSent { text: t, .. } => assert!(t.is_empty()),
+                Body::Ext { data, .. } => assert!(data.is_empty()),
+                _ => unreachable!(),
+            }
+        }
+    }
 }

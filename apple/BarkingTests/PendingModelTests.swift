@@ -127,6 +127,22 @@ final class PendingModelTests: XCTestCase {
                        "an acknowledgement of unknown contact names nobody")
     }
 
+    func testReactionPacketsHaveTheirOwnSection() async throws {
+        let d = FakeDevice()
+        d.pendingInfo = info([], sync: [
+            PendingSync(kind: .reaction, packets: 2, names: ["Alice"]),
+            PendingSync(kind: .ack, packets: 1, names: []),
+        ])
+        let m = make(d)
+        await m.load()
+        XCTAssertEqual(m.sync.map(\.kind), [.ack, .reaction], "reactions after the other kinds")
+        XCTAssertEqual(m.syncPackets, 3)
+        let en = try lang("en"), fr = try lang("fr")
+        XCTAssertEqual(PendingModel.title(of: m.sync[1], bundle: en.bundle, locale: en.locale), "Reactions · 2")
+        XCTAssertEqual(PendingModel.title(of: m.sync[1], bundle: fr.bundle, locale: fr.locale), "Réactions · 2")
+        XCTAssertFalse(m.sync[1].symbol.isEmpty)
+    }
+
     func testEmptyAndSyncOnlyStates() async {
         let d = FakeDevice()
         let m = make(d)

@@ -21,7 +21,7 @@
 //! not only the entry: an authentic archive never contains one),
 //! unique message identifiers. Insertion then happens in the
 //! `finish_link` transaction; an already present identifier is ignored
-//! (`insert_message` returns false), so importing twice creates no
+//! (`insert_message_row` returns false), so importing twice creates no
 //! duplicate, and a `SyncSent` copy received later for an archived message
 //! (same raw identifier, outgoing direction) is likewise ignored.
 //!
@@ -46,10 +46,13 @@ use rand_core::CryptoRng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::content::MessageRef;
 use crate::crypto::aead::{XNONCE_LEN, xopen, xseal};
 use crate::crypto::labels;
 use crate::identity::root::{Fingerprint, RootIdentity, RootPublic};
-use crate::store::{Direction, MessageId, MessageRow, MessageStatus, Queries};
+use crate::store::{
+    Direction, MessageId, MessageInsert, MessageRow, MessageStatus, Queries, ReactionRow,
+};
 use crate::{CoreError, Result};
 
 /// Size of a plaintext chunk: 64 KiB (the last one may be shorter).
@@ -134,6 +137,35 @@ pub(super) struct HistoryEntry {
     body: String,
     status: WireStatus,
     at: u64,
+    /// Raw envelope identifier of a received message: a reply or a
+    /// reaction of this device refers to it.
+    wire_id: Option<[u8; 16]>,
+    /// Stored identifier of the message this one replies to.
+    reply_to: Option<[u8; 16]>,
+    reply_ref: Option<MessageRef>,
+    placeholder: bool,
+}
+
+/// A reaction of the archive, as stored: its target may not be received yet
+/// (a reaction arrived before its message).
+#[derive(Serialize, Deserialize)]
+pub(super) struct HistoryReaction {
+    message_id: [u8; 16],
+    contact: Fingerprint,
+    reactor: [u8; 32],
+    emojis: Vec<String>,
+    clock: u64,
+    tie: [u8; 16],
+    first_seen: u64,
+    first_tie: [u8; 16],
+}
+
+/// The plaintext of an archive (before hash and signature): the messages,
+/// then the reactions of the same contacts.
+#[derive(Serialize, Deserialize, Default)]
+pub(super) struct History {
+    pub(super) entries: Vec<HistoryEntry>,
+    pub(super) reactions: Vec<HistoryReaction>,
 }
 
 impl Drop for HistoryEntry {
@@ -151,6 +183,7 @@ impl core::fmt::Debug for HistoryEntry {
             .field("body", &format_args!("<{} bytes>", self.body.len()))
             .field("status", &self.status)
             .field("at", &self.at)
+            .field("placeholder", &self.placeholder)
             .finish()
     }
 }
@@ -164,6 +197,10 @@ impl HistoryEntry {
             status,
             at,
             message_id,
+            wire_id,
+            reply_to,
+            reply_ref,
+            placeholder,
             ..
         } = row;
         HistoryEntry {
@@ -181,6 +218,10 @@ impl HistoryEntry {
                 MessageStatus::NotDelivered => WireStatus::Failed,
             },
             at,
+            wire_id,
+            reply_to: reply_to.map(|id| id.0),
+            reply_ref,
+            placeholder,
         }
     }
 
@@ -216,17 +257,31 @@ fn chunk_ad(index: usize, count: usize) -> Result<[u8; 8]> {
 }
 
 /// A's messages to archive: those of the `contacts` (copied into the
-/// link packet), in insertion order.
-pub(super) fn export(
-    q: &impl Queries,
-    contacts: &HashSet<Fingerprint>,
-) -> Result<Vec<HistoryEntry>> {
-    let mut out = Vec::new();
+/// link packet), in insertion order; then every reaction of those
+/// conversations, its target received or not.
+pub(super) fn export(q: &impl Queries, contacts: &HashSet<Fingerprint>) -> Result<History> {
+    let mut out = History::default();
     for mut row in q.all_messages()? {
         if contacts.contains(&row.contact_fp) {
-            out.push(HistoryEntry::from_row(row));
+            out.entries.push(HistoryEntry::from_row(row));
         } else {
             row.body.zeroize();
+        }
+    }
+    let mut sorted: Vec<&Fingerprint> = contacts.iter().collect();
+    sorted.sort_by_key(|fp| fp.0);
+    for fp in sorted {
+        for r in q.reactions_with(*fp)? {
+            out.reactions.push(HistoryReaction {
+                message_id: r.message_id.0,
+                contact: r.contact_fp,
+                reactor: r.reactor,
+                emojis: r.emojis,
+                clock: r.clock,
+                tie: r.tie,
+                first_seen: r.first_seen,
+                first_tie: r.first_tie,
+            });
         }
     }
     Ok(out)
@@ -238,7 +293,7 @@ pub(super) fn export(
 pub(super) fn seal_archive(
     secret: &[u8; 32],
     root: &RootIdentity,
-    entries: &[HistoryEntry],
+    entries: &History,
     rng: &mut impl CryptoRng,
 ) -> Result<HistoryArchive> {
     let size = postcard::experimental::serialized_size(entries)
@@ -277,7 +332,7 @@ pub(super) fn open_archive(
     secret: &[u8; 32],
     root: &RootPublic,
     archive: &HistoryArchive,
-) -> Result<Vec<HistoryEntry>> {
+) -> Result<History> {
     let count = archive.chunks.len();
     if count == 0 {
         return Err(BAD_HISTORY);
@@ -314,43 +369,66 @@ pub(super) fn open_archive(
     }
     root.verify(labels::LINK_HISTORY_SIG, &hash, &sig)
         .map_err(|_| BAD_HISTORY)?;
-    match postcard::take_from_bytes::<Vec<HistoryEntry>>(body) {
+    match postcard::take_from_bytes::<History>(body) {
         Ok((entries, [])) => Ok(entries),
         _ => Err(BAD_HISTORY),
     }
 }
 
-/// Each entry concerns a contact of `contacts` (those of the link
-/// packet) and message identifiers are unique; otherwise the whole
-/// archive is refused.
-pub(super) fn check_entries(
-    entries: &[HistoryEntry],
-    contacts: &HashSet<Fingerprint>,
-) -> Result<()> {
-    let mut ids = HashSet::with_capacity(entries.len());
-    for e in entries {
+/// Each entry and each reaction concerns a contact of `contacts` (those of
+/// the link packet), message identifiers are unique and every emoji set is
+/// valid; otherwise the whole archive is refused.
+pub(super) fn check_entries(history: &History, contacts: &HashSet<Fingerprint>) -> Result<()> {
+    let mut ids = HashSet::with_capacity(history.entries.len());
+    for e in &history.entries {
         if !contacts.contains(&e.contact) || !ids.insert(e.message_id) {
+            return Err(BAD_HISTORY);
+        }
+    }
+    for r in &history.reactions {
+        if !contacts.contains(&r.contact) || crate::emoji::canonical_set(&r.emojis).is_err() {
             return Err(BAD_HISTORY);
         }
     }
     Ok(())
 }
 
-/// Inserts the absent entries (an already present identifier is ignored).
+/// Inserts the absent entries (an already present identifier is ignored),
+/// then the reactions, each kept only if newer than the stored one.
 /// Returns the number of messages inserted.
-pub(super) fn import(q: &impl Queries, entries: &[HistoryEntry]) -> Result<u32> {
+pub(super) fn import(q: &impl Queries, history: &History) -> Result<u32> {
     let mut inserted = 0u32;
-    for e in entries {
-        if q.insert_message(
-            e.contact,
-            e.direction(),
-            &e.body,
-            e.status(),
-            e.at,
-            MessageId(e.message_id),
-        )? {
+    for e in &history.entries {
+        if q.insert_message_row(&MessageInsert {
+            contact_fp: e.contact,
+            direction: e.direction(),
+            body: e.body.clone(),
+            status: e.status(),
+            at: e.at,
+            message_id: MessageId(e.message_id),
+            wire_id: e.wire_id,
+            reply_to: e.reply_to.map(MessageId),
+            reply_ref: e.reply_ref,
+            placeholder: e.placeholder,
+        })? {
             inserted = inserted.saturating_add(1);
         }
+    }
+    for r in &history.reactions {
+        q.put_reaction_if_newer(&ReactionRow {
+            message_id: MessageId(r.message_id),
+            reactor: r.reactor,
+            contact_fp: r.contact,
+            emojis: r
+                .emojis
+                .iter()
+                .map(|e| crate::emoji::canonical(e))
+                .collect(),
+            clock: r.clock,
+            tie: r.tie,
+            first_seen: r.first_seen,
+            first_tie: r.first_tie,
+        })?;
     }
     Ok(inserted)
 }
@@ -376,6 +454,17 @@ mod tests {
             body: body.to_owned(),
             status: WireStatus::Delivered,
             at: u64::from(id),
+            wire_id: None,
+            reply_to: None,
+            reply_ref: None,
+            placeholder: false,
+        }
+    }
+
+    fn of(entries: Vec<HistoryEntry>) -> History {
+        History {
+            entries,
+            reactions: Vec::new(),
         }
     }
 
@@ -420,9 +509,12 @@ mod tests {
         let secret = [5u8; 32];
         let big = "y".repeat(40_000);
         let entries: Vec<_> = (0..5).map(|i| entry(i, 1, &big)).collect();
-        let archive = seal_archive(&secret, &root(1), &entries, &mut rng).unwrap();
+        let archive = seal_archive(&secret, &root(1), &of(entries), &mut rng).unwrap();
         assert_eq!(archive.chunks.len(), 4);
-        let back = open_archive(&secret, &root(1).public(), &archive).unwrap();
+        let entries: Vec<_> = (0..5).map(|i| entry(i, 1, &big)).collect();
+        let back = open_archive(&secret, &root(1).public(), &archive)
+            .unwrap()
+            .entries;
         assert_eq!(back.len(), 5);
         assert!(
             back.iter()
@@ -470,7 +562,7 @@ mod tests {
         let mut rng = rand::rng();
         let secret = [5u8; 32];
         let key = history_key(&secret);
-        let entries = vec![entry(1, 1, "hello")];
+        let entries = of(vec![entry(1, 1, "hello")]);
         let size = postcard::experimental::serialized_size(&entries).unwrap();
         let mut plain = vec![0u8; size + TRAILER_LEN];
         postcard::to_slice(&entries, &mut plain[..size]).unwrap();
@@ -485,6 +577,7 @@ mod tests {
         assert_eq!(
             open_archive(&secret, &root(1).public(), &one)
                 .unwrap()
+                .entries
                 .len(),
             1
         );
@@ -533,11 +626,38 @@ mod tests {
 
     #[test]
     fn check_entries_refuses_unknown_contact_and_duplicate_id() {
-        let ok = vec![entry(1, 1, "a"), entry(2, 2, "b")];
+        let ok = of(vec![entry(1, 1, "a"), entry(2, 2, "b")]);
         assert_eq!(check_entries(&ok, &known(&[1, 2])), Ok(()));
         assert_eq!(check_entries(&ok, &known(&[1])), Err(BAD_HISTORY));
-        let dup = vec![entry(1, 1, "a"), entry(1, 1, "b")];
+        let dup = of(vec![entry(1, 1, "a"), entry(1, 1, "b")]);
         assert_eq!(check_entries(&dup, &known(&[1])), Err(BAD_HISTORY));
+    }
+
+    #[test]
+    fn history_keeps_wire_and_reply_columns() {
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&d.path().join("db"), &[3u8; 32]).unwrap();
+        let mut rng = rand::rng();
+        let secret = [7u8; 32];
+        let reference = MessageRef {
+            id: [8; 16],
+            by_sender: true,
+        };
+        let mut e = entry(1, 1, "quote");
+        e.wire_id = Some([4; 16]);
+        e.reply_to = Some([5; 16]);
+        e.reply_ref = Some(reference);
+        let mut ph = entry(3, 1, "");
+        ph.placeholder = true;
+        let archive = seal_archive(&secret, &root(1), &of(vec![e, ph]), &mut rng).unwrap();
+        let opened = open_archive(&secret, &root(1).public(), &archive).unwrap();
+        store.transaction(|tx| import(tx, &opened)).unwrap();
+        let rows = store.messages_with(fp(1)).unwrap();
+        assert_eq!(rows[0].wire_id, Some([4; 16]));
+        assert_eq!(rows[0].reply_to, Some(MessageId([5; 16])));
+        assert_eq!(rows[0].reply_ref, Some(reference));
+        assert!(!rows[0].placeholder);
+        assert!(rows[1].placeholder);
     }
 
     #[test]
@@ -546,7 +666,7 @@ mod tests {
         let mut store = Store::open(&d.path().join("db"), &[3u8; 32]).unwrap();
         let mut rng = rand::rng();
         let secret = [7u8; 32];
-        let entries = vec![entry(1, 1, "a"), entry(2, 1, "b"), entry(3, 2, "c")];
+        let entries = of(vec![entry(1, 1, "a"), entry(2, 1, "b"), entry(3, 2, "c")]);
         let archive = seal_archive(&secret, &root(1), &entries, &mut rng).unwrap();
         let opened = open_archive(&secret, &root(1).public(), &archive).unwrap();
         let n = store.transaction(|tx| import(tx, &opened)).unwrap();
@@ -568,8 +688,47 @@ mod tests {
             )
         );
         // Export from this store: only the known contacts.
-        let out = export(&store, &known(&[2])).unwrap();
+        let out = export(&store, &known(&[2])).unwrap().entries;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].message_id, [3; 16]);
+    }
+
+    #[test]
+    fn history_carries_reactions_without_their_message() {
+        let d = tempfile::tempdir().unwrap();
+        let a = Store::open(&d.path().join("a"), &[3u8; 32]).unwrap();
+        let mut t = Store::open(&d.path().join("t"), &[4u8; 32]).unwrap();
+        let mut rng = rand::rng();
+        let secret = [7u8; 32];
+        // A reaction of contact 1 on a message not received yet, and one of
+        // another conversation.
+        let pending = ReactionRow {
+            message_id: MessageId([9; 16]),
+            reactor: fp(1).0,
+            contact_fp: fp(1),
+            emojis: vec!["👍".into()],
+            clock: 10,
+            tie: [1; 16],
+            first_seen: 10,
+            first_tie: [1; 16],
+        };
+        assert!(a.put_reaction_if_newer(&pending).unwrap());
+        let mut other = pending.clone();
+        other.contact_fp = fp(2);
+        other.reactor = fp(2).0;
+        assert!(a.put_reaction_if_newer(&other).unwrap());
+        let out = export(&a, &known(&[1])).unwrap();
+        assert!(out.entries.is_empty());
+        assert_eq!(out.reactions.len(), 1);
+        let archive = seal_archive(&secret, &root(1), &out, &mut rng).unwrap();
+        let opened = open_archive(&secret, &root(1).public(), &archive).unwrap();
+        assert_eq!(check_entries(&opened, &known(&[1])), Ok(()));
+        assert_eq!(check_entries(&opened, &known(&[2])), Err(BAD_HISTORY));
+        t.transaction(|tx| import(tx, &opened)).unwrap();
+        assert_eq!(
+            t.reaction(MessageId([9; 16]), fp(1).0).unwrap(),
+            Some(pending)
+        );
+        assert!(t.reaction(MessageId([9; 16]), fp(2).0).unwrap().is_none());
     }
 }

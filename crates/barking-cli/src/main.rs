@@ -845,7 +845,9 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
         }
         ReceiveOutcome::AckReceived { .. } => println!("{label}: delivered ✓"),
         ReceiveOutcome::Partial => println!("{label}: partial frame"),
-        ReceiveOutcome::Duplicate => println!("{label}: duplicate"),
+        ReceiveOutcome::Duplicate | ReceiveOutcome::DuplicateMessage => {
+            println!("{label}: duplicate");
+        }
         ReceiveOutcome::NotForUs => println!("{label}: not for you"),
         ReceiveOutcome::Expired => println!("{label}: expired"),
         ReceiveOutcome::Quarantined { reason } => {
@@ -861,6 +863,28 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
         }
         ReceiveOutcome::Removed => {
             println!("{label}: this device was removed from your account");
+        }
+        ReceiveOutcome::Ignored => println!("{label}: content this version cannot read, set aside"),
+        ReceiveOutcome::NeedsUpdate { from, alias } => {
+            let who = alias.unwrap_or_else(|| from.to_string());
+            println!(
+                "{label}: {} sent content this version cannot read (update needed)",
+                printable(&who)
+            );
+        }
+        ReceiveOutcome::Reaction {
+            from, alias, added, ..
+        } => {
+            let who = alias.unwrap_or_else(|| from.to_string());
+            if added.is_empty() {
+                println!("{label}: {} changed their reactions", printable(&who));
+            } else {
+                println!(
+                    "{label}: {} reacted {}",
+                    printable(&who),
+                    printable(&added.join(" "))
+                );
+            }
         }
     }
     Ok(())

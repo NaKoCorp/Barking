@@ -23,7 +23,7 @@ fn reopen_persists() {
         store.get_meta::<Vec<u8>>("hello").unwrap(),
         Some(vec![1, 2, 3])
     );
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
     assert_eq!(store.get_meta::<u32>("absent").unwrap(), None);
 }
 
@@ -683,7 +683,7 @@ fn insert_message_duplicate_id_returns_false() {
 #[test]
 fn newer_schema_refused() {
     let (_d, path, store) = open_tmp();
-    store.put_meta("schema_version", &4u32).unwrap();
+    store.put_meta("schema_version", &5u32).unwrap();
     drop(store);
     assert!(matches!(
         Store::open(&path, &KEY),
@@ -738,7 +738,7 @@ fn migration_v1_keeps_history_and_acks() {
         .unwrap();
     }
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
     let m = store.messages_with(fp).unwrap();
     let bodies: Vec<_> = m
         .iter()
@@ -808,7 +808,7 @@ fn migration_from_pre_1a_database() {
         .unwrap();
     }
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
     let m = store.messages_with(fp).unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(
@@ -827,7 +827,7 @@ fn migration_from_pre_1a_database() {
         .unwrap();
     assert_eq!(count_class(&store, EventClass::Security), 1);
     store
-        .record_inbound(PacketId([9; 16]), m[0].message_id)
+        .record_inbound(PacketId([9; 16]), m[0].message_id, Fingerprint([0; 32]))
         .unwrap();
     assert!(
         store
@@ -854,7 +854,9 @@ fn inbound_packets_map_to_their_message() {
         .unwrap();
     // The message and its resend (two packets) lead to the same message.
     for pid in [PacketId([1; 16]), PacketId([2; 16])] {
-        store.record_inbound(pid, mid).unwrap();
+        store
+            .record_inbound(pid, mid, Fingerprint([0; 32]))
+            .unwrap();
         let m = store.message_by_packet(pid).unwrap().unwrap();
         assert_eq!((m.message_id, m.direction), (mid, Direction::In));
     }
@@ -877,13 +879,15 @@ fn v2_database_without_inbound_gets_it() {
         .execute_batch("DROP TABLE inbound;")
         .unwrap();
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
     let fp = Fingerprint([4; 32]);
     let mid = MessageId::incoming(&fp, &[1; 16]);
     store
         .insert_message(fp, Direction::In, "x", MessageStatus::Received, 5, mid)
         .unwrap();
-    store.record_inbound(PacketId([1; 16]), mid).unwrap();
+    store
+        .record_inbound(PacketId([1; 16]), mid, Fingerprint([0; 32]))
+        .unwrap();
     assert!(
         store
             .message_by_packet(PacketId([1; 16]))
@@ -949,7 +953,7 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
     .unwrap();
     drop(raw);
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
     store.add_delivery(mid, to_me, mine, true, 5, 1024).unwrap();
     // Column `writer` added: unknown author (null) for the old row.
     let zero = crate::identity::device::DeviceId([0; 16]);
@@ -1209,7 +1213,7 @@ fn has_object(conn: &Connection, kind: &str, name: &str) -> bool {
 fn migrate_v2_to_v3_backfills_from_route_steps() {
     let (_d, path) = v2_fixture_copy();
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
     let c = store.conn();
     let node = Some(FX_NODE.to_owned());
     // Acked: first deposit (min(at)) and its node, Sealed size, AckVerified time.
@@ -1268,7 +1272,7 @@ fn migrate_v2_to_v3_backfills_from_route_steps() {
     // Reopening: the migration is not replayed.
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
     assert_eq!(delivery_cols(store.conn(), 0xA2).0, 0);
     assert_eq!(message_status(store.conn(), 0x22), 0);
 }
@@ -1296,7 +1300,7 @@ fn migration_is_one_transaction() {
     }
     // The untouched v2 database still migrates on the next open.
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
     assert_eq!(delivery_cols(store.conn(), 0xA2).0, 0);
 }
 
@@ -1322,5 +1326,85 @@ fn v3_database_without_deposit_tried_at_gets_it() {
     }
     let store = Store::open(&path, &KEY).unwrap();
     assert!(has_column(store.conn(), "outbox", "deposit_tried_at"));
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(3));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+}
+
+#[test]
+fn v4_database_without_superseded_gets_it() {
+    let (_d, path, store) = open_tmp();
+    // A development database at v4 before the column existed.
+    store
+        .conn()
+        .execute_batch("ALTER TABLE reaction_sends DROP COLUMN superseded;")
+        .unwrap();
+    assert!(!has_column(store.conn(), "reaction_sends", "superseded"));
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert!(has_column(store.conn(), "reaction_sends", "superseded"));
+    drop(store);
+    Store::open(&path, &KEY).unwrap();
+}
+
+#[test]
+fn v4_database_without_reaction_sends_target_gets_it() {
+    let (_d, path, store) = open_tmp();
+    assert!(has_object(store.conn(), "index", "reaction_sends_target"));
+    // A development database at v4 before the index existed.
+    store
+        .conn()
+        .execute_batch("DROP INDEX IF EXISTS reaction_sends_target;")
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path, &KEY).unwrap();
+    assert!(has_object(store.conn(), "index", "reaction_sends_target"));
+    drop(store);
+    Store::open(&path, &KEY).unwrap();
+}
+
+#[test]
+fn v3_database_upgrades_to_v4() {
+    let (_d, path, store) = open_tmp();
+    // Turn the fresh database back into a v3 one.
+    store
+        .conn()
+        .execute_batch(
+            "DROP TABLE reactions; DROP TABLE reaction_sends; \
+             ALTER TABLE messages DROP COLUMN wire_id; \
+             ALTER TABLE messages DROP COLUMN reply_to; \
+             ALTER TABLE messages DROP COLUMN reply_ref; \
+             ALTER TABLE messages DROP COLUMN placeholder;",
+        )
+        .unwrap();
+    store.put_meta("schema_version", &3u32).unwrap();
+    drop(store);
+    assert_eq!(
+        Store::open_read(&path, &KEY).err().unwrap(),
+        CoreError::Store("database schema not current".into())
+    );
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(4));
+    let cols: Vec<String> = store
+        .conn()
+        .prepare("SELECT name FROM pragma_table_info('messages')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for c in ["wire_id", "reply_to", "reply_ref", "placeholder"] {
+        assert!(cols.iter().any(|n| n == c), "{c} missing");
+    }
+    for t in ["reactions", "reaction_sends"] {
+        assert!(has_object(store.conn(), "table", t), "{t} missing");
+    }
+    drop(store);
+    Store::open_read(&path, &KEY).unwrap();
+}
+
+/// A message row to insert carries plaintext: dropped, it is wiped
+/// (history import, `record_message`, sends).
+#[test]
+fn message_insert_wipes_its_body() {
+    fn assert_zod<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zod::<MessageInsert>();
 }

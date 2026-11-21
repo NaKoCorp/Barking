@@ -256,14 +256,14 @@ fn duplicate_shown_once() {
     expect_msg(b.recv(&p, NOW, &mut rng));
     assert!(matches!(
         b.recv(&p, NOW + 1, &mut rng),
-        ReceiveOutcome::Duplicate
+        ReceiveOutcome::DuplicateMessage
     ));
     // Also for a normal message (after the session is opened).
     let q = one(b.send(&a.fp(), "back", NOW + 2, &mut rng));
     expect_msg(a.recv(&q, NOW + 2, &mut rng));
     assert!(matches!(
         a.recv(&q, NOW + 3, &mut rng),
-        ReceiveOutcome::Duplicate
+        ReceiveOutcome::DuplicateMessage
     ));
     assert!(
         b.events()
@@ -494,7 +494,7 @@ fn persists_across_reopen() {
     ));
     assert!(matches!(
         b.recv(&p1, NOW + 2, &mut rng),
-        ReceiveOutcome::Duplicate
+        ReceiveOutcome::DuplicateMessage
     ));
     let p3 = one(a.send(&b.fp(), "after", NOW + 3, &mut rng));
     assert!(!is_initial(&p3));
@@ -1523,7 +1523,7 @@ fn retry_reseals_same_message_id_with_new_date() {
     assert_eq!(text, "again");
     assert!(matches!(
         b.recv(&new, now, &mut rng),
-        ReceiveOutcome::Duplicate
+        ReceiveOutcome::DuplicateMessage
     ));
     assert_eq!(b.core.messages_with(&a.fp()).unwrap().len(), 1);
     // Its ack makes it received.
@@ -1546,7 +1546,7 @@ fn retry_dedups_when_the_old_one_arrived() {
     // Same message identifier: shown once, acked again.
     assert!(matches!(
         b.recv(&new, after, &mut rng),
-        ReceiveOutcome::Duplicate
+        ReceiveOutcome::DuplicateMessage
     ));
     assert_eq!(b.core.messages_with(&a.fp()).unwrap().len(), 1);
     let acks = b

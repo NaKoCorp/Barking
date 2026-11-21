@@ -367,4 +367,69 @@ final class ComponentTests: XCTestCase {
         XCTAssertEqual(DeliveryRow.oneLine("See you\nat the market\r\n\nat 6"), "See you at the market at 6")
         XCTAssertEqual(DeliveryRow.oneLine("plain"), "plain")
     }
+
+    // MARK: Reply and reactions (§5.6)
+
+    /// A chip reads its emoji, its count and whether it is mine, in the
+    /// language asked for, with the plural.
+    func testChipLabel() {
+        let en = Bundle.strings(for: Locale(identifier: "en"))
+        let fr = Bundle.strings(for: Locale(identifier: "fr"))
+        XCTAssertEqual(ReactionChip(emoji: "👍", count: 2, mine: true).label(bundle: en, locale: Locale(identifier: "en")),
+                       "👍, 2 reactions, including yours")
+        XCTAssertEqual(ReactionChip(emoji: "😂", count: 1, mine: false).label(bundle: en, locale: Locale(identifier: "en")),
+                       "😂, 1 reaction")
+        XCTAssertEqual(ReactionChip(emoji: "👍", count: 1, mine: true).label(bundle: fr, locale: Locale(identifier: "fr")),
+                       "👍, 1 réaction, dont la vôtre")
+        XCTAssertEqual(ReactionChip(emoji: "😮", count: 2, mine: false).label(bundle: fr, locale: Locale(identifier: "fr")),
+                       "😮, 2 réactions")
+    }
+
+    /// Each row of the chip look table; only my chips take the state.
+    func testReactionChipLookPerState() {
+        let pending = ReactionChipLook.of(mine: true, state: .pending)
+        XCTAssertEqual(pending, ReactionChipLook(stroke: .borderStrong, dashed: true, fill: .surfaceAlt,
+                                                 lineWidth: 1, warning: false))
+        let network = ReactionChipLook.of(mine: true, state: .onNetwork)
+        XCTAssertEqual(network, ReactionChipLook(stroke: .accent, dashed: false, fill: .surfaceCard,
+                                                 lineWidth: 1, warning: false))
+        // Received is today's "mine" look.
+        let received = ReactionChipLook.of(mine: true, state: .received)
+        XCTAssertEqual(received, ReactionChipLook(stroke: .accentFill, dashed: false,
+                                                  fill: Color.accentFill.opacity(0.12), lineWidth: 1.5, warning: false))
+        let failed = ReactionChipLook.of(mine: true, state: .notDelivered)
+        XCTAssertEqual(failed, ReactionChipLook(stroke: .warnBorder, dashed: false, fill: .warnBg,
+                                                lineWidth: 1, warning: true))
+        XCTAssertTrue(failed.warning)
+        XCTAssertEqual(ReactionChipLook.of(mine: true, state: nil), network, "no local tracking looks like on the network")
+        for state in [nil, DeliveryState.pending, .onNetwork, .received, .notDelivered] {
+            let other = ReactionChipLook.of(mine: false, state: state)
+            XCTAssertEqual(other, ReactionChipLook(stroke: .border, dashed: false, fill: .surfaceCard,
+                                                   lineWidth: 1, warning: false), "not mine: neutral for \(String(describing: state))")
+        }
+    }
+
+    /// The quote reads "Reply to Sam: …", or that the original is gone.
+    func testQuoteLineSpeech() {
+        let fr = (bundle: Bundle.strings(for: Locale(identifier: "fr")), locale: Locale(identifier: "fr"))
+        let shown = QuoteLine(quote: Quote(id: 3, authorIsMe: false, excerpt: "À six heures"), author: "Sam")
+        XCTAssertTrue(shown.available)
+        XCTAssertEqual(shown.spoken(bundle: fr.bundle, locale: fr.locale), "Réponse à Sam\u{00A0}: À six heures")
+        let gone = QuoteLine(quote: Quote(id: nil, authorIsMe: true, excerpt: nil), author: "Vous")
+        XCTAssertFalse(gone.available)
+        XCTAssertEqual(gone.spoken(bundle: fr.bundle, locale: fr.locale), "Message original indisponible")
+    }
+
+    /// The picker takes the first emoji and nothing else.
+    func testEmojiPickerKeepsTheFirstEmoji() {
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "👍"), "👍")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "a👍😂"), "👍")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "❤️"), "❤️")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "🇫🇷"), "🇫🇷")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "1️⃣"), "1️⃣")
+        XCTAssertEqual(EmojiPicker.firstEmoji(in: "👍🏽"), "👍🏽")
+        for plain in ["", "a", "7", "#", "*", " ", "é"] {
+            XCTAssertNil(EmojiPicker.firstEmoji(in: plain), "\(plain) is not an emoji")
+        }
+    }
 }

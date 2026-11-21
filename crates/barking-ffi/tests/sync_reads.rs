@@ -50,7 +50,7 @@ fn reads_do_not_wait_for_a_sync() {
     alice
         .add_contact(bob.contact_card("Bob".into()).unwrap(), Some("bob".into()))
         .unwrap();
-    alice.send_text("bob".into(), "hello".into()).unwrap();
+    alice.send_text("bob".into(), "hello".into(), None).unwrap();
     let id = alice.messages_with("bob".into()).unwrap()[0].id;
     let _hole = slow_node(&alice);
 
@@ -90,7 +90,7 @@ fn reads_do_not_wait_for_a_sync() {
     // A write still waits for the sync: the lock keeps it out.
     let writer = Device::at(with_timeout(&cfg, 100)).unwrap();
     assert!(matches!(
-        writer.send_text("bob".into(), "later".into()),
+        writer.send_text("bob".into(), "later".into(), None),
         Err(BarkingError::Locked)
     ));
 
@@ -101,7 +101,7 @@ fn reads_do_not_wait_for_a_sync() {
     assert!(took > reads + Duration::from_secs(1), "sync took {took:?}");
     // Once it is over, the lock is free again.
     assert!(Device::open(with_timeout(&cfg, 100)).is_ok());
-    alice.send_text("bob".into(), "after".into()).unwrap();
+    alice.send_text("bob".into(), "after".into(), None).unwrap();
 }
 
 #[test]

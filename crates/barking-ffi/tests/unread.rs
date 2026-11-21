@@ -25,7 +25,7 @@ async fn unread_counts_and_mark_read() {
         }
         bob.sync(30_000).unwrap();
         for t in ["one", "two", "three"] {
-            alice.send_text(fb.clone(), t.into()).unwrap();
+            alice.send_text(fb.clone(), t.into(), None).unwrap();
         }
         let s = alice.sync(30_000).unwrap();
         assert!(s.sent >= 1, "{s:?}");

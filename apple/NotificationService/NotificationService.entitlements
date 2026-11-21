@@ -6,6 +6,8 @@
 	<array>
 		<string>$(BARKING_APP_GROUP)</string>
 	</array>
+	<key>com.apple.developer.usernotifications.filtering</key>
+	<true/>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(BARKING_KEYCHAIN_GROUP)</string>

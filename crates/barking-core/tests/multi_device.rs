@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use barking_core::core::{HistoryArchive, LinkBundle, LinkOffer};
+use barking_core::core::{HistoryArchive, LinkBundle, LinkOffer, ReactionChip};
 use barking_core::identity::Fingerprint;
 use barking_core::identity::device_list::MAX_DEVICES;
 use barking_core::packet::{Kind, Packet};
@@ -2517,4 +2517,333 @@ fn a_new_device_receives_the_blocks() {
     assert_eq!(blocked_state(&t.core), vec![(carol_fp, false)]);
     sync_round(&mut a, &mut t, &mut rng);
     assert_eq!(blocked_state(&t.core), vec![(carol_fp, true)]);
+}
+
+// --- Lot 2, task 3: replies from linked devices.
+
+fn row_of(core: &Core, contact: &Fingerprint, body: &str) -> barking_core::store::MessageRow {
+    core.messages_with(contact)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == body)
+        .unwrap()
+}
+
+/// Each packet is offered to `to`; returns the outcomes that are not `NotForUs`.
+fn offer(to: &mut Dev, pkts: &[Packet], rng: &mut StdRng) -> Vec<ReceiveOutcome> {
+    pkts.iter()
+        .map(|p| to.core.receive(&p.encode(), T, NOW, rng).unwrap())
+        .filter(|o| !matches!(o, ReceiveOutcome::NotForUs))
+        .collect()
+}
+
+#[test]
+fn reply_from_tablet_resolves_on_admin_and_contact() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(60);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let mut bob = create(d.path(), "bob", 3, &mut rng);
+    let a_fp = bob
+        .core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, &mut rng)
+        .unwrap();
+    let bob_fp = a
+        .core
+        .add_contact(
+            &bob.core.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+
+    // Bob writes; both of my devices receive it.
+    let ping = bob.core.send_text(&a_fp, "ping", NOW, &mut rng).unwrap();
+    assert_eq!(offer(&mut a, &ping, &mut rng).len(), 1);
+    assert_eq!(offer(&mut t, &ping, &mut rng).len(), 1);
+
+    // T answers it: a `Reply` for Bob, a `SyncReply` for A.
+    let quoted = row_of(&t.core, &bob_fp, "ping");
+    let pkts = t
+        .core
+        .send_message(&bob_fp, "pong", Some(quoted.id), NOW, &mut rng)
+        .unwrap();
+    assert_eq!(pkts.len(), 2);
+    let at_bob = offer(&mut bob, &pkts, &mut rng);
+    assert!(matches!(at_bob[..], [ReceiveOutcome::Message { .. }]));
+    let at_a = offer(&mut a, &pkts, &mut rng);
+    assert!(matches!(
+        at_a[..],
+        [ReceiveOutcome::Synced {
+            kind: SyncKind::Sent,
+            contact: Some(c)
+        }] if c == bob_fp
+    ));
+
+    let on_bob = row_of(&bob.core, &a_fp, "pong");
+    let bobs_ping = row_of(&bob.core, &a_fp, "ping");
+    assert_eq!(on_bob.reply_to, Some(bobs_ping.message_id));
+    assert_eq!(
+        bob.core
+            .message_in(&a_fp, on_bob.reply_to.unwrap())
+            .unwrap()
+            .unwrap()
+            .body,
+        "ping"
+    );
+    let on_a = row_of(&a.core, &bob_fp, "pong");
+    assert_eq!(on_a.direction, Direction::Out);
+    assert_eq!(on_a.message_id, row_of(&t.core, &bob_fp, "pong").message_id);
+    assert_eq!(
+        on_a.reply_to,
+        Some(row_of(&a.core, &bob_fp, "ping").message_id)
+    );
+    assert!(on_a.reply_ref.is_some());
+}
+
+#[test]
+fn linked_device_quotes_imported_message() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(61);
+    let mut a = create(d.path(), "a", 1, &mut rng);
+    let mut bob = create(d.path(), "bob", 3, &mut rng);
+    let a_fp = bob
+        .core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, &mut rng)
+        .unwrap();
+    let bob_fp = a
+        .core
+        .add_contact(
+            &bob.core.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    let x = bob.core.send_text(&a_fp, "x", NOW, &mut rng).unwrap();
+    assert_eq!(offer(&mut a, &x, &mut rng).len(), 1);
+
+    // T joins with the history.
+    let o = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) = begin(d.path(), "t", 9, &o, &mut rng);
+    let out = a.core.link_device(&req, true, NOW + 30, &mut rng).unwrap();
+    t.core
+        .finish_link(&out.bundle, out.history.as_ref(), NOW + 31)
+        .unwrap();
+    // Bob learns about T through the card update.
+    for p in &out.packets {
+        bob.core
+            .receive(&p.encode(), T, NOW + 31, &mut rng)
+            .unwrap();
+    }
+    let imported = row_of(&t.core, &bob_fp, "x");
+    assert!(imported.wire_id.is_some());
+
+    let pkts = t
+        .core
+        .send_message(&bob_fp, "re x", Some(imported.id), NOW + 32, &mut rng)
+        .unwrap();
+    let at_bob: Vec<_> = pkts
+        .iter()
+        .map(|p| {
+            bob.core
+                .receive(&p.encode(), T, NOW + 32, &mut rng)
+                .unwrap()
+        })
+        .filter(|o| !matches!(o, ReceiveOutcome::NotForUs))
+        .collect();
+    assert!(
+        matches!(at_bob[..], [ReceiveOutcome::Message { .. }]),
+        "{at_bob:?}"
+    );
+    let got = row_of(&bob.core, &a_fp, "re x");
+    let bobs_x = row_of(&bob.core, &a_fp, "x");
+    assert_eq!(got.reply_to, Some(bobs_x.message_id));
+}
+
+// --- Lot 2, task 4: reactions.
+
+fn emo(list: &[&str]) -> Vec<String> {
+    list.iter().map(|e| (*e).to_owned()).collect()
+}
+
+fn chips(core: &Core, contact: &Fingerprint, body: &str) -> Vec<ReactionChip> {
+    let row = row_of(core, contact, body);
+    core.reaction_chips(contact, row.message_id).unwrap()
+}
+
+/// Chips as `(emoji, count)`: `mine` is a matter of side.
+fn counts(core: &Core, contact: &Fingerprint, body: &str) -> Vec<(String, u32)> {
+    chips(core, contact, body)
+        .into_iter()
+        .map(|c| (c.emoji, c.count))
+        .collect()
+}
+
+#[test]
+fn reactions_converge_on_all_devices() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(62);
+    let (mut a, mut t) = admin_and_tablet(d.path(), &mut rng);
+    let mut bob = create(d.path(), "bob", 3, &mut rng);
+    let a_fp = bob
+        .core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, &mut rng)
+        .unwrap();
+    let bob_fp = a
+        .core
+        .add_contact(
+            &bob.core.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    sync_round(&mut a, &mut t, &mut rng);
+    let ping = bob.core.send_text(&a_fp, "ping", NOW, &mut rng).unwrap();
+    assert_eq!(offer(&mut a, &ping, &mut rng).len(), 1);
+    assert_eq!(offer(&mut t, &ping, &mut rng).len(), 1);
+
+    // T, then A within the same second, each before seeing the other's.
+    let on_t = row_of(&t.core, &bob_fp, "ping").id;
+    let from_t = t
+        .core
+        .set_reactions(on_t, &emo(&["👍"]), NOW, &mut rng)
+        .unwrap();
+    let on_a = row_of(&a.core, &bob_fp, "ping").id;
+    let from_a = a
+        .core
+        .set_reactions(on_a, &emo(&["❤️", "🎉"]), NOW, &mut rng)
+        .unwrap();
+    assert_eq!((from_t.len(), from_a.len()), (2, 2));
+    // Crossed: each of my devices gets the other's copy after its own write,
+    // Bob gets A's set before T's.
+    let at_a = offer(&mut a, &from_t, &mut rng);
+    assert!(
+        matches!(
+            at_a[..],
+            [ReceiveOutcome::Synced {
+                kind: SyncKind::Reaction,
+                contact: Some(c)
+            }] if c == bob_fp
+        ),
+        "{at_a:?}"
+    );
+    offer(&mut t, &from_a, &mut rng);
+    offer(&mut bob, &from_a, &mut rng);
+    offer(&mut bob, &from_t, &mut rng);
+    // Bob answers on his own message.
+    let bobs = row_of(&bob.core, &a_fp, "ping").id;
+    let from_bob = bob
+        .core
+        .set_reactions(bobs, &emo(&["😂"]), NOW, &mut rng)
+        .unwrap();
+    let at_a = offer(&mut a, &from_bob, &mut rng);
+    assert!(
+        matches!(&at_a[..], [ReceiveOutcome::Reaction { added, .. }] if *added == emo(&["😂"])),
+        "{at_a:?}"
+    );
+    offer(&mut t, &from_bob, &mut rng);
+
+    let on_a = chips(&a.core, &bob_fp, "ping");
+    assert_eq!(on_a, chips(&t.core, &bob_fp, "ping"));
+    assert_eq!(
+        counts(&bob.core, &a_fp, "ping"),
+        counts(&a.core, &bob_fp, "ping")
+    );
+    // One of the two sets of mine won, the same everywhere.
+    let winner: Vec<String> = on_a
+        .iter()
+        .filter(|c| c.mine)
+        .map(|c| c.emoji.clone())
+        .collect();
+    assert!(
+        winner == emo(&["👍"]) || winner == emo(&["❤️", "🎉"]),
+        "{winner:?}"
+    ); // Plus Bob's, not mine.
+    assert_eq!(on_a.len(), winner.len() + 1, "{on_a:?}");
+    assert!(on_a.iter().any(|c| c.emoji == "😂" && !c.mine));
+}
+
+#[test]
+fn linked_device_reacts_to_imported_message() {
+    let d = dir();
+    let mut rng = StdRng::seed_from_u64(63);
+    let mut a = create(d.path(), "a", 1, &mut rng);
+    let mut bob = create(d.path(), "bob", 3, &mut rng);
+    let a_fp = bob
+        .core
+        .add_contact(&a.core.contact_card("A").unwrap(), Some("a"), NOW, &mut rng)
+        .unwrap();
+    let bob_fp = a
+        .core
+        .add_contact(
+            &bob.core.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    let x = bob.core.send_text(&a_fp, "x", NOW, &mut rng).unwrap();
+    assert_eq!(offer(&mut a, &x, &mut rng).len(), 1);
+    // Reactions on both sides before the link.
+    let on_a = row_of(&a.core, &bob_fp, "x").id;
+    let mine = a
+        .core
+        .set_reactions(on_a, &emo(&["👍"]), NOW, &mut rng)
+        .unwrap();
+    offer(&mut bob, &mine, &mut rng);
+    let on_bob = row_of(&bob.core, &a_fp, "x").id;
+    let his = bob
+        .core
+        .set_reactions(on_bob, &emo(&["❤️"]), NOW + 1, &mut rng)
+        .unwrap();
+    offer(&mut a, &his, &mut rng);
+    let before = chips(&a.core, &bob_fp, "x");
+    assert_eq!(before.len(), 2);
+
+    // T joins with the history: the reactions come along.
+    let o = a.core.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) = begin(d.path(), "t", 9, &o, &mut rng);
+    let out = a.core.link_device(&req, true, NOW + 30, &mut rng).unwrap();
+    t.core
+        .finish_link(&out.bundle, out.history.as_ref(), NOW + 31)
+        .unwrap();
+    assert_eq!(chips(&t.core, &bob_fp, "x"), before);
+    for p in &out.packets {
+        bob.core
+            .receive(&p.encode(), T, NOW + 31, &mut rng)
+            .unwrap();
+    }
+
+    let imported = row_of(&t.core, &bob_fp, "x").id;
+    let pkts = t
+        .core
+        .set_reactions(imported, &emo(&["👍", "🎉"]), NOW + 32, &mut rng)
+        .unwrap();
+    let at_bob: Vec<_> = pkts
+        .iter()
+        .map(|p| {
+            bob.core
+                .receive(&p.encode(), T, NOW + 32, &mut rng)
+                .unwrap()
+        })
+        .filter(|o| !matches!(o, ReceiveOutcome::NotForUs))
+        .collect();
+    assert!(
+        matches!(&at_bob[..], [ReceiveOutcome::Reaction { added, .. }] if *added == emo(&["🎉"])),
+        "{at_bob:?}"
+    );
+    for p in &pkts {
+        a.core.receive(&p.encode(), T, NOW + 32, &mut rng).unwrap();
+    }
+    let expected = vec![
+        ("👍".to_owned(), 1),
+        ("🎉".to_owned(), 1),
+        ("❤️".to_owned(), 1),
+    ];
+    assert_eq!(counts(&bob.core, &a_fp, "x"), expected);
+    assert_eq!(counts(&t.core, &bob_fp, "x"), expected);
+    assert_eq!(chips(&a.core, &bob_fp, "x"), chips(&t.core, &bob_fp, "x"));
 }

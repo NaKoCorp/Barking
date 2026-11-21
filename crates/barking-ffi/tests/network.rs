@@ -52,7 +52,7 @@ async fn quick_sync_receives_message() {
             d.add_node(id.clone(), addr.clone()).unwrap();
         }
         assert!(bob.sync(30_000).unwrap().network_up);
-        alice.send_text("bob".into(), "salut".into()).unwrap();
+        alice.send_text("bob".into(), "salut".into(), None).unwrap();
         assert!(alice.sync(30_000).unwrap().network_up);
         let s = bob.quick_sync(20_000).unwrap();
         assert_eq!(s.error, None);
@@ -177,7 +177,9 @@ async fn push_settings_subscribe_wake_and_cancel() {
     assert_eq!(received(), 0);
 
     tokio::task::spawn_blocking(move || {
-        alice2.send_text("bob".into(), "wake up".into()).unwrap();
+        alice2
+            .send_text("bob".into(), "wake up".into(), None)
+            .unwrap();
         assert!(alice2.sync(30_000).unwrap().sent >= 1);
     })
     .await
@@ -314,7 +316,7 @@ async fn sync_reports_delivery_changes() {
             d.add_node(id.clone(), addr.clone()).unwrap();
         }
         bob.sync(30_000).unwrap();
-        alice.send_text("bob".into(), "hello".into()).unwrap();
+        alice.send_text("bob".into(), "hello".into(), None).unwrap();
         let sent = message(&alice, "bob", "hello").id;
         let change = DeliveryChange {
             contact: bob.fingerprint().unwrap(),
@@ -378,7 +380,7 @@ async fn sync_and_quick_sync_report_expired_messages() {
         alice.add_node(id, addr).unwrap();
         let fb = bob.fingerprint().unwrap();
 
-        alice.send_text("bob".into(), "lost".into()).unwrap();
+        alice.send_text("bob".into(), "lost".into(), None).unwrap();
         expire_queue(&da, 1);
         let s = alice.sync(30_000).unwrap();
         let lost = DeliveryChange {
@@ -388,7 +390,9 @@ async fn sync_and_quick_sync_report_expired_messages() {
         assert_eq!(s.failed, vec![lost.clone()], "{s:?}");
         assert!(s.delivery_changes.contains(&lost), "{s:?}");
 
-        alice.send_text("bob".into(), "lost too".into()).unwrap();
+        alice
+            .send_text("bob".into(), "lost too".into(), None)
+            .unwrap();
         expire_queue(&da, 1);
         let s = alice.quick_sync(20_000).unwrap();
         let lost_too = DeliveryChange {
@@ -424,7 +428,7 @@ async fn sync_reports_failed_after_verdict() {
     let (da, alice, fb) = tokio::task::spawn_blocking(move || {
         let (alice, bob) = paired_devices(&da, &db);
         alice.add_node(id, addr).unwrap();
-        alice.send_text("bob".into(), "lost".into()).unwrap();
+        alice.send_text("bob".into(), "lost".into(), None).unwrap();
         alice.sync(30_000).unwrap();
         assert_eq!(state(&alice, "bob", "lost"), DeliveryState::OnNetwork);
         (da, alice, bob.fingerprint().unwrap())

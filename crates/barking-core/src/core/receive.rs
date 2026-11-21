@@ -9,10 +9,11 @@ use super::log_limit::{LogLimiter, log_limited};
 use super::route::{self, RouteStep};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
-    SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, remove, removed, ser_state,
-    session_ad, session_id, sync,
+    SEEN_RETENTION_SECS, admin, contacts, de_state, load_card, log, reactions, remove, removed,
+    ser_state, session_ad, session_id, sync,
 };
 use crate::contact::ContactCard;
+use crate::content::{ExtContent, MessageRef, UnknownPolicy};
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
@@ -20,7 +21,7 @@ use crate::identity::{DeviceKeys, DeviceList, DevicePublic, Fingerprint, RootIde
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
 use crate::packet::{ACK_GRACE_SECS, Kind, Packet, PacketId, ack};
 use crate::ratchet::{RatchetMessage, RatchetState};
-use crate::store::{Direction, MessageId, MessageStatus, Queries, SessionRow};
+use crate::store::{Direction, MessageId, MessageInsert, MessageStatus, Queries, SessionRow};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -130,6 +131,9 @@ impl Core {
             // message for a contact, or a sync for one of my
             // devices (without a message row for `SyncContact`/`SyncDevices`).
             if !tx.is_my_packet(acked)? {
+                // A superseded reaction packet (no delivery, no state):
+                // received, it only leaves the send queue.
+                reactions::drop_acked_superseded(tx, acked)?;
                 return Ok((ReceiveOutcome::NotForUs, false, None));
             }
             // Nodes keep a receipt until `max(its expiry, the acknowledged
@@ -240,7 +244,7 @@ impl Core {
                         packet_id: packet.id,
                     },
                 )?;
-                return Ok((ReceiveOutcome::Duplicate, None));
+                return Ok((repeat_outcome(tx, packet.id)?, None));
             }
             let opened = match parse_wire(&packet.payload) {
                 Err(_) => Err(R_UNREADABLE),
@@ -277,6 +281,21 @@ impl Core {
         }
         Ok(outcome)
     }
+}
+
+/// What a repeat of the received packet `packet_id` is: `DuplicateMessage`
+/// when the message it carried (text, reply or update placeholder) is still
+/// a row of the conversation, `Duplicate` otherwise (a reaction, a sync, a
+/// card, content set aside, or a message deleted since).
+fn repeat_outcome(q: &impl Queries, packet_id: PacketId) -> Result<ReceiveOutcome> {
+    let shown = q
+        .message_by_packet(packet_id)?
+        .is_some_and(|m| m.direction == Direction::In);
+    Ok(if shown {
+        ReceiveOutcome::DuplicateMessage
+    } else {
+        ReceiveOutcome::Duplicate
+    })
 }
 
 /// Days for which a mailbox (session or introduction) is accepted at
@@ -544,6 +563,26 @@ fn accept(
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, R_UNEXPECTED, id);
         }
+        // Extensible contents: replies and reactions, and kinds this version
+        // does not know (`accept_ext`).
+        (
+            Body::Ext {
+                kind,
+                unknown,
+                data,
+            },
+            _,
+        ) => {
+            let ext = Ext {
+                kind: *kind,
+                unknown: *unknown,
+                data,
+            };
+            return accept_ext(
+                q, limiter, packet, o, &env, &ext, from_me, device, admin, my_fp, transport, now,
+                rng,
+            );
+        }
         (_, false) => {
             let id = Some(authenticated_id);
             return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
@@ -552,6 +591,24 @@ fn accept(
             return accept_sync(q, limiter, packet, o, &env, device, admin, my_fp, now, rng);
         }
     };
+    record_message(q, limiter, packet, o, &env, text, None, transport, now, rng)
+}
+
+/// A text (or a reply, `reply_ref`) from a contact, once accepted: session
+/// written, message recorded, ack emitted.
+#[allow(clippy::too_many_arguments)]
+fn record_message(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    text: String,
+    reply_ref: Option<MessageRef>,
+    transport: &str,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
     let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
     // Before `insert_message` (unique packet identifier).
     q.mark_seen(packet.id, now)?;
@@ -560,16 +617,20 @@ fn accept(
     // it is: a resend or a retry of it, even one I deleted since, is a
     // duplicate.
     let inserted = !q.inbound_has_message(message_id)?
-        && q.insert_message(
-            row.contact_fp,
-            Direction::In,
-            &text,
-            MessageStatus::Received,
-            now,
+        && q.insert_message_row(&MessageInsert {
+            contact_fp: row.contact_fp,
+            direction: Direction::In,
+            body: text.clone(),
+            status: MessageStatus::Received,
+            at: now,
             message_id,
-        )?;
+            wire_id: Some(env.message_id),
+            reply_to: reply_ref.map(|r| r.resolve(false, &row.contact_fp)),
+            reply_ref,
+            placeholder: false,
+        })?;
     // Packet → message: found again through the emitted ack (`delete_contact`).
-    q.record_inbound(packet.id, message_id)?;
+    q.record_inbound(packet.id, message_id, row.contact_fp)?;
     route::record(q, packet.id, RouteStep::Opened, now, None)?;
     if inserted {
         log(
@@ -597,7 +658,7 @@ fn accept(
     let ack = emit_ack(q, packet, env.ack_secret, now, rng)?;
     let alias = Core::alias_in(q, row.contact_fp)?;
     if !inserted {
-        return Ok((ReceiveOutcome::Duplicate, new_prekeys));
+        return Ok((repeat_outcome(q, packet.id)?, new_prekeys));
     }
     Ok((
         ReceiveOutcome::Message {
@@ -605,6 +666,239 @@ fn accept(
             alias,
             text,
             ack,
+        },
+        new_prekeys,
+    ))
+}
+
+/// The content of a `Body::Ext`, as received.
+struct Ext<'a> {
+    kind: u16,
+    unknown: UnknownPolicy,
+    data: &'a [u8],
+}
+
+/// `Body::Ext` authenticated by a session. Sender x kind:
+///
+/// | Sender | `Reply` / `Reaction` | `SyncReply` / `SyncReaction` | Unknown |
+/// |---|---|---|---|
+/// | A contact | accepted | `R_NOT_MINE` | `unknown` policy |
+/// | One of my devices | `R_UNEXPECTED` | the sync path | `unknown` policy |
+///
+/// Every `Ext` from my own fingerprint first requires the sending device to
+/// be in my current list. A `Reply` is recorded like a text, a `Reaction`
+/// applied as the contact's (`accept_reaction`); `SyncReply` and
+/// `SyncReaction` go through the sync path (`accept_sync`). An unknown kind is
+/// acknowledged like a message (the sender stops resending it) and, per its
+/// `unknown` policy, ignored or shown as a placeholder asking for an update
+/// (never for my own devices: they would show it twice).
+#[allow(clippy::too_many_arguments)]
+fn accept_ext(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    ext: &Ext<'_>,
+    from_me: bool,
+    device: &DeviceKeys,
+    admin: Option<(&RootIdentity, &PrekeySecrets)>,
+    my_fp: &Fingerprint,
+    transport: &str,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let id = Some(ack::packet_id_for(&env.ack_secret));
+    if from_me && !sync::sender_is_listed(q, o.row.contact_device)? {
+        return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
+    }
+    let content = match ExtContent::decode(ext.kind, ext.data) {
+        Ok(content) => content,
+        Err(_) => return reject_authenticated(q, limiter, packet, o, now, R_BAD_CONTENT, id),
+    };
+    let Some(content) = content else {
+        return accept_unknown(q, limiter, packet, o, env, ext, from_me, now, rng);
+    };
+    let reason = match (content, from_me) {
+        (ExtContent::Reply { text, reply_to }, false) => {
+            // Blocked: dropped like a text (ratchet kept, no ack).
+            if q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+                return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+            }
+            return record_message(
+                q,
+                limiter,
+                packet,
+                o,
+                env,
+                text,
+                Some(reply_to),
+                transport,
+                now,
+                rng,
+            );
+        }
+        (ExtContent::Reaction { target, emojis }, false) => {
+            // Blocked: dropped like a text (ratchet kept, no ack).
+            if q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+                return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+            }
+            return accept_reaction(
+                q, limiter, packet, o, env, target, emojis, transport, now, rng,
+            );
+        }
+        (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, true) => {
+            return accept_sync(q, limiter, packet, o, env, device, admin, my_fp, now, rng);
+        }
+        (ExtContent::SyncReply { .. } | ExtContent::SyncReaction { .. }, false) => sync::R_NOT_MINE,
+        _ => R_UNEXPECTED,
+    };
+    reject_authenticated(q, limiter, packet, o, now, reason, id)
+}
+
+/// A contact's `Reaction`, once accepted: session written, packet marked
+/// seen, the set applied as the contact's (`reactions::apply`), ack emitted.
+/// Deduplicated by envelope identifier (`inbound`), like a text. A target
+/// deleted here or of another conversation is ignored: nothing written,
+/// acked, `Ignored` (nothing to notify).
+#[allow(clippy::too_many_arguments)]
+fn accept_reaction(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    target: MessageRef,
+    emojis: Vec<String>,
+    transport: &str,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
+    q.mark_seen(packet.id, now)?;
+    let from = row.contact_fp;
+    let received = MessageId::incoming(&from, &env.message_id);
+    let already = q.inbound_has_message(received)?;
+    q.record_inbound(packet.id, received, from)?;
+    route::record(q, packet.id, RouteStep::Opened, now, None)?;
+    if already {
+        log_limited(
+            q,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DuplicateIgnored {
+                packet_id: packet.id,
+            },
+        )?;
+        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        return Ok((ReceiveOutcome::Duplicate, new_prekeys));
+    }
+    log(
+        q,
+        now,
+        Some(packet.id),
+        &TransparencyEvent::PacketOpened {
+            packet_id: packet.id,
+            sender: from,
+            transport: transport.to_owned(),
+            first_contact,
+        },
+    )?;
+    let target = target.resolve(false, &from);
+    let applied = reactions::apply(q, from, from.0, target, emojis, env.sent_at, env.message_id)?;
+    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    let Some(added) = applied else {
+        return Ok((ReceiveOutcome::Ignored, new_prekeys));
+    };
+    let alias = Core::alias_in(q, from)?;
+    Ok((
+        ReceiveOutcome::Reaction {
+            from,
+            alias,
+            target,
+            added,
+        },
+        new_prekeys,
+    ))
+}
+
+/// Unknown kind of `Body::Ext`: see `accept_ext`.
+#[allow(clippy::too_many_arguments)]
+fn accept_unknown(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    ext: &Ext<'_>,
+    from_me: bool,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let id = Some(ack::packet_id_for(&env.ack_secret));
+    // A blocked contact's content is dropped like its texts.
+    if !from_me && q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+        return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+    }
+    let (row, new_prekeys, _) = commit_session(q, o, now)?;
+    q.mark_seen(packet.id, now)?;
+    // For my own devices `row.contact_fp` is my fingerprint, as in `accept_sync`.
+    let message_id = MessageId::incoming(&row.contact_fp, &env.message_id);
+    let already = q.inbound_has_message(message_id)?;
+    q.record_inbound(packet.id, message_id, row.contact_fp)?;
+    route::record(q, packet.id, RouteStep::Opened, now, None)?;
+    if already {
+        log_limited(
+            q,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DuplicateIgnored {
+                packet_id: packet.id,
+            },
+        )?;
+        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        return Ok((repeat_outcome(q, packet.id)?, new_prekeys));
+    }
+    log(
+        q,
+        now,
+        Some(packet.id),
+        &TransparencyEvent::UnknownContent {
+            packet_id: packet.id,
+            kind: ext.kind,
+        },
+    )?;
+    let show = ext.unknown == UnknownPolicy::ShowUpdate && !from_me;
+    let inserted = show
+        && q.insert_message_row(&MessageInsert {
+            contact_fp: row.contact_fp,
+            direction: Direction::In,
+            body: String::new(),
+            status: MessageStatus::Received,
+            at: now,
+            message_id,
+            wire_id: Some(env.message_id),
+            reply_to: None,
+            reply_ref: None,
+            placeholder: true,
+        })?;
+    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    if !inserted {
+        // Ignored, or a placeholder deleted since (tombstone).
+        let outcome = if show {
+            ReceiveOutcome::Duplicate
+        } else {
+            ReceiveOutcome::Ignored
+        };
+        return Ok((outcome, new_prekeys));
+    }
+    let alias = Core::alias_in(q, row.contact_fp)?;
+    Ok((
+        ReceiveOutcome::NeedsUpdate {
+            from: row.contact_fp,
+            alias,
         },
         new_prekeys,
     ))
@@ -646,7 +940,7 @@ fn accept_card_update(
     };
     let (_, new_prekeys, _) = commit_session(q, o, now)?;
     q.mark_seen(packet.id, now)?;
-    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id))?;
+    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id), fp)?;
     let Some(verified) = verified else {
         // Card already known or superseded: acked so that the sender
         // stops resending it, nothing is written.
@@ -706,7 +1000,7 @@ fn accept_own_card(
     let removal = removed::is_removal(&own.list, &device.public(), card);
     let (_, new_prekeys, _) = commit_session(q, o, now)?;
     q.mark_seen(packet.id, now)?;
-    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id))?;
+    q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id), fp)?;
     if removal && removed::enter(q, device, card, now, rng)? {
         emit_ack(q, packet, env.ack_secret, now, rng)?;
         return Ok((ReceiveOutcome::Removed, new_prekeys));
@@ -745,13 +1039,7 @@ fn accept_sync(
 ) -> Result<RxOut> {
     // The sending device must be in my current list (not just
     // have kept a session from before its removal).
-    let listed = OwnDevices::read(q)?.is_some_and(|own| {
-        own.list
-            .certs
-            .iter()
-            .any(|c| c.device.id() == o.row.contact_device)
-    });
-    if !listed {
+    if !sync::sender_is_listed(q, o.row.contact_device)? {
         let id = Some(ack::packet_id_for(&env.ack_secret));
         return reject_authenticated(q, limiter, packet, o, now, sync::R_NOT_MINE, id);
     }
@@ -788,7 +1076,7 @@ fn accept_sync(
         }
     }
     q.mark_seen(packet.id, now)?;
-    q.record_inbound(packet.id, sync_id)?;
+    q.record_inbound(packet.id, sync_id, *my_fp)?;
     route::record(q, packet.id, RouteStep::Opened, now, None)?;
     match kind {
         Some(kind) => log(
@@ -824,7 +1112,7 @@ fn accept_sync(
         Some(kind) => ReceiveOutcome::Synced {
             kind,
             contact: match &env.body {
-                Body::SyncSent { to, .. } if kind == SyncKind::Sent => Some(*to),
+                body if matches!(kind, SyncKind::Sent | SyncKind::Reaction) => sync::sent_to(body),
                 _ => None,
             },
         },

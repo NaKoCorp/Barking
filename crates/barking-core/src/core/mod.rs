@@ -19,6 +19,7 @@ mod frames;
 mod history;
 mod link;
 mod log_limit;
+mod reactions;
 mod receive;
 mod remove;
 mod removed;
@@ -46,7 +47,7 @@ use crate::identity::{
 use crate::mailbox::{MailboxId, day_of, intro_mailbox, session_mailbox};
 use crate::packet::{DEFAULT_TTL_SECS, Kind, Packet, PacketId};
 use crate::ratchet::RatchetState;
-use crate::store::{EventClass, MessageRow, MessageStatus, Queries, Store};
+use crate::store::{EventClass, MessageId, MessageRow, MessageStatus, Queries, Store};
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
@@ -60,6 +61,7 @@ pub use link::{
     MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES,
 };
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
+pub use reactions::{ME_REACTOR, ReactionChip, ReactionResend};
 pub use receive::{
     R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
     R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
@@ -168,6 +170,33 @@ pub enum ReceiveOutcome {
     /// A newer list signed by my root no longer contains this device: it is
     /// removed from my account (see `Core::removed`); the ack is queued.
     Removed,
+    /// Content of a kind this version does not know, acknowledged and set
+    /// aside (`UnknownPolicy::Ignore`, or one of my own devices'): nothing
+    /// is added to the conversation.
+    Ignored,
+    /// Content of an unknown kind its sender wants shown
+    /// (`UnknownPolicy::ShowUpdate`): the conversation gains a placeholder
+    /// row asking for a newer version; the ack is queued.
+    NeedsUpdate {
+        from: Fingerprint,
+        alias: Option<String>,
+    },
+    /// A contact's reactions on `target` (stored identifier, in the
+    /// conversation with `from`), applied or already superseded; the ack is
+    /// queued. `added`: the emoji its newer set adds to the one it replaced
+    /// (empty for a removal or a superseded packet: nothing to notify).
+    Reaction {
+        from: Fingerprint,
+        alias: Option<String>,
+        target: MessageId,
+        added: Vec<String>,
+    },
+    /// A message (text, reply or update placeholder) received again while
+    /// its row is still in the conversation: nothing is added, but what the
+    /// packet carried is visible here, so a wake-up that came for it must
+    /// not be dropped as having nothing to show. Any other repeat (a
+    /// reaction, a sync, an ack, a message deleted since) is `Duplicate`.
+    DuplicateMessage,
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -187,6 +216,7 @@ impl fmt::Debug for ReceiveOutcome {
                 .finish(),
             Self::Partial => f.write_str("Partial"),
             Self::Duplicate => f.write_str("Duplicate"),
+            Self::DuplicateMessage => f.write_str("DuplicateMessage"),
             Self::NotForUs => f.write_str("NotForUs"),
             Self::Expired => f.write_str("Expired"),
             Self::Quarantined { reason } => f
@@ -204,6 +234,25 @@ impl fmt::Debug for ReceiveOutcome {
                 .field("alias", alias)
                 .finish(),
             Self::Removed => f.write_str("Removed"),
+            Self::Ignored => f.write_str("Ignored"),
+            Self::NeedsUpdate { from, alias } => f
+                .debug_struct("NeedsUpdate")
+                .field("from", from)
+                .field("alias", alias)
+                .finish(),
+            // The emoji are content: only their number.
+            Self::Reaction {
+                from,
+                alias,
+                target,
+                added,
+            } => f
+                .debug_struct("Reaction")
+                .field("from", from)
+                .field("alias", alias)
+                .field("target", target)
+                .field("added", &format_args!("<{} emoji>", added.len()))
+                .finish(),
         }
     }
 }
@@ -873,6 +922,13 @@ impl Core {
             return Err(CoreError::Malformed("transport event"));
         }
         log(&self.store, now, None, &event)
+    }
+
+    /// The message `id` of the conversation with `contact`, for a quote.
+    /// `None` if it is absent (not received yet, deleted) or belongs to
+    /// another conversation.
+    pub fn message_in(&self, contact: &Fingerprint, id: MessageId) -> Result<Option<MessageRow>> {
+        self.store.message_in(*contact, id)
     }
 
     /// History with a contact, from oldest to newest.

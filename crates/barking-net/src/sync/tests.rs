@@ -4235,3 +4235,88 @@ async fn unanswered_deposit_is_not_cancelled_by_a_delete() {
             .any(|b| Packet::decode(b).is_ok_and(|p| p.kind == Kind::Message))
     );
 }
+
+// --- Lot 2, task 5: expired reaction packets are resent by the full sync.
+
+/// Bob's reaction to his own message, sealed so long ago that its packet
+/// expired undeposited, on a network where every node is down (the outbox
+/// stays as the sync leaves it). Returns the core, the network and the
+/// number of packets queued meanwhile.
+fn expired_reaction_scene() -> (TempDir, Core, Net, usize) {
+    use rand::SeedableRng;
+    let (dir, mut core, mut net) = setup();
+    net.down = net.records.keys().copied().collect();
+    let to = core.contacts().unwrap()[0].fingerprint;
+    let row = core.messages_with(&to).unwrap()[0].id;
+    let old = NOW - TTL - 100;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+    let sent = core
+        .set_reactions(row, &["👍".to_owned()], old, &mut rng)
+        .unwrap();
+    assert!(u64::from(sent[0].expires_at) < NOW);
+    // Expires the old packet (flagged), leaving the baseline.
+    let queued = core.pending_outbox(NOW).unwrap().len();
+    (dir, core, net, queued)
+}
+
+/// A send to the contact that expired is left to the manual resend: the
+/// full sync reseals only the copies for my other devices.
+#[tokio::test(start_paused = true)]
+async fn full_sync_does_not_resend_an_expired_contact_reaction() {
+    let (_dir, mut core, net, queued) = expired_reaction_scene();
+    sync(&mut core, &net, opts()).await;
+    assert_eq!(core.pending_outbox(NOW).unwrap().len(), queued);
+    let pending = core.pending_packets(NOW).unwrap();
+    assert!(
+        pending
+            .sync
+            .iter()
+            .all(|s| s.kind != barking_core::store::PendingKind::Reaction)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn quick_sync_does_not_resend_expired_reactions() {
+    let (_dir, mut core, net, queued) = expired_reaction_scene();
+    quick_sync(&mut core, &net, quick_opts()).await;
+    assert_eq!(core.pending_outbox(NOW).unwrap().len(), queued);
+}
+
+/// What the notification extension relies on to drop a wake-up that shows
+/// nothing: the quick sync read everything it meant to (a deadline or a
+/// truncation that cut a mailbox leaves it false).
+#[tokio::test(start_paused = true)]
+async fn quick_sync_cut_by_deadline_is_not_fetched_all() {
+    let (_dir, mut core, mut net) = setup();
+    // Each fetch outlasts a third of the deadline: the first mailboxes
+    // answer, the later ones are cut by the deadline.
+    net.fetch_delay = Duration::from_secs(10);
+    let cut = quick_sync(&mut core, &net, quick_opts()).await;
+    assert!(cut.network_up, "{cut:?}");
+    assert!(!cut.fetched_all, "{cut:?}");
+
+    // Every mailbox answered in full: true.
+    let (_dir, mut core, net) = setup();
+    let full = quick_sync(&mut core, &net, quick_opts()).await;
+    assert_eq!(full.receive_errors, 0);
+    assert!(full.fetched_all, "{full:?}");
+
+    // Every node truncates: no mailbox fetched in full.
+    let (_dir, mut core, mut net) = setup();
+    net.truncate = all_nodes(&net, FetchStop::Connection);
+    let truncated = quick_sync(&mut core, &net, quick_opts()).await;
+    assert!(!truncated.fetched_all, "{truncated:?}");
+}
+
+/// The full sync reads it the same way: all sessions and introductions.
+#[tokio::test(start_paused = true)]
+async fn full_sync_fetched_all_follows_the_polling() {
+    let (_dir, mut core, mut net) = setup();
+    net.truncate = all_nodes(&net, FetchStop::Connection);
+    let cut = sync(&mut core, &net, opts()).await;
+    assert!(cut.network_up && !cut.fetched_all, "{cut:?}");
+    net.truncate.clear();
+    let full = sync(&mut core, &net, opts()).await;
+    assert!(full.polled_all_sessions && !full.intro_partial);
+    assert!(full.fetched_all, "{full:?}");
+}

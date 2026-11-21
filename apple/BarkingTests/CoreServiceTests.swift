@@ -65,6 +65,35 @@ final class CoreServiceTests: XCTestCase {
         XCTAssertEqual(device.syncEvents, ["sync", "sync-done"])
     }
 
+    /// A reaction (a contact's, or mine from another device, a removal
+    /// included) changes a conversation without a new message: it reloads.
+    func testReactionContactsReloadConversations() async {
+        let d = FakeDevice()
+        d.summary = SyncSummary(itemsReceived: 1, sent: 0, newMessages: [], networkUp: true, error: nil,
+                                newReactions: [NewReaction(contact: "FP1", name: "Bob", emojis: ["👍"], excerpt: nil)],
+                                reactionContacts: ["FP1"])
+        let core = CoreService(device: d, runner: DirectRunner())
+        let seen = Seen(await core.changes)
+        let outcome = await core.sync(reason: .timer)
+        XCTAssertEqual(outcome.reactionContacts, ["FP1"])
+        XCTAssertEqual(outcome.newReactions.map(\.emojis), [["👍"]])
+        let ok = await seen.eventually { $0.contains(.messages(contact: "FP1")) }
+        XCTAssertTrue(ok, "\(seen.all)")
+    }
+
+    func testSendCarriesTheReplyAndReactionsAreSet() async throws {
+        let d = FakeDevice()
+        let core = CoreService(device: d, runner: DirectRunner())
+        let seen = Seen(await core.changes)
+        try await core.send("re", to: "FP1", replyTo: 7)
+        try await core.send("plain", to: "FP1")
+        XCTAssertEqual(d.sent.map(\.replyTo), [7, nil])
+        try await core.setReactions(7, emojis: ["👍", "🎉"], contact: "FP1")
+        XCTAssertEqual(d.reactions, [7: ["👍", "🎉"]])
+        let ok = await seen.eventually { $0.filter { $0 == .messages(contact: "FP1") }.count >= 3 }
+        XCTAssertTrue(ok, "\(seen.all)")
+    }
+
     func testMutationPublishesChange() async throws {
         let core = CoreService(device: FakeDevice(), runner: DirectRunner())
         let stream = await core.changes

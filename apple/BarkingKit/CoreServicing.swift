@@ -9,7 +9,8 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func contacts() throws -> [Contact]
     func messagesWith(contact: String) throws -> [Message]
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo]
-    func sendText(contact: String, text: String) throws
+    func sendText(contact: String, text: String, replyTo: Int64?) throws
+    func setReactions(message: Int64, emojis: [String]) throws
     func addContactBytes(card: Data, alias: String?) throws -> String
     func addContact(card: String, alias: String?) throws -> String
     func contactCardBytes() throws -> Data
@@ -51,6 +52,8 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func leaveState() throws -> LeaveState
     func deliveriesOf(ids: [Int64]) throws -> [DeliveryUpdate]
     func messageDelivery(messageId: Int64) throws -> MessageDelivery?
+    func reactionDelivery(message: Int64) throws -> ReactionDelivery?
+    func retryReactions(message: Int64) throws
     func deliveryCounts(contact: String) throws -> DeliveryCounts
     func deliveryPage(contact: String, state: DeliveryState, limit: UInt32, offset: UInt32) throws -> [DeliveryRowInfo]
     func deleteMessage(messageId: Int64) throws -> DeleteOutcome
@@ -113,6 +116,11 @@ public struct SyncOutcome: Sendable, Equatable {
     public var syncedContacts: [String] = []
     /// The new messages themselves, for the notifications of a background refresh.
     public var newMessages: [NewMessage] = []
+    /// Reactions a contact added (never a removal), for the notifications.
+    public var newReactions: [NewReaction] = []
+    /// Contacts whose conversation a reaction changed (a contact's, or one of
+    /// mine from another device, a removal included): it reloads.
+    public var reactionContacts: [String] = []
 
     /// Something came in or went out: what a background wake reports.
     public var changed: Bool { items > 0 || received > 0 || sent > 0 }
@@ -127,7 +135,8 @@ public struct SyncOutcome: Sendable, Equatable {
                            lines: ["$ barking sync", result], items: Int(s.itemsReceived),
                            deliveryChanges: s.deliveryChanges,
                            newMessageContacts: s.newMessages.map(\.contact), failed: s.failed,
-                           syncedContacts: s.syncedContacts, newMessages: s.newMessages)
+                           syncedContacts: s.syncedContacts, newMessages: s.newMessages,
+                           newReactions: s.newReactions, reactionContacts: s.reactionContacts)
     }
 }
 

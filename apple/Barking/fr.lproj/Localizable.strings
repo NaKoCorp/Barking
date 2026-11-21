@@ -388,6 +388,11 @@
 "Delete and cancel the rest" = "Supprimer et annuler le reste";
 "Deletion failed. Nothing has changed." = "Suppression impossible. Rien n’a changé.";
 "%@ has no reachable device left. The message can’t be sent again." = "%@ n’a plus d’appareil joignable. Le message ne peut pas être renvoyé.";
+"You can react with 20 emoji at most on one message." = "Vous pouvez réagir avec 20 émojis au plus sur un message.";
+"Reaction not saved. Try again." = "Réaction non enregistrée. Réessayez.";
+"Couldn't resend the reaction." = "Impossible de renvoyer la réaction.";
+"This contact was removed. Nothing can be sent to them." = "Ce contact a été supprimé. Rien ne peut lui être envoyé.";
+"You" = "Vous";
 "Your other devices keep their copy." = "Vos autres appareils gardent leur copie.";
 
 /* Lot M §6.4, §7.2: the message sheet ("received %@" is shared with the path) */
@@ -437,6 +442,7 @@
 "Copies of your messages for your other devices · %lld" = "Copies de vos messages pour vos autres appareils · %lld";
 "Updates for your other devices · %lld" = "Mises à jour pour vos autres appareils · %lld";
 "Your card, for your contacts · %lld" = "Votre carte, pour vos contacts · %lld";
+"Reactions · %lld" = "Réactions · %lld";
 "Receipts tell your contacts their messages arrived. Copies and updates keep your other devices in step; copies hold your messages, encrypted. Barking sends them on its own, and they can’t be deleted here." = "Les accusés disent à vos contacts que leurs messages sont arrivés. Les copies et les mises à jour gardent vos autres appareils à jour ; les copies contiennent vos messages, chiffrés. Barking les envoie seul, ils ne se suppriment pas d’ici.";
 "Cancel all · %lld" = "Tout annuler · %lld";
 "Only your messages. Sync packets stay." = "Seulement vos messages. Les paquets de synchronisation restent.";
@@ -509,3 +515,22 @@
 "Unblock" = "Débloquer";
 "Unblock %@" = "Débloquer %@";
 "You blocked this person. Unblock them in Settings › Blocked contacts first." = "Vous avez bloqué cette personne. Débloquez-la d’abord dans Réglages › Contacts bloqués.";
+
+/* Reply and reactions (spec §5.6) */
+"Reply" = "Répondre";
+"React" = "Réagir";
+"Original message unavailable" = "Message original indisponible";
+"Replying to %@" = "Réponse à %@";
+"Cancel reply" = "Annuler la réponse";
+"Reply to %@: %@" = "Réponse à %1$@ : %2$@";
+"More emoji" = "Plus d’emoji";
+"20 reactions at most on a message." = "20 réactions au plus sur un message.";
+"This message needs a newer version of Barking." = "Ce message nécessite une version plus récente de Barking.";
+"Show original" = "Afficher l’original";
+"reaction pending" = "en attente";
+"reaction on the network" = "sur le réseau";
+"reaction received" = "reçue";
+"reaction not delivered" = "non distribuée";
+"Resend reaction" = "Renvoyer la réaction";
+"Your reaction · %@" = "Votre réaction · %@";
+"Your reaction · removed" = "Votre réaction · retirée";

@@ -18,14 +18,14 @@ use std::collections::{HashSet, VecDeque};
 use rusqlite::{OptionalExtension, params};
 
 use super::Core;
-use super::route;
+use super::{reactions, route};
 use crate::Result;
 use crate::identity::Fingerprint;
 use crate::mailbox::MailboxId;
 use crate::packet::{Packet, PacketId};
 use crate::store::{
     DeliverySummary, Direction, MessageDeliveryDetail, MessageId, MessageRow, MessageStatus,
-    PendingPackets, Queries, arr, map_err, to_i64, to_u64,
+    PendingPackets, Queries, SEND_STATE_SQL, arr, map_err, to_i64, to_u64,
 };
 use crate::transparency::TransparencyEvent;
 
@@ -39,15 +39,13 @@ use crate::transparency::TransparencyEvent;
 pub(crate) fn recompute_message_status(q: &impl Queries, message_id: MessageId) -> Result<()> {
     q.conn()
         .execute(
-            "UPDATE messages SET status = (
-                SELECT CASE
-                    WHEN sum(d.status = 3) > 0 THEN 3
-                    WHEN sum(d.status = 1) > 0 THEN 1
-                    WHEN sum(d.status = 0) > 0 THEN 0
-                    ELSE 5 END
-                FROM deliveries d WHERE d.message_id = messages.message_id AND d.own = 0)
-            WHERE message_id = ?1 AND direction = 0
-              AND EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = ?1 AND d.own = 0)",
+            &format!(
+                "UPDATE messages SET status = (
+                    SELECT {SEND_STATE_SQL}
+                    FROM deliveries d WHERE d.message_id = messages.message_id AND d.own = 0)
+                WHERE message_id = ?1 AND direction = 0
+                  AND EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = ?1 AND d.own = 0)"
+            ),
             params![message_id.0.as_slice()],
         )
         .map_err(map_err)?;
@@ -172,6 +170,17 @@ impl Core {
             for (id, expires_at) in expired {
                 let id = PacketId(arr(id)?);
                 failed.push(fail(tx, id, MessageStatus::Pending, to_u64(expires_at))?);
+                // A reaction packet that never left: flagged here, before
+                // `outbox_purge_expired` below. `resend_reactions` reseals
+                // a copy for my devices; a send to the contact waits for the
+                // manual resend.
+                tx.conn()
+                    .execute(
+                        "UPDATE reaction_sends SET expired = 1 \
+                         WHERE packet_id = ?1 AND superseded = 0",
+                        params![id.0.as_slice()],
+                    )
+                    .map_err(map_err)?;
             }
             tx.outbox_purge_expired(now)?;
             Ok(failed)
@@ -274,6 +283,16 @@ impl Core {
                 return Ok(None);
             }
             let failed = fail(tx, packet, MessageStatus::OnNetwork, expires_at)?;
+            // A reaction packet lost on the network: flagged.
+            // `resend_reactions` reseals a copy for my devices; a send to
+            // the contact stays `NotDelivered` until the manual resend.
+            tx.conn()
+                .execute(
+                    "UPDATE reaction_sends SET expired = 1 \
+                     WHERE packet_id = ?1 AND superseded = 0",
+                    params![packet.0.as_slice()],
+                )
+                .map_err(map_err)?;
             tx.outbox_remove(packet)?;
             Ok(Some(failed))
         })?;
@@ -353,9 +372,29 @@ impl ChangeList {
 pub(crate) type Change = (Fingerprint, i64);
 
 /// The sent message `message` as a change, if it has a row (copies of a
-/// deleted message and messageless packets have none).
+/// deleted message and messageless packets have none). A reaction packet's
+/// `message` is its tie: the change names the row of its target, found
+/// through its `reaction_sends` row, when that row is still stored.
 pub(super) fn change_of(q: &impl Queries, message: MessageId) -> Result<Option<Change>> {
-    Ok(outgoing_status(q, message)?.map(|(contact, row, _)| (contact, row)))
+    if let Some((contact, row, _)) = outgoing_status(q, message)? {
+        return Ok(Some((contact, row)));
+    }
+    let sent: Option<(Vec<u8>, Vec<u8>)> = q
+        .conn()
+        .query_row(
+            "SELECT rs.contact_fp, rs.message_id FROM deliveries d \
+             JOIN reaction_sends rs ON rs.packet_id = d.packet_id \
+             WHERE d.message_id = ?1 LIMIT 1",
+            params![message.0.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(map_err)?;
+    let Some((contact, target)) = sent else {
+        return Ok(None);
+    };
+    let contact = Fingerprint(arr(contact)?);
+    Ok(reactions::row_id_of(q, contact, MessageId(arr(target)?))?.map(|row| (contact, row)))
 }
 
 /// What `fail` did to a sent message.
@@ -447,10 +486,12 @@ pub(super) fn fail(
         }
         _ => None,
     };
-    Ok(Failed {
-        change: after.map(|(contact, row, _)| (contact, row)),
-        notice,
-    })
+    let change = match after {
+        Some((contact, row, _)) => Some((contact, row)),
+        // A reaction packet: its target's row (no notice for it).
+        None => change_of(q, message)?,
+    };
+    Ok(Failed { change, notice })
 }
 
 /// Fails, at `now`, the contact deliveries of my messages to `fp` that
@@ -649,6 +690,7 @@ fn delete_rows(
             .execute("DELETE FROM messages WHERE id = ?1", params![row])
             .map_err(map_err)?;
         q.add_tombstone(message, now)?;
+        q.delete_reactions_of(message)?;
         out.deleted += 1;
         changes.push((contact, row));
     }

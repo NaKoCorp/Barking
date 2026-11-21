@@ -2,3 +2,7 @@
 "NEW_MESSAGE" = "New message";
 "FAILED_MESSAGE" = "A message couldn’t be delivered.";
 "FAILED_MESSAGES_COUNT" = "%lld messages couldn’t be delivered.";
+"REACTED" = "Reacted";
+"REACTED_EMOJI" = "Reacted %@";
+"REACTED_TO" = "Reacted %1$@ to “%2$@”";
+"NEEDS_UPDATE" = "This message needs a newer version of Barking.";

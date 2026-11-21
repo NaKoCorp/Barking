@@ -191,7 +191,7 @@ struct PendingContent: View {
                 messageRow(row).card(listed)
             }
         } header: {
-            SectionLabel("Your messages · \(model.messagePackets) packets")
+            SectionLabel("Your messages · \(model.messages.count) messages · \(model.messagePackets) packets")
                 .plain(listed).padding(.vertical, Space.s2)
         }
         if !model.sync.isEmpty {
@@ -279,7 +279,8 @@ struct PendingContent: View {
     @ViewBuilder private func noticeBanner(_ notice: ConversationModel.Notice) -> some View {
         switch notice {
         case .deleted(let message): Banner(kind: .info, verbatim: message.string(bundle: .strings(for: locale), locale: locale))
-        case .deleteFailed, .noReachableDevice:
+        case .deleteFailed, .noReachableDevice, .reactionTooMany, .reactionFailed, .reactionResendFailed,
+             .contactRemoved:
             Banner(kind: .warning, verbatim: notice.text(bundle: .strings(for: locale), locale: locale))
         }
     }

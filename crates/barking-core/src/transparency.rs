@@ -158,6 +158,12 @@ pub enum TransparencyEvent {
         cancelled: u32,
         already_left: u32,
     },
+    /// An authenticated content of kind `kind`, which this version does not
+    /// know, was acknowledged and set aside. No content. Added last.
+    UnknownContent {
+        packet_id: PacketId,
+        kind: u16,
+    },
 }
 
 /// Why a node was set aside.
@@ -175,8 +181,10 @@ pub enum SyncKind {
     Sent,
     Contact,
     Devices,
-    /// The root key (admin transfer). Added last.
+    /// The root key (admin transfer).
     Admin,
+    /// My emoji reactions on a message. Added last.
+    Reaction,
 }
 
 impl SyncKind {
@@ -187,6 +195,7 @@ impl SyncKind {
             SyncKind::Contact => "contact",
             SyncKind::Devices => "device list",
             SyncKind::Admin => "admin key",
+            SyncKind::Reaction => "reaction",
         }
     }
 }
@@ -453,6 +462,11 @@ impl TransparencyEvent {
                  leaving it, {already_left} had already left (the contact still receives \
                  them)."
             ),
+            Self::UnknownContent { packet_id, kind } => format!(
+                "Packet {} carried content this version cannot read (kind {kind}). \
+                 It was acknowledged and set aside.",
+                hex(&packet_id.0[..4])
+            ),
         }
     }
 }
@@ -694,6 +708,10 @@ mod tests {
         assert_eq!(
             d(SyncKind::Devices),
             "Synchronized from one of your devices: device list."
+        );
+        assert_eq!(
+            d(SyncKind::Reaction),
+            "Synchronized from one of your devices: reaction."
         );
         assert!(
             !TransparencyEvent::SyncApplied {

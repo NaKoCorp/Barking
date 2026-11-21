@@ -370,6 +370,12 @@ pub struct SyncReport {
     pub received: Vec<ReceiveOutcome>,
     /// Items that could not be processed (fetched again next time).
     pub receive_errors: usize,
+    /// Every mailbox the sync meant to read (sessions, awaited acks,
+    /// introductions) was fetched in full before the deadline, and no item
+    /// failed to process: what it brought is all there was to bring, so an
+    /// item that shows nothing (a reaction removed, content set aside) is
+    /// not a wake-up that hid a message.
+    pub fetched_all: bool,
     /// Receipts accepted by a node.
     pub acks_deposited: usize,
     /// First copies of messages accepted.
@@ -704,12 +710,16 @@ where
             list.sort_unstable_by_key(|m| m.0);
             list.dedup();
         }
-        self.fetch_stage(&sessions, FetchKind::Sessions).await;
+        let polled_sessions = self.fetch_stage(&sessions, FetchKind::Sessions).await;
+        // Introductions the deadline left no time for are not fetched.
+        let mut polled_intro = intro.is_empty();
         if !intro.is_empty() && !self.over() {
-            let polled_intro = self.fetch_stage(&intro, FetchKind::Intro).await;
+            polled_intro = self.fetch_stage(&intro, FetchKind::Intro).await;
             self.report.intro_partial = !polled_intro;
         }
         self.verdict_stage().await;
+        self.report.fetched_all =
+            polled_sessions && polled_intro && self.report.receive_errors == 0;
         self.give_verdicts();
         if !self.over() {
             self.deposit_stage(true).await;
@@ -1493,6 +1503,18 @@ where
         let polled_sessions = self.fetch_stage(&sessions, FetchKind::Sessions).await;
         self.report.polled_all_sessions = polled_sessions;
 
+        // Copies for my other devices of reaction packets that expired
+        // undeposited go out again, with the current set, in this sync's
+        // first deposit (a send to the contact waits for a manual resend).
+        // A failure here never stops the sync: what is left stays flagged
+        // for the next one. Logged without any content or identifier.
+        match self.core.resend_reactions(now, &mut rand::rng()) {
+            Ok(r) if r.failed > 0 => {
+                tracing::warn!(failed = r.failed, "reaction resend: groups failed");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "reaction resend failed"),
+        }
         self.deposit_stage(false).await;
 
         if !intro.is_empty() {
@@ -1524,6 +1546,9 @@ where
             tracing::warn!("poll date not recorded: {e}");
             self.report.polled_all_sessions = false;
         }
+        self.report.fetched_all = self.report.polled_all_sessions
+            && !self.report.intro_partial
+            && self.report.receive_errors == 0;
     }
 
     /// Wake subscriptions (stage 6 of the module documentation).

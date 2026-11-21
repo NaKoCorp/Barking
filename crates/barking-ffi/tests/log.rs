@@ -13,7 +13,9 @@ fn transparency_log_pages_and_filters() {
         .add_contact_bytes(bob.contact_card_bytes().unwrap(), None)
         .unwrap();
     for i in 0..3 {
-        alice.send_text(fb.clone(), format!("hello {i}")).unwrap();
+        alice
+            .send_text(fb.clone(), format!("hello {i}"), None)
+            .unwrap();
     }
     let all = alice.transparency_log(100, None, false).unwrap();
     assert!(all.len() >= 4, "{all:?}");
@@ -27,7 +29,9 @@ fn transparency_log_pages_and_filters() {
     assert_eq!(first[0].id, all[0].id);
     // An event arrives between the pages: the next page neither repeats nor
     // skips an entry.
-    alice.send_text(fb.clone(), "one more".into()).unwrap();
+    alice
+        .send_text(fb.clone(), "one more".into(), None)
+        .unwrap();
     let second = alice.transparency_log(2, Some(first[1].id), false).unwrap();
     assert_eq!(second[0].id, all[2].id);
     assert!(second.iter().all(|e| e.id < first[1].id));

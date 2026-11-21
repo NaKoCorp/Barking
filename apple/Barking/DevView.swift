@@ -110,7 +110,7 @@ final class DevModel {
     func send(_ text: String) async {
         guard let d = device, let c = selected else { return }
         await attempt("send") {
-            try await DeviceCall.run("send") { try d.sendText(contact: c, text: text) }
+            try await DeviceCall.run("send") { try d.sendText(contact: c, text: text, replyTo: nil) }
             try await self.refresh()
         }
     }

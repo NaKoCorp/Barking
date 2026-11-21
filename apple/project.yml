@@ -139,6 +139,7 @@ targets:
       properties:
         com.apple.security.application-groups: [$(BARKING_APP_GROUP)]
         keychain-access-groups: [$(BARKING_KEYCHAIN_GROUP)]
+        com.apple.developer.usernotifications.filtering: true
     info:
       path: NotificationService/Info.plist
       properties:

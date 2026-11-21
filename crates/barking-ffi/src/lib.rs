@@ -14,6 +14,7 @@ mod log;
 mod messages;
 mod net;
 mod push;
+mod reactions;
 mod route;
 
 use std::panic::{UnwindSafe, catch_unwind};
@@ -22,7 +23,7 @@ pub use contacts::{CardPreview, inspect_card, inspect_card_text};
 pub use delivery::{
     DeleteOutcome, Delivery, DeliveryChange, DeliveryCounts, DeliveryRowInfo, DeliveryState,
     DeliveryUpdate, DeviceDelivery, MessageDelivery, OwnCopies, PendingKind, PendingMessage,
-    PendingPackets, PendingSync, RelayHop,
+    PendingPackets, PendingSync, ReactionDelivery, RelayHop,
 };
 pub use device::{
     Contact, CreatedDevice, Device, DeviceConfig, Message, create_device, device_exists,
@@ -34,6 +35,7 @@ pub use log::{LogEntry, log_arg_tokens, log_keys};
 pub use messages::{ChatSummary, KeyChange, UnreadCount};
 pub use net::{LeaveState, NewMessage, NodeInfo, SyncSummary};
 pub use push::{NotificationPrefs, PushPreview, PushSettings, WakeNode, WakeStatus};
+pub use reactions::{NewReaction, Quote, ReactionChip, excerpt};
 pub use route::RouteStepInfo;
 
 uniffi::setup_scaffolding!();

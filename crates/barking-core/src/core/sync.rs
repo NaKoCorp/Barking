@@ -18,11 +18,14 @@ use super::route::{self, RouteStep};
 use super::send::{SealTime, Target, seal_for};
 use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts, load_card, log};
 use crate::contact::ContactCard;
+use crate::content::ExtContent;
 use crate::envelope::{self, Body, Envelope, SyncOp};
 use crate::handshake::PrekeyBundle;
 use crate::identity::{DeviceId, DeviceKeys, DeviceList, DevicePublic, Fingerprint};
 use crate::packet::Packet;
-use crate::store::{BlockState, ContactClock, Direction, MessageId, MessageStatus, Queries};
+use crate::store::{
+    BlockState, ContactClock, Direction, MessageId, MessageInsert, MessageStatus, Queries,
+};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -30,6 +33,13 @@ use crate::{CoreError, Result};
 pub(super) const R_NOT_MINE: &str = "synchronization from a device that is not mine";
 pub(super) const R_SYNC_REFUSED: &str = "synchronization refused";
 pub(super) const R_DEVICES_REFUSED: &str = "device list refused";
+
+/// The device `device` is in my current list (not just a session kept from
+/// before its removal): required of anything it sends as one of mine.
+pub(super) fn sender_is_listed(q: &impl Queries, device: DeviceId) -> Result<bool> {
+    Ok(OwnDevices::read(q)?
+        .is_some_and(|own| own.list.certs.iter().any(|c| c.device.id() == device)))
+}
 
 /// Seals `body` for each of my other devices; each packet is
 /// recorded as an `own` delivery of `message_id` (its ack does not make
@@ -348,6 +358,64 @@ pub(super) fn apply(
     let me = &device.public();
     match &env.body {
         Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
+        Body::Ext { kind, data, .. } => {
+            let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
+            // Only `SyncReply` and `SyncReaction` are sync contents; any
+            // other kind is refused.
+            let (to, text, reply_to) = match ExtContent::decode(*kind, data) {
+                Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => (to, text, reply_to),
+                Ok(Some(ExtContent::SyncReaction { to, target, emojis }))
+                    if to != own.list.root.fingerprint() =>
+                {
+                    // Blocked here: the block erased my reactions with `to`
+                    // and `set_reactions` refuses it; a copy crossing the
+                    // block is acked without effect.
+                    if q.block_state(to)?.blocked {
+                        return Ok(Ok(None));
+                    }
+                    // Removed since this copy was sealed: the removal erased
+                    // my reactions with `to`, a late copy must not bring one
+                    // back. One sealed after the removal (or before the
+                    // contact's first `Upsert` arrives) still applies.
+                    if q.contact_clock(to)?
+                        .is_some_and(|c| c.removed && c.at >= env.sent_at)
+                    {
+                        return Ok(Ok(None));
+                    }
+                    // My set, the same rules as a contact's: a target deleted
+                    // here or of another conversation is ignored (acked).
+                    let applied = super::reactions::apply(
+                        q,
+                        to,
+                        super::reactions::ME_REACTOR,
+                        target.resolve(true, &to),
+                        emojis,
+                        env.sent_at,
+                        env.message_id,
+                    )?;
+                    return Ok(Ok(applied.map(|_| SyncKind::Reaction)));
+                }
+                _ => return Ok(Err(R_SYNC_REFUSED)),
+            };
+            if to == own.list.root.fingerprint() {
+                return Ok(Err(R_SYNC_REFUSED));
+            }
+            // As `SyncSent`, with the quote: `reply_to` is resolved as my
+            // own packet's (I am the sealer's account).
+            q.insert_message_row(&MessageInsert {
+                contact_fp: to,
+                direction: Direction::Out,
+                body: text,
+                status: MessageStatus::OnNetwork,
+                at: env.sent_at,
+                message_id: MessageId(env.message_id),
+                wire_id: None,
+                reply_to: Some(reply_to.resolve(true, &to)),
+                reply_ref: Some(reply_to),
+                placeholder: false,
+            })?;
+            Ok(Ok(Some(SyncKind::Sent)))
+        }
         Body::AdminTransfer { seed, version } => super::admin::apply(q, seed, *version),
         // Handled by the receiver once the session is written (`remove.rs`).
         Body::RemoveMe => Ok(Ok(None)),
@@ -397,6 +465,20 @@ pub(super) fn apply(
             purge_removed_own_sessions(q, &card.devices)?;
             Ok(Ok(Some(SyncKind::Devices)))
         }
+    }
+}
+
+/// The contact a `SyncSent`, `SyncReply` or `SyncReaction` body was sent to.
+pub(super) fn sent_to(body: &Body) -> Option<Fingerprint> {
+    match body {
+        Body::SyncSent { to, .. } => Some(*to),
+        Body::Ext { kind, data, .. } => match ExtContent::decode(*kind, data) {
+            Ok(Some(ExtContent::SyncReply { to, .. } | ExtContent::SyncReaction { to, .. })) => {
+                Some(to)
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 

@@ -12,10 +12,14 @@ struct ConversationView: View {
     @Environment(\.syncLoop) private var syncLoop
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The app's language: notices and quotes follow it, not only the device's.
+    @Environment(\.locale) private var locale
     /// Saves the draft once typing stops for 2 s; restarted by each change.
     @State private var draftSave: Task<Void, Never>?
     /// The message whose sheet is open.
     @State private var sheetOf: SheetTarget?
+    /// The message the emoji picker is open for.
+    @State private var reactingTo: SheetTarget?
     /// The message the delete confirmation is open for, as it was then.
     @State private var confirming: ConversationModel.Item?
     /// The confirmation adds "Your other devices keep their copy." (§7.4).
@@ -123,6 +127,9 @@ struct ConversationView: View {
                 model.showDeleted($0)
             }
         }
+        .sheet(item: $reactingTo) { target in
+            EmojiPicker { emoji in react(emoji, on: target.id) }
+        }
         .confirmationDialog(confirmation?.title ?? "", isPresented: confirmingShown,
                             titleVisibility: .visible, presenting: confirming) { item in
             Button(DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery).button, role: .destructive) {
@@ -143,6 +150,7 @@ struct ConversationView: View {
             }
         }
         .toolbar(.hidden, for: .tabBar)
+        .onChange(of: locale, initial: true) { _, new in model.language = (Bundle.strings(for: new), new) }
         .onAppear { syncLoop?.conversationOpen = true }
         .onDisappear {
             model.onDisappear()
@@ -180,8 +188,9 @@ struct ConversationView: View {
     @ViewBuilder private func noticeBanner(_ notice: ConversationModel.Notice) -> some View {
         switch notice {
         case .deleted(let message): Banner(kind: .info, title: message.key)
-        case .deleteFailed, .noReachableDevice:
-            Banner(kind: .warning, verbatim: notice.text())
+        case .deleteFailed, .noReachableDevice, .reactionTooMany, .reactionFailed, .reactionResendFailed,
+             .contactRemoved:
+            Banner(kind: .warning, verbatim: notice.text(bundle: .strings(for: locale), locale: locale))
         }
     }
 
@@ -200,6 +209,11 @@ struct ConversationView: View {
         let side: HorizontalAlignment = item.outgoing ? .trailing : .leading
         VStack(alignment: side, spacing: 4) {
             bubble(item)
+            if !item.reactions.isEmpty {
+                ReactionChips(chips: item.reactions, outgoing: item.outgoing, myState: item.myReactionState) { react($0, on: item.id) }
+                    .disabled(deleting)
+                    .bubbleRow(outgoing: item.outgoing)
+            }
             if deleting {
                 ProgressView().controlSize(.mini)
                     .frame(maxWidth: .infinity, alignment: Alignment(horizontal: side, vertical: .center))
@@ -214,18 +228,46 @@ struct ConversationView: View {
     }
 
     /// One VoiceOver element (§8): the text, the state as its value, the
-    /// actions by name. A tap opens the message; a long press its menu.
+    /// actions by name. A tap opens the message; a long press its menu; a
+    /// swipe to the right answers it.
     private func bubble(_ item: ConversationModel.Item) -> some View {
         let failed = item.state == .notDelivered
+        // My latest reaction did not leave: offered even without a chip (a removal).
+        let resendable = item.myReactionState == .notDelivered
         // Still being sent: the core has no row to open or delete yet.
         let saved = !item.local
-        return Bubble(text: item.text, outgoing: item.outgoing)
+        // Not for a local row (not in the core yet) or a placeholder (§5.6).
+        let acts = item.canReplyOrReact
+        let strings = Bundle.strings(for: locale)
+        return Bubble(text: item.needsUpdate
+                        ? String(localized: "This message needs a newer version of Barking.", bundle: strings, locale: locale)
+                        : item.text,
+                      outgoing: item.outgoing,
+                      quote: model.quoteLine(for: item, bundle: strings, locale: locale),
+                      placeholder: item.needsUpdate,
+                      highlighted: model.highlighted == item.id) {
+            if let quote = item.quote { scrollTarget = model.jump(to: quote) }
+        }
             .onTapGesture { if saved { sheetOf = SheetTarget(id: item.id) } }
+            .swipeToReply(enabled: acts, outgoing: item.outgoing) { model.startReply(item.id) }
             .contextMenu {
+                if acts {
+                    emojiRow(item)
+                    Button { model.startReply(item.id) } label: {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                }
+                if resendable {
+                    Button { retryReaction(item.id) } label: {
+                        Label("Resend reaction", systemImage: "arrow.clockwise")
+                    }
+                }
                 if failed {
                     Button { retry(item.id) } label: { Label("Retry", systemImage: "arrow.clockwise") }
                 }
-                Button { copy(item.text) } label: { Label("Copy", systemImage: "doc.on.doc") }
+                if acts {
+                    Button { copy(item.text) } label: { Label("Copy", systemImage: "doc.on.doc") }
+                }
                 if saved {
                     Button { sheetOf = SheetTarget(id: item.id) } label: { Label("Details", systemImage: "info.circle") }
                     Divider()
@@ -236,14 +278,50 @@ struct ConversationView: View {
             .accessibilityValue(Text(verbatim: Self.spoken(item)))
             .accessibilityHint(saved ? Text("Opens the message details.") : Text(verbatim: ""))
             .accessibilityActions {
+                if acts {
+                    Button("Reply") { model.startReply(item.id) }
+                    Button("React") { reactingTo = SheetTarget(id: item.id) }
+                }
+                if let quote = item.quote, quote.id != nil, quote.excerpt != nil {
+                    Button("Show original") { scrollTarget = model.jump(to: quote) }
+                }
+                if resendable { Button("Resend reaction") { retryReaction(item.id) } }
                 if failed { Button("Retry") { retry(item.id) } }
-                Button("Copy") { copy(item.text) }
+                if acts { Button("Copy") { copy(item.text) } }
                 if saved {
                     Button("Details") { sheetOf = SheetTarget(id: item.id) }
                     Button("Delete") { confirm(item) }
                 }
             }
             .bubbleRow(outgoing: item.outgoing)
+    }
+
+    /// The row above the menu: the six frequent emoji and "+" (§5.6). One of
+    /// mine shows selected; at 20 of mine, the others and "+" are off.
+    @ViewBuilder private func emojiRow(_ item: ConversationModel.Item) -> some View {
+        let mine = Set(item.reactions.filter(\.mine).map(\.emoji))
+        let full = !model.canAdd(on: item.id)
+        ControlGroup {
+            ForEach(ConversationModel.frequentEmoji, id: \.self) { emoji in
+                let chosen = mine.contains(emoji)
+                Toggle(isOn: Binding(get: { chosen }, set: { _ in react(emoji, on: item.id) })) {
+                    Text(verbatim: emoji)
+                }
+                .menuActionDismissBehavior(.enabled)
+                .disabled(full && !chosen)
+                .accessibilityHint(full && !chosen ? Text("20 reactions at most on a message.") : Text(verbatim: ""))
+            }
+            Button { reactingTo = SheetTarget(id: item.id) } label: {
+                Label("More emoji", systemImage: "plus")
+            }
+            .disabled(full)
+            .accessibilityHint(full ? Text("20 reactions at most on a message.") : Text(verbatim: ""))
+        }
+        .controlGroupStyle(.palette)
+    }
+
+    private func react(_ emoji: String, on id: Int64) {
+        Task { await model.toggle(emoji, on: id) }
     }
 
     /// The bubble's VoiceOver value (§7.1): the state sentence of a sent
@@ -263,6 +341,11 @@ struct ConversationView: View {
             confirmingKeeps = await model.keepsOwnCopies(item)
             confirming = item
         }
+    }
+
+    private func retryReaction(_ id: Int64) {
+        Haptic.send.play()
+        Task { await model.retryReaction(id) }
     }
 
     private func retry(_ id: Int64) {
@@ -303,9 +386,13 @@ private struct ChatHeader: View {
 /// Text field, byte counter, send button.
 struct ComposerView: View {
     @Bindable var model: ConversationModel
+    @Environment(\.locale) private var locale
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
+            if let banner = model.replyBanner(bundle: .strings(for: locale), locale: locale) {
+                replyBanner(banner)
+            }
             if model.showsCounter {
                 Text(verbatim: "\(model.byteCount) / \(ConversationModel.maxBytes)")
                     .font(BarkingFont.mono(.caption2, size: 11))
@@ -334,6 +421,78 @@ struct ComposerView: View {
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(Color.surfaceCard)
         .overlay(alignment: .top) { Rectangle().fill(Color.border).frame(height: 1) }
+    }
+}
+
+extension ComposerView {
+    /// "Replying to Sam", the start of the original, and an ✕ (§5.6). Not
+    /// part of the draft.
+    fileprivate func replyBanner(_ banner: (name: String, excerpt: String)) -> some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 1.5).fill(Color.accentFill).frame(width: 3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Replying to \(banner.name)").font(BarkingFont.sans(.footnote, size: 12, weight: .semibold))
+                    .foregroundStyle(Color.accent)
+                Text(verbatim: banner.excerpt).font(BarkingFont.sans(.footnote, size: 13))
+                    .foregroundStyle(Color.fgMuted).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button { model.cancelReply() } label: {
+                Image(systemName: "xmark").font(.bSymbol(14, weight: .semibold, maximum: 22))
+                    .foregroundStyle(Color.fgMuted)
+                    .frame(width: 44, height: 44)
+                    .contentShape(.rect)
+            }
+            .accessibilityLabel(Text("Cancel reply"))
+            .accessibilityIdentifier("composer.cancelReply")
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// A swipe to the right on a bubble answers it (§5.6): the bubble follows the
+/// finger (up to 60 pt, less on a sent bubble, which sits at the edge and
+/// would be clipped) and a drag past 60 pt, mostly sideways, starts the
+/// reply. A drag that starts within 20 pt of the left edge is the system's
+/// back gesture. Not under VoiceOver, where the "Reply" action does it.
+/// The shift is a `GestureState`: it resets by itself if the drag is cancelled.
+private struct SwipeToReply: ViewModifier {
+    let enabled: Bool
+    let outgoing: Bool
+    let reply: () -> Void
+    @GestureState private var shift: CGFloat = 0
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    static let reach: CGFloat = 60
+    static let edge: CGFloat = 20
+    /// How far a sent bubble moves: the screen's gutter.
+    static let outgoingShift: CGFloat = 12
+
+    private func counts(_ drag: DragGesture.Value) -> Bool {
+        enabled && !voiceOver && drag.startLocation.x > Self.edge
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: shift)
+            .animation(Motion.gated(Motion.feedback, reduceMotion: reduceMotion), value: shift)
+            .simultaneousGesture(DragGesture(minimumDistance: 20, coordinateSpace: .global)
+                .updating($shift) { drag, state, _ in
+                    guard counts(drag), abs(drag.translation.width) > abs(drag.translation.height) else { return }
+                    state = min(max(drag.translation.width, 0), outgoing ? Self.outgoingShift : Self.reach)
+                }
+                .onEnded { drag in
+                    if counts(drag), drag.translation.width > Self.reach, abs(drag.translation.height) < 30 { reply() }
+                })
+    }
+}
+
+extension View {
+    fileprivate func swipeToReply(enabled: Bool, outgoing: Bool, reply: @escaping () -> Void) -> some View {
+        modifier(SwipeToReply(enabled: enabled, outgoing: outgoing, reply: reply))
     }
 }
 

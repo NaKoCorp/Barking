@@ -19,6 +19,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use zeroize::Zeroize;
 
+use crate::content::MessageRef;
 use crate::identity::device::DeviceId;
 use crate::identity::root::Fingerprint;
 use crate::packet::{Kind, Packet, PacketId};
@@ -215,6 +216,129 @@ pub struct MessageRow {
     pub status: MessageStatus,
     pub at: u64,
     pub message_id: MessageId,
+    /// Raw envelope identifier of a received message (what a reply or a
+    /// reaction of the other side refers to).
+    pub wire_id: Option<[u8; 16]>,
+    /// Stored identifier of the message this one replies to.
+    pub reply_to: Option<MessageId>,
+    /// The reference a reply carries, sent or received: the original's
+    /// author stays derivable after the original is deleted.
+    pub reply_ref: Option<MessageRef>,
+    /// Stands for content this version cannot read ("needs a newer version").
+    pub placeholder: bool,
+}
+
+/// A message row to insert (`Queries::insert_message_row`). Its body is
+/// plaintext, wiped when the value is dropped.
+#[derive(Clone)]
+pub struct MessageInsert {
+    pub contact_fp: Fingerprint,
+    pub direction: Direction,
+    pub body: String,
+    pub status: MessageStatus,
+    pub at: u64,
+    pub message_id: MessageId,
+    pub wire_id: Option<[u8; 16]>,
+    pub reply_to: Option<MessageId>,
+    pub reply_ref: Option<MessageRef>,
+    pub placeholder: bool,
+}
+
+impl Drop for MessageInsert {
+    fn drop(&mut self) {
+        self.body.zeroize();
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for MessageInsert {}
+
+/// One reactor's set of emoji on a message (`reactions` table): a
+/// last-writer-wins register per `(message_id, reactor)`, keyed
+/// `(clock, tie)`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReactionRow {
+    /// Stored identifier of the target message.
+    pub message_id: MessageId,
+    /// The contact's fingerprint, or `core::ME_REACTOR` for my devices.
+    pub reactor: [u8; 32],
+    /// The conversation.
+    pub contact_fp: Fingerprint,
+    pub emojis: Vec<String>,
+    /// `sent_at` of the envelope that carried the set.
+    pub clock: u64,
+    /// Envelope identifier of that packet: breaks a tie on `clock`.
+    pub tie: [u8; 16],
+    /// `(clock, tie)` of the write that created the row, kept when it is
+    /// replaced: the chips keep their place, the same on every side.
+    pub first_seen: u64,
+    pub first_tie: [u8; 16],
+}
+
+impl fmt::Debug for ReactionRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The emoji are content: only their number.
+        f.debug_struct("ReactionRow")
+            .field("message_id", &self.message_id)
+            .field("contact_fp", &self.contact_fp)
+            .field("emojis", &format_args!("<{} emoji>", self.emojis.len()))
+            .field("clock", &self.clock)
+            .field("first_seen", &self.first_seen)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `reactions.emojis`: the set joined by `'\n'` (no valid emoji contains one).
+fn join_emojis(emojis: &[String]) -> String {
+    emojis.join("\n")
+}
+
+fn split_emojis(stored: &str) -> Vec<String> {
+    if stored.is_empty() {
+        Vec::new()
+    } else {
+        stored.split('\n').map(str::to_owned).collect()
+    }
+}
+
+type ReactionRaw = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    String,
+    i64,
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+);
+
+const REACTION_COLUMNS: &str =
+    "message_id, reactor, contact_fp, emojis, clock, tie, first_seen, first_tie";
+
+fn reaction_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReactionRaw> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+    ))
+}
+
+fn reaction_from_raw(raw: ReactionRaw) -> Result<ReactionRow> {
+    let (message_id, reactor, contact_fp, emojis, clock, tie, first_seen, first_tie) = raw;
+    Ok(ReactionRow {
+        message_id: MessageId(arr(message_id)?),
+        reactor: arr(reactor)?,
+        contact_fp: Fingerprint(arr(contact_fp)?),
+        emojis: split_emojis(&emojis),
+        clock: to_u64(clock),
+        tie: arr(tie)?,
+        first_seen: to_u64(first_seen),
+        first_tie: arr(first_tie)?,
+    })
 }
 
 impl fmt::Debug for MessageRow {
@@ -228,6 +352,8 @@ impl fmt::Debug for MessageRow {
             .field("status", &self.status)
             .field("at", &self.at)
             .field("message_id", &self.message_id)
+            .field("reply_to", &self.reply_to)
+            .field("placeholder", &self.placeholder)
             .finish()
     }
 }
@@ -324,6 +450,43 @@ pub struct MessageDeliveryDetail {
     pub own_copies: OwnCopies,
 }
 
+/// Delivery detail of my current reaction send toward the contact on a
+/// message (the reaction sheet): the same fields as `MessageDeliveryDetail`,
+/// over the deliveries of that send's tie.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactionDeliveryDetail {
+    /// The target message's row.
+    pub row_id: i64,
+    pub contact: Fingerprint,
+    /// My current set on the target; empty for a removal.
+    pub emojis: Vec<String>,
+    pub summary: DeliverySummary,
+    /// Deliveries to the contact's devices, then the copies for mine.
+    pub deliveries: Vec<DeviceDeliveryRow>,
+    pub relays: Vec<RelayHop>,
+    pub own_copies: OwnCopies,
+}
+
+/// The summary, deliveries (contact devices first), relays and copies
+/// for my devices of one send (`Queries::send_detail`).
+pub type SendDetail = (
+    DeliverySummary,
+    Vec<DeviceDeliveryRow>,
+    Vec<RelayHop>,
+    OwnCopies,
+);
+
+/// The state of a send from its deliveries `d` to the contact's devices,
+/// as an SQL aggregate: `Received` (3) if one is received, else
+/// `OnNetwork` (1) if one is on the network, else `Pending` (0) if one is
+/// pending, else `NotDelivered` (5). Shared by the message state
+/// (`recompute_message_status`) and the reaction state.
+pub(crate) const SEND_STATE_SQL: &str = "CASE \
+    WHEN sum(d.status = 3) > 0 THEN 3 \
+    WHEN sum(d.status = 1) > 0 THEN 1 \
+    WHEN sum(d.status = 0) > 0 THEN 0 \
+    ELSE 5 END";
+
 /// Sort of a pending packet that is not one of my messages to a contact
 /// (spec §5.7): the "Synchronisation" section, read only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -339,6 +502,8 @@ pub enum PendingKind {
     DeviceSync,
     /// My card update for a contact's device.
     CardUpdate,
+    /// A reaction packet (to a contact's device, or a copy for one of mine).
+    Reaction,
 }
 
 /// One of my messages with packets to the contact still pending.
@@ -379,6 +544,58 @@ pub struct PendingPackets {
     /// In `PendingKind` order, only the sorts that have packets.
     pub sync: Vec<PendingSync>,
     pub packets: u32,
+}
+
+/// Drops the reaction packets tracked by the `reaction_sends` rows that
+/// match `rows` (a condition on its columns, with `p`): first their queued
+/// packets, then their tracking (`forget_reaction_tracking`): their
+/// deliveries (keyed on these packet ids only: cards and syncs also have
+/// deliveries without a message row), then the rows, which the others
+/// select from.
+pub(crate) fn drop_reaction_packets(
+    q: &(impl Queries + ?Sized),
+    rows: &str,
+    p: impl rusqlite::Params + Copy,
+) -> Result<()> {
+    q.conn()
+        .execute(
+            &format!(
+                "DELETE FROM outbox WHERE packet_id IN \
+                 (SELECT packet_id FROM reaction_sends WHERE {rows})"
+            ),
+            p,
+        )
+        .map_err(map_err)?;
+    forget_reaction_tracking(q, rows, p)
+}
+
+/// Forgets the tracking of the reaction packets of the `reaction_sends`
+/// rows that match `rows` (as `drop_reaction_packets`): their deliveries
+/// go, then the rows of packets no longer queued. The rows of queued
+/// packets stay, flagged `superseded`: the packets still leave (an older
+/// set is a valid state, only no longer followed) and the Pending screen
+/// still counts them as reactions. A superseded row has no state, is never
+/// flagged expired nor resent, and goes at the full sync once its packet
+/// left the queue (`drop_left_superseded`).
+pub(crate) fn forget_reaction_tracking(
+    q: &(impl Queries + ?Sized),
+    rows: &str,
+    p: impl rusqlite::Params + Copy,
+) -> Result<()> {
+    for sql in [
+        format!(
+            "DELETE FROM deliveries WHERE packet_id IN \
+             (SELECT packet_id FROM reaction_sends WHERE {rows})"
+        ),
+        format!(
+            "DELETE FROM reaction_sends WHERE ({rows}) \
+             AND packet_id NOT IN (SELECT packet_id FROM outbox)"
+        ),
+        format!("UPDATE reaction_sends SET superseded = 1 WHERE {rows}"),
+    ] {
+        q.conn().execute(&sql, p).map_err(map_err)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn map_err(e: rusqlite::Error) -> CoreError {
@@ -655,6 +872,45 @@ impl Store {
                 .execute_batch(schema::OUTBOX_ADD_DEPOSIT_TRIED_AT)
                 .map_err(map_err)?;
         }
+        if stored.is_none_or(|v| v < 4) {
+            schema::migrate_v3_to_v4(&self.conn).map_err(map_err)?;
+        }
+        // `inbound.contact_fp`, added to v4 before its release (idempotent).
+        let has_inbound_contact: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('inbound') \
+                 WHERE name = 'contact_fp'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_inbound_contact {
+            self.conn
+                .execute_batch(schema::INBOUND_ADD_CONTACT_FP)
+                .map_err(map_err)?;
+        }
+        // `reaction_sends.superseded`, added to v4 before its release
+        // (idempotent).
+        let has_superseded: bool = self
+            .conn
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('reaction_sends') \
+                 WHERE name = 'superseded'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+        if !has_superseded {
+            self.conn
+                .execute_batch(schema::REACTION_SENDS_ADD_SUPERSEDED)
+                .map_err(map_err)?;
+        }
+        // `reaction_sends_target`, added to v4 before its release
+        // (idempotent).
+        self.conn
+            .execute_batch(schema::REACTION_SENDS_TARGET_INDEX)
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -892,19 +1148,46 @@ pub trait Queries {
         at: u64,
         message_id: MessageId,
     ) -> Result<bool> {
+        self.insert_message_row(&MessageInsert {
+            contact_fp,
+            direction,
+            body: body.to_owned(),
+            status,
+            at,
+            message_id,
+            wire_id: None,
+            reply_to: None,
+            reply_ref: None,
+            placeholder: false,
+        })
+    }
+
+    /// `insert_message` with the reply and wire columns. Same tombstone rule.
+    fn insert_message_row(&self, m: &MessageInsert) -> Result<bool> {
+        let reply_ref = m
+            .reply_ref
+            .as_ref()
+            .map(postcard::to_allocvec)
+            .transpose()
+            .map_err(|_| CoreError::Store("serialization".into()))?;
         let n = self
             .conn()
             .execute(
                 "INSERT OR IGNORE INTO messages(message_id, contact_fp, direction, body, \
-                 status, at) SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE NOT EXISTS \
+                 status, at, wire_id, reply_to, reply_ref, placeholder) \
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 WHERE NOT EXISTS \
                  (SELECT 1 FROM deleted_messages WHERE message_id = ?1)",
                 params![
-                    message_id.0.as_slice(),
-                    contact_fp.0.as_slice(),
-                    direction as i64,
-                    body,
-                    status as i64,
-                    to_i64(at)
+                    m.message_id.0.as_slice(),
+                    m.contact_fp.0.as_slice(),
+                    m.direction as i64,
+                    m.body,
+                    m.status as i64,
+                    to_i64(m.at),
+                    m.wire_id.as_ref().map(<[u8; 16]>::as_slice),
+                    m.reply_to.as_ref().map(|id| id.0.as_slice()),
+                    reply_ref,
+                    i64::from(m.placeholder),
                 ],
             )
             .map_err(map_err)?;
@@ -925,13 +1208,24 @@ pub trait Queries {
         Ok(())
     }
 
-    /// Records that the received packet `packet_id` carried the message
+    /// Records that the received packet `packet_id`, from the conversation
+    /// with `contact` (my own fingerprint for a sync), carried the message
     /// `message_id` (a resend adds a row for the same message).
-    fn record_inbound(&self, packet_id: PacketId, message_id: MessageId) -> Result<()> {
+    fn record_inbound(
+        &self,
+        packet_id: PacketId,
+        message_id: MessageId,
+        contact: Fingerprint,
+    ) -> Result<()> {
         self.conn()
             .execute(
-                "INSERT OR IGNORE INTO inbound(packet_id, message_id) VALUES (?1, ?2)",
-                params![packet_id.0.as_slice(), message_id.0.as_slice()],
+                "INSERT OR IGNORE INTO inbound(packet_id, message_id, contact_fp) \
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    packet_id.0.as_slice(),
+                    message_id.0.as_slice(),
+                    contact.0.as_slice()
+                ],
             )
             .map_err(map_err)?;
         Ok(())
@@ -980,6 +1274,125 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         Ok(n > 0)
+    }
+
+    /// The reactions of `reactor` on `message`, if any.
+    fn reaction(&self, message: MessageId, reactor: [u8; 32]) -> Result<Option<ReactionRow>> {
+        let raw = self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {REACTION_COLUMNS} FROM reactions \
+                     WHERE message_id = ?1 AND reactor = ?2"
+                ),
+                params![message.0.as_slice(), reactor.as_slice()],
+                reaction_raw,
+            )
+            .optional()
+            .map_err(map_err)?;
+        raw.map(reaction_from_raw).transpose()
+    }
+
+    /// Writes `r` if no row exists for its `(message_id, reactor)`, or if
+    /// its `(clock, tie)` is strictly greater than the stored one (`tie`
+    /// compared bytewise) within the same conversation; a replaced row keeps
+    /// its `first_seen` and `first_tie`. Returns whether it was written.
+    fn put_reaction_if_newer(&self, r: &ReactionRow) -> Result<bool> {
+        let n = self
+            .conn()
+            .execute(
+                &format!(
+                    "INSERT INTO reactions({REACTION_COLUMNS}) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                     ON CONFLICT(message_id, reactor) DO UPDATE SET \
+                     emojis = excluded.emojis, clock = excluded.clock, tie = excluded.tie \
+                     WHERE reactions.contact_fp = excluded.contact_fp \
+                     AND (excluded.clock, excluded.tie) > (reactions.clock, reactions.tie)"
+                ),
+                params![
+                    r.message_id.0.as_slice(),
+                    r.reactor.as_slice(),
+                    r.contact_fp.0.as_slice(),
+                    join_emojis(&r.emojis),
+                    to_i64(r.clock),
+                    r.tie.as_slice(),
+                    to_i64(r.first_seen),
+                    r.first_tie.as_slice(),
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(n == 1)
+    }
+
+    /// The reactions on `message` in the conversation with `contact`, in
+    /// first-seen order: `(first_seen, first_tie)`, the same on both sides.
+    fn reactions_on(&self, contact: Fingerprint, message: MessageId) -> Result<Vec<ReactionRow>> {
+        let mut stmt = self
+            .conn()
+            .prepare(&format!(
+                "SELECT {REACTION_COLUMNS} FROM reactions \
+                 WHERE message_id = ?1 AND contact_fp = ?2 ORDER BY first_seen, first_tie"
+            ))
+            .map_err(map_err)?;
+        let raws = stmt
+            .query_map(
+                params![message.0.as_slice(), contact.0.as_slice()],
+                reaction_raw,
+            )
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        raws.into_iter().map(reaction_from_raw).collect()
+    }
+
+    /// Every reaction of the conversation with `contact`, whether its
+    /// target is stored or not yet received (history archive).
+    fn reactions_with(&self, contact: Fingerprint) -> Result<Vec<ReactionRow>> {
+        let mut stmt = self
+            .conn()
+            .prepare(&format!(
+                "SELECT {REACTION_COLUMNS} FROM reactions WHERE contact_fp = ?1 \
+                 ORDER BY first_seen, first_tie, message_id, reactor"
+            ))
+            .map_err(map_err)?;
+        let raws = stmt
+            .query_map(params![contact.0.as_slice()], reaction_raw)
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        raws.into_iter().map(reaction_from_raw).collect()
+    }
+
+    /// Erases every reaction on `message`.
+    fn delete_reactions_of(&self, message: MessageId) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM reactions WHERE message_id = ?1",
+                params![message.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        // Nor may its queued reaction packets, their deliveries and their
+        // tracking keep the link (a removal still queued goes with them).
+        drop_reaction_packets(self, "message_id = ?1", params![message.0.as_slice()])
+    }
+
+    /// Drops my queued reaction packets about the conversation with
+    /// `contact` (to the contact and to my other devices), with their
+    /// deliveries and their tracking (`drop_reaction_packets`).
+    fn drop_reaction_packets_with(&self, contact: Fingerprint) -> Result<()> {
+        drop_reaction_packets(self, "contact_fp = ?1", params![contact.0.as_slice()])
+    }
+
+    /// Erases every reaction of the conversation with `contact`, mine
+    /// included.
+    fn delete_reactions_with(&self, contact: Fingerprint) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM reactions WHERE contact_fp = ?1",
+                params![contact.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(())
     }
 
     /// Marks the delivery `packet_id` as `Received`, acknowledged at `now`
@@ -1205,7 +1618,8 @@ pub trait Queries {
         let mut stmt = self
             .conn()
             .prepare(
-                "SELECT id, contact_fp, direction, body, status, at, message_id \
+                "SELECT id, contact_fp, direction, body, status, at, message_id, \
+                 wire_id, reply_to, reply_ref, placeholder \
                  FROM messages WHERE contact_fp = ?1 ORDER BY at, id",
             )
             .map_err(map_err)?;
@@ -1217,12 +1631,50 @@ pub trait Queries {
         raws.into_iter().map(message_from_raw).collect()
     }
 
+    /// The message with row id `id`, whatever its conversation.
+    fn message_by_row(&self, id: i64) -> Result<Option<MessageRow>> {
+        let raw = self
+            .conn()
+            .query_row(
+                "SELECT id, contact_fp, direction, body, status, at, message_id, \
+                 wire_id, reply_to, reply_ref, placeholder \
+                 FROM messages WHERE id = ?1",
+                params![id],
+                message_raw,
+            )
+            .optional()
+            .map_err(map_err)?;
+        raw.map(message_from_raw).transpose()
+    }
+
+    /// The message `message_id` of the conversation with `contact_fp`; one
+    /// of another conversation reads as absent.
+    fn message_in(
+        &self,
+        contact_fp: Fingerprint,
+        message_id: MessageId,
+    ) -> Result<Option<MessageRow>> {
+        let raw = self
+            .conn()
+            .query_row(
+                "SELECT id, contact_fp, direction, body, status, at, message_id, \
+                 wire_id, reply_to, reply_ref, placeholder \
+                 FROM messages WHERE message_id = ?1 AND contact_fp = ?2",
+                params![message_id.0.as_slice(), contact_fp.0.as_slice()],
+                message_raw,
+            )
+            .optional()
+            .map_err(map_err)?;
+        raw.map(message_from_raw).transpose()
+    }
+
     /// All messages, in insertion order (history archive).
     fn all_messages(&self) -> Result<Vec<MessageRow>> {
         let mut stmt = self
             .conn()
             .prepare(
-                "SELECT id, contact_fp, direction, body, status, at, message_id \
+                "SELECT id, contact_fp, direction, body, status, at, message_id, \
+                 wire_id, reply_to, reply_ref, placeholder \
                  FROM messages ORDER BY id",
             )
             .map_err(map_err)?;
@@ -1384,7 +1836,8 @@ pub trait Queries {
     /// unlike `seen`).
     fn message_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageRow>> {
         const COLS: &str = "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, \
-                            m.message_id FROM messages m";
+                            m.message_id, m.wire_id, m.reply_to, m.reply_ref, m.placeholder \
+                            FROM messages m";
         let out = self
             .conn()
             .query_row(
@@ -1418,8 +1871,10 @@ pub trait Queries {
     /// Deletes a contact, all its sessions and its packets in the send
     /// queue: my messages for it that never left (no deposit recorded nor
     /// tried: a deposited one stays for its verdict, `confirm_expired`), my
-    /// card updates for its devices and my acknowledgements of its
-    /// messages (the history is kept). The `SyncSent` copies of my
+    /// card updates for its devices, my acknowledgements of its packets
+    /// (messages, reactions, content set aside: the history is kept), and
+    /// my reaction packets about the conversation, to it and to my other
+    /// devices, with their deliveries. The `SyncSent` copies of my
     /// messages for my other devices stay in the queue. Their pending
     /// deliveries are the caller's (`core::contacts::delete_in`).
     fn delete_contact(&self, fp: Fingerprint) -> Result<()> {
@@ -1489,6 +1944,15 @@ pub trait Queries {
                 self.outbox_remove(PacketId(arr(id)?))?;
             }
         }
+        // And those of its packets without a message row (reactions,
+        // content set aside, cards), by the sender `inbound` recorded.
+        self.conn()
+            .execute(
+                "DELETE FROM outbox WHERE kind = ?1 AND ref IN \
+                 (SELECT packet_id FROM inbound WHERE contact_fp = ?2)",
+                params![Kind::Ack as i64, fp.0.as_slice()],
+            )
+            .map_err(map_err)?;
         self.conn()
             .execute(
                 "DELETE FROM sessions WHERE contact_fp = ?1",
@@ -1496,6 +1960,8 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         self.delete_draft(fp)?;
+        self.delete_reactions_with(fp)?;
+        self.drop_reaction_packets_with(fp)?;
         self.conn()
             .execute(
                 "DELETE FROM contacts WHERE fp = ?1",
@@ -1869,97 +2335,8 @@ pub trait Queries {
         else {
             return Ok(None);
         };
-        let mid = message.message_id.0;
-        let mut stmt = self
-            .conn()
-            .prepare(
-                "SELECT device, own, status, sealed_at, deposited_at, node, acked_at, \
-                 expired_at, size FROM deliveries WHERE message_id = ?1 \
-                 ORDER BY own, sealed_at, rowid",
-            )
-            .map_err(map_err)?;
-        type Raw = (
-            Vec<u8>,
-            bool,
-            i64,
-            i64,
-            Option<i64>,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-        );
-        let raws = stmt
-            .query_map(params![mid.as_slice()], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                ))
-            })
-            .map_err(map_err)?
-            .collect::<rusqlite::Result<Vec<Raw>>>()
-            .map_err(map_err)?;
-        let mut deliveries = Vec::with_capacity(raws.len());
-        let mut own_copies = OwnCopies::default();
-        for (device, own, status, sealed, deposited, node, acked, expired, size) in raws {
-            let state = MessageStatus::from_i64(status)?;
-            if own {
-                own_copies.total += 1;
-                match state {
-                    MessageStatus::Pending => own_copies.waiting += 1,
-                    MessageStatus::OnNetwork | MessageStatus::Received => own_copies.left += 1,
-                    MessageStatus::NotDelivered => {}
-                }
-            }
-            deliveries.push(DeviceDeliveryRow {
-                device: DeviceId(arr(device)?),
-                own,
-                state,
-                sealed_at: to_u64(sealed),
-                deposited_at: deposited.map(to_u64),
-                node,
-                received_at: acked.map(to_u64),
-                expired_at: expired.map(to_u64),
-                size: size.map(|s| u32::try_from(s).unwrap_or(u32::MAX)),
-            });
-        }
-        // Relays: the `Deposited` steps of the contact packets, or, for a
-        // packet whose steps are purged, its delivery's first node.
-        let mut stmt = self
-            .conn()
-            .prepare(
-                "SELECT node, min(at), max(size) FROM ( \
-                 SELECT r.node AS node, r.at AS at, d.size AS size FROM deliveries d \
-                 JOIN route_steps r ON r.packet_id = d.packet_id AND r.step = ?2 \
-                 WHERE d.message_id = ?1 AND d.own = 0 AND r.node IS NOT NULL \
-                 UNION ALL \
-                 SELECT d.node, d.deposited_at, d.size FROM deliveries d \
-                 WHERE d.message_id = ?1 AND d.own = 0 AND d.node IS NOT NULL \
-                 AND d.deposited_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM route_steps r \
-                 WHERE r.packet_id = d.packet_id AND r.step = ?2)) \
-                 GROUP BY node ORDER BY min(at), node",
-            )
-            .map_err(map_err)?;
-        let relays = stmt
-            .query_map(params![mid.as_slice(), ROUTE_STEP_DEPOSITED], |r| {
-                Ok(RelayHop {
-                    node: r.get(0)?,
-                    at: to_u64(r.get(1)?),
-                    size: r
-                        .get::<_, Option<i64>>(2)?
-                        .map_or(0, |s| u32::try_from(s).unwrap_or(u32::MAX)),
-                })
-            })
-            .map_err(map_err)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(map_err)?;
+        let (deliveries, relays, own_copies) =
+            deliveries_and_relays(self.conn(), message.message_id)?;
         Ok(Some(MessageDeliveryDetail {
             row_id,
             contact: message.contact_fp,
@@ -1968,6 +2345,52 @@ pub trait Queries {
             relays,
             own_copies,
         }))
+    }
+
+    /// The state of the send whose packets carry `tie` as message
+    /// identifier, from its deliveries to the contact (`SEND_STATE_SQL`);
+    /// `None` without any.
+    fn send_state(&self, tie: MessageId) -> Result<Option<MessageStatus>> {
+        let state: Option<i64> = self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {SEND_STATE_SQL} FROM deliveries d \
+                     WHERE d.message_id = ?1 AND d.own = 0 HAVING count(*) > 0"
+                ),
+                params![tie.0.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(map_err)?;
+        state.map(MessageStatus::from_i64).transpose()
+    }
+
+    /// The summary, deliveries and relays of the send whose packets carry
+    /// `tie`, computed as `message_delivery` computes them for a message
+    /// (its state from `send_state`). `None` without a delivery to the
+    /// contact.
+    fn send_detail(&self, tie: MessageId) -> Result<Option<SendDetail>> {
+        let Some(state) = self.send_state(tie)? else {
+            return Ok(None);
+        };
+        let agg = self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {SUMMARY_AGG_SQL} FROM deliveries d \
+                     LEFT JOIN outbox o ON o.packet_id = d.packet_id \
+                     WHERE d.message_id = ?1 AND d.own = 0"
+                ),
+                params![tie.0.as_slice()],
+                |r| summary_agg(r, 0),
+            )
+            .map_err(map_err)?;
+        let Some(summary) = summary_from_agg(state, agg) else {
+            return Ok(None);
+        };
+        let (deliveries, relays, own_copies) = deliveries_and_relays(self.conn(), tie)?;
+        Ok(Some((summary, deliveries, relays, own_copies)))
     }
 
     /// Number of packets in the send queue that no node accepted yet and
@@ -2062,8 +2485,10 @@ pub trait Queries {
                   JOIN messages mi ON mi.message_id = i.message_id AND mi.direction = ?3 \
                   WHERE i.packet_id = o.ref LIMIT 1), \
                  (SELECT s.contact_fp FROM sessions s \
-                  WHERE s.contact_device = d.device LIMIT 1) \
+                  WHERE s.contact_device = d.device LIMIT 1), \
+                 rs.packet_id IS NOT NULL, rs.contact_fp \
                  FROM outbox o \
+                 LEFT JOIN reaction_sends rs ON rs.packet_id = o.packet_id \
                  LEFT JOIN deliveries d ON d.packet_id = o.packet_id \
                  LEFT JOIN messages m ON m.message_id = d.message_id AND m.direction = ?2 \
                  WHERE o.deposited_at IS NULL AND o.expires_at >= ?1 \
@@ -2078,6 +2503,8 @@ pub trait Queries {
             Option<bool>,
             Option<Vec<u8>>,
             Option<Vec<u8>>,
+            bool,
+            Option<Vec<u8>>,
         );
         let raws = stmt
             .query_map(
@@ -2091,6 +2518,8 @@ pub trait Queries {
                         r.get(4)?,
                         r.get(5)?,
                         r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
                     ))
                 },
             )
@@ -2099,8 +2528,21 @@ pub trait Queries {
             .map_err(map_err)?;
         let mut sync: std::collections::BTreeMap<PendingKind, (u32, Vec<Fingerprint>)> =
             std::collections::BTreeMap::new();
-        for (kind, delivered, own, row_contact, tombstone, ack_contact, device_contact) in raws {
-            let (kind, contact) = if kind == Kind::Ack as i64 {
+        for (
+            kind,
+            delivered,
+            own,
+            row_contact,
+            tombstone,
+            ack_contact,
+            device_contact,
+            reaction,
+            reaction_contact,
+        ) in raws
+        {
+            let (kind, contact) = if reaction {
+                (PendingKind::Reaction, reaction_contact)
+            } else if kind == Kind::Ack as i64 {
                 (PendingKind::Ack, ack_contact)
             } else if !delivered {
                 // A queued message packet without a delivery: none is
@@ -2173,13 +2615,189 @@ impl Queries for Tx<'_> {
     }
 }
 
-type MessageRaw = (i64, Vec<u8>, i64, String, i64, i64, Vec<u8>);
+type MessageRaw = (
+    i64,
+    Vec<u8>,
+    i64,
+    String,
+    i64,
+    i64,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    i64,
+);
 
 /// Ids per query of `Queries::deliveries_of`.
 pub const SUMMARY_CHUNK: usize = 200;
 
 /// `RouteStep::Deposited` as stored (`core::route`).
 const ROUTE_STEP_DEPOSITED: i64 = 1;
+
+/// The deliveries keyed on `message_id` (to the contact, then to my
+/// devices, each group by sealing date), the nodes that accepted its
+/// contact packets, and the count of its copies for my devices
+/// (`Queries::message_delivery`, `Queries::send_detail`).
+fn deliveries_and_relays(
+    conn: &Connection,
+    message_id: MessageId,
+) -> Result<(Vec<DeviceDeliveryRow>, Vec<RelayHop>, OwnCopies)> {
+    let mid = message_id.0;
+    let mut stmt = conn
+        .prepare(
+            "SELECT device, own, status, sealed_at, deposited_at, node, acked_at, \
+             expired_at, size FROM deliveries WHERE message_id = ?1 \
+             ORDER BY own, sealed_at, rowid",
+        )
+        .map_err(map_err)?;
+    type Raw = (
+        Vec<u8>,
+        bool,
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    );
+    let raws = stmt
+        .query_map(params![mid.as_slice()], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<Vec<Raw>>>()
+        .map_err(map_err)?;
+    let mut deliveries = Vec::with_capacity(raws.len());
+    let mut own_copies = OwnCopies::default();
+    for (device, own, status, sealed, deposited, node, acked, expired, size) in raws {
+        let state = MessageStatus::from_i64(status)?;
+        if own {
+            own_copies.total += 1;
+            match state {
+                MessageStatus::Pending => own_copies.waiting += 1,
+                MessageStatus::OnNetwork | MessageStatus::Received => own_copies.left += 1,
+                MessageStatus::NotDelivered => {}
+            }
+        }
+        deliveries.push(DeviceDeliveryRow {
+            device: DeviceId(arr(device)?),
+            own,
+            state,
+            sealed_at: to_u64(sealed),
+            deposited_at: deposited.map(to_u64),
+            node,
+            received_at: acked.map(to_u64),
+            expired_at: expired.map(to_u64),
+            size: size.map(|s| u32::try_from(s).unwrap_or(u32::MAX)),
+        });
+    }
+    // Relays: the `Deposited` steps of the contact packets, or, for a
+    // packet whose steps are purged, its delivery's first node.
+    let mut stmt = conn
+        .prepare(
+            "SELECT node, min(at), max(size) FROM ( \
+             SELECT r.node AS node, r.at AS at, d.size AS size FROM deliveries d \
+             JOIN route_steps r ON r.packet_id = d.packet_id AND r.step = ?2 \
+             WHERE d.message_id = ?1 AND d.own = 0 AND r.node IS NOT NULL \
+             UNION ALL \
+             SELECT d.node, d.deposited_at, d.size FROM deliveries d \
+             WHERE d.message_id = ?1 AND d.own = 0 AND d.node IS NOT NULL \
+             AND d.deposited_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM route_steps r \
+             WHERE r.packet_id = d.packet_id AND r.step = ?2)) \
+             GROUP BY node ORDER BY min(at), node",
+        )
+        .map_err(map_err)?;
+    let relays = stmt
+        .query_map(params![mid.as_slice(), ROUTE_STEP_DEPOSITED], |r| {
+            Ok(RelayHop {
+                node: r.get(0)?,
+                at: to_u64(r.get(1)?),
+                size: r
+                    .get::<_, Option<i64>>(2)?
+                    .map_or(0, |s| u32::try_from(s).unwrap_or(u32::MAX)),
+            })
+        })
+        .map_err(map_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map_err)?;
+    Ok((deliveries, relays, own_copies))
+}
+
+/// The aggregate columns of a send's deliveries `d` to the contact
+/// (`own = 0`), with the send queue `o` left-joined on each packet: read
+/// by `summary_agg`, mapped by `summary_from_agg`. Shared by `summaries`
+/// (per message) and `Queries::send_detail` (per reaction tie).
+const SUMMARY_AGG_SQL: &str = "count(d.packet_id), coalesce(sum(d.status = 3), 0), \
+     coalesce(sum(d.status IN (1, 3)), 0), coalesce(sum(d.status = 0), 0), \
+     min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at), \
+     coalesce(sum(d.status = 0 AND o.deposit_tried_at IS NOT NULL), 0), \
+     coalesce(sum(d.status = 1 AND o.packet_id IS NOT NULL), 0)";
+
+/// The values of `SUMMARY_AGG_SQL`, in its order.
+type SummaryAgg = (
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    i64,
+    i64,
+);
+
+/// Reads the `SUMMARY_AGG_SQL` columns of `r` from column `at`.
+fn summary_agg(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<SummaryAgg> {
+    Ok((
+        r.get(at)?,
+        r.get(at + 1)?,
+        r.get(at + 2)?,
+        r.get(at + 3)?,
+        r.get(at + 4)?,
+        r.get(at + 5)?,
+        r.get(at + 6)?,
+        r.get(at + 7)?,
+        r.get(at + 8)?,
+        r.get(at + 9)?,
+    ))
+}
+
+/// The summary of a send in `state` from its aggregate; `None` without
+/// any delivery to the contact. The latest expiry counts only once the
+/// send is `NotDelivered`.
+fn summary_from_agg(state: MessageStatus, agg: SummaryAgg) -> Option<DeliverySummary> {
+    let (devices, received, left, pending, sealed, deposited, acked, expired, tried, awaiting) =
+        agg;
+    let count = |n: i64| u32::try_from(n).unwrap_or(u32::MAX);
+    (devices > 0).then(|| DeliverySummary {
+        state,
+        sealed_at: sealed.map_or(0, to_u64),
+        deposited_at: deposited.map(to_u64),
+        received_at: acked.map(to_u64),
+        expired_at: expired
+            .filter(|_| state == MessageStatus::NotDelivered)
+            .map(to_u64),
+        devices: count(devices),
+        devices_received: count(received),
+        devices_left: count(left),
+        devices_tried: count(tried),
+        devices_pending: count(pending),
+        awaiting_verdict: awaiting > 0,
+    })
+}
 
 /// The delivery summary query of spec §5.8: messages matching `filter`,
 /// each with the aggregate of its deliveries to the contact (`own = 0`;
@@ -2196,81 +2814,22 @@ fn summaries(
 ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
     let sql = format!(
         "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, m.message_id, \
-         count(d.packet_id), coalesce(sum(d.status = 3), 0), \
-         coalesce(sum(d.status IN (1, 3)), 0), coalesce(sum(d.status = 0), 0), \
-         min(d.sealed_at), min(d.deposited_at), min(d.acked_at), max(d.expired_at), \
-         coalesce(sum(d.status = 0 AND o.deposit_tried_at IS NOT NULL), 0), \
-         coalesce(sum(d.status = 1 AND o.packet_id IS NOT NULL), 0) \
+         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, {SUMMARY_AGG_SQL} \
          FROM messages m \
          LEFT JOIN deliveries d ON d.message_id = m.message_id AND d.own = 0 AND m.direction = 0 \
          LEFT JOIN outbox o ON o.packet_id = d.packet_id \
          WHERE {filter} GROUP BY {group} {having} ORDER BY {order}"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(map_err)?;
-    type Agg = (
-        i64,
-        i64,
-        i64,
-        i64,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        i64,
-        i64,
-    );
     let raws = stmt
-        .query_map(args, |r| {
-            Ok((
-                message_raw(r)?,
-                (
-                    r.get(7)?,
-                    r.get(8)?,
-                    r.get(9)?,
-                    r.get(10)?,
-                    r.get(11)?,
-                    r.get(12)?,
-                    r.get(13)?,
-                    r.get(14)?,
-                    r.get(15)?,
-                    r.get(16)?,
-                ),
-            ))
-        })
+        .query_map(args, |r| Ok((message_raw(r)?, summary_agg(r, 11)?)))
         .map_err(map_err)?
-        .collect::<rusqlite::Result<Vec<(MessageRaw, Agg)>>>()
+        .collect::<rusqlite::Result<Vec<(MessageRaw, SummaryAgg)>>>()
         .map_err(map_err)?;
-    let count = |n: i64| u32::try_from(n).unwrap_or(u32::MAX);
     raws.into_iter()
         .map(|(raw, agg)| {
             let message = message_from_raw(raw)?;
-            let (
-                devices,
-                received,
-                left,
-                pending,
-                sealed,
-                deposited,
-                acked,
-                expired,
-                tried,
-                awaiting,
-            ) = agg;
-            let summary = (devices > 0).then(|| DeliverySummary {
-                state: message.status,
-                sealed_at: sealed.map_or(0, to_u64),
-                deposited_at: deposited.map(to_u64),
-                received_at: acked.map(to_u64),
-                expired_at: expired
-                    .filter(|_| message.status == MessageStatus::NotDelivered)
-                    .map(to_u64),
-                devices: count(devices),
-                devices_received: count(received),
-                devices_left: count(left),
-                devices_tried: count(tried),
-                devices_pending: count(pending),
-                awaiting_verdict: awaiting > 0,
-            });
+            let summary = summary_from_agg(message.status, agg);
             Ok((message, summary))
         })
         .collect()
@@ -2285,10 +2844,16 @@ fn message_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRaw> {
         r.get(4)?,
         r.get(5)?,
         r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
     ))
 }
 
-fn message_from_raw((id, fp, dir, body, st, at, mid): MessageRaw) -> Result<MessageRow> {
+fn message_from_raw(
+    (id, fp, dir, body, st, at, mid, wire, reply_to, reply_ref, placeholder): MessageRaw,
+) -> Result<MessageRow> {
     Ok(MessageRow {
         id,
         contact_fp: Fingerprint(arr(fp)?),
@@ -2297,6 +2862,13 @@ fn message_from_raw((id, fp, dir, body, st, at, mid): MessageRaw) -> Result<Mess
         status: MessageStatus::from_i64(st)?,
         at: to_u64(at),
         message_id: MessageId(arr(mid)?),
+        wire_id: wire.map(arr).transpose()?,
+        reply_to: reply_to.map(|b| arr(b).map(MessageId)).transpose()?,
+        reply_ref: reply_ref
+            .map(|b| postcard::from_bytes(&b))
+            .transpose()
+            .map_err(|_| CoreError::Store("invalid reply reference".into()))?,
+        placeholder: placeholder != 0,
     })
 }
 
