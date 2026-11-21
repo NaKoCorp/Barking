@@ -120,6 +120,10 @@ final class ConversationModel {
     /// The message the next send answers. Not part of the draft (spec §5.6):
     /// it is kept when a send fails and dropped when its row is gone.
     private(set) var replyingTo: Item?
+    /// The disappearing delay of the next send, in seconds (spec §5.5). Never
+    /// part of the draft: it goes back to nil after a send and when the
+    /// conversation disappears; a failed send keeps it with the draft.
+    var ttl: UInt32?
     /// The row a tapped quote jumped to, lit for `highlightDuration`.
     private(set) var highlighted: Int64?
     var highlightDuration: Duration = .milliseconds(1500)
@@ -157,6 +161,17 @@ final class ConversationModel {
         let line = item.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         return (item.outgoing ? String(localized: "You", bundle: bundle, locale: locale) : name,
                 String(line.prefix(Self.bannerChars)))
+    }
+
+    /// The warning above the field while a delay is set: when it erases here
+    /// and there, and that the contact can still take a screenshot.
+    func ephemeralBanner(bundle: Bundle = .main, locale: Locale = .current) -> String? {
+        guard let ttl else { return nil }
+        let delay = EphemeralDelay(seconds: ttl).longLabel(bundle: bundle, locale: locale)
+        let format = bundle.localizedString(
+            forKey: "Disappears %1$@ after sending for you, %1$@ after reading for %2$@. %2$@ can take a screenshot.",
+            value: nil, table: nil)
+        return String(format: format, locale: locale, delay, name)
     }
 
     /// What the quote of `item` shows: its author ("You" or the contact) and
@@ -210,6 +225,7 @@ final class ConversationModel {
 
     func onDisappear() {
         visible = false
+        ttl = nil
         onScreen = []
     }
 
@@ -314,6 +330,7 @@ final class ConversationModel {
         notice = nil
         let at = now()
         let replyId = replyingTo?.id
+        let delay = ttl
         let shown = Item(id: nextLocalId, outgoing: true, text: text, at: at,
                          delivery: Delivery(state: .pending, sealedAt: UInt64(at.timeIntervalSince1970),
                                             depositedAt: nil, receivedAt: nil, expiredAt: nil, devices: 0,
@@ -323,8 +340,9 @@ final class ConversationModel {
         shownAtSend = shown
         items.append(shown)
         do {
-            try await core.send(text, to: contact, replyTo: replyId)
+            try await core.send(text, to: contact, replyTo: replyId, ttlSecs: delay)
             replyingTo = nil
+            ttl = nil
             // Sent: the stored draft goes too. Not before, so a failure keeps it.
             if (try? await core.setDraft(contact, text: "")) != nil { lastSaved = "" }
         } catch {

@@ -536,3 +536,16 @@
 "Resend reaction" = "Renvoyer la réaction";
 "Your reaction · %@" = "Votre réaction · %@";
 "Your reaction · removed" = "Votre réaction · retirée";
+"No delay" = "Aucun délai";
+"1 hour" = "1 heure";
+"1 day" = "1 jour";
+"1 week" = "1 semaine";
+"Custom…" = "Personnalisé…";
+"Custom delay" = "Délai personnalisé";
+"Set" = "Choisir";
+"Disappearing delay" = "Délai d’effacement";
+"%lld d" = "%lld j";
+"days" = "jours";
+"hours" = "heures";
+"minutes" = "minutes";
+"Disappears %1$@ after sending for you, %1$@ after reading for %2$@. %2$@ can take a screenshot." = "S’efface %1$@ après l’envoi chez vous, %1$@ après lecture chez %2$@. %2$@ peut faire une capture d’écran.";

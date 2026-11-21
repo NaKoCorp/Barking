@@ -394,12 +394,16 @@ struct ComposerView: View {
             if let banner = model.replyBanner(bundle: .strings(for: locale), locale: locale) {
                 replyBanner(banner)
             }
+            if let warning = model.ephemeralBanner(bundle: .strings(for: locale), locale: locale) {
+                ephemeralBanner(warning)
+            }
             if model.showsCounter {
                 Text(verbatim: "\(model.byteCount) / \(ConversationModel.maxBytes)")
                     .font(BarkingFont.mono(.caption2, size: 11))
                     .foregroundStyle(model.byteCount > ConversationModel.maxBytes ? Color.danger : Color.fgSoft)
             }
             HStack(spacing: 8) {
+                EphemeralMenu(model: model)
                 TextField("Message", text: $model.draft, axis: .vertical)
                     .lineLimit(1...5)
                     .padding(.horizontal, 14).padding(.vertical, 10)
@@ -426,6 +430,21 @@ struct ComposerView: View {
 }
 
 extension ComposerView {
+    /// When a delay is set: when the message erases for you and for the
+    /// contact, and that a screenshot stays possible (§5.5).
+    fileprivate func ephemeralBanner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "hourglass").font(.bSymbol(13, weight: .semibold, maximum: 20))
+                .foregroundStyle(Color.accent)
+            Text(verbatim: text).font(BarkingFont.sans(.footnote, size: 13))
+                .foregroundStyle(Color.fgMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("composer.delayBanner")
+    }
+
     /// "Replying to Sam", the start of the original, and an ✕ (§5.6). Not
     /// part of the draft.
     fileprivate func replyBanner(_ banner: (name: String, excerpt: String)) -> some View {
