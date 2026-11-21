@@ -199,6 +199,8 @@ pub enum SyncKind {
     Reaction,
     /// Messages I deleted on another device (`SyncDelete`). Added last.
     Delete,
+    /// Ephemeral messages shown on another device (`SyncSeen`). Added last.
+    Seen,
 }
 
 impl SyncKind {
@@ -211,6 +213,7 @@ impl SyncKind {
             SyncKind::Admin => "admin key",
             SyncKind::Reaction => "reaction",
             SyncKind::Delete => "deletion",
+            SyncKind::Seen => "seen",
         }
     }
 }
@@ -679,6 +682,9 @@ mod tests {
             TransparencyEvent::SyncApplied {
                 kind: SyncKind::Delete,
             },
+            TransparencyEvent::SyncApplied {
+                kind: SyncKind::Seen,
+            },
         ]
     }
 
@@ -799,6 +805,10 @@ mod tests {
         assert_eq!(
             d(SyncKind::Delete),
             "Synchronized from one of your devices: deletion."
+        );
+        assert_eq!(
+            d(SyncKind::Seen),
+            "Synchronized from one of your devices: seen."
         );
         assert!(
             !TransparencyEvent::SyncApplied {

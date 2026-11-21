@@ -39,6 +39,7 @@
 "log.arg.sync_admin" = "clé d’administrateur";
 "log.arg.sync_reaction" = "réaction";
 "log.arg.sync_deletion" = "suppression";
+"log.arg.sync_seen" = "vu";
 "log.arg.node_lost" = "un message déposé là-bas s’est perdu";
 "log.arg.node_unreachable" = "il ne répondait plus";
 "log.arg.intro_mailbox" = "Premier message d’une session : sa boîte est calculée à partir des clés publiques (signature et accord de clés) de l’appareil destinataire et du jour.";

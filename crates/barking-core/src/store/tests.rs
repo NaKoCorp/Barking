@@ -115,7 +115,7 @@ fn contacts_sessions_messages_events() {
     store.add_delivery(mid, pid, dev, false, 5, 1024).unwrap();
     assert_eq!(store.mark_delivered_by_packet(pid, 9).unwrap(), Some(mid));
     crate::core::delivery::recompute_message_status(&store, mid).unwrap();
-    let m = store.messages_with(fp).unwrap();
+    let m = store.messages_with(fp, 0).unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(m[0].status, MessageStatus::Received);
     assert_eq!(m[0].direction, Direction::Out);
@@ -222,7 +222,7 @@ fn message_lookup_and_deletions() {
     assert!(store.get_contact(fp).unwrap().is_none());
     assert!(store.all_sessions().unwrap().is_empty());
     // The history remains.
-    assert_eq!(store.messages_with(fp).unwrap().len(), 1);
+    assert_eq!(store.messages_with(fp, 0).unwrap().len(), 1);
 }
 
 #[test]
@@ -387,7 +387,7 @@ fn message_row_debug_hides_body() {
             MessageId([1; 16]),
         )
         .unwrap();
-    let row = store.messages_with(fp).unwrap().remove(0);
+    let row = store.messages_with(fp, 0).unwrap().remove(0);
     let dbg = format!("{row:?}");
     assert!(!dbg.contains("the body secret"), "{dbg}");
     assert!(dbg.contains("15 bytes"), "{dbg}");
@@ -677,7 +677,7 @@ fn insert_message_duplicate_id_returns_false() {
     };
     assert!(ins("a"));
     assert!(!ins("b"));
-    assert_eq!(store.messages_with(fp).unwrap().len(), 1);
+    assert_eq!(store.messages_with(fp, 0).unwrap().len(), 1);
 }
 
 #[test]
@@ -739,7 +739,7 @@ fn migration_v1_keeps_history_and_acks() {
     }
     let store = Store::open(&path, &KEY).unwrap();
     assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
-    let m = store.messages_with(fp).unwrap();
+    let m = store.messages_with(fp, 0).unwrap();
     let bodies: Vec<_> = m
         .iter()
         .map(|r| (r.body.as_str(), r.direction, r.status))
@@ -770,13 +770,13 @@ fn migration_v1_keeps_history_and_acks() {
         Some(m[1].message_id)
     );
     crate::core::delivery::recompute_message_status(&store, m[1].message_id).unwrap();
-    let after = store.messages_with(fp).unwrap();
+    let after = store.messages_with(fp, 0).unwrap();
     assert_eq!(after.len(), 3);
     assert_eq!(after[1].status, MessageStatus::Received);
     // Reopening: the migration is not replayed.
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.messages_with(fp).unwrap().len(), 3);
+    assert_eq!(store.messages_with(fp, 0).unwrap().len(), 3);
 }
 
 #[test]
@@ -809,7 +809,7 @@ fn migration_from_pre_1a_database() {
     }
     let store = Store::open(&path, &KEY).unwrap();
     assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(5));
-    let m = store.messages_with(fp).unwrap();
+    let m = store.messages_with(fp, 0).unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(
         (m[0].body.as_str(), m[0].direction, m[0].status, m[0].at),
@@ -838,7 +838,7 @@ fn migration_from_pre_1a_database() {
     // Reopening: nothing is replayed.
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.messages_with(fp).unwrap().len(), 1);
+    assert_eq!(store.messages_with(fp, 0).unwrap().len(), 1);
     assert_eq!(store.events(10).unwrap().len(), 2);
 }
 
@@ -921,7 +921,7 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
     crate::core::delivery::recompute_message_status(&store, mid).unwrap();
     assert!(store.delivery_acked(to_me).unwrap());
     assert_eq!(
-        store.messages_with(fp).unwrap()[0].status,
+        store.messages_with(fp, 0).unwrap()[0].status,
         MessageStatus::Pending
     );
     // Contact deletion: the copy for my device stays in the queue.
@@ -1483,7 +1483,7 @@ fn ephemeral_columns_round_trip() {
     insert(2, Some(300), None, Some(604_900));
     insert(3, Some(60), Some(150), Some(210));
     let got: Vec<_> = store
-        .messages_with(fp)
+        .messages_with(fp, 0)
         .unwrap()
         .into_iter()
         .map(|m| (m.ttl_secs, m.seen_at, m.expire_at))
@@ -1496,9 +1496,9 @@ fn ephemeral_columns_round_trip() {
             (Some(60), Some(150), Some(210)),
         ]
     );
-    let row = store.messages_with(fp).unwrap()[2].clone();
+    let row = store.messages_with(fp, 0).unwrap()[2].clone();
     assert_eq!(store.message_by_row(row.id).unwrap(), Some(row.clone()));
-    assert_eq!(store.message_in(fp, row.message_id).unwrap(), Some(row));
+    assert_eq!(store.message_in(fp, row.message_id, 0).unwrap(), Some(row));
 }
 
 /// A message row to insert carries plaintext: dropped, it is wiped
@@ -1507,4 +1507,125 @@ fn ephemeral_columns_round_trip() {
 fn message_insert_wipes_its_body() {
     fn assert_zod<T: zeroize::ZeroizeOnDrop>() {}
     assert_zod::<MessageInsert>();
+}
+
+#[test]
+fn journal_is_not_wal() {
+    let (_d, _p, store) = open_tmp();
+    let mode: String = store
+        .conn()
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_ne!(mode.to_lowercase(), "wal");
+    assert_eq!(mode.to_lowercase(), "delete");
+}
+
+/// Marker text of `expired_text_absent_from_decrypted_pages`.
+const MARKER: &str = "ZQX-ephemeral-marker-7d1f0c-QXZ";
+
+/// An unencrypted store at `path` (`secure_delete` as given) holding two
+/// ephemerals carrying `MARKER` (one short, one long enough to spill onto
+/// overflow pages) among plain messages, seen once (their cells rewritten),
+/// then erased by the production sweep. Returns the raw file bytes after
+/// the insert and after the store is closed.
+fn erase_marked(path: &std::path::Path, secure_delete: bool) -> (Vec<u8>, Vec<u8>) {
+    let mut store = Store::open_unencrypted(path).unwrap();
+    if !secure_delete {
+        store
+            .conn()
+            .execute_batch("PRAGMA secure_delete = OFF;")
+            .unwrap();
+    }
+    let fp = Fingerprint([4; 32]);
+    let long = format!("{MARKER} {}", "x".repeat(3_000)) + MARKER;
+    let bodies = [
+        (1u8, "plain before".to_owned(), None),
+        (2, format!("short {MARKER}"), Some(60)),
+        (3, long, Some(60)),
+        (4, "plain after".to_owned(), None),
+    ];
+    store
+        .transaction(|tx| {
+            for (id, body, ttl) in &bodies {
+                tx.insert_message_row(&MessageInsert {
+                    contact_fp: fp,
+                    direction: Direction::In,
+                    body: body.clone(),
+                    status: MessageStatus::Received,
+                    at: 100,
+                    message_id: MessageId([*id; 16]),
+                    wire_id: Some([*id; 16]),
+                    reply_to: None,
+                    reply_ref: None,
+                    placeholder: false,
+                    ttl_secs: *ttl,
+                    seen_at: None,
+                    expire_at: ttl.map(|_| 100 + 604_800),
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    // Seen (as `Core::mark_seen` writes it): the cells are rewritten.
+    store
+        .conn()
+        .execute(
+            "UPDATE messages SET seen_at = 200, expire_at = 260 WHERE ttl_secs IS NOT NULL",
+            [],
+        )
+        .unwrap();
+    let before = std::fs::read(path).unwrap();
+    let erased = store
+        .transaction(|tx| crate::core::ephemeral::sweep(tx, 260))
+        .unwrap();
+    assert_eq!(erased.len(), 2);
+    assert_eq!(store.messages_with(fp, 0).unwrap().len(), 2);
+    drop(store);
+    let mut journal = path.as_os_str().to_owned();
+    journal.push("-journal");
+    assert!(
+        !std::path::Path::new(&journal).exists(),
+        "no rollback journal left"
+    );
+    (before, std::fs::read(path).unwrap())
+}
+
+fn holds(bytes: &[u8], needle: &str) -> bool {
+    bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+/// An expired ephemeral's text is in no page of the database, free pages
+/// included.
+///
+/// Method: the bundled SQLCipher is built without
+/// `SQLITE_ENABLE_DBPAGE_VTAB` (`sqlite_dbpage` is absent, checked first),
+/// so the pages are read through the fallback the plan allows: an
+/// unencrypted test store (`Store::open_unencrypted`: the production
+/// opening, schema and `secure_delete = ON`, only the key step left out),
+/// whose raw file is every page in clear. The positive control finds the
+/// marker in the file before the erasure; a control store with
+/// `secure_delete = OFF` still holds it after the same erasure, which
+/// shows the scan sees freed pages.
+#[test]
+fn expired_text_absent_from_decrypted_pages() {
+    let (_d, _p, encrypted) = open_tmp();
+    assert!(
+        encrypted
+            .conn()
+            .query_row("SELECT count(*) FROM sqlite_dbpage", [], |r| r
+                .get::<_, i64>(0))
+            .is_err(),
+        "sqlite_dbpage exists: read the encrypted pages through it instead"
+    );
+    drop(encrypted);
+    let dir = tempdir().unwrap();
+    let (before, after) = erase_marked(&dir.path().join("plain.sqlite"), true);
+    assert!(holds(&before, MARKER), "positive control");
+    assert!(!holds(&after, MARKER), "text left in the pages");
+    assert!(!holds(&after, "short "), "text left in the pages");
+    let (_, control) = erase_marked(&dir.path().join("control.sqlite"), false);
+    assert!(
+        holds(&control, MARKER),
+        "without secure_delete the freed cells keep the text"
+    );
 }

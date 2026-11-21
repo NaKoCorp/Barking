@@ -15,6 +15,7 @@
 mod admin;
 mod contacts;
 pub(crate) mod delivery;
+pub(crate) mod ephemeral;
 mod frames;
 mod history;
 mod link;
@@ -933,15 +934,21 @@ impl Core {
     }
 
     /// The message `id` of the conversation with `contact`, for a quote.
-    /// `None` if it is absent (not received yet, deleted) or belongs to
-    /// another conversation.
-    pub fn message_in(&self, contact: &Fingerprint, id: MessageId) -> Result<Option<MessageRow>> {
-        self.store.message_in(*contact, id)
+    /// `None` if it is absent (not received yet, deleted, an ephemeral due
+    /// at `now`) or belongs to another conversation.
+    pub fn message_in(
+        &self,
+        contact: &Fingerprint,
+        id: MessageId,
+        now: u64,
+    ) -> Result<Option<MessageRow>> {
+        self.store.message_in(*contact, id, now)
     }
 
-    /// History with a contact, from oldest to newest.
-    pub fn messages_with(&self, contact: &Fingerprint) -> Result<Vec<MessageRow>> {
-        self.store.messages_with(*contact)
+    /// History with a contact shown at `now`, from oldest to newest: an
+    /// ephemeral due is left out even before `expire_ephemeral` erases it.
+    pub fn messages_with(&self, contact: &Fingerprint, now: u64) -> Result<Vec<MessageRow>> {
+        self.store.messages_with(*contact, now)
     }
 }
 

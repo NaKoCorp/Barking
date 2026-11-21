@@ -31,6 +31,8 @@ pub const KIND_SYNC_DELETE: u16 = 5;
 pub const KIND_MESSAGE: u16 = 6;
 /// Kind number of [`ExtContent::SyncMessage`].
 pub const KIND_SYNC_MESSAGE: u16 = 7;
+/// Kind number of [`ExtContent::SyncSeen`].
+pub const KIND_SYNC_SEEN: u16 = 8;
 
 /// Shortest ephemeral delay: one minute.
 pub const MIN_TTL_SECS: u32 = 60;
@@ -43,6 +45,13 @@ pub const UNSEEN_CEILING_SECS: u64 = 604_800;
 /// Most identifiers in one `SyncDelete`: 32 × 16 bytes keep it in tier M
 /// (1 024 bytes). A larger deletion goes in several packets.
 pub const MAX_SYNC_DELETE_IDS: usize = 32;
+
+/// Most entries in one `SyncSeen`: each takes 49 bytes plus its date (5
+/// bytes today, 10 at most: identifier, contact, date), and 14 keep the
+/// packet in tier M (1 024 bytes) whatever the dates
+/// (`sync_seen_cap_fits_tier_m`); 15 fit only with today's dates, 16 never.
+/// More go in several packets.
+pub const MAX_SYNC_SEEN: usize = 14;
 
 /// What a receiver does with a kind it does not know.
 ///
@@ -111,6 +120,18 @@ impl MessageRef {
     }
 }
 
+/// One ephemeral message shown on one of my devices (`SyncSeen`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SeenEntry {
+    /// Stored identifier of the message, the same on all my devices.
+    pub id: MessageId,
+    /// The conversation it belongs to: a block or a removal of this contact
+    /// drops the entries still waiting for their message (`pending_seen`).
+    pub contact: Fingerprint,
+    /// When it was first shown, on the sealer's clock.
+    pub at: u64,
+}
+
 /// A known content of `Body::Ext`.
 ///
 /// A kind never gains fields: its `data` is parsed with no trailing byte
@@ -156,6 +177,9 @@ pub enum ExtContent {
         reply_to: Option<MessageRef>,
         ttl_secs: Option<u32>,
     },
+    /// Ephemeral messages shown on another of my devices (kind 8): 1 to
+    /// [`MAX_SYNC_SEEN`] entries.
+    SyncSeen { seen: Vec<SeenEntry> },
 }
 
 impl fmt::Debug for ExtContent {
@@ -173,6 +197,7 @@ impl fmt::Debug for ExtContent {
             ExtContent::SyncMessage { text, .. } => {
                 write!(f, "SyncMessage(<{} bytes>)", text.len())
             }
+            ExtContent::SyncSeen { seen } => write!(f, "SyncSeen(<{} entries>)", seen.len()),
         }
     }
 }
@@ -261,6 +286,16 @@ impl ExtContent {
                 UnknownPolicy::Ignore,
                 encode(&(to, text, reply_to, ttl_secs)),
             ),
+            ExtContent::SyncSeen { seen } => (
+                KIND_SYNC_SEEN,
+                UnknownPolicy::Ignore,
+                encode(
+                    &seen
+                        .iter()
+                        .map(|e| (e.id.0, e.contact, e.at))
+                        .collect::<Vec<_>>(),
+                ),
+            ),
         };
         Body::Ext {
             kind,
@@ -276,7 +311,8 @@ impl ExtContent {
     ///
     /// # Errors
     /// `Malformed` on bad or trailing bytes, for a `SyncDelete` without
-    /// identifier or with too many and for a delay out of
+    /// identifier or with too many, for a `SyncSeen` without entry or with
+    /// too many, and for a delay out of
     /// `MIN_TTL_SECS..=MAX_TTL_SECS`, `TooLarge` for a long text,
     /// `TooManyEmoji` or `InvalidEmoji` for a bad emoji set.
     pub fn decode(kind: u16, data: &[u8]) -> Result<Option<ExtContent>> {
@@ -327,6 +363,19 @@ impl ExtContent {
                     ttl_secs,
                 }
             }
+            KIND_SYNC_SEEN => {
+                let seen: Vec<([u8; 16], Fingerprint, u64)> = parse(data)?;
+                ExtContent::SyncSeen {
+                    seen: seen
+                        .into_iter()
+                        .map(|(id, contact, at)| SeenEntry {
+                            id: MessageId(id),
+                            contact,
+                            at,
+                        })
+                        .collect(),
+                }
+            }
             _ => return Ok(None),
         };
         content.validate()?;
@@ -353,6 +402,13 @@ impl ExtContent {
                     Ok(())
                 } else {
                     Err(CoreError::Malformed("ephemeral delay"))
+                }
+            }
+            ExtContent::SyncSeen { seen } => {
+                if (1..=MAX_SYNC_SEEN).contains(&seen.len()) {
+                    Ok(())
+                } else {
+                    Err(CoreError::Malformed("number of seen messages"))
                 }
             }
         }

@@ -616,6 +616,7 @@ fn set_block_in(
         q.delete_draft(fp)?;
         q.delete_reactions_with(fp)?;
         q.drop_reaction_packets_with(fp)?;
+        q.delete_pending_seen_with(fp)?;
     }
     sync::send_block(q, device, fp, &state, SealTime::at(now), rng)
 }
@@ -630,6 +631,7 @@ pub(super) fn merge_block(q: &impl Queries, fp: Fingerprint, state: &BlockState)
             q.delete_draft(fp)?;
             q.delete_reactions_with(fp)?;
             q.drop_reaction_packets_with(fp)?;
+            q.delete_pending_seen_with(fp)?;
         }
     }
     Ok(())

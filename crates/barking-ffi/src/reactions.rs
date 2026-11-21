@@ -85,7 +85,7 @@ pub(crate) fn quote_of(core: &Core, m: &MessageRow) -> Result<Option<Quote>, Bar
     let Some(original) = m.reply_to else {
         return Ok(None);
     };
-    let found = core.message_in(&m.contact_fp, original)?;
+    let found = core.message_in(&m.contact_fp, original, now())?;
     let sealed_by_me = m.direction == Direction::Out;
     let author_is_me = match (&m.reply_ref, &found) {
         (Some(r), _) => r.by_sender == sealed_by_me,

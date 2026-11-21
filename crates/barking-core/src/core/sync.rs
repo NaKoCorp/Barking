@@ -1,7 +1,8 @@
 //! Synchronization between my own devices: copies of my sent
 //! messages (`SyncSent`, `SyncReply`, `SyncMessage`), operations on
 //! contacts (`SyncContact`),
-//! new device list (`SyncDevices`), and my deletions (`SyncDelete`).
+//! new device list (`SyncDevices`), my deletions (`SyncDelete`), and the
+//! ephemeral messages I saw (`SyncSeen`).
 //!
 //! Sending: through the double ratchet sessions with my other devices
 //! (`Target::OwnDevices`), one delivery per packet so that their acks
@@ -394,8 +395,9 @@ pub(super) fn apply(
         Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
         Body::Ext { kind, data, .. } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
-            // Only `SyncReply`, `SyncMessage`, `SyncReaction` and
-            // `SyncDelete` are sync contents; any other kind is refused.
+            // Only `SyncReply`, `SyncMessage`, `SyncReaction`,
+            // `SyncDelete` and `SyncSeen` are sync contents; any other kind
+            // is refused.
             let (to, text, reply_to, ttl_secs) = match ExtContent::decode(*kind, data) {
                 Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => {
                     (to, text, Some(reply_to), None)
@@ -415,6 +417,11 @@ pub(super) fn apply(
                         q.note_change(contact, row);
                     }
                     return Ok(Ok(Some(SyncKind::Delete)));
+                }
+                Ok(Some(ExtContent::SyncSeen { seen })) => {
+                    // Never sent on either: each device erases on its own.
+                    super::ephemeral::apply_seen(q, &seen, now)?;
+                    return Ok(Ok(Some(SyncKind::Seen)));
                 }
                 Ok(Some(ExtContent::SyncReaction { to, target, emojis }))
                     if to != own.list.root.fingerprint() =>
@@ -527,7 +534,8 @@ pub(super) fn apply(
 
 /// The contact a `SyncSent`, `SyncReply`, `SyncMessage` or `SyncReaction`
 /// body was sent to.
-/// `None` for a `SyncDelete`: its messages may be of several contacts.
+/// `None` for a `SyncDelete` or a `SyncSeen`: its messages may be of
+/// several contacts.
 pub(super) fn sent_to(body: &Body) -> Option<Fingerprint> {
     match body {
         Body::SyncSent { to, .. } => Some(*to),
@@ -537,7 +545,7 @@ pub(super) fn sent_to(body: &Body) -> Option<Fingerprint> {
                 | ExtContent::SyncMessage { to, .. }
                 | ExtContent::SyncReaction { to, .. },
             )) => Some(to),
-            Ok(Some(ExtContent::SyncDelete { .. })) => None,
+            Ok(Some(ExtContent::SyncDelete { .. } | ExtContent::SyncSeen { .. })) => None,
             _ => None,
         },
         _ => None,

@@ -689,7 +689,7 @@ struct Ext<'a> {
 
 /// `Body::Ext` authenticated by a session. Sender x kind:
 ///
-/// | Sender | `Reply` / `Message` / `Reaction` | `SyncReply` / `SyncMessage` / `SyncReaction` / `SyncDelete` | Unknown |
+/// | Sender | `Reply` / `Message` / `Reaction` | `SyncReply` / `SyncMessage` / `SyncReaction` / `SyncDelete` / `SyncSeen` | Unknown |
 /// |---|---|---|---|
 /// | A contact | accepted | `R_NOT_MINE` | `unknown` policy |
 /// | One of my devices | `R_UNEXPECTED` | the sync path | `unknown` policy |
@@ -697,7 +697,8 @@ struct Ext<'a> {
 /// Every `Ext` from my own fingerprint first requires the sending device to
 /// be in my current list. A `Reply` or a `Message` is recorded like a text,
 /// a `Reaction` applied as the contact's (`accept_reaction`); `SyncReply`,
-/// `SyncMessage`, `SyncReaction` and `SyncDelete` go through the sync path
+/// `SyncMessage`, `SyncReaction`, `SyncDelete` and `SyncSeen` go through
+/// the sync path
 /// (`accept_sync`).
 /// An unknown kind is acknowledged like a message (the sender stops
 /// resending it) and, per its `unknown` policy, ignored or shown as a
@@ -779,7 +780,8 @@ fn accept_ext(
             ExtContent::SyncReply { .. }
             | ExtContent::SyncMessage { .. }
             | ExtContent::SyncReaction { .. }
-            | ExtContent::SyncDelete { .. },
+            | ExtContent::SyncDelete { .. }
+            | ExtContent::SyncSeen { .. },
             true,
         ) => {
             return accept_sync(q, limiter, packet, o, env, device, admin, my_fp, now, rng);
@@ -788,7 +790,8 @@ fn accept_ext(
             ExtContent::SyncReply { .. }
             | ExtContent::SyncMessage { .. }
             | ExtContent::SyncReaction { .. }
-            | ExtContent::SyncDelete { .. },
+            | ExtContent::SyncDelete { .. }
+            | ExtContent::SyncSeen { .. },
             false,
         ) => sync::R_NOT_MINE,
         _ => R_UNEXPECTED,

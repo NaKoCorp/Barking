@@ -167,7 +167,7 @@ fn alice_to_bob_and_back() {
     let (_, _, text, _) = expect_msg(b.recv(&p3, NOW + 10, &mut rng));
     assert_eq!(text, "works for me");
 
-    let hist = a.core.messages_with(&b.fp()).unwrap();
+    let hist = a.core.messages_with(&b.fp(), NOW).unwrap();
     assert_eq!(hist.len(), 3);
     assert_eq!(hist[1].direction, Direction::In);
     assert_eq!(hist[1].body, "Hi Alice");
@@ -188,7 +188,7 @@ fn initial_resent_until_first_reply() {
 fn ack_marks_delivered() {
     let (mut a, mut b, mut rng) = pair();
     let p = one(a.send(&b.fp(), "ack-me", NOW, &mut rng));
-    let sent = a.core.messages_with(&b.fp()).unwrap();
+    let sent = a.core.messages_with(&b.fp(), NOW).unwrap();
     // Not deposited on any node yet.
     assert_eq!(sent[0].status, MessageStatus::Pending);
     assert_eq!(sent.len(), 1);
@@ -200,7 +200,7 @@ fn ack_marks_delivered() {
         ReceiveOutcome::AckReceived { packet_id } => assert_eq!(packet_id, p.id),
         other => panic!("AckReceived expected, got {other:?}"),
     }
-    let after = a.core.messages_with(&b.fp()).unwrap();
+    let after = a.core.messages_with(&b.fp(), NOW).unwrap();
     assert_eq!(after[0].status, MessageStatus::Received);
     assert!(a.events().iter().any(
         |e| matches!(e, TransparencyEvent::AckVerified { for_packet } if *for_packet == p.id)
@@ -245,7 +245,7 @@ fn forged_or_malformed_acks_are_not_for_us() {
         ReceiveOutcome::NotForUs
     ));
     assert_eq!(
-        a.core.messages_with(&b.fp()).unwrap()[0].status,
+        a.core.messages_with(&b.fp(), NOW).unwrap()[0].status,
         MessageStatus::Pending
     );
 }
@@ -271,7 +271,7 @@ fn duplicate_shown_once() {
             .iter()
             .any(|e| matches!(e, TransparencyEvent::DuplicateIgnored { .. }))
     );
-    assert_eq!(b.core.messages_with(&a.fp()).unwrap().len(), 2);
+    assert_eq!(b.core.messages_with(&a.fp(), NOW).unwrap().len(), 2);
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn stale_initial_replayed_into_today_mailbox_quarantined() {
     // The session that this old Initial would have opened is not created:
     // only the 10 intro mailboxes of the window.
     assert_eq!(b.core.watched_mailboxes(later).unwrap().len(), 10);
-    assert!(b.core.messages_with(&a.fp()).unwrap().is_empty());
+    assert!(b.core.messages_with(&a.fp(), NOW).unwrap().is_empty());
 }
 
 #[test]
@@ -587,7 +587,7 @@ fn send_to_multi_device_contact_is_one_message() {
 
     let pkts = a.send(&bob, "a single message", NOW, &mut rng);
     assert_eq!(pkts.len(), 2);
-    let rows = a.core.messages_with(&bob).unwrap();
+    let rows = a.core.messages_with(&bob, NOW).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, MessageStatus::Pending);
     for core in [&mut bob1, &mut bob2] {
@@ -602,7 +602,7 @@ fn send_to_multi_device_contact_is_one_message() {
         let ack = ack.expect("each device opens a packet");
         let out = a.core.receive(&ack.encode(), T, NOW + 1, &mut rng).unwrap();
         assert!(matches!(out, ReceiveOutcome::AckReceived { .. }), "{out:?}");
-        let rows = a.core.messages_with(&bob).unwrap();
+        let rows = a.core.messages_with(&bob, NOW).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, MessageStatus::Received);
     }
@@ -1089,7 +1089,7 @@ fn revoked_device_refused_for_normal_and_initial() {
     }
     let texts: Vec<String> = alice
         .core
-        .messages_with(&bob_fp)
+        .messages_with(&bob_fp, NOW)
         .unwrap()
         .into_iter()
         .filter(|m| m.direction == Direction::In)
@@ -1474,7 +1474,7 @@ fn hash_failures_are_rate_limited() {
 
 /// Row id of the message `body` in `core`'s conversation with `contact`.
 fn row_of(core: &Core, contact: &Fingerprint, body: &str) -> i64 {
-    core.messages_with(contact)
+    core.messages_with(contact, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == body)
@@ -1490,7 +1490,7 @@ fn undelivered(a: &mut Party, b: &Party, body: &str, rng: &mut StdRng) -> (Vec<P
     a.core.expire_due(after).unwrap();
     let row = a
         .core
-        .messages_with(&b.fp())
+        .messages_with(&b.fp(), NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == body)
@@ -1503,13 +1503,13 @@ fn undelivered(a: &mut Party, b: &Party, body: &str, rng: &mut StdRng) -> (Vec<P
 fn retry_reseals_same_message_id_with_new_date() {
     let (mut a, mut b, mut rng) = pair();
     let (old, after) = undelivered(&mut a, &b, "again", &mut rng);
-    let before = a.core.messages_with(&b.fp()).unwrap().remove(0);
+    let before = a.core.messages_with(&b.fp(), NOW).unwrap().remove(0);
     let now = after + 60;
     let new = one(a.core.retry_message(before.id, now, &mut rng).unwrap());
     assert_ne!(new.id, old[0].id);
     assert!(u64::from(new.expires_at) > u64::from(old[0].expires_at));
     // Same message, same place and time in the conversation, pending again.
-    let row = a.core.messages_with(&b.fp()).unwrap().remove(0);
+    let row = a.core.messages_with(&b.fp(), NOW).unwrap().remove(0);
     assert_eq!(
         (row.id, row.message_id, row.at),
         (before.id, before.message_id, before.at)
@@ -1526,13 +1526,13 @@ fn retry_reseals_same_message_id_with_new_date() {
         b.recv(&new, now, &mut rng),
         ReceiveOutcome::DuplicateMessage
     ));
-    assert_eq!(b.core.messages_with(&a.fp()).unwrap().len(), 1);
+    assert_eq!(b.core.messages_with(&a.fp(), NOW).unwrap().len(), 1);
     // Its ack makes it received.
     assert!(matches!(
         a.recv(&ack, now + 1, &mut rng),
         ReceiveOutcome::AckReceived { .. }
     ));
-    let row = a.core.messages_with(&b.fp()).unwrap().remove(0);
+    let row = a.core.messages_with(&b.fp(), NOW).unwrap().remove(0);
     assert_eq!(row.status, MessageStatus::Received);
 }
 
@@ -1549,7 +1549,7 @@ fn retry_dedups_when_the_old_one_arrived() {
         b.recv(&new, after, &mut rng),
         ReceiveOutcome::DuplicateMessage
     ));
-    assert_eq!(b.core.messages_with(&a.fp()).unwrap().len(), 1);
+    assert_eq!(b.core.messages_with(&a.fp(), NOW).unwrap().len(), 1);
     let acks = b
         .core
         .pending_outbox(after)
@@ -1583,7 +1583,7 @@ fn retry_without_not_delivered_is_refused() {
     );
     assert_eq!(a.core.retry_all(&b.fp(), NOW + 1, &mut rng), Ok(0));
     assert_eq!(
-        a.core.messages_with(&b.fp()).unwrap()[0].status,
+        a.core.messages_with(&b.fp(), NOW).unwrap()[0].status,
         MessageStatus::Pending
     );
 }
@@ -1600,7 +1600,7 @@ fn retry_all_reseals_every_undelivered_message() {
     assert_eq!(a.core.retry_all(&b.fp(), after + 1, &mut rng), Ok(2));
     let statuses: Vec<MessageStatus> = a
         .core
-        .messages_with(&b.fp())
+        .messages_with(&b.fp(), NOW)
         .unwrap()
         .into_iter()
         .map(|m| m.status)
@@ -1680,7 +1680,7 @@ fn retry_skips_a_device_removed_from_the_card() {
         Err(CoreError::NoSession)
     );
     assert_eq!(
-        alice.core.messages_with(&bob).unwrap()[0].status,
+        alice.core.messages_with(&bob, NOW).unwrap()[0].status,
         MessageStatus::Received
     );
 }
@@ -1714,7 +1714,7 @@ fn retry_days_after_delete_stays_deleted_on_the_contact() {
     ));
     assert!(
         !b.core
-            .messages_with(&a.fp())
+            .messages_with(&a.fp(), NOW)
             .unwrap()
             .iter()
             .any(|m| m.body == "unwanted")
@@ -1748,7 +1748,7 @@ fn blocked_contact_texts_are_dropped_without_ack() {
     // Nothing stored, no ack queued: Alice sees it undelivered.
     let texts: Vec<String> = b
         .core
-        .messages_with(&a.fp())
+        .messages_with(&a.fp(), NOW)
         .unwrap()
         .into_iter()
         .map(|m| m.body)

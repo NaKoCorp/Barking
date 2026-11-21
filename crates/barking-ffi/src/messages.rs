@@ -92,7 +92,7 @@ impl Device {
                 for c in core.contacts()?.into_iter().filter(|c| !c.blocked) {
                     let mark = mark_of(&marks, &c.fingerprint);
                     let count = core
-                        .messages_with(&c.fingerprint)?
+                        .messages_with(&c.fingerprint, now())?
                         .iter()
                         .filter(|m| m.direction == Direction::In && m.id > mark)
                         .count();

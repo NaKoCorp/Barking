@@ -189,7 +189,7 @@ fn summary(core: &mut Core, mut report: SyncReport) -> SyncSummary {
                 added,
             } if !added.is_empty() => {
                 let excerpt = core
-                    .message_in(&from, target)
+                    .message_in(&from, target, now())
                     .ok()
                     .flatten()
                     .map(|row| excerpt(&row.body, NOTIFICATION_CHARS));

@@ -1434,7 +1434,7 @@ async fn packet_beyond_every_limit_is_dropped_on_a_v3_network() {
 fn delete_hi(core: &mut Core) -> barking_core::DeleteOutcome {
     let alice = core.contacts().unwrap()[0].fingerprint;
     let row = core
-        .messages_with(&alice)
+        .messages_with(&alice, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == "hi")
@@ -1845,7 +1845,7 @@ async fn reread_items_are_recorded_in_the_route() {
     sync(&mut core, &net, opts()).await;
     assert_eq!(rereads_of(&net.calls(), x, m).len(), 1);
     let alice = core.contacts().unwrap()[0].fingerprint;
-    let rows = core.messages_with(&alice).unwrap();
+    let rows = core.messages_with(&alice, NOW).unwrap();
     let row = |d| rows.iter().find(|r| r.direction == d).unwrap().id;
     let fetched = |row| -> Vec<Option<String>> {
         core.message_route(row)
@@ -3618,7 +3618,7 @@ fn expired_reply_with(
 
 fn reply_status(e: &Expired) -> barking_core::store::MessageStatus {
     e.core
-        .messages_with(&e.alice)
+        .messages_with(&e.alice, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == "hi")
@@ -3628,7 +3628,7 @@ fn reply_status(e: &Expired) -> barking_core::store::MessageStatus {
 
 fn reply_row(e: &Expired) -> i64 {
     e.core
-        .messages_with(&e.alice)
+        .messages_with(&e.alice, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == "hi")
@@ -3767,7 +3767,7 @@ async fn deposit_recorded_before_finish() {
     let (_dir, mut core, mut net) = setup();
     let alice = core.contacts().unwrap()[0].fingerprint;
     let status = |core: &Core| {
-        core.messages_with(&alice)
+        core.messages_with(&alice, NOW)
             .unwrap()
             .into_iter()
             .find(|m| m.body == "hi")
@@ -3803,7 +3803,7 @@ async fn too_far_in_future_packet_is_not_delivered() {
     let alice = core.contacts().unwrap()[0].fingerprint;
     let report = sync(&mut core, &net, opts()).await;
     let sealed = core
-        .messages_with(&alice)
+        .messages_with(&alice, NOW)
         .unwrap()
         .into_iter()
         .find(|m| m.body == "sealed")
@@ -4218,7 +4218,7 @@ async fn unanswered_deposit_is_not_cancelled_by_a_delete() {
     let (_dir, mut core, mut net) = setup();
     let alice = core.contacts().unwrap()[0].fingerprint;
     let reply = |core: &Core| {
-        core.messages_with(&alice)
+        core.messages_with(&alice, NOW)
             .unwrap()
             .into_iter()
             .find(|m| m.body == "hi")
@@ -4260,7 +4260,7 @@ fn expired_reaction_scene() -> (TempDir, Core, Net, usize) {
     let (dir, mut core, mut net) = setup();
     net.down = net.records.keys().copied().collect();
     let to = core.contacts().unwrap()[0].fingerprint;
-    let row = core.messages_with(&to).unwrap()[0].id;
+    let row = core.messages_with(&to, NOW).unwrap()[0].id;
     let old = NOW - TTL - 100;
     let mut rng = rand::rngs::StdRng::seed_from_u64(9);
     let sent = core

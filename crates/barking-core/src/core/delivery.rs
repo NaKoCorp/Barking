@@ -19,7 +19,7 @@ use rand_core::CryptoRng;
 use rusqlite::{OptionalExtension, params};
 
 use super::Core;
-use super::{reactions, route, sync};
+use super::{ephemeral, reactions, route, sync};
 use crate::Result;
 use crate::content::{ExtContent, MAX_SYNC_DELETE_IDS};
 use crate::identity::Fingerprint;
@@ -636,9 +636,9 @@ impl Core {
         self.delete_messages(&[row_id], now, rng)
     }
 
-    /// A deletion here goes to my other devices: this device is linked and
-    /// still in my account.
-    fn syncs_deletions(&self) -> Result<bool> {
+    /// A deletion (or a "seen") here goes to my other devices: this device
+    /// is linked and still in my account.
+    pub(super) fn syncs_deletions(&self) -> Result<bool> {
         match self.ensure_active() {
             Ok(()) => Ok(true),
             Err(crate::CoreError::LinkPending | crate::CoreError::DeviceRemoved) => Ok(false),
@@ -852,11 +852,10 @@ fn delete_stored(
             out.devices_total = gone.left + gone.cancelled;
         }
     }
-    q.conn()
-        .execute("DELETE FROM messages WHERE id = ?1", params![s.row])
-        .map_err(map_err)?;
-    q.add_tombstone(message, now)?;
-    q.delete_reactions_of(message)?;
+    // The row, its reactions and its tombstone, as an expiry erases them;
+    // then the queued reaction packets about it, which an expiry keeps.
+    ephemeral::erase_row(q, s.row, now)?;
+    crate::store::drop_reaction_packets(q, "message_id = ?1", params![message.0.as_slice()])?;
     out.deleted += 1;
     Ok((s.contact, s.row))
 }
@@ -961,7 +960,7 @@ impl Core {
         now: u64,
     ) -> Result<Vec<(MessageRow, Option<DeliverySummary>)>> {
         self.expire_due(now)?;
-        self.store.messages_with_delivery(*contact)
+        self.store.messages_with_delivery(*contact, now)
     }
 
     /// Delivery summaries of the messages `ids` that still exist, in the
@@ -977,7 +976,7 @@ impl Core {
         self.expire_due(now)?;
         let found: std::collections::HashMap<i64, Option<DeliverySummary>> = self
             .store
-            .deliveries_of(ids)?
+            .deliveries_of(ids, now)?
             .into_iter()
             .map(|(m, s)| (m.id, s))
             .collect();
@@ -996,7 +995,7 @@ impl Core {
         now: u64,
     ) -> Result<Option<MessageDeliveryDetail>> {
         self.expire_due(now)?;
-        self.store.message_delivery(row_id)
+        self.store.message_delivery(row_id, now)
     }
 
     /// Sent messages to `contact` with a delivery to the contact, per
@@ -1004,7 +1003,7 @@ impl Core {
     /// due packets first.
     pub fn delivery_counts(&mut self, contact: &Fingerprint, now: u64) -> Result<[u32; 4]> {
         self.expire_due(now)?;
-        self.store.delivery_counts(*contact)
+        self.store.delivery_counts(*contact, now)
     }
 
     /// One page of the sent messages to `contact` in `state` with a
@@ -1018,7 +1017,8 @@ impl Core {
         now: u64,
     ) -> Result<Vec<(MessageRow, DeliverySummary)>> {
         self.expire_due(now)?;
-        self.store.delivery_page(*contact, state, limit, offset)
+        self.store
+            .delivery_page(*contact, state, limit, offset, now)
     }
 
     /// Packets no node accepted yet that have not expired, classified
