@@ -24,7 +24,7 @@
 "log.this_device_removed" = "Cet appareil a été retiré de votre compte par une liste d’appareils plus récente (version %1$@). Il ne peut plus envoyer ; sa clé racine, s’il en avait une, a été effacée.";
 "log.device_removed" = "Votre appareil « %1$@ » (%2$@) a été retiré de votre compte. Vos autres appareils et vos contacts ne chiffreront plus rien pour lui dès qu’ils auront reçu la nouvelle liste d’appareils.";
 "log.remove_requested" = "Votre appareil « %1$@ » (%2$@) a demandé à quitter votre compte et a été retiré de votre liste d’appareils.";
-"log.messages_deleted" = "Messages supprimés de cet appareil : %1$@. Annulés avant de le quitter : %2$@. Déjà partis (le contact les reçoit quand même) : %3$@.";
+"log.messages_deleted" = "Messages supprimés de cet appareil (%4$@) : %1$@. Annulés avant de le quitter : %2$@. Déjà partis (le contact les reçoit quand même) : %3$@.";
 "log.unknown_content" = "Contenu reçu illisible par cette version (genre %1$@). Accusé et mis de côté.";
 "log.arg.initiator" = "vous l’avez ouverte";
 "log.arg.responder" = "votre contact l’a ouverte";
@@ -40,6 +40,8 @@
 "log.arg.sync_reaction" = "réaction";
 "log.arg.sync_deletion" = "suppression";
 "log.arg.sync_seen" = "vu";
+"log.arg.deleted_here" = "demandé sur cet appareil";
+"log.arg.deleted_elsewhere" = "demandé depuis un autre de vos appareils";
 "log.arg.node_lost" = "un message déposé là-bas s’est perdu";
 "log.arg.node_unreachable" = "il ne répondait plus";
 "log.arg.intro_mailbox" = "Premier message d’une session : sa boîte est calculée à partir des clés publiques (signature et accord de clés) de l’appareil destinataire et du jour.";
