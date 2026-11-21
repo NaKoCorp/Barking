@@ -751,7 +751,7 @@ final class ConversationModelTests: XCTestCase {
         d.retryReactionsError = BarkingError.NoSession
         d.deliveryUpdates[7] = DeliveryUpdate(messageId: 7, delivery: nil, removed: false, myReactionState: .notDelivered)
         await m.retryReaction(7)
-        XCTAssertEqual(m.notice, .reactionFailed)
+        XCTAssertEqual(m.notice, .reactionResendFailed)
         XCTAssertEqual(m.items[0].myReactionState, .notDelivered)
     }
 

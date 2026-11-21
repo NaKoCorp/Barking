@@ -268,7 +268,8 @@ final class MessageSheetModel {
     }
 
     /// Sends my reactions on this message to the contact again; the sheet
-    /// follows at once. Whatever the error, the banner says it was not saved.
+    /// follows at once. Whatever the error, the banner says the resend failed
+    /// (the reaction itself stays saved).
     func retryReaction() async {
         guard !retryingReaction else { return }
         retryingReaction = true
@@ -277,7 +278,7 @@ final class MessageSheetModel {
         do {
             try await core.retryReactions(messageId, contact: contact)
         } catch {
-            notice = .reactionFailed
+            notice = .reactionResendFailed
         }
         await refresh()
     }

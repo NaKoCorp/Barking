@@ -49,6 +49,8 @@ final class ConversationModel {
         case reactionTooMany
         /// A reaction was not saved (the emoji or the message is gone, or the core failed).
         case reactionFailed
+        /// A manual resend of my reaction failed; the reaction itself is saved.
+        case reactionResendFailed
         /// The contact was removed meanwhile; nothing can be sent to them.
         case contactRemoved
 
@@ -65,6 +67,8 @@ final class ConversationModel {
                 String(localized: "You can react with 20 emoji at most on one message.", bundle: bundle, locale: locale)
             case .reactionFailed:
                 String(localized: "Reaction not saved. Try again.", bundle: bundle, locale: locale)
+            case .reactionResendFailed:
+                String(localized: "Couldn't resend the reaction.", bundle: bundle, locale: locale)
             case .contactRemoved:
                 String(localized: "This contact was removed. Nothing can be sent to them.", bundle: bundle, locale: locale)
             }
@@ -412,7 +416,7 @@ final class ConversationModel {
 
     /// Sends my reactions on the row `id` to the contact again (a manual
     /// resend), then patches the row. Whatever the error, the banner says the
-    /// reaction was not saved.
+    /// resend failed (the reaction itself stays saved).
     func retryReaction(_ id: Int64) async {
         guard !retryingReaction.contains(id), items.contains(where: { $0.id == id }) else { return }
         retryingReaction.insert(id)
@@ -421,7 +425,7 @@ final class ConversationModel {
         do {
             try await core.retryReactions(id, contact: contact)
         } catch {
-            notice = .reactionFailed
+            notice = .reactionResendFailed
         }
         await refresh([id])
     }

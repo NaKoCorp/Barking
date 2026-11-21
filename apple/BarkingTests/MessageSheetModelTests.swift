@@ -556,7 +556,7 @@ final class MessageSheetModelTests: XCTestCase {
         d.retryReactionsError = BarkingError.NoSession
         d.reactionDeliveryError = BarkingError.Locked
         await m.retryReaction()
-        XCTAssertEqual(m.notice, .reactionFailed)
+        XCTAssertEqual(m.notice, .reactionResendFailed)
         XCTAssertEqual(m.reaction?.delivery.state, .notDelivered, "the Resend button stays")
     }
 

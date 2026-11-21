@@ -279,7 +279,8 @@ struct PendingContent: View {
     @ViewBuilder private func noticeBanner(_ notice: ConversationModel.Notice) -> some View {
         switch notice {
         case .deleted(let message): Banner(kind: .info, verbatim: message.string(bundle: .strings(for: locale), locale: locale))
-        case .deleteFailed, .noReachableDevice, .reactionTooMany, .reactionFailed, .contactRemoved:
+        case .deleteFailed, .noReachableDevice, .reactionTooMany, .reactionFailed, .reactionResendFailed,
+             .contactRemoved:
             Banner(kind: .warning, verbatim: notice.text(bundle: .strings(for: locale), locale: locale))
         }
     }

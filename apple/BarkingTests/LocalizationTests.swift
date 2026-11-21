@@ -325,7 +325,8 @@ final class LocalizationTests: XCTestCase {
         let keys = ["reaction pending": "en attente", "reaction on the network": "sur le réseau",
                     "reaction received": "reçue", "reaction not delivered": "non distribuée",
                     "Resend reaction": "Renvoyer la réaction", "Your reaction · %@": "Votre réaction · %@",
-                    "Your reaction · removed": "Votre réaction · retirée"]
+                    "Your reaction · removed": "Votre réaction · retirée",
+                    "Couldn't resend the reaction.": "Impossible de renvoyer la réaction."]
         let en = Bundle.strings(for: Locale(identifier: "en"))
         for (key, french) in keys {
             XCTAssertEqual(fr[key] as? String, french, key)
@@ -341,6 +342,9 @@ final class LocalizationTests: XCTestCase {
         let english = Locale(identifier: "en")
         XCTAssertTrue(chip.label(state: .notDelivered, bundle: .strings(for: english), locale: english)
             .hasSuffix(", reaction not delivered"))
+        let notice = ConversationModel.Notice.reactionResendFailed
+        XCTAssertEqual(notice.text(bundle: bundle, locale: locale), "Impossible de renvoyer la réaction.")
+        XCTAssertEqual(notice.text(bundle: .strings(for: english), locale: english), "Couldn't resend the reaction.")
     }
 
     /// Spec Lot M §7.1: the bubble's states, menu, VoiceOver values and
