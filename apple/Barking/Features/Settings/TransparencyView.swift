@@ -41,7 +41,7 @@ struct TransparencyView: View {
                     .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
                 if model.isEmpty, !model.loading {
                     Text("Nothing yet").font(BarkingFont.sans(.body, size: 15)).foregroundStyle(Color.fgMuted)
-                        .padding(.top, 6)
+                        .padding(.top, 8)
                 }
                 ForEach(model.days) { day in
                     SectionLabel(verbatim: model.title(of: day)).padding(.top, Space.section - Space.s2)
@@ -151,7 +151,7 @@ struct TransparencyView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(14)
+        .padding(16)
         .accessibilityElement(children: .combine)
     }
 
@@ -197,7 +197,7 @@ private struct JournalRowView: View {
                 Text(verbatim: row.title)
                     .font(BarkingFont.sans(.subheadline, size: 15, weight: .semibold)).foregroundStyle(Color.fg)
                     .lineLimit(titleLines)
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(verbatim: row.glyph.symbol)
                         .font(row.glyph.usesSystemFont ? .bSymbol(12, relativeTo: .caption, weight: .bold) : .bMeta)
                         .foregroundStyle(Color(row.glyph.token))

@@ -73,7 +73,7 @@ struct PhraseView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 16) {
                 Eyebrow("step 2 of 2")
                 ScreenTitle("Your recovery phrase", size: 26)
                 Text("24 words. They alone let you recover your identity on a new phone.")
@@ -140,7 +140,7 @@ struct PhraseWordsGrid: View {
     var identifiers = false
 
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
             ForEach(Array(words.enumerated()), id: \.offset) { i, w in
                 HStack(spacing: 4) {
                     Text(verbatim: "\(i + 1)").font(BarkingFont.mono(.caption2, size: 10.5))
@@ -229,7 +229,7 @@ struct PhraseConfirmView: View {
                     }
                 }
                 if model.quizWrong {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(verbatim: "✗").font(.bSymbol(13, relativeTo: .subheadline, weight: .bold))
                             .accessibilityHidden(true)
                         Text("One of the words is wrong. Check your copy.").font(.bBody)

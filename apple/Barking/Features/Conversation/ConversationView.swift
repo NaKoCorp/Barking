@@ -429,7 +429,7 @@ struct ComposerView: View {
                 EphemeralMenu(model: model)
                 TextField("Message", text: $model.draft, axis: .vertical)
                     .lineLimit(1...5)
-                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .padding(.horizontal, 16).padding(.vertical, 12)
                     .background(Color.surfaceAlt, in: .capsule)
                 Button {
                     Haptic.send.play()
