@@ -47,7 +47,13 @@ struct ConversationView: View {
         _model = State(initialValue: ConversationModel(contact: contact, core: core))
     }
 
+    // In parts: as one expression, `body` went past the type checker's
+    // time limit on the CI runner.
     var body: some View {
+        lifecycle(presentations(content))
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             if model.keyChanged {
                 Banner(kind: .danger, title: "\(model.name)'s key changed.",
@@ -63,52 +69,7 @@ struct ConversationView: View {
             if let notice = model.notice {
                 noticeBanner(notice).padding(.horizontal, 16).padding(.top, 8)
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    let shown = ConversationModel.metaShown(model.items,
-                                                            accessibilitySize: dynamicTypeSize.isAccessibilitySize)
-                    LazyVStack(spacing: 8) {
-                        ForEach(groupedByDay, id: \.day) { group in
-                            Text(verbatim: DayLabel.text(for: group.day))
-                                .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
-                                .padding(.top, 8)
-                            ForEach(group.items) { item in
-                                row(item, showsMeta: shown.contains(item.id))
-                                    .id(item.id)
-                                    // A cancelled message leaves (§6.3); at once under Reduce Motion.
-                                    .transition(.asymmetric(insertion: .identity,
-                                                            removal: .opacity.combined(with: .scale(scale: 0.98, anchor: .trailing))))
-                            }
-                        }
-                    }
-                    .padding(16)
-                    .animation(Motion.gated(Motion.enter, reduceMotion: reduceMotion), value: model.items.map(\.id))
-                }
-                // Held at the bottom: it opens there, and the keyboard or a
-                // new bubble keeps the last message in view without a jump.
-                .defaultScrollAnchor(.bottom)
-                .onScrollGeometryChange(for: Bool.self) { g in
-                    g.visibleRect.maxY >= g.contentSize.height - Self.bottomSlack
-                } action: { _, bottom in
-                    atBottom = bottom
-                }
-                // A message I send while reading higher up: brought into
-                // view. At the bottom the anchor already shows it, and a
-                // received message never moves what I am reading.
-                .onChange(of: model.items.last?.id) { _, id in
-                    guard let id, scrollTarget == nil, !atBottom,
-                          model.items.last?.outgoing == true else { return }
-                    withAnimation(Motion.gated(Motion.enter, reduceMotion: reduceMotion)) {
-                        proxy.scrollTo(id, anchor: .bottom)
-                    }
-                }
-                .onChange(of: scrollTarget) { _, id in
-                    guard let id else { return }
-                    proxy.scrollTo(id, anchor: .center)
-                    // Done: new messages scroll into view again.
-                    scrollTarget = nil
-                }
-            }
+            messages
             if let e = model.sendError {
                 Text(LocalizedStringKey(e)).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)
             }
@@ -116,74 +77,133 @@ struct ConversationView: View {
         }
         .background(Color.surface)
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $verifying) {
-            NavigationStack {
-                SafetyCodeView(core: core, contact: model.contact)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) { Button("Close") { verifying = false } }
+    }
+
+    private var messages: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                let shown = ConversationModel.metaShown(model.items,
+                                                        accessibilitySize: dynamicTypeSize.isAccessibilitySize)
+                LazyVStack(spacing: 8) {
+                    ForEach(groupedByDay, id: \.day) { group in
+                        Text(verbatim: DayLabel.text(for: group.day))
+                            .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
+                            .padding(.top, 8)
+                        ForEach(group.items) { item in
+                            row(item, showsMeta: shown.contains(item.id))
+                                .id(item.id)
+                                // A cancelled message leaves (§6.3); at once under Reduce Motion.
+                                .transition(.asymmetric(insertion: .identity,
+                                                        removal: .opacity.combined(with: .scale(scale: 0.98, anchor: .trailing))))
+                        }
                     }
+                }
+                .padding(16)
+                .animation(Motion.gated(Motion.enter, reduceMotion: reduceMotion), value: model.items.map(\.id))
             }
-            .presentationBackground(Color.surface)
-        }
-        .sheet(item: $sheetOf) { target in
-            MessageSheet(core: core, messageId: target.id, contact: model.contact, contactName: model.name) {
-                model.showDeleted($0)
+            // Held at the bottom: it opens there, and the keyboard or a
+            // new bubble keeps the last message in view without a jump.
+            .defaultScrollAnchor(.bottom)
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.visibleRect.maxY >= g.contentSize.height - Self.bottomSlack
+            } action: { _, bottom in
+                atBottom = bottom
             }
-        }
-        .sheet(item: $reactingTo) { target in
-            EmojiPicker { emoji in react(emoji, on: target.id) }
-        }
-        .confirmationDialog(Text(verbatim: confirmation?.title(otherDevices: confirmingDevices) ?? ""),
-                            isPresented: confirmingShown,
-                            titleVisibility: .visible, presenting: confirming) { item in
-            Button(DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery).button, role: .destructive) {
-                Task { await model.delete(item.id, shown: item.delivery) }
+            // A message I send while reading higher up: brought into
+            // view. At the bottom the anchor already shows it, and a
+            // received message never moves what I am reading.
+            .onChange(of: model.items.last?.id) { _, id in
+                guard let id, scrollTarget == nil, !atBottom,
+                      model.items.last?.outgoing == true else { return }
+                withAnimation(Motion.gated(Motion.enter, reduceMotion: reduceMotion)) {
+                    proxy.scrollTo(id, anchor: .bottom)
+                }
             }
-            Button("Keep", role: .cancel) {}
-        } message: { item in
-            Text(verbatim: DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery)
-                .message(name: model.name))
-        }
-        // The message went meanwhile (deleted elsewhere): nothing to confirm (§9).
-        .onChange(of: model.items.map(\.id)) { _, ids in
-            if let c = confirming, !ids.contains(c.id) { confirming = nil }
-        }
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                ChatHeader(core: core, model: model)
+            .onChange(of: scrollTarget) { _, id in
+                guard let id else { return }
+                proxy.scrollTo(id, anchor: .center)
+                // Done: new messages scroll into view again.
+                scrollTarget = nil
             }
         }
-        .toolbar(.hidden, for: .tabBar)
-        .onChange(of: locale, initial: true) { _, new in model.language = (Bundle.strings(for: new), new) }
-        .onAppear { syncLoop?.conversationOpen = true }
-        .onDisappear {
-            model.onDisappear()
-            syncLoop?.conversationOpen = false
-            draftSave?.cancel()
-            Task { await model.saveDraft() }
-        }
-        .onChange(of: phase) { _, new in
-            if new == .background { Task { await model.saveDraft() } }
-        }
-        // Ephemerals: erased when due and seen only while active and unlocked.
-        .onChange(of: phase, initial: true) { _, new in
-            Task { await model.phaseChanged(active: new == .active) }
-        }
-        .onChange(of: lock?.covered ?? false, initial: true) { _, covered in model.covered = covered }
-        .onChange(of: model.draft) {
-            draftSave?.cancel()
-            draftSave = Task {
-                try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled else { return }
-                await model.saveDraft()
+    }
+
+    /// The sheets, the delete confirmation and the toolbar.
+    private func presentations(_ view: some View) -> some View {
+        view
+            .sheet(isPresented: $verifying) {
+                NavigationStack {
+                    SafetyCodeView(core: core, contact: model.contact)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) { Button("Close") { verifying = false } }
+                        }
+                }
+                .presentationBackground(Color.surface)
             }
-        }
-        .task {
-            await model.onAppear()
-            // The first not delivered message, if it is still there.
-            if let focus, model.items.contains(where: { $0.id == focus }) { scrollTarget = focus }
-            for await change in await core.changes { await model.handle(change) }
-        }
+            .sheet(item: $sheetOf) { target in
+                MessageSheet(core: core, messageId: target.id, contact: model.contact, contactName: model.name) {
+                    model.showDeleted($0)
+                }
+            }
+            .sheet(item: $reactingTo) { target in
+                EmojiPicker { emoji in react(emoji, on: target.id) }
+            }
+            .confirmationDialog(Text(verbatim: confirmation?.title(otherDevices: confirmingDevices) ?? ""),
+                                isPresented: confirmingShown,
+                                titleVisibility: .visible, presenting: confirming) { item in
+                Button(DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery).button, role: .destructive) {
+                    Task { await model.delete(item.id, shown: item.delivery) }
+                }
+                Button("Keep", role: .cancel) {}
+            } message: { item in
+                Text(verbatim: DeleteConfirmation(outgoing: item.outgoing, delivery: item.delivery)
+                    .message(name: model.name))
+            }
+            // The message went meanwhile (deleted elsewhere): nothing to confirm (§9).
+            .onChange(of: model.items.map(\.id)) { _, ids in
+                if let c = confirming, !ids.contains(c.id) { confirming = nil }
+            }
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    ChatHeader(core: core, model: model)
+                }
+            }
+            .toolbar(.hidden, for: .tabBar)
+    }
+
+    /// Appearing, leaving, the scene phase, the lock and the draft.
+    private func lifecycle(_ view: some View) -> some View {
+        view
+            .onChange(of: locale, initial: true) { _, new in model.language = (Bundle.strings(for: new), new) }
+            .onAppear { syncLoop?.conversationOpen = true }
+            .onDisappear {
+                model.onDisappear()
+                syncLoop?.conversationOpen = false
+                draftSave?.cancel()
+                Task { await model.saveDraft() }
+            }
+            .onChange(of: phase) { _, new in
+                if new == .background { Task { await model.saveDraft() } }
+            }
+            // Ephemerals: erased when due and seen only while active and unlocked.
+            .onChange(of: phase, initial: true) { _, new in
+                Task { await model.phaseChanged(active: new == .active) }
+            }
+            .onChange(of: lock?.covered ?? false, initial: true) { _, covered in model.covered = covered }
+            .onChange(of: model.draft) {
+                draftSave?.cancel()
+                draftSave = Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    await model.saveDraft()
+                }
+            }
+            .task {
+                await model.onAppear()
+                // The first not delivered message, if it is still there.
+                if let focus, model.items.contains(where: { $0.id == focus }) { scrollTarget = focus }
+                for await change in await core.changes { await model.handle(change) }
+            }
     }
 
     private var confirmation: DeleteConfirmation? {
