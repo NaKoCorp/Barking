@@ -193,7 +193,7 @@ struct ChatRowView: View {
                             .font(.bMeta).foregroundStyle(Color.fgSoft)
                     }
                 }
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     switch row.line {
                     case .preview(let text):
                         if let s = row.lastStatus { DeliveryGlyph(s) }
@@ -209,7 +209,7 @@ struct ChatRowView: View {
                     Spacer(minLength: 0)
                     if row.unread > 0 {
                         Text(verbatim: "\(row.unread)").font(BarkingFont.mono(.caption, size: 12, weight: .semibold))
-                            .foregroundStyle(.white).padding(.horizontal, 7).frame(minHeight: 22)
+                            .foregroundStyle(.white).padding(.horizontal, 8).frame(minHeight: 22)
                             .background(Color.accentFill, in: .capsule)
                             .accessibilityLabel(Text("\(row.unread) unread"))
                     }

@@ -194,7 +194,7 @@ struct StatusDot: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             // The system font: Fira Code draws ✗ and ● at another weight.
             Text(verbatim: state.glyph).font(.bSymbol(11, relativeTo: .caption, weight: .bold))
                 .accessibilityHidden(true)

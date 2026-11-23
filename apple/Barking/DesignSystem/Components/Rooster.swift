@@ -77,7 +77,7 @@ struct MadeInFranceChip: View {
         }
         .font(BarkingFont.mono(.caption, size: 12))
         .foregroundStyle(Color.fgMuted)
-        .padding(.leading, 8).padding(.trailing, 12).padding(.vertical, 5)
+        .padding(.leading, 8).padding(.trailing, 12).padding(.vertical, 4)
         .background(Color.surfaceCard, in: Capsule())
         .overlay(Capsule().stroke(Color.border, lineWidth: 1))
     }

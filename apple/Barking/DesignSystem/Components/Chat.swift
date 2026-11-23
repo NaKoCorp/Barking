@@ -194,7 +194,7 @@ struct Bubble: View {
 
     var body: some View {
         let shape = Self.shape(outgoing: outgoing)
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             if let quote {
                 if quote.available {
                     QuoteView(line: quote, outgoing: outgoing).onTapGesture(perform: onQuote)
@@ -310,7 +310,7 @@ struct ReactionChips: View {
             ForEach(chips, id: \.emoji) { chip in
                 let look = ReactionChipLook.of(mine: chip.mine, state: myState)
                 Button { toggle(chip.emoji) } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 4) {
                         Text(verbatim: "\(chip.emoji) \(chip.count)")
                         if look.warning {
                             Text(verbatim: "\u{26A0}\u{FE0E}").foregroundStyle(Color.warnFg)

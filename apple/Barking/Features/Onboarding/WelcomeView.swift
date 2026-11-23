@@ -33,7 +33,7 @@ struct WelcomeView: View {
             .accessibilityIdentifier("welcome.header")
             .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).maxY } action: { bandTop = $0 }
             Spacer(minLength: Space.danger)
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 Eyebrow("welcome")
                 Text(verbatim: "Barking")
                     .font(BarkingFont.mono(.largeTitle, size: 44, weight: .semibold))

@@ -257,7 +257,7 @@ private struct QuoteCard: View {
                 TextLink("Show all") { expanded = true }
             }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.surfaceCard, in: RoundedRectangle(cornerRadius: Radius.card))
         .overlay(RoundedRectangle(cornerRadius: Radius.card).stroke(Color.border, lineWidth: 1))
@@ -284,7 +284,7 @@ private struct DeviceLine: View {
             DeliveryGlyph(row.state, relativeTo: .body, maximum: 28)
         }
         .padding(.horizontal, FormRowMetrics.inset)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .frame(minHeight: FormRowMetrics.minHeight(hasSubtitle: true))
         .accessibilityElement(children: .combine)
     }

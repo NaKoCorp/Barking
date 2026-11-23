@@ -30,7 +30,7 @@ struct PrivacyBlock: View {
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("// only you and \(contactName) can read it")
                 .font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.terminalFg)
             FlowLayout {
@@ -38,7 +38,7 @@ struct PrivacyBlock: View {
                 chip(Text("hidden sender"))
             }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.terminalBg, in: RoundedRectangle(cornerRadius: Radius.card))
         .overlay {
@@ -77,7 +77,7 @@ private struct PathStop: View {
             }
             // The column follows the disc, so a 48 pt disc never overhangs it.
             .frame(width: min(disc, 48))
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(verbatim: row.title).font(BarkingFont.sans(.subheadline, size: 15, weight: .semibold))
                     .foregroundStyle(Color.fg)
                 Text(verbatim: row.subtitle).font(BarkingFont.mono(.caption2, size: 11.5))
@@ -85,11 +85,11 @@ private struct PathStop: View {
                 Text(seen)
                     .font(BarkingFont.sans(.footnote, size: 12.5)).foregroundStyle(Color.fgMuted)
                     .lineSpacing(2).fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 10).padding(.vertical, 8)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.surfaceCard, in: RoundedRectangle(cornerRadius: Radius.tile))
                     .overlay(RoundedRectangle(cornerRadius: Radius.tile).stroke(Color.border, lineWidth: 1))
-                    .padding(.top, 6)
+                    .padding(.top, 8)
             }
             .padding(.top, 4)
         }

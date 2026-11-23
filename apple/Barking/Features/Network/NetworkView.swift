@@ -81,8 +81,8 @@ struct NetworkView: View {
     /// The transport, then its state as a glyph and a word (U-19). The ≋
     /// names the transport; the status dot is the only colour of state.
     private var internetCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
                 Text(verbatim: "≋").font(.bSymbol(13, relativeTo: .subheadline, weight: .bold))
                     .foregroundStyle(Color.transportNet).accessibilityHidden(true)
                 Text(verbatim: "Internet").font(BarkingFont.mono(.subheadline, size: 14, weight: .semibold))
