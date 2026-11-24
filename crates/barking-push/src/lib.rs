@@ -5,6 +5,7 @@
 
 pub mod apns;
 pub mod config;
+pub mod health;
 pub mod jwt;
 pub mod limit;
 pub mod server;
