@@ -357,6 +357,8 @@ async fn probe_loop<P: Pusher>(
             }
             _ = stop.wait_for(|s| *s) => return,
         };
+        // A probe answered 429 or 410 counts as healthy: APNs accepted the
+        // relay's credentials and connection, only not the (dummy) push.
         shared.record(outcome, env);
     }
 }
@@ -435,6 +437,8 @@ async fn stream<P: Pusher>(
         let _ = send.reset(STREAM_REFUSED.into());
     }
     if close {
+        // Also drops any other stream still open on this connection. A node
+        // sends one batch at a time per relay, so there is at most one.
         conn.close(CLOSE_UNAVAILABLE.into(), b"unavailable");
     }
 }
