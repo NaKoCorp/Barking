@@ -199,7 +199,7 @@ impl<P> Shared<P> {
         self.announce(h.available(now));
     }
 
-    /// Whether the relay serves; a time-based transition is noticed here.
+    /// Whether the relay serves, as left by the last recorded outcome.
     fn available(&self) -> bool {
         let h = self.health.lock().unwrap_or_else(PoisonError::into_inner);
         let available = h.available(Instant::now());
@@ -777,7 +777,11 @@ mod tests {
         let r = timeout(WAIT, Client::connect(relay.addr, relay.id))
             .await
             .expect("refused promptly");
-        assert!(r.is_err(), "connection accepted while unavailable");
+        assert!(
+            matches!(r, Err(ClientError::ConnectionRefused)),
+            "not an explicit refusal while unavailable: {:?}",
+            r.err()
+        );
         let _ = relay.stop.send(true);
     }
 
@@ -933,7 +937,11 @@ mod tests {
         )
         .await
         .expect("refused promptly, not left to time out");
-        assert!(r.is_err(), "connection accepted while draining");
+        assert!(
+            matches!(r, Err(ClientError::ConnectionRefused)),
+            "not an explicit refusal while draining: {:?}",
+            r.err()
+        );
         assert!(!relay.done.is_finished(), "still draining");
     }
 }

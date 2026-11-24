@@ -396,7 +396,12 @@ async fn per_ip_connection_cap_refuses_extra_connections() {
     })
     .await;
     let first = Client::connect(relay.addr, relay.id).await.unwrap();
-    assert!(Client::connect(relay.addr, relay.id).await.is_err());
+    let r = Client::connect(relay.addr, relay.id).await;
+    assert!(
+        matches!(r, Err(ClientError::ConnectionRefused)),
+        "{:?}",
+        r.err()
+    );
     drop(first);
     let _ = relay.stop.send(true);
 }

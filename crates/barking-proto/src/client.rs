@@ -246,6 +246,11 @@ const POW_RETRY_STEP: u8 = 2;
 pub enum ClientError {
     #[error("cannot connect to the node: {0}")]
     Connect(String),
+    /// The server answered the handshake with a QUIC CONNECTION_REFUSED:
+    /// it is up but turns new connections away on purpose (stopping, out of
+    /// service, connection caps reached).
+    #[error("the node refuses new connections")]
+    ConnectionRefused,
     #[error("connection to the node lost: {0}")]
     Connection(#[from] quinn::ConnectionError),
     #[error("protocol version incompatible with this node")]
@@ -363,8 +368,21 @@ pub async fn open_connection(addr: SocketAddr, expected: NodeId) -> Result<(Endp
     let conn = timeout(CONNECT_TIMEOUT, connecting)
         .await
         .map_err(|_| ClientError::Timeout)?
-        .map_err(|e| ClientError::Connect(e.to_string()))?;
+        .map_err(handshake_error)?;
     Ok((endpoint, conn))
+}
+
+/// A handshake failure; an explicit CONNECTION_REFUSED from the server is
+/// kept apart from the others (unreachable, bad identity, ...).
+fn handshake_error(e: quinn::ConnectionError) -> ClientError {
+    match e {
+        quinn::ConnectionError::ConnectionClosed(c)
+            if c.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED =>
+        {
+            ClientError::ConnectionRefused
+        }
+        e => ClientError::Connect(e.to_string()),
+    }
 }
 
 /// Sends a request on a new stream and reads the single response.
