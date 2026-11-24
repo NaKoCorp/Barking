@@ -2,7 +2,7 @@
 //! `log_interval_secs`. Counts only; nothing identifies a device or a node.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -40,6 +40,11 @@ pub struct RelayStats {
     pub failed: AtomicU64,
     /// Failed pushes by APNs code (`APNS_CODES`, then other/none).
     pub apns_errors: [AtomicU64; APNS_SLOTS],
+    /// Items of `Wake` requests refused unopened while the relay stepped
+    /// aside (APNs failing on its side).
+    pub refused_unavailable: AtomicU64,
+    /// The relay is stepping aside. A state, not a counter: `take` leaves it.
+    pub unavailable: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -54,6 +59,7 @@ pub struct StatsSnapshot {
     pub unregistered: u64,
     pub failed: u64,
     pub apns_errors: [u64; APNS_SLOTS],
+    pub refused_unavailable: u64,
 }
 
 impl RelayStats {
@@ -76,6 +82,7 @@ impl RelayStats {
             unregistered: self.unregistered.load(Relaxed),
             failed: self.failed.load(Relaxed),
             apns_errors: std::array::from_fn(|i| self.apns_errors[i].load(Relaxed)),
+            refused_unavailable: self.refused_unavailable.load(Relaxed),
         }
     }
 
@@ -92,6 +99,7 @@ impl RelayStats {
             unregistered: self.unregistered.swap(0, Relaxed),
             failed: self.failed.swap(0, Relaxed),
             apns_errors: std::array::from_fn(|i| self.apns_errors[i].swap(0, Relaxed)),
+            refused_unavailable: self.refused_unavailable.swap(0, Relaxed),
         }
     }
 }
@@ -104,10 +112,10 @@ pub async fn report_loop(stats: Arc<RelayStats>, every: Duration, mut stop: watc
     tick.tick().await; // first tick is immediate
     loop {
         tokio::select! {
-            _ = tick.tick() => log(&stats.take()),
+            _ = tick.tick() => log(&stats.take(), !stats.unavailable.load(Relaxed)),
             r = stop.changed() => {
                 if r.is_err() || *stop.borrow() {
-                    log(&stats.take());
+                    log(&stats.take(), !stats.unavailable.load(Relaxed));
                     return;
                 }
             }
@@ -115,8 +123,9 @@ pub async fn report_loop(stats: Arc<RelayStats>, every: Duration, mut stop: watc
     }
 }
 
-fn log(s: &StatsSnapshot) {
+fn log(s: &StatsSnapshot, available: bool) {
     tracing::info!(
+        available,
         wakes_in = s.wakes_in,
         over_budget = s.over_budget,
         invalid = s.invalid,
@@ -126,6 +135,7 @@ fn log(s: &StatsSnapshot) {
         sent = s.sent,
         unregistered = s.unregistered,
         failed = s.failed,
+        refused_unavailable = s.refused_unavailable,
         "relay stats"
     );
     // Apple errors by code; only non-zero ones are logged.

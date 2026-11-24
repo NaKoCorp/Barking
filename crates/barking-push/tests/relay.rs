@@ -29,6 +29,9 @@ impl Pusher for Recorder {
         self.notify.notify_waiters();
         PushOutcome::Sent
     }
+    async fn probe(&self, _env: ApnsEnv) -> PushOutcome {
+        PushOutcome::Sent
+    }
 }
 
 struct Relay {
@@ -217,6 +220,9 @@ impl Pusher for Hung {
     async fn push(&self, _token: WakeToken) -> PushOutcome {
         std::future::pending().await
     }
+    async fn probe(&self, _env: ApnsEnv) -> PushOutcome {
+        PushOutcome::Sent
+    }
 }
 
 #[tokio::test]
@@ -244,6 +250,9 @@ impl Pusher for Scripted {
             5 => PushOutcome::Failed(503),
             _ => PushOutcome::Failed(418),
         }
+    }
+    async fn probe(&self, _env: ApnsEnv) -> PushOutcome {
+        PushOutcome::Sent
     }
 }
 

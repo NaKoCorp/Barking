@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use barking_proto::client::MIN_PROTOCOL_VERSION;
 use barking_proto::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
-use barking_proto::push::{WakeToken, open};
+use barking_proto::push::{ApnsEnv, WakeToken, open};
 use barking_proto::{
     ErrorReason, Limits, MAX_WAKE_ITEMS, NodeId, PROTOCOL_VERSION, Request, Response, tls,
     versions_overlap,
@@ -22,6 +22,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::time::timeout;
 use x25519_dalek::StaticSecret;
 
+use crate::health::{ApnsHealth, PROBE_EVERY};
 use crate::limit::{IntakeBudget, TokenLimiter};
 use crate::stats::RelayStats;
 
@@ -40,6 +41,8 @@ const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 /// Application close code of a stopped endpoint.
 const CLOSE_STOP: u32 = 0;
 const STREAM_REFUSED: u32 = 1;
+/// Application close code of a connection refused while APNs fails.
+const CLOSE_UNAVAILABLE: u32 = 2;
 
 /// Result of one push to APNs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +57,9 @@ pub enum PushOutcome {
 /// Delivers one wake-up to a device.
 pub trait Pusher: Send + Sync + 'static {
     fn push(&self, token: WakeToken) -> impl Future<Output = PushOutcome> + Send;
+    /// Checks that APNs accepts this relay's requests in `env`, without
+    /// reaching any device: answered like `push`.
+    fn probe(&self, env: ApnsEnv) -> impl Future<Output = PushOutcome> + Send;
 }
 
 /// Connection caps. Peers are counted per IPv4 address and per IPv6 /64.
@@ -172,6 +178,39 @@ struct Shared<P> {
     limiter: Mutex<TokenLimiter>,
     intake: Mutex<IntakeBudget>,
     inflight: Arc<Semaphore>,
+    /// APNs health; `stats.unavailable` mirrors its last announced state and
+    /// is only changed under this lock, so each transition is logged once.
+    health: Mutex<ApnsHealth>,
+}
+
+impl<P> Shared<P> {
+    /// Records one APNs outcome (push or probe) for `env`.
+    fn record(&self, o: PushOutcome, env: ApnsEnv) {
+        let now = Instant::now();
+        let mut h = self.health.lock().unwrap_or_else(PoisonError::into_inner);
+        h.record(o, env, now);
+        self.announce(h.available(now));
+    }
+
+    /// Whether the relay serves; a time-based transition is noticed here.
+    fn available(&self) -> bool {
+        let h = self.health.lock().unwrap_or_else(PoisonError::into_inner);
+        let available = h.available(Instant::now());
+        self.announce(available);
+        available
+    }
+
+    /// Logs a change of state. Called with `health` locked.
+    fn announce(&self, available: bool) {
+        let was_unavailable = self.stats.unavailable.swap(!available, Relaxed);
+        if was_unavailable == available {
+            if available {
+                tracing::info!("relay available again");
+            } else {
+                tracing::warn!("relay unavailable: APNs failing");
+            }
+        }
+    }
 }
 
 /// Day number since the Unix epoch.
@@ -199,6 +238,32 @@ pub async fn serve<P: Pusher>(
     limits: ConnLimits,
     stop: watch::Receiver<bool>,
 ) {
+    serve_inner(
+        endpoints,
+        node_id,
+        keys,
+        pusher,
+        stats,
+        limits,
+        stop,
+        PROBE_EVERY,
+    )
+    .await;
+}
+
+/// `serve` with the probe interval as a parameter (shorter in tests).
+#[allow(clippy::too_many_arguments)]
+async fn serve_inner<P: Pusher>(
+    endpoints: Vec<Endpoint>,
+    node_id: NodeId,
+    keys: Vec<(u8, StaticSecret)>,
+    pusher: Arc<P>,
+    stats: Arc<RelayStats>,
+    limits: ConnLimits,
+    stop: watch::Receiver<bool>,
+    probe_every: Duration,
+) {
+    stats.unavailable.store(false, Relaxed);
     let shared = Arc::new(Shared {
         node_id,
         keys,
@@ -207,7 +272,9 @@ pub async fn serve<P: Pusher>(
         limiter: Mutex::new(TokenLimiter::new()),
         intake: Mutex::new(IntakeBudget::new()),
         inflight: Arc::new(Semaphore::new(MAX_INFLIGHT_PUSHES)),
+        health: Mutex::new(ApnsHealth::new(Instant::now())),
     });
+    let prober = tokio::spawn(probe_loop(shared.clone(), probe_every, stop.clone()));
     let conns = Arc::new(Conns {
         limits,
         state: Mutex::default(),
@@ -223,6 +290,47 @@ pub async fn serve<P: Pusher>(
     }
     for l in loops {
         let _ = l.await;
+    }
+    let _ = prober.await;
+}
+
+/// While the relay is unavailable, probes APNs every `every` in the
+/// environment of the last fault; a probe that is not a relay fault puts
+/// the relay back in service.
+async fn probe_loop<P: Pusher>(
+    shared: Arc<Shared<P>>,
+    every: Duration,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // first tick is immediate
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            r = stop.changed() => {
+                if r.is_err() || *stop.borrow() {
+                    return;
+                }
+                continue;
+            }
+        }
+        if shared.available() {
+            continue;
+        }
+        let env = shared
+            .health
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .probe_env();
+        // Abandoned on stop, so that `serve` does not wait for APNs.
+        let outcome = tokio::select! {
+            o = timeout(PUSH_TIMEOUT, shared.pusher.probe(env)) => {
+                o.unwrap_or(PushOutcome::Failed(0))
+            }
+            _ = stop.wait_for(|s| *s) => return,
+        };
+        shared.record(outcome, env);
     }
 }
 
@@ -245,6 +353,12 @@ async fn accept_loop<P: Pusher>(
                     } else {
                         incoming.ignore();
                     }
+                    continue;
+                }
+                // A relay whose APNs sends fail steps aside: nodes move on
+                // to another replica when the connection is refused.
+                if !shared.available() {
+                    incoming.refuse();
                     continue;
                 }
                 // Refused before any handshake work if a cap is reached.
@@ -272,7 +386,7 @@ async fn connection<P: Pusher>(incoming: Incoming, shared: Arc<Shared<P>>, _slot
     // The transport limits the open streams to MAX_STREAMS; the idle timeout
     // ends a silent connection.
     while let Ok((send, recv)) = conn.accept_bi().await {
-        tokio::spawn(stream(send, recv, peer, shared.clone()));
+        tokio::spawn(stream(send, recv, peer, conn.clone(), shared.clone()));
     }
 }
 
@@ -280,6 +394,7 @@ async fn stream<P: Pusher>(
     mut send: SendStream,
     mut recv: RecvStream,
     peer: IpAddr,
+    conn: quinn::Connection,
     shared: Arc<Shared<P>>,
 ) {
     let req = timeout(
@@ -287,9 +402,9 @@ async fn stream<P: Pusher>(
         frame::read::<Request>(&mut recv, MAX_REQUEST_BYTES),
     )
     .await;
-    let resp = match req {
+    let (resp, close) = match req {
         Ok(Ok(req)) => handle(req, peer, &shared).await,
-        Ok(Err(FrameError::Malformed)) => Response::Error(ErrorReason::Malformed),
+        Ok(Err(FrameError::Malformed)) => (Response::Error(ErrorReason::Malformed), false),
         Ok(Err(_)) | Err(_) => {
             let _ = recv.stop(STREAM_REFUSED.into());
             let _ = send.reset(STREAM_REFUSED.into());
@@ -307,10 +422,18 @@ async fn stream<P: Pusher>(
     if !matches!(sent, Ok(Some(None))) {
         let _ = send.reset(STREAM_REFUSED.into());
     }
+    if close {
+        conn.close(CLOSE_UNAVAILABLE.into(), b"unavailable");
+    }
 }
 
-async fn handle<P: Pusher>(req: Request, peer: IpAddr, shared: &Arc<Shared<P>>) -> Response {
-    match req {
+/// The response, and whether to close the connection once it is delivered.
+async fn handle<P: Pusher>(
+    req: Request,
+    peer: IpAddr,
+    shared: &Arc<Shared<P>>,
+) -> (Response, bool) {
+    let resp = match req {
         Request::Hello {
             version,
             min_version,
@@ -318,7 +441,7 @@ async fn handle<P: Pusher>(req: Request, peer: IpAddr, shared: &Arc<Shared<P>>) 
             if min_version > version
                 || !versions_overlap(min_version, version, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION)
             {
-                return Response::Error(ErrorReason::VersionTooOld);
+                return (Response::Error(ErrorReason::VersionTooOld), false);
             }
             Response::Hello {
                 version: PROTOCOL_VERSION,
@@ -335,14 +458,24 @@ async fn handle<P: Pusher>(req: Request, peer: IpAddr, shared: &Arc<Shared<P>>) 
         }
         Request::Wake { items } => {
             if items.len() > MAX_WAKE_ITEMS {
-                return Response::Error(ErrorReason::Malformed);
+                return (Response::Error(ErrorReason::Malformed), false);
+            }
+            if !shared.available() {
+                // Refused unopened; an updated node reroutes on an error,
+                // an older one when its next connection is refused.
+                shared
+                    .stats
+                    .refused_unavailable
+                    .fetch_add(items.len() as u64, Relaxed);
+                return (Response::Error(ErrorReason::NodeFull), true);
             }
             wake(items, peer, shared).await;
             // Always `Ok`: nothing about a device is revealed to the node.
             Response::Ok
         }
         _ => Response::Error(ErrorReason::Unsupported),
-    }
+    };
+    (resp, false)
 }
 
 /// Takes the peer's intake budget before any decryption, opens the granted
@@ -409,10 +542,12 @@ fn wake_item<P: Pusher>(token: Option<WakeToken>, day: u64, shared: &Arc<Shared<
     }
     let shared = shared.clone();
     tokio::spawn(async move {
+        let env = token.env;
         let outcome = timeout(PUSH_TIMEOUT, shared.pusher.push(token))
             .await
             .unwrap_or(PushOutcome::Failed(0));
         drop(permit);
+        shared.record(outcome, env);
         match outcome {
             PushOutcome::Sent => shared.stats.sent.fetch_add(1, Relaxed),
             PushOutcome::Unregistered => shared.stats.unregistered.fetch_add(1, Relaxed),
@@ -422,4 +557,223 @@ fn wake_item<P: Pusher>(token: Option<WakeToken>, day: u64, shared: &Arc<Shared<
             }
         };
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU16, AtomicUsize};
+
+    use barking_proto::client::{Client, ClientError};
+    use barking_proto::push::{WakeReason, seal};
+    use x25519_dalek::PublicKey;
+
+    use super::*;
+
+    /// A key that solves the node puzzle (as in `tests/relay.rs`).
+    const SEED: [u8; 32] = [
+        66, 125, 129, 83, 32, 106, 225, 91, 180, 232, 72, 26, 247, 131, 101, 82, 217, 244, 181, 75,
+        156, 236, 14, 63, 198, 19, 50, 80, 99, 40, 172, 214,
+    ];
+    const PROBE_TEST_EVERY: Duration = Duration::from_millis(50);
+    const WAIT: Duration = Duration::from_secs(10);
+
+    /// Every push fails with 403 (bad credentials on the relay side); the
+    /// probe answers `probe_code`, switchable during the test.
+    struct Failing {
+        pushes: AtomicUsize,
+        probes: Mutex<Vec<ApnsEnv>>,
+        probe_code: AtomicU16,
+    }
+
+    impl Failing {
+        fn new(probe_code: u16) -> Arc<Self> {
+            Arc::new(Failing {
+                pushes: AtomicUsize::new(0),
+                probes: Mutex::default(),
+                probe_code: AtomicU16::new(probe_code),
+            })
+        }
+    }
+
+    impl Pusher for Failing {
+        async fn push(&self, _token: WakeToken) -> PushOutcome {
+            self.pushes.fetch_add(1, Relaxed);
+            PushOutcome::Failed(403)
+        }
+        async fn probe(&self, env: ApnsEnv) -> PushOutcome {
+            self.probes.lock().unwrap().push(env);
+            PushOutcome::Failed(self.probe_code.load(Relaxed))
+        }
+    }
+
+    struct Relay {
+        addr: SocketAddr,
+        id: NodeId,
+        stats: Arc<RelayStats>,
+        secret: StaticSecret,
+        stop: watch::Sender<bool>,
+    }
+
+    fn start(pusher: Arc<Failing>) -> Relay {
+        let key = SigningKey::from_bytes(&SEED);
+        let id = NodeId::from_public_key(&key.verifying_key());
+        let endpoints = bind(&["127.0.0.1:0".to_string()], &key).unwrap();
+        let addr = endpoints[0].local_addr().unwrap();
+        let secret = StaticSecret::from([7u8; 32]);
+        let stats = Arc::new(RelayStats::default());
+        let (stop, rx) = watch::channel(false);
+        tokio::spawn(serve_inner(
+            endpoints,
+            id,
+            vec![(3, secret.clone())],
+            pusher,
+            stats.clone(),
+            ConnLimits::default(),
+            rx,
+            PROBE_TEST_EVERY,
+        ));
+        Relay {
+            addr,
+            id,
+            stats,
+            secret,
+            stop,
+        }
+    }
+
+    fn token(byte: u8, expires_day: u64) -> WakeToken {
+        WakeToken {
+            apns_token: vec![byte; 32],
+            env: ApnsEnv::Sandbox,
+            collapse: [byte; 16],
+            expires_day: u32::try_from(expires_day).unwrap(),
+            reason: WakeReason::Message,
+        }
+    }
+
+    impl Relay {
+        fn sealed(&self, t: &WakeToken) -> Vec<u8> {
+            seal(
+                PublicKey::from(&self.secret).as_bytes(),
+                3,
+                t,
+                &mut rand::rng(),
+            )
+        }
+
+        /// Five pushes failing on the relay side, one `Wake` each, then waits
+        /// for the relay to step aside.
+        async fn fail_five(&self, session: &barking_proto::client::Session) {
+            for b in 1..=5u8 {
+                session
+                    .wake(vec![self.sealed(&token(b, today() + 1))])
+                    .await
+                    .unwrap();
+            }
+            let deadline = tokio::time::Instant::now() + WAIT;
+            while !self.stats.unavailable.load(Relaxed) {
+                assert!(tokio::time::Instant::now() < deadline, "never unavailable");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_relay_answers_node_full_unopened() {
+        let pusher = Failing::new(403);
+        let relay = start(pusher.clone());
+        let session = Client::connect(relay.addr, relay.id).await.unwrap();
+        relay.fail_five(&session).await;
+        assert_eq!(relay.stats.snapshot().wakes_in, 5);
+
+        let err = session
+            .wake(vec![relay.sealed(&token(6, today() + 1))])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ClientError::Refused(ErrorReason::NodeFull)),
+            "{err:?}"
+        );
+        let s = relay.stats.snapshot();
+        assert_eq!((s.wakes_in, s.refused_unavailable), (5, 1));
+        assert_eq!(pusher.pushes.load(Relaxed), 5);
+        // The connection is closed after the response.
+        timeout(WAIT, session.connection().closed())
+            .await
+            .expect("connection closed after NodeFull");
+        let _ = relay.stop.send(true);
+    }
+
+    #[tokio::test]
+    async fn unavailable_relay_refuses_new_connections() {
+        let relay = start(Failing::new(403));
+        let session = Client::connect(relay.addr, relay.id).await.unwrap();
+        relay.fail_five(&session).await;
+        let r = timeout(WAIT, Client::connect(relay.addr, relay.id))
+            .await
+            .expect("refused promptly");
+        assert!(r.is_err(), "connection accepted while unavailable");
+        let _ = relay.stop.send(true);
+    }
+
+    #[tokio::test]
+    async fn successful_probe_restores_service() {
+        let pusher = Failing::new(403);
+        let relay = start(pusher.clone());
+        let session = Client::connect(relay.addr, relay.id).await.unwrap();
+        relay.fail_five(&session).await;
+        // Failing probes keep it aside.
+        tokio::time::sleep(PROBE_TEST_EVERY * 4).await;
+        assert!(relay.stats.unavailable.load(Relaxed));
+        assert!(!pusher.probes.lock().unwrap().is_empty());
+        assert!(
+            pusher
+                .probes
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|e| *e == ApnsEnv::Sandbox)
+        );
+        // APNs now answers BadDeviceToken: credentials are fine again.
+        pusher.probe_code.store(400, Relaxed);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let session = loop {
+            if let Ok(s) = Client::connect(relay.addr, relay.id).await {
+                break s;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "never restored");
+            tokio::time::sleep(PROBE_TEST_EVERY).await;
+        };
+        assert!(!relay.stats.unavailable.load(Relaxed));
+        session
+            .wake(vec![relay.sealed(&token(7, today() + 1))])
+            .await
+            .unwrap();
+        let _ = relay.stop.send(true);
+    }
+
+    #[tokio::test]
+    async fn wake_after_switch_is_refused_unopened() {
+        let pusher = Failing::new(403);
+        let relay = start(pusher.clone());
+        let session = Client::connect(relay.addr, relay.id).await.unwrap();
+        relay.fail_five(&session).await;
+        let before = relay.stats.snapshot();
+        // Would count as invalid and expired if opened.
+        let garbage = vec![0xAB; 50];
+        let expired = relay.sealed(&token(8, today() - 1));
+        let err = session.wake(vec![garbage, expired]).await.unwrap_err();
+        assert!(
+            matches!(err, ClientError::Refused(ErrorReason::NodeFull)),
+            "{err:?}"
+        );
+        let after = relay.stats.snapshot();
+        assert_eq!(
+            (after.wakes_in, after.invalid, after.expired),
+            (before.wakes_in, before.invalid, before.expired)
+        );
+        assert_eq!(after.refused_unavailable, 2);
+        assert_eq!(pusher.pushes.load(Relaxed), 5);
+        let _ = relay.stop.send(true);
+    }
 }

@@ -218,14 +218,35 @@ fn base_client() -> reqwest::ClientBuilder {
         .no_proxy()
 }
 
-impl Pusher for ApnsPusher {
-    async fn push(&self, token: WakeToken) -> PushOutcome {
-        let (outcome, rejected) = self.send(&token, None).await;
+impl ApnsPusher {
+    /// One push, retried once with a renewed provider token if APNs says
+    /// the current one expired.
+    async fn deliver(&self, token: &WakeToken) -> PushOutcome {
+        let (outcome, rejected) = self.send(token, None).await;
         if rejected.is_some() {
-            // Renew the provider token and retry once.
-            return self.send(&token, rejected).await.0;
+            return self.send(token, rejected).await.0;
         }
         outcome
+    }
+}
+
+impl Pusher for ApnsPusher {
+    async fn push(&self, token: WakeToken) -> PushOutcome {
+        self.deliver(&token).await
+    }
+
+    /// A silent push to the all-zero device token, which no device holds:
+    /// APNs answers 400 (BadDeviceToken) once it accepts our credentials,
+    /// 403 while it does not.
+    async fn probe(&self, env: ApnsEnv) -> PushOutcome {
+        let token = WakeToken {
+            apns_token: vec![0; 32],
+            env,
+            collapse: [0; 16],
+            expires_day: 0,
+            reason: WakeReason::Receipt,
+        };
+        self.deliver(&token).await
     }
 }
 
