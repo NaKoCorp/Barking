@@ -1182,18 +1182,42 @@ mod tests {
         let second = FakeRelay::start().await;
         let (r1, r2) = (first.relay_ref(), second.relay_ref());
         assert_eq!(r1.id, r2.id);
-        let t = QuicWakeTransport::with_fixed_addresses(vec![
-            SocketAddr::from(([127, 0, 0, 1], r1.port)),
-            SocketAddr::from(([127, 0, 0, 1], r2.port)),
-        ]);
+        let dead = SocketAddr::from(([127, 0, 0, 1], r1.port));
+        let live = SocketAddr::from(([127, 0, 0, 1], r2.port));
+        let t = QuicWakeTransport::with_fixed_addresses(vec![dead, live]);
         first.stop();
         let items = vec![vec![4u8; 8], vec![5u8; 8]];
-        for _ in 0..4 {
-            // Whatever the shuffled order, the live replica gets the batch.
+        let mut sent = 0;
+        // The shuffle picks the dead replica first sooner or later (each
+        // send is a fresh connection): it is tried, fails, and is set aside,
+        // while the batch still reaches the live one.
+        for _ in 0..64 {
             t.sessions().remove(&r2);
             t.send(&r2, items.clone()).await.unwrap();
+            sent += items.len();
+            if t.address_backoff().is_backed_off(&dead) {
+                break;
+            }
         }
-        assert_eq!(second.received().len(), 8);
+        assert!(
+            t.address_backoff().is_backed_off(&dead),
+            "the dead replica was never tried"
+        );
+        assert!(!t.address_backoff().is_backed_off(&live));
+        // Set aside, the dead replica goes last: fresh connections reach the
+        // live one without paying its connect cap again.
+        for _ in 0..8 {
+            t.sessions().remove(&r2);
+            let t0 = std::time::Instant::now();
+            t.send(&r2, items.clone()).await.unwrap();
+            sent += items.len();
+            assert!(
+                t0.elapsed() < ADDRESS_CONNECT_CAP / 2,
+                "the dead replica was tried first again: {:?}",
+                t0.elapsed()
+            );
+        }
+        assert_eq!(second.received().len(), sent);
         second.stop();
     }
 
