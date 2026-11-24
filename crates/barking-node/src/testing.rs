@@ -470,6 +470,11 @@ pub struct FakeRelay {
     id: NodeId,
     received: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
     conns: Arc<std::sync::Mutex<Vec<quinn::Connection>>>,
+    /// Answers `Wake` with `NodeFull` (nothing recorded), as a relay out of
+    /// service or stopping does.
+    refuse_wakes: Arc<std::sync::atomic::AtomicBool>,
+    /// Refuses new connections (QUIC CONNECTION_REFUSED).
+    refuse_connections: Arc<std::sync::atomic::AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -500,14 +505,23 @@ impl FakeRelay {
             std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)),
         )
         .ok();
+        let refuse_wakes: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let refuse_connections: Arc<std::sync::atomic::AtomicBool> = Arc::default();
         let mut tasks = Vec::new();
         for ep in std::iter::once(ep).chain(ep6) {
             let log = log.clone();
             let kept = kept.clone();
+            let refuse_wakes = refuse_wakes.clone();
+            let refuse_connections = refuse_connections.clone();
             tasks.push(tokio::spawn(async move {
                 while let Some(incoming) = ep.accept().await {
+                    if refuse_connections.load(std::sync::atomic::Ordering::SeqCst) {
+                        incoming.refuse();
+                        continue;
+                    }
                     let log = log.clone();
                     let kept = kept.clone();
+                    let refuse_wakes = refuse_wakes.clone();
                     tokio::spawn(async move {
                         let Ok(conn) = incoming.await else { return };
                         kept.lock()
@@ -532,6 +546,16 @@ impl FakeRelay {
                                         wake: false,
                                     },
                                 },
+                                // The real relay also closes the connection
+                                // once the answer is acknowledged; not done
+                                // here (a close racing the answer would make
+                                // the node see a lost stream), the node
+                                // closes it itself on a refusal.
+                                Request::Wake { .. }
+                                    if refuse_wakes.load(std::sync::atomic::Ordering::SeqCst) =>
+                                {
+                                    Response::Error(barking_proto::ErrorReason::NodeFull)
+                                }
                                 Request::Wake { items } => {
                                     log.lock()
                                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -552,8 +576,28 @@ impl FakeRelay {
             id,
             received,
             conns,
+            refuse_wakes,
+            refuse_connections,
             tasks,
         }
+    }
+
+    /// From now on, `Wake` is answered `NodeFull` (or served again).
+    pub fn set_refuse_wakes(&self, on: bool) {
+        self.refuse_wakes
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// From now on, new connections are refused (or accepted again); open
+    /// ones are kept.
+    pub fn set_refuse_connections(&self, on: bool) {
+        self.refuse_connections
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The IPv4 address the relay listens on.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
     }
 
     /// Closes every open connection (as an idle timeout would); the relay

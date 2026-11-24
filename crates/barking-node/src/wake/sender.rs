@@ -5,7 +5,9 @@
 //! accept gets a single retry (at once when it refused, so that the batch
 //! goes to another replica), a relay address that refused or could not be
 //! reached is tried last for `ADDRESS_BACKOFF`, and a relay that could not be
-//! reached is skipped for `RELAY_FAILURE_BACKOFF`. One host holds at most
+//! reached is skipped for `RELAY_FAILURE_BACKOFF`. A relay whose replicas
+//! all stepped aside on purpose (`NodeFull`, connection refused) is not
+//! skipped: the batch fails, the next one is tried as usual. One host holds at most
 //! `MAX_SENDS_PER_HOST` of the send permits. Nothing here logs a relay host,
 //! an address or a token.
 
@@ -44,12 +46,15 @@ pub enum WakeError {
     Resolve,
     /// The name resolves only to private, local or otherwise unroutable addresses.
     NoRoutableAddress,
-    /// No address accepted a QUIC connection with the expected identity.
+    /// No address accepted a QUIC connection with the expected identity,
+    /// and none refused it explicitly (silent, unreachable, bad identity).
     Connect,
     /// The relay was reached but the request failed (timeout, stream reset,
     /// unexpected response).
     Request,
-    /// The relay answered the request with an error.
+    /// The relay stepped aside on purpose: it answered the request with an
+    /// error, or every address failed and at least one refused the
+    /// connection (QUIC CONNECTION_REFUSED). Never backs off the relay.
     Refused,
 }
 
@@ -92,7 +97,10 @@ const MAX_BACKOFF_ENTRIES: usize = WAKE_QUEUE;
 pub const ADDRESS_BACKOFF: Duration = Duration::from_secs(60);
 
 /// Relay addresses set aside (bounded by `MAX_BACKOFF_ENTRIES`, oldest
-/// forgotten first): they are tried last, never skipped.
+/// forgotten first): they are tried last, never skipped. Keyed by address
+/// alone and shared by every relay of the transport: the same `addr:port`
+/// is the same server whatever name led to it, so setting it aside for all
+/// of them is harmless.
 #[derive(Default)]
 struct AddressBackoff {
     until: HashMap<SocketAddr, Instant>,
@@ -178,24 +186,34 @@ fn order_addresses(mut addrs: Vec<SocketAddr>, rng: &mut impl rand::Rng) -> Vec<
 /// equal share of the time left before `deadline`, at most
 /// `ADDRESS_CONNECT_CAP`, so that one that never answers does not starve the
 /// next ones. Each address that was tried and failed is passed to `failed`.
+/// When none gave a session, `Refused` if at least one refused the
+/// connection explicitly (the relay is up but stepping aside), else
+/// `Connect`.
 async fn connect_any(
     addrs: &[SocketAddr],
     id: barking_proto::NodeId,
     deadline: Instant,
     mut failed: impl FnMut(SocketAddr),
 ) -> Result<Session, WakeError> {
+    let mut refused = false;
     for (i, addr) in addrs.iter().enumerate() {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
         let share = (left / u32::try_from(addrs.len() - i).unwrap_or(1)).min(ADDRESS_CONNECT_CAP);
-        if let Ok(Ok(s)) = timeout(share, Client::connect(*addr, id)).await {
-            return Ok(s);
+        match timeout(share, Client::connect(*addr, id)).await {
+            Ok(Ok(s)) => return Ok(s),
+            Ok(Err(ClientError::ConnectionRefused)) => refused = true,
+            _ => {}
         }
         failed(*addr);
     }
-    Err(WakeError::Connect)
+    Err(if refused {
+        WakeError::Refused
+    } else {
+        WakeError::Connect
+    })
 }
 
 /// Bounded map of kept values, least recently used evicted.
@@ -275,6 +293,9 @@ pub struct QuicWakeTransport {
     /// Tests only: these addresses instead of name resolution.
     #[cfg(test)]
     fixed: Option<Vec<SocketAddr>>,
+    /// Tests only: try the addresses in the given order (no shuffle).
+    #[cfg(test)]
+    keep_order: bool,
 }
 
 impl QuicWakeTransport {
@@ -285,6 +306,8 @@ impl QuicWakeTransport {
             address_backoff: Mutex::default(),
             #[cfg(test)]
             fixed: None,
+            #[cfg(test)]
+            keep_order: false,
         }
     }
 
@@ -295,6 +318,16 @@ impl QuicWakeTransport {
         QuicWakeTransport {
             fixed: Some(addrs),
             ..QuicWakeTransport::new(true)
+        }
+    }
+
+    /// Tests only: like `with_fixed_addresses`, tried in this order (the
+    /// backed-off ones still last).
+    #[cfg(test)]
+    fn with_ordered_addresses(addrs: Vec<SocketAddr>) -> QuicWakeTransport {
+        QuicWakeTransport {
+            keep_order: true,
+            ..QuicWakeTransport::with_fixed_addresses(addrs)
         }
     }
 
@@ -328,14 +361,21 @@ impl QuicWakeTransport {
     /// Resolves the relay and keeps only addresses worth connecting to,
     /// backed-off ones last.
     async fn addresses(&self, relay: &RelayRef) -> Result<Vec<SocketAddr>, WakeError> {
-        let found = self.resolve(relay).await?;
-        let addrs = order_addresses(
+        let found: Vec<SocketAddr> = self
+            .resolve(relay)
+            .await?
+            .into_iter()
+            .filter(|a| wake_address_ok(a, self.allow_private))
+            .collect();
+        #[cfg(test)]
+        let keep_order = self.keep_order;
+        #[cfg(not(test))]
+        let keep_order = false;
+        let addrs = if keep_order {
             found
-                .into_iter()
-                .filter(|a| wake_address_ok(a, self.allow_private))
-                .collect(),
-            &mut rand::rng(),
-        );
+        } else {
+            order_addresses(found, &mut rand::rng())
+        };
         let addrs = self.address_backoff().last(addrs);
         if addrs.is_empty() {
             Err(WakeError::NoRoutableAddress)
@@ -604,10 +644,15 @@ async fn relay_worker<T: WakeTransport>(inner: Arc<Inner<T>>, relay: RelayRef) {
             }
             Err(e) => {
                 // Only a relay that could not be reached at all is skipped.
-                if matches!(
-                    e,
-                    WakeError::Resolve | WakeError::NoRoutableAddress | WakeError::Connect
-                ) {
+                // A replica answered `NodeFull` first (`rerouted`): the relay
+                // is up and stepping aside, so the other replicas failing to
+                // connect on the retry does not skip it either.
+                let unreachable = match e {
+                    WakeError::Resolve | WakeError::NoRoutableAddress => true,
+                    WakeError::Connect => !rerouted,
+                    WakeError::Request | WakeError::Refused => false,
+                };
+                if unreachable {
                     inner.start_backoff(&relay);
                 }
                 inner.stats.add_wake_failed(n as u64);
@@ -1219,6 +1264,177 @@ mod tests {
         }
         assert_eq!(second.received().len(), sent);
         second.stop();
+    }
+
+    /// Answers each call with the next scripted error, then `Ok`.
+    #[derive(Clone, Default)]
+    struct Scripted {
+        calls: Arc<AtomicUsize>,
+        script: Arc<Mutex<VecDeque<WakeError>>>,
+    }
+
+    impl Scripted {
+        fn new(script: Vec<WakeError>) -> Scripted {
+            Scripted {
+                calls: Arc::default(),
+                script: Arc::new(Mutex::new(script.into())),
+            }
+        }
+    }
+
+    impl WakeTransport for Scripted {
+        async fn send(&self, _: &RelayRef, _: Vec<Vec<u8>>) -> Result<(), WakeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.script.lock().unwrap().pop_front() {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refused_then_unreachable_does_not_back_off_the_relay() {
+        // Every replica stepped aside: the one reached answered `NodeFull`,
+        // the others refused or did not answer the connection.
+        let fake = Scripted::new(vec![WakeError::Refused, WakeError::Connect]);
+        let stats = Arc::new(ServerStats::default());
+        let sender = WakeSender::spawn(fake.clone(), stats.clone());
+        let r = relay("a.example");
+        sender.enqueue(orders(&r, 2));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(stats.wake_failed(), 2);
+        assert!(!sender.inner.in_backoff(&r), "relay backed off");
+        // The next batch is attempted at once.
+        sender.enqueue(orders(&r, 1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(stats.wake_sent(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refused_twice_does_not_back_off_the_relay() {
+        let fake = Scripted::new(vec![WakeError::Refused, WakeError::Refused]);
+        let stats = Arc::new(ServerStats::default());
+        let sender = WakeSender::spawn(fake.clone(), stats.clone());
+        let r = relay("a.example");
+        sender.enqueue(orders(&r, 1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(stats.wake_failed(), 1);
+        assert!(!sender.inner.in_backoff(&r));
+        sender.enqueue(orders(&r, 1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(stats.wake_sent(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refused_then_resolution_failure_still_backs_off() {
+        // Only a connection failure is excused by an earlier refusal: a
+        // name that no longer resolves is not a replica stepping aside.
+        let fake = Scripted::new(vec![WakeError::Refused, WakeError::Resolve]);
+        let stats = Arc::new(ServerStats::default());
+        let sender = WakeSender::spawn(fake.clone(), stats.clone());
+        let r = relay("a.example");
+        sender.enqueue(orders(&r, 1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(stats.wake_failed(), 1);
+        assert!(sender.inner.in_backoff(&r));
+    }
+
+    /// Polls `cond` for up to 10 s of real time.
+    async fn eventually(what: &str, cond: impl Fn() -> bool) {
+        let t0 = std::time::Instant::now();
+        while !cond() {
+            assert!(t0.elapsed() < Duration::from_secs(10), "never: {what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn node_full_from_one_replica_reroutes_to_the_other_over_quic() {
+        // Same key, hence same identity, on two ports; the first one tried
+        // answers `NodeFull`.
+        let first = FakeRelay::start().await;
+        let second = FakeRelay::start().await;
+        first.set_refuse_wakes(true);
+        let (a1, a2) = (first.addr(), second.addr());
+        let r = second.relay_ref();
+        let stats = Arc::new(ServerStats::default());
+        let sender = WakeSender::spawn(
+            QuicWakeTransport::with_ordered_addresses(vec![a1, a2]),
+            stats.clone(),
+        );
+        sender.enqueue(orders(&r, 3));
+        eventually("sent", || stats.wake_sent() + stats.wake_failed() >= 3).await;
+        assert_eq!(stats.wake_sent(), 3);
+        assert_eq!(stats.wake_rerouted(), 3);
+        assert_eq!(stats.wake_failed(), 0);
+        assert!(first.received().is_empty());
+        assert_eq!(second.received().len(), 3);
+        let backoff = sender.inner.transport.address_backoff();
+        assert!(backoff.is_backed_off(&a1), "the refusing address");
+        assert!(!backoff.is_backed_off(&a2));
+        drop(backoff);
+        assert!(!sender.inner.in_backoff(&r));
+        first.stop();
+        second.stop();
+    }
+
+    #[tokio::test]
+    async fn every_replica_stepping_aside_does_not_back_off_the_relay() {
+        let first = FakeRelay::start().await;
+        let second = FakeRelay::start().await;
+        let (a1, a2) = (first.addr(), second.addr());
+        let r = first.relay_ref();
+        let stats = Arc::new(ServerStats::default());
+        let sender = WakeSender::spawn(
+            QuicWakeTransport::with_ordered_addresses(vec![a1, a2]),
+            stats.clone(),
+        );
+        // A session to the first replica is kept.
+        sender.enqueue(orders(&r, 1));
+        eventually("first sent", || stats.wake_sent() >= 1).await;
+        // Both step aside: `NodeFull` on the open connection, new
+        // connections refused.
+        for relay in [&first, &second] {
+            relay.set_refuse_wakes(true);
+            relay.set_refuse_connections(true);
+        }
+        sender.enqueue(orders(&r, 2));
+        eventually("batch failed", || stats.wake_failed() >= 2).await;
+        assert_eq!(stats.wake_failed(), 2);
+        assert!(!sender.inner.in_backoff(&r), "relay backed off");
+        {
+            let backoff = sender.inner.transport.address_backoff();
+            assert!(backoff.is_backed_off(&a1) && backoff.is_backed_off(&a2));
+        }
+        // As soon as one replica serves again, wake-ups get through.
+        second.set_refuse_connections(false);
+        second.set_refuse_wakes(false);
+        sender.enqueue(orders(&r, 1));
+        eventually("sent again", || stats.wake_sent() >= 2).await;
+        assert_eq!(second.received().len(), 1);
+        first.stop();
+        second.stop();
+    }
+
+    #[tokio::test]
+    async fn an_explicit_refusal_wins_over_a_silent_address() {
+        let relay = FakeRelay::start().await;
+        relay.set_refuse_connections(true);
+        let hole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let hole = hole.local_addr().unwrap();
+        let id = relay.relay_ref().id;
+        let deadline = || tokio::time::Instant::now() + Duration::from_secs(1);
+        let mut failed = Vec::new();
+        let r = connect_any(&[relay.addr(), hole], id, deadline(), |a| failed.push(a)).await;
+        assert!(matches!(r, Err(WakeError::Refused)), "{:?}", r.err());
+        assert_eq!(failed, vec![relay.addr(), hole]);
+        // Silent only: a connection failure.
+        let r = connect_any(&[hole], id, deadline(), |_| {}).await;
+        assert!(matches!(r, Err(WakeError::Connect)), "{:?}", r.err());
+        relay.stop();
     }
 
     #[test]
