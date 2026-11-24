@@ -29,6 +29,8 @@ alpine="alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d22
 # Named volumes of deploy/compose.yaml (project name `barking`).
 node_volume="barking_node-data"
 relay_volume="barking_relay-secrets"
+# Container of the relay service (project `barking`, see deploy/compose.yaml).
+relay_container="barking-relay-1"
 node_port=4433
 relay_port=4434
 dns_name="push.barking.nakocorp.com"
@@ -57,6 +59,13 @@ ssh_dest() {
 # prompting for a password. Calls that do not stream redirect stdin.
 on_src() { ssh -o BatchMode=yes -- "$from" "$@"; }
 on_dst() { ssh -o BatchMode=yes -- "$to" "$@"; }
+
+# The relay's log (it logs to stderr), read from its container: the name is
+# fixed by `name: barking` in deploy/compose.yaml, whatever the path of the
+# deployment. Fails if the container cannot be read.
+relay_log() { # host-function
+  "$1" "docker logs $relay_container 2>&1" </dev/null
+}
 
 # Prints the last relay identity announced in the relay log read on stdin
 # (`relay <id> started`, the id in base32).
@@ -189,8 +198,8 @@ for id in $seal_ids; do
 "
 done
 
-source_id="$(on_src 'cd ~/barking/deploy && docker compose --profile relay logs --no-color --no-log-prefix relay' \
-  </dev/null 2>/dev/null | last_relay_id)" || source_id=""
+source_id="$(relay_log on_src | last_relay_id)" \
+  || fail "$from: cannot read the log of the relay container $relay_container (not found, or Docker error)"
 [ -n "$source_id" ] || fail "$from: no 'relay <id> started' line in the relay log (logs rotated?);" \
   "restart the source relay (docker compose --profile relay restart relay) and run again"
 step "source relay id: $source_id; seal keys:$seal_ids"
@@ -276,11 +285,11 @@ case "$tries" in '' | *[!0-9]*) tries=30 ;; esac
 target_id=""
 i=0
 while :; do
-  target_id="$(on_dst 'cd ~/barking/deploy && docker compose --profile relay logs --no-color --no-log-prefix relay' \
-    </dev/null 2>/dev/null | last_relay_id)" || target_id=""
+  target_id="$(relay_log on_dst | last_relay_id)" \
+    || fail "$to: cannot read the log of the relay container $relay_container (not found, or Docker error)"
   [ -z "$target_id" ] || break
   i=$((i + 1))
-  [ "$i" -lt "$tries" ] || fail "the relay on $to did not log 'relay <id> started'; see: docker compose -f ~/barking/deploy/compose.yaml --profile relay logs relay"
+  [ "$i" -lt "$tries" ] || fail "the relay on $to did not log 'relay <id> started'; see: docker logs $relay_container"
   sleep 2
 done
 [ "$target_id" = "$source_id" ] \

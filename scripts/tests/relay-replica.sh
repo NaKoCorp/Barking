@@ -50,7 +50,8 @@ EOF
 
 # Fake docker, per host (FAKE_HOST_DIR): volumes lists the existing volumes,
 # relay-files the files of barking_relay-secrets, relay.log the relay's log
-# (written at `up` from relay-log-on-up), fail a word that fails any call that
+# (no file: no relay container; written at `up` from relay-log-on-up, unless
+# no-container exists), fail a word that fails any call that
 # has it. Arguments are logged separated by a tab.
 cat > "$tmp/bin/docker" <<EOF
 #!/usr/bin/env bash
@@ -67,9 +68,16 @@ case " \$* " in
   *" -cf - "*) printf '$secret %s\n' "\$*" ;;
   *" -xpf - "*) cat > "\$d/received-keys"; echo barking_relay-secrets >> "\$d/volumes" ;;
   *" /tmp/apns.p8 "*) cat > "\$d/received-apns" ;;
-  *" logs "*) cat "\$d/relay.log" 2>/dev/null || true ;;
+  # The relay container exists once relay.log does (at \`up\` on the target).
+  " logs barking-relay-1 "*)
+    [ -e "\$d/relay.log" ] || { echo "Error response from daemon: No such container: barking-relay-1" >&2; exit 1; }
+    cat "\$d/relay.log" ;;
+  *" logs "*) echo "fake docker: unexpected logs call" >&2; exit 1 ;;
   *" init "*) echo barking_node-data >> "\$d/volumes"; printf 'identifier  : $node_id\naddress     : 0.0.0.0:4433\n' ;;
-  *" up "*) [ ! -e "\$d/relay-log-on-up" ] || cp "\$d/relay-log-on-up" "\$d/relay.log" ;;
+  *" up "*)
+    [ ! -e "\$d/no-container" ] || exit 0
+    : >> "\$d/relay.log"
+    [ ! -e "\$d/relay-log-on-up" ] || cp "\$d/relay-log-on-up" "\$d/relay.log" ;;
 esac
 exit 0
 EOF
@@ -160,7 +168,16 @@ fresh
 std_args
 run "${ra[@]}"
 t="refuses_when_source_logs_no_relay_id"
-if [ "$code" -eq 1 ] && nothing_changed; then ok "$t"; else ko "$t (code $code)"; fi
+if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -q 'logs rotated' && nothing_changed
+then ok "$t"; else ko "$t (code $code)"; fi
+fresh
+rm "$src/relay.log"
+std_args
+run "${ra[@]}"
+t="refuses_when_source_relay_log_unreadable"
+if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -qF 'src: cannot read the log of the relay container barking-relay-1' \
+  && ! printf '%s' "$out" | grep -qi 'restart' && nothing_changed
+then ok "$t"; else ko "$t (code $code)"; fi
 
 # --- streams_relay_keys_without_local_copy
 fresh
@@ -234,7 +251,16 @@ rm "$dst/relay-log-on-up"
 std_args
 run "${ra[@]}"
 t=fails_when_target_never_starts
-if [ "$code" -eq 1 ] && grep -q $'volume\trm\t-f\tbarking_relay-secrets' "$dst/docker.log"
+if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -qF "did not log 'relay <id> started'" \
+  && grep -q $'volume\trm\t-f\tbarking_relay-secrets' "$dst/docker.log"
+then ok "$t"; else ko "$t (code $code)"; fi
+fresh
+touch "$dst/no-container"
+std_args
+run "${ra[@]}"
+t=fails_when_target_relay_log_unreadable
+if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -qF 'dst: cannot read the log of the relay container barking-relay-1' \
+  && grep -q $'volume\trm\t-f\tbarking_relay-secrets' "$dst/docker.log"
 then ok "$t"; else ko "$t (code $code)"; fi
 
 # --- prints_dns_records
