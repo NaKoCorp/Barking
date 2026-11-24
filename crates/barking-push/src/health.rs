@@ -107,6 +107,25 @@ mod tests {
     }
 
     #[test]
+    fn a_non_relay_outcome_resets_the_streak() {
+        let t0 = Instant::now();
+        let mut h = ApnsHealth::new(t0);
+        for interrupt in [PushOutcome::Failed(400), PushOutcome::Unregistered] {
+            for _ in 0..4 {
+                h.record(PushOutcome::Failed(403), ApnsEnv::Production, t0);
+            }
+            h.record(interrupt, ApnsEnv::Production, t0);
+            for _ in 0..4 {
+                h.record(PushOutcome::Failed(403), ApnsEnv::Production, t0);
+            }
+            assert!(h.available(t0));
+            h.record(PushOutcome::Failed(403), ApnsEnv::Production, t0);
+            assert!(!h.available(t0));
+            h.record(PushOutcome::Sent, ApnsEnv::Production, t0);
+        }
+    }
+
+    #[test]
     fn a_success_restores_it() {
         let t0 = Instant::now();
         let mut h = ApnsHealth::new(t0);
