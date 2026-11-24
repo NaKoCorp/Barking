@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/NaKoCorp/Barking/compare/v0.3.0...v0.4.0) (2026-11-24)
+
+
+### Features
+
+* push relay replicas with failover ([#80](https://github.com/NaKoCorp/Barking/issues/80)) ([d089a7e](https://github.com/NaKoCorp/Barking/commit/d089a7e87a5af12883d17c2a382d49298df5d027))
+
 ## [0.3.0](https://github.com/NaKoCorp/Barking/compare/v0.2.0...v0.3.0) (2026-11-23)
 
 
