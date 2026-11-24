@@ -49,24 +49,32 @@ if [ -n "${FAKE_HOST_DIR:-}" ]; then cat "$FAKE_HOST_DIR/arch"; else exec /usr/b
 EOF
 
 # Fake docker, per host (FAKE_HOST_DIR): volumes lists the existing volumes,
-# relay-files the files of barking_relay-secrets, relay.log the relay's log
+# relay-files the files of barking_relay-secrets, key-hashes the output of
+# sha256sum over the relay keys (copied from the source's at the key copy,
+# or from hashes-on-copy if it exists), relay.log the relay's log
 # (no file: no relay container; written at `up` from relay-log-on-up, unless
-# no-container exists), fail a word that fails any call that
-# has it. Arguments are logged separated by a tab.
+# no-container exists), fail words (one per line) that fail any call that
+# has one of them. Arguments are logged separated by a tab.
 cat > "$tmp/bin/docker" <<EOF
 #!/usr/bin/env bash
 d="\${FAKE_HOST_DIR:?fake docker: not on a fake host}"
 ( IFS=\$'\t'; printf '%s\n' "\$*" ) >> "\$d/docker.log"
 if [ -s "\$d/fail" ]; then
-  case " \$* " in *" \$(cat "\$d/fail") "*) echo "fake docker: failing" >&2; exit 1 ;; esac
+  while IFS= read -r w; do
+    case " \$* " in *" \$w "*) echo "fake docker: failing" >&2; exit 1 ;; esac
+  done < "\$d/fail"
 fi
 case " \$* " in
+  *" sha256sum "*) cat "\$d/key-hashes" ;;
   " info "*) exit 0 ;;
   " volume inspect "*) grep -qxF "\$3" "\$d/volumes"; exit ;;
   " volume rm "*) for v in "\$@"; do grep -vxF "\$v" "\$d/volumes" > "\$d/v.tmp" || true; mv "\$d/v.tmp" "\$d/volumes"; done ;;
   *" ls /v "*) cat "\$d/relay-files" ;;
   *" -cf - "*) printf '$secret %s\n' "\$*" ;;
-  *" -xpf - "*) cat > "\$d/received-keys"; echo barking_relay-secrets >> "\$d/volumes" ;;
+  *" -xpf - "*)
+    cat > "\$d/received-keys"; echo barking_relay-secrets >> "\$d/volumes"
+    if [ -e "\$d/hashes-on-copy" ]; then cp "\$d/hashes-on-copy" "\$d/key-hashes"
+    else cp "\$FAKE_HOSTS/src/key-hashes" "\$d/key-hashes"; fi ;;
   *" /tmp/apns.p8 "*) cat > "\$d/received-apns" ;;
   # The relay container exists once relay.log does (at \`up\` on the target).
   " logs barking-relay-1 "*)
@@ -105,6 +113,11 @@ fresh() { # new repository copy in $repo, a source host `src` and a new host `ds
   printf '%s\n' barking_node-data barking_relay-secrets > "$src/volumes"
   : > "$dst/volumes"
   printf '%s\n' apns.p8 node.key seal1.key seal2.key > "$src/relay-files"
+  local h
+  for f in node.key seal1.key seal2.key; do
+    h="$(printf '%s' "$f" | cksum | cut -d' ' -f1)"
+    printf '%064d  %s\n' "$h" "$f"
+  done > "$src/key-hashes"
   printf 'INFO barking_push: relay %s started\nINFO barking_push: relay stats available=true\n' \
     "$relay_id" > "$src/relay.log"
   printf 'INFO barking_push: relay %s started\n' "$relay_id" > "$dst/relay-log-on-up"
@@ -163,20 +176,31 @@ for files in "apns.p8 seal1.key" "apns.p8 node.key"; do
   t="refuses_when_source_has_no_relay ($files)"
   if [ "$code" -eq 1 ] && nothing_changed; then ok "$t"; else ko "$t (code $code)"; fi
 done
+# --- source_log_is_irrelevant: identity is checked on key hashes, the source
+# relay's log is never read and nothing tells to restart it.
+for log in empty missing other-id; do
+  fresh
+  case "$log" in
+    empty) : > "$src/relay.log" ;;
+    missing) rm "$src/relay.log" ;;
+    other-id) printf 'INFO barking_push: relay %s started\n' "$other_id" > "$src/relay.log" ;;
+  esac
+  std_args
+  run "${ra[@]}"
+  t="source_log_is_irrelevant ($log)"
+  if [ "$code" -eq 0 ] && printf '%s\n' "$out" | grep -qxF "relay id : $relay_id" \
+    && ! grep -qE $'(^|\t)(logs|restart)(\t|$)' "$src/docker.log" \
+    && ! printf '%s' "$out" | grep -qi 'restart' \
+    && grep -q 'sha256sum node.key seal1.key seal2.key' "$src/ssh.log" \
+    && grep -q 'sha256sum node.key seal1.key seal2.key' "$dst/ssh.log"
+  then ok "$t"; else ko "$t (code $code)"; fi
+done
 fresh
-: > "$src/relay.log"
+echo sha256sum > "$src/fail"
 std_args
 run "${ra[@]}"
-t="refuses_when_source_logs_no_relay_id"
-if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -q 'logs rotated' && nothing_changed
-then ok "$t"; else ko "$t (code $code)"; fi
-fresh
-rm "$src/relay.log"
-std_args
-run "${ra[@]}"
-t="refuses_when_source_relay_log_unreadable"
-if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -qF 'src: cannot read the log of the relay container barking-relay-1' \
-  && ! printf '%s' "$out" | grep -qi 'restart' && nothing_changed
+t=refuses_when_source_keys_cannot_be_hashed
+if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -qF 'src: cannot hash the relay keys' && nothing_changed
 then ok "$t"; else ko "$t (code $code)"; fi
 
 # --- streams_relay_keys_without_local_copy
@@ -233,18 +257,30 @@ run "${ra[@]}" --topic com.example.app
 if [ "$code" -eq 0 ] && has "$dst/home/barking/deploy/config/barking-push.toml" 'topic = "com.example.app"'
 then ok "$t --topic"; else ko "$t --topic (code $code)"; fi
 
-# --- fails_on_identity_mismatch
+# --- fails_on_key_hash_mismatch: target cleaned, relay never started, no DNS
+fresh
+sed 's/^0/f/' "$src/key-hashes" > "$dst/hashes-on-copy"
+std_args
+run "${ra[@]}"
+t=fails_on_key_hash_mismatch
+if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -qF "identity mismatch" \
+  && ! printf '%s' "$out" | grep -q 'push.barking.nakocorp.com' \
+  && ! printf '%s' "$out" | grep -q 'relay id :' \
+  && ! grep -q $'\tup\t-d' "$dst/docker.log" \
+  && grep -qE $'\tdown(\t|$)' "$dst/docker.log" \
+  && grep -q $'volume\trm\t-f\tbarking_relay-secrets' "$dst/docker.log" \
+  && grep -q $'volume\trm\t-f\tbarking_node-data' "$dst/docker.log" \
+  && ! grep -qE $'(^|\t)(down|rm)(\t|$)' "$src/docker.log" \
+  && ! printf '%s' "$out" | grep -q 'WARNING'
+then ok "$t"; else ko "$t (code $code)"; fi
+# A target relay logging another identity cannot happen with matching keys;
+# whatever it logs is only displayed.
 fresh
 printf 'INFO barking_push: relay %s started\n' "$other_id" > "$dst/relay-log-on-up"
 std_args
 run "${ra[@]}"
-t=fails_on_identity_mismatch
-if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -qF "$other_id" \
-  && ! printf '%s' "$out" | grep -q 'push.barking.nakocorp.com' \
-  && grep -qE $'\tdown(\t|$)' "$dst/docker.log" \
-  && grep -q $'volume\trm\t-f\tbarking_relay-secrets' "$dst/docker.log" \
-  && grep -q $'volume\trm\t-f\tbarking_node-data' "$dst/docker.log" \
-  && ! grep -qE $'(^|\t)(down|rm)(\t|$)' "$src/docker.log"
+t=target_relay_id_is_displayed
+if [ "$code" -eq 0 ] && printf '%s\n' "$out" | grep -qxF "relay id : $other_id"
 then ok "$t"; else ko "$t (code $code)"; fi
 fresh
 rm "$dst/relay-log-on-up"
@@ -334,6 +370,27 @@ run "${ra[@]}"
 t=failed_build_is_cleaned
 if [ "$code" -eq 1 ] && ! grep -qE $'(^|\t)(build|up|down|rm|-cf)(\t|$)' "$src/docker.log" \
   && [ ! -s "$dst/volumes" ]; then ok "$t"; else ko "$t (code $code)"; fi
+
+# --- failed_cleanup_warns: the original error is kept, the target and the
+# commands to run by hand are printed.
+for broken in down rm; do
+  fresh
+  printf '%s\n' build "$broken" > "$dst/fail"
+  std_args
+  run "${ra[@]}"
+  t="failed_cleanup_warns ($broken)"
+  if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -qF 'WARNING: the clean-up of dst FAILED' \
+    && printf '%s' "$out" | grep -qF 'cd ~/barking/deploy && docker compose --profile relay down' \
+    && printf '%s' "$out" | grep -qF 'docker volume rm barking_relay-secrets barking_node-data'
+  then ok "$t"; else ko "$t (code $code)"; fi
+done
+fresh
+echo build > "$dst/fail"
+std_args
+run "${ra[@]}"
+t=successful_cleanup_does_not_warn
+if [ "$code" -eq 1 ] && ! printf '%s' "$out" | grep -q 'WARNING'
+then ok "$t"; else ko "$t (code $code)"; fi
 
 [ "$echecs" -eq 0 ] || { echo "$echecs failure(s)" >&2; exit 1; }
 echo "all relay-replica checks passed"

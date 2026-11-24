@@ -13,12 +13,15 @@
 # volume. The script copies the deployment there, writes its configuration
 # (this replica's APNs key id), builds the images, creates a new node identity,
 # streams the relay keys (node.key, seal*.key) from the source's volume to the
-# target's (they never touch this machine's disk), installs the APNs key,
-# starts the node and the relay, checks that the target relay logs the
-# source's identity, and prints the DNS records to add.
+# target's (they never touch this machine's disk), checks that the copied
+# keys hash the same on both servers (only SHA-256 sums cross the wire),
+# installs the APNs key, starts the node and the relay, waits for the target
+# relay to log its identity, and prints it with the DNS records to add. The
+# source is only read (its key volume); nothing on it is restarted.
 # If a step fails after the checks, the target's containers and volumes are
-# removed so that the script can be run again. RELAY_REPLICA_WAIT (default 30)
-# is the number of 2-second tries waiting for the target relay to start.
+# removed so that the script can be run again; if that clean-up fails, the
+# commands to run by hand are printed. RELAY_REPLICA_WAIT (default 30) is the
+# number of 2-second tries waiting for the target relay to start.
 # Exit codes: 0 success, 2 invalid usage, 1 any other error.
 # Runs on the macOS bash (3.2).
 set -euo pipefail
@@ -68,7 +71,8 @@ relay_log() { # host-function
 }
 
 # Prints the last relay identity announced in the relay log read on stdin
-# (`relay <id> started`, the id in base32).
+# (`relay <id> started`, the id in base32). Only displayed: the identity is
+# checked on the key hashes, the log may have rotated.
 last_relay_id() {
   sed -n 's/.*relay \([A-Z2-7][A-Z2-7]*\) started.*/\1/p' | tail -n 1
 }
@@ -190,28 +194,51 @@ EOF
 [ "$has_node_key" -eq 1 ] || fail "$from: no node.key in the volume $relay_volume"
 [ -n "$seal_ids" ] || fail "$from: no seal*.key in the volume $relay_volume"
 seal_ids="$(printf '%s' "$seal_ids" | sort -n | tr '\n' ' ')"
-key_files="node.key" key_paths="/v/node.key" seal_lines=""
+key_files="node.key" key_paths="/v/node.key" seal_lines="" key_count=1
 for id in $seal_ids; do
+  key_count=$((key_count + 1))
   key_files="$key_files seal$id.key"
   key_paths="$key_paths /v/seal$id.key"
   seal_lines="$seal_lines  { id = $id, file = \"/var/lib/barking-push/seal$id.key\" },
 "
 done
 
-source_id="$(relay_log on_src | last_relay_id)" \
-  || fail "$from: cannot read the log of the relay container $relay_container (not found, or Docker error)"
-[ -n "$source_id" ] || fail "$from: no 'relay <id> started' line in the relay log (logs rotated?);" \
-  "restart the source relay (docker compose --profile relay restart relay) and run again"
-step "source relay id: $source_id; seal keys:$seal_ids"
+# SHA-256 of the relay keys in a host's volume, one `<sum>  <file>` line per
+# key in the order of key_files, computed in a container on that host: the
+# keys never leave it. Fails unless every key was hashed.
+key_hashes() { # host-function
+  local out
+  out="$("$1" "docker run --rm --network none -v $relay_volume:/v:ro $alpine sh -c 'cd /v && sha256sum $key_files'" </dev/null)" \
+    || return 1
+  [ "$(printf '%s\n' "$out" | grep -cE '^[0-9a-f]{64}  ')" -eq "$key_count" ] || return 1
+  printf '%s\n' "$out"
+}
+source_hashes="$(key_hashes on_src)" || fail "$from: cannot hash the relay keys in the volume $relay_volume"
+step "source seal keys:$seal_ids"
 
 # --- from here on the target changes; a failure undoes it ------------------
 
 on_exit() {
-  local status=$?
+  local status=$? cleaned=1
   [ "$status" -ne 0 ] || return 0
   echo "error: replica set-up failed; removing the target's containers and volumes so that it can be run again" >&2
-  on_dst 'cd ~/barking/deploy && docker compose --profile relay down' </dev/null >/dev/null 2>&1 || true
-  on_dst "docker volume rm -f $relay_volume; docker volume rm -f $node_volume" </dev/null >/dev/null 2>&1 || true
+  # No deployment copied yet: no container either.
+  on_dst '[ ! -d ~/barking/deploy ] || { cd ~/barking/deploy && docker compose --profile relay down; }' \
+    </dev/null >/dev/null 2>&1 || cleaned=0
+  on_dst "docker volume rm -f $relay_volume" </dev/null >/dev/null 2>&1 || cleaned=0
+  on_dst "docker volume rm -f $node_volume" </dev/null >/dev/null 2>&1 || cleaned=0
+  if [ "$cleaned" -eq 0 ]; then
+    cat >&2 <<WARN
+
+!!! WARNING: the clean-up of $to FAILED. It may still run this replica's
+!!! containers or hold its volumes (a copy of the relay keys), and a new run
+!!! will refuse it. Run these commands on $to by hand:
+!!!
+!!!   cd ~/barking/deploy && docker compose --profile relay down
+!!!   docker volume rm $relay_volume $node_volume
+
+WARN
+  fi
   return "$status"
 }
 trap on_exit EXIT
@@ -271,6 +298,11 @@ step "streaming the relay keys ($key_files) from $from to $to"
 on_src "docker run --rm --network none -v $relay_volume:/v:ro $alpine tar -C /v -cf - $key_files" </dev/null \
   | on_dst "docker run --rm -i --network none --user 0:0 -v $relay_volume:/v $alpine sh -c 'tar -C /v --numeric-owner -xpf - && chown 65532:65532 /v $key_paths && chmod 700 /v && chmod 600 $key_paths'"
 
+step "checking that the keys on $to are the source's (SHA-256)"
+target_hashes="$(key_hashes on_dst)" || fail "$to: cannot hash the relay keys in the volume $relay_volume"
+[ "$target_hashes" = "$source_hashes" ] \
+  || fail "identity mismatch: the relay keys on $to do not hash like the source's"
+
 step "installing this replica's APNs key on $to"
 # Through a tmpfs: the key only lands in the volume, owned by the container user.
 on_dst "docker run --rm -i --network none --user 0:0 --tmpfs /tmp -v $relay_volume:/s $alpine sh -c 'cat > /tmp/apns.p8 && install -m 0600 -o 65532 -g 65532 /tmp/apns.p8 /s/apns.p8'" \
@@ -292,8 +324,6 @@ while :; do
   [ "$i" -lt "$tries" ] || fail "the relay on $to did not log 'relay <id> started'; see: docker logs $relay_container"
   sleep 2
 done
-[ "$target_id" = "$source_id" ] \
-  || fail "identity mismatch: the relay on $to is $target_id, the source's is $source_id"
 
 trap - EXIT
 step "replica ready (node $node_id). Add these DNS records (DNS only, TTL 60 s):"
