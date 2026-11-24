@@ -302,11 +302,9 @@ async fn serve_inner<P: Pusher>(
     }
     // A dropped sender stops too.
     let _ = stop.wait_for(|s| *s).await;
+    // New connections are refused from now on (`accept_loop`); open ones
+    // stay until the endpoints close.
     shared.draining.store(true, Relaxed);
-    for ep in &endpoints {
-        // New handshakes are no longer answered; open connections stay.
-        ep.set_server_config(None);
-    }
     tracing::info!("stopping: draining in-flight pushes");
     // Every permit back means no push is in flight.
     let all = u32::try_from(MAX_INFLIGHT_PUSHES).expect("permit count fits u32");
@@ -910,5 +908,28 @@ mod tests {
         // It did wait for the blocked push, up to the bound.
         assert!(t0.elapsed() >= drain, "{:?}", t0.elapsed());
         assert_eq!(relay.stats.snapshot().sent, 0);
+    }
+
+    #[tokio::test]
+    async fn new_connection_during_shutdown_is_refused_promptly() {
+        let pusher = Slow::new(Duration::from_secs(2));
+        let relay = start_with(pusher.clone(), DRAIN_TIMEOUT);
+        let session = Client::connect(relay.addr, relay.id).await.unwrap();
+        // One push in flight keeps the relay draining.
+        session
+            .wake(vec![relay.sealed(&token(1, today() + 1))])
+            .await
+            .unwrap();
+        pusher.started(1).await;
+        let _ = relay.stop.send(true);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let r = timeout(
+            Duration::from_secs(1),
+            Client::connect(relay.addr, relay.id),
+        )
+        .await
+        .expect("refused promptly, not left to time out");
+        assert!(r.is_err(), "connection accepted while draining");
+        assert!(!relay.done.is_finished(), "still draining");
     }
 }
