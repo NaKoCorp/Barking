@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -38,6 +39,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PUSH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Time to read a request, then to deliver the response.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+/// On stop, how long in-flight pushes may still run before the endpoints
+/// close.
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Application close code of a stopped endpoint.
 const CLOSE_STOP: u32 = 0;
 const STREAM_REFUSED: u32 = 1;
@@ -181,6 +185,9 @@ struct Shared<P> {
     /// APNs health; `stats.unavailable` mirrors its last announced state and
     /// is only changed under this lock, so each transition is logged once.
     health: Mutex<ApnsHealth>,
+    /// Set on stop: no new connection, and `Wake` is answered `NodeFull`
+    /// while in-flight pushes finish.
+    draining: AtomicBool,
 }
 
 impl<P> Shared<P> {
@@ -227,8 +234,10 @@ fn today() -> u64 {
 }
 
 /// Serves `endpoints` until `stop` turns true (or its sender is dropped), then
-/// closes them. `node_id` is the identity of the key the endpoints were bound
-/// with.
+/// drains: new connections are refused, `Wake` on open ones is answered
+/// `NodeFull`, and in-flight pushes get up to `DRAIN_TIMEOUT` to finish
+/// before the endpoints close. `node_id` is the identity of the key the
+/// endpoints were bound with.
 pub async fn serve<P: Pusher>(
     endpoints: Vec<Endpoint>,
     node_id: NodeId,
@@ -247,11 +256,13 @@ pub async fn serve<P: Pusher>(
         limits,
         stop,
         PROBE_EVERY,
+        DRAIN_TIMEOUT,
     )
     .await;
 }
 
-/// `serve` with the probe interval as a parameter (shorter in tests).
+/// `serve` with the probe interval and the drain bound as parameters
+/// (shorter in tests).
 #[allow(clippy::too_many_arguments)]
 async fn serve_inner<P: Pusher>(
     endpoints: Vec<Endpoint>,
@@ -260,8 +271,9 @@ async fn serve_inner<P: Pusher>(
     pusher: Arc<P>,
     stats: Arc<RelayStats>,
     limits: ConnLimits,
-    stop: watch::Receiver<bool>,
+    mut stop: watch::Receiver<bool>,
     probe_every: Duration,
+    drain: Duration,
 ) {
     stats.unavailable.store(false, Relaxed);
     let shared = Arc::new(Shared {
@@ -273,6 +285,7 @@ async fn serve_inner<P: Pusher>(
         intake: Mutex::new(IntakeBudget::new()),
         inflight: Arc::new(Semaphore::new(MAX_INFLIGHT_PUSHES)),
         health: Mutex::new(ApnsHealth::new(Instant::now())),
+        draining: AtomicBool::new(false),
     });
     let prober = tokio::spawn(probe_loop(shared.clone(), probe_every, stop.clone()));
     let conns = Arc::new(Conns {
@@ -280,13 +293,29 @@ async fn serve_inner<P: Pusher>(
         state: Mutex::default(),
     });
     let mut loops = Vec::new();
-    for ep in endpoints {
+    for ep in &endpoints {
         loops.push(tokio::spawn(accept_loop(
-            ep,
+            ep.clone(),
             shared.clone(),
             conns.clone(),
-            stop.clone(),
         )));
+    }
+    // A dropped sender stops too.
+    let _ = stop.wait_for(|s| *s).await;
+    shared.draining.store(true, Relaxed);
+    for ep in &endpoints {
+        // New handshakes are no longer answered; open connections stay.
+        ep.set_server_config(None);
+    }
+    tracing::info!("stopping: draining in-flight pushes");
+    // Every permit back means no push is in flight.
+    let all = u32::try_from(MAX_INFLIGHT_PUSHES).expect("permit count fits u32");
+    match timeout(drain, shared.inflight.acquire_many(all)).await {
+        Ok(Ok(_)) => {}
+        _ => tracing::warn!("drain timed out: in-flight pushes abandoned"),
+    }
+    for ep in &endpoints {
+        ep.close(CLOSE_STOP.into(), b"stop");
     }
     for l in loops {
         let _ = l.await;
@@ -334,47 +363,32 @@ async fn probe_loop<P: Pusher>(
     }
 }
 
-async fn accept_loop<P: Pusher>(
-    ep: Endpoint,
-    shared: Arc<Shared<P>>,
-    conns: Arc<Conns>,
-    mut stop: watch::Receiver<bool>,
-) {
-    loop {
-        tokio::select! {
-            incoming = ep.accept() => {
-                let Some(incoming) = incoming else { return };
-                // The source address of an Initial can be spoofed: before
-                // counting anything against it, the client must prove it
-                // (stateless Retry token), as barking-node does.
-                if !incoming.remote_address_validated() {
-                    if incoming.may_retry() {
-                        let _ = incoming.retry();
-                    } else {
-                        incoming.ignore();
-                    }
-                    continue;
-                }
-                // A relay whose APNs sends fail steps aside: nodes move on
-                // to another replica when the connection is refused.
-                if !shared.available() {
-                    incoming.refuse();
-                    continue;
-                }
-                // Refused before any handshake work if a cap is reached.
-                let Some(slot) = conns.try_acquire(incoming.remote_address().ip()) else {
-                    incoming.refuse();
-                    continue;
-                };
-                tokio::spawn(connection(incoming, shared.clone(), slot));
+/// Accepts until `serve` closes the endpoint.
+async fn accept_loop<P: Pusher>(ep: Endpoint, shared: Arc<Shared<P>>, conns: Arc<Conns>) {
+    while let Some(incoming) = ep.accept().await {
+        // The source address of an Initial can be spoofed: before counting
+        // anything against it, the client must prove it (stateless Retry
+        // token), as barking-node does.
+        if !incoming.remote_address_validated() {
+            if incoming.may_retry() {
+                let _ = incoming.retry();
+            } else {
+                incoming.ignore();
             }
-            r = stop.changed() => {
-                if r.is_err() || *stop.borrow() {
-                    ep.close(CLOSE_STOP.into(), b"stop");
-                    return;
-                }
-            }
+            continue;
         }
+        // A stopping relay, or one whose APNs sends fail, steps aside: nodes
+        // move on to another replica when the connection is refused.
+        if shared.draining.load(Relaxed) || !shared.available() {
+            incoming.refuse();
+            continue;
+        }
+        // Refused before any handshake work if a cap is reached.
+        let Some(slot) = conns.try_acquire(incoming.remote_address().ip()) else {
+            incoming.refuse();
+            continue;
+        };
+        tokio::spawn(connection(incoming, shared.clone(), slot));
     }
 }
 
@@ -459,6 +473,11 @@ async fn handle<P: Pusher>(
         Request::Wake { items } => {
             if items.len() > MAX_WAKE_ITEMS {
                 return (Response::Error(ErrorReason::Malformed), false);
+            }
+            if shared.draining.load(Relaxed) {
+                // Stopping: refused unopened (not counted), and the node
+                // reroutes to another replica.
+                return (Response::Error(ErrorReason::NodeFull), true);
             }
             if !shared.available() {
                 // Refused unopened; an updated node reroutes on an error,
@@ -546,7 +565,6 @@ fn wake_item<P: Pusher>(token: Option<WakeToken>, day: u64, shared: &Arc<Shared<
         let outcome = timeout(PUSH_TIMEOUT, shared.pusher.push(token))
             .await
             .unwrap_or(PushOutcome::Failed(0));
-        drop(permit);
         shared.record(outcome, env);
         match outcome {
             PushOutcome::Sent => shared.stats.sent.fetch_add(1, Relaxed),
@@ -556,6 +574,9 @@ fn wake_item<P: Pusher>(token: Option<WakeToken>, day: u64, shared: &Arc<Shared<
                 0
             }
         };
+        // Released last: a drain that gets every permit back sees the
+        // outcome counted.
+        drop(permit);
     });
 }
 
@@ -606,15 +627,55 @@ mod tests {
         }
     }
 
+    /// Every push succeeds after `delay`.
+    struct Slow {
+        delay: Duration,
+        started: AtomicUsize,
+    }
+
+    impl Slow {
+        fn new(delay: Duration) -> Arc<Self> {
+            Arc::new(Slow {
+                delay,
+                started: AtomicUsize::new(0),
+            })
+        }
+
+        /// Waits until `n` pushes have started.
+        async fn started(&self, n: usize) {
+            let deadline = tokio::time::Instant::now() + WAIT;
+            while self.started.load(Relaxed) < n {
+                assert!(tokio::time::Instant::now() < deadline, "push never started");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    impl Pusher for Slow {
+        async fn push(&self, _token: WakeToken) -> PushOutcome {
+            self.started.fetch_add(1, Relaxed);
+            tokio::time::sleep(self.delay).await;
+            PushOutcome::Sent
+        }
+        async fn probe(&self, _env: ApnsEnv) -> PushOutcome {
+            PushOutcome::Sent
+        }
+    }
+
     struct Relay {
         addr: SocketAddr,
         id: NodeId,
         stats: Arc<RelayStats>,
         secret: StaticSecret,
         stop: watch::Sender<bool>,
+        done: tokio::task::JoinHandle<()>,
     }
 
     fn start(pusher: Arc<Failing>) -> Relay {
+        start_with(pusher, DRAIN_TIMEOUT)
+    }
+
+    fn start_with<P: Pusher>(pusher: Arc<P>, drain: Duration) -> Relay {
         let key = SigningKey::from_bytes(&SEED);
         let id = NodeId::from_public_key(&key.verifying_key());
         let endpoints = bind(&["127.0.0.1:0".to_string()], &key).unwrap();
@@ -622,7 +683,7 @@ mod tests {
         let secret = StaticSecret::from([7u8; 32]);
         let stats = Arc::new(RelayStats::default());
         let (stop, rx) = watch::channel(false);
-        tokio::spawn(serve_inner(
+        let done = tokio::spawn(serve_inner(
             endpoints,
             id,
             vec![(3, secret.clone())],
@@ -631,6 +692,7 @@ mod tests {
             ConnLimits::default(),
             rx,
             PROBE_TEST_EVERY,
+            drain,
         ));
         Relay {
             addr,
@@ -638,6 +700,7 @@ mod tests {
             stats,
             secret,
             stop,
+            done,
         }
     }
 
@@ -775,5 +838,77 @@ mod tests {
         assert_eq!(after.refused_unavailable, 2);
         assert_eq!(pusher.pushes.load(Relaxed), 5);
         let _ = relay.stop.send(true);
+    }
+
+    #[tokio::test]
+    async fn shutdown_lets_inflight_push_finish() {
+        let pusher = Slow::new(Duration::from_secs(2));
+        let relay = start_with(pusher.clone(), DRAIN_TIMEOUT);
+        let session = Client::connect(relay.addr, relay.id).await.unwrap();
+        session
+            .wake(vec![relay.sealed(&token(1, today() + 1))])
+            .await
+            .unwrap();
+        pusher.started(1).await;
+        let _ = relay.stop.send(true);
+        timeout(WAIT, relay.done)
+            .await
+            .expect("serve ends once the push is done")
+            .unwrap();
+        assert_eq!(relay.stats.snapshot().sent, 1);
+    }
+
+    #[tokio::test]
+    async fn wake_during_shutdown_gets_node_full() {
+        let pusher = Slow::new(Duration::from_secs(2));
+        let relay = start_with(pusher.clone(), DRAIN_TIMEOUT);
+        let session = Client::connect(relay.addr, relay.id).await.unwrap();
+        // One push in flight keeps the relay draining.
+        session
+            .wake(vec![relay.sealed(&token(1, today() + 1))])
+            .await
+            .unwrap();
+        pusher.started(1).await;
+        let _ = relay.stop.send(true);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let err = session
+            .wake(vec![relay.sealed(&token(2, today() + 1))])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ClientError::Refused(ErrorReason::NodeFull)),
+            "{err:?}"
+        );
+        // Refused unopened.
+        assert_eq!(relay.stats.snapshot().wakes_in, 1);
+        assert_eq!(pusher.started.load(Relaxed), 1);
+        timeout(WAIT, relay.done)
+            .await
+            .expect("serve ends")
+            .unwrap();
+        assert_eq!(relay.stats.snapshot().sent, 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_wait_past_drain() {
+        // A short bound keeps the test fast; `serve` uses DRAIN_TIMEOUT.
+        let drain = Duration::from_secs(1);
+        let pusher = Slow::new(Duration::from_secs(60));
+        let relay = start_with(pusher.clone(), drain);
+        let session = Client::connect(relay.addr, relay.id).await.unwrap();
+        session
+            .wake(vec![relay.sealed(&token(1, today() + 1))])
+            .await
+            .unwrap();
+        pusher.started(1).await;
+        let t0 = tokio::time::Instant::now();
+        let _ = relay.stop.send(true);
+        timeout(drain + Duration::from_secs(2), relay.done)
+            .await
+            .expect("serve ends within the drain bound")
+            .unwrap();
+        // It did wait for the blocked push, up to the bound.
+        assert!(t0.elapsed() >= drain, "{:?}", t0.elapsed());
+        assert_eq!(relay.stats.snapshot().sent, 0);
     }
 }
