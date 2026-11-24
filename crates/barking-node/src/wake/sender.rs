@@ -66,7 +66,10 @@ pub const SESSION_IDLE: Duration = Duration::from_secs(20);
 /// blocking resolver threads).
 pub const MAX_CONCURRENT_RELAY_SENDS: usize = 32;
 /// Addresses tried per relay.
-const MAX_ADDRS: usize = 4;
+const MAX_ADDRS: usize = 8;
+/// No single address is given more than this to connect, however much of the
+/// deadline is left: a dead address costs at most this before the next.
+pub(crate) const ADDRESS_CONNECT_CAP: Duration = Duration::from_secs(3);
 /// A relay that could not be reached (resolution, no usable address,
 /// connection) is skipped this long: its orders are dropped, counted as
 /// failed, without taking a permit.
@@ -100,9 +103,34 @@ pub(crate) fn wake_address_ok(a: &SocketAddr, allow_private: bool) -> bool {
     allow_private || routable(a)
 }
 
+/// Shuffles `addrs`, then alternates the two IP families starting with the
+/// family of the first shuffled address (the rest of the longer family is
+/// appended once the other runs out), and keeps at most `MAX_ADDRS`. Spreads
+/// wake-ups over a relay's replicas and keeps one family from hiding the other.
+fn order_addresses(mut addrs: Vec<SocketAddr>, rng: &mut impl rand::Rng) -> Vec<SocketAddr> {
+    use rand::seq::SliceRandom;
+    addrs.shuffle(rng);
+    let Some(first) = addrs.first() else {
+        return addrs;
+    };
+    let first_is_v4 = first.is_ipv4();
+    let (mut same, mut other): (VecDeque<_>, VecDeque<_>) =
+        addrs.into_iter().partition(|a| a.is_ipv4() == first_is_v4);
+    let mut out = Vec::with_capacity(MAX_ADDRS);
+    while out.len() < MAX_ADDRS {
+        match (same.pop_front(), other.pop_front()) {
+            (None, None) => break,
+            (a, b) => out.extend(a.into_iter().chain(b)),
+        }
+    }
+    out.truncate(MAX_ADDRS);
+    out
+}
+
 /// Tries `addrs` in turn until one gives a session; each address gets an
-/// equal share of the time left before `deadline`, so that one that never
-/// answers does not starve the next ones.
+/// equal share of the time left before `deadline`, at most
+/// `ADDRESS_CONNECT_CAP`, so that one that never answers does not starve the
+/// next ones.
 async fn connect_any(
     addrs: &[SocketAddr],
     id: barking_proto::NodeId,
@@ -113,7 +141,7 @@ async fn connect_any(
         if left.is_zero() {
             break;
         }
-        let share = left / u32::try_from(addrs.len() - i).unwrap_or(1);
+        let share = (left / u32::try_from(addrs.len() - i).unwrap_or(1)).min(ADDRESS_CONNECT_CAP);
         if let Ok(Ok(s)) = timeout(share, Client::connect(*addr, id)).await {
             return Ok(s);
         }
@@ -208,10 +236,12 @@ impl QuicWakeTransport {
         let found = tokio::net::lookup_host((host, relay.port))
             .await
             .map_err(|_| WakeError::Resolve)?;
-        let addrs: Vec<SocketAddr> = found
-            .filter(|a| wake_address_ok(a, self.allow_private))
-            .take(MAX_ADDRS)
-            .collect();
+        let addrs = order_addresses(
+            found
+                .filter(|a| wake_address_ok(a, self.allow_private))
+                .collect(),
+            &mut rand::rng(),
+        );
         if addrs.is_empty() {
             Err(WakeError::NoRoutableAddress)
         } else {
@@ -817,6 +847,56 @@ mod tests {
         let session = connect_any(&addrs, r.id, tokio::time::Instant::now() + budget).await;
         assert!(session.is_ok(), "the second address was not tried");
         assert!(t0.elapsed() < budget);
+        relay.stop();
+    }
+
+    #[test]
+    fn addresses_are_capped_shuffled_and_interleaved() {
+        use rand::SeedableRng;
+        let v4: Vec<SocketAddr> = (1..=6)
+            .map(|i| SocketAddr::from(([203, 0, 113, i], 4434)))
+            .collect();
+        let v6: Vec<SocketAddr> = (1..=6)
+            .map(|i| SocketAddr::from(([0x2001, 0xdb8, 0, 0, 0, 0, 0, i], 4434)))
+            .collect();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let out = order_addresses([v4.clone(), v6.clone()].concat(), &mut rng);
+        assert_eq!(out.len(), 8);
+        for pair in out.windows(2) {
+            assert_ne!(pair[0].is_ipv4(), pair[1].is_ipv4());
+        }
+        let other = order_addresses([v4, v6].concat(), &mut rand::rngs::StdRng::seed_from_u64(8));
+        assert_ne!(out, other, "order must depend on the rng");
+    }
+
+    #[test]
+    fn single_family_keeps_all_up_to_the_cap() {
+        use rand::SeedableRng;
+        let v4: Vec<SocketAddr> = (1..=10)
+            .map(|i| SocketAddr::from(([203, 0, 113, i], 4434)))
+            .collect();
+        let out = order_addresses(v4, &mut rand::rngs::StdRng::seed_from_u64(1));
+        assert_eq!(out.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn dead_first_address_costs_at_most_the_cap() {
+        let relay = FakeRelay::start().await;
+        // A UDP socket that never answers.
+        let hole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let r = relay.relay_ref();
+        let addrs = vec![
+            hole.local_addr().unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], r.port)),
+        ];
+        let t0 = std::time::Instant::now();
+        let budget = Duration::from_secs(10);
+        let session = connect_any(&addrs, r.id, tokio::time::Instant::now() + budget).await;
+        assert!(session.is_ok(), "the second address was not tried");
+        assert!(
+            t0.elapsed() < ADDRESS_CONNECT_CAP + Duration::from_secs(1),
+            "a dead address cost more than the cap"
+        );
         relay.stop();
     }
 
