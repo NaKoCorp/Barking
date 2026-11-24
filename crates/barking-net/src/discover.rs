@@ -132,7 +132,9 @@ pub(crate) fn dial_error(e: ClientError) -> DialError {
     match e {
         ClientError::Timeout => DialError::Timeout,
         ClientError::Refused(reason) => DialError::Refused(reason),
-        ClientError::Connect(_) | ClientError::Connection(_) => DialError::Unreachable,
+        ClientError::Connect(_) | ClientError::ConnectionRefused | ClientError::Connection(_) => {
+            DialError::Unreachable
+        }
         _ => DialError::Protocol,
     }
 }

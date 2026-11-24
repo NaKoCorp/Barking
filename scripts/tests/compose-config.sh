@@ -52,6 +52,7 @@ check services.node.ports.0.target 4433
 check services.node.ports.0.protocol '"udp"'
 check services.relay.ports.0.target 4434
 check services.relay.ports.0.protocol '"udp"'
+check services.relay.stop_grace_period '"20s"'
 check networks.default.enable_ipv6 false
 printf 'BARKING_VERSION=0.0.1\nBARKING_IPV6=true\n' > "$tmp/v6.env"
 expect "networks.default.enable_ipv6 with BARKING_IPV6=true" \

@@ -483,7 +483,12 @@ async fn too_many_connections_per_ip() {
     let a = Client::connect(node.addr, node.id).await.unwrap();
     let _b = Client::connect(node.addr, node.id).await.unwrap();
     let r = Client::connect(node.addr, node.id).await;
-    assert!(matches!(r, Err(ClientError::Connect(_))), "{:?}", r.err());
+    // Refused explicitly (QUIC CONNECTION_REFUSED), not left to time out.
+    assert!(
+        matches!(r, Err(ClientError::ConnectionRefused)),
+        "{:?}",
+        r.err()
+    );
     // A slot frees up on close.
     a.close().await;
     let deadline = tokio::time::Instant::now() + LONG;

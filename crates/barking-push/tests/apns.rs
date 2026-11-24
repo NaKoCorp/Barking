@@ -333,3 +333,23 @@ async fn concurrent_expired_tokens_renew_once() {
     bearers.dedup();
     assert_eq!(bearers.len(), 2, "the old token and a single renewal");
 }
+
+#[tokio::test]
+async fn probe_targets_the_zero_token_in_its_environment() {
+    let prod = fake().await;
+    let sandbox = fake().await;
+    let p = pusher(&prod.url, &sandbox.url);
+    {
+        let mut r = sandbox.replies.lock().unwrap();
+        r.push_back((400, r#"{"reason":"BadDeviceToken"}"#));
+        r.push_back((403, r#"{"reason":"InvalidProviderToken"}"#));
+    }
+    assert_eq!(p.probe(ApnsEnv::Sandbox).await, PushOutcome::Failed(400));
+    assert_eq!(p.probe(ApnsEnv::Sandbox).await, PushOutcome::Failed(403));
+    assert_eq!(prod.seen.lock().unwrap().len(), 0);
+    let seen = sandbox.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].path, format!("/3/device/{}", "0".repeat(64)));
+    assert_eq!(seen[0].header("apns-push-type"), Some("background"));
+    assert_eq!(seen[0].body, RECEIPT_BODY);
+}

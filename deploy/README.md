@@ -126,3 +126,99 @@ Not automated. Follow the two-key procedure of [`barking-push.toml.example`](../
 2. List both keys in `deploy/config/barking-push.toml`.
 3. Ship an app build with the new key.
 4. Remove the old key once the old builds have expired.
+
+## Relay replicas
+
+The relay can run on several servers behind one DNS name, `push.barking.nakocorp.com`. Every replica has the **same** relay identity and seal keys, so the app needs no change. Each replica has its **own** node and its own APNs key. Nodes fail over from one address of the name to the next. A replica whose APNs calls fail refuses connections, so nodes try the next one. A stopping replica refuses new connections and finishes its pushes in flight (10 s at most).
+
+### Add a replica
+
+The new server needs Docker Engine, a user in the `docker` group that you reach with `ssh` without a password prompt, and neither a relay nor a node yet. Create a new APNs key for it in the Apple developer account. From your clone, with the verified release in `dist/`:
+
+```sh
+scripts/relay-replica.sh --from relay1 --to relay2 \
+  --public-addr <public-ipv4>:4433 --public-addr '[<public-ipv6>]:4433' \
+  --apns-key ~/.apple/AuthKey_KLMNO12345.p8 --team-id ABCDE12345 --key-id KLMNO12345 \
+  --version 0.1.0
+```
+
+`--from` and `--to` are ssh destinations (`user@host` or a `~/.ssh/config` alias). Both servers hold the deployment in `~/barking`. `--key-id` is the id of **this replica's** APNs key. The script:
+
+1. checks the release for the target's architecture, the source's relay keys (it hashes them), and that the target has neither `barking_relay-secrets` nor `barking_node-data`; it changes nothing if a check fails;
+2. copies `deploy/compose.yaml`, `docker/` and the release to `~/barking` on the target, and writes `deploy/.env` and both configuration files there;
+3. builds the images and creates a new node identity;
+4. streams `node.key` and the `seal*.key` files from the source's volume to the target's. They never touch your machine's disk. It then checks that the copied keys have the same SHA-256 on both servers (the sums are computed in a container on each server: only the sums travel);
+5. installs the APNs key, starts the node and the relay, and waits for the target relay to log its identity, which it prints.
+
+The source is only read: its relay keeps running and is never restarted.
+
+If a step fails after the checks, the script removes the target's containers and volumes, so you can run it again. If that clean-up fails too, it prints a warning with the commands to run on the target by hand. It ends with the records to add:
+
+```
+relay id : …
+A push.barking.nakocorp.com <public-ipv4>
+AAAA push.barking.nakocorp.com <public-ipv6>
+```
+
+Add them only once the relay runs. Keep the records **DNS only** (not proxied) with a TTL of 60 s, so that a replica leaves the name within a minute.
+
+Open UDP 4434 inbound on **every** replica (and UDP 4433 for its node), in the host's firewall and the provider's panel.
+
+### Update without downtime
+
+On the server, the deployment lives in `~/barking`: put the verified release in `~/barking/dist` and set `BARKING_VERSION` in `~/barking/deploy/.env`. Then, one replica at a time:
+
+1. Remove its A and AAAA records.
+2. Wait for the TTL (60 s).
+3. Run `docker compose -f ~/barking/deploy/compose.yaml --profile relay up -d --build`. The relay finishes its pushes in flight before it stops.
+4. Check the log: `docker compose -f ~/barking/deploy/compose.yaml --profile relay logs relay` must show `relay … started` with the same id, then `relay stats` lines with `available=true`.
+5. Put the records back.
+
+Deploy in this order: the NaKoCorp nodes first, then the relays, then the second replica.
+
+### Remove a replica
+
+1. Remove its A and AAAA records and wait for the TTL (60 s).
+2. Stop and remove the relay container only (the server's node keeps running):
+
+   ```sh
+   docker compose -f ~/barking/deploy/compose.yaml --profile relay stop relay
+   docker compose -f ~/barking/deploy/compose.yaml --profile relay rm -f relay
+   ```
+
+3. Delete its relay keys: `docker volume rm barking_relay-secrets`.
+4. Revoke its APNs key in the Apple developer account.
+
+### Seal key rotation on replicas
+
+Apply the [two-key procedure](#seal-key-rotation) on **every** replica, with the same new key, before you ship the app build that carries it. Create the key on one replica (`relay1` below), then stream it to each other one (`relay2`), from container to container through ssh: it never touches your disk. Set `k` to the new key's file name:
+
+```sh
+k=seal2.key
+ssh relay1 docker run --rm --network none -v barking_relay-secrets:/v:ro alpine tar -C /v -cf - "$k" \
+  | ssh relay2 docker run --rm -i --network none -v barking_relay-secrets:/v alpine \
+      sh -c "'tar -C /v --numeric-owner -xpf - && chown 65532:65532 /v/$k && chmod 600 /v/$k'"
+```
+
+Then check that every replica holds the same keys. The sums are computed on each server; the lines must be identical everywhere:
+
+```sh
+for h in relay1 relay2; do
+  echo "== $h"
+  ssh "$h" docker run --rm --network none -v barking_relay-secrets:/v:ro alpine sh -c "'cd /v && sha256sum node.key seal*.key'"
+done
+```
+
+Only then list the new key in `deploy/config/barking-push.toml` and restart the relay, one replica at a time.
+
+### A compromised replica
+
+All replicas share one identity: if one server is compromised, the identity is compromised everywhere.
+
+1. Revoke that replica's APNs key at once.
+2. Create a new relay identity and seal key, and put them on every replica.
+3. Ship a new app build with the new values.
+
+### Limits per replica
+
+The per-device quota and the per-node budget live in each replica's memory. With N replicas, a device or a node can get up to N times the limit in total. This is accepted: the limits protect each server, and N stays small (2 to 4).

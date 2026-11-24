@@ -518,7 +518,12 @@ async fn call_once(dht: &Dht, peer: NodeId, req: &Request) -> Call {
             dht.table().mark_alive(&peer, unix_now());
             Call::Answer(resp)
         }
-        Ok(Err(ClientError::Connect(_) | ClientError::Connection(_) | ClientError::Timeout))
+        Ok(Err(
+            ClientError::Connect(_)
+            | ClientError::ConnectionRefused
+            | ClientError::Connection(_)
+            | ClientError::Timeout,
+        ))
         | Err(_) => Call::NoAnswer,
         Ok(Err(_)) => Call::Broken,
     }

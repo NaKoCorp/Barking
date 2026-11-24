@@ -249,6 +249,9 @@ pub struct ServerStats {
     wake_failed: AtomicU64,
     /// Wake-up orders lost because the sender queue was full.
     wake_dropped: AtomicU64,
+    /// Wake-up orders sent through another replica after a refusal (also
+    /// counted in `wake_sent`).
+    wake_rerouted: AtomicU64,
     /// Refusals per reason (index: `reason_index`).
     refusals: [AtomicU64; REASONS.len()],
     /// Replication: since startup, and since the last `drain`.
@@ -350,6 +353,10 @@ impl ServerStats {
         self.wake_dropped.fetch_add(n, Ordering::Relaxed);
     }
 
+    pub fn add_wake_rerouted(&self, n: u64) {
+        self.wake_rerouted.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Wake-up orders sent since the last `drain`.
     pub fn wake_sent(&self) -> u64 {
         self.wake_sent.load(Ordering::Relaxed)
@@ -363,6 +370,11 @@ impl ServerStats {
     /// Wake-up orders dropped (full queue) since the last `drain`.
     pub fn wake_dropped(&self) -> u64 {
         self.wake_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Wake-up orders rerouted after a refusal since the last `drain`.
+    pub fn wake_rerouted(&self) -> u64 {
+        self.wake_rerouted.load(Ordering::Relaxed)
     }
 
     /// Counts a replication pass.
@@ -391,6 +403,7 @@ impl ServerStats {
             wake_sent: take(&self.wake_sent),
             wake_failed: take(&self.wake_failed),
             wake_dropped: take(&self.wake_dropped),
+            wake_rerouted: take(&self.wake_rerouted),
             refusals: REASONS
                 .iter()
                 .map(|r| (*r, take(&self.refusals[reason_index(*r)])))
@@ -420,6 +433,8 @@ pub struct Report {
     pub wake_sent: u64,
     pub wake_failed: u64,
     pub wake_dropped: u64,
+    /// Of `wake_sent`, those that reached another replica after a refusal.
+    pub wake_rerouted: u64,
     /// Refusals per reason (zero reasons omitted).
     pub refusals: Vec<(ErrorReason, u64)>,
     pub connections: usize,
@@ -451,8 +466,8 @@ impl fmt::Display for Report {
         if self.wake_sent + self.wake_failed + self.wake_dropped > 0 {
             write!(
                 f,
-                ", wake-ups: {} sent, {} failed, {} dropped",
-                self.wake_sent, self.wake_failed, self.wake_dropped
+                ", wake-ups: {} sent, {} failed, {} dropped, rerouted: {}",
+                self.wake_sent, self.wake_failed, self.wake_dropped, self.wake_rerouted
             )?;
         }
         if self.replication.passes > 0 {
@@ -1690,6 +1705,21 @@ mod tests {
         assert_eq!((r.deposits_ok, r.fetches, r.purged), (0, 0, 0));
         assert!(r.refusals.is_empty());
         assert_eq!((r.connections, r.connections_peak), (2, 2));
+    }
+
+    #[test]
+    fn report_counts_rerouted_wake_ups() {
+        let st = ServerStats::default();
+        st.add_wake_sent(5);
+        st.add_wake_rerouted(2);
+        let r = st.drain();
+        assert_eq!(r.wake_rerouted, 2);
+        let line = r.to_string();
+        assert!(
+            line.contains("5 sent") && line.contains("rerouted: 2"),
+            "{line}"
+        );
+        assert_eq!(st.drain().wake_rerouted, 0);
     }
 
     #[test]

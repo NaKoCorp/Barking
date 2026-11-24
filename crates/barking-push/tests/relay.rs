@@ -29,6 +29,9 @@ impl Pusher for Recorder {
         self.notify.notify_waiters();
         PushOutcome::Sent
     }
+    async fn probe(&self, _env: ApnsEnv) -> PushOutcome {
+        PushOutcome::Sent
+    }
 }
 
 struct Relay {
@@ -217,6 +220,9 @@ impl Pusher for Hung {
     async fn push(&self, _token: WakeToken) -> PushOutcome {
         std::future::pending().await
     }
+    async fn probe(&self, _env: ApnsEnv) -> PushOutcome {
+        PushOutcome::Sent
+    }
 }
 
 #[tokio::test]
@@ -244,6 +250,9 @@ impl Pusher for Scripted {
             5 => PushOutcome::Failed(503),
             _ => PushOutcome::Failed(418),
         }
+    }
+    async fn probe(&self, _env: ApnsEnv) -> PushOutcome {
+        PushOutcome::Sent
     }
 }
 
@@ -387,7 +396,12 @@ async fn per_ip_connection_cap_refuses_extra_connections() {
     })
     .await;
     let first = Client::connect(relay.addr, relay.id).await.unwrap();
-    assert!(Client::connect(relay.addr, relay.id).await.is_err());
+    let r = Client::connect(relay.addr, relay.id).await;
+    assert!(
+        matches!(r, Err(ClientError::ConnectionRefused)),
+        "{:?}",
+        r.err()
+    );
     drop(first);
     let _ = relay.stop.send(true);
 }
