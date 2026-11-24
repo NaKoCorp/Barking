@@ -144,13 +144,15 @@ scripts/relay-replica.sh --from relay1 --to relay2 \
 
 `--from` and `--to` are ssh destinations (`user@host` or a `~/.ssh/config` alias). Both servers hold the deployment in `~/barking`. `--key-id` is the id of **this replica's** APNs key. The script:
 
-1. checks the release for the target's architecture, the source's relay keys and log, and that the target has neither `barking_relay-secrets` nor `barking_node-data`; it changes nothing if a check fails;
+1. checks the release for the target's architecture, the source's relay keys (it hashes them), and that the target has neither `barking_relay-secrets` nor `barking_node-data`; it changes nothing if a check fails;
 2. copies `deploy/compose.yaml`, `docker/` and the release to `~/barking` on the target, and writes `deploy/.env` and both configuration files there;
 3. builds the images and creates a new node identity;
-4. streams `node.key` and the `seal*.key` files from the source's volume to the target's. They never touch your machine's disk;
-5. installs the APNs key, starts the node and the relay, and checks that the target relay logs the same identity as the source.
+4. streams `node.key` and the `seal*.key` files from the source's volume to the target's. They never touch your machine's disk. It then checks that the copied keys have the same SHA-256 on both servers (the sums are computed in a container on each server: only the sums travel);
+5. installs the APNs key, starts the node and the relay, and waits for the target relay to log its identity, which it prints.
 
-If a step fails after the checks, the script removes the target's containers and volumes, so you can run it again. It ends with the records to add:
+The source is only read: its relay keeps running and is never restarted.
+
+If a step fails after the checks, the script removes the target's containers and volumes, so you can run it again. If that clean-up fails too, it prints a warning with the commands to run on the target by hand. It ends with the records to add:
 
 ```
 relay id : …
@@ -177,13 +179,37 @@ Deploy in this order: the NaKoCorp nodes first, then the relays, then the second
 ### Remove a replica
 
 1. Remove its A and AAAA records and wait for the TTL (60 s).
-2. Stop it: `docker compose -f ~/barking/deploy/compose.yaml --profile relay down`.
+2. Stop and remove the relay container only (the server's node keeps running):
+
+   ```sh
+   docker compose -f ~/barking/deploy/compose.yaml --profile relay stop relay
+   docker compose -f ~/barking/deploy/compose.yaml --profile relay rm -f relay
+   ```
+
 3. Delete its relay keys: `docker volume rm barking_relay-secrets`.
 4. Revoke its APNs key in the Apple developer account.
 
 ### Seal key rotation on replicas
 
-Apply the [two-key procedure](#seal-key-rotation) on **every** replica, with the same new key, before you ship the app build that carries it. Create the key on one replica, then copy it to the others the same way the script does (a stream between containers, never through your disk).
+Apply the [two-key procedure](#seal-key-rotation) on **every** replica, with the same new key, before you ship the app build that carries it. Create the key on one replica (`relay1` below), then stream it to each other one (`relay2`), from container to container through ssh: it never touches your disk. Set `k` to the new key's file name:
+
+```sh
+k=seal2.key
+ssh relay1 docker run --rm --network none -v barking_relay-secrets:/v:ro alpine tar -C /v -cf - "$k" \
+  | ssh relay2 docker run --rm -i --network none -v barking_relay-secrets:/v alpine \
+      sh -c "'tar -C /v --numeric-owner -xpf - && chown 65532:65532 /v/$k && chmod 600 /v/$k'"
+```
+
+Then check that every replica holds the same keys. The sums are computed on each server; the lines must be identical everywhere:
+
+```sh
+for h in relay1 relay2; do
+  echo "== $h"
+  ssh "$h" docker run --rm --network none -v barking_relay-secrets:/v:ro alpine sh -c "'cd /v && sha256sum node.key seal*.key'"
+done
+```
+
+Only then list the new key in `deploy/config/barking-push.toml` and restart the relay, one replica at a time.
 
 ### A compromised replica
 
