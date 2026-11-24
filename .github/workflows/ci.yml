@@ -315,8 +315,10 @@ jobs:
       - run: scripts/tests/release-scripts.sh
       - run: bash scripts/tests/ci-scripts.sh
       - run: bash scripts/tests/cla-check.sh
-      # Deployment set-up (fake docker) and compose file of deploy/.
+      # Deployment set-up and relay replica (fake docker and ssh), and compose
+      # file of deploy/.
       - run: scripts/tests/stack-init.sh
+      - run: scripts/tests/relay-replica.sh
       - run: scripts/tests/compose-config.sh
 
   # Cargo cache warm-up when main skipped its checks: same paths and key as

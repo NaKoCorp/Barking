@@ -28,9 +28,11 @@ if cargo nextest --version >/dev/null 2>&1; then
 else
   cargo test --workspace --locked
 fi
-# Deployment: set-up script (fake docker, no daemon), and deploy/compose.yaml
-# for both profiles (needs docker compose, no daemon).
+# Deployment: set-up and relay replica scripts (fake docker and ssh, no
+# daemon), and deploy/compose.yaml for both profiles (needs docker compose,
+# no daemon).
 scripts/tests/stack-init.sh
+scripts/tests/relay-replica.sh
 if docker compose version >/dev/null 2>&1; then
   scripts/tests/compose-config.sh
 fi
