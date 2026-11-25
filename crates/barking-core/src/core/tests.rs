@@ -10729,8 +10729,8 @@ fn invite_to_the_devices_still_waiting_keeps_the_acceptance() {
     );
 }
 
-/// A held row for `fp` that cannot be read back (`ik` of 3 bytes): its
-/// replay fails on loading.
+/// A held row for `fp` that cannot be read back (`ik` of 3 bytes): the
+/// replay logs it as failed and deletes it.
 fn corrupt_held_row(c: &Core, fp: Fingerprint) {
     c.store
         .conn()
@@ -10838,4 +10838,114 @@ fn acceptance_learned_from_an_ack_survives_a_resend() {
         a.invite_state(&bob, later).unwrap(),
         InviteState::Accepted { at: at + 60 }
     );
+}
+
+// --- Contact requests, fix pass 2: unreadable held rows.
+
+/// A row of the queue of unknown senders with the identity key `ik` that
+/// cannot be read back (`session_id` of 3 bytes), its content read
+/// (`message_id` set).
+fn corrupt_queued_row(c: &Core, ik: [u8; 32]) {
+    c.store
+        .conn()
+        .execute(
+            "INSERT INTO pending_initials
+                (packet_id, ik, fp, session_id, message_id, bytes, received_at, invite)
+             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, 0)",
+            rusqlite::params![
+                vec![0xdd_u8; 16],
+                ik.to_vec(),
+                vec![1_u8, 2, 3],
+                vec![0xee_u8; 16],
+                vec![0_u8; 5],
+                i64::try_from(NOW).unwrap(),
+            ],
+        )
+        .unwrap();
+}
+
+/// Bob holds a request of Alice with unreadable rows: one held for her
+/// fingerprint, one queued under her device key.
+fn bob_with_unreadable_rows() -> (TempDir, Core, TempDir, Core, StdRng) {
+    let (da, a, db, b, rng) = bob_with_request(NOW);
+    corrupt_held_row(&b, a.fingerprint());
+    corrupt_queued_row(&b, a.device.public().dh);
+    (da, a, db, b, rng)
+}
+
+const REQUEST_EXPIRED: u64 = NOW + requests::REQUEST_RETENTION_SECS + 1;
+
+#[test]
+fn open_closes_an_expired_request_with_unreadable_rows() {
+    let (_da, _a, db, b, _rng) = bob_with_unreadable_rows();
+    drop(b);
+    let b = Core::open(&db.path().join("db"), &[2; 32], REQUEST_EXPIRED).unwrap();
+    assert!(b.requests().unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+}
+
+#[test]
+fn polling_closes_an_expired_request_with_unreadable_rows() {
+    let (_da, _a, _db, mut b, _rng) = bob_with_unreadable_rows();
+    b.mark_polled(REQUEST_EXPIRED).unwrap();
+    assert!(b.requests().unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+}
+
+#[test]
+fn refuse_closes_a_request_with_unreadable_rows() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_unreadable_rows();
+    b.refuse_request(&a.fingerprint(), NOW + 1, &mut rng)
+        .unwrap();
+    assert!(b.requests().unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+}
+
+#[test]
+fn block_closes_a_request_with_unreadable_rows() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_unreadable_rows();
+    b.block_request(&a.fingerprint(), NOW + 1, &mut rng)
+        .unwrap();
+    assert!(b.requests().unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+}
+
+#[test]
+fn blocked_sender_invitation_drops_an_unreadable_queued_row() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    b.block_contact(&alice, NOW, &mut rng).unwrap();
+    b.remove_contact(&alice, NOW, &mut rng).unwrap();
+    corrupt_queued_row(&b, a.device.public().dh);
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    let got = b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+}
+
+#[test]
+fn accept_skips_an_unreadable_row_and_replays_the_next() {
+    // The genuine packets arrive after the unreadable row (held at NOW).
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW + 1);
+    let alice = a.fingerprint();
+    corrupt_held_row(&b, alice);
+    let accepted = b.accept_request(&alice, None, NOW + 2, &mut rng).unwrap();
+    assert_eq!(replayed_texts(&accepted.replayed), ["un", "deux"]);
+    assert_eq!(texts_with(&b, alice, NOW + 2), ["un", "deux"]);
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(replay_failures(&b), 1);
+}
+
+#[test]
+fn committed_replay_skips_an_unreadable_row_and_replays_the_next() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW + 1);
+    let alice = a.fingerprint();
+    corrupt_held_row(&b, alice);
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW + 2, &mut rng)
+        .unwrap();
+    assert_eq!(texts_with(&b, alice, NOW + 2), ["un", "deux"]);
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(replay_failures(&b), 1);
 }

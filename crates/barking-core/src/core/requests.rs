@@ -257,7 +257,7 @@ pub(super) fn resolve_request(
 /// Closes the pending request of `fp` for good (`how`, logged), together
 /// with the packets held for it and those of its devices waiting in the
 /// queue of unknown senders: nothing of it is replayed, nor comes back
-/// (`drop_for_good`). Returns whether a request existed.
+/// (`drop_rows_for_good`). Returns whether a request existed.
 pub(super) fn close_request(
     q: &impl Queries,
     fp: Fingerprint,
@@ -267,11 +267,10 @@ pub(super) fn close_request(
     let Some(row) = get_request(q, fp)? else {
         return Ok(false);
     };
-    let mut held = list_pending_by_fp(q, fp)?;
+    drop_rows_for_good(q, "fp = ?1", &fp.0, now)?;
     if let Ok(card) = load_card(&row.card) {
-        held.extend(queued_of_card(q, &card)?);
+        drop_queued_of_card(q, &card, now)?;
     }
-    drop_for_good(q, held, now)?;
     delete_request(q, fp)?;
     log(
         q,
@@ -282,18 +281,47 @@ pub(super) fn close_request(
     Ok(true)
 }
 
-/// The packets of the queue of unknown senders whose initial message names
-/// one of the devices `card` lists.
-fn queued_of_card(q: &impl Queries, card: &ContactCard) -> Result<Vec<PendingInitial>> {
-    let mut out = Vec::new();
+/// Drops for good (`drop_rows_for_good`) the packets of the queue of
+/// unknown senders whose initial message names one of the devices `card`
+/// lists.
+fn drop_queued_of_card(q: &impl Queries, card: &ContactCard, now: u64) -> Result<()> {
     for c in &card.devices.certs {
-        out.extend(query_pending(
-            q,
-            &format!("SELECT {PENDING_COLUMNS} FROM pending_initials WHERE ik = ?1 AND fp IS NULL"),
-            &c.device.dh,
-        )?);
+        drop_rows_for_good(q, "ik = ?1 AND fp IS NULL", &c.device.dh, now)?;
     }
-    Ok(out)
+    Ok(())
+}
+
+/// `drop_for_good` of the held rows that `filter` selects (`key` is its
+/// `?1`), read tolerantly: only the packet id of a row whose content was
+/// read is needed, to mark it seen, and a row that cannot be read back is
+/// deleted with the others instead of failing the caller (a purge in
+/// `Core::open` would otherwise fail on every launch). An unreadable
+/// message id proves nothing: that row is only deleted.
+fn drop_rows_for_good(q: &impl Queries, filter: &str, key: &[u8], now: u64) -> Result<()> {
+    let seen: Vec<Vec<u8>> = {
+        let mut stmt = q
+            .conn()
+            .prepare(&format!(
+                "SELECT packet_id FROM pending_initials WHERE {filter}
+                   AND typeof(packet_id) = 'blob' AND length(packet_id) = 16
+                   AND typeof(message_id) = 'blob' AND length(message_id) = 16"
+            ))
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![key], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(map_err)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(map_err)?
+    };
+    for id in seen {
+        q.mark_seen(PacketId(arr(id)?), now)?;
+    }
+    q.conn()
+        .execute(
+            &format!("DELETE FROM pending_initials WHERE {filter}"),
+            params![key],
+        )
+        .map_err(map_err)?;
+    Ok(())
 }
 
 /// Drops held first packets for good. One whose content was read
@@ -564,6 +592,60 @@ pub(super) fn list_pending_by_fp(q: &impl Queries, fp: Fingerprint) -> Result<Ve
         ),
         &fp.0,
     )
+}
+
+/// The first packets held for `fp`, oldest first, to be replayed. A row
+/// that cannot be read back could never be replayed and would stop the
+/// replay of the rows after it: it is deleted instead, and its packet id
+/// (when readable) returned with the others, for the log.
+fn take_replayable(
+    q: &impl Queries,
+    fp: Fingerprint,
+) -> Result<(Vec<PendingInitial>, Vec<Option<PacketId>>)> {
+    type Row = (i64, Option<Vec<u8>>, rusqlite::Result<PendingRaw>);
+    let rows: Vec<Row> = {
+        let mut stmt = q
+            .conn()
+            .prepare(&format!(
+                "SELECT rowid, {PENDING_COLUMNS} FROM pending_initials WHERE fp = ?1
+                 ORDER BY received_at, rowid"
+            ))
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![fp.0.as_slice()], |r| {
+                let raw = (|| {
+                    Ok((
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                    ))
+                })();
+                Ok((r.get(0)?, r.get::<_, Vec<u8>>(1).ok(), raw))
+            })
+            .map_err(map_err)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(map_err)?
+    };
+    let (mut held, mut dropped) = (Vec::new(), Vec::new());
+    for (rowid, packet_id, raw) in rows {
+        match raw.map_err(map_err).and_then(into_pending) {
+            Ok(p) => held.push(p),
+            Err(_) => {
+                q.conn()
+                    .execute(
+                        "DELETE FROM pending_initials WHERE rowid = ?1",
+                        params![rowid],
+                    )
+                    .map_err(map_err)?;
+                dropped.push(packet_id.and_then(|v| arr(v).ok()).map(PacketId));
+            }
+        }
+    }
+    Ok((held, dropped))
 }
 
 /// The first packets held with the initial message identity key `ik`,
@@ -1168,7 +1250,7 @@ fn on_invitation(
     // A blocked sender's card names its devices: what they queued before
     // this invite goes for good.
     if block.blocked {
-        drop_for_good(q, queued_of_card(q, card)?, now)?;
+        drop_queued_of_card(q, card, now)?;
     }
     if block.drops(env.sent_at) || get_refusal(q, fp)?.is_some_and(|at| env.sent_at <= at) {
         return Ok((ReceiveOutcome::Ignored, None));
@@ -1377,15 +1459,20 @@ pub(super) fn replay_held(
 }
 
 /// Replays the first packets held for `fp`, oldest first (`replay_held`),
-/// each with the envelope message id it was held under.
+/// each with the envelope message id it was held under. A row that cannot
+/// be read back is logged and deleted (`take_replayable`), not replayed.
 fn replay_all(
     core: &mut Core,
     fp: Fingerprint,
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<Vec<(Option<MessageId>, ReceiveOutcome)>> {
+    let (held, dropped) = take_replayable(&core.store, fp)?;
+    for packet in dropped {
+        note_replay_failure(core, packet, now);
+    }
     let mut out = Vec::new();
-    for held in list_pending_by_fp(&core.store, fp)? {
+    for held in held {
         let outcome = replay_held(core, &held, now, rng)?;
         out.push((held.message_id, outcome));
     }
@@ -1428,15 +1515,21 @@ pub(super) fn replay_for_contacts(core: &mut Core, now: u64, rng: &mut impl Cryp
 /// receive). The outcome of that transaction stands: a failure is logged
 /// (`R_REPLAY_FAILED`, no content) instead of returned, and stops the
 /// replay of `fp` there (in order); the failed packet stays held and the
-/// next receive retries it.
+/// next receive retries it. A row that cannot be read back is logged the
+/// same way and deleted (`take_replayable`): the rows after it replay.
 pub(super) fn replay_committed(
     core: &mut Core,
     fp: Fingerprint,
     now: u64,
     rng: &mut impl CryptoRng,
 ) {
-    let held = match list_pending_by_fp(&core.store, fp) {
-        Ok(held) => held,
+    let held = match take_replayable(&core.store, fp) {
+        Ok((held, dropped)) => {
+            for packet in dropped {
+                note_replay_failure(core, packet, now);
+            }
+            held
+        }
         Err(_) => return note_replay_failure(core, None, now),
     };
     for p in held {
