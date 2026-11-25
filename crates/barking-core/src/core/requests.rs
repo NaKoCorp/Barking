@@ -254,6 +254,30 @@ pub(super) fn resolve_request(
     Ok(true)
 }
 
+/// Attaches to `fp`, a contact, the packets of the queue of unknown senders
+/// whose initial message names one of the devices its stored card lists
+/// (spec §7.3, step 3: "the request and the queue of unknown senders for
+/// these keys"), to be replayed with the request's. The replay
+/// authenticates each one; one that fails is quarantined and dropped.
+/// Returns how many were attached.
+pub(super) fn attach_queued_to_contact(q: &impl Queries, fp: Fingerprint) -> Result<usize> {
+    let Some(contact) = q.get_contact(fp)? else {
+        return Ok(0);
+    };
+    let card = load_card(&contact.card)?;
+    let mut n = 0;
+    for c in &card.devices.certs {
+        n += q
+            .conn()
+            .execute(
+                "UPDATE pending_initials SET fp = ?1 WHERE fp IS NULL AND ik = ?2",
+                params![fp.0.as_slice(), c.device.dh.as_slice()],
+            )
+            .map_err(map_err)?;
+    }
+    Ok(n)
+}
+
 /// Contacts with first packets still held for them: a request resolved
 /// (accepted, added here or on another of my devices) whose replay has not
 /// run or was interrupted, or a known contact's new device (spec §7.7).
@@ -1333,7 +1357,8 @@ impl Core {
     /// 1. in one transaction, adds its card as a contact without an alias
     ///    (never the declared name: an alias taken would replace another
     ///    contact), then sets `alias` if given, queues the contact for my
-    ///    other devices (`SyncContact`) and closes the request;
+    ///    other devices (`SyncContact`) and closes the request; its devices'
+    ///    packets in the queue of unknown senders join the held ones;
     /// 2. replays its held packets, oldest first, one transaction each
     ///    (`replay_held`);
     /// 3. tells the contact (`REQUEST_ACCEPTED`, with the ids of at most
@@ -1364,6 +1389,7 @@ impl Core {
             let time = sync::touch(tx, fp, now, false, device.public().id())?;
             sync::send_state(tx, device, fp, time, rng)?;
             resolve_request(tx, fp, RequestResolution::Accepted, now)?;
+            attach_queued_to_contact(tx, fp)?;
             Ok(())
         })?;
         let replayed = replay_all(self, fp, now, rng)?;

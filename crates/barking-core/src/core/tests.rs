@@ -10089,3 +10089,21 @@ fn accept_on_one_device_resolves_on_the_other() {
         1
     );
 }
+
+#[test]
+fn adding_a_card_replays_its_queued_packets() {
+    // Spec §7.3, step 3: the queue of unknown senders for the card's keys is
+    // replayed too. Alice writes without an invite; Bob adds her card.
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    let text = a
+        .send_text(&b.fingerprint(), "sans invitation", NOW, &mut rng)
+        .unwrap();
+    let got = b.receive(&text[0].encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_UNKNOWN_SENDER);
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 1);
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(texts_with(&b, alice, NOW), ["sans invitation"]);
+}

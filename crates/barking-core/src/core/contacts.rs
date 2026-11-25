@@ -48,7 +48,8 @@ impl Core {
     ///
     /// A pending request of the same fingerprint is resolved (spec §7.6):
     /// closed in that transaction, then its held packets replayed, without
-    /// `REQUEST_ACCEPTED` (my first message will say it).
+    /// `REQUEST_ACCEPTED` (my first message will say it). So are the packets
+    /// of the card's devices in the queue of unknown senders (spec §7.3).
     pub fn add_contact(
         &mut self,
         card: &ContactCard,
@@ -76,6 +77,7 @@ impl Core {
                 sync::send_op(tx, device, SyncOp::Remove(old), time, rng)?;
             }
             requests::resolve_request(tx, fp, RequestResolution::AddedDirectly, now)?;
+            requests::attach_queued_to_contact(tx, fp)?;
             Ok(fp)
         })?;
         requests::replay_pending(self, fp, now, rng)?;
@@ -416,8 +418,9 @@ pub(super) fn add_in(
 /// the most recent operation on all my devices, whatever the
 /// arrival order.
 ///
-/// A pending request of the same fingerprint is closed (spec §7.6): the
-/// receive replays its held packets once committed.
+/// A pending request of the same fingerprint is closed (spec §7.6), and the
+/// card's devices' packets in the queue of unknown senders join its held
+/// ones: the receive replays them once committed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn upsert_in(
     q: &impl Queries,
@@ -484,6 +487,7 @@ pub(super) fn upsert_in(
     };
     q.upsert_contact(fp, &bytes, alias, verified)?;
     requests::resolve_request(q, fp, RequestResolution::AddedDirectly, now)?;
+    requests::attach_queued_to_contact(q, fp)?;
     Ok(())
 }
 
