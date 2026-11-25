@@ -814,7 +814,7 @@ fn record_message(
             },
         )?;
     }
-    let ack = emit_ack(q, packet, env.ack_secret, now, rng)?;
+    let ack = emit_ack(q, packet, env, now, rng)?;
     let alias = Core::alias_in(q, row.contact_fp)?;
     if !inserted {
         return Ok((repeat_outcome(q, packet.id)?, new_prekeys));
@@ -1013,7 +1013,7 @@ fn accept_reaction(
                 packet_id: packet.id,
             },
         )?;
-        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        emit_ack(q, packet, env, now, rng)?;
         return Ok((ReceiveOutcome::Duplicate, new_prekeys));
     }
     log(
@@ -1029,7 +1029,7 @@ fn accept_reaction(
     )?;
     let target = target.resolve(false, &from);
     let applied = reactions::apply(q, from, from.0, target, emojis, env.sent_at, env.message_id)?;
-    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    emit_ack(q, packet, env, now, rng)?;
     let Some(added) = applied else {
         return Ok((ReceiveOutcome::Ignored, new_prekeys));
     };
@@ -1099,7 +1099,7 @@ fn accept_answer(
         )?;
         ReceiveOutcome::Ignored
     };
-    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    emit_ack(q, packet, env, now, rng)?;
     Ok((outcome, new_prekeys))
 }
 
@@ -1138,7 +1138,7 @@ fn accept_unknown(
                 packet_id: packet.id,
             },
         )?;
-        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        emit_ack(q, packet, env, now, rng)?;
         return Ok((repeat_outcome(q, packet.id)?, new_prekeys));
     }
     log(
@@ -1167,7 +1167,7 @@ fn accept_unknown(
             seen_at: None,
             expire_at: None,
         })?;
-    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    emit_ack(q, packet, env, now, rng)?;
     if !inserted {
         // Ignored, or a placeholder deleted since (tombstone).
         let outcome = if show {
@@ -1236,7 +1236,7 @@ fn accept_card_update(
                 packet_id: packet.id,
             },
         )?;
-        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        emit_ack(q, packet, env, now, rng)?;
         return Ok((ReceiveOutcome::Duplicate, new_prekeys));
     };
     let (added, removed) =
@@ -1252,7 +1252,7 @@ fn accept_card_update(
             removed,
         },
     )?;
-    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    emit_ack(q, packet, env, now, rng)?;
     sync::send_own_card(q, device, fp, &added, now, rng)?;
     let alias = Core::alias_in(q, fp)?;
     Ok((ReceiveOutcome::CardUpdated { from: fp, alias }, new_prekeys))
@@ -1285,7 +1285,7 @@ fn accept_own_card(
     q.mark_seen(packet.id, now)?;
     q.record_inbound(packet.id, MessageId::incoming(&fp, &env.message_id), fp)?;
     if removal && removed::enter(q, device, card, now, rng)? {
-        emit_ack(q, packet, env.ack_secret, now, rng)?;
+        emit_ack(q, packet, env, now, rng)?;
         return Ok((ReceiveOutcome::Removed, new_prekeys));
     }
     log_limited(
@@ -1297,7 +1297,7 @@ fn accept_own_card(
             packet_id: packet.id,
         },
     )?;
-    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    emit_ack(q, packet, env, now, rng)?;
     Ok((ReceiveOutcome::Duplicate, new_prekeys))
 }
 
@@ -1390,7 +1390,7 @@ fn accept_sync(
             &TransparencyEvent::OwnDevicesUpdated { added, removed },
         )?;
     }
-    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    emit_ack(q, packet, env, now, rng)?;
     let outcome = match kind {
         Some(kind) => ReceiveOutcome::Synced {
             kind,
@@ -1466,18 +1466,23 @@ fn commit_session(
 fn emit_ack(
     q: &impl Queries,
     packet: &Packet,
-    ack_secret: [u8; 16],
+    env: &Envelope,
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<Packet> {
-    let mut ack = Packet::ack(packet, ack_secret, now, rng);
+    let mut ack = Packet::ack(packet, env.ack_secret, now, rng);
     // Same granularity as sealed messages.
     ack.expires_at = crate::envelope::sealed_expiry(now);
     // A held packet replayed once its sender no longer waits for it (spec
     // §7.3, §8.3): the ack would tell nobody anything but the time of the
-    // acceptance. Built, never queued nor logged. A packet received live
-    // has not expired (`Core::receive`), so it is always acked.
-    if u64::from(packet.expires_at).saturating_add(ACK_GRACE_SECS) < now {
+    // acceptance. Built, never queued nor logged. The header expiry is
+    // not authenticated (a node may serve a copy with a later one): the
+    // expiry its sender gave it, sealed at the authenticated `sent_at`,
+    // bounds it. A packet received live has not expired (`Core::receive`)
+    // and was sent recently (`check_envelope`): it is acked.
+    let expiry =
+        u64::from(packet.expires_at).min(u64::from(crate::envelope::sealed_expiry(env.sent_at)));
+    if expiry.saturating_add(ACK_GRACE_SECS) < now {
         return Ok(ack);
     }
     log(

@@ -10949,3 +10949,47 @@ fn committed_replay_skips_an_unreadable_row_and_replays_the_next() {
     assert_eq!(count_table(&b, "pending_initials"), 0);
     assert_eq!(replay_failures(&b), 1);
 }
+
+// --- Contact requests, fix pass 2: late-ack cutoff from the sending time.
+
+/// Rewrites the header expiry of every packet held for `fp` to `u32::MAX`,
+/// as a malicious node could serve them (not covered by the packet id nor
+/// the AEAD).
+fn rewrite_held_expiry(c: &Core, fp: Fingerprint) {
+    for held in requests::list_pending_by_fp(&c.store, fp).unwrap() {
+        let mut packet = Packet::decode(&held.bytes).unwrap();
+        packet.expires_at = u32::MAX;
+        c.store
+            .conn()
+            .execute(
+                "UPDATE pending_initials SET bytes = ?2 WHERE packet_id = ?1",
+                rusqlite::params![held.packet_id.0.to_vec(), packet.encode()],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn accept_on_day_20_ignores_a_rewritten_header_expiry() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    rewrite_held_expiry(&b, alice);
+    let day_20 = NOW + 20 * 86_400;
+    let accepted = b.accept_request(&alice, None, day_20, &mut rng).unwrap();
+    assert_eq!(replayed_texts(&accepted.replayed), ["un", "deux"]);
+    assert_eq!(outbox_of(&mut b, Kind::Ack, day_20), 0);
+    assert_eq!(
+        count_events(&b, |e| matches!(e, TransparencyEvent::AckEmitted { .. })),
+        0
+    );
+}
+
+#[test]
+fn accept_within_grace_acks_despite_a_rewritten_header_expiry() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    rewrite_held_expiry(&b, alice);
+    let later = NOW + 3_600;
+    b.accept_request(&alice, None, later, &mut rng).unwrap();
+    assert_eq!(outbox_of(&mut b, Kind::Ack, later), 3);
+}
