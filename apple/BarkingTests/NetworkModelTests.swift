@@ -105,6 +105,15 @@ final class NodeListTests: XCTestCase {
         XCTAssertNil(row.extras)
     }
 
+    /// Ruling M: only a good relay is green; fair already reads as a warning.
+    func testReliabilityStates() {
+        XCTAssertEqual(NodeLabels.reliabilityState(.new), .checking)
+        XCTAssertEqual(NodeLabels.reliabilityState(.good), .ok)
+        XCTAssertEqual(NodeLabels.reliabilityState(.fair), .waiting)
+        XCTAssertEqual(NodeLabels.reliabilityState(.weak), .waiting)
+        XCTAssertEqual(NodeLabels.reliabilityState(.avoided(until: t0, reason: .unreachable)), .waiting)
+    }
+
     /// A mismatch is amber (attention), never red.
     func testMismatchIsAWarningInTheList() throws {
         let fr = try lang("fr")
@@ -120,9 +129,9 @@ final class NodeListTests: XCTestCase {
         let fr = try lang("fr")
         let expected: [(Reliability, String)] = [
             (.new, "Cet iPhone n'a pas encore assez échangé avec ce relais pour le juger."),
-            (.good, "Ce relais répond bien à ton iPhone ces derniers temps."),
-            (.fair, "Ce relais ne répond pas toujours. Tes messages restent en sécurité : ils sont aussi gardés ailleurs."),
-            (.weak, "Ce relais a souvent échoué. Barking s'en sert moins et confie tes messages à d'autres."),
+            (.good, "Ce relais répond bien à votre iPhone ces derniers temps."),
+            (.fair, "Ce relais ne répond pas toujours. Vos messages restent en sécurité : ils sont aussi gardés ailleurs."),
+            (.weak, "Ce relais a souvent échoué. Barking s'en sert moins et confie vos messages à d'autres."),
             (.avoided(until: t0 + 3_600, reason: .messageLost),
              "Un message confié à ce relais a disparu. Barking l'évite pour l'instant et réessaiera plus tard."),
             (.avoided(until: t0 + 3_600, reason: .unreachable),
@@ -293,8 +302,8 @@ final class NodeListTests: XCTestCase {
     func testResetConfirmationCountsTheNodes() throws {
         let fr = try lang("fr")
         XCTAssertEqual(flat(NodeLabels.resetMessage(3, lang: fr)),
-                       "Les 3 nœuds fournis avec Barking que tu as retirés reviennent dans la liste. Les nœuds bloqués restent bloqués.")
+                       "Les 3 nœuds fournis avec Barking que vous avez retirés reviennent dans la liste. Les nœuds bloqués restent bloqués.")
         XCTAssertEqual(flat(NodeLabels.resetMessage(1, lang: fr)),
-                       "Le nœud fourni avec Barking que tu as retiré revient dans la liste. Les nœuds bloqués restent bloqués.")
+                       "Le nœud fourni avec Barking que vous avez retiré revient dans la liste. Les nœuds bloqués restent bloqués.")
     }
 }

@@ -94,8 +94,8 @@ enum NodeLabels {
     static func reliabilityState(_ r: Reliability) -> StatusDot.State {
         switch r {
         case .new: .checking
-        case .good, .fair: .ok
-        case .weak, .avoided: .waiting
+        case .good: .ok
+        case .fair, .weak, .avoided: .waiting
         }
     }
 

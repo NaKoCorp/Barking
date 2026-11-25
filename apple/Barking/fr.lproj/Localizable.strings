@@ -567,9 +567,9 @@
 "avoided until %@" = "évité jusqu’à %@";
 "avoided until %@ (date)" = "évité jusqu’au %@";
 "This iPhone hasn't exchanged enough with this relay to judge it yet." = "Cet iPhone n’a pas encore assez échangé avec ce relais pour le juger.";
-"This relay has been answering your iPhone well lately." = "Ce relais répond bien à ton iPhone ces derniers temps.";
-"This relay doesn't always answer. Your messages stay safe: they're also kept elsewhere." = "Ce relais ne répond pas toujours. Tes messages restent en sécurité : ils sont aussi gardés ailleurs.";
-"This relay has often failed. Barking uses it less and hands your messages to others." = "Ce relais a souvent échoué. Barking s’en sert moins et confie tes messages à d’autres.";
+"This relay has been answering your iPhone well lately." = "Ce relais répond bien à votre iPhone ces derniers temps.";
+"This relay doesn't always answer. Your messages stay safe: they're also kept elsewhere." = "Ce relais ne répond pas toujours. Vos messages restent en sécurité : ils sont aussi gardés ailleurs.";
+"This relay has often failed. Barking uses it less and hands your messages to others." = "Ce relais a souvent échoué. Barking s’en sert moins et confie vos messages à d’autres.";
 "A message left with this relay disappeared. Barking avoids it for now and will try again later." = "Un message confié à ce relais a disparu. Barking l’évite pour l’instant et réessaiera plus tard.";
 "This relay stopped answering. Barking avoids it for now and will try again later." = "Ce relais ne répondait plus. Barking l’évite pour l’instant et réessaiera plus tard.";
 "fast" = "rapide";
@@ -590,13 +590,13 @@
 "Can't be checked · this node doesn't share its origin" = "Non vérifiable · ce nœud ne communique pas son origine";
 "Can't be checked · address missing from the base" = "Non vérifiable · adresse absente de la base";
 "Can't be checked · no address to compare" = "Non vérifiable · aucune adresse à comparer";
-"Address databases are sometimes behind. If the gap stays, you can block this node." = "Les bases d’adresses ont parfois du retard. Si l’écart persiste, tu peux bloquer ce nœud.";
+"Address databases are sometimes behind. If the gap stays, you can block this node." = "Les bases d’adresses ont parfois du retard. Si l’écart persiste, vous pouvez bloquer ce nœud.";
 "never" = "jamais";
 "less than an hour ago" = "il y a moins d’une heure";
 "%lld h ago" = "il y a %lld h";
 "yesterday" = "hier";
 "%lld subscriptions" = "%lld abonnements";
-"The %lld nodes that came with Barking and that you removed come back to the list. Blocked nodes stay blocked." = "Les %lld nœuds fournis avec Barking que tu as retirés reviennent dans la liste. Les nœuds bloqués restent bloqués.";
+"The %lld nodes that came with Barking and that you removed come back to the list. Blocked nodes stay blocked." = "Les %lld nœuds fournis avec Barking que vous avez retirés reviennent dans la liste. Les nœuds bloqués restent bloqués.";
 "wakes" = "réveils";
 "origin unknown" = "origine inconnue";
 "reliability %@" = "fiabilité %@";
@@ -608,6 +608,6 @@
 "Restore the default nodes?" = "Rétablir les nœuds par défaut ?";
 "Restore" = "Rétablir";
 "The default nodes could not be restored." = "Les nœuds par défaut n’ont pas pu être rétablis.";
-"Relays keep your sealed messages until your contacts pick them up. Tap a relay to see who hosts it and how it behaves." = "Les relais gardent tes messages scellés le temps que tes contacts les récupèrent. Touche un relais pour voir qui l’héberge et comment il se comporte.";
+"Relays keep your sealed messages until your contacts pick them up. Tap a relay to see who hosts it and how it behaves." = "Les relais gardent vos messages scellés le temps que vos contacts les récupèrent. Touchez un relais pour voir qui l’héberge et comment il se comporte.";
 "No other node known yet." = "Aucun autre nœud connu pour l’instant.";
 "No relay in use yet." = "Aucun relais utilisé pour l’instant.";
