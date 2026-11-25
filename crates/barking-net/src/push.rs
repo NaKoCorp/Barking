@@ -362,6 +362,17 @@ impl PushState {
         }
     }
 
+    /// Forgets every subscription held on `node` (it was blocked), without
+    /// unsubscribing: they expire by themselves. Entries left without a
+    /// node go; the next plan subscribes elsewhere.
+    pub fn forget_node(&mut self, node: &NodeId) {
+        self.subs.retain(|_, b| {
+            b.nodes.retain(|(n, _)| n != node);
+            !b.nodes.is_empty()
+        });
+        self.no_wake.remove(node);
+    }
+
     /// `node` refused or did not take a subscription: left out for
     /// `NO_WAKE_SECS`. Ended exclusions are pruned.
     pub fn note_no_wake(&mut self, node: NodeId, now: u64) {

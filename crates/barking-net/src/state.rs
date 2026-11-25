@@ -394,6 +394,21 @@ impl NetState {
         })
     }
 
+    /// Blocks `id`: its entry leaves the view, which refuses it from now on,
+    /// and `entry` goes to `blocked`. The only way to block (both tables
+    /// change together); see `nodes::block_node` for the rest of what a
+    /// block forgets. A node already blocked keeps its first entry.
+    pub fn block(&mut self, id: NodeId, entry: BlockedEntry) {
+        self.view.block(id);
+        self.blocked.entry(id).or_insert(entry);
+    }
+
+    /// Unblocks `id` (both tables); false if it was not blocked.
+    pub fn unblock(&mut self, id: &NodeId) -> bool {
+        self.view.unblock(id);
+        self.blocked.remove(id).is_some()
+    }
+
     /// Records round-trip times to `id`, in whole milliseconds (saturated),
     /// keeping the last `LATENCY_SAMPLES`.
     pub fn note_latency(&mut self, id: NodeId, samples: &[Duration]) {

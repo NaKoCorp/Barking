@@ -10,7 +10,7 @@ use std::time::Duration;
 use barking_packet::MailboxId;
 use barking_proto::client::{Client, ClientError, FetchResume, FetchStop, Session};
 use barking_proto::push::{OwnerProof, Subscription};
-use barking_proto::{ErrorReason, NodeId, NodeRecord};
+use barking_proto::{ErrorReason, NodeId, NodeInfoReport, NodeRecord};
 
 use crate::discover::{DIAL_TIMEOUT, DialError, Dialer, QuicDialer, dial_error};
 
@@ -81,6 +81,28 @@ pub trait Connector {
     ) -> impl Future<Output = Result<Self::Conn, DialError>> + Send;
 
     fn close(&self, conn: Self::Conn) -> impl Future<Output = ()> + Send;
+
+    /// Round trip times the session measured, the most recent last (see
+    /// `Session::rtt_samples`). None by default.
+    fn rtt_samples(&self, _conn: &Self::Conn) -> Vec<Duration> {
+        Vec::new()
+    }
+
+    /// The node understands `Info` (protocol 5). False by default.
+    fn info_supported(&self, _conn: &Self::Conn) -> bool {
+        false
+    }
+
+    /// The node's public report, or that of the push relay `relay` names
+    /// (see `Session::info`): `None` when the node does not speak `Info` or
+    /// answers with an error. `None` by default.
+    fn info(
+        &self,
+        _conn: &mut Self::Conn,
+        _relay: Option<NodeId>,
+    ) -> impl Future<Output = Result<Option<NodeInfoReport>, DialError>> + Send {
+        async { Ok(None) }
+    }
 }
 
 /// Fetches on a kept connection (see `Session::fetch_resumable`).
@@ -176,6 +198,22 @@ impl Connector for QuicDialer {
 
     async fn close(&self, conn: Session) {
         conn.close().await;
+    }
+
+    fn rtt_samples(&self, conn: &Session) -> Vec<Duration> {
+        conn.rtt_samples()
+    }
+
+    fn info_supported(&self, conn: &Session) -> bool {
+        conn.info_supported()
+    }
+
+    async fn info(
+        &self,
+        conn: &mut Session,
+        relay: Option<NodeId>,
+    ) -> Result<Option<NodeInfoReport>, DialError> {
+        conn.info(relay).await.map_err(dial_error)
     }
 }
 

@@ -434,12 +434,12 @@ where
             Ok(FetchReply::RateLimited) | Err(DialError::Refused(ErrorReason::RateLimited)) => {
                 self.answered(node);
                 self.limited.insert(node);
-                self.conns.insert(node, conn);
+                self.keep_conn(node, conn);
                 return (not_served(true), 0, true);
             }
             Err(DialError::Refused(_)) => {
                 self.answered(node);
-                self.conns.insert(node, conn);
+                self.keep_conn(node, conn);
                 return (not_served(false), 0, true);
             }
             Err(_) => {
@@ -462,7 +462,7 @@ where
             // this node dials again.
             drop(conn);
         } else {
-            self.conns.insert(node, conn);
+            self.keep_conn(node, conn);
         }
         if stop == FetchStop::RateLimited {
             self.limited.insert(node);
@@ -601,7 +601,7 @@ where
                         }
                         // A cut connection leaves a dead session.
                         if stop != FetchStop::Connection {
-                            self.conns.insert(node, conn);
+                            self.keep_conn(node, conn);
                         }
                         bytes_left = bytes_left.saturating_sub(
                             items.iter().map(Vec::len).fold(0, usize::saturating_add),
@@ -627,11 +627,11 @@ where
                     | Err(DialError::Refused(ErrorReason::RateLimited)) => {
                         self.answered(node);
                         self.limited.insert(node);
-                        self.conns.insert(node, conn);
+                        self.keep_conn(node, conn);
                     }
                     Err(DialError::Refused(_)) => {
                         self.answered(node);
-                        self.conns.insert(node, conn);
+                        self.keep_conn(node, conn);
                     }
                     Err(_) => self.fail(node),
                 }

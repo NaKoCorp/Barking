@@ -49,7 +49,18 @@
 //!    nodes were tried and none answered. The push state is saved after
 //!    each response. Neither scores nor the transparency log are touched,
 //!    and nothing about it is logged but local errors.
-//! 7. `mark_polled` only if every session mailbox was fetched in full.
+//! 7. **Node reports**, with the time left: `Info` on the sessions still
+//!    open (never a dial of its own), for the nodes whose cached report is
+//!    missing or `INFO_REFRESH_SECS` old; about the push relay when push is
+//!    on. Neither scores nor the log are touched.
+//! 8. `mark_polled` only if every session mailbox was fetched in full.
+//!
+//! **Latency.** The round trip times each session measured
+//! (`Connector::rtt_samples`) are recorded once per session at the end of
+//! the sync (`NetState::note_latency`), for the nodes still in the view, in
+//! both modes. **Blocked nodes** (`nodes::block_node`) are never dialled:
+//! not in the view, skipped among the built-in seeds, never pinged by the
+//! bootstrap nor asked by a lookup.
 //!
 //! **Score.** Successful requests +0.02, a failure −0.1 only once a node
 //! other than the failed one answered during this sync (until then failures
@@ -124,7 +135,7 @@
 //! each wake-up makes bounded, lasting progress. Then, with time left,
 //! receipts only are deposited (no proof of work, no fallback lookup). No
 //! loss audit, cross-check or re-read, no maintenance, no wake
-//! subscriptions, no `mark_polled`, and the positions of mailboxes not
+//! subscriptions, no `Info`, no `mark_polled`, and the positions of mailboxes not
 //! fetched are kept. Scores take the same events as in a full sync
 //! (requests that succeed or fail), but no `Found` nor `Lost`. Page sizes
 //! grow back in full syncs only. The state is saved as usual.
@@ -154,7 +165,7 @@ use crate::push::{
     HORIZON_DAYS, PushConfig, PushState, build_subscription, plan_push, prefer_long_lived,
 };
 use crate::score::ScoreEvent;
-use crate::state::NetState;
+use crate::state::{CachedInfo, NetState};
 use crate::{BOOTSTRAP_VIEW, CandidateBudget};
 
 mod fetch;
@@ -175,6 +186,9 @@ type SubTask = (MailboxId, SubKind, NodeId);
 /// on one node only, and nodes copy receipts to each other in their hourly
 /// replication pass (nodes keep receipts `ACK_GRACE_SECS` past expiry).
 pub const REPLICATION_SLACK_SECS: u64 = 7_200;
+/// A node's cached report (`Info`) older than this is asked again, on a
+/// session the sync opened for another reason.
+pub const INFO_REFRESH_SECS: u64 = 86_400;
 /// Longest synchronization.
 pub const SYNC_DEADLINE: Duration = Duration::from_secs(180);
 /// Longest quick sync (the notification extension's), closing included.
@@ -519,6 +533,7 @@ impl<'a, D: Connector> Run<'a, D> {
             verdict_responsibles: HashMap::new(),
             answered: HashMap::new(),
             seen_ids: HashSet::new(),
+            rtt: HashMap::new(),
             report: SyncReport::default(),
         }
     }
@@ -611,6 +626,10 @@ struct Run<'a, D: Connector> {
     /// Nodes met this sync whose protocol accepts less than the protocol 4
     /// lifetime (protocol 3 and older): they never hold a 7-day packet.
     short_lived: HashSet<NodeId>,
+    /// Round trip times of the last session to each node this sync, as the
+    /// session measured them (`Connector::rtt_samples`): taken again each
+    /// time the session goes back to `conns`, recorded once in `finish`.
+    rtt: HashMap<NodeId, Vec<Duration>>,
     report: SyncReport,
 }
 
@@ -626,6 +645,83 @@ where
             self.short_lived.insert(node);
         }
         max
+    }
+
+    /// Keeps the session to `id` for later requests, noting what it
+    /// measured.
+    fn keep_conn(&mut self, id: NodeId, conn: D::Conn) {
+        self.note_rtt(id, &conn);
+        self.conns.insert(id, conn);
+    }
+
+    /// Notes the round trip times the session to `id` measured so far. A
+    /// session's window holds all of its own samples, so the last note of
+    /// a session replaces the earlier ones: nothing counts twice.
+    fn note_rtt(&mut self, id: NodeId, conn: &D::Conn) {
+        let samples = self.dialer.rtt_samples(conn);
+        if !samples.is_empty() {
+            self.rtt.insert(id, samples);
+        }
+    }
+
+    /// The user blocked `id`: never dialled.
+    fn blocked(&self, id: &NodeId) -> bool {
+        self.state.blocked.contains_key(id)
+    }
+
+    /// The report of `id` is missing or older than `INFO_REFRESH_SECS`, and
+    /// the node is in the view.
+    fn info_due(&self, id: &NodeId) -> bool {
+        self.state.view.get(id).is_some()
+            && self
+                .state
+                .info
+                .get(id)
+                .is_none_or(|c| self.now.saturating_sub(c.fetched_at) >= INFO_REFRESH_SECS)
+    }
+
+    /// Node reports (stage 7 of the module documentation): `Info` on the
+    /// sessions still open, never on a new one, for the nodes whose report
+    /// is due. `relay`: the push relay asked about. Neither scores nor the
+    /// log are touched; a session that fails is dropped.
+    async fn info_stage(&mut self, relay: Option<NodeId>) {
+        let mut ids: Vec<NodeId> = self
+            .conns
+            .keys()
+            .filter(|id| self.info_due(id))
+            .copied()
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        ids.sort_unstable_by_key(|id| id.0);
+        for id in ids {
+            if self.over() {
+                break;
+            }
+            let Some(mut conn) = self.conns.remove(&id) else {
+                continue;
+            };
+            if !self.dialer.info_supported(&conn) {
+                self.conns.insert(id, conn);
+                continue;
+            }
+            self.unused.remove(&id);
+            let request = self.dialer.info(&mut conn, relay);
+            if let Ok(Ok(report)) = tokio::time::timeout_at(self.deadline, request).await {
+                if let Some(report) = report {
+                    self.state.info.insert(
+                        id,
+                        CachedInfo {
+                            report,
+                            fetched_at: self.now,
+                        },
+                    );
+                }
+                self.keep_conn(id, conn);
+            }
+        }
+        self.save();
     }
 
     /// Stage 1 (view), shared by both modes: a quick sync bootstraps only
@@ -649,7 +745,7 @@ where
             .collect();
         seeds.sort_unstable_by_key(|(id, _)| id.0);
         for b in builtin {
-            if !seeds.iter().any(|(id, _)| *id == b.id) {
+            if !self.blocked(&b.id) && !seeds.iter().any(|(id, _)| *id == b.id) {
                 seeds.push((b.id, vec![b.addr]));
             }
         }
@@ -864,6 +960,12 @@ where
         if self.mode == Mode::Full {
             self.state.recover_page_bytes(&self.page_confirmed);
         }
+        // Latency of the nodes still in the view (one note per session).
+        for (id, samples) in std::mem::take(&mut self.rtt) {
+            if self.state.view.get(&id).is_some() {
+                self.state.note_latency(id, &samples);
+            }
+        }
         self.save();
         for (_, (id, s)) in std::mem::take(&mut self.stats) {
             let node = short_id(&id);
@@ -1034,7 +1136,9 @@ where
         let candidate = self
             .seeds
             .iter()
-            .find(|(id, _)| !self.dialed.contains(id) && !self.failed.contains(id))
+            .find(|(id, _)| {
+                !self.dialed.contains(id) && !self.failed.contains(id) && !self.blocked(id)
+            })
             .cloned();
         let Some((id, addrs)) = candidate else {
             self.down = true;
@@ -1046,7 +1150,7 @@ where
             Ok(Ok(conn)) => {
                 self.answered(id);
                 self.state.view.confirm(&id, self.now);
-                self.conns.insert(id, conn);
+                self.keep_conn(id, conn);
                 self.unused.insert(id);
             }
             Ok(Err(DialError::Refused(_))) => {
@@ -1113,7 +1217,8 @@ where
             return Some((c, self.unused.remove(&id)));
         }
         self.confirm_down().await;
-        if self.down || self.failed.contains(&id) || self.limited.contains(&id) {
+        if self.down || self.failed.contains(&id) || self.limited.contains(&id) || self.blocked(&id)
+        {
             return None;
         }
         // The seed probe may have opened it.
@@ -1142,6 +1247,7 @@ where
                 self.answered(id);
                 // A pinned handshake proves the node.
                 self.state.view.confirm(&id, self.now);
+                self.note_rtt(id, &conn);
                 Some((conn, true))
             }
             // A refusal proves the network is up; the node is neutral.
@@ -1225,7 +1331,7 @@ where
                     // dropped. Each node is learned once: the replans end.
                     let max = self.note_protocol(d.node, &conn);
                     if Packet::decode(&d.bytes).is_ok_and(|p| too_old(&p, max, now)) {
-                        self.conns.insert(d.node, conn);
+                        self.keep_conn(d.node, conn);
                         old_nodes.insert(d.node, max);
                         continue 'plan;
                     }
@@ -1250,7 +1356,7 @@ where
                 let result = match reply.outcome {
                     Ok(DepositOutcome::Answered(result)) => result,
                     Ok(DepositOutcome::PowBudget) => {
-                        self.conns.insert(d.node, conn);
+                        self.keep_conn(d.node, conn);
                         pow_exhausted = true;
                         self.report.pow_exhausted = true;
                         continue;
@@ -1262,7 +1368,7 @@ where
                     }
                 };
                 self.answered(d.node);
-                self.conns.insert(d.node, conn);
+                self.keep_conn(d.node, conn);
                 let event = record_outcome(
                     &mut self.state.ledger,
                     content_hash(&d.bytes),
@@ -1537,6 +1643,11 @@ where
             self.push_stage(opts.push.as_ref()).await;
         }
 
+        if !self.over() {
+            self.info_stage(opts.push.as_ref().map(|c| c.relay.id))
+                .await;
+        }
+
         // With no session mailbox, "all polled" also needs a node that
         // answered: otherwise the window would move past unread days.
         self.report.polled_all_sessions &= self.network_up();
@@ -1681,7 +1792,7 @@ where
                     continue 'stage;
                 };
                 if !self.dialer.wake_supported(&conn) {
-                    self.conns.insert(node, conn);
+                    self.keep_conn(node, conn);
                     break None;
                 }
                 let collapse = push.collapse_for(mailbox, kind, day, &mut rand::rng());
@@ -1726,7 +1837,7 @@ where
                             };
                             outcome = owned;
                         }
-                        self.conns.insert(node, conn);
+                        self.keep_conn(node, conn);
                         break Some((outcome, secret));
                     }
                 }
@@ -1864,7 +1975,7 @@ where
                 match result {
                     Err(e) if !fresh && !redialled && dead_session(&e) => redialled = true,
                     Ok(()) | Err(DialError::Refused(_)) => {
-                        self.conns.insert(node, conn);
+                        self.keep_conn(node, conn);
                         break result;
                     }
                     Err(_) => {
@@ -1904,6 +2015,7 @@ where
             || skipped.contains(&id)
             || self.failed.contains(&id)
             || self.limited.contains(&id)
+            || self.blocked(&id)
         {
             return None;
         }
@@ -1920,7 +2032,10 @@ where
             return None;
         }
         match tokio::time::timeout_at(self.deadline, self.dialer.connect(id, &addrs)).await {
-            Ok(Ok(conn)) => Some((conn, true)),
+            Ok(Ok(conn)) => {
+                self.note_rtt(id, &conn);
+                Some((conn, true))
+            }
             _ => None,
         }
     }

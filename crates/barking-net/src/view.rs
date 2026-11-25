@@ -129,6 +129,24 @@ impl View {
         self.blocked = ids;
     }
 
+    /// True if `id` is refused entry into the view (see `blocked`).
+    pub fn is_blocked(&self, id: &NodeId) -> bool {
+        self.blocked.contains(id)
+    }
+
+    /// Drops the entry of `id` and refuses it from now on. Only
+    /// `NetState::block` calls it, so that its own table follows.
+    pub(crate) fn block(&mut self, id: NodeId) {
+        self.entries.remove(&id);
+        self.blocked.insert(id);
+    }
+
+    /// Lets `id` enter the view again (by the normal ways only). Only
+    /// `NetState::unblock` calls it.
+    pub(crate) fn unblock(&mut self, id: &NodeId) {
+        self.blocked.remove(id);
+    }
+
     /// Rules records must follow to enter the view.
     pub(crate) fn policy(&self) -> RecordPolicy {
         #[allow(unused_mut)]

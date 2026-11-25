@@ -250,7 +250,8 @@ impl BootstrapReport {
 /// (`builtin_bootstrap()`), and stops as soon as `BOOTSTRAP_REACHABLE` nodes
 /// answered. Valid card hints enter the view as candidates whether or not
 /// they are tried. Built-in entries only have an identifier and an address:
-/// once one answered, a random lookup brings real records.
+/// once one answered, a random lookup brings real records. A blocked node
+/// is never pinged, whatever its source.
 ///
 /// A source's pings all leave at once; the next source starts once they all
 /// ended or after `BOOTSTRAP_SOURCE_TIMEOUT`, while those still pending keep
@@ -310,7 +311,9 @@ pub async fn bootstrap<D: Dialer>(
         let launch = tokio::time::Instant::now();
         pending.extend(
             list.into_iter()
-                .filter(|(id, addrs)| !addrs.is_empty() && tried.insert(*id))
+                .filter(|(id, addrs)| {
+                    !addrs.is_empty() && !view.is_blocked(id) && tried.insert(*id)
+                })
                 .take(BOOTSTRAP_TRIES_PER_SOURCE)
                 .map(|(id, addrs)| Box::pin(timed_ping(dialer, id, addrs, launch + DIAL_TIMEOUT))),
         );
@@ -534,8 +537,8 @@ fn seeds(
 /// than `REQUEST_TIMEOUT_MS` left before `LOOKUP_TIMEOUT_MS`; each one is
 /// bounded by `REQUEST_TIMEOUT_MS`. A request cut there fails in the lookup
 /// but is only `cut_short` for the dialer: on a slow link a fresh connection
-/// may need longer. Nodes in `exclude` learnt on the way count as failed
-/// without being asked.
+/// may need longer. Nodes in `exclude` and blocked nodes learnt on the way
+/// count as failed without being asked.
 async fn run_lookup<D: Dialer>(
     view: &mut View,
     dialer: &D,
@@ -570,7 +573,8 @@ async fn run_lookup<D: Dialer>(
             loop {
                 let mut skipped = false;
                 for (id, record) in lookup.next_requests(t) {
-                    if exclude.contains(&id) {
+                    // A blocked node learnt on the way is never asked.
+                    if exclude.contains(&id) || view.is_blocked(&id) {
                         lookup.on_failure(&id);
                         skipped = true;
                         continue;

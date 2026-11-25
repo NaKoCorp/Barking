@@ -113,6 +113,23 @@ impl Ledger {
         self.packets.contains_key(hash)
     }
 
+    /// Forgets what `node` did with every packet (it was blocked): its
+    /// acceptances and retry delays go, so that a packet left with fewer
+    /// than `CLIENT_COPIES` holders is planned again on other nodes. A
+    /// packet it alone held counts as never accepted (its first copy is
+    /// made again, a receipt included). Losses stay: they ban nothing the
+    /// block does not already.
+    pub fn forget_node(&mut self, node: &NodeId) {
+        for s in self.packets.values_mut() {
+            let held = s.accepted.len();
+            s.accepted.retain(|(n, _)| n != node);
+            if held > 0 && s.accepted.is_empty() {
+                s.first_accepted = None;
+            }
+            s.retry.retain(|(n, _)| n != node);
+        }
+    }
+
     /// Nodes currently holding the packet.
     pub fn holders(&self, hash: &[u8; 32]) -> Vec<NodeId> {
         self.packets

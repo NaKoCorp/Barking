@@ -40,7 +40,7 @@ pub struct LogEntry {
 
 /// Number of variants of `TransparencyEvent`: one more than the last
 /// position `index` gives.
-const VARIANTS: usize = 28;
+const VARIANTS: usize = 30;
 
 /// Every key `LogEntry::key` can take, one per `TransparencyEvent` variant,
 /// in the order of `index`. The key of an event is `KEYS[index(event)]`: there
@@ -74,6 +74,8 @@ const KEYS: [&str; VARIANTS] = [
     "log.remove_requested",
     "log.messages_deleted",
     "log.unknown_content",
+    "log.node_blocked",
+    "log.node_unblocked",
 ];
 
 /// Position of a variant in `KEYS`. No wildcard: a new variant does not
@@ -109,6 +111,8 @@ fn index(e: &TransparencyEvent) -> usize {
         E::RemoveRequested { .. } => 25,
         E::MessagesDeleted { .. } => 26,
         E::UnknownContent { .. } => 27,
+        E::NodeBlocked { .. } => 28,
+        E::NodeUnblocked { .. } => 29,
     }
 }
 
@@ -366,6 +370,9 @@ fn parts(e: &TransparencyEvent, name: &dyn Fn(&Fingerprint) -> String) -> (Strin
             ],
         ),
         E::UnknownContent { kind, .. } => ("packet", vec![kind.to_string()]),
+        E::NodeBlocked { id_short } | E::NodeUnblocked { id_short } => {
+            ("node", vec![id_short.clone()])
+        }
     };
     (family.to_owned(), args)
 }
@@ -547,6 +554,12 @@ mod tests {
             E::UnknownContent {
                 packet_id: pid,
                 kind: 999,
+            },
+            E::NodeBlocked {
+                id_short: "abcd2345".into(),
+            },
+            E::NodeUnblocked {
+                id_short: "abcd2345".into(),
             },
         ]
     }
