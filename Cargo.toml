@@ -39,6 +39,8 @@ predicates = "3.1.4"
 proptest = "1.12.0"
 # QUIC: `ring` cryptographic provider everywhere (no aws-lc: no
 # cmake or NASM, simpler musl and reproducible build).
+# DNS stub resolver (Team Cymru origin lookup): UDP/TCP only, no DoT/DoH/DNSSEC.
+hickory-resolver = { version = "0.26.4", default-features = false, features = ["tokio", "system-config"] }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rand = "0.10.3"
 rand_core = "0.10.1"

@@ -85,3 +85,11 @@ pow_bits = 18
 # with or without an ownership proof (only a full mailbox is reclaimed).
 # Small device: max_subscriptions = 100000
 # max_subscriptions = 1000000
+
+# Public self-report of the node (`Info` request). The origin (autonomous
+# system and country of the node's own public address) is looked up at
+# startup, then daily, through Team Cymru's DNS service. The query name
+# contains the node's address, so the system resolver and Team Cymru see it.
+# Default: true. Without a public address in [dht], nothing is looked up.
+# [info]
+# origin_lookup = true

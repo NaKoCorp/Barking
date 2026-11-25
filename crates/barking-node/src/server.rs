@@ -60,7 +60,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -83,6 +83,7 @@ use crate::dht::replicate::{self, PassReport};
 use crate::dht::{Dht, maintain};
 use crate::info::{InfoState, info_loop};
 use crate::limits::{ConnectionSlot, GroupDbJob, LimitConfig, Limiter};
+use crate::origin::{HickoryLookup, origin_loop};
 use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
 use crate::store::{NodeStore, PURGE_BATCH, READERS};
 use crate::wake::sender::{QuicWakeTransport, WakeSender};
@@ -170,6 +171,8 @@ pub struct ServerConfig {
     /// Allow wake-ups to relays on private addresses. Follows
     /// `dht.allow_private_addrs` (tests, local networks); default: false.
     pub wake_allow_private: bool,
+    /// `[info] origin_lookup`; default: false (tests never query DNS).
+    pub origin_lookup: bool,
     /// Tests only (feature `test-harness`, never in a production build),
     /// never read from the configuration: answers `Ok` to `Deposit` and
     /// `Store` without keeping anything, as a node that loses messages
@@ -587,6 +590,7 @@ impl ServerConfig {
             dht_diversity: DiversityLimits::SPEC,
             wake: WakeConfig::default(),
             wake_allow_private: false,
+            origin_lookup: false,
             #[cfg(feature = "test-harness")]
             test_swallow_deposits: false,
             #[cfg(feature = "test-harness")]
@@ -905,6 +909,12 @@ pub async fn run(
         }
         has_addr
     });
+    // Own public address, as published in its record (IPv4 preferred).
+    let own_addr = dht_cfg.as_ref().and_then(|d| {
+        d.public_v4
+            .map(|a| IpAddr::V4(*a.ip()))
+            .or_else(|| d.public_v6.map(|a| IpAddr::V6(*a.ip())))
+    });
     let dht = dht_cfg.map(|d| {
         Arc::new(Dht::new(
             config.key.clone(),
@@ -999,6 +1009,20 @@ pub async fn run(
     tasks.spawn(purge_loop(Arc::clone(&shared), stop_rx.clone()));
     if let Some(store) = info_store {
         tasks.spawn(info_loop(info, store, stop_rx.clone()));
+    }
+    if config.origin_lookup && own_addr.is_some() {
+        match HickoryLookup::from_system() {
+            Ok(lookup) => {
+                tasks.spawn(origin_loop(
+                    lookup,
+                    own_addr,
+                    true,
+                    Arc::clone(&shared.info),
+                    stop_rx.clone(),
+                ));
+            }
+            Err(_) => tracing::warn!("origin: system DNS configuration unreadable, no lookup"),
+        }
     }
     if shared.wake_sender.is_some() {
         tasks.spawn(wake_loop(Arc::clone(&shared), stop_rx.clone()));

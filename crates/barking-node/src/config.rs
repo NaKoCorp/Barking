@@ -111,6 +111,24 @@ impl TryFrom<DhtToml> for DhtConfig {
     }
 }
 
+/// `[info]` section: the public self-report of the node.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InfoConfig {
+    /// Look up the AS and country of the node's own public address through
+    /// Team Cymru's DNS service, to report them. The address is sent to the
+    /// system resolver (and Team Cymru) in the query name.
+    pub origin_lookup: bool,
+}
+
+impl Default for InfoConfig {
+    fn default() -> Self {
+        InfoConfig {
+            origin_lookup: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -146,6 +164,8 @@ pub struct Config {
     pub dht: Option<DhtConfig>,
     /// Wake subscriptions for the iOS push relay.
     pub wake: WakeConfig,
+    /// Public self-report of the node.
+    pub info: InfoConfig,
     /// `[dht]` present without `public_addr`: table disabled, to be reported
     /// in the logs at startup.
     #[serde(skip)]
@@ -174,6 +194,7 @@ impl Default for Config {
             log_interval_secs: 60,
             dht: None,
             wake: WakeConfig::default(),
+            info: InfoConfig::default(),
             dht_without_public_addr: false,
         }
     }
@@ -307,6 +328,7 @@ impl Config {
             ..LimitConfig::default()
         };
         cfg.wake = self.wake.clone();
+        cfg.origin_lookup = self.info.origin_lookup;
         cfg.max_response_bytes_in_flight = self.max_response_bytes_in_flight;
         cfg.max_response_bytes_per_ip = self.max_response_bytes_per_ip;
         cfg.max_db_jobs = self.max_db_jobs;
@@ -447,6 +469,33 @@ mod tests {
         let d = Config::parse(&on).unwrap().dht.unwrap();
         assert_eq!(d.replication_bytes_per_hour, 128 << 20);
         assert!(d.public_v4.is_some() && d.public_v6.is_some());
+    }
+
+    #[test]
+    fn config_info_defaults_on() {
+        assert!(Config::parse("").unwrap().info.origin_lookup);
+        let c = Config::parse("[info]\norigin_lookup = false\n").unwrap();
+        assert!(!c.info.origin_lookup);
+        assert!(
+            !c.server_config(vec![], SigningKey::from_bytes(&[1; 32]))
+                .origin_lookup
+        );
+        assert!(Config::parse("[info]\ninconnue = 1").is_err());
+    }
+
+    #[test]
+    fn deploy_example_parses_with_info_section() {
+        let text = include_str!("../../../docs/deploy/barking-node.toml");
+        assert!(Config::parse(text).unwrap().info.origin_lookup);
+        let on: String = text
+            .lines()
+            .map(|l| match l.strip_prefix("# ") {
+                Some(r) if r == "[info]" || r.starts_with("origin_lookup") => r,
+                _ => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(Config::parse(&on).unwrap().info.origin_lookup);
     }
 
     #[test]
