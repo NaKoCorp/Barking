@@ -42,6 +42,16 @@ public enum DeviceFactory {
     /// config is built inside the call so that `key` is, as far as Swift lets
     /// us tell, the last holder of its buffer when `wipe` runs; the FFI keeps
     /// its own copy for the device's lifetime (each call reopens the database).
+    /// Gives the core the IP base bundled with the app, which checks the
+    /// origins the nodes declare. The extension does not carry the file:
+    /// nothing is set there.
+    private static func withIpdb(_ device: Device) -> Device {
+        if let url = Bundle.main.url(forResource: "ipdb", withExtension: "bin") {
+            device.setIpdbPath(path: url.path)
+        }
+        return device
+    }
+
     private static func handing<T>(_ key: inout Data, lockTimeoutMs: UInt64,
                                    _ body: (DeviceConfig) throws -> T) throws -> T {
         defer { key.wipe() }
@@ -53,7 +63,7 @@ public enum DeviceFactory {
         guard !Wipe.isPending() else { throw Wipe.Incomplete(failures: []) }
         guard var key = try keyStore.read() else { return nil }
         guard try databaseExists() else { key.wipe(); return nil }
-        let device = try handing(&key, lockTimeoutMs: lockTimeoutMs) { try Device.open(config: $0) }
+        let device = withIpdb(try handing(&key, lockTimeoutMs: lockTimeoutMs) { try Device.open(config: $0) })
         try? SharedPaths.excludeFromBackup()
         return device
     }
@@ -71,7 +81,7 @@ public enum DeviceFactory {
         keyRead()
         guard var key = read else { return nil }
         guard try databaseExists() else { key.wipe(); return nil }
-        return try handing(&key, lockTimeoutMs: lockTimeoutMs) { try Device.at(config: $0) }
+        return withIpdb(try handing(&key, lockTimeoutMs: lockTimeoutMs) { try Device.at(config: $0) })
     }
 
     /// A new key for a new database. A key left without its database
@@ -95,6 +105,7 @@ public enum DeviceFactory {
             try createDevice(config: $0, deviceName: deviceName)
         }
         try protectNewFiles()
+        _ = withIpdb(created.device)
         return created
     }
 
@@ -107,7 +118,7 @@ public enum DeviceFactory {
             try recoverDevice(config: $0, phrase: phrase, deviceName: deviceName)
         }
         try protectNewFiles()
-        return device
+        return withIpdb(device)
     }
 
     /// Starts linking this device to an existing identity.

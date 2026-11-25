@@ -23,11 +23,22 @@ public enum BootstrapNodes {
         }
     }
 
-    /// Adds every entry of `info` to `core`. Adding a node again changes
-    /// nothing; an entry the core refuses is skipped.
+    private static func defaults(info: [String: Any]) -> [DefaultNode] {
+        entries(info: info).map { DefaultNode(id: $0.id, addr: $0.addr) }
+    }
+
+    /// Adds every entry of `info` to `core` in one call, except the ones the
+    /// user removed. Adding a node again changes nothing; an entry the core
+    /// refuses is skipped.
     public static func add(to core: CoreService, info: [String: Any]) async {
-        for entry in entries(info: info) {
-            try? await core.addNode(id: entry.id, addr: entry.addr)
-        }
+        let nodes = defaults(info: info)
+        guard !nodes.isEmpty else { return }
+        try? await core.addDefaultNodes(nodes)
+    }
+
+    /// Brings back the entries of `info` the user removed; how many came back
+    /// (0 on error).
+    public static func reset(core: CoreService, info: [String: Any]) async -> Int {
+        (try? await core.resetDefaultNodes(defaults(info: info))) ?? 0
     }
 }

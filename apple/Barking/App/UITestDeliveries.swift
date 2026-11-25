@@ -453,6 +453,16 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     }
     func nodes() throws -> [NodeInfo] { try device.nodes() }
     func addNode(id: String, addr: String) throws { try device.addNode(id: id, addr: addr) }
+    func nodeDetail(id: String) throws -> NodeDetail { try device.nodeDetail(id: id) }
+    func refreshNodeInfo(id: String) throws -> NodeDetail { try device.refreshNodeInfo(id: id) }
+    func removeNode(id: String) throws { try device.removeNode(id: id) }
+    func blockNode(id: String) throws { try device.blockNode(id: id) }
+    func unblockNode(id: String) throws { try device.unblockNode(id: id) }
+    func blockedNodes() throws -> [BlockedNode] { try device.blockedNodes() }
+    func addDefaultNodes(entries: [DefaultNode]) throws { try device.addDefaultNodes(entries: entries) }
+    func resetDefaultNodes(entries: [DefaultNode]) throws -> UInt32 { try device.resetDefaultNodes(entries: entries) }
+    func dismissedDefaultsCount() throws -> UInt32 { try device.dismissedDefaultsCount() }
+    func usableNodesIfBlocked(id: String) throws -> UInt32 { try device.usableNodesIfBlocked(id: id) }
     func setPush(settings: PushSettings?) throws { try device.setPush(settings: settings) }
     func notificationPrefs() throws -> NotificationPrefs { try device.notificationPrefs() }
     func setInstant(on: Bool) throws { try device.setInstant(on: on) }

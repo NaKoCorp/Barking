@@ -181,6 +181,42 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     /// `id@addr` of each `addNode` call, in order.
     var addedNodes: [String] { lock.withLock { _addedNodes } }
     func addNode(id: String, addr: String) throws { lock.withLock { _addedNodes.append("\(id)@\(addr)") } }
+    private var _nodeCalls: [String] = []
+    /// `block:`, `unblock:` and `remove:` calls with their node id, in order.
+    var nodeCalls: [String] { lock.withLock { _nodeCalls } }
+    /// Returned by `nodeDetail` and `refreshNodeInfo`; they throw while it is `nil`.
+    var nodeDetailResult: NodeDetail?
+    var blockedNodeList: [BlockedNode] = []
+    var usableIfBlocked: UInt32 = 4
+    var dismissedCount: UInt32 = 1
+    var resetDefaultsResult: UInt32 = 0
+    var resetDefaultsError: Error?
+    private var _defaultNodeCalls: [[String]] = []
+    private var _resetCalls: [[String]] = []
+    /// `id@addr` entries of each `addDefaultNodes` call.
+    var defaultNodeCalls: [[String]] { lock.withLock { _defaultNodeCalls } }
+    /// `id@addr` entries of each `resetDefaultNodes` call.
+    var resetCalls: [[String]] { lock.withLock { _resetCalls } }
+    private func nodeDetailOrThrow() throws -> NodeDetail {
+        guard let nodeDetailResult else { throw NSError(domain: "FakeDevice", code: 1) }
+        return nodeDetailResult
+    }
+    func nodeDetail(id: String) throws -> NodeDetail { try nodeDetailOrThrow() }
+    func refreshNodeInfo(id: String) throws -> NodeDetail { try nodeDetailOrThrow() }
+    func removeNode(id: String) throws { lock.withLock { _nodeCalls.append("remove:\(id)") } }
+    func blockNode(id: String) throws { lock.withLock { _nodeCalls.append("block:\(id)") } }
+    func unblockNode(id: String) throws { lock.withLock { _nodeCalls.append("unblock:\(id)") } }
+    func blockedNodes() throws -> [BlockedNode] { blockedNodeList }
+    func addDefaultNodes(entries: [DefaultNode]) throws {
+        lock.withLock { _defaultNodeCalls.append(entries.map { "\($0.id)@\($0.addr)" }) }
+    }
+    func resetDefaultNodes(entries: [DefaultNode]) throws -> UInt32 {
+        lock.withLock { _resetCalls.append(entries.map { "\($0.id)@\($0.addr)" }) }
+        if let resetDefaultsError { throw resetDefaultsError }
+        return resetDefaultsResult
+    }
+    func dismissedDefaultsCount() throws -> UInt32 { dismissedCount }
+    func usableNodesIfBlocked(id: String) throws -> UInt32 { usableIfBlocked }
     private var _pushSettings: [PushSettings?] = []
     /// Every `setPush` call, in order (`nil`: push off).
     var pushSettings: [PushSettings?] { lock.withLock { _pushSettings } }

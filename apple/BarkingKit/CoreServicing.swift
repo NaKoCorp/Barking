@@ -36,6 +36,16 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func quickSync(deadlineMs: UInt64) throws -> SyncSummary
     func nodes() throws -> [NodeInfo]
     func addNode(id: String, addr: String) throws
+    func nodeDetail(id: String) throws -> NodeDetail
+    func refreshNodeInfo(id: String) throws -> NodeDetail
+    func removeNode(id: String) throws
+    func blockNode(id: String) throws
+    func unblockNode(id: String) throws
+    func blockedNodes() throws -> [BlockedNode]
+    func addDefaultNodes(entries: [DefaultNode]) throws
+    func resetDefaultNodes(entries: [DefaultNode]) throws -> UInt32
+    func dismissedDefaultsCount() throws -> UInt32
+    func usableNodesIfBlocked(id: String) throws -> UInt32
     func setPush(settings: PushSettings?) throws
     func pendingCount() throws -> UInt32
     func myDevices() throws -> [MyDeviceInfo]
