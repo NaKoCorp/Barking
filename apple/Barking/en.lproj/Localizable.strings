@@ -1,2 +1,8 @@
 /* Text of every push (spec iOS push §4); the extension replaces it when it can. */
 "NEW_MESSAGE" = "New message";
+
+/* Same English text as "avoided until %@", for a date rather than an hour (French says « jusqu’au »). */
+"avoided until %@ (date)" = "avoided until %@";
+/* Reliability words of a node; the bare "fair" and "weak" were password strengths once and must stay unused. */
+"fair (reliability)" = "fair";
+"weak (reliability)" = "weak";
