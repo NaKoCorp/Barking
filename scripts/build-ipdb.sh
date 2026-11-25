@@ -10,13 +10,15 @@
 # previous one if it is not published yet.
 #
 # The generated files ARE COMMITTED: the app build must not need the network.
-# Run this script (about once a month at most) to refresh them, then commit.
-# Downloads go to a temporary directory, never to the repository.
+# Run this script for each app release (spec §6.3), then commit. The base must
+# stay under 10 MB (10 485 760 bytes); the script fails beyond. Downloads go to
+# a temporary directory, never to the repository.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 out_dir=apple/Barking/Resources
 base=https://download.db-ip.com/free
+max_bytes=10485760
 
 month_ago() { # YYYY-MM of the previous month (BSD and GNU date)
   date -v-1m +%Y-%m 2>/dev/null || date -d "$(date +%Y-%m-01) -1 month" +%Y-%m
@@ -29,13 +31,26 @@ fetch() { # fetch <kind> <month> <dest>: 0 if downloaded, a valid non-empty gzip
   [ -s "$3" ] || return 1
 }
 
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+valid_month() { # YYYY-MM, month 01 to 12
+  [[ "$1" =~ ^[0-9]{4}-(0[1-9]|1[0-2])$ ]]
+}
+
+sha256() { # sha256 <file>: the hex digest (macOS shasum, else sha256sum)
+  if command -v shasum >/dev/null; then shasum -a 256 "$1"; else sha256sum "$1"; fi | cut -d' ' -f1
+}
 
 if [ "$#" -gt 1 ]; then
   echo "usage: scripts/build-ipdb.sh [YYYY-MM]" >&2
   exit 2
-elif [ "$#" -eq 1 ]; then
+elif [ "$#" -eq 1 ] && ! valid_month "$1"; then
+  echo "error: month must be YYYY-MM" >&2
+  exit 2
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+if [ "$#" -eq 1 ]; then
   month=$1
   fetch country "$month" "$tmp/country.csv" && fetch asn "$month" "$tmp/asn.csv" || {
     echo "error: DB-IP Lite $month not downloadable" >&2
@@ -52,18 +67,28 @@ else
     }
   fi
 fi
-[[ "$month" =~ ^[0-9]{4}-[0-9]{2}$ ]] || {
+valid_month "$month" || {
   echo "error: month must be YYYY-MM" >&2
   exit 2
 }
 
-mkdir -p "$out_dir"
+# Built aside, checked, then moved into place: a base over the cap never
+# reaches the repository.
 cargo run --release --locked -q -p barking-net --example build_ipdb -- \
-  "$tmp/country.csv" "$tmp/asn.csv" "$month" "$out_dir/ipdb.bin"
+  "$tmp/country.csv" "$tmp/asn.csv" "$month" "$tmp/ipdb.bin"
+size=$(wc -c <"$tmp/ipdb.bin" | tr -d ' ')
+if [ "$size" -gt "$max_bytes" ]; then
+  echo "error: ipdb.bin is $size bytes, over the $max_bytes-byte cap" >&2
+  exit 1
+fi
+mkdir -p "$out_dir"
+mv "$tmp/ipdb.bin" "$out_dir/ipdb.bin"
+digest=$(sha256 "$out_dir/ipdb.bin")
 
 cat >"$out_dir/ipdb.LICENSE.txt" <<LIC
 ipdb.bin is built from the DB-IP Lite country and ASN databases
 (source month: $month).
+SHA-256 of ipdb.bin: $digest
 
 IP Geolocation by DB-IP (https://db-ip.com)
 
