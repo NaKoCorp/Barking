@@ -9494,14 +9494,21 @@ fn resend_from_another_session_replaces_its_packets() {
 /// A text in Alice's pending session to Bob, sealed with an Initial without
 /// her signing key (as 0.6.0 wrote it).
 fn unsigned_initial(a: &Core, b: &Core, rng: &mut StdRng) -> Packet {
+    unsigned_initial_as(a, b, a.device.public().dh, 4, rng)
+}
+
+/// As `unsigned_initial`, with the Initial naming the identity key `ik`
+/// (another device's to forge it) and the envelope secret `[secret; 16]`.
+fn unsigned_initial_as(a: &Core, b: &Core, ik: [u8; 32], secret: u8, rng: &mut StdRng) -> Packet {
     let row = best_session(a);
     let mut init = de_init(row.pending_initial.as_deref().unwrap()).unwrap();
     init.sig = None;
+    init.ik = ik;
     let mut ratchet = de_state(&row.state).unwrap();
     let env = Envelope {
         sent_at: NOW,
-        ack_secret: [4; 16],
-        message_id: [4; 16],
+        ack_secret: [secret; 16],
+        message_id: [secret; 16],
         body: Body::Text("old".into()),
     };
     let peer = b.device.public();
@@ -9699,4 +9706,97 @@ fn recovered_identity_older_list_refused() {
     assert!(requests::list_requests(&b.store).unwrap().is_empty());
     assert_eq!(count_table(&b, "pending_initials"), 0);
     assert_eq!(b.store.all_sessions().unwrap().len(), 1);
+}
+
+/// Mallory, who added Bob, and a pending session of hers toward him: her
+/// Initials can name Alice's identity key, but not prove it.
+fn mallory_toward(b: &Core, rng: &mut StdRng) -> (TempDir, Core) {
+    let (dm, mut m) = party("m", 5);
+    m.add_contact(&b.contact_card("Bob").unwrap(), None, NOW, rng)
+        .unwrap();
+    m.send_text(&b.fingerprint(), "m", NOW, rng).unwrap();
+    (dm, m)
+}
+
+#[test]
+fn forged_unsigned_initial_cannot_join_a_request() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    let p = invite_one(&mut a, b.fingerprint(), NOW, &mut rng);
+    request_outcome(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    let mut row = requests::get_request(&b.store, alice).unwrap().unwrap();
+    row.unseen = false;
+    requests::upsert_request(&b.store, &row).unwrap();
+    let (_dm, m) = mallory_toward(&b, &mut rng);
+    let alice_ik = a.device.public().dh;
+    for secret in 1..=4 {
+        let forged = unsigned_initial_as(&m, &b, alice_ik, secret, &mut rng);
+        let got = b
+            .receive(&forged.encode(), "t", NOW + 60, &mut rng)
+            .unwrap();
+        let r = reason(got);
+        assert_ne!(r, R_PENDING_REQUEST);
+        assert_ne!(r, R_UNKNOWN_SENDER);
+    }
+    // No slot taken, the request untouched.
+    assert_eq!(held_messages(&b, alice), 0);
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+    assert_eq!(
+        requests::get_request(&b.store, alice).unwrap().unwrap(),
+        row
+    );
+}
+
+#[test]
+fn forged_queued_initial_is_not_attached() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    // Before any invite: no card to check them against, both are queued.
+    let (_dm, m) = mallory_toward(&b, &mut rng);
+    let forged = unsigned_initial_as(&m, &b, a.device.public().dh, 1, &mut rng);
+    let got = b.receive(&forged.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_UNKNOWN_SENDER);
+    let p = invite_one(&mut a, b.fingerprint(), NOW, &mut rng);
+    let genuine = unsigned_initial_as(&a, &b, a.device.public().dh, 2, &mut rng);
+    let got = b.receive(&genuine.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_UNKNOWN_SENDER);
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 2);
+    // The invite comes: only the genuine one joins the request.
+    request_outcome(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    let messages: Vec<_> = held.iter().filter(|h| !h.invite).collect();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].packet_id, genuine.id);
+    assert_eq!(messages[0].message_id, Some(MessageId([2; 16])));
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+}
+
+#[test]
+fn unsigned_message_from_the_requester_is_held() {
+    // A 0.6.0-style Initial (no signing key) from the requester's device:
+    // authenticated as the device its card lists, then held.
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    let p = invite_one(&mut a, b.fingerprint(), NOW, &mut rng);
+    request_outcome(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    let genuine = unsigned_initial(&a, &b, &mut rng);
+    let got = b
+        .receive(&genuine.encode(), "t", NOW + 60, &mut rng)
+        .unwrap();
+    assert_eq!(reason(got), R_PENDING_REQUEST);
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    let message = held.iter().find(|h| !h.invite).unwrap();
+    assert_eq!(message.packet_id, genuine.id);
+    assert_eq!(message.message_id, Some(MessageId([4; 16])));
+    assert_eq!(
+        requests::get_request(&b.store, alice)
+            .unwrap()
+            .unwrap()
+            .last_seen,
+        NOW + 60
+    );
+    let got = b
+        .receive(&genuine.encode(), "t", NOW + 60, &mut rng)
+        .unwrap();
+    assert!(matches!(got, ReceiveOutcome::Duplicate), "{got:?}");
 }

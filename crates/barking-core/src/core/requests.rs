@@ -27,7 +27,7 @@ use super::{
 };
 use crate::contact::ContactCard;
 use crate::content::ExtContent;
-use crate::envelope::{self, Body, Envelope};
+use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
@@ -410,12 +410,15 @@ pub(super) fn delete_pending(q: &impl Queries, packet_id: PacketId) -> Result<bo
 
 /// Attaches the queued first packets of unknown senders with the identity
 /// key `ik` to the request of `fp`, oldest first, while it holds fewer than
-/// `MAX_PACKETS_PER_REQUEST`; the others are dropped from the queue.
-/// Returns how many were attached.
+/// `MAX_PACKETS_PER_REQUEST`. Each must first pass `authentic`, which gives
+/// the message id of its content (then recorded) or `None`. The others
+/// (refused, or beyond the cap) are dropped from the queue. Returns how
+/// many were attached.
 pub(super) fn attach_unknown_to_fp(
     q: &impl Queries,
     ik: &[u8; 32],
     fp: Fingerprint,
+    mut authentic: impl FnMut(&PendingInitial) -> Result<Option<MessageId>>,
 ) -> Result<usize> {
     let queued = query_pending(
         q,
@@ -427,17 +430,26 @@ pub(super) fn attach_unknown_to_fp(
     )?;
     let mut attached = 0;
     for p in queued {
-        if count_pending_for_fp(q, fp)? < MAX_PACKETS_PER_REQUEST {
-            q.conn()
-                .execute(
-                    "UPDATE pending_initials SET fp = ?2 WHERE packet_id = ?1",
-                    params![p.packet_id.0.as_slice(), fp.0.as_slice()],
-                )
-                .map_err(map_err)?;
-            attached += 1;
+        let message_id = if count_pending_for_fp(q, fp)? < MAX_PACKETS_PER_REQUEST {
+            authentic(&p)?
         } else {
+            None
+        };
+        let Some(message_id) = message_id else {
             delete_pending(q, p.packet_id)?;
-        }
+            continue;
+        };
+        q.conn()
+            .execute(
+                "UPDATE pending_initials SET fp = ?2, message_id = ?3 WHERE packet_id = ?1",
+                params![
+                    p.packet_id.0.as_slice(),
+                    fp.0.as_slice(),
+                    message_id.0.as_slice()
+                ],
+            )
+            .map_err(map_err)?;
+        attached += 1;
     }
     Ok(attached)
 }
@@ -453,12 +465,13 @@ pub(super) fn get_pending(q: &impl Queries, packet_id: PacketId) -> Result<Optio
 }
 
 /// The request whose card lists a device with the X25519 key `ik` (and, when
-/// the Initial names it, the signing key `sig`). Several: none (ambiguous).
+/// the Initial names it, the signing key `sig`), with that device. Several:
+/// none (ambiguous).
 fn request_of_device(
     q: &impl Queries,
     ik: &[u8; 32],
     sig: Option<[u8; 32]>,
-) -> Result<Option<Fingerprint>> {
+) -> Result<Option<(Fingerprint, DevicePublic)>> {
     let mut stmt = q
         .conn()
         .prepare("SELECT fp, card FROM contact_requests")
@@ -476,12 +489,12 @@ fn request_of_device(
             .devices
             .certs
             .iter()
-            .any(|c| c.device.dh == *ik && sig.is_none_or(|s| s == c.device.sig));
-        if listed {
+            .find(|c| c.device.dh == *ik && sig.is_none_or(|s| s == c.device.sig));
+        if let Some(cert) = listed {
             if found.is_some() {
                 return Ok(None);
             }
-            found = Some(Fingerprint(arr(fp)?));
+            found = Some((Fingerprint(arr(fp)?), cert.device));
         }
     }
     Ok(found)
@@ -636,6 +649,8 @@ const R_REQUESTS_FULL: &str = "too many pending contact requests";
 
 /// A first packet from a device no contact lists, being handled.
 struct First<'a> {
+    device: &'a DeviceKeys,
+    prekeys: &'a PrekeySecrets,
     packet: &'a Packet,
     init: &'a InitialMessage,
     /// The session its Initial opens.
@@ -662,6 +677,45 @@ impl First<'_> {
             invite,
         }
     }
+
+    /// Trial opening of a held packet as `peer`, a device a request's card
+    /// lists (`trial_open`, writing nothing): the message id of its content
+    /// if it authenticates, otherwise `None`.
+    fn authenticate(
+        &self,
+        q: &impl Queries,
+        held: &PendingInitial,
+        peer: &DevicePublic,
+    ) -> Result<Option<MessageId>> {
+        let Ok(packet) = Packet::decode(&held.bytes) else {
+            return Ok(None);
+        };
+        let Ok(Wire::Initial {
+            ek,
+            sealed_init,
+            msg,
+        }) = parse_wire(&packet.payload)
+        else {
+            return Ok(None);
+        };
+        let Ok(init) = envelope::open_initial(self.device, &ek, &sealed_init) else {
+            return Ok(None);
+        };
+        if init.ik != peer.dh || init.sig.is_some_and(|sig| sig != peer.sig) {
+            return Ok(None);
+        }
+        let opened = trial_open(
+            q,
+            self.device,
+            self.prekeys,
+            &packet,
+            &init,
+            peer,
+            &msg,
+            self.now,
+        )?;
+        Ok(opened.ok().map(|env| MessageId(env.message_id)))
+    }
 }
 
 /// A `Wire::Initial` to my introduction mailbox from a device no contact
@@ -669,8 +723,10 @@ impl First<'_> {
 /// anything: no session written, no ack, nothing marked seen (spec §7.1).
 ///
 /// 1. Trial opening (`trial_open`) as the device the Initial names; refused:
-///    quarantine. An Initial without a signing key (written by 0.6.0) cannot
-///    be read before its sender's card is known: held as it is (3 or 4).
+///    quarantine. An Initial without a signing key (written by 0.6.0) is
+///    opened as the device of a request's card with its `ik`; with no such
+///    card it cannot be read yet, and is queued as it is (4). Nothing joins
+///    a request without passing this trial.
 /// 2. An invite (`ContactRequest`) creates or updates the request of its
 ///    card (`on_invitation`).
 /// 3. Any other content, from a device a request's card lists, joins that
@@ -692,17 +748,27 @@ pub(super) fn on_unknown_initial(
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
     let first = First {
+        device,
+        prekeys,
         packet,
         init,
         session: session_id(&init.ek),
         now,
     };
     let held = get_pending(q, packet.id)?;
-    let Some(peer) = init.initiator() else {
-        if held.is_some() {
-            return duplicate(q, limiter, packet, now);
-        }
-        return hold_message(q, limiter, &first, None);
+    let peer = match init.initiator() {
+        Some(peer) => peer,
+        // Written by 0.6.0 (no signing key): its session data still bind
+        // `blake3(sig || dh)`, so a card listing the device can authenticate it.
+        None => match request_of_device(q, &init.ik, None)? {
+            Some((_, listed)) => listed,
+            None => {
+                if held.is_some() {
+                    return duplicate(q, limiter, packet, now);
+                }
+                return queue_unread(q, limiter, &first);
+            }
+        },
     };
     // A held packet whose content was read (`message_id` set): its identifier
     // was bound to that content, a repeat is a duplicate (as `is_seen`).
@@ -727,11 +793,8 @@ pub(super) fn on_unknown_initial(
         _ => None,
     };
     match card {
-        Some(card) => on_invitation(q, limiter, device, &first, &peer, &env, &card, rng),
-        None => {
-            let from = Some((peer.sig, MessageId(env.message_id)));
-            hold_message(q, limiter, &first, from)
-        }
+        Some(card) => on_invitation(q, limiter, &first, &peer, &env, &card, rng),
+        None => hold_message(q, limiter, &first, &peer, MessageId(env.message_id)),
     }
 }
 
@@ -755,32 +818,42 @@ fn duplicate(
 }
 
 /// Steps 3 and 4 of `on_unknown_initial`: a first packet that is not an
-/// invite joins the request whose card lists its device, otherwise the
-/// queue of unknown senders, each within its cap. `from`: the signing key
-/// the Initial names and the message id, when the content was read.
+/// invite, authenticated as sealed by `peer`, joins the request whose card
+/// lists `peer`, otherwise the queue of unknown senders, each within its cap.
 fn hold_message(
     q: &impl Queries,
     limiter: &mut LogLimiter,
     first: &First<'_>,
-    from: Option<([u8; 32], MessageId)>,
+    peer: &DevicePublic,
+    message_id: MessageId,
 ) -> Result<RxOut> {
-    let (sig, message_id) = (from.map(|f| f.0), from.map(|f| f.1));
-    let reason = match request_of_device(q, &first.init.ik, sig)? {
-        Some(fp) => {
-            if count_pending_for_fp(q, fp)? < MAX_PACKETS_PER_REQUEST {
-                insert_pending_initial(q, &first.held(Some(fp), message_id, false))?;
-                touch_request(q, fp, first.now)?;
-            }
-            R_PENDING_REQUEST
-        }
-        None => {
-            if count_unknown(q)? < MAX_UNKNOWN_INITIALS {
-                insert_pending_initial(q, &first.held(None, message_id, false))?;
-            }
-            R_UNKNOWN_SENDER
-        }
+    let Some((fp, _)) = request_of_device(q, &first.init.ik, Some(peer.sig))? else {
+        return queue(q, limiter, first, Some(message_id));
     };
-    quarantine(q, limiter, first.packet, first.now, reason)
+    if count_pending_for_fp(q, fp)? < MAX_PACKETS_PER_REQUEST {
+        insert_pending_initial(q, &first.held(Some(fp), Some(message_id), false))?;
+        touch_request(q, fp, first.now)?;
+    }
+    quarantine(q, limiter, first.packet, first.now, R_PENDING_REQUEST)
+}
+
+/// Step 4 for an Initial without a signing key whose device no request's
+/// card lists: queued unread (`message_id` NULL), within the cap.
+fn queue_unread(q: &impl Queries, limiter: &mut LogLimiter, first: &First<'_>) -> Result<RxOut> {
+    queue(q, limiter, first, None)
+}
+
+/// Step 4: the queue of unknown senders, within its cap.
+fn queue(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    first: &First<'_>,
+    message_id: Option<MessageId>,
+) -> Result<RxOut> {
+    if count_unknown(q)? < MAX_UNKNOWN_INITIALS {
+        insert_pending_initial(q, &first.held(None, message_id, false))?;
+    }
+    quarantine(q, limiter, first.packet, first.now, R_UNKNOWN_SENDER)
 }
 
 /// A new packet joined the request of `fp`: seen now, and shown again.
@@ -811,7 +884,6 @@ fn lists(card: &ContactCard, peer: &DevicePublic) -> bool {
 fn on_invitation(
     q: &impl Queries,
     limiter: &mut LogLimiter,
-    device: &DeviceKeys,
     first: &First<'_>,
     peer: &DevicePublic,
     env: &Envelope,
@@ -821,7 +893,7 @@ fn on_invitation(
     let (packet, now) = (first.packet, first.now);
     let fp = card.fingerprint();
     if let Some(current) = q.get_contact(fp)? {
-        return on_contact_device(q, limiter, device, first, peer, env, &current, card, rng);
+        return on_contact_device(q, limiter, first, peer, env, &current, card, rng);
     }
     match contacts::check_card(q, card) {
         Ok(_) => {}
@@ -886,7 +958,7 @@ fn on_invitation(
         row.last_notified = Some(now);
     }
     upsert_request(q, &row)?;
-    hold_invitation(q, first, fp, message_id)?;
+    hold_invitation(q, first, fp, peer, message_id)?;
     if !resent || new_invite {
         log(
             q,
@@ -917,7 +989,6 @@ fn on_invitation(
 fn on_contact_device(
     q: &impl Queries,
     limiter: &mut LogLimiter,
-    device: &DeviceKeys,
     first: &First<'_>,
     peer: &DevicePublic,
     env: &Envelope,
@@ -925,7 +996,7 @@ fn on_contact_device(
     card: &ContactCard,
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
-    let (packet, now, fp) = (first.packet, first.now, current.fp);
+    let (packet, now, fp, device) = (first.packet, first.now, current.fp, first.device);
     let verified = match contacts::verify_card_update(q, current, card)? {
         Ok(contacts::CardUpdate::Newer(verified)) => verified,
         Ok(contacts::CardUpdate::Superseded) => {
@@ -953,14 +1024,15 @@ fn on_contact_device(
     if q.block_state(fp)?.drops(env.sent_at) {
         return Ok((ReceiveOutcome::Ignored, None));
     }
-    hold_invitation(q, first, fp, MessageId(env.message_id))?;
+    hold_invitation(q, first, fp, peer, MessageId(env.message_id))?;
     quarantine(q, limiter, packet, now, R_PENDING_REQUEST)
 }
 
 /// Holds an invite packet for `fp`. An invite from another session of the
 /// same device replaces that device's packets; the newest invite replaces
 /// the one held (one per request). The queued packets of the same device
-/// then join it, within the cap.
+/// then join it, within the cap, each once it authenticates as `peer`
+/// (the device the invite's card lists); the others are dropped.
 ///
 /// A replaced packet whose content was read is marked seen: never acked,
 /// it may be delivered again, and must not come back (nor count as a new
@@ -969,6 +1041,7 @@ fn hold_invitation(
     q: &impl Queries,
     first: &First<'_>,
     fp: Fingerprint,
+    peer: &DevicePublic,
     message_id: MessageId,
 ) -> Result<()> {
     let other_session = list_pending_by_ik(q, &first.init.ik)?
@@ -982,7 +1055,9 @@ fn hold_invitation(
         delete_pending(q, p.packet_id)?;
     }
     insert_pending_initial(q, &first.held(Some(fp), Some(message_id), true))?;
-    attach_unknown_to_fp(q, &first.init.ik, fp)?;
+    attach_unknown_to_fp(q, &first.init.ik, fp, |held| {
+        first.authenticate(q, held, peer)
+    })?;
     Ok(())
 }
 
@@ -1215,12 +1290,38 @@ mod tests {
         insert_pending_initial(&s, &pending(2, 9, None, true)).unwrap();
         insert_pending_initial(&s, &pending(3, 8, None, false)).unwrap();
         insert_pending_initial(&s, &pending(4, 9, Some(5), false)).unwrap();
-        assert_eq!(attach_unknown_to_fp(&s, &[9; 32], fp(7)).unwrap(), 2);
+        assert_eq!(attach_unknown_to_fp(&s, &[9; 32], fp(7), read).unwrap(), 2);
         assert_eq!(count_pending_for_fp(&s, fp(7)).unwrap(), 2);
         // The packet already attached to another request is left alone.
         assert_eq!(count_pending_for_fp(&s, fp(5)).unwrap(), 1);
         assert_eq!(count_unknown(&s).unwrap(), 1);
-        assert_eq!(attach_unknown_to_fp(&s, &[9; 32], fp(7)).unwrap(), 0);
+        assert_eq!(attach_unknown_to_fp(&s, &[9; 32], fp(7), read).unwrap(), 0);
+    }
+
+    /// Every packet authenticates, with a message id from its packet id.
+    fn read(p: &PendingInitial) -> Result<Option<MessageId>> {
+        Ok(Some(MessageId(p.packet_id.0)))
+    }
+
+    #[test]
+    fn unauthenticated_packets_are_dropped_not_attached() {
+        let (_d, s) = store();
+        insert_pending_initial(&s, &pending(1, 9, Some(7), true)).unwrap();
+        for id in 2..5 {
+            insert_pending_initial(&s, &pending(id, 9, None, false)).unwrap();
+        }
+        // Packet 3 does not authenticate: dropped, and takes no slot.
+        let n = attach_unknown_to_fp(&s, &[9; 32], fp(7), |p| {
+            Ok((p.packet_id.0[0] != 3).then_some(MessageId([0xaa; 16])))
+        })
+        .unwrap();
+        assert_eq!(n, 2);
+        let held = list_pending_by_fp(&s, fp(7)).unwrap();
+        let ids: Vec<u8> = held.iter().map(|p| p.packet_id.0[0]).collect();
+        assert_eq!(ids, vec![1, 2, 4]);
+        // The message id of the authenticated content is recorded.
+        assert_eq!(held[1].message_id, Some(MessageId([0xaa; 16])));
+        assert_eq!(count_unknown(&s).unwrap(), 0);
     }
 
     #[test]
@@ -1230,7 +1331,7 @@ mod tests {
         for id in 2..8 {
             insert_pending_initial(&s, &pending(id, 9, None, false)).unwrap();
         }
-        assert_eq!(attach_unknown_to_fp(&s, &[9; 32], fp(7)).unwrap(), 3);
+        assert_eq!(attach_unknown_to_fp(&s, &[9; 32], fp(7), read).unwrap(), 3);
         let held: Vec<u8> = list_pending_by_fp(&s, fp(7))
             .unwrap()
             .iter()
