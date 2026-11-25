@@ -1,12 +1,13 @@
 //! Public self-report of the node (`Request::Info`, protocol 5). A background
 //! task measures the node every `INFO_PERIOD`: fill of the storage and of the
-//! subscription table, uptime, and the push relays live subscriptions name.
-//! The state of the link to each relay comes from the node's own probes
-//! (`wake::probe`, every `PROBE_PERIOD`), never from the wake-ups it sends:
-//! it tells nothing of when users receive messages. Probe results are
-//! published at the next round only. A request only reads that precomputed
-//! report from memory: no database read at request time, nothing is logged
-//! per request.
+//! subscription table, and uptime. The state of the link to a push relay
+//! comes from the node's own probes (`wake::probe`, every `PROBE_PERIOD`) of
+//! the relays the operator lists in `[info] probe_relays`, never from
+//! subscriptions nor from the wake-ups it sends: it tells nothing of who
+//! uses which relay, nor of when users receive messages. Any other relay
+//! reads `Unknown`. Probe results are published at the next round only. A
+//! request only reads that precomputed report from memory: no database read
+//! at request time, nothing is logged per request.
 //!
 //! `Info` is unauthenticated: the link is reported only for the relay the
 //! caller names, and the node never lists relays or hosts.
@@ -15,11 +16,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use barking_proto::push::RelayRef;
 use barking_proto::{FillTier, MAX_SOFTWARE_LEN, NodeId, NodeInfoReport, NodeOrigin, PushLink};
 use tokio::sync::watch;
 
-use crate::server::unix_now;
 use crate::wake::{self, WakeConfig};
 use crate::{NodeStore, Result, store};
 
@@ -33,8 +32,6 @@ pub struct Measures {
     pub stored_bytes: u64,
     /// Subscriptions held (what `max_subscriptions` caps).
     pub subscriptions: u64,
-    /// Unexpired subscriptions per relay address.
-    pub relays: Vec<(RelayRef, u64)>,
 }
 
 /// The report as of the last round.
@@ -42,8 +39,8 @@ struct Precomputed {
     uptime_secs: u64,
     storage: FillTier,
     wake: Option<FillTier>,
-    /// Link state of each probed relay, as of the last probe round
-    /// published.
+    /// Link state of each configured relay probed, as of the last probe
+    /// round published.
     links: HashMap<NodeId, PushLink>,
     origin: Option<NodeOrigin>,
 }
@@ -56,8 +53,6 @@ pub struct InfoState {
     wake_max: Option<u64>,
     protocol: u16,
     report: Mutex<Precomputed>,
-    /// Relays of the last measurements, for the probes.
-    relays: Mutex<Vec<(RelayRef, u64)>>,
     /// Results of the last probe round, published at the next `update`.
     probed: Mutex<Option<HashMap<NodeId, PushLink>>>,
 }
@@ -84,7 +79,6 @@ impl InfoState {
             storage_max_bytes,
             wake_max,
             protocol,
-            relays: Mutex::default(),
             probed: Mutex::default(),
             report: Mutex::new(Precomputed {
                 uptime_secs: 0,
@@ -104,7 +98,6 @@ impl InfoState {
     /// the last probe round if one ended since; the uptime is rounded down
     /// to the hour.
     pub fn update(&self, m: Measures) {
-        *self.relays.lock().unwrap_or_else(PoisonError::into_inner) = m.relays;
         let probed = self
             .probed
             .lock()
@@ -119,14 +112,6 @@ impl InfoState {
         }
     }
 
-    /// Relays of the last measurements (live subscriptions per address).
-    pub fn relays_in_use(&self) -> Vec<(RelayRef, u64)> {
-        self.relays
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
     /// Results of a probe round, published at the next `update`.
     pub fn set_probed(&self, links: HashMap<NodeId, PushLink>) {
         *self.probed.lock().unwrap_or_else(PoisonError::into_inner) = Some(links);
@@ -138,7 +123,9 @@ impl InfoState {
     }
 
     /// The report; `relay`: the push relay whose link is asked about. The
-    /// precomputed report only, link states included.
+    /// precomputed report only, link states included: a relay not in
+    /// `[info] probe_relays` reads `Unknown`, by the same path whatever the
+    /// subscriptions.
     pub fn snapshot(&self, relay: Option<NodeId>) -> NodeInfoReport {
         let r = self.report();
         let push_link = match (self.wake_max, relay) {
@@ -158,11 +145,10 @@ impl InfoState {
 }
 
 /// Reads the measurements.
-pub fn measure(store: &NodeStore, now: u64) -> Result<Measures> {
+pub fn measure(store: &NodeStore) -> Result<Measures> {
     Ok(Measures {
         stored_bytes: store::stored_bytes(store.conn())?,
         subscriptions: wake::count_subscriptions(store)?,
-        relays: wake::relays_in_use(store, now)?,
     })
 }
 
@@ -178,7 +164,7 @@ pub async fn info_loop(state: Arc<InfoState>, store: NodeStore, mut stop: watch:
         }
         let Some(s) = store.take() else { return };
         let joined = tokio::task::spawn_blocking(move || {
-            let m = measure(&s, unix_now());
+            let m = measure(&s);
             (s, m)
         })
         .await;
@@ -195,7 +181,6 @@ pub async fn info_loop(state: Arc<InfoState>, store: NodeStore, mut stop: watch:
 mod tests {
     use std::collections::HashMap;
 
-    use barking_proto::push::RelayRef;
     use barking_proto::{FillTier, NodeId, PushLink};
 
     use super::*;
@@ -207,14 +192,6 @@ mod tests {
         Measures {
             stored_bytes: stored,
             subscriptions: subs,
-            relays: vec![(
-                RelayRef {
-                    host: "relay.example".into(),
-                    port: 4433,
-                    id: R,
-                },
-                1,
-            )],
         }
     }
 
@@ -244,8 +221,6 @@ mod tests {
         // Nothing is read at request time: a later change shows after a tick only.
         s.update(measures(960, 10));
         assert_eq!(s.snapshot(None).storage, FillTier::Full);
-        // The probes read the relays of the last measurements.
-        assert_eq!(s.relays_in_use(), measures(0, 0).relays);
     }
 
     #[test]

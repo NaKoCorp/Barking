@@ -119,9 +119,16 @@ Node 0.5.0 speaks protocol 5 and answers a new `Info` request. The app uses it t
 - the state of the push link to the relay the app asked about (see below);
 - the origin of the node (autonomous system and country), when known.
 
-**Push link.** The node checks the push relays itself. Every 5 minutes it connects to each relay that its live subscriptions name, checks the relay's identity (`Hello`) and closes the connection; it sends no wake-up. A push relay refuses new connections while its own sends to Apple fail, so `Ok` means "the relay answers and its link to APNs works". The state never comes from the wake-ups the node sends, so it does not tell when users receive messages, and there is no subscription threshold: a relay used by a single person is reported like any other. What stays visible: the change from `Unknown` to a state shows, within 5 minutes, that a first subscription to that relay appeared on this node.
+**Push link.** The node checks the push relays that its operator lists in `[info] probe_relays`, and only those. Every 5 minutes it connects to each listed relay, checks the relay's identity (`Hello`) and closes the connection; it sends no wake-up. A push relay refuses new connections while its own sends to Apple fail, so `Ok` means "the relay answers and its link to APNs works". Any relay not in the list reads `Unknown`.
 
-The host of a relay comes from whoever posted the subscription. Only a host that has already answered with the relay's identity (a proven host) can make the relay read `Failing`; a forged subscription with a dead host leaves at worst a relay never reached since the start `Unknown`. A relay that is down from the node's start therefore reads `Unknown`, not `Failing`, until it answers once. Bounds per 5-minute round: at most 32 relays (those with a proven host first), 6 hosts each, 8 at once, routable addresses only; nothing is logged. A node with `[wake] enabled = false` makes no probes. Expect outgoing QUIC connections to the push relays (UDP to their port) every 5 minutes.
+The list never comes from the subscriptions. `Info` is public, so a state derived from them would tell anyone who asks which relays the users of this node subscribe through, and, polled over time, when they subscribe or leave; for a relay used by few people, that points at them. A listed relay is probed whether or not anyone subscribes through it, and an unlisted one reads `Unknown` whether or not anyone does: the answer tells nothing about the subscriptions. The state never comes from the wake-ups the node sends either, so it does not tell when users receive messages. The list is visible from outside (anyone can ask about a relay and see `Ok`), so list only relays you are willing to be seen checking, such as the public NaKoCorp relay.
+
+```toml
+[info]
+probe_relays = ["<relay identifier>@push.example.org:4434"]
+```
+
+Entries are `identifier@host:port`, an IPv6 address in brackets; the identifier is the relay's node id (`BARKING_RELAY_ID`). At most 32 entries and 4 hosts per identifier, tried in order. Hosts must be DNS names or routable addresses, unless `[dht] allow_private_addrs = true`. A relay reads `Failing` only after it has answered once since the node started; one that is down from the start reads `Unknown`. Each round probes 8 relays at once and is cut after 250 s; nothing is logged. The default is an empty list: no probes, and every relay reads `Unknown`. A node with `[wake] enabled = false` makes no probes and reports no push link. Expect outgoing QUIC connections to the listed relays (UDP to their port) every 5 minutes.
 
 The report is precomputed: answering it reads no database, and the node logs nothing about the client that asked, neither its IP address nor the relay it named. A 0.4 node does not understand `Info`: the app does not send it and shows no report for that node.
 
@@ -136,7 +143,7 @@ origin_lookup = false
 
 The default is `true`. The report then carries no origin.
 
-**Upgrade.** Update the 6 deployed nodes to 0.5.0 as described in [Update](#update). No configuration change is needed: `[info]` is optional and the other keys are unchanged. The nodes can be upgraded one at a time, and 0.4 and 0.5 nodes work together.
+**Upgrade.** Update the 6 deployed nodes to 0.5.0 as described in [Update](#update). No configuration change is needed: `[info]` is optional and the other keys are unchanged. Add `probe_relays` to have a node report the link to the NaKoCorp relay; without it, the app shows that link as unknown. The nodes can be upgraded one at a time, and 0.4 and 0.5 nodes work together.
 
 **IP base in the app.** The app checks the origin a node states against an embedded base, `apple/Barking/Resources/ipdb.bin` (DB-IP Lite, CC BY 4.0). Regenerate it for each app release (spec §6.3), with the source month as argument, and commit the result:
 

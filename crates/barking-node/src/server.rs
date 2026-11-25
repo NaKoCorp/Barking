@@ -69,6 +69,7 @@ use barking_dht::DiversityLimits;
 use barking_packet::Tier;
 use barking_proto::client::MIN_PROTOCOL_VERSION;
 use barking_proto::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
+use barking_proto::push::RelayRef;
 use barking_proto::{
     ErrorReason, Limits, MAX_HOLDINGS_PER_PAGE, NodeId, PROTOCOL_VERSION, Request, Response, tls,
 };
@@ -173,6 +174,9 @@ pub struct ServerConfig {
     pub wake_allow_private: bool,
     /// `[info] origin_lookup`; default: false (tests never query DNS).
     pub origin_lookup: bool,
+    /// `[info] probe_relays`: the push relays whose link the node probes
+    /// and reports; default: none.
+    pub probe_relays: Vec<RelayRef>,
     /// Tests only (feature `test-harness`, never in a production build),
     /// never read from the configuration: answers `Ok` to `Deposit` and
     /// `Store` without keeping anything, as a node that loses messages
@@ -591,6 +595,7 @@ impl ServerConfig {
             wake: WakeConfig::default(),
             wake_allow_private: false,
             origin_lookup: false,
+            probe_relays: Vec::new(),
             #[cfg(feature = "test-harness")]
             test_swallow_deposits: false,
             #[cfg(feature = "test-harness")]
@@ -1007,14 +1012,17 @@ pub async fn run(
     }
     tasks.spawn(purge_loop(Arc::clone(&shared), stop_rx.clone()));
     if let Some(store) = info_store {
-        // The push link probes (`wake::probe`) read the relays measured by
-        // `info_loop`: none without it, nor when the node takes no
-        // subscriptions. Their own transport: no session or address set
-        // aside is shared with the wake sender.
-        if config.wake.enabled {
+        // The push link probes (`wake::probe`) cover the relays of
+        // `[info] probe_relays` only, never those subscriptions name; their
+        // results are published by `info_loop`. None without it, nor when
+        // the node takes no subscriptions or lists no relay. Their own
+        // transport: no session or address set aside is shared with the
+        // wake sender.
+        if config.wake.enabled && !config.probe_relays.is_empty() {
             tasks.spawn(wake::probe::probe_loop(
                 Arc::clone(&info),
                 QuicWakeTransport::new(config.wake_allow_private),
+                config.probe_relays.clone(),
                 stop_rx.clone(),
             ));
         }

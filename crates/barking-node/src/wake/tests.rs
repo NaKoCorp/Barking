@@ -911,35 +911,39 @@ fn max_expiry_days_is_fixed_by_protocol_4() {
     );
 }
 
-#[test]
-fn relays_in_use_per_address_skip_expired() {
-    let mut s = store();
+/// The finding behind `[info] probe_relays`: a relay that only a
+/// subscription names is never probed, and reads `Unknown` exactly as on a
+/// node without that subscription. Only the configured relay is probed.
+#[tokio::test]
+async fn subscriptions_never_choose_the_probed_relays() {
+    use crate::info::{InfoState, measure};
+    use barking_proto::PushLink;
+    use probe::Prober;
+    use probe::tests::{Fake, at};
+
+    let x = relay("relay.example.org");
+    let y = at("configured.example.org", NodeId([9; 32]));
+    let fake = Fake::default();
+    fake.set_up(&["relay.example.org", "configured.example.org"]);
     let cfg = WakeConfig::default();
-    // Three subscriptions to relay 7 under two hosts, one expired, one to relay 8.
-    let mut a = raw_sub(1, 1);
-    let mut b = raw_sub(2, 2);
-    b.relay.host = "other.example.org".into();
-    let mut c = raw_sub(3, 3);
-    c.expires_day = today();
-    let mut d = raw_sub(4, 4);
-    d.relay.id = NodeId([8; 32]);
-    let mut e = raw_sub(5, 5);
-    e.relay.host = "other.example.org".into();
-    for sb in [&mut a, &mut b, &mut c, &mut d, &mut e] {
-        assert_eq!(try_subscribe(&mut s, &cfg, sb), Ok(()));
+    let mut reports = Vec::new();
+    for subscribed in [true, false] {
+        let mut s = store();
+        if subscribed {
+            let a = raw_sub(1, 1);
+            assert_eq!(a.relay, x);
+            assert_eq!(try_subscribe(&mut s, &cfg, &a), Ok(()));
+        }
+        let info = InfoState::new(1000, &cfg, 5);
+        info.update(measure(&s).unwrap());
+        let mut p = Prober::new(fake.clone(), std::slice::from_ref(&y));
+        info.set_probed(p.round().await);
+        info.update(measure(&s).unwrap());
+        assert_eq!(fake.calls(), vec![y.clone()], "only the configured relay");
+        assert_eq!(info.snapshot(Some(y.id)).push_link, Some(PushLink::Ok));
+        let r = info.snapshot(Some(x.id));
+        assert_eq!(r.push_link, Some(PushLink::Unknown));
+        reports.push(r.push_link);
     }
-    // The second day after `NOW`: `c` (expires today) is expired, the others
-    // expire tomorrow.
-    let later = NOW + 86_400;
-    let mut got = relays_in_use(&s, later).unwrap();
-    got.sort_by(|x, y| (x.0.id.0, &x.0.host).cmp(&(y.0.id.0, &y.0.host)));
-    let want = vec![
-        (a.relay.clone(), 1),
-        (b.relay.clone(), 2),
-        (d.relay.clone(), 1),
-    ];
-    let mut want = want;
-    want.sort_by(|x, y| (x.0.id.0, &x.0.host).cmp(&(y.0.id.0, &y.0.host)));
-    assert_eq!(got, want);
-    assert_eq!(count_subscriptions(&s).unwrap(), 5);
+    assert_eq!(reports[0], reports[1]);
 }

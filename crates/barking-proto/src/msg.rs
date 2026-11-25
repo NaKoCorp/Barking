@@ -186,8 +186,9 @@ pub enum PushLink {
     Ok,
     /// No host of the relay that answered before did at the last probe.
     Failing,
-    /// Not probed: no live subscription on this node names the relay, or it
-    /// never answered since the node started.
+    /// Not probed: the node's operator does not list the relay among those
+    /// it probes, or it never answered since the node started. Never
+    /// depends on the node's subscriptions.
     Unknown,
 }
 
