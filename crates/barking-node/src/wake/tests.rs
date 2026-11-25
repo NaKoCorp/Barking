@@ -910,3 +910,40 @@ fn max_expiry_days_is_fixed_by_protocol_4() {
         (barking_proto::P4_LIFETIME_SECS / 86_400) as u32 + 2
     );
 }
+
+/// The finding behind `[info] probe_relays`: a relay that only a
+/// subscription names is never probed, and reads `Unknown` exactly as on a
+/// node without that subscription. Only the configured relay is probed.
+#[tokio::test]
+async fn subscriptions_never_choose_the_probed_relays() {
+    use crate::info::{InfoState, measure};
+    use barking_proto::PushLink;
+    use probe::Prober;
+    use probe::tests::{Fake, at};
+
+    let x = relay("relay.example.org");
+    let y = at("configured.example.org", NodeId([9; 32]));
+    let fake = Fake::default();
+    fake.set_up(&["relay.example.org", "configured.example.org"]);
+    let cfg = WakeConfig::default();
+    let mut reports = Vec::new();
+    for subscribed in [true, false] {
+        let mut s = store();
+        if subscribed {
+            let a = raw_sub(1, 1);
+            assert_eq!(a.relay, x);
+            assert_eq!(try_subscribe(&mut s, &cfg, &a), Ok(()));
+        }
+        let info = InfoState::new(1000, &cfg, 5);
+        info.update(measure(&s).unwrap());
+        let mut p = Prober::new(fake.clone(), std::slice::from_ref(&y));
+        info.set_probed(p.round().await);
+        info.update(measure(&s).unwrap());
+        assert_eq!(fake.calls(), vec![y.clone()], "only the configured relay");
+        assert_eq!(info.snapshot(Some(y.id)).push_link, Some(PushLink::Ok));
+        let r = info.snapshot(Some(x.id));
+        assert_eq!(r.push_link, Some(PushLink::Unknown));
+        reports.push(r.push_link);
+    }
+    assert_eq!(reports[0], reports[1]);
+}

@@ -13,6 +13,7 @@ mod lock;
 mod log;
 mod messages;
 mod net;
+mod nodes;
 mod push;
 mod reactions;
 mod route;
@@ -33,7 +34,11 @@ pub use identity::{MyDeviceInfo, RemovedInfo, bip39_words, recover_device};
 pub use link::{PendingLink, begin_link, inspect_link_request};
 pub use log::{LogEntry, log_arg_tokens, log_keys};
 pub use messages::{ChatSummary, KeyChange, UnreadCount};
-pub use net::{LeaveState, NewMessage, NodeInfo, SyncSummary};
+pub use net::{LeaveState, NewMessage, SyncSummary};
+pub use nodes::{
+    AvoidReason, BlockedNode, DefaultNode, FillTierView, NodeDetail, NodeInfo, NodeOriginKind,
+    NodeReportView, OriginVerdictView, OriginView, PushLinkView, Reliability,
+};
 pub use push::{NotificationPrefs, PushPreview, PushSettings, WakeNode, WakeStatus};
 pub use reactions::{NewReaction, Quote, ReactionChip, excerpt};
 pub use route::RouteStepInfo;

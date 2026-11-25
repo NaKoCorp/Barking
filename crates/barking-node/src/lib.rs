@@ -3,8 +3,10 @@
 
 pub mod config;
 pub mod dht;
+pub mod info;
 pub mod limits;
 pub mod logging;
+pub mod origin;
 pub mod rules;
 pub mod server;
 pub mod store;

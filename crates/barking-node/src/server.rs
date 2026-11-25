@@ -60,7 +60,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -69,6 +69,7 @@ use barking_dht::DiversityLimits;
 use barking_packet::Tier;
 use barking_proto::client::MIN_PROTOCOL_VERSION;
 use barking_proto::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
+use barking_proto::push::RelayRef;
 use barking_proto::{
     ErrorReason, Limits, MAX_HOLDINGS_PER_PAGE, NodeId, PROTOCOL_VERSION, Request, Response, tls,
 };
@@ -81,7 +82,9 @@ use tokio::time::timeout;
 use crate::config::DhtConfig;
 use crate::dht::replicate::{self, PassReport};
 use crate::dht::{Dht, maintain};
+use crate::info::{InfoState, info_loop};
 use crate::limits::{ConnectionSlot, GroupDbJob, LimitConfig, Limiter};
+use crate::origin::{HickoryLookup, origin_loop};
 use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
 use crate::store::{NodeStore, PURGE_BATCH, READERS};
 use crate::wake::sender::{QuicWakeTransport, WakeSender};
@@ -169,6 +172,11 @@ pub struct ServerConfig {
     /// Allow wake-ups to relays on private addresses. Follows
     /// `dht.allow_private_addrs` (tests, local networks); default: false.
     pub wake_allow_private: bool,
+    /// `[info] origin_lookup`; default: false (tests never query DNS).
+    pub origin_lookup: bool,
+    /// `[info] probe_relays`: the push relays whose link the node probes
+    /// and reports; default: none.
+    pub probe_relays: Vec<RelayRef>,
     /// Tests only (feature `test-harness`, never in a production build),
     /// never read from the configuration: answers `Ok` to `Deposit` and
     /// `Store` without keeping anything, as a node that loses messages
@@ -586,6 +594,8 @@ impl ServerConfig {
             dht_diversity: DiversityLimits::SPEC,
             wake: WakeConfig::default(),
             wake_allow_private: false,
+            origin_lookup: false,
+            probe_relays: Vec::new(),
             #[cfg(feature = "test-harness")]
             test_swallow_deposits: false,
             #[cfg(feature = "test-harness")]
@@ -632,6 +642,8 @@ pub(crate) struct Shared {
     pub(crate) wake_signal: wake::WakeSignal,
     /// `None` when wake-ups are disabled.
     wake_sender: Option<WakeSender>,
+    /// Precomputed `Info` report.
+    info: Arc<InfoState>,
     /// Tests only: see `ServerConfig::test_swallow_deposits`.
     #[cfg(feature = "test-harness")]
     swallow_deposits: bool,
@@ -902,6 +914,12 @@ pub async fn run(
         }
         has_addr
     });
+    // Own public address, as published in its record (IPv4 preferred).
+    let own_addr = dht_cfg.as_ref().and_then(|d| {
+        d.public_v4
+            .map(|a| IpAddr::V4(*a.ip()))
+            .or_else(|| d.public_v6.map(|a| IpAddr::V6(*a.ip())))
+    });
     let dht = dht_cfg.map(|d| {
         Arc::new(Dht::new(
             config.key.clone(),
@@ -921,7 +939,21 @@ pub async fn run(
             .collect::<Result<Vec<_>>>()?,
         None => Vec::new(),
     };
+    // Read connection of the `Info` measurements (none for a database in
+    // memory: the report then stays at its initial values).
+    let info_store = store.file_path().map(NodeStore::open_reader).transpose()?;
     let writer = Writer::spawn(store, policy, MAX_BATCH)?;
+    let wake_sender = config.wake.enabled.then(|| {
+        WakeSender::spawn(
+            QuicWakeTransport::new(config.wake_allow_private),
+            Arc::clone(&config.stats),
+        )
+    });
+    let info = Arc::new(InfoState::new(
+        policy.storage_max_bytes,
+        &config.wake,
+        config.version,
+    ));
     let shared = Arc::new(Shared {
         writer,
         readers,
@@ -953,12 +985,8 @@ pub async fn run(
         dht: dht.clone(),
         wake: config.wake.clone(),
         wake_signal: wake::WakeSignal::new(subscriptions_held),
-        wake_sender: config.wake.enabled.then(|| {
-            WakeSender::spawn(
-                QuicWakeTransport::new(config.wake_allow_private),
-                Arc::clone(&config.stats),
-            )
-        }),
+        wake_sender,
+        info: Arc::clone(&info),
         #[cfg(feature = "test-harness")]
         swallow_deposits: config.test_swallow_deposits,
         #[cfg(feature = "test-harness")]
@@ -983,6 +1011,37 @@ pub async fn run(
         ));
     }
     tasks.spawn(purge_loop(Arc::clone(&shared), stop_rx.clone()));
+    if let Some(store) = info_store {
+        // The push link probes (`wake::probe`) cover the relays of
+        // `[info] probe_relays` only, never those subscriptions name; their
+        // results are published by `info_loop`. None without it, nor when
+        // the node takes no subscriptions or lists no relay. Their own
+        // transport: no session or address set aside is shared with the
+        // wake sender.
+        if config.wake.enabled && !config.probe_relays.is_empty() {
+            tasks.spawn(wake::probe::probe_loop(
+                Arc::clone(&info),
+                QuicWakeTransport::new(config.wake_allow_private),
+                config.probe_relays.clone(),
+                stop_rx.clone(),
+            ));
+        }
+        tasks.spawn(info_loop(info, store, stop_rx.clone()));
+    }
+    if config.origin_lookup && own_addr.is_some() {
+        match HickoryLookup::from_system() {
+            Ok(lookup) => {
+                tasks.spawn(origin_loop(
+                    lookup,
+                    own_addr,
+                    true,
+                    Arc::clone(&shared.info),
+                    stop_rx.clone(),
+                ));
+            }
+            Err(_) => tracing::warn!("origin: system DNS configuration unreadable, no lookup"),
+        }
+    }
     if shared.wake_sender.is_some() {
         tasks.spawn(wake_loop(Arc::clone(&shared), stop_rx.clone()));
     }
@@ -1652,6 +1711,8 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
         },
         // A node is not a relay.
         Request::Wake { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
+        // From memory, through the same limiters as any request; not logged.
+        Request::Info { relay } => Stored::Done(Response::Info(shared.info.snapshot(relay))),
         Request::Ping { .. }
         | Request::FindNode { .. }
         | Request::Store { .. }

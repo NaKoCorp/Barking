@@ -176,11 +176,101 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _syncEvents: [String] = []
     /// Starts and ends of syncs, in order ("sync", "sync-done", "quick", "quick-done").
     var syncEvents: [String] { lock.withLock { _syncEvents } }
-    func nodes() throws -> [NodeInfo] { [] }
+    /// Returned by `nodes`.
+    var nodeList: [NodeInfo] = []
+    func nodes() throws -> [NodeInfo] { nodeList }
     private var _addedNodes: [String] = []
     /// `id@addr` of each `addNode` call, in order.
     var addedNodes: [String] { lock.withLock { _addedNodes } }
     func addNode(id: String, addr: String) throws { lock.withLock { _addedNodes.append("\(id)@\(addr)") } }
+    private var _nodeCalls: [String] = []
+    /// `refresh:`, `block:`, `unblock:` and `remove:` calls with their node id, in order.
+    var nodeCalls: [String] { lock.withLock { _nodeCalls } }
+    /// Returned by `nodeDetail` and `refreshNodeInfo`; they throw while it is `nil`.
+    var nodeDetailResult: NodeDetail?
+    var blockedNodeList: [BlockedNode] = []
+    var usableIfBlocked: UInt32 = 4
+    var dismissedCount: UInt32 = 1
+    var resetDefaultsResult: UInt32 = 0
+    var resetDefaultsError: Error?
+    private var _defaultNodeCalls: [[String]] = []
+    private var _resetCalls: [[String]] = []
+    /// `id@addr` entries of each `addDefaultNodes` call.
+    var defaultNodeCalls: [[String]] { lock.withLock { _defaultNodeCalls } }
+    /// `id@addr` entries of each `resetDefaultNodes` call.
+    var resetCalls: [[String]] { lock.withLock { _resetCalls } }
+    private func nodeDetailOrThrow() throws -> NodeDetail {
+        guard let nodeDetailResult else { throw NSError(domain: "FakeDevice", code: 1) }
+        return nodeDetailResult
+    }
+    /// Returned by `refreshNodeInfo` instead of `nodeDetailResult` when set.
+    var refreshedDetail: NodeDetail?
+    /// Thrown by `refreshNodeInfo` when set (the node is unreachable).
+    var refreshError: Error?
+    /// Thrown by `blockNode` and `removeNode` when set (nothing recorded).
+    var nodeActionError: Error?
+    /// Thrown by `nodeDetail` when set.
+    var nodeDetailError: Error?
+    /// Thrown by `usableNodesIfBlocked` when set.
+    var usableError: Error?
+    /// Thrown by `blockedNodes` when set.
+    var blockedNodesError: Error?
+    /// Thrown by `unblockNode` when set.
+    var unblockError: Error?
+    private var _blockLockedLeft = 0
+    /// `blockNode` throws `Locked` this many times first (a sync running).
+    var blockLockedTimes: Int {
+        get { lock.withLock { _blockLockedLeft } }
+        set { lock.withLock { _blockLockedLeft = newValue } }
+    }
+    private var _blockAttempts = 0
+    /// Every `blockNode` call, the `Locked` ones included.
+    var blockAttempts: Int { lock.withLock { _blockAttempts } }
+    func nodeDetail(id: String) throws -> NodeDetail {
+        if let nodeDetailError { throw nodeDetailError }
+        return try nodeDetailOrThrow()
+    }
+    func refreshNodeInfo(id: String) throws -> NodeDetail {
+        lock.withLock { _nodeCalls.append("refresh:\(id)") }
+        if let refreshError { throw refreshError }
+        return try refreshedDetail ?? nodeDetailOrThrow()
+    }
+    func removeNode(id: String) throws {
+        if let nodeActionError { throw nodeActionError }
+        lock.withLock { _nodeCalls.append("remove:\(id)") }
+    }
+    func blockNode(id: String) throws {
+        let locked = lock.withLock { () -> Bool in
+            _blockAttempts += 1
+            guard _blockLockedLeft > 0 else { return false }
+            _blockLockedLeft -= 1
+            return true
+        }
+        if locked { throw BarkingError.Locked }
+        if let nodeActionError { throw nodeActionError }
+        lock.withLock { _nodeCalls.append("block:\(id)") }
+    }
+    func unblockNode(id: String) throws {
+        if let unblockError { throw unblockError }
+        lock.withLock { _nodeCalls.append("unblock:\(id)") }
+    }
+    func blockedNodes() throws -> [BlockedNode] {
+        if let blockedNodesError { throw blockedNodesError }
+        return blockedNodeList
+    }
+    func addDefaultNodes(entries: [DefaultNode]) throws {
+        lock.withLock { _defaultNodeCalls.append(entries.map { "\($0.id)@\($0.addr)" }) }
+    }
+    func resetDefaultNodes(entries: [DefaultNode]) throws -> UInt32 {
+        lock.withLock { _resetCalls.append(entries.map { "\($0.id)@\($0.addr)" }) }
+        if let resetDefaultsError { throw resetDefaultsError }
+        return resetDefaultsResult
+    }
+    func dismissedDefaultsCount() throws -> UInt32 { dismissedCount }
+    func usableNodesIfBlocked(id: String) throws -> UInt32 {
+        if let usableError { throw usableError }
+        return usableIfBlocked
+    }
     private var _pushSettings: [PushSettings?] = []
     /// Every `setPush` call, in order (`nil`: push off).
     var pushSettings: [PushSettings?] { lock.withLock { _pushSettings } }

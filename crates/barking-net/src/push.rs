@@ -215,6 +215,15 @@ pub struct PushPlan {
 }
 
 impl PushState {
+    /// Nodes holding at least one of this device's subscriptions: the only
+    /// ones `Info` names the push relay to (the others learn nothing of it).
+    pub fn subscribed_nodes(&self) -> HashSet<NodeId> {
+        self.subs
+            .values()
+            .flat_map(|b| b.nodes.iter().map(|(n, _)| *n))
+            .collect()
+    }
+
     /// Reads the state. A missing or undecodable one gives an empty state; a
     /// storage read error is returned, so that the caller never plans from an
     /// empty state over real subscriptions (it would lose their cancel
@@ -360,6 +369,17 @@ impl PushState {
                 self.subs.remove(&key);
             }
         }
+    }
+
+    /// Forgets every subscription held on `node` (it was blocked), without
+    /// unsubscribing: they expire by themselves. Entries left without a
+    /// node go; the next plan subscribes elsewhere.
+    pub fn forget_node(&mut self, node: &NodeId) {
+        self.subs.retain(|_, b| {
+            b.nodes.retain(|(n, _)| n != node);
+            !b.nodes.is_empty()
+        });
+        self.no_wake.remove(node);
     }
 
     /// `node` refused or did not take a subscription: left out for

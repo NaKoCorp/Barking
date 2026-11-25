@@ -110,6 +110,49 @@ The node only dials public relay addresses. On the Mac that hosts both, it reach
 
 If the node logs connection failures to the relay while the relay is reachable from outside, the router does not loop back. Enable NAT loopback in its settings, if it has the option. No workaround is provided here.
 
+## Node 0.5: Info and origin lookup
+
+Node 0.5.0 speaks protocol 5 and answers a new `Info` request. The app uses it to show each node's state in its node list. A report holds:
+
+- the software version, the protocol and the uptime;
+- how full the node is, in coarse tiers (low, medium, high, full) for storage and for wake subscriptions, never exact counts;
+- the state of the push link to the relay the app asked about (see below);
+- the origin of the node (autonomous system and country), when known.
+
+**Push link.** The node checks the push relays that its operator lists in `[info] probe_relays`, and only those. Every 5 minutes it connects to each listed relay, checks the relay's identity (`Hello`) and closes the connection; it sends no wake-up. A push relay refuses new connections while its own sends to Apple fail, so `Ok` means "the relay answers and its link to APNs works". Any relay not in the list reads `Unknown`.
+
+The list never comes from the subscriptions. `Info` is public, so a state derived from them would tell anyone who asks which relays the users of this node subscribe through, and, polled over time, when they subscribe or leave; for a relay used by few people, that points at them. A listed relay is probed whether or not anyone subscribes through it, and an unlisted one reads `Unknown` whether or not anyone does: the answer tells nothing about the subscriptions. The state never comes from the wake-ups the node sends either, so it does not tell when users receive messages. The list is visible from outside (anyone can ask about a relay and see `Ok`), so list only relays you are willing to be seen checking, such as the public NaKoCorp relay.
+
+```toml
+[info]
+probe_relays = ["<relay identifier>@push.example.org:4434"]
+```
+
+Entries are `identifier@host:port`, an IPv6 address in brackets; the identifier is the relay's node id (`BARKING_RELAY_ID`). At most 32 entries and 4 hosts per identifier, tried in order. Hosts must be DNS names or routable addresses, unless `[dht] allow_private_addrs = true`. A relay reads `Failing` only after it has answered once since the node started; one that is down from the start reads `Unknown`. Each round probes 8 relays at once and is cut after 250 s; nothing is logged. The default is an empty list: no probes, and every relay reads `Unknown`. A node with `[wake] enabled = false` makes no probes and reports no push link. Expect outgoing QUIC connections to the listed relays (UDP to their port) every 5 minutes. `scripts/stack-init.sh --relay` writes this line for the relay it sets up, in a node config it writes in the same run; when it keeps an existing node config, it prints the line to add instead.
+
+The report is precomputed: answering it reads no database, and the node logs nothing about the client that asked, neither its IP address nor the relay it named. A 0.4 node does not understand `Info`: the app does not send it and shows no report for that node.
+
+The origin comes from a lookup that the node makes itself, at startup, then 24 h after a success, or 1 h after a failure. It needs a public address in `[dht]`. The query name contains the node's own IP address, so the **system resolver and Team Cymru see it**: `origin.asn.cymru.com` for IPv4, `origin6.asn.cymru.com` for IPv6, then a second query, `AS<n>.asn.cymru.com`, for the name of the autonomous system. This is the address the node already publishes in its signed record.
+
+Team Cymru answers are plain DNS, not authenticated. A resolver on the path can forge the origin; the app then shows it as a mismatch with its own IP base. To turn the lookup off, add this to `deploy/config/barking-node.toml`:
+
+```toml
+[info]
+origin_lookup = false
+```
+
+The default is `true`. The report then carries no origin.
+
+**Upgrade.** Update the 6 deployed nodes to 0.5.0 as described in [Update](#update). No configuration change is needed: `[info]` is optional and the other keys are unchanged. Add `probe_relays` to have a node report the link to the NaKoCorp relay; without it, the app shows that link as unknown. The nodes can be upgraded one at a time, and 0.4 and 0.5 nodes work together.
+
+**IP base in the app.** The app checks the origin a node states against an embedded base, `apple/Barking/Resources/ipdb.bin` (DB-IP Lite, CC BY 4.0). Regenerate it for each app release (spec §6.3), with the source month as argument, and commit the result:
+
+```sh
+scripts/build-ipdb.sh 2026-12
+```
+
+The script downloads the country and ASN files into a temporary directory and rewrites `ipdb.bin` and `ipdb.LICENSE.txt`, which records the source month and the SHA-256 of `ipdb.bin`. It fails if the base exceeds 10 MB (10 485 760 bytes), the cap for the app bundle. Each regeneration adds a new binary of nearly 10 MB to the repository history, which is why it follows releases, not the calendar.
+
 ## Update
 
 1. Verify the new release and put it in `dist/`.

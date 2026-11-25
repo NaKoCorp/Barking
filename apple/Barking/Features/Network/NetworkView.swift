@@ -15,6 +15,7 @@ struct NetworkView: View {
     @State private var confirming: AppRouter.RelayLink?
     /// A relay shown as a QR code, for another phone to scan.
     @State private var sharing: AppRouter.RelayLink?
+    @State private var confirmingReset = false
     @Environment(AppRouter.self) private var router
     @Environment(\.colorScheme) private var scheme
     @Environment(\.locale) private var locale
@@ -32,16 +33,12 @@ struct NetworkView: View {
                     syncCard.padding(.top, Space.s3)
                     // 24 pt above a section label, 8 below (U-14).
                     SectionLabel("Internet relays").padding(.top, Space.section - Space.s2)
-                    Card {
-                        VStack(alignment: .leading, spacing: 12) {
-                            if model.relays.isEmpty {
-                                Text("No relay yet. Until public relays exist, add one by hand.")
-                                    .font(.bBody).foregroundStyle(Color.fgMuted)
-                            }
-                            ForEach(model.relays, id: \.id) { r in relayRow(r) }
-                            TextLink("+ Add a relay") { adding = true }
-                        }
-                    }
+                    relaysCard
+                    // A quiet line under the card (§7.1).
+                    Text("Relays keep your sealed messages until your contacts pick them up. Tap a relay to see who hosts it and how it behaves.")
+                        .font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, Space.s1)
                 }
                 .padding(.horizontal, Space.gutter)
                 .padding(.vertical, Space.s4)
@@ -51,7 +48,23 @@ struct NetworkView: View {
             .navigationTitle(Text("Network"))
             .refreshable { await model.syncNow() }
             .sheet(isPresented: $adding, onDismiss: { scanning = false; notARelay = false }) { addSheet }
-            .sheet(item: $sharing) { relayCode($0) }
+            .sheet(item: $sharing) { r in RelayCodeSheet(relay: r) { sharing = nil } }
+            .navigationDestination(for: NetworkRoute.self) { route in
+                switch route {
+                case .node(let id): NodeDetailView(core: core, id: id)
+                case .others: OtherNodesView(model: model)
+                case .blocked: BlockedNodesView(core: core)
+                }
+            }
+            .alert(Text("Restore the default nodes?"), isPresented: $confirmingReset) {
+                Button("Restore") {
+                    Task { if await model.resetDefaults() > 0 { Haptic.success.play() } }
+                }
+                .accessibilityIdentifier("network.reset.confirm")
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(verbatim: NodeLabels.resetMessage(model.dismissedDefaults, lang: .of(locale)))
+            }
             .alert(Text("Add this relay?"),
                    isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
                    presenting: confirming) { r in
@@ -150,32 +163,52 @@ struct NetworkView: View {
         }
     }
 
-    private func relayRow(_ r: NodeInfo) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(verbatim: String(r.id.prefix(12))).font(BarkingFont.mono(.footnote, size: 13)).foregroundStyle(Color.fg)
-                Text(verbatim: r.addr).font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
-                if r.manual { Text("added by hand").font(.bMeta).foregroundStyle(Color.fgSoft) }
-                else if r.fromCard { Text("from a contact's card").font(.bMeta).foregroundStyle(Color.fgSoft) }
-            }
-            Spacer()
-            Text(verbatim: "\(Int(r.score * 100))%").font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.fgMuted)
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.surfaceAlt).frame(width: 64, height: 4)
-                Capsule().fill(Color.transportNet).frame(width: 64 * CGFloat(r.score), height: 4)
-            }
-            .accessibilityHidden(true)
-        }
-        .contentShape(.rect)
-        .contextMenu {
-            if let link = NetworkModel.relayLink(id: r.id, addr: r.addr) {
-                ShareLink(item: link) { Label("Share this relay", systemImage: "square.and.arrow.up") }
-            }
-            Button { sharing = AppRouter.RelayLink(id: r.id, addr: r.addr) } label: {
-                Label("Show its QR code", systemImage: "qrcode")
+    /// The nodes in use (§7.1), then the rest and the blocked ones behind
+    /// a row each, "+ Add a relay" and, once a default node was removed,
+    /// "Restore the default nodes".
+    private var relaysCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 0) {
+                if model.inUse.isEmpty {
+                    Text(model.others.isEmpty ? "No relay yet. Until public relays exist, add one by hand."
+                                              : "No relay in use yet.")
+                        .font(.bBody).foregroundStyle(Color.fgMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.bottom, Space.s2)
+                }
+                ForEach(Array(model.inUse.enumerated()), id: \.element.id) { i, node in
+                    if i > 0 { separator }
+                    NodeRow(node: node) { sharing = $0 }
+                }
+                if !model.others.isEmpty || model.blockedCount > 0 {
+                    if !model.inUse.isEmpty { separator }
+                    if !model.others.isEmpty {
+                        NodeListLink(route: .others, title: String(localized: "Other known nodes (\(model.others.count))",
+                                                                   bundle: .strings(for: locale), locale: locale),
+                                     identifier: "network.others")
+                    }
+                    if model.blockedCount > 0 {
+                        NodeListLink(route: .blocked, title: String(localized: "Blocked nodes (\(model.blockedCount))",
+                                                                    bundle: .strings(for: locale), locale: locale),
+                                     identifier: "network.blocked")
+                    }
+                }
+                VStack(alignment: .leading, spacing: Space.s1) {
+                    TextLink("+ Add a relay") { adding = true }
+                    if model.showsReset {
+                        TextLink("Restore the default nodes") { confirmingReset = true }
+                            .accessibilityIdentifier("network.reset")
+                    }
+                    if let e = model.resetError {
+                        Text(verbatim: e).font(.bBodySmall).foregroundStyle(Color.danger)
+                    }
+                }
+                .padding(.top, Space.s1)
             }
         }
     }
+
+    private var separator: some View { Rectangle().fill(Color.border).frame(height: 1) }
 
     /// A relay from a link, once confirmed. If it fails, the add sheet opens
     /// with the relay filled in and the error under it.
@@ -196,30 +229,6 @@ struct NetworkView: View {
         notARelay = false
         scanning = false
         Haptic.success.play()
-    }
-
-    /// The relay's link as a QR code (white ground in both themes).
-    private func relayCode(_ r: AppRouter.RelayLink) -> some View {
-        NavigationStack {
-            VStack(spacing: Space.s4) {
-                if let link = NetworkModel.relayLink(id: r.id, addr: r.addr),
-                   let img = QRPayload.image(for: Data(link.absoluteString.utf8), scale: 6) {
-                    Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
-                        .padding(12).background(Color.white, in: .rect(cornerRadius: Radius.card))
-                        .frame(maxWidth: 320)
-                        .accessibilityLabel(Text("Relay QR code. Another phone scans it to add this relay."))
-                    Text(verbatim: r.addr).font(BarkingFont.mono(.footnote, size: 13)).foregroundStyle(Color.fgMuted)
-                    ShareLink(item: link) { Text("Share this relay") }.buttonStyle(.barkingPrimary)
-                }
-            }
-            .padding(Space.gutter)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.surface)
-            .navigationTitle(Text("Relay"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { sharing = nil } } }
-        }
-        .presentationBackground(Color.surface)
     }
 
     private var addSheet: some View {

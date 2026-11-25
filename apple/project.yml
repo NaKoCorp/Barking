@@ -66,6 +66,9 @@ targets:
     type: application
     platform: iOS
     sources:
+      # Barking/Resources/ipdb.bin (offline IP base, scripts/build-ipdb.sh) and its
+      # license text are bundled as resources with the rest of this folder; the
+      # notification extension does not include them.
       - Barking
     dependencies:
       - target: BarkingKit

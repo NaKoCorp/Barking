@@ -85,3 +85,19 @@ pow_bits = 18
 # with or without an ownership proof (only a full mailbox is reclaimed).
 # Small device: max_subscriptions = 100000
 # max_subscriptions = 1000000
+
+# Public self-report of the node (`Info` request). The origin (autonomous
+# system and country of the node's own public address) is looked up at
+# startup, then daily, through Team Cymru's DNS service. The query name
+# contains the node's address, so the system resolver and Team Cymru see it.
+# Default: true. Without a public address in [dht], nothing is looked up.
+# [info]
+# origin_lookup = true
+# Push relays whose link the node checks every 5 minutes and reports in
+# `Info` (Ok or Failing), as `identifier@host:port` (an IPv6 address in
+# brackets). Every other relay reads Unknown. The list is never taken from
+# the subscriptions: the report must not tell which relays the users of this
+# node subscribe through. List only relays you are willing to be seen
+# probing. At most 32 entries, 4 hosts per identifier; routable addresses
+# only, unless [dht] allow_private_addrs. Default: none, no probe.
+# probe_relays = ["A4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQ@push.example.org:4434"]

@@ -82,7 +82,7 @@ enum LogGlyph: Equatable {
         case "log.packet_opened", "log.node_fetch", "log.duplicate_ignored": .received
         case "log.ack_verified": .verified
         case "log.contact_key_changed", "log.decrypt_failed": .warning
-        case "log.node_avoided": .node
+        case "log.node_avoided", "log.node_blocked", "log.node_unblocked": .node
         case "log.device_linked", "log.link_finished", "log.sync_applied", "log.sync_skipped",
              "log.contact_card_updated", "log.history_imported", "log.own_devices_updated", "log.seal_skipped",
              "log.admin_transfer_started", "log.admin_transferred", "log.admin_received",

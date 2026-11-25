@@ -27,6 +27,7 @@ postcard.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "net"] }
+tracing.workspace = true
 uniffi.workspace = true
 zeroize.workspace = true
 

@@ -3,14 +3,12 @@
 //! the CLI does: one thread, a predictable memory use in the extension.
 
 use std::future::Future;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use barking_core::identity::root::Fingerprint;
 use barking_core::{Core, ReceiveOutcome, SyncKind};
 use barking_net::push::PushConfig;
 use barking_net::{NetState, QuicDialer, QuickOptions, SyncOptions, SyncReport};
-use barking_proto::NodeId;
 
 use crate::delivery::{DeliveryChange, changes_of};
 use crate::device::{Device, now};
@@ -140,7 +138,7 @@ fn note_leave_deposits(core: &mut Core, now: u64, allow_private: bool) -> Result
 /// Time a runtime is given to close once the sync has returned.
 const SHUTDOWN: Duration = Duration::from_secs(1);
 
-fn block_on<F: Future>(f: F) -> Result<F::Output, BarkingError> {
+pub(crate) fn block_on<F: Future>(f: F) -> Result<F::Output, BarkingError> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -308,63 +306,8 @@ fn synced_contacts(received: &[ReceiveOutcome]) -> Vec<String> {
     out
 }
 
-/// A node of the local view (the Network screen's relays).
-#[derive(Debug, uniffi::Record)]
-pub struct NodeInfo {
-    pub id: String,
-    /// `ip:port`, the hand-entered one first; empty if unknown.
-    pub addr: String,
-    /// Reliability, 0 to 1.
-    pub score: f32,
-    /// Added by hand.
-    pub manual: bool,
-    /// Carried by a contact's card.
-    pub from_card: bool,
-    /// Unix seconds; 0 if never.
-    pub last_seen: u64,
-}
-
 #[uniffi::export]
 impl Device {
-    /// Nodes of the local view, best score first.
-    pub fn nodes(&self) -> Result<Vec<NodeInfo>, BarkingError> {
-        guard(|| {
-            let allow_private = self.allow_private();
-            self.with_core(|core| {
-                let t = now();
-                let (state, _) = NetState::load_checked(core, t, allow_private)
-                    .map_err(BarkingError::storage)?;
-                let hints = core.contact_node_hints().unwrap_or_default();
-                let from_cards = barking_net::card_hint_ids(&state.view, &hints, t);
-                let mut out: Vec<NodeInfo> = state
-                    .view
-                    .entries()
-                    .map(|(id, e)| {
-                        let addr = e
-                            .manual_addr
-                            .map(|a| a.to_string())
-                            .or_else(|| {
-                                e.record.as_ref().and_then(|r| {
-                                    r.v4.map(|a| a.to_string()).or(r.v6.map(|a| a.to_string()))
-                                })
-                            })
-                            .unwrap_or_default();
-                        NodeInfo {
-                            id: id.to_string(),
-                            addr,
-                            score: e.score.value(),
-                            manual: e.manual,
-                            from_card: from_cards.contains(id),
-                            last_seen: e.last_seen,
-                        }
-                    })
-                    .collect();
-                out.sort_by(|a, b| b.score.total_cmp(&a.score));
-                Ok(out)
-            })
-        })
-    }
-
     /// Where the request to be removed (`leave`, `transfer_and_leave`)
     /// stands: the app wipes on `Left` only, and calls `leave` again on
     /// `Expired`.
@@ -375,32 +318,6 @@ impl Device {
                 let t = now();
                 note_leave_deposits(core, t, allow_private)?;
                 Ok(core.leave_state(t)?.into())
-            })
-        })
-    }
-
-    /// Adds a node by hand (base32 identifier, `host:port` address).
-    pub fn add_node(&self, id: String, addr: String) -> Result<(), BarkingError> {
-        guard(|| {
-            let id: NodeId = id.trim().to_ascii_uppercase().parse().map_err(|_| {
-                BarkingError::invalid("node identifier: 52-character base32 expected")
-            })?;
-            if !id.puzzle_ok() {
-                return Err(BarkingError::invalid(
-                    "node identifier does not solve the identity puzzle",
-                ));
-            }
-            let addr: SocketAddr = addr
-                .trim()
-                .parse()
-                .map_err(|_| BarkingError::invalid("node address: ip:port expected"))?;
-            let allow_private = self.allow_private();
-            self.with_core(|core| {
-                let t = now();
-                let (mut state, _) = NetState::load_checked(core, t, allow_private)
-                    .map_err(BarkingError::storage)?;
-                state.view.add_manual(id, addr, t);
-                state.save(core).map_err(BarkingError::storage)
             })
         })
     }

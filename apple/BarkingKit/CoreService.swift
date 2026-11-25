@@ -443,6 +443,47 @@ public actor CoreService {
         try await call("node") { try $0.addNode(id: id, addr: addr) }
         publish(.network)
     }
+    public func nodeDetail(id: String) async throws -> NodeDetail {
+        try await call("node-detail") { try $0.nodeDetail(id: id) }
+    }
+    public func refreshNodeInfo(id: String) async throws -> NodeDetail {
+        let detail = try await call("node-refresh") { try $0.refreshNodeInfo(id: id) }
+        publish(.network)
+        return detail
+    }
+    public func removeNode(id: String) async throws {
+        try await call("node-remove") { try $0.removeNode(id: id) }
+        publish(.network)
+    }
+    public func blockNode(id: String) async throws {
+        try await call("node-block") { try $0.blockNode(id: id) }
+        publish(.network)
+    }
+    public func unblockNode(id: String) async throws {
+        try await call("node-unblock") { try $0.unblockNode(id: id) }
+        publish(.network)
+    }
+    public func blockedNodes() async throws -> [BlockedNode] {
+        try await call("blocked-nodes") { try $0.blockedNodes() }
+    }
+    /// Adds the nodes the app was built with (one call), unless dismissed.
+    public func addDefaultNodes(_ entries: [DefaultNode]) async throws {
+        try await call("default-nodes") { try $0.addDefaultNodes(entries: entries) }
+        publish(.network)
+    }
+    /// Restores the dismissed default nodes; how many came back.
+    public func resetDefaultNodes(_ entries: [DefaultNode]) async throws -> Int {
+        let restored = try await call("default-nodes-reset") { try $0.resetDefaultNodes(entries: entries) }
+        publish(.network)
+        return Int(restored)
+    }
+    public func dismissedDefaultsCount() async throws -> Int {
+        Int(try await call("dismissed-defaults") { try $0.dismissedDefaultsCount() })
+    }
+    /// How many nodes would still be usable if `id` were blocked.
+    public func usableNodesIfBlocked(id: String) async throws -> Int {
+        Int(try await call("usable-if-blocked") { try $0.usableNodesIfBlocked(id: id) })
+    }
     /// Wake-up settings (`nil`: push off), used from the next full sync.
     public func setPush(_ settings: PushSettings?) async throws {
         try await call("push") { try $0.setPush(settings: settings) }

@@ -919,14 +919,17 @@ impl Core {
         self.store.put_meta(&transport_key(key)?, &bytes)
     }
 
-    /// Logs a transport event (deposit or poll on a node):
-    /// only `NodeDeposit`, `NodeFetch` and `NodeAvoided` are accepted.
+    /// Logs a transport event (deposit or poll on a node, a node set aside,
+    /// blocked or unblocked): only `NodeDeposit`, `NodeFetch`,
+    /// `NodeAvoided`, `NodeBlocked` and `NodeUnblocked` are accepted.
     pub fn log_transport_event(&mut self, event: TransparencyEvent, now: u64) -> Result<()> {
         if !matches!(
             event,
             TransparencyEvent::NodeDeposit { .. }
                 | TransparencyEvent::NodeFetch { .. }
                 | TransparencyEvent::NodeAvoided { .. }
+                | TransparencyEvent::NodeBlocked { .. }
+                | TransparencyEvent::NodeUnblocked { .. }
         ) {
             return Err(CoreError::Malformed("transport event"));
         }

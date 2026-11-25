@@ -10,12 +10,14 @@
 //! to move even older plaintext files to that key before loading.
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::time::Duration;
 
 use barking_core::{Core, CoreError};
 use barking_packet::{MailboxId, Packet};
 use barking_proto::client::{FETCH_PAGE_SIZES, FetchResume};
 use barking_proto::pow::content_hash;
-use barking_proto::{MIN_PAGE_BYTES, NodeId};
+use barking_proto::{MIN_PAGE_BYTES, NodeId, NodeInfoReport, NodeOrigin};
 use serde::{Deserialize, Serialize};
 
 use crate::discover::FallbackLog;
@@ -29,12 +31,17 @@ pub const LEGACY_STATE_KEY: &str = "netsync";
 /// Nodes that failed in a sync that ended as network down are ranked last
 /// for this long.
 pub const DOWN_FAILED_SECS: u64 = 86_400;
-/// Version of the encoding: any other value reads as an unreadable state.
-/// Frozen: format 1 is the layout of `Stored` (and of the nested view and
-/// ledger encodings) as first released; any change to them must bump
-/// `FORMAT` and migrate the older format (`format_1_bytes_are_frozen` holds
-/// its bytes).
-const FORMAT: u8 = 1;
+/// Latency samples kept per node (the last ones).
+pub const LATENCY_SAMPLES: usize = 8;
+/// Version of the encoding written. Format 1 (`StoredV1`) still reads and is
+/// migrated; any other value reads as an unreadable state. Both layouts are
+/// frozen, as are the nested view and ledger encodings: any change to them
+/// must bump `FORMAT` and migrate the older formats
+/// (`format_1_bytes_are_frozen` and `format_2_bytes_are_frozen` hold their
+/// bytes).
+const FORMAT: u8 = 2;
+/// Format 1, as first released: `StoredV1`.
+const FORMAT_1: u8 = 1;
 
 /// Everything the network client keeps between synchronizations.
 #[derive(Clone, Debug)]
@@ -66,6 +73,36 @@ pub struct NetState {
     /// sync no page timeout confirmed it (`recover_page_bytes`), so that a
     /// forced shrink does not last. Absent: `FETCH_PAGE_SIZES[0]`.
     pub page_bytes: HashMap<NodeId, u32>,
+    /// Last self-report of a node (`Info`), kept for nodes of the view only.
+    pub info: HashMap<NodeId, CachedInfo>,
+    /// Last round-trip times to a node, in milliseconds, oldest first (at
+    /// most `LATENCY_SAMPLES`). Stays on the device, like the score.
+    pub latency: HashMap<NodeId, Vec<u32>>,
+    /// Nodes the user blocked: the view refuses them (`View::set_blocked`).
+    pub blocked: HashMap<NodeId, BlockedEntry>,
+    /// Default nodes shipped with the app, as added at launch.
+    pub defaults: HashSet<NodeId>,
+    /// Default nodes the user removed: not added again at launch.
+    pub dismissed_defaults: HashSet<NodeId>,
+}
+
+/// A node's self-report, the date (hour) it was fetched, and the address
+/// the node answered on: the remote address of the pinned connection that
+/// brought the report, the only address its declared origin is checked
+/// against (`geo::verdict`). `None` when it was not seen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedInfo {
+    pub report: NodeInfoReport,
+    pub fetched_at: u64,
+    pub observed: Option<IpAddr>,
+}
+
+/// A blocked node: date (hour) of the block, and the origin it declared
+/// then, if known (for the user to recognise it in the list).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedEntry {
+    pub at: u64,
+    pub origin: Option<NodeOrigin>,
 }
 
 /// Failure to read or write the state.
@@ -77,8 +114,9 @@ pub enum StateError {
     Encode,
 }
 
-/// Stored form. The view and the ledger are nested encodings so that their
-/// own `restore` checks them again on load.
+/// Stored form, format 2: format 1's fields unchanged, then the new tables.
+/// The view and the ledger are nested encodings so that their own `restore`
+/// checks them again on load.
 #[derive(Serialize, Deserialize)]
 struct Stored {
     format: u8,
@@ -92,6 +130,51 @@ struct Stored {
     crosscheck_at: Vec<(NodeId, MailboxId, u64)>,
     down_failed: Vec<(NodeId, u64)>,
     page_bytes: Vec<(NodeId, u32)>,
+    info: Vec<(NodeId, CachedInfo)>,
+    latency: Vec<(NodeId, Vec<u32>)>,
+    blocked: Vec<(NodeId, BlockedEntry)>,
+    defaults: Vec<NodeId>,
+    dismissed_defaults: Vec<NodeId>,
+}
+
+/// Stored form, format 1, as first released: read only, to migrate. Frozen.
+#[derive(Serialize, Deserialize)]
+struct StoredV1 {
+    format: u8,
+    view: Vec<u8>,
+    ledger: Vec<u8>,
+    positions: Vec<(NodeId, MailboxId, u64)>,
+    fallbacks: FallbackLog,
+    unaudited: Vec<(NodeId, u32)>,
+    audited_at: Vec<(NodeId, MailboxId, u64)>,
+    reread_at: Vec<(NodeId, MailboxId, u64)>,
+    crosscheck_at: Vec<(NodeId, MailboxId, u64)>,
+    down_failed: Vec<(NodeId, u64)>,
+    page_bytes: Vec<(NodeId, u32)>,
+}
+
+impl From<StoredV1> for Stored {
+    /// Format 1 migrated: every field kept, the new tables empty.
+    fn from(v1: StoredV1) -> Stored {
+        Stored {
+            format: FORMAT,
+            view: v1.view,
+            ledger: v1.ledger,
+            positions: v1.positions,
+            fallbacks: v1.fallbacks,
+            unaudited: v1.unaudited,
+            audited_at: v1.audited_at,
+            reread_at: v1.reread_at,
+            crosscheck_at: v1.crosscheck_at,
+            down_failed: v1.down_failed,
+            page_bytes: v1.page_bytes,
+            info: Vec::new(),
+            latency: Vec::new(),
+            blocked: Vec::new(),
+            defaults: Vec::new(),
+            dismissed_defaults: Vec::new(),
+        }
+    }
 }
 
 impl NetState {
@@ -108,6 +191,11 @@ impl NetState {
             crosscheck_at: HashMap::new(),
             down_failed: HashMap::new(),
             page_bytes: HashMap::new(),
+            info: HashMap::new(),
+            latency: HashMap::new(),
+            blocked: HashMap::new(),
+            defaults: HashSet::new(),
+            dismissed_defaults: HashSet::new(),
         }
     }
 
@@ -148,6 +236,12 @@ impl NetState {
 
     /// Postcard encoding of the state.
     pub fn encode(&self) -> Result<Vec<u8>, StateError> {
+        postcard::to_allocvec(&self.stored()?).map_err(|_| StateError::Encode)
+    }
+
+    /// Stored form, tables sorted by node so that the bytes are stable;
+    /// dates rounded to the hour.
+    fn stored(&self) -> Result<Stored, StateError> {
         let triples = |map: &HashMap<(NodeId, MailboxId), u64>| {
             let mut v: Vec<(NodeId, MailboxId, u64)> =
                 map.iter().map(|(&(n, m), &s)| (n, m, s)).collect();
@@ -163,8 +257,36 @@ impl NetState {
         let mut page_bytes: Vec<(NodeId, u32)> =
             self.page_bytes.iter().map(|(&n, &b)| (n, b)).collect();
         page_bytes.sort_unstable_by_key(|(n, _)| n.0);
+        let sorted = |set: &HashSet<NodeId>| {
+            let mut v: Vec<NodeId> = set.iter().copied().collect();
+            v.sort_unstable_by_key(|n| n.0);
+            v
+        };
+        let mut info: Vec<(NodeId, CachedInfo)> = self
+            .info
+            .iter()
+            .map(|(&n, c)| {
+                let mut c = c.clone();
+                c.fetched_at = hour(c.fetched_at);
+                (n, c)
+            })
+            .collect();
+        info.sort_unstable_by_key(|(n, _)| n.0);
+        let mut latency: Vec<(NodeId, Vec<u32>)> =
+            self.latency.iter().map(|(&n, l)| (n, l.clone())).collect();
+        latency.sort_unstable_by_key(|(n, _)| n.0);
+        let mut blocked: Vec<(NodeId, BlockedEntry)> = self
+            .blocked
+            .iter()
+            .map(|(&n, b)| {
+                let mut b = b.clone();
+                b.at = hour(b.at);
+                (n, b)
+            })
+            .collect();
+        blocked.sort_unstable_by_key(|(n, _)| n.0);
         let encode_err = |_| StateError::Encode;
-        let stored = Stored {
+        Ok(Stored {
             format: FORMAT,
             view: postcard::to_allocvec(&self.view).map_err(encode_err)?,
             ledger: postcard::to_allocvec(&self.ledger).map_err(encode_err)?,
@@ -176,21 +298,86 @@ impl NetState {
             crosscheck_at: triples(&self.crosscheck_at),
             down_failed,
             page_bytes,
+            info,
+            latency,
+            blocked,
+            defaults: sorted(&self.defaults),
+            dismissed_defaults: sorted(&self.dismissed_defaults),
+        })
+    }
+
+    /// Encoding under format 1 (the new tables dropped), for the migration
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn encode_format_1(&self) -> Result<Vec<u8>, StateError> {
+        let s = self.stored()?;
+        let v1 = StoredV1 {
+            format: FORMAT_1,
+            view: s.view,
+            ledger: s.ledger,
+            positions: s.positions,
+            fallbacks: s.fallbacks,
+            unaudited: s.unaudited,
+            audited_at: s.audited_at,
+            reread_at: s.reread_at,
+            crosscheck_at: s.crosscheck_at,
+            down_failed: s.down_failed,
+            page_bytes: s.page_bytes,
         };
-        postcard::to_allocvec(&stored).map_err(encode_err)
+        postcard::to_allocvec(&v1).map_err(|_| StateError::Encode)
     }
 
     /// Rebuilds a state from `encode` output, under the current policy (see
-    /// `View::restore`, `Ledger::restore`). `None` if unreadable.
+    /// `View::restore`, `Ledger::restore`). Format 1 is migrated. `None` if
+    /// unreadable.
     pub fn decode(bytes: &[u8], now: u64, allow_private: bool) -> Option<NetState> {
-        let stored: Stored = postcard::from_bytes(bytes).ok()?;
-        if stored.format != FORMAT {
-            return None;
-        }
+        // The format is the first byte: postcard writes a `u8` as is.
+        let stored: Stored = match *bytes.first()? {
+            FORMAT_1 => postcard::from_bytes::<StoredV1>(bytes).ok()?.into(),
+            FORMAT => postcard::from_bytes(bytes).ok()?,
+            _ => return None,
+        };
         let mut fallbacks = stored.fallbacks;
         fallbacks.prune(now);
+        let now_hour = hour(now);
+        let blocked: HashMap<NodeId, BlockedEntry> = stored
+            .blocked
+            .into_iter()
+            .map(|(n, mut b)| {
+                b.at = hour(b.at).min(now_hour);
+                // Node-sent, stored before checks existed: checked again.
+                b.origin = b.origin.and_then(NodeOrigin::sanitized);
+                (n, b)
+            })
+            .collect();
+        let mut view = View::restore(&stored.view, allow_private, now).ok()?;
+        view.set_blocked(blocked.keys().copied().collect());
         Some(NetState {
-            view: View::restore(&stored.view, allow_private, now).ok()?,
+            info: stored
+                .info
+                .into_iter()
+                .filter(|(n, _)| view.get(n).is_some())
+                // Node-sent, stored before checks existed: checked again
+                // (`NodeInfoReport::sanitized`, as on receipt).
+                .filter_map(|(n, mut c)| {
+                    c.report = c.report.sanitized()?;
+                    c.fetched_at = hour(c.fetched_at).min(now_hour);
+                    Some((n, c))
+                })
+                .collect(),
+            latency: stored
+                .latency
+                .into_iter()
+                .filter(|(_, l)| !l.is_empty())
+                .map(|(n, mut l)| {
+                    l.drain(..l.len().saturating_sub(LATENCY_SAMPLES));
+                    (n, l)
+                })
+                .collect(),
+            blocked,
+            defaults: stored.defaults.into_iter().collect(),
+            dismissed_defaults: stored.dismissed_defaults.into_iter().collect(),
+            view,
             ledger: Ledger::restore(&stored.ledger, now).ok()?,
             positions: stored
                 .positions
@@ -215,6 +402,52 @@ impl NetState {
                 .map(|(n, b)| (n, b.clamp(MIN_PAGE_BYTES, FETCH_PAGE_SIZES[0])))
                 .collect(),
         })
+    }
+
+    /// Blocks `id`: its entry leaves the view, which refuses it from now on,
+    /// and `entry` goes to `blocked`. The only way to block (both tables
+    /// change together); see `nodes::block_node` for the rest of what a
+    /// block forgets. A node already blocked keeps its first entry.
+    pub fn block(&mut self, id: NodeId, entry: BlockedEntry) {
+        self.view.block(id);
+        self.blocked.entry(id).or_insert(entry);
+    }
+
+    /// Unblocks `id` (both tables); false if it was not blocked.
+    pub fn unblock(&mut self, id: &NodeId) -> bool {
+        self.view.unblock(id);
+        self.blocked.remove(id).is_some()
+    }
+
+    /// Records round-trip times to `id`, in whole milliseconds (saturated),
+    /// keeping the last `LATENCY_SAMPLES`.
+    pub fn note_latency(&mut self, id: NodeId, samples: &[Duration]) {
+        if samples.is_empty() {
+            return;
+        }
+        let l = self.latency.entry(id).or_default();
+        l.extend(
+            samples
+                .iter()
+                .map(|d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX)),
+        );
+        l.drain(..l.len().saturating_sub(LATENCY_SAMPLES));
+    }
+
+    /// Median of the latency samples of `id`, in milliseconds (the mean of
+    /// the two middle ones for an even count, rounded down).
+    pub fn median_latency(&self, id: &NodeId) -> Option<u32> {
+        let mut l = self.latency.get(id)?.clone();
+        if l.is_empty() {
+            return None;
+        }
+        l.sort_unstable();
+        let mid = l.len() / 2;
+        if l.len() % 2 == 1 {
+            return Some(l[mid]);
+        }
+        let mean = (u64::from(l[mid - 1]) + u64::from(l[mid])) / 2;
+        Some(mean as u32)
     }
 
     /// Fetch page size to start from with `node` (see `page_bytes`).

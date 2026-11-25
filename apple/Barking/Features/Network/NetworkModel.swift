@@ -58,7 +58,16 @@ final class NetworkModel {
     private(set) var internetReachable: Bool?
     private(set) var lastSync: Date?
     private(set) var pending = 0
-    private(set) var relays: [NodeInfo] = []
+    /// Nodes in use (§7.1), by reliability then latency.
+    private(set) var inUse: [NodeInfo] = []
+    /// The rest of the view, behind "Other known nodes", in the same order.
+    private(set) var others: [NodeInfo] = []
+    private(set) var blockedCount = 0
+    /// Default nodes the user removed: "Restore the default nodes" shows
+    /// only above zero.
+    private(set) var dismissedDefaults = 0
+    /// Said under the link when the restore failed.
+    private(set) var resetError: String?
     private(set) var terminal: [String] = []
     private(set) var syncing = false
     /// The line of the last "Sync now", while no other sync came after it.
@@ -90,7 +99,52 @@ final class NetworkModel {
         internetReachable = await core.lastSync?.networkUp
         lastSync = await core.lastSyncAt
         pending = (try? await core.pendingCount()) ?? 0
-        relays = (try? await core.nodes()) ?? []
+        let nodes = (try? await core.nodes()) ?? []
+        inUse = Self.sorted(nodes.filter(\.inUse))
+        others = Self.sorted(nodes.filter { !$0.inUse })
+        blockedCount = (try? await core.blockedNodes().count) ?? 0
+        dismissedDefaults = (try? await core.dismissedDefaultsCount()) ?? 0
+    }
+
+    var showsReset: Bool { dismissedDefaults > 0 }
+
+    /// Good, fair, new, weak, avoided; then the fastest; an unknown latency
+    /// last; the id breaks a tie so the list never reshuffles.
+    static func sorted(_ nodes: [NodeInfo]) -> [NodeInfo] {
+        func rank(_ r: Reliability) -> Int {
+            switch r {
+            case .good: 0
+            case .fair: 1
+            case .new: 2
+            case .weak: 3
+            case .avoided: 4
+            }
+        }
+        return nodes.sorted {
+            (rank($0.reliability), $0.latencyMs ?? .max, $0.id) < (rank($1.reliability), $1.latencyMs ?? .max, $1.id)
+        }
+    }
+
+    /// Brings back the default nodes the user removed (Ruling J: the core
+    /// is called here, so a failure is told apart from "nothing to
+    /// restore"); how many came back, 0 on failure with `resetError` set.
+    func resetDefaults(info: [String: Any] = Bundle.main.infoDictionary ?? [:]) async -> Int {
+        var info = info
+        #if BARKING_DEV
+        // As at launch: a UI test never dials a developer's nodes.
+        if UITestNetwork.isolated { info["BarkingBootstrapNodes"] = nil }
+        #endif
+        let entries = BootstrapNodes.entries(info: info).map { DefaultNode(id: $0.id, addr: $0.addr) }
+        do {
+            let restored = try await core.resetDefaultNodes(entries)
+            resetError = nil
+            await load()
+            return restored
+        } catch {
+            resetError = String(localized: "The default nodes could not be restored.")
+            await load()
+            return 0
+        }
     }
 
     func syncNow() async {

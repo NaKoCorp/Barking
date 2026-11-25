@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::{NodeStore, Result};
 
+pub mod probe;
 pub mod sender;
 #[cfg(test)]
 mod tests;
@@ -322,6 +323,14 @@ pub fn has_subscriptions(store: &NodeStore) -> Result<bool> {
         .query_row("SELECT EXISTS(SELECT 1 FROM subscriptions)", [], |r| {
             r.get::<_, bool>(0)
         })?)
+}
+
+/// Subscriptions held, expired ones included (what `max_subscriptions` caps).
+pub fn count_subscriptions(store: &NodeStore) -> Result<u64> {
+    let n: i64 = store
+        .conn()
+        .query_row("SELECT COUNT(*) FROM subscriptions", [], |r| r.get(0))?;
+    Ok(u64::try_from(n).unwrap_or(0))
 }
 
 /// Tells the wake loop that a message arrived, only once the node holds (or

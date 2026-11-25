@@ -4,6 +4,8 @@
 //! synchronization itself (the only part doing I/O, through traits).
 
 pub mod discover;
+pub mod geo;
+pub mod nodes;
 pub mod plan;
 pub mod push;
 pub mod score;

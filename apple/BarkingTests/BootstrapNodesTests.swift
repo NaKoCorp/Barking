@@ -23,11 +23,34 @@ final class BootstrapNodesTests: XCTestCase {
     }
 
     @MainActor
-    func testEachEntryIsAddedToTheCore() async {
+    func testAddUsesDefaultNodesCall() async {
         let device = FakeDevice()
         let core = CoreService(device: device, runner: DirectRunner())
         let info: [String: Any] = ["BarkingBootstrapNodes": "\(Self.id)@203.0.113.7:4433 B@1.2.3.4:1"]
         await BootstrapNodes.add(to: core, info: info)
-        XCTAssertEqual(device.addedNodes, ["\(Self.id)@203.0.113.7:4433", "B@1.2.3.4:1"])
+        XCTAssertEqual(device.defaultNodeCalls, [["\(Self.id)@203.0.113.7:4433", "B@1.2.3.4:1"]])
+        XCTAssertTrue(device.addedNodes.isEmpty)
+    }
+
+    @MainActor
+    func testNoEntryMakesNoCall() async {
+        let device = FakeDevice()
+        let core = CoreService(device: device, runner: DirectRunner())
+        await BootstrapNodes.add(to: core, info: [:])
+        XCTAssertTrue(device.defaultNodeCalls.isEmpty)
+    }
+
+    @MainActor
+    func testResetReturnsRestoredCount() async {
+        let device = FakeDevice()
+        device.resetDefaultsResult = 2
+        let core = CoreService(device: device, runner: DirectRunner())
+        let info: [String: Any] = ["BarkingBootstrapNodes": "A@1.2.3.4:1 B@1.2.3.4:2 C@1.2.3.4:3"]
+        let restored = await BootstrapNodes.reset(core: core, info: info)
+        XCTAssertEqual(restored, 2)
+        XCTAssertEqual(device.resetCalls, [["A@1.2.3.4:1", "B@1.2.3.4:2", "C@1.2.3.4:3"]])
+        device.resetDefaultsError = NSError(domain: "t", code: 1)
+        let failed = await BootstrapNodes.reset(core: core, info: info)
+        XCTAssertEqual(failed, 0)
     }
 }

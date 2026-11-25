@@ -702,5 +702,37 @@
 			<string>%lld minutes</string>
 		</dict>
 	</dict>
+	<key>%lld subscriptions</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld subscription</string>
+			<key>other</key>
+			<string>%lld subscriptions</string>
+		</dict>
+	</dict>
+	<key>The %lld nodes that came with Barking and that you removed come back to the list. Blocked nodes stay blocked.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>The node that came with Barking and that you removed comes back to the list. Blocked nodes stay blocked.</string>
+			<key>other</key>
+			<string>The %lld nodes that came with Barking and that you removed come back to the list. Blocked nodes stay blocked.</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use barking_packet::Kind;
 use barking_proto::client::FetchResume;
 use barking_proto::push::{ApnsEnv, OwnerProof, RelayRef, SubKind, Subscription};
+use barking_proto::{FillTier, NodeInfoReport};
 
 use barking_core::Core;
 use tempfile::TempDir;
@@ -33,6 +34,8 @@ enum Call {
     Subscribe(NodeId, MailboxId, SubKind),
     SubscribeOwned(NodeId, MailboxId),
     Unsubscribe(NodeId, MailboxId),
+    /// Node, and the relay asked about.
+    Info(NodeId, Option<NodeId>),
     Close(NodeId),
 }
 
@@ -129,6 +132,10 @@ struct Net {
     fetch_bytes: Mutex<Vec<(NodeId, usize, usize)>>,
     /// Time each closing takes.
     close_delay: Duration,
+    /// Nodes that speak protocol 5, with the report their `Info` returns.
+    info: HashMap<NodeId, NodeInfoReport>,
+    /// Round trip times a session to that node measured.
+    rtt: HashMap<NodeId, Vec<Duration>>,
     calls: Mutex<Vec<Call>>,
 }
 
@@ -136,6 +143,8 @@ struct Net {
 struct Conn {
     id: NodeId,
     n: usize,
+    /// The address dialled: what the node is seen answering on.
+    addr: Option<SocketAddr>,
 }
 
 impl Net {
@@ -203,7 +212,7 @@ impl Dialer for Net {
 impl Connector for Net {
     type Conn = Conn;
 
-    async fn connect(&self, id: NodeId, _addrs: &[SocketAddr]) -> Result<Conn, DialError> {
+    async fn connect(&self, id: NodeId, addrs: &[SocketAddr]) -> Result<Conn, DialError> {
         let n = {
             let mut calls = self.calls.lock().unwrap();
             calls.push(Call::Connect(id));
@@ -217,7 +226,11 @@ impl Connector for Net {
         } else if self.refuse_connect.contains(&id) {
             Err(DialError::Refused(ErrorReason::NodeFull))
         } else if self.up(&id) {
-            Ok(Conn { id, n })
+            Ok(Conn {
+                id,
+                n,
+                addr: addrs.first().copied(),
+            })
         } else {
             Err(DialError::Unreachable)
         }
@@ -226,6 +239,27 @@ impl Connector for Net {
     async fn close(&self, conn: Conn) {
         tokio::time::sleep(self.close_delay).await;
         self.log(Call::Close(conn.id));
+    }
+
+    fn remote_addr(&self, conn: &Conn) -> Option<SocketAddr> {
+        conn.addr
+    }
+
+    fn rtt_samples(&self, conn: &Conn) -> Vec<Duration> {
+        self.rtt.get(&conn.id).cloned().unwrap_or_default()
+    }
+
+    fn info_supported(&self, conn: &Conn) -> bool {
+        self.info.contains_key(&conn.id)
+    }
+
+    async fn info(
+        &self,
+        conn: &mut Conn,
+        relay: Option<NodeId>,
+    ) -> Result<Option<NodeInfoReport>, DialError> {
+        self.log(Call::Info(conn.id, relay));
+        Ok(self.info.get(&conn.id).cloned())
     }
 }
 
@@ -4332,4 +4366,256 @@ async fn full_sync_fetched_all_follows_the_polling() {
     let full = sync(&mut core, &net, opts()).await;
     assert!(full.polled_all_sessions && !full.intro_partial);
     assert!(full.fetched_all, "{full:?}");
+}
+
+// --- Blocked nodes, latency and node reports ---------------------------------
+
+/// Every call that reaches `node`.
+fn calls_to(calls: &[Call], node: NodeId) -> Vec<Call> {
+    calls
+        .iter()
+        .filter(|c| match c {
+            Call::Ping(n)
+            | Call::Find(n, _)
+            | Call::Connect(n)
+            | Call::Fetch(n, ..)
+            | Call::Deposit(n, _)
+            | Call::Subscribe(n, ..)
+            | Call::SubscribeOwned(n, _)
+            | Call::Unsubscribe(n, _)
+            | Call::Info(n, _)
+            | Call::Close(n) => *n == node,
+        })
+        .cloned()
+        .collect()
+}
+
+/// The order spec §6.4 relies on: the sync loads, talks to X and saves; the
+/// block then loads, blocks and saves (it waits for the sync's lock). The
+/// next sync never reaches X, even listed as built-in or added by hand.
+#[tokio::test(start_paused = true)]
+async fn block_after_running_sync_is_not_overwritten() {
+    let (_dir, mut core, net) = setup();
+    let mut first_opts = opts();
+    first_opts.push = Some(push_config());
+    sync(&mut core, &net, first_opts).await;
+    let calls = net.calls();
+    let x = connects(&calls)[0];
+    assert!(!calls_to(&calls, x).is_empty());
+    crate::nodes::block_node_in_core(&mut core, x, NOW, true).unwrap();
+
+    net.calls.lock().unwrap().clear();
+    let mut next = opts();
+    next.push = Some(push_config());
+    next.builtin = vec![BootstrapEntry {
+        id: x,
+        addr: crate::test_support::addr(0, 0, 1).into(),
+    }];
+    next.manual_nodes = vec![(x, crate::test_support::addr(0, 0, 1).into())];
+    let report = sync(&mut core, &net, next).await;
+    assert!(report.network_up);
+    assert!(!net.calls().is_empty());
+    assert_eq!(calls_to(&net.calls(), x), vec![]);
+    let state = load(&mut core);
+    assert!(state.blocked.contains_key(&x) && state.view.get(&x).is_none());
+}
+
+/// A view too small to go without a bootstrap: neither the built-in list,
+/// nor the seed probe, nor a lookup reaches a blocked node.
+#[tokio::test(start_paused = true)]
+async fn bootstrap_never_dials_a_blocked_node() {
+    let (_dir, mut core) = subject(NOW);
+    let mut net = view_of(&mut core, &[0, 1]);
+    for n in 2..4 {
+        net.records.insert(id_of(n), record(n, NOW));
+    }
+    let x = id_of(0);
+    crate::nodes::block_node_in_core(&mut core, x, NOW, true).unwrap();
+    let mut o = opts();
+    o.builtin = [0, 2, 3]
+        .into_iter()
+        .map(|n| BootstrapEntry {
+            id: id_of(n),
+            addr: crate::test_support::addr(0, n as u8, 1).into(),
+        })
+        .collect();
+    sync(&mut core, &net, o.clone()).await;
+    assert!(net.calls().iter().any(|c| matches!(c, Call::Ping(_))));
+    assert_eq!(calls_to(&net.calls(), x), vec![]);
+
+    // Every other node down: the seed probe does not pick it either.
+    net.calls.lock().unwrap().clear();
+    for n in 1..4 {
+        net.down.insert(id_of(n));
+    }
+    sync(&mut core, &net, o).await;
+    assert_eq!(calls_to(&net.calls(), x), vec![]);
+}
+
+fn node_report() -> NodeInfoReport {
+    NodeInfoReport {
+        software: "barking-node 0.5.0".into(),
+        protocol: 5,
+        uptime_secs: 60,
+        storage: FillTier::Low,
+        wake: None,
+        push_link: None,
+        origin: None,
+    }
+}
+
+/// Every test node speaks protocol 5; the cache of each holds a report
+/// fetched `age` seconds ago.
+fn with_cached_info(core: &mut Core, net: &mut Net, age: u64) {
+    let mut state = load(core);
+    let mut old = node_report();
+    old.uptime_secs = 1;
+    for n in 0..NODES {
+        net.info.insert(id_of(n), node_report());
+        net.rtt.insert(
+            id_of(n),
+            vec![Duration::from_millis(30), Duration::from_millis(50)],
+        );
+        state.info.insert(
+            id_of(n),
+            crate::state::CachedInfo {
+                report: old.clone(),
+                fetched_at: NOW - age,
+                observed: None,
+            },
+        );
+    }
+    state.save(core).unwrap();
+}
+
+fn infos(calls: &[Call]) -> Vec<(NodeId, Option<NodeId>)> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Info(n, r) => Some((*n, *r)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn sync_records_latency_and_refreshes_stale_info() {
+    // Control: the same sync, nodes without `Info`.
+    let (_dir, mut core, net) = setup();
+    let mut o = opts();
+    o.push = Some(push_config());
+    sync(&mut core, &net, o.clone()).await;
+    let control = connects(&net.calls());
+
+    // Cache 25 h old: refreshed on the sessions the sync opened anyway.
+    let (_dir, mut core, mut net) = setup();
+    with_cached_info(&mut core, &mut net, 25 * 3_600);
+    sync(&mut core, &net, o.clone()).await;
+    let calls = net.calls();
+    assert_eq!(connects(&calls), control, "no dial just for Info");
+    let asked = infos(&calls);
+    assert!(!asked.is_empty());
+    // The relay is named only to a node holding one of my subscriptions;
+    // any other node is asked about itself.
+    let relay = Some(push_config().relay.id);
+    let subscribed = PushState::load(&core).unwrap().subscribed_nodes();
+    for (n, r) in &asked {
+        let expect = if subscribed.contains(n) { relay } else { None };
+        assert_eq!(*r, expect, "{n:?}");
+        let i = calls.iter().position(|c| *c == Call::Info(*n, *r)).unwrap();
+        assert!(calls[..i].contains(&Call::Connect(*n)));
+    }
+    assert!(
+        asked.iter().any(|(_, r)| r.is_some()),
+        "a subscribed node is asked about the relay"
+    );
+    let asked_nodes: HashSet<NodeId> = asked.iter().map(|(n, _)| *n).collect();
+    assert_eq!(asked_nodes.len(), asked.len(), "one Info per node");
+    let state = load(&mut core);
+    for n in 0..NODES {
+        let id = id_of(n);
+        let cached = state.info.get(&id).unwrap();
+        if asked_nodes.contains(&id) {
+            assert_eq!(cached.report, node_report());
+            assert_eq!(cached.fetched_at, NOW);
+            // The address the session reached is kept beside the report.
+            let dialled = state.view.get(&id).unwrap().addrs()[0].ip();
+            assert_eq!(cached.observed, Some(dialled), "{n}");
+        } else {
+            assert_eq!(cached.fetched_at, NOW - 25 * 3_600);
+            assert_eq!(cached.observed, None);
+        }
+        // Latency of every node a session reached.
+        if connects(&calls).contains(&id) {
+            assert_eq!(state.latency.get(&id), Some(&vec![30, 50]), "{n}");
+        } else {
+            assert!(!state.latency.contains_key(&id));
+        }
+    }
+
+    // Cache 2 h old: no `Info` at all. Push off: no relay asked about.
+    let (_dir, mut core, mut net) = setup();
+    with_cached_info(&mut core, &mut net, 2 * 3_600);
+    sync(&mut core, &net, opts()).await;
+    assert!(infos(&net.calls()).is_empty());
+    let state = load(&mut core);
+    assert!(!state.latency.is_empty());
+
+    // Push off, stale cache: `Info` about the node itself.
+    let (_dir, mut core, mut net) = setup();
+    with_cached_info(&mut core, &mut net, 25 * 3_600);
+    sync(&mut core, &net, opts()).await;
+    let asked = infos(&net.calls());
+    assert!(!asked.is_empty() && asked.iter().all(|(_, r)| r.is_none()));
+}
+
+/// Push on: a node that holds none of my subscriptions is never told the
+/// relay that rings this device; one that holds one is asked about it.
+#[tokio::test(start_paused = true)]
+async fn info_names_the_relay_only_to_subscribed_nodes() {
+    let (_dir, mut core, mut net) = setup();
+    with_cached_info(&mut core, &mut net, 25 * 3_600);
+    // Half the nodes take no subscription.
+    for n in (0..NODES).step_by(2) {
+        net.no_wake.insert(id_of(n));
+    }
+    let mut o = opts();
+    o.push = Some(push_config());
+    sync(&mut core, &net, o).await;
+    let subscribed = PushState::load(&core).unwrap().subscribed_nodes();
+    let asked = infos(&net.calls());
+    let relay = Some(push_config().relay.id);
+    let told: Vec<NodeId> = asked
+        .iter()
+        .filter(|(_, r)| r.is_some())
+        .map(|(n, _)| *n)
+        .collect();
+    let not_told: Vec<NodeId> = asked
+        .iter()
+        .filter(|(_, r)| r.is_none())
+        .map(|(n, _)| *n)
+        .collect();
+    assert!(!told.is_empty() && !not_told.is_empty(), "{asked:?}");
+    for (n, r) in &asked {
+        if subscribed.contains(n) {
+            assert_eq!(*r, relay);
+        } else {
+            assert_eq!(*r, None, "a node without my subscription learns no relay");
+        }
+    }
+}
+
+/// The notification extension never asks `Info`; it records latency.
+#[tokio::test(start_paused = true)]
+async fn quick_sync_records_latency_without_info() {
+    let (_dir, mut core, mut net) = setup();
+    with_cached_info(&mut core, &mut net, 25 * 3_600);
+    quick_sync(&mut core, &net, quick_opts()).await;
+    let calls = net.calls();
+    assert!(!connects(&calls).is_empty());
+    assert!(infos(&calls).is_empty());
+    let state = load(&mut core);
+    for id in connects(&calls) {
+        assert_eq!(state.latency.get(&id), Some(&vec![30, 50]));
+    }
 }

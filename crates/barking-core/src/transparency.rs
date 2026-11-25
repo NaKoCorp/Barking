@@ -169,6 +169,15 @@ pub enum TransparencyEvent {
         packet_id: PacketId,
         kind: u16,
     },
+    /// The user blocked a node (`id_short`: the short identifier, never an
+    /// address): it is no longer contacted. Added last.
+    NodeBlocked {
+        id_short: String,
+    },
+    /// The user unblocked a node. Added last.
+    NodeUnblocked {
+        id_short: String,
+    },
 }
 
 /// A `bool` added at the end of a stored variant. The log stores postcard,
@@ -491,6 +500,14 @@ impl TransparencyEvent {
                  It was acknowledged and set aside.",
                 hex(&packet_id.0[..4])
             ),
+            Self::NodeBlocked { id_short } => format!(
+                "You blocked node {id_short}: it is no longer contacted, and the copies \
+                 it held are deposited on other nodes."
+            ),
+            Self::NodeUnblocked { id_short } => format!(
+                "You unblocked node {id_short}: it can come back through discovery or \
+                 by being added by hand."
+            ),
         }
     }
 }
@@ -685,6 +702,12 @@ mod tests {
             TransparencyEvent::SyncApplied {
                 kind: SyncKind::Seen,
             },
+            TransparencyEvent::NodeBlocked {
+                id_short: "ABCDEFGH".into(),
+            },
+            TransparencyEvent::NodeUnblocked {
+                id_short: "ABCDEFGH".into(),
+            },
         ]
     }
 
@@ -780,6 +803,34 @@ mod tests {
         assert_eq!(
             u.describe(),
             "Node ABCDEFGH is set aside for 7 days: it kept failing to answer."
+        );
+    }
+
+    #[test]
+    fn node_blocked_and_unblocked_roundtrip() {
+        let blocked = TransparencyEvent::NodeBlocked {
+            id_short: "ABCDEFGH".into(),
+        };
+        let unblocked = TransparencyEvent::NodeUnblocked {
+            id_short: "ABCDEFGH".into(),
+        };
+        for e in [&blocked, &unblocked] {
+            assert!(!e.is_security());
+            let bytes = postcard::to_allocvec(e).unwrap();
+            assert_eq!(
+                &postcard::from_bytes::<TransparencyEvent>(&bytes).unwrap(),
+                e
+            );
+        }
+        assert_eq!(
+            blocked.describe(),
+            "You blocked node ABCDEFGH: it is no longer contacted, and the copies it \
+             held are deposited on other nodes."
+        );
+        assert_eq!(
+            unblocked.describe(),
+            "You unblocked node ABCDEFGH: it can come back through discovery or by \
+             being added by hand."
         );
     }
 

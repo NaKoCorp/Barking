@@ -28,6 +28,17 @@ import Foundation
 ///   app's timer erases it five seconds later. It stays in every read until
 ///   `expireEphemeral` hands it back.
 ///
+/// - `-BarkingUITestNodes`: a fixed list of Internet relays (spec node
+///   transparency §7.1): four in use (verified with wake-ups, avoided with
+///   an origin that doesn't match, an unverifiable one, a new one without
+///   origin), three others, one blocked, one default node removed. "Restore
+///   the default nodes" brings it back (the count drops to zero). Their
+///   details (§7.2): the verified one reports everything, the one that
+///   doesn't match never answers a refresh (unreachable), the unverifiable
+///   one is an old node (protocol 4), the new one reports nothing. Blocking,
+///   unblocking and removing change the lists; the guard-rail always says
+///   2 usable nodes would be left.
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -93,10 +104,22 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private var reactionResent: Set<Int64> = []
     /// Shown time by message (kept after a retry: the message keeps its date).
     private let shownAt: [Int64: UInt64]
+    /// `-BarkingUITestNodes`: the fixed relays, and the removed default
+    /// nodes until "Restore the default nodes".
+    private let fakeNodes: Bool
+    private var fakeDismissed: UInt32 = 1
+    /// The fixed relays blocked or removed so far (one blocked at launch).
+    private var fakeBlocked: [String: BlockedNode] = [
+        UITestDeliveries.nodeIds[7]: BlockedNode(id: UITestDeliveries.nodeIds[7], at: UITestDeliveries.hourNow - 86_400,
+                                origin: OriginView(asn: 64500, asName: "Example Hosting", country: "US",
+                                                   verdict: .noRecord)),
+    ]
+    private var fakeRemoved: Set<String> = []
 
     init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
-         ephemeral: Bool = false) {
+         ephemeral: Bool = false, nodes: Bool = false) {
         self.device = device
+        self.fakeNodes = nodes
         self.ephemeral = ephemeral
         self.reactionState = reactionState
         self.seed = seed
@@ -131,9 +154,75 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             }
         }
         let ephemeral = arguments.contains("-BarkingUITestEphemeral")
-        guard seeded || fakeReceived || reactionState != nil || ephemeral else { return device }
+        let nodes = arguments.contains("-BarkingUITestNodes")
+        guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes else { return device }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
-                                reactionState: reactionState, ephemeral: ephemeral)
+                                reactionState: reactionState, ephemeral: ephemeral, nodes: nodes)
+    }
+
+    // MARK: The relays (`-BarkingUITestNodes`)
+
+    /// Eight 52-character identifiers: four in use, three others, one blocked.
+    static let nodeIds = ["A7KQ2M", "C2LPT9", "H4WZ7R", "M3XB5D", "Q6RN2V", "T5JC8K", "W2EF4P", "Z7GH3S"]
+        .enumerated().map { i, head in head + String(repeating: Array("ABCDEFGHJKMNPQRSTVWXYZ234567")[i], count: 43) + "X4Q" }
+
+    private static var hourNow: UInt64 { UInt64(Date().timeIntervalSince1970) / 3_600 * 3_600 }
+
+    static func nodeFixture() -> [NodeInfo] {
+        let now = hourNow
+        func node(_ i: Int, _ addr: String, _ r: Reliability, _ ms: UInt32?, inUse: Bool = true,
+                  origin: OriginView? = nil, subs: UInt32 = 0, kind: NodeOriginKind = .discovered) -> NodeInfo {
+            NodeInfo(id: nodeIds[i], addr: addr, reliability: r, score: 0.5, manual: kind == .manual || kind == .bootstrap,
+                     fromCard: kind == .fromCard, lastSeen: now - 3_600, latencyMs: ms, inUse: inUse, origin: origin,
+                     mySubscriptions: subs, kind: kind)
+        }
+        return [
+            node(0, "51.38.12.4:7700", .good, 38, origin: OriginView(asn: 16276, asName: "OVH SAS", country: "FR",
+                                                                        verdict: .matches), subs: 3, kind: .bootstrap),
+            node(1, "95.217.3.1:7700", .avoided(until: now + 7 * 86_400, reason: .unreachable), 140,
+                 origin: OriginView(asn: 24940, asName: "Hetzner Online GmbH", country: "NL",
+                                    verdict: .mismatch(declaredCountry: "NL", observedCountry: "DE", declaredAsn: 24940,
+                                                       observedAsn: 24940))),
+            node(2, "185.170.112.9:7700", .fair, 210, origin: OriginView(asn: 197540, asName: "netcup GmbH",
+                                                                            country: "DE", verdict: .notInBase)),
+            node(3, "192.168.1.20:7700", .new, nil, kind: .manual),
+            node(4, "203.0.113.7:7700", .good, 64, inUse: false),
+            node(5, "198.51.100.12:7700", .weak, 420, inUse: false),
+            node(6, "", .new, nil, inUse: false),
+        ]
+    }
+
+    /// The detail of a fixed relay (§7.2).
+    static func nodeDetailFixture(_ node: NodeInfo) -> NodeDetail {
+        let hour = hourNow
+        let i = nodeIds.firstIndex(of: node.id) ?? -1
+        let v4 = node.addr.isEmpty ? nil : node.addr
+        switch i {
+        case 0:
+            return NodeDetail(node: node, v4: v4, v6: "[2001:41d0:304:200::9a1]:7700",
+                              report: NodeReportView(software: "0.5.0", protocol: 5, uptimeSecs: 3 * 86_400 + 7_200,
+                                                     storage: .medium, wake: .low, pushLink: .ok),
+                              fetchedAt: hour, peerVersion: 5)
+        case 1:
+            return NodeDetail(node: node, v4: v4, v6: nil,
+                              report: NodeReportView(software: "0.5.0", protocol: 5, uptimeSecs: 40 * 86_400,
+                                                     storage: .high, wake: .medium, pushLink: .unknown),
+                              fetchedAt: hour - 2 * 86_400, peerVersion: 5)
+        case 2:
+            return NodeDetail(node: node, v4: v4, v6: nil, report: nil, fetchedAt: nil, peerVersion: 4)
+        default:
+            return NodeDetail(node: node, v4: v4, v6: nil, report: nil, fetchedAt: nil, peerVersion: 5)
+        }
+    }
+
+    private func fakeNodeList() -> [NodeInfo] {
+        let gone = lock.withLock { Set(fakeBlocked.keys).union(fakeRemoved) }
+        return Self.nodeFixture().filter { !gone.contains($0.id) }
+    }
+
+    private func fakeDetail(_ id: String) throws -> NodeDetail {
+        guard let node = fakeNodeList().first(where: { $0.id == id }) else { throw BarkingError.NotFound }
+        return Self.nodeDetailFixture(node)
     }
 
     // MARK: The forced states
@@ -451,8 +540,43 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func quickSync(deadlineMs: UInt64) throws -> SyncSummary {
         seed == nil ? try device.quickSync(deadlineMs: deadlineMs) : Self.offline
     }
-    func nodes() throws -> [NodeInfo] { try device.nodes() }
+    func nodes() throws -> [NodeInfo] { fakeNodes ? fakeNodeList() : try device.nodes() }
     func addNode(id: String, addr: String) throws { try device.addNode(id: id, addr: addr) }
+    func nodeDetail(id: String) throws -> NodeDetail { fakeNodes ? try fakeDetail(id) : try device.nodeDetail(id: id) }
+    /// The node that doesn't match never answers: the screen keeps its cache.
+    func refreshNodeInfo(id: String) throws -> NodeDetail {
+        guard fakeNodes else { return try device.refreshNodeInfo(id: id) }
+        if id == Self.nodeIds[1] { throw BarkingError.Network(detail: "unreachable") }
+        return try fakeDetail(id)
+    }
+    func removeNode(id: String) throws {
+        guard fakeNodes else { return try device.removeNode(id: id) }
+        _ = lock.withLock { fakeRemoved.insert(id) }
+    }
+    func blockNode(id: String) throws {
+        guard fakeNodes else { return try device.blockNode(id: id) }
+        let origin = Self.nodeFixture().first { $0.id == id }?.origin
+        lock.withLock { fakeBlocked[id] = BlockedNode(id: id, at: Self.hourNow, origin: origin) }
+    }
+    func unblockNode(id: String) throws {
+        guard fakeNodes else { return try device.unblockNode(id: id) }
+        _ = lock.withLock { fakeBlocked.removeValue(forKey: id) }
+    }
+    func blockedNodes() throws -> [BlockedNode] {
+        fakeNodes ? lock.withLock { Array(fakeBlocked.values) } : try device.blockedNodes()
+    }
+    func addDefaultNodes(entries: [DefaultNode]) throws { try device.addDefaultNodes(entries: entries) }
+    func resetDefaultNodes(entries: [DefaultNode]) throws -> UInt32 {
+        guard fakeNodes else { return try device.resetDefaultNodes(entries: entries) }
+        return lock.withLock {
+            defer { fakeDismissed = 0 }
+            return fakeDismissed
+        }
+    }
+    func dismissedDefaultsCount() throws -> UInt32 {
+        fakeNodes ? lock.withLock { fakeDismissed } : try device.dismissedDefaultsCount()
+    }
+    func usableNodesIfBlocked(id: String) throws -> UInt32 { fakeNodes ? 2 : try device.usableNodesIfBlocked(id: id) }
     func setPush(settings: PushSettings?) throws { try device.setPush(settings: settings) }
     func notificationPrefs() throws -> NotificationPrefs { try device.notificationPrefs() }
     func setInstant(on: Bool) throws { try device.setInstant(on: on) }

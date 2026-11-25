@@ -17,6 +17,8 @@
 "log.node_deposit" = "Dépôts sur le nœud %1$@ : paquets %2$@, refusés %3$@. Le nœud voit la boîte, la taille, l’heure et votre adresse IP ; pas le contenu.";
 "log.node_fetch" = "Récupération sur le nœud %1$@ : boîtes %2$@, éléments reçus %3$@. Le nœud voit quelles boîtes vous relevez et votre adresse IP.";
 "log.node_avoided" = "Le nœud %1$@ est mis de côté 7 jours : %2$@.";
+"log.node_blocked" = "Le nœud %1$@ est bloqué : Barking ne lui parle plus.";
+"log.node_unblocked" = "Le nœud %1$@ est débloqué : Barking peut de nouveau s’en servir.";
 "log.seal_skipped" = "Rien n’a été chiffré pour l’appareil %2$@ de %1$@ : ses clés publiées sont inutilisables. Ses autres appareils reçoivent bien le paquet.";
 "log.admin_transfer_started" = "La clé racine a été envoyée, chiffrée, à votre appareil %1$@. Cet appareil la garde jusqu’à sa confirmation, puis l’efface.";
 "log.admin_transferred" = "Votre appareil %1$@ est maintenant l’administrateur. Cet appareil a effacé sa copie de la clé racine.";
@@ -85,6 +87,8 @@
 "log.title.node_deposit" = "Dépôt sur %1$@";
 "log.title.node_fetch" = "Relève sur %1$@";
 "log.title.node_avoided" = "Nœud mis de côté : %1$@";
+"log.title.node_blocked" = "Nœud bloqué : %1$@";
+"log.title.node_unblocked" = "Nœud débloqué : %1$@";
 "log.title.seal_skipped" = "Non chiffré pour un appareil de %1$@";
 "log.title.admin_transfer_started" = "Clé racine envoyée à %1$@";
 "log.title.admin_transferred" = "%1$@ est l’administrateur";

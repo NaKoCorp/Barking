@@ -29,6 +29,12 @@ pub const MAX_WAKE_ITEMS: usize = 100;
 /// At most this many fingerprints in a `Holdings` page.
 pub const MAX_HOLDINGS_PER_PAGE: usize = 1024;
 
+/// Longest `NodeInfoReport::software` a node sends (bytes).
+pub const MAX_SOFTWARE_LEN: usize = 32;
+
+/// Longest `NodeOrigin::as_name` a node sends (bytes).
+pub const MAX_AS_NAME_LEN: usize = 64;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
     Hello {
@@ -89,6 +95,13 @@ pub enum Request {
         pow: u64,
         owner: OwnerProof,
     },
+    /// Public report on the node (protocol 5): the node's own report, plus,
+    /// with `relay`, the state of its link to the push relay that node id
+    /// names (`NodeInfoReport::push_link`), as the node's own periodic probe
+    /// of that relay found it.
+    Info {
+        relay: Option<NodeId>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +138,120 @@ pub enum Response {
         hashes: Vec<[u8; 32]>,
         next: Option<u64>,
     },
+    /// Answer to `Request::Info` (protocol 5).
+    Info(NodeInfoReport),
+}
+
+/// How full a resource is, coarsely: exact figures stay private.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FillTier {
+    /// Under 50 %.
+    Low,
+    /// From 50 % to under 80 %.
+    Medium,
+    /// From 80 % to under 95 %.
+    High,
+    /// 95 % or more (also a resource without capacity).
+    Full,
+}
+
+impl FillTier {
+    /// Tier of `used` out of `max`; `max == 0` is `Full`.
+    pub fn of(used: u64, max: u64) -> FillTier {
+        if max == 0 {
+            return FillTier::Full;
+        }
+        let used = u128::from(used) * 100;
+        let max = u128::from(max);
+        if used >= max * 95 {
+            FillTier::Full
+        } else if used >= max * 80 {
+            FillTier::High
+        } else if used >= max * 50 {
+            FillTier::Medium
+        } else {
+            FillTier::Low
+        }
+    }
+}
+
+/// State of a node's link to a push relay, from the node's own periodic
+/// probe of that relay (a connection checking its identity, no wake-up):
+/// never from the wake-ups it sends, so it tells nothing of when users
+/// receive messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PushLink {
+    /// The relay answered the last probe with its identity. A relay accepts
+    /// connections only while its own push provider (APNs) works.
+    Ok,
+    /// No host of the relay that answered before did at the last probe.
+    Failing,
+    /// Not probed: the node's operator does not list the relay among those
+    /// it probes, or it never answered since the node started. Never
+    /// depends on the node's subscriptions.
+    Unknown,
+}
+
+/// Where a node's address sits on the network.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeOrigin {
+    /// Autonomous system number.
+    pub asn: u32,
+    /// Name of the autonomous system (at most `MAX_AS_NAME_LEN` bytes).
+    pub as_name: String,
+    /// ISO 3166-1 alpha-2 country code.
+    pub country: [u8; 2],
+    /// True if this describes the node's IPv6 address, false for IPv4.
+    pub for_v6: bool,
+}
+
+/// Public self-report of a node (protocol 5).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInfoReport {
+    /// Software name and version (at most `MAX_SOFTWARE_LEN` bytes).
+    pub software: String,
+    /// Highest protocol version the node speaks.
+    pub protocol: u16,
+    /// Seconds since the node started.
+    pub uptime_secs: u64,
+    /// Fill of the node's message storage.
+    pub storage: FillTier,
+    /// Fill of the wake subscription table, if the node takes subscriptions.
+    pub wake: Option<FillTier>,
+    /// Push link state, if the node fronts a push relay.
+    pub push_link: Option<PushLink>,
+    /// Network origin of the node, if known.
+    pub origin: Option<NodeOrigin>,
+}
+
+/// Printable ASCII (0x20 to 0x7E) only, at most `max` bytes.
+fn printable(s: &str, max: usize) -> bool {
+    s.len() <= max && s.bytes().all(|b| (0x20..=0x7E).contains(&b))
+}
+
+impl NodeOrigin {
+    /// The origin if every node-sent field is well formed: `as_name`
+    /// printable ASCII of at most `MAX_AS_NAME_LEN` bytes, `country` two
+    /// uppercase ASCII letters. `None` otherwise: a node is free to send
+    /// anything, and the app shows these strings.
+    pub fn sanitized(self) -> Option<NodeOrigin> {
+        let ok = printable(&self.as_name, MAX_AS_NAME_LEN)
+            && self.country.iter().all(u8::is_ascii_uppercase);
+        ok.then_some(self)
+    }
+}
+
+impl NodeInfoReport {
+    /// The report as a client may keep and show it: `None` if `software` is
+    /// not printable ASCII of at most `MAX_SOFTWARE_LEN` bytes; an origin
+    /// that `NodeOrigin::sanitized` refuses is dropped, the rest kept.
+    pub fn sanitized(mut self) -> Option<NodeInfoReport> {
+        if !printable(&self.software, MAX_SOFTWARE_LEN) {
+            return None;
+        }
+        self.origin = self.origin.and_then(NodeOrigin::sanitized);
+        Some(self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,5 +509,177 @@ mod tests {
             reason(ErrorReason::NotResponsible),
             reason(ErrorReason::Unsupported) + 1
         );
+    }
+
+    #[test]
+    fn old_request_variant_indices_unchanged() {
+        let enc = |r: &Request| postcard::to_allocvec(r).unwrap();
+        let hello = Request::Hello {
+            version: 4,
+            min_version: 2,
+        };
+        assert_eq!(enc(&hello), [0, 4, 2]);
+        assert_eq!(postcard::from_bytes::<Request>(&[0, 4, 2]).unwrap(), hello);
+        let ping = Request::Ping { from: None };
+        assert_eq!(enc(&ping), [3, 0]);
+        assert_eq!(postcard::from_bytes::<Request>(&[3, 0]).unwrap(), ping);
+        let wake = Request::Wake { items: vec![] };
+        assert_eq!(enc(&wake), [9, 0]);
+        assert_eq!(postcard::from_bytes::<Request>(&[9, 0]).unwrap(), wake);
+        let owned = postcard::to_allocvec(&Request::SubscribeOwned {
+            sub: crate::push::Subscription {
+                mailbox: MailboxId([0; 16]),
+                relay: crate::push::RelayRef {
+                    host: "r".into(),
+                    port: 1,
+                    id: NodeId([0; 32]),
+                },
+                sealed: vec![],
+                cancel_hash: [0; 32],
+                expires_day: 0,
+                kind: crate::push::SubKind::Messages,
+            },
+            pow: 0,
+            owner: crate::push::OwnerProof {
+                sig: [0; 32],
+                dh: [0; 32],
+                day: 0,
+                signature: [0; 64],
+            },
+        })
+        .unwrap()[0];
+        let info = enc(&Request::Info { relay: None })[0];
+        assert!(info > owned);
+        assert_eq!(info, owned + 1);
+        // The new response goes after the last old one (`Holdings`).
+        let holdings = postcard::to_allocvec(&Response::Holdings {
+            hashes: vec![],
+            next: None,
+        })
+        .unwrap()[0];
+        let report = postcard::to_allocvec(&Response::Info(report_none())).unwrap()[0];
+        assert_eq!(report, holdings + 1);
+    }
+
+    fn report_none() -> NodeInfoReport {
+        NodeInfoReport {
+            software: String::new(),
+            protocol: 0,
+            uptime_secs: 0,
+            storage: FillTier::Low,
+            wake: None,
+            push_link: None,
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn info_report_roundtrip() {
+        rt(Request::Info { relay: None });
+        rt(Request::Info {
+            relay: Some(NodeId([4; 32])),
+        });
+        rt(Response::Info(report_none()));
+        rt(Response::Info(NodeInfoReport {
+            software: "barking-node 0.1.0".into(),
+            protocol: 5,
+            uptime_secs: 86_400,
+            storage: FillTier::High,
+            wake: Some(FillTier::Medium),
+            push_link: Some(PushLink::Failing),
+            origin: Some(NodeOrigin {
+                asn: 64_496,
+                as_name: "EXAMPLE-AS".into(),
+                country: *b"FR",
+                for_v6: true,
+            }),
+        }));
+        for t in [
+            FillTier::Low,
+            FillTier::Medium,
+            FillTier::High,
+            FillTier::Full,
+        ] {
+            rt(t);
+        }
+        for l in [PushLink::Ok, PushLink::Failing, PushLink::Unknown] {
+            rt(l);
+        }
+    }
+
+    #[test]
+    fn fill_tier_thresholds() {
+        assert_eq!(FillTier::of(49, 100), FillTier::Low);
+        assert_eq!(FillTier::of(50, 100), FillTier::Medium);
+        assert_eq!(FillTier::of(79, 100), FillTier::Medium);
+        assert_eq!(FillTier::of(80, 100), FillTier::High);
+        assert_eq!(FillTier::of(94, 100), FillTier::High);
+        assert_eq!(FillTier::of(95, 100), FillTier::Full);
+        assert_eq!(FillTier::of(0, 0), FillTier::Full);
+        // Beyond the maximum, and no overflow on huge values.
+        assert_eq!(FillTier::of(200, 100), FillTier::Full);
+        assert_eq!(FillTier::of(u64::MAX / 2 + 1, u64::MAX), FillTier::Medium);
+    }
+
+    fn origin(as_name: &str, country: [u8; 2]) -> NodeOrigin {
+        NodeOrigin {
+            asn: 16276,
+            as_name: as_name.into(),
+            country,
+            for_v6: false,
+        }
+    }
+
+    fn with(software: &str, origin: Option<NodeOrigin>) -> NodeInfoReport {
+        NodeInfoReport {
+            software: software.into(),
+            origin,
+            ..report_none()
+        }
+    }
+
+    #[test]
+    fn sanitized_keeps_a_well_formed_report() {
+        let r = with("0.5.0", Some(origin("OVH SAS", *b"FR")));
+        assert_eq!(r.clone().sanitized(), Some(r));
+        let longest = with(
+            &"v".repeat(MAX_SOFTWARE_LEN),
+            Some(origin(&"A".repeat(MAX_AS_NAME_LEN), *b"NL")),
+        );
+        assert_eq!(longest.clone().sanitized(), Some(longest));
+        assert_eq!(with("", None).sanitized(), Some(with("", None)));
+    }
+
+    #[test]
+    fn sanitized_drops_a_hostile_origin_only() {
+        let hostile = [
+            origin(&"A".repeat(1 << 20), *b"FR"),
+            origin(&"A".repeat(MAX_AS_NAME_LEN + 1), *b"FR"),
+            origin("OVH\u{202E}SAS", *b"FR"),
+            origin("OVH\nSAS", *b"FR"),
+            origin("OVH\u{7F}", *b"FR"),
+            origin("OVH SAS", *b"fr"),
+            origin("OVH SAS", *b"F1"),
+            origin("OVH SAS", [0xC3, 0x89]),
+        ];
+        for o in hostile {
+            let r = with("0.5.0", Some(o.clone())).sanitized();
+            assert_eq!(r, Some(with("0.5.0", None)), "{:?}", o.as_name.get(..20));
+        }
+    }
+
+    #[test]
+    fn sanitized_drops_a_report_with_a_hostile_software() {
+        for software in [
+            "v".repeat(40),
+            "0.5.0\u{202E}".to_string(),
+            "0.5\n0".to_string(),
+            "v".repeat(1 << 20),
+        ] {
+            assert_eq!(
+                with(&software, Some(origin("OVH SAS", *b"FR"))).sanitized(),
+                None
+            );
+        }
     }
 }

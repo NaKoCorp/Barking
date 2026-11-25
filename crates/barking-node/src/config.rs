@@ -1,11 +1,13 @@
 //! TOML configuration of the node (spec §8). The default values are those of
 //! the spec; an unknown key or an out-of-range value is an error.
 
-use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
 use std::path::{Path, PathBuf};
 
 use barking_dht::{BootstrapEntry, parse_bootstrap};
+use barking_proto::NodeId;
 use barking_proto::pow::{DEFAULT_POW_BITS, MAX_POW_BITS};
+use barking_proto::push::RelayRef;
 use barking_proto::routable;
 use ed25519_dalek::SigningKey;
 use serde::Deserialize;
@@ -17,6 +19,7 @@ use crate::server::{
     DEFAULT_MAX_RESPONSE_BYTES_PER_IP, DEFAULT_MIN_SEND_RATE, ServerConfig,
 };
 use crate::wake::WakeConfig;
+use crate::wake::probe::{MAX_HOSTS_PER_RELAY, MAX_PROBE_RELAYS};
 use crate::{Error, Result};
 
 /// Default data directory (provided systemd unit).
@@ -111,6 +114,112 @@ impl TryFrom<DhtToml> for DhtConfig {
     }
 }
 
+/// `[info]` section: the public self-report of the node.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "InfoToml")]
+pub struct InfoConfig {
+    /// Look up the AS and country of the node's own public address through
+    /// Team Cymru's DNS service, to report them. The address is sent to the
+    /// system resolver (and Team Cymru) in the query name.
+    pub origin_lookup: bool,
+    /// Push relays whose link the node probes and reports (`wake::probe`).
+    /// Set by the operator only, never taken from subscriptions: any other
+    /// relay reads `Unknown`. Default: none.
+    pub probe_relays: Vec<RelayRef>,
+}
+
+impl Default for InfoConfig {
+    fn default() -> Self {
+        InfoConfig {
+            origin_lookup: true,
+            probe_relays: Vec::new(),
+        }
+    }
+}
+
+/// TOML form of `[info]`, before validation.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct InfoToml {
+    origin_lookup: bool,
+    probe_relays: Vec<String>,
+}
+
+impl Default for InfoToml {
+    fn default() -> Self {
+        InfoToml {
+            origin_lookup: true,
+            probe_relays: Vec::new(),
+        }
+    }
+}
+
+/// `identifier@host:port`, an IPv6 literal in brackets. Syntax only: the
+/// address rules are checked by `Config::validate`, which knows
+/// `dht.allow_private_addrs`.
+fn parse_relay(s: &str) -> Option<RelayRef> {
+    let (id, addr) = s.trim().split_once('@')?;
+    let id: NodeId = id.parse().ok()?;
+    let (host, port) = addr.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    if host.contains(':') {
+        let inner = host.strip_prefix('[')?.strip_suffix(']')?;
+        inner.parse::<Ipv6Addr>().ok()?;
+    }
+    Some(RelayRef {
+        host: host.to_string(),
+        port,
+        id,
+    })
+}
+
+impl TryFrom<InfoToml> for InfoConfig {
+    type Error = String;
+
+    /// Error messages echo no entry.
+    fn try_from(t: InfoToml) -> core::result::Result<InfoConfig, String> {
+        if t.probe_relays.len() > MAX_PROBE_RELAYS {
+            return Err(format!(
+                "info.probe_relays: at most {MAX_PROBE_RELAYS} entries"
+            ));
+        }
+        let mut relays: Vec<RelayRef> = Vec::with_capacity(t.probe_relays.len());
+        for (i, e) in t.probe_relays.iter().enumerate() {
+            let r = parse_relay(e).ok_or_else(|| {
+                format!("info.probe_relays: entry {i} invalid (expected identifier@host:port)")
+            })?;
+            if relays.contains(&r) {
+                return Err(format!("info.probe_relays: entry {i} listed twice"));
+            }
+            if relays.iter().filter(|x| x.id == r.id).count() >= MAX_HOSTS_PER_RELAY {
+                return Err(format!(
+                    "info.probe_relays: at most {MAX_HOSTS_PER_RELAY} hosts per relay identifier"
+                ));
+            }
+            relays.push(r);
+        }
+        Ok(InfoConfig {
+            origin_lookup: t.origin_lookup,
+            probe_relays: relays,
+        })
+    }
+}
+
+/// The address rules of a subscription's relay (`RelayRef::well_formed`):
+/// a DNS name, or a routable IP literal; a private IP literal too with
+/// `dht.allow_private_addrs`, as for wake-ups.
+fn probe_relay_ok(r: &RelayRef, allow_private: bool) -> bool {
+    if r.well_formed() {
+        return true;
+    }
+    let bare = r
+        .host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(&r.host);
+    allow_private && r.port != 0 && bare.parse::<IpAddr>().is_ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -146,6 +255,8 @@ pub struct Config {
     pub dht: Option<DhtConfig>,
     /// Wake subscriptions for the iOS push relay.
     pub wake: WakeConfig,
+    /// Public self-report of the node.
+    pub info: InfoConfig,
     /// `[dht]` present without `public_addr`: table disabled, to be reported
     /// in the logs at startup.
     #[serde(skip)]
@@ -174,6 +285,7 @@ impl Default for Config {
             log_interval_secs: 60,
             dht: None,
             wake: WakeConfig::default(),
+            info: InfoConfig::default(),
             dht_without_public_addr: false,
         }
     }
@@ -268,6 +380,18 @@ impl Config {
         if let Some(d) = &self.dht {
             check_dht_listen(d, &self.listen)?;
         }
+        let allow_private = self.dht.as_ref().is_some_and(|d| d.allow_private_addrs);
+        if let Some(i) = self
+            .info
+            .probe_relays
+            .iter()
+            .position(|r| !probe_relay_ok(r, allow_private))
+        {
+            return Err(bad(format!(
+                "info.probe_relays: entry {i} has an invalid or non-routable host \
+                 (dht.allow_private_addrs = false)"
+            )));
+        }
         if self.max_db_jobs == 0 || self.min_send_rate == 0 || self.log_interval_secs == 0 {
             return Err(bad(
                 "max_db_jobs, min_send_rate and log_interval_secs: at least 1",
@@ -307,6 +431,8 @@ impl Config {
             ..LimitConfig::default()
         };
         cfg.wake = self.wake.clone();
+        cfg.origin_lookup = self.info.origin_lookup;
+        cfg.probe_relays = self.info.probe_relays.clone();
         cfg.max_response_bytes_in_flight = self.max_response_bytes_in_flight;
         cfg.max_response_bytes_per_ip = self.max_response_bytes_per_ip;
         cfg.max_db_jobs = self.max_db_jobs;
@@ -447,6 +573,119 @@ mod tests {
         let d = Config::parse(&on).unwrap().dht.unwrap();
         assert_eq!(d.replication_bytes_per_hour, 128 << 20);
         assert!(d.public_v4.is_some() && d.public_v6.is_some());
+    }
+
+    #[test]
+    fn config_info_defaults_on() {
+        assert!(Config::parse("").unwrap().info.origin_lookup);
+        let c = Config::parse("[info]\norigin_lookup = false\n").unwrap();
+        assert!(!c.info.origin_lookup);
+        assert!(
+            !c.server_config(vec![], SigningKey::from_bytes(&[1; 32]))
+                .origin_lookup
+        );
+        assert!(Config::parse("[info]\ninconnue = 1").is_err());
+    }
+
+    #[test]
+    fn config_probe_relays() {
+        let id = NodeId([7; 32]);
+        let key = || SigningKey::from_bytes(&[1; 32]);
+        assert!(Config::parse("").unwrap().info.probe_relays.is_empty());
+        assert!(
+            Config::parse("")
+                .unwrap()
+                .server_config(vec![], key())
+                .probe_relays
+                .is_empty()
+        );
+        let c = Config::parse(&format!(
+            "[info]\nprobe_relays = [\"{id}@push.example.org:4434\", \"{id}@[2a01::1]:4434\", \"{id}@1.2.3.4:4434\"]\n"
+        ))
+        .unwrap();
+        let want = vec![
+            RelayRef {
+                host: "push.example.org".into(),
+                port: 4434,
+                id,
+            },
+            RelayRef {
+                host: "[2a01::1]".into(),
+                port: 4434,
+                id,
+            },
+            RelayRef {
+                host: "1.2.3.4".into(),
+                port: 4434,
+                id,
+            },
+        ];
+        assert_eq!(c.info.probe_relays, want);
+        assert_eq!(c.server_config(vec![], key()).probe_relays, want);
+        // A private address with `allow_private_addrs` only.
+        let private = format!("[info]\nprobe_relays = [\"{id}@192.168.1.2:4434\"]\n");
+        assert!(Config::parse(&private).is_err());
+        Config::parse(&format!(
+            "{private}[dht]\npublic_addr = [\"192.168.1.3:4433\"]\nallow_private_addrs = true\n"
+        ))
+        .unwrap();
+        // At most `MAX_PROBE_RELAYS` entries.
+        let many = |n: u8| {
+            let list: Vec<String> = (0..n)
+                .map(|i| format!("\"{}@push.example.org:4434\"", NodeId([i; 32])))
+                .collect();
+            format!("[info]\nprobe_relays = [{}]\n", list.join(", "))
+        };
+        Config::parse(&many(MAX_PROBE_RELAYS as u8)).unwrap();
+        assert!(Config::parse(&many(MAX_PROBE_RELAYS as u8 + 1)).is_err());
+        // At most `MAX_HOSTS_PER_RELAY` hosts per identity.
+        let hosts = |n: usize| {
+            let list: Vec<String> = (0..n)
+                .map(|i| format!("\"{id}@h{i}.example.org:4434\""))
+                .collect();
+            format!("[info]\nprobe_relays = [{}]\n", list.join(", "))
+        };
+        Config::parse(&hosts(MAX_HOSTS_PER_RELAY)).unwrap();
+        assert!(Config::parse(&hosts(MAX_HOSTS_PER_RELAY + 1)).is_err());
+        for bad in [
+            // Duplicate entry.
+            format!("\"{id}@push.example.org:4434\", \"{id}@push.example.org:4434\""),
+            // No identifier, bad identifier.
+            "\"push.example.org:4434\"".into(),
+            "\"pasbase32!@push.example.org:4434\"".into(),
+            // No port, port 0, bad host.
+            format!("\"{id}@push.example.org\""),
+            format!("\"{id}@push.example.org:0\""),
+            format!("\"{id}@push..example.org:4434\""),
+            format!("\"{id}@push_example.org:4434\""),
+            // IPv6 without brackets; non-routable literals.
+            format!("\"{id}@2a01::1:4434\""),
+            format!("\"{id}@127.0.0.1:4434\""),
+            format!("\"{id}@[::1]:4434\""),
+        ] {
+            let text = format!("[info]\nprobe_relays = [{bad}]\n");
+            let e = Config::parse(&text).expect_err(&text);
+            assert!(!e.to_string().contains("example.org"), "{e}");
+        }
+    }
+
+    #[test]
+    fn deploy_example_parses_with_info_section() {
+        let text = include_str!("../../../docs/deploy/barking-node.toml");
+        assert!(Config::parse(text).unwrap().info.origin_lookup);
+        let on: String = text
+            .lines()
+            .map(|l| match l.strip_prefix("# ") {
+                Some(r) if r == "[info]" || r.starts_with("origin_lookup") => r,
+                Some(r) if r.starts_with("probe_relays") => r,
+                _ => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let info = Config::parse(&on).unwrap().info;
+        assert!(info.origin_lookup);
+        assert_eq!(info.probe_relays.len(), 1);
+        assert_eq!(info.probe_relays[0].host, "push.example.org");
     }
 
     #[test]

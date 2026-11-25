@@ -9,6 +9,21 @@ final class SyncSchedulerTests: XCTestCase {
 }
 
 final class CoreServiceTests: XCTestCase {
+    func testBlockNodeGoesThroughCoreQueue() async throws {
+        let device = FakeDevice()
+        let runner = RecordingRunner()
+        let core = CoreService(device: device, runner: runner)
+        try await core.blockNode(id: "N1")
+        try await core.unblockNode(id: "N1")
+        try await core.removeNode(id: "N2")
+        XCTAssertEqual(device.nodeCalls, ["block:N1", "unblock:N1", "remove:N2"])
+        XCTAssertEqual(runner.names.count, 3)
+        let n = try await core.usableNodesIfBlocked(id: "N1")
+        XCTAssertEqual(n, 4)
+        let d = try await core.dismissedDefaultsCount()
+        XCTAssertEqual(d, 1)
+    }
+
     /// Reset of a removed device: `close` waits for the sync in flight, then
     /// no call reaches the device any more.
     func testCloseWaitsForSyncThenRefusesCalls() async {
@@ -168,5 +183,16 @@ final class CoreServiceTests: XCTestCase {
             let started = await syncStarted(device)
             XCTAssertTrue(started, "\(name): \(device.syncEvents)")
         }
+    }
+}
+
+/// Counts the calls that go through the core's runner.
+final class RecordingRunner: CallRunner, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _names: [String] = []
+    var names: [String] { lock.withLock { _names } }
+    func run<T: Sendable>(_ name: String, _ body: @escaping @Sendable () throws -> T) async throws -> T {
+        lock.withLock { _names.append(name) }
+        return try body()
     }
 }

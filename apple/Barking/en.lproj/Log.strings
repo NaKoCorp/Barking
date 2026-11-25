@@ -17,6 +17,8 @@
 "log.node_deposit" = "Deposits on node %1$@: packets %2$@, refused %3$@. The node sees the mailbox, the size, the time and your IP address; not the content.";
 "log.node_fetch" = "Fetch on node %1$@: mailboxes %2$@, items received %3$@. The node sees which mailboxes you fetch and your IP address.";
 "log.node_avoided" = "Node %1$@ is set aside for 7 days: %2$@.";
+"log.node_blocked" = "Node %1$@ is blocked: Barking no longer talks to it.";
+"log.node_unblocked" = "Node %1$@ is unblocked: Barking may use it again.";
 "log.seal_skipped" = "Nothing was encrypted for device %2$@ of %1$@: its published keys are unusable. Its other devices still receive the packet.";
 "log.admin_transfer_started" = "The root key was sent, encrypted, to your device %1$@. This device keeps it until that device confirms, then erases it.";
 "log.admin_transferred" = "Your device %1$@ is now the administrator. This device erased its copy of the root key.";
@@ -85,6 +87,8 @@
 "log.title.node_deposit" = "Deposit on %1$@";
 "log.title.node_fetch" = "Fetch on %1$@";
 "log.title.node_avoided" = "Node set aside: %1$@";
+"log.title.node_blocked" = "Node blocked: %1$@";
+"log.title.node_unblocked" = "Node unblocked: %1$@";
 "log.title.seal_skipped" = "Not encrypted for a device of %1$@";
 "log.title.admin_transfer_started" = "Root key sent to %1$@";
 "log.title.admin_transferred" = "Admin is now %1$@";

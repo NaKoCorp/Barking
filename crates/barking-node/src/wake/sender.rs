@@ -9,7 +9,10 @@
 //! all stepped aside on purpose (`NodeFull`, connection refused) is not
 //! skipped: the batch fails, the next one is tried as usual. One host holds at most
 //! `MAX_SENDS_PER_HOST` of the send permits. Nothing here logs a relay host,
-//! an address or a token.
+//! an address or a token. Whether a relay is reachable, for the public
+//! `Info` report, is not taken from these sends (they follow the users'
+//! activity) but from periodic probes (`super::probe`), through
+//! `RelayProbe` below.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -25,6 +28,7 @@ use tokio::sync::Semaphore;
 use tokio::time::{Instant, timeout};
 
 use super::WakeOrder;
+use super::probe::RelayProbe;
 use crate::server::ServerStats;
 
 /// Wake-ups waiting or in flight, all relays together.
@@ -447,6 +451,27 @@ impl WakeTransport for QuicWakeTransport {
     }
 }
 
+impl RelayProbe for QuicWakeTransport {
+    /// Resolution and connection like a send (`CONNECT_TIMEOUT`, routable
+    /// addresses only), then `Hello` with the pinned identity, and the
+    /// session is closed. Nothing is kept: no session, no address set aside,
+    /// so probes and sends never affect each other. A refused connection
+    /// proves no identity and counts as unreachable.
+    async fn reachable(&self, relay: &RelayRef) -> bool {
+        let deadline = Instant::now() + CONNECT_TIMEOUT;
+        let Ok(Ok(addrs)) = tokio::time::timeout_at(deadline, self.addresses(relay)).await else {
+            return false;
+        };
+        match connect_any(&addrs, relay.id, deadline, |_| {}).await {
+            Ok(session) => {
+                session.connection().close(0u32.into(), b"probe");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 /// Orders waiting per relay; a relay with an entry has a worker task.
 #[derive(Default)]
 struct Queues {
@@ -865,6 +890,25 @@ mod tests {
             .unwrap();
         let got = relay.received();
         assert_eq!(got, vec![vec![1u8; 8], vec![2u8; 8], vec![3u8; 8]]);
+        relay.stop();
+    }
+
+    /// A probe sends no wake-up and keeps nothing; only a session with the
+    /// pinned identity counts: a wrong identity or a refused connection
+    /// reads unreachable.
+    #[tokio::test]
+    async fn probe_checks_identity_and_sends_nothing() {
+        let relay = FakeRelay::start().await;
+        let t = QuicWakeTransport::new(true);
+        assert!(t.reachable(&relay.relay_ref()).await);
+        assert!(relay.received().is_empty());
+        assert_eq!(t.sessions().len(), 0, "no session kept");
+        let mut forged = relay.relay_ref();
+        forged.id = NodeId([9; 32]);
+        assert!(!t.reachable(&forged).await);
+        assert_eq!(t.address_backoff().len(), 0, "no address set aside");
+        relay.set_refuse_connections(true);
+        assert!(!t.reachable(&relay.relay_ref()).await);
         relay.stop();
     }
 
