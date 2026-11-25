@@ -65,10 +65,14 @@ final class BlockedNodesModel {
 }
 
 struct BlockedNodesView: View {
+    let core: CoreService
     @State private var model: BlockedNodesModel
     @Environment(\.locale) private var locale
 
-    init(core: CoreService) { _model = State(initialValue: BlockedNodesModel(core: core)) }
+    init(core: CoreService) {
+        self.core = core
+        _model = State(initialValue: BlockedNodesModel(core: core))
+    }
 
     var body: some View {
         Group {
@@ -83,7 +87,14 @@ struct BlockedNodesView: View {
                        })
                     .accessibilityIdentifier("blockedNodes.loadFailed")
             }
-            if model.loaded && !model.loadFailed && model.nodes.isEmpty {
+            if !model.loaded {
+                HStack(spacing: Space.s2) {
+                    ProgressView()
+                    Text("Loading the list…").font(.bBody).foregroundStyle(Color.fgMuted)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("blockedNodes.loading")
+            } else if !model.loadFailed && model.nodes.isEmpty {
                 Text("No blocked node.").font(.bBody).foregroundStyle(Color.fgSoft)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("blockedNodes.empty")
@@ -96,7 +107,12 @@ struct BlockedNodesView: View {
         .barkingScreen(tabRoot: true)
         .navigationTitle(Text("Blocked nodes"))
         .toolbarTitleDisplayMode(.inline)
-        .task { await model.load() }
+        .task {
+            await model.load()
+            // A block that lands after this screen opened (it waits for a
+            // sync in progress) shows here at once.
+            for await change in await core.changes where change == .network { await model.load() }
+        }
     }
 
     private func row(_ node: BlockedNode) -> some View {

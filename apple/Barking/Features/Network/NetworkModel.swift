@@ -69,8 +69,21 @@ final class NetworkModel {
     /// Said under the link when the restore failed.
     private(set) var resetError: String?
     private(set) var terminal: [String] = []
+    /// "Sync now" (or the sync joined on opening) runs: its button spins.
     private(set) var syncing = false
-    /// The line of the last "Sync now", while no other sync came after it.
+    /// A sync started elsewhere (the launch, the timer, Chats) runs.
+    private(set) var coreSyncing = false
+    /// The relays were read once: until then the card does not say "No
+    /// relay yet", which would be false while they load.
+    private(set) var loaded = false
+    /// The last read of the relays failed: what was shown stays, and a
+    /// line says so (never taken for an empty list).
+    private(set) var loadFailed = false
+    /// On opening, a sync older than this runs again (the foreground timer's
+    /// cadence, `SyncScheduler`).
+    static let staleAfter: TimeInterval = 60
+    /// The line of the last "Sync now" (or the sync run or joined on
+    /// opening the tab), while no other sync came after it.
     var result: SyncResult? { resultSync == lastSync ? lastResult : nil }
     private var lastResult: SyncResult?
     /// The sync time the result belongs to: a later (background) sync
@@ -81,7 +94,7 @@ final class NetworkModel {
     init(core: CoreService) { self.core = core }
 
     var status: NetworkStatus {
-        if syncing { return .checking }
+        if syncing || coreSyncing { return .checking }
         switch internetReachable {
         case true?: return .reachable
         case false?: return .unreachable
@@ -95,15 +108,41 @@ final class NetworkModel {
             : String(localized: "\(count) packets pending", bundle: bundle, locale: locale)
     }
 
+    /// Reads what the tab shows. A read that fails keeps what was shown (a
+    /// database held by the notification extension, say) and sets
+    /// `loadFailed`: the relays never vanish behind "No relay yet".
     func load() async {
         internetReachable = await core.lastSync?.networkUp
         lastSync = await core.lastSyncAt
-        pending = (try? await core.pendingCount()) ?? 0
-        let nodes = (try? await core.nodes()) ?? []
-        inUse = Self.sorted(nodes.filter(\.inUse))
-        others = Self.sorted(nodes.filter { !$0.inUse })
-        blockedCount = (try? await core.blockedNodes().count) ?? 0
-        dismissedDefaults = (try? await core.dismissedDefaultsCount()) ?? 0
+        coreSyncing = await core.isSyncing
+        var failed = false
+        func read<T>(_ body: () async throws -> T) async -> T? {
+            do { return try await body() } catch { failed = true; return nil }
+        }
+        if let n = await read({ try await core.pendingCount() }) { pending = n }
+        if let nodes = await read({ try await core.nodes() }) {
+            inUse = Self.sorted(nodes.filter(\.inUse))
+            others = Self.sorted(nodes.filter { !$0.inUse })
+            loaded = true
+        }
+        if let n = await read({ try await core.blockedNodes().count }) { blockedCount = n }
+        if let n = await read({ try await core.dismissedDefaultsCount() }) { dismissedDefaults = n }
+        loadFailed = failed
+    }
+
+    /// A sync started elsewhere: only the status moves.
+    func syncStarted() async {
+        coreSyncing = await core.isSyncing
+    }
+
+    /// The tab opens: what is known shows at once, then a sync runs if
+    /// none ran lately, or the one running is joined, so that the button
+    /// spins and its outcome is said (a failure included).
+    func appear(now: Date = Date()) async {
+        await load()
+        guard !syncing else { return }
+        let stale = lastSync.map { now.timeIntervalSince($0) > Self.staleAfter } ?? true
+        if coreSyncing || stale { await syncNow() }
     }
 
     var showsReset: Bool { dismissedDefaults > 0 }

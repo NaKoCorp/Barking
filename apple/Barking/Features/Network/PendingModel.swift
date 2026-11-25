@@ -223,7 +223,7 @@ final class PendingModel {
     func apply(_ change: CoreChange) async {
         switch change {
         case .network, .messages, .delivery, .contacts, .devices, .expired: await load()
-        case .identity: break
+        case .identity, .syncStarted: break
         }
     }
 

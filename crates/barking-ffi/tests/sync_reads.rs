@@ -108,6 +108,46 @@ fn reads_do_not_wait_for_a_sync() {
         .unwrap();
 }
 
+/// The Network screen opens while a sync runs: the nodes it knows, the
+/// blocked ones and the counts join the sync's lock instead of waiting.
+#[test]
+fn network_reads_do_not_wait_for_a_sync() {
+    let da = tempfile::tempdir().unwrap();
+    let cfg = common::config(&da, 1);
+    let alice = common::device(&da, 1, "Alice");
+    let _hole = slow_node(&alice);
+    let node = id_of(&key(0)).to_string();
+    let blocked = id_of(&key(1)).to_string();
+    alice.block_node(blocked.clone()).unwrap();
+
+    let syncing = Arc::clone(&alice);
+    let sync = thread::spawn(move || {
+        let start = Instant::now();
+        let s = syncing.sync(SYNC_MS);
+        (s, start.elapsed())
+    });
+    wait_for_sync_lock(&cfg);
+
+    let start = Instant::now();
+    let nodes = alice.nodes().unwrap();
+    assert_eq!(
+        nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+        vec![node.clone()]
+    );
+    alice.node_detail(node.clone()).unwrap();
+    let list = alice.blocked_nodes().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, blocked);
+    assert_eq!(alice.dismissed_defaults_count().unwrap(), 0);
+    alice.usable_nodes_if_blocked(node).unwrap();
+    let reads = start.elapsed();
+    assert!(reads < Duration::from_secs(1), "reads took {reads:?}");
+
+    let (summary, took) = sync.join().unwrap();
+    summary.unwrap();
+    assert!(took > reads + Duration::from_secs(1), "sync took {took:?}");
+}
+
 #[test]
 fn a_write_during_a_sync_waits_for_it() {
     let da = tempfile::tempdir().unwrap();

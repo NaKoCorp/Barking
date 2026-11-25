@@ -675,6 +675,10 @@
 "No blocked node." = "Aucun nœud bloqué.";
 "Couldn't load the list. Try again." = "Impossible de charger la liste. Réessayez.";
 "Reads the list again" = "Relit la liste";
+"Couldn't load the relays. Try again." = "Impossible de charger les relais. Réessayez.";
+"Reads the relays again" = "Relit les relais";
+"Loading the relays…" = "Chargement des relais…";
+"Loading the list…" = "Chargement de la liste…";
 "Sync in progress, try again in a moment" = "Synchronisation en cours, réessayez dans un instant";
 "Barking could not count the usable nodes that would be left: your messages may be kept in fewer places than usual." = "Barking n’a pas pu compter les nœuds utilisables qui resteraient : vos messages pourraient être gardés en moins d’endroits que d’habitude.";
 

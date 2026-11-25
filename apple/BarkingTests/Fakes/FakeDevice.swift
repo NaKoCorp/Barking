@@ -178,7 +178,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var syncEvents: [String] { lock.withLock { _syncEvents } }
     /// Returned by `nodes`.
     var nodeList: [NodeInfo] = []
-    func nodes() throws -> [NodeInfo] { nodeList }
+    /// Thrown by `nodes` when set.
+    var nodesError: Error?
+    func nodes() throws -> [NodeInfo] {
+        if let nodesError { throw nodesError }
+        return nodeList
+    }
     private var _addedNodes: [String] = []
     /// `id@addr` of each `addNode` call, in order.
     var addedNodes: [String] { lock.withLock { _addedNodes } }
