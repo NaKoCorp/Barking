@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/NaKoCorp/Barking/compare/v0.4.0...v0.5.0) (2026-11-25)
+
+
+### Features
+
+* node transparency with origin check and blocking ([#83](https://github.com/NaKoCorp/Barking/issues/83)) ([dceb243](https://github.com/NaKoCorp/Barking/commit/dceb2430100463c2ed8023334d8ac4788bea4a1b))
+
 ## [0.4.0](https://github.com/NaKoCorp/Barking/compare/v0.3.0...v0.4.0) (2026-11-24)
 
 
