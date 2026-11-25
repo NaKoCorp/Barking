@@ -10813,3 +10813,29 @@ fn block_contact_on_a_requester_closes_the_request() {
         Err(CoreError::UnknownContact)
     ));
 }
+
+#[test]
+fn acceptance_learned_from_an_ack_survives_a_resend() {
+    // Bob already knew Alice: he acks her invite without writing, so her
+    // session with him still waits for a first answer.
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let bob = b.fingerprint();
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    let at = NOW + 60;
+    b.receive(&invite.encode(), "t", at, &mut rng).unwrap();
+    let acks = acks_of(&mut b, at);
+    a.receive(&acks[0].encode(), "t", at + 60, &mut rng)
+        .unwrap();
+    assert_eq!(
+        a.invite_state(&bob, at + 60).unwrap(),
+        InviteState::Accepted { at: at + 60 }
+    );
+    let later = NOW + 86_400;
+    a.invite(&bob, later, &mut rng).unwrap();
+    assert_eq!(
+        a.invite_state(&bob, later).unwrap(),
+        InviteState::Accepted { at: at + 60 }
+    );
+}

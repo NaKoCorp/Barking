@@ -836,24 +836,51 @@ pub(super) fn invite_packet_fp(
 /// The devices of contact `fp` an invite goes to: those whose session (the
 /// one `seal_for` would use: most recently received, otherwise most recently
 /// created) still waits for a first answer (`pending_initial`), and those
-/// with no session yet. A device that already answered is left out. The
-/// flag tells whether every device of the card is waiting (none answered).
-fn waiting_devices(q: &impl Queries, fp: Fingerprint) -> Result<(Vec<DeviceId>, bool)> {
+/// with no session yet. A device that already answered is left out.
+struct Waiting {
+    devices: Vec<DeviceId>,
+    /// Every device of the card is waiting: none answered.
+    none_answered: bool,
+    /// Creation date of the oldest session with the contact's devices.
+    oldest_session: Option<u64>,
+}
+
+fn waiting_devices(q: &impl Queries, fp: Fingerprint) -> Result<Waiting> {
     let contact = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
     let card = load_card(&contact.card)?;
-    let mut out = Vec::new();
+    let mut devices = Vec::new();
+    let mut oldest_session: Option<u64> = None;
     for cert in &card.devices.certs {
         let id = cert.device.id();
-        let chosen = q
-            .sessions_for(fp, id)?
+        let sessions = q.sessions_for(fp, id)?;
+        for s in &sessions {
+            oldest_session = Some(oldest_session.map_or(s.created_at, |o| o.min(s.created_at)));
+        }
+        let chosen = sessions
             .into_iter()
             .max_by_key(|s| (s.last_rx, s.created_at));
         if chosen.is_none_or(|s| s.pending_initial.is_some()) {
-            out.push(id);
+            devices.push(id);
         }
     }
-    let none_answered = out.len() == card.devices.certs.len();
-    Ok((out, none_answered))
+    let none_answered = devices.len() == card.devices.certs.len();
+    Ok(Waiting {
+        devices,
+        none_answered,
+        oldest_session,
+    })
+}
+
+/// Whether the acceptance of my invite to `fp` belongs to a former contact
+/// (removed and added again since): no device has answered, and every
+/// session with it was opened after the acceptance was learned. An
+/// acceptance learned from an ack alone leaves the session that carried
+/// the invite waiting, but that session is older: it stays.
+fn acceptance_outlived(q: &impl Queries, fp: Fingerprint, waiting: &Waiting) -> Result<bool> {
+    let Some(accepted_at) = get_invite(q, fp)?.and_then(|row| row.accepted_at) else {
+        return Ok(false);
+    };
+    Ok(waiting.none_answered && waiting.oldest_session.is_none_or(|c| c > accepted_at))
 }
 
 /// Applies a `SyncInvite { to, at }` from one of my devices: the invite
@@ -1464,8 +1491,9 @@ impl Core {
     /// before the contact was removed and added again) is less than
     /// `INVITE_INTERVAL_SECS` old, `TooLarge` if my card does not fit in a
     /// packet. When every device already answered, `Ok(vec![])` and nothing
-    /// is written. When none has answered yet (the contact removed and added
-    /// again), an earlier acceptance is forgotten: the state is `Sent`.
+    /// is written. An acceptance that belongs to a former contact (removed
+    /// and added again, no device answered since: `acceptance_outlived`)
+    /// is forgotten: the state is `Sent`.
     pub fn invite(
         &mut self,
         to: &Fingerprint,
@@ -1494,14 +1522,15 @@ impl Core {
         if !envelope::fits_in_packet(&body) {
             return Err(CoreError::TooLarge);
         }
-        let (waiting, none_answered) = waiting_devices(&self.store, fp)?;
-        if waiting.is_empty() {
+        let waiting = waiting_devices(&self.store, fp)?;
+        if waiting.devices.is_empty() {
             return Ok(Vec::new());
         }
+        let outlived = acceptance_outlived(&self.store, fp, &waiting)?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             let message_id = random_message_id(rng);
-            let target = Target::ContactDevices(fp, waiting);
+            let target = Target::ContactDevices(fp, waiting.devices);
             let sealed = seal_for(
                 tx,
                 device,
@@ -1521,9 +1550,9 @@ impl Core {
                 insert_invite_packet(tx, packet.id, fp)?;
             }
             put_invite_at(tx, fp, now)?;
-            // No device answered (the contact was removed and added
-            // again): an earlier acceptance no longer holds.
-            if none_answered {
+            // The contact was removed and added again: an earlier
+            // acceptance no longer holds.
+            if outlived {
                 clear_invite_accepted(tx, fp)?;
             }
             log(
