@@ -66,8 +66,9 @@ pub use link::{
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
 pub use reactions::{ME_REACTOR, ReactionChip, ReactionResend};
 pub use receive::{
-    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
-    R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
+    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED,
+    R_PENDING_REQUEST, R_REQUEST_FORGED, R_STALE, R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER,
+    R_UNREADABLE,
 };
 pub use remove::LeaveState;
 pub use removed::Removed;
@@ -204,6 +205,16 @@ pub enum ReceiveOutcome {
     /// not be dropped as having nothing to show. Any other repeat (a
     /// reaction, a sync, an ack, a message deleted since) is `Duplicate`.
     DuplicateMessage,
+    /// An invite from a person who is not a contact: a pending request,
+    /// created or updated. Nothing is acked and no session is written
+    /// before it is accepted. `resent`: the request already existed.
+    /// `notify`: no notification for this request in the last
+    /// `NOTIFY_INTERVAL_SECS`.
+    ContactRequest {
+        contact: Fingerprint,
+        resent: bool,
+        notify: bool,
+    },
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -264,6 +275,16 @@ impl fmt::Debug for ReceiveOutcome {
                 .field("alias", alias)
                 .field("target", target)
                 .field("added", &format_args!("<{} emoji>", added.len()))
+                .finish(),
+            Self::ContactRequest {
+                contact,
+                resent,
+                notify,
+            } => f
+                .debug_struct("ContactRequest")
+                .field("contact", contact)
+                .field("resent", resent)
+                .field("notify", notify)
                 .finish(),
         }
     }

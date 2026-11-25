@@ -140,7 +140,13 @@ pub(super) fn seal_for(
         let (mut row, mut ratchet, init, opened_here) = match chosen {
             Some(row) => {
                 let ratchet = de_state(&row.state)?;
-                let init = row.pending_initial.as_deref().map(de_init).transpose()?;
+                let mut init = row.pending_initial.as_deref().map(de_init).transpose()?;
+                // A row stored by 0.6.0 has no signing key: mine is added, so
+                // that a recipient who does not know me yet can authenticate
+                // the content (spec §5.6).
+                if let Some(init) = &mut init {
+                    init.sig.get_or_insert(me.sig);
+                }
                 (row, ratchet, init, false)
             }
             None => {

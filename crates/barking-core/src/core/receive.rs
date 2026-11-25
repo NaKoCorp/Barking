@@ -10,7 +10,7 @@ use super::route::{self, RouteStep};
 use super::{
     Core, MAX_AGE_SECS, MAX_FUTURE_SECS, META_PREKEYS, OwnDevices, ReceiveOutcome,
     SEEN_RETENTION_SECS, admin, contacts, de_state, ephemeral, load_card, log, reactions, remove,
-    removed, ser_state, session_ad, session_id, sync,
+    removed, requests, ser_state, session_ad, session_id, sync,
 };
 use crate::contact::ContactCard;
 use crate::content::{ExtContent, MessageRef, UNSEEN_CEILING_SECS, UnknownPolicy};
@@ -37,6 +37,10 @@ pub const R_ID_MISMATCH: &str = "inconsistent packet identifier";
 pub const R_STALE: &str = "message too old or dated in the future";
 pub const R_ID_REUSED: &str = "packet identifier already used";
 pub const R_BLOCKED: &str = "blocked contact";
+/// An invite whose card does not list the device that sealed it.
+pub const R_REQUEST_FORGED: &str = "contact request not signed by its sender";
+/// A first packet held until its sender's contact request is resolved.
+pub const R_PENDING_REQUEST: &str = "pending contact request";
 
 /// Maximum number of sessions kept per remote device.
 const MAX_SESSIONS_PER_DEVICE: usize = 2;
@@ -44,7 +48,7 @@ const MAX_SESSIONS_PER_DEVICE: usize = 2;
 /// Output of a receive transaction: the result, and the new
 /// key-packet secrets if a session was opened (applied in
 /// memory only after the commit).
-type RxOut = (ReceiveOutcome, Option<PrekeySecrets>);
+pub(super) type RxOut = (ReceiveOutcome, Option<PrekeySecrets>);
 
 /// Session that authenticated the message.
 struct Opened {
@@ -252,7 +256,29 @@ impl Core {
                     ek,
                     sealed_init,
                     msg,
-                }) if to_intro => open_initial(tx, device, prekeys, &ek, &sealed_init, &msg, now)?,
+                }) if to_intro => match envelope::open_initial(device, &ek, &sealed_init) {
+                    Err(_) => Err(R_UNDECRYPTABLE),
+                    Ok(init) => match find_sender(tx, &init.ik, &me)? {
+                        Ok((contact_fp, peer)) => {
+                            open_initial(tx, device, prekeys, &init, contact_fp, &peer, &msg, now)?
+                        }
+                        // A device no contact lists: maybe a contact request.
+                        Err(R_UNKNOWN_SENDER) => {
+                            return requests::on_unknown_initial(
+                                tx,
+                                log_limiter,
+                                device,
+                                prekeys,
+                                packet,
+                                &init,
+                                &msg,
+                                now,
+                                rng,
+                            );
+                        }
+                        Err(reason) => Err(reason),
+                    },
+                },
                 Ok(Wire::Normal { msg }) if !matching.is_empty() => {
                     // Sessions that received most recently first.
                     matching.sort_by_key(|s| core::cmp::Reverse((s.last_rx, s.created_at)));
@@ -354,27 +380,22 @@ fn find_sender(
     Ok(found.ok_or(R_UNKNOWN_SENDER))
 }
 
-/// `Wire::Initial`: opens the sealed initial message, identifies the sender,
-/// then decrypts in the existing session (Initial returned) or in a
-/// new responder session. Nothing is written here.
+/// `Wire::Initial` from `peer`, a device of `contact_fp` (a contact, or my
+/// own fingerprint for my other devices) found by `find_sender`: decrypts in
+/// the existing session (Initial resent) or in a new responder session.
+/// Nothing is written here. A device no contact lists goes to
+/// `requests::on_unknown_initial` instead.
+#[allow(clippy::too_many_arguments)]
 fn open_initial(
     q: &impl Queries,
     device: &DeviceKeys,
     prekeys: &PrekeySecrets,
-    ek: &[u8; 32],
-    sealed_init: &[u8],
+    init: &InitialMessage,
+    contact_fp: Fingerprint,
+    peer: &DevicePublic,
     msg: &RatchetMessage,
     now: u64,
 ) -> Result<core::result::Result<Opened, &'static str>> {
-    let Ok(init) = envelope::open_initial(device, ek, sealed_init) else {
-        return Ok(Err(R_UNDECRYPTABLE));
-    };
-    // No contact requests in v0: only a device of a known contact,
-    // or one of my other devices, can open a session.
-    let (contact_fp, peer) = match find_sender(q, &init.ik, &device.public())? {
-        Ok(found) => found,
-        Err(reason) => return Ok(Err(reason)),
-    };
     // A signing key named by the Initial must be that of the device found
     // (`None`: written by 0.6.0, which did not carry it).
     if init.sig.is_some_and(|sig| sig != peer.sig) {
@@ -406,7 +427,39 @@ fn open_initial(
             Err(_) => Err(R_UNDECRYPTABLE),
         });
     }
-    open_new_session(device, prekeys, &init, contact_fp, peer_id, sid, msg, now)
+    open_new_session(device, prekeys, init, contact_fp, peer_id, sid, msg, now)
+}
+
+/// Trial opening of a first packet from `peer`, a device no contact lists
+/// (as its Initial names it): a responder session on a copy of the
+/// key-packet secrets, then the envelope and its checks (`check_envelope`).
+/// Nothing is written and nothing is marked seen: the session and the
+/// copy of the secrets are dropped. Refusal: `Ok(Err(reason))`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn trial_open(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    prekeys: &PrekeySecrets,
+    packet: &Packet,
+    init: &InitialMessage,
+    peer: &DevicePublic,
+    msg: &RatchetMessage,
+    now: u64,
+) -> Result<core::result::Result<Envelope, &'static str>> {
+    // The sender's fingerprint is not known yet: the row, dropped, gets none.
+    let unknown = Fingerprint([0; 32]);
+    let sid = session_id(&init.ek);
+    let o = match open_new_session(device, prekeys, init, unknown, peer.id(), sid, msg, now)? {
+        Ok(o) => o,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let Ok(env) = envelope::decode(&o.pt) else {
+        return Ok(Err(R_BAD_CONTENT));
+    };
+    if let Err(reason) = check_envelope(q, packet, &env, now)? {
+        return Ok(Err(reason));
+    }
+    Ok(Ok(env))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -482,7 +535,7 @@ fn open_normal(
 
 /// Refusal without decryption: no session state changes. In the log,
 /// grouped by reason (noise toward my introduction mailbox is free).
-fn quarantine(
+pub(super) fn quarantine(
     q: &impl Queries,
     limiter: &mut LogLimiter,
     packet: &Packet,

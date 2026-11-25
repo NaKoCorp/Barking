@@ -183,6 +183,11 @@ pub enum TransparencyEvent {
     InviteSent {
         contact: Fingerprint,
     },
+    /// An invite from `contact`, who is not a contact, created or updated a
+    /// pending request. Nothing was sent back. Added last.
+    ContactRequestReceived {
+        contact: Fingerprint,
+    },
 }
 
 /// A `bool` added at the end of a stored variant. The log stores postcard,
@@ -517,6 +522,10 @@ impl TransparencyEvent {
                 "Invite sent to {contact}: your contact card, encrypted for each of \
                  their devices that has not answered yet."
             ),
+            Self::ContactRequestReceived { contact } => format!(
+                "Contact request from {contact}: their card is kept until you accept, \
+                 refuse or block it. Nothing was sent back, not even a receipt."
+            ),
         }
     }
 }
@@ -718,6 +727,7 @@ mod tests {
                 id_short: "ABCDEFGH".into(),
             },
             TransparencyEvent::InviteSent { contact: fp(13) },
+            TransparencyEvent::ContactRequestReceived { contact: fp(14) },
         ]
     }
 

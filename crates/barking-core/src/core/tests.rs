@@ -9181,3 +9181,522 @@ fn invite_skips_devices_that_already_answered() {
     assert_eq!(count_table(&p.a, "deliveries"), deliveries);
     assert_eq!(count_table(&p.a, "invite_packets"), 0);
 }
+
+// --- Contact requests, task 5: receiving an invite from an unknown sender.
+
+/// Alice (display name "Alice") added Bob; Bob does not know her.
+fn alice_knows_bob() -> (TempDir, Core, TempDir, Core, StdRng) {
+    let (da, mut a) = party("a", 1);
+    let (db, b) = party("b", 2);
+    a.contact_card("Alice").unwrap();
+    a.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
+    (da, a, db, b, StdRng::seed_from_u64(8))
+}
+
+/// The one packet of an invite for Bob's single device.
+fn invite_one(a: &mut Core, bob: Fingerprint, at: u64, rng: &mut StdRng) -> Packet {
+    let mut out = a.invite(&bob, at, rng).unwrap();
+    assert_eq!(out.len(), 1);
+    out.remove(0)
+}
+
+/// A `ContactRequest` carrying `card`, sealed by `from` for `to` under
+/// `message_id` (no 24-hour cap: forged below the public API).
+fn sealed_invite(
+    from: &mut Core,
+    to: Fingerprint,
+    card: ContactCard,
+    message_id: u8,
+    rng: &mut StdRng,
+) -> Packet {
+    let body = ExtContent::ContactRequest {
+        card: Box::new(card),
+    }
+    .to_body();
+    seal_body(
+        from,
+        &send::Target::Contact(to),
+        &body,
+        MessageId([message_id; 16]),
+        rng,
+    )
+    .remove(0)
+    .0
+}
+
+fn request_outcome(o: ReceiveOutcome) -> (Fingerprint, bool, bool) {
+    match o {
+        ReceiveOutcome::ContactRequest {
+            contact,
+            resent,
+            notify,
+        } => (contact, resent, notify),
+        other => panic!("ContactRequest expected, got {other:?}"),
+    }
+}
+
+fn held_messages(c: &Core, fp: Fingerprint) -> usize {
+    requests::list_pending_by_fp(&c.store, fp)
+        .unwrap()
+        .iter()
+        .filter(|p| !p.invite)
+        .count()
+}
+
+#[test]
+fn invitation_creates_request_without_session_or_ack() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    let outbox_before = b.pending_outbox(NOW).unwrap().len();
+    let p = invite_one(&mut a, b.fingerprint(), NOW, &mut rng);
+    let got = b.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(request_outcome(got), (alice, false, true));
+    let list = requests::list_requests(&b.store).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].fingerprint, alice);
+    assert_eq!(list[0].display_name, "Alice");
+    assert_eq!(list[0].invite_count, 1);
+    assert_eq!(list[0].pending_messages, 0);
+    assert!(list[0].unseen);
+    // The packet is held, not accepted: no session, no ack, not seen.
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held[0].invite);
+    assert_eq!(held[0].packet_id, p.id);
+    assert!(b.store.all_sessions().unwrap().is_empty());
+    assert_eq!(b.pending_outbox(NOW).unwrap().len(), outbox_before);
+    assert_eq!(count_table(&b, "seen"), 0);
+    assert!(b.contacts().unwrap().is_empty());
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactRequestReceived { contact } if *contact == alice
+        )),
+        1
+    );
+}
+
+#[test]
+fn forged_invitation_creates_no_request() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    // Carol's real card, sealed by Alice's device: it does not list it.
+    let (_dc, c) = party("c", 3);
+    let carol = c.contact_card("Carol").unwrap();
+    let p = sealed_invite(&mut a, b.fingerprint(), carol, 1, &mut rng);
+    let got = b.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_REQUEST_FORGED);
+    assert!(requests::list_requests(&b.store).unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+}
+
+#[test]
+fn message_before_invitation_joins_request() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let text = a.send_text(&bob, "un", NOW, &mut rng).unwrap();
+    let got = b.receive(&text[0].encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_UNKNOWN_SENDER);
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 1);
+    let p = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    let list = requests::list_requests(&b.store).unwrap();
+    assert_eq!(list[0].pending_messages, 1);
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+    // A later message of the same sender joins the request directly.
+    let more = a.send_text(&bob, "deux", NOW, &mut rng).unwrap();
+    let got = b.receive(&more[0].encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_PENDING_REQUEST);
+    assert_eq!(held_messages(&b, alice), 2);
+    assert!(b.store.all_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn resend_updates_single_request_and_counts() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let first = invite_one(&mut a, bob, NOW, &mut rng);
+    b.receive(&first.encode(), "t", NOW, &mut rng).unwrap();
+    let later = NOW + 86_400;
+    let second = invite_one(&mut a, bob, later, &mut rng);
+    let got = b.receive(&second.encode(), "t", later, &mut rng).unwrap();
+    assert_eq!(request_outcome(got), (alice, true, true));
+    let list = requests::list_requests(&b.store).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].invite_count, 2);
+    assert_eq!(list[0].last_seen, later);
+    // The resend replaced the stored invite.
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].packet_id, second.id);
+    // The same packet again, or the replaced one redelivered (never acked,
+    // nodes keep it): nothing changes.
+    for p in [&second, &first] {
+        let got = b.receive(&p.encode(), "t", later, &mut rng).unwrap();
+        assert!(matches!(got, ReceiveOutcome::Duplicate), "{got:?}");
+    }
+    assert_eq!(
+        requests::list_requests(&b.store).unwrap()[0].invite_count,
+        2
+    );
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].packet_id, second.id);
+}
+
+#[test]
+fn notification_at_most_once_per_24h() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let card = a.contact_card("Alice").unwrap();
+    let one = sealed_invite(&mut a, bob, card.clone(), 1, &mut rng);
+    let two = sealed_invite(&mut a, bob, card, 2, &mut rng);
+    let got = b.receive(&one.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(request_outcome(got), (alice, false, true));
+    let got = b
+        .receive(&two.encode(), "t", NOW + 3_600, &mut rng)
+        .unwrap();
+    assert_eq!(request_outcome(got), (alice, true, false));
+    let row = requests::get_request(&b.store, alice).unwrap().unwrap();
+    assert_eq!(row.invite_count, 2);
+    assert_eq!(row.last_notified, Some(NOW));
+}
+
+#[test]
+fn caps_drop_newest() {
+    // A full list of requests: a new sender is dropped.
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    for n in 0..requests::MAX_PENDING_REQUESTS {
+        let mut fp = [0xee; 32];
+        fp[..4].copy_from_slice(&n.to_be_bytes());
+        requests::upsert_request(
+            &b.store,
+            &requests::RequestRow {
+                fp: Fingerprint(fp),
+                card: vec![1],
+                display_name: format!("r{n}"),
+                first_seen: NOW,
+                last_seen: NOW,
+                invite_count: 1,
+                hidden: false,
+                unseen: true,
+                last_notified: None,
+            },
+        )
+        .unwrap();
+    }
+    let p = invite_one(&mut a, bob, NOW, &mut rng);
+    let got = b.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert_eq!(requests::count_requests(&b.store).unwrap(), 50);
+    assert!(requests::get_request(&b.store, alice).unwrap().is_none());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+
+    // A request holds its newest invite and 3 messages: the 4th is dropped.
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let p = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    for i in 0..4 {
+        let text = a.send_text(&bob, &format!("m{i}"), NOW, &mut rng).unwrap();
+        let got = b.receive(&text[0].encode(), "t", NOW, &mut rng).unwrap();
+        assert_eq!(reason(got), R_PENDING_REQUEST);
+    }
+    assert_eq!(held_messages(&b, alice), 3);
+    assert_eq!(
+        requests::count_pending_for_fp(&b.store, alice).unwrap(),
+        requests::MAX_PACKETS_PER_REQUEST
+    );
+
+    // The queue of unknown senders holds 16 packets: the 17th is dropped.
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    for i in 0..=requests::MAX_UNKNOWN_INITIALS {
+        let text = a.send_text(&bob, &format!("u{i}"), NOW, &mut rng).unwrap();
+        let got = b.receive(&text[0].encode(), "t", NOW, &mut rng).unwrap();
+        assert_eq!(reason(got), R_UNKNOWN_SENDER);
+    }
+    assert_eq!(
+        requests::count_unknown(&b.store).unwrap(),
+        requests::MAX_UNKNOWN_INITIALS
+    );
+    // Attached to the request when the invite comes: within its cap, the
+    // others are dropped.
+    let p = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    assert_eq!(held_messages(&b, alice), 3);
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+}
+
+#[test]
+fn blocked_fingerprint_invitation_is_dropped() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    // Bob blocked Alice, then removed her: the block outlives the contact.
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    b.block_contact(&alice, NOW, &mut rng).unwrap();
+    b.remove_contact(&alice, NOW, &mut rng).unwrap();
+    let p = invite_one(&mut a, b.fingerprint(), NOW, &mut rng);
+    let got = b.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert!(requests::list_requests(&b.store).unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+}
+
+#[test]
+fn refused_fingerprint_older_invitation_is_dropped() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    requests::put_refusal(&b.store, alice, NOW).unwrap();
+    let p = invite_one(&mut a, b.fingerprint(), NOW, &mut rng);
+    let got = b.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert!(requests::list_requests(&b.store).unwrap().is_empty());
+    // Sealed after the refusal: a request again.
+    let later = NOW + 86_400;
+    let p = invite_one(&mut a, b.fingerprint(), later, &mut rng);
+    let got = b.receive(&p.encode(), "t", later, &mut rng).unwrap();
+    assert_eq!(request_outcome(got), (alice, false, true));
+}
+
+#[test]
+fn resend_from_another_session_replaces_its_packets() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let p = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    let text = a.send_text(&bob, "old", NOW, &mut rng).unwrap();
+    b.receive(&text[0].encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(held_messages(&b, alice), 1);
+    // Alice drops her session (removed and added Bob again): her next
+    // invite opens another one.
+    a.remove_contact(&bob, NOW, &mut rng).unwrap();
+    a.add_contact(&b.contact_card("Bob").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let later = NOW + 86_400;
+    let again = invite_one(&mut a, bob, later, &mut rng);
+    let got = b.receive(&again.encode(), "t", later, &mut rng).unwrap();
+    assert_eq!(request_outcome(got), (alice, true, true));
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].packet_id, again.id);
+    // The replaced message, redelivered, does not come back.
+    let got = b.receive(&text[0].encode(), "t", later, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Duplicate), "{got:?}");
+    assert_eq!(held_messages(&b, alice), 0);
+}
+
+/// A text in Alice's pending session to Bob, sealed with an Initial without
+/// her signing key (as 0.6.0 wrote it).
+fn unsigned_initial(a: &Core, b: &Core, rng: &mut StdRng) -> Packet {
+    let row = best_session(a);
+    let mut init = de_init(row.pending_initial.as_deref().unwrap()).unwrap();
+    init.sig = None;
+    let mut ratchet = de_state(&row.state).unwrap();
+    let env = Envelope {
+        sent_at: NOW,
+        ack_secret: [4; 16],
+        message_id: [4; 16],
+        body: Body::Text("old".into()),
+    };
+    let peer = b.device.public();
+    crate::envelope::seal(
+        &env,
+        &mut ratchet,
+        &row.ad,
+        Some((&init, &peer.dh)),
+        intro_mailbox(&peer, day_of(NOW)),
+        NOW,
+        rng,
+    )
+    .unwrap()
+}
+
+#[test]
+fn unsigned_initial_is_held_without_trial() {
+    // An Initial without the signing key (written by 0.6.0): held as it is,
+    // in the queue of unknown senders, with no envelope read.
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let bob = b.fingerprint();
+    a.send_text(&bob, "x", NOW, &mut rng).unwrap();
+    let p = unsigned_initial(&a, &b, &mut rng);
+    let got = b.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_UNKNOWN_SENDER);
+    let held = requests::list_pending_by_ik(&b.store, &a.device.public().dh).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].message_id, None);
+    // Held once.
+    let got = b.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Duplicate), "{got:?}");
+}
+
+#[test]
+fn unsigned_initial_does_not_squat_a_packet_id() {
+    // An unauthenticated packet carrying the id of a real invite, received
+    // first, does not make the invite pass for a duplicate.
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    let invite = invite_one(&mut a, b.fingerprint(), NOW, &mut rng);
+    let mut squat = unsigned_initial(&a, &b, &mut rng);
+    squat.id = invite.id;
+    let got = b.receive(&squat.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_UNKNOWN_SENDER);
+    let got = b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(request_outcome(got), (alice, false, true));
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held[0].invite);
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+}
+
+#[test]
+fn legacy_pending_initial_is_sealed_with_my_signing_key() {
+    let (_da, mut a, _db, b, mut rng) = alice_knows_bob();
+    let bob = b.fingerprint();
+    a.send_text(&bob, "x", NOW, &mut rng).unwrap();
+    // The row as 0.6.0 stored it: no signing key.
+    let mut row = best_session(&a);
+    let stored = row.pending_initial.clone().unwrap();
+    row.pending_initial = Some(stored[..stored.len() - 32].to_vec());
+    a.store.put_session(&row).unwrap();
+    let p = a.send_text(&bob, "y", NOW, &mut rng).unwrap();
+    let Wire::Initial {
+        ek, sealed_init, ..
+    } = parse_wire(&p[0].payload).unwrap()
+    else {
+        panic!("Initial expected");
+    };
+    let init = crate::envelope::open_initial(&b.device, &ek, &sealed_init).unwrap();
+    assert_eq!(init.sig, Some(a.device.public().sig));
+}
+
+#[test]
+fn contact_new_device_invitation_updates_card() {
+    // Bob knows Alice with one device; she links a tablet whose card never
+    // reached Bob, and the tablet invites him.
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(77);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    let (db, mut b) = party("b", 9);
+    let alice = a.fingerprint();
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) =
+        Core::begin_link(&dir.path().join("t"), &[2; 32], &offer, "t", NOW, &mut rng).unwrap();
+    let out = a.link_device(&req, false, NOW, &mut rng).unwrap();
+    t.finish_link(&out.bundle, None, NOW).unwrap();
+    t.add_contact(&b.contact_card("Bob").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let pkts = t.invite(&b.fingerprint(), NOW, &mut rng).unwrap();
+    let to_bob = pkts
+        .iter()
+        .find(|p| p.mailbox == intro_mailbox(&b.device.public(), day_of(NOW)))
+        .unwrap();
+    let got = b.receive(&to_bob.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_PENDING_REQUEST);
+    // No request: the card of a known contact is updated instead.
+    assert!(requests::list_requests(&b.store).unwrap().is_empty());
+    assert_eq!(stored_card(&b, alice).devices.certs.len(), 2);
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held[0].invite);
+    drop(db);
+}
+
+/// Bob knows Alice (her card signed at NOW) and has a session with her;
+/// Alice then recovers her identity from her phrase on a new device at
+/// `recovered_at` (a new device, a list of version `recovered_at`), adds Bob
+/// again and invites him. Returns Bob, Alice's fingerprint and the invite.
+fn recovered_alice_invites(recovered_at: u64) -> (TempDir, Core, Fingerprint, Packet) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(31);
+    let (mut a, phrase) =
+        Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    let (mut b, _) = Core::create(&dir.path().join("b"), &[2; 32], "b", NOW, &mut rng).unwrap();
+    let alice = a.fingerprint();
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    a.add_contact(&b.contact_card("Bob").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let p = a
+        .send_text(&b.fingerprint(), "before", NOW, &mut rng)
+        .unwrap();
+    b.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(b.store.all_sessions().unwrap().len(), 1);
+    let mut r = Core::recover(
+        &dir.path().join("r"),
+        &[3; 32],
+        phrase.as_str(),
+        "r",
+        recovered_at,
+        &mut rng,
+    )
+    .unwrap();
+    assert_eq!(r.fingerprint(), alice);
+    r.contact_card("Alice").unwrap();
+    r.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        None,
+        recovered_at,
+        &mut rng,
+    )
+    .unwrap();
+    let invite = invite_one(&mut r, b.fingerprint(), recovered_at, &mut rng);
+    (dir, b, alice, invite)
+}
+
+#[test]
+fn recovered_identity_invitation_updates_card() {
+    let (_d, mut b, alice, invite) = recovered_alice_invites(NOW + 100);
+    let old = stored_card(&b, alice);
+    let mut rng = StdRng::seed_from_u64(32);
+    let got = b
+        .receive(&invite.encode(), "t", NOW + 100, &mut rng)
+        .unwrap();
+    assert_eq!(reason(got), R_PENDING_REQUEST);
+    // No request: a card update, applied; the old device's session goes.
+    assert!(requests::list_requests(&b.store).unwrap().is_empty());
+    let card = stored_card(&b, alice);
+    assert!(card.devices.supersedes(&old.devices));
+    assert_eq!(card.devices.certs.len(), 1);
+    assert_ne!(card.devices.certs[0].device, old.devices.certs[0].device);
+    assert!(b.store.all_sessions().unwrap().is_empty());
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactCardUpdated { contact, .. } if *contact == alice
+        )),
+        1
+    );
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactKeyChanged { .. }
+        )),
+        0
+    );
+    // Held with Alice's fingerprint, for the replay.
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].packet_id, invite.id);
+}
+
+#[test]
+fn recovered_identity_older_list_refused() {
+    // Recovered with a clock behind: its list is older than the known one.
+    let (_d, mut b, alice, invite) = recovered_alice_invites(NOW - 100);
+    let old = stored_card(&b, alice);
+    let mut rng = StdRng::seed_from_u64(32);
+    let got = b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), contacts::R_CARD_REFUSED);
+    assert_eq!(stored_card(&b, alice), old);
+    assert!(requests::list_requests(&b.store).unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(b.store.all_sessions().unwrap().len(), 1);
+}

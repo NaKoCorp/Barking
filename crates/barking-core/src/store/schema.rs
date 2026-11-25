@@ -460,7 +460,8 @@ pub fn migrate_v4_to_v5(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Schema v6 (contact requests): the requests received from unknown
 /// senders, the first packets held until the request is accepted
-/// (`pending_initials`, `fp` NULL = queue of unknown senders), the refusals,
+/// (`pending_initials`, `fp` NULL = queue of unknown senders; `session_id`:
+/// the session the packet opens), the refusals,
 /// the invites I sent (kept when the contact is removed) and the packets of
 /// those invites.
 const SCHEMA_V6_TABLES: &str = "
@@ -471,8 +472,8 @@ CREATE TABLE IF NOT EXISTS contact_requests (
     unseen INTEGER NOT NULL DEFAULT 0, last_notified INTEGER);
 CREATE TABLE IF NOT EXISTS pending_initials (
     packet_id BLOB PRIMARY KEY NOT NULL, ik BLOB NOT NULL, fp BLOB,
-    message_id BLOB, bytes BLOB NOT NULL, received_at INTEGER NOT NULL,
-    invite INTEGER NOT NULL);
+    session_id BLOB NOT NULL, message_id BLOB, bytes BLOB NOT NULL,
+    received_at INTEGER NOT NULL, invite INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS pending_initials_ik ON pending_initials(ik);
 CREATE INDEX IF NOT EXISTS pending_initials_fp ON pending_initials(fp);
 CREATE TABLE IF NOT EXISTS refused_requests (

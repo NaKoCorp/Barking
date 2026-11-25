@@ -7,8 +7,9 @@ use std::collections::HashMap;
 
 use barking_core::Core;
 use barking_core::core::{
-    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
-    R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
+    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED,
+    R_PENDING_REQUEST, R_REQUEST_FORGED, R_STALE, R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER,
+    R_UNREADABLE,
 };
 use barking_core::fragment::{REASON_BAD_HASH, REASON_CONTRADICTORY};
 use barking_core::identity::root::Fingerprint;
@@ -40,7 +41,7 @@ pub struct LogEntry {
 
 /// Number of variants of `TransparencyEvent`: one more than the last
 /// position `index` gives.
-const VARIANTS: usize = 31;
+const VARIANTS: usize = 32;
 
 /// Every key `LogEntry::key` can take, one per `TransparencyEvent` variant,
 /// in the order of `index`. The key of an event is `KEYS[index(event)]`: there
@@ -77,6 +78,7 @@ const KEYS: [&str; VARIANTS] = [
     "log.node_blocked",
     "log.node_unblocked",
     "log.invite_sent",
+    "log.contact_request_received",
 ];
 
 /// Position of a variant in `KEYS`. No wildcard: a new variant does not
@@ -115,6 +117,7 @@ fn index(e: &TransparencyEvent) -> usize {
         E::NodeBlocked { .. } => 28,
         E::NodeUnblocked { .. } => 29,
         E::InviteSent { .. } => 30,
+        E::ContactRequestReceived { .. } => 31,
     }
 }
 
@@ -155,6 +158,8 @@ const TOKENS: &[&str] = &[
     "reason_stale",
     "reason_id_reused",
     "reason_blocked",
+    "reason_request_forged",
+    "reason_pending_request",
     "reason_bad_hash",
     "reason_contradictory",
     "reason_unknown",
@@ -205,6 +210,8 @@ fn reason_token(r: &str) -> String {
         R_STALE => "reason_stale",
         R_ID_REUSED => "reason_id_reused",
         R_BLOCKED => "reason_blocked",
+        R_REQUEST_FORGED => "reason_request_forged",
+        R_PENDING_REQUEST => "reason_pending_request",
         REASON_BAD_HASH => "reason_bad_hash",
         REASON_CONTRADICTORY => "reason_contradictory",
         _ => "reason_unknown",
@@ -375,7 +382,9 @@ fn parts(e: &TransparencyEvent, name: &dyn Fn(&Fingerprint) -> String) -> (Strin
         E::NodeBlocked { id_short } | E::NodeUnblocked { id_short } => {
             ("node", vec![id_short.clone()])
         }
-        E::InviteSent { contact } => ("session", vec![name(contact)]),
+        E::InviteSent { contact } | E::ContactRequestReceived { contact } => {
+            ("session", vec![name(contact)])
+        }
     };
     (family.to_owned(), args)
 }
@@ -565,6 +574,7 @@ mod tests {
                 id_short: "abcd2345".into(),
             },
             E::InviteSent { contact: fp(7) },
+            E::ContactRequestReceived { contact: fp(7) },
         ]
     }
 
@@ -642,6 +652,8 @@ mod tests {
             R_STALE,
             R_ID_REUSED,
             R_BLOCKED,
+            R_REQUEST_FORGED,
+            R_PENDING_REQUEST,
             REASON_BAD_HASH,
             REASON_CONTRADICTORY,
         ] {

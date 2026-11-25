@@ -16,14 +16,24 @@
 use rand_core::CryptoRng;
 use rusqlite::{OptionalExtension, params};
 
+use super::log_limit::{LogLimiter, log_limited};
+use super::receive::{
+    R_BAD_CONTENT, R_PENDING_REQUEST, R_REQUEST_FORGED, R_UNKNOWN_SENDER, RxOut, quarantine,
+    trial_open,
+};
 use super::send::{SealTime, Target, seal_for};
-use super::{Core, MAX_AGE_SECS, delivery, load_card, log, sync};
+use super::{
+    Core, MAX_AGE_SECS, ReceiveOutcome, contacts, delivery, load_card, log, session_id, sync,
+};
 use crate::contact::ContactCard;
 use crate::content::ExtContent;
-use crate::envelope;
-use crate::identity::{DeviceId, Fingerprint};
+use crate::envelope::{self, Body, Envelope};
+use crate::handshake::PrekeySecrets;
+use crate::handshake::pqxdh::InitialMessage;
+use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::packet::{Packet, PacketId};
-use crate::store::{MessageId, Queries, arr, map_err, to_i64, to_u64};
+use crate::ratchet::RatchetMessage;
+use crate::store::{ContactRow, MessageId, Queries, arr, map_err, to_i64, to_u64};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -90,13 +100,15 @@ pub(super) struct RequestRow {
 }
 
 /// A held first packet (`pending_initials` row). `fp` is `None` while it
-/// waits in the queue of unknown senders; `invite` marks the packet of an
-/// invite rather than a message.
+/// waits in the queue of unknown senders; `session_id` is that of the
+/// session its Initial opens; `invite` marks the packet of an invite rather
+/// than a message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PendingInitial {
     pub packet_id: PacketId,
     pub ik: [u8; 32],
     pub fp: Option<Fingerprint>,
+    pub session_id: [u8; 16],
     pub message_id: Option<MessageId>,
     pub bytes: Vec<u8>,
     pub received_at: u64,
@@ -261,12 +273,14 @@ pub(super) fn count_requests(q: &impl Queries) -> Result<u32> {
     Ok(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
-const PENDING_COLUMNS: &str = "packet_id, ik, fp, message_id, bytes, received_at, invite";
+const PENDING_COLUMNS: &str =
+    "packet_id, ik, fp, session_id, message_id, bytes, received_at, invite";
 
 type PendingRaw = (
     Vec<u8>,
     Vec<u8>,
     Option<Vec<u8>>,
+    Vec<u8>,
     Option<Vec<u8>>,
     Vec<u8>,
     i64,
@@ -282,15 +296,17 @@ fn pending_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PendingRaw> {
         r.get(4)?,
         r.get(5)?,
         r.get(6)?,
+        r.get(7)?,
     ))
 }
 
 fn into_pending(raw: PendingRaw) -> Result<PendingInitial> {
-    let (packet_id, ik, fp, message_id, bytes, received_at, invite) = raw;
+    let (packet_id, ik, fp, session_id, message_id, bytes, received_at, invite) = raw;
     Ok(PendingInitial {
         packet_id: PacketId(arr(packet_id)?),
         ik: arr(ik)?,
         fp: fp.map(|v| arr(v).map(Fingerprint)).transpose()?,
+        session_id: arr(session_id)?,
         message_id: message_id.map(|v| arr(v).map(MessageId)).transpose()?,
         bytes,
         received_at: to_u64(received_at),
@@ -312,12 +328,13 @@ pub(super) fn insert_pending_initial(q: &impl Queries, p: &PendingInitial) -> Re
         .execute(
             &format!(
                 "INSERT OR IGNORE INTO pending_initials ({PENDING_COLUMNS})
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             ),
             params![
                 p.packet_id.0.as_slice(),
                 p.ik.as_slice(),
                 p.fp.map(|f| f.0.to_vec()),
+                p.session_id.as_slice(),
                 p.message_id.map(|m| m.0.to_vec()),
                 p.bytes,
                 to_i64(p.received_at),
@@ -392,18 +409,82 @@ pub(super) fn delete_pending(q: &impl Queries, packet_id: PacketId) -> Result<bo
 }
 
 /// Attaches the queued first packets of unknown senders with the identity
-/// key `ik` to the request of `fp`. Returns how many were attached.
+/// key `ik` to the request of `fp`, oldest first, while it holds fewer than
+/// `MAX_PACKETS_PER_REQUEST`; the others are dropped from the queue.
+/// Returns how many were attached.
 pub(super) fn attach_unknown_to_fp(
     q: &impl Queries,
     ik: &[u8; 32],
     fp: Fingerprint,
 ) -> Result<usize> {
-    q.conn()
-        .execute(
-            "UPDATE pending_initials SET fp = ?2 WHERE ik = ?1 AND fp IS NULL",
-            params![ik.as_slice(), fp.0.as_slice()],
-        )
-        .map_err(map_err)
+    let queued = query_pending(
+        q,
+        &format!(
+            "SELECT {PENDING_COLUMNS} FROM pending_initials WHERE ik = ?1 AND fp IS NULL
+             ORDER BY received_at, packet_id"
+        ),
+        ik,
+    )?;
+    let mut attached = 0;
+    for p in queued {
+        if count_pending_for_fp(q, fp)? < MAX_PACKETS_PER_REQUEST {
+            q.conn()
+                .execute(
+                    "UPDATE pending_initials SET fp = ?2 WHERE packet_id = ?1",
+                    params![p.packet_id.0.as_slice(), fp.0.as_slice()],
+                )
+                .map_err(map_err)?;
+            attached += 1;
+        } else {
+            delete_pending(q, p.packet_id)?;
+        }
+    }
+    Ok(attached)
+}
+
+/// The held first packet with this id, if any.
+pub(super) fn get_pending(q: &impl Queries, packet_id: PacketId) -> Result<Option<PendingInitial>> {
+    Ok(query_pending(
+        q,
+        &format!("SELECT {PENDING_COLUMNS} FROM pending_initials WHERE packet_id = ?1"),
+        &packet_id.0,
+    )?
+    .pop())
+}
+
+/// The request whose card lists a device with the X25519 key `ik` (and, when
+/// the Initial names it, the signing key `sig`). Several: none (ambiguous).
+fn request_of_device(
+    q: &impl Queries,
+    ik: &[u8; 32],
+    sig: Option<[u8; 32]>,
+) -> Result<Option<Fingerprint>> {
+    let mut stmt = q
+        .conn()
+        .prepare("SELECT fp, card FROM contact_requests")
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(map_err)?;
+    let mut found = None;
+    for row in rows {
+        let (fp, card) = row.map_err(map_err)?;
+        let card = load_card(&card)?;
+        let listed = card
+            .devices
+            .certs
+            .iter()
+            .any(|c| c.device.dh == *ik && sig.is_none_or(|s| s == c.device.sig));
+        if listed {
+            if found.is_some() {
+                return Ok(None);
+            }
+            found = Some(Fingerprint(arr(fp)?));
+        }
+    }
+    Ok(found)
 }
 
 /// When `fp` was refused, if it was.
@@ -547,6 +628,362 @@ pub(super) fn apply_sync_invite(q: &impl Queries, to: Fingerprint, at: u64) -> R
     }
     put_invite_at(q, to, at)?;
     Ok(true)
+}
+
+/// Fixed reason logged (grouped) when a new sender finds the list of
+/// requests full.
+const R_REQUESTS_FULL: &str = "too many pending contact requests";
+
+/// A first packet from a device no contact lists, being handled.
+struct First<'a> {
+    packet: &'a Packet,
+    init: &'a InitialMessage,
+    /// The session its Initial opens.
+    session: [u8; 16],
+    now: u64,
+}
+
+impl First<'_> {
+    /// The packet as a held row.
+    fn held(
+        &self,
+        fp: Option<Fingerprint>,
+        message_id: Option<MessageId>,
+        invite: bool,
+    ) -> PendingInitial {
+        PendingInitial {
+            packet_id: self.packet.id,
+            ik: self.init.ik,
+            fp,
+            session_id: self.session,
+            message_id,
+            bytes: self.packet.encode(),
+            received_at: self.now,
+            invite,
+        }
+    }
+}
+
+/// A `Wire::Initial` to my introduction mailbox from a device no contact
+/// lists (`find_sender` gave `R_UNKNOWN_SENDER`), handled without accepting
+/// anything: no session written, no ack, nothing marked seen (spec §7.1).
+///
+/// 1. Trial opening (`trial_open`) as the device the Initial names; refused:
+///    quarantine. An Initial without a signing key (written by 0.6.0) cannot
+///    be read before its sender's card is known: held as it is (3 or 4).
+/// 2. An invite (`ContactRequest`) creates or updates the request of its
+///    card (`on_invitation`).
+/// 3. Any other content, from a device a request's card lists, joins that
+///    request: `R_PENDING_REQUEST`.
+/// 4. Otherwise it goes to the queue of unknown senders: `R_UNKNOWN_SENDER`.
+///
+/// Beyond a limit the new packet is dropped. A packet already held is a
+/// `Duplicate`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn on_unknown_initial(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    device: &DeviceKeys,
+    prekeys: &PrekeySecrets,
+    packet: &Packet,
+    init: &InitialMessage,
+    msg: &RatchetMessage,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let first = First {
+        packet,
+        init,
+        session: session_id(&init.ek),
+        now,
+    };
+    let held = get_pending(q, packet.id)?;
+    let Some(peer) = init.initiator() else {
+        if held.is_some() {
+            return duplicate(q, limiter, packet, now);
+        }
+        return hold_message(q, limiter, &first, None);
+    };
+    // A held packet whose content was read (`message_id` set): its identifier
+    // was bound to that content, a repeat is a duplicate (as `is_seen`).
+    if held.as_ref().is_some_and(|p| p.message_id.is_some()) {
+        return duplicate(q, limiter, packet, now);
+    }
+    let env = match trial_open(q, device, prekeys, packet, init, &peer, msg, now)? {
+        Ok(env) => env,
+        Err(reason) => return quarantine(q, limiter, packet, now, reason),
+    };
+    // A packet held unread under this identifier (an Initial without a
+    // signing key) proves nothing: the authenticated one replaces it.
+    if held.is_some() {
+        delete_pending(q, packet.id)?;
+    }
+    let card = match &env.body {
+        Body::Ext { kind, data, .. } => match ExtContent::decode(*kind, data) {
+            Ok(Some(ExtContent::ContactRequest { card })) => Some(card),
+            Ok(_) => None,
+            Err(_) => return quarantine(q, limiter, packet, now, R_BAD_CONTENT),
+        },
+        _ => None,
+    };
+    match card {
+        Some(card) => on_invitation(q, limiter, device, &first, &peer, &env, &card, rng),
+        None => {
+            let from = Some((peer.sig, MessageId(env.message_id)));
+            hold_message(q, limiter, &first, from)
+        }
+    }
+}
+
+/// A packet seen again while it is held: nothing changes.
+fn duplicate(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    now: u64,
+) -> Result<RxOut> {
+    log_limited(
+        q,
+        limiter,
+        now,
+        Some(packet.id),
+        &TransparencyEvent::DuplicateIgnored {
+            packet_id: packet.id,
+        },
+    )?;
+    Ok((ReceiveOutcome::Duplicate, None))
+}
+
+/// Steps 3 and 4 of `on_unknown_initial`: a first packet that is not an
+/// invite joins the request whose card lists its device, otherwise the
+/// queue of unknown senders, each within its cap. `from`: the signing key
+/// the Initial names and the message id, when the content was read.
+fn hold_message(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    first: &First<'_>,
+    from: Option<([u8; 32], MessageId)>,
+) -> Result<RxOut> {
+    let (sig, message_id) = (from.map(|f| f.0), from.map(|f| f.1));
+    let reason = match request_of_device(q, &first.init.ik, sig)? {
+        Some(fp) => {
+            if count_pending_for_fp(q, fp)? < MAX_PACKETS_PER_REQUEST {
+                insert_pending_initial(q, &first.held(Some(fp), message_id, false))?;
+                touch_request(q, fp, first.now)?;
+            }
+            R_PENDING_REQUEST
+        }
+        None => {
+            if count_unknown(q)? < MAX_UNKNOWN_INITIALS {
+                insert_pending_initial(q, &first.held(None, message_id, false))?;
+            }
+            R_UNKNOWN_SENDER
+        }
+    };
+    quarantine(q, limiter, first.packet, first.now, reason)
+}
+
+/// A new packet joined the request of `fp`: seen now, and shown again.
+fn touch_request(q: &impl Queries, fp: Fingerprint, now: u64) -> Result<()> {
+    q.conn()
+        .execute(
+            "UPDATE contact_requests SET last_seen = ?2, unseen = 1 WHERE fp = ?1",
+            params![fp.0.as_slice(), to_i64(now)],
+        )
+        .map_err(map_err)?;
+    Ok(())
+}
+
+/// Whether `card` lists `peer` exactly (signing and X25519 keys).
+fn lists(card: &ContactCard, peer: &DevicePublic) -> bool {
+    card.devices.certs.iter().any(|c| c.device == *peer)
+}
+
+/// Step 2 of `on_unknown_initial`: an invite, authenticated as sealed by
+/// `peer`. Its card must pass `check_card` (otherwise `R_CARD_REFUSED`) and
+/// list `peer` (otherwise `R_REQUEST_FORGED`). A blocked fingerprint, or an
+/// invite sealed before the last refusal, is dropped (`Ignored`); so is a
+/// new sender while `MAX_PENDING_REQUESTS` requests are kept. The request
+/// keeps the newest card, counts the distinct invites (envelope message
+/// id) and notifies at most once per `NOTIFY_INTERVAL_SECS`. A card of a
+/// known contact goes to `on_contact_device` instead.
+#[allow(clippy::too_many_arguments)]
+fn on_invitation(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    device: &DeviceKeys,
+    first: &First<'_>,
+    peer: &DevicePublic,
+    env: &Envelope,
+    card: &ContactCard,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let (packet, now) = (first.packet, first.now);
+    let fp = card.fingerprint();
+    if let Some(current) = q.get_contact(fp)? {
+        return on_contact_device(q, limiter, device, first, peer, env, &current, card, rng);
+    }
+    match contacts::check_card(q, card) {
+        Ok(_) => {}
+        Err(e @ (CoreError::Store(_) | CoreError::StoreLocked)) => return Err(e),
+        Err(_) => return quarantine(q, limiter, packet, now, contacts::R_CARD_REFUSED),
+    }
+    if !lists(card, peer) {
+        return quarantine(q, limiter, packet, now, R_REQUEST_FORGED);
+    }
+    if q.block_state(fp)?.drops(env.sent_at)
+        || get_refusal(q, fp)?.is_some_and(|at| env.sent_at <= at)
+    {
+        return Ok((ReceiveOutcome::Ignored, None));
+    }
+    let existing = get_request(q, fp)?;
+    if existing.is_none() && count_requests(q)? >= MAX_PENDING_REQUESTS {
+        log_limited(
+            q,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DecryptFailed {
+                packet_id: packet.id,
+                reason: R_REQUESTS_FULL.to_owned(),
+            },
+        )?;
+        return Ok((ReceiveOutcome::Ignored, None));
+    }
+    let message_id = MessageId(env.message_id);
+    let new_invite = !list_pending_by_fp(q, fp)?
+        .iter()
+        .any(|p| p.invite && p.message_id == Some(message_id));
+    let resent = existing.is_some();
+    let mut row = match existing {
+        Some(mut row) => {
+            let kept = load_card(&row.card)?;
+            if card.devices.supersedes(&kept.devices) || card.devices == kept.devices {
+                row.card = card.encode();
+                row.display_name.clone_from(&card.display_name);
+            }
+            row.invite_count = row.invite_count.saturating_add(u32::from(new_invite));
+            row
+        }
+        None => RequestRow {
+            fp,
+            card: card.encode(),
+            display_name: card.display_name.clone(),
+            first_seen: now,
+            last_seen: now,
+            invite_count: 1,
+            hidden: false,
+            unseen: true,
+            last_notified: None,
+        },
+    };
+    row.last_seen = now;
+    row.unseen = true;
+    let notify = row
+        .last_notified
+        .is_none_or(|at| now.saturating_sub(at) >= NOTIFY_INTERVAL_SECS);
+    if notify {
+        row.last_notified = Some(now);
+    }
+    upsert_request(q, &row)?;
+    hold_invitation(q, first, fp, message_id)?;
+    if !resent || new_invite {
+        log(
+            q,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::ContactRequestReceived { contact: fp },
+        )?;
+    }
+    Ok((
+        ReceiveOutcome::ContactRequest {
+            contact: fp,
+            resent,
+            notify,
+        },
+        None,
+    ))
+}
+
+/// An invite from a device of a known contact that its card, as I know it,
+/// does not list: a device linked since, whose card never reached me (spec
+/// §13). No request: the newer card it carries is a card update, verified
+/// as one (`verify_card_update`; older or identical: `R_CARD_REFUSED`). It
+/// must list `peer` (otherwise `R_REQUEST_FORGED`), and is then applied as
+/// `accept_card_update` does. The packet is held with the contact's
+/// fingerprint, to be replayed: `R_PENDING_REQUEST`. A blocked contact's
+/// card is applied too (as its card updates are), its invite dropped.
+#[allow(clippy::too_many_arguments)]
+fn on_contact_device(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    device: &DeviceKeys,
+    first: &First<'_>,
+    peer: &DevicePublic,
+    env: &Envelope,
+    current: &ContactRow,
+    card: &ContactCard,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let (packet, now, fp) = (first.packet, first.now, current.fp);
+    let verified = match contacts::verify_card_update(q, current, card)? {
+        Ok(contacts::CardUpdate::Newer(verified)) => verified,
+        Ok(contacts::CardUpdate::Superseded) => {
+            return quarantine(q, limiter, packet, now, contacts::R_CARD_REFUSED);
+        }
+        Err(reason) => return quarantine(q, limiter, packet, now, reason),
+    };
+    if !lists(card, peer) {
+        return quarantine(q, limiter, packet, now, R_REQUEST_FORGED);
+    }
+    let (added, removed) =
+        contacts::apply_card_update(q, device, current, card, verified, now, rng)?;
+    log(
+        q,
+        now,
+        Some(packet.id),
+        &TransparencyEvent::ContactCardUpdated {
+            contact: fp,
+            alias: current.alias.clone(),
+            added: u32::try_from(added.len()).unwrap_or(u32::MAX),
+            removed,
+        },
+    )?;
+    sync::send_own_card(q, device, fp, &added, now, rng)?;
+    if q.block_state(fp)?.drops(env.sent_at) {
+        return Ok((ReceiveOutcome::Ignored, None));
+    }
+    hold_invitation(q, first, fp, MessageId(env.message_id))?;
+    quarantine(q, limiter, packet, now, R_PENDING_REQUEST)
+}
+
+/// Holds an invite packet for `fp`. An invite from another session of the
+/// same device replaces that device's packets; the newest invite replaces
+/// the one held (one per request). The queued packets of the same device
+/// then join it, within the cap.
+///
+/// A replaced packet whose content was read is marked seen: never acked,
+/// it may be delivered again, and must not come back (nor count as a new
+/// invite). One held unread is only dropped.
+fn hold_invitation(
+    q: &impl Queries,
+    first: &First<'_>,
+    fp: Fingerprint,
+    message_id: MessageId,
+) -> Result<()> {
+    let other_session = list_pending_by_ik(q, &first.init.ik)?
+        .into_iter()
+        .filter(|p| p.session_id != first.session && p.fp.is_none_or(|f| f == fp));
+    let older_invite = list_pending_by_fp(q, fp)?.into_iter().filter(|p| p.invite);
+    for p in other_session.chain(older_invite) {
+        if p.message_id.is_some() {
+            q.mark_seen(p.packet_id, first.now)?;
+        }
+        delete_pending(q, p.packet_id)?;
+    }
+    insert_pending_initial(q, &first.held(Some(fp), Some(message_id), true))?;
+    attach_unknown_to_fp(q, &first.init.ik, fp)?;
+    Ok(())
 }
 
 fn random_message_id(rng: &mut impl CryptoRng) -> MessageId {
@@ -693,6 +1130,7 @@ mod tests {
             packet_id: PacketId([id; 16]),
             ik: [ik; 32],
             fp: owner.map(fp),
+            session_id: [ik; 16],
             message_id: (!invite).then_some(MessageId([id; 16])),
             bytes: vec![id; 5],
             received_at: u64::from(id),
@@ -783,6 +1221,24 @@ mod tests {
         assert_eq!(count_pending_for_fp(&s, fp(5)).unwrap(), 1);
         assert_eq!(count_unknown(&s).unwrap(), 1);
         assert_eq!(attach_unknown_to_fp(&s, &[9; 32], fp(7)).unwrap(), 0);
+    }
+
+    #[test]
+    fn attaching_beyond_the_cap_drops_the_rest() {
+        let (_d, s) = store();
+        insert_pending_initial(&s, &pending(1, 9, Some(7), true)).unwrap();
+        for id in 2..8 {
+            insert_pending_initial(&s, &pending(id, 9, None, false)).unwrap();
+        }
+        assert_eq!(attach_unknown_to_fp(&s, &[9; 32], fp(7)).unwrap(), 3);
+        let held: Vec<u8> = list_pending_by_fp(&s, fp(7))
+            .unwrap()
+            .iter()
+            .map(|p| p.packet_id.0[0])
+            .collect();
+        // The oldest join the request; the others leave the queue.
+        assert_eq!(held, vec![1, 2, 3, 4]);
+        assert_eq!(count_unknown(&s).unwrap(), 0);
     }
 
     #[test]

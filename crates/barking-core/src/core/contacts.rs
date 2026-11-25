@@ -261,7 +261,7 @@ impl Core {
 }
 
 /// Verified card, ready to be written.
-struct Checked {
+pub(super) struct Checked {
     fp: Fingerprint,
     bytes: Vec<u8>,
     /// Log timestamp: the list's (no clock here).
@@ -274,7 +274,7 @@ struct Checked {
 /// All the checks of a contact card, without writing anything:
 /// signature, not my identity nor one of my devices, no device of
 /// another contact, list identical to or newer than the known one.
-fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
+pub(super) fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
     card.verify()?;
     let fp = card.fingerprint();
     let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
