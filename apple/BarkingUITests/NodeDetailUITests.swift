@@ -128,6 +128,19 @@ final class NodeDetailUITests: XCTestCase {
         XCTAssertTrue(app.buttons["network.blocked"].waitUntil({ !$0.exists }), "no blocked node left")
     }
 
+    /// Settings › Licences credits the IP base the verdict comes from (§6.3).
+    func testLicensesCreditTheIPBase() throws {
+        let app = openNetwork()
+        app.tabBars.buttons["Settings"].tap()
+        let row = app.buttons["settings.licenses"]
+        for _ in 0..<6 where !(row.exists && row.isHittable) { app.swipeUp(velocity: .slow) }
+        row.tap()
+        let ipdb = app.descendants(matching: .any)["licenses.ipdb"]
+        XCTAssertTrue(ipdb.waitForExistence(timeout: 5))
+        XCTAssertTrue(ipdb.label.contains("IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0"), ipdb.label)
+        XCTAssertTrue(app.descendants(matching: .any)["licenses.font"].label.contains("SIL Open Font License 1.1"))
+    }
+
     /// Screenshots for review (`TEST_RUNNER_BARKING_NODE_SHOTS` = a folder
     /// on the Mac; `..._SIZE` = a content size category; `..._NAME` = a
     /// prefix). French; skipped otherwise.

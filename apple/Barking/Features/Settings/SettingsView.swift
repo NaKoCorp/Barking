@@ -61,6 +61,10 @@ struct SettingsView: View {
                                 icon: "globe") { RowGlyph(symbol: "arrow.up.forward") }
                     }
                     .accessibilityIdentifier("settings.language")
+                    NavigationLink { LicensesView() } label: {
+                        FormRow("Licenses", subtitle: "Data and font Barking ships with", icon: "doc.text") { RowGlyph() }
+                    }
+                    .accessibilityIdentifier("settings.licenses")
                 }
                 #if BARKING_DEV
                 FormCard {

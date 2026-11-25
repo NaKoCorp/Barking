@@ -670,3 +670,10 @@
 "blocked on %@" = "bloqué le %@";
 "Barking no longer contacts a blocked node. Unblocking it doesn't bring it back: it returns only if the network finds it again or you add it by hand." = "Barking ne contacte plus un nœud bloqué. Le débloquer ne le fait pas revenir : il ne revient que si le réseau le retrouve ou si vous l’ajoutez à la main.";
 "No blocked node." = "Aucun nœud bloqué.";
+
+/* Settings › Licences (node transparency spec §6.3). */
+"Licenses" = "Licences";
+"Data and font Barking ships with" = "Données et police fournies avec Barking";
+"IP address base" = "Base d’adresses IP";
+"IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0 license" = "IP Geolocation by DB-IP (https://db-ip.com), licence CC BY 4.0";
+"Fira Code font" = "Police Fira Code";
