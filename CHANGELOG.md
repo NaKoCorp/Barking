@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/NaKoCorp/Barking/compare/v0.5.0...v0.6.0) (2026-11-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** Barking 0.5.0 and earlier reject the padded envelope; messages sent to them are lost until they update.
+
+### Bug Fixes
+
+* **core:** pad the plaintext so a message fills its tier ([#85](https://github.com/NaKoCorp/Barking/issues/85)) ([9253b24](https://github.com/NaKoCorp/Barking/commit/9253b243ff10eca2c013411f18fe3bb60c0d115e))
+
 ## [0.5.0](https://github.com/NaKoCorp/Barking/compare/v0.4.0...v0.5.0) (2026-11-25)
 
 
