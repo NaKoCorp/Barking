@@ -1,8 +1,9 @@
 //! Synchronization between my own devices: copies of my sent
 //! messages (`SyncSent`, `SyncReply`, `SyncMessage`), operations on
 //! contacts (`SyncContact`),
-//! new device list (`SyncDevices`), my deletions (`SyncDelete`), and the
-//! ephemeral messages I saw (`SyncSeen`).
+//! new device list (`SyncDevices`), my deletions (`SyncDelete`), the
+//! ephemeral messages I saw (`SyncSeen`), and the date of my last invite
+//! to a person (`SyncInvite`).
 //!
 //! Sending: through the double ratchet sessions with my other devices
 //! (`Target::OwnDevices`), one delivery per packet so that their acks
@@ -396,8 +397,8 @@ pub(super) fn apply(
         Body::Ext { kind, data, .. } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
             // Only `SyncReply`, `SyncMessage`, `SyncReaction`,
-            // `SyncDelete` and `SyncSeen` are sync contents; any other kind
-            // is refused.
+            // `SyncDelete`, `SyncSeen` and `SyncInvite` are sync contents;
+            // any other kind is refused.
             let (to, text, reply_to, ttl_secs) = match ExtContent::decode(*kind, data) {
                 Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => {
                     (to, text, Some(reply_to), None)
@@ -453,6 +454,12 @@ pub(super) fn apply(
                         env.message_id,
                     )?;
                     return Ok(Ok(applied.map(|_| SyncKind::Reaction)));
+                }
+                Ok(Some(ExtContent::SyncInvite { to, at }))
+                    if to != own.list.root.fingerprint() =>
+                {
+                    let applied = super::requests::apply_sync_invite(q, to, at)?;
+                    return Ok(Ok(applied.then_some(SyncKind::Contact)));
                 }
                 _ => return Ok(Err(R_SYNC_REFUSED)),
             };

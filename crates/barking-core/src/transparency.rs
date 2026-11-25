@@ -178,6 +178,11 @@ pub enum TransparencyEvent {
     NodeUnblocked {
         id_short: String,
     },
+    /// A contact invite (my card) was sealed for the devices of `contact`
+    /// still waiting for a first answer. No name, no content. Added last.
+    InviteSent {
+        contact: Fingerprint,
+    },
 }
 
 /// A `bool` added at the end of a stored variant. The log stores postcard,
@@ -508,6 +513,10 @@ impl TransparencyEvent {
                 "You unblocked node {id_short}: it can come back through discovery or \
                  by being added by hand."
             ),
+            Self::InviteSent { contact } => format!(
+                "Invite sent to {contact}: your contact card, encrypted for each of \
+                 their devices that has not answered yet."
+            ),
         }
     }
 }
@@ -708,6 +717,7 @@ mod tests {
             TransparencyEvent::NodeUnblocked {
                 id_short: "ABCDEFGH".into(),
             },
+            TransparencyEvent::InviteSent { contact: fp(13) },
         ]
     }
 

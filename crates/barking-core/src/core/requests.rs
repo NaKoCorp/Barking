@@ -13,13 +13,19 @@
 // following changes; until then nothing calls them.
 #![allow(dead_code)]
 
+use rand_core::CryptoRng;
 use rusqlite::{OptionalExtension, params};
 
-use super::MAX_AGE_SECS;
-use crate::Result;
-use crate::identity::Fingerprint;
-use crate::packet::PacketId;
+use super::send::{SealTime, Target, seal_for};
+use super::{Core, MAX_AGE_SECS, delivery, load_card, log, sync};
+use crate::contact::ContactCard;
+use crate::content::ExtContent;
+use crate::envelope;
+use crate::identity::{DeviceId, Fingerprint};
+use crate::packet::{Packet, PacketId};
 use crate::store::{MessageId, Queries, arr, map_err, to_i64, to_u64};
+use crate::transparency::{SyncKind, TransparencyEvent};
+use crate::{CoreError, Result};
 
 /// Requests kept at most (visible or hidden); a new sender beyond it is dropped.
 pub(super) const MAX_PENDING_REQUESTS: u32 = 50;
@@ -508,6 +514,149 @@ pub(super) fn invite_packet_fp(
         .map_err(map_err)?
         .map(|v| arr(v).map(Fingerprint))
         .transpose()
+}
+
+/// The devices of contact `fp` an invite goes to: those whose session (the
+/// one `seal_for` would use: most recently received, otherwise most recently
+/// created) still waits for a first answer (`pending_initial`), and those
+/// with no session yet. A device that already answered is left out.
+fn waiting_devices(q: &impl Queries, fp: Fingerprint) -> Result<Vec<DeviceId>> {
+    let contact = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
+    let card = load_card(&contact.card)?;
+    let mut out = Vec::new();
+    for cert in &card.devices.certs {
+        let id = cert.device.id();
+        let chosen = q
+            .sessions_for(fp, id)?
+            .into_iter()
+            .max_by_key(|s| (s.last_rx, s.created_at));
+        if chosen.is_none_or(|s| s.pending_initial.is_some()) {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
+/// Applies a `SyncInvite { to, at }` from one of my devices: the invite
+/// date of `to` becomes the later of the two (last writer wins), so that
+/// the 24-hour cap holds for the account. The contact need not exist: the
+/// date outlives its removal. Returns whether anything was written.
+pub(super) fn apply_sync_invite(q: &impl Queries, to: Fingerprint, at: u64) -> Result<bool> {
+    if get_invite(q, to)?.is_some_and(|row| row.at >= at) {
+        return Ok(false);
+    }
+    put_invite_at(q, to, at)?;
+    Ok(true)
+}
+
+fn random_message_id(rng: &mut impl CryptoRng) -> MessageId {
+    let mut id = [0u8; 16];
+    rng.fill_bytes(&mut id);
+    MessageId(id)
+}
+
+impl Core {
+    /// Invites `to`, a contact: my current card (`ContactRequest`) sealed
+    /// for each of its devices still waiting for a first answer (a first
+    /// call after `add_contact` opens a session with each device; a resend
+    /// is the next message of the same pending session). Each packet has a
+    /// delivery (no message row: nothing in the conversation) so that its
+    /// ack is recognised, and is remembered as an invite packet. The invite
+    /// date is shared with my other devices (`SyncInvite`), whose packets
+    /// come after the contact's. Everything is written in one transaction.
+    ///
+    /// Refused, writing nothing: `UnknownContact`, `ContactBlocked`,
+    /// `TooSoon` while the last invite (sent by any of my devices, even
+    /// before the contact was removed and added again) is less than
+    /// `INVITE_INTERVAL_SECS` old, `TooLarge` if my card does not fit in a
+    /// packet. When every device already answered, `Ok(vec![])` and nothing
+    /// is written.
+    pub fn invite(
+        &mut self,
+        to: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Packet>> {
+        self.ensure_active()?;
+        let fp = *to;
+        if self.store.get_contact(fp)?.is_none() {
+            return Err(CoreError::UnknownContact);
+        }
+        if self.store.block_state(fp)?.blocked {
+            return Err(CoreError::ContactBlocked);
+        }
+        if let Some(last) = get_invite(&self.store, fp)? {
+            let retry_at = last.at.saturating_add(INVITE_INTERVAL_SECS);
+            if retry_at > now {
+                return Err(CoreError::TooSoon { retry_at });
+            }
+        }
+        let card = self.current_card()?;
+        let body = ExtContent::ContactRequest {
+            card: Box::new(card),
+        }
+        .to_body();
+        if !envelope::fits_in_packet(&body) {
+            return Err(CoreError::TooLarge);
+        }
+        let waiting = waiting_devices(&self.store, fp)?;
+        if waiting.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            let message_id = random_message_id(rng);
+            let target = Target::ContactDevices(fp, waiting);
+            let sealed = seal_for(
+                tx,
+                device,
+                &target,
+                &body,
+                message_id,
+                SealTime::at(now),
+                rng,
+            )?;
+            // No device reachable: no invite went out, the cap is not spent.
+            if sealed.is_empty() {
+                return Ok(Vec::new());
+            }
+            for (packet, peer) in &sealed {
+                let size = delivery::packet_size(packet);
+                tx.add_delivery(message_id, packet.id, *peer, false, now, size)?;
+                insert_invite_packet(tx, packet.id, fp)?;
+            }
+            put_invite_at(tx, fp, now)?;
+            log(
+                tx,
+                now,
+                None,
+                &TransparencyEvent::InviteSent { contact: fp },
+            )?;
+            let copy = ExtContent::SyncInvite { to: fp, at: now }.to_body();
+            let mine = sync::seal_to_own(
+                tx,
+                device,
+                &copy,
+                SyncKind::Contact,
+                random_message_id(rng),
+                SealTime::at(now),
+                rng,
+            )?;
+            let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
+            out.extend(mine);
+            Ok(out)
+        })
+    }
+
+    /// My current card: the stored one (`own_card`, kept by the link and
+    /// device list changes), otherwise, on an account never linked, the
+    /// card signed now under my display name, as `contact_card` gives it.
+    fn current_card(&self) -> Result<ContactCard> {
+        match sync::own_card(&self.store)? {
+            Some(card) => Ok(card),
+            None => self.sign_card(&self.display_name()?),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -541,6 +541,17 @@ impl Core {
     /// by the cards the core signs itself, see `set_display_name`).
     pub fn contact_card(&self, display_name: &str) -> Result<ContactCard> {
         self.ensure_active()?;
+        let card = self.sign_card(display_name)?;
+        if self.store.get_meta::<String>(META_DISPLAY_NAME)?.as_deref() != Some(display_name) {
+            self.store.put_meta(META_DISPLAY_NAME, &display_name)?;
+        }
+        Ok(card)
+    }
+
+    /// My card signed now by my root (admin only, `NotAdmin` otherwise),
+    /// under `display_name`, with this device's key packet, those of my
+    /// linked devices and my node hints. Writes nothing.
+    pub(super) fn sign_card(&self, display_name: &str) -> Result<ContactCard> {
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
         let mut bundles = vec![self.prekeys.bundle(&self.device, false)];
         bundles.extend(
@@ -553,11 +564,7 @@ impl Core {
             .store
             .get_meta::<Vec<Vec<u8>>>(META_CARD_NODES)?
             .unwrap_or_default();
-        let card = ContactCard::sign(root, display_name, self.devices.clone(), bundles, nodes)?;
-        if self.store.get_meta::<String>(META_DISPLAY_NAME)?.as_deref() != Some(display_name) {
-            self.store.put_meta(META_DISPLAY_NAME, &display_name)?;
-        }
-        Ok(card)
+        ContactCard::sign(root, display_name, self.devices.clone(), bundles, nodes)
     }
 
     /// Sets the node hints carried by my contact card (opaque to the core:

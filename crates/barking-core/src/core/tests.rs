@@ -8875,3 +8875,239 @@ fn message_born_due_is_not_surfaced() {
         );
     }
 }
+
+// --- Contact requests, task 3: sending and resending an invite.
+
+/// Bob (admin, linked to his tablet) and Alice, who added Bob's card (two
+/// devices) without inviting him yet.
+fn alice_and_bob_with_tablet() -> (TempDir, TempDir, Core, Core, Core, StdRng) {
+    let (db, b, bt, rng) = linked();
+    let (da, mut a) = party("a", 9);
+    a.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW,
+        &mut StdRng::seed_from_u64(3),
+    )
+    .unwrap();
+    (da, db, a, b, bt, rng)
+}
+
+fn count_table(c: &Core, table: &str) -> i64 {
+    c.store
+        .conn()
+        .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn invite_seals_one_initial_per_device_in_tier_l() {
+    let (_da, _db, mut a, b, bt, mut rng) = alice_and_bob_with_tablet();
+    let bob = b.fingerprint();
+    let messages_before = count_table(&a, "messages");
+    let out = a.invite(&bob, NOW, &mut rng).unwrap();
+    // Alice has no other device: only Bob's two devices.
+    assert_eq!(out.len(), 2);
+    let intros: Vec<_> = [&b, &bt]
+        .iter()
+        .map(|c| intro_mailbox(&c.device.public(), day_of(NOW)))
+        .collect();
+    for p in &out {
+        assert_eq!(p.kind, Kind::Message);
+        assert_eq!(p.tier, Tier::L);
+        assert!(matches!(
+            parse_wire(&p.payload).unwrap(),
+            Wire::Initial { .. }
+        ));
+        assert!(intros.contains(&p.mailbox));
+        // A delivery (its ack is recognised) and an invite packet row.
+        assert!(a.store.is_my_packet(p.id).unwrap());
+        assert_eq!(
+            requests::invite_packet_fp(&a.store, p.id).unwrap(),
+            Some(bob)
+        );
+    }
+    assert_ne!(out[0].mailbox, out[1].mailbox);
+    // No conversation row for an invite.
+    assert_eq!(count_table(&a, "messages"), messages_before);
+    assert_eq!(
+        requests::get_invite(&a.store, bob).unwrap(),
+        Some(requests::InviteRow {
+            at: NOW,
+            accepted_at: None
+        })
+    );
+    assert_eq!(
+        count_events(&a, |e| matches!(
+            e,
+            TransparencyEvent::InviteSent { contact } if *contact == bob
+        )),
+        1
+    );
+}
+
+#[test]
+fn invite_refuses_an_unknown_or_blocked_contact() {
+    let (_da, _db, mut a, b, _bt, mut rng) = alice_and_bob_with_tablet();
+    let stranger = Fingerprint([9; 32]);
+    assert!(matches!(
+        a.invite(&stranger, NOW, &mut rng),
+        Err(CoreError::UnknownContact)
+    ));
+    a.block_contact(&b.fingerprint(), NOW, &mut rng).unwrap();
+    assert!(matches!(
+        a.invite(&b.fingerprint(), NOW, &mut rng),
+        Err(CoreError::ContactBlocked)
+    ));
+    assert_eq!(count_table(&a, "invites"), 0);
+    assert_eq!(count_table(&a, "invite_packets"), 0);
+}
+
+#[test]
+fn invite_twice_within_24h_is_too_soon() {
+    let (_da, _db, mut a, b, _bt, mut rng) = alice_and_bob_with_tablet();
+    let bob = b.fingerprint();
+    assert_eq!(a.invite(&bob, NOW, &mut rng).unwrap().len(), 2);
+    let packets = count_table(&a, "invite_packets");
+    assert!(matches!(
+        a.invite(&bob, NOW + 86_399, &mut rng),
+        Err(CoreError::TooSoon { retry_at }) if retry_at == NOW + 86_400
+    ));
+    // Nothing written by the refused resend.
+    assert_eq!(count_table(&a, "invite_packets"), packets);
+    // A resend in the same pending sessions: one more Initial per device.
+    let again = a.invite(&bob, NOW + 86_400, &mut rng).unwrap();
+    assert_eq!(again.len(), 2);
+    for p in &again {
+        assert!(matches!(
+            parse_wire(&p.payload).unwrap(),
+            Wire::Initial { .. }
+        ));
+    }
+    assert_eq!(
+        requests::get_invite(&a.store, bob).unwrap().unwrap().at,
+        NOW + 86_400
+    );
+    assert_eq!(a.store.all_sessions().unwrap().len(), 2);
+}
+
+#[test]
+fn invite_cap_survives_remove_and_readd() {
+    let (_da, _db, mut a, b, _bt, mut rng) = alice_and_bob_with_tablet();
+    let bob = b.fingerprint();
+    a.invite(&bob, NOW, &mut rng).unwrap();
+    a.remove_contact(&bob, NOW + 5, &mut rng).unwrap();
+    a.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW + 6,
+        &mut rng,
+    )
+    .unwrap();
+    assert!(matches!(
+        a.invite(&bob, NOW + 10, &mut rng),
+        Err(CoreError::TooSoon { retry_at }) if retry_at == NOW + 86_400
+    ));
+}
+
+#[test]
+fn invite_cap_is_shared_by_my_devices() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, b) = party("b", 9);
+    let card = b.contact_card("Bob").unwrap();
+    a.add_contact(&card, Some("bob"), NOW, &mut rng).unwrap();
+    t.add_contact(&card, Some("bob"), NOW, &mut rng).unwrap();
+    let out = a.invite(&b.fingerprint(), NOW, &mut rng).unwrap();
+    // Bob's device, then the `SyncInvite` for the tablet.
+    assert_eq!(out.len(), 2);
+    assert_eq!(
+        out[0].mailbox,
+        intro_mailbox(&b.device.public(), day_of(NOW))
+    );
+    let got = t.receive(&out[1].encode(), "t", NOW, &mut rng).unwrap();
+    assert!(
+        !matches!(got, ReceiveOutcome::Quarantined { .. }),
+        "{got:?}"
+    );
+    assert_eq!(
+        count_events(&t, |e| matches!(
+            e,
+            TransparencyEvent::SyncApplied {
+                kind: SyncKind::Contact
+            }
+        )),
+        1
+    );
+    assert_eq!(
+        requests::get_invite(&t.store, b.fingerprint())
+            .unwrap()
+            .unwrap()
+            .at,
+        NOW
+    );
+    assert!(matches!(
+        t.invite(&b.fingerprint(), NOW + 10, &mut rng),
+        Err(CoreError::TooSoon { retry_at }) if retry_at == NOW + 86_400
+    ));
+}
+
+#[test]
+fn sync_invite_keeps_the_latest_date() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let bob = Fingerprint([5; 32]);
+    let seal = |a: &mut Core, at: u64, id: u8, rng: &mut StdRng| {
+        let body = ExtContent::SyncInvite { to: bob, at }.to_body();
+        seal_body(
+            a,
+            &send::Target::OwnDevices,
+            &body,
+            MessageId([id; 16]),
+            rng,
+        )
+        .remove(0)
+        .0
+    };
+    let newer = seal(&mut a, NOW + 50, 1, &mut rng);
+    let older = seal(&mut a, NOW + 20, 2, &mut rng);
+    t.receive(&newer.encode(), "t", NOW, &mut rng).unwrap();
+    t.receive(&older.encode(), "t", NOW, &mut rng).unwrap();
+    // No contact needed: the cap outlives the contact.
+    assert_eq!(
+        requests::get_invite(&t.store, bob).unwrap().unwrap().at,
+        NOW + 50
+    );
+}
+
+#[test]
+fn sync_invite_from_a_contact_is_not_mine() {
+    let mut p = pair();
+    let body = ExtContent::SyncInvite {
+        to: Fingerprint([5; 32]),
+        at: NOW,
+    }
+    .to_body();
+    let bob = p.b.fingerprint();
+    let pkt = seal_body(
+        &mut p.a,
+        &send::Target::Contact(bob),
+        &body,
+        MessageId([3; 16]),
+        &mut p.rng,
+    )
+    .remove(0)
+    .0;
+    let got = p.b.receive(&pkt.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(got), sync::R_NOT_MINE);
+    assert_eq!(count_table(&p.b, "invites"), 0);
+}
+
+#[test]
+fn invite_skips_devices_that_already_answered() {
+    let mut p = pair();
+    let bob = p.b.fingerprint();
+    let deliveries = count_table(&p.a, "deliveries");
+    assert!(p.a.invite(&bob, NOW, &mut p.rng).unwrap().is_empty());
+    assert_eq!(requests::get_invite(&p.a.store, bob).unwrap(), None);
+    assert_eq!(count_table(&p.a, "deliveries"), deliveries);
+    assert_eq!(count_table(&p.a, "invite_packets"), 0);
+}
