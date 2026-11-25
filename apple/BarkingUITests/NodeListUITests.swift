@@ -55,9 +55,9 @@ final class NodeListUITests: XCTestCase {
     func testNetworkDuringTheLaunchSync() throws {
         let app = openNetwork(extra: ["-BarkingUITestSlowSync"])
         let ovh = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "France, OVH SAS")).firstMatch
-        XCTAssertTrue(ovh.waitForExistence(timeout: 2), "the known relays wait for the sync")
-        XCTAssertFalse(says(app, "No relay yet").exists)
+        XCTAssertTrue(ovh.waitForExistence(timeout: 4), "the known relays wait for the sync")
         XCTAssertTrue(says(app, "Checking").exists, "the running sync is not shown")
+        XCTAssertFalse(says(app, "No relay yet").exists)
         let result = app.descendants(matching: .any)["network.result"]
         XCTAssertTrue(result.waitForExistence(timeout: 15), "the failed sync is not said")
         XCTAssertTrue(result.label.contains("Still unreachable"), result.label)

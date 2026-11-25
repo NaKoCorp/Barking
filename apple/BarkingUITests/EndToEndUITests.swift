@@ -42,7 +42,7 @@ final class EndToEndUITests: XCTestCase {
         addr.typeText(node[1])
         app.navigationBars.buttons["Add"].tap()
         XCTAssertTrue(app.staticTexts["added by hand"].waitForExistence(timeout: 10))
-        XCTAssertTrue(says(app, "Not synced yet").exists)
+        // Opening the tab synced already (no sync yet); this one reaches the node.
         app.buttons["Sync now"].tap()
         XCTAssertTrue(says(app, "Reachable").waitForExistence(timeout: 20))
         snap(app, "network-reachable")

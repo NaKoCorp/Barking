@@ -186,7 +186,7 @@ struct NetworkView: View {
                         .accessibilityIdentifier("network.loadFailed")
                         .padding(.bottom, Space.s2)
                 }
-                if !model.loaded {
+                if !model.loaded && !model.loadFailed {
                     // Never "No relay yet" before the relays were read.
                     HStack(spacing: Space.s2) {
                         ProgressView()

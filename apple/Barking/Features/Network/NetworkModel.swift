@@ -82,7 +82,8 @@ final class NetworkModel {
     /// On opening, a sync older than this runs again (the foreground timer's
     /// cadence, `SyncScheduler`).
     static let staleAfter: TimeInterval = 60
-    /// The line of the last "Sync now", while no other sync came after it.
+    /// The line of the last "Sync now" (or the sync run or joined on
+    /// opening the tab), while no other sync came after it.
     var result: SyncResult? { resultSync == lastSync ? lastResult : nil }
     private var lastResult: SyncResult?
     /// The sync time the result belongs to: a later (background) sync
