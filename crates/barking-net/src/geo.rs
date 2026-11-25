@@ -329,16 +329,21 @@ fn entries(
         out.push((s, a, c));
     };
     for r in ranges {
-        let s = unit_start(r.start);
-        let e = unit_end(r.end);
-        if u128::from(s) < cursor {
-            continue; // shares a unit with the previous range
+        let mut s = u128::from(unit_start(r.start));
+        let e = u128::from(unit_end(r.end));
+        if e < cursor {
+            continue; // lies entirely inside units already covered
         }
-        if u128::from(s) > cursor {
+        if s < cursor {
+            // Starts in a unit the previous range ended in: the unit stays
+            // with the earlier range, this one continues at the next unit.
+            s = cursor;
+        }
+        if s > cursor {
             push(&mut out, cursor as u64, 0, UNKNOWN_COUNTRY);
         }
-        push(&mut out, s, r.asn, r.country);
-        cursor = u128::from(e) + 1;
+        push(&mut out, s as u64, r.asn, r.country);
+        cursor = e + 1;
     }
     if cursor <= u128::from(max) {
         push(&mut out, cursor as u64, 0, UNKNOWN_COUNTRY);
@@ -419,6 +424,11 @@ pub enum OriginVerdict {
 /// Compares the origin a node reports with the base's answer for the
 /// address of its record in the family the origin describes (`for_v6`).
 /// There is no fallback to another address.
+///
+/// An observed ASN 0 or country "ZZ" means that half is unknown, and an
+/// unknown half never produces a `Mismatch`: any known observed half that
+/// differs from the declared one is a `Mismatch`; otherwise it `Matches` if
+/// both halves are known, else it is `Unverifiable(NotInBase)`.
 pub fn verdict(
     db: Option<&IpDb>,
     origin: Option<&NodeOrigin>,
@@ -441,8 +451,16 @@ pub fn verdict(
     let Some((asn, country)) = db.and_then(|d| d.lookup(ip)) else {
         return Unverifiable(UnverifiableReason::NotInBase);
     };
-    if asn == origin.asn && country.eq_ignore_ascii_case(&origin.country) {
-        OriginVerdict::Matches
+    let asn_known = asn != 0;
+    let country_known = country != UNKNOWN_COUNTRY;
+    let differs = (asn_known && asn != origin.asn)
+        || (country_known && !country.eq_ignore_ascii_case(&origin.country));
+    if !differs {
+        if asn_known && country_known {
+            OriginVerdict::Matches
+        } else {
+            Unverifiable(UnverifiableReason::NotInBase)
+        }
     } else {
         OriginVerdict::Mismatch {
             declared_asn: origin.asn,
@@ -691,6 +709,74 @@ mod tests {
                 rng(350, 399, 8, b"ZZ"),
             ]
         );
+    }
+
+    #[test]
+    fn verdict_half_known_never_mismatches_on_the_unknown_half() {
+        let db = IpDb::from_bytes(encode(
+            "2026-11",
+            &[
+                rng(v4([10, 0, 0, 0]), v4([10, 0, 0, 255]), 0, b"FR"),
+                rng(v4([10, 0, 1, 0]), v4([10, 0, 1, 255]), 64500, b"ZZ"),
+            ],
+            &[],
+        ))
+        .unwrap();
+        let a = record(Some("10.0.0.7:4000"), None); // asn unknown, FR
+        let b = record(Some("10.0.1.7:4000"), None); // AS64500, country unknown
+        let nib = OriginVerdict::Unverifiable(UnverifiableReason::NotInBase);
+        assert_eq!(
+            verdict(Some(&db), Some(&origin(7, b"FR", false)), Some(&a)),
+            nib
+        );
+        assert!(matches!(
+            verdict(Some(&db), Some(&origin(7, b"DE", false)), Some(&a)),
+            OriginVerdict::Mismatch {
+                observed_asn: 0,
+                ..
+            }
+        ));
+        assert_eq!(
+            verdict(Some(&db), Some(&origin(64500, b"DE", false)), Some(&b)),
+            nib
+        );
+        assert!(matches!(
+            verdict(Some(&db), Some(&origin(1, b"DE", false)), Some(&b)),
+            OriginVerdict::Mismatch {
+                observed_asn: 64500,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn v6_range_starting_mid_unit_keeps_its_later_units() {
+        // A ends mid-/64 (unit u); B starts in the same unit and runs on.
+        let a = rng(v6("2001:db8::"), v6("2001:db8:0:1:8000::"), 1, b"FR");
+        let b = rng(
+            v6("2001:db8:0:1:8000::1"),
+            v6("2001:db8:0:5:ffff:ffff:ffff:ffff"),
+            2,
+            b"DE",
+        );
+        let db = IpDb::from_bytes(encode("2026-11", &[], &[a, b])).unwrap();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert_eq!(db.lookup(ip("2001:db8:0:1::")), Some((1, *b"FR")));
+        // Later units of B are covered, not a gap.
+        for u in ["2001:db8:0:2::", "2001:db8:0:3::1", "2001:db8:0:5:ffff::"] {
+            assert_eq!(db.lookup(ip(u)), Some((2, *b"DE")), "{u}");
+        }
+        assert_eq!(db.lookup(ip("2001:db8:0:6::")), None);
+        // /64 design: an address in a range's first /64 maps to that range
+        // even before the exact start.
+        let c = rng(
+            v6("2001:db9:0:7:8000::"),
+            v6("2001:db9:0:7:ffff::"),
+            3,
+            b"NL",
+        );
+        let db = IpDb::from_bytes(encode("2026-11", &[], &[c])).unwrap();
+        assert_eq!(db.lookup(ip("2001:db9:0:7::1")), Some((3, *b"NL")));
     }
 
     #[test]
