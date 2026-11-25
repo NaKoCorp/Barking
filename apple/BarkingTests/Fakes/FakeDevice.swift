@@ -184,7 +184,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var addedNodes: [String] { lock.withLock { _addedNodes } }
     func addNode(id: String, addr: String) throws { lock.withLock { _addedNodes.append("\(id)@\(addr)") } }
     private var _nodeCalls: [String] = []
-    /// `block:`, `unblock:` and `remove:` calls with their node id, in order.
+    /// `refresh:`, `block:`, `unblock:` and `remove:` calls with their node id, in order.
     var nodeCalls: [String] { lock.withLock { _nodeCalls } }
     /// Returned by `nodeDetail` and `refreshNodeInfo`; they throw while it is `nil`.
     var nodeDetailResult: NodeDetail?
@@ -203,10 +203,26 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         guard let nodeDetailResult else { throw NSError(domain: "FakeDevice", code: 1) }
         return nodeDetailResult
     }
+    /// Returned by `refreshNodeInfo` instead of `nodeDetailResult` when set.
+    var refreshedDetail: NodeDetail?
+    /// Thrown by `refreshNodeInfo` when set (the node is unreachable).
+    var refreshError: Error?
+    /// Thrown by `blockNode` and `removeNode` when set (nothing recorded).
+    var nodeActionError: Error?
     func nodeDetail(id: String) throws -> NodeDetail { try nodeDetailOrThrow() }
-    func refreshNodeInfo(id: String) throws -> NodeDetail { try nodeDetailOrThrow() }
-    func removeNode(id: String) throws { lock.withLock { _nodeCalls.append("remove:\(id)") } }
-    func blockNode(id: String) throws { lock.withLock { _nodeCalls.append("block:\(id)") } }
+    func refreshNodeInfo(id: String) throws -> NodeDetail {
+        lock.withLock { _nodeCalls.append("refresh:\(id)") }
+        if let refreshError { throw refreshError }
+        return try refreshedDetail ?? nodeDetailOrThrow()
+    }
+    func removeNode(id: String) throws {
+        if let nodeActionError { throw nodeActionError }
+        lock.withLock { _nodeCalls.append("remove:\(id)") }
+    }
+    func blockNode(id: String) throws {
+        if let nodeActionError { throw nodeActionError }
+        lock.withLock { _nodeCalls.append("block:\(id)") }
+    }
     func unblockNode(id: String) throws { lock.withLock { _nodeCalls.append("unblock:\(id)") } }
     func blockedNodes() throws -> [BlockedNode] { blockedNodeList }
     func addDefaultNodes(entries: [DefaultNode]) throws {

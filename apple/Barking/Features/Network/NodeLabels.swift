@@ -230,6 +230,86 @@ enum NodeLabels {
         lang.text("The \(n) nodes that came with Barking and that you removed come back to the list. Blocked nodes stay blocked.")
     }
 
+    // MARK: The detail screen (§7.2)
+
+    /// "Ce qu'il fait" when the node gave no report.
+    static func notShared(olderThan05: Bool, lang: Lang = .current) -> String {
+        olderThan05 ? lang.text("not shared · node version older than 0.5") : lang.text("not shared")
+    }
+
+    /// "0.5.0 · protocole 5 · en ligne depuis 3 j": what the node says of itself.
+    static func version(_ r: NodeReportView, lang: Lang = .current) -> String {
+        let hours = r.uptimeSecs / 3_600
+        let up = switch hours {
+        case 0: lang.text("online for less than an hour")
+        case ..<48: lang.text("online for \(Int(hours)) h")
+        default: lang.text("online for \(Int(hours / 24)) d")
+        }
+        return [r.software.isEmpty ? nil : r.software, lang.text("protocol \(Int(r.protocol))"), up]
+            .compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// The confirmation of "Block this node" (§7.4), with the guard-rail of
+    /// §6.4 when fewer than 3 usable nodes would be left.
+    static func blockMessage(usableLeft: Int?, lang: Lang = .current) -> String {
+        let base = lang.text("Barking stops talking to it at once. What it keeps for you will only be picked up through the other copies. The wake-ups set on it stop.")
+        guard let n = usableLeft else { return base }
+        let warning = switch n {
+        case ...0: lang.text("No usable node would be left: your messages could no longer leave this iPhone.")
+        case 1: lang.text("Only 1 usable node would be left: your messages would be kept in fewer places than usual.")
+        default: lang.text("Only \(n) usable nodes would be left: your messages would be kept in fewer places than usual.")
+        }
+        return "\(base)\n\n\(warning)"
+    }
+
+    /// The confirmation of "Remove".
+    static func removeMessage(_ kind: NodeOriginKind, lang: Lang = .current) -> String {
+        kind == .bootstrap
+            ? lang.text("It no longer comes back at launch. “Restore the default nodes” brings it back.")
+            : lang.text("Its address is forgotten. If the network finds it again, it comes back as an ordinary node.")
+    }
+
+    // MARK: Explanations (§7.3)
+
+    static func explainTitle(_ topic: ExplainTopic, lang: Lang = .current) -> String {
+        switch topic {
+        case .reliability: lang.text("How Barking judges a relay")
+        case .latency: lang.text("Latency")
+        case .origin: lang.text("Where it runs")
+        case .fill: lang.text("Fill")
+        case .subscriptions: lang.text("Subscriptions")
+        case .pushLink: lang.text("Push relay")
+        case .mySubscriptions: lang.text("My subscriptions")
+        }
+    }
+
+    /// The paragraphs of an ⓘ sheet, in plain words: what it means for the
+    /// user's messages, never the mechanism.
+    static func explainText(_ topic: ExplainTopic, mismatch: Bool = false, unknownPushLink: Bool = false,
+                            lang: Lang = .current) -> [String] {
+        switch topic {
+        case .reliability:
+            return [lang.text("Each time your iPhone leaves or picks up a message, it notes whether the relay answered and whether it kept what it was given. This judgement is made by your iPhone alone: it is sent to no one, and another phone may see the same relay differently."),
+                    lang.text("A relay that fails loses your iPhone's trust, then slowly wins it back over time. Your messages are always left with several relays at once: one unreliable relay is not enough to lose one.")]
+        case .latency:
+            return [lang.text("The time this relay takes to answer your iPhone. The lower it is, the faster your messages leave.")]
+        case .origin:
+            let text = lang.text("The host and the country are announced by the relay itself. Your iPhone compares them with its own list of addresses, without asking anyone.")
+            return mismatch ? [text, mismatchAdvice(lang: lang)] : [text]
+        case .fill:
+            return [lang.text("The room this relay still has to keep messages. When it is full, Barking uses others.")]
+        case .subscriptions:
+            return [lang.text("How many phones this relay can still alert when a message arrives.")]
+        case .pushLink:
+            let text = lang.text("The service that rings your iPhone when a message is waiting for you. “Reached” means this relay manages to alert it.")
+            return unknownPushLink
+                ? [text, lang.text("This relay only tells when many people use it, so as to reveal nothing about anyone.")]
+                : [text]
+        case .mySubscriptions:
+            return [lang.text("This relay will alert you as soon as a message reaches you there.")]
+        }
+    }
+
     // MARK: The row (§7.1)
 
     /// The texts of one row of the list, and the one sentence VoiceOver
