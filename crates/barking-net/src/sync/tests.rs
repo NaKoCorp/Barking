@@ -143,6 +143,8 @@ struct Net {
 struct Conn {
     id: NodeId,
     n: usize,
+    /// The address dialled: what the node is seen answering on.
+    addr: Option<SocketAddr>,
 }
 
 impl Net {
@@ -210,7 +212,7 @@ impl Dialer for Net {
 impl Connector for Net {
     type Conn = Conn;
 
-    async fn connect(&self, id: NodeId, _addrs: &[SocketAddr]) -> Result<Conn, DialError> {
+    async fn connect(&self, id: NodeId, addrs: &[SocketAddr]) -> Result<Conn, DialError> {
         let n = {
             let mut calls = self.calls.lock().unwrap();
             calls.push(Call::Connect(id));
@@ -224,7 +226,11 @@ impl Connector for Net {
         } else if self.refuse_connect.contains(&id) {
             Err(DialError::Refused(ErrorReason::NodeFull))
         } else if self.up(&id) {
-            Ok(Conn { id, n })
+            Ok(Conn {
+                id,
+                n,
+                addr: addrs.first().copied(),
+            })
         } else {
             Err(DialError::Unreachable)
         }
@@ -233,6 +239,10 @@ impl Connector for Net {
     async fn close(&self, conn: Conn) {
         tokio::time::sleep(self.close_delay).await;
         self.log(Call::Close(conn.id));
+    }
+
+    fn remote_addr(&self, conn: &Conn) -> Option<SocketAddr> {
+        conn.addr
     }
 
     fn rtt_samples(&self, conn: &Conn) -> Vec<Duration> {
@@ -4471,6 +4481,7 @@ fn with_cached_info(core: &mut Core, net: &mut Net, age: u64) {
             crate::state::CachedInfo {
                 report: old.clone(),
                 fetched_at: NOW - age,
+                observed: None,
             },
         );
     }
@@ -4527,8 +4538,12 @@ async fn sync_records_latency_and_refreshes_stale_info() {
         if asked_nodes.contains(&id) {
             assert_eq!(cached.report, node_report());
             assert_eq!(cached.fetched_at, NOW);
+            // The address the session reached is kept beside the report.
+            let dialled = state.view.get(&id).unwrap().addrs()[0].ip();
+            assert_eq!(cached.observed, Some(dialled), "{n}");
         } else {
             assert_eq!(cached.fetched_at, NOW - 25 * 3_600);
+            assert_eq!(cached.observed, None);
         }
         // Latency of every node a session reached.
         if connects(&calls).contains(&id) {

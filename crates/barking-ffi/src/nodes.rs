@@ -13,7 +13,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use barking_core::Core;
@@ -97,7 +97,8 @@ pub enum OriginVerdictView {
     NotReported,
     /// The base has no data for the node's address (or there is no base).
     NotInBase,
-    /// No signed address for the family the origin describes.
+    /// The node was not seen answering on an address of the family the
+    /// origin describes (none recorded, or one of the other family).
     NoRecord,
 }
 
@@ -317,16 +318,14 @@ fn verdict_view(v: OriginVerdict) -> OriginVerdictView {
     }
 }
 
-fn origin_view(
-    db: Option<&IpDb>,
-    origin: &NodeOrigin,
-    record: Option<&barking_proto::NodeRecord>,
-) -> OriginView {
+/// `origin` checked against `observed`, the address the node answered on
+/// when it sent it (`CachedInfo::observed`), never against its record.
+fn origin_view(db: Option<&IpDb>, origin: &NodeOrigin, observed: Option<IpAddr>) -> OriginView {
     OriginView {
         asn: origin.asn,
         as_name: origin.as_name.clone(),
         country: country(origin.country),
-        verdict: verdict_view(verdict(db, Some(origin), record)),
+        verdict: verdict_view(verdict(db, Some(origin), observed)),
     }
 }
 
@@ -484,12 +483,10 @@ impl Context {
             my_subscriptions,
             self.now,
         );
-        let origin = self
-            .state
-            .info
-            .get(id)
-            .and_then(|c| c.report.origin.as_ref())
-            .map(|o| origin_view(self.db.as_deref(), o, e.record.as_ref()));
+        let origin = self.state.info.get(id).and_then(|c| {
+            let o = c.report.origin.as_ref()?;
+            Some(origin_view(self.db.as_deref(), o, c.observed))
+        });
         NodeInfo {
             id: id.to_string(),
             addr,
@@ -541,6 +538,8 @@ struct Exchange {
     peer_version: u16,
     report: Option<NodeInfoReport>,
     rtt: Vec<std::time::Duration>,
+    /// The address the pinned connection reached (`CachedInfo::observed`).
+    observed: Option<IpAddr>,
 }
 
 /// Connects to `id` at `addrs` (the sync's dialer) and asks its report,
@@ -556,6 +555,7 @@ async fn exchange(
     let dialer = QuicDialer;
     let mut conn = dialer.connect(id, addrs).await.map_err(|e| network(&e))?;
     let peer_version = conn.peer_version();
+    let observed = dialer.remote_addr(&conn).map(|a| a.ip());
     let report = tokio::time::timeout(DIAL_TIMEOUT, dialer.info(&mut conn, relay)).await;
     let rtt = dialer.rtt_samples(&conn);
     dialer.close(conn).await;
@@ -568,6 +568,7 @@ async fn exchange(
         peer_version,
         report,
         rtt,
+        observed,
     })
 }
 
@@ -594,8 +595,9 @@ impl Device {
     }
 
     /// Dials the node, asks its report (about the push relay when push is
-    /// on), records the round trips and the report, and returns the
-    /// detail, with the protocol version the session negotiated. Holds the
+    /// on), records the round trips, the report and the address the node
+    /// answered on, and returns the detail, with the protocol version the
+    /// session negotiated. Holds the
     /// lock like a sync for the whole exchange (it waits for a sync in
     /// progress first). A blocked node is refused (`InvalidInput`, "node is
     /// blocked"), a node not in the view is `NotFound`; a node that does not
@@ -629,6 +631,7 @@ impl Device {
                         CachedInfo {
                             report,
                             fetched_at: t,
+                            observed: got.observed,
                         },
                     );
                 }

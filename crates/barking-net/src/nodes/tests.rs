@@ -99,6 +99,7 @@ fn block_forgets_everything_about_node() {
             CachedInfo {
                 report: report(),
                 fetched_at: NOW,
+                observed: None,
             },
         );
         s.note_latency(id, &[Duration::from_millis(40)]);

@@ -573,6 +573,7 @@ async fn detail_of_v4_node_reports_unknown() {
 async fn refresh_node_info_against_test_node() {
     let nodes = network(0..1, |_| u64::MAX).await;
     let (id, addr) = (nodes[0].id.to_string(), nodes[0].addr.to_string());
+    let (node_id, node_ip) = (nodes[0].id, nodes[0].addr.ip());
     let dir = tempfile::tempdir().unwrap();
     tokio::task::spawn_blocking(move || {
         let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
@@ -595,6 +596,11 @@ async fn refresh_node_info_against_test_node() {
         assert_eq!(cached.peer_version, Some(5));
         // The node answered as itself.
         assert_ne!(cached.node.reliability, Reliability::New);
+        // The address it answered on is kept beside its report: its
+        // declared origin is checked against that one.
+        edit_net_state(&dir, |state, _| {
+            assert_eq!(state.info[&node_id].observed, Some(node_ip));
+        });
 
         // A blocked node is never dialled.
         d.block_node(id.clone()).unwrap();
@@ -729,14 +735,27 @@ fn origin_checked_against_ipdb() {
             for_v6: false,
         }),
     };
+    // Each node's record is at 127.0.0.<n>. Nodes 2 to 4 answered there;
+    // node 5 answered elsewhere (198.51.100.5, not in the base) yet declares
+    // the origin of the address its record names; node 6 was never seen
+    // answering; node 7 answered on the IPv4-mapped form of its address.
+    let at = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
     edit_net_state(&dir, |state, now| {
-        for (n, asn, country) in [(2, 64500, *b"FR"), (3, 64501, *b"DE"), (4, 64502, *b"fr")] {
+        for (n, asn, country, observed) in [
+            (2, 64500, *b"FR", at("127.0.0.2")),
+            (3, 64501, *b"DE", at("127.0.0.3")),
+            (4, 64502, *b"fr", at("127.0.0.4")),
+            (5, 64500, *b"FR", at("198.51.100.5")),
+            (6, 64500, *b"FR", None),
+            (7, 64500, *b"FR", at("::ffff:127.0.0.7")),
+        ] {
             assert!(state.view.insert(record_of(n, now), now));
             state.info.insert(
                 id_of(&key(n)),
                 barking_net::state::CachedInfo {
                     report: report(asn, country),
                     fetched_at: now,
+                    observed,
                 },
             );
         }
@@ -794,6 +813,11 @@ fn origin_checked_against_ipdb() {
     .unwrap();
     d.set_ipdb_path(base.display().to_string());
     assert_eq!(origin_of(2).verdict, OriginVerdictView::Matches);
+    // A record naming an address of the right network proves nothing: the
+    // check is on the address the node answered on.
+    assert_eq!(origin_of(5).verdict, OriginVerdictView::NotInBase);
+    assert_eq!(origin_of(6).verdict, OriginVerdictView::NoRecord);
+    assert_eq!(origin_of(7).verdict, OriginVerdictView::Matches);
     assert_eq!(
         origin_of(3).verdict,
         OriginVerdictView::Mismatch {

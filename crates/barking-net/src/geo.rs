@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
-use barking_proto::{NodeOrigin, NodeRecord};
+use barking_proto::NodeOrigin;
 
 const MAGIC: &[u8; 8] = b"BARKIPDB";
 const VERSION: u32 = 1;
@@ -404,7 +404,8 @@ pub enum UnverifiableReason {
     NotReported,
     /// The base has no data for the node's address (or there is no base).
     NotInBase,
-    /// No record for the node, or none for the address family reported.
+    /// No address the node was seen answering on, or one of another
+    /// family than the origin describes (`for_v6`).
     NoRecord,
 }
 
@@ -421,9 +422,14 @@ pub enum OriginVerdict {
     Unverifiable(UnverifiableReason),
 }
 
-/// Compares the origin a node reports with the base's answer for the
-/// address of its record in the family the origin describes (`for_v6`).
-/// There is no fallback to another address.
+/// Compares the origin a node reports with the base's answer for
+/// `observed`, the address the node was seen answering on (the remote
+/// address of the pinned connection that brought its report), never an
+/// address the node states itself: a record can name anyone's address.
+/// `observed` is taken in its canonical form (an IPv4-mapped IPv6 address
+/// is IPv4); one of another family than the origin describes (`for_v6`),
+/// or none, is `Unverifiable(NoRecord)`. There is no fallback to another
+/// address.
 ///
 /// An observed ASN 0 or country "ZZ" means that half is unknown, and an
 /// unknown half never produces a `Mismatch`: any known observed half that
@@ -432,20 +438,16 @@ pub enum OriginVerdict {
 pub fn verdict(
     db: Option<&IpDb>,
     origin: Option<&NodeOrigin>,
-    record: Option<&NodeRecord>,
+    observed: Option<IpAddr>,
 ) -> OriginVerdict {
     use OriginVerdict::Unverifiable;
     let Some(origin) = origin else {
         return Unverifiable(UnverifiableReason::NotReported);
     };
-    let ip = record.and_then(|r| {
-        if origin.for_v6 {
-            r.v6.map(|a| IpAddr::V6(*a.ip()))
-        } else {
-            r.v4.map(|a| IpAddr::V4(*a.ip()))
-        }
-    });
-    let Some(ip) = ip else {
+    let Some(ip) = observed
+        .map(|a| a.to_canonical())
+        .filter(|a| a.is_ipv6() == origin.for_v6)
+    else {
         return Unverifiable(UnverifiableReason::NoRecord);
     };
     let Some((asn, country)) = db.and_then(|d| d.lookup(ip)) else {
@@ -474,7 +476,6 @@ pub fn verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{SocketAddrV4, SocketAddrV6};
 
     fn v4(a: [u8; 4]) -> u128 {
         u128::from(u32::from(Ipv4Addr::from(a)))
@@ -517,14 +518,8 @@ mod tests {
         }
     }
 
-    fn record(v4: Option<&str>, v6: Option<&str>) -> NodeRecord {
-        NodeRecord {
-            public_key: [0; 32],
-            v4: v4.map(|a| a.parse::<SocketAddrV4>().unwrap()),
-            v6: v6.map(|a| a.parse::<SocketAddrV6>().unwrap()),
-            issued_at: 0,
-            signature: ed25519_dalek::Signature::from_bytes(&[0u8; 64]),
-        }
+    fn seen(a: &str) -> Option<IpAddr> {
+        Some(a.parse().unwrap())
     }
 
     #[test]
@@ -554,14 +549,20 @@ mod tests {
     #[test]
     fn verdict_matches() {
         let db = table();
-        let rec = record(Some("10.0.0.7:4000"), None);
         assert_eq!(
-            verdict(Some(&db), Some(&origin(64500, b"FR", false)), Some(&rec)),
+            verdict(
+                Some(&db),
+                Some(&origin(64500, b"FR", false)),
+                seen("10.0.0.7")
+            ),
             OriginVerdict::Matches
         );
-        let rec6 = record(Some("10.0.0.7:4000"), Some("[2001:db8::1]:4000"));
         assert_eq!(
-            verdict(Some(&db), Some(&origin(64503, b"NL", true)), Some(&rec6)),
+            verdict(
+                Some(&db),
+                Some(&origin(64503, b"NL", true)),
+                seen("2001:db8::1")
+            ),
             OriginVerdict::Matches
         );
     }
@@ -569,9 +570,8 @@ mod tests {
     #[test]
     fn verdict_mismatch_on_asn() {
         let db = table();
-        let rec = record(Some("10.0.0.7:4000"), None);
         assert_eq!(
-            verdict(Some(&db), Some(&origin(1, b"FR", false)), Some(&rec)),
+            verdict(Some(&db), Some(&origin(1, b"FR", false)), seen("10.0.0.7")),
             OriginVerdict::Mismatch {
                 declared_asn: 1,
                 declared_country: *b"FR",
@@ -584,9 +584,12 @@ mod tests {
     #[test]
     fn verdict_mismatch_on_country() {
         let db = table();
-        let rec = record(Some("10.0.0.7:4000"), None);
         assert_eq!(
-            verdict(Some(&db), Some(&origin(64500, b"DE", false)), Some(&rec)),
+            verdict(
+                Some(&db),
+                Some(&origin(64500, b"DE", false)),
+                seen("10.0.0.7")
+            ),
             OriginVerdict::Mismatch {
                 declared_asn: 64500,
                 declared_country: *b"DE",
@@ -597,18 +600,29 @@ mod tests {
     }
 
     #[test]
-    fn verdict_unverifiable_without_record() {
+    fn verdict_unverifiable_without_observed_address() {
         let db = table();
         let o4 = origin(64500, b"FR", false);
         let o6 = origin(64503, b"NL", true);
-        let only4 = record(Some("10.0.0.7:4000"), None);
+        let none = OriginVerdict::Unverifiable(UnverifiableReason::NoRecord);
+        assert_eq!(verdict(Some(&db), Some(&o4), None), none);
+        // Seen on the other family than the origin names: no fallback.
+        assert_eq!(verdict(Some(&db), Some(&o6), seen("10.0.0.7")), none);
+        assert_eq!(verdict(Some(&db), Some(&o4), seen("2001:db8::1")), none);
+    }
+
+    /// An IPv4-mapped IPv6 address (a dual-stack socket) is the IPv4
+    /// address it carries: it checks a v4 origin, never a v6 one.
+    #[test]
+    fn verdict_takes_a_mapped_address_as_ipv4() {
+        let db = table();
+        let mapped = seen("::ffff:10.0.0.7");
         assert_eq!(
-            verdict(Some(&db), Some(&o4), None),
-            OriginVerdict::Unverifiable(UnverifiableReason::NoRecord)
+            verdict(Some(&db), Some(&origin(64500, b"FR", false)), mapped),
+            OriginVerdict::Matches
         );
-        // The family named by the origin is absent: no fallback.
         assert_eq!(
-            verdict(Some(&db), Some(&o6), Some(&only4)),
+            verdict(Some(&db), Some(&origin(64500, b"FR", true)), mapped),
             OriginVerdict::Unverifiable(UnverifiableReason::NoRecord)
         );
     }
@@ -616,19 +630,17 @@ mod tests {
     #[test]
     fn verdict_unverifiable_not_in_base() {
         let db = table();
-        let rec = record(Some("99.0.0.1:4000"), None);
         let o = origin(64500, b"FR", false);
         let nib = OriginVerdict::Unverifiable(UnverifiableReason::NotInBase);
-        assert_eq!(verdict(Some(&db), Some(&o), Some(&rec)), nib);
-        assert_eq!(verdict(None, Some(&o), Some(&rec)), nib);
+        assert_eq!(verdict(Some(&db), Some(&o), seen("99.0.0.1")), nib);
+        assert_eq!(verdict(None, Some(&o), seen("10.0.0.7")), nib);
     }
 
     #[test]
     fn verdict_unverifiable_not_reported() {
         let db = table();
-        let rec = record(Some("10.0.0.7:4000"), None);
         assert_eq!(
-            verdict(Some(&db), None, Some(&rec)),
+            verdict(Some(&db), None, seen("10.0.0.7")),
             OriginVerdict::Unverifiable(UnverifiableReason::NotReported)
         );
     }
@@ -722,26 +734,23 @@ mod tests {
             &[],
         ))
         .unwrap();
-        let a = record(Some("10.0.0.7:4000"), None); // asn unknown, FR
-        let b = record(Some("10.0.1.7:4000"), None); // AS64500, country unknown
+        let a = seen("10.0.0.7"); // asn unknown, FR
+        let b = seen("10.0.1.7"); // AS64500, country unknown
         let nib = OriginVerdict::Unverifiable(UnverifiableReason::NotInBase);
-        assert_eq!(
-            verdict(Some(&db), Some(&origin(7, b"FR", false)), Some(&a)),
-            nib
-        );
+        assert_eq!(verdict(Some(&db), Some(&origin(7, b"FR", false)), a), nib);
         assert!(matches!(
-            verdict(Some(&db), Some(&origin(7, b"DE", false)), Some(&a)),
+            verdict(Some(&db), Some(&origin(7, b"DE", false)), a),
             OriginVerdict::Mismatch {
                 observed_asn: 0,
                 ..
             }
         ));
         assert_eq!(
-            verdict(Some(&db), Some(&origin(64500, b"DE", false)), Some(&b)),
+            verdict(Some(&db), Some(&origin(64500, b"DE", false)), b),
             nib
         );
         assert!(matches!(
-            verdict(Some(&db), Some(&origin(1, b"DE", false)), Some(&b)),
+            verdict(Some(&db), Some(&origin(1, b"DE", false)), b),
             OriginVerdict::Mismatch {
                 observed_asn: 64500,
                 ..

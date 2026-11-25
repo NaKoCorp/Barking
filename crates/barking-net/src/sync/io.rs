@@ -82,6 +82,10 @@ pub trait Connector {
 
     fn close(&self, conn: Self::Conn) -> impl Future<Output = ()> + Send;
 
+    /// The address the node answers on (the connection's remote address),
+    /// if known: what its declared origin is checked against.
+    fn remote_addr(&self, conn: &Self::Conn) -> Option<SocketAddr>;
+
     /// Round trip times the session measured, the most recent last (see
     /// `Session::rtt_samples`). None by default.
     fn rtt_samples(&self, _conn: &Self::Conn) -> Vec<Duration> {
@@ -199,6 +203,10 @@ impl Connector for QuicDialer {
 
     async fn close(&self, conn: Session) {
         conn.close().await;
+    }
+
+    fn remote_addr(&self, conn: &Session) -> Option<SocketAddr> {
+        Some(conn.connection().remote_address())
     }
 
     fn rtt_samples(&self, conn: &Session) -> Vec<Duration> {

@@ -10,6 +10,7 @@
 //! to move even older plaintext files to that key before loading.
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::time::Duration;
 
 use barking_core::{Core, CoreError};
@@ -85,11 +86,15 @@ pub struct NetState {
     pub dismissed_defaults: HashSet<NodeId>,
 }
 
-/// A node's self-report and the date (hour) it was fetched.
+/// A node's self-report, the date (hour) it was fetched, and the address
+/// the node answered on: the remote address of the pinned connection that
+/// brought the report, the only address its declared origin is checked
+/// against (`geo::verdict`). `None` when it was not seen.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachedInfo {
     pub report: NodeInfoReport,
     pub fetched_at: u64,
+    pub observed: Option<IpAddr>,
 }
 
 /// A blocked node: date (hour) of the block, and the origin it declared

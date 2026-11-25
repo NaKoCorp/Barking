@@ -718,6 +718,10 @@ where
             }
             self.unused.remove(&id);
             let relay = relay.filter(|_| subscribed.contains(&id));
+            // The address this pinned connection reached: the origin the
+            // report declares is checked against it, never against the
+            // addresses the node states itself.
+            let observed = self.dialer.remote_addr(&conn).map(|a| a.ip());
             let request = self.dialer.info(&mut conn, relay);
             if let Ok(Ok(report)) = tokio::time::timeout_at(self.deadline, request).await {
                 if let Some(report) = report {
@@ -726,6 +730,7 @@ where
                         CachedInfo {
                             report,
                             fetched_at: self.now,
+                            observed,
                         },
                     );
                 }
