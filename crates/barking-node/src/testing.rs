@@ -136,6 +136,9 @@ pub struct NodeSpec {
     pub wake: WakeConfig,
     /// `ServerConfig::wake_allow_private`: the fake relay is on 127.0.0.1.
     pub wake_allow_private: bool,
+    /// `ServerConfig::version`: highest protocol version spoken (an older
+    /// node, for the clients' fallbacks).
+    pub version: u16,
 }
 
 impl NodeSpec {
@@ -154,6 +157,7 @@ impl NodeSpec {
             purge_interval: None,
             wake: WakeConfig::default(),
             wake_allow_private: false,
+            version: PROTOCOL_VERSION,
         }
     }
 }
@@ -290,6 +294,7 @@ fn launch(
     cfg.test_purge_interval = spec.purge_interval;
     cfg.wake = spec.wake.clone();
     cfg.wake_allow_private = spec.wake_allow_private;
+    cfg.version = spec.version;
     let stats = Arc::clone(&cfg.stats);
     let store = NodeStore::open(dir.path().join("node.db")).expect("node database");
     let (tx, rx) = oneshot::channel::<()>();

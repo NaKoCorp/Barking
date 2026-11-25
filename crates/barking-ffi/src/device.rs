@@ -3,12 +3,13 @@
 //! §3.3): the app never holds the database while suspended.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::contact::ContactCard;
 use barking_core::store::{DeliverySummary, Direction};
 use barking_core::{Core, CoreError};
+use barking_net::geo::IpDb;
 use zeroize::Zeroize;
 
 use crate::delivery::{Delivery, DeliveryState, delivery_of, state_of};
@@ -124,6 +125,17 @@ pub struct Message {
 pub struct Device {
     config: DeviceConfig,
     key: [u8; 32],
+    /// The embedded IP base (`set_ipdb_path`), opened at its first use.
+    ipdb: Mutex<IpDbSlot>,
+}
+
+/// Where the IP base is and, once opened, the base. An open that failed is
+/// not tried again until a new path is given.
+#[derive(Default)]
+struct IpDbSlot {
+    path: Option<PathBuf>,
+    db: Option<Arc<IpDb>>,
+    tried: bool,
 }
 
 /// New identity (`Device::create`). A free function: UniFFI constructors
@@ -162,7 +174,11 @@ impl Device {
         let key: Result<[u8; 32], _> = config.db_key.as_slice().try_into();
         config.db_key.zeroize();
         let key = key.map_err(|_| BarkingError::invalid("database key must be 32 bytes"))?;
-        Ok(Device { config, key })
+        Ok(Device {
+            config,
+            key,
+            ipdb: Mutex::default(),
+        })
     }
 
     fn lock(&self) -> Result<DbLock, BarkingError> {
@@ -219,6 +235,23 @@ impl Device {
 
     pub(crate) fn allow_private(&self) -> bool {
         self.config.allow_private
+    }
+
+    /// The IP base given to `set_ipdb_path`, opened at the first call that
+    /// needs it and kept. `None` without a path, or if it does not open (a
+    /// warning, once, without the path: origins then read as not in the
+    /// base).
+    pub(crate) fn ipdb(&self) -> Option<Arc<IpDb>> {
+        let mut slot = self.ipdb.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.db.is_none() && !slot.tried {
+            slot.tried = true;
+            let path = slot.path.clone()?;
+            match IpDb::open(&path) {
+                Ok(db) => slot.db = Some(Arc::new(db)),
+                Err(_) => tracing::warn!("the IP base does not open: origins are not checked"),
+            }
+        }
+        slot.db.clone()
     }
 
     /// Runs `f` on the opened core, under the lock. The core is closed before
@@ -311,6 +344,18 @@ impl Device {
             }
             Ok(Arc::new(device))
         })
+    }
+
+    /// Path of the embedded IP base (spec node transparency §6.3), which
+    /// checks the origins the nodes declare. Read lazily, at the first call
+    /// that shows an origin; nothing is checked before it is given. A new
+    /// path replaces the base.
+    pub fn set_ipdb_path(&self, path: String) {
+        let mut slot = self.ipdb.lock().unwrap_or_else(PoisonError::into_inner);
+        *slot = IpDbSlot {
+            path: Some(PathBuf::from(path)),
+            ..IpDbSlot::default()
+        };
     }
 
     pub fn fingerprint(&self) -> Result<String, BarkingError> {

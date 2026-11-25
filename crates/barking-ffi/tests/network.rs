@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use barking_core::store::{Queries, Store};
 use barking_ffi::{
-    BarkingError, DeliveryChange, DeliveryState, Device, DeviceConfig, Message, PushSettings,
+    BarkingError, DefaultNode, DeliveryChange, DeliveryState, Device, DeviceConfig, Message,
+    NodeOriginKind, PushSettings, Reliability,
 };
 use barking_node::testing::{
     FakeRelay, TICK, id_of, key, network, network_with, set_clock_offset, stop_all,
@@ -474,4 +475,332 @@ async fn sync_reports_failed_after_verdict() {
     .await
     .unwrap();
     stop_all(nodes).await;
+}
+
+// --- Node transparency (spec node transparency §6.4, §6.5) ---
+
+/// Opens the core of the device in `dir` (key byte 1), outside the device:
+/// the test edits the stored network state between two calls.
+fn edit_net_state(dir: &tempfile::TempDir, f: impl FnOnce(&mut barking_net::NetState, u64)) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut core = barking_core::Core::open(&dir.path().join("barking.db"), &[1; 32], now).unwrap();
+    let mut state = barking_net::NetState::load(&mut core, now, true).unwrap();
+    f(&mut state, now);
+    state.save(&mut core).unwrap();
+}
+
+/// A signed record of test key `n`, at `127.0.0.<n>:4433`, issued at `at`.
+fn record_of(n: usize, at: u64) -> barking_proto::NodeRecord {
+    let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(127, 0, 0, n as u8), 4433);
+    barking_proto::NodeRecord::sign(&key(n), Some(addr), None, at)
+}
+
+#[test]
+fn nodes_sorted_in_use_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
+    let id = |n: usize| id_of(&key(n)).to_string();
+    // Added by hand, never answered: in use, `New`.
+    d.add_node(id(1), "127.0.0.1:4001".into()).unwrap();
+    edit_net_state(&dir, |state, now| {
+        let old = now - 8 * 86_400;
+        // Discovered, seen eight days ago, never answered: not in use, `New`.
+        assert!(state.view.insert(record_of(2, old), old));
+        // Discovered, answered now: in use, `Good`.
+        assert!(state.view.insert(record_of(3, now), now));
+        state.view.confirm(&id_of(&key(3)), now);
+        // Discovered, answered eight days ago: not in use, `Good`.
+        assert!(state.view.insert(record_of(4, old), old));
+        state.view.confirm(&id_of(&key(4)), old);
+        state.latency.insert(id_of(&key(4)), vec![40]);
+        // Discovered, answered eight days ago, slower: after node 4.
+        assert!(state.view.insert(record_of(5, old), old));
+        state.view.confirm(&id_of(&key(5)), old);
+        state.latency.insert(id_of(&key(5)), vec![90]);
+    });
+    let nodes = d.nodes().unwrap();
+    let order: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(order, [id(3), id(1), id(4), id(5), id(2)]);
+    let by_id = |n: usize| nodes.iter().find(|x| x.id == id(n)).unwrap();
+    assert!(by_id(1).in_use && by_id(3).in_use);
+    assert!(!by_id(2).in_use && !by_id(4).in_use);
+    assert_eq!(by_id(1).reliability, Reliability::New);
+    assert_eq!(by_id(3).reliability, Reliability::Good);
+    assert_eq!(by_id(1).kind, NodeOriginKind::Manual);
+    assert_eq!(by_id(2).kind, NodeOriginKind::Discovered);
+    assert_eq!(by_id(4).latency_ms, Some(40));
+    assert_eq!(by_id(2).latency_ms, None);
+    assert_eq!(by_id(1).my_subscriptions, 0);
+    // No report cached: no origin.
+    assert!(nodes.iter().all(|n| n.origin.is_none()));
+    // Confirmed and not avoided, without node 3: 4 and 5.
+    assert_eq!(d.usable_nodes_if_blocked(id(3)).unwrap(), 2);
+    assert_eq!(d.usable_nodes_if_blocked(id(1)).unwrap(), 3);
+}
+
+/// A node forced to protocol 4 knows nothing of `Info`: no report, and
+/// the version it spoke.
+#[tokio::test(flavor = "multi_thread")]
+async fn detail_of_v4_node_reports_unknown() {
+    let nodes = network_with(0..1, |spec| spec.version = 4).await;
+    let (id, addr) = (nodes[0].id.to_string(), nodes[0].addr.to_string());
+    let dir = tempfile::tempdir().unwrap();
+    tokio::task::spawn_blocking(move || {
+        let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
+        d.add_node(id.clone(), addr).unwrap();
+        let detail = d.node_detail(id.clone()).unwrap();
+        assert_eq!(detail.report, None);
+        assert_eq!(detail.peer_version, None);
+        assert_eq!(detail.fetched_at, None);
+        // The refresh dials it: still no report, the version it speaks.
+        let detail = d.refresh_node_info(id.clone()).unwrap();
+        assert_eq!(detail.report, None);
+        assert_eq!(detail.peer_version, Some(4));
+        assert_eq!(detail.fetched_at, None);
+        assert!(detail.node.latency_ms.is_some());
+        // Nothing stored about the version: the cached detail does not know it.
+        assert_eq!(d.node_detail(id).unwrap().peer_version, None);
+    })
+    .await
+    .unwrap();
+    stop_all(nodes).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_node_info_against_test_node() {
+    let nodes = network(0..1, |_| u64::MAX).await;
+    let (id, addr) = (nodes[0].id.to_string(), nodes[0].addr.to_string());
+    let dir = tempfile::tempdir().unwrap();
+    tokio::task::spawn_blocking(move || {
+        let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
+        assert!(matches!(
+            d.node_detail(id.clone()),
+            Err(BarkingError::NotFound)
+        ));
+        d.add_node(id.clone(), addr).unwrap();
+        let detail = d.refresh_node_info(id.clone()).unwrap();
+        let report = detail.report.clone().expect("a protocol 5 node reports");
+        assert_eq!(report.protocol, 5);
+        assert!(!report.software.is_empty());
+        assert_eq!(detail.peer_version, Some(5));
+        assert!(detail.fetched_at.is_some());
+        assert!(detail.node.latency_ms.is_some());
+        assert_eq!(detail.node.id, id);
+        // Cached: the detail reads it back without a dial.
+        let cached = d.node_detail(id.clone()).unwrap();
+        assert_eq!(cached.report, Some(report));
+        assert_eq!(cached.peer_version, Some(5));
+        // The node answered as itself.
+        assert_ne!(cached.node.reliability, Reliability::New);
+
+        // A blocked node is never dialled.
+        d.block_node(id.clone()).unwrap();
+        assert!(matches!(
+            d.refresh_node_info(id.clone()),
+            Err(BarkingError::InvalidInput { detail }) if detail.contains("node is blocked")
+        ));
+    })
+    .await
+    .unwrap();
+    stop_all(nodes).await;
+}
+
+#[test]
+fn refresh_of_unreachable_node_is_network_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
+    let id = id_of(&key(1)).to_string();
+    // Nothing listens there.
+    d.add_node(id.clone(), "127.0.0.1:9".into()).unwrap();
+    assert!(matches!(
+        d.refresh_node_info(id.clone()),
+        Err(BarkingError::Network { .. })
+    ));
+    // The node stays, its detail unchanged.
+    assert_eq!(d.node_detail(id).unwrap().report, None);
+}
+
+#[test]
+fn block_then_add_node_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
+    let id = id_of(&key(1)).to_string();
+    d.add_node(id.clone(), "127.0.0.1:4001".into()).unwrap();
+    d.block_node(id.clone()).unwrap();
+    assert!(d.nodes().unwrap().is_empty());
+    let blocked = d.blocked_nodes().unwrap();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].id, id);
+    assert!(blocked[0].at > 0);
+    assert!(blocked[0].origin.is_none());
+    assert!(matches!(
+        d.node_detail(id.clone()),
+        Err(BarkingError::NotFound)
+    ));
+    assert!(matches!(
+        d.add_node(id.clone(), "127.0.0.1:4001".into()),
+        Err(BarkingError::InvalidInput { detail }) if detail.contains("node is blocked")
+    ));
+    // The block is in the transparency log.
+    assert!(
+        d.transparency_log(10, None, false)
+            .unwrap()
+            .iter()
+            .any(|e| e.key.contains("block"))
+    );
+    d.unblock_node(id.clone()).unwrap();
+    assert!(d.blocked_nodes().unwrap().is_empty());
+    d.add_node(id, "127.0.0.1:4001".into()).unwrap();
+    assert_eq!(d.nodes().unwrap().len(), 1);
+}
+
+#[test]
+fn default_nodes_flow() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
+    let id = |n: usize| id_of(&key(n)).to_string();
+    let defaults: Vec<DefaultNode> = (1..=3)
+        .map(|n| DefaultNode {
+            id: id(n),
+            addr: format!("127.0.0.1:400{n}"),
+        })
+        .collect();
+    d.add_default_nodes(defaults.clone()).unwrap();
+    let nodes = d.nodes().unwrap();
+    assert_eq!(nodes.len(), 3);
+    assert!(
+        nodes
+            .iter()
+            .all(|n| n.kind == NodeOriginKind::Bootstrap && n.in_use && n.manual)
+    );
+    assert_eq!(d.dismissed_defaults_count().unwrap(), 0);
+
+    // Removed: dismissed, not added again at the next launch.
+    d.remove_node(id(1)).unwrap();
+    assert_eq!(d.dismissed_defaults_count().unwrap(), 1);
+    d.add_default_nodes(defaults.clone()).unwrap();
+    assert!(d.nodes().unwrap().iter().all(|n| n.id != id(1)));
+
+    // Blocked: stays blocked through a reset.
+    d.block_node(id(2)).unwrap();
+    d.add_default_nodes(defaults.clone()).unwrap();
+    assert_eq!(d.nodes().unwrap().len(), 1);
+    assert_eq!(d.reset_default_nodes(defaults.clone()).unwrap(), 1);
+    assert_eq!(d.dismissed_defaults_count().unwrap(), 0);
+    let ids: Vec<String> = d.nodes().unwrap().into_iter().map(|n| n.id).collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&id(1)) && ids.contains(&id(3)) && !ids.contains(&id(2)));
+
+    // An invalid entry is refused.
+    assert!(matches!(
+        d.add_default_nodes(vec![DefaultNode {
+            id: "XYZ".into(),
+            addr: "127.0.0.1:4001".into(),
+        }]),
+        Err(BarkingError::InvalidInput { .. })
+    ));
+}
+
+/// The origin a cached report declares, checked against the IP base given
+/// by `set_ipdb_path` (spec node transparency §6.3).
+#[test]
+fn origin_checked_against_ipdb() {
+    use barking_ffi::{BlockedNode, OriginVerdictView, OriginView};
+    use barking_net::geo::{Range, encode};
+    use barking_proto::{FillTier, NodeInfoReport, NodeOrigin};
+
+    let dir = tempfile::tempdir().unwrap();
+    let d = Device::create(config(&dir, 1), "a".into()).unwrap().device;
+    let id = |n: usize| id_of(&key(n)).to_string();
+    let report = |asn: u32, country: [u8; 2]| NodeInfoReport {
+        software: "barking-node 0.5.0".into(),
+        protocol: 5,
+        uptime_secs: 60,
+        storage: FillTier::Low,
+        wake: None,
+        push_link: None,
+        origin: Some(NodeOrigin {
+            asn,
+            as_name: "Example".into(),
+            country,
+            for_v6: false,
+        }),
+    };
+    edit_net_state(&dir, |state, now| {
+        for (n, asn, country) in [(2, 64500, *b"fr"), (3, 64501, *b"DE")] {
+            assert!(state.view.insert(record_of(n, now), now));
+            state.info.insert(
+                id_of(&key(n)),
+                barking_net::state::CachedInfo {
+                    report: report(asn, country),
+                    fetched_at: now,
+                },
+            );
+        }
+    });
+    let origin_of = |n: usize| {
+        d.nodes()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == id(n))
+            .unwrap()
+            .origin
+            .unwrap()
+    };
+    // No base given: nothing to check against.
+    assert_eq!(
+        origin_of(2),
+        OriginView {
+            asn: 64500,
+            as_name: "Example".into(),
+            country: "FR".into(),
+            verdict: OriginVerdictView::NotInBase,
+        }
+    );
+    // A base that does not open: the same, no error.
+    d.set_ipdb_path(dir.path().join("missing.bin").display().to_string());
+    assert_eq!(origin_of(2).verdict, OriginVerdictView::NotInBase);
+
+    // 127.0.0.0/8 is AS64500 in France.
+    let v4 = |a: [u8; 4]| u128::from(u32::from(std::net::Ipv4Addr::from(a)));
+    let base = dir.path().join("ipdb.bin");
+    std::fs::write(
+        &base,
+        encode(
+            "test",
+            &[Range {
+                start: v4([127, 0, 0, 0]),
+                end: v4([127, 255, 255, 255]),
+                asn: 64500,
+                country: *b"FR",
+            }],
+            &[],
+        ),
+    )
+    .unwrap();
+    d.set_ipdb_path(base.display().to_string());
+    assert_eq!(origin_of(2).verdict, OriginVerdictView::Matches);
+    assert_eq!(
+        origin_of(3).verdict,
+        OriginVerdictView::Mismatch {
+            declared_country: "DE".into(),
+            observed_country: "FR".into(),
+            declared_asn: 64501,
+            observed_asn: 64500,
+        }
+    );
+    let detail = d.node_detail(id(3)).unwrap();
+    assert_eq!(detail.peer_version, Some(5));
+    assert_eq!(detail.v4.as_deref(), Some("127.0.0.3:4433"));
+    assert_eq!(detail.report.unwrap().software, "barking-node 0.5.0");
+
+    // A blocked node keeps the origin it declared; its address left with it.
+    d.block_node(id(3)).unwrap();
+    let blocked: Vec<BlockedNode> = d.blocked_nodes().unwrap();
+    let origin = blocked[0].origin.clone().unwrap();
+    assert_eq!((origin.asn, origin.country.as_str()), (64501, "DE"));
+    assert_eq!(origin.verdict, OriginVerdictView::NoRecord);
 }
