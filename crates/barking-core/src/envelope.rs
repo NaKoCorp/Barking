@@ -367,11 +367,15 @@ pub fn open(
 ///
 /// Separate from [`open`] so that the caller can tell a decryption failure
 /// (ratchet unchanged) from authenticated but rejected content (ratchet advanced).
+///
+/// The plaintext is `postcard(Envelope)` followed by zero padding that makes
+/// the packet fill its tier (issue #82); any non-zero byte after the
+/// envelope is refused.
 pub fn decode(pt: &[u8]) -> Result<Envelope> {
     let (env, rest): (Envelope, _) =
         postcard::take_from_bytes(pt).map_err(|_| CoreError::Malformed("envelope"))?;
-    if !rest.is_empty() {
-        return Err(CoreError::Malformed("extra bytes in the envelope"));
+    if rest.iter().any(|&b| b != 0) {
+        return Err(CoreError::Malformed("non-zero padding in the envelope"));
     }
     env.body.check()?;
     Ok(env)
@@ -717,6 +721,24 @@ mod tests {
         assert!(matches!(parse_wire(&bytes), Err(CoreError::Malformed(_))));
         assert!(matches!(parse_wire(&[]), Err(CoreError::Malformed(_))));
         assert!(matches!(parse_wire(&[7]), Err(CoreError::Malformed(_))));
+    }
+
+    #[test]
+    fn decode_accepts_zero_padding() {
+        let mut rng = ChaCha20Rng::seed_from_u64(40);
+        let e = env(&mut rng, "hi");
+        let mut pt = postcard::to_allocvec(&e).unwrap();
+        pt.extend_from_slice(&[0; 500]);
+        assert_eq!(decode(&pt).unwrap(), e);
+    }
+
+    #[test]
+    fn decode_rejects_nonzero_trailing() {
+        let mut rng = ChaCha20Rng::seed_from_u64(41);
+        let e = env(&mut rng, "hi");
+        let mut pt = postcard::to_allocvec(&e).unwrap();
+        pt.extend_from_slice(&[0, 0, 1, 0]);
+        assert!(matches!(decode(&pt), Err(CoreError::Malformed(_))));
     }
 
     fn mref(n: u8, by_sender: bool) -> MessageRef {
