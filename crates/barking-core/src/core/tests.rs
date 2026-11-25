@@ -10306,3 +10306,260 @@ fn any_message_from_the_invited_marks_the_invite_accepted() {
         InviteState::Accepted { at: NOW + 10 }
     );
 }
+
+// --- Contact requests, task 8: refusing, blocking, hiding, listing, purging.
+
+fn unknown_packet(id: u8, received_at: u64) -> requests::PendingInitial {
+    requests::PendingInitial {
+        packet_id: PacketId([id; 16]),
+        ik: [id; 32],
+        fp: None,
+        session_id: [id; 16],
+        message_id: Some(MessageId([id; 16])),
+        bytes: vec![id; 5],
+        received_at,
+        invite: false,
+    }
+}
+
+/// Alice invites Bob and his tablet; each device holds a request.
+fn both_devices_have_request() -> (TempDir, TempDir, Core, Core, Core, StdRng) {
+    let (da, db, mut a, mut b, mut bt, mut rng) = alice_and_bob_with_tablet();
+    let bob = b.fingerprint();
+    let out = a.invite(&bob, NOW, &mut rng).unwrap();
+    for p in &out {
+        let target = if p.mailbox == intro_mailbox(&b.device.public(), day_of(NOW)) {
+            &mut b
+        } else {
+            &mut bt
+        };
+        request_outcome(target.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    }
+    (da, db, a, b, bt, rng)
+}
+
+#[test]
+fn refuse_sends_nothing_to_requester() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    let queued = b.pending_outbox(NOW).unwrap().len();
+    let out = b.refuse_request(&alice, NOW + 1, &mut rng).unwrap();
+    // No other device of mine: no `SyncRefused` either.
+    assert!(out.is_empty());
+    assert_eq!(b.pending_outbox(NOW + 1).unwrap().len(), queued);
+    assert!(b.requests().unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(
+        requests::get_refusal(&b.store, alice).unwrap(),
+        Some(NOW + 1)
+    );
+    assert!(matches!(
+        b.refuse_request(&alice, NOW + 2, &mut rng),
+        Err(CoreError::UnknownContact)
+    ));
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactRequestResolved {
+                how: RequestResolution::Refused,
+                ..
+            }
+        )),
+        1
+    );
+}
+
+#[test]
+fn invitation_sealed_before_refusal_is_dropped() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let first = invite_one(&mut a, bob, NOW, &mut rng);
+    let card = a.contact_card("Alice").unwrap();
+    let opening = sealed_invite(&mut a, bob, card, 7, &mut rng);
+    request_outcome(b.receive(&opening.encode(), "t", NOW, &mut rng).unwrap());
+    b.refuse_request(&alice, NOW + 1, &mut rng).unwrap();
+    // Sealed at NOW, fetched only at NOW + 5.
+    let got = b.receive(&first.encode(), "t", NOW + 5, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert!(b.requests().unwrap().is_empty());
+    // A resend sealed a day later is a new request, notified.
+    let later = NOW + 86_400;
+    let resend = invite_one(&mut a, bob, later, &mut rng);
+    let got = b.receive(&resend.encode(), "t", later, &mut rng).unwrap();
+    assert_eq!(request_outcome(got), (alice, false, true));
+}
+
+#[test]
+fn refusal_syncs_to_my_other_devices() {
+    let (_da, _db, a, mut b, mut bt, mut rng) = both_devices_have_request();
+    let alice = a.fingerprint();
+    assert_eq!(bt.requests().unwrap().len(), 1);
+    let out = b.refuse_request(&alice, NOW + 1, &mut rng).unwrap();
+    assert_eq!(out.len(), 1);
+    let got = bt
+        .receive(&out[0].encode(), "t", NOW + 1, &mut rng)
+        .unwrap();
+    assert!(
+        !matches!(got, ReceiveOutcome::Quarantined { .. }),
+        "{got:?}"
+    );
+    assert!(bt.requests().unwrap().is_empty());
+    assert_eq!(count_table(&bt, "pending_initials"), 0);
+    assert_eq!(
+        requests::get_refusal(&bt.store, alice).unwrap(),
+        Some(NOW + 1)
+    );
+    // Last writer wins: an older refusal does not move the date back.
+    let older = ExtContent::SyncRefused { fp: alice, at: NOW }.to_body();
+    let pkt = seal_body(
+        &mut b,
+        &send::Target::OwnDevices,
+        &older,
+        MessageId([9; 16]),
+        &mut rng,
+    )
+    .remove(0)
+    .0;
+    bt.receive(&pkt.encode(), "t", NOW + 2, &mut rng).unwrap();
+    assert_eq!(
+        requests::get_refusal(&bt.store, alice).unwrap(),
+        Some(NOW + 1)
+    );
+}
+
+#[test]
+fn block_request_drops_later_invitations() {
+    let (_da, _db, mut a, mut b, mut bt, mut rng) = both_devices_have_request();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let out = b.block_request(&alice, NOW + 1, &mut rng).unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(b.requests().unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert!(b.store.block_state(alice).unwrap().blocked);
+    // `SyncOp::Block` closes the request on the tablet too.
+    bt.receive(&out[0].encode(), "t", NOW + 1, &mut rng)
+        .unwrap();
+    assert!(bt.store.block_state(alice).unwrap().blocked);
+    assert!(bt.requests().unwrap().is_empty());
+    let later = NOW + 86_400;
+    let resend = a.invite(&bob, later, &mut rng).unwrap();
+    let mine = intro_mailbox(&b.device.public(), day_of(later));
+    let resend = resend.iter().find(|p| p.mailbox == mine).unwrap();
+    let got = b.receive(&resend.encode(), "t", later, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert!(b.requests().unwrap().is_empty());
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactRequestResolved {
+                how: RequestResolution::Blocked,
+                ..
+            }
+        )),
+        1
+    );
+}
+
+#[test]
+fn hidden_request_stays_listed_and_lights_indicator() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let first = invite_one(&mut a, bob, NOW, &mut rng);
+    b.receive(&first.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(b.requests().unwrap()[0].unseen);
+    b.set_request_hidden(&alice, true).unwrap();
+    // Hiding touches neither `unseen` nor the other devices.
+    let list = b.requests().unwrap();
+    assert!(list[0].hidden && list[0].unseen);
+    assert_eq!(count_table(&b, "outbox"), 0);
+    b.mark_requests_seen().unwrap();
+    assert!(!b.requests().unwrap()[0].unseen);
+    let later = NOW + 86_400;
+    let resend = invite_one(&mut a, bob, later, &mut rng);
+    b.receive(&resend.encode(), "t", later, &mut rng).unwrap();
+    let list = b.requests().unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(list[0].hidden && list[0].unseen);
+    b.set_request_hidden(&alice, false).unwrap();
+    assert!(!b.requests().unwrap()[0].hidden);
+    assert!(matches!(
+        b.set_request_hidden(&Fingerprint([9; 32]), true),
+        Err(CoreError::UnknownContact)
+    ));
+}
+
+#[test]
+fn requests_are_listed_most_recent_first() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (_dc, mut c) = party("c", 3);
+    c.contact_card("Carol").unwrap();
+    c.add_contact(&b.contact_card("Bob").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let bob = b.fingerprint();
+    let pa = invite_one(&mut a, bob, NOW, &mut rng);
+    let pc = invite_one(&mut c, bob, NOW + 10, &mut rng);
+    b.receive(&pc.encode(), "t", NOW + 10, &mut rng).unwrap();
+    b.receive(&pa.encode(), "t", NOW + 20, &mut rng).unwrap();
+    let list = b.requests().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].fingerprint, a.fingerprint());
+    assert_eq!(list[1].fingerprint, c.fingerprint());
+}
+
+#[test]
+fn purge_expires_requests_queue_and_refusals() {
+    let (_da, a, _db, b, _rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    let (day, week) = (86_400, requests::UNKNOWN_RETENTION_SECS);
+    requests::insert_pending_initial(&b.store, &unknown_packet(200, NOW)).unwrap();
+    requests::put_refusal(&b.store, Fingerprint([8; 32]), NOW).unwrap();
+    // Exactly at the limit nothing goes.
+    requests::purge_requests(&b.store, NOW + week).unwrap();
+    assert_eq!(count_table(&b, "pending_initials") as usize, 4);
+    assert_eq!(count_table(&b, "refused_requests"), 1);
+    requests::purge_requests(&b.store, NOW + week + 1).unwrap();
+    assert_eq!(count_table(&b, "refused_requests"), 0);
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+    // The request itself keeps its 30 days.
+    assert_eq!(b.requests().unwrap().len(), 1);
+    assert_eq!(held_messages(&b, alice), 2);
+    requests::purge_requests(&b.store, NOW + 30 * day).unwrap();
+    assert_eq!(b.requests().unwrap().len(), 1);
+    requests::purge_requests(&b.store, NOW + 30 * day + 1).unwrap();
+    assert!(b.requests().unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactRequestResolved {
+                how: RequestResolution::Expired,
+                ..
+            }
+        )),
+        1
+    );
+}
+
+#[test]
+fn purge_drops_old_packets_held_for_a_contact() {
+    let p = pair();
+    let alice = p.a.fingerprint();
+    let mut old = unknown_packet(1, NOW);
+    old.fp = Some(alice);
+    let mut recent = unknown_packet(2, NOW + 100);
+    recent.fp = Some(alice);
+    requests::insert_pending_initial(&p.b.store, &old).unwrap();
+    requests::insert_pending_initial(&p.b.store, &recent).unwrap();
+    let limit = NOW + requests::UNKNOWN_RETENTION_SECS;
+    requests::purge_requests(&p.b.store, limit + 1).unwrap();
+    let left = requests::list_pending_by_fp(&p.b.store, alice).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].packet_id, recent.packet_id);
+}
+
+#[test]
+fn polling_purges_expired_requests() {
+    let (_da, _a, _db, mut b, _rng) = bob_with_request(NOW);
+    b.mark_polled(NOW + 30 * 86_400 + 1).unwrap();
+    assert!(b.requests().unwrap().is_empty());
+}

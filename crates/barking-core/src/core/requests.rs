@@ -9,10 +9,6 @@
 //! NULL, keyed by the initial message's identity key `ik`). When a limit is
 //! reached the new item is dropped: nothing is ever evicted.
 
-// The accessors are used by the behavior built on top of this module in the
-// following changes; until then nothing calls them.
-#![allow(dead_code)]
-
 use rand_core::CryptoRng;
 use rusqlite::{OptionalExtension, params};
 
@@ -253,6 +249,107 @@ pub(super) fn resolve_request(
         &TransparencyEvent::ContactRequestResolved { contact: fp, how },
     )?;
     Ok(true)
+}
+
+/// Closes the pending request of `fp` for good (`how`, logged), together
+/// with the packets held for it and those of its devices waiting in the
+/// queue of unknown senders: nothing of it is replayed. Returns whether a
+/// request existed.
+pub(super) fn close_request(
+    q: &impl Queries,
+    fp: Fingerprint,
+    how: RequestResolution,
+    now: u64,
+) -> Result<bool> {
+    let Some(row) = get_request(q, fp)? else {
+        return Ok(false);
+    };
+    if let Ok(card) = load_card(&row.card) {
+        for c in &card.devices.certs {
+            q.conn()
+                .execute(
+                    "DELETE FROM pending_initials WHERE fp IS NULL AND ik = ?1",
+                    params![c.device.dh.as_slice()],
+                )
+                .map_err(map_err)?;
+        }
+    }
+    delete_request(q, fp)?;
+    log(
+        q,
+        now,
+        None,
+        &TransparencyEvent::ContactRequestResolved { contact: fp, how },
+    )?;
+    Ok(true)
+}
+
+/// Refuses `fp`: its request and packets are dropped, and the refusal is
+/// dated `at` (never moved back), so that an invitation sealed before it is
+/// dropped on arrival (spec §7.4).
+fn refuse_in(q: &impl Queries, fp: Fingerprint, at: u64, now: u64) -> Result<()> {
+    close_request(q, fp, RequestResolution::Refused, now)?;
+    let at = get_refusal(q, fp)?.map_or(at, |known| known.max(at));
+    put_refusal(q, fp, at)
+}
+
+/// Applies a `SyncRefused { fp, at }` from one of my devices, as a refusal
+/// here (last writer wins on the date). Returns whether anything changed.
+pub(super) fn apply_sync_refused(
+    q: &impl Queries,
+    fp: Fingerprint,
+    at: u64,
+    now: u64,
+) -> Result<bool> {
+    let known = get_refusal(q, fp)?;
+    let had_request = get_request(q, fp)?.is_some();
+    if !had_request && known.is_some_and(|k| k >= at) {
+        return Ok(false);
+    }
+    refuse_in(q, fp, at, now)?;
+    Ok(true)
+}
+
+/// Periodic purge: requests with no new packet for `REQUEST_RETENTION_SECS`
+/// (logged `Expired`, with their packets), packets of the queue of unknown
+/// senders and refusals older than their retention, and packets held for a
+/// fingerprint with no request (a contact's, after an acceptance or a new
+/// device) older than `UNKNOWN_RETENTION_SECS` by arrival.
+pub(super) fn purge_requests(q: &impl Queries, now: u64) -> Result<()> {
+    let expired: Vec<Fingerprint> = {
+        let mut stmt = q
+            .conn()
+            .prepare("SELECT fp FROM contact_requests WHERE last_seen + ?1 < ?2")
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![to_i64(REQUEST_RETENTION_SECS), to_i64(now)], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })
+            .map_err(map_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(Fingerprint(arr(row.map_err(map_err)?)?));
+        }
+        out
+    };
+    for fp in expired {
+        close_request(q, fp, RequestResolution::Expired, now)?;
+    }
+    q.conn()
+        .execute(
+            "DELETE FROM pending_initials
+             WHERE received_at + ?1 < ?2
+               AND (fp IS NULL OR fp NOT IN (SELECT fp FROM contact_requests))",
+            params![to_i64(UNKNOWN_RETENTION_SECS), to_i64(now)],
+        )
+        .map_err(map_err)?;
+    q.conn()
+        .execute(
+            "DELETE FROM refused_requests WHERE at + ?1 < ?2",
+            params![to_i64(REFUSAL_RETENTION_SECS), to_i64(now)],
+        )
+        .map_err(map_err)?;
+    Ok(())
 }
 
 /// Attaches to `fp`, a contact, the packets of the queue of unknown senders
@@ -605,7 +702,9 @@ pub(super) fn put_refusal(q: &impl Queries, fp: Fingerprint, at: u64) -> Result<
     Ok(())
 }
 
-/// Forgets the refusal of `fp`. Returns whether there was one.
+/// Forgets the refusal of `fp`. Returns whether there was one. Only the
+/// storage test uses it: refusals leave by purge or are overwritten.
+#[allow(dead_code)]
 pub(super) fn delete_refusal(q: &impl Queries, fp: Fingerprint) -> Result<bool> {
     let n = q
         .conn()
@@ -1450,6 +1549,101 @@ impl Core {
             replayed: replayed.into_iter().map(|(_, o)| o).collect(),
             packets,
         })
+    }
+
+    /// The pending requests, hidden ones included, most recently seen first.
+    pub fn requests(&self) -> Result<Vec<ContactRequest>> {
+        list_requests(&self.store)
+    }
+
+    /// Refuses the request of `fp` (spec §7.4): the request and its packets
+    /// are dropped and nothing goes to the requester (no ack: for it a
+    /// refusal looks like no answer). Only the date is kept, to drop the
+    /// invitations sealed before it, and shared with my other devices
+    /// (`SyncRefused`): the returned packets are for them. No request:
+    /// `UnknownContact`.
+    pub fn refuse_request(
+        &mut self,
+        fp: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Packet>> {
+        self.ensure_active()?;
+        let fp = *fp;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            if get_request(tx, fp)?.is_none() {
+                return Err(CoreError::UnknownContact);
+            }
+            refuse_in(tx, fp, now, now)?;
+            let copy = ExtContent::SyncRefused { fp, at: now }.to_body();
+            sync::seal_to_own(
+                tx,
+                device,
+                &copy,
+                SyncKind::Contact,
+                random_message_id(rng),
+                SealTime::at(now),
+                rng,
+            )
+        })
+    }
+
+    /// Blocks the requester `fp` (spec §7.5): `block_contact`'s block, which
+    /// needs no contact and is shared with my other devices (`SyncOp::Block`,
+    /// whose packets are returned), then the request and its packets are
+    /// dropped. Later invitations are dropped silently. No request:
+    /// `UnknownContact`.
+    pub fn block_request(
+        &mut self,
+        fp: &Fingerprint,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Packet>> {
+        self.ensure_active()?;
+        let fp = *fp;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            if get_request(tx, fp)?.is_none() {
+                return Err(CoreError::UnknownContact);
+            }
+            let out = contacts::set_block_sealed(tx, device, fp, true, now, rng)?;
+            close_request(tx, fp, RequestResolution::Blocked, now)?;
+            Ok(out)
+        })
+    }
+
+    /// Hides or shows the request of `fp` in the main list. Local to this
+    /// device: not synchronized, `unseen` untouched. No request:
+    /// `UnknownContact`.
+    pub fn set_request_hidden(&mut self, fp: &Fingerprint, hidden: bool) -> Result<()> {
+        self.ensure_active()?;
+        let n = self
+            .store
+            .conn()
+            .execute(
+                "UPDATE contact_requests SET hidden = ?2 WHERE fp = ?1",
+                params![fp.0.as_slice(), hidden],
+            )
+            .map_err(map_err)?;
+        if n == 0 {
+            return Err(CoreError::UnknownContact);
+        }
+        Ok(())
+    }
+
+    /// The user opened the list of requests: none is `unseen` any more
+    /// (the indicator goes out until a new packet arrives).
+    pub fn mark_requests_seen(&mut self) -> Result<()> {
+        self.ensure_active()?;
+        self.store
+            .conn()
+            .execute(
+                "UPDATE contact_requests SET unseen = 0 WHERE unseen = 1",
+                [],
+            )
+            .map_err(map_err)?;
+        Ok(())
     }
 
     /// My current card: the stored one (`own_card`, kept by the link and

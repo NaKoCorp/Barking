@@ -459,6 +459,7 @@ impl Core {
         core.store.transaction(|tx| {
             link::purge_expired_offer(tx, now)?;
             admin::purge_expired(tx, now)?;
+            requests::purge_requests(tx, now)?;
             sweep_skipped(tx, now)
         })?;
         Ok(core)
@@ -825,7 +826,10 @@ impl Core {
     /// previous value. The polling window no longer depends on it (it always
     /// covers the whole lifetime); `last_polled_day` reads it back.
     pub fn mark_polled(&mut self, now: u64) -> Result<()> {
-        self.store.put_meta(META_LAST_POLLED, &day_of(now))
+        self.store.transaction(|tx| {
+            requests::purge_requests(tx, now)?;
+            tx.put_meta(META_LAST_POLLED, &day_of(now))
+        })
     }
 
     /// Day of the last poll recorded by `mark_polled`, if any.

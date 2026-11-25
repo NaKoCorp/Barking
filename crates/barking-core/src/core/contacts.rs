@@ -9,6 +9,7 @@ use super::{Core, OwnDevices, load_card, log, requests, sync};
 use crate::contact::ContactCard;
 use crate::envelope::{MAX_TEXT_LEN, SyncOp};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
+use crate::packet::Packet;
 use crate::store::{BlockState, ContactClock, ContactRow, Queries};
 use crate::transparency::{RequestResolution, TransparencyEvent};
 use crate::{CoreError, Result};
@@ -619,6 +620,18 @@ fn set_block_in(
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<()> {
+    set_block_sealed(q, device, fp, blocked, now, rng).map(drop)
+}
+
+/// As `set_block_in`, returning the packets sealed for my other devices.
+pub(super) fn set_block_sealed(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    fp: Fingerprint,
+    blocked: bool,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Packet>> {
     let known = q.block_state(fp)?;
     let at = now.max(known.at.saturating_add(1));
     let since = if blocked && !known.blocked {
@@ -634,12 +647,18 @@ fn set_block_in(
         q.drop_reaction_packets_with(fp)?;
         q.delete_pending_seen_with(fp)?;
     }
-    sync::send_block(q, device, fp, &state, SealTime::at(now), rng)
+    sync::seal_block(q, device, fp, &state, SealTime::at(now), rng)
 }
 
 /// Merges a received block register: the most recent change wins; at an
-/// equal date, the block, so that all my devices decide the same way.
-pub(super) fn merge_block(q: &impl Queries, fp: Fingerprint, state: &BlockState) -> Result<()> {
+/// equal date, the block, so that all my devices decide the same way. A
+/// block also closes the pending request of `fp`.
+pub(super) fn merge_block(
+    q: &impl Queries,
+    fp: Fingerprint,
+    state: &BlockState,
+    now: u64,
+) -> Result<()> {
     let known = q.block_state(fp)?;
     if (state.at, state.blocked) > (known.at, known.blocked) {
         q.set_block_state(fp, state)?;
@@ -648,6 +667,7 @@ pub(super) fn merge_block(q: &impl Queries, fp: Fingerprint, state: &BlockState)
             q.delete_reactions_with(fp)?;
             q.drop_reaction_packets_with(fp)?;
             q.delete_pending_seen_with(fp)?;
+            requests::close_request(q, fp, RequestResolution::Blocked, now)?;
         }
     }
     Ok(())
