@@ -375,6 +375,11 @@ fn open_initial(
         Ok(found) => found,
         Err(reason) => return Ok(Err(reason)),
     };
+    // A signing key named by the Initial must be that of the device found
+    // (`None`: written by 0.6.0, which did not carry it).
+    if init.sig.is_some_and(|sig| sig != peer.sig) {
+        return Ok(Err(R_HANDSHAKE));
+    }
     let peer_id = peer.id();
     let sid = session_id(&init.ek);
     if let Some(row) = q

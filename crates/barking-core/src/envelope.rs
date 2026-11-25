@@ -201,10 +201,12 @@ impl Body {
 
 /// Upper bound of what the `Wire::Initial` payload (the heaviest) adds to
 /// the serialized envelope: tag, `ek` (32), sealed initial message
-/// (keys, identifiers, 1088-byte ML-KEM ciphertext, AEAD tag,
-/// lengths ≈ 1,190), encrypted header (80) and body tag (16),
-/// lengths included. Verified by a test on real packets.
-pub const MAX_WIRE_OVERHEAD: usize = 1_340;
+/// (keys, identifiers, 1088-byte ML-KEM ciphertext, initiator's signing
+/// key, AEAD tag, lengths ≈ 1,220), encrypted header (80) and body tag
+/// (16), lengths included. Worst case 1,352 (5-byte identifiers, one-time
+/// key); 0.6.0's 1,340 plus the 32 bytes of `sig`. Verified by a test on
+/// real packets.
+pub const MAX_WIRE_OVERHEAD: usize = 1_372;
 
 /// Does the content fit in a single packet (L tier), whatever the
 /// session (opening included)? Computed without writing or advancing anything:
@@ -255,7 +257,7 @@ fn seal_initial(
     let ek = PublicKey::from(&e_seal).to_bytes();
     let dh = nonzero_dh(e_seal.diffie_hellman(&PublicKey::from(*ik_b)).to_bytes())?;
     let (key, nonce) = initial_key(&dh)?;
-    let pt = postcard::to_allocvec(init).map_err(|_| CoreError::Malformed("initial message"))?;
+    let pt = init.encode()?;
     // Each ephemeral key is new: the (key, nonce) pair is never reused.
     Ok((ek, aead::seal(&key, &nonce, &ek, &pt)))
 }
@@ -386,12 +388,8 @@ pub fn open_initial(me: &DeviceKeys, ek: &[u8; 32], sealed_init: &[u8]) -> Resul
     let dh = nonzero_dh(me.dh(&PublicKey::from(*ek)))?;
     let (key, nonce) = initial_key(&dh)?;
     let pt = Zeroizing::new(aead::open(&key, &nonce, ek, sealed_init)?);
-    let (init, rest) =
-        postcard::take_from_bytes(&pt).map_err(|_| CoreError::Malformed("initial message"))?;
-    if !rest.is_empty() {
-        return Err(CoreError::Malformed("extra bytes in the initial message"));
-    }
-    Ok(init)
+    // Both forms: with `sig`, or that of 0.6.0 (`sig: None`).
+    InitialMessage::decode(&pt)
 }
 
 /// Decrypts `msg` in the `ratchet` session and decodes the envelope.

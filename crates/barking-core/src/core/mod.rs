@@ -1079,10 +1079,13 @@ fn de_state(bytes: &[u8]) -> Result<RatchetState> {
     postcard::from_bytes(bytes).map_err(|_| CoreError::Store("corrupted session".into()))
 }
 
+/// Same bytes as on the wire ([`InitialMessage::encode`]).
 fn ser_init(init: &InitialMessage) -> Result<Vec<u8>> {
-    postcard::to_allocvec(init).map_err(|_| CoreError::Store("serialization".into()))
+    init.encode()
+        .map_err(|_| CoreError::Store("serialization".into()))
 }
 
+/// Also reads a `pending_initial` stored by 0.6.0 (`sig: None`).
 fn de_init(bytes: &[u8]) -> Result<InitialMessage> {
-    postcard::from_bytes(bytes).map_err(|_| CoreError::Store("corrupted session".into()))
+    InitialMessage::decode(bytes).map_err(|_| CoreError::Store("corrupted session".into()))
 }

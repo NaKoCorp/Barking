@@ -2,7 +2,7 @@
 
 use super::prekeys::{PQ_CT_LEN, PrekeyBundle, PrekeySecrets};
 use crate::crypto::{kdf::hkdf_sha256, labels};
-use crate::identity::DeviceKeys;
+use crate::identity::{DeviceKeys, DevicePublic};
 use crate::{CoreError, Result};
 use core::fmt;
 use ml_kem::{Ciphertext, Decapsulate, Encapsulate, EncapsulationKey, MlKem768, TryKeyInit};
@@ -18,7 +18,10 @@ const KM_MAX: usize = 32 * 6;
 
 /// First message from the initiator: what the responder needs to
 /// reproduce the computation.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+///
+/// Not serde: the wire form is written and read by [`InitialMessage::encode`]
+/// and [`InitialMessage::decode`] only (0.6.0 form followed by `sig`).
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct InitialMessage {
     /// X25519 identity key of the initiating device (`DevicePublic.dh`).
     pub ik: [u8; 32],
@@ -29,6 +32,83 @@ pub struct InitialMessage {
     pub opk_id: Option<u32>,
     /// ML-KEM-768 ciphertext (1088 bytes).
     pub kem_ct: Vec<u8>,
+    /// Ed25519 signing key of the initiating device (`DevicePublic.sig`):
+    /// with `ik`, the responder knows the initiator's `DeviceId` without its
+    /// card. `None` only for a message written by 0.6.0 (which did not carry it).
+    pub sig: Option<[u8; 32]>,
+}
+
+/// 0.6.0 wire form of [`InitialMessage`] (without `sig`).
+#[derive(Serialize, Deserialize)]
+struct InitialV1 {
+    ik: [u8; 32],
+    ek: [u8; 32],
+    spk_id: u32,
+    pq_id: u32,
+    opk_id: Option<u32>,
+    kem_ct: Vec<u8>,
+}
+
+/// Current wire form: the 0.6.0 bytes followed by the 32 bytes of `sig`
+/// (postcard concatenates struct fields: no tag, no length).
+#[derive(Serialize, Deserialize)]
+struct InitialV2 {
+    v1: InitialV1,
+    sig: [u8; 32],
+}
+
+impl InitialMessage {
+    /// The initiating device, when the message names its signing key.
+    pub fn initiator(&self) -> Option<DevicePublic> {
+        self.sig.map(|sig| DevicePublic { sig, dh: self.ik })
+    }
+
+    /// Wire bytes: [`InitialV2`] with `sig`, the 0.6.0 form without
+    /// (a `pending_initial` stored by 0.6.0 is written back unchanged).
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let v1 = InitialV1 {
+            ik: self.ik,
+            ek: self.ek,
+            spk_id: self.spk_id,
+            pq_id: self.pq_id,
+            opk_id: self.opk_id,
+            kem_ct: self.kem_ct.clone(),
+        };
+        let bytes = match self.sig {
+            Some(sig) => postcard::to_allocvec(&InitialV2 { v1, sig }),
+            None => postcard::to_allocvec(&v1),
+        };
+        bytes.map_err(|_| CoreError::Malformed("initial message"))
+    }
+
+    /// Reads [`InitialV2`], else the 0.6.0 form (`sig: None`). Any other
+    /// remainder is refused. The two forms cannot be confused: `kem_ct` is
+    /// length-prefixed, so they differ by exactly 32 bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if let Ok((v2, rest)) = postcard::take_from_bytes::<InitialV2>(bytes)
+            && rest.is_empty()
+        {
+            return Ok(Self::from_v1(v2.v1, Some(v2.sig)));
+        }
+        let (v1, rest) = postcard::take_from_bytes::<InitialV1>(bytes)
+            .map_err(|_| CoreError::Malformed("initial message"))?;
+        if !rest.is_empty() {
+            return Err(CoreError::Malformed("extra bytes in the initial message"));
+        }
+        Ok(Self::from_v1(v1, None))
+    }
+
+    fn from_v1(v1: InitialV1, sig: Option<[u8; 32]>) -> Self {
+        Self {
+            ik: v1.ik,
+            ek: v1.ek,
+            spk_id: v1.spk_id,
+            pq_id: v1.pq_id,
+            opk_id: v1.opk_id,
+            kem_ct: v1.kem_ct,
+            sig,
+        }
+    }
 }
 
 /// Secrets resulting from the handshake, shared by both sides.
@@ -79,15 +159,16 @@ pub fn initiate(
     km.extend_from_slice(&ss);
     ss.zeroize();
 
-    let ik_a = me.public().dh;
-    let secrets = derive(&km, &ik_a, &bundle.device.dh)?;
+    let me_pub = me.public();
+    let secrets = derive(&km, &me_pub.dh, &bundle.device.dh)?;
     let init = InitialMessage {
-        ik: ik_a,
+        ik: me_pub.dh,
         ek: PublicKey::from(&ek).to_bytes(),
         spk_id: bundle.spk_id,
         pq_id: bundle.pq_id,
         opk_id: bundle.opk.map(|(id, _)| id),
         kem_ct: ct.to_vec(),
+        sig: Some(me_pub.sig),
     };
     Ok((secrets, init))
 }
@@ -337,7 +418,7 @@ mod tests {
         let b = bob(&mut rng);
         let (_, init) = initiate(&alice, &b.pre.bundle(&b.dev, true), &mut rng).unwrap();
         assert_eq!(init.kem_ct.len(), PQ_CT_LEN);
-        let len = postcard::to_allocvec(&init).unwrap().len();
+        let len = init.encode().unwrap().len();
         assert!((1100..=1300).contains(&len), "size {len}");
         assert!(len > 1024, "beyond the M tier: goes in L");
     }
@@ -451,5 +532,86 @@ mod tests {
         let b = bob(&mut rng);
         let (sa, _) = initiate(&alice, &b.pre.bundle(&b.dev, false), &mut rng).unwrap();
         assert_eq!(format!("{sa:?}"), "SessionSecrets(<secret>)");
+    }
+
+    /// The 0.6.0 wire form, copied here so that the test does not depend
+    /// on the production helper.
+    #[derive(Serialize)]
+    struct Legacy<'a> {
+        ik: [u8; 32],
+        ek: [u8; 32],
+        spk_id: u32,
+        pq_id: u32,
+        opk_id: Option<u32>,
+        kem_ct: &'a [u8],
+    }
+
+    fn legacy_bytes(init: &InitialMessage) -> Vec<u8> {
+        postcard::to_allocvec(&Legacy {
+            ik: init.ik,
+            ek: init.ek,
+            spk_id: init.spk_id,
+            pq_id: init.pq_id,
+            opk_id: init.opk_id,
+            kem_ct: &init.kem_ct,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn initial_roundtrips_with_sig() {
+        let mut rng = StdRng::seed_from_u64(17);
+        let alice = DeviceKeys::generate(&mut rng);
+        let b = bob(&mut rng);
+        for with_opk in [false, true] {
+            let (_, init) = initiate(&alice, &b.pre.bundle(&b.dev, with_opk), &mut rng).unwrap();
+            assert_eq!(init.sig, Some(alice.public().sig));
+            assert_eq!(init.initiator(), Some(alice.public()));
+            let bytes = init.encode().unwrap();
+            // The 0.6.0 bytes followed by the 32 bytes of `sig`, no Option tag.
+            let mut expected = legacy_bytes(&init);
+            expected.extend_from_slice(&alice.public().sig);
+            assert_eq!(bytes, expected);
+            assert_eq!(InitialMessage::decode(&bytes).unwrap(), init);
+        }
+    }
+
+    #[test]
+    fn initial_without_sig_still_decodes() {
+        let mut rng = StdRng::seed_from_u64(18);
+        let alice = DeviceKeys::generate(&mut rng);
+        let b = bob(&mut rng);
+        let (_, init) = initiate(&alice, &b.pre.bundle(&b.dev, true), &mut rng).unwrap();
+        let old = InitialMessage::decode(&legacy_bytes(&init)).unwrap();
+        assert_eq!(old.sig, None);
+        assert_eq!(old.initiator(), None);
+        assert_eq!(InitialMessage { sig: None, ..init }, old);
+        // Without `sig`, the 0.6.0 form is written back unchanged.
+        assert_eq!(old.encode().unwrap(), legacy_bytes(&old));
+    }
+
+    #[test]
+    fn initial_with_extra_bytes_refused() {
+        let mut rng = StdRng::seed_from_u64(19);
+        let alice = DeviceKeys::generate(&mut rng);
+        let b = bob(&mut rng);
+        let (_, init) = initiate(&alice, &b.pre.bundle(&b.dev, false), &mut rng).unwrap();
+        let mut bytes = init.encode().unwrap();
+        bytes.push(0);
+        assert_eq!(
+            InitialMessage::decode(&bytes),
+            Err(CoreError::Malformed("extra bytes in the initial message"))
+        );
+        // A partial `sig` (V1 + 1..31 bytes) is refused too.
+        let mut partial = legacy_bytes(&init);
+        partial.extend_from_slice(&[7; 31]);
+        assert_eq!(
+            InitialMessage::decode(&partial),
+            Err(CoreError::Malformed("extra bytes in the initial message"))
+        );
+        assert_eq!(
+            InitialMessage::decode(&bytes[..10]),
+            Err(CoreError::Malformed("initial message"))
+        );
     }
 }

@@ -299,6 +299,76 @@ fn session_id_uses_inner_pqxdh_ek() {
     assert_ne!(seal_ek, init.ek, "the sealing ephemeral is distinct");
 }
 
+/// Alice has added Bob (not the reverse yet: Bob adds her in the tests) and
+/// sent him a first text: her session row still carries `pending_initial`.
+fn alice_opened_to_bob() -> (TempDir, Core, TempDir, Core, StdRng) {
+    let (da, mut a) = party("a", 1);
+    let (db, mut b) = party("b", 2);
+    a.add_contact(
+        &b.contact_card("Bob").unwrap(),
+        None,
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
+    b.add_contact(
+        &a.contact_card("Alice").unwrap(),
+        None,
+        NOW,
+        &mut StdRng::seed_from_u64(0),
+    )
+    .unwrap();
+    let mut rng = StdRng::seed_from_u64(6);
+    a.send_text(&b.fingerprint(), "x", NOW, &mut rng).unwrap();
+    (da, a, db, b, rng)
+}
+
+#[test]
+fn stored_v1_pending_initial_still_reads() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_opened_to_bob();
+    let mut row = best_session(&a);
+    let stored = row.pending_initial.clone().unwrap();
+    let init = de_init(&stored).unwrap();
+    assert_eq!(init.sig, Some(a.device.public().sig));
+    // A row written by 0.6.0: the same bytes without the trailing `sig`.
+    let v1 = stored[..stored.len() - 32].to_vec();
+    let old = de_init(&v1).unwrap();
+    assert_eq!(old.sig, None);
+    assert_eq!(old.ek, init.ek);
+    assert_eq!(old.kem_ct, init.kem_ct);
+    // The legacy row still sends, and Bob (who knows Alice) opens it.
+    row.pending_initial = Some(v1);
+    a.store.put_session(&row).unwrap();
+    let p = a.send_text(&b.fingerprint(), "y", NOW, &mut rng).unwrap();
+    assert!(matches!(
+        b.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap(),
+        ReceiveOutcome::Message { .. }
+    ));
+}
+
+#[test]
+fn known_sender_with_wrong_sig_refused() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_opened_to_bob();
+    // Alice's Initial now names another signing key than the one of her
+    // device in Bob's copy of her card.
+    let mut row = best_session(&a);
+    let mut init = de_init(row.pending_initial.as_deref().unwrap()).unwrap();
+    let other = DeviceKeys::generate(&mut rng).public().sig;
+    init.sig = Some(other);
+    row.pending_initial = Some(ser_init(&init).unwrap());
+    a.store.put_session(&row).unwrap();
+    let p = a.send_text(&b.fingerprint(), "y", NOW, &mut rng).unwrap();
+    assert!(matches!(
+        parse_wire(&p[0].payload).unwrap(),
+        Wire::Initial { .. }
+    ));
+    assert_eq!(
+        reason(b.receive(&p[0].encode(), "t", NOW, &mut rng).unwrap()),
+        R_HANDSHAKE
+    );
+    assert!(b.store.all_sessions().unwrap().is_empty());
+}
+
 #[test]
 fn relay_rewritten_id_does_not_suppress_genuine_packet() {
     // A relay copies P2's identifier into P1's header.
