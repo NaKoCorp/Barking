@@ -1366,7 +1366,9 @@ fn replay_all(
 }
 
 /// Replays the first packets held for `fp`, now a contact, oldest first:
-/// their outcomes, in that order.
+/// their outcomes, in that order. Only the tests need the outcomes: the
+/// callers replay with `replay_committed`.
+#[cfg(test)]
 pub(super) fn replay_pending(
     core: &mut Core,
     fp: Fingerprint,
