@@ -972,15 +972,24 @@ fn write_sync_packets(out: Option<&Path>, packets: &[Packet]) -> CliResult<()> {
                 println!("{}", write_packet(dir, p)?.display());
             }
         }
-        None if !packets.is_empty() => {
-            println!(
-                "{} packet(s) for your other devices: rerun with --out",
-                packets.len()
-            );
-        }
+        None if !packets.is_empty() => println!("{}", sync_packets_hint(packets.len())),
         None => {}
     }
     Ok(())
+}
+
+/// What to do with the packets for my other devices left unwritten. Not
+/// "rerun": the request is gone. They wait in the send queue.
+fn sync_packets_hint(n: usize) -> String {
+    format!("{n} packet(s) for your other devices: write them with `barking outbox --out <dir>`")
+}
+
+/// The line for a `ReceiveOutcome::Ignored`, whatever its cause (content
+/// set aside, an ephemeral already due, an answer to my invite, an
+/// invitation dropped as blocked, refused or beyond the list): true of
+/// each, nothing to show.
+fn ignored_line(label: &str) -> String {
+    format!("{label}: nothing to show")
 }
 
 /// Shows what `accept` replayed, then writes the answer packets.
@@ -1088,7 +1097,7 @@ fn show_outcome(
             let again = if resent { " resent" } else { "" };
             println!("{label}: Contact request from {contact}{name}{again}");
         }
-        ReceiveOutcome::Ignored => println!("{label}: content this version cannot read, set aside"),
+        ReceiveOutcome::Ignored => println!("{}", ignored_line(label)),
         ReceiveOutcome::NeedsUpdate { from, alias } => {
             let who = alias.unwrap_or_else(|| from.to_string());
             println!(
@@ -1224,6 +1233,20 @@ fn format_time(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_packets_hint_points_to_the_outbox() {
+        // The request is gone after `refuse`/`block`: rerunning fails.
+        let hint = sync_packets_hint(2);
+        assert!(hint.contains("barking outbox --out <dir>"), "{hint}");
+        assert!(!hint.contains("rerun"), "{hint}");
+    }
+
+    #[test]
+    fn ignored_outcome_is_neutral() {
+        // Also an invitation dropped (blocked, refused, list full).
+        assert_eq!(ignored_line("p.bin"), "p.bin: nothing to show");
+    }
 
     #[test]
     fn formats_unix_time_in_utc() {

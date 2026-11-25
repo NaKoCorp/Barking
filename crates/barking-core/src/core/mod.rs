@@ -181,9 +181,12 @@ pub enum ReceiveOutcome {
     /// A newer list signed by my root no longer contains this device: it is
     /// removed from my account (see `Core::removed`); the ack is queued.
     Removed,
-    /// Content of a kind this version does not know, acknowledged and set
-    /// aside (`UnknownPolicy::Ignore`, or one of my own devices'): nothing
-    /// is added to the conversation.
+    /// Nothing to show. For example: content of a kind this version does not know,
+    /// acknowledged and set aside (`UnknownPolicy::Ignore`, or one of my
+    /// own devices'), an ephemeral already due, or a first packet dropped
+    /// (an invitation from a blocked or refused sender, or beyond the list
+    /// of requests; a message for a blocked requester). Nothing is added to
+    /// the conversation.
     Ignored,
     /// Content of an unknown kind its sender wants shown
     /// (`UnknownPolicy::ShowUpdate`): the conversation gains a placeholder
