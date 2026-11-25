@@ -20,6 +20,9 @@ use rand::rngs::StdRng;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt;
 
 /// Generous timeout for any test wait.
 const LONG: Duration = Duration::from_secs(20);
@@ -1724,5 +1727,95 @@ async fn fetch_rate_limited_after_pages() {
         s.fetch_resumable(&nine, &mut resume, 1 << 30).await,
         Err(ClientError::Refused(ErrorReason::RateLimited))
     ));
+    node.stop().await;
+}
+
+/// `Info` is answered with the public report: software, protocol, no origin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn info_request_answers_over_quic() {
+    let (_d, db) = db();
+    let node = start(&db);
+    let s = Client::connect(node.addr, node.id).await.unwrap();
+    let report = timeout(LONG, s.info(None))
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("the node answers Info");
+    assert_eq!(report.software, env!("CARGO_PKG_VERSION"));
+    assert_eq!(report.protocol, 5);
+    assert_eq!(report.protocol, PROTOCOL_VERSION);
+    assert_eq!(report.uptime_secs % 3600, 0);
+    assert_eq!(report.push_link, None);
+    assert_eq!(report.origin, None);
+    // A relay asked about, never contacted: no data.
+    let r = timeout(LONG, s.info(Some(NodeId([3; 32]))))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.push_link, Some(barking_proto::PushLink::Unknown));
+    node.stop().await;
+}
+
+/// A node without wake-ups reports neither the subscription table nor a link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn info_without_wake_reports_none() {
+    let (_d, db) = db();
+    let node = start_with(&db, key(0), policy(), |c| c.wake.enabled = false);
+    let s = Client::connect(node.addr, node.id).await.unwrap();
+    let report = timeout(LONG, s.info(Some(NodeId([3; 32]))))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!((report.wake, report.push_link), (None, None));
+    node.stop().await;
+}
+
+struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Answering `Info` logs nothing: no address, no relay asked about. The
+/// subscriber is local to this thread, and the runtime runs on it alone.
+#[tokio::test(flavor = "current_thread")]
+async fn info_request_logs_nothing() {
+    let (_d, db) = db();
+    let node = start(&db);
+    let s = Client::connect(node.addr, node.id).await.unwrap();
+    // The node is up and answering: its start is behind us.
+    timeout(LONG, s.info(None)).await.unwrap().unwrap().unwrap();
+    let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&buf);
+    // The node's and the protocol crate's events, at every level (the QUIC
+    // library's own traces are not the node's logs).
+    let targets = Targets::new()
+        .with_target("barking_node", tracing::Level::TRACE)
+        .with_target("barking_proto", tracing::Level::TRACE);
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(move || Capture(Arc::clone(&sink)))
+            .with_filter(targets),
+    );
+    let guard = tracing::subscriber::set_default(subscriber);
+    for i in 0..3u8 {
+        let r = timeout(LONG, s.info(Some(NodeId([i; 32]))))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(r.is_some());
+    }
+    drop(guard);
+    let logged = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+    assert_eq!(logged, "", "Info logged something");
     node.stop().await;
 }

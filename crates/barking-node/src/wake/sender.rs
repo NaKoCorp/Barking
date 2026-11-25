@@ -9,7 +9,9 @@
 //! all stepped aside on purpose (`NodeFull`, connection refused) is not
 //! skipped: the batch fails, the next one is tried as usual. One host holds at most
 //! `MAX_SENDS_PER_HOST` of the send permits. Nothing here logs a relay host,
-//! an address or a token.
+//! an address or a token. It also keeps, per relay identity and in memory
+//! only, whether the link to that relay works (`LinkStates`), for the public
+//! `Info` report.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -17,10 +19,10 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use barking_proto::MAX_WAKE_ITEMS;
 use barking_proto::client::{Client, ClientError, Session};
 use barking_proto::push::RelayRef;
 use barking_proto::routable;
+use barking_proto::{MAX_WAKE_ITEMS, NodeId, PushLink};
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, timeout};
 
@@ -447,6 +449,86 @@ impl WakeTransport for QuicWakeTransport {
     }
 }
 
+/// What the sender knows of the link to one relay identity.
+struct LinkRecord {
+    /// A send succeeded since the start.
+    ever_ok: bool,
+    /// The last send failed.
+    last_failed: bool,
+    /// The relay is set aside until then.
+    backoff_until: Option<Instant>,
+    /// Last update (the oldest entry is forgotten first).
+    touched: Instant,
+}
+
+/// State of the link to each relay, by identity (`RelayRef::id`), in memory
+/// only and bounded (`MAX_BACKOFF_ENTRIES`, oldest forgotten first: a
+/// forgotten relay reads `Unknown`). Read for the public `Info` report;
+/// nothing here is logged.
+#[derive(Default)]
+pub struct LinkStates {
+    map: Mutex<HashMap<NodeId, LinkRecord>>,
+}
+
+impl LinkStates {
+    fn update(&self, id: NodeId, f: impl FnOnce(&mut LinkRecord)) {
+        let now = Instant::now();
+        let mut m = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        if !m.contains_key(&id) && m.len() >= MAX_BACKOFF_ENTRIES {
+            let oldest = m.iter().min_by_key(|(_, r)| r.touched).map(|(k, _)| *k);
+            if let Some(k) = oldest {
+                m.remove(&k);
+            }
+        }
+        let r = m.entry(id).or_insert(LinkRecord {
+            ever_ok: false,
+            last_failed: false,
+            backoff_until: None,
+            touched: now,
+        });
+        r.touched = now;
+        f(r);
+    }
+
+    /// A send to the relay succeeded.
+    pub fn record_ok(&self, id: NodeId) {
+        self.update(id, |r| {
+            r.ever_ok = true;
+            r.last_failed = false;
+        });
+    }
+
+    /// A send to the relay failed.
+    pub fn record_failed(&self, id: NodeId) {
+        self.update(id, |r| r.last_failed = true);
+    }
+
+    /// The relay is set aside until `until`.
+    pub fn record_backoff(&self, id: NodeId, until: Instant) {
+        self.update(id, |r| {
+            r.backoff_until = Some(r.backoff_until.map_or(until, |u| u.max(until)));
+        });
+    }
+
+    /// `Failing` while the relay is set aside or its last send failed, `Ok`
+    /// after a success, `Unknown` if nothing was sent since the start.
+    pub fn state(&self, id: &NodeId) -> PushLink {
+        let m = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        match m.get(id) {
+            None => PushLink::Unknown,
+            Some(r) => {
+                if r.last_failed || r.backoff_until.is_some_and(|u| Instant::now() < u) {
+                    PushLink::Failing
+                } else if r.ever_ok {
+                    PushLink::Ok
+                } else {
+                    PushLink::Unknown
+                }
+            }
+        }
+    }
+}
+
 /// Orders waiting per relay; a relay with an entry has a worker task.
 #[derive(Default)]
 struct Queues {
@@ -466,6 +548,8 @@ struct Inner<T> {
     hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
     /// Relays that could not be reached, and until when they are skipped.
     backoff: Mutex<HashMap<RelayRef, Instant>>,
+    /// State of the link to each relay identity.
+    links: Arc<LinkStates>,
 }
 
 impl<T> Inner<T> {
@@ -492,6 +576,9 @@ impl<T> Inner<T> {
             }
         }
         b.insert(relay.clone(), now + RELAY_FAILURE_BACKOFF);
+        drop(b);
+        self.links
+            .record_backoff(relay.id, now + RELAY_FAILURE_BACKOFF);
     }
 
     fn host_share(&self, relay: &RelayRef) -> Arc<Semaphore> {
@@ -531,8 +618,22 @@ impl<T: WakeTransport> WakeSender<T> {
                 sends: Semaphore::new(MAX_CONCURRENT_RELAY_SENDS),
                 hosts: Mutex::default(),
                 backoff: Mutex::default(),
+                links: Arc::default(),
             }),
         }
+    }
+
+    /// State of the link to the relay `relay` (any of its addresses): `Ok`
+    /// after a successful send since the start while it is not set aside,
+    /// `Failing` while it is set aside or its last send failed, `Unknown`
+    /// otherwise. Not filtered by subscription count: see `InfoState`.
+    pub fn link_state(&self, relay: &NodeId) -> PushLink {
+        self.inner.links.state(relay)
+    }
+
+    /// The link states, shared with the `Info` report.
+    pub fn links(&self) -> Arc<LinkStates> {
+        Arc::clone(&self.inner.links)
     }
 
     /// Queues wake-ups. Beyond `WAKE_QUEUE` pending orders, the excess is
@@ -637,12 +738,14 @@ async fn relay_worker<T: WakeTransport>(inner: Arc<Inner<T>>, relay: RelayRef) {
         }
         match result {
             Ok(()) => {
+                inner.links.record_ok(relay.id);
                 inner.stats.add_wake_sent(n as u64);
                 if rerouted {
                     inner.stats.add_wake_rerouted(n as u64);
                 }
             }
             Err(e) => {
+                inner.links.record_failed(relay.id);
                 // Only a relay that could not be reached at all is skipped.
                 // A replica answered `NodeFull` first (`rerouted`): the relay
                 // is up and stepping aside, so the other replicas failing to
@@ -800,6 +903,35 @@ mod tests {
             );
         }
         assert!(calls[1].0 >= Duration::from_secs(2), "{:?}", calls[1].0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn link_state_follows_the_sends() {
+        let fake = Fake::new(2, false);
+        let sender = WakeSender::spawn(fake.clone(), Arc::new(ServerStats::default()));
+        let r = relay("a.example");
+        assert_eq!(sender.link_state(&r.id), PushLink::Unknown);
+        // The batch and its retry fail: the link is failing.
+        sender.enqueue(orders(&r, 1));
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(sender.link_state(&r.id), PushLink::Failing);
+        // The next send goes through: the link is up.
+        sender.enqueue(orders(&r, 1));
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(sender.link_state(&r.id), PushLink::Ok);
+        // Another relay is not affected.
+        assert_eq!(sender.link_state(&NodeId([8; 32])), PushLink::Unknown);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn link_state_failing_while_set_aside() {
+        let sender = WakeSender::spawn(Fake::new(0, false), Arc::new(ServerStats::default()));
+        let r = relay("a.example");
+        sender.inner.links.record_ok(r.id);
+        sender.inner.start_backoff(&r);
+        assert_eq!(sender.link_state(&r.id), PushLink::Failing);
+        tokio::time::sleep(RELAY_FAILURE_BACKOFF + Duration::from_secs(1)).await;
+        assert_eq!(sender.link_state(&r.id), PushLink::Ok);
     }
 
     #[tokio::test(start_paused = true)]

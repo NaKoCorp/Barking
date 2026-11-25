@@ -81,6 +81,7 @@ use tokio::time::timeout;
 use crate::config::DhtConfig;
 use crate::dht::replicate::{self, PassReport};
 use crate::dht::{Dht, maintain};
+use crate::info::{InfoState, info_loop};
 use crate::limits::{ConnectionSlot, GroupDbJob, LimitConfig, Limiter};
 use crate::rules::{self, MAX_MAILBOXES_PER_FETCH, Policy};
 use crate::store::{NodeStore, PURGE_BATCH, READERS};
@@ -632,6 +633,8 @@ pub(crate) struct Shared {
     pub(crate) wake_signal: wake::WakeSignal,
     /// `None` when wake-ups are disabled.
     wake_sender: Option<WakeSender>,
+    /// Precomputed `Info` report.
+    info: Arc<InfoState>,
     /// Tests only: see `ServerConfig::test_swallow_deposits`.
     #[cfg(feature = "test-harness")]
     swallow_deposits: bool,
@@ -921,7 +924,22 @@ pub async fn run(
             .collect::<Result<Vec<_>>>()?,
         None => Vec::new(),
     };
+    // Read connection of the `Info` measurements (none for a database in
+    // memory: the report then stays at its initial values).
+    let info_store = store.file_path().map(NodeStore::open_reader).transpose()?;
     let writer = Writer::spawn(store, policy, MAX_BATCH)?;
+    let wake_sender = config.wake.enabled.then(|| {
+        WakeSender::spawn(
+            QuicWakeTransport::new(config.wake_allow_private),
+            Arc::clone(&config.stats),
+        )
+    });
+    let info = Arc::new(InfoState::new(
+        policy.storage_max_bytes,
+        &config.wake,
+        config.version,
+        wake_sender.as_ref().map(WakeSender::links),
+    ));
     let shared = Arc::new(Shared {
         writer,
         readers,
@@ -953,12 +971,8 @@ pub async fn run(
         dht: dht.clone(),
         wake: config.wake.clone(),
         wake_signal: wake::WakeSignal::new(subscriptions_held),
-        wake_sender: config.wake.enabled.then(|| {
-            WakeSender::spawn(
-                QuicWakeTransport::new(config.wake_allow_private),
-                Arc::clone(&config.stats),
-            )
-        }),
+        wake_sender,
+        info: Arc::clone(&info),
         #[cfg(feature = "test-harness")]
         swallow_deposits: config.test_swallow_deposits,
         #[cfg(feature = "test-harness")]
@@ -983,6 +997,9 @@ pub async fn run(
         ));
     }
     tasks.spawn(purge_loop(Arc::clone(&shared), stop_rx.clone()));
+    if let Some(store) = info_store {
+        tasks.spawn(info_loop(info, store, stop_rx.clone()));
+    }
     if shared.wake_sender.is_some() {
         tasks.spawn(wake_loop(Arc::clone(&shared), stop_rx.clone()));
     }
@@ -1652,8 +1669,8 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
         },
         // A node is not a relay.
         Request::Wake { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
-        // Answered from a later task; unsupported until then.
-        Request::Info { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
+        // From memory, through the same limiters as any request; not logged.
+        Request::Info { relay } => Stored::Done(Response::Info(shared.info.snapshot(relay))),
         Request::Ping { .. }
         | Request::FindNode { .. }
         | Request::Store { .. }

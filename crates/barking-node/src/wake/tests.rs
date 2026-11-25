@@ -910,3 +910,27 @@ fn max_expiry_days_is_fixed_by_protocol_4() {
         (barking_proto::P4_LIFETIME_SECS / 86_400) as u32 + 2
     );
 }
+
+#[test]
+fn counts_by_relay_identity_skip_expired() {
+    let mut s = store();
+    let cfg = WakeConfig::default();
+    // Three subscriptions to relay 7 under two hosts, one expired, one to relay 8.
+    let mut a = raw_sub(1, 1);
+    let mut b = raw_sub(2, 2);
+    b.relay.host = "other.example.org".into();
+    let mut c = raw_sub(3, 3);
+    c.expires_day = today();
+    let mut d = raw_sub(4, 4);
+    d.relay.id = NodeId([8; 32]);
+    for sb in [&mut a, &mut b, &mut c, &mut d] {
+        assert_eq!(try_subscribe(&mut s, &cfg, sb), Ok(()));
+    }
+    // The second day after `NOW`: `c` (expires today) is expired, the others
+    // expire tomorrow.
+    let later = NOW + 86_400;
+    let counts = count_by_relay(&s, later).unwrap();
+    assert_eq!(counts.get(&NodeId([7; 32])), Some(&2));
+    assert_eq!(counts.get(&NodeId([8; 32])), Some(&1));
+    assert_eq!(count_subscriptions(&s).unwrap(), 4);
+}

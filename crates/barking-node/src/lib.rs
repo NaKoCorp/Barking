@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod dht;
+pub mod info;
 pub mod limits;
 pub mod logging;
 pub mod rules;
