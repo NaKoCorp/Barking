@@ -29,6 +29,16 @@ pub const MAX_WAKE_ITEMS: usize = 100;
 /// At most this many fingerprints in a `Holdings` page.
 pub const MAX_HOLDINGS_PER_PAGE: usize = 1024;
 
+/// A relay's push link is only reported (`Ok` / `Failing`) once it serves at
+/// least this many subscriptions; below, it is `Unknown`.
+pub const PUSH_LINK_MIN_SUBS: u64 = 20;
+
+/// Longest `NodeInfoReport::software` a node sends (bytes).
+pub const MAX_SOFTWARE_LEN: usize = 32;
+
+/// Longest `NodeOrigin::as_name` a node sends (bytes).
+pub const MAX_AS_NAME_LEN: usize = 64;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
     Hello {
@@ -89,6 +99,11 @@ pub enum Request {
         pow: u64,
         owner: OwnerProof,
     },
+    /// Public report on the node (protocol 5). With `relay`, the report of
+    /// the push relay that node id names, if the node fronts it.
+    Info {
+        relay: Option<NodeId>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +140,84 @@ pub enum Response {
         hashes: Vec<[u8; 32]>,
         next: Option<u64>,
     },
+    /// Answer to `Request::Info` (protocol 5).
+    Info(NodeInfoReport),
+}
+
+/// How full a resource is, coarsely: exact figures stay private.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FillTier {
+    /// Under 50 %.
+    Low,
+    /// From 50 % to under 80 %.
+    Medium,
+    /// From 80 % to under 95 %.
+    High,
+    /// 95 % or more (also a resource without capacity).
+    Full,
+}
+
+impl FillTier {
+    /// Tier of `used` out of `max`; `max == 0` is `Full`.
+    pub fn of(used: u64, max: u64) -> FillTier {
+        if max == 0 {
+            return FillTier::Full;
+        }
+        let used = u128::from(used) * 100;
+        let max = u128::from(max);
+        if used >= max * 95 {
+            FillTier::Full
+        } else if used >= max * 80 {
+            FillTier::High
+        } else if used >= max * 50 {
+            FillTier::Medium
+        } else {
+            FillTier::Low
+        }
+    }
+}
+
+/// State of a relay's link to its push provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PushLink {
+    /// Recent pushes went through.
+    Ok,
+    /// Recent pushes failed.
+    Failing,
+    /// Not enough subscriptions (`PUSH_LINK_MIN_SUBS`) or data to tell.
+    Unknown,
+}
+
+/// Where a node's address sits on the network.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeOrigin {
+    /// Autonomous system number.
+    pub asn: u32,
+    /// Name of the autonomous system (at most `MAX_AS_NAME_LEN` bytes).
+    pub as_name: String,
+    /// ISO 3166-1 alpha-2 country code.
+    pub country: [u8; 2],
+    /// True if this describes the node's IPv6 address, false for IPv4.
+    pub for_v6: bool,
+}
+
+/// Public self-report of a node (protocol 5).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInfoReport {
+    /// Software name and version (at most `MAX_SOFTWARE_LEN` bytes).
+    pub software: String,
+    /// Highest protocol version the node speaks.
+    pub protocol: u16,
+    /// Seconds since the node started.
+    pub uptime_secs: u64,
+    /// Fill of the node's message storage.
+    pub storage: FillTier,
+    /// Fill of the wake subscription table, if the node takes subscriptions.
+    pub wake: Option<FillTier>,
+    /// Push link state, if the node fronts a push relay.
+    pub push_link: Option<PushLink>,
+    /// Network origin of the node, if known.
+    pub origin: Option<NodeOrigin>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,5 +475,115 @@ mod tests {
             reason(ErrorReason::NotResponsible),
             reason(ErrorReason::Unsupported) + 1
         );
+    }
+
+    #[test]
+    fn old_request_variant_indices_unchanged() {
+        let enc = |r: &Request| postcard::to_allocvec(r).unwrap();
+        let hello = Request::Hello {
+            version: 4,
+            min_version: 2,
+        };
+        assert_eq!(enc(&hello), [0, 4, 2]);
+        assert_eq!(postcard::from_bytes::<Request>(&[0, 4, 2]).unwrap(), hello);
+        let ping = Request::Ping { from: None };
+        assert_eq!(enc(&ping), [3, 0]);
+        assert_eq!(postcard::from_bytes::<Request>(&[3, 0]).unwrap(), ping);
+        let wake = Request::Wake { items: vec![] };
+        assert_eq!(enc(&wake), [9, 0]);
+        assert_eq!(postcard::from_bytes::<Request>(&[9, 0]).unwrap(), wake);
+        let owned = postcard::to_allocvec(&Request::SubscribeOwned {
+            sub: crate::push::Subscription {
+                mailbox: MailboxId([0; 16]),
+                relay: crate::push::RelayRef {
+                    host: "r".into(),
+                    port: 1,
+                    id: NodeId([0; 32]),
+                },
+                sealed: vec![],
+                cancel_hash: [0; 32],
+                expires_day: 0,
+                kind: crate::push::SubKind::Messages,
+            },
+            pow: 0,
+            owner: crate::push::OwnerProof {
+                sig: [0; 32],
+                dh: [0; 32],
+                day: 0,
+                signature: [0; 64],
+            },
+        })
+        .unwrap()[0];
+        let info = enc(&Request::Info { relay: None })[0];
+        assert!(info > owned);
+        assert_eq!(info, owned + 1);
+        // The new response goes after the last old one (`Holdings`).
+        let holdings = postcard::to_allocvec(&Response::Holdings {
+            hashes: vec![],
+            next: None,
+        })
+        .unwrap()[0];
+        let report = postcard::to_allocvec(&Response::Info(report_none())).unwrap()[0];
+        assert_eq!(report, holdings + 1);
+    }
+
+    fn report_none() -> NodeInfoReport {
+        NodeInfoReport {
+            software: String::new(),
+            protocol: 0,
+            uptime_secs: 0,
+            storage: FillTier::Low,
+            wake: None,
+            push_link: None,
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn info_report_roundtrip() {
+        rt(Request::Info { relay: None });
+        rt(Request::Info {
+            relay: Some(NodeId([4; 32])),
+        });
+        rt(Response::Info(report_none()));
+        rt(Response::Info(NodeInfoReport {
+            software: "barking-node 0.1.0".into(),
+            protocol: 5,
+            uptime_secs: 86_400,
+            storage: FillTier::High,
+            wake: Some(FillTier::Medium),
+            push_link: Some(PushLink::Failing),
+            origin: Some(NodeOrigin {
+                asn: 64_496,
+                as_name: "EXAMPLE-AS".into(),
+                country: *b"FR",
+                for_v6: true,
+            }),
+        }));
+        for t in [
+            FillTier::Low,
+            FillTier::Medium,
+            FillTier::High,
+            FillTier::Full,
+        ] {
+            rt(t);
+        }
+        for l in [PushLink::Ok, PushLink::Failing, PushLink::Unknown] {
+            rt(l);
+        }
+    }
+
+    #[test]
+    fn fill_tier_thresholds() {
+        assert_eq!(FillTier::of(49, 100), FillTier::Low);
+        assert_eq!(FillTier::of(50, 100), FillTier::Medium);
+        assert_eq!(FillTier::of(79, 100), FillTier::Medium);
+        assert_eq!(FillTier::of(80, 100), FillTier::High);
+        assert_eq!(FillTier::of(94, 100), FillTier::High);
+        assert_eq!(FillTier::of(95, 100), FillTier::Full);
+        assert_eq!(FillTier::of(0, 0), FillTier::Full);
+        // Beyond the maximum, and no overflow on huge values.
+        assert_eq!(FillTier::of(200, 100), FillTier::Full);
+        assert_eq!(FillTier::of(u64::MAX / 2 + 1, u64::MAX), FillTier::Medium);
     }
 }

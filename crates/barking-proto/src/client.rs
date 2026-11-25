@@ -36,10 +36,10 @@
 //! differs from the mailbox picked up is not discarded (the acknowledgement is stored in
 //! each mailbox that held the packet).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use barking_packet::{Kind, MailboxId, Packet};
 use ed25519_dalek::SigningKey;
@@ -47,12 +47,16 @@ use quinn::{Connection, Endpoint};
 use tokio::time::timeout;
 
 use crate::frame::{self, FrameError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
-use crate::msg::{ACK_CURSOR_BASE, ErrorReason, Limits, MAX_PAGE_ITEMS, Request, Response};
+use crate::msg::{
+    ACK_CURSOR_BASE, ErrorReason, Limits, MAX_PAGE_ITEMS, NodeInfoReport, Request, Response,
+};
 use crate::push::{OwnerProof, Subscription, subscription_hash};
 use crate::{NodeId, PROTOCOL_VERSION, max_expiry_secs, pow, tls};
 
 /// Oldest protocol version this client can speak.
 pub const MIN_PROTOCOL_VERSION: u16 = 2;
+/// Round trip samples a session keeps (the most recent).
+pub const MAX_RTT_SAMPLES: usize = 8;
 /// Maximum number of items accepted per `fetch` call.
 pub const MAX_FETCH_ITEMS: usize = 10_000;
 /// Maximum number of bytes accepted per `fetch` call.
@@ -410,7 +414,7 @@ impl Client {
     /// `Hello` and checks the announced version and parameters.
     pub async fn connect(addr: SocketAddr, expected: NodeId) -> Result<Session> {
         let (endpoint, conn) = open_connection(addr, expected).await?;
-        let (pow_bits, limits, peer_version) = hello(&conn, expected).await?;
+        let (pow_bits, limits, peer_version, rtt) = hello(&conn, expected).await?;
         Ok(Session {
             endpoint,
             conn,
@@ -423,6 +427,7 @@ impl Client {
             pow_spent: 0,
             fetch_deadline: FETCH_DEADLINE,
             learn: PageLearn::default(),
+            rtt: Mutex::new(VecDeque::from([rtt])),
         })
     }
 }
@@ -494,13 +499,17 @@ fn no_incoming_streams() -> quinn::TransportConfig {
 
 /// Sends `Hello` and checks the announced version and parameters; returns the
 /// base difficulty, the node's limits and the protocol version to speak with
-/// it (the lower of its highest and ours).
-async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits, u16)> {
+/// it (the lower of its highest and ours), and the round trip time of the
+/// exchange.
+async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits, u16, Duration)> {
     let hello = Request::Hello {
         version: PROTOCOL_VERSION,
         min_version: MIN_PROTOCOL_VERSION,
     };
-    match request(conn, &hello).await? {
+    let sent = Instant::now();
+    let response = request(conn, &hello).await?;
+    let rtt = sent.elapsed();
+    match response {
         Response::Hello {
             version,
             min_version,
@@ -528,7 +537,7 @@ async fn hello(conn: &Connection, expected: NodeId) -> Result<(u8, Limits, u16)>
             if limits.max_mailboxes_per_fetch == 0 {
                 return Err(ClientError::Protocol("pickup limit is zero"));
             }
-            Ok((pow_bits, limits, version.min(PROTOCOL_VERSION)))
+            Ok((pow_bits, limits, version.min(PROTOCOL_VERSION), rtt))
         }
         Response::Error(ErrorReason::VersionTooOld) => Err(ClientError::Version),
         Response::Error(r) => Err(ClientError::Refused(r)),
@@ -555,6 +564,25 @@ pub struct Session {
     fetch_deadline: Duration,
     /// Page size reached on this link, kept from one call to the next.
     learn: PageLearn,
+    /// Round trip times of the last `MAX_RTT_SAMPLES` timed requests, oldest first.
+    rtt: Mutex<VecDeque<Duration>>,
+}
+
+/// True for the requests whose round trip time says something about the
+/// link: small, one response. Not `Fetch` / `FindValue` (paginated), not
+/// `Store` / `Wake` (node to node).
+fn timed(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::Hello { .. }
+            | Request::Ping { .. }
+            | Request::Info { .. }
+            | Request::FindNode { .. }
+            | Request::Subscribe { .. }
+            | Request::SubscribeOwned { .. }
+            | Request::Unsubscribe { .. }
+            | Request::Deposit { .. }
+    )
 }
 
 impl Session {
@@ -623,6 +651,32 @@ impl Session {
         self.peer_version >= 3
     }
 
+    /// Highest protocol version both sides speak.
+    pub fn peer_version(&self) -> u16 {
+        self.peer_version
+    }
+
+    /// True if the node understands `Info` (protocol 5).
+    pub fn info_supported(&self) -> bool {
+        self.peer_version >= 5
+    }
+
+    /// Round trip times of the last timed requests (at most
+    /// `MAX_RTT_SAMPLES`), the most recent last. `Hello`, `Ping`, `Info`,
+    /// `FindNode`, `Subscribe*`, `Unsubscribe` and `Deposit` are timed.
+    pub fn rtt_samples(&self) -> Vec<Duration> {
+        let rtt = self.rtt.lock().unwrap_or_else(|e| e.into_inner());
+        rtt.iter().copied().collect()
+    }
+
+    fn record_rtt(&self, rtt: Duration) {
+        let mut samples = self.rtt.lock().unwrap_or_else(|e| e.into_inner());
+        if samples.len() == MAX_RTT_SAMPLES {
+            samples.pop_front();
+        }
+        samples.push_back(rtt);
+    }
+
     /// Furthest expiry from now the node accepts (`max_expiry_secs` of the
     /// negotiated version).
     pub fn max_expiry_secs(&self) -> u64 {
@@ -636,7 +690,27 @@ impl Session {
 
     /// Raw request on this connection.
     pub async fn request(&self, req: &Request) -> Result<Response> {
-        request(&self.conn, req).await
+        if !timed(req) {
+            return request(&self.conn, req).await;
+        }
+        let sent = Instant::now();
+        let response = request(&self.conn, req).await?;
+        self.record_rtt(sent.elapsed());
+        Ok(response)
+    }
+
+    /// Public report of the node, or of the push relay `relay` names. `None`
+    /// if the node speaks a protocol older than 5 (nothing is sent) or
+    /// answers with an error.
+    pub async fn info(&self, relay: Option<NodeId>) -> Result<Option<NodeInfoReport>> {
+        if !self.info_supported() {
+            return Ok(None);
+        }
+        match self.request(&Request::Info { relay }).await? {
+            Response::Info(report) => Ok(Some(report)),
+            Response::Error(_) => Ok(None),
+            _ => Err(ClientError::Protocol("unexpected response to Info")),
+        }
     }
 
     /// Deposits an encoded packet. Computes the proof of work of a message

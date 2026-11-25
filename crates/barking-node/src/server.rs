@@ -1652,6 +1652,8 @@ async fn handle(req: Request, shared: &Arc<Shared>, state: &ConnState) -> Stored
         },
         // A node is not a relay.
         Request::Wake { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
+        // Answered from a later task; unsupported until then.
+        Request::Info { .. } => Stored::Done(Response::Error(ErrorReason::Unsupported)),
         Request::Ping { .. }
         | Request::FindNode { .. }
         | Request::Store { .. }

@@ -11,14 +11,16 @@ pub mod record;
 pub mod tls;
 
 pub use msg::{
-    ACK_CURSOR_BASE, ErrorReason, Limits, MAX_HOLDINGS_PER_PAGE, MAX_NODES_PER_RESPONSE,
-    MAX_PAGE_ITEMS, MAX_WAKE_ITEMS, MIN_PAGE_BYTES, Request, Response,
+    ACK_CURSOR_BASE, ErrorReason, FillTier, Limits, MAX_AS_NAME_LEN, MAX_HOLDINGS_PER_PAGE,
+    MAX_NODES_PER_RESPONSE, MAX_PAGE_ITEMS, MAX_SOFTWARE_LEN, MAX_WAKE_ITEMS, MIN_PAGE_BYTES,
+    NodeInfoReport, NodeOrigin, PUSH_LINK_MIN_SUBS, PushLink, Request, Response,
 };
 pub use node_id::{NodeId, generate_node_key};
 pub use record::{NodeRecord, RecordError, RecordPolicy, embeds_ipv4, routable};
 
 /// Protocol version. 4: messages may live `P4_LIFETIME_SECS` (7 days).
-pub const PROTOCOL_VERSION: u16 = 4;
+/// 5: the public `Info` request.
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Message lifetime a protocol 4 node accepts: 7 days. Fixed by the
 /// protocol, not by the client's `DEFAULT_TTL_SECS`: shortening the client
