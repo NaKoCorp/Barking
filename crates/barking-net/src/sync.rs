@@ -52,7 +52,8 @@
 //! 7. **Node reports**, with the time left: `Info` on the sessions still
 //!    open (never a dial of its own), for the nodes whose cached report is
 //!    missing or `INFO_REFRESH_SECS` old; about the push relay when push is
-//!    on. Neither scores nor the log are touched.
+//!    on and the node holds one of this device's subscriptions (any other
+//!    node is asked about itself). Neither scores nor the log are touched.
 //! 8. `mark_polled` only if every session mailbox was fetched in full.
 //!
 //! **Latency.** The round trip times each session measured
@@ -682,9 +683,18 @@ where
 
     /// Node reports (stage 7 of the module documentation): `Info` on the
     /// sessions still open, never on a new one, for the nodes whose report
-    /// is due. `relay`: the push relay asked about. Neither scores nor the
+    /// is due. `relay`: the push relay asked about, of the nodes holding one
+    /// of this device's subscriptions only. Neither scores nor the
     /// log are touched; a session that fails is dropped.
     async fn info_stage(&mut self, relay: Option<NodeId>) {
+        // The relay is named only to nodes holding one of my subscriptions:
+        // to any other node it would tell which relay rings this device.
+        let subscribed = match relay {
+            Some(_) => PushState::load(self.core)
+                .map(|p| p.subscribed_nodes())
+                .unwrap_or_default(),
+            None => HashSet::new(),
+        };
         let mut ids: Vec<NodeId> = self
             .conns
             .keys()
@@ -707,6 +717,7 @@ where
                 continue;
             }
             self.unused.remove(&id);
+            let relay = relay.filter(|_| subscribed.contains(&id));
             let request = self.dialer.info(&mut conn, relay);
             if let Ok(Ok(report)) = tokio::time::timeout_at(self.deadline, request).await {
                 if let Some(report) = report {

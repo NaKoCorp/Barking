@@ -171,6 +171,10 @@ pub fn run(home: &Path, cmd: NodeCommand) -> CliResult<()> {
             let mut core = open(home)?;
             let t = now();
             let mut state = load_state(&mut core, t)?;
+            // Before any dial: a blocked node is never contacted.
+            if state.blocked.contains_key(&id) {
+                return fail("This node is blocked: nothing was added");
+            }
             if state
                 .view
                 .get(&id)

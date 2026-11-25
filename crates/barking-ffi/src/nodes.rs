@@ -125,12 +125,13 @@ pub struct NodeInfo {
     pub manual: bool,
     /// Carried by a contact's card.
     pub from_card: bool,
-    /// Unix seconds (to the hour); 0 if never.
+    /// Unix seconds (to the hour) the node was last seen, once it answered
+    /// this phone; 0 if it never did (a node only heard of).
     pub last_seen: u64,
     /// Median of the last round trips, in milliseconds.
     pub latency_ms: Option<u32>,
     /// Added by hand or by default, holding one of my copies or wake
-    /// subscriptions, or seen in the last 7 days.
+    /// subscriptions, or answered this phone and seen in the last 7 days.
     pub in_use: bool,
     /// The hosting its last report declared, checked against the IP base.
     pub origin: Option<OriginView>,
@@ -252,6 +253,14 @@ fn reliability(confirmed: bool, score: f32, avoided: Option<(u64, AvoidReason)>)
     } else {
         Reliability::Weak
     }
+}
+
+/// In use: added by hand or by default, holding one of my copies or wake
+/// subscriptions, or confirmed and seen within `IN_USE_SECS`. A node only
+/// heard of (its record learned, never answered) is not in use.
+fn in_use(e: &NodeEntry, is_default: bool, holder: bool, my_subscriptions: u32, now: u64) -> bool {
+    let recent = e.confirmed && e.last_seen > 0 && now.saturating_sub(e.last_seen) < IN_USE_SECS;
+    e.manual || is_default || holder || my_subscriptions > 0 || recent
 }
 
 /// Rank of a reliability in the list: Good, Fair, New, Weak, Avoided.
@@ -468,9 +477,13 @@ impl Context {
             NodeOriginKind::Discovered
         };
         let my_subscriptions = self.subscriptions.get(id).copied().unwrap_or(0);
-        let recent = e.last_seen > 0 && self.now.saturating_sub(e.last_seen) < IN_USE_SECS;
-        let in_use =
-            e.manual || is_default || self.holders.contains(id) || my_subscriptions > 0 || recent;
+        let in_use = in_use(
+            e,
+            is_default,
+            self.holders.contains(id),
+            my_subscriptions,
+            self.now,
+        );
         let origin = self
             .state
             .info
@@ -484,7 +497,9 @@ impl Context {
             score: e.score.value(),
             manual: e.manual,
             from_card,
-            last_seen: e.last_seen,
+            // Learning a node's record moves `last_seen` too: only an
+            // answer of the node itself counts here.
+            last_seen: if e.confirmed { e.last_seen } else { 0 },
             latency_ms: self.state.median_latency(id),
             in_use,
             origin,
@@ -597,7 +612,13 @@ impl Device {
                     return Err(BarkingError::invalid("node is blocked"));
                 }
                 let addrs = state.view.get(&id).ok_or(BarkingError::NotFound)?.addrs();
-                let relay = PushConfig::effective(core)?.map(|c| c.relay.id);
+                // The relay only to a node holding one of my subscriptions
+                // (the others would learn which relay rings this device).
+                let relay = PushConfig::effective(core)?
+                    .map(|c| c.relay.id)
+                    .filter(|_| {
+                        PushState::load(core).is_ok_and(|p| p.subscribed_nodes().contains(&id))
+                    });
                 let got = block_on(exchange(id, &addrs, relay))??;
                 // The session proved the node: it answered as itself.
                 state.view.confirm(&id, t);
@@ -774,6 +795,61 @@ impl Device {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(manual: bool, confirmed: bool, last_seen: u64) -> NodeEntry {
+        NodeEntry {
+            record: None,
+            manual_addr: None,
+            confirmed,
+            manual,
+            first_seen: 0,
+            last_seen,
+            score: Default::default(),
+            avoided_until: None,
+            decayed_at: 0,
+        }
+    }
+
+    #[test]
+    fn in_use_needs_a_reason_or_a_recent_answer() {
+        let now = 1_800_000_000;
+        let recent = now - 3_600;
+        let old = now - IN_USE_SECS;
+        // Each reason alone.
+        assert!(
+            in_use(&entry(true, false, 0), false, false, 0, now),
+            "manual"
+        );
+        assert!(
+            in_use(&entry(false, false, 0), true, false, 0, now),
+            "default"
+        );
+        assert!(
+            in_use(&entry(false, false, 0), false, true, 0, now),
+            "holder"
+        );
+        assert!(
+            in_use(&entry(false, false, 0), false, false, 1, now),
+            "subscription"
+        );
+        assert!(
+            in_use(&entry(false, true, recent), false, false, 0, now),
+            "recent, confirmed"
+        );
+        // Only heard of: its record learned recently, never answered.
+        assert!(
+            !in_use(&entry(false, false, recent), false, false, 0, now),
+            "recent, unconfirmed"
+        );
+        assert!(
+            !in_use(&entry(false, true, old), false, false, 0, now),
+            "confirmed, too old"
+        );
+        assert!(
+            !in_use(&entry(false, true, 0), false, false, 0, now),
+            "never seen"
+        );
+    }
 
     #[test]
     fn reliability_thresholds() {

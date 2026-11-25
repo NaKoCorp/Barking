@@ -4504,12 +4504,20 @@ async fn sync_records_latency_and_refreshes_stale_info() {
     assert_eq!(connects(&calls), control, "no dial just for Info");
     let asked = infos(&calls);
     assert!(!asked.is_empty());
+    // The relay is named only to a node holding one of my subscriptions;
+    // any other node is asked about itself.
     let relay = Some(push_config().relay.id);
+    let subscribed = PushState::load(&core).unwrap().subscribed_nodes();
     for (n, r) in &asked {
-        assert_eq!(*r, relay);
+        let expect = if subscribed.contains(n) { relay } else { None };
+        assert_eq!(*r, expect, "{n:?}");
         let i = calls.iter().position(|c| *c == Call::Info(*n, *r)).unwrap();
         assert!(calls[..i].contains(&Call::Connect(*n)));
     }
+    assert!(
+        asked.iter().any(|(_, r)| r.is_some()),
+        "a subscribed node is asked about the relay"
+    );
     let asked_nodes: HashSet<NodeId> = asked.iter().map(|(n, _)| *n).collect();
     assert_eq!(asked_nodes.len(), asked.len(), "one Info per node");
     let state = load(&mut core);
@@ -4544,6 +4552,42 @@ async fn sync_records_latency_and_refreshes_stale_info() {
     sync(&mut core, &net, opts()).await;
     let asked = infos(&net.calls());
     assert!(!asked.is_empty() && asked.iter().all(|(_, r)| r.is_none()));
+}
+
+/// Push on: a node that holds none of my subscriptions is never told the
+/// relay that rings this device; one that holds one is asked about it.
+#[tokio::test(start_paused = true)]
+async fn info_names_the_relay_only_to_subscribed_nodes() {
+    let (_dir, mut core, mut net) = setup();
+    with_cached_info(&mut core, &mut net, 25 * 3_600);
+    // Half the nodes take no subscription.
+    for n in (0..NODES).step_by(2) {
+        net.no_wake.insert(id_of(n));
+    }
+    let mut o = opts();
+    o.push = Some(push_config());
+    sync(&mut core, &net, o).await;
+    let subscribed = PushState::load(&core).unwrap().subscribed_nodes();
+    let asked = infos(&net.calls());
+    let relay = Some(push_config().relay.id);
+    let told: Vec<NodeId> = asked
+        .iter()
+        .filter(|(_, r)| r.is_some())
+        .map(|(n, _)| *n)
+        .collect();
+    let not_told: Vec<NodeId> = asked
+        .iter()
+        .filter(|(_, r)| r.is_none())
+        .map(|(n, _)| *n)
+        .collect();
+    assert!(!told.is_empty() && !not_told.is_empty(), "{asked:?}");
+    for (n, r) in &asked {
+        if subscribed.contains(n) {
+            assert_eq!(*r, relay);
+        } else {
+            assert_eq!(*r, None, "a node without my subscription learns no relay");
+        }
+    }
 }
 
 /// The notification extension never asks `Info`; it records latency.

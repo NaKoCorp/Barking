@@ -730,7 +730,7 @@ fn origin_checked_against_ipdb() {
         }),
     };
     edit_net_state(&dir, |state, now| {
-        for (n, asn, country) in [(2, 64500, *b"fr"), (3, 64501, *b"DE")] {
+        for (n, asn, country) in [(2, 64500, *b"FR"), (3, 64501, *b"DE"), (4, 64502, *b"fr")] {
             assert!(state.view.insert(record_of(n, now), now));
             state.info.insert(
                 id_of(&key(n)),
@@ -750,6 +750,17 @@ fn origin_checked_against_ipdb() {
             .origin
             .unwrap()
     };
+    // A lowercase country is not what a node sends: the origin is dropped
+    // on load (`NodeInfoReport::sanitized`).
+    assert_eq!(
+        d.nodes()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == id(4))
+            .unwrap()
+            .origin,
+        None
+    );
     // No base given: nothing to check against.
     assert_eq!(
         origin_of(2),

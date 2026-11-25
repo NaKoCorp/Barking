@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use barking_proto::client::Client;
 use barking_proto::frame::{self, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
-use barking_proto::msg::{FillTier, Limits, NodeInfoReport, Request, Response};
+use barking_proto::msg::{FillTier, Limits, NodeInfoReport, NodeOrigin, Request, Response};
 use barking_proto::{ErrorReason, NodeId, NodeRecord, tls};
 use ed25519_dalek::SigningKey;
 use quinn::Endpoint;
@@ -31,11 +31,11 @@ fn report() -> NodeInfoReport {
 }
 
 /// Server speaking `version` in `Hello`; counts every request other than
-/// `Hello`. `Info` gets the report, or `Unsupported` if `info_unsupported`.
+/// `Hello`. `Info` gets `info`, or `Unsupported` if `None`.
 fn spawn_server(
     key: &SigningKey,
     version: u16,
-    info_unsupported: bool,
+    info: Option<NodeInfoReport>,
 ) -> (SocketAddr, Arc<AtomicUsize>, Endpoint) {
     let ep = Endpoint::server(
         tls::quinn_server_config(key),
@@ -49,7 +49,7 @@ fn spawn_server(
     let (ep2, others2) = (ep.clone(), others.clone());
     tokio::spawn(async move {
         while let Some(incoming) = ep2.accept().await {
-            let (record, others) = (record.clone(), others2.clone());
+            let (record, others, info) = (record.clone(), others2.clone(), info.clone());
             tokio::spawn(async move {
                 let Ok(conn) = incoming.await else { return };
                 while let Ok((mut send, mut recv)) = conn.accept_bi().await {
@@ -71,10 +71,9 @@ fn spawn_server(
                         },
                         Request::Info { .. } => {
                             others.fetch_add(1, Ordering::SeqCst);
-                            if info_unsupported {
-                                Response::Error(ErrorReason::Unsupported)
-                            } else {
-                                Response::Info(report())
+                            match &info {
+                                Some(r) => Response::Info(r.clone()),
+                                None => Response::Error(ErrorReason::Unsupported),
                             }
                         }
                         _ => {
@@ -100,7 +99,7 @@ fn id_of(k: &SigningKey) -> NodeId {
 #[tokio::test]
 async fn info_not_sent_below_v5() {
     let key = SigningKey::from_bytes(&SEED);
-    let (addr, requests, _ep) = spawn_server(&key, 4, false);
+    let (addr, requests, _ep) = spawn_server(&key, 4, Some(report()));
     let session = Client::connect(addr, id_of(&key)).await.unwrap();
     assert_eq!(session.peer_version(), 4);
     assert!(!session.info_supported());
@@ -112,7 +111,7 @@ async fn info_not_sent_below_v5() {
 #[tokio::test]
 async fn info_returns_the_report_from_v5() {
     let key = SigningKey::from_bytes(&SEED);
-    let (addr, requests, _ep) = spawn_server(&key, 5, false);
+    let (addr, requests, _ep) = spawn_server(&key, 5, Some(report()));
     let session = Client::connect(addr, id_of(&key)).await.unwrap();
     assert_eq!(session.peer_version(), 5);
     assert!(session.info_supported());
@@ -123,7 +122,7 @@ async fn info_returns_the_report_from_v5() {
 #[tokio::test]
 async fn info_error_response_is_none() {
     let key = SigningKey::from_bytes(&SEED);
-    let (addr, _requests, _ep) = spawn_server(&key, 5, true);
+    let (addr, _requests, _ep) = spawn_server(&key, 5, None);
     let session = Client::connect(addr, id_of(&key)).await.unwrap();
     assert_eq!(session.info(None).await.unwrap(), None);
 }
@@ -131,7 +130,7 @@ async fn info_error_response_is_none() {
 #[tokio::test]
 async fn rtt_samples_keep_last_eight() {
     let key = SigningKey::from_bytes(&SEED);
-    let (addr, _requests, _ep) = spawn_server(&key, 5, false);
+    let (addr, _requests, _ep) = spawn_server(&key, 5, Some(report()));
     let session = Client::connect(addr, id_of(&key)).await.unwrap();
     // `Hello` already gave one sample.
     assert_eq!(session.rtt_samples().len(), 1);
@@ -142,4 +141,31 @@ async fn rtt_samples_keep_last_eight() {
             .unwrap();
     }
     assert_eq!(session.rtt_samples().len(), 8);
+}
+
+/// A node's strings are checked on receipt: an origin with a bidi override
+/// in its name is dropped, a report with an overlong software is dropped.
+#[tokio::test]
+async fn info_sanitizes_what_the_node_sends() {
+    let key = SigningKey::from_bytes(&SEED);
+    let mut hostile = report();
+    hostile.origin = Some(NodeOrigin {
+        asn: 1,
+        as_name: "OVH\u{202E}SAS".into(),
+        country: *b"FR",
+        for_v6: false,
+    });
+    let (addr, _requests, _ep) = spawn_server(&key, 5, Some(hostile));
+    let session = Client::connect(addr, id_of(&key)).await.unwrap();
+    assert_eq!(
+        session.info(None).await.unwrap(),
+        Some(report()),
+        "origin dropped"
+    );
+
+    let mut hostile = report();
+    hostile.software = "v".repeat(40);
+    let (addr, _requests, _ep) = spawn_server(&key, 5, Some(hostile));
+    let session = Client::connect(addr, id_of(&key)).await.unwrap();
+    assert_eq!(session.info(None).await.unwrap(), None, "report dropped");
 }

@@ -340,6 +340,8 @@ impl NetState {
             .into_iter()
             .map(|(n, mut b)| {
                 b.at = hour(b.at).min(now_hour);
+                // Node-sent, stored before checks existed: checked again.
+                b.origin = b.origin.and_then(NodeOrigin::sanitized);
                 (n, b)
             })
             .collect();
@@ -350,9 +352,12 @@ impl NetState {
                 .info
                 .into_iter()
                 .filter(|(n, _)| view.get(n).is_some())
-                .map(|(n, mut c)| {
+                // Node-sent, stored before checks existed: checked again
+                // (`NodeInfoReport::sanitized`, as on receipt).
+                .filter_map(|(n, mut c)| {
+                    c.report = c.report.sanitized()?;
                     c.fetched_at = hour(c.fetched_at).min(now_hour);
-                    (n, c)
+                    Some((n, c))
                 })
                 .collect(),
             latency: stored

@@ -699,15 +699,17 @@ impl Session {
         Ok(response)
     }
 
-    /// Public report of the node, or of the push relay `relay` names. `None`
-    /// if the node speaks a protocol older than 5 (nothing is sent) or
-    /// answers with an error.
+    /// The node's own public report, plus its link state to the push relay
+    /// `relay` names. `None`
+    /// if the node speaks a protocol older than 5 (nothing is sent), answers
+    /// with an error, or sends a report `NodeInfoReport::sanitized` refuses
+    /// (an ill-formed origin alone is dropped from it).
     pub async fn info(&self, relay: Option<NodeId>) -> Result<Option<NodeInfoReport>> {
         if !self.info_supported() {
             return Ok(None);
         }
         match self.request(&Request::Info { relay }).await? {
-            Response::Info(report) => Ok(Some(report)),
+            Response::Info(report) => Ok(report.sanitized()),
             Response::Error(_) => Ok(None),
             _ => Err(ClientError::Protocol("unexpected response to Info")),
         }

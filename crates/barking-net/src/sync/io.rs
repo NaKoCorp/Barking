@@ -93,9 +93,10 @@ pub trait Connector {
         false
     }
 
-    /// The node's public report, or that of the push relay `relay` names
-    /// (see `Session::info`): `None` when the node does not speak `Info` or
-    /// answers with an error. `None` by default.
+    /// The node's own public report, plus its link state to the push relay
+    /// `relay` names (see `Session::info`): `None` when the node does not
+    /// speak `Info`, answers with an error or sends an ill-formed report.
+    /// `None` by default.
     fn info(
         &self,
         _conn: &mut Self::Conn,

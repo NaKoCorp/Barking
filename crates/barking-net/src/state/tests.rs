@@ -386,6 +386,40 @@ fn format_2_load_sanitizes_new_tables() {
     assert!(!back.latency.contains_key(&id_of(3)));
 }
 
+/// Node-sent strings stored before they were checked are checked on load:
+/// a hostile origin is dropped (cache and blocked list), a report with a
+/// hostile software is dropped whole.
+#[test]
+fn format_2_load_sanitizes_node_strings() {
+    let mut s = golden_state_v2();
+    let hostile = NodeOrigin {
+        asn: 64_496,
+        as_name: format!("EXAMPLE\u{202E}{}\n", "A".repeat(1 << 20)),
+        country: *b"XY",
+        for_v6: false,
+    };
+    s.info.get_mut(&id_of(0)).unwrap().report.origin = Some(hostile.clone());
+    s.blocked.get_mut(&id_of(2)).unwrap().origin = Some(hostile.clone());
+    let back = NetState::decode(&s.encode().unwrap(), NOW, true).unwrap();
+    let kept = &back.info[&id_of(0)].report;
+    assert_eq!(kept.origin, None, "origin dropped");
+    assert_eq!(kept.software, "barking-node 0.1.0", "rest kept");
+    assert_eq!(back.blocked[&id_of(2)].origin, None);
+
+    // A lowercase country alone is refused too.
+    let mut lower = hostile;
+    lower.as_name = "EXAMPLE-AS".into();
+    lower.country = *b"fr";
+    s.info.get_mut(&id_of(0)).unwrap().report.origin = Some(lower);
+    let back = NetState::decode(&s.encode().unwrap(), NOW, true).unwrap();
+    assert_eq!(back.info[&id_of(0)].report.origin, None);
+
+    // A 40-byte software: the whole report goes.
+    s.info.get_mut(&id_of(0)).unwrap().report = report(&"v".repeat(40));
+    let back = NetState::decode(&s.encode().unwrap(), NOW, true).unwrap();
+    assert!(!back.info.contains_key(&id_of(0)));
+}
+
 #[test]
 fn latency_median_of_last_eight() {
     let mut s = NetState::new(true);

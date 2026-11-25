@@ -215,6 +215,15 @@ pub struct PushPlan {
 }
 
 impl PushState {
+    /// Nodes holding at least one of this device's subscriptions: the only
+    /// ones `Info` names the push relay to (the others learn nothing of it).
+    pub fn subscribed_nodes(&self) -> HashSet<NodeId> {
+        self.subs
+            .values()
+            .flat_map(|b| b.nodes.iter().map(|(n, _)| *n))
+            .collect()
+    }
+
     /// Reads the state. A missing or undecodable one gives an empty state; a
     /// storage read error is returned, so that the caller never plans from an
     /// empty state over real subscriptions (it would lose their cancel
