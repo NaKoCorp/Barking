@@ -10396,6 +10396,12 @@ fn refusal_syncs_to_my_other_devices() {
     assert_eq!(bt.requests().unwrap().len(), 1);
     let out = b.refuse_request(&alice, NOW + 1, &mut rng).unwrap();
     assert_eq!(out.len(), 1);
+    // Also in the send queue: `barking outbox` rewrites it.
+    assert!(
+        b.pending_outbox(NOW + 1)
+            .unwrap()
+            .contains(&out[0].encode())
+    );
     let got = bt
         .receive(&out[0].encode(), "t", NOW + 1, &mut rng)
         .unwrap();
@@ -10433,6 +10439,11 @@ fn block_request_drops_later_invitations() {
     let (alice, bob) = (a.fingerprint(), b.fingerprint());
     let out = b.block_request(&alice, NOW + 1, &mut rng).unwrap();
     assert_eq!(out.len(), 1);
+    assert!(
+        b.pending_outbox(NOW + 1)
+            .unwrap()
+            .contains(&out[0].encode())
+    );
     assert!(b.requests().unwrap().is_empty());
     assert_eq!(count_table(&b, "pending_initials"), 0);
     assert!(b.store.block_state(alice).unwrap().blocked);
@@ -10562,4 +10573,243 @@ fn polling_purges_expired_requests() {
     let (_da, _a, _db, mut b, _rng) = bob_with_request(NOW);
     b.mark_polled(NOW + 30 * 86_400 + 1).unwrap();
     assert!(b.requests().unwrap().is_empty());
+}
+
+// --- Contact requests, whole-branch review fixes.
+
+/// Alice invites Bob and writes "un" to him; Bob holds a request with that
+/// message. Returns the invite and the message packets.
+fn bob_holds_invite_and_message(a: &mut Core, b: &mut Core, rng: &mut StdRng) -> (Packet, Packet) {
+    let bob = b.fingerprint();
+    let invite = invite_one(a, bob, NOW, rng);
+    let un = a.send_text(&bob, "un", NOW, rng).unwrap().remove(0);
+    request_outcome(b.receive(&invite.encode(), "t", NOW, rng).unwrap());
+    assert_eq!(
+        reason(b.receive(&un.encode(), "t", NOW, rng).unwrap()),
+        R_PENDING_REQUEST
+    );
+    (invite, un)
+}
+
+#[test]
+fn refused_requester_packets_do_not_come_back() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let bob = b.fingerprint();
+    let alice = a.fingerprint();
+    let (invite, un) = bob_holds_invite_and_message(&mut a, &mut b, &mut rng);
+    b.refuse_request(&alice, NOW + 1, &mut rng).unwrap();
+    // Nodes keep the packets (never acked): the next poll fetches them
+    // again. They do not land in the queue of unknown senders.
+    for p in [&invite, &un] {
+        let got = b.receive(&p.encode(), "t", NOW + 2, &mut rng).unwrap();
+        assert!(matches!(got, ReceiveOutcome::Duplicate), "{got:?}");
+    }
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+    // A fresh resend opens a new request without the refused message,
+    // even when that message is fetched again afterwards.
+    let later = NOW + 86_400;
+    let resend = invite_one(&mut a, bob, later, &mut rng);
+    request_outcome(b.receive(&resend.encode(), "t", later, &mut rng).unwrap());
+    b.receive(&un.encode(), "t", later, &mut rng).unwrap();
+    let list = b.requests().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].pending_messages, 0);
+}
+
+#[test]
+fn blocked_requester_packets_do_not_come_back() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let bob = b.fingerprint();
+    let alice = a.fingerprint();
+    let (invite, un) = bob_holds_invite_and_message(&mut a, &mut b, &mut rng);
+    b.block_request(&alice, NOW + 1, &mut rng).unwrap();
+    for p in [&invite, &un] {
+        let got = b.receive(&p.encode(), "t", NOW + 2, &mut rng).unwrap();
+        assert!(matches!(got, ReceiveOutcome::Duplicate), "{got:?}");
+    }
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+    // Unblocked, then invited again: the message blocked stays out.
+    b.unblock_contact(&alice, NOW + 3, &mut rng).unwrap();
+    let later = NOW + 86_400;
+    let resend = invite_one(&mut a, bob, later, &mut rng);
+    request_outcome(b.receive(&resend.encode(), "t", later, &mut rng).unwrap());
+    b.receive(&un.encode(), "t", later, &mut rng).unwrap();
+    let list = b.requests().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].pending_messages, 0);
+}
+
+#[test]
+fn blocked_sender_invitation_empties_its_queued_messages() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    b.block_contact(&alice, NOW, &mut rng).unwrap();
+    b.remove_contact(&alice, NOW, &mut rng).unwrap();
+    // A message before the invite: no card yet, it is queued.
+    let un = a.send_text(&bob, "un", NOW, &mut rng).unwrap().remove(0);
+    assert_eq!(
+        reason(b.receive(&un.encode(), "t", NOW, &mut rng).unwrap()),
+        R_UNKNOWN_SENDER
+    );
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 1);
+    // The invite names her devices: her queued packets go, for good.
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    let got = b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+    let got = b.receive(&un.encode(), "t", NOW + 1, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Duplicate), "{got:?}");
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+}
+
+#[test]
+fn message_of_a_blocked_requester_is_not_held() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap());
+    // A block that did not close the request (a crossing it cannot be
+    // reproduced with: set below the API).
+    let state = crate::store::BlockState {
+        blocked: true,
+        at: NOW,
+        since: NOW,
+    };
+    b.store.set_block_state(alice, &state).unwrap();
+    let un = a.send_text(&bob, "un", NOW, &mut rng).unwrap().remove(0);
+    let got = b.receive(&un.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert_eq!(held_messages(&b, alice), 0);
+    assert_eq!(requests::count_unknown(&b.store).unwrap(), 0);
+}
+
+#[test]
+fn invite_after_remove_and_readd_is_not_accepted() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap());
+    let accepted = b.accept_request(&alice, None, NOW + 10, &mut rng).unwrap();
+    a.receive(&accepted.packets[0].encode(), "t", NOW + 10, &mut rng)
+        .unwrap();
+    assert_eq!(
+        a.invite_state(&bob, NOW + 10).unwrap(),
+        InviteState::Accepted { at: NOW + 10 }
+    );
+    a.remove_contact(&bob, NOW + 20, &mut rng).unwrap();
+    a.add_contact(&b.contact_card("Bob").unwrap(), None, NOW + 20, &mut rng)
+        .unwrap();
+    let later = NOW + 86_400;
+    invite_one(&mut a, bob, later, &mut rng);
+    assert_eq!(
+        a.invite_state(&bob, later).unwrap(),
+        InviteState::Sent { at: later }
+    );
+}
+
+#[test]
+fn invite_to_the_devices_still_waiting_keeps_the_acceptance() {
+    let (_da, _db, mut a, mut b, _bt, mut rng) = alice_and_bob_with_tablet();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let out = a.invite(&bob, NOW, &mut rng).unwrap();
+    let mine = intro_mailbox(&b.device.public(), day_of(NOW));
+    let to_phone = out.iter().find(|p| p.mailbox == mine).unwrap();
+    request_outcome(b.receive(&to_phone.encode(), "t", NOW, &mut rng).unwrap());
+    let accepted = b.accept_request(&alice, None, NOW + 10, &mut rng).unwrap();
+    a.receive(&accepted.packets[0].encode(), "t", NOW + 10, &mut rng)
+        .unwrap();
+    // The tablet has not answered: the resend goes to it only.
+    let later = NOW + 86_400;
+    assert_eq!(a.invite(&bob, later, &mut rng).unwrap().len(), 1);
+    assert_eq!(
+        a.invite_state(&bob, later).unwrap(),
+        InviteState::Accepted { at: NOW + 10 }
+    );
+}
+
+/// A held row for `fp` that cannot be read back (`ik` of 3 bytes): its
+/// replay fails on loading.
+fn corrupt_held_row(c: &Core, fp: Fingerprint) {
+    c.store
+        .conn()
+        .execute(
+            "INSERT INTO pending_initials
+                (packet_id, ik, fp, session_id, message_id, bytes, received_at, invite)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 0)",
+            rusqlite::params![
+                vec![0xcc_u8; 16],
+                vec![1_u8, 2, 3],
+                fp.0.to_vec(),
+                vec![0_u8; 16],
+                vec![0_u8; 5],
+                i64::try_from(NOW).unwrap(),
+            ],
+        )
+        .unwrap();
+}
+
+fn replay_failures(c: &Core) -> usize {
+    count_events(c, |e| {
+        matches!(
+            e,
+            TransparencyEvent::DecryptFailed { reason, .. } if reason == requests::R_REPLAY_FAILED
+        )
+    })
+}
+
+#[test]
+fn failed_replay_does_not_fail_a_committed_receive() {
+    let mut p = pair();
+    let alice = p.a.fingerprint();
+    corrupt_held_row(&p.b, alice);
+    let text =
+        p.a.send_text(&p.b.fingerprint(), "ok", NOW, &mut p.rng)
+            .unwrap();
+    let got =
+        p.b.receive(&text[0].encode(), "t", NOW, &mut p.rng)
+            .unwrap();
+    assert!(matches!(got, ReceiveOutcome::Message { .. }), "{got:?}");
+    assert!(texts_with(&p.b, alice, NOW).contains(&"ok".to_owned()));
+    assert_eq!(replay_failures(&p.b), 1);
+}
+
+#[test]
+fn failed_replay_does_not_fail_a_committed_add() {
+    let (_da, a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    corrupt_held_row(&b, alice);
+    let added = b
+        .add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    assert_eq!(added, alice);
+    assert!(b.store.get_contact(alice).unwrap().is_some());
+    assert_eq!(replay_failures(&b), 1);
+}
+
+#[test]
+fn block_contact_on_a_requester_closes_the_request() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    b.block_contact(&alice, NOW + 1, &mut rng).unwrap();
+    assert!(b.store.block_state(alice).unwrap().blocked);
+    assert!(b.requests().unwrap().is_empty());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactRequestResolved {
+                how: RequestResolution::Blocked,
+                ..
+            }
+        )),
+        1
+    );
+    // Still refused for a fingerprint that is neither a contact nor a
+    // requester.
+    assert!(matches!(
+        b.block_contact(&Fingerprint([9; 32]), NOW + 2, &mut rng),
+        Err(CoreError::UnknownContact)
+    ));
 }

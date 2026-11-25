@@ -132,7 +132,7 @@ impl Core {
                 // committed contact and this device's state). Their outcomes
                 // are not returned: the messages are in the conversation.
                 if !matches!(outcome, ReceiveOutcome::Removed) && self.ensure_active().is_ok() {
-                    requests::replay_for_contacts(self, now, rng)?;
+                    requests::replay_for_contacts(self, now, rng);
                 }
                 Ok(outcome)
             }

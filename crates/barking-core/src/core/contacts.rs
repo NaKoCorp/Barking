@@ -81,7 +81,8 @@ impl Core {
             requests::attach_queued_to_contact(tx, fp)?;
             Ok(fp)
         })?;
-        requests::replay_pending(self, fp, now, rng)?;
+        // Committed: a failed replay is logged, and retried by the next receive.
+        requests::replay_committed(self, fp, now, rng);
         Ok(fp)
     }
 
@@ -145,7 +146,10 @@ impl Core {
     /// it and its history, which stays stored. Its card updates are still
     /// accepted, so that unblocking finds working sessions. The block
     /// survives the contact's deletion: its card is not added again until
-    /// it is unblocked. Synchronized with my other devices.
+    /// it is unblocked. Synchronized with my other devices. The fingerprint
+    /// of a pending request can be blocked too (`block_request`): the
+    /// request is closed. Neither a contact nor a requester:
+    /// `UnknownContact`.
     pub fn block_contact(
         &mut self,
         contact: &Fingerprint,
@@ -155,7 +159,11 @@ impl Core {
         self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
-            tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
+            let known = tx.get_contact(*contact)?.is_some()
+                || requests::get_request(tx, *contact)?.is_some();
+            if !known {
+                return Err(CoreError::UnknownContact);
+            }
             set_block_in(tx, device, *contact, true, now, rng)
         })
     }
@@ -646,6 +654,8 @@ pub(super) fn set_block_sealed(
         q.delete_reactions_with(fp)?;
         q.drop_reaction_packets_with(fp)?;
         q.delete_pending_seen_with(fp)?;
+        // As `merge_block`: a block closes the pending request of `fp`.
+        requests::close_request(q, fp, RequestResolution::Blocked, now)?;
     }
     sync::seal_block(q, device, fp, &state, SealTime::at(now), rng)
 }

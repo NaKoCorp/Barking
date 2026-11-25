@@ -49,6 +49,9 @@ pub(super) const REFUSAL_RETENTION_SECS: u64 = MAX_AGE_SECS;
 pub(super) const INVITE_INTERVAL_SECS: u64 = 86_400;
 /// Minimum delay between two notifications for the same request.
 pub(super) const NOTIFY_INTERVAL_SECS: u64 = 86_400;
+/// Fixed reason logged (grouped) when held packets could not be replayed
+/// after the transaction that resolved their sender was committed.
+pub(super) const R_REPLAY_FAILED: &str = "held packet replay failed";
 
 /// A pending contact request, as shown to the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,8 +256,8 @@ pub(super) fn resolve_request(
 
 /// Closes the pending request of `fp` for good (`how`, logged), together
 /// with the packets held for it and those of its devices waiting in the
-/// queue of unknown senders: nothing of it is replayed. Returns whether a
-/// request existed.
+/// queue of unknown senders: nothing of it is replayed, nor comes back
+/// (`drop_for_good`). Returns whether a request existed.
 pub(super) fn close_request(
     q: &impl Queries,
     fp: Fingerprint,
@@ -264,16 +267,11 @@ pub(super) fn close_request(
     let Some(row) = get_request(q, fp)? else {
         return Ok(false);
     };
+    let mut held = list_pending_by_fp(q, fp)?;
     if let Ok(card) = load_card(&row.card) {
-        for c in &card.devices.certs {
-            q.conn()
-                .execute(
-                    "DELETE FROM pending_initials WHERE fp IS NULL AND ik = ?1",
-                    params![c.device.dh.as_slice()],
-                )
-                .map_err(map_err)?;
-        }
+        held.extend(queued_of_card(q, &card)?);
     }
+    drop_for_good(q, held, now)?;
     delete_request(q, fp)?;
     log(
         q,
@@ -282,6 +280,40 @@ pub(super) fn close_request(
         &TransparencyEvent::ContactRequestResolved { contact: fp, how },
     )?;
     Ok(true)
+}
+
+/// The packets of the queue of unknown senders whose initial message names
+/// one of the devices `card` lists.
+fn queued_of_card(q: &impl Queries, card: &ContactCard) -> Result<Vec<PendingInitial>> {
+    let mut out = Vec::new();
+    for c in &card.devices.certs {
+        out.extend(query_pending(
+            q,
+            &format!("SELECT {PENDING_COLUMNS} FROM pending_initials WHERE ik = ?1 AND fp IS NULL"),
+            &c.device.dh,
+        )?);
+    }
+    Ok(out)
+}
+
+/// Drops held first packets for good. One whose content was read
+/// (`message_id` set: it authenticated) is marked seen: never acked, the
+/// nodes keep it and it is fetched again, as a duplicate, instead of
+/// landing in the queue of unknown senders (or joining a later request of
+/// the same sender). One held unread proves nothing and is only dropped:
+/// marking it seen would let a forged packet hide the real one.
+fn drop_for_good(
+    q: &impl Queries,
+    held: impl IntoIterator<Item = PendingInitial>,
+    now: u64,
+) -> Result<()> {
+    for p in held {
+        if p.message_id.is_some() {
+            q.mark_seen(p.packet_id, now)?;
+        }
+        delete_pending(q, p.packet_id)?;
+    }
+    Ok(())
 }
 
 /// Refuses `fp`: its request and packets are dropped, and the refusal is
@@ -744,6 +776,18 @@ pub(super) fn put_invite_at(q: &impl Queries, fp: Fingerprint, at: u64) -> Resul
     Ok(())
 }
 
+/// Forgets the acceptance of the invite to `fp` (a new invite that no
+/// device of the contact answered yet).
+fn clear_invite_accepted(q: &impl Queries, fp: Fingerprint) -> Result<()> {
+    q.conn()
+        .execute(
+            "UPDATE invites SET accepted_at = NULL WHERE fp = ?1",
+            params![fp.0.as_slice()],
+        )
+        .map_err(map_err)?;
+    Ok(())
+}
+
 /// Marks the invite to `fp` accepted at `at`, keeping an earlier date.
 /// Returns whether an invite existed.
 pub(super) fn set_invite_accepted(q: &impl Queries, fp: Fingerprint, at: u64) -> Result<bool> {
@@ -792,8 +836,9 @@ pub(super) fn invite_packet_fp(
 /// The devices of contact `fp` an invite goes to: those whose session (the
 /// one `seal_for` would use: most recently received, otherwise most recently
 /// created) still waits for a first answer (`pending_initial`), and those
-/// with no session yet. A device that already answered is left out.
-fn waiting_devices(q: &impl Queries, fp: Fingerprint) -> Result<Vec<DeviceId>> {
+/// with no session yet. A device that already answered is left out. The
+/// flag tells whether every device of the card is waiting (none answered).
+fn waiting_devices(q: &impl Queries, fp: Fingerprint) -> Result<(Vec<DeviceId>, bool)> {
     let contact = q.get_contact(fp)?.ok_or(CoreError::UnknownContact)?;
     let card = load_card(&contact.card)?;
     let mut out = Vec::new();
@@ -807,7 +852,8 @@ fn waiting_devices(q: &impl Queries, fp: Fingerprint) -> Result<Vec<DeviceId>> {
             out.push(id);
         }
     }
-    Ok(out)
+    let none_answered = out.len() == card.devices.certs.len();
+    Ok((out, none_answered))
 }
 
 /// Applies a `SyncInvite { to, at }` from one of my devices: the invite
@@ -973,7 +1019,7 @@ pub(super) fn on_unknown_initial(
     };
     match card {
         Some(card) => on_invitation(q, limiter, &first, &peer, &env, &card, rng),
-        None => hold_message(q, limiter, &first, &peer, MessageId(env.message_id)),
+        None => hold_message(q, limiter, &first, &peer, &env),
     }
 }
 
@@ -999,16 +1045,24 @@ fn duplicate(
 /// Steps 3 and 4 of `on_unknown_initial`: a first packet that is not an
 /// invite, authenticated as sealed by `peer`, joins the request whose card
 /// lists `peer`, otherwise the queue of unknown senders, each within its cap.
+/// A request whose sender is blocked (a block that crossed it) takes
+/// nothing: the packet is marked seen, so that it does not come back, and
+/// dropped (`Ignored`).
 fn hold_message(
     q: &impl Queries,
     limiter: &mut LogLimiter,
     first: &First<'_>,
     peer: &DevicePublic,
-    message_id: MessageId,
+    env: &Envelope,
 ) -> Result<RxOut> {
+    let message_id = MessageId(env.message_id);
     let Some((fp, _)) = request_of_device(q, &first.init.ik, Some(peer.sig))? else {
         return queue(q, limiter, first, Some(message_id));
     };
+    if q.block_state(fp)?.drops(env.sent_at) {
+        q.mark_seen(first.packet.id, first.now)?;
+        return Ok((ReceiveOutcome::Ignored, None));
+    }
     if count_pending_for_fp(q, fp)? < MAX_PACKETS_PER_REQUEST {
         insert_pending_initial(q, &first.held(Some(fp), Some(message_id), false))?;
         touch_request(q, fp, first.now)?;
@@ -1054,7 +1108,8 @@ fn lists(card: &ContactCard, peer: &DevicePublic) -> bool {
 /// Step 2 of `on_unknown_initial`: an invite, authenticated as sealed by
 /// `peer`. Its card must pass `check_card` (otherwise `R_CARD_REFUSED`) and
 /// list `peer` (otherwise `R_REQUEST_FORGED`). A blocked fingerprint, or an
-/// invite sealed before the last refusal, is dropped (`Ignored`); so is a
+/// invite sealed before the last refusal, is dropped (`Ignored`), and a
+/// blocked sender's packets in the queue of unknown senders with it; so is a
 /// new sender while `MAX_PENDING_REQUESTS` requests are kept. The request
 /// keeps the newest card, counts the distinct invites (envelope message
 /// id) and notifies at most once per `NOTIFY_INTERVAL_SECS`. A card of a
@@ -1082,9 +1137,13 @@ fn on_invitation(
     if !lists(card, peer) {
         return quarantine(q, limiter, packet, now, R_REQUEST_FORGED);
     }
-    if q.block_state(fp)?.drops(env.sent_at)
-        || get_refusal(q, fp)?.is_some_and(|at| env.sent_at <= at)
-    {
+    let block = q.block_state(fp)?;
+    // A blocked sender's card names its devices: what they queued before
+    // this invite goes for good.
+    if block.blocked {
+        drop_for_good(q, queued_of_card(q, card)?, now)?;
+    }
+    if block.drops(env.sent_at) || get_refusal(q, fp)?.is_some_and(|at| env.sent_at <= at) {
         return Ok((ReceiveOutcome::Ignored, None));
     }
     let existing = get_request(q, fp)?;
@@ -1227,12 +1286,7 @@ fn hold_invitation(
         .into_iter()
         .filter(|p| p.session_id != first.session && p.fp.is_none_or(|f| f == fp));
     let older_invite = list_pending_by_fp(q, fp)?.into_iter().filter(|p| p.invite);
-    for p in other_session.chain(older_invite) {
-        if p.message_id.is_some() {
-            q.mark_seen(p.packet_id, first.now)?;
-        }
-        delete_pending(q, p.packet_id)?;
-    }
+    drop_for_good(q, other_session.chain(older_invite), first.now)?;
     insert_pending_initial(q, &first.held(Some(fp), Some(message_id), true))?;
     attach_unknown_to_fp(q, &first.init.ik, fp, |held| {
         first.authenticate(q, held, peer)
@@ -1327,16 +1381,50 @@ pub(super) fn replay_pending(
 
 /// Replays what is held for every contact (`held_for_contacts`): after an
 /// add here or synchronized from another of my devices, after a known
-/// contact's card was updated by an invite, or a replay interrupted.
-pub(super) fn replay_for_contacts(
+/// contact's card was updated by an invite, or a replay interrupted. Runs
+/// after the caller's transaction is committed: a failure is logged
+/// (`replay_committed`), never returned.
+pub(super) fn replay_for_contacts(core: &mut Core, now: u64, rng: &mut impl CryptoRng) {
+    let contacts = match held_for_contacts(&core.store) {
+        Ok(contacts) => contacts,
+        Err(_) => return note_replay_failure(core, None, now),
+    };
+    for fp in contacts {
+        replay_committed(core, fp, now, rng);
+    }
+}
+
+/// Replays the first packets held for `fp`, now a contact, oldest first,
+/// once the transaction that made it one is committed (`add_contact`, a
+/// receive). The outcome of that transaction stands: a failure is logged
+/// (`R_REPLAY_FAILED`, no content) instead of returned, and stops the
+/// replay of `fp` there (in order); the failed packet stays held and the
+/// next receive retries it.
+pub(super) fn replay_committed(
     core: &mut Core,
+    fp: Fingerprint,
     now: u64,
     rng: &mut impl CryptoRng,
-) -> Result<()> {
-    for fp in held_for_contacts(&core.store)? {
-        replay_pending(core, fp, now, rng)?;
+) {
+    let held = match list_pending_by_fp(&core.store, fp) {
+        Ok(held) => held,
+        Err(_) => return note_replay_failure(core, None, now),
+    };
+    for p in held {
+        if replay_held(core, &p, now, rng).is_err() {
+            return note_replay_failure(core, Some(p.packet_id), now);
+        }
     }
-    Ok(())
+}
+
+/// Logs a failed replay (grouped). Best effort: the store may be what
+/// failed.
+fn note_replay_failure(core: &mut Core, packet: Option<PacketId>, now: u64) {
+    let event = TransparencyEvent::DecryptFailed {
+        packet_id: packet.unwrap_or(PacketId([0; 16])),
+        reason: R_REPLAY_FAILED.to_owned(),
+    };
+    let _ = log_limited(&core.store, &mut core.log_limiter, now, packet, &event);
 }
 
 /// What `Core::accept_request` did.
@@ -1374,7 +1462,8 @@ impl Core {
     /// before the contact was removed and added again) is less than
     /// `INVITE_INTERVAL_SECS` old, `TooLarge` if my card does not fit in a
     /// packet. When every device already answered, `Ok(vec![])` and nothing
-    /// is written.
+    /// is written. When none has answered yet (the contact removed and added
+    /// again), an earlier acceptance is forgotten: the state is `Sent`.
     pub fn invite(
         &mut self,
         to: &Fingerprint,
@@ -1403,7 +1492,7 @@ impl Core {
         if !envelope::fits_in_packet(&body) {
             return Err(CoreError::TooLarge);
         }
-        let waiting = waiting_devices(&self.store, fp)?;
+        let (waiting, none_answered) = waiting_devices(&self.store, fp)?;
         if waiting.is_empty() {
             return Ok(Vec::new());
         }
@@ -1430,6 +1519,11 @@ impl Core {
                 insert_invite_packet(tx, packet.id, fp)?;
             }
             put_invite_at(tx, fp, now)?;
+            // No device answered (the contact was removed and added
+            // again): an earlier acceptance no longer holds.
+            if none_answered {
+                clear_invite_accepted(tx, fp)?;
+            }
             log(
                 tx,
                 now,
@@ -1607,9 +1701,8 @@ impl Core {
             if get_request(tx, fp)?.is_none() {
                 return Err(CoreError::UnknownContact);
             }
-            let out = contacts::set_block_sealed(tx, device, fp, true, now, rng)?;
-            close_request(tx, fp, RequestResolution::Blocked, now)?;
-            Ok(out)
+            // The block closes the request (`set_block_sealed`).
+            contacts::set_block_sealed(tx, device, fp, true, now, rng)
         })
     }
 
