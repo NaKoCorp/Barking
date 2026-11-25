@@ -12,8 +12,13 @@ mod state;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use header::ENC_HEADER_LEN;
 pub use header::RatchetMessage;
 pub use state::RatchetState;
+
+/// Authentication tag the body encryption adds to the plaintext
+/// (ChaCha20-Poly1305, `state::seal_body`): `ct.len() == pt.len() + 16`.
+pub(crate) const BODY_TAG_LEN: usize = 16;
 #[cfg(test)]
 pub(crate) use state::STATE_CLONES;
 
