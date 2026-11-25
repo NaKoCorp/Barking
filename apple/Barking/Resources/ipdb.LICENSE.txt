@@ -1,0 +1,12 @@
+ipdb.bin is built from the DB-IP Lite country and ASN databases
+(source month: 2026-11).
+
+IP Geolocation by DB-IP (https://db-ip.com)
+
+The DB-IP Lite databases are licensed under the Creative Commons Attribution
+4.0 International License (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+
+The data was converted to a compact binary format (see
+crates/barking-net/src/geo.rs); IPv6 ranges are stored at /64 granularity.
+Regenerate with scripts/build-ipdb.sh.
