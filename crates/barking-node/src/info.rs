@@ -1,9 +1,10 @@
 //! Public self-report of the node (`Request::Info`, protocol 5). A background
 //! task measures the node every `INFO_PERIOD`: fill of the storage and of the
-//! subscription table, uptime, active subscriptions per push relay. A request
-//! only reads that precomputed report from memory, plus the link state of the
-//! relay it names: no database read at request time, and nothing is logged
-//! per request.
+//! subscription table, uptime, active subscriptions per push relay and the
+//! link state of each such relay. A request only reads that precomputed
+//! report from memory: no database read at request time, nothing is logged
+//! per request, and a link state changes for callers once per period only
+//! (no second-level timing of the wake-ups).
 //!
 //! `Info` is unauthenticated. The push link of a relay is therefore only
 //! reported once at least `PUSH_LINK_MIN_SUBS` active subscriptions of this
@@ -43,8 +44,9 @@ struct Precomputed {
     uptime_secs: u64,
     storage: FillTier,
     wake: Option<FillTier>,
-    /// Relays with at least `PUSH_LINK_MIN_SUBS` active subscriptions.
-    busy_relays: HashMap<NodeId, u64>,
+    /// Relays with at least `PUSH_LINK_MIN_SUBS` active subscriptions, with
+    /// their link state as of the round.
+    busy_relays: HashMap<NodeId, PushLink>,
     origin: Option<NodeOrigin>,
 }
 
@@ -101,11 +103,21 @@ impl InfoState {
         self.report.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Records the measurements of one round; the uptime is rounded down to
-    /// the hour.
+    /// Records the measurements of one round, with the link state of each
+    /// busy relay as of now; the uptime is rounded down to the hour.
     pub fn update(&self, m: Measures) {
-        let mut busy = m.per_relay;
-        busy.retain(|_, n| *n >= PUSH_LINK_MIN_SUBS);
+        let busy: HashMap<NodeId, PushLink> = m
+            .per_relay
+            .into_iter()
+            .filter(|(_, n)| *n >= PUSH_LINK_MIN_SUBS)
+            .map(|(id, _)| {
+                let link = self
+                    .links
+                    .as_ref()
+                    .map_or(PushLink::Unknown, |l| l.state(&id));
+                (id, link)
+            })
+            .collect();
         let mut r = self.report();
         r.uptime_secs = self.started.elapsed().as_secs() / 3600 * 3600;
         r.storage = FillTier::of(m.stored_bytes, self.storage_max_bytes);
@@ -118,15 +130,14 @@ impl InfoState {
         self.report().origin = origin;
     }
 
-    /// The report; `relay`: the push relay whose link is asked about. Memory
-    /// only.
+    /// The report; `relay`: the push relay whose link is asked about. The
+    /// precomputed report only, link states included.
     pub fn snapshot(&self, relay: Option<NodeId>) -> NodeInfoReport {
         let r = self.report();
         let push_link = match (self.wake_max, relay) {
-            (Some(_), Some(id)) => Some(match &self.links {
-                Some(links) if r.busy_relays.contains_key(&id) => links.state(&id),
-                _ => PushLink::Unknown,
-            }),
+            (Some(_), Some(id)) => {
+                Some(r.busy_relays.get(&id).copied().unwrap_or(PushLink::Unknown))
+            }
             _ => None,
         };
         NodeInfoReport {
@@ -250,6 +261,28 @@ mod tests {
         links.record_backoff(
             R,
             tokio::time::Instant::now() + std::time::Duration::from_secs(300),
+        );
+        s.update(measures(0, PUSH_LINK_MIN_SUBS));
+        assert_eq!(s.snapshot(Some(R)).push_link, Some(PushLink::Failing));
+    }
+
+    /// A link state change shows at the next round only, never at once:
+    /// `Info` cannot time a wake-up to the second.
+    #[test]
+    fn push_link_changes_show_at_the_next_round_only() {
+        let links = Arc::new(LinkStates::default());
+        let s = state(&links);
+        links.record_ok(R);
+        s.update(measures(0, PUSH_LINK_MIN_SUBS));
+        assert_eq!(s.snapshot(Some(R)).push_link, Some(PushLink::Ok));
+        links.record_backoff(
+            R,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(300),
+        );
+        assert_eq!(
+            s.snapshot(Some(R)).push_link,
+            Some(PushLink::Ok),
+            "not before the round"
         );
         s.update(measures(0, PUSH_LINK_MIN_SUBS));
         assert_eq!(s.snapshot(Some(R)).push_link, Some(PushLink::Failing));
