@@ -948,7 +948,6 @@ pub async fn run(
         policy.storage_max_bytes,
         &config.wake,
         config.version,
-        wake_sender.as_ref().map(WakeSender::links),
     ));
     let shared = Arc::new(Shared {
         writer,
@@ -1008,6 +1007,17 @@ pub async fn run(
     }
     tasks.spawn(purge_loop(Arc::clone(&shared), stop_rx.clone()));
     if let Some(store) = info_store {
+        // The push link probes (`wake::probe`) read the relays measured by
+        // `info_loop`: none without it, nor when the node takes no
+        // subscriptions. Their own transport: no session or address set
+        // aside is shared with the wake sender.
+        if config.wake.enabled {
+            tasks.spawn(wake::probe::probe_loop(
+                Arc::clone(&info),
+                QuicWakeTransport::new(config.wake_allow_private),
+                stop_rx.clone(),
+            ));
+        }
         tasks.spawn(info_loop(info, store, stop_rx.clone()));
     }
     if config.origin_lookup && own_addr.is_some() {

@@ -912,7 +912,7 @@ fn max_expiry_days_is_fixed_by_protocol_4() {
 }
 
 #[test]
-fn counts_by_relay_identity_skip_expired() {
+fn relays_in_use_per_address_skip_expired() {
     let mut s = store();
     let cfg = WakeConfig::default();
     // Three subscriptions to relay 7 under two hosts, one expired, one to relay 8.
@@ -923,14 +923,23 @@ fn counts_by_relay_identity_skip_expired() {
     c.expires_day = today();
     let mut d = raw_sub(4, 4);
     d.relay.id = NodeId([8; 32]);
-    for sb in [&mut a, &mut b, &mut c, &mut d] {
+    let mut e = raw_sub(5, 5);
+    e.relay.host = "other.example.org".into();
+    for sb in [&mut a, &mut b, &mut c, &mut d, &mut e] {
         assert_eq!(try_subscribe(&mut s, &cfg, sb), Ok(()));
     }
     // The second day after `NOW`: `c` (expires today) is expired, the others
     // expire tomorrow.
     let later = NOW + 86_400;
-    let counts = count_by_relay(&s, later).unwrap();
-    assert_eq!(counts.get(&NodeId([7; 32])), Some(&2));
-    assert_eq!(counts.get(&NodeId([8; 32])), Some(&1));
-    assert_eq!(count_subscriptions(&s).unwrap(), 4);
+    let mut got = relays_in_use(&s, later).unwrap();
+    got.sort_by(|x, y| (x.0.id.0, &x.0.host).cmp(&(y.0.id.0, &y.0.host)));
+    let want = vec![
+        (a.relay.clone(), 1),
+        (b.relay.clone(), 2),
+        (d.relay.clone(), 1),
+    ];
+    let mut want = want;
+    want.sort_by(|x, y| (x.0.id.0, &x.0.host).cmp(&(y.0.id.0, &y.0.host)));
+    assert_eq!(got, want);
+    assert_eq!(count_subscriptions(&s).unwrap(), 5);
 }

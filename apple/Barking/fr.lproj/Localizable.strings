@@ -640,7 +640,7 @@
 "The room this relay still has to keep messages. When it is full, Barking uses others." = "La place que ce relais a encore pour garder des messages. Quand il est plein, Barking en utilise d’autres.";
 "How many phones this relay can still alert when a message arrives." = "Combien de téléphones ce relais peut encore prévenir quand un message arrive.";
 "The service that rings your iPhone when a message is waiting for you. “Reached” means this relay manages to alert it." = "Le service qui fait sonner votre iPhone quand un message vous attend. « Joint » veut dire que ce relais arrive à le prévenir.";
-"This relay only tells when many people use it, so as to reveal nothing about anyone." = "Ce relais ne le dit que lorsque beaucoup de monde l’utilise, pour ne rien révéler de personne.";
+"This relay checks that service by itself every few minutes and has not been able to tell yet." = "Ce relais vérifie lui-même ce service toutes les quelques minutes et n’a pas encore pu le dire.";
 "This relay will alert you as soon as a message reaches you there." = "Ce relais vous préviendra dès qu’un message vous arrive chez lui.";
 "This node is no longer in the list." = "Ce nœud n’est plus dans la liste.";
 "Block this node?" = "Bloquer ce nœud ?";

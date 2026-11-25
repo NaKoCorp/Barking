@@ -116,8 +116,12 @@ Node 0.5.0 speaks protocol 5 and answers a new `Info` request. The app uses it t
 
 - the software version, the protocol and the uptime;
 - how full the node is, in coarse tiers (low, medium, high, full) for storage and for wake subscriptions, never exact counts;
-- the state of the push link to the relay the app asked about, only when at least 20 active subscriptions on this node name that relay (below, `Unknown`). The state is refreshed once a minute, not per request. On a node with few users of a private relay, someone who watches that state over time could still infer when those users are active;
+- the state of the push link to the relay the app asked about (see below);
 - the origin of the node (autonomous system and country), when known.
+
+**Push link.** The node checks the push relays itself. Every 5 minutes it connects to each relay that its live subscriptions name, checks the relay's identity (`Hello`) and closes the connection; it sends no wake-up. A push relay refuses new connections while its own sends to Apple fail, so `Ok` means "the relay answers and its link to APNs works". The state never comes from the wake-ups the node sends, so it does not tell when users receive messages, and there is no subscription threshold: a relay used by a single person is reported like any other. What stays visible: the change from `Unknown` to a state shows, within 5 minutes, that a first subscription to that relay appeared on this node.
+
+The host of a relay comes from whoever posted the subscription. Only a host that has already answered with the relay's identity (a proven host) can make the relay read `Failing`; a forged subscription with a dead host leaves at worst a relay never reached since the start `Unknown`. A relay that is down from the node's start therefore reads `Unknown`, not `Failing`, until it answers once. Bounds per 5-minute round: at most 32 relays (those with a proven host first), 6 hosts each, 8 at once, routable addresses only; nothing is logged. A node with `[wake] enabled = false` makes no probes. Expect outgoing QUIC connections to the push relays (UDP to their port) every 5 minutes.
 
 The report is precomputed: answering it reads no database, and the node logs nothing about the client that asked, neither its IP address nor the relay it named. A 0.4 node does not understand `Info`: the app does not send it and shows no report for that node.
 

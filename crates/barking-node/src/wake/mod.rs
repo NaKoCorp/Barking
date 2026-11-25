@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 
 use barking_packet::MailboxId;
-use barking_proto::NodeId;
 use barking_proto::msg::ErrorReason;
 use barking_proto::pow;
 use barking_proto::push::{
@@ -19,6 +18,7 @@ use serde::Deserialize;
 
 use crate::{NodeStore, Result};
 
+pub mod probe;
 pub mod sender;
 #[cfg(test)]
 mod tests;
@@ -335,25 +335,25 @@ pub fn count_subscriptions(store: &NodeStore) -> Result<u64> {
     Ok(u64::try_from(n).unwrap_or(0))
 }
 
-/// Unexpired subscriptions per relay identity (`RelayRef::id`, whatever the
-/// host and port), in one query. A row whose relay no longer decodes counts
-/// for nobody.
-pub fn count_by_relay(store: &NodeStore, now: u64) -> Result<HashMap<NodeId, u64>> {
+/// Unexpired subscriptions per relay address (`RelayRef`: identity, host and
+/// port), in one query: what the push link probes choose from
+/// (`probe::Prober`). A row whose relay no longer decodes counts for nobody.
+pub fn relays_in_use(store: &NodeStore, now: u64) -> Result<Vec<(RelayRef, u64)>> {
     let mut st = store.conn().prepare_cached(
         "SELECT relay, COUNT(*) FROM subscriptions WHERE expires_day>=?1 GROUP BY relay",
     )?;
     let rows = st.query_map(params![i64::from(day_of(now))], |r| {
         Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
     })?;
-    let mut counts: HashMap<NodeId, u64> = HashMap::new();
+    let mut counts: HashMap<RelayRef, u64> = HashMap::new();
     for row in rows {
         let (relay, n) = row?;
         if let Ok(relay) = postcard::from_bytes::<RelayRef>(&relay) {
-            let c = counts.entry(relay.id).or_default();
+            let c = counts.entry(relay).or_default();
             *c = c.saturating_add(u64::try_from(n).unwrap_or(0));
         }
     }
-    Ok(counts)
+    Ok(counts.into_iter().collect())
 }
 
 /// Tells the wake loop that a message arrived, only once the node holds (or

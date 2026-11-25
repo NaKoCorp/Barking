@@ -319,7 +319,7 @@ enum NodeLabels {
         case .pushLink:
             let text = lang.text("The service that rings your iPhone when a message is waiting for you. “Reached” means this relay manages to alert it.")
             return unknownPushLink
-                ? [text, lang.text("This relay only tells when many people use it, so as to reveal nothing about anyone.")]
+                ? [text, lang.text("This relay checks that service by itself every few minutes and has not been able to tell yet.")]
                 : [text]
         case .mySubscriptions:
             return [lang.text("This relay will alert you as soon as a message reaches you there.")]

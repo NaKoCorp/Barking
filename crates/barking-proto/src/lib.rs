@@ -13,7 +13,7 @@ pub mod tls;
 pub use msg::{
     ACK_CURSOR_BASE, ErrorReason, FillTier, Limits, MAX_AS_NAME_LEN, MAX_HOLDINGS_PER_PAGE,
     MAX_NODES_PER_RESPONSE, MAX_PAGE_ITEMS, MAX_SOFTWARE_LEN, MAX_WAKE_ITEMS, MIN_PAGE_BYTES,
-    NodeInfoReport, NodeOrigin, PUSH_LINK_MIN_SUBS, PushLink, Request, Response,
+    NodeInfoReport, NodeOrigin, PushLink, Request, Response,
 };
 pub use node_id::{NodeId, generate_node_key};
 pub use record::{NodeRecord, RecordError, RecordPolicy, embeds_ipv4, routable};

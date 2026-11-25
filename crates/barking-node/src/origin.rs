@@ -266,7 +266,7 @@ mod tests {
     }
 
     fn state() -> Arc<InfoState> {
-        Arc::new(InfoState::new(1000, &WakeConfig::default(), 5, None))
+        Arc::new(InfoState::new(1000, &WakeConfig::default(), 5))
     }
 
     #[tokio::test]

@@ -29,10 +29,6 @@ pub const MAX_WAKE_ITEMS: usize = 100;
 /// At most this many fingerprints in a `Holdings` page.
 pub const MAX_HOLDINGS_PER_PAGE: usize = 1024;
 
-/// A relay's push link is only reported (`Ok` / `Failing`) once it serves at
-/// least this many subscriptions; below, it is `Unknown`.
-pub const PUSH_LINK_MIN_SUBS: u64 = 20;
-
 /// Longest `NodeInfoReport::software` a node sends (bytes).
 pub const MAX_SOFTWARE_LEN: usize = 32;
 
@@ -101,7 +97,8 @@ pub enum Request {
     },
     /// Public report on the node (protocol 5): the node's own report, plus,
     /// with `relay`, the state of its link to the push relay that node id
-    /// names (`NodeInfoReport::push_link`).
+    /// names (`NodeInfoReport::push_link`), as the node's own periodic probe
+    /// of that relay found it.
     Info {
         relay: Option<NodeId>,
     },
@@ -178,14 +175,19 @@ impl FillTier {
     }
 }
 
-/// State of a relay's link to its push provider.
+/// State of a node's link to a push relay, from the node's own periodic
+/// probe of that relay (a connection checking its identity, no wake-up):
+/// never from the wake-ups it sends, so it tells nothing of when users
+/// receive messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PushLink {
-    /// Recent pushes went through.
+    /// The relay answered the last probe with its identity. A relay accepts
+    /// connections only while its own push provider (APNs) works.
     Ok,
-    /// Recent pushes failed.
+    /// No host of the relay that answered before did at the last probe.
     Failing,
-    /// Not enough subscriptions (`PUSH_LINK_MIN_SUBS`) or data to tell.
+    /// Not probed: no live subscription on this node names the relay, or it
+    /// never answered since the node started.
     Unknown,
 }
 
