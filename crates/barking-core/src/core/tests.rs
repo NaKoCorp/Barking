@@ -1540,15 +1540,17 @@ fn wire_overhead_bound_holds() {
         };
         let env_len = postcard::to_allocvec(&env).unwrap().len();
         let packet = &out[0].0;
-        assert!(matches!(
-            parse_wire(&packet.payload).unwrap(),
-            Wire::Initial { .. }
-        ));
+        let Wire::Initial { msg, .. } = parse_wire(&packet.payload).unwrap() else {
+            panic!("Initial expected");
+        };
+        // The payload fills its tier (issue #82): the overhead is what the
+        // wire adds to the padded plaintext, `ct` minus its tag.
+        let padded_pt = msg.ct.len() - crate::ratchet::BODY_TAG_LEN;
+        assert!(padded_pt >= env_len);
+        let overhead = packet.payload.len() - padded_pt;
         assert!(
-            packet.payload.len() <= env_len + crate::envelope::MAX_WIRE_OVERHEAD,
-            "{} > {} + {}",
-            packet.payload.len(),
-            env_len,
+            overhead <= crate::envelope::MAX_WIRE_OVERHEAD,
+            "{overhead} > {}",
             crate::envelope::MAX_WIRE_OVERHEAD
         );
         // Session opened: a new one is made for the next content.
