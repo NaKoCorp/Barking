@@ -246,6 +246,23 @@ elif [ "$relay" -eq 1 ]; then
   echo "Relay already initialized ($push_toml), kept."
 fi
 
+# --- push link probe ------------------------------------------------------
+# The node reports the push link only for relays its operator lists
+# ([info] probe_relays). A relay set up in this run is listed in a node
+# config written in this run; a kept config is never edited.
+
+if [ -n "${relay_id:-}" ]; then
+  probe_line="probe_relays = [\"$relay_id@$relay_host:$relay_port\"]"
+  if [ "$do_node" -eq 1 ]; then
+    printf '\n[info]\n# The push relay of this machine: the node probes it and reports its link.\n%s\n' \
+      "$probe_line" >> "$node_toml"
+  else
+    echo
+    echo "To report this relay's push link, add to the [info] section of $node_toml:"
+    echo "  $probe_line"
+  fi
+fi
+
 # --- next steps -----------------------------------------------------------
 
 echo

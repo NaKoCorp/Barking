@@ -116,7 +116,9 @@ if [ "$code" -eq 0 ] && printf '%s' "$out" | grep -qF "$block" \
   && grep -q $'keygen-node\t--out\t/var/lib/barking-push/node.key' "$FAKE_DOCKER_LOG" \
   && grep -q $'keygen-seal\t--out\t/var/lib/barking-push/seal1.key\t--id\t1' "$FAKE_DOCKER_LOG" \
   && grep -qF "type=bind,src=$repo/Key Dir/AuthKey.p8,dst=/in/apns.p8,readonly" "$FAKE_DOCKER_LOG" \
-  && grep -q 'barking_relay-secrets:/s' "$FAKE_DOCKER_LOG"; then ok "$t"; else ko "$t"; fi
+  && grep -q 'barking_relay-secrets:/s' "$FAKE_DOCKER_LOG" \
+  && has "$repo/deploy/config/barking-node.toml" '[info]' \
+  && has "$repo/deploy/config/barking-node.toml" "probe_relays = [\"$relay_id@relay.example.org:4434\"]"; then ok "$t"; else ko "$t"; fi
 
 # --- rejects_private_public_addr
 t=rejects_private_public_addr
@@ -194,7 +196,8 @@ run --version 0.1.0 --public-addr 80.67.169.12:4433 "${ra[@]}"
 t=relay_added_later_keeps_node
 if [ "$code" -eq 0 ] && ! grep -q $'\tinit\t' "$FAKE_DOCKER_LOG" && grep -q keygen-node "$FAKE_DOCKER_LOG" \
   && cmp -s "$tmp/before.toml" "$repo/deploy/config/barking-node.toml" \
-  && [ -e "$repo/deploy/config/barking-push.toml" ]; then ok "$t"; else ko "$t"; fi
+  && [ -e "$repo/deploy/config/barking-push.toml" ] \
+  && printf '%s' "$out" | grep -qF "probe_relays = [\"$relay_id@relay.example.org:4434\"]"; then ok "$t"; else ko "$t"; fi
 
 # --- force_first_run_without_env
 fresh
