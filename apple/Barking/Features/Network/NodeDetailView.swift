@@ -5,7 +5,7 @@ import SwiftUI
 /// against observed), what it does, how it behaves with this iPhone, its
 /// addresses, then "Remove" and "Block" in a danger zone. Every value has
 /// its plain sentence, under it or behind an ⓘ (§7.3); pull to refresh asks
-/// the node again.
+/// the node again (the only way to ask a node this device never reached).
 struct NodeDetailView: View {
     let core: CoreService
     @State private var model: NodeDetailModel
@@ -293,6 +293,13 @@ struct NodeDetailView: View {
                         .padding(.horizontal, FormRowMetrics.inset)
                         .padding(.vertical, Space.s2)
                         .accessibilityIdentifier("node.notShared")
+                case .notAsked:
+                    StatusDot(.checking, verbatim: NodeLabels.notAsked(lang: lang))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .padding(.horizontal, FormRowMetrics.inset)
+                        .padding(.vertical, Space.s2)
+                        .accessibilityIdentifier("node.notAsked")
                 }
             }
         }

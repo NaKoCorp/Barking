@@ -616,6 +616,7 @@
 
 /* Node transparency: the node's detail, its explanations and the blocked nodes (spec §7.2 to §7.4). */
 "not shared · node version older than 0.5" = "non communiqué · version du nœud antérieure à 0.5";
+"not asked yet · pull down to ask the node" = "pas encore demandé · tirez vers le bas pour interroger le nœud";
 "online for less than an hour" = "en ligne depuis moins d’une heure";
 "online for %lld h" = "en ligne depuis %lld h";
 "online for %lld d" = "en ligne depuis %lld j";

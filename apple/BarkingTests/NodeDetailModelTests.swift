@@ -12,9 +12,12 @@ final class NodeDetailModelTests: XCTestCase {
 
     // MARK: Fixtures
 
-    private func node(kind: NodeOriginKind = .discovered, origin: OriginView? = nil) -> NodeInfo {
+    /// `lastSeen` 0: never confirmed by this device (the core says 0 until
+    /// the node answered as itself).
+    private func node(kind: NodeOriginKind = .discovered, origin: OriginView? = nil,
+                      lastSeen: UInt64 = 1_800_000_000) -> NodeInfo {
         NodeInfo(id: Self.id, addr: "51.38.12.4:7700", reliability: .good, score: 0.7,
-                 manual: kind == .manual || kind == .bootstrap, fromCard: kind == .fromCard, lastSeen: 0,
+                 manual: kind == .manual || kind == .bootstrap, fromCard: kind == .fromCard, lastSeen: lastSeen,
                  latencyMs: 38, inUse: true, origin: origin, mySubscriptions: 3, kind: kind)
     }
 
@@ -24,8 +27,8 @@ final class NodeDetailModelTests: XCTestCase {
     }
 
     private func detail(kind: NodeOriginKind = .discovered, origin: OriginView? = nil, report: NodeReportView? = nil,
-                        peer: UInt16? = 5) -> NodeDetail {
-        NodeDetail(node: node(kind: kind, origin: origin), v4: "51.38.12.4:7700", v6: nil, report: report,
+                        peer: UInt16? = 5, lastSeen: UInt64 = 1_800_000_000) -> NodeDetail {
+        NodeDetail(node: node(kind: kind, origin: origin, lastSeen: lastSeen), v4: "51.38.12.4:7700", v6: nil, report: report,
                    fetchedAt: report == nil ? nil : 1_800_000_000, peerVersion: peer)
     }
 
@@ -154,6 +157,40 @@ final class NodeDetailModelTests: XCTestCase {
         await model.refresh()
         XCTAssertFalse(model.unreachable)
         XCTAssertEqual(model.activity, .report(report(push: .failing)))
+    }
+
+    /// A node this device never reached (found on the network, on a card,
+    /// added by hand) is not dialled when its screen opens: only a pull to
+    /// refresh asks it. Until then nothing spins: "not asked yet".
+    func testUnconfirmedNodeIsAskedOnlyOnPull() async throws {
+        let d = FakeDevice()
+        d.nodeDetailResult = detail(report: nil, peer: nil, lastSeen: 0)
+        let model = make(d)
+        await model.load()
+        XCTAssertFalse(model.confirmed)
+        XCTAssertEqual(d.nodeCalls, [], "opening dials nothing")
+        XCTAssertEqual(model.activity, .notAsked)
+        XCTAssertFalse(model.refreshing)
+        let fr = try lang("fr")
+        XCTAssertEqual(flat(NodeLabels.notAsked(lang: fr)),
+                       "pas encore demandé · tirez vers le bas pour interroger le nœud")
+
+        // The explicit pull asks it.
+        d.refreshedDetail = detail(report: report(), lastSeen: 1_800_000_000)
+        await model.refresh()
+        XCTAssertEqual(d.nodeCalls, ["refresh:\(Self.id)"])
+        XCTAssertEqual(model.activity, .report(report()))
+        XCTAssertTrue(model.confirmed)
+    }
+
+    /// A confirmed node is asked as soon as the screen opens.
+    func testConfirmedNodeIsAskedOnOpening() async {
+        let d = FakeDevice()
+        d.nodeDetailResult = detail(report: report())
+        let model = make(d)
+        await model.load()
+        XCTAssertTrue(model.confirmed)
+        XCTAssertEqual(d.nodeCalls, ["refresh:\(Self.id)"])
     }
 
     // MARK: Errors (lock, gone, network)

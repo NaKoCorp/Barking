@@ -248,6 +248,11 @@ enum NodeLabels {
         olderThan05 ? lang.text("not shared · node version older than 0.5") : lang.text("not shared")
     }
 
+    /// "Ce qu'il fait" for a node this device never reached: not asked yet.
+    static func notAsked(lang: Lang = .current) -> String {
+        lang.text("not asked yet · pull down to ask the node")
+    }
+
     /// "0.5.0 · protocole 5 · en ligne depuis 3 j": what the node says of itself.
     static func version(_ r: NodeReportView, lang: Lang = .current) -> String {
         let hours = r.uptimeSecs / 3_600

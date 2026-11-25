@@ -19,6 +19,9 @@ final class NodeDetailModel {
         case report(NodeReportView)
         /// Never reported yet and not answered yet: asked right now.
         case asking
+        /// Never confirmed by this device: not asked on opening, only when
+        /// the user pulls to refresh.
+        case notAsked
         /// No report: an old node (protocol under 5), or one that said nothing.
         case notShared(olderThan05: Bool)
     }
@@ -104,8 +107,13 @@ final class NodeDetailModel {
     var activity: Activity {
         if let report = detail?.report { return .report(report) }
         if let v = detail?.peerVersion, v < 5 { return .notShared(olderThan05: true) }
-        return refreshed ? .notShared(olderThan05: false) : .asking
+        if refreshing || (!refreshed && confirmed) { return .asking }
+        return refreshed ? .notShared(olderThan05: false) : .notAsked
     }
+
+    /// This device has already reached the node as itself (`lastSeen` is 0
+    /// until then): only such a node is asked as soon as the screen opens.
+    var confirmed: Bool { (node?.lastSeen ?? 0) > 0 }
 
     /// No origin declared reads as "doesn't share its origin".
     var verdict: OriginVerdictView { node?.origin?.verdict ?? .notReported }
@@ -137,10 +145,13 @@ final class NodeDetailModel {
         }
     }
 
-    /// The cached detail, then the node's own answer (§6.1).
+    /// The cached detail, then the node's own answer (§6.1) if this device
+    /// has already confirmed it. A node never confirmed is only known by
+    /// what it, or others, announce: opening its screen dials nothing, and
+    /// it is asked only on an explicit pull to refresh.
     func load() async {
         await loadCached()
-        await refresh()
+        if confirmed { await refresh() }
     }
 
     /// The cache alone: the screen shows it while the node is asked. Only
