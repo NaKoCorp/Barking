@@ -10,7 +10,7 @@ use crate::identity::{
     DeviceCertificate, DeviceId, DeviceKeys, DeviceList, DevicePublic, RootIdentity,
 };
 use crate::mailbox::day_of;
-use crate::packet::{ACK_GRACE_SECS, DEFAULT_HOPS, Kind, Tier, ack};
+use crate::packet::{ACK_GRACE_SECS, DEFAULT_HOPS, DEFAULT_TTL_SECS, Kind, Tier, ack};
 use crate::store::{Direction, MessageId, MessageStatus, ReactionRow, SessionRow};
 use crate::transparency::{SyncKind, TransparencyEvent};
 use rand::SeedableRng;
@@ -10106,4 +10106,203 @@ fn adding_a_card_replays_its_queued_packets() {
         .unwrap();
     assert_eq!(count_table(&b, "pending_initials"), 0);
     assert_eq!(texts_with(&b, alice, NOW), ["sans invitation"]);
+}
+
+// --- Contact requests, task 7: the invite's state on the inviting side.
+
+/// The `Kind::Ack` packets in `c`'s send queue at `now`.
+fn acks_of(c: &mut Core, now: u64) -> Vec<Packet> {
+    c.pending_outbox(now)
+        .unwrap()
+        .iter()
+        .map(|b| Packet::decode(b).unwrap())
+        .filter(|p| p.kind == Kind::Ack)
+        .collect()
+}
+
+/// The status of my outgoing message `text` to `fp`.
+fn sent_status(c: &Core, fp: Fingerprint, text: &str, now: u64) -> MessageStatus {
+    c.messages_with(&fp, now)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == text && m.direction == Direction::Out)
+        .unwrap()
+        .status
+}
+
+#[test]
+fn invite_state_moves_from_sent_to_unanswered() {
+    let (_da, mut a, _db, b, mut rng) = alice_knows_bob();
+    let bob = b.fingerprint();
+    assert_eq!(a.invite_state(&bob, NOW).unwrap(), InviteState::None);
+    invite_one(&mut a, bob, NOW, &mut rng);
+    assert_eq!(
+        a.invite_state(&bob, NOW + 1).unwrap(),
+        InviteState::Sent { at: NOW }
+    );
+    assert_eq!(
+        a.invite_state(&bob, NOW + 604_799).unwrap(),
+        InviteState::Sent { at: NOW }
+    );
+    assert_eq!(
+        a.invite_state(&bob, NOW + 604_800).unwrap(),
+        InviteState::Unanswered { at: NOW }
+    );
+}
+
+#[test]
+fn request_accepted_marks_state_and_replayed_messages() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    let salut = a.send_text(&bob, "salut", NOW, &mut rng).unwrap();
+    request_outcome(b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap());
+    assert_eq!(
+        reason(b.receive(&salut[0].encode(), "t", NOW, &mut rng).unwrap()),
+        R_PENDING_REQUEST
+    );
+    // Never deposited: the delivery expires at Alice's.
+    let expired = NOW + DEFAULT_TTL_SECS + 1;
+    a.expire_due(expired).unwrap();
+    assert_eq!(
+        sent_status(&a, bob, "salut", expired),
+        MessageStatus::NotDelivered
+    );
+    let day_20 = NOW + 20 * 86_400;
+    let accepted = b.accept_request(&alice, None, day_20, &mut rng).unwrap();
+    assert_eq!(accepted.packets.len(), 1);
+    let got = a
+        .receive(&accepted.packets[0].encode(), "t", day_20, &mut rng)
+        .unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert_eq!(
+        a.invite_state(&bob, day_20).unwrap(),
+        InviteState::Accepted { at: day_20 }
+    );
+    assert_eq!(
+        sent_status(&a, bob, "salut", day_20),
+        MessageStatus::Received
+    );
+    // Acked like any message, so Bob stops resending it.
+    assert_eq!(acks_of(&mut a, day_20).len(), 1);
+    // The first date stays.
+    let later = day_20 + 3_600;
+    let text = b.send_text(&alice, "plus tard", later, &mut rng).unwrap();
+    a.receive(&text[0].encode(), "t", later, &mut rng).unwrap();
+    assert_eq!(
+        a.invite_state(&bob, later).unwrap(),
+        InviteState::Accepted { at: day_20 }
+    );
+}
+
+#[test]
+fn request_accepted_ignores_other_messages() {
+    // The list names only my outgoing messages to the sender.
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    let (_dc, c) = party("c", 7);
+    a.add_contact(&c.contact_card("Carol").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let carol = c.fingerprint();
+    a.send_text(&carol, "pour carol", NOW, &mut rng).unwrap();
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap());
+    let expired = NOW + DEFAULT_TTL_SECS + 1;
+    a.expire_due(expired).unwrap();
+    b.accept_request(&alice, None, expired, &mut rng).unwrap();
+    // A forged list naming Alice's message to Carol, sealed by Bob.
+    let carol_id = a
+        .messages_with(&carol, expired)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body == "pour carol")
+        .unwrap()
+        .message_id;
+    let body = ExtContent::RequestAccepted {
+        replayed: vec![carol_id],
+    }
+    .to_body();
+    let forged = seal_body(
+        &mut b,
+        &send::Target::Contact(alice),
+        &body,
+        MessageId([9; 16]),
+        &mut rng,
+    )
+    .remove(0)
+    .0;
+    a.receive(&forged.encode(), "t", expired, &mut rng).unwrap();
+    assert_eq!(
+        sent_status(&a, carol, "pour carol", expired),
+        MessageStatus::NotDelivered
+    );
+}
+
+#[test]
+fn request_accepted_from_my_own_device_is_refused() {
+    let (_dir, mut a, mut tablet, mut rng) = linked();
+    let (_db, b) = party("b", 2);
+    let bob = b.fingerprint();
+    a.add_contact(&b.contact_card("Bob").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    a.invite(&bob, NOW, &mut rng).unwrap();
+    let body = ExtContent::RequestAccepted { replayed: vec![] }.to_body();
+    let p = seal_body(
+        &mut tablet,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([4; 16]),
+        &mut rng,
+    )
+    .remove(0)
+    .0;
+    let got = a.receive(&p.encode(), "t", NOW, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Quarantined { .. }), "{got:?}");
+    assert_eq!(
+        a.invite_state(&bob, NOW).unwrap(),
+        InviteState::Sent { at: NOW }
+    );
+}
+
+#[test]
+fn invitation_to_known_contact_is_acked_and_ignored() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    let at = NOW + 60;
+    let got = b.receive(&invite.encode(), "t", at, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert!(requests::get_request(&b.store, alice).unwrap().is_none());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    let acks = acks_of(&mut b, at);
+    assert_eq!(acks.len(), 1);
+    let later = at + 60;
+    let got = a.receive(&acks[0].encode(), "t", later, &mut rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::AckReceived { .. }), "{got:?}");
+    assert_eq!(
+        a.invite_state(&bob, later).unwrap(),
+        InviteState::Accepted { at: later }
+    );
+}
+
+#[test]
+fn any_message_from_the_invited_marks_the_invite_accepted() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    let bob = b.fingerprint();
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    invite_one(&mut a, bob, NOW, &mut rng);
+    let text = b.send_text(&alice, "coucou", NOW + 5, &mut rng).unwrap();
+    a.receive(&text[0].encode(), "t", NOW + 10, &mut rng)
+        .unwrap();
+    assert_eq!(
+        a.invite_state(&bob, NOW + 10).unwrap(),
+        InviteState::Accepted { at: NOW + 10 }
+    );
 }

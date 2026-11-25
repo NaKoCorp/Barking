@@ -31,7 +31,7 @@ use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
-use crate::packet::{Packet, PacketId};
+use crate::packet::{DEFAULT_TTL_SECS, Packet, PacketId};
 use crate::ratchet::RatchetMessage;
 use crate::store::{ContactRow, MessageId, Queries, arr, map_err, to_i64, to_u64};
 use crate::transparency::{RequestResolution, SyncKind, TransparencyEvent};
@@ -80,7 +80,8 @@ pub enum InviteState {
     Sent { at: u64 },
     /// Invite sent at `at` that was refused or got no answer.
     Unanswered { at: u64 },
-    /// The invite sent at `at` was accepted.
+    /// The invite was accepted: `at` is when I first learned it (an ack of
+    /// an invite, `REQUEST_ACCEPTED` or any message from the contact).
     Accepted { at: u64 },
 }
 
@@ -644,13 +645,13 @@ pub(super) fn put_invite_at(q: &impl Queries, fp: Fingerprint, at: u64) -> Resul
     Ok(())
 }
 
-/// Marks the invite to `fp` accepted at `at`. Returns whether an invite
-/// existed.
+/// Marks the invite to `fp` accepted at `at`, keeping an earlier date.
+/// Returns whether an invite existed.
 pub(super) fn set_invite_accepted(q: &impl Queries, fp: Fingerprint, at: u64) -> Result<bool> {
     let n = q
         .conn()
         .execute(
-            "UPDATE invites SET accepted_at = ?2 WHERE fp = ?1",
+            "UPDATE invites SET accepted_at = coalesce(accepted_at, ?2) WHERE fp = ?1",
             params![fp.0.as_slice(), to_i64(at)],
         )
         .map_err(map_err)?;
@@ -1352,6 +1353,24 @@ impl Core {
         })
     }
 
+    /// State of the invite I sent to `contact` (spec §6.2): `None` without
+    /// one; `Accepted` once answered; otherwise `Unanswered` once the last
+    /// invite's packet has expired (`at + DEFAULT_TTL_SECS <= now`), `Sent`
+    /// before. The row outlives the contact (the 24-hour cap does too).
+    pub fn invite_state(&self, contact: &Fingerprint, now: u64) -> Result<InviteState> {
+        Ok(match get_invite(&self.store, *contact)? {
+            None => InviteState::None,
+            Some(InviteRow {
+                accepted_at: Some(at),
+                ..
+            }) => InviteState::Accepted { at },
+            Some(InviteRow { at, .. }) if at.saturating_add(DEFAULT_TTL_SECS) <= now => {
+                InviteState::Unanswered { at }
+            }
+            Some(InviteRow { at, .. }) => InviteState::Sent { at },
+        })
+    }
+
     /// Accepts the pending request of `fp` (spec §7.3):
     ///
     /// 1. in one transaction, adds its card as a contact without an alias
@@ -1641,6 +1660,8 @@ mod tests {
             })
         );
         assert!(set_invite_accepted(&s, fp(1), 20).unwrap());
+        // The first acceptance date stays.
+        assert!(set_invite_accepted(&s, fp(1), 25).unwrap());
         put_invite_at(&s, fp(1), 30).unwrap();
         assert_eq!(
             get_invite(&s, fp(1)).unwrap(),

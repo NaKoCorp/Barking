@@ -22,7 +22,7 @@ use super::Core;
 use super::{ephemeral, reactions, route, sync};
 use crate::Result;
 use crate::content::{ExtContent, MAX_SYNC_DELETE_IDS};
-use crate::identity::Fingerprint;
+use crate::identity::{DeviceId, Fingerprint};
 use crate::mailbox::MailboxId;
 use crate::packet::{Packet, PacketId};
 use crate::store::{
@@ -531,6 +531,61 @@ pub(super) fn fail_stranded(q: &impl Queries, fp: Fingerprint, now: u64) -> Resu
         if let Some((contact, row)) = failed.change {
             q.note_change(contact, row);
         }
+    }
+    Ok(())
+}
+
+/// The messages `replayed` that `contact`'s `device` read on accepting my
+/// invite (`RequestAccepted`, spec §6.2): of each one that is my outgoing
+/// message to `contact`, the delivery to `device` becomes `Received`
+/// whatever its state (`NotDelivered` included: the verdict came before the
+/// acceptance) and leaves the send queue, and the message is recomputed.
+/// An identifier of another conversation, of a received message or
+/// unknown here is skipped: the list comes from the contact.
+pub(super) fn mark_replayed(
+    q: &impl Queries,
+    contact: Fingerprint,
+    device: DeviceId,
+    replayed: &[MessageId],
+    now: u64,
+) -> Result<()> {
+    for &message in replayed {
+        let Some((fp, row, _)) = outgoing_status(q, message)? else {
+            continue;
+        };
+        if fp != contact {
+            continue;
+        }
+        let packets: Vec<Vec<u8>> = {
+            let mut stmt = q
+                .conn()
+                .prepare(
+                    "UPDATE deliveries SET status = ?1, acked_at = coalesce(acked_at, ?2) \
+                     WHERE message_id = ?3 AND device = ?4 AND own = 0 AND status <> ?1 \
+                     RETURNING packet_id",
+                )
+                .map_err(map_err)?;
+            stmt.query_map(
+                params![
+                    MessageStatus::Received as i64,
+                    to_i64(now),
+                    message.0.as_slice(),
+                    device.0.as_slice()
+                ],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(map_err)?
+        };
+        if packets.is_empty() {
+            continue;
+        }
+        for packet in packets {
+            q.outbox_remove(PacketId(arr(packet)?))?;
+        }
+        recompute_message_status(q, message)?;
+        q.note_change(fp, row);
     }
     Ok(())
 }

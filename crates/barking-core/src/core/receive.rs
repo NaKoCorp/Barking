@@ -206,6 +206,11 @@ impl Core {
                 }
                 None => None,
             };
+            // The ack of an invite: the invited person accepted it, or
+            // already knew me (spec §6.2).
+            if let Some(invited) = requests::invite_packet_fp(tx, acked)? {
+                requests::set_invite_accepted(tx, invited, now)?;
+            }
             route::record(tx, acked, RouteStep::AckVerified, now, None)?;
             tx.outbox_remove(acked)?;
             // An acked request to be removed has left, whatever the transport saw.
@@ -759,6 +764,8 @@ fn record_message(
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
     let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
+    // Any message from the contact answers my invite (spec §6.2).
+    requests::set_invite_accepted(q, row.contact_fp, now)?;
     // Before `insert_message` (unique packet identifier).
     q.mark_seen(packet.id, now)?;
     let message_id = MessageId::incoming(&row.contact_fp, &env.message_id);
@@ -932,7 +939,16 @@ fn accept_ext(
             if q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
                 return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
             }
-            return accept_invite(q, limiter, packet, o, env, transport, now, rng);
+            return accept_answer(q, limiter, packet, o, env, &[], transport, now, rng);
+        }
+        // The contact accepted my invite (spec §6.2): the messages it lists
+        // were replayed there, whatever their state here. Only from a
+        // contact: from one of my devices it falls to `R_UNEXPECTED`.
+        (ExtContent::RequestAccepted { replayed }, false) => {
+            if q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+                return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+            }
+            return accept_answer(q, limiter, packet, o, env, &replayed, transport, now, rng);
         }
         (
             ExtContent::SyncReply { .. }
@@ -980,6 +996,7 @@ fn accept_reaction(
     let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
     q.mark_seen(packet.id, now)?;
     let from = row.contact_fp;
+    requests::set_invite_accepted(q, from, now)?;
     let received = MessageId::incoming(&from, &env.message_id);
     let already = q.inbound_has_message(received)?;
     q.record_inbound(packet.id, received, from)?;
@@ -1026,24 +1043,31 @@ fn accept_reaction(
     ))
 }
 
-/// An invite (`ContactRequest`) from a contact: session written, packet
-/// marked seen, acked, `Ignored`. Its card is not applied: a contact's card
+/// An invite (`ContactRequest`) or a `RequestAccepted` from a contact:
+/// session written, packet marked seen, my invite to it marked accepted,
+/// acked, `Ignored`. An invite's card is not applied: a contact's card
 /// changes only by `CardUpdate` (a newer one from an unlisted device was
-/// applied before the replay, `requests::on_unknown_initial`).
+/// applied before the replay, `requests::on_unknown_initial`). The
+/// `replayed` messages of a `RequestAccepted` become `Received`
+/// (`delivery::mark_replayed`).
 #[allow(clippy::too_many_arguments)]
-fn accept_invite(
+fn accept_answer(
     q: &impl Queries,
     limiter: &mut LogLimiter,
     packet: &Packet,
     o: Opened,
     env: &Envelope,
+    replayed: &[MessageId],
     transport: &str,
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
+    let device = o.row.contact_device;
     let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
     q.mark_seen(packet.id, now)?;
     let from = row.contact_fp;
+    requests::set_invite_accepted(q, from, now)?;
+    delivery::mark_replayed(q, from, device, replayed, now)?;
     let received = MessageId::incoming(&from, &env.message_id);
     let already = q.inbound_has_message(received)?;
     q.record_inbound(packet.id, received, from)?;
