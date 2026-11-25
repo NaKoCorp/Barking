@@ -110,6 +110,36 @@ The node only dials public relay addresses. On the Mac that hosts both, it reach
 
 If the node logs connection failures to the relay while the relay is reachable from outside, the router does not loop back. Enable NAT loopback in its settings, if it has the option. No workaround is provided here.
 
+## Node 0.5: Info and origin lookup
+
+Node 0.5.0 speaks protocol 5 and answers a new `Info` request. The app uses it to show each node's state in its node list. A report holds:
+
+- the software version, the protocol and the uptime;
+- how full the node is, in coarse tiers (low, medium, high, full) for storage and for wake subscriptions, never exact counts;
+- the state of the push link to the relay the app asked about, only when at least 20 active subscriptions name that relay, so that a quiet node reveals nothing about a single user;
+- the origin of the node (autonomous system and country), when known.
+
+The report is precomputed: answering it reads no database, and the node logs nothing about the client that asked, neither its IP address nor the relay it named. A 0.4 node does not understand `Info`: the app does not send it and shows no report for that node.
+
+The origin comes from a lookup that the node makes itself, at startup and then daily. It needs a public address in `[dht]`. The query name contains the node's own IP address, so the **system resolver and Team Cymru (`origin.asn.cymru.com`) see it**. This is the address the node already publishes in its signed record. To turn the lookup off, add this to `deploy/config/barking-node.toml`:
+
+```toml
+[info]
+origin_lookup = false
+```
+
+The default is `true`. The report then carries no origin.
+
+**Upgrade.** Update the 6 deployed nodes to 0.5.0 as described in [Update](#update). No configuration change is needed: `[info]` is optional and the other keys are unchanged. The nodes can be upgraded one at a time, and 0.4 and 0.5 nodes work together.
+
+**IP base in the app.** The app checks the origin a node states against an embedded base, `apple/Barking/Resources/ipdb.bin` (DB-IP Lite, CC BY 4.0). Refresh it about once a month, with the month as argument, and commit the result:
+
+```sh
+scripts/build-ipdb.sh 2026-12
+```
+
+The script downloads the country and ASN files into a temporary directory and rewrites `ipdb.bin` and `ipdb.LICENSE.txt`. The new base reaches users with the next app build.
+
 ## Update
 
 1. Verify the new release and put it in `dist/`.
