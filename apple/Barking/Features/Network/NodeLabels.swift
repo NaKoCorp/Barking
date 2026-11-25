@@ -45,9 +45,19 @@ enum NodeLabels {
 
     /// The host it declares, else its short identifier.
     static func name(_ node: NodeInfo) -> String {
-        guard let host = node.origin?.asName.trimmingCharacters(in: .whitespaces), !host.isEmpty
-        else { return shortId(node.id) }
+        statedName(node) ?? shortId(node.id)
+    }
+
+    /// The host name the node declares itself, if any: free text from the
+    /// node, never checked (only its network and country are).
+    static func statedName(_ node: NodeInfo) -> String? {
+        guard let host = node.origin?.asName.trimmingCharacters(in: .whitespaces), !host.isEmpty else { return nil }
         return host
+    }
+
+    /// Said under a name the node declares itself.
+    static func statedNameNote(lang: Lang = .current) -> String {
+        lang.text("name stated by the node")
     }
 
     /// Its declared country as an ISO code, else a dash (no flag, no emoji).
@@ -168,7 +178,8 @@ enum NodeLabels {
     /// The list's short word for a declared origin.
     static func verdictWord(_ verdict: OriginVerdictView, lang: Lang = .current) -> Line {
         switch verdict {
-        case .matches: Line(state: .ok, text: lang.text("verified"))
+        // The network (AS) and the country, not the name the node gives.
+        case .matches: Line(state: .ok, text: lang.text("network and country verified"))
         case .mismatch: Line(state: .waiting, text: lang.text("doesn't match"))
         case .notReported, .notInBase, .noRecord: Line(state: .checking, text: lang.text("can't be checked"))
         }
@@ -178,7 +189,7 @@ enum NodeLabels {
     static func verdictLine(_ verdict: OriginVerdictView, lang: Lang = .current) -> Line {
         switch verdict {
         case .matches:
-            return Line(state: .ok, text: lang.text("Matches what this iPhone sees"))
+            return Line(state: .ok, text: lang.text("Network and country verified"))
         case .mismatch(let declaredCountry, let observedCountry, let declaredAsn, let observedAsn):
             if declaredCountry != observedCountry {
                 let declared = countryName(declaredCountry, lang: lang)
@@ -251,8 +262,13 @@ enum NodeLabels {
 
     /// The confirmation of "Block this node" (§7.4), with the guard-rail of
     /// §6.4 when fewer than 3 usable nodes would be left.
-    static func blockMessage(usableLeft: Int?, lang: Lang = .current) -> String {
+    /// `countUnknown`: the usable nodes left could not be counted; the
+    /// warning stays, without a number (fail closed).
+    static func blockMessage(usableLeft: Int?, countUnknown: Bool = false, lang: Lang = .current) -> String {
         let base = lang.text("Barking stops talking to it at once. What it keeps for you will only be picked up through the other copies. The wake-ups set on it stop.")
+        if countUnknown {
+            return "\(base)\n\n\(lang.text("Barking could not count the usable nodes that would be left: your messages may be kept in fewer places than usual."))"
+        }
         guard let n = usableLeft else { return base }
         let warning = switch n {
         case ...0: lang.text("No usable node would be left: your messages could no longer leave this iPhone.")

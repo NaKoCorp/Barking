@@ -1,5 +1,6 @@
 ipdb.bin is built from the DB-IP Lite country and ASN databases
 (source month: 2026-11).
+SHA-256 of ipdb.bin: 8cdbc6626961a48751b054745749702330baab30727ef2eefa1d38fd3b576ee7
 
 IP Geolocation by DB-IP (https://db-ip.com)
 

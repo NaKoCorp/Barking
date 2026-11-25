@@ -140,7 +140,7 @@ final class NodeDetailModelTests: XCTestCase {
     func testRefreshFailureKeepsCachedDetail() async {
         let d = FakeDevice()
         d.nodeDetailResult = detail(report: report())
-        d.refreshError = NSError(domain: "net", code: 1)
+        d.refreshError = BarkingError.Network(detail: "timeout")
         let model = make(d)
         await model.load()
         XCTAssertEqual(d.nodeCalls, ["refresh:\(Self.id)"])
@@ -154,6 +154,163 @@ final class NodeDetailModelTests: XCTestCase {
         await model.refresh()
         XCTAssertFalse(model.unreachable)
         XCTAssertEqual(model.activity, .report(report(push: .failing)))
+    }
+
+    // MARK: Errors (lock, gone, network)
+
+    /// A sync holding the database (`Locked`) never reads as "gone" nor
+    /// "unreachable": the last content stays, with "try again shortly".
+    func testLockedKeepsContentAndSaysSyncInProgress() async throws {
+        let d = FakeDevice()
+        d.nodeDetailResult = detail(report: report())
+        let model = make(d)
+        await model.load()
+        XCTAssertFalse(model.syncBusy)
+
+        d.nodeDetailError = BarkingError.Locked
+        d.refreshError = BarkingError.Locked
+        await model.loadCached()
+        XCTAssertTrue(model.syncBusy)
+        XCTAssertFalse(model.missing)
+        XCTAssertNotNil(model.detail, "last content kept")
+        await model.refresh()
+        XCTAssertTrue(model.syncBusy)
+        XCTAssertFalse(model.missing)
+        XCTAssertFalse(model.unreachable)
+        XCTAssertEqual(model.activity, .report(report()))
+
+        // Locked on the very first read: still not "missing".
+        let fresh = make(d)
+        await fresh.load()
+        XCTAssertFalse(fresh.missing)
+        XCTAssertTrue(fresh.syncBusy)
+
+        // The next answer clears the line.
+        d.nodeDetailError = nil
+        d.refreshError = nil
+        await model.refresh()
+        XCTAssertFalse(model.syncBusy)
+
+        let fr = try lang("fr")
+        XCTAssertEqual(String(localized: "Sync in progress, try again in a moment", bundle: fr.bundle, locale: fr.locale),
+                       "Synchronisation en cours, réessayez dans un instant")
+    }
+
+    /// Only `NotFound` (and, on refresh, a block from elsewhere) says the
+    /// node left the list; the network failing says "unreachable".
+    func testErrorKindsMapToTheirStatement() async {
+        let d = FakeDevice()
+        d.nodeDetailError = BarkingError.NotFound
+        d.refreshError = BarkingError.NotFound
+        var model = make(d)
+        await model.load()
+        XCTAssertTrue(model.missing)
+        XCTAssertNil(model.detail)
+        XCTAssertFalse(model.unreachable)
+
+        let cases: [(Error, missing: Bool, unreachable: Bool, busy: Bool)] = [
+            (BarkingError.NotFound, true, false, false),
+            (BarkingError.InvalidInput(detail: "node is blocked"), true, false, false),
+            (BarkingError.Network(detail: "timeout"), false, true, false),
+            (BarkingError.Locked, false, false, true),
+        ]
+        for (error, missing, unreachable, busy) in cases {
+            d.nodeDetailError = nil
+            d.refreshError = nil
+            d.nodeDetailResult = detail(report: report())
+            model = make(d)
+            await model.load()
+            d.refreshError = error
+            await model.refresh()
+            XCTAssertEqual(model.missing, missing, "\(error)")
+            XCTAssertEqual(model.unreachable, unreachable, "\(error)")
+            XCTAssertEqual(model.syncBusy, busy, "\(error)")
+            XCTAssertEqual(model.detail == nil, missing, "gone: no stale detail; else kept (\(error))")
+        }
+    }
+
+    /// The guard-rail fails closed: a count that cannot be read keeps the
+    /// warning, without a number.
+    func testBlockGuardRailFailsClosed() async throws {
+        let d = FakeDevice()
+        d.nodeDetailResult = detail()
+        d.usableError = BarkingError.Locked
+        let model = make(d)
+        await model.load()
+        XCTAssertTrue(model.blockCountUnknown)
+        XCTAssertNil(model.blockWarning)
+        let fr = try lang("fr")
+        let text = flat(NodeLabels.blockMessage(usableLeft: model.blockWarning, countUnknown: model.blockCountUnknown,
+                                                lang: fr))
+        XCTAssertTrue(text.hasPrefix("Barking cesse immédiatement"), text)
+        XCTAssertTrue(text.contains("n'a pas pu compter les nœuds utilisables"), text)
+        XCTAssertTrue(NodeLabels.blockMessage(usableLeft: nil, countUnknown: true, lang: try lang("en"))
+            .contains("could not count the usable nodes"))
+
+        d.usableError = nil
+        d.usableIfBlocked = 5
+        await model.checkBlock()
+        XCTAssertFalse(model.blockCountUnknown)
+        XCTAssertNil(model.blockWarning)
+    }
+
+    /// A second tap while the count runs does nothing.
+    func testSecondTapDuringTheCountIsIgnored() async {
+        let d = FakeDevice()
+        d.nodeDetailResult = detail()
+        let model = make(d)
+        async let first = model.checkBlock()
+        async let second = model.checkBlock()
+        let results = await [first, second]
+        XCTAssertEqual(results.filter { $0 }.count, 1, "one count only")
+        XCTAssertFalse(model.checkingBlock)
+    }
+
+    /// A block during a sync stays "Blocking…" and tries again until the
+    /// lock is free; past the deadline it says it failed.
+    func testBlockRetriesWhileLocked() async {
+        let d = FakeDevice()
+        d.nodeDetailResult = detail()
+        let model = make(d)
+        model.lockRetry = .milliseconds(1)
+        d.blockLockedTimes = 3
+        let ok = await model.block()
+        XCTAssertTrue(ok)
+        XCTAssertEqual(d.blockAttempts, 4)
+        XCTAssertFalse(model.actionFailed)
+        XCTAssertFalse(model.blocking)
+        XCTAssertEqual(d.nodeCalls.last, "block:\(Self.id)")
+
+        model.lockDeadline = .milliseconds(20)
+        model.lockRetry = .milliseconds(5)
+        d.blockLockedTimes = 1_000
+        let late = await model.block()
+        XCTAssertFalse(late)
+        XCTAssertTrue(model.actionFailed)
+        XCTAssertFalse(model.blocking)
+    }
+
+    /// The blocked list: a failed read is an error, not "no blocked node";
+    /// a failed unblock is told.
+    func testBlockedListErrorIsNotEmpty() async {
+        let d = FakeDevice()
+        d.blockedNodesError = BarkingError.Locked
+        let model = BlockedNodesModel(core: CoreService(device: d, runner: DirectRunner()))
+        await model.load()
+        XCTAssertTrue(model.loaded)
+        XCTAssertTrue(model.loadFailed)
+        XCTAssertTrue(model.nodes.isEmpty)
+
+        d.blockedNodesError = nil
+        d.blockedNodeList = [BlockedNode(id: Self.id, at: 1_800_000_000, origin: nil)]
+        await model.load()
+        XCTAssertFalse(model.loadFailed)
+        XCTAssertEqual(model.nodes.count, 1)
+
+        d.unblockError = BarkingError.Locked
+        let unblocked = await model.unblock(model.nodes[0])
+        XCTAssertFalse(unblocked)
+        XCTAssertTrue(model.failed)
     }
 
     /// The push link only with instant notifications on, and when the

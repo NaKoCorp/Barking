@@ -1,5 +1,6 @@
 import BarkingKit
 import Observation
+import os
 import SwiftUI
 
 /// The blocked nodes (spec §7.4), newest first, each with "Unblock". A row
@@ -12,18 +13,37 @@ final class BlockedNodesModel {
     private(set) var loaded = false
     /// The last unblock was not recorded.
     private(set) var failed = false
+    /// The list could not be read (a sync holding the database, a storage
+    /// error): not the same as an empty list.
+    private(set) var loadFailed = false
+
+    private static let log = Logger(subsystem: "barking", category: "blocked-nodes")
 
     init(core: CoreService) { self.core = core }
 
+    /// Reads the list; a failure keeps what was shown and says so.
     func load() async {
-        nodes = ((try? await core.blockedNodes()) ?? []).sorted { ($0.at, $0.id) > ($1.at, $1.id) }
+        do {
+            nodes = try await core.blockedNodes().sorted { ($0.at, $0.id) > ($1.at, $1.id) }
+            loadFailed = false
+        } catch {
+            Self.log.error("blocked nodes: read failed (\(NodeDetailModel.kind(error), privacy: .public))")
+            loadFailed = true
+        }
         loaded = true
     }
 
     /// Unblocked, the node comes back only by the usual ways (discovery,
     /// added by hand): it leaves this list, not into the relays (§6.4).
     func unblock(_ node: BlockedNode) async -> Bool {
-        failed = (try? await core.unblockNode(id: node.id)) == nil
+        do {
+            try await core.unblockNode(id: node.id)
+            failed = false
+        } catch {
+            let kind = NodeDetailModel.kind(error), short = NodeLabels.shortId(node.id)
+            Self.log.error("blocked nodes: unblock failed (\(kind, privacy: .public)) for \(short, privacy: .public)")
+            failed = true
+        }
         await load()
         return !failed
     }
@@ -56,7 +76,14 @@ struct BlockedNodesView: View {
                 .font(.bBody).foregroundStyle(Color.fgMuted)
                 .fixedSize(horizontal: false, vertical: true)
             if model.failed { Banner(kind: .danger, title: "Not saved. Try again.") }
-            if model.loaded && model.nodes.isEmpty {
+            if model.loadFailed {
+                Banner(kind: .danger, title: "Couldn't load the list. Try again.",
+                       action: Banner.Action(label: "Try again", hint: "Reads the list again") {
+                           Task { await model.load() }
+                       })
+                    .accessibilityIdentifier("blockedNodes.loadFailed")
+            }
+            if model.loaded && !model.loadFailed && model.nodes.isEmpty {
                 Text("No blocked node.").font(.bBody).foregroundStyle(Color.fgSoft)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("blockedNodes.empty")

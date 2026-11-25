@@ -39,7 +39,9 @@ final class NodeDetailUITests: XCTestCase {
         open(app, "France, OVH SAS")
         let verdict = app.descendants(matching: .any)["node.verdict"]
         XCTAssertTrue(verdict.waitForExistence(timeout: 10))
-        XCTAssertTrue(verdict.label.contains("Matches what this iPhone sees"), verdict.label)
+        XCTAssertTrue(verdict.label.contains("Network and country verified"), verdict.label)
+        // The title is the node's own name: said so under it.
+        XCTAssertEqual(app.staticTexts["node.statedName"].label, "name stated by the node")
         XCTAssertTrue(app.descendants(matching: .any)["node.version"].label.contains("0.5.0 · protocol 5"))
         let reliability = app.buttons["node.reliability"]
         reveal(reliability, in: app)

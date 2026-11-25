@@ -69,7 +69,8 @@ struct NodeDetailView: View {
                 .accessibilityIdentifier("node.block.confirm")
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(verbatim: NodeLabels.blockMessage(usableLeft: model.blockWarning, lang: lang))
+            Text(verbatim: NodeLabels.blockMessage(usableLeft: model.blockWarning,
+                                                   countUnknown: model.blockCountUnknown, lang: lang))
         }
         .confirmationDialog(Text("Remove this node?"), isPresented: $confirmingRemove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) { Task { await remove() } }
@@ -87,6 +88,13 @@ struct NodeDetailView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: Space.s2) {
             ScreenTitle(verbatim: model.node.map(NodeLabels.name) ?? NodeLabels.shortId(model.id), size: 22)
+            if let node = model.node, NodeLabels.statedName(node) != nil {
+                // The title is the node's own free text: only its network
+                // and country are checked.
+                Text(verbatim: NodeLabels.statedNameNote(lang: lang))
+                    .font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                    .accessibilityIdentifier("node.statedName")
+            }
             HStack(alignment: .firstTextBaseline, spacing: Space.s2) {
                 Text(verbatim: Self.grouped(model.id))
                     .font(BarkingFont.mono(.caption, size: 12)).foregroundStyle(Color.fgMuted)
@@ -111,6 +119,11 @@ struct NodeDetailView: View {
                 StatusDot(.waiting, label: "Unreachable right now · last known details")
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("node.unreachable")
+            }
+            if model.syncBusy {
+                StatusDot(.checking, label: "Sync in progress, try again in a moment")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("node.syncBusy")
             }
         }
     }
@@ -304,8 +317,12 @@ struct NodeDetailView: View {
                 InfoRow(label: s("Latency"), value: latency, explain: { explaining = .latency },
                         identifier: "node.latency") { MonoValue(text: latency) }
                 InfoRow(label: s("Origin"), value: origin, identifier: "node.kind") { MonoValue(text: origin) }
-                InfoRow(label: s("Last answer"), value: lastSeen, identifier: "node.lastSeen") {
-                    MonoValue(text: lastSeen)
+                // A node that never answered this iPhone has no last answer
+                // (its reliability already says "new").
+                if node.lastSeen > 0 {
+                    InfoRow(label: s("Last answer"), value: lastSeen, identifier: "node.lastSeen") {
+                        MonoValue(text: lastSeen)
+                    }
                 }
                 InfoRow(label: s("My subscriptions"), value: subs, explain: { explaining = .mySubscriptions },
                         identifier: "node.mySubscriptions") { MonoValue(text: subs) }
@@ -342,11 +359,12 @@ struct NodeDetailView: View {
             if model.canRemove {
                 DangerButton("Remove", identifier: "node.remove", enabled: !model.blocking) { confirmingRemove = true }
             }
-            DangerButton("Block this node", identifier: "node.block", enabled: !model.blocking) {
+            DangerButton("Block this node", identifier: "node.block",
+                         enabled: !model.blocking && !model.checkingBlock) {
                 Task {
-                    // The guard-rail is read at the tap, then the question (§6.4).
-                    await model.checkBlock()
-                    confirmingBlock = true
+                    // The guard-rail is read at the tap, then the question
+                    // (§6.4); a second tap during the count does nothing.
+                    if await model.checkBlock() { confirmingBlock = true }
                 }
             }
             if model.blocking {

@@ -209,7 +209,27 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var refreshError: Error?
     /// Thrown by `blockNode` and `removeNode` when set (nothing recorded).
     var nodeActionError: Error?
-    func nodeDetail(id: String) throws -> NodeDetail { try nodeDetailOrThrow() }
+    /// Thrown by `nodeDetail` when set.
+    var nodeDetailError: Error?
+    /// Thrown by `usableNodesIfBlocked` when set.
+    var usableError: Error?
+    /// Thrown by `blockedNodes` when set.
+    var blockedNodesError: Error?
+    /// Thrown by `unblockNode` when set.
+    var unblockError: Error?
+    private var _blockLockedLeft = 0
+    /// `blockNode` throws `Locked` this many times first (a sync running).
+    var blockLockedTimes: Int {
+        get { lock.withLock { _blockLockedLeft } }
+        set { lock.withLock { _blockLockedLeft = newValue } }
+    }
+    private var _blockAttempts = 0
+    /// Every `blockNode` call, the `Locked` ones included.
+    var blockAttempts: Int { lock.withLock { _blockAttempts } }
+    func nodeDetail(id: String) throws -> NodeDetail {
+        if let nodeDetailError { throw nodeDetailError }
+        return try nodeDetailOrThrow()
+    }
     func refreshNodeInfo(id: String) throws -> NodeDetail {
         lock.withLock { _nodeCalls.append("refresh:\(id)") }
         if let refreshError { throw refreshError }
@@ -220,11 +240,24 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         lock.withLock { _nodeCalls.append("remove:\(id)") }
     }
     func blockNode(id: String) throws {
+        let locked = lock.withLock { () -> Bool in
+            _blockAttempts += 1
+            guard _blockLockedLeft > 0 else { return false }
+            _blockLockedLeft -= 1
+            return true
+        }
+        if locked { throw BarkingError.Locked }
         if let nodeActionError { throw nodeActionError }
         lock.withLock { _nodeCalls.append("block:\(id)") }
     }
-    func unblockNode(id: String) throws { lock.withLock { _nodeCalls.append("unblock:\(id)") } }
-    func blockedNodes() throws -> [BlockedNode] { blockedNodeList }
+    func unblockNode(id: String) throws {
+        if let unblockError { throw unblockError }
+        lock.withLock { _nodeCalls.append("unblock:\(id)") }
+    }
+    func blockedNodes() throws -> [BlockedNode] {
+        if let blockedNodesError { throw blockedNodesError }
+        return blockedNodeList
+    }
     func addDefaultNodes(entries: [DefaultNode]) throws {
         lock.withLock { _defaultNodeCalls.append(entries.map { "\($0.id)@\($0.addr)" }) }
     }
@@ -234,7 +267,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         return resetDefaultsResult
     }
     func dismissedDefaultsCount() throws -> UInt32 { dismissedCount }
-    func usableNodesIfBlocked(id: String) throws -> UInt32 { usableIfBlocked }
+    func usableNodesIfBlocked(id: String) throws -> UInt32 {
+        if let usableError { throw usableError }
+        return usableIfBlocked
+    }
     private var _pushSettings: [PushSettings?] = []
     /// Every `setPush` call, in order (`nil`: push off).
     var pushSettings: [PushSettings?] { lock.withLock { _pushSettings } }

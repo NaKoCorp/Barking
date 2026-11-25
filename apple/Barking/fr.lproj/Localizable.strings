@@ -585,7 +585,9 @@
 "not shared" = "non communiqué";
 "doesn't match" = "ne concorde pas";
 "can't be checked" = "non vérifiable";
-"Matches what this iPhone sees" = "Concorde avec ce que voit cet iPhone";
+"Network and country verified" = "Réseau et pays vérifiés";
+"network and country verified" = "réseau et pays vérifiés";
+"name stated by the node" = "nom déclaré par le nœud";
 "Declared %@ · observed %@" = "Déclaré %@ · constaté %@";
 "Can't be checked · this node doesn't share its origin" = "Non vérifiable · ce nœud ne communique pas son origine";
 "Can't be checked · address missing from the base" = "Non vérifiable · adresse absente de la base";
@@ -670,6 +672,10 @@
 "blocked on %@" = "bloqué le %@";
 "Barking no longer contacts a blocked node. Unblocking it doesn't bring it back: it returns only if the network finds it again or you add it by hand." = "Barking ne contacte plus un nœud bloqué. Le débloquer ne le fait pas revenir : il ne revient que si le réseau le retrouve ou si vous l’ajoutez à la main.";
 "No blocked node." = "Aucun nœud bloqué.";
+"Couldn't load the list. Try again." = "Impossible de charger la liste. Réessayez.";
+"Reads the list again" = "Relit la liste";
+"Sync in progress, try again in a moment" = "Synchronisation en cours, réessayez dans un instant";
+"Barking could not count the usable nodes that would be left: your messages may be kept in fewer places than usual." = "Barking n’a pas pu compter les nœuds utilisables qui resteraient : vos messages pourraient être gardés en moins d’endroits que d’habitude.";
 
 /* Settings › Licences (node transparency spec §6.3). */
 "Licenses" = "Licences";

@@ -83,10 +83,12 @@ final class NodeListTests: XCTestCase {
         XCTAssertEqual(flat(row.status.text), "bonne · 38 ms")
         XCTAssertEqual(row.idLine, "AAAAAA…AXQ · 51.38.12.4:7700")
         XCTAssertEqual(row.verdict?.state, .ok)
-        XCTAssertEqual(row.verdict?.text, "vérifié")
+        // The network and the country are checked, not the name (free text).
+        XCTAssertEqual(row.verdict?.text, "réseau et pays vérifiés")
+        XCTAssertEqual(NodeLabels.verdictWord(.matches, lang: try lang("en")).text, "network and country verified")
         XCTAssertEqual(row.extras, "réveils · 3 abonnements")
         let label = flat(row.accessibilityLabel)
-        for part in ["France", "OVH SAS", "fiabilité bonne", "38 ms", "vérifié", "3 abonnements"] {
+        for part in ["France", "OVH SAS", "fiabilité bonne", "38 ms", "réseau et pays vérifiés", "3 abonnements"] {
             XCTAssertTrue(label.contains(part), "\(part) in \(label)")
         }
     }
@@ -193,7 +195,8 @@ final class NodeListTests: XCTestCase {
         let fr = try lang("fr")
         let match = NodeLabels.verdictLine(.matches, lang: fr)
         XCTAssertEqual(match.state, .ok)
-        XCTAssertEqual(match.text, "Concorde avec ce que voit cet iPhone")
+        XCTAssertEqual(match.text, "Réseau et pays vérifiés")
+        XCTAssertEqual(NodeLabels.verdictLine(.matches, lang: try lang("en")).text, "Network and country verified")
         let off = NodeLabels.verdictLine(.mismatch(declaredCountry: "FR", observedCountry: "NL", declaredAsn: 16276,
                                                    observedAsn: 24940), lang: fr)
         XCTAssertEqual(off.state, .waiting)
