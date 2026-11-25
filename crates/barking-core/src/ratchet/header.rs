@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Size of the plaintext header.
 pub(super) const HEADER_LEN: usize = 32 + 4 + 4;
 /// Size of the encrypted header: XChaCha20 nonce, header, Poly1305 tag.
-pub(super) const ENC_HEADER_LEN: usize = XNONCE_LEN + HEADER_LEN + 16;
+pub(crate) const ENC_HEADER_LEN: usize = XNONCE_LEN + HEADER_LEN + 16;
 
 /// Double ratchet message as it travels.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

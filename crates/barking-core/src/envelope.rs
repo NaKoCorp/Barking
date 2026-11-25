@@ -22,8 +22,8 @@ use crate::crypto::labels;
 use crate::handshake::pqxdh::InitialMessage;
 use crate::identity::{DeviceKeys, Fingerprint};
 use crate::mailbox::MailboxId;
-use crate::packet::{DEFAULT_HOPS, DEFAULT_TTL_SECS, Kind, Packet, Tier, ack};
-use crate::ratchet::{RatchetMessage, RatchetState};
+use crate::packet::{DEFAULT_HOPS, DEFAULT_TTL_SECS, Kind, OVERHEAD, Packet, Tier, ack};
+use crate::ratchet::{BODY_TAG_LEN, ENC_HEADER_LEN, RatchetMessage, RatchetState};
 use crate::{CoreError, Result};
 
 /// Maximum size of a text, in bytes.
@@ -265,6 +265,11 @@ fn seal_initial(
 /// With `initial = Some((init, ik_b))`, the packet is a `Wire::Initial`: the
 /// PQXDH message is sealed for the recipient's X25519 identity key `ik_b`.
 /// On error, `ratchet` has not advanced.
+///
+/// The plaintext is padded with zeros so that the payload always fills its
+/// tier (`tier.size() - OVERHEAD` bytes): neither the clear `payload_len`
+/// nor the postcard lengths inside the payload reveal the message size,
+/// only the tier (issue #82).
 pub fn seal(
     env: &Envelope,
     ratchet: &mut RatchetState,
@@ -275,12 +280,31 @@ pub fn seal(
     rng: &mut impl CryptoRng,
 ) -> Result<Packet> {
     env.body.check()?;
-    let pt =
-        Zeroizing::new(postcard::to_allocvec(env).map_err(|_| CoreError::Malformed("envelope"))?);
     // All fallible checks before advancing the ratchet.
+    let base = postcard::experimental::serialized_size(env)
+        .map_err(|_| CoreError::Malformed("envelope"))?;
     let sealed = initial
         .map(|(init, ik_b)| seal_initial(init, ik_b, rng))
         .transpose()?;
+    // Tier chosen on the unpadded size.
+    let unpadded = wire_len(sealed.as_ref(), base)?;
+    let mut tier = Tier::fit(unpadded)?;
+    if sealed.is_some() && tier == Tier::S {
+        // Session opening: never in tier S (not over LoRa).
+        tier = Tier::M;
+    }
+    let target = tier.size() - OVERHEAD;
+    let mut pad = target - unpadded;
+    // A postcard length that grows from 1 to 2 bytes with the padding
+    // overshoots the target: corrected once, then checked.
+    pad = pad.saturating_sub(wire_len(sealed.as_ref(), base + pad)?.saturating_sub(target));
+    if wire_len(sealed.as_ref(), base + pad)? != target {
+        return Err(CoreError::Malformed("padding"));
+    }
+    // Exact-size buffer: no reallocation leaves a copy of the plaintext
+    // in freed memory.
+    let mut pt = Zeroizing::new(vec![0u8; base + pad]);
+    postcard::to_slice(env, pt.as_mut_slice()).map_err(|_| CoreError::Malformed("envelope"))?;
     let mut next = ratchet.clone();
     let msg = next.encrypt(&pt, ad, rng)?;
     let wire = match sealed {
@@ -292,10 +316,8 @@ pub fn seal(
         None => Wire::Normal { msg },
     };
     let payload = postcard::to_allocvec(&wire).map_err(|_| CoreError::Malformed("payload"))?;
-    let mut tier = Tier::fit(payload.len())?;
-    if matches!(wire, Wire::Initial { .. }) && tier == Tier::S {
-        // Session opening: never in tier S (not over LoRa).
-        tier = Tier::M;
+    if payload.len() != target {
+        return Err(CoreError::Malformed("padding"));
     }
     *ratchet = next;
     Ok(Packet {
@@ -307,6 +329,30 @@ pub fn seal(
         mailbox,
         payload,
     })
+}
+
+/// Postcard size of the `Wire` that a plaintext of `pt_len` bytes gives, of
+/// the same variant as `sealed` (`Initial` with that sealed message, or
+/// `Normal`). Measured on a zeroed stand-in: the ratchet message has a
+/// fixed-size encrypted header and a body `BODY_TAG_LEN` longer than the
+/// plaintext.
+fn wire_len(sealed: Option<&([u8; 32], Vec<u8>)>, pt_len: usize) -> Result<usize> {
+    let ct_len = pt_len
+        .checked_add(BODY_TAG_LEN)
+        .ok_or(CoreError::TooLarge)?;
+    let msg = RatchetMessage {
+        enc_header: vec![0; ENC_HEADER_LEN],
+        ct: vec![0; ct_len],
+    };
+    let wire = match sealed {
+        Some((ek, sealed_init)) => Wire::Initial {
+            ek: *ek,
+            sealed_init: sealed_init.clone(),
+            msg,
+        },
+        None => Wire::Normal { msg },
+    };
+    postcard::experimental::serialized_size(&wire).map_err(|_| CoreError::Malformed("payload"))
 }
 
 /// Granularity of the expiry of a packet sealed by the core.
@@ -367,11 +413,15 @@ pub fn open(
 ///
 /// Separate from [`open`] so that the caller can tell a decryption failure
 /// (ratchet unchanged) from authenticated but rejected content (ratchet advanced).
+///
+/// The plaintext is `postcard(Envelope)` followed by zero padding that makes
+/// the packet fill its tier (issue #82); any non-zero byte after the
+/// envelope is refused.
 pub fn decode(pt: &[u8]) -> Result<Envelope> {
     let (env, rest): (Envelope, _) =
         postcard::take_from_bytes(pt).map_err(|_| CoreError::Malformed("envelope"))?;
-    if !rest.is_empty() {
-        return Err(CoreError::Malformed("extra bytes in the envelope"));
+    if rest.iter().any(|&b| b != 0) {
+        return Err(CoreError::Malformed("non-zero padding in the envelope"));
     }
     env.body.check()?;
     Ok(env)
@@ -384,7 +434,7 @@ mod tests {
     use crate::handshake::pqxdh::{SessionSecrets, initiate, respond};
     use crate::handshake::prekeys::PrekeySecrets;
     use crate::identity::RootIdentity;
-    use crate::packet::DEFAULT_TTL_SECS;
+    use crate::packet::{DEFAULT_TTL_SECS, OVERHEAD};
     use crate::store::MessageId;
     use chacha20::ChaCha20Rng;
     use proptest::prelude::*;
@@ -717,6 +767,57 @@ mod tests {
         assert!(matches!(parse_wire(&bytes), Err(CoreError::Malformed(_))));
         assert!(matches!(parse_wire(&[]), Err(CoreError::Malformed(_))));
         assert!(matches!(parse_wire(&[7]), Err(CoreError::Malformed(_))));
+    }
+
+    #[test]
+    fn decode_accepts_zero_padding() {
+        let mut rng = ChaCha20Rng::seed_from_u64(40);
+        let e = env(&mut rng, "hi");
+        let mut pt = postcard::to_allocvec(&e).unwrap();
+        pt.extend_from_slice(&[0; 500]);
+        assert_eq!(decode(&pt).unwrap(), e);
+    }
+
+    #[test]
+    fn decode_rejects_nonzero_trailing() {
+        let mut rng = ChaCha20Rng::seed_from_u64(41);
+        let e = env(&mut rng, "hi");
+        let mut pt = postcard::to_allocvec(&e).unwrap();
+        pt.extend_from_slice(&[0, 0, 1, 0]);
+        assert!(matches!(decode(&pt), Err(CoreError::Malformed(_))));
+    }
+
+    #[test]
+    fn payload_fills_tier_for_every_text_len() {
+        let mut s = setup(42);
+        let ad = s.sa.ad.clone();
+        let e0 = env(&mut s.rng, "x");
+        let p0 = send_initial(&mut s, &e0);
+        let Wire::Initial { msg, .. } = parse_wire(&p0.payload).unwrap() else {
+            panic!("Initial expected");
+        };
+        open(&msg, &mut s.b, &ad, NOW).unwrap();
+        for len in 0..=MAX_TEXT_LEN {
+            let e = env(&mut s.rng, &"a".repeat(len));
+            let p = seal(&e, &mut s.b, &ad, None, MB, NOW, &mut s.rng).unwrap();
+            assert_eq!(p.payload.len(), p.tier.size() - OVERHEAD, "len {len}");
+            let decoded = Packet::decode(&p.encode()).unwrap();
+            let Wire::Normal { msg } = parse_wire(&decoded.payload).unwrap() else {
+                panic!("Normal expected");
+            };
+            assert_eq!(open(&msg, &mut s.a, &ad, NOW).unwrap(), e, "len {len}");
+        }
+    }
+
+    #[test]
+    fn initial_payload_fills_tier() {
+        for len in [0, 1, 500, MAX_TEXT_LEN] {
+            let mut s = setup(43);
+            let e = env(&mut s.rng, &"a".repeat(len));
+            let p = send_initial(&mut s, &e);
+            assert_eq!(p.tier, Tier::L);
+            assert_eq!(p.payload.len(), Tier::L.size() - OVERHEAD, "len {len}");
+        }
     }
 
     fn mref(n: u8, by_sender: bool) -> MessageRef {
