@@ -8,8 +8,10 @@
 //! any write (`Device::with_core`): during a sync of this process they wait
 //! for it to end (up to the lock timeout, `Locked` past it), and the sync,
 //! which saved its state before releasing the lock, cannot overwrite them.
-//! `refresh_node_info` dials a node and holds the lock like a sync for the
-//! whole exchange (`Device::with_core_sync`).
+//! `refresh_node_info` takes it the same way, twice and briefly: once to
+//! read what the dial needs, once to save what came back. The dial itself
+//! (up to some 40 s against dead addresses) runs without it, so that it
+//! never holds up the notification extension or the other calls.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -542,6 +544,14 @@ struct Exchange {
     observed: Option<IpAddr>,
 }
 
+/// What `refresh_node_info` reads under the lock before dialling.
+struct DialPlan {
+    addrs: Vec<SocketAddr>,
+    /// The push relay to ask about, only to a node holding one of my
+    /// subscriptions.
+    relay: Option<NodeId>,
+}
+
 /// Connects to `id` at `addrs` (the sync's dialer) and asks its report,
 /// about `relay` when push is on.
 async fn exchange(
@@ -572,6 +582,66 @@ async fn exchange(
     })
 }
 
+impl Device {
+    /// `refresh_node_info` with `dial` doing the exchange, between two short
+    /// holds of the lock: none while `dial` runs.
+    fn refresh_with(
+        &self,
+        id: NodeId,
+        dial: impl FnOnce(NodeId, &[SocketAddr], Option<NodeId>) -> Result<Exchange, BarkingError>,
+    ) -> Result<NodeDetail, BarkingError> {
+        let allow_private = self.allow_private();
+        let plan = self.with_core(|core| {
+            let (state, _) = NetState::load_checked(core, now(), allow_private)
+                .map_err(BarkingError::storage)?;
+            if state.blocked.contains_key(&id) {
+                return Err(BarkingError::invalid("node is blocked"));
+            }
+            let addrs = state.view.get(&id).ok_or(BarkingError::NotFound)?.addrs();
+            // The relay only to a node holding one of my subscriptions
+            // (the others would learn which relay rings this device).
+            let relay = PushConfig::effective(core)?
+                .map(|c| c.relay.id)
+                .filter(|_| {
+                    PushState::load(core).is_ok_and(|p| p.subscribed_nodes().contains(&id))
+                });
+            Ok(DialPlan { addrs, relay })
+        })?;
+        let got = dial(id, &plan.addrs, plan.relay)?;
+        self.with_core(|core| {
+            // Read again: a sync, a block or a removal may have landed
+            // during the dial, and saving the state read before it would
+            // undo them.
+            let t = now();
+            let (mut state, _) =
+                NetState::load_checked(core, t, allow_private).map_err(BarkingError::storage)?;
+            if state.blocked.contains_key(&id) {
+                return Err(BarkingError::invalid("node is blocked"));
+            }
+            if state.view.get(&id).is_none() {
+                return Err(BarkingError::NotFound);
+            }
+            // The session proved the node: it answered as itself.
+            state.view.confirm(&id, t);
+            state.note_latency(id, &got.rtt);
+            if let Some(report) = got.report {
+                state.info.insert(
+                    id,
+                    CachedInfo {
+                        report,
+                        fetched_at: t,
+                        observed: got.observed,
+                    },
+                );
+            }
+            state.save(core).map_err(BarkingError::storage)?;
+            let mut detail = Context::load(core, self, Some(state), t)?.detail(&id)?;
+            detail.peer_version = Some(got.peer_version);
+            Ok(detail)
+        })
+    }
+}
+
 #[uniffi::export]
 impl Device {
     /// Nodes of the local view: in use first, then by reliability (Good,
@@ -597,49 +667,16 @@ impl Device {
     /// Dials the node, asks its report (about the push relay when push is
     /// on), records the round trips, the report and the address the node
     /// answered on, and returns the detail, with the protocol version the
-    /// session negotiated. Holds the
-    /// lock like a sync for the whole exchange (it waits for a sync in
-    /// progress first). A blocked node is refused (`InvalidInput`, "node is
-    /// blocked"), a node not in the view is `NotFound`; a node that does not
-    /// answer is `Network`, what is stored unchanged.
+    /// session negotiated. The lock is held only to read what the dial needs
+    /// and to save its outcome, not during the dial (module documentation).
+    /// A blocked node is refused (`InvalidInput`, "node is blocked"), before
+    /// the dial or if it was blocked during it (the answer is then dropped);
+    /// a node not in the view is `NotFound`; a node that does not answer is
+    /// `Network`, what is stored unchanged.
     pub fn refresh_node_info(&self, id: String) -> Result<NodeDetail, BarkingError> {
         guard(|| {
             let id = parse_id(&id)?;
-            let allow_private = self.allow_private();
-            self.with_core_sync(|core| {
-                let t = now();
-                let (mut state, _) = NetState::load_checked(core, t, allow_private)
-                    .map_err(BarkingError::storage)?;
-                if state.blocked.contains_key(&id) {
-                    return Err(BarkingError::invalid("node is blocked"));
-                }
-                let addrs = state.view.get(&id).ok_or(BarkingError::NotFound)?.addrs();
-                // The relay only to a node holding one of my subscriptions
-                // (the others would learn which relay rings this device).
-                let relay = PushConfig::effective(core)?
-                    .map(|c| c.relay.id)
-                    .filter(|_| {
-                        PushState::load(core).is_ok_and(|p| p.subscribed_nodes().contains(&id))
-                    });
-                let got = block_on(exchange(id, &addrs, relay))??;
-                // The session proved the node: it answered as itself.
-                state.view.confirm(&id, t);
-                state.note_latency(id, &got.rtt);
-                if let Some(report) = got.report {
-                    state.info.insert(
-                        id,
-                        CachedInfo {
-                            report,
-                            fetched_at: t,
-                            observed: got.observed,
-                        },
-                    );
-                }
-                state.save(core).map_err(BarkingError::storage)?;
-                let mut detail = Context::load(core, self, Some(state), t)?.detail(&id)?;
-                detail.peer_version = Some(got.peer_version);
-                Ok(detail)
-            })
+            self.refresh_with(id, |id, addrs, relay| block_on(exchange(id, addrs, relay))?)
         })
     }
 
@@ -932,5 +969,106 @@ mod tests {
                 observed_asn: 2,
             }
         );
+    }
+
+    /// A device with node `n` added by hand, its lock never waited for:
+    /// a held lock fails at once (`Locked`).
+    fn device_with_node(dir: &tempfile::TempDir, n: usize) -> (Arc<Device>, NodeId) {
+        let config = crate::DeviceConfig {
+            db_path: dir.path().join("barking.db").display().to_string(),
+            lock_path: dir.path().join("barking.lock").display().to_string(),
+            db_key: vec![1; 32],
+            lock_timeout_ms: 0,
+            allow_private: true,
+        };
+        let d = Device::create(config, "a".into()).unwrap().device;
+        let key = barking_node::testing::key(n);
+        let id = NodeId::from_public_key(&key.verifying_key());
+        d.add_node(id.to_string(), "127.0.0.1:9".into()).unwrap();
+        (d, id)
+    }
+
+    fn answer(observed: &str) -> Exchange {
+        Exchange {
+            peer_version: 5,
+            report: Some(NodeInfoReport {
+                software: "barking-node 0.5.0".into(),
+                protocol: 5,
+                uptime_secs: 60,
+                storage: FillTier::Low,
+                wake: None,
+                push_link: None,
+                origin: None,
+            }),
+            rtt: vec![std::time::Duration::from_millis(30)],
+            observed: Some(observed.parse().unwrap()),
+        }
+    }
+
+    fn cached(d: &Device, id: &NodeId) -> Option<CachedInfo> {
+        d.with_core(|core| {
+            let (state, _) =
+                NetState::load_checked(core, now(), true).map_err(BarkingError::storage)?;
+            Ok(state.info.get(id).cloned())
+        })
+        .unwrap()
+    }
+
+    /// The dial runs without the lock: another call (here a write, with no
+    /// wait allowed) goes through meanwhile; the answer, and the address it
+    /// came from, are saved afterwards.
+    #[test]
+    fn refresh_dials_without_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (d, id) = device_with_node(&dir, 1);
+        let detail = d
+            .refresh_with(id, |_, addrs, relay| {
+                assert_eq!(addrs, ["127.0.0.1:9".parse().unwrap()]);
+                assert_eq!(relay, None);
+                // Would be `Locked` if the refresh held the lock.
+                d.add_node(id.to_string(), "127.0.0.1:10".into())?;
+                Ok(answer("203.0.113.9"))
+            })
+            .unwrap();
+        assert_eq!(detail.peer_version, Some(5));
+        assert!(detail.report.is_some());
+        assert_eq!(detail.node.latency_ms, Some(30));
+        let c = cached(&d, &id).unwrap();
+        assert_eq!(c.observed, Some("203.0.113.9".parse().unwrap()));
+    }
+
+    /// Blocked during the dial: the answer is dropped and the refresh says
+    /// so as for a node blocked before; removed during it: `NotFound`.
+    #[test]
+    fn refresh_drops_the_answer_of_a_node_blocked_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (d, id) = device_with_node(&dir, 1);
+        let r = d.refresh_with(id, |id, _, _| {
+            d.block_node(id.to_string())?;
+            Ok(answer("203.0.113.9"))
+        });
+        assert!(
+            matches!(&r, Err(BarkingError::InvalidInput { detail }) if detail.contains("node is blocked")),
+            "{r:?}"
+        );
+        assert_eq!(cached(&d, &id), None);
+        assert!(
+            d.blocked_nodes()
+                .unwrap()
+                .iter()
+                .any(|b| b.id == id.to_string())
+        );
+        // Blocked before: never dialled.
+        let r = d.refresh_with(id, |_, _, _| panic!("a blocked node is dialled"));
+        assert!(matches!(r, Err(BarkingError::InvalidInput { .. })));
+
+        let dir = tempfile::tempdir().unwrap();
+        let (d, id) = device_with_node(&dir, 2);
+        let r = d.refresh_with(id, |id, _, _| {
+            d.remove_node(id.to_string())?;
+            Ok(answer("203.0.113.9"))
+        });
+        assert!(matches!(r, Err(BarkingError::NotFound)), "{r:?}");
+        assert_eq!(cached(&d, &id), None);
     }
 }
