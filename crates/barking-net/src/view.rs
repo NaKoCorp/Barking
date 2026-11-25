@@ -7,7 +7,7 @@
 //! of the view, so a clock error cannot wipe the view or ban a node forever.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 use barking_core::transparency::AvoidReason;
@@ -104,6 +104,11 @@ pub struct View {
     #[cfg(test)]
     #[serde(skip)]
     pub(crate) no_puzzle: bool,
+    /// Nodes the user blocked: never let into the view. Runtime-only (the
+    /// view encoding is unchanged): `NetState` fills it from its own
+    /// `blocked` table on load.
+    #[serde(skip)]
+    pub(crate) blocked: HashSet<NodeId>,
     pub(crate) entries: HashMap<NodeId, NodeEntry>,
 }
 
@@ -113,8 +118,15 @@ impl View {
             allow_private,
             #[cfg(test)]
             no_puzzle: false,
+            blocked: HashSet::new(),
             entries: HashMap::new(),
         }
+    }
+
+    /// Sets the nodes refused entry into the view (see `blocked`). Entries
+    /// already in the view are left as they are.
+    pub fn set_blocked(&mut self, ids: HashSet<NodeId>) {
+        self.blocked = ids;
     }
 
     /// Rules records must follow to enter the view.
@@ -131,18 +143,19 @@ impl View {
     /// Adds or updates a node from a signed record, as a candidate: a record
     /// never confirms a node, only `confirm` does (after a handshake with that
     /// very node). An invalid record is ignored; a newer one replaces the old;
-    /// an older one is ignored. Returns true if the view changed.
+    /// an older one is ignored, as is the record of a blocked node. Returns
+    /// true if the view changed.
     pub fn insert(&mut self, record: NodeRecord, now: u64) -> bool {
         match record.verify(now, &self.policy()) {
-            Ok(id) => self.upsert(id, record, now),
-            Err(_) => false,
+            Ok(id) if !self.blocked.contains(&id) => self.upsert(id, record, now),
+            _ => false,
         }
     }
 
     /// Fills the record of an entry that has none (or refreshes it). The
-    /// record must verify and belong to `id`.
+    /// record must verify and belong to `id`, a node not blocked.
     pub fn set_record(&mut self, id: &NodeId, record: NodeRecord, now: u64) -> bool {
-        if !self.entries.contains_key(id) {
+        if self.blocked.contains(id) || !self.entries.contains_key(id) {
             return false;
         }
         match record.verify(now, &self.policy()) {
@@ -178,7 +191,11 @@ impl View {
     }
 
     /// Adds a node by hand, by identifier and address. It never expires.
+    /// A blocked node is refused (false).
     pub fn add_manual(&mut self, id: NodeId, addr: SocketAddr, now: u64) -> bool {
+        if self.blocked.contains(&id) {
+            return false;
+        }
         match self.entries.get_mut(&id) {
             Some(e) => {
                 let changed = !e.manual || e.manual_addr != Some(addr);
@@ -882,5 +899,28 @@ mod tests {
         let e = r.get(&id_of(2)).unwrap();
         assert!(e.last_seen <= NOW);
         assert!(e.avoided_until.unwrap() <= NOW + 7 * DAY);
+    }
+
+    #[test]
+    fn blocked_id_never_enters_view() {
+        let mut v = view();
+        let x = id_of(0);
+        v.set_blocked(HashSet::from([x]));
+        assert!(!v.insert(record(0, NOW), NOW));
+        assert!(!v.add_manual(x, addr(9, 9, 9).into(), NOW));
+        assert!(!v.set_record(&x, record(0, NOW), NOW));
+        assert!(v.get(&x).is_none());
+        // Other nodes still enter.
+        assert!(v.insert(record(1, NOW), NOW));
+        // An entry already in the view takes no new record once blocked.
+        let y = id_of(2);
+        assert!(v.add_manual(y, addr(8, 8, 8).into(), NOW));
+        v.set_blocked(HashSet::from([x, y]));
+        assert!(!v.set_record(&y, record(2, NOW), NOW));
+        assert!(v.get(&y).unwrap().record.is_none());
+        // The blocked set is not persisted: the view encoding is unchanged.
+        let bytes = postcard::to_allocvec(&v).unwrap();
+        let back = View::restore(&bytes, true, NOW).unwrap();
+        assert!(back.blocked.is_empty());
     }
 }

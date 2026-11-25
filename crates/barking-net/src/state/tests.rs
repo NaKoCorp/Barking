@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use barking_packet::Kind;
+use barking_proto::{NodeInfoReport, NodeOrigin};
 
 use super::*;
 use crate::plan::plan_deposits;
@@ -240,17 +243,221 @@ const FORMAT_1: &str = concat!(
 
 #[test]
 fn format_1_bytes_are_frozen() {
-    let bytes = golden_state().encode().unwrap();
+    // `StoredV1` still writes the bytes first released.
+    assert_eq!(
+        hex(&golden_state().encode_format_1().unwrap()),
+        FORMAT_1,
+        "the format 1 layout changed: it must stay readable as released"
+    );
+}
+
+/// Empty trailing tables of format 2: five empty sequences.
+const EMPTY_V2_TAIL: &str = "0000000000";
+
+#[test]
+fn format_1_state_migrates_to_2() {
+    // The released bytes read as format 2, every format 1 field unchanged:
+    // the encoding is the old one under the new version, then empty tables.
+    let v1 = data_encoding::HEXLOWER.decode(FORMAT_1.as_bytes()).unwrap();
+    let back = NetState::decode(&v1, NOW, true).expect("format 1 still reads");
+    let golden = golden_state();
+    assert_eq!(
+        hex(&back.encode().unwrap()),
+        format!("02{}{}", &FORMAT_1[2..], EMPTY_V2_TAIL)
+    );
+    assert_eq!(back.positions, golden.positions);
+    assert_eq!(back.ledger, golden.ledger);
+    assert_eq!(back.unaudited, golden.unaudited);
+    assert_eq!(back.page_bytes, golden.page_bytes);
+    assert!(back.view.get(&id_of(0)).unwrap().confirmed);
+    assert!(back.info.is_empty() && back.latency.is_empty() && back.blocked.is_empty());
+    assert!(back.defaults.is_empty() && back.dismissed_defaults.is_empty());
+
+    // A format 1 state with nodes added by hand, through the database.
+    let (_dir, mut core) = subject(NOW);
+    let mut s = golden_state();
+    s.view
+        .add_manual(id_of(4), crate::test_support::addr(9, 9, 9).into(), NOW);
+    s.view
+        .add_manual(id_of(5), crate::test_support::addr(8, 8, 8).into(), NOW);
+    core.set_transport_state(STATE_KEY, &s.encode_format_1().unwrap())
+        .unwrap();
+    let (back, reset) = NetState::load_checked(&mut core, NOW, true).unwrap();
+    assert!(!reset);
+    for n in [4, 5] {
+        let e = back.view.get(&id_of(n)).expect("hand-added node kept");
+        assert!(e.manual);
+        assert_eq!(e.manual_addr, s.view.get(&id_of(n)).unwrap().manual_addr);
+    }
+    assert_eq!(back.view.len(), 3);
+    assert_eq!(back.positions, s.positions);
+    assert_eq!(back.ledger, s.ledger);
+}
+
+fn report(software: &str) -> NodeInfoReport {
+    NodeInfoReport {
+        software: software.into(),
+        protocol: 5,
+        uptime_secs: 86_400,
+        storage: barking_proto::FillTier::Medium,
+        wake: Some(barking_proto::FillTier::Low),
+        push_link: None,
+        origin: Some(NodeOrigin {
+            asn: 64_496,
+            as_name: "EXAMPLE-AS".into(),
+            country: *b"FR",
+            for_v6: false,
+        }),
+    }
+}
+
+/// `golden_state` with every format 2 table filled (two ids where a table
+/// is sorted, so that the order is pinned).
+fn golden_state_v2() -> NetState {
+    let (a, b, c) = (id_of(0), id_of(1), id_of(2));
+    let mut s = golden_state();
+    s.info.insert(
+        a,
+        CachedInfo {
+            report: report("barking-node 0.1.0"),
+            fetched_at: NOW,
+        },
+    );
+    s.note_latency(a, &[Duration::from_millis(40), Duration::from_millis(60)]);
+    s.note_latency(b, &[Duration::from_millis(120)]);
+    s.blocked.insert(
+        b,
+        BlockedEntry {
+            at: NOW,
+            origin: None,
+        },
+    );
+    s.blocked.insert(
+        c,
+        BlockedEntry {
+            at: NOW,
+            origin: report("x").origin,
+        },
+    );
+    s.defaults.extend([a, c]);
+    s.dismissed_defaults.extend([b, c]);
+    s
+}
+
+#[test]
+fn format_2_roundtrip() {
+    let (_dir, mut core) = subject(NOW);
+    let s = golden_state_v2();
+    s.save(&mut core).unwrap();
+    let back = NetState::load(&mut core, NOW, true).unwrap();
+    assert_eq!(back.info, s.info);
+    assert_eq!(back.latency, s.latency);
+    assert_eq!(back.blocked, s.blocked);
+    assert_eq!(back.defaults, s.defaults);
+    assert_eq!(back.dismissed_defaults, s.dismissed_defaults);
+    assert_eq!(back.positions, s.positions);
+    assert_eq!(back.ledger, s.ledger);
+    assert_eq!(back.encode().unwrap(), s.encode().unwrap());
+    // The view refuses the blocked nodes again after a load.
+    let mut view = back.view.clone();
+    assert!(!view.add_manual(id_of(2), crate::test_support::addr(7, 7, 7).into(), NOW));
+}
+
+#[test]
+fn format_2_load_sanitizes_new_tables() {
+    let mut s = golden_state_v2();
+    // Info of a node no longer in the view, latency too long, dates ahead.
+    s.info.insert(
+        id_of(3),
+        CachedInfo {
+            report: report("gone"),
+            fetched_at: NOW,
+        },
+    );
+    s.info.get_mut(&id_of(0)).unwrap().fetched_at = NOW + 10 * 86_400;
+    s.blocked.get_mut(&id_of(1)).unwrap().at = u64::MAX;
+    s.latency.insert(id_of(0), (1..=12).collect());
+    s.latency.insert(id_of(3), Vec::new());
+    let back = NetState::decode(&s.encode().unwrap(), NOW, true).unwrap();
+    assert!(!back.info.contains_key(&id_of(3)));
+    assert_eq!(back.info[&id_of(0)].fetched_at, NOW);
+    assert_eq!(back.blocked[&id_of(1)].at, NOW);
+    assert_eq!(back.latency[&id_of(0)], (5..=12).collect::<Vec<u32>>());
+    assert!(!back.latency.contains_key(&id_of(3)));
+}
+
+#[test]
+fn latency_median_of_last_eight() {
+    let mut s = NetState::new(true);
+    let x = id_of(0);
+    assert_eq!(s.median_latency(&x), None);
+    let samples: Vec<Duration> = (1..=10).map(|i| Duration::from_millis(i * 10)).collect();
+    s.note_latency(x, &samples);
+    assert_eq!(s.latency[&x], vec![30, 40, 50, 60, 70, 80, 90, 100]);
+    assert_eq!(s.median_latency(&x), Some(65));
+    // Odd count: the middle value; whole milliseconds, saturated.
+    let y = id_of(1);
+    s.note_latency(
+        y,
+        &[
+            Duration::from_micros(1_900),
+            Duration::from_secs(u64::MAX),
+            Duration::from_millis(5),
+        ],
+    );
+    assert_eq!(s.latency[&y], vec![1, u32::MAX, 5]);
+    assert_eq!(s.median_latency(&y), Some(5));
+    // Two saturated values do not overflow the mean.
+    let z = id_of(2);
+    s.note_latency(z, &[Duration::MAX, Duration::MAX]);
+    assert_eq!(s.median_latency(&z), Some(u32::MAX));
+    // No samples: no entry.
+    s.note_latency(id_of(3), &[]);
+    assert!(!s.latency.contains_key(&id_of(3)));
+}
+
+/// The bytes of `golden_state_v2` under `FORMAT` 2.
+const FORMAT_2: &str = concat!(
+    "02a701018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7c2069101ecc263",
+    "164bd7c90cda670b9e5b2c0c1c56b4c79187158d8a514015787006ba31010a000001a01f0080a4a7",
+    "da0640ff05568312955f35cb45b0adb7bab8e7f25877a6731b512daf9ecdd3085eabe8da09c17d6f",
+    "49d45e8a3a836db02bce038237099f75071c9009711ee56c0e6b0c00010080a4a7da0680a4a7da06",
+    "0000003f0080a4a7da06750109090909090909090909090909090909090909090909090909090909",
+    "090909090180a4a7da06018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7",
+    "c2069180a4a7da06018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7c206",
+    "9180c7acda060000018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7c206",
+    "9105050505050505050505050505050505070001c3fbc0923c6a6a8c64c0c62574ad50b04f05b53b",
+    "d5804daedd43d2b584259c1b02018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab",
+    "1a5fd7c206910505050505050505050505050505050580a4a7da06018d3a191424b7a6b371871d41",
+    "18e5b63e4e0d6d398e90910e60ab1a5fd7c206910505050505050505050505050505050580a4a7da",
+    "0601c3fbc0923c6a6a8c64c0c62574ad50b04f05b53bd5804daedd43d2b584259c1b050505050505",
+    "0505050505050505050580a4a7da0601c3fbc0923c6a6a8c64c0c62574ad50b04f05b53bd5804dae",
+    "dd43d2b584259c1b80a4a7da06018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab",
+    "1a5fd7c20691808004018d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7c2",
+    "0691126261726b696e672d6e6f646520302e312e300580a3050101000001f0f7030a4558414d504c",
+    "452d415346520080a4a7da06028d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a",
+    "5fd7c2069102283cc3fbc0923c6a6a8c64c0c62574ad50b04f05b53bd5804daedd43d2b584259c1b",
+    "0178020456825618a8c20bb0ac92826f2e74475b0d03edde65f9eb1c319cb08a749b5a80a4a7da06",
+    "01f0f7030a4558414d504c452d4153465200c3fbc0923c6a6a8c64c0c62574ad50b04f05b53bd580",
+    "4daedd43d2b584259c1b80a4a7da0600020456825618a8c20bb0ac92826f2e74475b0d03edde65f9",
+    "eb1c319cb08a749b5a8d3a191424b7a6b371871d4118e5b63e4e0d6d398e90910e60ab1a5fd7c206",
+    "91020456825618a8c20bb0ac92826f2e74475b0d03edde65f9eb1c319cb08a749b5ac3fbc0923c6a",
+    "6a8c64c0c62574ad50b04f05b53bd5804daedd43d2b584259c1b",
+);
+
+#[test]
+fn format_2_bytes_are_frozen() {
+    let bytes = golden_state_v2().encode().unwrap();
     assert_eq!(
         hex(&bytes),
-        FORMAT_1,
+        FORMAT_2,
         "the stored network state changed: bump FORMAT and migrate"
     );
     let back = NetState::decode(
-        &data_encoding::HEXLOWER.decode(FORMAT_1.as_bytes()).unwrap(),
+        &data_encoding::HEXLOWER.decode(FORMAT_2.as_bytes()).unwrap(),
         NOW,
         true,
     )
-    .expect("format 1 still reads");
+    .expect("format 2 still reads");
     assert_eq!(back.encode().unwrap(), bytes);
 }
