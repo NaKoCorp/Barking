@@ -27,6 +27,8 @@ public actor CoreService {
     private var deliveryFlush: Task<Void, Never>?
     public private(set) var lastSync: SyncOutcome?
     public private(set) var lastSyncAt: Date?
+    /// A sync is running now, whoever started it.
+    public var isSyncing: Bool { inFlight != nil }
 
     /// `sleep` waits out the delivery window (tests open it by hand).
     public init(device: any DeviceHandle, runner: any CallRunner,
@@ -419,6 +421,7 @@ public actor CoreService {
         }
         inFlight = task
         inFlightQuick = quick
+        publish(.syncStarted)
         let outcome = await task.value
         // A full sync waiting for this one may have cleared it and started.
         finish(task)

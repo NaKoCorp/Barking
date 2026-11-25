@@ -49,6 +49,26 @@ final class NodeListUITests: XCTestCase {
         XCTAssertTrue(reset.waitUntil({ !$0.exists }), "the link leaves once nothing is left to restore")
     }
 
+    /// Opened while the launch sync still runs (six seconds here): the
+    /// known relays show at once, the sync shows as running, and once it
+    /// fails the tab says so.
+    func testNetworkDuringTheLaunchSync() throws {
+        let app = openNetwork(extra: ["-BarkingUITestSlowSync"])
+        let ovh = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "France, OVH SAS")).firstMatch
+        XCTAssertTrue(ovh.waitForExistence(timeout: 2), "the known relays wait for the sync")
+        XCTAssertFalse(says(app, "No relay yet").exists)
+        XCTAssertTrue(says(app, "Checking").exists, "the running sync is not shown")
+        let result = app.descendants(matching: .any)["network.result"]
+        XCTAssertTrue(result.waitForExistence(timeout: 15), "the failed sync is not said")
+        XCTAssertTrue(result.label.contains("Still unreachable"), result.label)
+        XCTAssertTrue(says(app, "Unreachable").exists)
+        XCTAssertTrue(ovh.exists, "the relays stay after the sync")
+    }
+
+    private func says(_ app: XCUIApplication, _ text: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+    }
+
     /// Screenshots of the list for review (`TEST_RUNNER_BARKING_NODE_SHOTS`
     /// = a folder on the Mac; `..._SIZE` = a content size category). Skipped
     /// otherwise.

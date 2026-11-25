@@ -39,6 +39,10 @@ import Foundation
 ///   unblocking and removing change the lists; the guard-rail always says
 ///   2 usable nodes would be left.
 ///
+/// - `-BarkingUITestSlowSync`: every sync takes six seconds, then reports
+///   the network unreachable (the launch sync is still running when a test
+///   opens the Network tab).
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -115,10 +119,14 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
                                                    verdict: .noRecord)),
     ]
     private var fakeRemoved: Set<String> = []
+    /// `-BarkingUITestSlowSync`.
+    private let slowSync: Bool
+    static let slowSyncSecs: TimeInterval = 6
 
     init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
-         ephemeral: Bool = false, nodes: Bool = false) {
+         ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false) {
         self.device = device
+        self.slowSync = slowSync
         self.fakeNodes = nodes
         self.ephemeral = ephemeral
         self.reactionState = reactionState
@@ -155,9 +163,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         }
         let ephemeral = arguments.contains("-BarkingUITestEphemeral")
         let nodes = arguments.contains("-BarkingUITestNodes")
-        guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes else { return device }
+        let slowSync = arguments.contains("-BarkingUITestSlowSync")
+        guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync else { return device }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
-                                reactionState: reactionState, ephemeral: ephemeral, nodes: nodes)
+                                reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync)
     }
 
     // MARK: The relays (`-BarkingUITestNodes`)
@@ -535,7 +544,11 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     }
     func contactDevices(contact: String) throws -> [MyDeviceInfo] { try device.contactDevices(contact: contact) }
     func sync(deadlineMs: UInt64) throws -> SyncSummary {
-        seed == nil ? try device.sync(deadlineMs: deadlineMs) : Self.offline
+        if slowSync {
+            Thread.sleep(forTimeInterval: Self.slowSyncSecs)
+            return Self.offline
+        }
+        return seed == nil ? try device.sync(deadlineMs: deadlineMs) : Self.offline
     }
     func quickSync(deadlineMs: UInt64) throws -> SyncSummary {
         seed == nil ? try device.quickSync(deadlineMs: deadlineMs) : Self.offline

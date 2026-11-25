@@ -34,7 +34,8 @@ struct RemovedBanner: View {
         }
         .task {
             await load()
-            for await _ in await core.changes { await load() }
+            // A sync starting changes nothing yet: its end says `.network`.
+            for await change in await core.changes where change != .syncStarted { await load() }
         }
     }
 

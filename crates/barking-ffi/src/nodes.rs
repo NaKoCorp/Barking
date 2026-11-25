@@ -8,7 +8,11 @@
 //! any write (`Device::with_core`): during a sync of this process they wait
 //! for it to end (up to the lock timeout, `Locked` past it), and the sync,
 //! which saved its state before releasing the lock, cannot overwrite them.
-//! `refresh_node_info` takes it the same way, twice and briefly: once to
+//! The reads of the screen (`nodes`, `node_detail`, `blocked_nodes`,
+//! `dismissed_defaults_count`, `usable_nodes_if_blocked`) do not wait for a
+//! sync of this process: they join its lock (`Device::with_core_read`), so
+//! the screen shows the nodes it knows while the sync runs.
+//! `refresh_node_info` takes it the same way as the writes, twice and briefly: once to
 //! read what the dial needs, once to save what came back. The dial itself
 //! (up to some 40 s against dead addresses) runs without it, so that it
 //! never holds up the notification extension or the other calls.
@@ -648,7 +652,7 @@ impl Device {
     /// Fair, New, Weak, Avoided), then by latency (unknown last).
     pub fn nodes(&self) -> Result<Vec<NodeInfo>, BarkingError> {
         guard(|| {
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let ctx = Context::load(core, self, None, now())?;
                 Ok(ctx.list())
             })
@@ -660,7 +664,7 @@ impl Device {
     pub fn node_detail(&self, id: String) -> Result<NodeDetail, BarkingError> {
         guard(|| {
             let id = parse_id(&id)?;
-            self.with_core(|core| Context::load(core, self, None, now())?.detail(&id))
+            self.with_core_read(|core| Context::load(core, self, None, now())?.detail(&id))
         })
     }
 
@@ -747,7 +751,7 @@ impl Device {
     pub fn blocked_nodes(&self) -> Result<Vec<BlockedNode>, BarkingError> {
         guard(|| {
             let allow_private = self.allow_private();
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let (state, _) = NetState::load_checked(core, now(), allow_private)
                     .map_err(BarkingError::storage)?;
                 let db = self.ipdb();
@@ -802,7 +806,7 @@ impl Device {
     pub fn dismissed_defaults_count(&self) -> Result<u32, BarkingError> {
         guard(|| {
             let allow_private = self.allow_private();
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let (state, _) = NetState::load_checked(core, now(), allow_private)
                     .map_err(BarkingError::storage)?;
                 Ok(u32::try_from(state.dismissed_defaults.len()).unwrap_or(u32::MAX))
@@ -817,7 +821,7 @@ impl Device {
         guard(|| {
             let id = parse_id(&id)?;
             let allow_private = self.allow_private();
-            self.with_core(|core| {
+            self.with_core_read(|core| {
                 let t = now();
                 let (state, _) = NetState::load_checked(core, t, allow_private)
                     .map_err(BarkingError::storage)?;

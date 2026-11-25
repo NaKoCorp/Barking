@@ -11,6 +11,8 @@ final class SyncReadsTests: XCTestCase {
     /// A node identifier that solves the identity puzzle (barking-node
     /// `testing::id_of(&key(0))`).
     private static let nodeId = "RU5BSFBEW6TLG4MHDVARRZNWHZHA23JZR2IJCDTAVMNF7V6CA2IQ"
+    /// Any identifier: a block does not check the puzzle.
+    private static let blockedId = String(repeating: "A", count: 50) + "XQ"
 
     func testConversationShowsWhileASyncIsInFlight() async throws {
         var cfg = try TestDevice.config(lockTimeoutMs: Budget.appLockMs)
@@ -43,6 +45,47 @@ final class SyncReadsTests: XCTestCase {
         XCTAssertFalse(model.removed)
 
         // The sync was still running: the reads did not come after it.
+        let took = await sync.value
+        XCTAssertGreaterThan(took, opened + 1)
+    }
+
+    /// The Network tab opens on the relays it knows while the launch sync
+    /// is still running, and so do the blocked nodes: neither list waits
+    /// for the sync.
+    func testNetworkShowsKnownRelaysWhileASyncIsInFlight() async throws {
+        var cfg = try TestDevice.config(lockTimeoutMs: Budget.appLockMs)
+        cfg.allowPrivate = true
+        let alice = try createDevice(config: cfg, deviceName: "alice").device
+        let hole = try SilentPort()
+        defer { hole.close() }
+        try alice.addNode(id: Self.nodeId, addr: "127.0.0.1:\(hole.port)")
+        try alice.blockNode(id: Self.blockedId)
+
+        let core = CoreService(device: alice, runner: AppCallRunner())
+        let sync = Task.detached { () -> TimeInterval in
+            let start = Date()
+            _ = await core.sync(reason: .launch)
+            return Date().timeIntervalSince(start)
+        }
+        try await waitForSyncLock(cfg)
+
+        let model = NetworkModel(core: core)
+        let start = Date()
+        await model.load()
+        let opened = Date().timeIntervalSince(start)
+        XCTAssertLessThan(opened, 1, "the relays waited for the sync")
+        XCTAssertEqual((model.inUse + model.others).map(\.id), [Self.nodeId])
+        XCTAssertEqual(model.blockedCount, 1)
+        XCTAssertTrue(model.loaded)
+        XCTAssertFalse(model.loadFailed)
+        XCTAssertEqual(model.status, .checking, "the launch sync shows as running")
+
+        let blocked = BlockedNodesModel(core: core)
+        let listed = Date()
+        await blocked.load()
+        XCTAssertLessThan(Date().timeIntervalSince(listed), 1, "the blocked nodes waited for the sync")
+        XCTAssertEqual(blocked.nodes.map(\.id), [Self.blockedId])
+
         let took = await sync.value
         XCTAssertGreaterThan(took, opened + 1)
     }

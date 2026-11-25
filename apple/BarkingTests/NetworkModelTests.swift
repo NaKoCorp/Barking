@@ -260,6 +260,85 @@ final class NodeListTests: XCTestCase {
         XCTAssertEqual(m.others.map(\.id), ["O2", "O1"])
     }
 
+    /// A failed read keeps the relays shown and says so: never "No relay yet".
+    func testFailedReadKeepsTheRelays() async {
+        let d = FakeDevice()
+        d.nodeList = [node("G1")]
+        let m = make(d)
+        XCTAssertFalse(m.loaded, "nothing read yet: no \"No relay yet\"")
+        await m.load()
+        XCTAssertTrue(m.loaded)
+        XCTAssertFalse(m.loadFailed)
+        d.nodesError = BarkingError.Locked
+        await m.load()
+        XCTAssertEqual(m.inUse.map(\.id), ["G1"], "the relays stay")
+        XCTAssertTrue(m.loadFailed)
+        d.nodesError = nil
+        await m.load()
+        XCTAssertFalse(m.loadFailed)
+    }
+
+    /// The first read failed: still not loaded, so the card waits instead of
+    /// claiming there is no relay.
+    func testFirstReadFailedIsNotAnEmptyList() async {
+        let d = FakeDevice()
+        d.nodesError = BarkingError.Locked
+        let m = make(d)
+        await m.load()
+        XCTAssertFalse(m.loaded)
+        XCTAssertTrue(m.loadFailed)
+    }
+
+    /// Never synced: opening the tab syncs, and says how it went.
+    func testAppearSyncsWhenNeverSynced() async {
+        let d = FakeDevice()
+        d.nodeList = [node("G1")]
+        let m = make(d)
+        await m.appear()
+        XCTAssertEqual(d.syncCalls, 1)
+        XCTAssertEqual(m.inUse.map(\.id), ["G1"])
+        XCTAssertNotNil(m.result, "the outcome is said")
+        XCTAssertFalse(m.syncing)
+    }
+
+    /// A sync that just ran is not run again on opening.
+    func testAppearSkipsAFreshSync() async {
+        let d = FakeDevice()
+        let core = CoreService(device: d, runner: DirectRunner())
+        _ = await core.sync(reason: .launch)
+        let m = NetworkModel(core: core)
+        await m.appear()
+        XCTAssertEqual(d.syncCalls, 1)
+        await m.appear(now: Date().addingTimeInterval(NetworkModel.staleAfter + 1))
+        XCTAssertEqual(d.syncCalls, 2, "an old sync runs again")
+    }
+
+    /// A failed sync on opening is said as such.
+    func testAppearSaysAFailedSync() async {
+        let d = FakeDevice()
+        d.summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: false, error: nil)
+        let m = make(d)
+        await m.appear()
+        XCTAssertEqual(m.status, .unreachable)
+        XCTAssertEqual(m.result, .unreachable(waiting: 0))
+    }
+
+    /// A sync started elsewhere shows as "Checking…" until it ends.
+    func testSyncStartedElsewhereShows() async {
+        let d = FakeDevice()
+        d.syncDelay = 0.5
+        let core = CoreService(device: d, runner: DirectRunner())
+        let m = NetworkModel(core: core)
+        let changes = await core.changes
+        let sync = Task.detached { _ = await core.sync(reason: .timer) }
+        for await change in changes where change == .syncStarted { break }
+        await m.syncStarted()
+        XCTAssertEqual(m.status, .checking)
+        await sync.value
+        await m.load()
+        XCTAssertNotEqual(m.status, .checking)
+    }
+
     func testResetLinkHiddenWithoutDismissed() async {
         let d = FakeDevice()
         d.dismissedCount = 0

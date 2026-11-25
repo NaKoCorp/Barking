@@ -82,11 +82,20 @@ struct NetworkView: View {
             confirming = r
         }
         .task {
-            await model.load()
-            for await change in await core.changes {
-                // Anything but a delivery state can move the queue or the relays.
-                if case .delivery = change { continue }
-                await model.load()
+            // Subscribed before the opening sync, so that none of its changes is missed.
+            let changes = await core.changes
+            await withDiscardingTaskGroup { group in
+                group.addTask { await model.appear() }
+                group.addTask {
+                    for await change in changes {
+                        switch change {
+                        case .syncStarted: await model.syncStarted()
+                        // Anything but a delivery state can move the queue or the relays.
+                        case .delivery: continue
+                        default: await model.load()
+                        }
+                    }
+                }
             }
         }
     }
@@ -169,7 +178,24 @@ struct NetworkView: View {
     private var relaysCard: some View {
         Card {
             VStack(alignment: .leading, spacing: 0) {
-                if model.inUse.isEmpty {
+                if model.loadFailed {
+                    Banner(kind: .danger, title: "Couldn't load the relays. Try again.",
+                           action: Banner.Action(label: "Try again", hint: "Reads the relays again") {
+                               Task { await model.load() }
+                           })
+                        .accessibilityIdentifier("network.loadFailed")
+                        .padding(.bottom, Space.s2)
+                }
+                if !model.loaded {
+                    // Never "No relay yet" before the relays were read.
+                    HStack(spacing: Space.s2) {
+                        ProgressView()
+                        Text("Loading the relays…").font(.bBody).foregroundStyle(Color.fgMuted)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("network.loading")
+                    .padding(.bottom, Space.s2)
+                } else if model.inUse.isEmpty {
                     Text(model.others.isEmpty ? "No relay yet. Until public relays exist, add one by hand."
                                               : "No relay in use yet.")
                         .font(.bBody).foregroundStyle(Color.fgMuted)

@@ -105,6 +105,9 @@ public enum CoreChange: Sendable, Equatable {
     /// (`CoreService.deliveriesOf`).
     case delivery(contact: String, ids: [Int64])
     case network
+    /// A sync started (any: the launch, the timer, a pull): the Network
+    /// tab shows it running. Its end publishes `.network`.
+    case syncStarted
     case devices
     case identity
     /// Ephemeral rows erased (`Message.id`): the expiry names no contact,
