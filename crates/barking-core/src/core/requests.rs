@@ -18,15 +18,15 @@ use rusqlite::{OptionalExtension, params};
 
 use super::log_limit::{LogLimiter, log_limited};
 use super::receive::{
-    R_BAD_CONTENT, R_PENDING_REQUEST, R_REQUEST_FORGED, R_UNKNOWN_SENDER, RxOut, quarantine,
-    trial_open,
+    R_BAD_CONTENT, R_PENDING_REQUEST, R_REQUEST_FORGED, R_UNKNOWN_SENDER, R_UNREADABLE,
+    REPLAY_TRANSPORT, Rx, RxClock, RxOut, quarantine, rx_packet, trial_open,
 };
 use super::send::{SealTime, Target, seal_for};
 use super::{
     Core, MAX_AGE_SECS, ReceiveOutcome, contacts, delivery, load_card, log, session_id, sync,
 };
 use crate::contact::ContactCard;
-use crate::content::ExtContent;
+use crate::content::{ExtContent, MAX_REPLAYED};
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::InitialMessage;
@@ -34,7 +34,7 @@ use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::packet::{Packet, PacketId};
 use crate::ratchet::RatchetMessage;
 use crate::store::{ContactRow, MessageId, Queries, arr, map_err, to_i64, to_u64};
-use crate::transparency::{SyncKind, TransparencyEvent};
+use crate::transparency::{RequestResolution, SyncKind, TransparencyEvent};
 use crate::{CoreError, Result};
 
 /// Requests kept at most (visible or hidden); a new sender beyond it is dropped.
@@ -220,6 +220,61 @@ pub(super) fn delete_request(q: &impl Queries, fp: Fingerprint) -> Result<bool> 
     Ok(n > 0)
 }
 
+/// Removes the request row of `fp` only: its held packets stay, attached by
+/// `fp`, to be replayed. Returns whether a request existed.
+pub(super) fn delete_request_row(q: &impl Queries, fp: Fingerprint) -> Result<bool> {
+    let n = q
+        .conn()
+        .execute(
+            "DELETE FROM contact_requests WHERE fp = ?1",
+            params![fp.0.as_slice()],
+        )
+        .map_err(map_err)?;
+    Ok(n > 0)
+}
+
+/// Closes the request of `fp`, if there is one (`how`, logged); its held
+/// packets stay, to be replayed (`replay_pending`). Returns whether a
+/// request existed.
+pub(super) fn resolve_request(
+    q: &impl Queries,
+    fp: Fingerprint,
+    how: RequestResolution,
+    now: u64,
+) -> Result<bool> {
+    if !delete_request_row(q, fp)? {
+        return Ok(false);
+    }
+    log(
+        q,
+        now,
+        None,
+        &TransparencyEvent::ContactRequestResolved { contact: fp, how },
+    )?;
+    Ok(true)
+}
+
+/// Contacts with first packets still held for them: a request resolved
+/// (accepted, added here or on another of my devices) whose replay has not
+/// run or was interrupted, or a known contact's new device (spec §7.7).
+pub(super) fn held_for_contacts(q: &impl Queries) -> Result<Vec<Fingerprint>> {
+    let mut stmt = q
+        .conn()
+        .prepare(
+            "SELECT DISTINCT p.fp FROM pending_initials p
+             JOIN contacts c ON c.fp = p.fp",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, Vec<u8>>(0))
+        .map_err(map_err)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(Fingerprint(arr(row.map_err(map_err)?)?));
+    }
+    Ok(out)
+}
+
 /// Every request (hidden ones too), most recently seen first, with the
 /// number of messages held for each.
 pub(super) fn list_requests(q: &impl Queries) -> Result<Vec<ContactRequest>> {
@@ -351,7 +406,7 @@ pub(super) fn list_pending_by_fp(q: &impl Queries, fp: Fingerprint) -> Result<Ve
         q,
         &format!(
             "SELECT {PENDING_COLUMNS} FROM pending_initials WHERE fp = ?1
-             ORDER BY received_at, packet_id"
+             ORDER BY received_at, rowid"
         ),
         &fp.0,
     )
@@ -364,7 +419,7 @@ pub(super) fn list_pending_by_ik(q: &impl Queries, ik: &[u8; 32]) -> Result<Vec<
         q,
         &format!(
             "SELECT {PENDING_COLUMNS} FROM pending_initials WHERE ik = ?1
-             ORDER BY received_at, packet_id"
+             ORDER BY received_at, rowid"
         ),
         ik,
     )
@@ -424,7 +479,7 @@ pub(super) fn attach_unknown_to_fp(
         q,
         &format!(
             "SELECT {PENDING_COLUMNS} FROM pending_initials WHERE ik = ?1 AND fp IS NULL
-             ORDER BY received_at, packet_id"
+             ORDER BY received_at, rowid"
         ),
         ik,
     )?;
@@ -1061,6 +1116,119 @@ fn hold_invitation(
     Ok(())
 }
 
+/// Replays one held first packet (spec §7.3, step 3), in one transaction
+/// that also drops its row: an interrupted replay resumes with the next
+/// packet, never twice the same. The packet goes through the normal receive
+/// path past the mailbox match, its checks dated at its reception, its
+/// writes and ack at `now` (`RxClock`).
+pub(super) fn replay_held(
+    core: &mut Core,
+    held: &PendingInitial,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<ReceiveOutcome> {
+    let my_fp = core.fingerprint();
+    let Core {
+        store,
+        device,
+        prekeys,
+        root,
+        log_limiter,
+        ..
+    } = core;
+    let clock = RxClock {
+        check: held.received_at,
+        write: now,
+    };
+    let (outcome, new_prekeys) = store.transaction(|tx| -> Result<RxOut> {
+        delete_pending(tx, held.packet_id)?;
+        let Ok(packet) = Packet::decode(&held.bytes) else {
+            let reason = R_UNREADABLE.to_owned();
+            return Ok((ReceiveOutcome::Quarantined { reason }, None));
+        };
+        let rx = Rx {
+            limiter: log_limiter,
+            device,
+            prekeys,
+            root: root.as_ref(),
+            my_fp: &my_fp,
+        };
+        rx_packet(
+            tx,
+            rx,
+            &packet,
+            true,
+            Vec::new(),
+            true,
+            REPLAY_TRANSPORT,
+            clock,
+            rng,
+        )
+    })?;
+    if let Some(p) = new_prekeys {
+        *prekeys = p;
+    }
+    Ok(outcome)
+}
+
+/// Replays the first packets held for `fp`, oldest first (`replay_held`),
+/// each with the envelope message id it was held under.
+fn replay_all(
+    core: &mut Core,
+    fp: Fingerprint,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<(Option<MessageId>, ReceiveOutcome)>> {
+    let mut out = Vec::new();
+    for held in list_pending_by_fp(&core.store, fp)? {
+        let outcome = replay_held(core, &held, now, rng)?;
+        out.push((held.message_id, outcome));
+    }
+    Ok(out)
+}
+
+/// Replays the first packets held for `fp`, now a contact, oldest first:
+/// their outcomes, in that order.
+pub(super) fn replay_pending(
+    core: &mut Core,
+    fp: Fingerprint,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<ReceiveOutcome>> {
+    Ok(replay_all(core, fp, now, rng)?
+        .into_iter()
+        .map(|(_, o)| o)
+        .collect())
+}
+
+/// Replays what is held for every contact (`held_for_contacts`): after an
+/// add here or synchronized from another of my devices, after a known
+/// contact's card was updated by an invite, or a replay interrupted.
+pub(super) fn replay_for_contacts(
+    core: &mut Core,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<()> {
+    for fp in held_for_contacts(&core.store)? {
+        replay_pending(core, fp, now, rng)?;
+    }
+    Ok(())
+}
+
+/// What `Core::accept_request` did.
+#[derive(Debug)]
+pub struct Accepted {
+    /// The new contact.
+    pub contact: Fingerprint,
+    /// The outcomes of its held packets, replayed oldest first. The ack of
+    /// a packet its sender no longer waits for is not queued: the `ack` of
+    /// such a `Message` must not be sent either.
+    pub replayed: Vec<ReceiveOutcome>,
+    /// `REQUEST_ACCEPTED`, sealed for each of the contact's devices (also
+    /// in the send queue).
+    pub packets: Vec<Packet>,
+}
+
 fn random_message_id(rng: &mut impl CryptoRng) -> MessageId {
     let mut id = [0u8; 16];
     rng.fill_bytes(&mut id);
@@ -1157,6 +1325,85 @@ impl Core {
             let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
             out.extend(mine);
             Ok(out)
+        })
+    }
+
+    /// Accepts the pending request of `fp` (spec §7.3):
+    ///
+    /// 1. in one transaction, adds its card as a contact without an alias
+    ///    (never the declared name: an alias taken would replace another
+    ///    contact), then sets `alias` if given, queues the contact for my
+    ///    other devices (`SyncContact`) and closes the request;
+    /// 2. replays its held packets, oldest first, one transaction each
+    ///    (`replay_held`);
+    /// 3. tells the contact (`REQUEST_ACCEPTED`, with the ids of at most
+    ///    `MAX_REPLAYED` messages shown), by the normal send path.
+    ///
+    /// No request: `UnknownContact`. An `alias` already used by another
+    /// contact: `Malformed`, and nothing is written.
+    pub fn accept_request(
+        &mut self,
+        fp: &Fingerprint,
+        alias: Option<&str>,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Accepted> {
+        self.ensure_active()?;
+        let fp = *fp;
+        let row = get_request(&self.store, fp)?.ok_or(CoreError::UnknownContact)?;
+        if self.store.block_state(fp)?.blocked {
+            return Err(CoreError::ContactBlocked);
+        }
+        let card = load_card(&row.card)?;
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
+            contacts::add_in(tx, device, &card, None, now, rng)?;
+            if let Some(alias) = alias {
+                contacts::set_alias_in(tx, fp, alias)?;
+            }
+            let time = sync::touch(tx, fp, now, false, device.public().id())?;
+            sync::send_state(tx, device, fp, time, rng)?;
+            resolve_request(tx, fp, RequestResolution::Accepted, now)?;
+            Ok(())
+        })?;
+        let replayed = replay_all(self, fp, now, rng)?;
+        let shown: Vec<MessageId> = replayed
+            .iter()
+            .filter(|(_, o)| {
+                matches!(
+                    o,
+                    ReceiveOutcome::Message { .. } | ReceiveOutcome::NeedsUpdate { .. }
+                )
+            })
+            .filter_map(|(id, _)| *id)
+            .take(MAX_REPLAYED)
+            .collect();
+        let body = ExtContent::RequestAccepted { replayed: shown }.to_body();
+        let Core { store, device, .. } = self;
+        let packets = store.transaction(|tx| {
+            let message_id = random_message_id(rng);
+            let target = Target::Contact(fp);
+            let sealed = seal_for(
+                tx,
+                device,
+                &target,
+                &body,
+                message_id,
+                SealTime::at(now),
+                rng,
+            )?;
+            // A delivery without a message row, as an invite: its ack is
+            // recognised and clears the send queue.
+            for (packet, peer) in &sealed {
+                let size = delivery::packet_size(packet);
+                tx.add_delivery(message_id, packet.id, *peer, false, now, size)?;
+            }
+            Ok(sealed.into_iter().map(|(p, _)| p).collect())
+        })?;
+        Ok(Accepted {
+            contact: fp,
+            replayed: replayed.into_iter().map(|(_, o)| o).collect(),
+            packets,
         })
     }
 

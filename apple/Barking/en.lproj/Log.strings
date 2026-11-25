@@ -22,6 +22,7 @@
 "log.seal_skipped" = "Nothing was encrypted for device %2$@ of %1$@: its published keys are unusable. Its other devices still receive the packet.";
 "log.invite_sent" = "Invite sent to %1$@: your contact card, encrypted for each of their devices that has not answered yet.";
 "log.contact_request_received" = "Contact request from %1$@: their card is kept until you accept, refuse or block it. Nothing was sent back, not even a receipt.";
+"log.contact_request_resolved" = "Contact request from %1$@ closed: %2$@.";
 "log.admin_transfer_started" = "The root key was sent, encrypted, to your device %1$@. This device keeps it until that device confirms, then erases it.";
 "log.admin_transferred" = "Your device %1$@ is now the administrator. This device erased its copy of the root key.";
 "log.admin_received" = "This device is now the administrator: it received the root key from another of your devices.";
@@ -59,6 +60,11 @@
 "log.arg.reason_blocked" = "blocked contact";
 "log.arg.reason_request_forged" = "a contact request not signed by its sender";
 "log.arg.reason_pending_request" = "held until you answer the contact request";
+"log.arg.request_accepted" = "accepted, the messages it held were opened";
+"log.arg.request_refused" = "refused, nothing was sent back";
+"log.arg.request_blocked" = "the sender is blocked";
+"log.arg.request_expired" = "nothing new came for 30 days";
+"log.arg.request_added_directly" = "added as a contact, the messages it held were opened";
 "log.arg.reason_unknown_sender" = "unknown sender";
 "log.arg.reason_ambiguous_sender" = "ambiguous sender";
 "log.arg.reason_handshake" = "the session could not be opened";
@@ -96,6 +102,7 @@
 "log.title.seal_skipped" = "Not encrypted for a device of %1$@";
 "log.title.invite_sent" = "Invite sent to %1$@";
 "log.title.contact_request_received" = "Contact request from %1$@";
+"log.title.contact_request_resolved" = "Contact request from %1$@ closed";
 "log.title.admin_transfer_started" = "Root key sent to %1$@";
 "log.title.admin_transferred" = "Admin is now %1$@";
 "log.title.admin_received" = "This device is the admin";

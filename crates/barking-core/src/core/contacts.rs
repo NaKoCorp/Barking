@@ -5,12 +5,12 @@ use std::collections::HashSet;
 use rand_core::CryptoRng;
 
 use super::send::SealTime;
-use super::{Core, OwnDevices, load_card, log, sync};
+use super::{Core, OwnDevices, load_card, log, requests, sync};
 use crate::contact::ContactCard;
 use crate::envelope::{MAX_TEXT_LEN, SyncOp};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::store::{BlockState, ContactClock, ContactRow, Queries};
-use crate::transparency::TransparencyEvent;
+use crate::transparency::{RequestResolution, TransparencyEvent};
 use crate::{CoreError, Result};
 
 /// Maximum size of an alias, in bytes.
@@ -45,6 +45,10 @@ impl Core {
     /// The resulting state (and the deletion of the replaced contact) is queued
     /// for each of my other devices (`SyncContact`), in the same
     /// transaction.
+    ///
+    /// A pending request of the same fingerprint is resolved (spec §7.6):
+    /// closed in that transaction, then its held packets replayed, without
+    /// `REQUEST_ACCEPTED` (my first message will say it).
     pub fn add_contact(
         &mut self,
         card: &ContactCard,
@@ -57,7 +61,7 @@ impl Core {
             return Err(CoreError::ContactBlocked);
         }
         let Core { store, device, .. } = self;
-        store.transaction(|tx| {
+        let fp = store.transaction(|tx| {
             let me = device.public().id();
             let (fp, replaced) = add_in(tx, device, card, alias, now, rng)?;
             // The new state goes out before the deletion of the replaced contact:
@@ -71,8 +75,11 @@ impl Core {
                 let time = sync::touch(tx, old, now, true, me)?;
                 sync::send_op(tx, device, SyncOp::Remove(old), time, rng)?;
             }
+            requests::resolve_request(tx, fp, RequestResolution::AddedDirectly, now)?;
             Ok(fp)
-        })
+        })?;
+        requests::replay_pending(self, fp, now, rng)?;
+        Ok(fp)
     }
 
     /// Deletes a contact, its sessions, its stored card and its packets in the
@@ -408,6 +415,9 @@ pub(super) fn add_in(
 /// the received alias is dropped (the contact no longer has one). Thus the alias goes to
 /// the most recent operation on all my devices, whatever the
 /// arrival order.
+///
+/// A pending request of the same fingerprint is closed (spec §7.6): the
+/// receive replays its held packets once committed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn upsert_in(
     q: &impl Queries,
@@ -472,7 +482,9 @@ pub(super) fn upsert_in(
         Some(known) => known.verified,
         None => verified,
     };
-    q.upsert_contact(fp, &bytes, alias, verified)
+    q.upsert_contact(fp, &bytes, alias, verified)?;
+    requests::resolve_request(q, fp, RequestResolution::AddedDirectly, now)?;
+    Ok(())
 }
 
 /// Quarantine reason for a refused card update (fixed text).

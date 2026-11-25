@@ -42,6 +42,30 @@ pub const R_REQUEST_FORGED: &str = "contact request not signed by its sender";
 /// A first packet held until its sender's contact request is resolved.
 pub const R_PENDING_REQUEST: &str = "pending contact request";
 
+/// Transport noted for a held packet opened by a replay (`requests::replay_held`).
+pub(super) const REPLAY_TRANSPORT: &str = "replay";
+
+/// The clocks of a receive. `check` dates the time-dependent checks
+/// (accepted mailbox days, `check_envelope`, the ratchet), `write` what is
+/// written (session, messages, log, acks). Equal for a packet received now;
+/// a held packet replayed later is checked at its reception date, when it
+/// was fresh (spec §7.3), and written at the real time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RxClock {
+    pub check: u64,
+    pub write: u64,
+}
+
+impl RxClock {
+    /// A packet received at `now`.
+    pub(super) fn live(now: u64) -> Self {
+        RxClock {
+            check: now,
+            write: now,
+        }
+    }
+}
+
 /// Maximum number of sessions kept per remote device.
 const MAX_SESSIONS_PER_DEVICE: usize = 2;
 
@@ -100,6 +124,15 @@ impl Core {
                     }
                     | ReceiveOutcome::Removed => self.reload_root()?,
                     _ => {}
+                }
+                // A contact added by another of my devices (`SyncContact`), or
+                // a known contact's card updated by its invite (spec §7.7):
+                // what was held for it is replayed, each packet in its own
+                // transaction, after this one (`replay_pending` needs the
+                // committed contact and this device's state). Their outcomes
+                // are not returned: the messages are in the conversation.
+                if !matches!(outcome, ReceiveOutcome::Removed) && self.ensure_active().is_ok() {
+                    requests::replay_for_contacts(self, now, rng)?;
                 }
                 Ok(outcome)
             }
@@ -223,7 +256,7 @@ impl Core {
             .any(|d| intro_mailbox(&me, *d) == packet.mailbox);
 
         let (outcome, new_prekeys) = store.transaction(|tx| -> Result<RxOut> {
-            let mut matching: Vec<SessionRow> = tx
+            let matching: Vec<SessionRow> = tx
                 .all_sessions()?
                 .into_iter()
                 .filter(|s| {
@@ -234,78 +267,128 @@ impl Core {
             if !to_intro && matching.is_empty() {
                 return Ok((ReceiveOutcome::NotForUs, None));
             }
-            tx.purge_seen(now.saturating_sub(SEEN_RETENTION_SECS))?;
-            // Verified without being recorded: only an authenticated packet is
-            // marked seen, otherwise a fake packet carrying the same identifier
-            // would make the original pass for a duplicate.
-            if tx.is_seen(packet.id)? {
-                log_limited(
-                    tx,
-                    log_limiter,
-                    now,
-                    Some(packet.id),
-                    &TransparencyEvent::DuplicateIgnored {
-                        packet_id: packet.id,
-                    },
-                )?;
-                return Ok((repeat_outcome(tx, packet.id)?, None));
-            }
-            let opened = match parse_wire(&packet.payload) {
-                Err(_) => Err(R_UNREADABLE),
-                Ok(Wire::Initial {
-                    ek,
-                    sealed_init,
-                    msg,
-                }) if to_intro => match envelope::open_initial(device, &ek, &sealed_init) {
-                    Err(_) => Err(R_UNDECRYPTABLE),
-                    Ok(init) => match find_sender(tx, &init.ik, &me)? {
-                        Ok((contact_fp, peer)) => {
-                            open_initial(tx, device, prekeys, &init, contact_fp, &peer, &msg, now)?
-                        }
-                        // A device no contact lists: maybe a contact request.
-                        Err(R_UNKNOWN_SENDER) => {
-                            return requests::on_unknown_initial(
-                                tx,
-                                log_limiter,
-                                device,
-                                prekeys,
-                                packet,
-                                &init,
-                                &msg,
-                                now,
-                                rng,
-                            );
-                        }
-                        Err(reason) => Err(reason),
-                    },
-                },
-                Ok(Wire::Normal { msg }) if !matching.is_empty() => {
-                    // Sessions that received most recently first.
-                    matching.sort_by_key(|s| core::cmp::Reverse((s.last_rx, s.created_at)));
-                    open_normal(matching, &msg, now)?
-                }
-                Ok(_) => Err(R_UNEXPECTED),
+            let rx = Rx {
+                limiter: log_limiter,
+                device,
+                prekeys,
+                root: root.as_ref(),
+                my_fp: &my_fp,
             };
-            match opened {
-                Err(reason) => quarantine(tx, log_limiter, packet, now, reason),
-                Ok(o) => accept(
-                    tx,
-                    log_limiter,
-                    packet,
-                    o,
-                    device,
-                    root.as_ref().map(|r| (r, &*prekeys)),
-                    &my_fp,
-                    transport,
-                    now,
-                    rng,
-                ),
-            }
+            rx_packet(
+                tx,
+                rx,
+                packet,
+                to_intro,
+                matching,
+                false,
+                transport,
+                RxClock::live(now),
+                rng,
+            )
         })?;
         if let Some(p) = new_prekeys {
             *prekeys = p;
         }
         Ok(outcome)
+    }
+}
+
+/// This device's keys and log, for one receive.
+pub(super) struct Rx<'a> {
+    pub limiter: &'a mut LogLimiter,
+    pub device: &'a DeviceKeys,
+    pub prekeys: &'a PrekeySecrets,
+    pub root: Option<&'a RootIdentity>,
+    pub my_fp: &'a Fingerprint,
+}
+
+/// A packet for me (`to_intro`: it is in my introduction mailbox;
+/// `matching`: the sessions whose mailbox it is in), in the receive
+/// transaction: deduplicated, opened, then accepted or quarantined.
+///
+/// A held first packet replayed (`replay`, spec §7.3) comes here with
+/// `to_intro` and no session, past the mailbox match: its sender is a
+/// contact by now, and a device no contact lists is quarantined rather than
+/// held again.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rx_packet(
+    tx: &impl Queries,
+    me: Rx<'_>,
+    packet: &Packet,
+    to_intro: bool,
+    mut matching: Vec<SessionRow>,
+    replay: bool,
+    transport: &str,
+    clock: RxClock,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let Rx {
+        limiter,
+        device,
+        prekeys,
+        root,
+        my_fp,
+    } = me;
+    let now = clock.write;
+    let public = device.public();
+    tx.purge_seen(now.saturating_sub(SEEN_RETENTION_SECS))?;
+    // Verified without being recorded: only an authenticated packet is
+    // marked seen, otherwise a fake packet carrying the same identifier
+    // would make the original pass for a duplicate.
+    if tx.is_seen(packet.id)? {
+        log_limited(
+            tx,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DuplicateIgnored {
+                packet_id: packet.id,
+            },
+        )?;
+        return Ok((repeat_outcome(tx, packet.id)?, None));
+    }
+    let opened = match parse_wire(&packet.payload) {
+        Err(_) => Err(R_UNREADABLE),
+        Ok(Wire::Initial {
+            ek,
+            sealed_init,
+            msg,
+        }) if to_intro => match envelope::open_initial(device, &ek, &sealed_init) {
+            Err(_) => Err(R_UNDECRYPTABLE),
+            Ok(init) => match find_sender(tx, &init.ik, &public)? {
+                Ok((contact_fp, peer)) => {
+                    open_initial(tx, device, prekeys, &init, contact_fp, &peer, &msg, clock)?
+                }
+                // A device no contact lists: maybe a contact request.
+                Err(R_UNKNOWN_SENDER) if !replay => {
+                    return requests::on_unknown_initial(
+                        tx, limiter, device, prekeys, packet, &init, &msg, now, rng,
+                    );
+                }
+                Err(reason) => Err(reason),
+            },
+        },
+        Ok(Wire::Normal { msg }) if !matching.is_empty() => {
+            // Sessions that received most recently first.
+            matching.sort_by_key(|s| core::cmp::Reverse((s.last_rx, s.created_at)));
+            open_normal(matching, &msg, clock.check)?
+        }
+        Ok(_) => Err(R_UNEXPECTED),
+    };
+    match opened {
+        Err(reason) => quarantine(tx, limiter, packet, now, reason),
+        Ok(o) => accept(
+            tx,
+            limiter,
+            packet,
+            o,
+            device,
+            root.map(|r| (r, prekeys)),
+            my_fp,
+            transport,
+            clock,
+            rng,
+        ),
     }
 }
 
@@ -394,7 +477,7 @@ fn open_initial(
     contact_fp: Fingerprint,
     peer: &DevicePublic,
     msg: &RatchetMessage,
-    now: u64,
+    clock: RxClock,
 ) -> Result<core::result::Result<Opened, &'static str>> {
     // A signing key named by the Initial must be that of the device found
     // (`None`: written by 0.6.0, which did not carry it).
@@ -416,7 +499,7 @@ fn open_initial(
         if !ratchet.could_open(msg) {
             return Ok(Err(R_UNDECRYPTABLE));
         }
-        return Ok(match ratchet.decrypt(msg, &row.ad, now) {
+        return Ok(match ratchet.decrypt(msg, &row.ad, clock.check) {
             Ok(pt) => Ok(Opened {
                 row,
                 ratchet,
@@ -427,7 +510,7 @@ fn open_initial(
             Err(_) => Err(R_UNDECRYPTABLE),
         });
     }
-    open_new_session(device, prekeys, init, contact_fp, peer_id, sid, msg, now)
+    open_new_session(device, prekeys, init, contact_fp, peer_id, sid, msg, clock)
 }
 
 /// Trial opening of a first packet from `peer`, a device no contact lists
@@ -449,7 +532,8 @@ pub(super) fn trial_open(
     // The sender's fingerprint is not known yet: the row, dropped, gets none.
     let unknown = Fingerprint([0; 32]);
     let sid = session_id(&init.ek);
-    let o = match open_new_session(device, prekeys, init, unknown, peer.id(), sid, msg, now)? {
+    let clock = RxClock::live(now);
+    let o = match open_new_session(device, prekeys, init, unknown, peer.id(), sid, msg, clock)? {
         Ok(o) => o,
         Err(reason) => return Ok(Err(reason)),
     };
@@ -472,7 +556,7 @@ fn open_new_session(
     peer_id: crate::identity::DeviceId,
     sid: [u8; 16],
     msg: &RatchetMessage,
-    now: u64,
+    clock: RxClock,
 ) -> Result<core::result::Result<Opened, &'static str>> {
     let mut pk = copy_prekeys(prekeys)?;
     let Ok(secrets) = pqxdh::respond(device, &mut pk, init) else {
@@ -483,7 +567,7 @@ fn open_new_session(
     if !ratchet.could_open(msg) {
         return Ok(Err(R_UNDECRYPTABLE));
     }
-    let Ok(pt) = ratchet.decrypt(msg, &ad, now) else {
+    let Ok(pt) = ratchet.decrypt(msg, &ad, clock.check) else {
         return Ok(Err(R_UNDECRYPTABLE));
     };
     let row = SessionRow {
@@ -494,8 +578,8 @@ fn open_new_session(
         mailbox_secret: secrets.mailbox_secret,
         ad,
         pending_initial: None,
-        last_rx: now,
-        created_at: now,
+        last_rx: clock.write,
+        created_at: clock.write,
     };
     Ok(Ok(Opened {
         row,
@@ -580,9 +664,11 @@ fn accept(
     admin: Option<(&RootIdentity, &PrekeySecrets)>,
     my_fp: &Fingerprint,
     transport: &str,
-    now: u64,
+    clock: RxClock,
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
+    // Only `check_envelope` is dated at `check`: what follows is written.
+    let now = clock.write;
     let env = match envelope::decode(&o.pt) {
         // No authenticated ack secret: nothing to mark as seen.
         Err(_) => return reject_authenticated(q, limiter, packet, o, now, R_BAD_CONTENT, None),
@@ -591,7 +677,7 @@ fn accept(
     // Only the identifier derived from the authenticated content is marked seen, never
     // the plaintext header identifier (which a relay can rewrite).
     let authenticated_id = ack::packet_id_for(&env.ack_secret);
-    if let Err(reason) = check_envelope(q, packet, &env, now)? {
+    if let Err(reason) = check_envelope(q, packet, &env, clock.check)? {
         return reject_authenticated(q, limiter, packet, o, now, reason, Some(authenticated_id));
     }
     let from_me = o.row.contact_fp == *my_fp;
@@ -840,6 +926,14 @@ fn accept_ext(
                 q, limiter, packet, o, env, target, emojis, transport, now, rng,
             );
         }
+        // An invite from a contact: a known kind without effect (spec
+        // §7.6). A held invite replayed after acceptance opens its session here.
+        (ExtContent::ContactRequest { .. }, false) => {
+            if q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+                return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+            }
+            return accept_invite(q, limiter, packet, o, env, transport, now, rng);
+        }
         (
             ExtContent::SyncReply { .. }
             | ExtContent::SyncMessage { .. }
@@ -930,6 +1024,57 @@ fn accept_reaction(
         },
         new_prekeys,
     ))
+}
+
+/// An invite (`ContactRequest`) from a contact: session written, packet
+/// marked seen, acked, `Ignored`. Its card is not applied: a contact's card
+/// changes only by `CardUpdate` (a newer one from an unlisted device was
+/// applied before the replay, `requests::on_unknown_initial`).
+#[allow(clippy::too_many_arguments)]
+fn accept_invite(
+    q: &impl Queries,
+    limiter: &mut LogLimiter,
+    packet: &Packet,
+    o: Opened,
+    env: &Envelope,
+    transport: &str,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<RxOut> {
+    let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
+    q.mark_seen(packet.id, now)?;
+    let from = row.contact_fp;
+    let received = MessageId::incoming(&from, &env.message_id);
+    let already = q.inbound_has_message(received)?;
+    q.record_inbound(packet.id, received, from)?;
+    route::record(q, packet.id, RouteStep::Opened, now, None)?;
+    let outcome = if already {
+        log_limited(
+            q,
+            limiter,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::DuplicateIgnored {
+                packet_id: packet.id,
+            },
+        )?;
+        ReceiveOutcome::Duplicate
+    } else {
+        log(
+            q,
+            now,
+            Some(packet.id),
+            &TransparencyEvent::PacketOpened {
+                packet_id: packet.id,
+                sender: from,
+                transport: transport.to_owned(),
+                first_contact,
+            },
+        )?;
+        ReceiveOutcome::Ignored
+    };
+    emit_ack(q, packet, env.ack_secret, now, rng)?;
+    Ok((outcome, new_prekeys))
 }
 
 /// Unknown kind of `Body::Ext`: see `accept_ext`.
@@ -1288,7 +1433,8 @@ fn commit_session(
     Ok((row, new_prekeys, first_contact))
 }
 
-/// Receipt ack of the packet, queued for sending. In the message's
+/// Receipt ack of the packet, queued for sending (unless the packet has
+/// expired past `ACK_GRACE_SECS`: a late replay). In the message's
 /// mailbox: answering elsewhere would link the two directions of the
 /// conversation, and the nodes that keep the message would not see it.
 fn emit_ack(
@@ -1298,6 +1444,16 @@ fn emit_ack(
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<Packet> {
+    let mut ack = Packet::ack(packet, ack_secret, now, rng);
+    // Same granularity as sealed messages.
+    ack.expires_at = crate::envelope::sealed_expiry(now);
+    // A held packet replayed once its sender no longer waits for it (spec
+    // §7.3, §8.3): the ack would tell nobody anything but the time of the
+    // acceptance. Built, never queued nor logged. A packet received live
+    // has not expired (`Core::receive`), so it is always acked.
+    if u64::from(packet.expires_at).saturating_add(ACK_GRACE_SECS) < now {
+        return Ok(ack);
+    }
     log(
         q,
         now,
@@ -1306,9 +1462,6 @@ fn emit_ack(
             for_packet: packet.id,
         },
     )?;
-    let mut ack = Packet::ack(packet, ack_secret, now, rng);
-    // Same granularity as sealed messages.
-    ack.expires_at = crate::envelope::sealed_expiry(now);
     q.outbox_put(
         ack.id,
         &ack.encode(),

@@ -9583,9 +9583,9 @@ fn legacy_pending_initial_is_sealed_with_my_signing_key() {
 }
 
 #[test]
-fn contact_new_device_invitation_updates_card() {
+fn known_contact_new_device_invitation_updates_card() {
     // Bob knows Alice with one device; she links a tablet whose card never
-    // reached Bob, and the tablet invites him.
+    // reached Bob. The tablet writes to him, then invites him.
     let dir = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(77);
     let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
@@ -9600,27 +9600,43 @@ fn contact_new_device_invitation_updates_card() {
     t.finish_link(&out.bundle, None, NOW).unwrap();
     t.add_contact(&b.contact_card("Bob").unwrap(), None, NOW, &mut rng)
         .unwrap();
-    let pkts = t.invite(&b.fingerprint(), NOW, &mut rng).unwrap();
-    let to_bob = pkts
-        .iter()
-        .find(|p| p.mailbox == intro_mailbox(&b.device.public(), day_of(NOW)))
-        .unwrap();
-    let got = b.receive(&to_bob.encode(), "t", NOW, &mut rng).unwrap();
+    let to_bob = |pkts: Vec<Packet>| {
+        pkts.into_iter()
+            .find(|p| p.mailbox == intro_mailbox(&b.device.public(), day_of(NOW)))
+            .unwrap()
+    };
+    let text = to_bob(
+        t.send_text(&b.fingerprint(), "tablette", NOW, &mut rng)
+            .unwrap(),
+    );
+    let invite = to_bob(t.invite(&b.fingerprint(), NOW, &mut rng).unwrap());
+    let got = b.receive(&text.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(got), R_UNKNOWN_SENDER);
+    let got = b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap();
     assert_eq!(reason(got), R_PENDING_REQUEST);
-    // No request: the card of a known contact is updated instead.
+    // No request: the card of a known contact is updated instead, and the
+    // tablet's packets are replayed at once.
     assert!(requests::list_requests(&b.store).unwrap().is_empty());
     assert_eq!(stored_card(&b, alice).devices.certs.len(), 2);
-    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
-    assert_eq!(held.len(), 1);
-    assert!(held[0].invite);
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(texts_with(&b, alice, NOW), ["tablette"]);
+    let tablet = t.device.public().id();
+    assert!(
+        b.store
+            .all_sessions()
+            .unwrap()
+            .iter()
+            .any(|s| s.contact_device == tablet)
+    );
     drop(db);
 }
 
 /// Bob knows Alice (her card signed at NOW) and has a session with her;
 /// Alice then recovers her identity from her phrase on a new device at
 /// `recovered_at` (a new device, a list of version `recovered_at`), adds Bob
-/// again and invites him. Returns Bob, Alice's fingerprint and the invite.
-fn recovered_alice_invites(recovered_at: u64) -> (TempDir, Core, Fingerprint, Packet) {
+/// again and invites him. Returns the recovered device, Bob, Alice's
+/// fingerprint and the invite.
+fn recovered_alice_invites(recovered_at: u64) -> (TempDir, Core, Core, Fingerprint, Packet) {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(31);
     let (mut a, phrase) =
@@ -9655,12 +9671,12 @@ fn recovered_alice_invites(recovered_at: u64) -> (TempDir, Core, Fingerprint, Pa
     )
     .unwrap();
     let invite = invite_one(&mut r, b.fingerprint(), recovered_at, &mut rng);
-    (dir, b, alice, invite)
+    (dir, r, b, alice, invite)
 }
 
 #[test]
 fn recovered_identity_invitation_updates_card() {
-    let (_d, mut b, alice, invite) = recovered_alice_invites(NOW + 100);
+    let (_d, r, mut b, alice, invite) = recovered_alice_invites(NOW + 100);
     let old = stored_card(&b, alice);
     let mut rng = StdRng::seed_from_u64(32);
     let got = b
@@ -9673,7 +9689,11 @@ fn recovered_identity_invitation_updates_card() {
     assert!(card.devices.supersedes(&old.devices));
     assert_eq!(card.devices.certs.len(), 1);
     assert_ne!(card.devices.certs[0].device, old.devices.certs[0].device);
-    assert!(b.store.all_sessions().unwrap().is_empty());
+    // The old device's session went; the replayed invite opened one with
+    // the new device.
+    let sessions = b.store.all_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].contact_device, r.device.public().id());
     assert_eq!(
         count_events(&b, |e| matches!(
             e,
@@ -9688,16 +9708,14 @@ fn recovered_identity_invitation_updates_card() {
         )),
         0
     );
-    // Held with Alice's fingerprint, for the replay.
-    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
-    assert_eq!(held.len(), 1);
-    assert_eq!(held[0].packet_id, invite.id);
+    // Held with Alice's fingerprint, then replayed: nothing left.
+    assert_eq!(count_table(&b, "pending_initials"), 0);
 }
 
 #[test]
 fn recovered_identity_older_list_refused() {
     // Recovered with a clock behind: its list is older than the known one.
-    let (_d, mut b, alice, invite) = recovered_alice_invites(NOW - 100);
+    let (_d, _r, mut b, alice, invite) = recovered_alice_invites(NOW - 100);
     let old = stored_card(&b, alice);
     let mut rng = StdRng::seed_from_u64(32);
     let got = b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap();
@@ -9799,4 +9817,275 @@ fn unsigned_message_from_the_requester_is_held() {
         .receive(&genuine.encode(), "t", NOW + 60, &mut rng)
         .unwrap();
     assert!(matches!(got, ReceiveOutcome::Duplicate), "{got:?}");
+}
+
+// --- Contact requests, task 6: accepting, replaying, resolving by an add.
+
+/// The texts of my conversation with `fp`, oldest first.
+fn texts_with(c: &Core, fp: Fingerprint, now: u64) -> Vec<String> {
+    c.messages_with(&fp, now)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.body)
+        .collect()
+}
+
+/// The texts of the `Message` outcomes, in order.
+fn replayed_texts(outcomes: &[ReceiveOutcome]) -> Vec<String> {
+    outcomes
+        .iter()
+        .filter_map(|o| match o {
+            ReceiveOutcome::Message { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Packets of `kind` in `c`'s send queue at `now`.
+fn outbox_of(c: &mut Core, kind: Kind, now: u64) -> usize {
+    c.pending_outbox(now)
+        .unwrap()
+        .iter()
+        .filter(|b| Packet::decode(b).unwrap().kind == kind)
+        .count()
+}
+
+/// Alice invites Bob, then writes "un" and "deux"; Bob receives the three
+/// packets at `at`: a request holding the invite and two messages.
+fn bob_with_request(at: u64) -> (TempDir, Core, TempDir, Core, StdRng) {
+    let (da, mut a, db, mut b, mut rng) = alice_knows_bob();
+    let bob = b.fingerprint();
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    let un = a.send_text(&bob, "un", NOW, &mut rng).unwrap();
+    let deux = a.send_text(&bob, "deux", NOW, &mut rng).unwrap();
+    request_outcome(b.receive(&invite.encode(), "t", at, &mut rng).unwrap());
+    for p in [&un[0], &deux[0]] {
+        assert_eq!(
+            reason(b.receive(&p.encode(), "t", at, &mut rng).unwrap()),
+            R_PENDING_REQUEST
+        );
+    }
+    (da, a, db, b, rng)
+}
+
+#[test]
+fn accept_replays_messages_in_order() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    let accepted = b.accept_request(&alice, None, NOW, &mut rng).unwrap();
+    assert_eq!(accepted.contact, alice);
+    assert_eq!(replayed_texts(&accepted.replayed), ["un", "deux"]);
+    assert_eq!(texts_with(&b, alice, NOW), ["un", "deux"]);
+    // REQUEST_ACCEPTED, sealed for Alice.
+    assert!(!accepted.packets.is_empty());
+    assert!(requests::get_request(&b.store, alice).unwrap().is_none());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactRequestResolved {
+                contact,
+                how: RequestResolution::Accepted,
+            } if *contact == alice
+        )),
+        1
+    );
+    // Accepted without an alias: the declared name stays the card's.
+    assert_eq!(b.store.get_contact(alice).unwrap().unwrap().alias, "");
+}
+
+#[test]
+fn accept_never_replaces_contact_with_same_name() {
+    let (_dx, mut x, _db, mut b, mut rng) = alice_knows_bob();
+    let (_dl, l) = party("l", 6);
+    let lea = l.fingerprint();
+    b.add_contact(&l.contact_card("Léa").unwrap(), Some("léa"), NOW, &mut rng)
+        .unwrap();
+    // An unknown X declares "Léa".
+    let xfp = x.fingerprint();
+    x.contact_card("Léa").unwrap();
+    let card = x.contact_card("Léa").unwrap();
+    let p = sealed_invite(&mut x, b.fingerprint(), card, 1, &mut rng);
+    request_outcome(b.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    // An explicit alias already taken: refused, nothing written.
+    let got = b.accept_request(&xfp, Some("léa"), NOW, &mut rng);
+    assert!(matches!(got, Err(CoreError::Malformed(_))), "{got:?}");
+    assert_eq!(b.store.get_contact(lea).unwrap().unwrap().alias, "léa");
+    assert!(b.store.get_contact(xfp).unwrap().is_none());
+    assert!(requests::get_request(&b.store, xfp).unwrap().is_some());
+    assert_eq!(
+        requests::list_pending_by_fp(&b.store, xfp).unwrap().len(),
+        1
+    );
+    // Accepted without an alias: Léa stays, X is added without one.
+    b.accept_request(&xfp, None, NOW, &mut rng).unwrap();
+    assert_eq!(b.store.get_contact(lea).unwrap().unwrap().alias, "léa");
+    assert_eq!(b.store.get_contact(xfp).unwrap().unwrap().alias, "");
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactKeyChanged { .. }
+        )),
+        0
+    );
+}
+
+#[test]
+fn accept_on_day_20_replays_without_acks() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    let day_20 = NOW + 20 * 86_400;
+    let accepted = b.accept_request(&alice, None, day_20, &mut rng).unwrap();
+    assert_eq!(replayed_texts(&accepted.replayed), ["un", "deux"]);
+    assert_eq!(texts_with(&b, alice, day_20), ["un", "deux"]);
+    assert_eq!(outbox_of(&mut b, Kind::Ack, day_20), 0);
+    assert_eq!(
+        count_events(&b, |e| matches!(e, TransparencyEvent::AckEmitted { .. })),
+        0
+    );
+}
+
+#[test]
+fn accept_within_grace_acks_replayed_packets() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    let later = NOW + 3_600;
+    b.accept_request(&alice, None, later, &mut rng).unwrap();
+    // The invite and both messages.
+    assert_eq!(outbox_of(&mut b, Kind::Ack, later), 3);
+}
+
+#[test]
+fn replay_is_resumable() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    // Accepted (step 1), then a crash after the first packet's replay.
+    let row = requests::get_request(&b.store, alice).unwrap().unwrap();
+    let card = load_card(&row.card).unwrap();
+    {
+        let Core { store, device, .. } = &mut b;
+        store
+            .transaction(|tx| {
+                contacts::add_in(tx, device, &card, None, NOW, &mut rng)?;
+                requests::delete_request_row(tx, alice)
+            })
+            .unwrap();
+    }
+    let held = requests::list_pending_by_fp(&b.store, alice).unwrap();
+    assert_eq!(held.len(), 3);
+    requests::replay_held(&mut b, &held[0], NOW, &mut rng).unwrap();
+    assert_eq!(
+        requests::list_pending_by_fp(&b.store, alice).unwrap().len(),
+        2
+    );
+    // Resumed: the rest only, nothing twice.
+    let rest = requests::replay_pending(&mut b, alice, NOW, &mut rng).unwrap();
+    assert_eq!(rest.len(), 2);
+    assert_eq!(texts_with(&b, alice, NOW), ["un", "deux"]);
+    assert!(
+        requests::replay_pending(&mut b, alice, NOW, &mut rng)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(texts_with(&b, alice, NOW), ["un", "deux"]);
+}
+
+#[test]
+fn adding_requester_resolves_request() {
+    let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
+    let alice = a.fingerprint();
+    b.add_contact(&a.contact_card("Alice").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    assert!(requests::get_request(&b.store, alice).unwrap().is_none());
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(texts_with(&b, alice, NOW), ["un", "deux"]);
+    // No REQUEST_ACCEPTED: nothing but the acks (Bob has no other device).
+    assert_eq!(outbox_of(&mut b, Kind::Message, NOW), 0);
+    assert_eq!(outbox_of(&mut b, Kind::Ack, NOW), 3);
+    assert_eq!(
+        count_events(&b, |e| matches!(
+            e,
+            TransparencyEvent::ContactRequestResolved {
+                how: RequestResolution::AddedDirectly,
+                ..
+            }
+        )),
+        1
+    );
+}
+
+#[test]
+fn recovered_identity_invitation_switches_contact_to_new_device() {
+    // Alice (here the one who recovers) and Bob know each other; Alice
+    // recovers from her phrase, adds Bob again, invites him and writes.
+    let at = NOW + 100;
+    let (_d, mut r, mut b, alice, invite) = recovered_alice_invites(at);
+    let mut rng = StdRng::seed_from_u64(33);
+    let bob = b.fingerprint();
+    let text = r.send_text(&bob, "back", at, &mut rng).unwrap();
+    // The message first: its device is not in Alice's card yet.
+    let got = b.receive(&text[0].encode(), "t", at, &mut rng).unwrap();
+    assert_eq!(reason(got), R_UNKNOWN_SENDER);
+    b.receive(&invite.encode(), "t", at, &mut rng).unwrap();
+    // No request; the card lists the new device only; the message replayed.
+    assert!(requests::list_requests(&b.store).unwrap().is_empty());
+    let card = stored_card(&b, alice);
+    assert_eq!(card.devices.certs.len(), 1);
+    assert_eq!(card.devices.certs[0].device, r.device.public());
+    let new_id = r.device.public().id();
+    let sessions = b.store.all_sessions().unwrap();
+    assert!(!sessions.is_empty());
+    assert!(sessions.iter().all(|s| s.contact_device == new_id));
+    assert_eq!(count_table(&b, "pending_initials"), 0);
+    assert_eq!(texts_with(&b, alice, at), ["before", "back"]);
+    // Bob answers; the recovered device reads it.
+    let reply = b.send_text(&alice, "ok", at, &mut rng).unwrap();
+    assert_eq!(reply.len(), 1);
+    match r.receive(&reply[0].encode(), "t", at, &mut rng).unwrap() {
+        ReceiveOutcome::Message { text, .. } => assert_eq!(text, "ok"),
+        other => panic!("Message expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn accept_on_one_device_resolves_on_the_other() {
+    // Bob has two devices, each received its invite.
+    let (_d, mut b1, mut b2, mut rng) = linked();
+    let (_da, mut a) = party("alice", 7);
+    let alice = a.fingerprint();
+    a.contact_card("Alice").unwrap();
+    a.add_contact(&b1.contact_card("Bob").unwrap(), None, NOW, &mut rng)
+        .unwrap();
+    let packets = a.invite(&b1.fingerprint(), NOW, &mut rng).unwrap();
+    assert_eq!(packets.len(), 2);
+    for bob in [&mut b1, &mut b2] {
+        let mailbox = intro_mailbox(&bob.device.public(), day_of(NOW));
+        let p = packets.iter().find(|p| p.mailbox == mailbox).unwrap();
+        request_outcome(bob.receive(&p.encode(), "t", NOW, &mut rng).unwrap());
+    }
+    b1.accept_request(&alice, None, NOW, &mut rng).unwrap();
+    // The SyncContact reaches B2: its packets replayed, its request gone.
+    for bytes in b1.pending_outbox(NOW).unwrap() {
+        b2.receive(&bytes, "t", NOW, &mut rng).unwrap();
+    }
+    assert!(b2.store.get_contact(alice).unwrap().is_some());
+    assert!(requests::get_request(&b2.store, alice).unwrap().is_none());
+    assert_eq!(count_table(&b2, "pending_initials"), 0);
+    assert!(
+        b2.store
+            .all_sessions()
+            .unwrap()
+            .iter()
+            .any(|s| s.contact_fp == alice)
+    );
+    assert_eq!(
+        count_events(&b2, |e| matches!(
+            e,
+            TransparencyEvent::ContactRequestResolved {
+                how: RequestResolution::AddedDirectly,
+                ..
+            }
+        )),
+        1
+    );
 }

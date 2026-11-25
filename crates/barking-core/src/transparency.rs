@@ -188,6 +188,27 @@ pub enum TransparencyEvent {
     ContactRequestReceived {
         contact: Fingerprint,
     },
+    /// The pending request of `contact` was closed (`how`). Added last.
+    ContactRequestResolved {
+        contact: Fingerprint,
+        how: RequestResolution,
+    },
+}
+
+/// How a pending contact request was closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RequestResolution {
+    /// Accepted (`Core::accept_request`): its held packets were replayed.
+    Accepted,
+    /// Refused: the request and its packets were deleted.
+    Refused,
+    /// The sender was blocked.
+    Blocked,
+    /// No new packet for too long: deleted.
+    Expired,
+    /// The sender was added as a contact (here or on another of my
+    /// devices): its held packets were replayed.
+    AddedDirectly,
 }
 
 /// A `bool` added at the end of a stored variant. The log stores postcard,
@@ -526,6 +547,25 @@ impl TransparencyEvent {
                 "Contact request from {contact}: their card is kept until you accept, \
                  refuse or block it. Nothing was sent back, not even a receipt."
             ),
+            Self::ContactRequestResolved { contact, how } => match how {
+                RequestResolution::Accepted => format!(
+                    "Contact request from {contact} accepted: the messages it held were \
+                     opened, and {contact} was told."
+                ),
+                RequestResolution::Refused => {
+                    format!("Contact request from {contact} refused: nothing was sent back.")
+                }
+                RequestResolution::Blocked => {
+                    format!("Contact request from {contact} closed: {contact} is blocked.")
+                }
+                RequestResolution::Expired => {
+                    format!("Contact request from {contact} expired: nothing new came for 30 days.")
+                }
+                RequestResolution::AddedDirectly => format!(
+                    "Contact request from {contact} closed: {contact} was added as a \
+                     contact, and the messages it held were opened."
+                ),
+            },
         }
     }
 }
@@ -728,6 +768,14 @@ mod tests {
             },
             TransparencyEvent::InviteSent { contact: fp(13) },
             TransparencyEvent::ContactRequestReceived { contact: fp(14) },
+            TransparencyEvent::ContactRequestResolved {
+                contact: fp(15),
+                how: RequestResolution::Accepted,
+            },
+            TransparencyEvent::ContactRequestResolved {
+                contact: fp(16),
+                how: RequestResolution::AddedDirectly,
+            },
         ]
     }
 

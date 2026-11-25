@@ -54,7 +54,7 @@ use crate::store::{EventClass, MessageId, MessageRow, MessageStatus, Queries, St
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
-pub use crate::transparency::SyncKind;
+pub use crate::transparency::{RequestResolution, SyncKind};
 pub use contacts::ContactSummary;
 pub use delivery::{AwaitingVerdict, DeleteOutcome, MAX_NOTED_CHANGES};
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
@@ -72,7 +72,7 @@ pub use receive::{
 };
 pub use remove::LeaveState;
 pub use removed::Removed;
-pub use requests::{ContactRequest, InviteState};
+pub use requests::{Accepted, ContactRequest, InviteState};
 pub use route::{RouteEntry, RouteStep};
 
 use log_limit::LogLimiter;
@@ -138,7 +138,10 @@ const SEEN_RETENTION_SECS: u64 = MAX_AGE_SECS + MAX_FUTURE_SECS;
 
 /// Result of receiving bytes from outside.
 pub enum ReceiveOutcome {
-    /// Decrypted message. `ack` is the receipt acknowledgement to send back.
+    /// Decrypted message. `ack` is the receipt acknowledgement to send back
+    /// (also queued), except for a held message replayed by
+    /// `accept_request` once its sender no longer waits for it: that one is
+    /// not queued and must not be sent (spec §7.3).
     /// `ephemeral`: the message carries a delay (its notification must not
     /// show the text).
     Message {
