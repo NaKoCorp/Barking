@@ -9,7 +9,8 @@
 //! Layout: `contacts.rs` (cards, alias, verification), `send.rs`
 //! (`send_text`), `receive.rs` (`receive`), `frames.rs` (fragmentation and
 //! reassembly of frames), `link.rs` (linking a new device),
-//! `history.rs` (history archive transferred at link time), `sync.rs`
+//! `history.rs` (history archive transferred at link time), `requests.rs`
+//! (storage of contact requests), `sync.rs`
 //! (synchronization between my devices).
 
 mod admin;
@@ -24,6 +25,7 @@ mod reactions;
 mod receive;
 mod remove;
 mod removed;
+mod requests;
 mod route;
 mod send;
 mod sync;
@@ -69,6 +71,7 @@ pub use receive::{
 };
 pub use remove::LeaveState;
 pub use removed::Removed;
+pub use requests::{ContactRequest, InviteState};
 pub use route::{RouteEntry, RouteStep};
 
 use log_limit::LogLimiter;

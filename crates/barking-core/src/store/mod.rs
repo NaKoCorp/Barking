@@ -945,6 +945,9 @@ impl Store {
         if stored.is_none_or(|v| v < 5) {
             schema::migrate_v4_to_v5(&self.conn).map_err(map_err)?;
         }
+        if stored.is_none_or(|v| v < 6) {
+            schema::migrate_v5_to_v6(&self.conn).map_err(map_err)?;
+        }
         Ok(())
     }
 

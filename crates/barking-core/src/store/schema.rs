@@ -1,8 +1,8 @@
-//! SQL storage schema (v5) and migrations from v1, v2, v3 and v4.
+//! SQL storage schema (v6) and migrations from v1, v2, v3, v4 and v5.
 
 use rusqlite::{Connection, params};
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Schema v1 (batch 1A), kept for the migration and for its tests: a
 /// v1 database is opened with this schema, then migrated.
@@ -455,6 +455,40 @@ pub fn migrate_v4_to_v5(conn: &Connection) -> rusqlite::Result<()> {
     add_missing_columns(&tx, "messages", &V5_MESSAGE_COLUMNS)?;
     tx.execute_batch(SCHEMA_V5_TABLES)?;
     set_version(&tx, 5)?;
+    tx.commit()
+}
+
+/// Schema v6 (contact requests): the requests received from unknown
+/// senders, the first packets held until the request is accepted
+/// (`pending_initials`, `fp` NULL = queue of unknown senders), the refusals,
+/// the invites I sent (kept when the contact is removed) and the packets of
+/// those invites.
+const SCHEMA_V6_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS contact_requests (
+    fp BLOB PRIMARY KEY NOT NULL, card BLOB NOT NULL, display_name TEXT NOT NULL,
+    first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+    invite_count INTEGER NOT NULL, hidden INTEGER NOT NULL DEFAULT 0,
+    unseen INTEGER NOT NULL DEFAULT 0, last_notified INTEGER);
+CREATE TABLE IF NOT EXISTS pending_initials (
+    packet_id BLOB PRIMARY KEY NOT NULL, ik BLOB NOT NULL, fp BLOB,
+    message_id BLOB, bytes BLOB NOT NULL, received_at INTEGER NOT NULL,
+    invite INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS pending_initials_ik ON pending_initials(ik);
+CREATE INDEX IF NOT EXISTS pending_initials_fp ON pending_initials(fp);
+CREATE TABLE IF NOT EXISTS refused_requests (
+    fp BLOB PRIMARY KEY NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS invites (
+    fp BLOB PRIMARY KEY NOT NULL, at INTEGER NOT NULL, accepted_at INTEGER);
+CREATE TABLE IF NOT EXISTS invite_packets (
+    packet_id BLOB PRIMARY KEY NOT NULL, fp BLOB NOT NULL);
+";
+
+/// Migrates a v5 database to v6 in a single transaction (DDL only): the
+/// contact request tables, then `schema_version` set to 6.
+pub fn migrate_v5_to_v6(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(SCHEMA_V6_TABLES)?;
+    set_version(&tx, 6)?;
     tx.commit()
 }
 
