@@ -11,6 +11,7 @@ use core::fmt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::contact::ContactCard;
 use crate::emoji;
 use crate::envelope::{Body, MAX_TEXT_LEN};
 use crate::identity::Fingerprint;
@@ -33,6 +34,14 @@ pub const KIND_MESSAGE: u16 = 6;
 pub const KIND_SYNC_MESSAGE: u16 = 7;
 /// Kind number of [`ExtContent::SyncSeen`].
 pub const KIND_SYNC_SEEN: u16 = 8;
+/// Kind number of [`ExtContent::ContactRequest`].
+pub const KIND_CONTACT_REQUEST: u16 = 9;
+/// Kind number of [`ExtContent::RequestAccepted`].
+pub const KIND_REQUEST_ACCEPTED: u16 = 10;
+/// Kind number of [`ExtContent::SyncInvite`].
+pub const KIND_SYNC_INVITE: u16 = 11;
+/// Kind number of [`ExtContent::SyncRefused`].
+pub const KIND_SYNC_REFUSED: u16 = 12;
 
 /// Shortest ephemeral delay: one minute.
 pub const MIN_TTL_SECS: u32 = 60;
@@ -52,6 +61,9 @@ pub const MAX_SYNC_DELETE_IDS: usize = 32;
 /// (`sync_seen_cap_fits_tier_m`); 15 fit only with today's dates, 16 never.
 /// More go in several packets.
 pub const MAX_SYNC_SEEN: usize = 14;
+
+/// Most messages replayed in one `RequestAccepted`.
+pub const MAX_REPLAYED: usize = 4;
 
 /// What a receiver does with a kind it does not know.
 ///
@@ -180,6 +192,18 @@ pub enum ExtContent {
     /// Ephemeral messages shown on another of my devices (kind 8): 1 to
     /// [`MAX_SYNC_SEEN`] entries.
     SyncSeen { seen: Vec<SeenEntry> },
+    /// A contact request: my card, sent to someone who has not accepted me
+    /// yet (kind 9).
+    ContactRequest { card: Box<ContactCard> },
+    /// The request I received was accepted (kind 10): 0 to [`MAX_REPLAYED`]
+    /// identifiers of the messages sent while it was pending, replayed.
+    RequestAccepted { replayed: Vec<MessageId> },
+    /// An invitation I sent to `to` at `at`, copied to my other devices
+    /// (kind 11).
+    SyncInvite { to: Fingerprint, at: u64 },
+    /// A request from `fp` that I refused at `at` on another of my devices
+    /// (kind 12).
+    SyncRefused { fp: Fingerprint, at: u64 },
 }
 
 impl fmt::Debug for ExtContent {
@@ -198,6 +222,14 @@ impl fmt::Debug for ExtContent {
                 write!(f, "SyncMessage(<{} bytes>)", text.len())
             }
             ExtContent::SyncSeen { seen } => write!(f, "SyncSeen(<{} entries>)", seen.len()),
+            ExtContent::ContactRequest { card } => {
+                write!(f, "ContactRequest(<{} devices>)", card.devices.certs.len())
+            }
+            ExtContent::RequestAccepted { replayed } => {
+                write!(f, "RequestAccepted(<{} ids>)", replayed.len())
+            }
+            ExtContent::SyncInvite { .. } => write!(f, "SyncInvite"),
+            ExtContent::SyncRefused { .. } => write!(f, "SyncRefused"),
         }
     }
 }
@@ -296,6 +328,20 @@ impl ExtContent {
                         .collect::<Vec<_>>(),
                 ),
             ),
+            ExtContent::ContactRequest { card } => {
+                (KIND_CONTACT_REQUEST, UnknownPolicy::Ignore, encode(&card))
+            }
+            ExtContent::RequestAccepted { replayed } => (
+                KIND_REQUEST_ACCEPTED,
+                UnknownPolicy::Ignore,
+                encode(&replayed.iter().map(|id| id.0).collect::<Vec<_>>()),
+            ),
+            ExtContent::SyncInvite { to, at } => {
+                (KIND_SYNC_INVITE, UnknownPolicy::Ignore, encode(&(to, at)))
+            }
+            ExtContent::SyncRefused { fp, at } => {
+                (KIND_SYNC_REFUSED, UnknownPolicy::Ignore, encode(&(fp, at)))
+            }
         };
         Body::Ext {
             kind,
@@ -312,7 +358,8 @@ impl ExtContent {
     /// # Errors
     /// `Malformed` on bad or trailing bytes, for a `SyncDelete` without
     /// identifier or with too many, for a `SyncSeen` without entry or with
-    /// too many, and for a delay out of
+    /// too many, for a `RequestAccepted` with more than [`MAX_REPLAYED`]
+    /// identifiers, and for a delay out of
     /// `MIN_TTL_SECS..=MAX_TTL_SECS`, `TooLarge` for a long text,
     /// `TooManyEmoji` or `InvalidEmoji` for a bad emoji set.
     pub fn decode(kind: u16, data: &[u8]) -> Result<Option<ExtContent>> {
@@ -376,6 +423,21 @@ impl ExtContent {
                         .collect(),
                 }
             }
+            KIND_CONTACT_REQUEST => ExtContent::ContactRequest { card: parse(data)? },
+            KIND_REQUEST_ACCEPTED => {
+                let replayed: Vec<[u8; 16]> = parse(data)?;
+                ExtContent::RequestAccepted {
+                    replayed: replayed.into_iter().map(MessageId).collect(),
+                }
+            }
+            KIND_SYNC_INVITE => {
+                let (to, at) = parse(data)?;
+                ExtContent::SyncInvite { to, at }
+            }
+            KIND_SYNC_REFUSED => {
+                let (fp, at) = parse(data)?;
+                ExtContent::SyncRefused { fp, at }
+            }
             _ => return Ok(None),
         };
         content.validate()?;
@@ -411,6 +473,16 @@ impl ExtContent {
                     Err(CoreError::Malformed("number of seen messages"))
                 }
             }
+            ExtContent::RequestAccepted { replayed } => {
+                if replayed.len() <= MAX_REPLAYED {
+                    Ok(())
+                } else {
+                    Err(CoreError::Malformed("number of replayed messages"))
+                }
+            }
+            ExtContent::ContactRequest { .. }
+            | ExtContent::SyncInvite { .. }
+            | ExtContent::SyncRefused { .. } => Ok(()),
         }
     }
 }
@@ -418,6 +490,7 @@ impl ExtContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contact::ContactCard;
 
     #[test]
     fn policy_is_one_byte_and_unknown_values_ask_for_an_update() {
@@ -592,5 +665,109 @@ mod tests {
             ExtContent::decode(KIND_SYNC_DELETE, &trailing),
             Err(CoreError::Malformed(_))
         ));
+    }
+    fn card() -> ContactCard {
+        use crate::identity::{DeviceCertificate, DeviceKeys, DeviceList, RootIdentity};
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+        let (root, _) = RootIdentity::generate(&mut rng);
+        let device = DeviceKeys::generate(&mut rng);
+        let cert = DeviceCertificate::issue(&root, &device, "phone", 1).unwrap();
+        let list = DeviceList::sign(&root, 1, vec![cert]).unwrap();
+        let bundle = crate::handshake::PrekeySecrets::generate(&mut rng, 0).bundle(&device, false);
+        ContactCard::sign(&root, "Alice", list, vec![bundle], Vec::new()).unwrap()
+    }
+
+    fn request_contents() -> [(ExtContent, u16); 4] {
+        [
+            (
+                ExtContent::ContactRequest {
+                    card: Box::new(card()),
+                },
+                KIND_CONTACT_REQUEST,
+            ),
+            (
+                ExtContent::RequestAccepted { replayed: ids(2) },
+                KIND_REQUEST_ACCEPTED,
+            ),
+            (
+                ExtContent::SyncInvite {
+                    to: Fingerprint([3; 32]),
+                    at: 1_700_000_000,
+                },
+                KIND_SYNC_INVITE,
+            ),
+            (
+                ExtContent::SyncRefused {
+                    fp: Fingerprint([4; 32]),
+                    at: 1_700_000_001,
+                },
+                KIND_SYNC_REFUSED,
+            ),
+        ]
+    }
+
+    #[test]
+    fn request_kinds_roundtrip_and_are_ignored_when_unknown() {
+        for (content, kind) in request_contents() {
+            let Body::Ext {
+                kind: k,
+                unknown,
+                data,
+            } = content.to_body()
+            else {
+                panic!("Ext expected");
+            };
+            assert_eq!((k, unknown), (kind, UnknownPolicy::Ignore));
+            assert_eq!(ExtContent::decode(k, &data).unwrap(), Some(content));
+        }
+    }
+
+    #[test]
+    fn request_accepted_caps_replayed() {
+        let raw = |n: usize| {
+            let ids: Vec<[u8; 16]> = ids(n).iter().map(|m| m.0).collect();
+            postcard::to_allocvec(&ids).unwrap()
+        };
+        assert!(matches!(
+            ExtContent::decode(KIND_REQUEST_ACCEPTED, &raw(MAX_REPLAYED + 1)),
+            Err(CoreError::Malformed(_))
+        ));
+        assert!(
+            ExtContent::decode(KIND_REQUEST_ACCEPTED, &raw(MAX_REPLAYED))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            ExtContent::decode(KIND_REQUEST_ACCEPTED, &raw(0))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn request_kinds_reject_trailing_bytes() {
+        for (content, kind) in request_contents() {
+            let Body::Ext { mut data, .. } = content.to_body() else {
+                panic!("Ext expected");
+            };
+            data.push(0);
+            assert!(
+                matches!(
+                    ExtContent::decode(kind, &data),
+                    Err(CoreError::Malformed(_))
+                ),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_kinds_debug_shows_sizes_only() {
+        let [(request, _), (accepted, _), (invite, _), (refused, _)] = request_contents();
+        assert_eq!(format!("{request:?}"), "ContactRequest(<1 devices>)");
+        assert_eq!(format!("{accepted:?}"), "RequestAccepted(<2 ids>)");
+        assert_eq!(format!("{invite:?}"), "SyncInvite");
+        assert_eq!(format!("{refused:?}"), "SyncRefused");
     }
 }

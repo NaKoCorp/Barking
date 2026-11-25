@@ -1520,6 +1520,18 @@ fn device_cap_fits_one_packet() {
 }
 
 #[test]
+fn max_card_invitation_fits_one_packet() {
+    use crate::identity::device_list::MAX_DEVICES;
+    let mut rng = StdRng::seed_from_u64(5);
+    let card = max_card(MAX_DEVICES, &mut rng);
+    let body = ExtContent::ContactRequest {
+        card: Box::new(card),
+    }
+    .to_body();
+    assert!(crate::envelope::fits_in_packet(&body));
+}
+
+#[test]
 fn wire_overhead_bound_holds() {
     // Session opening (Wire::Initial, the heaviest) with the largest card.
     let (_d, mut a, _t, mut rng) = linked();
