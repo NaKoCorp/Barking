@@ -533,6 +533,8 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var inviteStatusByContact: [String: InviteStatus] = [:]
     /// Thrown by `invite` when set (nothing is recorded then).
     var inviteError: BarkingError?
+    /// Thrown by `inviteStatus` when set.
+    var inviteStatusError: BarkingError?
     /// Thrown by `acceptRequest` when set (nothing is recorded then).
     var acceptError: BarkingError?
     /// Thrown by `refuseRequest`, `blockRequest` and `requests` when set
@@ -611,7 +613,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if let inviteError { throw inviteError }
         lock.withLock { _invited.append(contact) }
     }
-    func inviteStatus(contact: String) throws -> InviteStatus { inviteStatusByContact[contact] ?? .none }
+    func inviteStatus(contact: String) throws -> InviteStatus {
+        if let inviteStatusError { throw inviteStatusError }
+        return inviteStatusByContact[contact] ?? .none
+    }
     func setInviteNotifications(on: Bool) throws {
         lock.withLock { _inviteNotifications.append(on); prefs.invites = on }
     }

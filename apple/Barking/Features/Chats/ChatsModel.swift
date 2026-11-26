@@ -250,8 +250,7 @@ final class AddContactModel {
             return .sent
         } catch BarkingError.TooSoon {
             return .tooSoon
-        } catch BarkingError.InvalidInput(let detail) where detail == "data too large" {
-            // `CoreError::TooLarge`, as the FFI words it.
+        } catch let e as BarkingError where e.isCardTooLarge {
             return .tooLarge
         } catch {
             return nil
@@ -259,4 +258,13 @@ final class AddContactModel {
     }
 
     func reset() { preview = nil; error = nil; bytes = nil; text = nil; added = nil; inviteResult = nil }
+}
+
+extension BarkingError {
+    /// The card does not fit in an invitation: `CoreError::TooLarge`, as the
+    /// FFI words it. A retry never helps; showing the code does.
+    var isCardTooLarge: Bool {
+        if case .InvalidInput(let detail) = self { return detail == "data too large" }
+        return false
+    }
 }

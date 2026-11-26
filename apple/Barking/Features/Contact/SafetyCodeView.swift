@@ -252,7 +252,12 @@ extension SafetyCodeView {
                 switch model.invite {
                 case .sent, .unanswered:
                     resendButton
-                    if model.resendFailed {
+                    if model.resendTooLarge {
+                        Banner(kind: .info, title: "Your card is too large for an invitation",
+                               message: "Show them your code instead.",
+                               action: .init(label: "Show my code", hint: "Opens your code.") { showsMyCode = true })
+                            .accessibilityIdentifier("contact.invite.tooLarge")
+                    } else if model.resendFailed {
                         Banner(kind: .danger, title: "Not sent. Try again in a moment.")
                     }
                 case .none, .accepted:

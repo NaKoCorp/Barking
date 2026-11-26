@@ -149,4 +149,43 @@ final class ContactModelTests: XCTestCase {
         XCTAssertNil(m.retryAt)
         XCTAssertTrue(m.resendAllowed)
     }
+
+    /// A card too large for an invitation is not a failure to retry: the
+    /// page offers my code instead.
+    func testResendTooLargeOffersTheCode() async {
+        let d = FakeDevice()
+        let m = makeInvite(d, .unanswered(at: nowSecs - 8 * 86_400))
+        await m.load()
+        d.inviteError = .InvalidInput(detail: "data too large")
+        await m.resend()
+        XCTAssertTrue(m.resendTooLarge)
+        XCTAssertFalse(m.resendFailed)
+        d.inviteError = .InvalidInput(detail: "malformed")
+        await m.resend()
+        XCTAssertTrue(m.resendFailed)
+    }
+
+    /// A reload keeps the later date the core gave with `TooSoon`.
+    func testReloadKeepsTheCoresLaterRetry() async {
+        let d = FakeDevice()
+        let at = nowSecs - 3600
+        let m = makeInvite(d, .sent(at: at))
+        await m.load()
+        let x = at + 86_400 + 7200
+        d.inviteError = .TooSoon(retryAt: x)
+        await m.resend()
+        await m.load()
+        XCTAssertEqual(m.retryAt, Date(timeIntervalSince1970: TimeInterval(x)))
+    }
+
+    /// A resend that went waits a day, even when the status cannot be read back.
+    func testResendWaitsADayWithoutReload() async {
+        let d = FakeDevice()
+        let m = makeInvite(d, .unanswered(at: nowSecs - 8 * 86_400))
+        await m.load()
+        d.inviteStatusError = .InvalidInput(detail: "unreadable")
+        await m.resend()
+        XCTAssertEqual(m.retryAt, now.addingTimeInterval(86_400))
+        XCTAssertEqual(m.hoursUntilRetry, 24)
+    }
 }

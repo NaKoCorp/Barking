@@ -22,8 +22,11 @@ final class ContactModel {
     /// When a resend becomes possible: 24 h after the last invitation, or
     /// the core's own answer to a resend that came too soon.
     private(set) var retryAt: Date?
-    /// The last resend failed for another reason than "too soon".
+    /// The last resend failed for another reason than "too soon" or "too large".
     private(set) var resendFailed = false
+    /// The card is too large for an invitation: a retry cannot help, the
+    /// contact must scan my code instead.
+    private(set) var resendTooLarge = false
     private let now: () -> Date
 
     init(contact: String, core: CoreService, now: @escaping () -> Date = Date.init) {
@@ -73,7 +76,10 @@ final class ContactModel {
         guard let status = try? await core.inviteStatus(contact) else { return }
         invite = status
         switch status {
-        case .sent(let at), .unanswered(let at): retryAt = Self.date(at + Self.inviteInterval)
+        case .sent(let at), .unanswered(let at):
+            // A later date the core gave with `TooSoon` stays.
+            let fromStatus = Self.date(at + Self.inviteInterval)
+            retryAt = retryAt.map { max($0, fromStatus) } ?? fromStatus
         case .none, .accepted: retryAt = nil
         }
     }
@@ -83,10 +89,16 @@ final class ContactModel {
         do {
             try await core.invite(contact)
             resendFailed = false
+            resendTooLarge = false
+            // Holds even if the reload below fails.
+            retryAt = now().addingTimeInterval(TimeInterval(Self.inviteInterval))
             await loadInvite()
         } catch BarkingError.TooSoon(let at) {
             resendFailed = false
             retryAt = Self.date(at)
+        } catch let e as BarkingError where e.isCardTooLarge {
+            resendFailed = false
+            resendTooLarge = true
         } catch {
             resendFailed = true
         }
