@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0](https://github.com/NaKoCorp/Barking/compare/v0.6.0...v0.7.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* a 0.6.0 device can no longer open a session started by an updated device.
+
+### Features
+
+* contact requests and invitations ([#90](https://github.com/NaKoCorp/Barking/issues/90)) ([f1e8b75](https://github.com/NaKoCorp/Barking/commit/f1e8b750baf430f96036972ceb54258e58b6b427))
+
+
+### Bug Fixes
+
+* **ios:** show the known relays at once while a sync runs ([#88](https://github.com/NaKoCorp/Barking/issues/88)) ([0004d13](https://github.com/NaKoCorp/Barking/commit/0004d139dfecec871367a984db33026f5cc1bbb4))
+
 ## [0.6.0](https://github.com/NaKoCorp/Barking/compare/v0.5.0...v0.6.0) (2026-11-25)
 
 
