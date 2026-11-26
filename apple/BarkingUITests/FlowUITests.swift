@@ -325,6 +325,18 @@ final class NotificationsUITests: XCTestCase {
             toggle.waitUntil({ $0.value as? String == "0" }, timeout: 5)
         }
         XCTAssertEqual(toggle.value as? String, "0")
+        let invites = app.switches["notifications.invites"]
+        XCTAssertTrue(invites.waitForExistence(timeout: 5))
+        XCTAssertEqual(invites.value as? String, "1", "on by default")
+        for _ in 0..<3 where invites.value as? String == "1" {
+            invites.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            invites.waitUntil({ $0.value as? String == "0" }, timeout: 5)
+        }
+        XCTAssertEqual(invites.value as? String, "0")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "notifications-invites-off"
+        shot.lifetime = .keepAlways
+        add(shot)
         app.terminate()
 
         let again = XCUIApplication.isolated()
@@ -335,6 +347,8 @@ final class NotificationsUITests: XCTestCase {
         XCTAssertTrue(again.buttons["notifications.preview.nameOnly"].isSelected)
         let toggleAgain = again.switches["notifications.instant"]
         XCTAssertTrue(toggleAgain.waitUntil({ $0.value as? String == "0" }, timeout: 10))
+        XCTAssertTrue(again.switches["notifications.invites"].waitUntil({ $0.value as? String == "0" }, timeout: 10),
+                      "the invitations setting is kept by the core")
     }
 }
 

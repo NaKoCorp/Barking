@@ -521,6 +521,39 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(d.reads.last?.1, 5)
     }
 
+    /// The changed-device line (design decision 7): the latest change of
+    /// this contact, for 7 days.
+    func testDeviceChangeShownWithinWeek() async throws {
+        let now = Date(timeIntervalSince1970: 100 * 86_400)
+        let day: UInt64 = 86_400
+        let today = UInt64(now.timeIntervalSince1970)
+        func shown(_ changes: [DeviceChange]) async -> ConversationModel {
+            let d = FakeDevice()
+            d.deviceChangeList = changes
+            let m = make(d)
+            m.now = { now }
+            await m.onAppear()
+            return m
+        }
+        var m = await shown([DeviceChange(contact: "b", at: today - 2 * day)])
+        XCTAssertEqual(m.deviceChangedAt, Date(timeIntervalSince1970: TimeInterval(today - 2 * day)))
+        m = await shown([DeviceChange(contact: "b", at: today - 8 * day)])
+        XCTAssertNil(m.deviceChangedAt, "older than 7 days")
+        m = await shown([DeviceChange(contact: "c", at: today - 2 * day)])
+        XCTAssertNil(m.deviceChangedAt, "another contact's change")
+        m = await shown([DeviceChange(contact: "b", at: today - 3 * day), DeviceChange(contact: "b", at: today - day),
+                         DeviceChange(contact: "b", at: today - 2 * day)])
+        XCTAssertEqual(m.deviceChangedAt, Date(timeIntervalSince1970: TimeInterval(today - day)), "the latest only")
+
+        let french = try XCTUnwrap(Bundle.main.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+        let fr = Locale(identifier: "fr")
+        let ago = RequestHistory.relative(try XCTUnwrap(m.deviceChangedAt), now: now, locale: fr)
+        XCTAssertEqual(m.deviceChangedLine(bundle: french, locale: fr), "bob a changé d’appareil · \(ago)",
+                       "the alias, else the name")
+        m = await shown([])
+        XCTAssertNil(m.deviceChangedLine())
+    }
+
     func testKeyChangeBanner() async {
         let d = FakeDevice()
         d.keyChangeList = [KeyChange(contact: "b", at: 10)]

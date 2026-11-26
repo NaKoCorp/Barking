@@ -115,6 +115,11 @@ final class ConversationModel {
     /// What the header says (U-20).
     var trust: Trust { Trust(verified: verified) }
     private(set) var keyChanged = false
+    /// The contact's latest device change of the last 7 days (§7.7): a
+    /// quiet line, not a warning, since the root key did not change.
+    private(set) var deviceChangedAt: Date?
+    /// How long the changed-device line stays.
+    static let deviceChangeShownFor: TimeInterval = 7 * 86_400
     /// The contact was read from the core: until then `verified` says nothing.
     private var contactLoaded = false
     /// Writing to a contact whose safety code was never compared: a warning,
@@ -247,6 +252,22 @@ final class ConversationModel {
         await reload()
         let changes = (try? await core.keyChanges(since: 0)) ?? []
         keyChanged = !verified && changes.contains { $0.contact == contact }
+        await loadDeviceChange()
+    }
+
+    private func loadDeviceChange() async {
+        let since = UInt64(max(0, now().timeIntervalSince1970 - Self.deviceChangeShownFor))
+        let latest = ((try? await core.deviceChanges(since: since)) ?? [])
+            .filter { $0.contact == contact && $0.at >= since }.map(\.at).max()
+        deviceChangedAt = latest.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+    }
+
+    /// "Léa changed device · 2 d ago", in the app's language; nil without a
+    /// recent change.
+    func deviceChangedLine(bundle: Bundle = .main, locale: Locale = .current) -> String? {
+        guard let deviceChangedAt else { return nil }
+        let ago = RequestHistory.relative(deviceChangedAt, now: now(), locale: locale)
+        return String(localized: "\(name) changed device · \(ago)", bundle: bundle, locale: locale)
     }
 
     /// Puts the stored draft in the field, unless something was typed

@@ -30,6 +30,9 @@ final class NotificationsModel {
 
     private(set) var instant = true
     private(set) var preview: PushPreview = .nameAndText
+    /// Notify an invitation from an unknown person (on by default). Off, it
+    /// still arrives in the list.
+    private(set) var invites = true
     private(set) var appLocked = false
     /// The last change of the switch or the preview was not stored: the
     /// screen shows the value the core holds and says so.
@@ -88,6 +91,20 @@ final class NotificationsModel {
         await readPrefs()
     }
 
+    /// No sync follows: the core reads the setting when an invitation arrives.
+    func setInvites(_ on: Bool) async {
+        let previous = invites
+        invites = on
+        do {
+            try await core.setInviteNotifications(on)
+            saveFailed = false
+        } catch {
+            saveFailed = true
+            invites = previous
+        }
+        await readPrefs()
+    }
+
     /// Shows the iOS prompt, applies the push guard, then reads the state.
     func requestPermission() async {
         if let request {
@@ -102,5 +119,6 @@ final class NotificationsModel {
         guard let prefs = try? await core.notificationPrefs() else { return }
         instant = prefs.instant
         preview = prefs.preview
+        invites = prefs.invites
     }
 }

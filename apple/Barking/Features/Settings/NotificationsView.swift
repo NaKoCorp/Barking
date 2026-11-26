@@ -30,6 +30,20 @@ struct NotificationsView: View {
                 stateNote
                 action
             }
+            // Its own card: the notes above describe the instant switch. Not
+            // tied to the permission, like the preview: the core keeps it.
+            VStack(alignment: .leading, spacing: Space.s2) {
+                FormCard {
+                    Toggle(isOn: Binding(get: { model.invites }, set: { on in Task { await model.setInvites(on) } })) {
+                        Text("Notify invitations").font(.bBody.weight(.semibold)).foregroundStyle(Color.fg)
+                    }
+                    .tint(Color.toggleOn)
+                    .padding(.horizontal, FormRowMetrics.inset)
+                    .frame(minHeight: FormRowMetrics.minHeight(hasSubtitle: false))
+                    .accessibilityIdentifier("notifications.invites")
+                }
+                note("Off, an invitation still arrives in your list.")
+            }
             if model.saveFailed {
                 Banner(kind: .danger, title: "Not saved. Try again.")
             }

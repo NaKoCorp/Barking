@@ -723,3 +723,10 @@
 "No answer · sent %@" = "Sans réponse · envoyée %@";
 "Accepted" = "Acceptée";
 "Resend the invitation" = "Renvoyer l’invitation";
+
+/* Contact requests: the invitations setting (design decision 8). */
+"Notify invitations" = "Notifier les invitations";
+"Off, an invitation still arrives in your list." = "Coupé, une invitation arrive quand même dans ta liste.";
+
+/* A contact's new device, in the conversation (design decision 7): the name, then how long ago. */
+"%@ changed device · %@" = "%1$@ a changé d’appareil · %2$@";

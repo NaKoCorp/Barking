@@ -265,6 +265,24 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(String(localized: "Possible in \(5) h", bundle: french), "Possible dans 5 h")
     }
 
+    /// The invitations setting and the changed-device line (Copie table,
+    /// design decisions 7 and 8).
+    func testInvitesSettingAndDeviceChangeStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = [
+            "Notify invitations": "Notifier les invitations",
+            "Off, an invitation still arrives in your list.": "Coupé, une invitation arrive quand même dans ta liste.",
+            "%@ changed device · %@": "%1$@ a changé d’appareil · %2$@",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        let french = try XCTUnwrap(Bundle.main.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+        let name = "Léa", ago = "il y a 2 j"
+        XCTAssertEqual(String(localized: "\(name) changed device · \(ago)", bundle: french),
+                       "Léa a changé d’appareil · il y a 2 j")
+    }
+
     /// The invitation notification texts (BarkingKit, read by the extension)
     /// exist in English and French, with their one placeholder.
     func testInvitationNotificationStrings() throws {

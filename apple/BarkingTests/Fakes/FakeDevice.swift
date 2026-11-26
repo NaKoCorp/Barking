@@ -617,7 +617,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if let inviteStatusError { throw inviteStatusError }
         return inviteStatusByContact[contact] ?? .none
     }
+    /// Thrown by `setInviteNotifications` when set (nothing is recorded then).
+    var setInviteNotificationsError: Error?
     func setInviteNotifications(on: Bool) throws {
+        if let setInviteNotificationsError { throw setInviteNotificationsError }
         lock.withLock { _inviteNotifications.append(on); prefs.invites = on }
     }
     func deviceChanges(since: UInt64) throws -> [DeviceChange] { deviceChangeList.filter { $0.at >= since } }
