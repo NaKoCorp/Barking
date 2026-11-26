@@ -14,15 +14,26 @@ public enum NotificationContent {
     /// `.nameOnly` keeps the name and the thread but never the text.
     /// An ephemeral never shows its text, whatever the preview: "Disappearing
     /// message", and a reaction to one says so without its emoji (spec
-    /// deletion/ephemeral §5.4). `bundle`: the strings (tests pass French).
+    /// deletion/ephemeral §5.4). A wake with no message or reaction but
+    /// contact requests to notify shows the invitation ("INVITE_*"); a message
+    /// in the same wake wins. `bundle`: the strings (tests pass French);
+    /// `locale`: the quotation marks around a declared name.
     public static func apply(_ summary: SyncSummary?, to content: UNMutableNotificationContent,
                              preview: PushPreview, locked: Bool,
-                             bundle: Bundle = Bundle(for: Marker.self)) -> String {
+                             bundle: Bundle = Bundle(for: Marker.self), locale: Locale = .current) -> String {
         guard let summary else { return "original" }
         let messages = summary.newMessages
         let reactions = summary.newReactions
         let count = messages.count + reactions.count
         guard count > 0 else {
+            let requests = summary.newRequests
+            if !requests.isEmpty {
+                content.title = ""
+                content.body = invitationBody(requests, hidden: locked || preview == .generic,
+                                              bundle: bundle, locale: locale)
+                content.threadIdentifier = ""
+                return "shown"
+            }
             guard summary.nothingToShow else { return "original" }
             content.title = ""
             content.body = ""
@@ -56,6 +67,20 @@ public enum NotificationContent {
         }
         content.threadIdentifier = oneContact ? (contacts.first ?? "") : ""
         return "shown"
+    }
+
+    /// One request: who invited, their declared name quoted. Several, or
+    /// while the name must not show: "New invitation". No thread: a
+    /// requester has no conversation yet.
+    private static func invitationBody(_ requests: [NewRequest], hidden: Bool, bundle: Bundle, locale: Locale) -> String {
+        guard !hidden, requests.count == 1, let r = requests.first else {
+            return localized("INVITE_GENERIC", fallback: "New invitation", bundle: bundle)
+        }
+        let name = DeclaredName.quoted(r.name, fingerprint: r.contact, locale: locale)
+        let format = r.resent
+            ? localized("INVITE_RESENT", fallback: "%@ resent their invitation", bundle: bundle)
+            : localized("INVITE_NEW", fallback: "New invitation from %@", bundle: bundle)
+        return String(format: format, name)
     }
 
     private static func reactionBody(_ r: NewReaction, withText: Bool, bundle: Bundle) -> String {

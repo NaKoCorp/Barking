@@ -167,6 +167,22 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(fr["Blocked contacts"] as? String, "Contacts bloqués")
     }
 
+    /// The invitation notification texts (BarkingKit, read by the extension)
+    /// exist in English and French, with their one placeholder.
+    func testInvitationNotificationStrings() throws {
+        let kit = Bundle(for: NotificationContent.Marker.self)
+        for lang in ["en", "fr"] {
+            let path = try XCTUnwrap(kit.path(forResource: "Localizable", ofType: "strings", inDirectory: nil,
+                                              forLocalization: lang))
+            let t = try XCTUnwrap(NSDictionary(contentsOfFile: path))
+            for key in ["INVITE_NEW", "INVITE_RESENT", "INVITE_GENERIC"] {
+                XCTAssertNotNil(t[key], "missing \(lang) for \(key)")
+            }
+            XCTAssertTrue((t["INVITE_NEW"] as? String ?? "").contains("%@"))
+            XCTAssertTrue((t["INVITE_RESENT"] as? String ?? "").contains("%@"))
+        }
+    }
+
     /// UI review B4: messaging and status strings land in both languages.
     func testMessagingStringsInFrench() throws {
         let fr = try XCTUnwrap(table("fr"))

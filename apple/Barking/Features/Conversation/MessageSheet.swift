@@ -436,5 +436,16 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func markSeen(ids: [Int64]) throws { throw Never() }
     func nextExpiry() throws -> UInt64? { throw Never() }
     func expireEphemeral() throws -> [Int64] { throw Never() }
+    func requests() throws -> [ContactRequestInfo] { throw Never() }
+    func requestSafetyNumber(fingerprint: String) throws -> [String] { throw Never() }
+    func acceptRequest(fingerprint: String, alias: String?) throws -> String { throw Never() }
+    func refuseRequest(fingerprint: String) throws { throw Never() }
+    func blockRequest(fingerprint: String) throws { throw Never() }
+    func setRequestHidden(fingerprint: String, hidden: Bool) throws { throw Never() }
+    func markRequestsSeen() throws { throw Never() }
+    func invite(contact: String) throws { throw Never() }
+    func inviteStatus(contact: String) throws -> InviteStatus { throw Never() }
+    func setInviteNotifications(on: Bool) throws { throw Never() }
+    func deviceChanges(since: UInt64) throws -> [DeviceChange] { throw Never() }
 }
 #endif

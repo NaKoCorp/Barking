@@ -594,6 +594,23 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func notificationPrefs() throws -> NotificationPrefs { try device.notificationPrefs() }
     func setInstant(on: Bool) throws { try device.setInstant(on: on) }
     func setPreview(preview: PushPreview) throws { try device.setPreview(preview: preview) }
+    func setInviteNotifications(on: Bool) throws { try device.setInviteNotifications(on: on) }
+    func requests() throws -> [ContactRequestInfo] { try device.requests() }
+    func requestSafetyNumber(fingerprint: String) throws -> [String] {
+        try device.requestSafetyNumber(fingerprint: fingerprint)
+    }
+    func acceptRequest(fingerprint: String, alias: String?) throws -> String {
+        try device.acceptRequest(fingerprint: fingerprint, alias: alias)
+    }
+    func refuseRequest(fingerprint: String) throws { try device.refuseRequest(fingerprint: fingerprint) }
+    func blockRequest(fingerprint: String) throws { try device.blockRequest(fingerprint: fingerprint) }
+    func setRequestHidden(fingerprint: String, hidden: Bool) throws {
+        try device.setRequestHidden(fingerprint: fingerprint, hidden: hidden)
+    }
+    func markRequestsSeen() throws { try device.markRequestsSeen() }
+    func invite(contact: String) throws { try device.invite(contact: contact) }
+    func inviteStatus(contact: String) throws -> InviteStatus { try device.inviteStatus(contact: contact) }
+    func deviceChanges(since: UInt64) throws -> [DeviceChange] { try device.deviceChanges(since: since) }
     func noteWake(atSecs: UInt64) throws { try device.noteWake(atSecs: atSecs) }
     func wakeStatus() throws -> WakeStatus { try device.wakeStatus() }
     func myDevices() throws -> [MyDeviceInfo] { try device.myDevices() }

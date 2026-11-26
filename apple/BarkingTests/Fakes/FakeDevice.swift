@@ -520,6 +520,92 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
             return expiring
         }
     }
+
+    // MARK: Contact requests
+
+    /// What `requests` returns; `acceptRequest` removes the accepted one.
+    var requestList: [ContactRequestInfo] {
+        get { lock.withLock { _requestList } }
+        set { lock.withLock { _requestList = newValue } }
+    }
+    private var _requestList: [ContactRequestInfo] = []
+    /// What `inviteStatus` returns per contact (missing: `.none`).
+    var inviteStatusByContact: [String: InviteStatus] = [:]
+    /// Thrown by `invite` when set (nothing is recorded then).
+    var inviteError: BarkingError?
+    /// Thrown by `acceptRequest` when set (nothing is recorded then).
+    var acceptError: BarkingError?
+    /// What `deviceChanges` returns (filtered by `since`).
+    var deviceChangeList: [DeviceChange] = []
+    private var _invited: [String] = []
+    private var _accepted: [(fingerprint: String, alias: String?)] = []
+    private var _refused: [String] = []
+    private var _blockedRequests: [String] = []
+    private var _hidden: [(String, Bool)] = []
+    private var _seenMarks = 0
+    private var _inviteNotifications: [Bool] = []
+    /// Contacts `invite` ran for, in order.
+    var invited: [String] { lock.withLock { _invited } }
+    /// Each `acceptRequest`, in order.
+    var accepted: [(fingerprint: String, alias: String?)] { lock.withLock { _accepted } }
+    var refused: [String] { lock.withLock { _refused } }
+    /// Requesters `blockRequest` ran for (`blockedList` is for contacts).
+    var blockedRequests: [String] { lock.withLock { _blockedRequests } }
+    /// Each `setRequestHidden` (fingerprint, hidden), in order.
+    var hidden: [(String, Bool)] { lock.withLock { _hidden } }
+    /// How many times `markRequestsSeen` ran (`seen` is for `markSeen`).
+    var seenMarks: Int { lock.withLock { _seenMarks } }
+    /// Each `setInviteNotifications`, in order (it also sets `prefs.invites`).
+    var inviteNotifications: [Bool] { lock.withLock { _inviteNotifications } }
+
+    func requests() throws -> [ContactRequestInfo] { requestList }
+    func requestSafetyNumber(fingerprint: String) throws -> [String] { Array(repeating: "54321", count: 12) }
+    func acceptRequest(fingerprint: String, alias: String?) throws -> String {
+        if let acceptError { throw acceptError }
+        return try lock.withLock {
+            guard let i = _requestList.firstIndex(where: { $0.fingerprint == fingerprint }) else {
+                throw BarkingError.NotFound
+            }
+            _requestList.remove(at: i)
+            _accepted.append((fingerprint, alias))
+            return fingerprint
+        }
+    }
+    func refuseRequest(fingerprint: String) throws {
+        lock.withLock {
+            _requestList.removeAll { $0.fingerprint == fingerprint }
+            _refused.append(fingerprint)
+        }
+    }
+    func blockRequest(fingerprint: String) throws {
+        lock.withLock {
+            _requestList.removeAll { $0.fingerprint == fingerprint }
+            _blockedRequests.append(fingerprint)
+        }
+    }
+    func setRequestHidden(fingerprint: String, hidden: Bool) throws {
+        lock.withLock {
+            if let i = _requestList.firstIndex(where: { $0.fingerprint == fingerprint }) {
+                _requestList[i].hidden = hidden
+            }
+            _hidden.append((fingerprint, hidden))
+        }
+    }
+    func markRequestsSeen() throws {
+        lock.withLock {
+            for i in _requestList.indices { _requestList[i].unseen = false }
+            _seenMarks += 1
+        }
+    }
+    func invite(contact: String) throws {
+        if let inviteError { throw inviteError }
+        lock.withLock { _invited.append(contact) }
+    }
+    func inviteStatus(contact: String) throws -> InviteStatus { inviteStatusByContact[contact] ?? .none }
+    func setInviteNotifications(on: Bool) throws {
+        lock.withLock { _inviteNotifications.append(on); prefs.invites = on }
+    }
+    func deviceChanges(since: UInt64) throws -> [DeviceChange] { deviceChangeList.filter { $0.at >= since } }
 }
 
 /// Runs device calls directly (no background task) in tests.
