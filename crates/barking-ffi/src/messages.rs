@@ -41,6 +41,34 @@ pub struct KeyChange {
     pub at: u64,
 }
 
+/// A contact whose card replaced at least one device by another (a
+/// recovered identity, a lost phone replaced).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DeviceChange {
+    /// Fingerprint of the contact.
+    pub contact: String,
+    /// Unix seconds.
+    pub at: u64,
+}
+
+/// The device change `e` records, if any: a card update that both added
+/// and removed devices. An addition alone (a linked device) or a removal
+/// alone is not one.
+fn device_change(at: u64, e: TransparencyEvent) -> Option<DeviceChange> {
+    match e {
+        TransparencyEvent::ContactCardUpdated {
+            contact,
+            added,
+            removed,
+            ..
+        } if added > 0 && removed > 0 => Some(DeviceChange {
+            contact: contact.to_string(),
+            at,
+        }),
+        _ => None,
+    }
+}
+
 type Marks = Vec<([u8; 32], i64)>;
 
 fn load_marks(core: &Core) -> Result<Marks, BarkingError> {
@@ -185,5 +213,52 @@ impl Device {
                     .collect())
             })
         })
+    }
+
+    /// Contacts whose devices were replaced (`DeviceChange`), logged after
+    /// `since` (Unix seconds).
+    pub fn device_changes(&self, since: u64) -> Result<Vec<DeviceChange>, BarkingError> {
+        guard(|| {
+            self.with_core_read(|core| {
+                Ok(core
+                    .transparency_log(LOG_LIMIT)?
+                    .into_iter()
+                    .filter(|(at, _)| *at >= since)
+                    .filter_map(|(at, e)| device_change(at, e))
+                    .collect())
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_replacement_is_a_device_change() {
+        let alice = Fingerprint([7; 32]);
+        let update = |added, removed| TransparencyEvent::ContactCardUpdated {
+            contact: alice,
+            alias: String::new(),
+            added,
+            removed,
+        };
+        assert_eq!(
+            device_change(5, update(1, 1)),
+            Some(DeviceChange {
+                contact: alice.to_string(),
+                at: 5,
+            })
+        );
+        assert_eq!(device_change(5, update(1, 0)), None);
+        assert_eq!(device_change(5, update(0, 1)), None);
+        assert_eq!(
+            device_change(
+                5,
+                TransparencyEvent::ContactRequestReceived { contact: alice }
+            ),
+            None
+        );
     }
 }

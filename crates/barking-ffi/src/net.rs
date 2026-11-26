@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use barking_core::identity::root::Fingerprint;
 use barking_core::{Core, ReceiveOutcome, SyncKind};
-use barking_net::push::PushConfig;
+use barking_net::push::{PushConfig, PushPrefs};
 use barking_net::{NetState, QuicDialer, QuickOptions, SyncOptions, SyncReport};
 
 use crate::delivery::{DeliveryChange, changes_of};
@@ -64,6 +64,26 @@ pub struct SyncSummary {
     /// the rows to drop (`Message::id`).
     #[uniffi(default = [])]
     pub expired: Vec<i64>,
+    /// Contact requests to notify, in arrival order: the core allows one
+    /// per requester per 24 hours, and none when the user turned
+    /// invitation notifications off (`NotificationPrefs::invites`).
+    #[uniffi(default = [])]
+    pub new_requests: Vec<NewRequest>,
+    /// Requesters whose request moved during the sync (notified or not),
+    /// each once, in arrival order: the requests list reloads.
+    #[uniffi(default = [])]
+    pub request_contacts: Vec<String>,
+}
+
+/// A contact request to notify.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct NewRequest {
+    /// Fingerprint of the requester.
+    pub contact: String,
+    /// Its declared display name, otherwise the start of the fingerprint.
+    pub name: String,
+    /// The request already existed (a new invite from the same person).
+    pub resent: bool,
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -167,8 +187,13 @@ fn summary(core: &mut Core, mut report: SyncReport, expired: Vec<i64>) -> SyncSu
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| from.to_string().chars().take(8).collect())
     };
+    let request_contacts = request_contacts(&received);
+    // An unreadable preference reads as the default (on), as `load` does.
+    let notify_invites = PushPrefs::load(core).map_or(true, |p| p.invites);
+    let requests = core.requests().unwrap_or_default();
     let mut new_messages = Vec::new();
     let mut new_reactions = Vec::new();
+    let mut new_requests = Vec::new();
     let mut repeats = 0usize;
     for outcome in received {
         match outcome {
@@ -221,14 +246,35 @@ fn summary(core: &mut Core, mut report: SyncReport, expired: Vec<i64>) -> SyncSu
             // A message already in its conversation, received again: no
             // new row, but the push may have come for it.
             ReceiveOutcome::DuplicateMessage => repeats += 1,
+            // The core notifies a requester at most once per 24 hours; the
+            // user may turn these notifications off.
+            ReceiveOutcome::ContactRequest {
+                contact,
+                resent,
+                notify,
+            } if notify && notify_invites => new_requests.push(NewRequest {
+                contact: contact.to_string(),
+                name: requests
+                    .iter()
+                    .find(|r| r.fingerprint == contact)
+                    .map(|r| r.display_name.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| contact.to_string().chars().take(8).collect()),
+                resent,
+            }),
             // `Partial` lands here too and counts as nothing to show only
             // because the packet's last fragment is a deposit of its own,
             // which sends its own push: that wake-up shows the message.
             _ => {}
         }
     }
-    let nothing_to_show =
-        nothing_to_show(&report, new_messages.len(), new_reactions.len(), repeats);
+    let nothing_to_show = nothing_to_show(
+        &report,
+        new_messages.len(),
+        new_reactions.len(),
+        new_requests.len(),
+        repeats,
+    );
     SyncSummary {
         items_received: u32::try_from(report.items_received).unwrap_or(u32::MAX),
         sent: u32::try_from(report.first_copies).unwrap_or(u32::MAX),
@@ -244,19 +290,23 @@ fn summary(core: &mut Core, mut report: SyncReport, expired: Vec<i64>) -> SyncSu
         reaction_contacts,
         nothing_to_show,
         expired,
+        new_requests,
+        request_contacts,
     }
 }
 
 /// The wake-up that came for `report` has nothing to show: the sync read
 /// every mailbox it meant to (`fetched_all`: so no message was cut off by a
 /// deadline), brought items, and none of them is a visible message, a
-/// reaction to notify, or a repeat of a message still shown (`repeats`,
+/// reaction or a contact request to notify (a request not notified counts
+/// as nothing), or a repeat of a message still shown (`repeats`,
 /// `ReceiveOutcome::DuplicateMessage`: an earlier sync or another node may
 /// have taken the message this push came for).
 fn nothing_to_show(
     report: &SyncReport,
     new_messages: usize,
     new_reactions: usize,
+    new_requests: usize,
     repeats: usize,
 ) -> bool {
     report.error.is_none()
@@ -265,7 +315,23 @@ fn nothing_to_show(
         && report.items_received > 0
         && new_messages == 0
         && new_reactions == 0
+        && new_requests == 0
         && repeats == 0
+}
+
+/// Requesters of the contact requests among `received`, notified or not,
+/// in first-seen order.
+fn request_contacts(received: &[ReceiveOutcome]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for o in received {
+        if let ReceiveOutcome::ContactRequest { contact, .. } = o {
+            let c = contact.to_string();
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 /// Contacts whose conversation a reaction changed (a contact's own, or a
@@ -613,7 +679,7 @@ mod tests {
             fetched_all: true,
             ..SyncReport::default()
         };
-        assert!(nothing_to_show(&clean, 0, 0, 0));
+        assert!(nothing_to_show(&clean, 0, 0, 0, 0));
         let cases = [
             (
                 "error",
@@ -657,9 +723,144 @@ mod tests {
             ("new reaction", clean_copy(&clean), 0, 1),
         ];
         for (what, report, messages, reactions) in cases {
-            assert!(!nothing_to_show(&report, messages, reactions, 0), "{what}");
+            assert!(
+                !nothing_to_show(&report, messages, reactions, 0, 0),
+                "{what}"
+            );
         }
-        assert!(!nothing_to_show(&clean, 0, 0, 1), "a visible repeat");
+        assert!(!nothing_to_show(&clean, 0, 0, 0, 1), "a visible repeat");
+        assert!(!nothing_to_show(&clean, 0, 0, 1, 0), "a new request");
+    }
+
+    /// Clock of the invitation tests.
+    const T: u64 = 1_800_000_000;
+
+    /// Alice ("Alice") knows Bob and invites him at `at`. Returns Alice's
+    /// core, Bob's, Alice's fingerprint and the invite.
+    fn alice_invites_bob(
+        dir: &tempfile::TempDir,
+        at: u64,
+    ) -> (Core, Core, Fingerprint, barking_core::packet::Packet) {
+        let mut rng = rand::rng();
+        let (pa, pb) = (dir.path().join("a.db"), dir.path().join("b.db"));
+        let (mut a, _) = Core::create(&pa, &[1; 32], "a-phone", at, &mut rng).unwrap();
+        let (b, _) = Core::create(&pb, &[2; 32], "b-phone", at, &mut rng).unwrap();
+        a.contact_card("Alice").unwrap();
+        a.add_contact(&b.contact_card("Bob").unwrap(), None, at, &mut rng)
+            .unwrap();
+        let mut out = a.invite(&b.fingerprint(), at, &mut rng).unwrap();
+        assert_eq!(out.len(), 1);
+        let fa = a.fingerprint();
+        (a, b, fa, out.remove(0))
+    }
+
+    /// A clean, complete sync that brought `received`.
+    fn clean_report(received: Vec<ReceiveOutcome>) -> SyncReport {
+        SyncReport {
+            items_received: received.len(),
+            network_up: true,
+            fetched_all: true,
+            received,
+            ..SyncReport::default()
+        }
+    }
+
+    /// Bob receives Alice's invite at `T`: the outcome and Bob's core.
+    fn bob_receives_invite(dir: &tempfile::TempDir) -> (Core, Fingerprint, ReceiveOutcome) {
+        let (_a, mut b, fa, p) = alice_invites_bob(dir, T);
+        let got = b.receive(&p.encode(), "t", T, &mut rand::rng()).unwrap();
+        (b, fa, got)
+    }
+
+    #[test]
+    fn sync_summary_lists_new_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut b, fa, got) = bob_receives_invite(&dir);
+        let s = summary(&mut b, clean_report(vec![got]), Vec::new());
+        assert_eq!(
+            s.new_requests,
+            vec![NewRequest {
+                contact: fa.to_string(),
+                name: "Alice".into(),
+                resent: false,
+            }]
+        );
+        assert_eq!(s.request_contacts, vec![fa.to_string()]);
+        assert!(!s.nothing_to_show);
+    }
+
+    #[test]
+    fn request_only_wake_without_notify_is_nothing_to_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut b, fa, got) = bob_receives_invite(&dir);
+        PushPrefs {
+            invites: false,
+            ..PushPrefs::default()
+        }
+        .store(&mut b)
+        .unwrap();
+        let s = summary(&mut b, clean_report(vec![got]), Vec::new());
+        assert!(s.new_requests.is_empty());
+        assert_eq!(s.request_contacts, vec![fa.to_string()]);
+        assert!(s.nothing_to_show);
+    }
+
+    /// A second invite less than 24 hours after the first was received
+    /// (the first arrived late): listed for reload, not notified.
+    #[test]
+    fn resend_within_day_not_notified() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut a, mut b, fa, first) = alice_invites_bob(&dir, T);
+        let mut rng = rand::rng();
+        let got = b
+            .receive(&first.encode(), "t", T + 86_000, &mut rng)
+            .unwrap();
+        let s = summary(&mut b, clean_report(vec![got]), Vec::new());
+        assert_eq!(s.new_requests.len(), 1);
+        let again = T + 86_401;
+        let second = a.invite(&b.fingerprint(), again, &mut rng).unwrap();
+        let got = b
+            .receive(&second[0].encode(), "t", again + 99, &mut rng)
+            .unwrap();
+        assert!(matches!(
+            got,
+            ReceiveOutcome::ContactRequest {
+                resent: true,
+                notify: false,
+                ..
+            }
+        ));
+        let s = summary(&mut b, clean_report(vec![got]), Vec::new());
+        assert!(s.new_requests.is_empty());
+        assert_eq!(s.request_contacts, vec![fa.to_string()]);
+        assert!(s.nothing_to_show);
+    }
+
+    /// Several outcomes for one requester: listed once, in arrival order;
+    /// no declared name: the start of the fingerprint.
+    #[test]
+    fn request_contacts_once_in_arrival_order() {
+        let (_dir, mut core, _bob) = core_with_bob_message();
+        let (x, y) = (Fingerprint([3; 32]), Fingerprint([4; 32]));
+        let req = |contact, notify| ReceiveOutcome::ContactRequest {
+            contact,
+            resent: false,
+            notify,
+        };
+        let s = summary(
+            &mut core,
+            clean_report(vec![req(y, true), req(x, false), req(y, false)]),
+            Vec::new(),
+        );
+        assert_eq!(s.request_contacts, vec![y.to_string(), x.to_string()]);
+        assert_eq!(
+            s.new_requests,
+            vec![NewRequest {
+                contact: y.to_string(),
+                name: y.to_string().chars().take(8).collect(),
+                resent: false,
+            }]
+        );
     }
 
     fn clean_copy(r: &SyncReport) -> SyncReport {

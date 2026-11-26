@@ -562,6 +562,7 @@ fn wake_prefs() -> PushPrefs {
         instant: false,
         preview: Preview::NameOnly,
         last_wake: Some(1_763_100_000),
+        invites: true,
     }
 }
 
@@ -575,8 +576,14 @@ fn push_prefs_default_when_absent() {
             instant: true,
             preview: Preview::NameAndText,
             last_wake: None,
+            invites: true,
         }
     );
+}
+
+#[test]
+fn push_prefs_default_invites_on() {
+    assert!(PushPrefs::default().invites);
 }
 
 #[test]
@@ -584,6 +591,12 @@ fn push_prefs_round_trip() {
     let (_dir, mut core) = subject(NOW);
     wake_prefs().store(&mut core).unwrap();
     assert_eq!(PushPrefs::load(&core).unwrap(), wake_prefs());
+    let off = PushPrefs {
+        invites: false,
+        ..wake_prefs()
+    };
+    off.store(&mut core).unwrap();
+    assert_eq!(PushPrefs::load(&core).unwrap(), off);
 }
 
 #[test]
@@ -591,11 +604,26 @@ fn push_prefs_golden_bytes() {
     let (_dir, mut core) = subject(NOW);
     wake_prefs().store(&mut core).unwrap();
     let bytes = core.transport_state(PUSH_PREFS_KEY).unwrap().unwrap();
-    assert_eq!(bytes[0], 0x01);
+    assert_eq!(bytes[0], 0x02);
     assert_eq!(
         hex(&bytes),
-        "01000101e08adbc806",
+        "02000101e08adbc80601",
         "the stored push prefs changed: bump their format and migrate"
+    );
+}
+
+/// Format 1 had no `invites`: it reads with invitation notifications on.
+#[test]
+fn push_prefs_v1_reads_with_invites_on() {
+    let (_dir, mut core) = subject(NOW);
+    let v1 = [0x01, 0x00, 0x01, 0x01, 0xe0, 0x8a, 0xdb, 0xc8, 0x06];
+    core.set_transport_state(PUSH_PREFS_KEY, &v1).unwrap();
+    assert_eq!(
+        PushPrefs::load(&core).unwrap(),
+        PushPrefs {
+            invites: true,
+            ..wake_prefs()
+        }
     );
 }
 

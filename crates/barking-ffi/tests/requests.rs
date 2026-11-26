@@ -208,3 +208,84 @@ fn bad_fingerprint_is_invalid_input() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+/// Alice, known to Bob, recovers her identity on a new device (§7.7) and
+/// invites him: her card replaces the old device by the new one, which
+/// `device_changes` reports. Bob's other contact links a second device
+/// (an addition only): not reported.
+#[test]
+fn device_changes_lists_replaced_device() {
+    let (da, dr, db) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let bob = device(&db, 2, "Bob");
+    // The original device, a while ago: the recovered list is newer.
+    let before = now() - 100;
+    let mut rng = rand::rng();
+    let (a, phrase) = Core::create(
+        &da.path().join("a.db"),
+        &[1; 32],
+        "a-phone",
+        before,
+        &mut rng,
+    )
+    .unwrap();
+    let fa = bob
+        .add_contact_bytes(a.contact_card("Alice").unwrap().encode(), None)
+        .unwrap();
+    assert!(bob.device_changes(0).unwrap().is_empty());
+    drop(a);
+    let r = barking_ffi::recover_device(
+        common::config(&dr, 3),
+        phrase.as_str().to_owned(),
+        "r-phone".into(),
+    )
+    .unwrap();
+    r.set_display_name("Alice".into()).unwrap();
+    let fb = r
+        .add_contact_bytes(bob.contact_card_bytes().unwrap(), None)
+        .unwrap();
+    r.invite(fb).unwrap();
+    deliver((&dr, 3), (&db, 2));
+    let changes = bob.device_changes(0).unwrap();
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].contact, fa);
+    assert!(changes[0].at >= before);
+    // Nothing after the change.
+    assert!(bob.device_changes(changes[0].at + 1).unwrap().is_empty());
+
+    // Carol links a tablet: her card gains a device, loses none.
+    let (dc, dt) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let carol = device(&dc, 4, "Carol");
+    let fc = bob
+        .add_contact_bytes(carol.contact_card_bytes().unwrap(), None)
+        .unwrap();
+    carol
+        .add_contact_bytes(bob.contact_card_bytes().unwrap(), None)
+        .unwrap();
+    let pending = barking_ffi::begin_link(
+        common::config(&dt, 5),
+        carol.link_offer().unwrap(),
+        "t".into(),
+    )
+    .unwrap();
+    pending
+        .device
+        .finish_link(carol.link_device(pending.request, false).unwrap())
+        .unwrap();
+    drop(pending.device);
+    let packets = open(&dc, 4).pending_outbox(now()).unwrap();
+    let mut b = open(&db, 2);
+    for p in packets {
+        // Packets for Carol's tablet are not Bob's to read.
+        let _ = b.receive(&p, "t", now(), &mut rand::rng());
+    }
+    drop(b);
+    let carol_card = bob.contact_devices(fc.clone()).unwrap();
+    assert_eq!(carol_card.len(), 2, "Carol's card update reached Bob");
+    let changes = bob.device_changes(0).unwrap();
+    assert!(changes.iter().all(|c| c.contact != fc), "{changes:?}");
+    assert_eq!(changes.len(), 1);
+}

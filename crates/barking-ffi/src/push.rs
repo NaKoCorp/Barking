@@ -100,6 +100,11 @@ impl Device {
         self.update_prefs(|p| p.preview = preview.into())
     }
 
+    /// Turns the notification of new contact requests on or off.
+    pub fn set_invite_notifications(&self, on: bool) -> Result<(), BarkingError> {
+        self.update_prefs(|p| p.invites = on)
+    }
+
     /// Records that a push woke the app at `at_secs` (Unix seconds).
     pub fn note_wake(&self, at_secs: u64) -> Result<(), BarkingError> {
         self.update_prefs(|p| p.last_wake = Some(at_secs))
@@ -172,6 +177,9 @@ pub struct NotificationPrefs {
     pub preview: PushPreview,
     /// When a push last woke the app (Unix seconds), if ever.
     pub last_wake: Option<u64>,
+    /// New contact requests are notified.
+    #[uniffi(default = true)]
+    pub invites: bool,
 }
 
 impl From<PushPrefs> for NotificationPrefs {
@@ -180,6 +188,7 @@ impl From<PushPrefs> for NotificationPrefs {
             instant: p.instant,
             preview: p.preview.into(),
             last_wake: p.last_wake,
+            invites: p.invites,
         }
     }
 }
