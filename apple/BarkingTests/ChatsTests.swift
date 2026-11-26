@@ -173,6 +173,82 @@ final class ChatsModelTests: XCTestCase {
         XCTAssertEqual(m.rows.first?.line, .preview("plain"), "after the expiry, the message before")
     }
 
+    func request(_ fp: String, _ name: String, lastSeen: UInt64, hidden: Bool = false,
+                 unseen: Bool = false) -> ContactRequestInfo {
+        ContactRequestInfo(fingerprint: fp, displayName: name, firstSeen: lastSeen, lastSeen: lastSeen,
+                           inviteCount: 1, pendingMessages: 0, hidden: hidden, unseen: unseen, nameClash: false)
+    }
+
+    /// A request takes its place among the chats by date: seen a minute ago,
+    /// it comes before a chat of ten minutes ago; an undated chat stays last.
+    func testRequestsMergedByDate() async {
+        let now = UInt64(Date().timeIntervalSince1970)
+        let d = FakeDevice()
+        d.contactList = [contact("a", "Léa"), contact("z", "Zoé")]
+        d.messageList = ["a": [Message(id: 1, outgoing: false, body: "hi", at: now - 600)]]
+        d.requestList = [request("r", "Sam", lastSeen: now - 60)]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        XCTAssertEqual(m.items.map(\.id), ["request:r", "chat:a", "chat:z"])
+        // The search filters the chats only.
+        m.query = "lea"
+        XCTAssertEqual(m.items.map(\.id), ["request:r", "chat:a"])
+    }
+
+    /// A hidden request leaves the list; the Invitations entry counts it.
+    func testHiddenRequestOnlyCounted() async {
+        let d = FakeDevice()
+        d.requestList = [request("r", "Sam", lastSeen: 100, hidden: true, unseen: true),
+                         request("s", "Ana", lastSeen: 90, hidden: true)]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        XCTAssertTrue(m.items.isEmpty)
+        XCTAssertEqual(m.hiddenCount, 2)
+        XCTAssertEqual(m.hiddenUnseen, 1)
+    }
+
+    /// Request changes are published as `.contacts`, which reloads the list,
+    /// and a reload reads the requests again.
+    func testReloadsOnContactsChangeIncludesRequests() async {
+        XCTAssertTrue(ChatsModel.reloads(on: .contacts))
+        XCTAssertTrue(ChatsModel.reloads(on: .network))
+        XCTAssertFalse(ChatsModel.reloads(on: .syncStarted))
+        let d = FakeDevice()
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        XCTAssertTrue(m.items.isEmpty)
+        d.requestList = [request("r", "Sam", lastSeen: 100)]
+        await m.reload()
+        XCTAssertEqual(m.items.map(\.id), ["request:r"])
+    }
+
+    func testHideCallsCore() async {
+        let d = FakeDevice()
+        d.requestList = [request("r", "Sam", lastSeen: 100)]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        await m.hide("r")
+        XCTAssertEqual(d.hidden.map(\.0), ["r"])
+        XCTAssertEqual(d.hidden.map(\.1), [true])
+        XCTAssertTrue(m.items.isEmpty, "reloaded after hiding")
+        XCTAssertEqual(m.hiddenCount, 1)
+    }
+
+    /// The Invitations screen: every request, the hidden ones apart; opening
+    /// it marks them seen; showing one again unhides it.
+    func testInvitationsSplitHiddenAndMarkSeen() async {
+        let d = FakeDevice()
+        d.requestList = [request("r", "Sam", lastSeen: 100), request("h", "Bob", lastSeen: 200, hidden: true, unseen: true)]
+        let m = InvitationsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.open()
+        XCTAssertEqual(d.seenMarks, 1)
+        XCTAssertEqual(m.visible.map(\.fingerprint), ["r"])
+        XCTAssertEqual(m.hidden.map(\.fingerprint), ["h"])
+        await m.setHidden("h", hidden: false)
+        XCTAssertEqual(m.visible.map(\.fingerprint), ["h", "r"])
+        XCTAssertTrue(m.hidden.isEmpty)
+    }
+
     /// B4 carry: the conversation title stays inside the bar at AX sizes.
     func testChatTitleIsCappedForTheBar() {
         let ax5 = UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge)

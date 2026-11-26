@@ -31,6 +31,8 @@ struct ChatRow: Identifiable, Equatable {
 final class ChatsModel {
     private let core: CoreService
     private(set) var rows: [ChatRow] = []
+    /// Every pending contact request, hidden ones included.
+    private(set) var requests: [ContactRequestInfo] = []
     private(set) var offline = false
     var query = ""
 
@@ -50,8 +52,61 @@ final class ChatsModel {
         return rows.contains { $0.contact == contact }
     }
 
+    /// One line of the list: a chat, or a contact request that is not hidden.
+    enum ListItem: Identifiable {
+        case chat(ChatRow), request(ContactRequestInfo)
+
+        var id: String {
+            switch self {
+            case .chat(let row): "chat:\(row.contact)"
+            case .request(let r): "request:\(r.fingerprint)"
+            }
+        }
+
+        fileprivate var date: Date? {
+            switch self {
+            case .chat(let row): row.lastAt
+            case .request(let r): Date(timeIntervalSince1970: TimeInterval(r.lastSeen))
+            }
+        }
+    }
+
+    /// The chats (searched as `visibleRows`) and the requests not hidden,
+    /// newest first: a chat by its last message, a request by its last
+    /// invitation. Chats without a message stay last, in their order.
+    var items: [ListItem] {
+        let dated = visibleRows.filter { $0.lastAt != nil }.map(ListItem.chat)
+            + requests.filter { !$0.hidden }.map(ListItem.request)
+        let undated = visibleRows.filter { $0.lastAt == nil }.map(ListItem.chat)
+        return dated.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) } + undated
+    }
+
+    /// Hidden requests: the Invitations entry shows only when there is one.
+    var hiddenCount: Int { requests.count { $0.hidden } }
+    /// Hidden requests not seen yet: the entry's "new" dot.
+    var hiddenUnseen: Int { requests.count { $0.hidden && $0.unseen } }
+
+    /// Nothing to show at all: no chat, no request in the list.
+    var isEmpty: Bool { rows.isEmpty && !requests.contains { !$0.hidden } }
+
+    /// The changes after which the list reads the core again. Request
+    /// changes are published as `.contacts`.
+    static func reloads(on change: CoreChange) -> Bool {
+        switch change {
+        case .contacts, .network, .messages, .delivery, .expired: true
+        default: false
+        }
+    }
+
+    func hide(_ fp: String) async {
+        try? await core.setRequestHidden(fp, hidden: true)
+        await reload()
+    }
+
     func reload() async {
         offline = await core.lastSync.map { !$0.networkUp } ?? false
+        // A failed read keeps the last list rather than blanking it.
+        if let requests = try? await core.requests() { self.requests = requests }
         guard let summaries = try? await core.chatSummaries() else { return }
         var out: [ChatRow] = []
         for s in summaries {

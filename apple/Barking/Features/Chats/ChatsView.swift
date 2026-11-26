@@ -1,6 +1,14 @@
 import BarkingKit
 import SwiftUI
 
+/// Where the chats stack goes: a conversation, a contact request, or the
+/// Invitations screen.
+enum ChatsRoute: Hashable {
+    case conversation(String)
+    case request(String)
+    case invitations
+}
+
 /// Screen 3 of the mockup.
 struct ChatsView: View {
     let core: CoreService
@@ -12,8 +20,8 @@ struct ChatsView: View {
     /// sheet closes, however it closes.
     @State private var addedContact: String?
     @State private var confirmDelete: ChatRow?
-    /// The conversation pushed, so a tapped notification can open one.
-    @State private var path: [String] = []
+    /// The screens pushed, so a tapped notification can open a conversation.
+    @State private var path: [ChatsRoute] = []
     /// The message the pushed conversation scrolls to (a failure notice),
     /// and its contact. Not read from `path`: the destination must not
     /// depend on the path, which a push from the conversation
@@ -37,7 +45,11 @@ struct ChatsView: View {
                            message: "Messages wait and leave as soon as one is.")
                         .listRowSeparator(.hidden).listRowBackground(Color.surface)
                 }
-                if model.rows.isEmpty {
+                if model.hiddenCount > 0 {
+                    InvitationsEntry(count: model.hiddenCount, unseen: model.hiddenUnseen)
+                        .listRowSeparator(.hidden).listRowBackground(Color.surface)
+                }
+                if model.isEmpty {
                     VStack(spacing: 16) {
                         Text("No chats yet").font(BarkingFont.mono(.headline, size: 16, weight: .semibold))
                             .foregroundStyle(Color.fg)
@@ -46,16 +58,32 @@ struct ChatsView: View {
                     .padding(.vertical, 40)
                     .listRowSeparator(.hidden).listRowBackground(Color.surface)
                 }
-                ForEach(model.visibleRows) { row in
-                    NavigationLink(value: row.contact) { ChatRowView(row: row) }
-                        .listRowBackground(Color.surface)
-                        .listRowSeparator(.hidden)
-                        .swipeActions {
-                            Button(role: .destructive) { confirmDelete = row } label: {
-                                Label("Delete", systemImage: "trash")
+                ForEach(model.items) { item in
+                    switch item {
+                    case .chat(let row):
+                        NavigationLink(value: ChatsRoute.conversation(row.contact)) { ChatRowView(row: row) }
+                            .listRowBackground(Color.surface)
+                            .listRowSeparator(.hidden)
+                            .swipeActions {
+                                Button(role: .destructive) { confirmDelete = row } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .tint(Color.danger)
                             }
-                            .tint(Color.danger)
-                        }
+                    case .request(let request):
+                        NavigationLink(value: ChatsRoute.request(request.fingerprint)) { RequestRowView(request: request) }
+                            .accessibilityIdentifier("chats.request.\(request.fingerprint.prefix(8))")
+                            .listRowBackground(Color.surface)
+                            .listRowSeparator(.hidden)
+                            .swipeActions {
+                                // Hiding only: refusing and blocking are confirmed on the request page.
+                                Button { Task { await model.hide(request.fingerprint) } } label: {
+                                    Label("Hide", systemImage: "eye.slash")
+                                }
+                                .tint(Color.fgMuted)
+                                .accessibilityIdentifier("chats.request.hide")
+                            }
+                    }
                 }
             }
             .listStyle(.plain)
@@ -68,8 +96,16 @@ struct ChatsView: View {
             .safeAreaInset(edge: .top, spacing: 0) { header }
             .navigationTitle(Text("Chats"))
             .toolbarVisibility(.hidden, for: .navigationBar)
-            .navigationDestination(for: String.self) { contact in
-                ConversationView(core: core, contact: contact, focus: focus?.contact == contact ? focus?.id : nil)
+            .navigationDestination(for: ChatsRoute.self) { route in
+                switch route {
+                case .conversation(let contact):
+                    ConversationView(core: core, contact: contact, focus: focus?.contact == contact ? focus?.id : nil)
+                case .request(let fp):
+                    // Task 5 replaces this with the request page.
+                    RequestPlaceholder(request: model.requests.first { $0.fingerprint == fp }, fingerprint: fp)
+                case .invitations:
+                    InvitationsView(core: core)
+                }
             }
             .sheet(isPresented: $adding, onDismiss: openAdded) {
                 AddContactView(core: core, link: pendingLink, onAdded: { addedContact = $0 }) { adding = false }
@@ -85,14 +121,7 @@ struct ChatsView: View {
         .task {
             await model.reload()
             for await change in await core.changes {
-                if change == .contacts || change == .network || {
-                    switch change {
-                    case .messages, .delivery, .expired: true
-                    default: false
-                    }
-                }() {
-                    await model.reload()
-                }
+                if ChatsModel.reloads(on: change) { await model.reload() }
                 if change == .contacts { await closeBlocked() }
             }
         }
@@ -102,7 +131,7 @@ struct ChatsView: View {
                 // A contact removed since the notice: nothing to open.
                 guard await model.canOpen(target.contact) else { return }
                 focus = target.messageId.map { (target.contact, $0) }
-                path = [target.contact]
+                path = [.conversation(target.contact)]
             }
         }
         .onChange(of: path.isEmpty) { _, empty in if empty { focus = nil } }
@@ -115,7 +144,7 @@ struct ChatsView: View {
 extension ChatsView {
     /// A blocked contact leaves the chats: its open conversation closes.
     private func closeBlocked() async {
-        guard let open = path.last,
+        guard case .conversation(let open) = path.last,
               let blocked = try? await core.blockedContacts(),
               blocked.contains(where: { $0.fingerprint == open }) else { return }
         path = []
@@ -130,7 +159,7 @@ extension ChatsView {
         Task {
             guard await model.canOpen(contact) else { return }
             focus = nil
-            path = [contact]
+            path = [.conversation(contact)]
         }
     }
 

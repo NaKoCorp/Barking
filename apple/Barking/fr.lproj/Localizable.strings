@@ -688,3 +688,11 @@
 "IP address base" = "Base d’adresses IP";
 "IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0 license" = "IP Geolocation by DB-IP (https://db-ip.com), licence CC BY 4.0";
 "Fira Code font" = "Police Fira Code";
+
+/* Contact requests: the chat list, the Invitations entry and screen. */
+"Invitation" = "Invitation";
+"Invitations" = "Invitations";
+"Hidden (invitations)" = "Masquées";
+"Invitation received %@" = "Invitation reçue %@";
+"Invitation resent · %@" = "Invitation renvoyée · %@";
+"No invitations" = "Aucune invitation";

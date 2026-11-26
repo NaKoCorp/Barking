@@ -767,5 +767,53 @@
 			<string>Les %lld nœuds fournis avec Barking que vous avez retirés reviennent dans la liste. Les nœuds bloqués restent bloqués.</string>
 		</dict>
 	</dict>
+	<key>%lld invitations</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld invitation</string>
+			<key>other</key>
+			<string>%lld invitations</string>
+		</dict>
+	</dict>
+	<key>%lld messages waiting</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld message en attente</string>
+			<key>other</key>
+			<string>%lld messages en attente</string>
+		</dict>
+	</dict>
+	<key>%lld new</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld nouvelle</string>
+			<key>other</key>
+			<string>%lld nouvelles</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

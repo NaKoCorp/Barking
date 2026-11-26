@@ -43,6 +43,11 @@ import Foundation
 ///   the network unreachable (the launch sync is still running when a test
 ///   opens the Network tab).
 ///
+/// - `-BarkingUITestRequests`: two contact requests, kept in memory: “Alice”
+///   in the list (invited 2 h ago, 2 messages waiting) and “Bob”, hidden and
+///   not seen yet (3 invitations). Hiding, showing and marking seen change
+///   them; the safety code is a fixed one.
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -121,11 +126,25 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private var fakeRemoved: Set<String> = []
     /// `-BarkingUITestSlowSync`.
     private let slowSync: Bool
+    /// `-BarkingUITestRequests`: the faked requests, nil without the flag.
+    private var fakeRequests: [ContactRequestInfo]?
+    static let aliceRequest = "a11ce0000000000000000000000000000000000000000000000000000000a11c"
+    static let bobRequest = "b0b0000000000000000000000000000000000000000000000000000000000b0b"
+
+    static func requestFixture(now: UInt64 = UInt64(Date().timeIntervalSince1970)) -> [ContactRequestInfo] {
+        [ContactRequestInfo(fingerprint: aliceRequest, displayName: "Alice", firstSeen: now - 2 * 3_600,
+                            lastSeen: now - 2 * 3_600, inviteCount: 1, pendingMessages: 2, hidden: false,
+                            unseen: true, nameClash: false),
+         ContactRequestInfo(fingerprint: bobRequest, displayName: "Bob", firstSeen: now - 3 * 86_400,
+                            lastSeen: now - 5 * 3_600, inviteCount: 3, pendingMessages: 0, hidden: true,
+                            unseen: true, nameClash: false)]
+    }
     static let slowSyncSecs: TimeInterval = 6
 
     init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
-         ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false) {
+         ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false, requests: Bool = false) {
         self.device = device
+        self.fakeRequests = requests ? Self.requestFixture() : nil
         self.slowSync = slowSync
         self.fakeNodes = nodes
         self.ephemeral = ephemeral
@@ -164,9 +183,13 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         let ephemeral = arguments.contains("-BarkingUITestEphemeral")
         let nodes = arguments.contains("-BarkingUITestNodes")
         let slowSync = arguments.contains("-BarkingUITestSlowSync")
-        guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync else { return device }
+        let requests = arguments.contains("-BarkingUITestRequests")
+        guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync || requests else {
+            return device
+        }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
-                                reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync)
+                                reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync,
+                                requests: requests)
     }
 
     // MARK: The relays (`-BarkingUITestNodes`)
@@ -595,9 +618,14 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func setInstant(on: Bool) throws { try device.setInstant(on: on) }
     func setPreview(preview: PushPreview) throws { try device.setPreview(preview: preview) }
     func setInviteNotifications(on: Bool) throws { try device.setInviteNotifications(on: on) }
-    func requests() throws -> [ContactRequestInfo] { try device.requests() }
+    func requests() throws -> [ContactRequestInfo] {
+        if let fake = lock.withLock({ fakeRequests }) { return fake }
+        return try device.requests()
+    }
     func requestSafetyNumber(fingerprint: String) throws -> [String] {
-        try device.requestSafetyNumber(fingerprint: fingerprint)
+        if lock.withLock({ fakeRequests }) != nil { return ["12345", "67890", "13579", "24680", "11223", "44556",
+                                                             "77889", "90817", "26354", "48596", "10293", "84756"] }
+        return try device.requestSafetyNumber(fingerprint: fingerprint)
     }
     func acceptRequest(fingerprint: String, alias: String?) throws -> String {
         try device.acceptRequest(fingerprint: fingerprint, alias: alias)
@@ -605,9 +633,23 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func refuseRequest(fingerprint: String) throws { try device.refuseRequest(fingerprint: fingerprint) }
     func blockRequest(fingerprint: String) throws { try device.blockRequest(fingerprint: fingerprint) }
     func setRequestHidden(fingerprint: String, hidden: Bool) throws {
-        try device.setRequestHidden(fingerprint: fingerprint, hidden: hidden)
+        let faked = lock.withLock { () -> Bool in
+            guard var fake = fakeRequests else { return false }
+            for i in fake.indices where fake[i].fingerprint == fingerprint { fake[i].hidden = hidden }
+            fakeRequests = fake
+            return true
+        }
+        if !faked { try device.setRequestHidden(fingerprint: fingerprint, hidden: hidden) }
     }
-    func markRequestsSeen() throws { try device.markRequestsSeen() }
+    func markRequestsSeen() throws {
+        let faked = lock.withLock { () -> Bool in
+            guard var fake = fakeRequests else { return false }
+            for i in fake.indices { fake[i].unseen = false }
+            fakeRequests = fake
+            return true
+        }
+        if !faked { try device.markRequestsSeen() }
+    }
     func invite(contact: String) throws { try device.invite(contact: contact) }
     func inviteStatus(contact: String) throws -> InviteStatus { try device.inviteStatus(contact: contact) }
     func deviceChanges(since: UInt64) throws -> [DeviceChange] { try device.deviceChanges(since: since) }

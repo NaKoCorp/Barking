@@ -169,6 +169,28 @@ final class LocalizationTests: XCTestCase {
 
     /// The invitation notification texts (BarkingKit, read by the extension)
     /// exist in English and French, with their one placeholder.
+    /// Contact requests in the chats and the Invitations screen (Copie table).
+    func testInvitationsListStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = ["Invitation": "Invitation", "Invitations": "Invitations", "Hidden (invitations)": "Masquées",
+                        "Hide": "Masquer", "Show": "Afficher", "Invitation received %@": "Invitation reçue %@",
+                        "Invitation resent · %@": "Invitation renvoyée · %@", "No invitations": "Aucune invitation"]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        // The password field keeps its own "Hidden".
+        XCTAssertEqual(fr["Hidden"] as? String, "Masqué")
+        XCTAssertEqual(table("en")?["Hidden (invitations)"] as? String, "Hidden")
+        for lang in ["en", "fr"] {
+            let d = try XCTUnwrap(table(lang, "Localizable", "stringsdict"), lang)
+            for key in ["%lld invitations", "%lld messages waiting", "%lld new"] {
+                let rule = (d[key] as? NSDictionary)?["n"] as? NSDictionary
+                XCTAssertNotNil(rule?["one"], "\(lang) \(key)")
+                XCTAssertNotNil(rule?["other"], "\(lang) \(key)")
+            }
+        }
+    }
+
     func testInvitationNotificationStrings() throws {
         let kit = Bundle(for: NotificationContent.Marker.self)
         for lang in ["en", "fr"] {
