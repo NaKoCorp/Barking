@@ -88,6 +88,26 @@ final class CoreServiceTests: XCTestCase {
         XCTAssertEqual(status, InviteStatus.none)
     }
 
+    /// Accepting, refusing, blocking a request and inviting all queue packets
+    /// (REQUEST_ACCEPTED, the invite): each starts a sync so they leave now.
+    func testRequestActionsSync() async throws {
+        for action in ["accept", "refuse", "block", "invite"] {
+            let d = FakeDevice()
+            d.requestList = [ContactRequestInfo(fingerprint: "FPR", displayName: "Alice", firstSeen: 1, lastSeen: 2,
+                                                inviteCount: 1, pendingMessages: 0, hidden: false, unseen: false,
+                                                nameClash: false)]
+            let core = CoreService(device: d, runner: DirectRunner())
+            switch action {
+            case "accept": _ = try await core.acceptRequest("FPR", alias: nil)
+            case "refuse": try await core.refuseRequest("FPR")
+            case "block": try await core.blockRequest("FPR")
+            default: try await core.invite("C1")
+            }
+            for _ in 0..<100 where d.syncCalls == 0 { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(d.syncCalls, 1, action)
+        }
+    }
+
     func testConcurrentSyncsShareOne() async {
         let device = FakeDevice()
         device.syncDelay = 0.2

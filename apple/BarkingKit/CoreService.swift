@@ -237,22 +237,26 @@ public actor CoreService {
         try await call("request-safety") { try $0.requestSafetyNumber(fingerprint: fp) }
     }
     /// The requester becomes a contact (not verified); returns its
-    /// fingerprint. Its held messages show in its conversation.
+    /// fingerprint. Its held messages show in its conversation. Accepting,
+    /// refusing, blocking and inviting queue packets: a sync sends them now.
     public func acceptRequest(_ fp: String, alias: String?) async throws -> String {
         let contact = try await call("accept") { try $0.acceptRequest(fingerprint: fp, alias: alias) }
         publish(.contacts)
         publish(.messages(contact: contact))
+        Task { _ = await self.sync(reason: .afterSend) }
         return contact
     }
     /// Drops the request; nothing goes to the requester.
     public func refuseRequest(_ fp: String) async throws {
         try await call("refuse") { try $0.refuseRequest(fingerprint: fp) }
         publish(.contacts)
+        Task { _ = await self.sync(reason: .afterSend) }
     }
     /// Drops the request and the requester's later invitations.
     public func blockRequest(_ fp: String) async throws {
         try await call("block-request") { try $0.blockRequest(fingerprint: fp) }
         publish(.contacts)
+        Task { _ = await self.sync(reason: .afterSend) }
     }
     public func setRequestHidden(_ fp: String, hidden: Bool) async throws {
         try await call("request-hidden") { try $0.setRequestHidden(fingerprint: fp, hidden: hidden) }
@@ -268,6 +272,7 @@ public actor CoreService {
     public func invite(_ contact: String) async throws {
         try await call("invite") { try $0.invite(contact: contact) }
         publish(.contacts)
+        Task { _ = await self.sync(reason: .afterSend) }
     }
     public func inviteStatus(_ contact: String) async throws -> InviteStatus {
         try await call("invite-status") { try $0.inviteStatus(contact: contact) }
