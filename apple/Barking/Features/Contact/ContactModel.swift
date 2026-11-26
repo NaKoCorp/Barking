@@ -17,11 +17,43 @@ final class ContactModel {
     private(set) var saveFailed = false
     /// The contact's devices, from its card.
     private(set) var devices: [MyDeviceInfo] = []
+    /// The last invitation sent to the contact (design decision 6).
+    private(set) var invite: InviteStatus = .none
+    /// When a resend becomes possible: 24 h after the last invitation, or
+    /// the core's own answer to a resend that came too soon.
+    private(set) var retryAt: Date?
+    /// The last resend failed for another reason than "too soon".
+    private(set) var resendFailed = false
+    private let now: () -> Date
 
-    init(contact: String, core: CoreService) {
+    init(contact: String, core: CoreService, now: @escaping () -> Date = Date.init) {
         self.contact = contact
         self.core = core
+        self.now = now
     }
+
+    /// A day between two invitations, as the core counts it.
+    static let inviteInterval: UInt64 = 86_400
+
+    var resendAllowed: Bool { retryAt.map { $0 <= now() } ?? true }
+
+    /// The whole hours until a resend, rounded up and never under 1; nil
+    /// once it is allowed.
+    var hoursUntilRetry: Int? {
+        guard let retryAt, !resendAllowed else { return nil }
+        return max(1, Int((retryAt.timeIntervalSince(now()) / 3600).rounded(.up)))
+    }
+
+    /// No section without an invitation; "Accepted" only for a day.
+    var showsInvite: Bool {
+        switch invite {
+        case .none: false
+        case .sent, .unanswered: true
+        case .accepted(let at): now() < Self.date(at + Self.inviteInterval)
+        }
+    }
+
+    private static func date(_ secs: UInt64) -> Date { Date(timeIntervalSince1970: TimeInterval(secs)) }
 
     /// The first four groups of the fingerprint: `zab2 2ccf · kzfa fsms`.
     var fingerprintShort: String { FingerprintFormat.grouped(contact, form: .short) }
@@ -34,6 +66,30 @@ final class ContactModel {
         }
         groups = (try? await core.safetyNumber(for: contact)) ?? []
         devices = (try? await core.contactDevices(contact)) ?? []
+        await loadInvite()
+    }
+
+    private func loadInvite() async {
+        guard let status = try? await core.inviteStatus(contact) else { return }
+        invite = status
+        switch status {
+        case .sent(let at), .unanswered(let at): retryAt = Self.date(at + Self.inviteInterval)
+        case .none, .accepted: retryAt = nil
+        }
+    }
+
+    /// Sends the invitation again; the core says when a resend comes too soon.
+    func resend() async {
+        do {
+            try await core.invite(contact)
+            resendFailed = false
+            await loadInvite()
+        } catch BarkingError.TooSoon(let at) {
+            resendFailed = false
+            retryAt = Self.date(at)
+        } catch {
+            resendFailed = true
+        }
     }
 
     func match() async {

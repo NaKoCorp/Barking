@@ -241,6 +241,30 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
+    /// The invitation on the contact page (Copie table, design decision 6).
+    func testContactInvitationStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = [
+            "Invitation": "Invitation",
+            "Invitation sent · %@": "Invitation envoyée · %@",
+            "No answer · sent %@": "Sans réponse · envoyée %@",
+            "Accepted": "Acceptée",
+            "Resend the invitation": "Renvoyer l’invitation",
+            "Not sent. Try again in a moment.": "Non envoyé. Réessayez dans un instant.",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        for lang in ["en", "fr"] {
+            let d = try XCTUnwrap(table(lang, "Localizable", "stringsdict"), lang)
+            let rule = (d["Possible in %lld h"] as? NSDictionary)?["n"] as? NSDictionary
+            XCTAssertNotNil(rule?["one"], lang)
+            XCTAssertNotNil(rule?["other"], lang)
+        }
+        let french = try XCTUnwrap(Bundle.main.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+        XCTAssertEqual(String(localized: "Possible in \(5) h", bundle: french), "Possible dans 5 h")
+    }
+
     /// The invitation notification texts (BarkingKit, read by the extension)
     /// exist in English and French, with their one placeholder.
     func testInvitationNotificationStrings() throws {

@@ -831,5 +831,21 @@
 			<string>%lld messages en attente. Tu pourras les lire après avoir accepté.</string>
 		</dict>
 	</dict>
+	<key>Possible in %lld h</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Possible dans %lld h</string>
+			<key>other</key>
+			<string>Possible dans %lld h</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

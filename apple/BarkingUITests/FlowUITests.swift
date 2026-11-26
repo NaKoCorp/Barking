@@ -122,6 +122,27 @@ final class ChatUITests: XCTestCase {
         XCTAssertEqual(toggle.value as? String, "1")
     }
 
+    /// Right after an add that sent the invitation, the contact page says so
+    /// and the resend waits a day, in words (design decision 6).
+    func testContactPageShowsTheSentInvitation() throws {
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestOpenCard", samCard])
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
+        app.buttons["Add"].tap()
+        let state = app.staticTexts["contact.invite.state"]
+        XCTAssertTrue(state.waitForExistence(timeout: 5))
+        XCTAssertTrue(state.label.hasPrefix("Invitation sent · "), "state: \(state.label)")
+        let resend = app.buttons["contact.invite.resend"]
+        for _ in 0..<6 where !resend.isHittable { app.swipeUp() }
+        XCTAssertFalse(resend.isEnabled)
+        XCTAssertEqual(resend.label, "Resend the invitation")
+        XCTAssertEqual(resend.value as? String, "Possible in 24 h")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "contact-invite"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     /// A bubble shows when it sits above the composer, inside the screen.
     private func shows(_ bubble: XCUIElement, above field: XCUIElement) -> Bool {
         bubble.exists && bubble.frame.minY >= 0 && bubble.frame.maxY <= field.frame.minY + 1
