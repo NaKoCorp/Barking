@@ -289,3 +289,108 @@ fn device_changes_lists_replaced_device() {
     assert!(changes.iter().all(|c| c.contact != fc), "{changes:?}");
     assert_eq!(changes.len(), 1);
 }
+
+/// Hands `from`'s send queue to `to` like `deliver`, ignoring the packets
+/// `to` cannot read (those for another device).
+fn deliver_any(from: (&tempfile::TempDir, u8), to: (&tempfile::TempDir, u8)) {
+    let packets = open(from.0, from.1).pending_outbox(now()).unwrap();
+    let mut core = open(to.0, to.1);
+    for p in packets {
+        let _ = core.receive(&p, "t", now(), &mut rand::rng());
+    }
+}
+
+/// Spec §7.2: a message held for a hidden request, seen before, moves it
+/// (a reload, the indicator lit again) without any new invitation. The
+/// sync reports it in `request_contacts`, not in `new_requests`.
+#[test]
+fn held_message_moves_request_in_sync() {
+    let s = alice_invited_bob();
+    // No node: the syncs reach no one; the first one sees the request.
+    assert_eq!(
+        s.bob.sync(1_000).unwrap().request_contacts,
+        Vec::<String>::new()
+    );
+    s.bob.set_request_hidden(s.fa.clone(), true).unwrap();
+    s.bob.mark_requests_seen().unwrap();
+    let fb = s.bob.fingerprint().unwrap();
+    s.alice.send_text(fb, "un".into(), None, None).unwrap();
+    let (da, db) = &s.dirs;
+    deliver_any((da, 1), (db, 2));
+    let sum = s.bob.sync(1_000).unwrap();
+    assert_eq!(sum.request_contacts, vec![s.fa.clone()]);
+    assert!(sum.new_requests.is_empty());
+    let r = only_request(&s.bob);
+    assert!(r.hidden && r.unseen, "{r:?}");
+    assert_eq!(r.pending_messages, 1);
+    // Nothing moved since: nothing reported.
+    assert!(s.bob.sync(1_000).unwrap().request_contacts.is_empty());
+}
+
+/// A request refused on my other device leaves this one's list: the next
+/// sync reports it, so that the list and an open request page reload.
+#[test]
+fn refusal_from_my_other_device_moves_request_in_sync() {
+    let (da, db, dt) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let alice = device(&da, 1, "Alice");
+    let bob = device(&db, 2, "Bob");
+    let pending =
+        barking_ffi::begin_link(config(&dt, 3), bob.link_offer().unwrap(), "t".into()).unwrap();
+    pending
+        .device
+        .finish_link(bob.link_device(pending.request, false).unwrap())
+        .unwrap();
+    let tablet = pending.device;
+    let fb = alice
+        .add_contact_bytes(bob.contact_card_bytes().unwrap(), None)
+        .unwrap();
+    alice.invite(fb).unwrap();
+    let fa = alice.fingerprint().unwrap();
+    deliver_any((&da, 1), (&db, 2));
+    deliver_any((&da, 1), (&dt, 3));
+    assert_eq!(only_request(&tablet).fingerprint, fa);
+    tablet.sync(1_000).unwrap();
+    bob.refuse_request(fa.clone()).unwrap();
+    deliver_any((&db, 2), (&dt, 3));
+    assert!(tablet.requests().unwrap().is_empty());
+    assert_eq!(tablet.sync(1_000).unwrap().request_contacts, vec![fa]);
+}
+
+/// A blocked requester is no contact, yet Settings lists it by fingerprint
+/// (`blocked_fingerprints`) and unblocks it (`unblock_contact` takes a
+/// bare fingerprint): a later invitation opens a request again.
+#[test]
+fn blocked_requester_listed_and_unblocked() {
+    let t = alice_invited_bob();
+    t.bob.block_request(t.fa.clone()).unwrap();
+    assert!(t.bob.blocked_contacts().unwrap().is_empty());
+    assert_eq!(t.bob.blocked_fingerprints().unwrap(), vec![t.fa.clone()]);
+    t.bob.unblock_contact(t.fa.clone()).unwrap();
+    assert!(t.bob.blocked_fingerprints().unwrap().is_empty());
+    // Sealed after the unblock (and past Alice's 24-hour cap): kept.
+    let (da, db) = &t.dirs;
+    let later = now() + 86_400 + 60;
+    let fb = parse_fingerprint(&t.bob.fingerprint().unwrap()).unwrap();
+    let again = open(da, 1).invite(&fb, later, &mut rand::rng()).unwrap();
+    let mut bob = open(db, 2);
+    for p in &again {
+        bob.receive(&p.encode(), "t", later, &mut rand::rng())
+            .unwrap();
+    }
+    drop(bob);
+    assert_eq!(only_request(&t.bob).fingerprint, t.fa);
+}
+
+/// A blocked contact is listed by `blocked_contacts`, not twice.
+#[test]
+fn blocked_contact_is_not_a_blocked_fingerprint() {
+    let s = alice_invited_bob();
+    s.bob.accept_request(s.fa.clone(), None).unwrap();
+    s.bob.block_contact(s.fa.clone()).unwrap();
+    assert_eq!(s.bob.blocked_contacts().unwrap().len(), 1);
+    assert!(s.bob.blocked_fingerprints().unwrap().is_empty());
+}

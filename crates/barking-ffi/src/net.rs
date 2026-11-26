@@ -3,6 +3,7 @@
 //! the CLI does: one thread, a predictable memory use in the extension.
 
 use std::future::Future;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use barking_core::identity::root::Fingerprint;
@@ -334,6 +335,88 @@ fn request_contacts(received: &[ReceiveOutcome]) -> Vec<String> {
     out
 }
 
+/// What the list and the page of a request show of it: a change in any of
+/// these, or the request gone, reloads them. `hidden` and `unseen` change
+/// by the user's own hand here, which reloads already.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RequestStamp {
+    fp: Fingerprint,
+    display_name: String,
+    last_seen: u64,
+    invite_count: u32,
+    pending_messages: u32,
+}
+
+/// The stamps of `core`'s requests; nil when they cannot be read (no
+/// report then: a reload too few, never a sync failed for it).
+fn request_stamps(core: &Core) -> Option<Vec<RequestStamp>> {
+    let list = core.requests().ok()?;
+    Some(
+        list.into_iter()
+            .map(|r| RequestStamp {
+                fp: r.fingerprint,
+                display_name: r.display_name,
+                last_seen: r.last_seen,
+                invite_count: r.invite_count,
+                pending_messages: r.pending_messages,
+            })
+            .collect(),
+    )
+}
+
+/// Requesters whose request is new, changed or gone from `before` to
+/// `after`: those of `after` in its order, then those gone.
+fn moved_requests(before: &[RequestStamp], after: &[RequestStamp]) -> Vec<String> {
+    let changed = after.iter().filter(|a| !before.contains(a)).map(|a| a.fp);
+    let gone = before
+        .iter()
+        .filter(|b| !after.iter().any(|a| a.fp == b.fp))
+        .map(|b| b.fp);
+    changed.chain(gone).map(|fp| fp.to_string()).collect()
+}
+
+/// Adds `moved` to `s.request_contacts`, after the requesters already
+/// there, each once.
+fn add_moved(s: &mut SyncSummary, moved: Vec<String>) {
+    for fp in moved {
+        if !s.request_contacts.contains(&fp) {
+            s.request_contacts.push(fp);
+        }
+    }
+}
+
+impl Device {
+    /// Runs `sync` on `core`, then adds to its `request_contacts` the
+    /// requests that moved since this device's previous sync ended (since
+    /// `sync` began, on the first): a message held for a request, a
+    /// decision synced from another of my devices, a request expired
+    /// (purged as the core opens, before `sync` begins). None of these is a
+    /// `ReceiveOutcome::ContactRequest`. Changes made here between two
+    /// syncs are reported too: one reload more.
+    fn tracking_requests(
+        &self,
+        core: &mut Core,
+        sync: impl FnOnce(&mut Core) -> Result<SyncSummary, BarkingError>,
+    ) -> Result<SyncSummary, BarkingError> {
+        let remembered = self
+            .requests_seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let before = remembered.or_else(|| request_stamps(core));
+        let mut s = sync(core)?;
+        let after = request_stamps(core);
+        if let (Some(before), Some(after)) = (&before, &after) {
+            add_moved(&mut s, moved_requests(before, after));
+        }
+        *self
+            .requests_seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = after;
+        Ok(s)
+    }
+}
+
 /// Contacts whose conversation a reaction changed (a contact's own, or a
 /// copy of mine from another device), in first-seen order.
 fn reaction_contacts(received: &[ReceiveOutcome]) -> Vec<String> {
@@ -396,16 +479,18 @@ impl Device {
         guard(|| {
             let opts_private = self.allow_private();
             self.with_core_sync(|core| {
-                let expired = core.expire_ephemeral(now())?;
-                let opts = SyncOptions {
-                    deadline: Duration::from_millis(deadline_ms),
-                    allow_private: opts_private,
-                    push: PushConfig::effective(core)?,
-                    ..SyncOptions::default()
-                };
-                let report = block_on(barking_net::sync(core, &QuicDialer, opts))?;
-                note_leave_deposits(core, now(), opts_private)?;
-                Ok(summary(core, report, expired))
+                self.tracking_requests(core, |core| {
+                    let expired = core.expire_ephemeral(now())?;
+                    let opts = SyncOptions {
+                        deadline: Duration::from_millis(deadline_ms),
+                        allow_private: opts_private,
+                        push: PushConfig::effective(core)?,
+                        ..SyncOptions::default()
+                    };
+                    let report = block_on(barking_net::sync(core, &QuicDialer, opts))?;
+                    note_leave_deposits(core, now(), opts_private)?;
+                    Ok(summary(core, report, expired))
+                })
             })
         })
     }
@@ -423,10 +508,12 @@ impl Device {
                 ..QuickOptions::default()
             };
             self.with_core_sync(|core| {
-                let expired = core.expire_ephemeral(now())?;
-                let report = block_on(barking_net::quick_sync(core, &QuicDialer, opts))?;
-                note_leave_deposits(core, now(), opts_private)?;
-                Ok(summary(core, report, expired))
+                self.tracking_requests(core, |core| {
+                    let expired = core.expire_ephemeral(now())?;
+                    let report = block_on(barking_net::quick_sync(core, &QuicDialer, opts))?;
+                    note_leave_deposits(core, now(), opts_private)?;
+                    Ok(summary(core, report, expired))
+                })
             })
         })
     }
@@ -861,6 +948,34 @@ mod tests {
                 resent: false,
             }]
         );
+    }
+
+    fn stamp(b: u8, last_seen: u64, pending_messages: u32) -> RequestStamp {
+        RequestStamp {
+            fp: Fingerprint([b; 32]),
+            display_name: "x".into(),
+            last_seen,
+            invite_count: 1,
+            pending_messages,
+        }
+    }
+
+    /// New, changed, then gone (an expiry, a decision from another
+    /// device); an unchanged request is not reported; nor twice a requester
+    /// the outcomes already named.
+    #[test]
+    fn moved_requests_new_changed_then_gone() {
+        let before = [stamp(1, 10, 0), stamp(2, 10, 0), stamp(3, 10, 0)];
+        let after = [stamp(4, 30, 0), stamp(2, 20, 1), stamp(3, 10, 0)];
+        let moved = moved_requests(&before, &after);
+        let fp = |b: u8| Fingerprint([b; 32]).to_string();
+        assert_eq!(moved, vec![fp(4), fp(2), fp(1)]);
+        let (_dir, mut core, _bob) = core_with_bob_message();
+        let mut s = summary(&mut core, clean_report(Vec::new()), Vec::new());
+        s.request_contacts = vec![fp(2)];
+        add_moved(&mut s, moved);
+        assert_eq!(s.request_contacts, vec![fp(2), fp(4), fp(1)]);
+        assert!(moved_requests(&after, &after).is_empty());
     }
 
     fn clean_copy(r: &SyncReport) -> SyncReport {

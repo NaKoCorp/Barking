@@ -10515,6 +10515,50 @@ fn hidden_request_stays_listed_and_lights_indicator() {
     ));
 }
 
+/// Spec §7.2: a message held for a hidden request, already seen, lights
+/// the indicator again; the request stays hidden.
+#[test]
+fn held_message_relights_hidden_request() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let first = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&first.encode(), "t", NOW, &mut rng).unwrap());
+    b.set_request_hidden(&alice, true).unwrap();
+    b.mark_requests_seen().unwrap();
+    assert!(!b.requests().unwrap()[0].unseen);
+    let text = a.send_text(&bob, "un", NOW + 60, &mut rng).unwrap();
+    let got = b
+        .receive(&text[0].encode(), "t", NOW + 60, &mut rng)
+        .unwrap();
+    assert_eq!(reason(got), R_PENDING_REQUEST);
+    let list = b.requests().unwrap();
+    assert!(list[0].hidden && list[0].unseen);
+    assert_eq!(list[0].pending_messages, 1);
+    assert_eq!(list[0].last_seen, NOW + 60);
+}
+
+/// A blocked requester is no contact: `blocked_strangers` lists it, so
+/// that it can be unblocked; a blocked contact is not listed there.
+#[test]
+fn blocked_strangers_lists_blocked_non_contacts() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let (_dc, c) = party("c", 3);
+    let carol_card = c.contact_card("Carol").unwrap();
+    let carol = c.fingerprint();
+    b.add_contact(&carol_card, Some("carol"), NOW, &mut rng)
+        .unwrap();
+    b.block_contact(&carol, NOW, &mut rng).unwrap();
+    assert!(b.blocked_strangers().unwrap().is_empty());
+    let first = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&first.encode(), "t", NOW, &mut rng).unwrap());
+    b.block_request(&alice, NOW + 1, &mut rng).unwrap();
+    assert_eq!(b.blocked_strangers().unwrap(), vec![alice]);
+    b.unblock_contact(&alice, NOW + 2, &mut rng).unwrap();
+    assert!(b.blocked_strangers().unwrap().is_empty());
+    drop(c);
+}
+
 #[test]
 fn requests_are_listed_most_recent_first() {
     let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();

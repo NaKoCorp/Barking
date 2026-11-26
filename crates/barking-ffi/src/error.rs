@@ -148,3 +148,18 @@ impl From<CoreError> for BarkingError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The apps recognize a card too large for an invitation by this exact
+    /// detail (Swift `BarkingError.isCardTooLarge`).
+    #[test]
+    fn too_large_is_invalid_input_data_too_large() {
+        assert!(matches!(
+            BarkingError::from(CoreError::TooLarge),
+            BarkingError::InvalidInput { detail } if detail == "data too large"
+        ));
+    }
+}

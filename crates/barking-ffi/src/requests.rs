@@ -59,14 +59,28 @@ fn request_fp(s: &str) -> Result<Fingerprint, BarkingError> {
 }
 
 /// Does `name` equal, ignoring case, the alias or the name of one of the
-/// (not blocked) `contacts`? An empty name clashes with nothing.
+/// (not blocked) `contacts`? Both sides are compared as `comparable`
+/// makes them. An empty name clashes with nothing.
 fn name_clash(name: &str, contacts: &[ContactSummary]) -> bool {
-    let name = name.to_lowercase();
+    let name = comparable(name);
     !name.is_empty()
         && contacts.iter().filter(|c| !c.blocked).any(|c| {
-            c.display_name.to_lowercase() == name
-                || c.alias.as_deref().is_some_and(|a| a.to_lowercase() == name)
+            comparable(&c.display_name) == name
+                || c.alias.as_deref().is_some_and(|a| comparable(a) == name)
         })
+}
+
+/// A name as it reads: lowercased, without the invisible direction marks
+/// (U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) and without the
+/// spaces around it, so that "Alice " or "\u{202E}Alice" passes for no
+/// one else than "Alice".
+fn comparable(name: &str) -> String {
+    let bidi = |c: char| matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+    name.chars()
+        .filter(|c| !bidi(*c))
+        .collect::<String>()
+        .trim()
+        .to_lowercase()
 }
 
 fn info(r: ContactRequest, contacts: &[ContactSummary]) -> ContactRequestInfo {
@@ -194,5 +208,43 @@ impl Device {
                 Ok(core.invite_state(&fp, now())?.into())
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contact(display_name: &str, alias: Option<&str>) -> ContactSummary {
+        ContactSummary {
+            fingerprint: Fingerprint([1; 32]),
+            alias: alias.map(str::to_owned),
+            display_name: display_name.into(),
+            verified: false,
+            blocked: false,
+        }
+    }
+
+    /// Spaces around the name and invisible direction marks do not hide a
+    /// clash: "Alice " and "\u{202E}Alice" read as "Alice".
+    #[test]
+    fn name_clash_ignores_spaces_and_bidi_controls() {
+        let alice = [contact("Alice", None)];
+        for name in [
+            "Alice",
+            "alice",
+            "Alice ",
+            " Alice\t",
+            "\u{202E}Alice",
+            "Al\u{200F}ice",
+            "\u{2066}Alice\u{2069}",
+            "\u{202A}\u{202B}\u{202C}\u{202D}Alice\u{200E}\u{2067}\u{2068}",
+        ] {
+            assert!(name_clash(name, &alice), "{name:?}");
+        }
+        assert!(name_clash("Ali ", &[contact("Bob", Some(" ali"))]));
+        assert!(!name_clash("Alicia", &alice));
+        // Nothing left once cleaned: clashes with nothing.
+        assert!(!name_clash(" \u{202E} ", &[contact("", None)]));
     }
 }

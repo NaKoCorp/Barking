@@ -1,7 +1,7 @@
 //! Contacts: card in binary (QR code), verification, alias, removal, safety code.
 
-use barking_core::CoreError;
 use barking_core::contact::ContactCard;
+use barking_core::{CoreError, parse_fingerprint};
 
 use crate::device::{Device, now};
 use crate::{BarkingError, guard};
@@ -130,11 +130,19 @@ impl Device {
         })
     }
 
-    /// Lifts a block. Messages sent while blocked stay dropped.
+    /// Lifts a block. Messages sent while blocked stay dropped. `contact`:
+    /// a contact (fingerprint or alias), or the bare fingerprint of a
+    /// blocked stranger (`blocked_fingerprints`).
     pub fn unblock_contact(&self, contact: String) -> Result<(), BarkingError> {
         guard(|| {
             self.with_core(|core| {
-                let fp = core.resolve(&contact)?;
+                let fp = match core.resolve(&contact) {
+                    Ok(fp) => fp,
+                    Err(CoreError::UnknownContact) => {
+                        parse_fingerprint(&contact).ok_or(BarkingError::NotFound)?
+                    }
+                    Err(e) => return Err(e.into()),
+                };
                 Ok(core.unblock_contact(&fp, now(), &mut rand::rng())?)
             })
         })

@@ -272,6 +272,20 @@ impl Core {
             .collect()
     }
 
+    /// The blocked fingerprints that are no contact (a blocked requester,
+    /// or a blocked contact deleted since), sorted: `contacts` does not
+    /// list them, and `unblock_contact` takes them.
+    pub fn blocked_strangers(&self) -> Result<Vec<Fingerprint>> {
+        let mut out = Vec::new();
+        for fp in self.store.blocked_fingerprints()? {
+            if self.store.get_contact(fp)?.is_none() {
+                out.push(fp);
+            }
+        }
+        out.sort_by_key(|fp| fp.0);
+        Ok(out)
+    }
+
     /// Alias of a known contact, if it has one.
     pub(super) fn alias_in(q: &impl Queries, fp: Fingerprint) -> Result<Option<String>> {
         Ok(q.get_contact(fp)?.and_then(|c| alias_of(&c.alias)))
