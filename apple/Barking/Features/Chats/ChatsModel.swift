@@ -147,7 +147,8 @@ final class ChatsModel {
 final class AddContactModel {
     enum AddError: Equatable { case notACard, ownCard, blocked, failed }
     /// What came of the invitation sent with the add (design decision 5).
-    enum InviteResult: Equatable { case sent, tooLarge, tooSoon }
+    /// `failed`: any other error; the add stands and the page says so.
+    enum InviteResult: Equatable { case sent, tooLarge, tooSoon, failed }
 
     private let core: CoreService
     private(set) var preview: CardPreview?
@@ -160,8 +161,8 @@ final class AddContactModel {
     private(set) var added: String?
     /// Send an invitation with the add. Not remembered: on for every add.
     var sendsInvitation = true
-    /// The invitation sent with the last add; nil when none was sent, or
-    /// when it failed in a way the contact's page will offer to retry.
+    /// What came of the invitation sent with the last add; nil when none
+    /// was asked for.
     private(set) var inviteResult: InviteResult?
 
     init(core: CoreService) { self.core = core }
@@ -242,9 +243,9 @@ final class AddContactModel {
         }
     }
 
-    /// Never fails the add: an invitation that did not go can be resent
-    /// from the contact's page.
-    private func invite(_ fp: String) async -> InviteResult? {
+    /// Never fails the add: an invitation that did not go is said on the
+    /// page that follows, never read as sent.
+    private func invite(_ fp: String) async -> InviteResult {
         do {
             try await core.invite(fp)
             return .sent
@@ -253,7 +254,7 @@ final class AddContactModel {
         } catch let e as BarkingError where e.isCardTooLarge {
             return .tooLarge
         } catch {
-            return nil
+            return .failed
         }
     }
 

@@ -72,6 +72,13 @@ final class ContactModel {
         await loadInvite()
     }
 
+    /// While the page is open the invitation may be answered or sent from
+    /// another device: `.contacts` reloads its state, and only it (the
+    /// alias being typed stays).
+    func handle(_ change: CoreChange) async {
+        if change == .contacts { await loadInvite() }
+    }
+
     private func loadInvite() async {
         guard let status = try? await core.inviteStatus(contact) else { return }
         invite = status

@@ -161,16 +161,16 @@ final class AddContactModelTests: XCTestCase {
         XCTAssertEqual(m.inviteResult, .tooLarge)
     }
 
-    /// Any other failure says nothing: the add stands, and the invitation can
-    /// be sent again from the contact's page.
-    func testInviteOtherErrorKeepsAddSilently() async throws {
+    /// Any other failure keeps the add, and is said on the page that follows
+    /// (never read as sent): `.failed`, not an add error.
+    func testInviteOtherErrorKeepsAddAndSaysSo() async throws {
         let d = FakeDevice()
         d.inviteError = .InvalidInput(detail: "malformed")
         let m = try await previewing(d)
         let ok = await m.add(alias: "")
         XCTAssertTrue(ok)
         XCTAssertEqual(m.added, "fp-new")
-        XCTAssertNil(m.inviteResult)
+        XCTAssertEqual(m.inviteResult, .failed)
         XCTAssertNil(m.error)
     }
 }

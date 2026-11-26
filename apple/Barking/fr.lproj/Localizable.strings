@@ -717,6 +717,7 @@
 "Show my code" = "Montrer mon code";
 "Opens your code." = "Ouvre ton code.";
 "Invitation already sent less than 24 h ago. You can resend it from their page." = "Invitation déjà envoyée il y a moins de 24 h. Tu pourras la renvoyer depuis sa fiche.";
+"The invitation was not sent. You can send it from their page." = "L’invitation n’est pas partie. Tu pourras l’envoyer depuis sa fiche.";
 
 /* Contact requests: the invitation on the contact page (design decision 6). */
 "Invitation sent · %@" = "Invitation envoyée · %@";

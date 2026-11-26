@@ -26,7 +26,11 @@ struct RequestRowView: View {
                     Text(verbatim: DeclaredName.quoted(request.displayName, fingerprint: request.fingerprint))
                         .font(BarkingFont.sans(.headline, size: 16, weight: .semibold))
                         .foregroundStyle(Color.fg).lineLimit(1)
+                    // A long declared name (up to 64 characters) is cut,
+                    // never the tag that says what the row is.
                     Tag("Invitation", style: .neutral)
+                        .fixedSize()
+                        .layoutPriority(1)
                     Spacer(minLength: 0)
                 }
                 // Up to two lines (three at accessibility sizes): cut to one,

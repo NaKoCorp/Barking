@@ -21,6 +21,7 @@ struct SafetyCodeView: View {
     /// The invitation sent with the add, when shown right after it.
     private let inviteResult: AddContactModel.InviteResult?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
 
     init(core: CoreService, contact: String, inviteResult: AddContactModel.InviteResult? = nil) {
         self.core = core
@@ -75,7 +76,13 @@ struct SafetyCodeView: View {
         .toolbarTitleDisplayMode(.inline)
         // Pushed from the conversation, which hides the tab bar (U-26).
         .toolbar(.hidden, for: .tabBar)
-        .task { await model.load(); aliasDraft = model.alias }
+        .task {
+            await model.load()
+            aliasDraft = model.alias
+            // An invitation answered while the page is open.
+            let changes = await core.changes
+            for await change in changes { await model.handle(change) }
+        }
         // A match is said (banner, haptic, VoiceOver), then the screen goes
         // back to the conversation; the mark can be removed from here later.
         .task(id: model.justVerified) {
@@ -131,6 +138,11 @@ struct SafetyCodeView: View {
                 .font(.bBodySmall).foregroundStyle(Color.fgMuted)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("contact.inviteTooSoon")
+        case .failed:
+            Text("The invitation was not sent. You can send it from their page.")
+                .font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("contact.inviteFailed")
         case .sent, nil:
             EmptyView()
         }
@@ -267,9 +279,12 @@ extension SafetyCodeView {
         }
     }
 
-    /// "Invitation sent · 2 h ago", "No answer · sent 8 d ago", "Accepted".
+    /// "Invitation sent · 2 h ago", "No answer · sent 8 d ago", "Accepted";
+    /// the date in the app's language, as the text around it.
     @ViewBuilder fileprivate func inviteState(now: Date) -> some View {
-        let ago = { (at: UInt64) in RequestHistory.relative(Date(timeIntervalSince1970: TimeInterval(at)), now: now) }
+        let ago = { (at: UInt64) in
+            RequestHistory.relative(Date(timeIntervalSince1970: TimeInterval(at)), now: now, locale: locale)
+        }
         switch model.invite {
         case .sent(let at): Text("Invitation sent · \(ago(at))")
         case .unanswered(let at): Text("No answer · sent \(ago(at))")

@@ -416,8 +416,9 @@ final class TourUITests: XCTestCase {
     /// the safety code with the sent invitation ("Possible in 24 h"), the
     /// changed-device line, the chats with a request and the Invitations
     /// entry, the Invitations screen, the request page (top and actions),
-    /// Settings › Notifications, then the add's two notices (too large,
-    /// too soon), each from its own launch.
+    /// a request with a 64-character name, Settings › Notifications, then
+    /// the add's three notices (too large, too soon, failed), each from its
+    /// own launch.
     func testTourRequests() throws {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipIf(env["BARKING_TOUR"] == nil)
@@ -426,7 +427,7 @@ final class TourUITests: XCTestCase {
         let size = env["BARKING_TOUR_SIZE"].flatMap { $0.isEmpty ? nil : ["-UIPreferredContentSizeCategoryName", $0] } ?? []
         for scheme in ["light", "dark"] {
             requestsPass(lang: lang, L: L, size: size, scheme: scheme)
-            for notice in ["tooLarge", "tooSoon"] {
+            for notice in ["tooLarge", "tooSoon", "failed"] {
                 addNotice(notice, lang: lang, L: L, size: size, scheme: scheme)
             }
             for status in ["unanswered", "accepted"] {
@@ -528,11 +529,35 @@ final class TourUITests: XCTestCase {
         block.waitUntilStill()
         snap(app, "requests-request-actions-\(scheme)", numbered: false)
         back()
-        // Settings › Notifications: the invitations switch.
+        // A 64-character declared name: cut in the row, whole on its page.
+        let long = app.buttons["chats.request.c0ffee00"]
+        XCTAssertTrue(long.waitForExistence(timeout: 10))
+        long.tap()
+        XCTAssertTrue(app.buttons["request.accept"].waitForExistence(timeout: 10))
+        snap(app, "requests-request-long-name-\(scheme)", numbered: false)
+        // Blocked: listed in Settings › Blocked contacts by its fingerprint.
+        let blockLong = app.buttons["request.block"]
+        for _ in 0..<8 where !blockLong.isHittable { app.swipeUp() }
+        blockLong.tap()
+        let confirmBlock = app.buttons["request.block.confirm"].firstMatch
+        XCTAssertTrue(confirmBlock.waitForExistence(timeout: 10))
+        confirmBlock.tap()
+        XCTAssertTrue(long.waitUntil({ !$0.exists }))
         XCTAssertTrue(app.tabBars.buttons[L.settings].waitForExistence(timeout: 10))
         app.tabBars.buttons[L.settings].tap()
+        let blockedRow = app.buttons["settings.blocked"]
+        XCTAssertTrue(blockedRow.waitForExistence(timeout: 10))
+        for _ in 0..<6 where !blockedRow.isHittable { app.swipeUp() }
+        blockedRow.tap()
+        let unblock = app.buttons["blocked.unblock"]
+        XCTAssertTrue(unblock.waitForExistence(timeout: 10))
+        unblock.waitUntilStill()
+        snap(app, "requests-settings-blocked-\(scheme)", numbered: false)
+        back()
+        // Settings › Notifications: the invitations switch.
         let notifications = app.buttons["settings.notifications"]
         XCTAssertTrue(notifications.waitForExistence(timeout: 10))
+        for _ in 0..<6 where !notifications.isHittable { app.swipeDown() }
         notifications.tap()
         let invites = app.switches["notifications.invites"]
         XCTAssertTrue(invites.waitForExistence(timeout: 10))
@@ -549,7 +574,11 @@ final class TourUITests: XCTestCase {
         let add = app.buttons[L.add].firstMatch
         XCTAssertTrue(add.waitForExistence(timeout: 10))
         add.tap()
-        let id = notice == "tooLarge" ? "contact.inviteTooLarge" : "contact.inviteTooSoon"
+        let id = switch notice {
+        case "tooLarge": "contact.inviteTooLarge"
+        case "tooSoon": "contact.inviteTooSoon"
+        default: "contact.inviteFailed"
+        }
         let shown = app.descendants(matching: .any)[id].firstMatch
         XCTAssertTrue(shown.waitForExistence(timeout: 10), "the \(notice) notice")
         shown.waitUntilStill()

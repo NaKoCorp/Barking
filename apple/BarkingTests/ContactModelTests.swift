@@ -84,6 +84,25 @@ final class ContactModelTests: XCTestCase {
         XCTAssertEqual(m.hoursUntilRetry, 23)
     }
 
+    /// The page stays open while the invitation is answered: a `.contacts`
+    /// change reloads its state (and only it: the alias being typed and the
+    /// name stay as they are); other changes do not.
+    func testContactsChangeReloadsTheInvitation() async {
+        let d = FakeDevice()
+        let at = nowSecs - 3600
+        let m = makeInvite(d, .sent(at: at))
+        await m.load()
+        d.inviteStatusByContact[m.contact] = .accepted(at: nowSecs - 60)
+        d.contactList = [Contact(fingerprint: m.contact, alias: "Mai", displayName: "Maya", verified: false)]
+        await m.handle(.network)
+        XCTAssertEqual(m.invite, .sent(at: at))
+        await m.handle(.contacts)
+        XCTAssertEqual(m.invite, .accepted(at: nowSecs - 60))
+        XCTAssertNil(m.retryAt)
+        XCTAssertEqual(m.name, "Maya", "only the invitation reloads")
+        XCTAssertEqual(m.alias, "")
+    }
+
     func testUnansweredAllowsResend() async {
         let at = nowSecs - 8 * 86_400
         let m = makeInvite(FakeDevice(), .unanswered(at: at))
