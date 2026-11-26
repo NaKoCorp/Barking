@@ -41,6 +41,28 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(m.items.map(\.id), [5], "the core's row replaces the shown one")
     }
 
+    /// The core writes the row and publishes `.messages` before the send
+    /// returns: the reload then must not show the row and the local bubble
+    /// both. An older message with the same text does not count.
+    func testReloadDuringSendShowsTheCoreRowOnce() async throws {
+        let d = FakeDevice()
+        d.messageList = ["b": [Message(id: 3, outgoing: true, body: "hello", at: 1, delivery: .state(.received))]]
+        d.syncDelay = 0.5
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "hello"
+        let send = Task { await m.send() }
+        for _ in 0..<50 where m.items.count < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        await m.handle(.messages(contact: "b"))
+        XCTAssertEqual(m.items.count, 2, "the old message, then the local bubble")
+        XCTAssertEqual(m.items.last?.local, true)
+        d.messageList["b"]?.append(Message(id: 5, outgoing: true, body: "hello", at: 2, delivery: .state(.pending)))
+        await m.handle(.messages(contact: "b"))
+        XCTAssertEqual(m.items.map(\.id), [3, 5], "the core's row, not a second bubble")
+        await send.value
+        XCTAssertEqual(m.items.map(\.id), [3, 5])
+    }
+
     func testFailedSendTakesItsBubbleBack() async {
         let d = FakeDevice()
         d.sendError = BarkingError.Locked

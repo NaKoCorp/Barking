@@ -129,6 +129,9 @@ final class ConversationModel {
     /// The bubble of the send running: a send can wait seconds on the core
     /// lock while a sync holds it, so it shows at once and survives reloads.
     private var shownAtSend: Item?
+    /// The newest core row shown when that send started: a later sent row
+    /// with its text is the send's own row, which replaces the bubble.
+    private var shownAtSendAfter: Int64 = 0
     private var nextLocalId: Int64 = -1
     /// Rows whose retry is running: a second tap on one does nothing.
     private var retrying: Set<Int64> = []
@@ -400,6 +403,12 @@ final class ConversationModel {
         let resent = messages.filter { $0.failed && $0.outgoing }.filter { f in
             messages.contains { $0.outgoing && !$0.failed && $0.id > f.id && $0.body == f.body }
         }.map(\.id)
+        // The core writes the send's row (and says so) before the send
+        // returns: from then on that row stands for the bubble, never both.
+        if let local = shownAtSend,
+           messages.contains(where: { $0.outgoing && $0.id > shownAtSendAfter && $0.body == local.text }) {
+            shownAtSend = nil
+        }
         items = messages.filter { !resent.contains($0.id) }.map {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)), delivery: $0.delivery,
@@ -486,6 +495,7 @@ final class ConversationModel {
                                             devicesReceived: 0, devicesLeft: 0, devicesPending: 0),
                          local: true)
         nextLocalId -= 1
+        shownAtSendAfter = items.filter { !$0.local }.map(\.id).max() ?? 0
         shownAtSend = shown
         items.append(shown)
         do {
