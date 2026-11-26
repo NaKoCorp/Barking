@@ -696,3 +696,15 @@
 "Invitation received %@" = "Invitation reçue %@";
 "Invitation resent · %@" = "Invitation renvoyée · %@";
 "No invitations" = "Aucune invitation";
+
+/* Contact requests: the request page (design decision 4). */
+"Show in the list" = "Afficher dans la liste";
+"Introduces themselves as %@. This name is not verified." = "Se présente comme %@. Ce nom n’est pas vérifié.";
+"Same name as one of your contacts" = "Même nom qu’un de tes contacts";
+"Compare it aloud with the person before you accept." = "Compare-le de vive voix avec la personne avant d’accepter.";
+"History" = "Historique";
+"Accept" = "Accepter";
+"Refuse" = "Refuser";
+"Nothing is sent. A new invitation brings it back." = "Rien n’est envoyé. Une nouvelle invitation la fera revenir.";
+"Their invitations and messages are dropped. They are not told." = "Ses invitations et ses messages sont ignorés. Cette personne n’est pas prévenue.";
+"This alias is already used" = "Cet alias est déjà pris";

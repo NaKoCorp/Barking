@@ -46,7 +46,10 @@ import Foundation
 /// - `-BarkingUITestRequests`: two contact requests, kept in memory: “Alice”
 ///   in the list (invited 2 h ago, 2 messages waiting) and “Bob”, hidden and
 ///   not seen yet (3 invitations). Hiding, showing and marking seen change
-///   them; the safety code is a fixed one.
+///   them; the safety code is a fixed one. Refusing and blocking remove the
+///   request; accepting removes it too and adds an unverified contact of
+///   that name to `contacts()`, so its conversation opens with the "not
+///   verified" banner.
 ///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
@@ -128,6 +131,8 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private let slowSync: Bool
     /// `-BarkingUITestRequests`: the faked requests, nil without the flag.
     private var fakeRequests: [ContactRequestInfo]?
+    /// The requests accepted so far, as contacts.
+    private var fakeAccepted: [Contact] = []
     static let aliceRequest = "a11ce0000000000000000000000000000000000000000000000000000000a11c"
     static let bobRequest = "b0b0000000000000000000000000000000000000000000000000000000000b0b"
 
@@ -523,7 +528,9 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func fingerprint() throws -> String { try device.fingerprint() }
     func displayName() throws -> String { try device.displayName() }
     func setDisplayName(name: String) throws { try device.setDisplayName(name: name) }
-    func contacts() throws -> [Contact] { try device.contacts() }
+    func contacts() throws -> [Contact] {
+        try device.contacts() + lock.withLock { fakeAccepted }
+    }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { try device.messageRoute(messageId: messageId) }
     func sendText(contact: String, text: String, replyTo: Int64?, ttlSecs: UInt32?) throws {
         try device.sendText(contact: contact, text: text, replyTo: replyTo, ttlSecs: ttlSecs)
@@ -628,10 +635,32 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         return try device.requestSafetyNumber(fingerprint: fingerprint)
     }
     func acceptRequest(fingerprint: String, alias: String?) throws -> String {
-        try device.acceptRequest(fingerprint: fingerprint, alias: alias)
+        guard let request = try removeFakeRequest(fingerprint) else {
+            return try device.acceptRequest(fingerprint: fingerprint, alias: alias)
+        }
+        lock.withLock {
+            fakeAccepted.append(Contact(fingerprint: fingerprint, alias: alias, displayName: request.displayName,
+                                        verified: false))
+        }
+        return fingerprint
     }
-    func refuseRequest(fingerprint: String) throws { try device.refuseRequest(fingerprint: fingerprint) }
-    func blockRequest(fingerprint: String) throws { try device.blockRequest(fingerprint: fingerprint) }
+    func refuseRequest(fingerprint: String) throws {
+        if try removeFakeRequest(fingerprint) == nil { try device.refuseRequest(fingerprint: fingerprint) }
+    }
+    func blockRequest(fingerprint: String) throws {
+        if try removeFakeRequest(fingerprint) == nil { try device.blockRequest(fingerprint: fingerprint) }
+    }
+    /// The faked request taken out of the list; nil without the flag, and
+    /// `NotFound`, as the core says it, for one no longer there.
+    private func removeFakeRequest(_ fingerprint: String) throws -> ContactRequestInfo? {
+        try lock.withLock { () throws -> ContactRequestInfo? in
+            guard var fake = fakeRequests else { return nil }
+            guard let i = fake.firstIndex(where: { $0.fingerprint == fingerprint }) else { throw BarkingError.NotFound }
+            let request = fake.remove(at: i)
+            fakeRequests = fake
+            return request
+        }
+    }
     func setRequestHidden(fingerprint: String, hidden: Bool) throws {
         let faked = lock.withLock { () -> Bool in
             guard var fake = fakeRequests else { return false }

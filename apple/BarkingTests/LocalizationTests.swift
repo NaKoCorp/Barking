@@ -189,6 +189,39 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
+    /// The request page (Copie table), with the keys it reuses.
+    func testRequestPageStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = [
+            "Show in the list": "Afficher dans la liste",
+            "Introduces themselves as %@. This name is not verified.": "Se présente comme %@. Ce nom n’est pas vérifié.",
+            "Same name as one of your contacts": "Même nom qu’un de tes contacts",
+            "Safety code": "Code de sécurité",
+            "Compare it aloud with the person before you accept.":
+                "Compare-le de vive voix avec la personne avant d’accepter.",
+            "History": "Historique", "Alias (optional)": "Alias (facultatif)", "Accept": "Accepter",
+            "Refuse": "Refuser", "Block": "Bloquer", "Hide": "Masquer", "Invitation": "Invitation",
+            "Nothing is sent. A new invitation brings it back.":
+                "Rien n’est envoyé. Une nouvelle invitation la fera revenir.",
+            "Their invitations and messages are dropped. They are not told.":
+                "Ses invitations et ses messages sont ignorés. Cette personne n’est pas prévenue.",
+            "This alias is already used": "Cet alias est déjà pris",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        let waiting = "%lld messages waiting. You can read them once you accept."
+        for lang in ["en", "fr"] {
+            let d = try XCTUnwrap(table(lang, "Localizable", "stringsdict"), lang)
+            let rule = (d[waiting] as? NSDictionary)?["n"] as? NSDictionary
+            XCTAssertNotNil(rule?["one"], "\(lang) \(waiting)")
+            XCTAssertNotNil(rule?["other"], "\(lang) \(waiting)")
+        }
+        let french = try XCTUnwrap(Bundle.main.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+        XCTAssertEqual(String(localized: "\(2) messages waiting. You can read them once you accept.", bundle: french),
+                       "2 messages en attente. Tu pourras les lire après avoir accepté.")
+    }
+
     /// The invitation notification texts (BarkingKit, read by the extension)
     /// exist in English and French, with their one placeholder.
     func testInvitationNotificationStrings() throws {

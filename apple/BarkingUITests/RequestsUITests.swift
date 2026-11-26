@@ -12,8 +12,8 @@ final class RequestsUITests: XCTestCase {
         return app
     }
 
-    /// The row reads as an invitation, never as a chat. Task 5 adds: a tap
-    /// opens the request page and its safety code.
+    /// The row reads as an invitation, never as a chat; a tap opens the
+    /// request page and its safety code.
     func testRequestRowShowsTagAndOpens() throws {
         let app = launch()
         let row = app.buttons["chats.request.a11ce000"]
@@ -21,6 +21,51 @@ final class RequestsUITests: XCTestCase {
         XCTAssertTrue(row.label.contains("Alice"), row.label)
         XCTAssertTrue(row.label.contains("Invitation"), row.label)
         XCTAssertFalse(app.buttons["chats.request.b0b00000"].exists, "a hidden request stays out of the list")
+
+        row.tap()
+        XCTAssertTrue(app.staticTexts["Safety code"].waitForExistence(timeout: 5), "the request page")
+        let code = app.descendants(matching: .any)["contact.safetyCode"]
+        XCTAssertTrue(code.exists, "the safety code grid")
+        XCTAssertTrue(code.label.contains("12345"), code.label)
+        XCTAssertTrue(app.buttons["request.accept"].exists)
+    }
+
+    /// Accepting replaces the page with the new contact's conversation,
+    /// which says it is not verified; back, the request is gone from the list.
+    func testAcceptOpensConversation() throws {
+        let app = launch()
+        let row = app.buttons["chats.request.a11ce000"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        let accept = app.buttons["request.accept"]
+        XCTAssertTrue(accept.waitForExistence(timeout: 5))
+        accept.tap()
+
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.unverified"].waitForExistence(timeout: 10),
+                      "the conversation's not verified banner")
+        XCTAssertFalse(app.buttons["request.accept"].exists, "the request page is gone")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["chats.invitations"].waitForExistence(timeout: 5), "back on the chats")
+        XCTAssertTrue(row.waitUntil({ !$0.exists }), "the request row left the list")
+    }
+
+    /// Refusing asks first; confirmed, it goes back to a list without the row.
+    func testRefuseAsksConfirmation() throws {
+        let app = launch()
+        let row = app.buttons["chats.request.a11ce000"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        let refuse = app.buttons["request.refuse"]
+        XCTAssertTrue(refuse.waitForExistence(timeout: 5))
+        refuse.tap()
+
+        let confirm = app.buttons["request.refuse.confirm"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5), "a confirmation, not an immediate refusal")
+        confirm.tap()
+
+        XCTAssertTrue(app.buttons["chats.invitations"].waitForExistence(timeout: 5), "back on the chats")
+        XCTAssertTrue(row.waitUntil({ !$0.exists }), "the request row left the list")
+        XCTAssertFalse(app.buttons["request.refuse"].exists)
     }
 
     /// The entry counts the hidden request and says one is new; the screen

@@ -535,6 +535,11 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var inviteError: BarkingError?
     /// Thrown by `acceptRequest` when set (nothing is recorded then).
     var acceptError: BarkingError?
+    /// Thrown by `refuseRequest`, `blockRequest` and `requests` when set
+    /// (nothing is recorded then).
+    var refuseError: BarkingError?
+    var blockRequestError: BarkingError?
+    var requestsError: BarkingError?
     /// What `deviceChanges` returns (filtered by `since`).
     var deviceChangeList: [DeviceChange] = []
     private var _invited: [String] = []
@@ -558,7 +563,10 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     /// Each `setInviteNotifications`, in order (it also sets `prefs.invites`).
     var inviteNotifications: [Bool] { lock.withLock { _inviteNotifications } }
 
-    func requests() throws -> [ContactRequestInfo] { requestList }
+    func requests() throws -> [ContactRequestInfo] {
+        if let requestsError { throw requestsError }
+        return requestList
+    }
     func requestSafetyNumber(fingerprint: String) throws -> [String] { Array(repeating: "54321", count: 12) }
     func acceptRequest(fingerprint: String, alias: String?) throws -> String {
         if let acceptError { throw acceptError }
@@ -572,12 +580,14 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         }
     }
     func refuseRequest(fingerprint: String) throws {
+        if let refuseError { throw refuseError }
         lock.withLock {
             _requestList.removeAll { $0.fingerprint == fingerprint }
             _refused.append(fingerprint)
         }
     }
     func blockRequest(fingerprint: String) throws {
+        if let blockRequestError { throw blockRequestError }
         lock.withLock {
             _requestList.removeAll { $0.fingerprint == fingerprint }
             _blockedRequests.append(fingerprint)

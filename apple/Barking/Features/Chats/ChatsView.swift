@@ -101,8 +101,7 @@ struct ChatsView: View {
                 case .conversation(let contact):
                     ConversationView(core: core, contact: contact, focus: focus?.contact == contact ? focus?.id : nil)
                 case .request(let fp):
-                    // Task 5 replaces this with the request page.
-                    RequestPlaceholder(request: model.requests.first { $0.fingerprint == fp }, fingerprint: fp)
+                    RequestView(core: core, fingerprint: fp) { openAccepted($0) }
                 case .invitations:
                     InvitationsView(core: core)
                 }
@@ -148,6 +147,14 @@ extension ChatsView {
               let blocked = try? await core.blockedContacts(),
               blocked.contains(where: { $0.fingerprint == open }) else { return }
         path = []
+    }
+
+    /// An accepted request: its page gives way to the new contact's
+    /// conversation, in one write, so Back leads where the page came from.
+    private func openAccepted(_ contact: String) {
+        focus = nil
+        guard case .request = path.last else { path.append(.conversation(contact)); return }
+        path[path.count - 1] = .conversation(contact)
     }
 
     /// After the add sheet: the new contact's conversation, unless it was

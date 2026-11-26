@@ -815,5 +815,21 @@
 			<string>%lld nouvelles</string>
 		</dict>
 	</dict>
+	<key>%lld messages waiting. You can read them once you accept.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld message en attente. Tu pourras le lire après avoir accepté.</string>
+			<key>other</key>
+			<string>%lld messages en attente. Tu pourras les lire après avoir accepté.</string>
+		</dict>
+	</dict>
 </dict>
 </plist>
