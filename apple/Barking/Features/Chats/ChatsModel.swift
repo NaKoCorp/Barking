@@ -38,12 +38,21 @@ final class ChatsModel {
 
     init(core: CoreService) { self.core = core }
 
-    /// Rows filtered on name and alias, ignoring case and accents.
-    var visibleRows: [ChatRow] {
+    /// The search, shared by chats and requests: `name` contains the query,
+    /// ignoring case and accents; an empty query matches everything.
+    private func matches(_ name: String) -> Bool {
         let q = query.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return rows }
-        return rows.filter { $0.name.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+        return q.isEmpty || name.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
     }
+
+    /// Rows filtered on name and alias, ignoring case and accents.
+    var visibleRows: [ChatRow] { rows.filter { matches($0.name) } }
+
+    /// The requests that belong in the list: not hidden.
+    private var listedRequests: [ContactRequestInfo] { requests.filter { !$0.hidden } }
+
+    /// Listed requests filtered on their declared name, as `visibleRows`.
+    var visibleRequests: [ContactRequestInfo] { listedRequests.filter { matches($0.displayName) } }
 
     /// The contact is still there (a notification may outlive it): rows are
     /// reloaded first.
@@ -71,12 +80,12 @@ final class ChatsModel {
         }
     }
 
-    /// The chats (searched as `visibleRows`) and the requests not hidden,
+    /// The chats and the requests not hidden, both searched,
     /// newest first: a chat by its last message, a request by its last
     /// invitation. Chats without a message stay last, in their order.
     var items: [ListItem] {
         let dated = visibleRows.filter { $0.lastAt != nil }.map(ListItem.chat)
-            + requests.filter { !$0.hidden }.map(ListItem.request)
+            + visibleRequests.map(ListItem.request)
         let undated = visibleRows.filter { $0.lastAt == nil }.map(ListItem.chat)
         return dated.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) } + undated
     }
@@ -86,8 +95,10 @@ final class ChatsModel {
     /// Hidden requests not seen yet: the entry's "new" dot.
     var hiddenUnseen: Int { requests.count { $0.hidden && $0.unseen } }
 
-    /// Nothing to show at all: no chat, no request in the list.
-    var isEmpty: Bool { rows.isEmpty && !requests.contains { !$0.hidden } }
+    /// Nothing to show at all: no chat, no request in the list. Not the
+    /// search's result, as with chats: a search without a match never
+    /// shows "No chats yet".
+    var isEmpty: Bool { rows.isEmpty && listedRequests.isEmpty }
 
     /// The changes after which the list reads the core again. Request
     /// changes are published as `.contacts`.

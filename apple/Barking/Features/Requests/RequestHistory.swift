@@ -4,13 +4,14 @@ import Foundation
 /// The history of a contact request, in words: the list row's second line
 /// (`short`) and the request page's History section (`long`).
 enum RequestHistory {
-    /// "3 d ago", "2 h ago": the Copie's relative durations.
+    /// "3 d ago", "2 h ago": the Copie's relative durations. A date after
+    /// `now` (a clock ahead) reads as now, never "in 2 min".
     static func relative(_ date: Date, now: Date, locale: Locale = .current) -> String {
         let f = RelativeDateTimeFormatter()
         f.dateTimeStyle = .named
         f.unitsStyle = .abbreviated
         f.locale = locale
-        return f.localizedString(for: date, relativeTo: now)
+        return f.localizedString(for: min(date, now), relativeTo: now)
     }
 
     private static func date(_ secs: UInt64) -> Date { Date(timeIntervalSince1970: TimeInterval(secs)) }

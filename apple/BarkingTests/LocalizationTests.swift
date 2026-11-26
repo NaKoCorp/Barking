@@ -167,8 +167,6 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(fr["Blocked contacts"] as? String, "Contacts bloqués")
     }
 
-    /// The invitation notification texts (BarkingKit, read by the extension)
-    /// exist in English and French, with their one placeholder.
     /// Contact requests in the chats and the Invitations screen (Copie table).
     func testInvitationsListStrings() throws {
         let fr = try XCTUnwrap(table("fr"))
@@ -191,6 +189,8 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
+    /// The invitation notification texts (BarkingKit, read by the extension)
+    /// exist in English and French, with their one placeholder.
     func testInvitationNotificationStrings() throws {
         let kit = Bundle(for: NotificationContent.Marker.self)
         for lang in ["en", "fr"] {

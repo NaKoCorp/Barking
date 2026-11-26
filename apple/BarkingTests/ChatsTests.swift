@@ -190,9 +190,25 @@ final class ChatsModelTests: XCTestCase {
         let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
         await m.reload()
         XCTAssertEqual(m.items.map(\.id), ["request:r", "chat:a", "chat:z"])
-        // The search filters the chats only.
+        // The search filters requests too, on their declared name.
         m.query = "lea"
-        XCTAssertEqual(m.items.map(\.id), ["request:r", "chat:a"])
+        XCTAssertEqual(m.items.map(\.id), ["chat:a"])
+    }
+
+    /// The search finds a request by its declared name, ignoring case and
+    /// accents; a search without a match is not the empty list.
+    func testSearchMatchesRequestName() async {
+        let d = FakeDevice()
+        d.contactList = [contact("a", "Léa")]
+        d.requestList = [request("r", "Zoé", lastSeen: 100)]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        m.query = "ZOE"
+        XCTAssertEqual(m.items.map(\.id), ["request:r"])
+        XCTAssertEqual(m.visibleRequests.map(\.fingerprint), ["r"])
+        m.query = "nobody"
+        XCTAssertTrue(m.items.isEmpty)
+        XCTAssertFalse(m.isEmpty, "no match is not \"No chats yet\"")
     }
 
     /// A hidden request leaves the list; the Invitations entry counts it.

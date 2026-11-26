@@ -45,6 +45,16 @@ final class RequestHistoryTests: XCTestCase {
             .hasPrefix("Invitation renvoyée · "))
     }
 
+    /// A request dated after `now` (another device's clock ahead) reads as
+    /// now, never "in 2 min".
+    func testFutureDateReadsAsNow() throws {
+        let en = try bundle("en")
+        XCTAssertEqual(RequestHistory.relative(now.addingTimeInterval(120), now: now, locale: en.locale),
+                       RequestHistory.relative(now, now: now, locale: en.locale))
+        let r = request(first: -120, last: -120, count: 1)
+        XCTAssertFalse(RequestHistory.short(r, now: now, bundle: en.bundle, locale: en.locale).contains("in "))
+    }
+
     /// The list row's waiting messages, in a plural.
     func testWaitingMessages() throws {
         let en = try bundle("en")
