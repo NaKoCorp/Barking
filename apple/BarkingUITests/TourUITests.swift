@@ -508,7 +508,11 @@ final class TourUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["request.clash"].firstMatch.waitForExistence(timeout: 10))
         snap(app, "requests-request-hidden-clash-\(scheme)", numbered: false)
         let show = app.buttons["request.hide"]
-        for _ in 0..<8 where !show.isHittable { app.swipeUp() }
+        // Up to the lower part of the screen: "isHittable" alone stops at the bottom edge.
+        let screen = app.windows.firstMatch.frame
+        for _ in 0..<10 where !(show.isHittable && show.frame.maxY < screen.minY + screen.height * 0.8) {
+            app.swipeUp(velocity: .slow)
+        }
         show.waitUntilStill()
         snap(app, "requests-request-hidden-actions-\(scheme)", numbered: false)
         back()

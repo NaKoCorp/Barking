@@ -41,11 +41,10 @@ struct NotificationsView: View {
                     .padding(.horizontal, FormRowMetrics.inset)
                     .frame(minHeight: FormRowMetrics.minHeight(hasSubtitle: false))
                     .accessibilityIdentifier("notifications.invites")
-                    // VoiceOver hears the note with the switch too; the line
-                    // stays readable for those who turned hints off.
+                    // VoiceOver hears the note with the switch, not twice.
                     .accessibilityHint(Text("Off, an invitation still arrives in your list."))
                 }
-                note("Off, an invitation still arrives in your list.")
+                note("Off, an invitation still arrives in your list.").accessibilityHidden(true)
             }
             if model.saveFailed {
                 Banner(kind: .danger, title: "Not saved. Try again.")

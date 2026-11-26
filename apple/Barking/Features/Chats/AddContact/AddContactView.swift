@@ -107,6 +107,8 @@ struct AddContactView: View {
             Text("Your card goes, encrypted, to their devices. Without it, they see your messages only after adding you.")
                 .font(.bBodySmall).foregroundStyle(Color.fgMuted)
                 .fixedSize(horizontal: false, vertical: true)
+                // The switch's hint says it: VoiceOver hears it once.
+                .accessibilityHidden(true)
         }
     }
 

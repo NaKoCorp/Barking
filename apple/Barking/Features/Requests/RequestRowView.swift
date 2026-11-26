@@ -8,11 +8,14 @@ import SwiftUI
 struct RequestRowView: View {
     let request: ContactRequestInfo
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.locale) private var locale
 
+    /// In the app's language, as the conversation's lines (`Bundle.strings`).
     private var history: String {
-        let line = RequestHistory.short(request, now: .now)
+        let strings = Bundle.strings(for: locale)
+        let line = RequestHistory.short(request, now: .now, bundle: strings, locale: locale)
         guard request.pendingMessages > 0 else { return line }
-        return line + " · " + RequestHistory.waiting(Int(request.pendingMessages))
+        return line + " · " + RequestHistory.waiting(Int(request.pendingMessages), bundle: strings, locale: locale)
     }
 
     var body: some View {
@@ -26,10 +29,11 @@ struct RequestRowView: View {
                     Tag("Invitation", style: .neutral)
                     Spacer(minLength: 0)
                 }
-                // One line, as a chat's preview; at accessibility sizes one
-                // line keeps only "Invitation received 2h a…", so it may wrap.
+                // Up to two lines (three at accessibility sizes): cut to one,
+                // "· 2 messages wai…" hides what the row is for (Ruling 10).
                 Text(verbatim: history).font(.bBodySmall).foregroundStyle(Color.fgMuted)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(minHeight: 64)

@@ -14,6 +14,7 @@ struct RequestView: View {
     @State private var confirmRefuse = false
     @State private var confirmBlock = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
 
     init(core: CoreService, fingerprint: String, onAccepted: @escaping (String) -> Void) {
         self.core = core
@@ -95,7 +96,8 @@ struct RequestView: View {
     private func historySection(_ request: ContactRequestInfo) -> some View {
         VStack(alignment: .leading, spacing: Space.s2) {
             SectionLabel("History")
-            ForEach(RequestHistory.long(request, now: .now), id: \.self) { line in
+            ForEach(RequestHistory.long(request, now: .now, bundle: .strings(for: locale), locale: locale),
+                    id: \.self) { line in
                 Text(verbatim: line).font(.bBody).foregroundStyle(Color.fg)
             }
             if request.pendingMessages > 0 {
