@@ -20,7 +20,7 @@ public enum NotificationContent {
     /// `locale`: the quotation marks around a declared name.
     public static func apply(_ summary: SyncSummary?, to content: UNMutableNotificationContent,
                              preview: PushPreview, locked: Bool,
-                             bundle: Bundle = Bundle(for: Marker.self), locale: Locale = .current) -> String {
+                             bundle: Bundle = Bundle(for: Marker.self), locale: Locale = DeclaredName.textLocale) -> String {
         guard let summary else { return "original" }
         let messages = summary.newMessages
         let reactions = summary.newReactions

@@ -19,4 +19,11 @@ final class DeclaredNameTests: XCTestCase {
         XCTAssertEqual(DeclaredName.quoted("", fingerprint: "ABCDEF0123456789", locale: en), "“ABCDEF01”")
         XCTAssertEqual(DeclaredName.quoted("  \n", fingerprint: "ABCDEF0123456789", locale: en), "“ABCDEF01”")
     }
+
+    /// Without a locale: the quotes of the app's text language.
+    func testDefaultLocaleFollowsTextLanguage() {
+        let lang = Bundle.main.preferredLocalizations.first ?? "en"
+        let expected = DeclaredName.quoted("Léa", fingerprint: "F", locale: Locale(identifier: lang))
+        XCTAssertEqual(DeclaredName.quoted("Léa", fingerprint: "F"), expected)
+    }
 }
