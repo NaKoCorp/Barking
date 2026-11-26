@@ -110,7 +110,10 @@ final class ConversationModel {
     let contact: String
     private let core: CoreService
     private(set) var items: [Item] = []
-    private(set) var name = ""
+    private(set) var name = "" {
+        // A renamed contact: the changed-device line says the new name too.
+        didSet { if name != oldValue { deviceChangedText = deviceChangedLine(bundle: language.bundle, locale: language.locale) } }
+    }
     private(set) var verified = false
     /// What the header says (U-20).
     var trust: Trust { Trust(verified: verified) }

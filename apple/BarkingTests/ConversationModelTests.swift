@@ -575,6 +575,16 @@ final class ConversationModelTests: XCTestCase {
         // Built once, at load and when the language changes, for the view.
         m.language = (french, fr)
         XCTAssertEqual(m.deviceChangedText, "bob a changé d’appareil · \(ago)")
+        // A rename (the alias field is one tap away) reaches the line.
+        let d = FakeDevice()
+        d.deviceChangeList = [DeviceChange(contact: "b", at: today - 2 * day)]
+        m = make(d)
+        m.now = { now }
+        await m.onAppear()
+        d.contactList = [Contact(fingerprint: "b", alias: "Bobby", displayName: "Bob", verified: false)]
+        await m.handle(.contacts)
+        XCTAssertTrue(m.deviceChangedText?.hasPrefix("Bobby changed device · ") == true,
+                      String(describing: m.deviceChangedText))
         m = await shown([])
         XCTAssertNil(m.deviceChangedLine())
         XCTAssertNil(m.deviceChangedText)
