@@ -411,6 +411,148 @@ final class TourUITests: XCTestCase {
         }
     }
 
+    /// Contact requests (Task 9 design pass), in light and dark, unnumbered
+    /// ("requests-…-light|dark"): the add's confirmation with its switch,
+    /// the safety code with the sent invitation ("Possible in 24 h"), the
+    /// changed-device line, the chats with a request and the Invitations
+    /// entry, the Invitations screen, the request page (top and actions),
+    /// Settings › Notifications, then the add's two notices (too large,
+    /// too soon), each from its own launch.
+    func testTourRequests() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipIf(env["BARKING_TOUR"] == nil)
+        let lang = env["BARKING_TOUR_LANG"] ?? "en"
+        let L = lang == "fr" ? Labels.fr : Labels.en
+        let size = env["BARKING_TOUR_SIZE"].flatMap { $0.isEmpty ? nil : ["-UIPreferredContentSizeCategoryName", $0] } ?? []
+        for scheme in ["light", "dark"] {
+            requestsPass(lang: lang, L: L, size: size, scheme: scheme)
+            for notice in ["tooLarge", "tooSoon"] {
+                addNotice(notice, lang: lang, L: L, size: size, scheme: scheme)
+            }
+            for status in ["unanswered", "accepted"] {
+                contactInvitation(status, lang: lang, size: size, scheme: scheme)
+            }
+        }
+    }
+
+    /// Sam's page with its invitation unanswered (Resend open) or accepted.
+    private func contactInvitation(_ status: String, lang: String, size: [String], scheme: String) {
+        let app = XCUIApplication.seeded(language: lang, extra: [
+            "-BarkingUITestNoAutoUnlock", "-barking.appearance", scheme,
+            "-BarkingUITestInviteStatus", status] + size)
+        app.launch()
+        let sam = app.staticTexts["Sam"].firstMatch
+        XCTAssertTrue(sam.waitForExistence(timeout: 10))
+        sam.tap()
+        let header = app.buttons["conversation.header"]
+        XCTAssertTrue(header.waitForExistence(timeout: 10))
+        header.tap()
+        let state = app.staticTexts["contact.invite.state"]
+        XCTAssertTrue(state.waitForExistence(timeout: 10), "the invitation section")
+        let resend = app.buttons["contact.invite.resend"]
+        let last = status == "accepted" ? state : resend
+        // Up to the lower part of the screen: "isHittable" alone stops at the bottom edge.
+        let screen = app.windows.firstMatch.frame
+        for _ in 0..<10 where !(last.isHittable && last.frame.maxY < screen.minY + screen.height * 0.8) {
+            app.swipeUp(velocity: .slow)
+        }
+        last.waitUntilStill()
+        snap(app, "requests-contact-\(status)-\(scheme)", numbered: false)
+        app.terminate()
+    }
+
+    private func requestsLaunch(lang: String, size: [String], scheme: String, extra: [String]) -> XCUIApplication {
+        // The appearance is the app's own setting, read from the arguments domain.
+        let app = XCUIApplication.seeded(card: nil, language: lang, extra: [
+            "-BarkingUITestOpenCard", samCard, "-BarkingUITestNoAutoUnlock",
+            "-barking.appearance", scheme] + extra + size)
+        app.launch()
+        return app
+    }
+
+    private func requestsPass(lang: String, L: Labels, size: [String], scheme: String) {
+        let app = requestsLaunch(lang: lang, size: size, scheme: scheme,
+                                 extra: ["-BarkingUITestRequests", "-BarkingUITestDeviceChanged"])
+        let back = { app.navigationBars.buttons.firstMatch.tap() }
+        // The add's confirmation, its invitation switch in view.
+        let toggle = app.switches["add.invite"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        for _ in 0..<4 where !toggle.isHittable { app.swipeUp() }
+        toggle.waitUntilStill()
+        snap(app, "requests-add-invitation-\(scheme)", numbered: false)
+        let add = app.buttons[L.add].firstMatch
+        for _ in 0..<4 where !add.isHittable { app.swipeDown() }
+        add.tap()
+        // Sam's safety code: the invitation went, the resend waits a day.
+        let resend = app.buttons["contact.invite.resend"]
+        XCTAssertTrue(resend.waitForExistence(timeout: 10))
+        for _ in 0..<6 where !resend.isHittable { app.swipeUp() }
+        resend.waitUntilStill()
+        snap(app, "requests-contact-invitation-\(scheme)", numbered: false)
+        app.buttons["addContact.later"].tap()
+        // The conversation: Sam changed device two days ago.
+        let line = app.staticTexts["conversation.deviceChanged"]
+        XCTAssertTrue(line.waitForExistence(timeout: 10), "the changed-device line")
+        snap(app, "requests-conversation-device-changed-\(scheme)", numbered: false)
+        back()
+        // The chats: Alice's request among them, Bob behind the entry.
+        let row = app.buttons["chats.request.a11ce000"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        snap(app, "requests-chats-\(scheme)", numbered: false)
+        app.buttons["chats.invitations"].tap()
+        let bob = app.buttons["invitations.row.b0b00000"]
+        XCTAssertTrue(bob.waitForExistence(timeout: 10))
+        snap(app, "requests-invitations-\(scheme)", numbered: false)
+        // Bob's page: hidden, resent, his name clashes with a contact's.
+        bob.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["request.clash"].firstMatch.waitForExistence(timeout: 10))
+        snap(app, "requests-request-hidden-clash-\(scheme)", numbered: false)
+        let show = app.buttons["request.hide"]
+        for _ in 0..<8 where !show.isHittable { app.swipeUp() }
+        show.waitUntilStill()
+        snap(app, "requests-request-hidden-actions-\(scheme)", numbered: false)
+        back()
+        XCTAssertTrue(bob.waitForExistence(timeout: 10))
+        back()
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        let accept = app.buttons["request.accept"]
+        XCTAssertTrue(accept.waitForExistence(timeout: 10))
+        snap(app, "requests-request-\(scheme)", numbered: false)
+        let block = app.buttons["request.block"]
+        for _ in 0..<8 where !block.isHittable { app.swipeUp() }
+        block.waitUntilStill()
+        snap(app, "requests-request-actions-\(scheme)", numbered: false)
+        back()
+        // Settings › Notifications: the invitations switch.
+        XCTAssertTrue(app.tabBars.buttons[L.settings].waitForExistence(timeout: 10))
+        app.tabBars.buttons[L.settings].tap()
+        let notifications = app.buttons["settings.notifications"]
+        XCTAssertTrue(notifications.waitForExistence(timeout: 10))
+        notifications.tap()
+        let invites = app.switches["notifications.invites"]
+        XCTAssertTrue(invites.waitForExistence(timeout: 10))
+        for _ in 0..<4 where !invites.isHittable { app.swipeUp() }
+        invites.waitUntilStill()
+        snap(app, "requests-settings-notifications-\(scheme)", numbered: false)
+        app.terminate()
+    }
+
+    /// The add whose invitation could not go: the too-large banner or the
+    /// too-soon line, on the safety code that follows.
+    private func addNotice(_ notice: String, lang: String, L: Labels, size: [String], scheme: String) {
+        let app = requestsLaunch(lang: lang, size: size, scheme: scheme, extra: ["-BarkingUITestInvite", notice])
+        let add = app.buttons[L.add].firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 10))
+        add.tap()
+        let id = notice == "tooLarge" ? "contact.inviteTooLarge" : "contact.inviteTooSoon"
+        let shown = app.descendants(matching: .any)[id].firstMatch
+        XCTAssertTrue(shown.waitForExistence(timeout: 10), "the \(notice) notice")
+        shown.waitUntilStill()
+        snap(app, "requests-add-\(notice)-\(scheme)", numbered: false)
+        app.terminate()
+    }
+
     private func snap(_ app: XCUIApplication, _ name: String, numbered: Bool = true) {
         if numbered { step += 1 }
         let shot = XCTAttachment(screenshot: app.screenshot())

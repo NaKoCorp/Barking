@@ -45,6 +45,20 @@ final class RequestHistoryTests: XCTestCase {
             .hasPrefix("Invitation renvoyée · "))
     }
 
+    /// French reads "il y a 2 h", never the bare "-2 h" that the abbreviated
+    /// `RelativeDateTimeFormatter` gives (Task 9 tour, fr): the plan's
+    /// `Date.RelativeFormatStyle(presentation: .named, unitsStyle: .abbreviated)`.
+    func testFrenchRelativeSaysIlYA() throws {
+        let fr = Locale(identifier: "fr")
+        for secs in [2 * 3_600.0, 3 * 86_400.0] {
+            let ago = RequestHistory.relative(now.addingTimeInterval(-secs), now: now, locale: fr)
+            XCTAssertTrue(ago.hasPrefix("il y a"), ago)
+            XCTAssertFalse(ago.contains("-"), ago)
+        }
+        let en = RequestHistory.relative(now.addingTimeInterval(-2 * 3_600), now: now, locale: Locale(identifier: "en"))
+        XCTAssertTrue(en.hasSuffix("ago"), en)
+    }
+
     /// A request dated after `now` (another device's clock ahead) reads as
     /// now, never "in 2 min".
     func testFutureDateReadsAsNow() throws {

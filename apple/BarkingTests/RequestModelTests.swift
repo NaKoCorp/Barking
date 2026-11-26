@@ -143,6 +143,36 @@ final class RequestModelTests: XCTestCase {
         XCTAssertEqual(m.request?.hidden, true)
     }
 
+    /// Editing the alias takes "already used" away; another error stays.
+    func testAliasEditClearsAliasTaken() async {
+        let d = FakeDevice()
+        let m = make(d)
+        await m.load()
+        d.acceptError = .InvalidInput(detail: "alias taken")
+        _ = await m.accept(alias: "Sam")
+        XCTAssertEqual(m.error, .aliasTaken)
+        m.aliasEdited()
+        XCTAssertNil(m.error)
+        d.acceptError = .Storage(detail: "disk")
+        _ = await m.accept(alias: "Sam")
+        m.aliasEdited()
+        XCTAssertEqual(m.error, .failed)
+    }
+
+    /// The spinner belongs to Accept's own call: off before and after it,
+    /// and never set by another action.
+    func testAcceptingFollowsAcceptsOwnCall() async {
+        let d = FakeDevice()
+        let m = make(d)
+        await m.load()
+        XCTAssertFalse(m.isAccepting)
+        await m.setHidden(true)
+        XCTAssertFalse(m.isAccepting)
+        d.acceptError = .Storage(detail: "disk")
+        _ = await m.accept(alias: "")
+        XCTAssertFalse(m.isAccepting, "cleared when the call ends, even failed")
+    }
+
     /// Two taps on Accept: one call, one contact, no error.
     func testWorkingIgnoresSecondAccept() async {
         let d = FakeDevice()
@@ -155,5 +185,6 @@ final class RequestModelTests: XCTestCase {
         XCTAssertEqual(results.compactMap { $0 }, [fp])
         XCTAssertNil(m.error)
         XCTAssertFalse(m.vanished, "the second tap never reached the core (it would have found nothing)")
+        XCTAssertFalse(m.isAccepting)
     }
 }

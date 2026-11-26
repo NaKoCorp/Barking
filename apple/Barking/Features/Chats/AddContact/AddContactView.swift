@@ -102,6 +102,7 @@ struct AddContactView: View {
                 .padding(.horizontal, FormRowMetrics.inset)
                 .frame(minHeight: FormRowMetrics.minHeight(hasSubtitle: false))
                 .accessibilityIdentifier("add.invite")
+                .accessibilityHint(Text("Your card goes, encrypted, to their devices. Without it, they see your messages only after adding you."))
             }
             Text("Your card goes, encrypted, to their devices. Without it, they see your messages only after adding you.")
                 .font(.bBodySmall).foregroundStyle(Color.fgMuted)

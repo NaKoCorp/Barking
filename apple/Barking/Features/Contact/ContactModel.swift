@@ -95,12 +95,14 @@ final class ContactModel {
             await loadInvite()
         } catch BarkingError.TooSoon(let at) {
             resendFailed = false
+            resendTooLarge = false
             retryAt = Self.date(at)
         } catch let e as BarkingError where e.isCardTooLarge {
             resendFailed = false
             resendTooLarge = true
         } catch {
             resendFailed = true
+            resendTooLarge = false
         }
     }
 

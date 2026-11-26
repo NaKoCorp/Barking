@@ -7,6 +7,7 @@ import SwiftUI
 /// accepted.
 struct RequestRowView: View {
     let request: ContactRequestInfo
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var history: String {
         let line = RequestHistory.short(request, now: .now)
@@ -25,7 +26,10 @@ struct RequestRowView: View {
                     Tag("Invitation", style: .neutral)
                     Spacer(minLength: 0)
                 }
-                Text(verbatim: history).font(.bBodySmall).foregroundStyle(Color.fgMuted).lineLimit(1)
+                // One line, as a chat's preview; at accessibility sizes one
+                // line keeps only "Invitation received 2h a…", so it may wrap.
+                Text(verbatim: history).font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
             }
         }
         .frame(minHeight: 64)

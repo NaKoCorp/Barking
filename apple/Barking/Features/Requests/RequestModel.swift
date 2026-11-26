@@ -20,6 +20,10 @@ final class RequestModel {
     private(set) var codeGroups: [String] = []
     /// A call runs: a second tap does nothing.
     private(set) var isWorking = false
+    /// The call under way is Accept's: its button shows the spinner, the
+    /// others are only disabled. Set and cleared by that same call, so a
+    /// second tap, turned away, never clears it.
+    private(set) var isAccepting = false
     private(set) var error: RequestError?
     /// The request left the core from elsewhere (another device, a race):
     /// the page closes.
@@ -61,8 +65,12 @@ final class RequestModel {
     func accept(alias: String) async -> String? {
         guard !isWorking, !resolved else { return nil }
         isWorking = true
+        isAccepting = true
         error = nil
-        defer { isWorking = false }
+        defer {
+            isWorking = false
+            isAccepting = false
+        }
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let contact = try await core.acceptRequest(fingerprint, alias: trimmed.isEmpty ? nil : trimmed)
@@ -72,6 +80,11 @@ final class RequestModel {
             fail(error, aliasTaken: true)
             return nil
         }
+    }
+
+    /// The alias was edited: "already used" no longer speaks of it.
+    func aliasEdited() {
+        if error == .aliasTaken { error = nil }
     }
 
     /// True once refused: the page goes back to the list.

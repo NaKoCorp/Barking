@@ -572,8 +572,12 @@ final class ConversationModelTests: XCTestCase {
         let ago = RequestHistory.relative(try XCTUnwrap(m.deviceChangedAt), now: now, locale: fr)
         XCTAssertEqual(m.deviceChangedLine(bundle: french, locale: fr), "bob a changé d’appareil · \(ago)",
                        "the alias, else the name")
+        // Built once, at load and when the language changes, for the view.
+        m.language = (french, fr)
+        XCTAssertEqual(m.deviceChangedText, "bob a changé d’appareil · \(ago)")
         m = await shown([])
         XCTAssertNil(m.deviceChangedLine())
+        XCTAssertNil(m.deviceChangedText)
     }
 
     func testKeyChangeBanner() async {

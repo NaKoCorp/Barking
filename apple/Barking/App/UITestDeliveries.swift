@@ -45,11 +45,23 @@ import Foundation
 ///
 /// - `-BarkingUITestRequests`: two contact requests, kept in memory: “Alice”
 ///   in the list (invited 2 h ago, 2 messages waiting) and “Bob”, hidden and
-///   not seen yet (3 invitations). Hiding, showing and marking seen change
+///   not seen yet (3 invitations), whose name is said to clash with a
+///   contact's. Hiding, showing and marking seen change
 ///   them; the safety code is a fixed one. Refusing and blocking remove the
 ///   request; accepting removes it too and adds an unverified contact of
 ///   that name to `contacts()`, so its conversation opens with the "not
 ///   verified" banner.
+///
+/// - `-BarkingUITestDeviceChanged`: every contact changed device two days
+///   ago (`deviceChanges`), so a conversation shows its changed-device line.
+///
+/// - `-BarkingUITestInvite tooLarge|tooSoon`: every invitation fails as the
+///   core says it for a card too large, or for one sent less than 24 h ago
+///   (retry in 5 h), so the add's notices can be seen.
+///
+/// - `-BarkingUITestInviteStatus unanswered|accepted`: every contact's
+///   invitation reads as unanswered (sent 8 days ago, so a resend is open)
+///   or accepted an hour ago (`inviteStatus`).
 ///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
@@ -142,13 +154,23 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
                             unseen: true, nameClash: false),
          ContactRequestInfo(fingerprint: bobRequest, displayName: "Bob", firstSeen: now - 3 * 86_400,
                             lastSeen: now - 5 * 3_600, inviteCount: 3, pendingMessages: 0, hidden: true,
-                            unseen: true, nameClash: false)]
+                            unseen: true, nameClash: true)]
     }
     static let slowSyncSecs: TimeInterval = 6
+    /// `-BarkingUITestDeviceChanged`.
+    private let deviceChanged: Bool
+    /// `-BarkingUITestInvite`: what every `invite` throws, nil to send.
+    private let inviteFailure: BarkingError?
+    /// `-BarkingUITestInviteStatus`: every contact's invitation state, nil for the core's.
+    private let inviteStatusOverride: InviteStatus?
 
     init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
-         ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false, requests: Bool = false) {
+         ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false, requests: Bool = false,
+         deviceChanged: Bool = false, inviteFailure: BarkingError? = nil, inviteStatus: InviteStatus? = nil) {
         self.device = device
+        self.deviceChanged = deviceChanged
+        self.inviteFailure = inviteFailure
+        self.inviteStatusOverride = inviteStatus
         self.fakeRequests = requests ? Self.requestFixture() : nil
         self.slowSync = slowSync
         self.fakeNodes = nodes
@@ -189,12 +211,32 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         let nodes = arguments.contains("-BarkingUITestNodes")
         let slowSync = arguments.contains("-BarkingUITestSlowSync")
         let requests = arguments.contains("-BarkingUITestRequests")
-        guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync || requests else {
+        let deviceChanged = arguments.contains("-BarkingUITestDeviceChanged")
+        let inviteFailure = arguments.firstIndex(of: "-BarkingUITestInvite").flatMap { i -> BarkingError? in
+            guard i + 1 < arguments.count else { return nil }
+            return switch arguments[i + 1] {
+            case "tooLarge": .InvalidInput(detail: "data too large")
+            case "tooSoon": .TooSoon(retryAt: UInt64(Date().timeIntervalSince1970) + 5 * 3_600 - 60)
+            default: nil
+            }
+        }
+        let inviteStatus = arguments.firstIndex(of: "-BarkingUITestInviteStatus").flatMap { i -> InviteStatus? in
+            guard i + 1 < arguments.count else { return nil }
+            let now = UInt64(Date().timeIntervalSince1970)
+            return switch arguments[i + 1] {
+            case "unanswered": .unanswered(at: now - 8 * 86_400)
+            case "accepted": .accepted(at: now - 3_600)
+            default: nil
+            }
+        }
+        guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync || requests
+            || deviceChanged || inviteFailure != nil || inviteStatus != nil else {
             return device
         }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
                                 reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync,
-                                requests: requests)
+                                requests: requests, deviceChanged: deviceChanged, inviteFailure: inviteFailure,
+                                inviteStatus: inviteStatus)
     }
 
     // MARK: The relays (`-BarkingUITestNodes`)
@@ -679,9 +721,19 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         }
         if !faked { try device.markRequestsSeen() }
     }
-    func invite(contact: String) throws { try device.invite(contact: contact) }
-    func inviteStatus(contact: String) throws -> InviteStatus { try device.inviteStatus(contact: contact) }
-    func deviceChanges(since: UInt64) throws -> [DeviceChange] { try device.deviceChanges(since: since) }
+    func invite(contact: String) throws {
+        if let inviteFailure { throw inviteFailure }
+        try device.invite(contact: contact)
+    }
+    func inviteStatus(contact: String) throws -> InviteStatus {
+        if let inviteStatusOverride { return inviteStatusOverride }
+        return try device.inviteStatus(contact: contact)
+    }
+    func deviceChanges(since: UInt64) throws -> [DeviceChange] {
+        guard deviceChanged else { return try device.deviceChanges(since: since) }
+        let at = UInt64(Date().timeIntervalSince1970) - 2 * 86_400
+        return try contacts().map { DeviceChange(contact: $0.fingerprint, at: at) }
+    }
     func noteWake(atSecs: UInt64) throws { try device.noteWake(atSecs: atSecs) }
     func wakeStatus() throws -> WakeStatus { try device.wakeStatus() }
     func myDevices() throws -> [MyDeviceInfo] { try device.myDevices() }

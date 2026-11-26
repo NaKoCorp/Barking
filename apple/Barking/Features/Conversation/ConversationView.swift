@@ -71,7 +71,7 @@ struct ConversationView: View {
             }
             // A system line like the day separators, not a banner: the root
             // key did not change (§7.7).
-            if let line = model.deviceChangedLine(bundle: .strings(for: locale), locale: locale) {
+            if let line = model.deviceChangedText {
                 Text(verbatim: line)
                     .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
                     .multilineTextAlignment(.center)

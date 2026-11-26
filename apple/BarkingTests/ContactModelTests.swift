@@ -163,6 +163,13 @@ final class ContactModelTests: XCTestCase {
         d.inviteError = .InvalidInput(detail: "malformed")
         await m.resend()
         XCTAssertTrue(m.resendFailed)
+        XCTAssertFalse(m.resendTooLarge, "a later failure replaces the too-large card")
+        d.inviteError = .InvalidInput(detail: "data too large")
+        await m.resend()
+        d.inviteError = .TooSoon(retryAt: nowSecs + 3600)
+        await m.resend()
+        XCTAssertFalse(m.resendTooLarge, "a later too-soon replaces the too-large card")
+        XCTAssertFalse(m.resendFailed)
     }
 
     /// A reload keeps the later date the core gave with `TooSoon`.

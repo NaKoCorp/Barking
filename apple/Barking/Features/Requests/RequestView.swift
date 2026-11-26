@@ -13,8 +13,6 @@ struct RequestView: View {
     @State private var alias = ""
     @State private var confirmRefuse = false
     @State private var confirmBlock = false
-    /// Accept's own call runs (its button shows the spinner; the others are only disabled).
-    @State private var accepting = false
     @Environment(\.dismiss) private var dismiss
 
     init(core: CoreService, fingerprint: String, onAccepted: @escaping (String) -> Void) {
@@ -114,12 +112,11 @@ struct RequestView: View {
                              error: model.error == .aliasTaken ? "This alias is already used" : nil,
                              identifier: "request.alias")
                 .submitLabel(.done)
-            PrimaryButton("Accept", enabled: !model.isWorking, isLoading: accepting, identifier: "request.accept") {
-                accepting = true
+                .onChange(of: alias) { model.aliasEdited() }
+            PrimaryButton("Accept", enabled: !model.isWorking, isLoading: model.isAccepting,
+                          identifier: "request.accept") {
                 Task {
-                    let contact = await model.accept(alias: alias)
-                    accepting = false
-                    if let contact {
+                    if let contact = await model.accept(alias: alias) {
                         Haptic.success.play()
                         onAccepted(contact)
                     } else if model.error != nil {

@@ -118,6 +118,9 @@ final class ConversationModel {
     /// The contact's latest device change of the last 7 days (§7.7): a
     /// quiet line, not a warning, since the root key did not change.
     private(set) var deviceChangedAt: Date?
+    /// `deviceChangedLine` in the app's language, built when the change is
+    /// read or the language changes, not at every render.
+    private(set) var deviceChangedText: String?
     /// How long the changed-device line stays.
     static let deviceChangeShownFor: TimeInterval = 7 * 86_400
     /// The contact was read from the core: until then `verified` says nothing.
@@ -171,7 +174,9 @@ final class ConversationModel {
     private var announcementFlush: Task<Void, Never>?
     /// The app's language, set by the view: what is spoken follows the same
     /// override as what is shown.
-    var language: (bundle: Bundle, locale: Locale) = (.main, .current)
+    var language: (bundle: Bundle, locale: Locale) = (.main, .current) {
+        didSet { deviceChangedText = deviceChangedLine(bundle: language.bundle, locale: language.locale) }
+    }
     /// Posts a VoiceOver announcement (tests record it).
     var announce: (String) -> Void = { AccessibilityNotification.Announcement($0).post() }
     var now: () -> Date = Date.init
@@ -263,6 +268,7 @@ final class ConversationModel {
         let latest = ((try? await core.deviceChanges(since: since)) ?? [])
             .filter { $0.contact == contact && $0.at >= since }.map(\.at).max()
         deviceChangedAt = latest.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        deviceChangedText = deviceChangedLine(bundle: language.bundle, locale: language.locale)
     }
 
     /// "Léa changed device · 2 d ago", in the app's language; nil without a

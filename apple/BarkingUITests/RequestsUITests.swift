@@ -91,4 +91,17 @@ final class RequestsUITests: XCTestCase {
         XCTAssertTrue(entry.waitUntil({ !(($0.value as? String) ?? "").contains("new") }),
                       "the new dot is gone: \(String(describing: entry.value))")
     }
+
+    /// A contact who changed device: its conversation says so in a quiet
+    /// line, built in the app's language (§7.7).
+    func testChangedDeviceLine() throws {
+        let app = XCUIApplication.seeded(extra: ["-BarkingUITestDeviceChanged"])
+        app.launch()
+        let sam = app.staticTexts["Sam"].firstMatch
+        XCTAssertTrue(sam.waitForExistence(timeout: 10))
+        sam.tap()
+        let line = app.staticTexts["conversation.deviceChanged"]
+        XCTAssertTrue(line.waitForExistence(timeout: 10), "the changed-device line")
+        XCTAssertTrue(line.label.hasPrefix("Sam changed device · "), line.label)
+    }
 }
