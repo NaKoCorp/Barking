@@ -17,10 +17,11 @@ public enum NotificationContent {
     /// deletion/ephemeral §5.4). A wake with no message or reaction but
     /// contact requests to notify shows the invitation ("INVITE_*"); a message
     /// in the same wake wins. `bundle`: the strings (tests pass French);
-    /// `locale`: the quotation marks around a declared name.
+    /// `locale`: the quotation marks around a declared name (nil: the
+    /// language of `bundle`, so quotes and text agree).
     public static func apply(_ summary: SyncSummary?, to content: UNMutableNotificationContent,
                              preview: PushPreview, locked: Bool,
-                             bundle: Bundle = Bundle(for: Marker.self), locale: Locale = DeclaredName.textLocale) -> String {
+                             bundle: Bundle = Bundle(for: Marker.self), locale: Locale? = nil) -> String {
         guard let summary else { return "original" }
         let messages = summary.newMessages
         let reactions = summary.newReactions
@@ -30,7 +31,7 @@ public enum NotificationContent {
             if !requests.isEmpty {
                 content.title = ""
                 content.body = invitationBody(requests, hidden: locked || preview == .generic,
-                                              bundle: bundle, locale: locale)
+                                              bundle: bundle, locale: locale ?? DeclaredName.textLocale(bundle))
                 content.threadIdentifier = ""
                 return "shown"
             }

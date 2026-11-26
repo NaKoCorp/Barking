@@ -183,6 +183,15 @@ final class NotificationContentTests: XCTestCase {
         XCTAssertEqual(fr.body, "Nouvelle invitation de «\u{00A0}Alice\u{00A0}»")
     }
 
+    /// No locale given: the quotes follow the strings' bundle, as in the
+    /// extension (whose own bundle has no .lproj). French text, « » quotes.
+    func testInvitationQuotesFollowStringsBundle() throws {
+        let c = original()
+        let s = invitations([NewRequest(contact: "FPR", name: "Alice", resent: false)])
+        _ = NotificationContent.apply(s, to: c, preview: .nameAndText, locked: false, bundle: try french())
+        XCTAssertEqual(c.body, "Nouvelle invitation de «\u{00A0}Alice\u{00A0}»")
+    }
+
     func testResentInvitation() throws {
         let c = original()
         let s = invitations([NewRequest(contact: "FPR", name: "Alice", resent: true)])

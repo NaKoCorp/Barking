@@ -20,10 +20,15 @@ final class DeclaredNameTests: XCTestCase {
         XCTAssertEqual(DeclaredName.quoted("  \n", fingerprint: "ABCDEF0123456789", locale: en), "“ABCDEF01”")
     }
 
-    /// Without a locale: the quotes of the app's text language.
-    func testDefaultLocaleFollowsTextLanguage() {
-        let lang = Bundle.main.preferredLocalizations.first ?? "en"
-        let expected = DeclaredName.quoted("Léa", fingerprint: "F", locale: Locale(identifier: lang))
-        XCTAssertEqual(DeclaredName.quoted("Léa", fingerprint: "F"), expected)
+    /// Surrounding spaces are not part of the name.
+    func testNameIsTrimmed() {
+        XCTAssertEqual(DeclaredName.quoted("  Léa \n", fingerprint: "F", locale: Locale(identifier: "en_US")), "“Léa”")
+    }
+
+    /// The text locale is the strings bundle's language, a bare .lproj included.
+    func testTextLocaleOfLprojBundle() throws {
+        let kit = Bundle(for: NotificationContent.Marker.self)
+        let fr = try XCTUnwrap(kit.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+        XCTAssertEqual(DeclaredName.textLocale(fr).language.languageCode, .french)
     }
 }
