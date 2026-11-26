@@ -9931,6 +9931,22 @@ fn accept_never_replaces_contact_with_same_name() {
 }
 
 #[test]
+fn request_safety_number_matches_after_accept() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let alice = a.fingerprint();
+    // No request yet.
+    assert!(matches!(
+        b.request_safety_number(&alice),
+        Err(CoreError::UnknownContact)
+    ));
+    let invite = invite_one(&mut a, b.fingerprint(), NOW, &mut rng);
+    request_outcome(b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap());
+    let before = b.request_safety_number(&alice).unwrap();
+    b.accept_request(&alice, None, NOW, &mut rng).unwrap();
+    assert_eq!(before, b.safety_number(&alice).unwrap());
+}
+
+#[test]
 fn accept_on_day_20_replays_without_acks() {
     let (_da, a, _db, mut b, mut rng) = bob_with_request(NOW);
     let alice = a.fingerprint();

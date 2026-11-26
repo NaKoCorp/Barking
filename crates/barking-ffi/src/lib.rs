@@ -16,6 +16,7 @@ mod net;
 mod nodes;
 mod push;
 mod reactions;
+mod requests;
 mod route;
 
 use std::panic::{UnwindSafe, catch_unwind};
@@ -41,6 +42,7 @@ pub use nodes::{
 };
 pub use push::{NotificationPrefs, PushPreview, PushSettings, WakeNode, WakeStatus};
 pub use reactions::{NewReaction, Quote, ReactionChip, excerpt};
+pub use requests::{ContactRequestInfo, InviteStatus};
 pub use route::RouteStepInfo;
 
 uniffi::setup_scaffolding!();

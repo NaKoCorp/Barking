@@ -770,7 +770,7 @@ pub(super) fn claimed_by_contact(
 }
 
 /// Inverse of `Display` for `Fingerprint`: lowercase base32, groups separated by `-`.
-fn parse_fingerprint(s: &str) -> Option<Fingerprint> {
+pub fn parse_fingerprint(s: &str) -> Option<Fingerprint> {
     let compact: String = s
         .chars()
         .filter(|c| *c != '-' && !c.is_whitespace())

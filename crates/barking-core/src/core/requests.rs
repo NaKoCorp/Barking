@@ -26,7 +26,7 @@ use crate::content::{ExtContent, MAX_REPLAYED};
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::InitialMessage;
-use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
+use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint, safety_number};
 use crate::packet::{DEFAULT_TTL_SECS, Packet, PacketId};
 use crate::ratchet::RatchetMessage;
 use crate::store::{ContactRow, MessageId, Queries, arr, map_err, to_i64, to_u64};
@@ -1767,6 +1767,14 @@ impl Core {
             replayed: replayed.into_iter().map(|(_, o)| o).collect(),
             packets,
         })
+    }
+
+    /// Security code to compare with the requester `fp` before accepting,
+    /// as `safety_number` gives it once accepted. No request:
+    /// `UnknownContact`.
+    pub fn request_safety_number(&self, fp: &Fingerprint) -> Result<String> {
+        get_request(&self.store, *fp)?.ok_or(CoreError::UnknownContact)?;
+        Ok(safety_number(&self.fingerprint(), fp))
     }
 
     /// The pending requests, hidden ones included, most recently seen first.

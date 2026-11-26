@@ -57,6 +57,10 @@ pub enum BarkingError {
     /// Added last.
     #[error("message not found")]
     MessageNotFound,
+    /// Refused until `retry_at` (Unix seconds): an invite to the same person
+    /// less than 24 hours after the last one. Added last.
+    #[error("too soon")]
+    TooSoon { retry_at: u64 },
 }
 
 /// Why a link step was refused (spec iOS messaging §5.8).
@@ -120,6 +124,9 @@ impl From<CoreError> for BarkingError {
     fn from(e: CoreError) -> Self {
         let detail = e.to_string();
         match e {
+            CoreError::Malformed("alias already used by another contact") => {
+                BarkingError::invalid("alias taken")
+            }
             CoreError::InvalidSignature
             | CoreError::Malformed(_)
             | CoreError::TooLarge
@@ -136,6 +143,7 @@ impl From<CoreError> for BarkingError {
             CoreError::TooManyEmoji => BarkingError::TooManyEmoji,
             CoreError::InvalidEmoji => BarkingError::InvalidEmoji,
             CoreError::MessageNotFound => BarkingError::MessageNotFound,
+            CoreError::TooSoon { retry_at } => BarkingError::TooSoon { retry_at },
             _ => BarkingError::Internal { detail },
         }
     }

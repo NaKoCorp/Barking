@@ -55,7 +55,7 @@ use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
 pub use crate::transparency::{RequestResolution, SyncKind};
-pub use contacts::ContactSummary;
+pub use contacts::{ContactSummary, parse_fingerprint};
 pub use delivery::{AwaitingVerdict, DeleteOutcome, MAX_NOTED_CHANGES};
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
 pub use history::{HistoryArchive, MAX_ARCHIVE_BYTES};
