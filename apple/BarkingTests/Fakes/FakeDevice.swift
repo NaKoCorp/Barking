@@ -123,8 +123,13 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         c.blocked = true
         blockedList.append(c)
     }
+    /// Blocked fingerprints that are no contact (`blockedFingerprints`):
+    /// a blocked requester. `unblockContact` removes one.
+    var blockedFingerprintList: [String] = []
+    func blockedFingerprints() throws -> [String] { blockedFingerprintList }
     func unblockContact(contact: String) throws {
         if let blockError { throw blockError }
+        blockedFingerprintList.removeAll { $0 == contact }
         guard let i = blockedList.firstIndex(where: { $0.fingerprint == contact }) else { return }
         var c = blockedList.remove(at: i)
         c.blocked = false

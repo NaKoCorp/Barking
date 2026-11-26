@@ -92,6 +92,47 @@ final class RequestsUITests: XCTestCase {
                       "the new dot is gone: \(String(describing: entry.value))")
     }
 
+    /// A 64-character declared name: the row still reads as an invitation
+    /// (the tour's shots show the name cut and the tag whole).
+    func testLongNameRowReadsAsInvitation() throws {
+        let app = launch()
+        let row = app.buttons["chats.request.c0ffee00"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "the long-name request row")
+        XCTAssertTrue(row.label.contains("Maximilienne"), row.label)
+        XCTAssertTrue(row.label.contains("Invitation"), row.label)
+    }
+
+    /// Blocked from its invitation, the requester is no contact, yet
+    /// Settings › Blocked contacts lists it (its fingerprint's start for a
+    /// name) and unblocks it: no dead end.
+    func testBlockedRequesterUnblockedFromSettings() throws {
+        let app = launch()
+        let row = app.buttons["chats.request.a11ce000"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        let block = app.buttons["request.block"]
+        XCTAssertTrue(block.waitForExistence(timeout: 5))
+        for _ in 0..<8 where !block.isHittable { app.swipeUp() }
+        block.tap()
+        let confirm = app.buttons["request.block.confirm"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.tap()
+        XCTAssertTrue(row.waitUntil({ !$0.exists }), "the request row left the list")
+
+        XCTAssertTrue(app.tabBars.buttons["Settings"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Settings"].tap()
+        let blocked = app.buttons["settings.blocked"]
+        XCTAssertTrue(blocked.waitForExistence(timeout: 5))
+        for _ in 0..<6 where !blocked.isHittable { app.swipeUp() }
+        blocked.tap()
+        let unblock = app.buttons["blocked.unblock"]
+        XCTAssertTrue(unblock.waitForExistence(timeout: 10), "the blocked requester's row")
+        XCTAssertTrue(unblock.label.contains("a11ce000"), unblock.label)
+        unblock.tap()
+        XCTAssertTrue(app.staticTexts["No blocked contacts"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["blocked.unblock"].exists)
+    }
+
     /// A contact who changed device: its conversation says so in a quiet
     /// line, built in the app's language (§7.7).
     func testChangedDeviceLine() throws {

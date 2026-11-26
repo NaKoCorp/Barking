@@ -90,6 +90,29 @@ final class RequestModelTests: XCTestCase {
         XCTAssertNil(r.error)
     }
 
+    /// A sync that reports the request moved, with no new invitation (here
+    /// refused on another device: gone from the core), publishes `.contacts`;
+    /// the open page, which follows the changes as the view does, closes.
+    func testRequestGoneInASyncClosesThePage() async {
+        let d = FakeDevice()
+        d.requestList = [request()]
+        let core = CoreService(device: d, runner: DirectRunner())
+        let m = RequestModel(fingerprint: fp, core: core)
+        await m.load()
+        let changes = await core.changes
+        let follow = Task { @MainActor in
+            for await change in changes { await m.handle(change) }
+        }
+        defer { follow.cancel() }
+        d.requestList = []
+        d.summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: true, error: nil,
+                                requestContacts: [fp])
+        _ = await core.sync(reason: .timer)
+        for _ in 0..<200 where !m.vanished { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(m.vanished)
+        XCTAssertNil(m.error)
+    }
+
     /// A failed read says nothing about the request: the page stays.
     func testFailedReadIsNotVanished() async {
         let d = FakeDevice()

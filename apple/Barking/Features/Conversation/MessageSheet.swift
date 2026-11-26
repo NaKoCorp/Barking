@@ -380,6 +380,7 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func blockContact(contact: String) throws { throw Never() }
     func unblockContact(contact: String) throws { throw Never() }
     func blockedContacts() throws -> [Contact] { [] }
+    func blockedFingerprints() throws -> [String] { [] }
     func safetyNumber(contact: String) throws -> [String] { throw Never() }
     func unreadCounts() throws -> [UnreadCount] { throw Never() }
     func chatSummaries() throws -> [ChatSummary] { throw Never() }

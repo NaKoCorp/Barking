@@ -210,6 +210,11 @@ public actor CoreService {
     public func blockedContacts() async throws -> [Contact] {
         try await call("blocked") { try $0.blockedContacts() }
     }
+    /// Blocked fingerprints that are no contact (a blocked requester), for
+    /// the same list; `unblockContact` takes them.
+    public func blockedFingerprints() async throws -> [String] {
+        try await call("blocked-fp") { try $0.blockedFingerprints() }
+    }
     public func safetyNumber(for contact: String) async throws -> [String] {
         try await call("safety") { try $0.safetyNumber(contact: contact) }
     }

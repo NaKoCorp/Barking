@@ -25,6 +25,9 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func blockContact(contact: String) throws
     func unblockContact(contact: String) throws
     func blockedContacts() throws -> [Contact]
+    /// Blocked fingerprints that are no contact (a blocked requester);
+    /// `unblockContact` takes them.
+    func blockedFingerprints() throws -> [String]
     func safetyNumber(contact: String) throws -> [String]
     func unreadCounts() throws -> [UnreadCount]
     func chatSummaries() throws -> [ChatSummary]

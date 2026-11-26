@@ -43,21 +43,24 @@ import Foundation
 ///   the network unreachable (the launch sync is still running when a test
 ///   opens the Network tab).
 ///
-/// - `-BarkingUITestRequests`: two contact requests, kept in memory: “Alice”
-///   in the list (invited 2 h ago, 2 messages waiting) and “Bob”, hidden and
-///   not seen yet (3 invitations), whose name is said to clash with a
-///   contact's. Hiding, showing and marking seen change
+/// - `-BarkingUITestRequests`: three contact requests, kept in memory:
+///   “Alice” in the list (invited 2 h ago, 2 messages waiting), “Bob”,
+///   hidden and not seen yet (3 invitations), whose name is said to clash
+///   with a contact's, and one with a 64-character name in the list
+///   (invited yesterday). Hiding, showing and marking seen change
 ///   them; the safety code is a fixed one. Refusing and blocking remove the
-///   request; accepting removes it too and adds an unverified contact of
+///   request; a blocked one is then listed by `blockedFingerprints` until
+///   unblocked. Accepting removes it too and adds an unverified contact of
 ///   that name to `contacts()`, so its conversation opens with the "not
 ///   verified" banner.
 ///
 /// - `-BarkingUITestDeviceChanged`: every contact changed device two days
 ///   ago (`deviceChanges`), so a conversation shows its changed-device line.
 ///
-/// - `-BarkingUITestInvite tooLarge|tooSoon`: every invitation fails as the
-///   core says it for a card too large, or for one sent less than 24 h ago
-///   (retry in 5 h), so the add's notices can be seen.
+/// - `-BarkingUITestInvite tooLarge|tooSoon|failed`: every invitation fails
+///   as the core says it for a card too large, for one sent less than 24 h
+///   ago (retry in 5 h), or for a storage error, so the add's notices can
+///   be seen.
 ///
 /// - `-BarkingUITestInviteStatus unanswered|accepted`: every contact's
 ///   invitation reads as unanswered (sent 8 days ago, so a resend is open)
@@ -145,8 +148,13 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private var fakeRequests: [ContactRequestInfo]?
     /// The requests accepted so far, as contacts.
     private var fakeAccepted: [Contact] = []
+    /// The faked requesters blocked so far (`blockedFingerprints`).
+    private var fakeBlockedRequesters: [String] = []
     static let aliceRequest = "a11ce0000000000000000000000000000000000000000000000000000000a11c"
     static let bobRequest = "b0b0000000000000000000000000000000000000000000000000000000000b0b"
+    static let longRequest = "c0ffee0000000000000000000000000000000000000000000000000000c0ffee"
+    /// The longest declared name a card carries: 64 characters.
+    static let longName = "Maximilienne-Alexandrine de La Tour d’Auvergne-Castelnau-Montmir"
 
     static func requestFixture(now: UInt64 = UInt64(Date().timeIntervalSince1970)) -> [ContactRequestInfo] {
         [ContactRequestInfo(fingerprint: aliceRequest, displayName: "Alice", firstSeen: now - 2 * 3_600,
@@ -154,7 +162,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
                             unseen: true, nameClash: false),
          ContactRequestInfo(fingerprint: bobRequest, displayName: "Bob", firstSeen: now - 3 * 86_400,
                             lastSeen: now - 5 * 3_600, inviteCount: 3, pendingMessages: 0, hidden: true,
-                            unseen: true, nameClash: true)]
+                            unseen: true, nameClash: true),
+         ContactRequestInfo(fingerprint: longRequest, displayName: longName, firstSeen: now - 26 * 3_600,
+                            lastSeen: now - 26 * 3_600, inviteCount: 1, pendingMessages: 0, hidden: false,
+                            unseen: false, nameClash: false)]
     }
     static let slowSyncSecs: TimeInterval = 6
     /// `-BarkingUITestDeviceChanged`.
@@ -217,6 +228,7 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             return switch arguments[i + 1] {
             case "tooLarge": .InvalidInput(detail: "data too large")
             case "tooSoon": .TooSoon(retryAt: UInt64(Date().timeIntervalSince1970) + 5 * 3_600 - 60)
+            case "failed": .Storage(detail: "disk")
             default: nil
             }
         }
@@ -604,8 +616,18 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func markVerified(contact: String) throws { try device.markVerified(contact: contact) }
     func unmarkVerified(contact: String) throws { try device.unmarkVerified(contact: contact) }
     func blockContact(contact: String) throws { try device.blockContact(contact: contact) }
-    func unblockContact(contact: String) throws { try device.unblockContact(contact: contact) }
+    func unblockContact(contact: String) throws {
+        let faked = lock.withLock { () -> Bool in
+            guard let i = fakeBlockedRequesters.firstIndex(of: contact) else { return false }
+            fakeBlockedRequesters.remove(at: i)
+            return true
+        }
+        if !faked { try device.unblockContact(contact: contact) }
+    }
     func blockedContacts() throws -> [Contact] { try device.blockedContacts() }
+    func blockedFingerprints() throws -> [String] {
+        try (lock.withLock { fakeBlockedRequesters } + device.blockedFingerprints()).sorted()
+    }
     func safetyNumber(contact: String) throws -> [String] { try device.safetyNumber(contact: contact) }
     func unreadCounts() throws -> [UnreadCount] { try device.unreadCounts() }
     func chatSummaries() throws -> [ChatSummary] { try device.chatSummaries() }
@@ -690,7 +712,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         if try removeFakeRequest(fingerprint) == nil { try device.refuseRequest(fingerprint: fingerprint) }
     }
     func blockRequest(fingerprint: String) throws {
-        if try removeFakeRequest(fingerprint) == nil { try device.blockRequest(fingerprint: fingerprint) }
+        guard try removeFakeRequest(fingerprint) != nil else {
+            return try device.blockRequest(fingerprint: fingerprint)
+        }
+        lock.withLock { fakeBlockedRequesters.append(fingerprint) }
     }
     /// The faked request taken out of the list; nil without the flag, and
     /// `NotFound`, as the core says it, for one no longer there.
