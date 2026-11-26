@@ -32,7 +32,8 @@ enum BackgroundRefresh {
 
     /// Applies the permission guard (iOS notifications may have been denied
     /// while the app was suspended: push goes off before any subscription is
-    /// renewed), syncs, then posts one notification for the new messages and reactions.
+    /// renewed), syncs, then posts one notification for the new messages,
+    /// reactions and invitations.
     /// `false` when there is no open core (no device, wipe pending, before
     /// first unlock: nothing is opened here) or the network was down.
     @MainActor
@@ -43,13 +44,15 @@ enum BackgroundRefresh {
         let outcome = await service.refreshSync()
         // Expired meanwhile (the sync itself is not cancelled with us): post nothing.
         if Task.isCancelled { return false }
-        if !outcome.newMessages.isEmpty || !outcome.newReactions.isEmpty {
+        // An invitation alone is told too: with instant push off, nothing
+        // else will (and the core spent its once-a-day notify on it).
+        if !outcome.newMessages.isEmpty || !outcome.newReactions.isEmpty || !outcome.newRequests.isEmpty {
             let preview = (try? await service.notificationPrefs().preview) ?? .generic
             if Task.isCancelled { return false }
             let content = UNMutableNotificationContent()
             let summary = SyncSummary(itemsReceived: UInt32(outcome.items), sent: UInt32(outcome.sent),
                                       newMessages: outcome.newMessages, networkUp: outcome.networkUp, error: nil,
-                                      newReactions: outcome.newReactions)
+                                      newReactions: outcome.newReactions, newRequests: outcome.newRequests)
             _ = NotificationContent.apply(summary, to: content, preview: preview, locked: locked)
             await post(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
