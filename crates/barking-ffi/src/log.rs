@@ -7,13 +7,14 @@ use std::collections::HashMap;
 
 use barking_core::Core;
 use barking_core::core::{
-    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
-    R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
+    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED,
+    R_PENDING_REQUEST, R_REQUEST_FORGED, R_STALE, R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER,
+    R_UNREADABLE,
 };
 use barking_core::fragment::{REASON_BAD_HASH, REASON_CONTRADICTORY};
 use barking_core::identity::root::Fingerprint;
 use barking_core::packet::Tier;
-use barking_core::transparency::{AvoidReason, SyncKind, TransparencyEvent};
+use barking_core::transparency::{AvoidReason, RequestResolution, SyncKind, TransparencyEvent};
 
 use crate::device::Device;
 use crate::{BarkingError, guard};
@@ -40,7 +41,7 @@ pub struct LogEntry {
 
 /// Number of variants of `TransparencyEvent`: one more than the last
 /// position `index` gives.
-const VARIANTS: usize = 30;
+const VARIANTS: usize = 33;
 
 /// Every key `LogEntry::key` can take, one per `TransparencyEvent` variant,
 /// in the order of `index`. The key of an event is `KEYS[index(event)]`: there
@@ -76,6 +77,9 @@ const KEYS: [&str; VARIANTS] = [
     "log.unknown_content",
     "log.node_blocked",
     "log.node_unblocked",
+    "log.invite_sent",
+    "log.contact_request_received",
+    "log.contact_request_resolved",
 ];
 
 /// Position of a variant in `KEYS`. No wildcard: a new variant does not
@@ -113,6 +117,9 @@ fn index(e: &TransparencyEvent) -> usize {
         E::UnknownContent { .. } => 27,
         E::NodeBlocked { .. } => 28,
         E::NodeUnblocked { .. } => 29,
+        E::InviteSent { .. } => 30,
+        E::ContactRequestReceived { .. } => 31,
+        E::ContactRequestResolved { .. } => 32,
     }
 }
 
@@ -153,9 +160,16 @@ const TOKENS: &[&str] = &[
     "reason_stale",
     "reason_id_reused",
     "reason_blocked",
+    "reason_request_forged",
+    "reason_pending_request",
     "reason_bad_hash",
     "reason_contradictory",
     "reason_unknown",
+    "request_accepted",
+    "request_refused",
+    "request_blocked",
+    "request_expired",
+    "request_added_directly",
 ];
 
 /// Keys of the log, for the app's translation check.
@@ -203,9 +217,22 @@ fn reason_token(r: &str) -> String {
         R_STALE => "reason_stale",
         R_ID_REUSED => "reason_id_reused",
         R_BLOCKED => "reason_blocked",
+        R_REQUEST_FORGED => "reason_request_forged",
+        R_PENDING_REQUEST => "reason_pending_request",
         REASON_BAD_HASH => "reason_bad_hash",
         REASON_CONTRADICTORY => "reason_contradictory",
         _ => "reason_unknown",
+    })
+}
+
+/// Token of the way a contact request was closed.
+fn resolution_token(how: RequestResolution) -> String {
+    token(match how {
+        RequestResolution::Accepted => "request_accepted",
+        RequestResolution::Refused => "request_refused",
+        RequestResolution::Blocked => "request_blocked",
+        RequestResolution::Expired => "request_expired",
+        RequestResolution::AddedDirectly => "request_added_directly",
     })
 }
 
@@ -372,6 +399,12 @@ fn parts(e: &TransparencyEvent, name: &dyn Fn(&Fingerprint) -> String) -> (Strin
         E::UnknownContent { kind, .. } => ("packet", vec![kind.to_string()]),
         E::NodeBlocked { id_short } | E::NodeUnblocked { id_short } => {
             ("node", vec![id_short.clone()])
+        }
+        E::InviteSent { contact } | E::ContactRequestReceived { contact } => {
+            ("session", vec![name(contact)])
+        }
+        E::ContactRequestResolved { contact, how } => {
+            ("session", vec![name(contact), resolution_token(*how)])
         }
     };
     (family.to_owned(), args)
@@ -561,6 +594,12 @@ mod tests {
             E::NodeUnblocked {
                 id_short: "abcd2345".into(),
             },
+            E::InviteSent { contact: fp(7) },
+            E::ContactRequestReceived { contact: fp(7) },
+            E::ContactRequestResolved {
+                contact: fp(7),
+                how: RequestResolution::Accepted,
+            },
         ]
     }
 
@@ -638,6 +677,8 @@ mod tests {
             R_STALE,
             R_ID_REUSED,
             R_BLOCKED,
+            R_REQUEST_FORGED,
+            R_PENDING_REQUEST,
             REASON_BAD_HASH,
             REASON_CONTRADICTORY,
         ] {

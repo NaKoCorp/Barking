@@ -114,6 +114,8 @@ pub struct PushPrefs {
     pub preview: Preview,
     /// When a push last woke the app (Unix seconds), if ever.
     pub last_wake: Option<u64>,
+    /// Notify a new contact request (on by default).
+    pub invites: bool,
 }
 
 impl Default for PushPrefs {
@@ -122,6 +124,26 @@ impl Default for PushPrefs {
             instant: true,
             preview: Preview::default(),
             last_wake: None,
+            invites: true,
+        }
+    }
+}
+
+/// Format 1 of the preferences: no `invites` (read as on).
+#[derive(Deserialize)]
+struct PushPrefsV1 {
+    instant: bool,
+    preview: Preview,
+    last_wake: Option<u64>,
+}
+
+impl From<PushPrefsV1> for PushPrefs {
+    fn from(p: PushPrefsV1) -> Self {
+        PushPrefs {
+            instant: p.instant,
+            preview: p.preview,
+            last_wake: p.last_wake,
+            invites: true,
         }
     }
 }
@@ -129,8 +151,11 @@ impl Default for PushPrefs {
 /// Key of the preferences in the core's database.
 pub const PUSH_PREFS_KEY: &str = "push-prefs";
 /// Version of the stored preferences. Frozen: any change to `PushPrefs` must
-/// bump it and migrate (`push_prefs_golden_bytes` holds its bytes).
-const PREFS_FORMAT: u8 = 1;
+/// bump it and migrate (`push_prefs_golden_bytes` holds its bytes). Format 1
+/// (no `invites`) still reads, with `invites` on; it is written back as the
+/// current format on the next store.
+const PREFS_FORMAT: u8 = 2;
+const PREFS_FORMAT_1: u8 = 1;
 
 impl PushPrefs {
     /// Reads the preferences; absent or unreadable ones read as the defaults.
@@ -141,6 +166,9 @@ impl PushPrefs {
         }
         let prefs = match bytes.split_first() {
             Some((&PREFS_FORMAT, rest)) => postcard::from_bytes(rest).ok(),
+            Some((&PREFS_FORMAT_1, rest)) => postcard::from_bytes::<PushPrefsV1>(rest)
+                .ok()
+                .map(PushPrefs::from),
             _ => None,
         };
         Ok(prefs.unwrap_or_else(|| {

@@ -5,12 +5,13 @@ use std::collections::HashSet;
 use rand_core::CryptoRng;
 
 use super::send::SealTime;
-use super::{Core, OwnDevices, load_card, log, sync};
+use super::{Core, OwnDevices, load_card, log, requests, sync};
 use crate::contact::ContactCard;
 use crate::envelope::{MAX_TEXT_LEN, SyncOp};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
+use crate::packet::Packet;
 use crate::store::{BlockState, ContactClock, ContactRow, Queries};
-use crate::transparency::TransparencyEvent;
+use crate::transparency::{RequestResolution, TransparencyEvent};
 use crate::{CoreError, Result};
 
 /// Maximum size of an alias, in bytes.
@@ -45,6 +46,11 @@ impl Core {
     /// The resulting state (and the deletion of the replaced contact) is queued
     /// for each of my other devices (`SyncContact`), in the same
     /// transaction.
+    ///
+    /// A pending request of the same fingerprint is resolved (spec §7.6):
+    /// closed in that transaction, then its held packets replayed, without
+    /// `REQUEST_ACCEPTED` (my first message will say it). So are the packets
+    /// of the card's devices in the queue of unknown senders (spec §7.3).
     pub fn add_contact(
         &mut self,
         card: &ContactCard,
@@ -57,7 +63,7 @@ impl Core {
             return Err(CoreError::ContactBlocked);
         }
         let Core { store, device, .. } = self;
-        store.transaction(|tx| {
+        let fp = store.transaction(|tx| {
             let me = device.public().id();
             let (fp, replaced) = add_in(tx, device, card, alias, now, rng)?;
             // The new state goes out before the deletion of the replaced contact:
@@ -71,8 +77,13 @@ impl Core {
                 let time = sync::touch(tx, old, now, true, me)?;
                 sync::send_op(tx, device, SyncOp::Remove(old), time, rng)?;
             }
+            requests::resolve_request(tx, fp, RequestResolution::AddedDirectly, now)?;
+            requests::attach_queued_to_contact(tx, fp)?;
             Ok(fp)
-        })
+        })?;
+        // Committed: a failed replay is logged, and retried by the next receive.
+        requests::replay_committed(self, fp, now, rng);
+        Ok(fp)
     }
 
     /// Deletes a contact, its sessions, its stored card and its packets in the
@@ -135,7 +146,10 @@ impl Core {
     /// it and its history, which stays stored. Its card updates are still
     /// accepted, so that unblocking finds working sessions. The block
     /// survives the contact's deletion: its card is not added again until
-    /// it is unblocked. Synchronized with my other devices.
+    /// it is unblocked. Synchronized with my other devices. The fingerprint
+    /// of a pending request can be blocked too (`block_request`): the
+    /// request is closed. Neither a contact nor a requester:
+    /// `UnknownContact`.
     pub fn block_contact(
         &mut self,
         contact: &Fingerprint,
@@ -145,7 +159,11 @@ impl Core {
         self.ensure_active()?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
-            tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
+            let known = tx.get_contact(*contact)?.is_some()
+                || requests::get_request(tx, *contact)?.is_some();
+            if !known {
+                return Err(CoreError::UnknownContact);
+            }
             set_block_in(tx, device, *contact, true, now, rng)
         })
     }
@@ -254,6 +272,20 @@ impl Core {
             .collect()
     }
 
+    /// The blocked fingerprints that are no contact (a blocked requester,
+    /// or a blocked contact deleted since), sorted: `contacts` does not
+    /// list them, and `unblock_contact` takes them.
+    pub fn blocked_strangers(&self) -> Result<Vec<Fingerprint>> {
+        let mut out = Vec::new();
+        for fp in self.store.blocked_fingerprints()? {
+            if self.store.get_contact(fp)?.is_none() {
+                out.push(fp);
+            }
+        }
+        out.sort_by_key(|fp| fp.0);
+        Ok(out)
+    }
+
     /// Alias of a known contact, if it has one.
     pub(super) fn alias_in(q: &impl Queries, fp: Fingerprint) -> Result<Option<String>> {
         Ok(q.get_contact(fp)?.and_then(|c| alias_of(&c.alias)))
@@ -261,7 +293,7 @@ impl Core {
 }
 
 /// Verified card, ready to be written.
-struct Checked {
+pub(super) struct Checked {
     fp: Fingerprint,
     bytes: Vec<u8>,
     /// Log timestamp: the list's (no clock here).
@@ -274,7 +306,7 @@ struct Checked {
 /// All the checks of a contact card, without writing anything:
 /// signature, not my identity nor one of my devices, no device of
 /// another contact, list identical to or newer than the known one.
-fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
+pub(super) fn check_card(q: &impl Queries, card: &ContactCard) -> Result<Checked> {
     card.verify()?;
     let fp = card.fingerprint();
     let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
@@ -408,6 +440,10 @@ pub(super) fn add_in(
 /// the received alias is dropped (the contact no longer has one). Thus the alias goes to
 /// the most recent operation on all my devices, whatever the
 /// arrival order.
+///
+/// A pending request of the same fingerprint is closed (spec §7.6), and the
+/// card's devices' packets in the queue of unknown senders join its held
+/// ones: the receive replays them once committed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn upsert_in(
     q: &impl Queries,
@@ -472,7 +508,10 @@ pub(super) fn upsert_in(
         Some(known) => known.verified,
         None => verified,
     };
-    q.upsert_contact(fp, &bytes, alias, verified)
+    q.upsert_contact(fp, &bytes, alias, verified)?;
+    requests::resolve_request(q, fp, RequestResolution::AddedDirectly, now)?;
+    requests::attach_queued_to_contact(q, fp)?;
+    Ok(())
 }
 
 /// Quarantine reason for a refused card update (fixed text).
@@ -603,6 +642,18 @@ fn set_block_in(
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<()> {
+    set_block_sealed(q, device, fp, blocked, now, rng).map(drop)
+}
+
+/// As `set_block_in`, returning the packets sealed for my other devices.
+pub(super) fn set_block_sealed(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    fp: Fingerprint,
+    blocked: bool,
+    now: u64,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Packet>> {
     let known = q.block_state(fp)?;
     let at = now.max(known.at.saturating_add(1));
     let since = if blocked && !known.blocked {
@@ -617,13 +668,21 @@ fn set_block_in(
         q.delete_reactions_with(fp)?;
         q.drop_reaction_packets_with(fp)?;
         q.delete_pending_seen_with(fp)?;
+        // As `merge_block`: a block closes the pending request of `fp`.
+        requests::close_request(q, fp, RequestResolution::Blocked, now)?;
     }
-    sync::send_block(q, device, fp, &state, SealTime::at(now), rng)
+    sync::seal_block(q, device, fp, &state, SealTime::at(now), rng)
 }
 
 /// Merges a received block register: the most recent change wins; at an
-/// equal date, the block, so that all my devices decide the same way.
-pub(super) fn merge_block(q: &impl Queries, fp: Fingerprint, state: &BlockState) -> Result<()> {
+/// equal date, the block, so that all my devices decide the same way. A
+/// block also closes the pending request of `fp`.
+pub(super) fn merge_block(
+    q: &impl Queries,
+    fp: Fingerprint,
+    state: &BlockState,
+    now: u64,
+) -> Result<()> {
     let known = q.block_state(fp)?;
     if (state.at, state.blocked) > (known.at, known.blocked) {
         q.set_block_state(fp, state)?;
@@ -632,6 +691,7 @@ pub(super) fn merge_block(q: &impl Queries, fp: Fingerprint, state: &BlockState)
             q.delete_reactions_with(fp)?;
             q.drop_reaction_packets_with(fp)?;
             q.delete_pending_seen_with(fp)?;
+            requests::close_request(q, fp, RequestResolution::Blocked, now)?;
         }
     }
     Ok(())
@@ -724,7 +784,7 @@ pub(super) fn claimed_by_contact(
 }
 
 /// Inverse of `Display` for `Fingerprint`: lowercase base32, groups separated by `-`.
-fn parse_fingerprint(s: &str) -> Option<Fingerprint> {
+pub fn parse_fingerprint(s: &str) -> Option<Fingerprint> {
     let compact: String = s
         .chars()
         .filter(|c| *c != '-' && !c.is_whitespace())

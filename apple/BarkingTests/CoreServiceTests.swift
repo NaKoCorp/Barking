@@ -45,6 +45,69 @@ final class CoreServiceTests: XCTestCase {
         } catch {}
     }
 
+    /// A sync that only brought a contact request (nothing received, sent or
+    /// changed otherwise): the chat list, which shows requests, reloads.
+    func testRequestOnlySyncPublishesContacts() async {
+        let device = FakeDevice()
+        device.summary = SyncSummary(itemsReceived: 1, sent: 0, newMessages: [], networkUp: true, error: nil,
+                                     requestContacts: ["fp"])
+        let core = CoreService(device: device, runner: DirectRunner())
+        let seen = Seen(await core.changes)
+        let outcome = await core.sync(reason: .pull)
+        XCTAssertEqual(outcome.requestContacts, ["fp"])
+        let ok = await seen.eventually { $0.contains(.contacts) }
+        XCTAssertTrue(ok, "\(seen.all)")
+    }
+
+    /// Each request action publishes `.contacts`; accepting also reloads the
+    /// new contact's conversation (its held messages).
+    func testRequestActionsPublish() async throws {
+        let device = FakeDevice()
+        device.requestList = [ContactRequestInfo(fingerprint: "FPR", displayName: "Alice", firstSeen: 1, lastSeen: 2,
+                                                 inviteCount: 1, pendingMessages: 0, hidden: false, unseen: true,
+                                                 nameClash: false)]
+        let core = CoreService(device: device, runner: DirectRunner())
+        let seen = Seen(await core.changes)
+        try await core.setRequestHidden("FPR", hidden: true)
+        try await core.markRequestsSeen()
+        let fp = try await core.acceptRequest("FPR", alias: "Ali")
+        XCTAssertEqual(fp, "FPR")
+        try await core.refuseRequest("X")
+        try await core.blockRequest("Y")
+        try await core.invite("C1")
+        try await core.setInviteNotifications(false)
+        XCTAssertEqual(device.hidden.map(\.0), ["FPR"])
+        XCTAssertEqual(device.seenMarks, 1)
+        XCTAssertEqual(device.accepted.map(\.alias), ["Ali"])
+        XCTAssertTrue(device.requestList.isEmpty)
+        XCTAssertEqual([device.refused, device.blockedRequests, device.invited], [["X"], ["Y"], ["C1"]])
+        XCTAssertEqual(device.inviteNotifications, [false])
+        let ok = await seen.eventually { $0.filter { $0 == .contacts }.count >= 6 && $0.contains(.messages(contact: "FPR")) }
+        XCTAssertTrue(ok, "\(seen.all)")
+        let status = try await core.inviteStatus("C1")
+        XCTAssertEqual(status, InviteStatus.none)
+    }
+
+    /// Accepting, refusing, blocking a request and inviting all queue packets
+    /// (REQUEST_ACCEPTED, the invite): each starts a sync so they leave now.
+    func testRequestActionsSync() async throws {
+        for action in ["accept", "refuse", "block", "invite"] {
+            let d = FakeDevice()
+            d.requestList = [ContactRequestInfo(fingerprint: "FPR", displayName: "Alice", firstSeen: 1, lastSeen: 2,
+                                                inviteCount: 1, pendingMessages: 0, hidden: false, unseen: false,
+                                                nameClash: false)]
+            let core = CoreService(device: d, runner: DirectRunner())
+            switch action {
+            case "accept": _ = try await core.acceptRequest("FPR", alias: nil)
+            case "refuse": try await core.refuseRequest("FPR")
+            case "block": try await core.blockRequest("FPR")
+            default: try await core.invite("C1")
+            }
+            for _ in 0..<100 where d.syncCalls == 0 { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(d.syncCalls, 1, action)
+        }
+    }
+
     func testConcurrentSyncsShareOne() async {
         let device = FakeDevice()
         device.syncDelay = 0.2

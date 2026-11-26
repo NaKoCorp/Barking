@@ -110,11 +110,22 @@ final class ConversationModel {
     let contact: String
     private let core: CoreService
     private(set) var items: [Item] = []
-    private(set) var name = ""
+    private(set) var name = "" {
+        // A renamed contact: the changed-device line says the new name too.
+        didSet { if name != oldValue { deviceChangedText = deviceChangedLine(bundle: language.bundle, locale: language.locale) } }
+    }
     private(set) var verified = false
     /// What the header says (U-20).
     var trust: Trust { Trust(verified: verified) }
     private(set) var keyChanged = false
+    /// The contact's latest device change of the last 7 days (§7.7): a
+    /// quiet line, not a warning, since the root key did not change.
+    private(set) var deviceChangedAt: Date?
+    /// `deviceChangedLine` in the app's language, built when the change is
+    /// read or the language changes, not at every render.
+    private(set) var deviceChangedText: String?
+    /// How long the changed-device line stays.
+    static let deviceChangeShownFor: TimeInterval = 7 * 86_400
     /// The contact was read from the core: until then `verified` says nothing.
     private var contactLoaded = false
     /// Writing to a contact whose safety code was never compared: a warning,
@@ -124,6 +135,9 @@ final class ConversationModel {
     /// The bubble of the send running: a send can wait seconds on the core
     /// lock while a sync holds it, so it shows at once and survives reloads.
     private var shownAtSend: Item?
+    /// The newest core row shown when that send started: a later sent row
+    /// with its text is the send's own row, which replaces the bubble.
+    private var shownAtSendAfter: Int64 = 0
     private var nextLocalId: Int64 = -1
     /// Rows whose retry is running: a second tap on one does nothing.
     private var retrying: Set<Int64> = []
@@ -163,7 +177,9 @@ final class ConversationModel {
     private var announcementFlush: Task<Void, Never>?
     /// The app's language, set by the view: what is spoken follows the same
     /// override as what is shown.
-    var language: (bundle: Bundle, locale: Locale) = (.main, .current)
+    var language: (bundle: Bundle, locale: Locale) = (.main, .current) {
+        didSet { deviceChangedText = deviceChangedLine(bundle: language.bundle, locale: language.locale) }
+    }
     /// Posts a VoiceOver announcement (tests record it).
     var announce: (String) -> Void = { AccessibilityNotification.Announcement($0).post() }
     var now: () -> Date = Date.init
@@ -247,6 +263,23 @@ final class ConversationModel {
         await reload()
         let changes = (try? await core.keyChanges(since: 0)) ?? []
         keyChanged = !verified && changes.contains { $0.contact == contact }
+        await loadDeviceChange()
+    }
+
+    private func loadDeviceChange() async {
+        let since = UInt64(max(0, now().timeIntervalSince1970 - Self.deviceChangeShownFor))
+        let latest = ((try? await core.deviceChanges(since: since)) ?? [])
+            .filter { $0.contact == contact && $0.at >= since }.map(\.at).max()
+        deviceChangedAt = latest.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        deviceChangedText = deviceChangedLine(bundle: language.bundle, locale: language.locale)
+    }
+
+    /// "Léa changed device · 2 d ago", in the app's language; nil without a
+    /// recent change.
+    func deviceChangedLine(bundle: Bundle = .main, locale: Locale = .current) -> String? {
+        guard let deviceChangedAt else { return nil }
+        let ago = RequestHistory.relative(deviceChangedAt, now: now(), locale: locale)
+        return String(localized: "\(name) changed device · \(ago)", bundle: bundle, locale: locale)
     }
 
     /// Puts the stored draft in the field, unless something was typed
@@ -379,6 +412,12 @@ final class ConversationModel {
         let resent = messages.filter { $0.failed && $0.outgoing }.filter { f in
             messages.contains { $0.outgoing && !$0.failed && $0.id > f.id && $0.body == f.body }
         }.map(\.id)
+        // The core writes the send's row (and says so) before the send
+        // returns: from then on that row stands for the bubble, never both.
+        if let local = shownAtSend,
+           messages.contains(where: { $0.outgoing && $0.id > shownAtSendAfter && $0.body == local.text }) {
+            shownAtSend = nil
+        }
         items = messages.filter { !resent.contains($0.id) }.map {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)), delivery: $0.delivery,
@@ -465,6 +504,7 @@ final class ConversationModel {
                                             devicesReceived: 0, devicesLeft: 0, devicesPending: 0),
                          local: true)
         nextLocalId -= 1
+        shownAtSendAfter = items.filter { !$0.local }.map(\.id).max() ?? 0
         shownAtSend = shown
         items.append(shown)
         do {

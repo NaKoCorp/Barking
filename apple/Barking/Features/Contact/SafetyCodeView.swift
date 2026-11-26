@@ -15,10 +15,17 @@ struct SafetyCodeView: View {
     @State private var confirmBlock = false
     @State private var blockFailed = false
     @State private var showsMismatch = false
+    @State private var showsMyCode = false
+    /// A resend is under way: a second tap must not start another.
+    @State private var resending = false
+    /// The invitation sent with the add, when shown right after it.
+    private let inviteResult: AddContactModel.InviteResult?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
 
-    init(core: CoreService, contact: String) {
+    init(core: CoreService, contact: String, inviteResult: AddContactModel.InviteResult? = nil) {
         self.core = core
+        self.inviteResult = inviteResult
         _model = State(initialValue: ContactModel(contact: contact, core: core))
     }
 
@@ -31,6 +38,7 @@ struct SafetyCodeView: View {
                     .font(.bBody).foregroundStyle(Color.fgMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            inviteNotice
             verifySection
             VStack(alignment: .leading, spacing: Space.s2) {
                 SectionLabel("Contact")
@@ -48,6 +56,7 @@ struct SafetyCodeView: View {
                     .foregroundStyle(Color.ok)
                 }
             }
+            if model.showsInvite { inviteSection }
             if !model.devices.isEmpty { devicesSection }
             DangerZone {
                 DangerButton("Block this contact", hint: "Their messages stop reaching you. They are not told.",
@@ -67,7 +76,13 @@ struct SafetyCodeView: View {
         .toolbarTitleDisplayMode(.inline)
         // Pushed from the conversation, which hides the tab bar (U-26).
         .toolbar(.hidden, for: .tabBar)
-        .task { await model.load(); aliasDraft = model.alias }
+        .task {
+            await model.load()
+            aliasDraft = model.alias
+            // An invitation answered while the page is open.
+            let changes = await core.changes
+            for await change in changes { await model.handle(change) }
+        }
         // A match is said (banner, haptic, VoiceOver), then the screen goes
         // back to the conversation; the mark can be removed from here later.
         .task(id: model.justVerified) {
@@ -106,6 +121,45 @@ struct SafetyCodeView: View {
             Text("Their messages will no longer reach you and they leave your chats, on all your devices. They are not told. You can unblock them in Settings.")
         }
         .sheet(isPresented: $showsMismatch) { MismatchSheet() }
+        .sheet(isPresented: $showsMyCode) { myCode }
+    }
+
+    /// What came of the invitation sent with the add (design decision 5);
+    /// nothing when it went.
+    @ViewBuilder private var inviteNotice: some View {
+        switch inviteResult {
+        case .tooLarge:
+            Banner(kind: .info, title: "Your card is too large for an invitation",
+                   message: "Show them your code instead.",
+                   action: .init(label: "Show my code", hint: "Opens your code.") { showsMyCode = true })
+                .accessibilityIdentifier("contact.inviteTooLarge")
+        case .tooSoon:
+            Text("Invitation already sent less than 24 h ago. You can resend it from their page.")
+                .font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("contact.inviteTooSoon")
+        case .failed:
+            // No invitation is recorded, so the page offers no resend: the
+            // code is the way left.
+            Banner(kind: .info, title: "The invitation was not sent",
+                   message: "Show them your code instead.",
+                   action: .init(label: "Show my code", hint: "Opens your code.") { showsMyCode = true })
+                .accessibilityIdentifier("contact.inviteFailed")
+        case .sent, nil:
+            EmptyView()
+        }
+    }
+
+    /// My code, for the contact to scan when the invitation cannot carry it.
+    private var myCode: some View {
+        NavigationStack {
+            ScrollView { MyCodeView(core: core).padding(Space.gutter) }
+                .background(Color.surface)
+                .navigationTitle(Text("My code"))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { showsMyCode = false } } }
+        }
+        .presentationBackground(Color.surface)
     }
 
     private func feelFailure() { if model.saveFailed { Haptic.error.play() } }
@@ -198,6 +252,68 @@ extension SafetyCodeView {
         if aliasSaved { AccessibilityNotification.Announcement(String(localized: "Saved")).post() }
     }
 
+
+    /// The last invitation and its resend (design decision 6). Redrawn each
+    /// minute, so "2 h ago" and "Possible in 5 h" keep up with the clock.
+    fileprivate var inviteSection: some View {
+        TimelineView(.everyMinute) { context in
+            VStack(alignment: .leading, spacing: Space.s2) {
+                SectionLabel("Invitation")
+                inviteState(now: context.date)
+                    .font(.bBody).foregroundStyle(Color.fg)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("contact.invite.state")
+                switch model.invite {
+                case .sent, .unanswered:
+                    resendButton
+                    if model.resendTooLarge {
+                        Banner(kind: .info, title: "Your card is too large for an invitation",
+                               message: "Show them your code instead.",
+                               action: .init(label: "Show my code", hint: "Opens your code.") { showsMyCode = true })
+                            .accessibilityIdentifier("contact.invite.tooLarge")
+                    } else if model.resendFailed {
+                        Banner(kind: .danger, title: "Not sent. Try again in a moment.")
+                    }
+                case .none, .accepted:
+                    EmptyView()
+                }
+            }
+        }
+    }
+
+    /// "Invitation sent · 2 h ago", "No answer · sent 8 d ago", "Accepted";
+    /// the date in the app's language, as the text around it.
+    @ViewBuilder fileprivate func inviteState(now: Date) -> some View {
+        let ago = { (at: UInt64) in
+            RequestHistory.relative(Date(timeIntervalSince1970: TimeInterval(at)), now: now, locale: locale)
+        }
+        switch model.invite {
+        case .sent(let at): Text("Invitation sent · \(ago(at))")
+        case .unanswered(let at): Text("No answer · sent \(ago(at))")
+        case .accepted: Text("Accepted")
+        case .none: EmptyView()
+        }
+    }
+
+    /// Before the delay, the button says when it opens: "Possible in 5 h",
+    /// read in words, not only dimmed. VoiceOver hears the action first.
+    @ViewBuilder fileprivate var resendButton: some View {
+        if let hours = model.hoursUntilRetry {
+            SecondaryButton("Possible in \(hours) h", enabled: false) {}
+                .accessibilityLabel(Text("Resend the invitation"))
+                .accessibilityValue(Text("Possible in \(hours) h"))
+                .accessibilityIdentifier("contact.invite.resend")
+        } else {
+            SecondaryButton("Resend the invitation", enabled: !resending) {
+                resending = true
+                Task {
+                    await model.resend()
+                    resending = false
+                }
+            }
+            .accessibilityIdentifier("contact.invite.resend")
+        }
+    }
 
     /// The contact's devices, with the date each was added to its card.
     fileprivate var devicesSection: some View {

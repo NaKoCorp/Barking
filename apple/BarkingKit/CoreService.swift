@@ -210,6 +210,11 @@ public actor CoreService {
     public func blockedContacts() async throws -> [Contact] {
         try await call("blocked") { try $0.blockedContacts() }
     }
+    /// Blocked fingerprints that are no contact (a blocked requester), for
+    /// the same list; `unblockContact` takes them.
+    public func blockedFingerprints() async throws -> [String] {
+        try await call("blocked-fp") { try $0.blockedFingerprints() }
+    }
     public func safetyNumber(for contact: String) async throws -> [String] {
         try await call("safety") { try $0.safetyNumber(contact: contact) }
     }
@@ -224,6 +229,65 @@ public actor CoreService {
     /// Devices of a contact, as its card lists them.
     public func contactDevices(_ contact: String) async throws -> [MyDeviceInfo] {
         try await call("contactDevices") { try $0.contactDevices(contact: contact) }
+    }
+
+    // MARK: Contact requests
+
+    /// Contact requests, hidden ones included (`ContactRequestInfo.hidden`).
+    /// The chat list shows them: every change to one publishes `.contacts`.
+    public func requests() async throws -> [ContactRequestInfo] {
+        try await call("requests") { try $0.requests() }
+    }
+    public func requestSafetyNumber(_ fp: String) async throws -> [String] {
+        try await call("request-safety") { try $0.requestSafetyNumber(fingerprint: fp) }
+    }
+    /// The requester becomes a contact (not verified); returns its
+    /// fingerprint. Its held messages show in its conversation. Accepting,
+    /// refusing, blocking and inviting queue packets: a sync sends them now.
+    public func acceptRequest(_ fp: String, alias: String?) async throws -> String {
+        let contact = try await call("accept") { try $0.acceptRequest(fingerprint: fp, alias: alias) }
+        publish(.contacts)
+        publish(.messages(contact: contact))
+        Task { _ = await self.sync(reason: .afterSend) }
+        return contact
+    }
+    /// Drops the request; nothing goes to the requester.
+    public func refuseRequest(_ fp: String) async throws {
+        try await call("refuse") { try $0.refuseRequest(fingerprint: fp) }
+        publish(.contacts)
+        Task { _ = await self.sync(reason: .afterSend) }
+    }
+    /// Drops the request and the requester's later invitations.
+    public func blockRequest(_ fp: String) async throws {
+        try await call("block-request") { try $0.blockRequest(fingerprint: fp) }
+        publish(.contacts)
+        Task { _ = await self.sync(reason: .afterSend) }
+    }
+    public func setRequestHidden(_ fp: String, hidden: Bool) async throws {
+        try await call("request-hidden") { try $0.setRequestHidden(fingerprint: fp, hidden: hidden) }
+        publish(.contacts)
+    }
+    /// The requests screen was opened: none is new any more.
+    public func markRequestsSeen() async throws {
+        try await call("requests-seen") { try $0.markRequestsSeen() }
+        publish(.contacts)
+    }
+    /// Invites a contact who has not added me yet; within 24 hours of the
+    /// last one: `BarkingError.TooSoon(retryAt:)`.
+    public func invite(_ contact: String) async throws {
+        try await call("invite") { try $0.invite(contact: contact) }
+        publish(.contacts)
+        Task { _ = await self.sync(reason: .afterSend) }
+    }
+    public func inviteStatus(_ contact: String) async throws -> InviteStatus {
+        try await call("invite-status") { try $0.inviteStatus(contact: contact) }
+    }
+    public func setInviteNotifications(_ on: Bool) async throws {
+        try await call("invite-notifications") { try $0.setInviteNotifications(on: on) }
+    }
+    /// Contacts whose devices were replaced, logged at or after `since` (Unix seconds).
+    public func deviceChanges(since: UInt64) async throws -> [DeviceChange] {
+        try await call("device-changes") { try $0.deviceChanges(since: since) }
     }
 
     // MARK: Messages
@@ -428,7 +492,8 @@ public actor CoreService {
         lastSync = outcome
         lastSyncAt = Date()
         publish(.network)
-        if outcome.received > 0 || outcome.sent > 0 { publish(.contacts) }
+        // Contact requests show in the chat list: one that moved reloads it.
+        if outcome.received > 0 || outcome.sent > 0 || !outcome.requestContacts.isEmpty { publish(.contacts) }
         // It expired first: the rows it erased leave every screen.
         if !outcome.expired.isEmpty { publish(.expired(ids: outcome.expired)) }
         // A new message (or a copy of one I sent from another device)

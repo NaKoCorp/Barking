@@ -3,11 +3,12 @@
 //! the CLI does: one thread, a predictable memory use in the extension.
 
 use std::future::Future;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use barking_core::identity::root::Fingerprint;
 use barking_core::{Core, ReceiveOutcome, SyncKind};
-use barking_net::push::PushConfig;
+use barking_net::push::{PushConfig, PushPrefs};
 use barking_net::{NetState, QuicDialer, QuickOptions, SyncOptions, SyncReport};
 
 use crate::delivery::{DeliveryChange, changes_of};
@@ -64,6 +65,26 @@ pub struct SyncSummary {
     /// the rows to drop (`Message::id`).
     #[uniffi(default = [])]
     pub expired: Vec<i64>,
+    /// Contact requests to notify, in arrival order: the core allows one
+    /// per requester per 24 hours, and none when the user turned
+    /// invitation notifications off (`NotificationPrefs::invites`).
+    #[uniffi(default = [])]
+    pub new_requests: Vec<NewRequest>,
+    /// Requesters whose request moved during the sync (notified or not),
+    /// each once, in arrival order: the requests list reloads.
+    #[uniffi(default = [])]
+    pub request_contacts: Vec<String>,
+}
+
+/// A contact request to notify.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct NewRequest {
+    /// Fingerprint of the requester.
+    pub contact: String,
+    /// Its declared display name, otherwise the start of the fingerprint.
+    pub name: String,
+    /// The request already existed (a new invite from the same person).
+    pub resent: bool,
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -167,8 +188,13 @@ fn summary(core: &mut Core, mut report: SyncReport, expired: Vec<i64>) -> SyncSu
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| from.to_string().chars().take(8).collect())
     };
+    let request_contacts = request_contacts(&received);
+    // An unreadable preference reads as the default (on), as `load` does.
+    let notify_invites = PushPrefs::load(core).map_or(true, |p| p.invites);
+    let requests = core.requests().unwrap_or_default();
     let mut new_messages = Vec::new();
     let mut new_reactions = Vec::new();
+    let mut new_requests = Vec::new();
     let mut repeats = 0usize;
     for outcome in received {
         match outcome {
@@ -221,14 +247,35 @@ fn summary(core: &mut Core, mut report: SyncReport, expired: Vec<i64>) -> SyncSu
             // A message already in its conversation, received again: no
             // new row, but the push may have come for it.
             ReceiveOutcome::DuplicateMessage => repeats += 1,
+            // The core notifies a requester at most once per 24 hours; the
+            // user may turn these notifications off.
+            ReceiveOutcome::ContactRequest {
+                contact,
+                resent,
+                notify,
+            } if notify && notify_invites => new_requests.push(NewRequest {
+                contact: contact.to_string(),
+                name: requests
+                    .iter()
+                    .find(|r| r.fingerprint == contact)
+                    .map(|r| r.display_name.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| contact.to_string().chars().take(8).collect()),
+                resent,
+            }),
             // `Partial` lands here too and counts as nothing to show only
             // because the packet's last fragment is a deposit of its own,
             // which sends its own push: that wake-up shows the message.
             _ => {}
         }
     }
-    let nothing_to_show =
-        nothing_to_show(&report, new_messages.len(), new_reactions.len(), repeats);
+    let nothing_to_show = nothing_to_show(
+        &report,
+        new_messages.len(),
+        new_reactions.len(),
+        new_requests.len(),
+        repeats,
+    );
     SyncSummary {
         items_received: u32::try_from(report.items_received).unwrap_or(u32::MAX),
         sent: u32::try_from(report.first_copies).unwrap_or(u32::MAX),
@@ -244,19 +291,23 @@ fn summary(core: &mut Core, mut report: SyncReport, expired: Vec<i64>) -> SyncSu
         reaction_contacts,
         nothing_to_show,
         expired,
+        new_requests,
+        request_contacts,
     }
 }
 
 /// The wake-up that came for `report` has nothing to show: the sync read
 /// every mailbox it meant to (`fetched_all`: so no message was cut off by a
 /// deadline), brought items, and none of them is a visible message, a
-/// reaction to notify, or a repeat of a message still shown (`repeats`,
+/// reaction or a contact request to notify (a request not notified counts
+/// as nothing), or a repeat of a message still shown (`repeats`,
 /// `ReceiveOutcome::DuplicateMessage`: an earlier sync or another node may
 /// have taken the message this push came for).
 fn nothing_to_show(
     report: &SyncReport,
     new_messages: usize,
     new_reactions: usize,
+    new_requests: usize,
     repeats: usize,
 ) -> bool {
     report.error.is_none()
@@ -265,7 +316,105 @@ fn nothing_to_show(
         && report.items_received > 0
         && new_messages == 0
         && new_reactions == 0
+        && new_requests == 0
         && repeats == 0
+}
+
+/// Requesters of the contact requests among `received`, notified or not,
+/// in first-seen order.
+fn request_contacts(received: &[ReceiveOutcome]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for o in received {
+        if let ReceiveOutcome::ContactRequest { contact, .. } = o {
+            let c = contact.to_string();
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// What the list and the page of a request show of it: a change in any of
+/// these, or the request gone, reloads them. `hidden` and `unseen` change
+/// by the user's own hand here, which reloads already.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RequestStamp {
+    fp: Fingerprint,
+    display_name: String,
+    last_seen: u64,
+    invite_count: u32,
+    pending_messages: u32,
+}
+
+/// The stamps of `core`'s requests; nil when they cannot be read (no
+/// report then: a reload too few, never a sync failed for it).
+fn request_stamps(core: &Core) -> Option<Vec<RequestStamp>> {
+    let list = core.requests().ok()?;
+    Some(
+        list.into_iter()
+            .map(|r| RequestStamp {
+                fp: r.fingerprint,
+                display_name: r.display_name,
+                last_seen: r.last_seen,
+                invite_count: r.invite_count,
+                pending_messages: r.pending_messages,
+            })
+            .collect(),
+    )
+}
+
+/// Requesters whose request is new, changed or gone from `before` to
+/// `after`: those of `after` in its order, then those gone.
+fn moved_requests(before: &[RequestStamp], after: &[RequestStamp]) -> Vec<String> {
+    let changed = after.iter().filter(|a| !before.contains(a)).map(|a| a.fp);
+    let gone = before
+        .iter()
+        .filter(|b| !after.iter().any(|a| a.fp == b.fp))
+        .map(|b| b.fp);
+    changed.chain(gone).map(|fp| fp.to_string()).collect()
+}
+
+/// Adds `moved` to `s.request_contacts`, after the requesters already
+/// there, each once.
+fn add_moved(s: &mut SyncSummary, moved: Vec<String>) {
+    for fp in moved {
+        if !s.request_contacts.contains(&fp) {
+            s.request_contacts.push(fp);
+        }
+    }
+}
+
+impl Device {
+    /// Runs `sync` on `core`, then adds to its `request_contacts` the
+    /// requests that moved since this device's previous sync ended (since
+    /// `sync` began, on the first): a message held for a request, a
+    /// decision synced from another of my devices, a request expired
+    /// (purged as the core opens, before `sync` begins). None of these is a
+    /// `ReceiveOutcome::ContactRequest`. Changes made here between two
+    /// syncs are reported too: one reload more.
+    fn tracking_requests(
+        &self,
+        core: &mut Core,
+        sync: impl FnOnce(&mut Core) -> Result<SyncSummary, BarkingError>,
+    ) -> Result<SyncSummary, BarkingError> {
+        let remembered = self
+            .requests_seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let before = remembered.or_else(|| request_stamps(core));
+        let mut s = sync(core)?;
+        let after = request_stamps(core);
+        if let (Some(before), Some(after)) = (&before, &after) {
+            add_moved(&mut s, moved_requests(before, after));
+        }
+        *self
+            .requests_seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = after;
+        Ok(s)
+    }
 }
 
 /// Contacts whose conversation a reaction changed (a contact's own, or a
@@ -330,16 +479,18 @@ impl Device {
         guard(|| {
             let opts_private = self.allow_private();
             self.with_core_sync(|core| {
-                let expired = core.expire_ephemeral(now())?;
-                let opts = SyncOptions {
-                    deadline: Duration::from_millis(deadline_ms),
-                    allow_private: opts_private,
-                    push: PushConfig::effective(core)?,
-                    ..SyncOptions::default()
-                };
-                let report = block_on(barking_net::sync(core, &QuicDialer, opts))?;
-                note_leave_deposits(core, now(), opts_private)?;
-                Ok(summary(core, report, expired))
+                self.tracking_requests(core, |core| {
+                    let expired = core.expire_ephemeral(now())?;
+                    let opts = SyncOptions {
+                        deadline: Duration::from_millis(deadline_ms),
+                        allow_private: opts_private,
+                        push: PushConfig::effective(core)?,
+                        ..SyncOptions::default()
+                    };
+                    let report = block_on(barking_net::sync(core, &QuicDialer, opts))?;
+                    note_leave_deposits(core, now(), opts_private)?;
+                    Ok(summary(core, report, expired))
+                })
             })
         })
     }
@@ -357,10 +508,12 @@ impl Device {
                 ..QuickOptions::default()
             };
             self.with_core_sync(|core| {
-                let expired = core.expire_ephemeral(now())?;
-                let report = block_on(barking_net::quick_sync(core, &QuicDialer, opts))?;
-                note_leave_deposits(core, now(), opts_private)?;
-                Ok(summary(core, report, expired))
+                self.tracking_requests(core, |core| {
+                    let expired = core.expire_ephemeral(now())?;
+                    let report = block_on(barking_net::quick_sync(core, &QuicDialer, opts))?;
+                    note_leave_deposits(core, now(), opts_private)?;
+                    Ok(summary(core, report, expired))
+                })
             })
         })
     }
@@ -613,7 +766,7 @@ mod tests {
             fetched_all: true,
             ..SyncReport::default()
         };
-        assert!(nothing_to_show(&clean, 0, 0, 0));
+        assert!(nothing_to_show(&clean, 0, 0, 0, 0));
         let cases = [
             (
                 "error",
@@ -657,9 +810,172 @@ mod tests {
             ("new reaction", clean_copy(&clean), 0, 1),
         ];
         for (what, report, messages, reactions) in cases {
-            assert!(!nothing_to_show(&report, messages, reactions, 0), "{what}");
+            assert!(
+                !nothing_to_show(&report, messages, reactions, 0, 0),
+                "{what}"
+            );
         }
-        assert!(!nothing_to_show(&clean, 0, 0, 1), "a visible repeat");
+        assert!(!nothing_to_show(&clean, 0, 0, 0, 1), "a visible repeat");
+        assert!(!nothing_to_show(&clean, 0, 0, 1, 0), "a new request");
+    }
+
+    /// Clock of the invitation tests.
+    const T: u64 = 1_800_000_000;
+
+    /// Alice ("Alice") knows Bob and invites him at `at`. Returns Alice's
+    /// core, Bob's, Alice's fingerprint and the invite.
+    fn alice_invites_bob(
+        dir: &tempfile::TempDir,
+        at: u64,
+    ) -> (Core, Core, Fingerprint, barking_core::packet::Packet) {
+        let mut rng = rand::rng();
+        let (pa, pb) = (dir.path().join("a.db"), dir.path().join("b.db"));
+        let (mut a, _) = Core::create(&pa, &[1; 32], "a-phone", at, &mut rng).unwrap();
+        let (b, _) = Core::create(&pb, &[2; 32], "b-phone", at, &mut rng).unwrap();
+        a.contact_card("Alice").unwrap();
+        a.add_contact(&b.contact_card("Bob").unwrap(), None, at, &mut rng)
+            .unwrap();
+        let mut out = a.invite(&b.fingerprint(), at, &mut rng).unwrap();
+        assert_eq!(out.len(), 1);
+        let fa = a.fingerprint();
+        (a, b, fa, out.remove(0))
+    }
+
+    /// A clean, complete sync that brought `received`.
+    fn clean_report(received: Vec<ReceiveOutcome>) -> SyncReport {
+        SyncReport {
+            items_received: received.len(),
+            network_up: true,
+            fetched_all: true,
+            received,
+            ..SyncReport::default()
+        }
+    }
+
+    /// Bob receives Alice's invite at `T`: the outcome and Bob's core.
+    fn bob_receives_invite(dir: &tempfile::TempDir) -> (Core, Fingerprint, ReceiveOutcome) {
+        let (_a, mut b, fa, p) = alice_invites_bob(dir, T);
+        let got = b.receive(&p.encode(), "t", T, &mut rand::rng()).unwrap();
+        (b, fa, got)
+    }
+
+    #[test]
+    fn sync_summary_lists_new_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut b, fa, got) = bob_receives_invite(&dir);
+        let s = summary(&mut b, clean_report(vec![got]), Vec::new());
+        assert_eq!(
+            s.new_requests,
+            vec![NewRequest {
+                contact: fa.to_string(),
+                name: "Alice".into(),
+                resent: false,
+            }]
+        );
+        assert_eq!(s.request_contacts, vec![fa.to_string()]);
+        assert!(!s.nothing_to_show);
+    }
+
+    #[test]
+    fn request_only_wake_without_notify_is_nothing_to_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut b, fa, got) = bob_receives_invite(&dir);
+        PushPrefs {
+            invites: false,
+            ..PushPrefs::default()
+        }
+        .store(&mut b)
+        .unwrap();
+        let s = summary(&mut b, clean_report(vec![got]), Vec::new());
+        assert!(s.new_requests.is_empty());
+        assert_eq!(s.request_contacts, vec![fa.to_string()]);
+        assert!(s.nothing_to_show);
+    }
+
+    /// A second invite less than 24 hours after the first was received
+    /// (the first arrived late): listed for reload, not notified.
+    #[test]
+    fn resend_within_day_not_notified() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut a, mut b, fa, first) = alice_invites_bob(&dir, T);
+        let mut rng = rand::rng();
+        let got = b
+            .receive(&first.encode(), "t", T + 86_000, &mut rng)
+            .unwrap();
+        let s = summary(&mut b, clean_report(vec![got]), Vec::new());
+        assert_eq!(s.new_requests.len(), 1);
+        let again = T + 86_401;
+        let second = a.invite(&b.fingerprint(), again, &mut rng).unwrap();
+        let got = b
+            .receive(&second[0].encode(), "t", again + 99, &mut rng)
+            .unwrap();
+        assert!(matches!(
+            got,
+            ReceiveOutcome::ContactRequest {
+                resent: true,
+                notify: false,
+                ..
+            }
+        ));
+        let s = summary(&mut b, clean_report(vec![got]), Vec::new());
+        assert!(s.new_requests.is_empty());
+        assert_eq!(s.request_contacts, vec![fa.to_string()]);
+        assert!(s.nothing_to_show);
+    }
+
+    /// Several outcomes for one requester: listed once, in arrival order;
+    /// no declared name: the start of the fingerprint.
+    #[test]
+    fn request_contacts_once_in_arrival_order() {
+        let (_dir, mut core, _bob) = core_with_bob_message();
+        let (x, y) = (Fingerprint([3; 32]), Fingerprint([4; 32]));
+        let req = |contact, notify| ReceiveOutcome::ContactRequest {
+            contact,
+            resent: false,
+            notify,
+        };
+        let s = summary(
+            &mut core,
+            clean_report(vec![req(y, true), req(x, false), req(y, false)]),
+            Vec::new(),
+        );
+        assert_eq!(s.request_contacts, vec![y.to_string(), x.to_string()]);
+        assert_eq!(
+            s.new_requests,
+            vec![NewRequest {
+                contact: y.to_string(),
+                name: y.to_string().chars().take(8).collect(),
+                resent: false,
+            }]
+        );
+    }
+
+    fn stamp(b: u8, last_seen: u64, pending_messages: u32) -> RequestStamp {
+        RequestStamp {
+            fp: Fingerprint([b; 32]),
+            display_name: "x".into(),
+            last_seen,
+            invite_count: 1,
+            pending_messages,
+        }
+    }
+
+    /// New, changed, then gone (an expiry, a decision from another
+    /// device); an unchanged request is not reported; nor twice a requester
+    /// the outcomes already named.
+    #[test]
+    fn moved_requests_new_changed_then_gone() {
+        let before = [stamp(1, 10, 0), stamp(2, 10, 0), stamp(3, 10, 0)];
+        let after = [stamp(4, 30, 0), stamp(2, 20, 1), stamp(3, 10, 0)];
+        let moved = moved_requests(&before, &after);
+        let fp = |b: u8| Fingerprint([b; 32]).to_string();
+        assert_eq!(moved, vec![fp(4), fp(2), fp(1)]);
+        let (_dir, mut core, _bob) = core_with_bob_message();
+        let mut s = summary(&mut core, clean_report(Vec::new()), Vec::new());
+        s.request_contacts = vec![fp(2)];
+        add_moved(&mut s, moved);
+        assert_eq!(s.request_contacts, vec![fp(2), fp(4), fp(1)]);
+        assert!(moved_requests(&after, &after).is_empty());
     }
 
     fn clean_copy(r: &SyncReport) -> SyncReport {

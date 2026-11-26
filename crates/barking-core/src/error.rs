@@ -66,6 +66,11 @@ pub enum CoreError {
     /// An ephemeral delay outside `MIN_TTL_SECS..=MAX_TTL_SECS`. Added last.
     #[error("invalid ephemeral delay")]
     InvalidTtl,
+    /// An invite to this person was sent less than 24 hours ago, by this
+    /// device or another of mine: possible again at `retry_at` (Unix
+    /// seconds). Added last.
+    #[error("invite sent less than 24 hours ago")]
+    TooSoon { retry_at: u64 },
 }
 
 impl From<barking_packet::PacketError> for CoreError {

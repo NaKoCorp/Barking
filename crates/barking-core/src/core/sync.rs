@@ -1,8 +1,9 @@
 //! Synchronization between my own devices: copies of my sent
 //! messages (`SyncSent`, `SyncReply`, `SyncMessage`), operations on
 //! contacts (`SyncContact`),
-//! new device list (`SyncDevices`), my deletions (`SyncDelete`), and the
-//! ephemeral messages I saw (`SyncSeen`).
+//! new device list (`SyncDevices`), my deletions (`SyncDelete`), the
+//! ephemeral messages I saw (`SyncSeen`), and the date of my last invite
+//! to a person (`SyncInvite`).
 //!
 //! Sending: through the double ratchet sessions with my other devices
 //! (`Target::OwnDevices`), one delivery per packet so that their acks
@@ -290,6 +291,17 @@ pub(super) fn send_op(
     time: SealTime,
     rng: &mut impl CryptoRng,
 ) -> Result<()> {
+    seal_op(q, device, op, time, rng).map(drop)
+}
+
+/// As [`send_op`], returning the packets sealed for my other devices.
+fn seal_op(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    op: SyncOp,
+    time: SealTime,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Packet>> {
     let mut id = [0u8; 16];
     rng.fill_bytes(&mut id);
     let body = Body::SyncContact(op);
@@ -301,8 +313,7 @@ pub(super) fn send_op(
         MessageId(id),
         time,
         rng,
-    )?;
-    Ok(())
+    )
 }
 
 /// Queues the stored state of contact `fp` (`SyncOp::Upsert`).
@@ -339,13 +350,25 @@ pub(super) fn send_block(
     time: SealTime,
     rng: &mut impl CryptoRng,
 ) -> Result<()> {
+    seal_block(q, device, fp, state, time, rng).map(drop)
+}
+
+/// As [`send_block`], returning the packets sealed for my other devices.
+pub(super) fn seal_block(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    fp: Fingerprint,
+    state: &BlockState,
+    time: SealTime,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Packet>> {
     let op = SyncOp::Block {
         fp,
         blocked: state.blocked,
         at: state.at,
         since: state.since,
     };
-    send_op(q, device, op, time, rng)
+    seal_op(q, device, op, time, rng)
 }
 
 /// Local operation of device `me` on contact `fp` at `now`:
@@ -396,8 +419,8 @@ pub(super) fn apply(
         Body::Ext { kind, data, .. } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
             // Only `SyncReply`, `SyncMessage`, `SyncReaction`,
-            // `SyncDelete` and `SyncSeen` are sync contents; any other kind
-            // is refused.
+            // `SyncDelete`, `SyncSeen`, `SyncInvite` and `SyncRefused` are sync contents;
+            // any other kind is refused.
             let (to, text, reply_to, ttl_secs) = match ExtContent::decode(*kind, data) {
                 Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => {
                     (to, text, Some(reply_to), None)
@@ -453,6 +476,18 @@ pub(super) fn apply(
                         env.message_id,
                     )?;
                     return Ok(Ok(applied.map(|_| SyncKind::Reaction)));
+                }
+                Ok(Some(ExtContent::SyncInvite { to, at }))
+                    if to != own.list.root.fingerprint() =>
+                {
+                    let applied = super::requests::apply_sync_invite(q, to, at)?;
+                    return Ok(Ok(applied.then_some(SyncKind::Contact)));
+                }
+                Ok(Some(ExtContent::SyncRefused { fp, at }))
+                    if fp != own.list.root.fingerprint() =>
+                {
+                    let applied = super::requests::apply_sync_refused(q, fp, at, now)?;
+                    return Ok(Ok(applied.then_some(SyncKind::Contact)));
                 }
                 _ => return Ok(Err(R_SYNC_REFUSED)),
             };
@@ -611,7 +646,7 @@ fn apply_op(
                 at: *at,
                 since: *since,
             };
-            return contacts::merge_block(q, *fp, &state);
+            return contacts::merge_block(q, *fp, &state, now);
         }
     };
     // The verified status is its own register: merged whatever the clock of

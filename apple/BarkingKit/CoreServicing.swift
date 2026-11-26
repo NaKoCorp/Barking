@@ -25,6 +25,9 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func blockContact(contact: String) throws
     func unblockContact(contact: String) throws
     func blockedContacts() throws -> [Contact]
+    /// Blocked fingerprints that are no contact (a blocked requester);
+    /// `unblockContact` takes them.
+    func blockedFingerprints() throws -> [String]
     func safetyNumber(contact: String) throws -> [String]
     func unreadCounts() throws -> [UnreadCount]
     func chatSummaries() throws -> [ChatSummary]
@@ -84,6 +87,20 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func nextExpiry() throws -> UInt64?
     /// Erases the ephemeral messages due now; their rows.
     func expireEphemeral() throws -> [Int64]
+    /// Contact requests (people who added me and sent an invitation).
+    func requests() throws -> [ContactRequestInfo]
+    func requestSafetyNumber(fingerprint: String) throws -> [String]
+    /// The new contact's fingerprint; an alias in use: `InvalidInput("alias taken")`.
+    func acceptRequest(fingerprint: String, alias: String?) throws -> String
+    func refuseRequest(fingerprint: String) throws
+    func blockRequest(fingerprint: String) throws
+    func setRequestHidden(fingerprint: String, hidden: Bool) throws
+    func markRequestsSeen() throws
+    /// Again within 24 hours: `TooSoon(retryAt:)`.
+    func invite(contact: String) throws
+    func inviteStatus(contact: String) throws -> InviteStatus
+    func setInviteNotifications(on: Bool) throws
+    func deviceChanges(since: UInt64) throws -> [DeviceChange]
 }
 
 extension Device: DeviceHandle {}
@@ -147,6 +164,10 @@ public struct SyncOutcome: Sendable, Equatable {
     public var reactionContacts: [String] = []
     /// Ephemeral rows the sync erased (it expires first).
     public var expired: [Int64] = []
+    /// Contact requests to notify (already filtered by the invitations setting).
+    public var newRequests: [NewRequest] = []
+    /// Requesters whose request moved during the sync, notified or not.
+    public var requestContacts: [String] = []
 
     /// Something came in or went out: what a background wake reports.
     public var changed: Bool { items > 0 || received > 0 || sent > 0 }
@@ -163,7 +184,8 @@ public struct SyncOutcome: Sendable, Equatable {
                            newMessageContacts: s.newMessages.map(\.contact), failed: s.failed,
                            syncedContacts: s.syncedContacts, newMessages: s.newMessages,
                            newReactions: s.newReactions, reactionContacts: s.reactionContacts,
-                           expired: s.expired)
+                           expired: s.expired, newRequests: s.newRequests,
+                           requestContacts: s.requestContacts)
     }
 }
 

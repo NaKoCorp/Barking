@@ -8,3 +8,6 @@
 "NEEDS_UPDATE" = "Ce message nécessite une version plus récente de Barking.";
 "EPHEMERAL_MESSAGE" = "Message éphémère";
 "REACTED_EPHEMERAL" = "A réagi à un message éphémère";
+"INVITE_NEW" = "Nouvelle invitation de %@";
+"INVITE_RESENT" = "%@ a renvoyé son invitation";
+"INVITE_GENERIC" = "Nouvelle invitation";

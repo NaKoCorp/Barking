@@ -44,12 +44,17 @@ fn card(home: &Path, display: &str) -> String {
         .to_owned()
 }
 
+/// Adds a contact without inviting them (no packet to hand over).
+fn add_quietly(home: &Path, card: &str, alias: &str) {
+    ok(home, &["add", card, "--alias", alias, "--no-invite"]);
+}
+
 /// A and B know each other: `bob` at A, `alice` at B.
 fn pair() -> ((TempDir, PathBuf), (TempDir, PathBuf)) {
     let a = party("tel-a");
     let b = party("tel-b");
-    ok(&a.1, &["add", &card(&b.1, "Bob"), "--alias", "bob"]);
-    ok(&b.1, &["add", &card(&a.1, "Alice"), "--alias", "alice"]);
+    add_quietly(&a.1, &card(&b.1, "Bob"), "bob");
+    add_quietly(&b.1, &card(&a.1, "Alice"), "alice");
     (a, b)
 }
 
@@ -187,7 +192,7 @@ fn add_on_pending_link_is_not_an_invalid_card() {
         ],
     );
     barking(&tablet)
-        .args(["add", &card(&bob, "Bob")])
+        .args(["add", &card(&bob, "Bob"), "--no-invite"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("waiting for its link"))
@@ -273,12 +278,12 @@ fn unknown_contact_and_invalid_card_exit_nonzero() {
         .failure()
         .stderr(predicate::str::contains("Unknown contact"));
     barking(&home)
-        .args(["add", "not-a-card"])
+        .args(["add", "not-a-card", "--no-invite"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Invalid contact card"));
     barking(&home)
-        .args(["add", "barking1:AAAA"])
+        .args(["add", "barking1:AAAA", "--no-invite"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Invalid contact card"));
@@ -341,7 +346,7 @@ fn remove_then_readd() {
         .stderr(predicate::str::contains("Unknown contact"));
 
     // Added back, they become reachable again.
-    ok(&a, &["add", &card(&b, "Bob"), "--alias", "bob"]);
+    add_quietly(&a, &card(&b, "Bob"), "bob");
     let before = packets(&out_a).len();
     ok(&a, &["send", "bob", "trois", "--out", path_arg(&out_a)]);
     let all = packets(&out_a);
@@ -1588,4 +1593,172 @@ fn unreadable_network_state_is_reported() {
             "{args:?}: {err}"
         );
     }
+}
+
+// Contact requests and invitations.
+
+/// The fingerprint printed by `whoami`.
+fn fingerprint(home: &Path) -> String {
+    ok(home, &["whoami"]).trim().to_owned()
+}
+
+#[test]
+fn contact_request_roundtrip() {
+    let (da, alice) = party("tel-a");
+    let (db, bob) = party("tel-b");
+    let d1 = da.path().join("d1");
+    let d2 = db.path().join("d2");
+    // The declared name travels in the card Alice signs for the invitation.
+    card(&alice, "Alice");
+
+    // Alice invites Bob, then writes to him before any answer.
+    let added = ok(
+        &alice,
+        &[
+            "add",
+            &card(&bob, "Bob"),
+            "--alias",
+            "bob",
+            "--out",
+            path_arg(&d1),
+        ],
+    );
+    assert!(added.contains("Contact added"), "{added}");
+    ok(&alice, &["send", "bob", "salut", "--out", path_arg(&d1)]);
+    let invitation_and_text = packets(&d1);
+    assert!(invitation_and_text.len() >= 2);
+    let contacts = ok(&alice, &["contacts"]);
+    assert!(contacts.contains("invited"), "{contacts}");
+
+    // Bob sees a request, with the message held back.
+    let mut args = vec!["receive"];
+    args.extend(invitation_and_text.iter().map(|p| path_arg(p)));
+    let got = ok(&bob, &args);
+    assert!(got.contains("Contact request from"), "{got}");
+    assert!(!got.contains("salut"), "{got}");
+    let alice_fp = fingerprint(&alice);
+    let listed = ok(&bob, &["requests"]);
+    assert!(listed.contains(&alice_fp), "{listed}");
+    assert!(listed.contains("Alice"), "{listed}");
+    assert!(listed.contains("1 messages pending"), "{listed}");
+    assert!(listed.contains("1 invitations"), "{listed}");
+
+    // Accepting replays the message and answers.
+    let accepted = ok(
+        &bob,
+        &[
+            "accept",
+            &alice_fp,
+            "--alias",
+            "alice",
+            "--out",
+            path_arg(&d2),
+        ],
+    );
+    assert!(accepted.contains("[alice] salut"), "{accepted}");
+    assert!(!ok(&bob, &["requests"]).contains(&alice_fp));
+    let answers = packets(&d2);
+    assert!(!answers.is_empty());
+
+    let mut args = vec!["receive"];
+    args.extend(answers.iter().map(|p| path_arg(p)));
+    ok(&alice, &args);
+    let contacts = ok(&alice, &["contacts"]);
+    assert!(contacts.contains("accepted"), "{contacts}");
+    assert!(ok(&alice, &["messages", "bob"]).contains("delivered"));
+}
+
+#[test]
+fn add_needs_an_output_directory_unless_no_invite() {
+    let (_da, alice) = party("tel-a");
+    let (_db, bob) = party("tel-b");
+    barking(&alice)
+        .args(["add", &card(&bob, "Bob")])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--out"));
+    // Nothing was added.
+    assert!(!ok(&alice, &["contacts"]).contains("Bob"));
+    ok(&alice, &["add", &card(&bob, "Bob"), "--no-invite"]);
+    assert!(
+        ok(&alice, &["contacts"]).contains("  -\n")
+            || ok(&alice, &["contacts"]).contains("unverified  -")
+    );
+}
+
+#[test]
+fn invite_is_refused_within_a_day() {
+    let (da, alice) = party("tel-a");
+    let (_db, bob) = party("tel-b");
+    let d1 = da.path().join("d1");
+    ok(
+        &alice,
+        &[
+            "add",
+            &card(&bob, "Bob"),
+            "--alias",
+            "bob",
+            "--out",
+            path_arg(&d1),
+        ],
+    );
+    barking(&alice)
+        .args(["invite", "bob", "--out", path_arg(&d1)])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("possible after"));
+}
+
+/// Alice (display name `name`) invites Bob; returns Alice's home and fingerprint
+/// after Bob received the invitation.
+fn invited_by(bob: &Path, name: &str) -> (TempDir, PathBuf, String) {
+    let (d, alice) = party(name);
+    card(&alice, name);
+    let out = d.path().join("out");
+    ok(
+        &alice,
+        &[
+            "add",
+            &card(bob, "Bob"),
+            "--alias",
+            "bob",
+            "--out",
+            path_arg(&out),
+        ],
+    );
+    let files = packets(&out);
+    let mut args = vec!["receive"];
+    args.extend(files.iter().map(|p| path_arg(p)));
+    ok(bob, &args);
+    let fp = fingerprint(&alice);
+    (d, alice, fp)
+}
+
+#[test]
+fn refuse_and_block_close_the_request() {
+    let (_db, bob) = party("tel-b");
+    let (_d1, _alice, alice_fp) = invited_by(&bob, "Alice");
+    let (_d2, _carol, carol_fp) = invited_by(&bob, "Carol");
+    let listed = ok(&bob, &["requests"]);
+    assert!(
+        listed.contains(&alice_fp) && listed.contains(&carol_fp),
+        "{listed}"
+    );
+
+    let refused = ok(&bob, &["refuse", &alice_fp]);
+    assert!(refused.contains("refused"), "{refused}");
+    let listed = ok(&bob, &["requests"]);
+    assert!(
+        !listed.contains(&alice_fp) && listed.contains(&carol_fp),
+        "{listed}"
+    );
+    // Nothing left to refuse.
+    barking(&bob)
+        .args(["refuse", &alice_fp])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No contact request"));
+
+    ok(&bob, &["block", &carol_fp]);
+    assert!(!ok(&bob, &["requests"]).contains(&carol_fp));
 }

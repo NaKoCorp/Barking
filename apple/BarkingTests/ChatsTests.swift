@@ -107,6 +107,72 @@ final class AddContactModelTests: XCTestCase {
         XCTAssertEqual(m.added, try me.contacts().first?.fingerprint)
         XCTAssertNotNil(m.added)
     }
+
+    // MARK: Invitation on add (design decision 5)
+
+    /// A model on a fake core, with Bob's real card previewed (`inspectCard`
+    /// reads real bytes; the fake adds it as "fp-new").
+    private func previewing(_ d: FakeDevice) async throws -> AddContactModel {
+        let m = AddContactModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.scanned(try tempDevice("Bob").contactCardBytes())
+        XCTAssertNotNil(m.preview)
+        return m
+    }
+
+    func testAddSendsInvitationByDefault() async throws {
+        let d = FakeDevice()
+        let m = try await previewing(d)
+        XCTAssertTrue(m.sendsInvitation)
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(d.invited, ["fp-new"])
+        XCTAssertEqual(m.inviteResult, .sent)
+    }
+
+    func testAddWithoutInvitation() async throws {
+        let d = FakeDevice()
+        let m = try await previewing(d)
+        m.sendsInvitation = false
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(m.added, "fp-new")
+        XCTAssertEqual(d.invited, [])
+        XCTAssertNil(m.inviteResult)
+    }
+
+    func testInviteTooSoonKeepsAdd() async throws {
+        let d = FakeDevice()
+        d.inviteError = .TooSoon(retryAt: 1_000)
+        let m = try await previewing(d)
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(m.added, "fp-new")
+        XCTAssertEqual(m.inviteResult, .tooSoon)
+    }
+
+    /// `CoreError::TooLarge` reaches Swift as `InvalidInput("data too large")`.
+    func testInviteTooLarge() async throws {
+        let d = FakeDevice()
+        d.inviteError = .InvalidInput(detail: "data too large")
+        let m = try await previewing(d)
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(m.added, "fp-new")
+        XCTAssertEqual(m.inviteResult, .tooLarge)
+    }
+
+    /// Any other failure keeps the add, and is said on the page that follows
+    /// (never read as sent): `.failed`, not an add error.
+    func testInviteOtherErrorKeepsAddAndSaysSo() async throws {
+        let d = FakeDevice()
+        d.inviteError = .InvalidInput(detail: "malformed")
+        let m = try await previewing(d)
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(m.added, "fp-new")
+        XCTAssertEqual(m.inviteResult, .failed)
+        XCTAssertNil(m.error)
+    }
 }
 
 @MainActor
@@ -171,6 +237,98 @@ final class ChatsModelTests: XCTestCase {
         d.messageList = ["a": [Message(id: 1, outgoing: false, body: "plain", at: 100)]]
         await m.reload()
         XCTAssertEqual(m.rows.first?.line, .preview("plain"), "after the expiry, the message before")
+    }
+
+    func request(_ fp: String, _ name: String, lastSeen: UInt64, hidden: Bool = false,
+                 unseen: Bool = false) -> ContactRequestInfo {
+        ContactRequestInfo(fingerprint: fp, displayName: name, firstSeen: lastSeen, lastSeen: lastSeen,
+                           inviteCount: 1, pendingMessages: 0, hidden: hidden, unseen: unseen, nameClash: false)
+    }
+
+    /// A request takes its place among the chats by date: seen a minute ago,
+    /// it comes before a chat of ten minutes ago; an undated chat stays last.
+    func testRequestsMergedByDate() async {
+        let now = UInt64(Date().timeIntervalSince1970)
+        let d = FakeDevice()
+        d.contactList = [contact("a", "Léa"), contact("z", "Zoé")]
+        d.messageList = ["a": [Message(id: 1, outgoing: false, body: "hi", at: now - 600)]]
+        d.requestList = [request("r", "Sam", lastSeen: now - 60)]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        XCTAssertEqual(m.items.map(\.id), ["request:r", "chat:a", "chat:z"])
+        // The search filters requests too, on their declared name.
+        m.query = "lea"
+        XCTAssertEqual(m.items.map(\.id), ["chat:a"])
+    }
+
+    /// The search finds a request by its declared name, ignoring case and
+    /// accents; a search without a match is not the empty list.
+    func testSearchMatchesRequestName() async {
+        let d = FakeDevice()
+        d.contactList = [contact("a", "Léa")]
+        d.requestList = [request("r", "Zoé", lastSeen: 100)]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        m.query = "ZOE"
+        XCTAssertEqual(m.items.map(\.id), ["request:r"])
+        XCTAssertEqual(m.visibleRequests.map(\.fingerprint), ["r"])
+        m.query = "nobody"
+        XCTAssertTrue(m.items.isEmpty)
+        XCTAssertFalse(m.isEmpty, "no match is not \"No chats yet\"")
+    }
+
+    /// A hidden request leaves the list; the Invitations entry counts it.
+    func testHiddenRequestOnlyCounted() async {
+        let d = FakeDevice()
+        d.requestList = [request("r", "Sam", lastSeen: 100, hidden: true, unseen: true),
+                         request("s", "Ana", lastSeen: 90, hidden: true)]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        XCTAssertTrue(m.items.isEmpty)
+        XCTAssertEqual(m.hiddenCount, 2)
+        XCTAssertEqual(m.hiddenUnseen, 1)
+    }
+
+    /// Request changes are published as `.contacts`, which reloads the list,
+    /// and a reload reads the requests again.
+    func testReloadsOnContactsChangeIncludesRequests() async {
+        XCTAssertTrue(ChatsModel.reloads(on: .contacts))
+        XCTAssertTrue(ChatsModel.reloads(on: .network))
+        XCTAssertFalse(ChatsModel.reloads(on: .syncStarted))
+        let d = FakeDevice()
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        XCTAssertTrue(m.items.isEmpty)
+        d.requestList = [request("r", "Sam", lastSeen: 100)]
+        await m.reload()
+        XCTAssertEqual(m.items.map(\.id), ["request:r"])
+    }
+
+    func testHideCallsCore() async {
+        let d = FakeDevice()
+        d.requestList = [request("r", "Sam", lastSeen: 100)]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        await m.hide("r")
+        XCTAssertEqual(d.hidden.map(\.0), ["r"])
+        XCTAssertEqual(d.hidden.map(\.1), [true])
+        XCTAssertTrue(m.items.isEmpty, "reloaded after hiding")
+        XCTAssertEqual(m.hiddenCount, 1)
+    }
+
+    /// The Invitations screen: every request, the hidden ones apart; opening
+    /// it marks them seen; showing one again unhides it.
+    func testInvitationsSplitHiddenAndMarkSeen() async {
+        let d = FakeDevice()
+        d.requestList = [request("r", "Sam", lastSeen: 100), request("h", "Bob", lastSeen: 200, hidden: true, unseen: true)]
+        let m = InvitationsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.open()
+        XCTAssertEqual(d.seenMarks, 1)
+        XCTAssertEqual(m.visible.map(\.fingerprint), ["r"])
+        XCTAssertEqual(m.hidden.map(\.fingerprint), ["h"])
+        await m.setHidden("h", hidden: false)
+        XCTAssertEqual(m.visible.map(\.fingerprint), ["h", "r"])
+        XCTAssertTrue(m.hidden.isEmpty)
     }
 
     /// B4 carry: the conversation title stays inside the bar at AX sizes.

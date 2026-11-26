@@ -69,6 +69,17 @@ struct ConversationView: View {
             if let notice = model.notice {
                 noticeBanner(notice).padding(.horizontal, 16).padding(.top, 8)
             }
+            // A system line like the day separators, not a banner: the root
+            // key did not change (§7.7).
+            if let line = model.deviceChangedText {
+                Text(verbatim: line)
+                    .font(BarkingFont.mono(.caption2, size: 11)).foregroundStyle(Color.fgSoft)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16).padding(.top, 8)
+                    .accessibilityIdentifier("conversation.deviceChanged")
+            }
             messages
             if let e = model.sendError {
                 Text(LocalizedStringKey(e)).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)

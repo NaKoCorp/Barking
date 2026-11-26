@@ -36,8 +36,24 @@ fn prefs_default_then_set() {
             instant: false,
             preview: PushPreview::Generic,
             last_wake: Some(1_763_100_000),
+            invites: true,
         }
     );
+}
+
+#[test]
+fn notification_prefs_invites_default_true() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = common::device(&dir, 1, "alice");
+    assert!(d.notification_prefs().unwrap().invites);
+    d.set_invite_notifications(false).unwrap();
+    let p = d.notification_prefs().unwrap();
+    assert!(!p.invites);
+    // The other preferences are untouched.
+    assert!(p.instant);
+    assert_eq!(p.preview, PushPreview::NameAndText);
+    d.set_invite_notifications(true).unwrap();
+    assert!(d.notification_prefs().unwrap().invites);
 }
 
 #[test]

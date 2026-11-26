@@ -127,6 +127,10 @@ pub struct Device {
     key: [u8; 32],
     /// The embedded IP base (`set_ipdb_path`), opened at its first use.
     ipdb: Mutex<IpDbSlot>,
+    /// The requests as the last sync of this device left them (in memory
+    /// only): the next sync reports those that moved since, whatever moved
+    /// them (`net::RequestStamp`).
+    pub(crate) requests_seen: Mutex<Option<Vec<crate::net::RequestStamp>>>,
 }
 
 /// Where the IP base is and, once opened, the base. An open that failed is
@@ -178,6 +182,7 @@ impl Device {
             config,
             key,
             ipdb: Mutex::default(),
+            requests_seen: Mutex::default(),
         })
     }
 
@@ -403,6 +408,21 @@ impl Device {
                     .into_iter()
                     .filter(|c| c.blocked)
                     .map(Contact::from)
+                    .collect())
+            })
+        })
+    }
+
+    /// Blocked fingerprints that are no contact (a blocked requester, or a
+    /// blocked contact deleted since), sorted: `blocked_contacts` does not
+    /// list them, and `unblock_contact` takes them.
+    pub fn blocked_fingerprints(&self) -> Result<Vec<String>, BarkingError> {
+        guard(|| {
+            self.with_core_read(|core| {
+                Ok(core
+                    .blocked_strangers()?
+                    .iter()
+                    .map(ToString::to_string)
                     .collect())
             })
         })

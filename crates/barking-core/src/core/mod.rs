@@ -9,7 +9,8 @@
 //! Layout: `contacts.rs` (cards, alias, verification), `send.rs`
 //! (`send_text`), `receive.rs` (`receive`), `frames.rs` (fragmentation and
 //! reassembly of frames), `link.rs` (linking a new device),
-//! `history.rs` (history archive transferred at link time), `sync.rs`
+//! `history.rs` (history archive transferred at link time), `requests.rs`
+//! (storage of contact requests), `sync.rs`
 //! (synchronization between my devices).
 
 mod admin;
@@ -24,6 +25,7 @@ mod reactions;
 mod receive;
 mod remove;
 mod removed;
+mod requests;
 mod route;
 mod send;
 mod sync;
@@ -52,8 +54,8 @@ use crate::store::{EventClass, MessageId, MessageRow, MessageStatus, Queries, St
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
-pub use crate::transparency::SyncKind;
-pub use contacts::ContactSummary;
+pub use crate::transparency::{RequestResolution, SyncKind};
+pub use contacts::{ContactSummary, parse_fingerprint};
 pub use delivery::{AwaitingVerdict, DeleteOutcome, MAX_NOTED_CHANGES};
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
 pub use history::{HistoryArchive, MAX_ARCHIVE_BYTES};
@@ -64,11 +66,13 @@ pub use link::{
 pub use log_limit::NOISY_EVENT_LOG_INTERVAL_SECS;
 pub use reactions::{ME_REACTOR, ReactionChip, ReactionResend};
 pub use receive::{
-    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED, R_STALE,
-    R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER, R_UNREADABLE,
+    R_AMBIGUOUS_SENDER, R_BAD_CONTENT, R_BLOCKED, R_HANDSHAKE, R_ID_MISMATCH, R_ID_REUSED,
+    R_PENDING_REQUEST, R_REQUEST_FORGED, R_STALE, R_UNDECRYPTABLE, R_UNEXPECTED, R_UNKNOWN_SENDER,
+    R_UNREADABLE,
 };
 pub use remove::LeaveState;
 pub use removed::Removed;
+pub use requests::{Accepted, ContactRequest, InviteState};
 pub use route::{RouteEntry, RouteStep};
 
 use log_limit::LogLimiter;
@@ -134,7 +138,10 @@ const SEEN_RETENTION_SECS: u64 = MAX_AGE_SECS + MAX_FUTURE_SECS;
 
 /// Result of receiving bytes from outside.
 pub enum ReceiveOutcome {
-    /// Decrypted message. `ack` is the receipt acknowledgement to send back.
+    /// Decrypted message. `ack` is the receipt acknowledgement to send back
+    /// (also queued), except for a held message replayed by
+    /// `accept_request` once its sender no longer waits for it: that one is
+    /// not queued and must not be sent (spec §7.3).
     /// `ephemeral`: the message carries a delay (its notification must not
     /// show the text).
     Message {
@@ -174,9 +181,12 @@ pub enum ReceiveOutcome {
     /// A newer list signed by my root no longer contains this device: it is
     /// removed from my account (see `Core::removed`); the ack is queued.
     Removed,
-    /// Content of a kind this version does not know, acknowledged and set
-    /// aside (`UnknownPolicy::Ignore`, or one of my own devices'): nothing
-    /// is added to the conversation.
+    /// Nothing to show. For example: content of a kind this version does not know,
+    /// acknowledged and set aside (`UnknownPolicy::Ignore`, or one of my
+    /// own devices'), an ephemeral already due, or a first packet dropped
+    /// (an invitation from a blocked or refused sender, or beyond the list
+    /// of requests; a message for a blocked requester). Nothing is added to
+    /// the conversation.
     Ignored,
     /// Content of an unknown kind its sender wants shown
     /// (`UnknownPolicy::ShowUpdate`): the conversation gains a placeholder
@@ -201,6 +211,16 @@ pub enum ReceiveOutcome {
     /// not be dropped as having nothing to show. Any other repeat (a
     /// reaction, a sync, an ack, a message deleted since) is `Duplicate`.
     DuplicateMessage,
+    /// An invite from a person who is not a contact: a pending request,
+    /// created or updated. Nothing is acked and no session is written
+    /// before it is accepted. `resent`: the request already existed.
+    /// `notify`: no notification for this request in the last
+    /// `NOTIFY_INTERVAL_SECS`.
+    ContactRequest {
+        contact: Fingerprint,
+        resent: bool,
+        notify: bool,
+    },
 }
 
 impl fmt::Debug for ReceiveOutcome {
@@ -261,6 +281,16 @@ impl fmt::Debug for ReceiveOutcome {
                 .field("alias", alias)
                 .field("target", target)
                 .field("added", &format_args!("<{} emoji>", added.len()))
+                .finish(),
+            Self::ContactRequest {
+                contact,
+                resent,
+                notify,
+            } => f
+                .debug_struct("ContactRequest")
+                .field("contact", contact)
+                .field("resent", resent)
+                .field("notify", notify)
                 .finish(),
         }
     }
@@ -432,6 +462,7 @@ impl Core {
         core.store.transaction(|tx| {
             link::purge_expired_offer(tx, now)?;
             admin::purge_expired(tx, now)?;
+            requests::purge_requests(tx, now)?;
             sweep_skipped(tx, now)
         })?;
         Ok(core)
@@ -538,6 +569,17 @@ impl Core {
     /// by the cards the core signs itself, see `set_display_name`).
     pub fn contact_card(&self, display_name: &str) -> Result<ContactCard> {
         self.ensure_active()?;
+        let card = self.sign_card(display_name)?;
+        if self.store.get_meta::<String>(META_DISPLAY_NAME)?.as_deref() != Some(display_name) {
+            self.store.put_meta(META_DISPLAY_NAME, &display_name)?;
+        }
+        Ok(card)
+    }
+
+    /// My card signed now by my root (admin only, `NotAdmin` otherwise),
+    /// under `display_name`, with this device's key packet, those of my
+    /// linked devices and my node hints. Writes nothing.
+    pub(super) fn sign_card(&self, display_name: &str) -> Result<ContactCard> {
         let root = self.root.as_ref().ok_or(CoreError::NotAdmin)?;
         let mut bundles = vec![self.prekeys.bundle(&self.device, false)];
         bundles.extend(
@@ -550,11 +592,7 @@ impl Core {
             .store
             .get_meta::<Vec<Vec<u8>>>(META_CARD_NODES)?
             .unwrap_or_default();
-        let card = ContactCard::sign(root, display_name, self.devices.clone(), bundles, nodes)?;
-        if self.store.get_meta::<String>(META_DISPLAY_NAME)?.as_deref() != Some(display_name) {
-            self.store.put_meta(META_DISPLAY_NAME, &display_name)?;
-        }
-        Ok(card)
+        ContactCard::sign(root, display_name, self.devices.clone(), bundles, nodes)
     }
 
     /// Sets the node hints carried by my contact card (opaque to the core:
@@ -791,7 +829,10 @@ impl Core {
     /// previous value. The polling window no longer depends on it (it always
     /// covers the whole lifetime); `last_polled_day` reads it back.
     pub fn mark_polled(&mut self, now: u64) -> Result<()> {
-        self.store.put_meta(META_LAST_POLLED, &day_of(now))
+        self.store.transaction(|tx| {
+            requests::purge_requests(tx, now)?;
+            tx.put_meta(META_LAST_POLLED, &day_of(now))
+        })
     }
 
     /// Day of the last poll recorded by `mark_polled`, if any.
@@ -1069,10 +1110,13 @@ fn de_state(bytes: &[u8]) -> Result<RatchetState> {
     postcard::from_bytes(bytes).map_err(|_| CoreError::Store("corrupted session".into()))
 }
 
+/// Same bytes as on the wire ([`InitialMessage::encode`]).
 fn ser_init(init: &InitialMessage) -> Result<Vec<u8>> {
-    postcard::to_allocvec(init).map_err(|_| CoreError::Store("serialization".into()))
+    init.encode()
+        .map_err(|_| CoreError::Store("serialization".into()))
 }
 
+/// Also reads a `pending_initial` stored by 0.6.0 (`sig: None`).
 fn de_init(bytes: &[u8]) -> Result<InitialMessage> {
-    postcard::from_bytes(bytes).map_err(|_| CoreError::Store("corrupted session".into()))
+    InitialMessage::decode(bytes).map_err(|_| CoreError::Store("corrupted session".into()))
 }

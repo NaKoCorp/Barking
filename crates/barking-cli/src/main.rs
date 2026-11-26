@@ -12,12 +12,12 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::contact::ContactCard;
-use barking_core::identity::Fingerprint;
+use barking_core::identity::{Fingerprint, safety_number};
 use barking_core::packet::Packet;
 use barking_core::store::{Direction, MessageStatus};
 use barking_core::{
-    Core, CoreError, HistoryArchive, LinkBundle, LinkOffer, LinkRequest, MAX_ARCHIVE_BYTES,
-    MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES, ReceiveOutcome,
+    Accepted, Core, CoreError, HistoryArchive, InviteState, LinkBundle, LinkOffer, LinkRequest,
+    MAX_ARCHIVE_BYTES, MAX_LINK_BUNDLE_BYTES, MAX_LINK_FILE_BYTES, ReceiveOutcome,
 };
 use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
@@ -58,11 +58,49 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         display_name: String,
     },
-    /// Adds a contact from their card.
+    /// Adds a contact from their card and invites them: the invitation
+    /// packets are written to --out.
     Add {
         card: String,
         #[arg(long)]
         alias: Option<String>,
+        /// Adds the contact without sending an invitation.
+        #[arg(long)]
+        no_invite: bool,
+        /// Directory where to write the invitation packets.
+        #[arg(long, value_name = "DIR", required_unless_present = "no_invite")]
+        out: Option<PathBuf>,
+    },
+    /// Sends the invitation to a contact again (at most once a day).
+    Invite {
+        contact: String,
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
+    /// Lists the contact requests (people who invited me and are not contacts).
+    Requests,
+    /// Accepts a contact request: adds the contact, shows the held messages
+    /// and writes the answer packets.
+    Accept {
+        fingerprint: String,
+        #[arg(long)]
+        alias: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
+    /// Refuses a contact request; nothing is sent to the requester.
+    Refuse {
+        fingerprint: String,
+        /// Directory where to write the packets for my other devices.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
+    /// Blocks the sender of a contact request.
+    Block {
+        fingerprint: String,
+        /// Directory where to write the packets for my other devices.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
     },
     /// Removes a contact and their sessions (the history is kept).
     Remove { contact: String },
@@ -346,10 +384,20 @@ fn run(cli: Cli) -> CliResult<()> {
                 open_core(&home)?.contact_card(&display_name)?.to_text()
             );
         }
-        Command::Add { card, alias } => {
+        Command::Add {
+            card,
+            alias,
+            no_invite,
+            out,
+        } => {
             let card = ContactCard::from_text(&card)
                 .map_err(|e| CliError(format!("Invalid contact card: {e}")))?;
+            let out = if no_invite { None } else { out };
             let mut core = open_core(&home)?;
+            // Checked before anything is added: a failure leaves no half-done add.
+            if let Some(dir) = &out {
+                check_packets_dir(dir)?;
+            }
             let fp = core
                 .add_contact(&card, alias.as_deref(), now(), &mut rand::rng())
                 .map_err(|e| match e {
@@ -359,6 +407,84 @@ fn run(cli: Cli) -> CliResult<()> {
                     other => CliError::from(other),
                 })?;
             println!("Contact added: {fp}");
+            if let Some(dir) = out {
+                match core.invite(&fp, now(), &mut rand::rng()) {
+                    Ok(packets) => write_packets(&dir, &packets, "Invitation")?,
+                    // The contact stays added: only the invitation waits.
+                    Err(CoreError::TooSoon { retry_at }) => {
+                        println!(
+                            "Invitation not sent: possible after {}",
+                            format_time(retry_at)
+                        );
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        Command::Invite { contact, out } => {
+            let mut core = open_core(&home)?;
+            let fp = resolve(&core, &contact)?;
+            check_packets_dir(&out)?;
+            match core.invite(&fp, now(), &mut rand::rng()) {
+                Ok(packets) => write_packets(&out, &packets, "Invitation")?,
+                Err(CoreError::TooSoon { retry_at }) => {
+                    return fail(format!(
+                        "Invitation not sent: possible after {}",
+                        format_time(retry_at)
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Command::Requests => {
+            let mut core = open_core(&home)?;
+            let me = core.fingerprint();
+            for r in core.requests()? {
+                let mut line = format!(
+                    "{}  {}  code {}  {} invitations  {} messages pending  last {}",
+                    r.fingerprint,
+                    if r.display_name.is_empty() {
+                        "-".to_owned()
+                    } else {
+                        printable(&r.display_name)
+                    },
+                    safety_number(&me, &r.fingerprint),
+                    r.invite_count,
+                    r.pending_messages,
+                    format_time(r.last_seen),
+                );
+                if r.hidden {
+                    line.push_str("  hidden");
+                }
+                println!("{line}");
+            }
+            core.mark_requests_seen()?;
+        }
+        Command::Accept {
+            fingerprint,
+            alias,
+            out,
+        } => {
+            let mut core = open_core(&home)?;
+            let fp = resolve_request(&core, &fingerprint)?;
+            check_packets_dir(&out)?;
+            let accepted = core.accept_request(&fp, alias.as_deref(), now(), &mut rand::rng())?;
+            println!("Contact added: {}", accepted.contact);
+            show_accepted(&core, accepted, &out)?;
+        }
+        Command::Refuse { fingerprint, out } => {
+            let mut core = open_core(&home)?;
+            let fp = resolve_request(&core, &fingerprint)?;
+            let packets = core.refuse_request(&fp, now(), &mut rand::rng())?;
+            println!("Request refused: {fp} (nothing is sent to them)");
+            write_sync_packets(out.as_deref(), &packets)?;
+        }
+        Command::Block { fingerprint, out } => {
+            let mut core = open_core(&home)?;
+            let fp = resolve_request(&core, &fingerprint)?;
+            let packets = core.block_request(&fp, now(), &mut rand::rng())?;
+            println!("Blocked: {fp}");
+            write_sync_packets(out.as_deref(), &packets)?;
         }
         Command::Remove { contact } => {
             let mut core = open_core(&home)?;
@@ -371,7 +497,13 @@ fn run(cli: Cli) -> CliResult<()> {
             for c in core.contacts()? {
                 let alias = c.alias.as_deref().unwrap_or("-");
                 let state = if c.verified { "verified" } else { "unverified" };
-                println!("{}  {}  {state}", printable(alias), c.fingerprint);
+                let invite = match core.invite_state(&c.fingerprint, now())? {
+                    InviteState::None => "-",
+                    InviteState::Sent { .. } => "invited",
+                    InviteState::Unanswered { .. } => "unanswered",
+                    InviteState::Accepted { .. } => "accepted",
+                };
+                println!("{}  {}  {state}  {invite}", printable(alias), c.fingerprint);
             }
         }
         Command::Send { contact, text, out } => {
@@ -464,7 +596,7 @@ fn sync(home: &Path) -> CliResult<()> {
         return fail(format!("Sync failed: {e}"));
     }
     for outcome in std::mem::take(&mut report.received) {
-        show_outcome("network", outcome, AckSink::Queued)?;
+        show_outcome(&core, "network", outcome, AckSink::Queued)?;
     }
     if report.receive_errors > 0 {
         println!(
@@ -798,6 +930,85 @@ fn resolve(core: &Core, who: &str) -> CliResult<Fingerprint> {
     })
 }
 
+/// Finds the pending request named by `who` (displayed fingerprint, with or
+/// without dashes, in any case).
+fn resolve_request(core: &Core, who: &str) -> CliResult<Fingerprint> {
+    let compact = |s: &str| {
+        s.chars()
+            .filter(|c| *c != '-' && !c.is_whitespace())
+            .map(|c| c.to_ascii_lowercase())
+            .collect::<String>()
+    };
+    let wanted = compact(who);
+    if !wanted.is_empty() {
+        for r in core.requests()? {
+            if compact(&r.fingerprint.to_string()) == wanted {
+                return Ok(r.fingerprint);
+            }
+        }
+    }
+    fail(format!("No contact request from: {}", printable(who)))
+}
+
+/// Writes the packets and lists them; `what` names them in the summary.
+fn write_packets(dir: &Path, packets: &[Packet], what: &str) -> CliResult<()> {
+    fs::create_dir_all(dir)?;
+    for p in packets {
+        println!("{}", write_packet(dir, p)?.display());
+    }
+    if packets.is_empty() {
+        println!("{what}: no packet to send (every device already answered)");
+    }
+    Ok(())
+}
+
+/// Packets for my other devices after a refusal or a block: written when a
+/// directory is given, otherwise left to `barking outbox`.
+fn write_sync_packets(out: Option<&Path>, packets: &[Packet]) -> CliResult<()> {
+    match out {
+        Some(dir) => {
+            fs::create_dir_all(dir)?;
+            for p in packets {
+                println!("{}", write_packet(dir, p)?.display());
+            }
+        }
+        None if !packets.is_empty() => println!("{}", sync_packets_hint(packets.len())),
+        None => {}
+    }
+    Ok(())
+}
+
+/// What to do with the packets for my other devices left unwritten. Not
+/// "rerun": the request is gone. They wait in the send queue.
+fn sync_packets_hint(n: usize) -> String {
+    format!("{n} packet(s) for your other devices: write them with `barking outbox --out <dir>`")
+}
+
+/// The line for a `ReceiveOutcome::Ignored`, whatever its cause (content
+/// set aside, an ephemeral already due, an answer to my invite, an
+/// invitation dropped as blocked, refused or beyond the list): true of
+/// each, nothing to show.
+fn ignored_line(label: &str) -> String {
+    format!("{label}: nothing to show")
+}
+
+/// Shows what `accept` replayed, then writes the answer packets.
+///
+/// The receipts of the replayed messages are NEVER written, nor shown as
+/// receipts: a replayed message can be older than the receipt grace window,
+/// and the core then deliberately does not queue its receipt (a late receipt
+/// would reveal when the request was accepted). The core keeps the receipts
+/// it did queue in its send queue (`barking outbox`). Only `accepted.packets`
+/// are written here.
+fn show_accepted(core: &Core, accepted: Accepted, out: &Path) -> CliResult<()> {
+    for outcome in accepted.replayed {
+        show_outcome(core, "replayed", outcome, AckSink::Withheld)?;
+    }
+    write_packets(out, &accepted.packets, "Answer")?;
+    println!("Receipts of the replayed messages, if any, go out with `barking outbox`");
+    Ok(())
+}
+
 fn write_packet(dir: &Path, packet: &Packet) -> CliResult<PathBuf> {
     let name = data_encoding::HEXLOWER.encode(&packet.id.0);
     let path = dir.join(format!("{name}.pkt"));
@@ -814,6 +1025,8 @@ enum AckSink<'a> {
     Dir(&'a Path),
     /// Stored in the core's send queue (dropped by the sync).
     Queued,
+    /// The receipt is neither written nor mentioned (replayed messages).
+    Withheld,
 }
 
 impl<'a> From<Option<&'a Path>> for AckSink<'a> {
@@ -823,7 +1036,12 @@ impl<'a> From<Option<&'a Path>> for AckSink<'a> {
 }
 
 /// Shows the result of processing a received packet (file or node).
-fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> CliResult<()> {
+fn show_outcome(
+    core: &Core,
+    label: &str,
+    outcome: ReceiveOutcome,
+    ack_sink: AckSink<'_>,
+) -> CliResult<()> {
     match outcome {
         ReceiveOutcome::Message {
             from,
@@ -842,6 +1060,7 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
                 }
                 AckSink::Unwritten => println!("  receipt not written (no --out)"),
                 AckSink::Queued => println!("  receipt queued for sending"),
+                AckSink::Withheld => {}
             }
         }
         ReceiveOutcome::AckReceived { .. } => println!("{label}: delivered ✓"),
@@ -865,7 +1084,20 @@ fn show_outcome(label: &str, outcome: ReceiveOutcome, ack_sink: AckSink<'_>) -> 
         ReceiveOutcome::Removed => {
             println!("{label}: this device was removed from your account");
         }
-        ReceiveOutcome::Ignored => println!("{label}: content this version cannot read, set aside"),
+        ReceiveOutcome::ContactRequest {
+            contact, resent, ..
+        } => {
+            // The declared name is read from the stored request.
+            let name = core
+                .requests()?
+                .into_iter()
+                .find(|r| r.fingerprint == contact)
+                .map(|r| format!(" ({})", printable(&r.display_name)))
+                .unwrap_or_default();
+            let again = if resent { " resent" } else { "" };
+            println!("{label}: Contact request from {contact}{name}{again}");
+        }
+        ReceiveOutcome::Ignored => println!("{}", ignored_line(label)),
         ReceiveOutcome::NeedsUpdate { from, alias } => {
             let who = alias.unwrap_or_else(|| from.to_string());
             println!(
@@ -905,7 +1137,7 @@ fn receive(home: &Path, files: &[PathBuf], out: Option<&Path>) -> CliResult<()> 
             }
         };
         let outcome = core.receive(&bytes, "file", now(), &mut rand::rng())?;
-        show_outcome(&label.to_string(), outcome, AckSink::from(out))?;
+        show_outcome(&core, &label.to_string(), outcome, AckSink::from(out))?;
     }
     if failed {
         return fail("Some files could not be read");
@@ -1003,6 +1235,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sync_packets_hint_points_to_the_outbox() {
+        // The request is gone after `refuse`/`block`: rerunning fails.
+        let hint = sync_packets_hint(2);
+        assert!(hint.contains("barking outbox --out <dir>"), "{hint}");
+        assert!(!hint.contains("rerun"), "{hint}");
+    }
+
+    #[test]
+    fn ignored_outcome_is_neutral() {
+        // Also an invitation dropped (blocked, refused, list full).
+        assert_eq!(ignored_line("p.bin"), "p.bin: nothing to show");
+    }
+
+    #[test]
     fn formats_unix_time_in_utc() {
         assert_eq!(format_time(0), "1970-01-01 00:00:00");
         assert_eq!(format_time(1_800_000_000), "2027-01-15 08:00:00");
@@ -1062,5 +1308,60 @@ mod tests {
         );
         assert_eq!(render_message("bob", "x"), "[bob] x\n");
         assert_eq!(render_message("bob", "a\r\n"), "[bob] a\u{FFFD}\n  │ \n");
+    }
+
+    /// Spec §8.3: past the receipt grace window, writing the receipt of a
+    /// replayed message would reveal when the request was accepted. `accept`
+    /// writes only `Accepted.packets`, never the receipts carried by the
+    /// replayed outcomes. (The binary cannot control its clock: the day-20
+    /// case is exercised here, at the helper level.)
+    #[test]
+    fn accept_on_day_20_writes_no_receipt() {
+        const T0: u64 = 1_800_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let key = [7u8; 32];
+        let mut rng = rand::rng();
+        let (mut alice, _) =
+            Core::create(&dir.path().join("a.db"), &key, "tel-a", T0, &mut rng).unwrap();
+        let (mut bob, _) =
+            Core::create(&dir.path().join("b.db"), &key, "tel-b", T0, &mut rng).unwrap();
+        alice.contact_card("Alice").unwrap();
+        let bob_card = bob.contact_card("Bob").unwrap();
+        let bob_fp = alice.add_contact(&bob_card, None, T0, &mut rng).unwrap();
+        let mut sent = alice.invite(&bob_fp, T0, &mut rng).unwrap();
+        sent.extend(alice.send_text(&bob_fp, "salut", T0 + 1, &mut rng).unwrap());
+        for p in &sent {
+            bob.receive(&p.encode(), "file", T0 + 2, &mut rng).unwrap();
+        }
+        let request = bob.requests().unwrap().remove(0);
+        assert_eq!(request.pending_messages, 1);
+
+        let day_20 = T0 + 20 * 86_400;
+        let accepted = bob
+            .accept_request(&request.fingerprint, Some("alice"), day_20, &mut rng)
+            .unwrap();
+        let receipts: Vec<_> = accepted
+            .replayed
+            .iter()
+            .filter_map(|o| match o {
+                ReceiveOutcome::Message { ack, .. } => Some(ack.id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(receipts.len(), 1, "the held message is replayed");
+        let written: Vec<_> = accepted.packets.iter().map(|p| p.id).collect();
+        assert!(!written.is_empty());
+
+        let out = dir.path().join("out");
+        show_accepted(&bob, accepted, &out).unwrap_or_else(|e| panic!("{}", e.0));
+        let on_disk: Vec<_> = fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(on_disk.len(), written.len(), "{on_disk:?}");
+        for id in receipts {
+            let name = format!("{}.pkt", data_encoding::HEXLOWER.encode(&id.0));
+            assert!(!on_disk.contains(&name), "a receipt was written");
+        }
     }
 }

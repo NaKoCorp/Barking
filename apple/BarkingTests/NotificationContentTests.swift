@@ -160,6 +160,88 @@ final class NotificationContentTests: XCTestCase {
         XCTAssertEqual(n.body, "New message")
     }
 
+    // MARK: Invitations
+
+    func invitations(_ r: [NewRequest], messages: [NewMessage] = [], nothingToShow: Bool = false,
+                     requestContacts: [String]? = nil) -> SyncSummary {
+        SyncSummary(itemsReceived: UInt32(r.count + messages.count), sent: 0, newMessages: messages, networkUp: true,
+                    error: nil, nothingToShow: nothingToShow, newRequests: r,
+                    requestContacts: requestContacts ?? r.map(\.contact))
+    }
+    let en = Locale(identifier: "en_US")
+
+    func testSingleNewInvitation() throws {
+        let c = original()
+        c.title = "x"
+        c.threadIdentifier = "t"
+        let s = invitations([NewRequest(contact: "FPR", name: "Alice", resent: false)])
+        XCTAssertEqual(NotificationContent.apply(s, to: c, preview: .nameAndText, locked: false, locale: en), "shown")
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "New invitation from “Alice”", ""])
+        let fr = original()
+        _ = NotificationContent.apply(s, to: fr, preview: .nameOnly, locked: false, bundle: try french(),
+                                      locale: Locale(identifier: "fr_FR"))
+        XCTAssertEqual(fr.body, "Nouvelle invitation de «\u{00A0}Alice\u{00A0}»")
+    }
+
+    /// No locale given: the quotes follow the strings' bundle, as in the
+    /// extension (whose own bundle has no .lproj). French text, « » quotes.
+    func testInvitationQuotesFollowStringsBundle() throws {
+        let c = original()
+        let s = invitations([NewRequest(contact: "FPR", name: "Alice", resent: false)])
+        _ = NotificationContent.apply(s, to: c, preview: .nameAndText, locked: false, bundle: try french())
+        XCTAssertEqual(c.body, "Nouvelle invitation de «\u{00A0}Alice\u{00A0}»")
+    }
+
+    func testResentInvitation() throws {
+        let c = original()
+        let s = invitations([NewRequest(contact: "FPR", name: "Alice", resent: true)])
+        XCTAssertEqual(NotificationContent.apply(s, to: c, preview: .nameAndText, locked: false, locale: en), "shown")
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "“Alice” resent their invitation", ""])
+        let fr = original()
+        _ = NotificationContent.apply(s, to: fr, preview: .nameAndText, locked: false, bundle: try french(),
+                                      locale: Locale(identifier: "fr_FR"))
+        XCTAssertEqual(fr.body, "«\u{00A0}Alice\u{00A0}» a renvoyé son invitation")
+    }
+
+    func testSeveralInvitationsAreGeneric() {
+        let c = original()
+        let s = invitations([NewRequest(contact: "FP1", name: "Alice", resent: false),
+                             NewRequest(contact: "FP2", name: "Bob", resent: true)])
+        XCTAssertEqual(NotificationContent.apply(s, to: c, preview: .nameAndText, locked: false, locale: en), "shown")
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "New invitation", ""])
+    }
+
+    func testInvitationGenericWhenLocked() throws {
+        let s = invitations([NewRequest(contact: "FPR", name: "Alice", resent: false)])
+        for (preview, locked) in [(PushPreview.nameAndText, true), (.generic, false)] {
+            let c = original()
+            c.title = "x"
+            XCTAssertEqual(NotificationContent.apply(s, to: c, preview: preview, locked: locked, locale: en), "shown")
+            XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "New invitation", ""])
+            XCTAssertFalse(c.body.contains("Alice"))
+        }
+        let fr = original()
+        _ = NotificationContent.apply(s, to: fr, preview: .generic, locked: false, bundle: try french())
+        XCTAssertEqual(fr.body, "Nouvelle invitation")
+    }
+
+    func testMessageWinsOverInvitation() {
+        let c = original()
+        let s = invitations([NewRequest(contact: "FPR", name: "Bob", resent: false)],
+                            messages: [msg("FP1", "Alice", "salut")])
+        XCTAssertEqual(NotificationContent.apply(s, to: c, preview: .nameAndText, locked: false, locale: en), "shown")
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["Alice", "salut", "FP1"])
+    }
+
+    /// A wake that only moved a request it must not notify (setting off, or
+    /// notified within 24 h): suppressed, never the generic "New message".
+    func testRequestNotNotifiedSuppresses() {
+        let c = original()
+        let s = invitations([], nothingToShow: true, requestContacts: ["FPR"])
+        XCTAssertEqual(NotificationContent.apply(s, to: c, preview: .nameAndText, locked: false), "suppressed")
+        XCTAssertEqual([c.title, c.body, c.threadIdentifier], ["", "", ""])
+    }
+
     private func french() throws -> Bundle {
         let kit = Bundle(for: FailureNotifier.Marker.self)
         return try XCTUnwrap(kit.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))

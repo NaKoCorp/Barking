@@ -43,6 +43,29 @@ import Foundation
 ///   the network unreachable (the launch sync is still running when a test
 ///   opens the Network tab).
 ///
+/// - `-BarkingUITestRequests`: three contact requests, kept in memory:
+///   “Alice” in the list (invited 2 h ago, 2 messages waiting), “Bob”,
+///   hidden and not seen yet (3 invitations), whose name is said to clash
+///   with a contact's, and one with a 64-character name in the list
+///   (invited yesterday). Hiding, showing and marking seen change
+///   them; the safety code is a fixed one. Refusing and blocking remove the
+///   request; a blocked one is then listed by `blockedFingerprints` until
+///   unblocked. Accepting removes it too and adds an unverified contact of
+///   that name to `contacts()`, so its conversation opens with the "not
+///   verified" banner.
+///
+/// - `-BarkingUITestDeviceChanged`: every contact changed device two days
+///   ago (`deviceChanges`), so a conversation shows its changed-device line.
+///
+/// - `-BarkingUITestInvite tooLarge|tooSoon|failed`: every invitation fails
+///   as the core says it for a card too large, for one sent less than 24 h
+///   ago (retry in 5 h), or for a storage error, so the add's notices can
+///   be seen.
+///
+/// - `-BarkingUITestInviteStatus unanswered|accepted`: every contact's
+///   invitation reads as unanswered (sent 8 days ago, so a resend is open)
+///   or accepted an hour ago (`inviteStatus`).
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -121,11 +144,45 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private var fakeRemoved: Set<String> = []
     /// `-BarkingUITestSlowSync`.
     private let slowSync: Bool
+    /// `-BarkingUITestRequests`: the faked requests, nil without the flag.
+    private var fakeRequests: [ContactRequestInfo]?
+    /// The requests accepted so far, as contacts.
+    private var fakeAccepted: [Contact] = []
+    /// The faked requesters blocked so far (`blockedFingerprints`).
+    private var fakeBlockedRequesters: [String] = []
+    static let aliceRequest = "a11ce0000000000000000000000000000000000000000000000000000000a11c"
+    static let bobRequest = "b0b0000000000000000000000000000000000000000000000000000000000b0b"
+    static let longRequest = "c0ffee0000000000000000000000000000000000000000000000000000c0ffee"
+    /// The longest declared name a card carries: 64 characters.
+    static let longName = "Maximilienne-Alexandrine de La Tour d’Auvergne-Castelnau-Montmir"
+
+    static func requestFixture(now: UInt64 = UInt64(Date().timeIntervalSince1970)) -> [ContactRequestInfo] {
+        [ContactRequestInfo(fingerprint: aliceRequest, displayName: "Alice", firstSeen: now - 2 * 3_600,
+                            lastSeen: now - 2 * 3_600, inviteCount: 1, pendingMessages: 2, hidden: false,
+                            unseen: true, nameClash: false),
+         ContactRequestInfo(fingerprint: bobRequest, displayName: "Bob", firstSeen: now - 3 * 86_400,
+                            lastSeen: now - 5 * 3_600, inviteCount: 3, pendingMessages: 0, hidden: true,
+                            unseen: true, nameClash: true),
+         ContactRequestInfo(fingerprint: longRequest, displayName: longName, firstSeen: now - 26 * 3_600,
+                            lastSeen: now - 26 * 3_600, inviteCount: 1, pendingMessages: 0, hidden: false,
+                            unseen: false, nameClash: false)]
+    }
     static let slowSyncSecs: TimeInterval = 6
+    /// `-BarkingUITestDeviceChanged`.
+    private let deviceChanged: Bool
+    /// `-BarkingUITestInvite`: what every `invite` throws, nil to send.
+    private let inviteFailure: BarkingError?
+    /// `-BarkingUITestInviteStatus`: every contact's invitation state, nil for the core's.
+    private let inviteStatusOverride: InviteStatus?
 
     init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
-         ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false) {
+         ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false, requests: Bool = false,
+         deviceChanged: Bool = false, inviteFailure: BarkingError? = nil, inviteStatus: InviteStatus? = nil) {
         self.device = device
+        self.deviceChanged = deviceChanged
+        self.inviteFailure = inviteFailure
+        self.inviteStatusOverride = inviteStatus
+        self.fakeRequests = requests ? Self.requestFixture() : nil
         self.slowSync = slowSync
         self.fakeNodes = nodes
         self.ephemeral = ephemeral
@@ -164,9 +221,34 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         let ephemeral = arguments.contains("-BarkingUITestEphemeral")
         let nodes = arguments.contains("-BarkingUITestNodes")
         let slowSync = arguments.contains("-BarkingUITestSlowSync")
-        guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync else { return device }
+        let requests = arguments.contains("-BarkingUITestRequests")
+        let deviceChanged = arguments.contains("-BarkingUITestDeviceChanged")
+        let inviteFailure = arguments.firstIndex(of: "-BarkingUITestInvite").flatMap { i -> BarkingError? in
+            guard i + 1 < arguments.count else { return nil }
+            return switch arguments[i + 1] {
+            case "tooLarge": .InvalidInput(detail: "data too large")
+            case "tooSoon": .TooSoon(retryAt: UInt64(Date().timeIntervalSince1970) + 5 * 3_600 - 60)
+            case "failed": .Storage(detail: "disk")
+            default: nil
+            }
+        }
+        let inviteStatus = arguments.firstIndex(of: "-BarkingUITestInviteStatus").flatMap { i -> InviteStatus? in
+            guard i + 1 < arguments.count else { return nil }
+            let now = UInt64(Date().timeIntervalSince1970)
+            return switch arguments[i + 1] {
+            case "unanswered": .unanswered(at: now - 8 * 86_400)
+            case "accepted": .accepted(at: now - 3_600)
+            default: nil
+            }
+        }
+        guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync || requests
+            || deviceChanged || inviteFailure != nil || inviteStatus != nil else {
+            return device
+        }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
-                                reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync)
+                                reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync,
+                                requests: requests, deviceChanged: deviceChanged, inviteFailure: inviteFailure,
+                                inviteStatus: inviteStatus)
     }
 
     // MARK: The relays (`-BarkingUITestNodes`)
@@ -500,7 +582,9 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func fingerprint() throws -> String { try device.fingerprint() }
     func displayName() throws -> String { try device.displayName() }
     func setDisplayName(name: String) throws { try device.setDisplayName(name: name) }
-    func contacts() throws -> [Contact] { try device.contacts() }
+    func contacts() throws -> [Contact] {
+        try device.contacts() + lock.withLock { fakeAccepted }
+    }
     func messageRoute(messageId: Int64) throws -> [RouteStepInfo] { try device.messageRoute(messageId: messageId) }
     func sendText(contact: String, text: String, replyTo: Int64?, ttlSecs: UInt32?) throws {
         try device.sendText(contact: contact, text: text, replyTo: replyTo, ttlSecs: ttlSecs)
@@ -532,8 +616,18 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func markVerified(contact: String) throws { try device.markVerified(contact: contact) }
     func unmarkVerified(contact: String) throws { try device.unmarkVerified(contact: contact) }
     func blockContact(contact: String) throws { try device.blockContact(contact: contact) }
-    func unblockContact(contact: String) throws { try device.unblockContact(contact: contact) }
+    func unblockContact(contact: String) throws {
+        let faked = lock.withLock { () -> Bool in
+            guard let i = fakeBlockedRequesters.firstIndex(of: contact) else { return false }
+            fakeBlockedRequesters.remove(at: i)
+            return true
+        }
+        if !faked { try device.unblockContact(contact: contact) }
+    }
     func blockedContacts() throws -> [Contact] { try device.blockedContacts() }
+    func blockedFingerprints() throws -> [String] {
+        try (lock.withLock { fakeBlockedRequesters } + device.blockedFingerprints()).sorted()
+    }
     func safetyNumber(contact: String) throws -> [String] { try device.safetyNumber(contact: contact) }
     func unreadCounts() throws -> [UnreadCount] { try device.unreadCounts() }
     func chatSummaries() throws -> [ChatSummary] { try device.chatSummaries() }
@@ -594,6 +688,77 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func notificationPrefs() throws -> NotificationPrefs { try device.notificationPrefs() }
     func setInstant(on: Bool) throws { try device.setInstant(on: on) }
     func setPreview(preview: PushPreview) throws { try device.setPreview(preview: preview) }
+    func setInviteNotifications(on: Bool) throws { try device.setInviteNotifications(on: on) }
+    func requests() throws -> [ContactRequestInfo] {
+        if let fake = lock.withLock({ fakeRequests }) { return fake }
+        return try device.requests()
+    }
+    func requestSafetyNumber(fingerprint: String) throws -> [String] {
+        if lock.withLock({ fakeRequests }) != nil { return ["12345", "67890", "13579", "24680", "11223", "44556",
+                                                             "77889", "90817", "26354", "48596", "10293", "84756"] }
+        return try device.requestSafetyNumber(fingerprint: fingerprint)
+    }
+    func acceptRequest(fingerprint: String, alias: String?) throws -> String {
+        guard let request = try removeFakeRequest(fingerprint) else {
+            return try device.acceptRequest(fingerprint: fingerprint, alias: alias)
+        }
+        lock.withLock {
+            fakeAccepted.append(Contact(fingerprint: fingerprint, alias: alias, displayName: request.displayName,
+                                        verified: false))
+        }
+        return fingerprint
+    }
+    func refuseRequest(fingerprint: String) throws {
+        if try removeFakeRequest(fingerprint) == nil { try device.refuseRequest(fingerprint: fingerprint) }
+    }
+    func blockRequest(fingerprint: String) throws {
+        guard try removeFakeRequest(fingerprint) != nil else {
+            return try device.blockRequest(fingerprint: fingerprint)
+        }
+        lock.withLock { fakeBlockedRequesters.append(fingerprint) }
+    }
+    /// The faked request taken out of the list; nil without the flag, and
+    /// `NotFound`, as the core says it, for one no longer there.
+    private func removeFakeRequest(_ fingerprint: String) throws -> ContactRequestInfo? {
+        try lock.withLock { () throws -> ContactRequestInfo? in
+            guard var fake = fakeRequests else { return nil }
+            guard let i = fake.firstIndex(where: { $0.fingerprint == fingerprint }) else { throw BarkingError.NotFound }
+            let request = fake.remove(at: i)
+            fakeRequests = fake
+            return request
+        }
+    }
+    func setRequestHidden(fingerprint: String, hidden: Bool) throws {
+        let faked = lock.withLock { () -> Bool in
+            guard var fake = fakeRequests else { return false }
+            for i in fake.indices where fake[i].fingerprint == fingerprint { fake[i].hidden = hidden }
+            fakeRequests = fake
+            return true
+        }
+        if !faked { try device.setRequestHidden(fingerprint: fingerprint, hidden: hidden) }
+    }
+    func markRequestsSeen() throws {
+        let faked = lock.withLock { () -> Bool in
+            guard var fake = fakeRequests else { return false }
+            for i in fake.indices { fake[i].unseen = false }
+            fakeRequests = fake
+            return true
+        }
+        if !faked { try device.markRequestsSeen() }
+    }
+    func invite(contact: String) throws {
+        if let inviteFailure { throw inviteFailure }
+        try device.invite(contact: contact)
+    }
+    func inviteStatus(contact: String) throws -> InviteStatus {
+        if let inviteStatusOverride { return inviteStatusOverride }
+        return try device.inviteStatus(contact: contact)
+    }
+    func deviceChanges(since: UInt64) throws -> [DeviceChange] {
+        guard deviceChanged else { return try device.deviceChanges(since: since) }
+        let at = UInt64(Date().timeIntervalSince1970) - 2 * 86_400
+        return try contacts().map { DeviceChange(contact: $0.fingerprint, at: at) }
+    }
     func noteWake(atSecs: UInt64) throws { try device.noteWake(atSecs: atSecs) }
     func wakeStatus() throws -> WakeStatus { try device.wakeStatus() }
     func myDevices() throws -> [MyDeviceInfo] { try device.myDevices() }

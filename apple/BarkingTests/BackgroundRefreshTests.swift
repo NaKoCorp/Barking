@@ -79,6 +79,24 @@ final class BackgroundRefreshTests: XCTestCase {
         XCTAssertEqual(posted.first?.content.body, "Reacted 👍 to “hi”")
     }
 
+    /// With instant push off, the refresh is the only way an invitation is
+    /// told: one that came alone posts its notification, the core having
+    /// spent its once-a-day notify on it.
+    func testInvitationAlonePostsANotification() async {
+        let (core, d) = service([])
+        d.summary.itemsReceived = 1
+        d.summary.newRequests = [NewRequest(contact: "fp-alice", name: "Alice", resent: false)]
+        d.summary.requestContacts = ["fp-alice"]
+        let (ok, posted) = await run(core)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(posted.count, 1)
+        XCTAssertEqual(posted.first?.content.title, "")
+        XCTAssertEqual(posted.first?.content.body, "New invitation from “Alice”")
+        // Locked: the name stays hidden.
+        let (_, hidden) = await run(core, locked: true)
+        XCTAssertEqual(hidden.first?.content.body, "New invitation")
+    }
+
     func testRunNoNewMessagesPostsNothing() async {
         let (core, _) = service([])
         let (ok, posted) = await run(core)

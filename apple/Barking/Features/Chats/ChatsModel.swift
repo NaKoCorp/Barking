@@ -31,17 +31,28 @@ struct ChatRow: Identifiable, Equatable {
 final class ChatsModel {
     private let core: CoreService
     private(set) var rows: [ChatRow] = []
+    /// Every pending contact request, hidden ones included.
+    private(set) var requests: [ContactRequestInfo] = []
     private(set) var offline = false
     var query = ""
 
     init(core: CoreService) { self.core = core }
 
-    /// Rows filtered on name and alias, ignoring case and accents.
-    var visibleRows: [ChatRow] {
+    /// The search, shared by chats and requests: `name` contains the query,
+    /// ignoring case and accents; an empty query matches everything.
+    private func matches(_ name: String) -> Bool {
         let q = query.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return rows }
-        return rows.filter { $0.name.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+        return q.isEmpty || name.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
     }
+
+    /// Rows filtered on name and alias, ignoring case and accents.
+    var visibleRows: [ChatRow] { rows.filter { matches($0.name) } }
+
+    /// The requests that belong in the list: not hidden.
+    private var listedRequests: [ContactRequestInfo] { requests.filter { !$0.hidden } }
+
+    /// Listed requests filtered on their declared name, as `visibleRows`.
+    var visibleRequests: [ContactRequestInfo] { listedRequests.filter { matches($0.displayName) } }
 
     /// The contact is still there (a notification may outlive it): rows are
     /// reloaded first.
@@ -50,8 +61,63 @@ final class ChatsModel {
         return rows.contains { $0.contact == contact }
     }
 
+    /// One line of the list: a chat, or a contact request that is not hidden.
+    enum ListItem: Identifiable {
+        case chat(ChatRow), request(ContactRequestInfo)
+
+        var id: String {
+            switch self {
+            case .chat(let row): "chat:\(row.contact)"
+            case .request(let r): "request:\(r.fingerprint)"
+            }
+        }
+
+        fileprivate var date: Date? {
+            switch self {
+            case .chat(let row): row.lastAt
+            case .request(let r): Date(timeIntervalSince1970: TimeInterval(r.lastSeen))
+            }
+        }
+    }
+
+    /// The chats and the requests not hidden, both searched,
+    /// newest first: a chat by its last message, a request by its last
+    /// invitation. Chats without a message stay last, in their order.
+    var items: [ListItem] {
+        let dated = visibleRows.filter { $0.lastAt != nil }.map(ListItem.chat)
+            + visibleRequests.map(ListItem.request)
+        let undated = visibleRows.filter { $0.lastAt == nil }.map(ListItem.chat)
+        return dated.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) } + undated
+    }
+
+    /// Hidden requests: the Invitations entry shows only when there is one.
+    var hiddenCount: Int { requests.count { $0.hidden } }
+    /// Hidden requests not seen yet: the entry's "new" dot.
+    var hiddenUnseen: Int { requests.count { $0.hidden && $0.unseen } }
+
+    /// Nothing to show at all: no chat, no request in the list. Not the
+    /// search's result, as with chats: a search without a match never
+    /// shows "No chats yet".
+    var isEmpty: Bool { rows.isEmpty && listedRequests.isEmpty }
+
+    /// The changes after which the list reads the core again. Request
+    /// changes are published as `.contacts`.
+    static func reloads(on change: CoreChange) -> Bool {
+        switch change {
+        case .contacts, .network, .messages, .delivery, .expired: true
+        default: false
+        }
+    }
+
+    func hide(_ fp: String) async {
+        try? await core.setRequestHidden(fp, hidden: true)
+        await reload()
+    }
+
     func reload() async {
         offline = await core.lastSync.map { !$0.networkUp } ?? false
+        // A failed read keeps the last list rather than blanking it.
+        if let requests = try? await core.requests() { self.requests = requests }
         guard let summaries = try? await core.chatSummaries() else { return }
         var out: [ChatRow] = []
         for s in summaries {
@@ -80,6 +146,9 @@ final class ChatsModel {
 @MainActor @Observable
 final class AddContactModel {
     enum AddError: Equatable { case notACard, ownCard, blocked, failed }
+    /// What came of the invitation sent with the add (design decision 5).
+    /// `failed`: any other error; the add stands and the page says so.
+    enum InviteResult: Equatable { case sent, tooLarge, tooSoon, failed }
 
     private let core: CoreService
     private(set) var preview: CardPreview?
@@ -90,6 +159,11 @@ final class AddContactModel {
     private(set) var isAdding = false
     /// The contact just added: the sheet then shows its safety code.
     private(set) var added: String?
+    /// Send an invitation with the add. Not remembered: on for every add.
+    var sendsInvitation = true
+    /// What came of the invitation sent with the last add; nil when none
+    /// was asked for.
+    private(set) var inviteResult: InviteResult?
 
     init(core: CoreService) { self.core = core }
 
@@ -144,13 +218,20 @@ final class AddContactModel {
         guard !isAdding, preview != nil else { return false }
         isAdding = true
         defer { isAdding = false }
+        let invites = sendsInvitation
+        inviteResult = nil
         let a = alias.trimmingCharacters(in: .whitespaces)
         do {
+            var fp: String?
             if let bytes {
-                added = try await core.addContact(card: bytes, alias: a.isEmpty ? nil : a)
+                fp = try await core.addContact(card: bytes, alias: a.isEmpty ? nil : a)
             } else if let text {
-                added = try await core.addContact(text: text, alias: a.isEmpty ? nil : a)
+                fp = try await core.addContact(text: text, alias: a.isEmpty ? nil : a)
             }
+            // The invitation is settled before `added` is set: the safety
+            // code then opens with its notice, not one that pops in.
+            if invites, let fp { inviteResult = await invite(fp) }
+            added = fp
             preview = nil
             return true
         } catch BarkingError.ContactBlocked {
@@ -162,5 +243,29 @@ final class AddContactModel {
         }
     }
 
-    func reset() { preview = nil; error = nil; bytes = nil; text = nil; added = nil }
+    /// Never fails the add: an invitation that did not go is said on the
+    /// page that follows, never read as sent.
+    private func invite(_ fp: String) async -> InviteResult {
+        do {
+            try await core.invite(fp)
+            return .sent
+        } catch BarkingError.TooSoon {
+            return .tooSoon
+        } catch let e as BarkingError where e.isCardTooLarge {
+            return .tooLarge
+        } catch {
+            return .failed
+        }
+    }
+
+    func reset() { preview = nil; error = nil; bytes = nil; text = nil; added = nil; inviteResult = nil }
+}
+
+extension BarkingError {
+    /// The card does not fit in an invitation: `CoreError::TooLarge`, as the
+    /// FFI words it. A retry never helps; showing the code does.
+    var isCardTooLarge: Bool {
+        if case .InvalidInput(let detail) = self { return detail == "data too large" }
+        return false
+    }
 }

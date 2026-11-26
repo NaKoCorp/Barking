@@ -167,6 +167,139 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(fr["Blocked contacts"] as? String, "Contacts bloqués")
     }
 
+    /// Contact requests in the chats and the Invitations screen (Copie table).
+    func testInvitationsListStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = ["Invitation": "Invitation", "Invitations": "Invitations", "Hidden (invitations)": "Masquées",
+                        "Hide": "Masquer", "Show": "Afficher", "Invitation received %@": "Invitation reçue %@",
+                        "Invitation resent · %@": "Invitation renvoyée · %@", "No invitations": "Aucune invitation"]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        // The password field keeps its own "Hidden".
+        XCTAssertEqual(fr["Hidden"] as? String, "Masqué")
+        XCTAssertEqual(table("en")?["Hidden (invitations)"] as? String, "Hidden")
+        for lang in ["en", "fr"] {
+            let d = try XCTUnwrap(table(lang, "Localizable", "stringsdict"), lang)
+            for key in ["%lld invitations", "%lld messages waiting", "%lld new"] {
+                let rule = (d[key] as? NSDictionary)?["n"] as? NSDictionary
+                XCTAssertNotNil(rule?["one"], "\(lang) \(key)")
+                XCTAssertNotNil(rule?["other"], "\(lang) \(key)")
+            }
+        }
+    }
+
+    /// The request page (Copie table), with the keys it reuses.
+    func testRequestPageStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = [
+            "Show in the list": "Afficher dans la liste",
+            "Introduces themselves as %@. This name is not verified.": "Se présente comme %@. Ce nom n’est pas vérifié.",
+            "Same name as one of your contacts": "Même nom qu’un de tes contacts",
+            "Safety code": "Code de sécurité",
+            "Compare it aloud with the person before you accept.":
+                "Compare-le de vive voix avec la personne avant d’accepter.",
+            "History": "Historique", "Alias (optional)": "Alias (facultatif)", "Accept": "Accepter",
+            "Refuse": "Refuser", "Block": "Bloquer", "Hide": "Masquer", "Invitation": "Invitation",
+            "Nothing is sent. A new invitation brings it back.":
+                "Rien n’est envoyé. Une nouvelle invitation la fera revenir.",
+            "Their invitations and messages are dropped. They are not told.":
+                "Ses invitations et ses messages sont ignorés. Cette personne n’est pas prévenue.",
+            "This alias is already used": "Cet alias est déjà pris",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        let waiting = "%lld messages waiting. You can read them once you accept."
+        for lang in ["en", "fr"] {
+            let d = try XCTUnwrap(table(lang, "Localizable", "stringsdict"), lang)
+            let rule = (d[waiting] as? NSDictionary)?["n"] as? NSDictionary
+            XCTAssertNotNil(rule?["one"], "\(lang) \(waiting)")
+            XCTAssertNotNil(rule?["other"], "\(lang) \(waiting)")
+        }
+        let french = try XCTUnwrap(Bundle.main.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+        XCTAssertEqual(String(localized: "\(2) messages waiting. You can read them once you accept.", bundle: french),
+                       "2 messages en attente. Tu pourras les lire après avoir accepté.")
+    }
+
+    /// The invitation sent when adding a contact (Copie table, design decision 5).
+    func testAddInvitationStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = [
+            "Send an invitation": "Envoyer une invitation",
+            "Your card goes, encrypted, to their devices. Without it, they see your messages only after adding you.":
+                "Ta carte part chiffrée vers ses appareils. Sans invitation, cette personne ne verra tes messages qu’après t’avoir ajouté.",
+            "Your card is too large for an invitation": "Ta carte est trop grande pour une invitation",
+            "Show them your code instead.": "Montre-lui ton code à la place.",
+            "Show my code": "Montrer mon code",
+            "Opens your code.": "Ouvre ton code.",
+            "Invitation already sent less than 24 h ago. You can resend it from their page.":
+                "Invitation déjà envoyée il y a moins de 24 h. Tu pourras la renvoyer depuis sa fiche.",
+            "The invitation was not sent": "L’invitation n’est pas partie",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+    }
+
+    /// The invitation on the contact page (Copie table, design decision 6).
+    func testContactInvitationStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = [
+            "Invitation": "Invitation",
+            "Invitation sent · %@": "Invitation envoyée · %@",
+            "No answer · sent %@": "Sans réponse · envoyée %@",
+            "Accepted": "Acceptée",
+            "Resend the invitation": "Renvoyer l’invitation",
+            "Not sent. Try again in a moment.": "Non envoyé. Réessayez dans un instant.",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        for lang in ["en", "fr"] {
+            let d = try XCTUnwrap(table(lang, "Localizable", "stringsdict"), lang)
+            let rule = (d["Possible in %lld h"] as? NSDictionary)?["n"] as? NSDictionary
+            XCTAssertNotNil(rule?["one"], lang)
+            XCTAssertNotNil(rule?["other"], lang)
+        }
+        let french = try XCTUnwrap(Bundle.main.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+        XCTAssertEqual(String(localized: "Possible in \(5) h", bundle: french), "Possible dans 5 h")
+    }
+
+    /// The invitations setting and the changed-device line (Copie table,
+    /// design decisions 7 and 8).
+    func testInvitesSettingAndDeviceChangeStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = [
+            "Notify invitations": "Notifier les invitations",
+            "Off, an invitation still arrives in your list.": "Coupé, une invitation arrive quand même dans ta liste.",
+            "%@ changed device · %@": "%1$@ a changé d’appareil · %2$@",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+        let french = try XCTUnwrap(Bundle.main.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+        let name = "Léa", ago = "il y a 2 j"
+        XCTAssertEqual(String(localized: "\(name) changed device · \(ago)", bundle: french),
+                       "Léa a changé d’appareil · il y a 2 j")
+    }
+
+    /// The invitation notification texts (BarkingKit, read by the extension)
+    /// exist in English and French, with their one placeholder.
+    func testInvitationNotificationStrings() throws {
+        let kit = Bundle(for: NotificationContent.Marker.self)
+        for lang in ["en", "fr"] {
+            let path = try XCTUnwrap(kit.path(forResource: "Localizable", ofType: "strings", inDirectory: nil,
+                                              forLocalization: lang))
+            let t = try XCTUnwrap(NSDictionary(contentsOfFile: path))
+            for key in ["INVITE_NEW", "INVITE_RESENT", "INVITE_GENERIC"] {
+                XCTAssertNotNil(t[key], "missing \(lang) for \(key)")
+            }
+            XCTAssertTrue((t["INVITE_NEW"] as? String ?? "").contains("%@"))
+            XCTAssertTrue((t["INVITE_RESENT"] as? String ?? "").contains("%@"))
+        }
+    }
+
     /// UI review B4: messaging and status strings land in both languages.
     func testMessagingStringsInFrench() throws {
         let fr = try XCTUnwrap(table("fr"))
@@ -415,8 +548,10 @@ final class LocalizationTests: XCTestCase {
     /// §5.3: no text states the old 24 hour lifetime; the days come through
     /// the stringsdict, in both languages.
     func testNoStringStatesTheOldLifetime() throws {
+        // The 24 hours between two invitations is another delay, not the lifetime.
+        let invitationInterval: Set = ["Invitation already sent less than 24 h ago. You can resend it from their page."]
         for lang in ["en", "fr"] {
-            for (key, value) in table(lang) ?? [:] {
+            for (key, value) in table(lang) ?? [:] where !invitationInterval.contains(key as? String ?? "") {
                 let text = "\(key) \(value)"
                 XCTAssertFalse(text.contains("24 hours") || text.contains("24 h"), "\(lang): \(key)")
             }

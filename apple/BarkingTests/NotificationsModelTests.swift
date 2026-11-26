@@ -113,6 +113,35 @@ final class NotificationsModelTests: XCTestCase {
         XCTAssertTrue(m.saveFailed)
     }
 
+    func testInvitesToggleWrites() async {
+        let d = FakeDevice()
+        let m = model(d, push(.authorized))
+        await m.load()
+        XCTAssertTrue(m.invites, "on by default")
+        await m.setInvites(false)
+        XCTAssertEqual(d.inviteNotifications, [false])
+        XCTAssertFalse(m.invites)
+        XCTAssertFalse(m.saveFailed)
+        XCTAssertNil(m.lastSync, "the core reads the setting when an invitation arrives: no sync")
+        d.prefs.invites = true
+        await m.load()
+        XCTAssertTrue(m.invites, "read from the core")
+    }
+
+    func testInvitesToggleRevertsOnFailure() async {
+        let d = FakeDevice()
+        let m = model(d, push(.authorized))
+        await m.load()
+        d.setInviteNotificationsError = BarkingError.Locked
+        await m.setInvites(false)
+        XCTAssertTrue(m.invites, "the stored value shows, not the one that failed")
+        XCTAssertTrue(m.saveFailed)
+        XCTAssertEqual(d.inviteNotifications, [])
+        d.setInviteNotificationsError = nil
+        await m.setInvites(false)
+        XCTAssertFalse(m.saveFailed, "a later write that works clears the error")
+    }
+
     func testFailedWriteKeepsPreviousValueWhenTheReadFailsToo() async {
         let d = FakeDevice()
         let m = model(d, push(.authorized))

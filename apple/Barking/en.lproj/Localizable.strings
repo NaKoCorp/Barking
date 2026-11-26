@@ -6,3 +6,5 @@
 /* Reliability words of a node; the bare "fair" and "weak" were password strengths once and must stay unused. */
 "fair (reliability)" = "fair";
 "weak (reliability)" = "weak";
+/* The Invitations screen's section of hidden requests; the bare "Hidden" is a password field's state. */
+"Hidden (invitations)" = "Hidden";

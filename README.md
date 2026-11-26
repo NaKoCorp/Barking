@@ -63,7 +63,7 @@ The CLI asks for a passphrase and stores its data in `~/.barking` (use `--home <
 **2. Add a contact and a relay, then talk**
 
 ```sh
-./target/release/barking add '<contact-card>' --alias bob
+./target/release/barking add '<contact-card>' --alias bob --out ./packets
 ./target/release/barking node add <IP:port> <node-id>
 ./target/release/barking send bob 'Hello!' --out ./packets
 ./target/release/barking sync

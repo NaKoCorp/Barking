@@ -41,6 +41,28 @@ final class ConversationModelTests: XCTestCase {
         XCTAssertEqual(m.items.map(\.id), [5], "the core's row replaces the shown one")
     }
 
+    /// The core writes the row and publishes `.messages` before the send
+    /// returns: the reload then must not show the row and the local bubble
+    /// both. An older message with the same text does not count.
+    func testReloadDuringSendShowsTheCoreRowOnce() async throws {
+        let d = FakeDevice()
+        d.messageList = ["b": [Message(id: 3, outgoing: true, body: "hello", at: 1, delivery: .state(.received))]]
+        d.syncDelay = 0.5
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "hello"
+        let send = Task { await m.send() }
+        for _ in 0..<50 where m.items.count < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        await m.handle(.messages(contact: "b"))
+        XCTAssertEqual(m.items.count, 2, "the old message, then the local bubble")
+        XCTAssertEqual(m.items.last?.local, true)
+        d.messageList["b"]?.append(Message(id: 5, outgoing: true, body: "hello", at: 2, delivery: .state(.pending)))
+        await m.handle(.messages(contact: "b"))
+        XCTAssertEqual(m.items.map(\.id), [3, 5], "the core's row, not a second bubble")
+        await send.value
+        XCTAssertEqual(m.items.map(\.id), [3, 5])
+    }
+
     func testFailedSendTakesItsBubbleBack() async {
         let d = FakeDevice()
         d.sendError = BarkingError.Locked
@@ -519,6 +541,53 @@ final class ConversationModelTests: XCTestCase {
         await m.onAppear()
         XCTAssertEqual(d.reads.last?.0, "b")
         XCTAssertEqual(d.reads.last?.1, 5)
+    }
+
+    /// The changed-device line (design decision 7): the latest change of
+    /// this contact, for 7 days.
+    func testDeviceChangeShownWithinWeek() async throws {
+        let now = Date(timeIntervalSince1970: 100 * 86_400)
+        let day: UInt64 = 86_400
+        let today = UInt64(now.timeIntervalSince1970)
+        func shown(_ changes: [DeviceChange]) async -> ConversationModel {
+            let d = FakeDevice()
+            d.deviceChangeList = changes
+            let m = make(d)
+            m.now = { now }
+            await m.onAppear()
+            return m
+        }
+        var m = await shown([DeviceChange(contact: "b", at: today - 2 * day)])
+        XCTAssertEqual(m.deviceChangedAt, Date(timeIntervalSince1970: TimeInterval(today - 2 * day)))
+        m = await shown([DeviceChange(contact: "b", at: today - 8 * day)])
+        XCTAssertNil(m.deviceChangedAt, "older than 7 days")
+        m = await shown([DeviceChange(contact: "c", at: today - 2 * day)])
+        XCTAssertNil(m.deviceChangedAt, "another contact's change")
+        m = await shown([DeviceChange(contact: "b", at: today - 3 * day), DeviceChange(contact: "b", at: today - day),
+                         DeviceChange(contact: "b", at: today - 2 * day)])
+        XCTAssertEqual(m.deviceChangedAt, Date(timeIntervalSince1970: TimeInterval(today - day)), "the latest only")
+
+        let french = try XCTUnwrap(Bundle.main.path(forResource: "fr", ofType: "lproj").flatMap(Bundle.init(path:)))
+        let fr = Locale(identifier: "fr")
+        let ago = RequestHistory.relative(try XCTUnwrap(m.deviceChangedAt), now: now, locale: fr)
+        XCTAssertEqual(m.deviceChangedLine(bundle: french, locale: fr), "bob a changé d’appareil · \(ago)",
+                       "the alias, else the name")
+        // Built once, at load and when the language changes, for the view.
+        m.language = (french, fr)
+        XCTAssertEqual(m.deviceChangedText, "bob a changé d’appareil · \(ago)")
+        // A rename (the alias field is one tap away) reaches the line.
+        let d = FakeDevice()
+        d.deviceChangeList = [DeviceChange(contact: "b", at: today - 2 * day)]
+        m = make(d)
+        m.now = { now }
+        await m.onAppear()
+        d.contactList = [Contact(fingerprint: "b", alias: "Bobby", displayName: "Bob", verified: false)]
+        await m.handle(.contacts)
+        XCTAssertTrue(m.deviceChangedText?.hasPrefix("Bobby changed device · ") == true,
+                      String(describing: m.deviceChangedText))
+        m = await shown([])
+        XCTAssertNil(m.deviceChangedLine())
+        XCTAssertNil(m.deviceChangedText)
     }
 
     func testKeyChangeBanner() async {
