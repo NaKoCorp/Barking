@@ -20,9 +20,9 @@
 "log.node_blocked" = "Le nœud %1$@ est bloqué : Barking ne lui parle plus.";
 "log.node_unblocked" = "Le nœud %1$@ est débloqué : Barking peut de nouveau s’en servir.";
 "log.seal_skipped" = "Rien n’a été chiffré pour l’appareil %2$@ de %1$@ : ses clés publiées sont inutilisables. Ses autres appareils reçoivent bien le paquet.";
-"log.invite_sent" = "Invitation envoyée à %1$@ : votre carte de contact, chiffrée pour chacun de ses appareils qui n’a pas encore répondu.";
-"log.contact_request_received" = "Invitation de %1$@ : elle reste en attente jusqu’à ce que vous l’acceptiez, la refusiez ou bloquiez son expéditeur. Rien ne lui a été renvoyé, pas même un accusé.";
-"log.contact_request_resolved" = "Invitation de %1$@ traitée : %2$@.";
+"log.invite_sent" = "Invitation envoyée à %1$@ : votre carte de contact, chiffrée pour chacun de ses appareils qui n’a pas encore répondu.";
+"log.contact_request_received" = "Invitation de %1$@ : elle reste en attente jusqu’à ce que vous l’acceptiez, la refusiez ou bloquiez son expéditeur. Rien ne lui a été renvoyé, pas même un accusé.";
+"log.contact_request_resolved" = "Invitation de %1$@ traitée : %2$@.";
 "log.admin_transfer_started" = "La clé racine a été envoyée, chiffrée, à votre appareil %1$@. Cet appareil la garde jusqu’à sa confirmation, puis l’efface.";
 "log.admin_transferred" = "Votre appareil %1$@ est maintenant l’administrateur. Cet appareil a effacé sa copie de la clé racine.";
 "log.admin_received" = "Cet appareil est maintenant l’administrateur : il a reçu la clé racine d’un autre de vos appareils.";
