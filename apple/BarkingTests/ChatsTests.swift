@@ -107,6 +107,72 @@ final class AddContactModelTests: XCTestCase {
         XCTAssertEqual(m.added, try me.contacts().first?.fingerprint)
         XCTAssertNotNil(m.added)
     }
+
+    // MARK: Invitation on add (design decision 5)
+
+    /// A model on a fake core, with Bob's real card previewed (`inspectCard`
+    /// reads real bytes; the fake adds it as "fp-new").
+    private func previewing(_ d: FakeDevice) async throws -> AddContactModel {
+        let m = AddContactModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.scanned(try tempDevice("Bob").contactCardBytes())
+        XCTAssertNotNil(m.preview)
+        return m
+    }
+
+    func testAddSendsInvitationByDefault() async throws {
+        let d = FakeDevice()
+        let m = try await previewing(d)
+        XCTAssertTrue(m.sendsInvitation)
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(d.invited, ["fp-new"])
+        XCTAssertEqual(m.inviteResult, .sent)
+    }
+
+    func testAddWithoutInvitation() async throws {
+        let d = FakeDevice()
+        let m = try await previewing(d)
+        m.sendsInvitation = false
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(m.added, "fp-new")
+        XCTAssertEqual(d.invited, [])
+        XCTAssertNil(m.inviteResult)
+    }
+
+    func testInviteTooSoonKeepsAdd() async throws {
+        let d = FakeDevice()
+        d.inviteError = .TooSoon(retryAt: 1_000)
+        let m = try await previewing(d)
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(m.added, "fp-new")
+        XCTAssertEqual(m.inviteResult, .tooSoon)
+    }
+
+    /// `CoreError::TooLarge` reaches Swift as `InvalidInput("data too large")`.
+    func testInviteTooLarge() async throws {
+        let d = FakeDevice()
+        d.inviteError = .InvalidInput(detail: "data too large")
+        let m = try await previewing(d)
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(m.added, "fp-new")
+        XCTAssertEqual(m.inviteResult, .tooLarge)
+    }
+
+    /// Any other failure says nothing: the add stands, and the invitation can
+    /// be sent again from the contact's page.
+    func testInviteOtherErrorKeepsAddSilently() async throws {
+        let d = FakeDevice()
+        d.inviteError = .InvalidInput(detail: "malformed")
+        let m = try await previewing(d)
+        let ok = await m.add(alias: "")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(m.added, "fp-new")
+        XCTAssertNil(m.inviteResult)
+        XCTAssertNil(m.error)
+    }
 }
 
 @MainActor

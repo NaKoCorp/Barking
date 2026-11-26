@@ -146,6 +146,8 @@ final class ChatsModel {
 @MainActor @Observable
 final class AddContactModel {
     enum AddError: Equatable { case notACard, ownCard, blocked, failed }
+    /// What came of the invitation sent with the add (design decision 5).
+    enum InviteResult: Equatable { case sent, tooLarge, tooSoon }
 
     private let core: CoreService
     private(set) var preview: CardPreview?
@@ -156,6 +158,11 @@ final class AddContactModel {
     private(set) var isAdding = false
     /// The contact just added: the sheet then shows its safety code.
     private(set) var added: String?
+    /// Send an invitation with the add. Not remembered: on for every add.
+    var sendsInvitation = true
+    /// The invitation sent with the last add; nil when none was sent, or
+    /// when it failed in a way the contact's page will offer to retry.
+    private(set) var inviteResult: InviteResult?
 
     init(core: CoreService) { self.core = core }
 
@@ -210,13 +217,20 @@ final class AddContactModel {
         guard !isAdding, preview != nil else { return false }
         isAdding = true
         defer { isAdding = false }
+        let invites = sendsInvitation
+        inviteResult = nil
         let a = alias.trimmingCharacters(in: .whitespaces)
         do {
+            var fp: String?
             if let bytes {
-                added = try await core.addContact(card: bytes, alias: a.isEmpty ? nil : a)
+                fp = try await core.addContact(card: bytes, alias: a.isEmpty ? nil : a)
             } else if let text {
-                added = try await core.addContact(text: text, alias: a.isEmpty ? nil : a)
+                fp = try await core.addContact(text: text, alias: a.isEmpty ? nil : a)
             }
+            // The invitation is settled before `added` is set: the safety
+            // code then opens with its notice, not one that pops in.
+            if invites, let fp { inviteResult = await invite(fp) }
+            added = fp
             preview = nil
             return true
         } catch BarkingError.ContactBlocked {
@@ -228,5 +242,21 @@ final class AddContactModel {
         }
     }
 
-    func reset() { preview = nil; error = nil; bytes = nil; text = nil; added = nil }
+    /// Never fails the add: an invitation that did not go can be resent
+    /// from the contact's page.
+    private func invite(_ fp: String) async -> InviteResult? {
+        do {
+            try await core.invite(fp)
+            return .sent
+        } catch BarkingError.TooSoon {
+            return .tooSoon
+        } catch BarkingError.InvalidInput(let detail) where detail == "data too large" {
+            // `CoreError::TooLarge`, as the FFI words it.
+            return .tooLarge
+        } catch {
+            return nil
+        }
+    }
+
+    func reset() { preview = nil; error = nil; bytes = nil; text = nil; added = nil; inviteResult = nil }
 }

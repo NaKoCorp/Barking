@@ -31,7 +31,7 @@ struct AddContactView: View {
             if let contact = model.added {
                 // Its own dismiss: a match closes the sheet, as it goes back
                 // from a conversation.
-                SafetyCodeView(core: core, contact: contact)
+                SafetyCodeView(core: core, contact: contact, inviteResult: model.inviteResult)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
                             Button("Later", action: onDone).accessibilityIdentifier("addContact.later")
@@ -89,6 +89,26 @@ struct AddContactView: View {
         return Text(text).font(.bBodySmall).foregroundStyle(Color.danger).frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Send an invitation with the add (design decision 5): on by default,
+    /// and on again at every add.
+    private var invitation: some View {
+        VStack(alignment: .leading, spacing: Space.s2) {
+            FormCard {
+                Toggle(isOn: $model.sendsInvitation) {
+                    Text("Send an invitation").font(.bBody.weight(.semibold)).foregroundStyle(Color.fg)
+                }
+                .tint(Color.toggleOn)
+                .disabled(model.isAdding)
+                .padding(.horizontal, FormRowMetrics.inset)
+                .frame(minHeight: FormRowMetrics.minHeight(hasSubtitle: false))
+                .accessibilityIdentifier("add.invite")
+            }
+            Text("Your card goes, encrypted, to their devices. Without it, they see your messages only after adding you.")
+                .font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private func confirmation(_ p: CardPreview) -> some View {
         Group {
             VStack(alignment: .leading, spacing: Space.s3) {
@@ -100,6 +120,7 @@ struct AddContactView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             BarkingTextField("Alias (optional)", text: $alias, identifier: "addContact.alias")
+            invitation
             if let e = model.error { errorText(e) }
         }
         .barkingScreen()

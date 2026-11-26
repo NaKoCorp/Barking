@@ -15,10 +15,14 @@ struct SafetyCodeView: View {
     @State private var confirmBlock = false
     @State private var blockFailed = false
     @State private var showsMismatch = false
+    @State private var showsMyCode = false
+    /// The invitation sent with the add, when shown right after it.
+    private let inviteResult: AddContactModel.InviteResult?
     @Environment(\.dismiss) private var dismiss
 
-    init(core: CoreService, contact: String) {
+    init(core: CoreService, contact: String, inviteResult: AddContactModel.InviteResult? = nil) {
         self.core = core
+        self.inviteResult = inviteResult
         _model = State(initialValue: ContactModel(contact: contact, core: core))
     }
 
@@ -31,6 +35,7 @@ struct SafetyCodeView: View {
                     .font(.bBody).foregroundStyle(Color.fgMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            inviteNotice
             verifySection
             VStack(alignment: .leading, spacing: Space.s2) {
                 SectionLabel("Contact")
@@ -106,6 +111,38 @@ struct SafetyCodeView: View {
             Text("Their messages will no longer reach you and they leave your chats, on all your devices. They are not told. You can unblock them in Settings.")
         }
         .sheet(isPresented: $showsMismatch) { MismatchSheet() }
+        .sheet(isPresented: $showsMyCode) { myCode }
+    }
+
+    /// What came of the invitation sent with the add (design decision 5);
+    /// nothing when it went.
+    @ViewBuilder private var inviteNotice: some View {
+        switch inviteResult {
+        case .tooLarge:
+            Banner(kind: .info, title: "Your card is too large for an invitation",
+                   message: "Show them your code instead.",
+                   action: .init(label: "Show my code", hint: "Opens your code.") { showsMyCode = true })
+                .accessibilityIdentifier("contact.inviteTooLarge")
+        case .tooSoon:
+            Text("Invitation already sent less than 24 h ago. You can resend it from their page.")
+                .font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("contact.inviteTooSoon")
+        case .sent, nil:
+            EmptyView()
+        }
+    }
+
+    /// My code, for the contact to scan when the invitation cannot carry it.
+    private var myCode: some View {
+        NavigationStack {
+            ScrollView { MyCodeView(core: core).padding(Space.gutter) }
+                .background(Color.surface)
+                .navigationTitle(Text("My code"))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { showsMyCode = false } } }
+        }
+        .presentationBackground(Color.surface)
     }
 
     private func feelFailure() { if model.saveFailed { Haptic.error.play() } }

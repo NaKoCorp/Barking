@@ -222,6 +222,25 @@ final class LocalizationTests: XCTestCase {
                        "2 messages en attente. Tu pourras les lire après avoir accepté.")
     }
 
+    /// The invitation sent when adding a contact (Copie table, design decision 5).
+    func testAddInvitationStrings() throws {
+        let fr = try XCTUnwrap(table("fr"))
+        let expected = [
+            "Send an invitation": "Envoyer une invitation",
+            "Your card goes, encrypted, to their devices. Without it, they see your messages only after adding you.":
+                "Ta carte part chiffrée vers ses appareils. Sans invitation, cette personne ne verra tes messages qu’après t’avoir ajouté.",
+            "Your card is too large for an invitation": "Ta carte est trop grande pour une invitation",
+            "Show them your code instead.": "Montre-lui ton code à la place.",
+            "Show my code": "Montrer mon code",
+            "Opens your code.": "Ouvre ton code.",
+            "Invitation already sent less than 24 h ago. You can resend it from their page.":
+                "Invitation déjà envoyée il y a moins de 24 h. Tu pourras la renvoyer depuis sa fiche.",
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(fr[key] as? String, value, key)
+        }
+    }
+
     /// The invitation notification texts (BarkingKit, read by the extension)
     /// exist in English and French, with their one placeholder.
     func testInvitationNotificationStrings() throws {
@@ -486,8 +505,10 @@ final class LocalizationTests: XCTestCase {
     /// §5.3: no text states the old 24 hour lifetime; the days come through
     /// the stringsdict, in both languages.
     func testNoStringStatesTheOldLifetime() throws {
+        // The 24 hours between two invitations is another delay, not the lifetime.
+        let invitationInterval: Set = ["Invitation already sent less than 24 h ago. You can resend it from their page."]
         for lang in ["en", "fr"] {
-            for (key, value) in table(lang) ?? [:] {
+            for (key, value) in table(lang) ?? [:] where !invitationInterval.contains(key as? String ?? "") {
                 let text = "\(key) \(value)"
                 XCTAssertFalse(text.contains("24 hours") || text.contains("24 h"), "\(lang): \(key)")
             }

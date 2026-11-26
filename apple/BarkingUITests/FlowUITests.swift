@@ -111,6 +111,17 @@ final class ChatUITests: XCTestCase {
         XCTAssertTrue(value.hasPrefix("Pending since") || value.hasPrefix("On the network since"), "value: \(value)")
     }
 
+    /// The add's confirmation sends an invitation unless turned off (design
+    /// decision 5): the switch is on at every add.
+    func testAddContactInvitationToggleOnByDefault() throws {
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestOpenCard", samCard])
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
+        let toggle = app.switches["add.invite"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "1")
+    }
+
     /// A bubble shows when it sits above the composer, inside the screen.
     private func shows(_ bubble: XCUIElement, above field: XCUIElement) -> Bool {
         bubble.exists && bubble.frame.minY >= 0 && bubble.frame.maxY <= field.frame.minY + 1

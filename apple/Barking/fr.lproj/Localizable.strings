@@ -708,3 +708,12 @@
 "Nothing is sent. A new invitation brings it back." = "Rien n’est envoyé. Une nouvelle invitation la fera revenir.";
 "Their invitations and messages are dropped. They are not told." = "Ses invitations et ses messages sont ignorés. Cette personne n’est pas prévenue.";
 "This alias is already used" = "Cet alias est déjà pris";
+
+/* Contact requests: the invitation sent when adding a contact (design decision 5). */
+"Send an invitation" = "Envoyer une invitation";
+"Your card goes, encrypted, to their devices. Without it, they see your messages only after adding you." = "Ta carte part chiffrée vers ses appareils. Sans invitation, cette personne ne verra tes messages qu’après t’avoir ajouté.";
+"Your card is too large for an invitation" = "Ta carte est trop grande pour une invitation";
+"Show them your code instead." = "Montre-lui ton code à la place.";
+"Show my code" = "Montrer mon code";
+"Opens your code." = "Ouvre ton code.";
+"Invitation already sent less than 24 h ago. You can resend it from their page." = "Invitation déjà envoyée il y a moins de 24 h. Tu pourras la renvoyer depuis sa fiche.";
