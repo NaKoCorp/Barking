@@ -73,10 +73,11 @@ final class ContactModel {
     }
 
     /// While the page is open the invitation may be answered or sent from
-    /// another device: `.contacts` reloads its state, and only it (the
-    /// alias being typed stays).
+    /// another device: `.contacts`, and the end of any sync (`.network`: an
+    /// acceptance alone brings no message, so no `.contacts`), reload its
+    /// state, and only it (the alias being typed stays).
     func handle(_ change: CoreChange) async {
-        if change == .contacts { await loadInvite() }
+        if change == .contacts || change == .network { await loadInvite() }
     }
 
     private func loadInvite() async {
