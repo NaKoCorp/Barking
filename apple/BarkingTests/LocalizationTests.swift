@@ -235,8 +235,7 @@ final class LocalizationTests: XCTestCase {
             "Opens your code.": "Ouvre ton code.",
             "Invitation already sent less than 24 h ago. You can resend it from their page.":
                 "Invitation déjà envoyée il y a moins de 24 h. Tu pourras la renvoyer depuis sa fiche.",
-            "The invitation was not sent. You can send it from their page.":
-                "L’invitation n’est pas partie. Tu pourras l’envoyer depuis sa fiche.",
+            "The invitation was not sent": "L’invitation n’est pas partie",
         ]
         for (key, value) in expected {
             XCTAssertEqual(fr[key] as? String, value, key)

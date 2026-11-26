@@ -139,9 +139,11 @@ struct SafetyCodeView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("contact.inviteTooSoon")
         case .failed:
-            Text("The invitation was not sent. You can send it from their page.")
-                .font(.bBodySmall).foregroundStyle(Color.fgMuted)
-                .fixedSize(horizontal: false, vertical: true)
+            // No invitation is recorded, so the page offers no resend: the
+            // code is the way left.
+            Banner(kind: .info, title: "The invitation was not sent",
+                   message: "Show them your code instead.",
+                   action: .init(label: "Show my code", hint: "Opens your code.") { showsMyCode = true })
                 .accessibilityIdentifier("contact.inviteFailed")
         case .sent, nil:
             EmptyView()
