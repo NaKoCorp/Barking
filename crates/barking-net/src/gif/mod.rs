@@ -8,8 +8,7 @@ pub mod http;
 pub mod klipy;
 pub mod provider;
 
-use barking_core::Core;
-use barking_core::core::GifUse;
+pub use barking_core::core::GifUse;
 use barking_core::gif::GifProviderId;
 use url::Url;
 
@@ -121,17 +120,29 @@ pub struct GifMedia {
     pub title: String,
 }
 
+/// Consent and usage counters, as the caller keeps them. Asked for each
+/// check and each count, never held across a request: the FFI answers each
+/// by opening the core briefly, so a request (up to [`http::TIMEOUT`]) never
+/// keeps the core from other calls.
+pub trait GifGate {
+    /// Whether this client may contact `provider` now. A caller that cannot
+    /// tell answers `false`.
+    fn allowed(&self, provider: u8) -> bool;
+    /// Counts one use, once the call succeeded. A count that cannot be
+    /// written never fails the call.
+    fn record(&self, use_: GifUse);
+}
+
 fn provider_of(id: GifProviderId) -> &'static dyn GifProvider {
-    providers()
-        .into_iter()
-        .find(|p| p.id() == id)
-        .expect("every GifProviderId has a provider")
+    match id {
+        GifProviderId::Klipy => klipy(),
+    }
 }
 
 /// Consent, then key: the provider's key if this client may contact it
-/// now. A core that cannot answer counts as no consent.
-fn gate(core: &Core, keys: &GifKeys, id: GifProviderId) -> Result<String, GifError> {
-    if !core.gif_allowed(id.as_u8()).unwrap_or(false) {
+/// now. Asked again before every request.
+fn gate(g: &impl GifGate, keys: &GifKeys, id: GifProviderId) -> Result<String, GifError> {
+    if !g.allowed(id.as_u8()) {
         return Err(GifError::NotEnabled);
     }
     let key = match id {
@@ -148,21 +159,19 @@ fn gate(core: &Core, keys: &GifKeys, id: GifProviderId) -> Result<String, GifErr
 /// `NotEnabled` without consent (nothing is sent), `NotConfigured` without
 /// a key, otherwise what the transport or the provider's reply gives.
 pub async fn search(
-    core: &mut Core,
+    g: &impl GifGate,
     keys: &GifKeys,
     t: &impl GifTransport,
     query: &str,
     page: u32,
-    now: u64,
 ) -> Result<GifPage, GifError> {
     let provider = provider_of(ACTIVE_GIF_PROVIDER);
-    let key = gate(core, keys, ACTIVE_GIF_PROVIDER)?;
+    let key = gate(g, keys, ACTIVE_GIF_PROVIDER)?;
     let body = t
         .get(&provider.search_url(&key, query, page), MAX_GIF_BYTES)
         .await?;
     let page = provider.parse_page(&body)?;
-    // A counter that cannot be written never fails the search.
-    let _ = core.record_gif_use(GifUse::Search, now);
+    g.record(GifUse::Search);
     Ok(page)
 }
 
@@ -171,14 +180,13 @@ pub async fn search(
 /// # Errors
 /// As [`search`].
 pub async fn trending(
-    core: &mut Core,
+    g: &impl GifGate,
     keys: &GifKeys,
     t: &impl GifTransport,
     page: u32,
-    _now: u64,
 ) -> Result<GifPage, GifError> {
     let provider = provider_of(ACTIVE_GIF_PROVIDER);
-    let key = gate(core, keys, ACTIVE_GIF_PROVIDER)?;
+    let key = gate(g, keys, ACTIVE_GIF_PROVIDER)?;
     let body = t
         .get(&provider.trending_url(&key, page), MAX_GIF_BYTES)
         .await?;
@@ -190,37 +198,37 @@ pub async fn trending(
 ///
 /// # Errors
 /// `NotFound` for an unknown provider or a malformed identifier (nothing
-/// is sent) and for a media host that no longer serves the GIF (`403`,
-/// `404`); `Malformed` if the provider answers with another entry; else as
-/// [`search`].
+/// is sent), and for a media host that refuses or no longer serves the GIF
+/// (`401`, `403`, `404`: on a media host this means the file is gone, not
+/// that the app's key is wrong); `Malformed` if the provider answers with
+/// another entry; `NotEnabled` if consent was withdrawn during the
+/// resolution (the MP4 is then never requested); else as [`search`].
 pub async fn data(
-    core: &mut Core,
+    g: &impl GifGate,
     keys: &GifKeys,
     t: &impl GifTransport,
     provider: u8,
     id: &str,
-    now: u64,
 ) -> Result<GifMedia, GifError> {
     let pid = GifProviderId::from_u8(provider).ok_or(GifError::NotFound)?;
     let p = provider_of(pid);
     if !p.validate_id(id) {
         return Err(GifError::NotFound);
     }
-    let key = gate(core, keys, pid)?;
+    let key = gate(g, keys, pid)?;
     let body = t.get(&p.resolve_url(&key, id), MAX_GIF_BYTES).await?;
     let item = p.parse_item(&body)?;
     if item.id != id {
         return Err(GifError::Malformed);
     }
-    // Consent may have been withdrawn while the first call was running.
-    gate(core, keys, pid)?;
+    // Consent may have been withdrawn while the first request was running.
+    gate(g, keys, pid)?;
     let mp4 = t.get(&item.mp4, MAX_GIF_BYTES).await.map_err(|e| match e {
-        // On the media host a refusal means the file is gone, not that the
-        // app's key is wrong.
+        // `401`/`403` from the media host: the file is refused, not the key.
         GifError::NotConfigured => GifError::NotFound,
         e => e,
     })?;
-    let _ = core.record_gif_use(GifUse::Shown, now);
+    g.record(GifUse::Shown);
     Ok(GifMedia {
         mp4,
         author: item.author,
@@ -230,8 +238,8 @@ pub async fn data(
 
 #[cfg(test)]
 mod tests {
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::http::HttpReply;
     use super::http::fake::FakeTransport;
@@ -241,17 +249,50 @@ mod tests {
     const TRENDING: &[u8] = include_bytes!("../../tests/fixtures/klipy/trending.json");
     const ITEMS: &[u8] = include_bytes!("../../tests/fixtures/klipy/items.json");
     const SLUG: &str = "hello-hi-662";
-    const NOW: u64 = 1_800_000_000;
 
-    fn core(enabled: bool) -> (tempfile::TempDir, Core, StdRng) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut rng = StdRng::seed_from_u64(3);
-        let (mut core, _) =
-            Core::create(&dir.path().join("a.db"), &[1; 32], "a", NOW, &mut rng).unwrap();
-        if enabled {
-            core.enable_gif_provider(1, 1, NOW, &mut rng).unwrap();
+    /// Consent answered by a script: `true` for the first `allow` checks,
+    /// then `false` (`usize::MAX`: always). Records the checks and uses.
+    struct FakeGate {
+        allow: usize,
+        checks: AtomicUsize,
+        uses: Mutex<Vec<GifUse>>,
+    }
+
+    impl FakeGate {
+        fn new(allow: usize) -> Self {
+            Self {
+                allow,
+                checks: AtomicUsize::new(0),
+                uses: Mutex::default(),
+            }
         }
-        (dir, core, rng)
+
+        fn on() -> Self {
+            Self::new(usize::MAX)
+        }
+
+        fn off() -> Self {
+            Self::new(0)
+        }
+
+        fn uses(&self) -> Vec<GifUse> {
+            self.uses.lock().unwrap().clone()
+        }
+
+        fn checks(&self) -> usize {
+            self.checks.load(Ordering::SeqCst)
+        }
+    }
+
+    impl GifGate for FakeGate {
+        fn allowed(&self, provider: u8) -> bool {
+            assert_eq!(provider, 1);
+            self.checks.fetch_add(1, Ordering::SeqCst) < self.allow
+        }
+
+        fn record(&self, use_: GifUse) {
+            self.uses.lock().unwrap().push(use_);
+        }
     }
 
     fn keys() -> GifKeys {
@@ -260,153 +301,176 @@ mod tests {
         }
     }
 
-    fn usage(core: &Core) -> (u32, u32) {
-        core.gif_usage(1)
-            .unwrap()
-            .first()
-            .map_or((0, 0), |d| (d.searches, d.shown))
-    }
-
     #[tokio::test]
     async fn gif_calls_refused_without_consent() {
-        let (_d, mut core, _) = core(false);
+        let g = FakeGate::off();
         let t = FakeTransport::new([HttpReply::ok(SEARCH), HttpReply::ok(ITEMS)]);
         assert_eq!(
-            search(&mut core, &keys(), &t, "hi", 1, NOW).await.err(),
+            search(&g, &keys(), &t, "hi", 1).await.err(),
             Some(GifError::NotEnabled)
         );
         assert_eq!(
-            trending(&mut core, &keys(), &t, 1, NOW).await.err(),
+            trending(&g, &keys(), &t, 1).await.err(),
             Some(GifError::NotEnabled)
         );
         assert_eq!(
-            data(&mut core, &keys(), &t, 1, SLUG, NOW).await.err(),
+            data(&g, &keys(), &t, 1, SLUG).await.err(),
             Some(GifError::NotEnabled)
         );
         assert_eq!(t.calls(), 0);
-        assert_eq!(usage(&core), (0, 0));
+        assert!(g.uses().is_empty());
     }
 
+    /// The gate is asked again for every call: an answer that turns to no
+    /// stops the next call before any request.
     #[tokio::test]
     async fn gif_disable_between_calls_blocks_next_call() {
-        let (_d, mut core, mut rng) = core(true);
+        let g = FakeGate::new(1);
         let t = FakeTransport::new([HttpReply::ok(SEARCH), HttpReply::ok(SEARCH)]);
-        search(&mut core, &keys(), &t, "hi", 1, NOW).await.unwrap();
-        core.disable_gif_provider(1, NOW + 1, &mut rng).unwrap();
+        search(&g, &keys(), &t, "hi", 1).await.unwrap();
         assert_eq!(
-            search(&mut core, &keys(), &t, "hi", 1, NOW).await.err(),
+            search(&g, &keys(), &t, "hi", 1).await.err(),
             Some(GifError::NotEnabled)
         );
         assert_eq!(t.calls(), 1);
+        assert_eq!(g.checks(), 2);
+    }
+
+    /// Consent withdrawn while the resolution was running: the MP4 is never
+    /// requested, nothing is counted.
+    #[tokio::test]
+    async fn gif_data_consent_withdrawn_before_download_is_not_enabled() {
+        let g = FakeGate::new(1);
+        let t = FakeTransport::new([HttpReply::ok(ITEMS), HttpReply::ok("MP4")]);
+        assert_eq!(
+            data(&g, &keys(), &t, 1, SLUG).await.err(),
+            Some(GifError::NotEnabled)
+        );
+        assert_eq!(t.calls(), 1);
+        assert_eq!(g.checks(), 2);
+        assert!(g.uses().is_empty());
     }
 
     #[tokio::test]
     async fn gif_missing_key_is_not_configured() {
-        let (_d, mut core, _) = core(true);
+        let g = FakeGate::on();
         let t = FakeTransport::new([HttpReply::ok(SEARCH)]);
         let none = GifKeys::default();
-        assert_eq!(
-            search(&mut core, &none, &t, "hi", 1, NOW).await.err(),
-            Some(GifError::NotConfigured)
-        );
-        assert_eq!(
-            trending(&mut core, &none, &t, 1, NOW).await.err(),
-            Some(GifError::NotConfigured)
-        );
-        assert_eq!(
-            data(&mut core, &none, &t, 1, SLUG, NOW).await.err(),
-            Some(GifError::NotConfigured)
-        );
+        let empty = GifKeys {
+            klipy: Some(String::new()),
+        };
+        for k in [&none, &empty] {
+            assert_eq!(
+                search(&g, k, &t, "hi", 1).await.err(),
+                Some(GifError::NotConfigured)
+            );
+            assert_eq!(
+                trending(&g, k, &t, 1).await.err(),
+                Some(GifError::NotConfigured)
+            );
+            assert_eq!(
+                data(&g, k, &t, 1, SLUG).await.err(),
+                Some(GifError::NotConfigured)
+            );
+        }
         assert_eq!(t.calls(), 0);
     }
 
     #[tokio::test]
     async fn gif_unknown_provider_data_is_not_found_without_call() {
-        let (_d, mut core, _) = core(true);
+        let g = FakeGate::on();
         let t = FakeTransport::new([HttpReply::ok(ITEMS)]);
         for provider in [0, 2] {
             assert_eq!(
-                data(&mut core, &keys(), &t, provider, SLUG, NOW)
-                    .await
-                    .err(),
+                data(&g, &keys(), &t, provider, SLUG).await.err(),
                 Some(GifError::NotFound)
             );
         }
         assert_eq!(
-            data(&mut core, &keys(), &t, 1, "Bad Id!", NOW).await.err(),
+            data(&g, &keys(), &t, 1, "Bad Id!").await.err(),
             Some(GifError::NotFound)
         );
         assert_eq!(t.calls(), 0);
+        assert_eq!(g.checks(), 0);
     }
 
     #[tokio::test]
     async fn gif_data_resolves_then_downloads() {
-        let (_d, mut core, _) = core(true);
+        let g = FakeGate::on();
         let mp4 = b"MP4-BYTES".to_vec();
         let t = FakeTransport::new([HttpReply::ok(ITEMS), HttpReply::ok(mp4.clone())]);
-        let media = data(&mut core, &keys(), &t, 1, SLUG, NOW).await.unwrap();
+        let media = data(&g, &keys(), &t, 1, SLUG).await.unwrap();
         assert_eq!(media.mp4, mp4);
         assert_eq!(t.calls(), 2);
+        // Consent checked before each of the two requests.
+        assert_eq!(g.checks(), 2);
         let urls = t.urls();
         assert_eq!(urls[0].path(), "/api/v1/KEY/gifs/items");
         assert!(urls[1].host_str().unwrap().ends_with("klipy.com"));
         assert_ne!(urls[1].host_str(), Some("api.klipy.com"));
-        assert_eq!(usage(&core), (0, 1));
+        assert_eq!(g.uses(), vec![GifUse::Shown]);
     }
 
     #[tokio::test]
     async fn gif_data_refuses_another_entry_without_download() {
-        let (_d, mut core, _) = core(true);
+        let g = FakeGate::on();
         let t = FakeTransport::new([HttpReply::ok(ITEMS), HttpReply::ok("x")]);
         assert_eq!(
-            data(&mut core, &keys(), &t, 1, "other-slug-1", NOW)
-                .await
-                .err(),
+            data(&g, &keys(), &t, 1, "other-slug-1").await.err(),
             Some(GifError::Malformed)
         );
         assert_eq!(t.calls(), 1);
-        assert_eq!(usage(&core), (0, 0));
+        assert!(g.uses().is_empty());
     }
 
     #[tokio::test]
-    async fn gif_data_media_403_is_not_found_api_403_is_not_configured() {
-        let (_d, mut core, _) = core(true);
-        for media in [403, 404] {
+    async fn gif_data_media_refusal_is_not_found_api_refusal_is_not_configured() {
+        let g = FakeGate::on();
+        for media in [401, 403, 404] {
             let t = FakeTransport::new([HttpReply::ok(ITEMS), HttpReply::status(media)]);
             assert_eq!(
-                data(&mut core, &keys(), &t, 1, SLUG, NOW).await.err(),
+                data(&g, &keys(), &t, 1, SLUG).await.err(),
                 Some(GifError::NotFound),
                 "{media}"
             );
             assert_eq!(t.calls(), 2);
         }
-        let t = FakeTransport::new([HttpReply::status(403)]);
-        assert_eq!(
-            data(&mut core, &keys(), &t, 1, SLUG, NOW).await.err(),
-            Some(GifError::NotConfigured)
-        );
-        assert_eq!(t.calls(), 1);
-        assert_eq!(usage(&core), (0, 0));
+        for api in [401, 403] {
+            let t = FakeTransport::new([HttpReply::status(api)]);
+            assert_eq!(
+                data(&g, &keys(), &t, 1, SLUG).await.err(),
+                Some(GifError::NotConfigured),
+                "{api}"
+            );
+            assert_eq!(t.calls(), 1);
+        }
+        assert!(g.uses().is_empty());
     }
 
     #[tokio::test]
     async fn gif_search_counts_usage() {
-        let (_d, mut core, _) = core(true);
+        let g = FakeGate::on();
         let t = FakeTransport::new([
             HttpReply::ok(SEARCH),
             HttpReply::ok(TRENDING),
             HttpReply::status(500),
         ]);
-        let page = search(&mut core, &keys(), &t, "hi", 1, NOW).await.unwrap();
+        let page = search(&g, &keys(), &t, "hi", 1).await.unwrap();
         assert!(!page.results.is_empty());
-        assert_eq!(usage(&core), (1, 0));
+        assert_eq!(g.uses(), vec![GifUse::Search]);
         // Trending is not a search; a failed search is not counted.
-        trending(&mut core, &keys(), &t, 1, NOW).await.unwrap();
+        trending(&g, &keys(), &t, 1).await.unwrap();
         assert_eq!(
-            search(&mut core, &keys(), &t, "hi", 1, NOW).await.err(),
+            search(&g, &keys(), &t, "hi", 1).await.err(),
             Some(GifError::Unreachable)
         );
-        assert_eq!(usage(&core), (1, 0));
+        assert_eq!(g.uses(), vec![GifUse::Search]);
+    }
+
+    #[test]
+    fn every_provider_id_has_its_provider() {
+        let id = GifProviderId::Klipy;
+        assert_eq!(provider_of(id).id(), id);
     }
 
     #[test]

@@ -44,7 +44,9 @@ pub struct HttpReply {
 /// (`NotConfigured`, retrying will not help), another `4xx` or a `2xx` other
 /// than `200` a request or reply this client does not understand
 /// (`Malformed`), a `3xx` (redirects are never followed) or `1xx`
-/// `Unreachable`.
+/// `Unreachable`. These are the API host's meanings: on a media host,
+/// [`super::data`] reads `401`, `403` and `404` alike as `NotFound` (the
+/// file is gone or refused, the key is not in that request).
 pub fn map_reply(reply: HttpReply) -> Result<Vec<u8>, GifError> {
     match reply.status {
         200 => Ok(reply.body),
@@ -52,16 +54,27 @@ pub fn map_reply(reply: HttpReply) -> Result<Vec<u8>, GifError> {
         429 => Err(GifError::RateLimited {
             retry_after_secs: reply
                 .retry_after
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .map_or(DEFAULT_RETRY_AFTER_SECS, |s| {
-                    u32::try_from(s.min(u64::from(MAX_RETRY_AFTER_SECS)))
-                        .unwrap_or(MAX_RETRY_AFTER_SECS)
-                }),
+                .as_deref()
+                .map_or(DEFAULT_RETRY_AFTER_SECS, retry_after_secs),
         }),
         401 | 403 => Err(GifError::NotConfigured),
         201..=299 | 400..=499 => Err(GifError::Malformed),
         _ => Err(GifError::Unreachable),
     }
+}
+
+/// Seconds to wait from a `Retry-After` value: delay-seconds clamped to
+/// [`MAX_RETRY_AFTER_SECS`], an all-digit value too large for any integer
+/// included; a date or anything else gives [`DEFAULT_RETRY_AFTER_SECS`].
+fn retry_after_secs(value: &str) -> u32 {
+    let v = value.trim();
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return DEFAULT_RETRY_AFTER_SECS;
+    }
+    v.parse::<u64>()
+        .ok()
+        .and_then(|s| u32::try_from(s).ok())
+        .map_or(MAX_RETRY_AFTER_SECS, |s| s.min(MAX_RETRY_AFTER_SECS))
 }
 
 /// Whether the transport may contact `url`: HTTPS on port 443 to a host of
@@ -293,9 +306,9 @@ mod tests {
         assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(30));
         assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(60));
         assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(60));
-        // Clamped to an hour, however large.
+        // Clamped to an hour, however large, beyond any integer included.
         assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(3600));
-        assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(60));
+        assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(3600));
         assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(3600));
         assert_eq!(t.calls(), 6);
         assert_eq!(t.urls()[0], url);
