@@ -1762,3 +1762,64 @@ fn refuse_and_block_close_the_request() {
     ok(&bob, &["block", &carol_fp]);
     assert!(!ok(&bob, &["requests"]).contains(&carol_fp));
 }
+
+// --- Census of the network (public node list) ---
+
+mod census {
+    use barking_node::config::DEFAULT_REPLICATION_BYTES_PER_HOUR;
+    use barking_node::testing::{network, stop_all};
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lists_every_node_of_the_table_without_any_address() {
+        let nodes = network(0..3, |_| DEFAULT_REPLICATION_BYTES_PER_HOUR).await;
+        let seed = nodes[0].entry();
+        let seeds = format!("{}@{}", seed.id, seed.addr);
+        let host = seed.addr.ip().to_string();
+
+        let out = tokio::task::spawn_blocking(move || {
+            Command::cargo_bin("barking")
+                .unwrap()
+                .env("BARKING_SEEDS", seeds)
+                .env("BARKING_TEST_ALLOW_PRIVATE", "1")
+                .args(["census", "--deadline", "60"])
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        stop_all(nodes).await;
+
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(out.status.success(), "{stderr}");
+        assert!(!stdout.contains(&host) && !stderr.contains(&host));
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(json["schema"], 1);
+        assert_eq!(json["unreachable"], 0);
+        let listed = json["nodes"].as_array().unwrap();
+        assert_eq!(listed.len(), 3, "{stdout}");
+        for node in listed {
+            assert_eq!(node["id"].as_str().unwrap().len(), 8);
+            assert_eq!(node["in_table"], true);
+            assert_eq!(node["protocol"], 5);
+            assert!(node.get("addr").is_none());
+        }
+        assert!(stderr.contains("3 nodes answered"), "{stderr}");
+    }
+
+    #[test]
+    fn refuses_to_run_without_seeds_and_never_echoes_them() {
+        let home = tempfile::tempdir().unwrap();
+        let out = barking(home.path())
+            .env("BARKING_SEEDS", "not-a-seed@198.51.100.7:4433")
+            .arg("census")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(!out.status.success());
+        assert!(stderr.contains("entry 1"), "{stderr}");
+        assert!(!stderr.contains("198.51.100.7"), "{stderr}");
+    }
+}

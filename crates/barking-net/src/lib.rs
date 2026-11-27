@@ -3,6 +3,7 @@
 //! and the deposit plan, the state kept between synchronizations and the
 //! synchronization itself (the only part doing I/O, through traits).
 
+pub mod census;
 pub mod discover;
 pub mod geo;
 pub mod nodes;

@@ -22,7 +22,7 @@ Post-quantum key agreement · Double Ratchet · self-hosted relays · built for 
 ---
 
 > [!WARNING]
-> Barking is a **prototype**. It has not been externally audited, relays can observe client IP addresses, and there is no public relay network yet. Do not rely on it for sensitive communications.
+> Barking is a **prototype**. It has not been externally audited, relays can observe client IP addresses, and the public relay network is in beta: its first nodes are up (see the [live network map](https://www.nakocorp.com/en/network/)). Do not rely on it for sensitive communications.
 
 ## ✨ Features
 
@@ -111,6 +111,12 @@ To run a node, or a node and the push relay, with Docker Compose on a Mac: see [
 See [`docs/deploy`](docs/deploy) for `barking-node.toml`, `barking-push.toml.example` and their systemd units.
 
 </details>
+
+Once `[dht] public_addr` is set, the relay joins the hash table and shows up on the [network map](https://www.nakocorp.com/en/network/) within the hour, by country and network operator, never by address. The map comes from `barking census`, which walks the table from the seeds in `BARKING_SEEDS` and writes the nodes that answered as JSON:
+
+```sh
+BARKING_SEEDS='<node-id>@<IP:port>' ./target/release/barking census --ipdb apple/Barking/Resources/ipdb.bin --out nodes.json
+```
 
 ## 🧱 Repository layout
 
