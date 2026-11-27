@@ -13,7 +13,7 @@
 use rand_core::CryptoRng;
 
 use super::send::SealTime;
-use super::{Core, META_GIF_SETTINGS, log, sync};
+use super::{Core, MAX_FUTURE_SECS, META_GIF_SETTINGS, log, sync};
 use crate::content::ExtContent;
 use crate::gif::{GifConsent, GifProviderId, GifSettings, MIN_GIF_WARNING_VERSION};
 use crate::identity::{DeviceId, DeviceKeys};
@@ -30,8 +30,16 @@ fn read(q: &impl Queries) -> Result<Register> {
         .unwrap_or_else(|| (GifSettings::default(), 0, DeviceId([0; 16]))))
 }
 
+/// Whether a consent lets this build contact its provider: the provider is
+/// known and the accepted warning is current.
+fn effective(provider: u8, consent: &GifConsent) -> bool {
+    GifProviderId::from_u8(provider).is_some() && consent.warning_version >= MIN_GIF_WARNING_VERSION
+}
+
 /// Logs a `GifConsent` for each provider turned on or off between `old` and
-/// `new` (a renewed consent counts as turned on).
+/// `new` (a renewed consent counts as turned on). Only what is effective is
+/// logged: a stale or unknown-provider consent never claims that the
+/// provider receives data.
 fn log_changes(
     q: &impl Queries,
     old: &GifSettings,
@@ -50,9 +58,14 @@ fn log_changes(
         if before == after {
             continue;
         }
+        let was = before.is_some_and(|c| effective(*provider, c));
+        let is = after.is_some_and(|c| effective(*provider, c));
+        if !was && !is {
+            continue;
+        }
         let event = TransparencyEvent::GifConsent {
             provider: *provider,
-            enabled: after.is_some(),
+            enabled: is,
             remote,
         };
         log(q, now, None, &event)?;
@@ -99,6 +112,10 @@ pub(super) fn apply_settings(
     now: u64,
 ) -> Result<bool> {
     let (old, stored_at, author) = read(q)?;
+    // A date far ahead of my clock would win over every later change.
+    if at > now.saturating_add(MAX_FUTURE_SECS) {
+        return Ok(false);
+    }
     if (at, sender) <= (stored_at, author) {
         return Ok(false);
     }

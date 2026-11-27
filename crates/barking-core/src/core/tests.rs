@@ -12264,7 +12264,8 @@ fn gif_survives_history_export() {
 /// Delivers every packet queued by `from` to `to` at `now`.
 fn deliver_all_at(from: &mut Core, to: &mut Core, now: u64, rng: &mut StdRng) {
     for b in from.pending_outbox(now).unwrap() {
-        let _ = to.receive(&b, "t", now, rng);
+        to.receive(&b, "t", now, rng)
+            .expect("a queued packet is delivered");
     }
 }
 
@@ -12519,4 +12520,90 @@ fn gif_settings_fit_tier_m() {
         &mut rng,
     );
     assert_eq!(pkt.tier, Tier::M);
+}
+
+#[test]
+fn stale_consent_logs_no_enabled_event() {
+    let (_d, mut a, _t, mut rng) = linked();
+    let on =
+        |e: &TransparencyEvent| matches!(e, TransparencyEvent::GifConsent { enabled: true, .. });
+    // A warning below the minimum does not make Klipy reachable: no claim.
+    a.enable_gif_provider(1, 0, NOW, &mut rng).unwrap();
+    assert!(!a.gif_allowed(1).unwrap());
+    assert_eq!(
+        count_events(&a, |e| matches!(e, TransparencyEvent::GifConsent { .. })),
+        0
+    );
+    a.enable_gif_provider(1, crate::gif::MIN_GIF_WARNING_VERSION, NOW + 1, &mut rng)
+        .unwrap();
+    assert_eq!(count_events(&a, on), 1);
+    // Back to a stale version: effectively off, logged as such.
+    a.enable_gif_provider(1, 0, NOW + 2, &mut rng).unwrap();
+    assert_eq!(count_events(&a, on), 1);
+    assert_eq!(
+        count_events(&a, |e| matches!(
+            e,
+            TransparencyEvent::GifConsent { enabled: false, .. }
+        )),
+        1
+    );
+}
+
+#[test]
+fn unknown_provider_by_sync_logs_no_consent() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let settings = crate::gif::GifSettings {
+        enabled: [(7, consent(this_device(&t), NOW))].into(),
+        auto_load: false,
+    };
+    let pkt = gif_settings_packet(
+        &mut t,
+        &send::Target::OwnDevices,
+        settings,
+        NOW + 5,
+        1,
+        &mut rng,
+    );
+    a.receive(&pkt.encode(), "t", NOW + 5, &mut rng).unwrap();
+    assert!(a.gif_settings().unwrap().enabled.contains_key(&7));
+    assert_eq!(
+        count_events(&a, |e| matches!(e, TransparencyEvent::GifConsent { .. })),
+        0
+    );
+}
+
+#[test]
+fn gif_settings_from_far_future_ignored() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let settings = crate::gif::GifSettings {
+        enabled: [(1, consent(this_device(&t), NOW))].into(),
+        auto_load: true,
+    };
+    let now = NOW + 5;
+    let too_far = now + super::MAX_FUTURE_SECS + 1;
+    let pkt = gif_settings_packet(
+        &mut t,
+        &send::Target::OwnDevices,
+        settings.clone(),
+        too_far,
+        1,
+        &mut rng,
+    );
+    let r = a.receive(&pkt.encode(), "t", now, &mut rng).unwrap();
+    assert!(!matches!(r, ReceiveOutcome::Synced { .. }), "{r:?}");
+    assert_eq!(
+        a.gif_settings().unwrap(),
+        crate::gif::GifSettings::default()
+    );
+    // At the tolerance it is still applied.
+    let pkt = gif_settings_packet(
+        &mut t,
+        &send::Target::OwnDevices,
+        settings.clone(),
+        now + super::MAX_FUTURE_SECS,
+        2,
+        &mut rng,
+    );
+    a.receive(&pkt.encode(), "t", now, &mut rng).unwrap();
+    assert_eq!(a.gif_settings().unwrap(), settings);
 }
