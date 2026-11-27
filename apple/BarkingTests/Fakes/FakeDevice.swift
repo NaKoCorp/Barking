@@ -671,12 +671,19 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _gifEnabled: [(provider: UInt8, warningVersion: UInt16)] = []
     private var _gifDisabled: [UInt8] = []
     private var _gifAutoLoad: [Bool] = []
-    private var _gifSent: [(contact: String, gif: GifInfo)] = []
+    private var _gifSent: [(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?)] = []
+    private var _gifSearches: [String] = []
+    private var _gifTrendingCalls = 0
     var klipyKeys: [String?] { lock.withLock { _klipyKeys } }
     var gifEnabled: [(provider: UInt8, warningVersion: UInt16)] { lock.withLock { _gifEnabled } }
     var gifDisabled: [UInt8] { lock.withLock { _gifDisabled } }
     var gifAutoLoad: [Bool] { lock.withLock { _gifAutoLoad } }
-    var gifSent: [(contact: String, gif: GifInfo)] { lock.withLock { _gifSent } }
+    var gifSent: [(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?)] { lock.withLock { _gifSent } }
+    /// The queries `gifSearch` was called with, in order.
+    var gifSearches: [String] { lock.withLock { _gifSearches } }
+    var gifTrendingCalls: Int { lock.withLock { _gifTrendingCalls } }
+    /// Thrown by `gifSearch` and `gifTrending` when set (the call is still recorded).
+    var gifSearchError: Error?
     var gifPage = GifPageInfo(results: [], next: nil)
     var gifUsageDays: [GifUsageDayInfo] = []
 
@@ -712,14 +719,22 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if let gifError { throw gifError }
         lock.withLock { _gifAutoLoad.append(on); gifSettingsInfo.autoLoad = on }
     }
-    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo { gifPage }
-    func gifTrending(page: UInt32) throws -> GifPageInfo { gifPage }
+    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo {
+        lock.withLock { _gifSearches.append(query) }
+        if let gifSearchError { throw gifSearchError }
+        return gifPage
+    }
+    func gifTrending(page: UInt32) throws -> GifPageInfo {
+        lock.withLock { _gifTrendingCalls += 1 }
+        if let gifSearchError { throw gifSearchError }
+        return gifPage
+    }
     func gifData(provider: UInt8, id: String) throws -> GifMediaInfo {
         GifMediaInfo(mp4: Data(), author: nil, title: "")
     }
     func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws {
         if let sendError { throw sendError }
-        lock.withLock { _gifSent.append((contact, gif)) }
+        lock.withLock { _gifSent.append((contact, gif, replyTo, ttlSecs)) }
     }
     func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] { gifUsageDays }
 }

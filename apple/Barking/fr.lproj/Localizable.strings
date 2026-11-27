@@ -780,3 +780,12 @@
 "%@ privacy policy ›" = "Politique de confidentialité de %@ ›";
 "Not now" = "Pas maintenant";
 "Use GIFs" = "Utiliser les GIF";
+
+/* The GIF button and picker (spec GIF §9.1, §9.4). "Search KLIPY" is the placeholder Klipy's terms require, kept as is. */
+"GIF" = "GIF";
+"Search KLIPY" = "Search KLIPY";
+"No GIFs for “%@”" = "Aucun GIF pour « %@ »";
+"You're offline" = "Tu es hors ligne";
+"%@ is unreachable · Retry" = "%@ est injoignable · Réessayer";
+"%@ is busy · Try again in a minute" = "%@ est surchargé · Réessaie dans une minute";
+"Sends this GIF." = "Envoie ce GIF.";

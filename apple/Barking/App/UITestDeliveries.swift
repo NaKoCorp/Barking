@@ -69,6 +69,11 @@ import Foundation
 /// - `-BarkingUITestLinkedDevices n`: n other linked devices after the real
 ///   ones in `myDevices` (the GIF warning counts them).
 ///
+/// - `-BarkingUITestGifResults`: search and trending answer a fixed page of
+///   four GIFs, without contacting any provider, and only while GIFs are on
+///   in the real core (otherwise `notEnabled`, as the core answers). Their
+///   preview URLs are outside Klipy's hosts: no preview is fetched.
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -114,6 +119,8 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private let device: any DeviceHandle
     /// `-BarkingUITestLinkedDevices n`: other devices added to `myDevices`.
     private let linkedDevices: Int
+    /// `-BarkingUITestGifResults`.
+    private let gifResults: Bool
     private let seed: Seed?
     private let fakeReceived: Bool
     /// `-BarkingUITestEphemeral`: the faked ephemeral, until it expires.
@@ -183,9 +190,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
          ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false, requests: Bool = false,
          deviceChanged: Bool = false, inviteFailure: BarkingError? = nil, inviteStatus: InviteStatus? = nil,
-         linkedDevices: Int = 0) {
+         linkedDevices: Int = 0, gifResults: Bool = false) {
         self.device = device
         self.linkedDevices = linkedDevices
+        self.gifResults = gifResults
         self.deviceChanged = deviceChanged
         self.inviteFailure = inviteFailure
         self.inviteStatusOverride = inviteStatus
@@ -251,14 +259,15 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         let linkedDevices = arguments.firstIndex(of: "-BarkingUITestLinkedDevices").flatMap { i -> Int? in
             i + 1 < arguments.count ? Int(arguments[i + 1]) : nil
         } ?? 0
+        let gifResults = arguments.contains("-BarkingUITestGifResults")
         guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync || requests
-            || deviceChanged || inviteFailure != nil || inviteStatus != nil || linkedDevices > 0 else {
+            || deviceChanged || inviteFailure != nil || inviteStatus != nil || linkedDevices > 0 || gifResults else {
             return device
         }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
                                 reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync,
                                 requests: requests, deviceChanged: deviceChanged, inviteFailure: inviteFailure,
-                                inviteStatus: inviteStatus, linkedDevices: linkedDevices)
+                                inviteStatus: inviteStatus, linkedDevices: linkedDevices, gifResults: gifResults)
     }
 
     // MARK: The relays (`-BarkingUITestNodes`)
@@ -817,8 +826,24 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     }
     func disableGifProvider(provider: UInt8) throws { try device.disableGifProvider(provider: provider) }
     func setGifAutoLoad(on: Bool) throws { try device.setGifAutoLoad(on: on) }
-    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo { try device.gifSearch(query: query, page: page) }
-    func gifTrending(page: UInt32) throws -> GifPageInfo { try device.gifTrending(page: page) }
+    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo {
+        guard gifResults else { return try device.gifSearch(query: query, page: page) }
+        return try fakeGifPage()
+    }
+    func gifTrending(page: UInt32) throws -> GifPageInfo {
+        guard gifResults else { return try device.gifTrending(page: page) }
+        return try fakeGifPage()
+    }
+
+    /// The fixed page, behind the real core's consent check.
+    private func fakeGifPage() throws -> GifPageInfo {
+        guard try device.gifSettings().enabled else { throw BarkingError.Gif(kind: .notEnabled, retryAfterSecs: 0) }
+        let results = ["hello-hi-662", "thumbs-up-17", "dog-wave-3", "party-time-41"].map { id in
+            GifResultInfo(gif: GifInfo(provider: 1, id: id, width: 480, height: 270), title: id,
+                          previewMp4Url: "https://preview.invalid/\(id).mp4")
+        }
+        return GifPageInfo(results: results, next: nil)
+    }
     func gifData(provider: UInt8, id: String) throws -> GifMediaInfo { try device.gifData(provider: provider, id: id) }
     func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws {
         try device.sendGif(contact: contact, gif: gif, replyTo: replyTo, ttlSecs: ttlSecs)

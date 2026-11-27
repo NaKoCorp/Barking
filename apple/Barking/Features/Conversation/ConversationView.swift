@@ -41,10 +41,24 @@ struct ConversationView: View {
 
     private struct SheetTarget: Identifiable { let id: Int64 }
 
+    /// GIFs as the core holds them (spec GIF §9.1): read again at each tap.
+    @State private var gifs: GifSettingsModel
+    /// The GIF sheet open: the warning, or the picker. One sheet at a time.
+    @State private var gifSheet: GifSheet?
+    /// "Use GIFs" was tapped: once the warning has gone, the picker opens
+    /// if the core stored the consent.
+    @State private var enabling: Task<Bool, Never>?
+
+    private enum GifSheet: Identifiable {
+        case warning, picker
+        var id: Self { self }
+    }
+
     init(core: CoreService, contact: String, focus: Int64? = nil) {
         self.core = core
         self.focus = focus
         _model = State(initialValue: ConversationModel(contact: contact, core: core))
+        _gifs = State(initialValue: GifSettingsModel(core: core))
     }
 
     // In parts: as one expression, `body` went past the type checker's
@@ -87,7 +101,7 @@ struct ConversationView: View {
             if let e = model.sendError {
                 Text(LocalizedStringKey(e)).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)
             }
-            ComposerView(model: model)
+            ComposerView(model: model) { openGifs() }
         }
         .background(Color.surface)
         .navigationBarTitleDisplayMode(.inline)
@@ -162,6 +176,9 @@ struct ConversationView: View {
             .sheet(item: $reactingTo) { target in
                 EmojiPicker { emoji in react(emoji, on: target.id) }
             }
+            .sheet(item: $gifSheet, onDismiss: gifSheetClosed) { sheet in
+                gifSheetView(sheet)
+            }
             .confirmationDialog(Text(verbatim: confirmation?.title(otherDevices: confirmingDevices) ?? ""),
                                 isPresented: confirmingShown,
                                 titleVisibility: .visible, presenting: confirming) { item in
@@ -218,6 +235,40 @@ struct ConversationView: View {
                 if let focus, model.items.contains(where: { $0.id == focus }) { scrollTarget = focus }
                 for await change in await core.changes { await model.handle(change) }
             }
+    }
+
+    /// The GIF button: the picker when GIFs are on, otherwise the warning,
+    /// the only way to turn them on (spec GIF §9.1, §9.2). Nothing before
+    /// the core named its provider.
+    private func openGifs() {
+        Task {
+            await gifs.refresh()
+            guard gifs.provider != nil, gifSheet == nil else { return }
+            gifSheet = gifs.enabled ? .picker : .warning
+        }
+    }
+
+    @ViewBuilder private func gifSheetView(_ sheet: GifSheet) -> some View {
+        if let provider = gifs.provider {
+            switch sheet {
+            case .warning:
+                GifWarningSheet(provider: provider, linkedDevices: gifs.linkedDevices, updated: gifs.updated) {
+                    enabling = Task { (try? await gifs.enable()) != nil }
+                }
+            case .picker:
+                GifPickerView(core: core, providerName: provider.name) { gif in await model.sendGif(gif) }
+            }
+        }
+    }
+
+    /// After the warning: the picker opens in place once "Use GIFs" was
+    /// stored. A dismissal without it (Not now, a swipe) opens nothing.
+    private func gifSheetClosed() {
+        guard let enabling else { return }
+        self.enabling = nil
+        Task {
+            if await enabling.value { gifSheet = .picker }
+        }
     }
 
     private var confirmation: DeleteConfirmation? {
@@ -468,9 +519,11 @@ private struct ChatHeader: View {
     }
 }
 
-/// Text field, byte counter, send button.
+/// Text field, byte counter, GIF and send buttons.
 struct ComposerView: View {
     @Bindable var model: ConversationModel
+    /// The GIF button: the same whether GIFs are on or off (spec GIF §9.1).
+    var onGif: () -> Void = {}
     @Environment(\.locale) private var locale
 
     var body: some View {
@@ -488,6 +541,17 @@ struct ComposerView: View {
             }
             HStack(spacing: 8) {
                 EphemeralMenu(model: model)
+                Button(action: onGif) {
+                    Text(verbatim: "GIF").font(BarkingFont.mono(.caption, size: 12, weight: .semibold))
+                        .foregroundStyle(Color.fgMuted)
+                        .padding(.horizontal, 5).padding(.vertical, 3)
+                        .overlay(RoundedRectangle(cornerRadius: Radius.tag).strokeBorder(Color.fgMuted, lineWidth: 1.5))
+                        .frame(width: 44, height: 44)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("GIF"))
+                .accessibilityIdentifier("composer.gif")
                 TextField("Message", text: $model.draft, axis: .vertical)
                     .lineLimit(1...5)
                     .padding(.horizontal, 16).padding(.vertical, 12)

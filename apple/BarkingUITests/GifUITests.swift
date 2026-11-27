@@ -107,4 +107,77 @@ final class GifUITests: XCTestCase {
         let line = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Applies to your")).firstMatch
         XCTAssertFalse(line.exists)
     }
+
+    // MARK: Conversation (spec GIF §9.1, §9.4)
+
+    /// A ready identity with a conversation with Sam (the seed's messages).
+    private func launchWithSam(extra: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication.seeded("deliveries", extra: extra)
+        app.launch()
+        return app
+    }
+
+    /// Opens Sam's conversation and returns the GIF button.
+    private func gifButton(_ app: XCUIApplication) -> XCUIElement {
+        openSamChat(app)
+        let button = app.buttons["composer.gif"]
+        XCTAssertTrue(button.waitForExistence(timeout: 5), "no GIF button")
+        return button
+    }
+
+    /// Turns GIFs on from the conversation: the warning, then "Use GIFs".
+    private func enableFromConversation(_ app: XCUIApplication) -> XCUIElement {
+        gifButton(app).tap()
+        let sheet = app.descendants(matching: .any)["gifWarning"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), "the GIF button did not open the warning")
+        app.buttons["gifWarning.use"].tap()
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), "the warning stayed")
+        let picker = app.descendants(matching: .any)["gifPicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10), "the picker did not open")
+        return picker
+    }
+
+    /// The same button whether GIFs are on or off, named "GIF".
+    func testGifButtonAlwaysVisible() {
+        let app = launchWithSam()
+        let button = gifButton(app)
+        XCTAssertEqual(button.label, "GIF")
+        XCTAssertTrue(button.isHittable)
+    }
+
+    func testGifButtonWhenOffOpensWarning() {
+        let app = launchWithSam(extra: ["-BarkingUITestGifResults"])
+        gifButton(app).tap()
+        XCTAssertTrue(app.descendants(matching: .any)["gifWarning"].waitForExistence(timeout: 5),
+                      "the GIF button did not open the warning")
+        XCTAssertTrue(app.staticTexts["Use GIFs from Klipy?"].exists)
+        app.buttons["gifWarning.notNow"].tap()
+        XCTAssertFalse(app.descendants(matching: .any)["gifPicker"].waitForExistence(timeout: 2),
+                       "Not now opened the picker")
+    }
+
+    /// "Use GIFs" closes the warning and opens the picker in place: still
+    /// the conversation, no other tab. With animations, as a user sees it.
+    func testEnableFromConversationOpensPicker() {
+        let app = launchWithSam(extra: ["-BarkingUITestGifResults", "-BarkingUITestKeepAnimations"])
+        _ = enableFromConversation(app)
+        XCTAssertTrue(app.textFields["Search KLIPY"].waitForExistence(timeout: 5), "no search field")
+        XCTAssertTrue(app.buttons["gifPicker.result.0"].waitForExistence(timeout: 5), "no trending")
+        XCTAssertTrue(app.textFields["Message"].exists, "left the conversation")
+        XCTAssertFalse(app.tabBars.buttons["Settings"].isHittable, "another tab")
+    }
+
+    /// A tap on a result sends it: the picker closes and my GIF shows.
+    func testTapResultSends() {
+        let app = launchWithSam(extra: ["-BarkingUITestGifResults"])
+        let picker = enableFromConversation(app)
+        let first = app.buttons["gifPicker.result.0"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5), "no result")
+        first.tap()
+        XCTAssertTrue(picker.waitForNonExistence(timeout: 5), "the picker stayed")
+        let bubble = app.staticTexts.matching(NSPredicate(format: "label == %@", "GIF")).firstMatch
+        XCTAssertTrue(bubble.waitForExistence(timeout: 5), "no GIF bubble")
+        XCTAssertTrue(bubble.waitUntil({ ($0.value as? String ?? "").hasPrefix("Pending since") }),
+                      "not my sent GIF: \(bubble.value ?? "nil")")
+    }
 }

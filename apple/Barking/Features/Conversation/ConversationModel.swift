@@ -546,6 +546,33 @@ final class ConversationModel {
         }
     }
 
+    /// Sends a GIF picked in the picker (spec GIF §9.4), as `send` a text:
+    /// to the message being answered and with the delay set, both dropped
+    /// once it is queued and kept if it is not. The draft stays as it is.
+    /// True once the core queued it; false while another send runs.
+    @discardableResult
+    func sendGif(_ gif: GifInfo) async -> Bool {
+        guard !sending, !removed else { return false }
+        sending = true
+        defer { sending = false }
+        sendError = nil
+        notice = nil
+        let replyId = replyingTo?.id
+        let delay = ttl
+        do {
+            let rows = try await core.sendGif(gif, to: contact, replyTo: replyId, ttlSecs: delay)
+            replyingTo = nil
+            ttl = nil
+            // Read in the send's own call, before the sync it starts.
+            if let rows { show(rows) }
+            Task { await reload() }
+            return true
+        } catch {
+            sendError = "Not sent. Try again in a moment."
+            return false
+        }
+    }
+
     /// Starts answering the row `id`; ignored for a local row, a placeholder
     /// or a row not shown.
     func startReply(_ id: Int64) {
