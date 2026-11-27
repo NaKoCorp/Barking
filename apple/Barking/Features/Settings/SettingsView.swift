@@ -42,7 +42,7 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.notifications")
                     NavigationLink { GifSettingsView(core: core, model: gifs) } label: {
                         FormRow(title: Text("GIFs"),
-                                subtitle: gifs.enabled ? Text("On · \(gifs.provider.name) sees your IP address") : Text("Off"),
+                                subtitle: gifs.enabled ? Text("On · \(gifs.provider.name) sees your IP address") : Text("Off (GIFs)"),
                                 icon: "photo.on.rectangle") { RowGlyph() }
                     }
                     .accessibilityIdentifier("settings.gifs")

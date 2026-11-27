@@ -40,17 +40,19 @@ final class GifSettingsModel {
     }
 
     /// After "Use GIFs": the core records the warning version just shown.
-    /// Throws when it did not store it (GIFs stay off).
+    /// Throws when it did not store it (GIFs stay off). The settings are
+    /// read in the write's own call: a read after it could wait on the sync
+    /// it starts.
     func enable() async throws {
         do {
-            try await core.enableGifProvider(provider.id, warningVersion: provider.warningVersion)
+            let s = try await core.enableGifProvider(provider.id, warningVersion: provider.warningVersion)
             saveFailed = false
+            if let s { apply(s) } else { enabled = true; enabledFrom = nil }
         } catch {
             saveFailed = true
             await readSettings()
             throw error
         }
-        await readSettings()
     }
 
     /// Immediate, without confirmation.
@@ -58,30 +60,36 @@ final class GifSettingsModel {
         let previous = enabled
         enabled = false
         do {
-            try await core.disableGifProvider(provider.id)
+            let s = try await core.disableGifProvider(provider.id)
             saveFailed = false
+            if let s { apply(s) } else { enabledFrom = nil; enabledAt = nil }
         } catch {
             saveFailed = true
             enabled = previous
+            await readSettings()
         }
-        await readSettings()
     }
 
     func setAutoLoad(_ on: Bool) async {
         let previous = autoLoad
         autoLoad = on
         do {
-            try await core.setGifAutoLoad(on)
+            let s = try await core.setGifAutoLoad(on)
             saveFailed = false
+            if let s { apply(s) }
         } catch {
             saveFailed = true
             autoLoad = previous
+            await readSettings()
         }
-        await readSettings()
     }
 
     private func readSettings() async {
         guard let s = try? await core.gifSettings() else { return }
+        apply(s)
+    }
+
+    private func apply(_ s: GifSettingsInfo) {
         enabled = s.enabled
         autoLoad = s.autoLoad
         enabledFrom = s.enabled ? s.enabledFromOtherDevice : nil

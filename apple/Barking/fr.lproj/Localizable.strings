@@ -759,7 +759,7 @@
 
 /* Settings › GIFs and the GIF warning (spec GIF §9.2, §9.3). The provider name comes from the core. */
 "GIFs" = "GIF";
-"Off" = "Désactivés";
+"Off (GIFs)" = "Désactivés";
 "On · %@ sees your IP address" = "Activés · %@ voit ton adresse IP";
 "Use GIFs from %@" = "Utiliser les GIF de %@";
 "Off, Barking never contacts %@" = "Désactivés, Barking ne contacte jamais %@";

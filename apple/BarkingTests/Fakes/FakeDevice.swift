@@ -681,7 +681,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
 
     func configureGifs(klipyKey: String?) { lock.withLock { _klipyKeys.append(klipyKey) } }
     func gifProvider() -> GifProviderInfo { gifProviderInfo }
-    func gifSettings() throws -> GifSettingsInfo { lock.withLock { gifSettingsInfo } }
+    /// Thrown by `gifSettings` when set (a read that fails, the write aside).
+    var gifSettingsError: Error?
+    func gifSettings() throws -> GifSettingsInfo {
+        if let gifSettingsError { throw gifSettingsError }
+        return lock.withLock { gifSettingsInfo }
+    }
     func enableGifProvider(provider: UInt8, warningVersion: UInt16) throws {
         if let gifError { throw gifError }
         lock.withLock {

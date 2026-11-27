@@ -46,6 +46,18 @@ final class GifSettingsModelTests: XCTestCase {
         XCTAssertEqual(m.enabledAt, Date(timeIntervalSince1970: 1_795_000_000))
     }
 
+    /// The core stored the consent but the read that follows failed: the
+    /// switch still shows GIFs on (a read must not undo a stored write).
+    func testEnableStandsWhenTheReadBackFails() async throws {
+        let d = FakeDevice()
+        let m = model(d)
+        await m.load()
+        d.gifSettingsError = BarkingError.Storage(detail: "locked")
+        try await m.enable()
+        XCTAssertTrue(m.enabled)
+        XCTAssertFalse(m.saveFailed)
+    }
+
     /// Turned on here: no origin line.
     func testEnabledHereShowsNoOrigin() async throws {
         let d = FakeDevice()
@@ -125,7 +137,7 @@ final class GifSettingsModelTests: XCTestCase {
     func testGifStringsInFrench() throws {
         let fr = try XCTUnwrap(Bundle.main.path(forResource: "Localizable", ofType: "strings", inDirectory: nil,
                                                 forLocalization: "fr").flatMap { NSDictionary(contentsOfFile: $0) })
-        for key in ["GIFs", "Off", "On · %@ sees your IP address", "Use GIFs from %@", "Use GIFs from %@?",
+        for key in ["GIFs", "Off (GIFs)", "On · %@ sees your IP address", "Use GIFs from %@", "Use GIFs from %@?",
                     "Off, Barking never contacts %@", "Turned on from %@ · %@", "another device",
                     "Play GIFs automatically",
                     "Each GIF shown is requested from %@ from your address. Off, you choose GIF by GIF",

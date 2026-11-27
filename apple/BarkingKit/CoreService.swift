@@ -614,17 +614,31 @@ public actor CoreService {
     public func gifSettings() async throws -> GifSettingsInfo { try await call("gif-settings") { try $0.gifSettings() } }
     /// After the warning was accepted. The change leaves for my other
     /// devices with the next sync, started at once (as after a send).
-    public func enableGifProvider(_ provider: UInt8, warningVersion: UInt16) async throws {
-        try await call("gif-enable") { try $0.enableGifProvider(provider: provider, warningVersion: warningVersion) }
-        Task { _ = await self.sync(reason: .afterSend) }
+    /// Returns the settings read in the same call, before that sync holds
+    /// the core (nil if that read failed; the write stands).
+    @discardableResult
+    public func enableGifProvider(_ provider: UInt8, warningVersion: UInt16) async throws -> GifSettingsInfo? {
+        try await gifWrite("gif-enable") { try $0.enableGifProvider(provider: provider, warningVersion: warningVersion) }
     }
-    public func disableGifProvider(_ provider: UInt8) async throws {
-        try await call("gif-disable") { try $0.disableGifProvider(provider: provider) }
-        Task { _ = await self.sync(reason: .afterSend) }
+    /// As `enableGifProvider`.
+    @discardableResult
+    public func disableGifProvider(_ provider: UInt8) async throws -> GifSettingsInfo? {
+        try await gifWrite("gif-disable") { try $0.disableGifProvider(provider: provider) }
     }
-    public func setGifAutoLoad(_ on: Bool) async throws {
-        try await call("gif-auto-load") { try $0.setGifAutoLoad(on: on) }
+    /// As `enableGifProvider`.
+    @discardableResult
+    public func setGifAutoLoad(_ on: Bool) async throws -> GifSettingsInfo? {
+        try await gifWrite("gif-auto-load") { try $0.setGifAutoLoad(on: on) }
+    }
+    /// A GIF settings write, the settings read back in the same call, then the sync.
+    private func gifWrite(_ name: String,
+                          _ body: @escaping @Sendable (any DeviceHandle) throws -> Void) async throws -> GifSettingsInfo? {
+        let settings = try await call(name) { device -> GifSettingsInfo? in
+            try body(device)
+            return try? device.gifSettings()
+        }
         Task { _ = await self.sync(reason: .afterSend) }
+        return settings
     }
     public func gifSearch(_ query: String, page: UInt32) async throws -> GifPageInfo {
         try await call("gif-search") { try $0.gifSearch(query: query, page: page) }
