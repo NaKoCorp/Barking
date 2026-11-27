@@ -569,6 +569,8 @@ pub struct PendingMessage {
     pub row_id: i64,
     pub contact: Fingerprint,
     pub body: String,
+    /// The message is a GIF (`body` is then empty).
+    pub gif: bool,
     pub sealed_at: u64,
     /// Earliest expiry of its pending packets.
     pub expires_at: u64,
@@ -2695,7 +2697,8 @@ pub trait Queries {
         let mut stmt = self
             .conn()
             .prepare(
-                "SELECT m.id, m.contact_fp, m.body, min(d.sealed_at), min(o.expires_at), \
+                "SELECT m.id, m.contact_fp, m.body, m.gif IS NOT NULL, min(d.sealed_at), \
+                 min(o.expires_at), \
                  count(*), \
                  (SELECT count(*) FROM deliveries d2 \
                   WHERE d2.message_id = m.message_id AND d2.own = 0), \
@@ -2713,7 +2716,7 @@ pub trait Queries {
                  GROUP BY m.id ORDER BY min(o.expires_at), m.id",
             )
             .map_err(map_err)?;
-        type Raw = (i64, Vec<u8>, String, i64, i64, i64, i64, i64, i64);
+        type Raw = (i64, Vec<u8>, String, bool, i64, i64, i64, i64, i64, i64);
         let raws = stmt
             .query_map(
                 params![
@@ -2734,6 +2737,7 @@ pub trait Queries {
                         r.get(6)?,
                         r.get(7)?,
                         r.get(8)?,
+                        r.get(9)?,
                     ))
                 },
             )
@@ -2742,12 +2746,13 @@ pub trait Queries {
             .map_err(map_err)?;
         let count = |n: i64| u32::try_from(n).unwrap_or(u32::MAX);
         let mut out = PendingPackets::default();
-        for (row_id, fp, body, sealed, expires, packets, devices, left, tried) in raws {
+        for (row_id, fp, body, gif, sealed, expires, packets, devices, left, tried) in raws {
             out.packets = out.packets.saturating_add(count(packets));
             out.messages.push(PendingMessage {
                 row_id,
                 contact: Fingerprint(arr(fp)?),
                 body,
+                gif,
                 sealed_at: to_u64(sealed),
                 expires_at: to_u64(expires),
                 packets: count(packets),

@@ -12,7 +12,7 @@ use barking_net::push::{PushConfig, PushPrefs};
 use barking_net::{NetState, QuicDialer, QuickOptions, SyncOptions, SyncReport};
 
 use crate::delivery::{DeliveryChange, changes_of};
-use crate::device::{Device, now};
+use crate::device::{Device, now, shown_text};
 use crate::reactions::{NOTIFICATION_CHARS, NewReaction, excerpt};
 use crate::{BarkingError, guard};
 
@@ -235,7 +235,7 @@ fn summary(core: &mut Core, mut report: SyncReport, expired: Vec<i64>) -> SyncSu
                 let on_ephemeral = target.as_ref().is_some_and(|r| r.ttl_secs.is_some());
                 let excerpt = target
                     .filter(|_| !on_ephemeral)
-                    .map(|row| excerpt(&row.body, NOTIFICATION_CHARS));
+                    .map(|row| excerpt(&shown_text(&row), NOTIFICATION_CHARS));
                 new_reactions.push(NewReaction {
                     contact: from.to_string(),
                     name: name_of(&from, alias),
@@ -596,6 +596,53 @@ mod tests {
         assert!(s.new_messages.is_empty());
         // A notification to show.
         assert!(!s.nothing_to_show);
+    }
+
+    /// A reaction to a GIF reads "GIF", never its title or an empty text.
+    #[test]
+    fn reaction_on_gif_reads_gif() {
+        let (dir, core, bob) = core_with_bob_message();
+        drop(core);
+        let path = dir.path().join("a.db");
+        Store::open(&path, &[1u8; 32])
+            .unwrap()
+            .insert_message_row(&MessageInsert {
+                contact_fp: bob,
+                direction: Direction::In,
+                body: String::new(),
+                status: MessageStatus::Received,
+                at: 1_600,
+                message_id: MessageId([6; 16]),
+                wire_id: Some([6; 16]),
+                reply_to: None,
+                reply_ref: None,
+                placeholder: false,
+                ttl_secs: None,
+                seen_at: None,
+                expire_at: None,
+                gif: Some(barking_core::gif::GifRef {
+                    provider: 1,
+                    id: "hello-hi-662".into(),
+                    width: 480,
+                    height: 270,
+                }),
+            })
+            .unwrap();
+        let mut core = Core::open(&path, &[1u8; 32], 2_000).unwrap();
+        let report = SyncReport {
+            items_received: 1,
+            network_up: true,
+            fetched_all: true,
+            received: vec![ReceiveOutcome::Reaction {
+                from: bob,
+                alias: Some("bob".into()),
+                target: MessageId([6; 16]),
+                added: vec!["👍".into()],
+            }],
+            ..SyncReport::default()
+        };
+        let s = summary(&mut core, report, Vec::new());
+        assert_eq!(s.new_reactions[0].excerpt.as_deref(), Some("GIF"));
     }
 
     /// A reaction to a live ephemeral says so, without a word of it.

@@ -111,7 +111,9 @@ impl CappedBody {
 }
 
 /// reqwest over rustls (`ring`, webpki roots), HTTP/1.1, no cookie, no
-/// redirect, no proxy.
+/// redirect, no proxy, no connection kept between requests: nothing
+/// outlives the call, and each call may run on its own runtime (the FFI
+/// builds one per call), which a pooled connection would not survive.
 pub struct HttpsTransport {
     client: reqwest::Client,
 }
@@ -137,6 +139,7 @@ impl HttpsTransport {
             .user_agent(USER_AGENT)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
+            .pool_max_idle_per_host(0)
             .timeout(TIMEOUT)
             .build()
             .map_err(|_| GifError::Unreachable)?;

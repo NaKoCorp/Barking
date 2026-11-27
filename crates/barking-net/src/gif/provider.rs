@@ -10,6 +10,12 @@ pub trait GifProvider: Send + Sync {
     fn id(&self) -> GifProviderId;
     /// Name shown in the interface.
     fn name(&self) -> &'static str;
+    /// Version of this provider's warning the interface shows now; at
+    /// least `MIN_GIF_WARNING_VERSION`, raised when its text changes in a
+    /// way that matters.
+    fn warning_version(&self) -> u16;
+    /// The provider's privacy policy, linked from the warning.
+    fn privacy_url(&self) -> &'static str;
     /// The only hosts ever contacted for this provider, API and media.
     fn hosts(&self) -> &'static [&'static str];
     /// Whether `id` has the format of an identifier of this provider.

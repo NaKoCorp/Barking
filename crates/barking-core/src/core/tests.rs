@@ -4570,6 +4570,7 @@ fn pending_kinds_are_classified() {
             row_id: row_of(&a, &bob, "m"),
             contact: bob,
             body: "m".into(),
+            gif: false,
             sealed_at: NOW,
             expires_at: u64::from(sent[0].expires_at),
             packets: 1,

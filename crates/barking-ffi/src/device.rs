@@ -7,12 +7,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use barking_core::contact::ContactCard;
+use barking_core::core::GifUse;
+use barking_core::gif::GIF_PREVIEW;
 use barking_core::store::{DeliverySummary, Direction};
 use barking_core::{Core, CoreError};
 use barking_net::geo::IpDb;
+use barking_net::gif::{GifKeys, HttpsTransport};
 use zeroize::Zeroize;
 
 use crate::delivery::{Delivery, DeliveryState, delivery_of, state_of};
+use crate::gif::GifInfo;
 use crate::lock::DbLock;
 use crate::reactions::{Quote, ReactionChip, chips_of, quote_of};
 use crate::{BarkingError, guard};
@@ -119,6 +123,10 @@ pub struct Message {
     /// "never shown" ceiling); `None` for a plain message.
     #[uniffi(default = None)]
     pub expire_at: Option<u64>,
+    /// The GIF this message is; `body` then reads "GIF" (never its title).
+    /// `None` for a text.
+    #[uniffi(default = None)]
+    pub gif: Option<GifInfo>,
 }
 
 #[derive(uniffi::Object)]
@@ -131,6 +139,13 @@ pub struct Device {
     /// only): the next sync reports those that moved since, whatever moved
     /// them (`net::RequestStamp`).
     pub(crate) requests_seen: Mutex<Option<Vec<crate::net::RequestStamp>>>,
+    /// The app's GIF provider keys (`configure_gifs`), in memory only.
+    pub(crate) gif_keys: Mutex<GifKeys>,
+    /// The HTTPS client of the GIF calls, built at the first one.
+    pub(crate) gif_transport: Mutex<Option<Arc<HttpsTransport>>>,
+    /// GIF uses not counted yet: the database was busy (a sync) when the
+    /// call ended. Counted with the next use (`gif::DeviceGate`).
+    pub(crate) gif_uncounted: Mutex<Vec<(GifUse, u64)>>,
 }
 
 /// Where the IP base is and, once opened, the base. An open that failed is
@@ -183,6 +198,9 @@ impl Device {
             key,
             ipdb: Mutex::default(),
             requests_seen: Mutex::default(),
+            gif_keys: Mutex::default(),
+            gif_transport: Mutex::default(),
+            gif_uncounted: Mutex::default(),
         })
     }
 
@@ -266,6 +284,18 @@ impl Device {
         f: impl FnOnce(&mut Core) -> Result<T, BarkingError>,
     ) -> Result<T, BarkingError> {
         let lock = self.lock()?;
+        self.run_on_core(lock, f)
+    }
+
+    /// Runs `f` like `with_core`, waiting at most `wait` for the lock (and
+    /// never longer than the configured wait).
+    pub(crate) fn with_core_within<T>(
+        &self,
+        wait: Duration,
+        f: impl FnOnce(&mut Core) -> Result<T, BarkingError>,
+    ) -> Result<T, BarkingError> {
+        let wait = wait.min(Duration::from_millis(self.config.lock_timeout_ms));
+        let lock = DbLock::acquire(Path::new(&self.config.lock_path), wait)?;
         self.run_on_core(lock, f)
     }
 
@@ -492,10 +522,21 @@ pub(crate) fn message_of(
         expire_at: m.expire_at,
         id: m.id,
         outgoing: m.direction == Direction::Out,
-        body: m.body,
+        body: shown_text(&m),
+        gif: m.gif.map(GifInfo::from),
         at: m.at,
         delivery: delivery.map(delivery_of),
     })
+}
+
+/// The text the apps show for a message row: "GIF" for a GIF (its body is
+/// empty, its title never shown outside the bubble), else its body.
+pub(crate) fn shown_text(m: &barking_core::store::MessageRow) -> String {
+    if m.gif.is_some() {
+        GIF_PREVIEW.to_owned()
+    } else {
+        m.body.clone()
+    }
 }
 
 impl Drop for Device {

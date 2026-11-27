@@ -27,6 +27,10 @@ const HOSTS: &[&str] = &[
     "static1.klipy.com",
     "static2.klipy.com",
 ];
+/// Version of the warning text (spec §9.2).
+const WARNING_VERSION: u16 = 1;
+/// Klipy's privacy policy (read 2026-11-27).
+const PRIVACY_URL: &str = "https://klipy.com/support/privacy-policy";
 /// Results per page (Klipy accepts 8 to 50).
 const PER_PAGE: &str = "24";
 const FORMAT_FILTER: &str = "mp4";
@@ -194,6 +198,14 @@ impl GifProvider for Klipy {
 
     fn hosts(&self) -> &'static [&'static str] {
         HOSTS
+    }
+
+    fn warning_version(&self) -> u16 {
+        WARNING_VERSION
+    }
+
+    fn privacy_url(&self) -> &'static str {
+        PRIVACY_URL
     }
 
     /// A Klipy slug: `[a-z0-9-]{1,64}`.
@@ -367,6 +379,8 @@ mod tests {
             ]
         );
         assert_eq!(klipy().id(), GifProviderId::Klipy);
+        assert!(klipy().warning_version() >= barking_core::gif::MIN_GIF_WARNING_VERSION);
+        assert!(klipy().privacy_url().starts_with("https://klipy.com/"));
         assert_eq!(klipy().name(), "Klipy");
     }
 

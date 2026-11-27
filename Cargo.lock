@@ -325,6 +325,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uniffi",
+ "url",
  "zeroize",
 ]
 
