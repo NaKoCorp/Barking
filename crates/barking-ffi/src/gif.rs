@@ -595,4 +595,23 @@ mod tests {
         assert!(d.gif_settings().unwrap().auto_load);
         assert_eq!(d.gif_usage(1).unwrap()[0].searches, 1);
     }
+
+    /// A use that finds the database busy (a sync) is not lost: it is
+    /// counted with the next use.
+    #[test]
+    fn ffi_gif_use_counted_later_when_the_database_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = device(&dir, 1, "Alice");
+        d.with_core_sync(|_| {
+            DeviceGate(&d).record(GifUse::Search);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(d.gif_uncounted.lock().unwrap().len(), 1);
+        assert!(d.gif_usage(1).unwrap().is_empty());
+        DeviceGate(&d).record(GifUse::Shown);
+        assert!(d.gif_uncounted.lock().unwrap().is_empty());
+        let day = d.gif_usage(1).unwrap()[0];
+        assert_eq!((day.searches, day.shown), (1, 1));
+    }
 }
