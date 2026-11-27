@@ -610,6 +610,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func contactCardBytes() throws -> Data { try device.contactCardBytes() }
     func contactCard(displayName: String) throws -> String { try device.contactCard(displayName: displayName) }
     func setAlias(contact: String, alias: String) throws { try device.setAlias(contact: contact, alias: alias) }
+    func setContactAvatar(contact: String, avatar: ContactAvatar?) throws {
+        try device.setContactAvatar(contact: contact, avatar: avatar)
+    }
+    func contactAvatars() throws -> [ContactAvatarEntry] { try device.contactAvatars() }
     func removeContact(contact: String) throws { try device.removeContact(contact: contact) }
     func setDraft(contact: String, text: String) throws { try device.setDraft(contact: contact, text: text) }
     func draft(contact: String) throws -> String? { try device.draft(contact: contact) }

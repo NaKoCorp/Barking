@@ -37,7 +37,7 @@ struct SafetyCodeView: View {
     var body: some View {
         Group {
             VStack(alignment: .leading, spacing: Space.s3) {
-                Avatar(name: model.name, fingerprint: model.contact, size: 64)
+                AvatarEditor(name: model.name, fingerprint: model.contact)
                 ScreenTitle("Compare with \(model.name)", size: 22)
                 Text("Read the numbers aloud, in person or on a call you trust. If they match, nobody sits between you.")
                     .font(.bBody).foregroundStyle(Color.fgMuted)
