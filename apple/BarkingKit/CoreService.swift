@@ -304,12 +304,29 @@ public actor CoreService {
     /// `ttlSecs`: an ephemeral message, erased that long after it is seen
     /// (60 to 604 800 seconds, else `BarkingError.InvalidInput`); nil: a
     /// plain one.
-    public func send(_ text: String, to contact: String, replyTo: Int64? = nil, ttlSecs: UInt32? = nil) async throws {
-        try await call("send") {
-            try $0.sendText(contact: contact, text: text, replyTo: replyTo, ttlSecs: ttlSecs)
+    /// Returns the conversation's rows, read in the same call, before the
+    /// sync starts: that sync holds the core through its network round, so
+    /// a read after it would leave the sent bubble without its row (no
+    /// details, no menu) until the round ends. Nil if that read failed.
+    /// `clearingDraft`: the stored draft goes in that call too, once sent
+    /// (a failed send keeps it); `false` if clearing it failed.
+    @discardableResult
+    public func send(_ text: String, to contact: String, replyTo: Int64? = nil,
+                     ttlSecs: UInt32? = nil, clearingDraft: Bool = false) async throws -> SendResult {
+        let result = try await call("send") { device -> SendResult in
+            try device.sendText(contact: contact, text: text, replyTo: replyTo, ttlSecs: ttlSecs)
+            let cleared = clearingDraft ? (try? device.setDraft(contact: contact, text: "")) != nil : false
+            return SendResult(rows: try? device.messagesWith(contact: contact), draftCleared: cleared)
         }
         publish(.messages(contact: contact))
         Task { _ = await self.sync(reason: .afterSend) }
+        return result
+    }
+
+    /// What `send` read and did in its call.
+    public struct SendResult: Sendable {
+        public let rows: [Message]?
+        public let draftCleared: Bool
     }
     /// Replaces my reactions on message `messageId` of the conversation with
     /// `contact` (empty: removes mine); the packets leave with the next sync.

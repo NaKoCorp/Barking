@@ -8,6 +8,14 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _sent: [(contact: String, text: String, replyTo: Int64?)] = []
     private var _reactions: [Int64: [String]] = [:]
     var syncDelay: TimeInterval = 0
+    /// Models the core's lock: a sync holds it this long (its network
+    /// round) and a write (`setDraft`) waits for it, as in barking-ffi
+    /// (`with_core`). Reads join the sync's lock and do not wait.
+    var networkDelay: TimeInterval = 0
+    private let coreGate = NSLock()
+    /// `sendText` writes its row, as the core does, so a read sees it.
+    var sentRowsAppear = false
+    private var nextSentId: Int64 = 1000
     var summary = SyncSummary(itemsReceived: 0, sent: 0, newMessages: [], networkUp: true, error: nil)
     var contactList: [Contact] = []
     var messageList: [String: [Message]] = [:]
@@ -63,6 +71,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         lock.withLock {
             _sent.append((contact, text, replyTo))
             _sentTtls.append(ttlSecs)
+            if sentRowsAppear {
+                nextSentId += 1
+                messageList[contact, default: []].append(Message(
+                    id: nextSentId, outgoing: true, body: text, at: UInt64(Date().timeIntervalSince1970),
+                    delivery: .state(.pending)))
+            }
         }
     }
     private var _sentTtls: [UInt32?] = []
@@ -99,6 +113,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     /// How many times `setDraft` ran, failed ones included.
     var setDraftCalls: Int { lock.withLock { _setDraftCalls } }
     func setDraft(contact: String, text: String) throws {
+        if networkDelay > 0 { coreGate.lock(); coreGate.unlock() }
         lock.withLock { _setDraftCalls += 1 }
         if let setDraftError { throw setDraftError }
         lock.withLock { _drafts[contact] = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text }
@@ -165,6 +180,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         }
         defer { lock.withLock { _syncEvents.append("sync-done") } }
         Thread.sleep(forTimeInterval: syncDelay)
+        if networkDelay > 0 { coreGate.lock(); Thread.sleep(forTimeInterval: networkDelay); coreGate.unlock() }
         if queued, summary.networkUp, !depositFails { lock.withLock { _leaveDeposited = true } }
         return summary
     }

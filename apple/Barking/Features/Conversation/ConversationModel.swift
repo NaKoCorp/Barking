@@ -410,6 +410,18 @@ final class ConversationModel {
     func reload() async {
         await refreshContact()
         let messages = (try? await core.messages(with: contact)) ?? []
+        show(messages)
+        // What arrives while the conversation is on screen is read.
+        if visible, let last = items.last(where: { !$0.outgoing }) {
+            try? await core.markRead(contact, upTo: last.id)
+        }
+        reportSeen()
+        await armExpiry()
+    }
+
+    /// The core's rows become the bubbles, with the send in progress, if
+    /// its row is not there yet. No core call: a send shows its row at once.
+    private func show(_ messages: [Message]) {
         loaded = true
         // A failed message with a later sent copy was retried the old way
         // (before Lot M, a new row): hide it, even after reopening.
@@ -430,12 +442,6 @@ final class ConversationModel {
         } + [shownAtSend].compactMap { $0 }
         // The row being answered left (deleted): nothing to answer any more.
         if let target = replyingTo, !items.contains(where: { $0.id == target.id }) { replyingTo = nil }
-        // What arrives while the conversation is on screen is read.
-        if visible, let last = items.last(where: { !$0.outgoing }) {
-            try? await core.markRead(contact, upTo: last.id)
-        }
-        reportSeen()
-        await armExpiry()
     }
 
     /// Fresh delivery of the rows `ids` shown here, patched in place (and
@@ -512,20 +518,32 @@ final class ConversationModel {
         shownAtSend = shown
         items.append(shown)
         do {
-            try await core.send(text, to: contact, replyTo: replyId, ttlSecs: delay)
+            // Sent: the stored draft goes in the same call. Not before, so
+            // a failure keeps it.
+            let result = try await core.send(text, to: contact, replyTo: replyId, ttlSecs: delay,
+                                             clearingDraft: true)
+            if result.draftCleared { lastSaved = "" }
             replyingTo = nil
             ttl = nil
-            // Sent: the stored draft goes too. Not before, so a failure keeps it.
-            if (try? await core.setDraft(contact, text: "")) != nil { lastSaved = "" }
+            // The core's row replaces the bubble now, read before the sync
+            // the send starts: that sync holds the core through its network
+            // round, and any later call waits for it.
+            if let rows = result.rows { show(rows) }
+            // Not awaited, so the next send need not wait for the sync.
+            Task {
+                // This send's bubble only: a later send keeps its own.
+                if shownAtSend?.id == shown.id { shownAtSend = nil }
+                await reload()
+            }
         } catch {
             draft = text
             sendError = "Not sent. Try again in a moment."
             // A disappear during the send skipped its save: store it now.
             await persistDraft()
+            // The reload drops the bubble.
+            shownAtSend = nil
+            await reload()
         }
-        // The reload swaps it for the core's row, or drops it on failure.
-        shownAtSend = nil
-        await reload()
     }
 
     /// Starts answering the row `id`; ignored for a local row, a placeholder
