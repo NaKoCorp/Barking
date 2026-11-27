@@ -188,8 +188,9 @@ impl Device {
         guard(|| self.with_core(|core| Ok(core.mark_requests_seen()?)))
     }
 
-    /// Invites a contact who has not added me yet. Again within 24 hours:
-    /// `TooSoon { retry_at }`.
+    /// Invites a contact who has not added me yet, or again one who
+    /// accepted and may have deleted me since (a fresh session). Again
+    /// within 24 hours: `TooSoon { retry_at }`.
     pub fn invite(&self, contact: String) -> Result<(), BarkingError> {
         guard(|| {
             self.with_core(|core| {

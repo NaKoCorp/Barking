@@ -9171,15 +9171,192 @@ fn sync_invite_from_a_contact_is_not_mine() {
     assert_eq!(count_table(&p.b, "invites"), 0);
 }
 
+/// Bob, who still has Alice as a contact, invites her after she removed him:
+/// every device answered long ago, so the invite opens a new session with each
+/// (a fresh Initial, the only kind she can still read).
+fn bob_reinvites_after_removal(p: &mut Pair, at: u64) -> Packet {
+    let alice = p.a.fingerprint();
+    p.a.remove_contact(&p.b.fingerprint(), NOW + 1, &mut p.rng)
+        .unwrap();
+    let mut out = p.b.invite(&alice, at, &mut p.rng).unwrap();
+    assert_eq!(out.len(), 1);
+    let invite = out.remove(0);
+    assert!(matches!(
+        parse_wire(&invite.payload).unwrap(),
+        Wire::Initial { .. }
+    ));
+    assert_eq!(
+        invite.mailbox,
+        intro_mailbox(&p.a.device.public(), day_of(at))
+    );
+    invite
+}
+
 #[test]
-fn invite_skips_devices_that_already_answered() {
+fn reinvite_after_removal_reaches_the_remover_as_a_request() {
     let mut p = pair();
-    let bob = p.b.fingerprint();
-    let deliveries = count_table(&p.a, "deliveries");
-    assert!(p.a.invite(&bob, NOW, &mut p.rng).unwrap().is_empty());
-    assert_eq!(requests::get_invite(&p.a.store, bob).unwrap(), None);
-    assert_eq!(count_table(&p.a, "deliveries"), deliveries);
-    assert_eq!(count_table(&p.a, "invite_packets"), 0);
+    let (alice, bob) = (p.a.fingerprint(), p.b.fingerprint());
+    let at = NOW + 10;
+    let invite = bob_reinvites_after_removal(&mut p, at);
+    assert_eq!(
+        p.b.invite_state(&alice, at).unwrap(),
+        InviteState::Sent { at }
+    );
+    let got = p.a.receive(&invite.encode(), "t", at, &mut p.rng).unwrap();
+    assert_eq!(request_outcome(got).0, bob);
+    // Written before she accepts: it rides the new session too, and waits
+    // with the request.
+    let early = p.b.send_text(&alice, "early", at + 1, &mut p.rng).unwrap();
+    assert_eq!(early.len(), 1);
+    assert_eq!(
+        reason(
+            p.a.receive(&early[0].encode(), "t", at + 1, &mut p.rng)
+                .unwrap()
+        ),
+        R_PENDING_REQUEST
+    );
+    let accepted = p.a.accept_request(&bob, None, at + 20, &mut p.rng).unwrap();
+    assert!(
+        accepted
+            .replayed
+            .iter()
+            .any(|o| matches!(o, ReceiveOutcome::Message { .. })),
+        "{:?}",
+        accepted.replayed
+    );
+    for pkt in &accepted.packets {
+        p.b.receive(&pkt.encode(), "t", at + 30, &mut p.rng)
+            .unwrap();
+    }
+    assert_eq!(
+        p.b.invite_state(&alice, at + 30).unwrap(),
+        InviteState::Accepted { at: at + 30 }
+    );
+    // From then on Bob writes in the new session, answered.
+    let next = p.b.send_text(&alice, "again", at + 40, &mut p.rng).unwrap();
+    assert!(matches!(
+        parse_wire(&next[0].payload).unwrap(),
+        Wire::Normal { .. }
+    ));
+    let got =
+        p.a.receive(&next[0].encode(), "t", at + 40, &mut p.rng)
+            .unwrap();
+    assert!(matches!(got, ReceiveOutcome::Message { .. }), "{got:?}");
+}
+
+#[test]
+fn reinvite_after_removal_works_from_the_first_inviter() {
+    let (_da, mut a, _db, mut b, mut rng) = alice_knows_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let invite = invite_one(&mut a, bob, NOW, &mut rng);
+    request_outcome(b.receive(&invite.encode(), "t", NOW, &mut rng).unwrap());
+    let accepted = b.accept_request(&alice, None, NOW + 10, &mut rng).unwrap();
+    a.receive(&accepted.packets[0].encode(), "t", NOW + 10, &mut rng)
+        .unwrap();
+    b.remove_contact(&alice, NOW + 20, &mut rng).unwrap();
+    // Within 24 hours of her first invite: refused, nothing written.
+    let packets = count_table(&a, "invite_packets");
+    assert!(matches!(
+        a.invite(&bob, NOW + 30, &mut rng),
+        Err(CoreError::TooSoon { retry_at }) if retry_at == NOW + 86_400
+    ));
+    assert_eq!(count_table(&a, "invite_packets"), packets);
+    assert_eq!(
+        a.invite_state(&bob, NOW + 30).unwrap(),
+        InviteState::Accepted { at: NOW + 10 }
+    );
+    // A second Initial on the same key packet of Bob's card.
+    let later = NOW + 86_400;
+    let again = invite_one(&mut a, bob, later, &mut rng);
+    assert_eq!(
+        a.invite_state(&bob, later).unwrap(),
+        InviteState::Sent { at: later }
+    );
+    let got = b.receive(&again.encode(), "t", later, &mut rng).unwrap();
+    assert_eq!(request_outcome(got).0, alice);
+}
+
+#[test]
+fn reinvite_after_removal_keeps_the_24h_cap() {
+    let mut p = pair();
+    let alice = p.a.fingerprint();
+    let at = NOW + 10;
+    bob_reinvites_after_removal(&mut p, at);
+    let sessions = p.b.store.all_sessions().unwrap().len();
+    assert!(matches!(
+        p.b.invite(&alice, at + 86_399, &mut p.rng),
+        Err(CoreError::TooSoon { retry_at }) if retry_at == at + 86_400
+    ));
+    // The resend is the next message of the new pending session.
+    let again = p.b.invite(&alice, at + 86_400, &mut p.rng).unwrap();
+    assert_eq!(again.len(), 1);
+    assert!(matches!(
+        parse_wire(&again[0].payload).unwrap(),
+        Wire::Initial { .. }
+    ));
+    assert_eq!(p.b.store.all_sessions().unwrap().len(), sessions);
+}
+
+#[test]
+fn reinvite_cycles_keep_the_session_cap() {
+    let mut p = pair();
+    let (alice, bob) = (p.a.fingerprint(), p.b.fingerprint());
+    for (i, at) in [NOW + 10, NOW + 10 + 86_400].into_iter().enumerate() {
+        if i > 0 {
+            p.a.remove_contact(&bob, at - 5, &mut p.rng).unwrap();
+        }
+        let out = if i == 0 {
+            vec![bob_reinvites_after_removal(&mut p, at)]
+        } else {
+            p.b.invite(&alice, at, &mut p.rng).unwrap()
+        };
+        assert_eq!(out.len(), 1);
+        let got = p.a.receive(&out[0].encode(), "t", at, &mut p.rng).unwrap();
+        assert_eq!(request_outcome(got).0, bob);
+        let accepted = p.a.accept_request(&bob, None, at + 20, &mut p.rng).unwrap();
+        for pkt in &accepted.packets {
+            p.b.receive(&pkt.encode(), "t", at + 30, &mut p.rng)
+                .unwrap();
+        }
+        let text = p.b.send_text(&alice, "hi", at + 40, &mut p.rng).unwrap();
+        let got =
+            p.a.receive(&text[0].encode(), "t", at + 40, &mut p.rng)
+                .unwrap();
+        assert!(matches!(got, ReceiveOutcome::Message { .. }), "{got:?}");
+        // Bob keeps at most two sessions with her device.
+        assert_eq!(p.b.store.all_sessions().unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn reinvite_of_a_contact_who_kept_me_is_harmless() {
+    let mut p = pair();
+    let (alice, bob) = (p.a.fingerprint(), p.b.fingerprint());
+    let at = NOW + 10;
+    let out = p.b.invite(&alice, at, &mut p.rng).unwrap();
+    assert_eq!(out.len(), 1);
+    let got = p.a.receive(&out[0].encode(), "t", at, &mut p.rng).unwrap();
+    assert!(matches!(got, ReceiveOutcome::Ignored), "{got:?}");
+    assert!(requests::get_request(&p.a.store, bob).unwrap().is_none());
+    // Her ack tells Bob she knows him.
+    let acks = acks_of(&mut p.a, at);
+    let ack = acks.iter().find(|k| k.mailbox == out[0].mailbox).unwrap();
+    p.b.receive(&ack.encode(), "t", at + 5, &mut p.rng).unwrap();
+    assert_eq!(
+        p.b.invite_state(&alice, at + 5).unwrap(),
+        InviteState::Accepted { at: at + 5 }
+    );
+    // Both ways still work.
+    let to_a = p.b.send_text(&alice, "b", at + 6, &mut p.rng).unwrap();
+    let got =
+        p.a.receive(&to_a[0].encode(), "t", at + 6, &mut p.rng)
+            .unwrap();
+    assert!(matches!(got, ReceiveOutcome::Message { .. }), "{got:?}");
+    let to_b = p.a.send_text(&bob, "a", at + 7, &mut p.rng).unwrap();
+    let got =
+        p.b.receive(&to_b[0].encode(), "t", at + 7, &mut p.rng)
+            .unwrap();
+    assert!(matches!(got, ReceiveOutcome::Message { .. }), "{got:?}");
 }
 
 // --- Contact requests, task 5: receiving an invite from an unknown sender.
