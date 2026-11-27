@@ -8170,6 +8170,37 @@ fn sync_seen_cap_fits_tier_m() {
 }
 
 #[test]
+fn gif_with_reply_and_ttl_fits_tier_m() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    answer_own_session(&mut a, &mut t, &mut rng);
+    let content = ExtContent::SyncGif {
+        to: b.fingerprint(),
+        gif: crate::gif::GifRef {
+            provider: u8::MAX,
+            id: "-".repeat(crate::gif::MAX_GIF_ID_LEN),
+            width: u16::MAX,
+            height: u16::MAX,
+        },
+        reply_to: Some(MessageRef {
+            id: [0xff; 16],
+            by_sender: true,
+        }),
+        // The longest delay `seal` accepts (`u32::MAX` is refused as out of
+        // bounds).
+        ttl_secs: Some(crate::content::MAX_TTL_SECS),
+    };
+    let mut sealed = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &content.to_body(),
+        MessageId([0x52; 16]),
+        &mut rng,
+    );
+    assert_eq!(sealed.len(), 1);
+    assert_eq!(sealed.remove(0).0.tier, Tier::M);
+}
+
+#[test]
 fn sync_seen_round_trips() {
     let seen = vec![SeenEntry {
         id: MessageId([1; 16]),
