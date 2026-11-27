@@ -29,6 +29,52 @@ pub const MAX_CARD_NODES: usize = 3;
 /// Maximum size of one node hint (bytes). Hints are opaque to the core.
 pub const MAX_NODE_HINT_BYTES: usize = 192;
 
+/// Maximum size of an avatar emoji, in bytes: room for a long ZWJ
+/// sequence (a family, a flag), not for a sentence.
+pub const MAX_AVATAR_EMOJI_LEN: usize = 64;
+/// Maximum size of an avatar photo, in bytes. The photo is synchronized
+/// with my other devices in a single packet (`SyncOp::Avatar`, L tier,
+/// 16 KiB): 12 KiB leaves room for the envelope and the worst-case wire
+/// overhead (test `max_avatar_op_fits_one_packet`).
+pub const MAX_AVATAR_PHOTO_LEN: usize = 12 * 1024;
+
+/// The picture I gave a contact. Synchronized with my other devices
+/// (`SyncOp::Avatar`, last writer wins) and copied by a link; never
+/// logged nor sent to the contact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContactAvatar {
+    Emoji(String),
+    /// A JPEG file.
+    Photo(Vec<u8>),
+}
+
+impl ContactAvatar {
+    /// Refuses what the apps could not show: a blank emoji, one with a
+    /// control character (a newline would break a list row), or a photo
+    /// that is not a JPEG. Too long: `TooLarge`.
+    pub fn check(&self) -> Result<()> {
+        match self {
+            ContactAvatar::Emoji(value) => {
+                if value.len() > MAX_AVATAR_EMOJI_LEN {
+                    return Err(CoreError::TooLarge);
+                }
+                if value.trim().is_empty() || value.chars().any(char::is_control) {
+                    return Err(CoreError::Malformed("invalid avatar emoji"));
+                }
+            }
+            ContactAvatar::Photo(jpeg) => {
+                if jpeg.len() > MAX_AVATAR_PHOTO_LEN {
+                    return Err(CoreError::TooLarge);
+                }
+                if !jpeg.starts_with(&[0xFF, 0xD8]) {
+                    return Err(CoreError::Malformed("avatar photo is not a JPEG"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A contact card. Serialized with serde (inside a message body or the
 /// encrypted store) as the length-prefixed bytes of [`ContactCard::encode`],
 /// so that every decode goes through [`ContactCard::decode`].

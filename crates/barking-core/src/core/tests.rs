@@ -1202,6 +1202,11 @@ fn sync_from_contact_quarantined() {
             text: "faux".into(),
         },
         Body::SyncContact(SyncOp::Remove(b_fp)),
+        Body::SyncContact(SyncOp::Avatar {
+            contact: b_fp,
+            avatar: None,
+            at: NOW,
+        }),
         Body::SyncContact(SyncOp::Upsert {
             card: Box::new(card.clone()),
             alias: "x".into(),
@@ -11231,9 +11236,11 @@ fn accept_within_grace_acks_despite_a_rewritten_header_expiry() {
     assert_eq!(outbox_of(&mut b, Kind::Ack, later), 3);
 }
 
-// Contact avatars: local to this device, never synchronized, logged or sent.
+// Contact avatars: a register synchronized between my devices (last writer
+// wins), copied by a link, never logged nor sent to the contact.
 
-use crate::core::ContactAvatar;
+use crate::core::{ContactAvatar, MAX_AVATAR_PHOTO_LEN};
+use crate::store::{AvatarKind, AvatarRegister};
 
 /// A tiny byte string that starts like a JPEG (SOI marker).
 fn jpeg(len: usize) -> Vec<u8> {
@@ -11241,6 +11248,14 @@ fn jpeg(len: usize) -> Vec<u8> {
     v[0] = 0xFF;
     v[1] = 0xD8;
     v
+}
+
+fn dog() -> ContactAvatar {
+    ContactAvatar::Emoji("\u{1F436}".into())
+}
+
+fn cat() -> ContactAvatar {
+    ContactAvatar::Emoji("\u{1F431}".into())
 }
 
 fn avatar_of(core: &Core, fp: &Fingerprint) -> Option<ContactAvatar> {
@@ -11258,6 +11273,48 @@ fn outbox_count(core: &Core) -> i64 {
         .unwrap()
 }
 
+/// Deliveries addressed to a contact (not to one of my devices).
+fn contact_deliveries(core: &Core) -> i64 {
+    core.store
+        .conn()
+        .query_row("SELECT count(*) FROM deliveries WHERE own = 0", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+}
+
+/// A (admin) linked to T, both knowing Bob (added on A, synchronized).
+fn linked_with_bob() -> (TempDir, TempDir, Core, Core, Fingerprint, StdRng) {
+    let (d, mut a, mut t, mut rng) = linked();
+    let (db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert!(t.resolve("bob").is_ok());
+    (d, db, a, t, fp, rng)
+}
+
+/// The packets `c` queued since `before` (a previous `pending_outbox`).
+fn queued_since(c: &mut Core, before: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    c.pending_outbox(NOW + 9)
+        .unwrap()
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .collect()
+}
+
+fn deliver_bytes(to: &mut Core, packets: &[Vec<u8>], rng: &mut StdRng) {
+    for p in packets {
+        let _ = to.receive(p, "t", NOW + 9, rng);
+    }
+}
+
 #[test]
 fn avatar_emoji_roundtrip() {
     let mut p = pair();
@@ -11265,7 +11322,8 @@ fn avatar_emoji_roundtrip() {
     assert!(p.a.contact_avatars().unwrap().is_empty());
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
     let avatar = ContactAvatar::Emoji(family.into());
-    p.a.set_contact_avatar(&bob, Some(&avatar)).unwrap();
+    p.a.set_contact_avatar(&bob, Some(&avatar), NOW, &mut p.rng)
+        .unwrap();
     assert_eq!(p.a.contact_avatars().unwrap(), vec![(bob, avatar)]);
 }
 
@@ -11273,38 +11331,45 @@ fn avatar_emoji_roundtrip() {
 fn avatar_photo_roundtrip_and_replace() {
     let mut p = pair();
     let bob = p.a.resolve("bob").unwrap();
-    let photo = ContactAvatar::Photo(jpeg(64 * 1024));
-    p.a.set_contact_avatar(&bob, Some(&photo)).unwrap();
+    let photo = ContactAvatar::Photo(jpeg(MAX_AVATAR_PHOTO_LEN));
+    p.a.set_contact_avatar(&bob, Some(&photo), NOW, &mut p.rng)
+        .unwrap();
     assert_eq!(avatar_of(&p.a, &bob), Some(photo));
-    let emoji = ContactAvatar::Emoji("\u{1F436}".into());
-    p.a.set_contact_avatar(&bob, Some(&emoji)).unwrap();
-    assert_eq!(p.a.contact_avatars().unwrap(), vec![(bob, emoji)]);
+    p.a.set_contact_avatar(&bob, Some(&dog()), NOW, &mut p.rng)
+        .unwrap();
+    assert_eq!(p.a.contact_avatars().unwrap(), vec![(bob, dog())]);
 }
 
 #[test]
 fn avatar_clear() {
     let mut p = pair();
     let bob = p.a.resolve("bob").unwrap();
-    // Clearing without an avatar is no error.
-    p.a.set_contact_avatar(&bob, None).unwrap();
-    p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Emoji("\u{1F436}".into())))
+    // Clearing without an avatar is no error, and writes nothing.
+    p.a.set_contact_avatar(&bob, None, NOW, &mut p.rng).unwrap();
+    assert_eq!(p.a.store.contact_avatar(bob).unwrap(), None);
+    p.a.set_contact_avatar(&bob, Some(&dog()), NOW, &mut p.rng)
         .unwrap();
-    p.a.set_contact_avatar(&bob, None).unwrap();
+    p.a.set_contact_avatar(&bob, None, NOW, &mut p.rng).unwrap();
     assert!(p.a.contact_avatars().unwrap().is_empty());
+    // A tombstone, dated after the set (same second: one more).
+    assert_eq!(
+        p.a.store.contact_avatar(bob).unwrap(),
+        Some(AvatarRegister {
+            at: NOW + 1,
+            value: None
+        })
+    );
 }
 
 #[test]
 fn avatar_unknown_contact_refused() {
     let mut p = pair();
     assert_eq!(
-        p.a.set_contact_avatar(
-            &Fingerprint([7; 32]),
-            Some(&ContactAvatar::Emoji("\u{1F436}".into()))
-        ),
+        p.a.set_contact_avatar(&Fingerprint([7; 32]), Some(&dog()), NOW, &mut p.rng),
         Err(CoreError::UnknownContact)
     );
     assert_eq!(
-        p.a.set_contact_avatar(&Fingerprint([7; 32]), None),
+        p.a.set_contact_avatar(&Fingerprint([7; 32]), None, NOW, &mut p.rng),
         Err(CoreError::UnknownContact)
     );
 }
@@ -11313,10 +11378,16 @@ fn avatar_unknown_contact_refused() {
 fn avatar_photo_refused_when_oversize_or_not_jpeg() {
     let mut p = pair();
     let bob = p.a.resolve("bob").unwrap();
-    let keep = ContactAvatar::Emoji("\u{1F436}".into());
-    p.a.set_contact_avatar(&bob, Some(&keep)).unwrap();
+    p.a.set_contact_avatar(&bob, Some(&dog()), NOW, &mut p.rng)
+        .unwrap();
+    assert_eq!(MAX_AVATAR_PHOTO_LEN, 12 * 1024);
     assert_eq!(
-        p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Photo(jpeg(64 * 1024 + 1)))),
+        p.a.set_contact_avatar(
+            &bob,
+            Some(&ContactAvatar::Photo(jpeg(MAX_AVATAR_PHOTO_LEN + 1))),
+            NOW,
+            &mut p.rng
+        ),
         Err(CoreError::TooLarge)
     );
     for bad in [
@@ -11327,14 +11398,14 @@ fn avatar_photo_refused_when_oversize_or_not_jpeg() {
     ] {
         assert!(
             matches!(
-                p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Photo(bad))),
+                p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Photo(bad)), NOW, &mut p.rng),
                 Err(CoreError::Malformed(_))
             ),
             "accepted"
         );
     }
     // The previous avatar is kept.
-    assert_eq!(avatar_of(&p.a, &bob), Some(keep));
+    assert_eq!(avatar_of(&p.a, &bob), Some(dog()));
 }
 
 #[test]
@@ -11343,16 +11414,31 @@ fn avatar_emoji_refused_when_empty_too_long_or_control() {
     let bob = p.a.resolve("bob").unwrap();
     // 16 four-byte emoji: 64 bytes, the limit.
     let max = "\u{1F436}".repeat(16);
-    p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Emoji(max.clone())))
-        .unwrap();
+    p.a.set_contact_avatar(
+        &bob,
+        Some(&ContactAvatar::Emoji(max.clone())),
+        NOW,
+        &mut p.rng,
+    )
+    .unwrap();
     assert_eq!(
-        p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Emoji(format!("{max}a")))),
+        p.a.set_contact_avatar(
+            &bob,
+            Some(&ContactAvatar::Emoji(format!("{max}a"))),
+            NOW,
+            &mut p.rng
+        ),
         Err(CoreError::TooLarge)
     );
     for bad in ["", "   ", "\u{1F436}\n", "\u{1F436}\u{7}", "\t"] {
         assert!(
             matches!(
-                p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Emoji(bad.into()))),
+                p.a.set_contact_avatar(
+                    &bob,
+                    Some(&ContactAvatar::Emoji(bad.into())),
+                    NOW,
+                    &mut p.rng
+                ),
                 Err(CoreError::Malformed(_))
             ),
             "{bad:?} accepted"
@@ -11365,10 +11451,11 @@ fn avatar_emoji_refused_when_empty_too_long_or_control() {
 fn avatar_removed_with_contact() {
     let mut p = pair();
     let bob = p.a.resolve("bob").unwrap();
-    p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Photo(jpeg(10))))
+    p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Photo(jpeg(10))), NOW, &mut p.rng)
         .unwrap();
     p.a.remove_contact(&bob, NOW, &mut p.rng).unwrap();
     assert!(p.a.contact_avatars().unwrap().is_empty());
+    assert_eq!(p.a.store.contact_avatar(bob).unwrap(), None);
     // Added again: no avatar.
     p.a.add_contact(
         &p.b.contact_card("Bob").unwrap(),
@@ -11395,7 +11482,7 @@ fn avatar_survives_reopen() {
             &mut rng,
         )
         .unwrap();
-    a.set_contact_avatar(&fp, Some(&ContactAvatar::Photo(jpeg(100))))
+    a.set_contact_avatar(&fp, Some(&ContactAvatar::Photo(jpeg(100))), NOW, &mut rng)
         .unwrap();
     drop(a);
     let a = Core::open(&path, &[9; 32], NOW).unwrap();
@@ -11403,9 +11490,145 @@ fn avatar_survives_reopen() {
 }
 
 #[test]
-fn avatar_neither_logged_nor_queued_nor_synchronized() {
+fn avatar_alone_neither_logged_nor_queued() {
+    // Without another device of mine: nothing to synchronize.
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    let events = p.a.store.recent_events(10_000).unwrap().len();
+    let queued = outbox_count(&p.a);
+    p.a.set_contact_avatar(&bob, Some(&dog()), NOW, &mut p.rng)
+        .unwrap();
+    p.a.set_contact_avatar(&bob, None, NOW, &mut p.rng).unwrap();
+    assert_eq!(p.a.store.recent_events(10_000).unwrap().len(), events);
+    assert_eq!(outbox_count(&p.a), queued);
+}
+
+#[test]
+fn avatar_never_sent_to_the_contact() {
+    let (_d, _db, mut a, _t, fp, mut rng) = linked_with_bob();
+    let to_contacts = contact_deliveries(&a);
+    let queued = outbox_count(&a);
+    a.set_contact_avatar(&fp, Some(&ContactAvatar::Photo(jpeg(50))), NOW, &mut rng)
+        .unwrap();
+    // One copy, for T only.
+    assert_eq!(outbox_count(&a), queued + 1);
+    assert_eq!(contact_deliveries(&a), to_contacts);
+}
+
+#[test]
+fn avatar_emoji_synchronized_to_linked_device() {
+    let (_d, _db, mut a, mut t, fp, mut rng) = linked_with_bob();
+    a.set_contact_avatar(&fp, Some(&dog()), NOW + 1, &mut rng)
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert_eq!(t.contact_avatars().unwrap(), vec![(fp, dog())]);
+    // The other way too.
+    t.set_contact_avatar(&fp, Some(&cat()), NOW + 2, &mut rng)
+        .unwrap();
+    deliver_all(&mut t, &mut a, &mut rng);
+    assert_eq!(a.contact_avatars().unwrap(), vec![(fp, cat())]);
+}
+
+#[test]
+fn avatar_max_photo_synchronized_to_linked_device() {
+    let (_d, _db, mut a, mut t, fp, mut rng) = linked_with_bob();
+    let photo = ContactAvatar::Photo(jpeg(MAX_AVATAR_PHOTO_LEN));
+    a.set_contact_avatar(&fp, Some(&photo), NOW + 1, &mut rng)
+        .unwrap();
+    // Sealed, not skipped for its size.
+    let skipped = a
+        .transparency_log(1_000)
+        .unwrap()
+        .into_iter()
+        .any(|(_, e)| matches!(e, TransparencyEvent::SyncSkipped { .. }));
+    assert!(!skipped);
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert_eq!(avatar_of(&t, &fp), Some(photo));
+    assert_eq!(
+        t.store.contact_avatar(fp).unwrap().map(|r| r.at),
+        a.store.contact_avatar(fp).unwrap().map(|r| r.at)
+    );
+}
+
+#[test]
+fn avatar_clear_synchronized() {
+    let (_d, _db, mut a, mut t, fp, mut rng) = linked_with_bob();
+    a.set_contact_avatar(&fp, Some(&dog()), NOW + 1, &mut rng)
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert_eq!(avatar_of(&t, &fp), Some(dog()));
+    a.set_contact_avatar(&fp, None, NOW + 2, &mut rng).unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert!(t.contact_avatars().unwrap().is_empty());
+    assert_eq!(
+        t.store.contact_avatar(fp).unwrap(),
+        Some(AvatarRegister {
+            at: NOW + 2,
+            value: None
+        })
+    );
+}
+
+#[test]
+fn avatar_older_op_arriving_late_is_ignored() {
+    let (_d, _db, mut a, mut t, fp, mut rng) = linked_with_bob();
+    let before = a.pending_outbox(NOW + 9).unwrap();
+    a.set_contact_avatar(&fp, Some(&dog()), NOW + 5, &mut rng)
+        .unwrap();
+    let old = queued_since(&mut a, &before);
+    let mut seen = before.clone();
+    seen.extend(old.iter().cloned());
+    a.set_contact_avatar(&fp, Some(&cat()), NOW + 10, &mut rng)
+        .unwrap();
+    let new = queued_since(&mut a, &seen);
+    assert_eq!((old.len(), new.len()), (1, 1));
+    // The newer op first, then the older one: the newer stays.
+    deliver_bytes(&mut t, &new, &mut rng);
+    deliver_bytes(&mut t, &old, &mut rng);
+    assert_eq!(avatar_of(&t, &fp), Some(cat()));
+    // A clear is a tombstone: an older set arriving after it stays out.
+    let mut seen = a.pending_outbox(NOW + 9).unwrap();
+    a.set_contact_avatar(&fp, None, NOW + 20, &mut rng).unwrap();
+    let clear = queued_since(&mut a, &seen);
+    seen.extend(clear.iter().cloned());
+    deliver_bytes(&mut t, &clear, &mut rng);
+    deliver_bytes(&mut t, &new, &mut rng);
+    assert!(t.contact_avatars().unwrap().is_empty());
+}
+
+#[test]
+fn avatar_concurrent_changes_converge() {
+    let (_d, _db, mut a, mut t, fp, mut rng) = linked_with_bob();
+    // T's change is older than A's: A's wins on both.
+    t.set_contact_avatar(&fp, Some(&cat()), NOW + 7, &mut rng)
+        .unwrap();
+    a.set_contact_avatar(&fp, Some(&dog()), NOW + 10, &mut rng)
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    deliver_all(&mut t, &mut a, &mut rng);
+    assert_eq!(avatar_of(&a, &fp), Some(dog()));
+    assert_eq!(avatar_of(&t, &fp), Some(dog()));
+    // Same date on both: the same value wins on both.
+    a.set_contact_avatar(&fp, Some(&cat()), NOW + 20, &mut rng)
+        .unwrap();
+    t.set_contact_avatar(
+        &fp,
+        Some(&ContactAvatar::Photo(jpeg(40))),
+        NOW + 20,
+        &mut rng,
+    )
+    .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    deliver_all(&mut t, &mut a, &mut rng);
+    assert_eq!(avatar_of(&a, &fp), avatar_of(&t, &fp));
+    assert_eq!(avatar_of(&a, &fp), Some(ContactAvatar::Photo(jpeg(40))));
+}
+
+#[test]
+fn avatar_op_before_contact_shows_once_contact_arrives() {
     let (_d, mut a, mut t, mut rng) = linked();
     let (_db, bob) = party("bob", 5);
+    let before = a.pending_outbox(NOW + 9).unwrap();
     let fp = a
         .add_contact(
             &bob.contact_card("Bob").unwrap(),
@@ -11414,42 +11637,229 @@ fn avatar_neither_logged_nor_queued_nor_synchronized() {
             &mut rng,
         )
         .unwrap();
-    deliver_all(&mut a, &mut t, &mut rng);
-    assert!(t.resolve("bob").is_ok());
-    let events = a.store.recent_events(10_000).unwrap().len();
-    let queued = outbox_count(&a);
-    a.set_contact_avatar(&fp, Some(&ContactAvatar::Emoji("\u{1F436}".into())))
+    let contact = queued_since(&mut a, &before);
+    let mut seen = before.clone();
+    seen.extend(contact.iter().cloned());
+    a.set_contact_avatar(&fp, Some(&dog()), NOW + 1, &mut rng)
         .unwrap();
-    a.set_contact_avatar(&fp, Some(&ContactAvatar::Photo(jpeg(50))))
-        .unwrap();
-    assert_eq!(a.store.recent_events(10_000).unwrap().len(), events);
-    assert_eq!(outbox_count(&a), queued);
-    deliver_all(&mut a, &mut t, &mut rng);
+    let avatar = queued_since(&mut a, &seen);
+    deliver_bytes(&mut t, &avatar, &mut rng);
+    // Kept, not shown: no such contact yet.
     assert!(t.contact_avatars().unwrap().is_empty());
-    // The other way: T's avatar stays on T.
-    t.set_contact_avatar(&fp, Some(&ContactAvatar::Emoji("\u{1F431}".into())))
+    assert!(t.store.contact_avatar(fp).unwrap().is_some());
+    deliver_bytes(&mut t, &contact, &mut rng);
+    assert!(t.resolve("bob").is_ok());
+    assert_eq!(t.contact_avatars().unwrap(), vec![(fp, dog())]);
+}
+
+#[test]
+fn avatar_removed_on_both_devices_with_the_contact() {
+    let (_d, _db, mut a, mut t, fp, mut rng) = linked_with_bob();
+    a.set_contact_avatar(&fp, Some(&dog()), NOW + 1, &mut rng)
         .unwrap();
-    deliver_all(&mut t, &mut a, &mut rng);
-    assert_eq!(avatar_of(&a, &fp), Some(ContactAvatar::Photo(jpeg(50))));
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert_eq!(avatar_of(&t, &fp), Some(dog()));
+    a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert_eq!(t.resolve("bob"), Err(CoreError::UnknownContact));
+    assert!(a.contact_avatars().unwrap().is_empty());
+    assert!(t.contact_avatars().unwrap().is_empty());
+    assert_eq!(t.store.contact_avatar(fp).unwrap(), None);
+}
+
+#[test]
+fn avatar_set_before_a_removal_arriving_after_it_stays_out() {
+    let (_d, _db, mut a, mut t, fp, mut rng) = linked_with_bob();
+    let before = a.pending_outbox(NOW + 9).unwrap();
+    a.set_contact_avatar(&fp, Some(&dog()), NOW + 1, &mut rng)
+        .unwrap();
+    let set = queued_since(&mut a, &before);
+    let mut seen = before.clone();
+    seen.extend(set.iter().cloned());
+    a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
+    let removal = queued_since(&mut a, &seen);
+    // The removal first, then the older set: no orphan left behind, so
+    // adding the contact again on T shows no avatar.
+    deliver_bytes(&mut t, &removal, &mut rng);
+    assert_eq!(t.resolve("bob"), Err(CoreError::UnknownContact));
+    deliver_bytes(&mut t, &set, &mut rng);
+    assert_eq!(t.store.contact_avatar(fp).unwrap(), None);
+}
+
+#[test]
+fn avatar_received_before_the_contact_goes_with_its_removal() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let before = a.pending_outbox(NOW + 9).unwrap();
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    let contact = queued_since(&mut a, &before);
+    let mut seen = before.clone();
+    seen.extend(contact.iter().cloned());
+    a.set_contact_avatar(&fp, Some(&dog()), NOW + 1, &mut rng)
+        .unwrap();
+    let avatar = queued_since(&mut a, &seen);
+    seen.extend(avatar.iter().cloned());
+    a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
+    let removal = queued_since(&mut a, &seen);
+    // T never sees the contact: the avatar, then the removal.
+    deliver_bytes(&mut t, &avatar, &mut rng);
+    assert!(t.store.contact_avatar(fp).unwrap().is_some());
+    deliver_bytes(&mut t, &removal, &mut rng);
+    assert_eq!(t.store.contact_avatar(fp).unwrap(), None);
+    // The late Upsert (older than the removal) changes nothing.
+    deliver_bytes(&mut t, &contact, &mut rng);
+    assert_eq!(t.resolve("bob"), Err(CoreError::UnknownContact));
+    assert!(t.contact_avatars().unwrap().is_empty());
 }
 
 #[test]
 fn avatar_removed_when_contact_removed_by_sync() {
-    let (_d, mut a, mut t, mut rng) = linked();
-    let (_db, bob) = party("bob", 5);
-    let fp = a
-        .add_contact(
-            &bob.contact_card("Bob").unwrap(),
-            Some("bob"),
-            NOW,
-            &mut rng,
-        )
-        .unwrap();
-    deliver_all(&mut a, &mut t, &mut rng);
-    t.set_contact_avatar(&fp, Some(&ContactAvatar::Emoji("\u{1F436}".into())))
+    let (_d, _db, mut a, mut t, fp, mut rng) = linked_with_bob();
+    t.set_contact_avatar(&fp, Some(&dog()), NOW, &mut rng)
         .unwrap();
     a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
     deliver_all(&mut a, &mut t, &mut rng);
     assert_eq!(t.resolve("bob"), Err(CoreError::UnknownContact));
     assert!(t.contact_avatars().unwrap().is_empty());
+}
+
+#[test]
+fn avatar_copied_to_a_newly_linked_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(77);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    let mut fps = Vec::new();
+    for (i, name) in ["bob", "carol", "dan"].iter().enumerate() {
+        let (_dc, c) = party(name, 10 + i as u8);
+        fps.push(
+            a.add_contact(&c.contact_card(name).unwrap(), Some(name), NOW, &mut rng)
+                .unwrap(),
+        );
+    }
+    let photo = ContactAvatar::Photo(jpeg(MAX_AVATAR_PHOTO_LEN));
+    a.set_contact_avatar(&fps[0], Some(&photo), NOW + 1, &mut rng)
+        .unwrap();
+    a.set_contact_avatar(&fps[1], Some(&dog()), NOW + 2, &mut rng)
+        .unwrap();
+    a.set_contact_avatar(&fps[2], Some(&cat()), NOW + 3, &mut rng)
+        .unwrap();
+    a.set_contact_avatar(&fps[2], None, NOW + 4, &mut rng)
+        .unwrap();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) =
+        Core::begin_link(&dir.path().join("t"), &[2; 32], &offer, "t", NOW, &mut rng).unwrap();
+    let out = a.link_device(&req, false, NOW + 5, &mut rng).unwrap();
+    t.finish_link(&out.bundle, None, NOW + 5).unwrap();
+    // On T as soon as the link is finished, with A's dates.
+    let mut want = vec![(fps[0], photo), (fps[1], dog())];
+    want.sort_by_key(|(fp, _)| fp.0);
+    assert_eq!(t.contact_avatars().unwrap(), want);
+    for fp in &fps {
+        assert_eq!(
+            t.store.contact_avatar(*fp).unwrap(),
+            a.store.contact_avatar(*fp).unwrap()
+        );
+    }
+}
+
+#[test]
+fn max_avatar_op_fits_one_packet() {
+    let op = |len: usize| {
+        Body::SyncContact(SyncOp::Avatar {
+            contact: Fingerprint([0xFF; 32]),
+            avatar: Some(ContactAvatar::Photo(jpeg(len))),
+            at: u64::MAX,
+        })
+    };
+    assert!(crate::envelope::fits_in_packet(&op(MAX_AVATAR_PHOTO_LEN)));
+    // With margin: the limit is not the edge.
+    assert!(crate::envelope::fits_in_packet(&op(
+        MAX_AVATAR_PHOTO_LEN + 1024
+    )));
+    assert!(!crate::envelope::fits_in_packet(&op(16 * 1024)));
+}
+
+#[test]
+fn legacy_oversize_avatar_kept_locally_but_not_synchronized() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(77);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    // Stored by the local-only build (64 KiB limit), migrated with date 0.
+    let legacy = jpeg(64 * 1024);
+    a.store
+        .put_contact_avatar(fp, Some((AvatarKind::Photo, &legacy)), 0)
+        .unwrap();
+    assert_eq!(
+        avatar_of(&a, &fp),
+        Some(ContactAvatar::Photo(legacy.clone()))
+    );
+    // The link neither fails nor copies it.
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut t, req) =
+        Core::begin_link(&dir.path().join("t"), &[2; 32], &offer, "t", NOW, &mut rng).unwrap();
+    let out = a.link_device(&req, false, NOW, &mut rng).unwrap();
+    t.finish_link(&out.bundle, None, NOW).unwrap();
+    assert!(t.contact_avatars().unwrap().is_empty());
+    assert_eq!(t.store.contact_avatar(fp).unwrap(), None);
+    // Nor does a sync of it: nothing queued, no error.
+    let queued = outbox_count(&a);
+    let Core { store, device, .. } = &mut a;
+    store
+        .transaction(|tx| {
+            sync::send_avatar(
+                tx,
+                device,
+                fp,
+                Some(&ContactAvatar::Photo(legacy.clone())),
+                1,
+                send::SealTime::at(NOW),
+                &mut rng,
+            )
+        })
+        .unwrap();
+    assert_eq!(outbox_count(&a), queued);
+    // Still shown here.
+    assert_eq!(avatar_of(&a, &fp), Some(ContactAvatar::Photo(legacy)));
+}
+
+#[test]
+fn invalid_avatar_op_from_my_device_refused() {
+    let (_d, _db, mut a, mut t, fp, mut rng) = linked_with_bob();
+    a.set_contact_avatar(&fp, Some(&dog()), NOW, &mut rng)
+        .unwrap();
+    for (i, avatar) in [
+        ContactAvatar::Photo(jpeg(MAX_AVATAR_PHOTO_LEN + 1)),
+        ContactAvatar::Photo(vec![1, 2, 3]),
+        ContactAvatar::Emoji("\n".into()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let body = Body::SyncContact(SyncOp::Avatar {
+            contact: fp,
+            avatar: Some(avatar),
+            at: NOW + 100,
+        });
+        let id = MessageId([i as u8 + 50; 16]);
+        let out = seal_body(&mut t, &send::Target::OwnDevices, &body, id, &mut rng);
+        let r = a.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
+        assert_eq!(reason(r), "synchronization refused", "case {i}");
+    }
+    assert_eq!(avatar_of(&a, &fp), Some(dog()));
 }

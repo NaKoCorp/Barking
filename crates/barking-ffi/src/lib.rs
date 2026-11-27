@@ -22,7 +22,8 @@ mod route;
 use std::panic::{UnwindSafe, catch_unwind};
 
 pub use contacts::{
-    CardPreview, ContactAvatar, ContactAvatarEntry, inspect_card, inspect_card_text,
+    CardPreview, ContactAvatar, ContactAvatarEntry, avatar_photo_max_bytes, inspect_card,
+    inspect_card_text,
 };
 pub use delivery::{
     DeleteOutcome, Delivery, DeliveryChange, DeliveryCounts, DeliveryRowInfo, DeliveryState,

@@ -6,7 +6,7 @@ use rand_core::CryptoRng;
 
 use super::send::SealTime;
 use super::{Core, OwnDevices, load_card, log, requests, sync};
-use crate::contact::ContactCard;
+use crate::contact::{ContactAvatar, ContactCard};
 use crate::envelope::{MAX_TEXT_LEN, SyncOp};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::packet::Packet;
@@ -27,49 +27,6 @@ pub struct ContactSummary {
     /// Blocked: hidden from the contact and chat lists, nothing sent to it,
     /// its messages dropped (see `block_contact`).
     pub blocked: bool,
-}
-
-/// Maximum size of an avatar emoji, in bytes: room for a long ZWJ
-/// sequence (a family, a flag), not for a sentence.
-pub const MAX_AVATAR_EMOJI_LEN: usize = 64;
-/// Maximum size of an avatar photo, in bytes: the app sends a small
-/// thumbnail, and the whole list is read on each refresh.
-pub const MAX_AVATAR_PHOTO_LEN: usize = 64 * 1024;
-
-/// The picture I gave a contact on this device. Never synchronized,
-/// logged, sent to the contact or copied by a link.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ContactAvatar {
-    Emoji(String),
-    /// A JPEG file.
-    Photo(Vec<u8>),
-}
-
-impl ContactAvatar {
-    /// Refuses what the apps could not show: a blank emoji, one with a
-    /// control character (a newline would break a list row), or a photo
-    /// that is not a JPEG. Too long: `TooLarge`.
-    fn check(&self) -> Result<()> {
-        match self {
-            ContactAvatar::Emoji(value) => {
-                if value.len() > MAX_AVATAR_EMOJI_LEN {
-                    return Err(CoreError::TooLarge);
-                }
-                if value.trim().is_empty() || value.chars().any(char::is_control) {
-                    return Err(CoreError::Malformed("invalid avatar emoji"));
-                }
-            }
-            ContactAvatar::Photo(jpeg) => {
-                if jpeg.len() > MAX_AVATAR_PHOTO_LEN {
-                    return Err(CoreError::TooLarge);
-                }
-                if !jpeg.starts_with(&[0xFF, 0xD8]) {
-                    return Err(CoreError::Malformed("avatar photo is not a JPEG"));
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Stored alias: the empty string means "no alias".
@@ -244,47 +201,42 @@ impl Core {
     /// replacing the previous one. Invalid: `Malformed` or `TooLarge`, the
     /// previous avatar kept. Unknown: `UnknownContact`. Kept while the
     /// contact is blocked, so that unblocking finds it; erased with the
-    /// contact. Local to this device: never synchronized, logged or noted
-    /// as a change.
+    /// contact. Synchronized with my other devices (`SyncOp::Avatar`, in
+    /// the same transaction), its date strictly after the last known one;
+    /// never logged, noted as a change nor sent to the contact. Clearing
+    /// an absent avatar does nothing.
     pub fn set_contact_avatar(
         &mut self,
         contact: &Fingerprint,
         avatar: Option<&ContactAvatar>,
+        now: u64,
+        rng: &mut impl CryptoRng,
     ) -> Result<()> {
         self.ensure_active()?;
         if let Some(avatar) = avatar {
             avatar.check()?;
         }
-        self.store.transaction(|tx| {
+        let Core { store, device, .. } = self;
+        store.transaction(|tx| {
             tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
-            match avatar {
-                None => tx.delete_contact_avatar(*contact),
-                Some(ContactAvatar::Emoji(value)) => {
-                    tx.put_contact_avatar(*contact, AvatarKind::Emoji, value.as_bytes())
-                }
-                Some(ContactAvatar::Photo(jpeg)) => {
-                    tx.put_contact_avatar(*contact, AvatarKind::Photo, jpeg)
-                }
+            let known = tx.contact_avatar(*contact)?;
+            if avatar.is_none() && known.as_ref().is_none_or(|r| r.value.is_none()) {
+                return Ok(());
             }
+            let at = now.max(known.map_or(0, |r| r.at).saturating_add(1));
+            tx.put_contact_avatar(*contact, avatar.map(avatar_row), at)?;
+            sync::send_avatar(tx, device, *contact, avatar, at, SealTime::at(now), rng)
         })
     }
 
     /// Every contact's avatar on this device, by fingerprint. A read
-    /// only: it works on the read-only opening.
+    /// only: it works on the read-only opening. A photo stored before the
+    /// limit was lowered is still shown.
     pub fn contact_avatars(&self) -> Result<Vec<(Fingerprint, ContactAvatar)>> {
         self.store
             .contact_avatars()?
             .into_iter()
-            .map(|(fp, kind, data)| {
-                let avatar = match kind {
-                    AvatarKind::Emoji => ContactAvatar::Emoji(
-                        String::from_utf8(data)
-                            .map_err(|_| CoreError::Store("avatar emoji not UTF-8".into()))?,
-                    ),
-                    AvatarKind::Photo => ContactAvatar::Photo(data),
-                };
-                Ok((fp, avatar))
-            })
+            .map(|(fp, kind, data)| Ok((fp, avatar_of_row(kind, data)?)))
             .collect()
     }
 
@@ -807,6 +759,61 @@ pub(super) fn merge_verified(
     } else {
         Ok(())
     }
+}
+
+/// An avatar as stored: its kind and its bytes.
+pub(super) fn avatar_row(avatar: &ContactAvatar) -> (AvatarKind, &[u8]) {
+    match avatar {
+        ContactAvatar::Emoji(value) => (AvatarKind::Emoji, value.as_bytes()),
+        ContactAvatar::Photo(jpeg) => (AvatarKind::Photo, jpeg),
+    }
+}
+
+/// Inverse of [`avatar_row`].
+pub(super) fn avatar_of_row(kind: AvatarKind, data: Vec<u8>) -> Result<ContactAvatar> {
+    Ok(match kind {
+        AvatarKind::Emoji => ContactAvatar::Emoji(
+            String::from_utf8(data)
+                .map_err(|_| CoreError::Store("avatar emoji not UTF-8".into()))?,
+        ),
+        AvatarKind::Photo => ContactAvatar::Photo(data),
+    })
+}
+
+/// Merges a received avatar register of `fp`, known contact or not (the
+/// op may arrive before the contact's `Upsert`; `contact_avatars` shows it
+/// once the contact exists). Checked first: invalid, `Malformed` or
+/// `TooLarge`, nothing written. The most recent change wins; at an equal
+/// date, the greater value (a set beats a clear, then by kind and bytes),
+/// so that all my devices decide the same way. A value dated no later
+/// than the contact's removal is dropped: the removal erased the avatar.
+pub(super) fn merge_avatar(
+    q: &impl Queries,
+    fp: Fingerprint,
+    avatar: Option<&ContactAvatar>,
+    at: u64,
+) -> Result<()> {
+    if let Some(avatar) = avatar {
+        avatar.check()?;
+    }
+    if q.contact_clock(fp)?
+        .is_some_and(|c| c.removed && c.at >= at)
+    {
+        return Ok(());
+    }
+    let new = avatar.map(avatar_row);
+    let known = q.contact_avatar(fp)?;
+    let newer = match &known {
+        None => true,
+        Some(r) => {
+            let old = r.value.as_ref().map(|(k, d)| (*k as u8, d.as_slice()));
+            (at, new.map(|(k, d)| (k as u8, d))) > (r.at, old)
+        }
+    };
+    if newer {
+        q.put_contact_avatar(fp, new, at)?;
+    }
+    Ok(())
 }
 
 /// Changes the alias of a known contact of `q`; returns the stored alias.
