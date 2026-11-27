@@ -590,10 +590,17 @@ impl ExtContent {
                     Err(CoreError::Malformed("ephemeral delay"))
                 }
             }
+            // Provider 0 is refused everywhere; an unknown one is kept.
+            ExtContent::SyncGifSettings { settings, .. } => {
+                if settings.enabled.contains_key(&0) {
+                    Err(CoreError::Malformed("GIF provider"))
+                } else {
+                    Ok(())
+                }
+            }
             ExtContent::ContactRequest { .. }
             | ExtContent::SyncInvite { .. }
-            | ExtContent::SyncRefused { .. }
-            | ExtContent::SyncGifSettings { .. } => Ok(()),
+            | ExtContent::SyncRefused { .. } => Ok(()),
         }
     }
 }
@@ -992,6 +999,53 @@ mod tests {
         assert!(bad(decode_id(1, "ABC")), "Klipy is lowercase only");
         assert!(bad(decode_id(1, "a_b")), "Klipy has no underscore");
         assert!(decode_id(1, "a-b-9").unwrap().is_some());
+    }
+
+    #[test]
+    fn sync_gif_settings_refuses_provider_zero() {
+        let consent = crate::gif::GifConsent {
+            warning_version: 1,
+            device: crate::identity::DeviceId([5; 16]),
+            at: 1_700_000_000,
+        };
+        let decode = |providers: &[u8]| {
+            let c = ExtContent::SyncGifSettings {
+                settings: crate::gif::GifSettings {
+                    enabled: providers.iter().map(|p| (*p, consent.clone())).collect(),
+                    auto_load: false,
+                },
+                at: 1_700_000_001,
+            };
+            let Body::Ext { kind, data, .. } = c.to_body() else {
+                panic!()
+            };
+            ExtContent::decode(kind, &data)
+        };
+        assert!(matches!(decode(&[0]), Err(CoreError::Malformed(_))));
+        assert!(matches!(decode(&[0, 1]), Err(CoreError::Malformed(_))));
+        assert!(decode(&[1, 7]).unwrap().is_some(), "unknown provider kept");
+        assert!(decode(&[]).unwrap().is_some(), "nothing enabled");
+    }
+
+    #[test]
+    fn gif_ttl_out_of_bounds_is_malformed() {
+        for ttl in [0, MIN_TTL_SECS - 1, MAX_TTL_SECS + 1, u32::MAX] {
+            let c = ExtContent::Gif {
+                gif: gif_ref(1, "hello-hi-662"),
+                reply_to: None,
+                ttl_secs: Some(ttl),
+            };
+            let Body::Ext { kind, data, .. } = c.to_body() else {
+                panic!()
+            };
+            assert!(
+                matches!(
+                    ExtContent::decode(kind, &data),
+                    Err(CoreError::Malformed(_))
+                ),
+                "{ttl}"
+            );
+        }
     }
 
     #[test]

@@ -767,11 +767,6 @@ fn record_message(
     now: u64,
     rng: &mut impl CryptoRng,
 ) -> Result<RxOut> {
-    let preview = if gif.is_some() {
-        GIF_PREVIEW.to_owned()
-    } else {
-        text.clone()
-    };
     let (row, new_prekeys, first_contact) = commit_session(q, o, now)?;
     // Any message from the contact answers my invite (spec §6.2).
     requests::set_invite_accepted(q, row.contact_fp, now)?;
@@ -781,6 +776,7 @@ fn record_message(
     // A message already received once (`inbound`, never purged) stays as
     // it is: a resend or a retry of it, even one I deleted since, is a
     // duplicate.
+    let is_gif = gif.is_some();
     let inserted = !q.inbound_has_message(message_id)?
         && q.insert_message_row(&MessageInsert {
             contact_fp: row.contact_fp,
@@ -839,7 +835,7 @@ fn record_message(
         ReceiveOutcome::Message {
             from: row.contact_fp,
             alias,
-            text: preview,
+            text: if is_gif { GIF_PREVIEW.to_owned() } else { text },
             ack,
             ephemeral: ttl_secs.is_some(),
         },

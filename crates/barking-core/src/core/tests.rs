@@ -12189,6 +12189,13 @@ fn gif_reply_and_ttl_preserved() {
         (got.ttl_secs, got.seen_at, got.expire_at),
         (Some(300), None, Some(NOW + UNSEEN_CEILING_SECS))
     );
+    // A text replying to the GIF resolves its quote on both sides.
+    let back =
+        p.a.send_message(&b, "yes", Some(got.id), None, NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(full_row(&p.a, &b, "yes").reply_to, Some(got.message_id));
+    deliver(&mut p.b, &back[0], &mut p.rng);
+    assert_eq!(full_row(&p.b, &a, "yes").reply_to, Some(mine.message_id));
     // A missing quote writes nothing.
     assert!(matches!(
         p.b.send_gif(&a, hello_gif(), Some(i64::MAX), None, NOW, &mut p.rng),
