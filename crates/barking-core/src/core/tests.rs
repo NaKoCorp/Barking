@@ -11961,6 +11961,17 @@ fn gif_send_receive_round_trip() {
     assert_eq!(got.body, "");
     assert!(!got.placeholder);
     assert!(got.wire_id.is_some());
+    // Only the sender counts a send; receiving counts nothing.
+    let day = |sent| {
+        [GifUsageDay {
+            day: (NOW / 86_400) as u32,
+            searches: 0,
+            shown: 0,
+            sent,
+        }]
+    };
+    assert_eq!(p.a.gif_usage(7).unwrap(), day(1));
+    assert!(p.b.gif_usage(7).unwrap().is_empty());
     // A repeat adds nothing and shows as a stored message.
     assert!(matches!(
         deliver(&mut p.b, &out[0], &mut p.rng),
@@ -12606,4 +12617,68 @@ fn gif_settings_from_far_future_ignored() {
     );
     a.receive(&pkt.encode(), "t", now, &mut rng).unwrap();
     assert_eq!(a.gif_settings().unwrap(), settings);
+}
+
+// --- GIF, task 4: daily usage counters.
+
+fn usage_day(day: u32, searches: u32, shown: u32, sent: u32) -> GifUsageDay {
+    GifUsageDay {
+        day,
+        searches,
+        shown,
+        sent,
+    }
+}
+
+#[test]
+fn gif_usage_counts_per_day() {
+    let (_d, mut a) = party("a", 1);
+    assert!(a.gif_usage(7).unwrap().is_empty());
+    a.record_gif_use(GifUse::Search, 10).unwrap();
+    a.record_gif_use(GifUse::Search, 20).unwrap();
+    a.record_gif_use(GifUse::Shown, 30).unwrap();
+    a.record_gif_use(GifUse::Sent, 86_400 + 5).unwrap();
+    assert_eq!(
+        a.gif_usage(7).unwrap(),
+        [usage_day(1, 0, 0, 1), usage_day(0, 2, 1, 0)]
+    );
+    assert_eq!(a.gif_usage(1).unwrap(), [usage_day(1, 0, 0, 1)]);
+    assert!(a.gif_usage(0).unwrap().is_empty());
+    // An earlier day recorded late (clock moved back) lands in its place.
+    a.record_gif_use(GifUse::Shown, 40).unwrap();
+    assert_eq!(
+        a.gif_usage(7).unwrap(),
+        [usage_day(1, 0, 0, 1), usage_day(0, 2, 2, 0)]
+    );
+}
+
+#[test]
+fn gif_usage_keeps_30_days() {
+    let (_d, mut a) = party("a", 1);
+    for day in 0..40u64 {
+        a.record_gif_use(GifUse::Search, day * 86_400).unwrap();
+    }
+    let rows = a.gif_usage(255).unwrap();
+    assert_eq!(rows.len(), 30);
+    assert_eq!(rows[0].day, 39);
+    assert_eq!(rows[29].day, 10);
+}
+
+#[test]
+fn gif_usage_saturates() {
+    let (_d, mut a) = party("a", 1);
+    a.store
+        .put_meta(META_GIF_USAGE, &vec![usage_day(0, u32::MAX, 0, 0)])
+        .unwrap();
+    a.record_gif_use(GifUse::Search, 1).unwrap();
+    assert_eq!(a.gif_usage(1).unwrap(), [usage_day(0, u32::MAX, 0, 0)]);
+}
+
+#[test]
+fn gif_usage_never_stores_content() {
+    // A row holds four numbers and nothing else.
+    let (_d, mut a) = party("a", 1);
+    a.record_gif_use(GifUse::Search, 1).unwrap();
+    let raw: Vec<GifUsageDay> = a.store.get_meta(META_GIF_USAGE).unwrap().unwrap();
+    assert_eq!(postcard::to_allocvec(&raw).unwrap().len(), 5);
 }

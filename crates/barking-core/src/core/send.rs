@@ -433,6 +433,9 @@ impl Core {
             )?;
             let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
             out.extend(mine);
+            if gif.is_some() {
+                super::gif::record_use(tx, super::gif::GifUse::Sent, now)?;
+            }
             if ttl_secs.is_some() {
                 let seen = SeenEntry {
                     id: message_id,
