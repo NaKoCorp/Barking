@@ -3,7 +3,8 @@ import Observation
 import UIKit
 
 /// The avatars I gave my contacts: an emoji or a photo, kept in the core's
-/// encrypted database on this iPhone only (never synced, never sent).
+/// encrypted database and synchronized with my linked devices (never sent
+/// to the contact).
 /// Shared by every screen through the environment, so a change shows at
 /// once in the lists, the conversation and the contact page.
 @MainActor @Observable
@@ -12,29 +13,35 @@ final class AvatarStore {
     private(set) var emoji: [String: String] = [:]
     private(set) var photos: [String: UIImage] = [:]
 
-    /// The side of a stored photo, in pixels: three times the largest
-    /// avatar drawn (64 pt), sharp on any screen.
-    static let side: CGFloat = 192
-    /// The core refuses a photo over 64 KiB; this leaves room.
-    static let maxBytes = 60_000
+    /// The side of a stored photo, in pixels: sharp in the lists (44 pt)
+    /// and small enough to reach my other devices in one packet.
+    static let side: CGFloat = 128
+    /// The core's limit: a photo travels to my devices in one packet.
+    static var maxBytes: Int { Int(avatarPhotoMaxBytes()) }
 
     init(core: CoreService) { self.core = core }
 
     func has(_ fingerprint: String) -> Bool { emoji[fingerprint] != nil || photos[fingerprint] != nil }
 
-    /// Reads them all again; a failed read keeps what is shown.
+    /// Reads them all again; a failed read keeps what is shown. A photo
+    /// saved larger than the core now syncs (an earlier, local-only
+    /// build) is made small again, which sends it to my other devices.
     func reload() async {
         guard let entries = try? await core.contactAvatars() else { return }
         var emoji: [String: String] = [:]
         var photos: [String: UIImage] = [:]
+        var oversize: [(String, Data)] = []
         for entry in entries {
             switch entry.avatar {
             case .emoji(let value): emoji[entry.fingerprint] = value
-            case .photo(let jpeg): if let image = UIImage(data: jpeg) { photos[entry.fingerprint] = image }
+            case .photo(let jpeg):
+                if let image = UIImage(data: jpeg) { photos[entry.fingerprint] = image }
+                if jpeg.count > Self.maxBytes { oversize.append((entry.fingerprint, jpeg)) }
             }
         }
         self.emoji = emoji
         self.photos = photos
+        for (fingerprint, jpeg) in oversize { _ = await setPhoto(jpeg, for: fingerprint) }
     }
 
     func setEmoji(_ value: String, for contact: String) async -> Bool {
@@ -71,7 +78,7 @@ final class AvatarStore {
             image.draw(in: CGRect(x: (side - drawn.width) / 2, y: (side - drawn.height) / 2,
                                   width: drawn.width, height: drawn.height))
         }
-        for quality in stride(from: 0.8, through: 0.3, by: -0.1) {
+        for quality in stride(from: 0.8, through: 0.2, by: -0.1) {
             if let data = square.jpegData(compressionQuality: quality), data.count <= maxBytes { return data }
         }
         return nil

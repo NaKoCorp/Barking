@@ -750,9 +750,9 @@
 "Invite again" = "Inviter à nouveau";
 "If %@ deleted you, a new invitation lets them add you back." = "Si %@ ne t’a plus dans ses contacts, une nouvelle invitation lui permet de te rajouter.";
 
-/* A contact's avatar: a photo or an emoji, kept on this iPhone only. */
+/* A contact's avatar: a photo or an emoji, synchronized with my linked devices, never sent to the contact. */
 "Choose a photo" = "Choisir une photo";
 "Choose an emoji" = "Choisir un emoji";
 "Remove the avatar" = "Retirer l’avatar";
 "Avatar of %@" = "Avatar de %@";
-"Choose a photo or an emoji, kept on this iPhone." = "Choisis une photo ou un emoji, gardé sur cet iPhone.";
+"Choose a photo or an emoji. Your linked devices get it, not the contact." = "Choisis une photo ou un emoji. Tes appareils liés le reçoivent, pas le contact.";
