@@ -17,6 +17,9 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func contactCardBytes() throws -> Data
     func contactCard(displayName: String) throws -> String
     func setAlias(contact: String, alias: String) throws
+    /// The contact's avatar on this device only (emoji or JPEG); nil clears it.
+    func setContactAvatar(contact: String, avatar: ContactAvatar?) throws
+    func contactAvatars() throws -> [ContactAvatarEntry]
     func removeContact(contact: String) throws
     func setDraft(contact: String, text: String) throws
     func draft(contact: String) throws -> String?

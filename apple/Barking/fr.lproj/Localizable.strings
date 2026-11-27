@@ -749,3 +749,10 @@
 "No invitation sent" = "Aucune invitation envoyée";
 "Invite again" = "Inviter à nouveau";
 "If %@ deleted you, a new invitation lets them add you back." = "Si %@ ne t’a plus dans ses contacts, une nouvelle invitation lui permet de te rajouter.";
+
+/* A contact's avatar: a photo or an emoji, kept on this iPhone only. */
+"Choose a photo" = "Choisir une photo";
+"Choose an emoji" = "Choisir un emoji";
+"Remove the avatar" = "Retirer l’avatar";
+"Avatar of %@" = "Avatar de %@";
+"Choose a photo or an emoji, kept on this iPhone." = "Choisis une photo ou un emoji, gardé sur cet iPhone.";
