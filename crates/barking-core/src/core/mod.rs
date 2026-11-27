@@ -18,6 +18,7 @@ mod contacts;
 pub(crate) mod delivery;
 pub(crate) mod ephemeral;
 mod frames;
+mod gif;
 mod history;
 mod link;
 mod log_limit;
@@ -92,6 +93,8 @@ const META_DEVICE_LIST: &str = "device_list";
 const META_LINKED_BUNDLES: &str = "linked_bundles";
 /// Last day (day number) on which this device polled its mailboxes.
 const META_LAST_POLLED: &str = "last_polled_day";
+/// GIF settings register (`gif.rs`): `(GifSettings, at, author device)`.
+const META_GIF_SETTINGS: &str = "gif/settings";
 /// Polling window: 8 days back, the current day and the next day = 10
 /// days, always. A packet's mailbox is fixed at its seal day, and a packet
 /// sealed offline may be deposited days later, up to its lifetime: the

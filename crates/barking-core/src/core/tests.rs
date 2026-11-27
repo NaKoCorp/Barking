@@ -12258,3 +12258,265 @@ fn gif_survives_history_export() {
         [(Direction::In, hello_gif()), (Direction::Out, hello_gif())]
     );
 }
+
+// --- GIF, task 3: consent and synced settings.
+
+/// Delivers every packet queued by `from` to `to` at `now`.
+fn deliver_all_at(from: &mut Core, to: &mut Core, now: u64, rng: &mut StdRng) {
+    for b in from.pending_outbox(now).unwrap() {
+        let _ = to.receive(&b, "t", now, rng);
+    }
+}
+
+/// A consent with every field set.
+fn consent(device: DeviceId, at: u64) -> crate::gif::GifConsent {
+    crate::gif::GifConsent {
+        warning_version: 1,
+        device,
+        at,
+    }
+}
+
+#[test]
+fn gif_disabled_by_default() {
+    let (_d, a) = party("a", 1);
+    let s = a.gif_settings().unwrap();
+    assert!(s.enabled.is_empty());
+    assert!(!s.auto_load);
+    assert!(!a.gif_allowed(1).unwrap());
+}
+
+#[test]
+fn enable_records_device_and_date() {
+    let (_d, mut a) = party("a", 1);
+    let mut rng = StdRng::seed_from_u64(1);
+    a.enable_gif_provider(1, 1, 1000, &mut rng).unwrap();
+    let s = a.gif_settings().unwrap();
+    assert_eq!(s.enabled.get(&1), Some(&consent(this_device(&a), 1000)));
+    assert!(a.gif_allowed(1).unwrap());
+    // Provider 0 is refused, and so is a provider this client does not know.
+    assert!(matches!(
+        a.enable_gif_provider(0, 1, 1001, &mut rng),
+        Err(CoreError::Malformed(_))
+    ));
+    assert!(matches!(
+        a.enable_gif_provider(7, 1, 1001, &mut rng),
+        Err(CoreError::Malformed(_))
+    ));
+    a.disable_gif_provider(1, 1002, &mut rng).unwrap();
+    assert!(!a.gif_allowed(1).unwrap());
+    assert!(a.gif_settings().unwrap().enabled.is_empty());
+}
+
+#[test]
+fn stale_warning_version_is_not_allowed() {
+    let (_d, mut a) = party("a", 1);
+    let mut rng = StdRng::seed_from_u64(1);
+    a.enable_gif_provider(1, 0, NOW, &mut rng).unwrap();
+    assert!(!a.gif_allowed(1).unwrap());
+    a.enable_gif_provider(1, crate::gif::MIN_GIF_WARNING_VERSION, NOW + 1, &mut rng)
+        .unwrap();
+    assert!(a.gif_allowed(1).unwrap());
+}
+
+#[test]
+fn gif_settings_sync_to_other_device() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    a.enable_gif_provider(1, 1, NOW + 10, &mut rng).unwrap();
+    a.set_gif_auto_load(true, NOW + 11, &mut rng).unwrap();
+    deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+    assert!(t.gif_allowed(1).unwrap());
+    let s = t.gif_settings().unwrap();
+    assert_eq!(s, a.gif_settings().unwrap());
+    assert_eq!(s.enabled[&1].device, this_device(&a));
+    assert!(s.auto_load);
+    // And back: a change on T reaches A.
+    t.disable_gif_provider(1, NOW + 40, &mut rng).unwrap();
+    deliver_all_at(&mut t, &mut a, NOW + 50, &mut rng);
+    assert!(!a.gif_allowed(1).unwrap());
+    assert!(a.gif_settings().unwrap().auto_load, "kept when disabled");
+}
+
+#[test]
+fn gif_settings_last_writer_wins() {
+    for a_first in [true, false] {
+        let (_d, mut a, mut t, mut rng) = linked();
+        a.enable_gif_provider(1, 1, NOW + 10, &mut rng).unwrap();
+        // Disabling a provider T never had is still a change, dated later.
+        t.disable_gif_provider(1, NOW + 20, &mut rng).unwrap();
+        if a_first {
+            deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+            deliver_all_at(&mut t, &mut a, NOW + 30, &mut rng);
+        } else {
+            deliver_all_at(&mut t, &mut a, NOW + 30, &mut rng);
+            deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+        }
+        assert!(!a.gif_allowed(1).unwrap(), "A, a_first {a_first}");
+        assert!(!t.gif_allowed(1).unwrap(), "T, a_first {a_first}");
+        assert_eq!(a.gif_settings().unwrap(), t.gif_settings().unwrap());
+    }
+}
+
+#[test]
+fn gif_settings_tie_breaks_on_device_id() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    a.enable_gif_provider(1, 1, NOW + 10, &mut rng).unwrap();
+    t.set_gif_auto_load(true, NOW + 10, &mut rng).unwrap();
+    let winner = if this_device(&a) > this_device(&t) {
+        a.gif_settings().unwrap()
+    } else {
+        t.gif_settings().unwrap()
+    };
+    deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+    deliver_all_at(&mut t, &mut a, NOW + 30, &mut rng);
+    assert_eq!(a.gif_settings().unwrap(), winner);
+    assert_eq!(t.gif_settings().unwrap(), winner);
+}
+
+/// `SyncGifSettings` carrying `settings` dated `at`, sealed by `from` for
+/// `target`.
+fn gif_settings_packet(
+    from: &mut Core,
+    target: &send::Target,
+    settings: crate::gif::GifSettings,
+    at: u64,
+    id: u8,
+    rng: &mut StdRng,
+) -> Packet {
+    let body = ExtContent::SyncGifSettings { settings, at }.to_body();
+    seal_body(from, target, &body, MessageId([id; 16]), rng)
+        .remove(0)
+        .0
+}
+
+#[test]
+fn gif_settings_from_contact_rejected() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let settings = crate::gif::GifSettings {
+        enabled: [(1, consent(this_device(&p.b), NOW))].into(),
+        auto_load: true,
+    };
+    let pkt = gif_settings_packet(
+        &mut p.b,
+        &send::Target::Contact(a_fp),
+        settings,
+        NOW,
+        1,
+        &mut p.rng,
+    );
+    let r = p.a.receive(&pkt.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), NOT_MINE);
+    assert_eq!(
+        p.a.gif_settings().unwrap(),
+        crate::gif::GifSettings::default()
+    );
+    assert!(!p.a.gif_allowed(1).unwrap());
+}
+
+#[test]
+fn gif_settings_unknown_provider_kept() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let td = this_device(&t);
+    let settings = crate::gif::GifSettings {
+        enabled: [(1, consent(td, NOW)), (7, consent(td, NOW))].into(),
+        auto_load: false,
+    };
+    let pkt = gif_settings_packet(
+        &mut t,
+        &send::Target::OwnDevices,
+        settings.clone(),
+        NOW + 5,
+        1,
+        &mut rng,
+    );
+    assert!(matches!(
+        a.receive(&pkt.encode(), "t", NOW + 5, &mut rng).unwrap(),
+        ReceiveOutcome::Synced {
+            kind: SyncKind::GifSettings,
+            ..
+        }
+    ));
+    assert_eq!(a.gif_settings().unwrap(), settings);
+    assert!(a.gif_allowed(1).unwrap());
+    assert!(!a.gif_allowed(7).unwrap());
+    // The next change on A sends provider 7 on, untouched.
+    a.set_gif_auto_load(true, NOW + 6, &mut rng).unwrap();
+    deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+    let got = t.gif_settings().unwrap();
+    assert_eq!(got.enabled, settings.enabled);
+    assert!(got.auto_load);
+}
+
+#[test]
+fn newly_linked_device_gets_gif_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(77);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    a.enable_gif_provider(1, 1, NOW, &mut rng).unwrap();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut c, req) =
+        Core::begin_link(&dir.path().join("c"), &[2; 32], &offer, "c", NOW, &mut rng).unwrap();
+    let out = a.link_device(&req, false, NOW, &mut rng).unwrap();
+    c.finish_link(&out.bundle, None, NOW).unwrap();
+    assert!(!c.gif_allowed(1).unwrap());
+    deliver_all_at(&mut a, &mut c, NOW + 1, &mut rng);
+    assert!(c.gif_allowed(1).unwrap());
+    assert_eq!(c.gif_settings().unwrap(), a.gif_settings().unwrap());
+}
+
+#[test]
+fn gif_consent_is_logged() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let consent_event = |enabled, remote| TransparencyEvent::GifConsent {
+        provider: 1,
+        enabled,
+        remote,
+    };
+    a.enable_gif_provider(1, 1, NOW + 10, &mut rng).unwrap();
+    assert_eq!(count_events(&a, |e| *e == consent_event(true, false)), 1);
+    deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+    assert_eq!(count_events(&t, |e| *e == consent_event(true, true)), 1);
+    assert_eq!(
+        count_events(&t, |e| *e
+            == TransparencyEvent::SyncApplied {
+                kind: SyncKind::GifSettings
+            }),
+        1
+    );
+    // A change that leaves the provider as it was logs no consent.
+    a.set_gif_auto_load(true, NOW + 31, &mut rng).unwrap();
+    deliver_all_at(&mut a, &mut t, NOW + 40, &mut rng);
+    assert_eq!(
+        count_events(&t, |e| matches!(e, TransparencyEvent::GifConsent { .. })),
+        1
+    );
+    a.disable_gif_provider(1, NOW + 41, &mut rng).unwrap();
+    assert_eq!(count_events(&a, |e| *e == consent_event(false, false)), 1);
+    deliver_all_at(&mut a, &mut t, NOW + 50, &mut rng);
+    assert_eq!(count_events(&t, |e| *e == consent_event(false, true)), 1);
+}
+
+#[test]
+fn gif_settings_fit_tier_m() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    answer_own_session(&mut a, &mut t, &mut rng);
+    let wide = crate::gif::GifConsent {
+        warning_version: u16::MAX,
+        device: DeviceId([0xff; 16]),
+        at: u64::MAX,
+    };
+    let settings = crate::gif::GifSettings {
+        enabled: (1..=8).map(|p| (p, wide.clone())).collect(),
+        auto_load: true,
+    };
+    let pkt = gif_settings_packet(
+        &mut a,
+        &send::Target::OwnDevices,
+        settings,
+        u64::MAX,
+        1,
+        &mut rng,
+    );
+    assert_eq!(pkt.tier, Tier::M);
+}

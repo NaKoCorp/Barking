@@ -36,7 +36,20 @@ impl GifProviderId {
     pub fn as_u8(self) -> u8 {
         self as u8
     }
+
+    /// Name shown to the user.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Klipy => "Klipy",
+        }
+    }
 }
+
+/// Oldest version of a provider's warning that still counts as consent:
+/// an older accepted version is treated as not enabled until the user
+/// accepts the current text.
+pub const MIN_GIF_WARNING_VERSION: u16 = 1;
 
 /// Reference to a GIF held by a provider.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

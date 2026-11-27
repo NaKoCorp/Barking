@@ -1,6 +1,7 @@
 //! Transparency log: what the core did, and what the
 //! intermediaries could see of it (spec §8). Local only.
 
+use crate::gif::GifProviderId;
 use crate::identity::device::DeviceId;
 use crate::identity::root::Fingerprint;
 use crate::mailbox::MailboxId;
@@ -193,6 +194,14 @@ pub enum TransparencyEvent {
         contact: Fingerprint,
         how: RequestResolution,
     },
+    /// GIFs from `provider` were turned on (`enabled`) or off, on this
+    /// device or, `remote`, on another of my devices (received by
+    /// synchronization). Added last.
+    GifConsent {
+        provider: u8,
+        enabled: bool,
+        remote: bool,
+    },
 }
 
 /// How a pending contact request was closed.
@@ -241,6 +250,8 @@ pub enum SyncKind {
     Delete,
     /// Ephemeral messages shown on another device (`SyncSeen`). Added last.
     Seen,
+    /// My GIF settings (`SyncGifSettings`). Added last.
+    GifSettings,
 }
 
 impl SyncKind {
@@ -254,6 +265,7 @@ impl SyncKind {
             SyncKind::Reaction => "reaction",
             SyncKind::Delete => "deletion",
             SyncKind::Seen => "seen",
+            SyncKind::GifSettings => "GIF settings",
         }
     }
 }
@@ -566,6 +578,29 @@ impl TransparencyEvent {
                      contact, and the messages it held were opened."
                 ),
             },
+            Self::GifConsent {
+                provider,
+                enabled,
+                remote,
+            } => {
+                let name = GifProviderId::from_u8(*provider).map_or_else(
+                    || format!("GIF provider {provider}"),
+                    |p| p.name().to_owned(),
+                );
+                let from = if *remote {
+                    "from another of your devices"
+                } else {
+                    "from this device"
+                };
+                if *enabled {
+                    format!(
+                        "GIFs from {name} turned on {from}. {name} receives your IP \
+                         address, your GIF searches, and which GIFs you show."
+                    )
+                } else {
+                    format!("GIFs from {name} turned off {from}. {name} is no longer contacted.")
+                }
+            }
         }
     }
 }
@@ -775,6 +810,19 @@ mod tests {
             TransparencyEvent::ContactRequestResolved {
                 contact: fp(16),
                 how: RequestResolution::AddedDirectly,
+            },
+            TransparencyEvent::SyncApplied {
+                kind: SyncKind::GifSettings,
+            },
+            TransparencyEvent::GifConsent {
+                provider: 1,
+                enabled: true,
+                remote: false,
+            },
+            TransparencyEvent::GifConsent {
+                provider: 7,
+                enabled: false,
+                remote: true,
             },
         ]
     }

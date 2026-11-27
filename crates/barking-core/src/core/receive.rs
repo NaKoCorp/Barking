@@ -852,7 +852,7 @@ struct Ext<'a> {
 
 /// `Body::Ext` authenticated by a session. Sender x kind:
 ///
-/// | Sender | `Reply` / `Message` / `Reaction` / `Gif` | `SyncReply` / `SyncMessage` / `SyncReaction` / `SyncDelete` / `SyncSeen` / `SyncInvite` / `SyncRefused` / `SyncGif` | Unknown |
+/// | Sender | `Reply` / `Message` / `Reaction` / `Gif` | `SyncReply` / `SyncMessage` / `SyncReaction` / `SyncDelete` / `SyncSeen` / `SyncInvite` / `SyncRefused` / `SyncGif` / `SyncGifSettings` | Unknown |
 /// |---|---|---|---|
 /// | A contact | accepted | `R_NOT_MINE` | `unknown` policy |
 /// | One of my devices | `R_UNEXPECTED` | the sync path | `unknown` policy |
@@ -861,9 +861,8 @@ struct Ext<'a> {
 /// be in my current list. A `Reply`, a `Message` or a `Gif` is recorded like
 /// a text, a `Reaction` applied as the contact's (`accept_reaction`);
 /// `SyncReply`, `SyncMessage`, `SyncReaction`, `SyncDelete`, `SyncSeen`,
-/// `SyncInvite`, `SyncRefused` and `SyncGif` go through the sync path
-/// (`accept_sync`). `SyncGifSettings` is not applied yet: unexpected from
-/// anyone.
+/// `SyncInvite`, `SyncRefused`, `SyncGif` and `SyncGifSettings` go through
+/// the sync path (`accept_sync`).
 /// An unknown kind is acknowledged like a message (the sender stops
 /// resending it) and, per its `unknown` policy, ignored or shown as a
 /// placeholder asking for an update (never for my own devices: they would
@@ -993,7 +992,8 @@ fn accept_ext(
             | ExtContent::SyncSeen { .. }
             | ExtContent::SyncInvite { .. }
             | ExtContent::SyncRefused { .. }
-            | ExtContent::SyncGif { .. },
+            | ExtContent::SyncGif { .. }
+            | ExtContent::SyncGifSettings { .. },
             true,
         ) => {
             return accept_sync(q, limiter, packet, o, env, device, admin, my_fp, now, rng);
@@ -1006,7 +1006,8 @@ fn accept_ext(
             | ExtContent::SyncSeen { .. }
             | ExtContent::SyncInvite { .. }
             | ExtContent::SyncRefused { .. }
-            | ExtContent::SyncGif { .. },
+            | ExtContent::SyncGif { .. }
+            | ExtContent::SyncGifSettings { .. },
             false,
         ) => sync::R_NOT_MINE,
         _ => R_UNEXPECTED,
