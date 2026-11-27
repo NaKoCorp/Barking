@@ -240,7 +240,9 @@ struct PendingContent: View {
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 if !selecting {
-                    Button(role: .destructive) { delete(row.id) } label: { Text("Delete") }
+                    // No `role: .destructive`: in swipe actions it animates the row away
+                    // at once, before the confirmation; the row then came back behind it.
+                    Button { delete(row.id) } label: { Text("Delete") }
                         .tint(Color.danger)
                 }
             }

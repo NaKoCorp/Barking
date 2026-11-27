@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
-use crate::contact::ContactCard;
+use crate::contact::{ContactAvatar, ContactCard};
 use crate::content::{ExtContent, UnknownPolicy};
 use crate::crypto::aead;
 use crate::crypto::kdf::hkdf_sha256;
@@ -113,6 +113,16 @@ pub enum SyncOp {
         at: u64,
         since: u64,
     },
+    /// Avatar register of a contact (`None`: cleared): its own register,
+    /// the most recent change wins (ties broken by the value), whatever the
+    /// contact's other operations and whether the contact is known yet.
+    /// Between my devices only, never sent to the contact. Appended last:
+    /// older devices refuse it.
+    Avatar {
+        contact: Fingerprint,
+        avatar: Option<ContactAvatar>,
+        at: u64,
+    },
 }
 
 /// Encrypted content of a packet. No sender identity.
@@ -155,6 +165,7 @@ impl fmt::Debug for SyncOp {
             SyncOp::Remove(_) => "Remove",
             SyncOp::UpsertV2 { .. } => "UpsertV2",
             SyncOp::Block { .. } => "Block",
+            SyncOp::Avatar { .. } => "Avatar",
         })
     }
 }

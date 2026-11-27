@@ -5,6 +5,7 @@ import UIKit
 /// the emoji keyboard. The first emoji typed is the pick; the sheet then
 /// closes. Anything else typed is ignored.
 struct EmojiPicker: View {
+    var title: LocalizedStringKey = "More emoji"
     let pick: (String) -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -34,7 +35,7 @@ struct EmojiPicker: View {
             .frame(maxHeight: .infinity, alignment: .top)
             .padding(.top, Space.s3)
             .background(Color.surface)
-            .navigationTitle("More emoji")
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }

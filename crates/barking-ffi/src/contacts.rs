@@ -1,6 +1,7 @@
 //! Contacts: card in binary (QR code), verification, alias, removal, safety code.
 
 use barking_core::contact::ContactCard;
+use barking_core::core::{ContactAvatar as CoreAvatar, MAX_AVATAR_PHOTO_LEN};
 use barking_core::{CoreError, parse_fingerprint};
 
 use crate::device::{Device, now};
@@ -11,6 +12,48 @@ use crate::{BarkingError, guard};
 pub struct CardPreview {
     pub fingerprint: String,
     pub display_name: String,
+}
+
+/// The picture I gave a contact: synchronized with my other devices (the
+/// latest change wins), never sent to the contact.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ContactAvatar {
+    /// At most 64 bytes, not blank, no control character.
+    Emoji { value: String },
+    /// A JPEG file of at most `avatar_photo_max_bytes()` bytes.
+    Photo { jpeg: Vec<u8> },
+}
+
+/// Largest avatar photo `set_contact_avatar` accepts, in bytes: the app
+/// encodes its JPEG to fit (it travels to my other devices in one packet).
+#[uniffi::export]
+pub fn avatar_photo_max_bytes() -> u32 {
+    u32::try_from(MAX_AVATAR_PHOTO_LEN).unwrap_or(u32::MAX)
+}
+
+/// One contact's avatar, by the fingerprint `Contact.fingerprint` shows.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ContactAvatarEntry {
+    pub fingerprint: String,
+    pub avatar: ContactAvatar,
+}
+
+impl From<ContactAvatar> for CoreAvatar {
+    fn from(a: ContactAvatar) -> Self {
+        match a {
+            ContactAvatar::Emoji { value } => CoreAvatar::Emoji(value),
+            ContactAvatar::Photo { jpeg } => CoreAvatar::Photo(jpeg),
+        }
+    }
+}
+
+impl From<CoreAvatar> for ContactAvatar {
+    fn from(a: CoreAvatar) -> Self {
+        match a {
+            CoreAvatar::Emoji(value) => ContactAvatar::Emoji { value },
+            CoreAvatar::Photo(jpeg) => ContactAvatar::Photo { jpeg },
+        }
+    }
 }
 
 fn not_a_card(_: CoreError) -> BarkingError {
@@ -114,6 +157,42 @@ impl Device {
             self.with_core_read(|core| {
                 let fp = core.resolve(&contact)?;
                 Ok(core.draft(&fp)?)
+            })
+        })
+    }
+
+    /// Sets (Some) or clears (None) the avatar of a contact, and queues the
+    /// change for my other devices (never for the contact). Not an emoji or
+    /// a JPEG the app can show, or too large: `InvalidInput`; unknown
+    /// contact: `NotFound`.
+    pub fn set_contact_avatar(
+        &self,
+        contact: String,
+        avatar: Option<ContactAvatar>,
+    ) -> Result<(), BarkingError> {
+        guard(|| {
+            let avatar = avatar.map(CoreAvatar::from);
+            self.with_core(|core| {
+                let fp = core.resolve(&contact)?;
+                Ok(core.set_contact_avatar(&fp, avatar.as_ref(), now(), &mut rand::rng())?)
+            })
+        })
+    }
+
+    /// Every contact's avatar (a read: it does not wait for a sync in
+    /// flight). Another of my devices may change it: reload after a sync
+    /// that received something (`SyncSummary::items_received`).
+    pub fn contact_avatars(&self) -> Result<Vec<ContactAvatarEntry>, BarkingError> {
+        guard(|| {
+            self.with_core_read(|core| {
+                Ok(core
+                    .contact_avatars()?
+                    .into_iter()
+                    .map(|(fp, avatar)| ContactAvatarEntry {
+                        fingerprint: fp.to_string(),
+                        avatar: avatar.into(),
+                    })
+                    .collect())
             })
         })
     }

@@ -99,6 +99,16 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     func contactCardBytes() throws -> Data { Data([1, 2, 3]) }
     func contactCard(displayName: String) throws -> String { "barking1:abc" }
     func setAlias(contact: String, alias: String) throws {}
+    private var _avatars: [String: ContactAvatar] = [:]
+    var avatars: [String: ContactAvatar] { lock.withLock { _avatars } }
+    var avatarError: Error?
+    func setContactAvatar(contact: String, avatar: ContactAvatar?) throws {
+        if let avatarError { throw avatarError }
+        lock.withLock { _avatars[contact] = avatar }
+    }
+    func contactAvatars() throws -> [ContactAvatarEntry] {
+        lock.withLock { _avatars.map { ContactAvatarEntry(fingerprint: $0.key, avatar: $0.value) } }
+    }
     private var _removedContacts: [String] = []
     var removedContacts: [String] { lock.withLock { _removedContacts } }
     func removeContact(contact: String) throws { lock.withLock { _removedContacts.append(contact) } }

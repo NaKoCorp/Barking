@@ -177,6 +177,17 @@ public actor CoreService {
         try await call("alias") { try $0.setAlias(contact: contact, alias: alias) }
         publish(.contacts)
     }
+    /// Every contact's avatar, kept on this device only (never synced nor
+    /// sent). A read: it does not wait for a sync.
+    public func contactAvatars() async throws -> [ContactAvatarEntry] {
+        try await call("avatars") { try $0.contactAvatars() }
+    }
+    /// Sets (or, with nil, clears) a contact's avatar on this device; the
+    /// lists showing it reload on `.contacts`.
+    public func setContactAvatar(_ contact: String, _ avatar: ContactAvatar?) async throws {
+        try await call("avatar") { try $0.setContactAvatar(contact: contact, avatar: avatar) }
+        publish(.contacts)
+    }
     public func removeContact(_ contact: String) async throws {
         try await call("remove") { try $0.removeContact(contact: contact) }
         publish(.contacts)

@@ -46,14 +46,14 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use super::contacts::{MAX_ALIAS_LEN, claimed_by_other, overlaps};
+use super::contacts::{MAX_ALIAS_LEN, avatar_of_row, avatar_row, claimed_by_other, overlaps};
 use super::history::{self, HistoryArchive};
 use super::send::SealTime;
 use super::{
     Core, META_DEVICE, META_DEVICE_LIST, META_DEVICE_NAME, META_DISPLAY_NAME, META_LINKED_BUNDLES,
     META_PREKEYS, ensure_empty, log, sync,
 };
-use crate::contact::ContactCard;
+use crate::contact::{ContactAvatar, ContactCard};
 use crate::crypto::aead::{xopen, xseal};
 use crate::crypto::bytes64;
 use crate::crypto::kdf::{hmac_sha256, hmac_sha256_verify};
@@ -272,6 +272,12 @@ pub struct ContactSnapshot {
     pub verified: bool,
     /// Date of the copy: storage does not keep the real date of addition.
     pub added_at: u64,
+    /// The avatar I gave the contact (`None`: none, or cleared) and the
+    /// date of its last change (0: never changed), the register the new
+    /// device starts from (`SyncOp::Avatar`). A photo stored before the
+    /// limit was lowered is not copied.
+    pub avatar: Option<ContactAvatar>,
+    pub avatar_at: u64,
 }
 
 /// Plaintext of the link bundle.
@@ -639,21 +645,39 @@ impl Core {
             .list_contacts()?
             .into_iter()
             .map(|row| {
+                let (avatar, avatar_at) = snapshot_avatar(&self.store, row.fp)?;
                 Ok(ContactSnapshot {
                     card: super::load_card(&row.card)?,
                     alias: (!row.alias.is_empty()).then_some(row.alias),
                     verified: row.verified,
                     added_at: now,
+                    avatar,
+                    avatar_at,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let plain = LinkPlain {
+        let mut plain = LinkPlain {
             devices: devices.clone(),
             card: card.clone(),
             own_bundles,
             contacts,
         };
-        let bundle = seal_bundle(&offer.secret, &root_pub, root, &device.id(), &plain, rng)?;
+        let mut bundle = seal_bundle(&offer.secret, &root_pub, root, &device.id(), &plain, rng)?;
+        // Avatar photos never make the link fail: when they push the bundle
+        // over its limit, they leave it and follow as `SyncOp::Avatar`
+        // once the new list is written (as the block registers).
+        let mut deferred = Vec::new();
+        if bundle.to_bytes().len() > bundle_max() {
+            for snap in &mut plain.contacts {
+                if matches!(snap.avatar, Some(ContactAvatar::Photo(_))) {
+                    deferred.push((snap.card.fingerprint(), snap.avatar.take(), snap.avatar_at));
+                    snap.avatar_at = 0;
+                }
+            }
+            if !deferred.is_empty() {
+                bundle = seal_bundle(&offer.secret, &root_pub, root, &device.id(), &plain, rng)?;
+            }
+        }
         // Refused before the transaction: T would refuse this bundle when reading it,
         // and the offer would be lost for nothing. Compared like the reader
         // (`LinkBundle::from_bytes`): on the encoded file, prefix included.
@@ -718,6 +742,9 @@ impl Core {
             // after the new list, so the new device receives them too.
             for (fp, state) in tx.block_states()? {
                 sync::send_block(tx, me, fp, &state, SealTime::at(now), rng)?;
+            }
+            for (fp, avatar, at) in &deferred {
+                sync::send_avatar(tx, me, *fp, avatar.as_ref(), *at, SealTime::at(now), rng)?;
             }
             log(tx, now, None, &event)?;
             // And for each of my contacts (spec §3.2).
@@ -825,8 +852,18 @@ impl Core {
                 {
                     return Err(BAD_CONTACT);
                 }
+                if snap.avatar.as_ref().is_some_and(|a| a.check().is_err()) {
+                    return Err(BAD_CONTACT);
+                }
                 let bytes = card.encode();
                 tx.upsert_contact(fp, &bytes, alias, snap.verified)?;
+                if snap.avatar.is_some() || snap.avatar_at != 0 {
+                    tx.put_contact_avatar(
+                        fp,
+                        snap.avatar.as_ref().map(avatar_row),
+                        snap.avatar_at,
+                    )?;
+                }
             }
             tx.put_meta(META_DEVICE_LIST, &plain.devices)?;
             tx.put_meta(META_LINKED_BUNDLES, &plain.own_bundles)?;
@@ -847,6 +884,22 @@ impl Core {
         self.pending = false;
         Ok(())
     }
+}
+
+/// The avatar register of `fp` as copied by a link: its value and date. A
+/// value the new device would refuse (a photo stored before the limit was
+/// lowered) is left out, with no error: the new device starts without it.
+fn snapshot_avatar(q: &impl Queries, fp: Fingerprint) -> Result<(Option<ContactAvatar>, u64)> {
+    let Some(register) = q.contact_avatar(fp)? else {
+        return Ok((None, 0));
+    };
+    let Some((kind, data)) = register.value else {
+        return Ok((None, register.at));
+    };
+    Ok(match avatar_of_row(kind, data) {
+        Ok(avatar) if avatar.check().is_ok() => (Some(avatar), register.at),
+        _ => (None, 0),
+    })
 }
 
 /// Verifies the link bundle plaintext on T's side: list signed by the expected
@@ -1026,6 +1079,8 @@ mod tests {
             alias: Some("me".into()),
             verified: false,
             added_at: NOW,
+            avatar: None,
+            avatar_at: 0,
         });
         let forged = forged_bundle(
             &offer,
@@ -1424,6 +1479,68 @@ mod tests {
         // Refreshed list: a new attempt with the same offer succeeds.
         a1.link_device(&r2, false, NOW, &mut rng).unwrap();
         assert_eq!(a1.devices.certs.len(), 3);
+    }
+
+    /// A (admin, seed `seed`) with a contact whose avatar is a max-size
+    /// photo, and T pending; returns the link outcome under `max`.
+    fn link_with_photo(
+        d: &TempDir,
+        tag: &str,
+        max: Option<usize>,
+    ) -> (Core, Core, Fingerprint, LinkOutcome) {
+        let mut rng = StdRng::seed_from_u64(21);
+        let mut a = admin(d, &format!("a{tag}"), 1, &mut rng);
+        let c1 = admin(d, &format!("c{tag}"), 3, &mut rng);
+        let fp = a
+            .add_contact(&c1.contact_card("C1").unwrap(), Some("c1"), NOW, &mut rng)
+            .unwrap();
+        let photo = ContactAvatar::Photo({
+            let mut v = vec![0xAB; crate::contact::MAX_AVATAR_PHOTO_LEN];
+            v[..2].copy_from_slice(&[0xFF, 0xD8]);
+            v
+        });
+        a.set_contact_avatar(&fp, Some(&photo), NOW, &mut rng)
+            .unwrap();
+        let offer = a.link_offer(NOW, &mut rng).unwrap();
+        let (t, req) = Core::begin_link(
+            &d.path().join(format!("t{tag}")),
+            &[9; 32],
+            &offer,
+            "t",
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+        BUNDLE_MAX_OVERRIDE.with(|c| c.set(max));
+        let out = a.link_device(&req, false, NOW, &mut rng);
+        BUNDLE_MAX_OVERRIDE.with(|c| c.set(None));
+        (a, t, fp, out.unwrap())
+    }
+
+    #[test]
+    fn avatar_photos_follow_the_link_when_the_bundle_is_full() {
+        let d = tempfile::tempdir().unwrap();
+        // The same A twice: the bundle with the photo measures `full`.
+        let (_a, mut t, fp, out) = link_with_photo(&d, "1", None);
+        let full = out.bundle.to_bytes().len();
+        t.finish_link(&out.bundle, None, NOW).unwrap();
+        assert_eq!(t.contact_avatars().unwrap().len(), 1);
+        // Under a limit the photo would cross: the link still succeeds,
+        // without the photo, which follows as a synchronization.
+        let (mut a, mut t, fp2, out) = link_with_photo(&d, "2", Some(full - 6_000));
+        assert_eq!(fp, fp2);
+        assert!(out.bundle.to_bytes().len() <= full - 6_000);
+        t.finish_link(&out.bundle, None, NOW).unwrap();
+        assert!(t.contact_avatars().unwrap().is_empty());
+        let mut rng = StdRng::seed_from_u64(5);
+        for p in a.pending_outbox(NOW).unwrap() {
+            let _ = t.receive(&p, "t", NOW, &mut rng);
+        }
+        assert_eq!(t.contact_avatars().unwrap(), a.contact_avatars().unwrap());
+        assert_eq!(
+            t.store.contact_avatar(fp).unwrap(),
+            a.store.contact_avatar(fp).unwrap()
+        );
     }
 
     #[test]

@@ -2,7 +2,10 @@
 
 mod common;
 
-use barking_ffi::{BarkingError, inspect_card, inspect_card_text};
+use barking_ffi::{
+    BarkingError, ContactAvatar, ContactAvatarEntry, avatar_photo_max_bytes, inspect_card,
+    inspect_card_text,
+};
 use common::device;
 
 #[test]
@@ -188,4 +191,78 @@ fn draft_roundtrip() {
     assert_eq!(alice.draft(fb.clone()).unwrap(), Some("hi".to_string()));
     alice.set_draft(fb.clone(), "".into()).unwrap();
     assert_eq!(alice.draft(fb).unwrap(), None);
+}
+
+#[test]
+fn contact_avatar_roundtrip() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let alice = device(&da, 1, "Alice");
+    let bob = device(&db, 2, "Bob");
+    let fb = alice
+        .add_contact_bytes(bob.contact_card_bytes().unwrap(), Some("bob".into()))
+        .unwrap();
+    assert!(alice.contact_avatars().unwrap().is_empty());
+    let emoji = ContactAvatar::Emoji {
+        value: "\u{1F436}".into(),
+    };
+    // Resolved by alias, listed by fingerprint.
+    alice
+        .set_contact_avatar("bob".into(), Some(emoji.clone()))
+        .unwrap();
+    assert_eq!(
+        alice.contact_avatars().unwrap(),
+        vec![ContactAvatarEntry {
+            fingerprint: fb.clone(),
+            avatar: emoji,
+        }]
+    );
+    let photo = ContactAvatar::Photo {
+        jpeg: vec![0xFF, 0xD8, 0xFF, 0xE0],
+    };
+    alice
+        .set_contact_avatar(fb.clone(), Some(photo.clone()))
+        .unwrap();
+    assert_eq!(alice.contact_avatars().unwrap()[0].avatar, photo);
+    assert!(matches!(
+        alice.set_contact_avatar(fb.clone(), Some(ContactAvatar::Photo { jpeg: vec![1, 2] })),
+        Err(BarkingError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        alice.set_contact_avatar(fb.clone(), Some(ContactAvatar::Emoji { value: " ".into() })),
+        Err(BarkingError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        alice.set_contact_avatar("nobody".into(), None),
+        Err(BarkingError::NotFound)
+    ));
+    alice.set_contact_avatar(fb, None).unwrap();
+    assert!(alice.contact_avatars().unwrap().is_empty());
+}
+
+#[test]
+fn avatar_photo_max_bytes_is_the_core_limit() {
+    assert_eq!(
+        avatar_photo_max_bytes() as usize,
+        barking_core::core::MAX_AVATAR_PHOTO_LEN
+    );
+    assert_eq!(avatar_photo_max_bytes(), 12 * 1024);
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let alice = device(&da, 1, "Alice");
+    let bob = device(&db, 2, "Bob");
+    let fb = alice
+        .add_contact_bytes(bob.contact_card_bytes().unwrap(), Some("bob".into()))
+        .unwrap();
+    let photo = |len: usize| {
+        let mut jpeg = vec![0xAB; len];
+        jpeg[..2].copy_from_slice(&[0xFF, 0xD8]);
+        ContactAvatar::Photo { jpeg }
+    };
+    let max = avatar_photo_max_bytes() as usize;
+    alice
+        .set_contact_avatar(fb.clone(), Some(photo(max)))
+        .unwrap();
+    assert!(matches!(
+        alice.set_contact_avatar(fb, Some(photo(max + 1))),
+        Err(BarkingError::InvalidInput { .. })
+    ));
 }

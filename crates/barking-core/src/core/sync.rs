@@ -20,7 +20,7 @@ use super::link::META_OWN_CARD;
 use super::route::{self, RouteStep};
 use super::send::{SealTime, Target, seal_for};
 use super::{META_DEVICE_LIST, META_LINKED_BUNDLES, OwnDevices, contacts, load_card, log};
-use crate::contact::ContactCard;
+use crate::contact::{ContactAvatar, ContactCard};
 use crate::content::{ExtContent, UNSEEN_CEILING_SECS};
 use crate::envelope::{self, Body, Envelope, SyncOp};
 use crate::handshake::PrekeyBundle;
@@ -371,6 +371,29 @@ pub(super) fn seal_block(
     seal_op(q, device, op, time, rng)
 }
 
+/// Queues the avatar register of `fp` (`SyncOp::Avatar`): `avatar`
+/// (`None`: cleared) dated `at`. A photo stored before the limit was
+/// lowered is not sent (no error): the op would not fit in a packet.
+pub(super) fn send_avatar(
+    q: &impl Queries,
+    device: &DeviceKeys,
+    fp: Fingerprint,
+    avatar: Option<&ContactAvatar>,
+    at: u64,
+    time: SealTime,
+    rng: &mut impl CryptoRng,
+) -> Result<()> {
+    if avatar.is_some_and(|a| a.check().is_err()) {
+        return Ok(());
+    }
+    let op = SyncOp::Avatar {
+        contact: fp,
+        avatar: avatar.cloned(),
+        at,
+    };
+    send_op(q, device, op, time, rng)
+}
+
 /// Local operation of device `me` on contact `fp` at `now`:
 /// the contact's clock advances strictly (a local operation wins
 /// over everything this device already knows), and `removed` sets or clears the
@@ -648,6 +671,11 @@ fn apply_op(
             };
             return contacts::merge_block(q, *fp, &state, now);
         }
+        SyncOp::Avatar {
+            contact,
+            avatar,
+            at,
+        } => return contacts::merge_avatar(q, *contact, avatar.as_ref(), *at),
     };
     // The verified status is its own register: merged whatever the clock of
     // the contact's other operations.
@@ -658,7 +686,7 @@ fn apply_op(
             verified_at,
             ..
         } => Some((*verified, *verified_at)),
-        SyncOp::Remove(_) | SyncOp::Block { .. } => None,
+        SyncOp::Remove(_) | SyncOp::Block { .. } | SyncOp::Avatar { .. } => None,
     };
     if let Some((verified, at)) = register {
         contacts::merge_verified(q, fp, verified, at)?;
@@ -692,10 +720,13 @@ fn apply_op(
         SyncOp::Remove(fp) => {
             if q.get_contact(*fp)?.is_some() {
                 contacts::delete_in(q, *fp, now)?;
+            } else {
+                // An avatar that came before the contact goes with it.
+                q.delete_contact_avatar(*fp)?;
             }
         }
         // Returned above.
-        SyncOp::Block { .. } => {}
+        SyncOp::Block { .. } | SyncOp::Avatar { .. } => {}
     }
     q.set_contact_clock(fp, &clock)
 }

@@ -54,6 +54,7 @@ use crate::store::{EventClass, MessageId, MessageRow, MessageStatus, Queries, St
 use crate::transparency::TransparencyEvent;
 use crate::{CoreError, Result};
 
+pub use crate::contact::{ContactAvatar, MAX_AVATAR_EMOJI_LEN, MAX_AVATAR_PHOTO_LEN};
 pub use crate::transparency::{RequestResolution, SyncKind};
 pub use contacts::{ContactSummary, parse_fingerprint};
 pub use delivery::{AwaitingVerdict, DeleteOutcome, MAX_NOTED_CHANGES};

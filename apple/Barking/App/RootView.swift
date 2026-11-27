@@ -39,6 +39,8 @@ struct MainTabView: View {
     @State private var loop: SyncLoop
     /// Erases ephemerals as they fall due while the app is in front.
     @State private var expiry: ExpiryTimer
+    /// The photos and emoji I gave my contacts, for every screen.
+    @State private var avatars: AvatarStore
     @Environment(AppRouter.self) private var router
     @Environment(\.scenePhase) private var phase
 
@@ -46,6 +48,7 @@ struct MainTabView: View {
         self.core = core
         _loop = State(initialValue: SyncLoop(core: core))
         _expiry = State(initialValue: ExpiryTimer(core: core))
+        _avatars = State(initialValue: AvatarStore(core: core))
     }
 
     var body: some View {
@@ -63,6 +66,7 @@ struct MainTabView: View {
         .onChange(of: router.pendingCardLink, initial: true) { _, link in if link != nil { tab = .chats } }
         .onChange(of: router.pendingRelayLink, initial: true) { _, link in if link != nil { tab = .network } }
         .environment(\.syncLoop, loop)
+        .environment(avatars)
         .onChange(of: phase, initial: true) { _, now in
             loop.scenePhaseChanged(to: now)
             // At launch and each return: what fell due meanwhile goes (the
@@ -71,9 +75,12 @@ struct MainTabView: View {
         }
         // An expiry, a sync or a send can move the next expiry.
         .task {
+            await avatars.reload()
             for await change in await core.changes {
                 switch change {
                 case .expired, .network, .messages: await expiry.arm()
+                // A contact deleted or added again: its avatar went with it.
+                case .contacts: await avatars.reload()
                 default: break
                 }
             }

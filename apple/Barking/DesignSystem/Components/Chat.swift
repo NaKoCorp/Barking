@@ -344,20 +344,31 @@ extension View {
     }
 }
 
-/// Initial on a stable color.
+/// The photo or emoji I gave the contact, else its initial, on a stable
+/// color. Without an `AvatarStore` (previews, requests), the initial.
 struct Avatar: View {
     let name: String
     let fingerprint: String
     var size: CGFloat = 48
+    @Environment(AvatarStore.self) private var store: AvatarStore?
 
     var body: some View {
         let c = AvatarPalette.colors(for: fingerprint)
-        Text(String(name.first ?? "?").uppercased())
-            .font(.system(size: size * 0.38, weight: .bold))
-            .foregroundStyle(c.text)
-            .frame(width: size, height: size)
-            .background(c.fill, in: .circle)
-            .accessibilityHidden(true)
+        Group {
+            if let photo = store?.photos[fingerprint] {
+                Image(uiImage: photo).resizable().scaledToFill()
+            } else if let emoji = store?.emoji[fingerprint] {
+                Text(verbatim: emoji).font(.system(size: size * 0.5))
+            } else {
+                Text(String(name.first ?? "?").uppercased())
+                    .font(.system(size: size * 0.38, weight: .bold))
+                    .foregroundStyle(c.text)
+            }
+        }
+        .frame(width: size, height: size)
+        .background(c.fill)
+        .clipShape(.circle)
+        .accessibilityHidden(true)
     }
 }
 
