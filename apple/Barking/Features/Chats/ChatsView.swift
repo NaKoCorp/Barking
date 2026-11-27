@@ -74,7 +74,9 @@ struct ChatsView: View {
                             .listRowBackground(Color.surface)
                             .listRowSeparator(.hidden)
                             .swipeActions {
-                                Button(role: .destructive) { confirmDelete = row } label: {
+                                // No `role: .destructive`: in swipe actions it animates the row away
+                                // at once, before the confirmation; the row then came back behind it.
+                                Button { confirmDelete = row } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
                                 .tint(Color.danger)
