@@ -3,7 +3,8 @@
 mod common;
 
 use barking_ffi::{
-    BarkingError, ContactAvatar, ContactAvatarEntry, inspect_card, inspect_card_text,
+    BarkingError, ContactAvatar, ContactAvatarEntry, avatar_photo_max_bytes, inspect_card,
+    inspect_card_text,
 };
 use common::device;
 
@@ -236,4 +237,32 @@ fn contact_avatar_roundtrip() {
     ));
     alice.set_contact_avatar(fb, None).unwrap();
     assert!(alice.contact_avatars().unwrap().is_empty());
+}
+
+#[test]
+fn avatar_photo_max_bytes_is_the_core_limit() {
+    assert_eq!(
+        avatar_photo_max_bytes() as usize,
+        barking_core::core::MAX_AVATAR_PHOTO_LEN
+    );
+    assert_eq!(avatar_photo_max_bytes(), 12 * 1024);
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let alice = device(&da, 1, "Alice");
+    let bob = device(&db, 2, "Bob");
+    let fb = alice
+        .add_contact_bytes(bob.contact_card_bytes().unwrap(), Some("bob".into()))
+        .unwrap();
+    let photo = |len: usize| {
+        let mut jpeg = vec![0xAB; len];
+        jpeg[..2].copy_from_slice(&[0xFF, 0xD8]);
+        ContactAvatar::Photo { jpeg }
+    };
+    let max = avatar_photo_max_bytes() as usize;
+    alice
+        .set_contact_avatar(fb.clone(), Some(photo(max)))
+        .unwrap();
+    assert!(matches!(
+        alice.set_contact_avatar(fb, Some(photo(max + 1))),
+        Err(BarkingError::InvalidInput { .. })
+    ));
 }

@@ -1,8 +1,8 @@
-//! SQL storage schema (v7) and migrations from v1, v2, v3, v4, v5 and v6.
+//! SQL storage schema (v8) and migrations from v1, v2, v3, v4, v5, v6 and v7.
 
 use rusqlite::{Connection, params};
 
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Schema v1 (batch 1A), kept for the migration and for its tests: a
 /// v1 database is opened with this schema, then migrated.
@@ -495,8 +495,8 @@ pub fn migrate_v5_to_v6(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Schema v7 (contact avatars): the picture I gave a contact, at most one
 /// per fingerprint. `kind`: 0 emoji (`data` is its UTF-8 text), 1 JPEG
-/// photo. Local to this device: never synchronized, logged, sent or copied
-/// by a link; erased with the contact (`delete_contact`).
+/// photo. Replaced by v8 (a register synchronized between my devices); a
+/// fresh database still goes through it, then through v8.
 const SCHEMA_V7_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS contact_avatars (
     fp BLOB PRIMARY KEY NOT NULL,
@@ -511,6 +511,43 @@ pub fn migrate_v6_to_v7(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(SCHEMA_V7_TABLES)?;
     set_version(&tx, 7)?;
+    tx.commit()
+}
+
+/// Schema v8 (synchronized contact avatars): each avatar is a register
+/// with the date `at` of its last change (`SyncOp::Avatar`, last writer
+/// wins). A cleared avatar is a tombstone: `kind` and `data` NULL, `at`
+/// kept, so that an older value arriving later does not come back. Erased
+/// with the contact (`delete_contact`).
+const SCHEMA_V8_AVATARS: &str = "
+CREATE TABLE contact_avatars_v8 (
+    fp BLOB PRIMARY KEY NOT NULL,
+    kind INTEGER,
+    data BLOB,
+    at INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO contact_avatars_v8(fp, kind, data, at)
+    SELECT fp, kind, data, 0 FROM contact_avatars;
+DROP TABLE contact_avatars;
+ALTER TABLE contact_avatars_v8 RENAME TO contact_avatars;
+";
+
+/// Migrates a v7 database to v8 in a single transaction: `contact_avatars`
+/// recreated with nullable `kind` and `data` and an `at` column (SQLite
+/// cannot drop a NOT NULL in place), its rows copied with `at` 0, then
+/// `schema_version` set to 8. A table that already has `at` is kept as is:
+/// a replay never resets the dates.
+pub fn migrate_v7_to_v8(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let has_at: bool = tx.query_row(
+        "SELECT count(*) > 0 FROM pragma_table_info('contact_avatars') WHERE name = 'at'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_at {
+        tx.execute_batch(SCHEMA_V8_AVATARS)?;
+    }
+    set_version(&tx, 8)?;
     tx.commit()
 }
 
