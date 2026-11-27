@@ -2,6 +2,7 @@
 //! packet = one `.pkt` file) and the network (`barking sync`, through
 //! `barking-net`).
 
+mod census;
 mod nodes;
 mod passphrase;
 
@@ -150,6 +151,20 @@ enum Command {
     Node(NodeCommand),
     /// Drops the pending packets on the nodes, polls my mailboxes and processes what was received.
     Sync,
+    /// Walks the network from the seeds of `BARKING_SEEDS` and writes the
+    /// public list of the nodes that answered, as JSON (no address). Needs
+    /// no identity.
+    Census {
+        /// IP base (`ipdb.bin`) that places each node from the address it answered on.
+        #[arg(long, value_name = "FILE")]
+        ipdb: Option<PathBuf>,
+        /// Output file (default: standard output).
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Global deadline, in seconds.
+        #[arg(long, value_name = "SECS", default_value_t = 600)]
+        deadline: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -338,6 +353,14 @@ fn show_created(core: &Core) {
 }
 
 fn run(cli: Cli) -> CliResult<()> {
+    if let Command::Census {
+        ipdb,
+        out,
+        deadline,
+    } = &cli.command
+    {
+        return census::run(ipdb.as_deref(), out.as_deref(), *deadline);
+    }
     let home = match cli.home {
         Some(h) => h,
         None => default_home()?,
@@ -571,6 +594,7 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Link(cmd) => link(&home, cmd)?,
         Command::Node(cmd) => nodes::run(&home, cmd)?,
         Command::Sync => return sync(&home),
+        Command::Census { .. } => unreachable!("handled before the data directory"),
     }
     Ok(())
 }
