@@ -6,6 +6,7 @@
 pub mod census;
 pub mod discover;
 pub mod geo;
+pub mod gif;
 pub mod nodes;
 pub mod plan;
 pub mod push;

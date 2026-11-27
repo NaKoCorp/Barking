@@ -66,8 +66,12 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 toml = "1.2.1"
 # Grapheme segmentation (emoji validation); no dependencies.
 unicode-segmentation = "1.13"
+url = "2.5.9"
 # Swift and Kotlin bindings of barking-ffi.
 uniffi = "0.32.2"
+# GIF client roots (Mozilla list compiled in): the system store is not
+# reachable through rustls-native-certs on iOS.
+webpki-roots = "1.0.10"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
 
