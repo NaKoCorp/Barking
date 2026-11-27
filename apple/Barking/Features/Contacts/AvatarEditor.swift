@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The contact page's avatar, as a menu: a photo from the library, an
 /// emoji, or back to the initial. A small pencil says it can be changed.
-/// What is chosen stays on this iPhone (`AvatarStore`).
+/// What is chosen reaches my linked devices, never the contact (`AvatarStore`).
 struct AvatarEditor: View {
     let name: String
     let fingerprint: String
@@ -39,7 +39,7 @@ struct AvatarEditor: View {
             }
             .disabled(store == nil)
             .accessibilityLabel(Text("Avatar of \(name)"))
-            .accessibilityHint(Text("Choose a photo or an emoji, kept on this iPhone."))
+            .accessibilityHint(Text("Choose a photo or an emoji. Your linked devices get it, not the contact."))
             .accessibilityIdentifier("contact.avatar")
             if failed {
                 Text("Not saved. Try again.").font(.bMeta).foregroundStyle(Color.danger)
