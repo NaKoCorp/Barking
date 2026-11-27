@@ -23,7 +23,7 @@ fn reopen_persists() {
         store.get_meta::<Vec<u8>>("hello").unwrap(),
         Some(vec![1, 2, 3])
     );
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     assert_eq!(store.get_meta::<u32>("absent").unwrap(), None);
 }
 
@@ -683,7 +683,7 @@ fn insert_message_duplicate_id_returns_false() {
 #[test]
 fn newer_schema_refused() {
     let (_d, path, store) = open_tmp();
-    store.put_meta("schema_version", &7u32).unwrap();
+    store.put_meta("schema_version", &8u32).unwrap();
     drop(store);
     assert!(matches!(
         Store::open(&path, &KEY),
@@ -738,7 +738,7 @@ fn migration_v1_keeps_history_and_acks() {
         .unwrap();
     }
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     let m = store.messages_with(fp, 0).unwrap();
     let bodies: Vec<_> = m
         .iter()
@@ -808,7 +808,7 @@ fn migration_from_pre_1a_database() {
         .unwrap();
     }
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     let m = store.messages_with(fp, 0).unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(
@@ -879,7 +879,7 @@ fn v2_database_without_inbound_gets_it() {
         .execute_batch("DROP TABLE inbound;")
         .unwrap();
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     let fp = Fingerprint([4; 32]);
     let mid = MessageId::incoming(&fp, &[1; 16]);
     store
@@ -953,7 +953,7 @@ fn own_delivery_never_aggregates_and_survives_contact_removal() {
     .unwrap();
     drop(raw);
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     store.add_delivery(mid, to_me, mine, true, 5, 1024).unwrap();
     // Column `writer` added: unknown author (null) for the old row.
     let zero = crate::identity::device::DeviceId([0; 16]);
@@ -1213,7 +1213,7 @@ fn has_object(conn: &Connection, kind: &str, name: &str) -> bool {
 fn migrate_v2_to_v3_backfills_from_route_steps() {
     let (_d, path) = v2_fixture_copy();
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     let c = store.conn();
     let node = Some(FX_NODE.to_owned());
     // Acked: first deposit (min(at)) and its node, Sealed size, AckVerified time.
@@ -1272,7 +1272,7 @@ fn migrate_v2_to_v3_backfills_from_route_steps() {
     // Reopening: the migration is not replayed.
     drop(store);
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     assert_eq!(delivery_cols(store.conn(), 0xA2).0, 0);
     assert_eq!(message_status(store.conn(), 0x22), 0);
 }
@@ -1300,7 +1300,7 @@ fn migration_is_one_transaction() {
     }
     // The untouched v2 database still migrates on the next open.
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     assert_eq!(delivery_cols(store.conn(), 0xA2).0, 0);
 }
 
@@ -1326,7 +1326,7 @@ fn v3_database_without_deposit_tried_at_gets_it() {
     }
     let store = Store::open(&path, &KEY).unwrap();
     assert!(has_column(store.conn(), "outbox", "deposit_tried_at"));
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
 }
 
 #[test]
@@ -1382,7 +1382,7 @@ fn v3_database_upgrades_to_v4() {
         CoreError::Store("database schema not current".into())
     );
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     let cols: Vec<String> = store
         .conn()
         .prepare("SELECT name FROM pragma_table_info('messages')")
@@ -1421,7 +1421,7 @@ fn migrates_v4_to_v5() {
         CoreError::Store("database schema not current".into())
     );
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     for c in ["ttl_secs", "seen_at", "expire_at"] {
         assert!(has_column(store.conn(), "messages", c), "{c} missing");
     }
@@ -1457,7 +1457,7 @@ fn migrates_v5_to_v6() {
         CoreError::Store("database schema not current".into())
     );
     let store = Store::open(&path, &KEY).unwrap();
-    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
     for t in [
         "contact_requests",
         "pending_initials",
@@ -1472,7 +1472,8 @@ fn migrates_v5_to_v6() {
     }
     drop(store);
     Store::open_read(&path, &KEY).unwrap();
-    // Replaying the migration on a v6 database is harmless.
+    // Replaying the migration on a newer database is harmless: it only
+    // creates what is missing (and writes its own version back).
     let store = Store::open(&path, &KEY).unwrap();
     schema::migrate_v5_to_v6(store.conn()).unwrap();
     assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(6));
@@ -1667,4 +1668,64 @@ fn expired_text_absent_from_decrypted_pages() {
         holds(&control, MARKER),
         "without secure_delete the freed cells keep the text"
     );
+}
+
+#[test]
+fn migrates_v6_to_v7() {
+    let (_d, path, store) = open_tmp();
+    // Turn the fresh database back into a v6 one.
+    store
+        .conn()
+        .execute_batch("DROP TABLE contact_avatars;")
+        .unwrap();
+    store.put_meta("schema_version", &6u32).unwrap();
+    drop(store);
+    assert_eq!(
+        Store::open_read(&path, &KEY).err().unwrap(),
+        CoreError::Store("database schema not current".into())
+    );
+    let store = Store::open(&path, &KEY).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
+    assert!(has_object(store.conn(), "table", "contact_avatars"));
+    for c in ["fp", "kind", "data"] {
+        assert!(
+            has_column(store.conn(), "contact_avatars", c),
+            "{c} missing"
+        );
+    }
+    drop(store);
+    Store::open_read(&path, &KEY).unwrap();
+    // Replaying the migration on a v7 database is harmless.
+    let store = Store::open(&path, &KEY).unwrap();
+    schema::migrate_v6_to_v7(store.conn()).unwrap();
+    assert_eq!(store.get_meta::<u32>("schema_version").unwrap(), Some(7));
+}
+
+#[test]
+fn contact_avatar_rows_replace_list_and_delete() {
+    let (_d, _path, store) = open_tmp();
+    let (a, b) = (Fingerprint([1; 32]), Fingerprint([2; 32]));
+    for fp in [a, b] {
+        store.upsert_contact(fp, b"card", "", false).unwrap();
+    }
+    store
+        .put_contact_avatar(b, AvatarKind::Photo, &[0xFF, 0xD8])
+        .unwrap();
+    store
+        .put_contact_avatar(a, AvatarKind::Emoji, "x".as_bytes())
+        .unwrap();
+    store
+        .put_contact_avatar(a, AvatarKind::Emoji, "y".as_bytes())
+        .unwrap();
+    assert_eq!(
+        store.contact_avatars().unwrap(),
+        vec![
+            (a, AvatarKind::Emoji, b"y".to_vec()),
+            (b, AvatarKind::Photo, vec![0xFF, 0xD8]),
+        ]
+    );
+    store.delete_contact_avatar(a).unwrap();
+    store.delete_contact_avatar(a).unwrap();
+    store.delete_contact(b).unwrap();
+    assert!(store.contact_avatars().unwrap().is_empty());
 }

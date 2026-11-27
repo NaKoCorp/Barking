@@ -76,6 +76,25 @@ impl Direction {
     }
 }
 
+/// What a `contact_avatars` row holds: fixed values, stored as is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AvatarKind {
+    /// `data` is the emoji's UTF-8 text.
+    Emoji = 0,
+    /// `data` is a JPEG file.
+    Photo = 1,
+}
+
+impl AvatarKind {
+    fn from_i64(v: i64) -> Result<Self> {
+        match v {
+            0 => Ok(Self::Emoji),
+            1 => Ok(Self::Photo),
+            _ => Err(CoreError::Store("unknown avatar kind".into())),
+        }
+    }
+}
+
 /// Stored contact: `card` is the postcard of `ContactCard` (opaque here).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactRow {
@@ -948,6 +967,9 @@ impl Store {
         if stored.is_none_or(|v| v < 6) {
             schema::migrate_v5_to_v6(&self.conn).map_err(map_err)?;
         }
+        if stored.is_none_or(|v| v < 7) {
+            schema::migrate_v6_to_v7(&self.conn).map_err(map_err)?;
+        }
         Ok(())
     }
 
@@ -1585,6 +1607,56 @@ pub trait Queries {
         Ok(())
     }
 
+    /// Writes the avatar of `fp`, replacing the previous one. The caller
+    /// checks `data` (`core::contacts::set_contact_avatar`).
+    fn put_contact_avatar(&self, fp: Fingerprint, kind: AvatarKind, data: &[u8]) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO contact_avatars(fp, kind, data) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(fp) DO UPDATE SET kind = excluded.kind, data = excluded.data",
+                params![fp.0.as_slice(), kind as i64, data],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Deletes the avatar of `fp`, if any.
+    fn delete_contact_avatar(&self, fp: Fingerprint) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM contact_avatars WHERE fp = ?1",
+                params![fp.0.as_slice()],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Every avatar of a known contact, by fingerprint. A row whose
+    /// contact is gone is skipped rather than shown under no name.
+    fn contact_avatars(&self) -> Result<Vec<(Fingerprint, AvatarKind, Vec<u8>)>> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT a.fp, a.kind, a.data FROM contact_avatars a \
+                 JOIN contacts c ON c.fp = a.fp ORDER BY a.fp",
+            )
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(map_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_err)?;
+        rows.into_iter()
+            .map(|(fp, kind, data)| Ok((Fingerprint(arr(fp)?), AvatarKind::from_i64(kind)?, data)))
+            .collect()
+    }
+
     /// Writes the block register of `fp`.
     fn set_block_state(&self, fp: Fingerprint, state: &BlockState) -> Result<()> {
         self.conn()
@@ -2077,6 +2149,7 @@ pub trait Queries {
             )
             .map_err(map_err)?;
         self.delete_draft(fp)?;
+        self.delete_contact_avatar(fp)?;
         self.delete_reactions_with(fp)?;
         self.drop_reaction_packets_with(fp)?;
         self.delete_pending_seen_with(fp)?;

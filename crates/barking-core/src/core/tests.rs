@@ -11230,3 +11230,226 @@ fn accept_within_grace_acks_despite_a_rewritten_header_expiry() {
     b.accept_request(&alice, None, later, &mut rng).unwrap();
     assert_eq!(outbox_of(&mut b, Kind::Ack, later), 3);
 }
+
+// Contact avatars: local to this device, never synchronized, logged or sent.
+
+use crate::core::ContactAvatar;
+
+/// A tiny byte string that starts like a JPEG (SOI marker).
+fn jpeg(len: usize) -> Vec<u8> {
+    let mut v = vec![0xAB; len];
+    v[0] = 0xFF;
+    v[1] = 0xD8;
+    v
+}
+
+fn avatar_of(core: &Core, fp: &Fingerprint) -> Option<ContactAvatar> {
+    core.contact_avatars()
+        .unwrap()
+        .into_iter()
+        .find(|(f, _)| f == fp)
+        .map(|(_, a)| a)
+}
+
+fn outbox_count(core: &Core) -> i64 {
+    core.store
+        .conn()
+        .query_row("SELECT count(*) FROM outbox", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn avatar_emoji_roundtrip() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    assert!(p.a.contact_avatars().unwrap().is_empty());
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    let avatar = ContactAvatar::Emoji(family.into());
+    p.a.set_contact_avatar(&bob, Some(&avatar)).unwrap();
+    assert_eq!(p.a.contact_avatars().unwrap(), vec![(bob, avatar)]);
+}
+
+#[test]
+fn avatar_photo_roundtrip_and_replace() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    let photo = ContactAvatar::Photo(jpeg(64 * 1024));
+    p.a.set_contact_avatar(&bob, Some(&photo)).unwrap();
+    assert_eq!(avatar_of(&p.a, &bob), Some(photo));
+    let emoji = ContactAvatar::Emoji("\u{1F436}".into());
+    p.a.set_contact_avatar(&bob, Some(&emoji)).unwrap();
+    assert_eq!(p.a.contact_avatars().unwrap(), vec![(bob, emoji)]);
+}
+
+#[test]
+fn avatar_clear() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    // Clearing without an avatar is no error.
+    p.a.set_contact_avatar(&bob, None).unwrap();
+    p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Emoji("\u{1F436}".into())))
+        .unwrap();
+    p.a.set_contact_avatar(&bob, None).unwrap();
+    assert!(p.a.contact_avatars().unwrap().is_empty());
+}
+
+#[test]
+fn avatar_unknown_contact_refused() {
+    let mut p = pair();
+    assert_eq!(
+        p.a.set_contact_avatar(
+            &Fingerprint([7; 32]),
+            Some(&ContactAvatar::Emoji("\u{1F436}".into()))
+        ),
+        Err(CoreError::UnknownContact)
+    );
+    assert_eq!(
+        p.a.set_contact_avatar(&Fingerprint([7; 32]), None),
+        Err(CoreError::UnknownContact)
+    );
+}
+
+#[test]
+fn avatar_photo_refused_when_oversize_or_not_jpeg() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    let keep = ContactAvatar::Emoji("\u{1F436}".into());
+    p.a.set_contact_avatar(&bob, Some(&keep)).unwrap();
+    assert_eq!(
+        p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Photo(jpeg(64 * 1024 + 1)))),
+        Err(CoreError::TooLarge)
+    );
+    for bad in [
+        Vec::new(),
+        vec![0xFF],
+        b"\x89PNG\r\n\x1a\n".to_vec(),
+        vec![0xD8, 0xFF, 0x00],
+    ] {
+        assert!(
+            matches!(
+                p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Photo(bad))),
+                Err(CoreError::Malformed(_))
+            ),
+            "accepted"
+        );
+    }
+    // The previous avatar is kept.
+    assert_eq!(avatar_of(&p.a, &bob), Some(keep));
+}
+
+#[test]
+fn avatar_emoji_refused_when_empty_too_long_or_control() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    // 16 four-byte emoji: 64 bytes, the limit.
+    let max = "\u{1F436}".repeat(16);
+    p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Emoji(max.clone())))
+        .unwrap();
+    assert_eq!(
+        p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Emoji(format!("{max}a")))),
+        Err(CoreError::TooLarge)
+    );
+    for bad in ["", "   ", "\u{1F436}\n", "\u{1F436}\u{7}", "\t"] {
+        assert!(
+            matches!(
+                p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Emoji(bad.into()))),
+                Err(CoreError::Malformed(_))
+            ),
+            "{bad:?} accepted"
+        );
+    }
+    assert_eq!(avatar_of(&p.a, &bob), Some(ContactAvatar::Emoji(max)));
+}
+
+#[test]
+fn avatar_removed_with_contact() {
+    let mut p = pair();
+    let bob = p.a.resolve("bob").unwrap();
+    p.a.set_contact_avatar(&bob, Some(&ContactAvatar::Photo(jpeg(10))))
+        .unwrap();
+    p.a.remove_contact(&bob, NOW, &mut p.rng).unwrap();
+    assert!(p.a.contact_avatars().unwrap().is_empty());
+    // Added again: no avatar.
+    p.a.add_contact(
+        &p.b.contact_card("Bob").unwrap(),
+        Some("bob"),
+        NOW,
+        &mut p.rng,
+    )
+    .unwrap();
+    assert!(p.a.contact_avatars().unwrap().is_empty());
+}
+
+#[test]
+fn avatar_survives_reopen() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("db");
+    let mut rng = StdRng::seed_from_u64(9);
+    let (mut a, _) = Core::create(&path, &[9; 32], "a", NOW, &mut rng).unwrap();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    a.set_contact_avatar(&fp, Some(&ContactAvatar::Photo(jpeg(100))))
+        .unwrap();
+    drop(a);
+    let a = Core::open(&path, &[9; 32], NOW).unwrap();
+    assert_eq!(avatar_of(&a, &fp), Some(ContactAvatar::Photo(jpeg(100))));
+}
+
+#[test]
+fn avatar_neither_logged_nor_queued_nor_synchronized() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert!(t.resolve("bob").is_ok());
+    let events = a.store.recent_events(10_000).unwrap().len();
+    let queued = outbox_count(&a);
+    a.set_contact_avatar(&fp, Some(&ContactAvatar::Emoji("\u{1F436}".into())))
+        .unwrap();
+    a.set_contact_avatar(&fp, Some(&ContactAvatar::Photo(jpeg(50))))
+        .unwrap();
+    assert_eq!(a.store.recent_events(10_000).unwrap().len(), events);
+    assert_eq!(outbox_count(&a), queued);
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert!(t.contact_avatars().unwrap().is_empty());
+    // The other way: T's avatar stays on T.
+    t.set_contact_avatar(&fp, Some(&ContactAvatar::Emoji("\u{1F431}".into())))
+        .unwrap();
+    deliver_all(&mut t, &mut a, &mut rng);
+    assert_eq!(avatar_of(&a, &fp), Some(ContactAvatar::Photo(jpeg(50))));
+}
+
+#[test]
+fn avatar_removed_when_contact_removed_by_sync() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let (_db, bob) = party("bob", 5);
+    let fp = a
+        .add_contact(
+            &bob.contact_card("Bob").unwrap(),
+            Some("bob"),
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    t.set_contact_avatar(&fp, Some(&ContactAvatar::Emoji("\u{1F436}".into())))
+        .unwrap();
+    a.remove_contact(&fp, NOW + 5, &mut rng).unwrap();
+    deliver_all(&mut a, &mut t, &mut rng);
+    assert_eq!(t.resolve("bob"), Err(CoreError::UnknownContact));
+    assert!(t.contact_avatars().unwrap().is_empty());
+}

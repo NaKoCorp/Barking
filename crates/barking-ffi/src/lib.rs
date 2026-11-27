@@ -21,7 +21,9 @@ mod route;
 
 use std::panic::{UnwindSafe, catch_unwind};
 
-pub use contacts::{CardPreview, inspect_card, inspect_card_text};
+pub use contacts::{
+    CardPreview, ContactAvatar, ContactAvatarEntry, inspect_card, inspect_card_text,
+};
 pub use delivery::{
     DeleteOutcome, Delivery, DeliveryChange, DeliveryCounts, DeliveryRowInfo, DeliveryState,
     DeliveryUpdate, DeviceDelivery, MessageDelivery, OwnCopies, PendingKind, PendingMessage,
