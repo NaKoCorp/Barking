@@ -39,7 +39,7 @@ final class GifSettingsModelTests: XCTestCase {
     func testEnabledFromOtherDeviceShown() async {
         let d = FakeDevice()
         d.gifSettingsInfo = GifSettingsInfo(enabled: true, autoLoad: false, enabledFromOtherDevice: "iPhone",
-                                            enabledAt: 1_795_000_000)
+                                            enabledAt: 1_795_000_000, consentOutdated: false)
         let m = model(d)
         await m.load()
         XCTAssertEqual(m.enabledFrom, "iPhone")
@@ -121,8 +121,43 @@ final class GifSettingsModelTests: XCTestCase {
         let d = FakeDevice()
         let m = model(d)
         await m.load()
-        XCTAssertEqual(m.provider.name, "Klipy")
-        XCTAssertEqual(m.provider.privacyUrl, "https://klipy.com/support/privacy-policy")
+        XCTAssertEqual(m.provider?.name, "Klipy")
+        XCTAssertEqual(m.provider?.privacyUrl, "https://klipy.com/support/privacy-policy")
+    }
+
+    /// Before the core named the provider, nothing is named and nothing can
+    /// be turned on: no stand-in provider reaches the core.
+    func testEnableBeforeLoadRefuses() async {
+        let d = FakeDevice()
+        let m = model(d)
+        XCTAssertNil(m.provider)
+        do {
+            try await m.enable()
+            XCTFail("enable should throw before load")
+        } catch {}
+        XCTAssertTrue(d.gifEnabled.isEmpty)
+        XCTAssertFalse(m.enabled)
+    }
+
+    /// A consent for an older warning: off, and the warning says "Updated".
+    func testOutdatedConsentShowsUpdated() async throws {
+        let d = FakeDevice()
+        d.gifSettingsInfo.consentOutdated = true
+        let m = model(d)
+        await m.load()
+        XCTAssertFalse(m.enabled)
+        XCTAssertTrue(m.updated)
+        try await m.enable()
+        XCTAssertTrue(m.enabled)
+        XCTAssertFalse(m.updated)
+    }
+
+    /// Never turned on: the warning is not "Updated".
+    func testNeverEnabledIsNotUpdated() async {
+        let d = FakeDevice()
+        let m = model(d)
+        await m.load()
+        XCTAssertFalse(m.updated)
     }
 
     /// The build's key reaches the core trimmed; none or blank: nil.

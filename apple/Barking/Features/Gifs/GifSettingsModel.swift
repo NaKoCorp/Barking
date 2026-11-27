@@ -18,13 +18,14 @@ final class GifSettingsModel {
     private(set) var enabledFrom: String?
     /// When the consent in force was given.
     private(set) var enabledAt: Date?
-    /// The active provider: what the warning names and links. The value
-    /// before `load` only stands in for the first frame.
-    private(set) var provider = GifProviderInfo(id: 1, name: "Klipy", warningVersion: 1, privacyUrl: "")
+    /// The active provider, as the core names it: what the warning names
+    /// and links. Nil until `load` read it: nothing can be turned on then,
+    /// and no settings are shown.
+    private(set) var provider: GifProviderInfo?
     /// My other devices, which the consent applies to as well.
     private(set) var linkedDevices = 0
-    /// The warning changed since the version accepted (spec §6.4). The FFI
-    /// does not report an outdated consent yet: always false for now.
+    /// The warning changed since the version accepted (spec §6.4): GIFs are
+    /// off and the warning shows again with "Updated".
     private(set) var updated = false
     /// The last change was not stored: the screen shows what the core holds.
     private(set) var saveFailed = false
@@ -34,9 +35,15 @@ final class GifSettingsModel {
     }
 
     func load() async {
-        if let p = try? await core.gifProvider() { provider = p }
+        if provider == nil { provider = try? await core.gifProvider() }
         linkedDevices = ((try? await core.myDevices()) ?? []).filter { !$0.thisDevice }.count
         await readSettings()
+    }
+
+    /// The settings again, as the core holds them now (changed in Settings,
+    /// or by a sync from another of my devices).
+    func refresh() async {
+        if provider == nil { await load() } else { await readSettings() }
     }
 
     /// After "Use GIFs": the core records the warning version just shown.
@@ -44,10 +51,12 @@ final class GifSettingsModel {
     /// read in the write's own call: a read after it could wait on the sync
     /// it starts.
     func enable() async throws {
+        // Never a provider or a warning version the core did not name.
+        guard let provider else { throw GifSettingsError.providerNotLoaded }
         do {
             let s = try await core.enableGifProvider(provider.id, warningVersion: provider.warningVersion)
             saveFailed = false
-            if let s { apply(s) } else { enabled = true; enabledFrom = nil }
+            if let s { apply(s) } else { enabled = true; enabledFrom = nil; updated = false }
         } catch {
             saveFailed = true
             await readSettings()
@@ -57,6 +66,7 @@ final class GifSettingsModel {
 
     /// Immediate, without confirmation.
     func disable() async {
+        guard let provider else { return }
         let previous = enabled
         enabled = false
         do {
@@ -84,8 +94,9 @@ final class GifSettingsModel {
         }
     }
 
+    /// Only once the provider is known: the settings are its settings.
     private func readSettings() async {
-        guard let s = try? await core.gifSettings() else { return }
+        guard provider != nil, let s = try? await core.gifSettings() else { return }
         apply(s)
     }
 
@@ -94,5 +105,11 @@ final class GifSettingsModel {
         autoLoad = s.autoLoad
         enabledFrom = s.enabled ? s.enabledFromOtherDevice : nil
         enabledAt = s.enabledAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        updated = !s.enabled && s.consentOutdated
     }
+}
+
+enum GifSettingsError: Error {
+    /// `enable` before `load` read the provider from the core.
+    case providerNotLoaded
 }

@@ -9,7 +9,9 @@ struct GifSettingsView: View {
     @State private var showsWarning = false
 
     var body: some View {
-        let name = model.provider.name
+        // Until the core named the provider, nothing names it: the switch
+        // waits, off and disabled.
+        let name = model.provider?.name ?? ""
         Group {
             VStack(alignment: .leading, spacing: Space.s2) {
                 FormCard {
@@ -19,6 +21,7 @@ struct GifSettingsView: View {
                         Text("Use GIFs from \(name)").font(.bBody.weight(.semibold)).foregroundStyle(Color.fg)
                     }
                     .tint(Color.toggleOn)
+                    .disabled(model.provider == nil)
                     .padding(.horizontal, FormRowMetrics.inset)
                     .frame(minHeight: FormRowMetrics.minHeight(hasSubtitle: false))
                     .accessibilityIdentifier("gifs.use")
@@ -64,8 +67,10 @@ struct GifSettingsView: View {
         .navigationTitle(Text("GIFs"))
         .task { await model.load() }
         .sheet(isPresented: $showsWarning) {
-            GifWarningSheet(provider: model.provider, linkedDevices: model.linkedDevices, updated: model.updated) {
-                Task { try? await model.enable() }
+            if let provider = model.provider {
+                GifWarningSheet(provider: provider, linkedDevices: model.linkedDevices, updated: model.updated) {
+                    Task { try? await model.enable() }
+                }
             }
         }
     }

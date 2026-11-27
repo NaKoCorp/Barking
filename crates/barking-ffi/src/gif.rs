@@ -137,6 +137,10 @@ pub struct GifSettingsInfo {
     pub enabled_from_other_device: Option<String>,
     /// While enabled, when it was turned on (Unix seconds).
     pub enabled_at: Option<u64>,
+    /// A consent for the active provider is stored, but for a warning older
+    /// than `MIN_GIF_WARNING_VERSION`: GIFs are off (`enabled` is false) and
+    /// the warning shows again marked "Updated". Added last.
+    pub consent_outdated: bool,
 }
 
 /// Counters of one day (`day` is Unix seconds / 86 400).
@@ -348,7 +352,11 @@ impl Device {
                 let provider = ACTIVE_GIF_PROVIDER.as_u8();
                 let settings = core.gif_settings()?;
                 let enabled = core.gif_allowed(provider)?;
-                let consent = settings.enabled.get(&provider).filter(|_| enabled);
+                let stored = settings.enabled.get(&provider);
+                let consent_outdated = stored.is_some_and(|c| {
+                    c.warning_version < barking_core::gif::MIN_GIF_WARNING_VERSION
+                });
+                let consent = stored.filter(|_| enabled);
                 let enabled_from_other_device =
                     consent.and_then(|c| consent_origin(&core.my_devices(), c.device));
                 Ok(GifSettingsInfo {
@@ -356,6 +364,7 @@ impl Device {
                     auto_load: settings.auto_load,
                     enabled_from_other_device,
                     enabled_at: consent.map(|c| c.at),
+                    consent_outdated,
                 })
             })
         })
@@ -546,6 +555,7 @@ mod tests {
                 auto_load: false,
                 enabled_from_other_device: None,
                 enabled_at: None,
+                consent_outdated: false,
             }
         );
     }
@@ -557,7 +567,7 @@ mod tests {
         d.enable_gif_provider(1, 1).unwrap();
         d.set_gif_auto_load(true).unwrap();
         let s = d.gif_settings().unwrap();
-        assert!(s.enabled && s.auto_load);
+        assert!(s.enabled && s.auto_load && !s.consent_outdated);
         // Turned on here: no other device to name.
         assert_eq!(s.enabled_from_other_device, None);
         assert!(s.enabled_at.is_some());
@@ -565,9 +575,18 @@ mod tests {
         let s = d.gif_settings().unwrap();
         // Auto-load is kept while GIFs are off.
         assert!(!s.enabled && s.auto_load && s.enabled_at.is_none());
-        // A stale warning version is not consent.
+        // Turned off is not outdated: the warning shows without "Updated".
+        assert!(!s.consent_outdated);
+        // A stale warning version is not consent, and says so.
         d.enable_gif_provider(1, 0).unwrap();
-        assert!(!d.gif_settings().unwrap().enabled);
+        let s = d.gif_settings().unwrap();
+        assert!(!s.enabled && s.consent_outdated);
+        assert_eq!(s.enabled_at, None);
+        // Accepting the current text clears it.
+        d.enable_gif_provider(1, barking_core::gif::MIN_GIF_WARNING_VERSION)
+            .unwrap();
+        let s = d.gif_settings().unwrap();
+        assert!(s.enabled && !s.consent_outdated);
         assert!(matches!(
             d.enable_gif_provider(0, 1),
             Err(BarkingError::InvalidInput { .. })

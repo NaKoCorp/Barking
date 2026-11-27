@@ -663,7 +663,8 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var gifProviderInfo = GifProviderInfo(id: 1, name: "Klipy", warningVersion: 1,
                                           privacyUrl: "https://klipy.com/support/privacy-policy")
     /// What `gifSettings` returns; enabling and disabling change it, as the core does.
-    var gifSettingsInfo = GifSettingsInfo(enabled: false, autoLoad: false, enabledFromOtherDevice: nil, enabledAt: nil)
+    var gifSettingsInfo = GifSettingsInfo(enabled: false, autoLoad: false, enabledFromOtherDevice: nil, enabledAt: nil,
+                                          consentOutdated: false)
     /// Thrown by every GIF write when set (nothing changes then).
     var gifError: Error?
     private var _klipyKeys: [String?] = []
@@ -694,6 +695,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
             gifSettingsInfo.enabled = true
             gifSettingsInfo.enabledFromOtherDevice = nil
             gifSettingsInfo.enabledAt = UInt64(Date().timeIntervalSince1970)
+            gifSettingsInfo.consentOutdated = false
         }
     }
     func disableGifProvider(provider: UInt8) throws {
@@ -703,6 +705,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
             gifSettingsInfo.enabled = false
             gifSettingsInfo.enabledFromOtherDevice = nil
             gifSettingsInfo.enabledAt = nil
+            gifSettingsInfo.consentOutdated = false
         }
     }
     func setGifAutoLoad(on: Bool) throws {

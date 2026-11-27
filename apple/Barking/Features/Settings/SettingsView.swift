@@ -42,7 +42,7 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.notifications")
                     NavigationLink { GifSettingsView(core: core, model: gifs) } label: {
                         FormRow(title: Text("GIFs"),
-                                subtitle: gifs.enabled ? Text("On · \(gifs.provider.name) sees your IP address") : Text("Off (GIFs)"),
+                                subtitle: gifSubtitle,
                                 icon: "photo.on.rectangle") { RowGlyph() }
                     }
                     .accessibilityIdentifier("settings.gifs")
@@ -95,6 +95,16 @@ struct SettingsView: View {
         .task {
             await model.load()
             await gifs.load()
+        }
+    }
+
+    /// "On · Klipy sees your IP address", the provider named by the core
+    /// (GIFs read as on only once it is known).
+    private var gifSubtitle: Text {
+        if gifs.enabled, let provider = gifs.provider {
+            Text("On · \(provider.name) sees your IP address")
+        } else {
+            Text("Off (GIFs)")
         }
     }
 
