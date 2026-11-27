@@ -66,6 +66,9 @@ import Foundation
 ///   invitation reads as unanswered (sent 8 days ago, so a resend is open)
 ///   or accepted an hour ago (`inviteStatus`).
 ///
+/// - `-BarkingUITestLinkedDevices n`: n other linked devices after the real
+///   ones in `myDevices` (the GIF warning counts them).
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -109,6 +112,8 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private static let devices = [("5a3f9c21d4e8b706", "iPhone"), ("c90e14b7a2f65d38", "iPad")]
 
     private let device: any DeviceHandle
+    /// `-BarkingUITestLinkedDevices n`: other devices added to `myDevices`.
+    private let linkedDevices: Int
     private let seed: Seed?
     private let fakeReceived: Bool
     /// `-BarkingUITestEphemeral`: the faked ephemeral, until it expires.
@@ -177,8 +182,10 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
 
     init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
          ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false, requests: Bool = false,
-         deviceChanged: Bool = false, inviteFailure: BarkingError? = nil, inviteStatus: InviteStatus? = nil) {
+         deviceChanged: Bool = false, inviteFailure: BarkingError? = nil, inviteStatus: InviteStatus? = nil,
+         linkedDevices: Int = 0) {
         self.device = device
+        self.linkedDevices = linkedDevices
         self.deviceChanged = deviceChanged
         self.inviteFailure = inviteFailure
         self.inviteStatusOverride = inviteStatus
@@ -241,14 +248,17 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             default: nil
             }
         }
+        let linkedDevices = arguments.firstIndex(of: "-BarkingUITestLinkedDevices").flatMap { i -> Int? in
+            i + 1 < arguments.count ? Int(arguments[i + 1]) : nil
+        } ?? 0
         guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync || requests
-            || deviceChanged || inviteFailure != nil || inviteStatus != nil else {
+            || deviceChanged || inviteFailure != nil || inviteStatus != nil || linkedDevices > 0 else {
             return device
         }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
                                 reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync,
                                 requests: requests, deviceChanged: deviceChanged, inviteFailure: inviteFailure,
-                                inviteStatus: inviteStatus)
+                                inviteStatus: inviteStatus, linkedDevices: linkedDevices)
     }
 
     // MARK: The relays (`-BarkingUITestNodes`)
@@ -765,7 +775,16 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     }
     func noteWake(atSecs: UInt64) throws { try device.noteWake(atSecs: atSecs) }
     func wakeStatus() throws -> WakeStatus { try device.wakeStatus() }
-    func myDevices() throws -> [MyDeviceInfo] { try device.myDevices() }
+    /// `-BarkingUITestLinkedDevices n`: n other devices follow the real list.
+    func myDevices() throws -> [MyDeviceInfo] {
+        let real = try device.myDevices()
+        guard linkedDevices > 0 else { return real }
+        let now = UInt64(Date().timeIntervalSince1970)
+        return real + (0..<linkedDevices).map { i in
+            MyDeviceInfo(id: String(format: "%032x", 0xd00d_0000 + i), name: i == 0 ? "iPad" : "Mac \(i)",
+                         issuedAt: now - 86_400, thisDevice: false, admin: false)
+        }
+    }
     func linkOffer() throws -> Data { try device.linkOffer() }
     func linkDevice(request: Data, withHistory: Bool) throws -> Data {
         try device.linkDevice(request: request, withHistory: withHistory)
@@ -787,5 +806,23 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         guard seed != nil else { return try device.cancelAllPending() }
         return try device.deleteMessages(ids: try pendingPackets().messages.map(\.messageId))
     }
+
+    // MARK: GIFs (the real core)
+
+    func configureGifs(klipyKey: String?) { device.configureGifs(klipyKey: klipyKey) }
+    func gifProvider() -> GifProviderInfo { device.gifProvider() }
+    func gifSettings() throws -> GifSettingsInfo { try device.gifSettings() }
+    func enableGifProvider(provider: UInt8, warningVersion: UInt16) throws {
+        try device.enableGifProvider(provider: provider, warningVersion: warningVersion)
+    }
+    func disableGifProvider(provider: UInt8) throws { try device.disableGifProvider(provider: provider) }
+    func setGifAutoLoad(on: Bool) throws { try device.setGifAutoLoad(on: on) }
+    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo { try device.gifSearch(query: query, page: page) }
+    func gifTrending(page: UInt32) throws -> GifPageInfo { try device.gifTrending(page: page) }
+    func gifData(provider: UInt8, id: String) throws -> GifMediaInfo { try device.gifData(provider: provider, id: id) }
+    func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws {
+        try device.sendGif(contact: contact, gif: gif, replyTo: replyTo, ttlSecs: ttlSecs)
+    }
+    func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] { try device.gifUsage(days: days) }
 }
 #endif

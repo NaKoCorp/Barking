@@ -14,6 +14,8 @@
 	<string>$(BARKING_BOOTSTRAP_NODES)</string>
 	<key>BarkingKeychainGroup</key>
 	<string>$(BARKING_KEYCHAIN_GROUP)</string>
+	<key>BarkingKlipyKey</key>
+	<string>$(BARKING_KLIPY_KEY)</string>
 	<key>BarkingRelayHost</key>
 	<string>$(BARKING_RELAY_HOST)</string>
 	<key>BarkingRelayId</key>

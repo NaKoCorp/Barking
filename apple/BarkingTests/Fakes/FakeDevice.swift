@@ -657,6 +657,63 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         lock.withLock { _inviteNotifications.append(on); prefs.invites = on }
     }
     func deviceChanges(since: UInt64) throws -> [DeviceChange] { deviceChangeList.filter { $0.at >= since } }
+
+    // MARK: GIFs
+
+    var gifProviderInfo = GifProviderInfo(id: 1, name: "Klipy", warningVersion: 1,
+                                          privacyUrl: "https://klipy.com/support/privacy-policy")
+    /// What `gifSettings` returns; enabling and disabling change it, as the core does.
+    var gifSettingsInfo = GifSettingsInfo(enabled: false, autoLoad: false, enabledFromOtherDevice: nil, enabledAt: nil)
+    /// Thrown by every GIF write when set (nothing changes then).
+    var gifError: Error?
+    private var _klipyKeys: [String?] = []
+    private var _gifEnabled: [(provider: UInt8, warningVersion: UInt16)] = []
+    private var _gifDisabled: [UInt8] = []
+    private var _gifAutoLoad: [Bool] = []
+    private var _gifSent: [(contact: String, gif: GifInfo)] = []
+    var klipyKeys: [String?] { lock.withLock { _klipyKeys } }
+    var gifEnabled: [(provider: UInt8, warningVersion: UInt16)] { lock.withLock { _gifEnabled } }
+    var gifDisabled: [UInt8] { lock.withLock { _gifDisabled } }
+    var gifAutoLoad: [Bool] { lock.withLock { _gifAutoLoad } }
+    var gifSent: [(contact: String, gif: GifInfo)] { lock.withLock { _gifSent } }
+    var gifPage = GifPageInfo(results: [], next: nil)
+    var gifUsageDays: [GifUsageDayInfo] = []
+
+    func configureGifs(klipyKey: String?) { lock.withLock { _klipyKeys.append(klipyKey) } }
+    func gifProvider() -> GifProviderInfo { gifProviderInfo }
+    func gifSettings() throws -> GifSettingsInfo { lock.withLock { gifSettingsInfo } }
+    func enableGifProvider(provider: UInt8, warningVersion: UInt16) throws {
+        if let gifError { throw gifError }
+        lock.withLock {
+            _gifEnabled.append((provider, warningVersion))
+            gifSettingsInfo.enabled = true
+            gifSettingsInfo.enabledFromOtherDevice = nil
+            gifSettingsInfo.enabledAt = UInt64(Date().timeIntervalSince1970)
+        }
+    }
+    func disableGifProvider(provider: UInt8) throws {
+        if let gifError { throw gifError }
+        lock.withLock {
+            _gifDisabled.append(provider)
+            gifSettingsInfo.enabled = false
+            gifSettingsInfo.enabledFromOtherDevice = nil
+            gifSettingsInfo.enabledAt = nil
+        }
+    }
+    func setGifAutoLoad(on: Bool) throws {
+        if let gifError { throw gifError }
+        lock.withLock { _gifAutoLoad.append(on); gifSettingsInfo.autoLoad = on }
+    }
+    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo { gifPage }
+    func gifTrending(page: UInt32) throws -> GifPageInfo { gifPage }
+    func gifData(provider: UInt8, id: String) throws -> GifMediaInfo {
+        GifMediaInfo(mp4: Data(), author: nil, title: "")
+    }
+    func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws {
+        if let sendError { throw sendError }
+        lock.withLock { _gifSent.append((contact, gif)) }
+    }
+    func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] { gifUsageDays }
 }
 
 /// Runs device calls directly (no background task) in tests.

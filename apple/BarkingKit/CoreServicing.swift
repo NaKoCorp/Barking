@@ -104,6 +104,24 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func inviteStatus(contact: String) throws -> InviteStatus
     func setInviteNotifications(on: Bool) throws
     func deviceChanges(since: UInt64) throws -> [DeviceChange]
+
+    // GIFs (spec GIF §6.6)
+    /// The provider keys the app was built with (memory only); nil: none.
+    func configureGifs(klipyKey: String?)
+    /// The active provider: name, warning version and privacy link.
+    func gifProvider() -> GifProviderInfo
+    /// `enabled` only while a still accepted warning stands.
+    func gifSettings() throws -> GifSettingsInfo
+    /// Once the user accepted version `warningVersion` of the warning.
+    func enableGifProvider(provider: UInt8, warningVersion: UInt16) throws
+    func disableGifProvider(provider: UInt8) throws
+    func setGifAutoLoad(on: Bool) throws
+    /// Refused (`Gif(kind: .notEnabled)`) without consent: nothing is sent.
+    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo
+    func gifTrending(page: UInt32) throws -> GifPageInfo
+    func gifData(provider: UInt8, id: String) throws -> GifMediaInfo
+    func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws
+    func gifUsage(days: UInt8) throws -> [GifUsageDayInfo]
 }
 
 extension Device: DeviceHandle {}

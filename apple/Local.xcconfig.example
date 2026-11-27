@@ -17,3 +17,8 @@ DEVELOPMENT_TEAM = ABCDE12345
 // identifier is what `barking-node status` prints. A node publishes an IP, not
 // a DNS name: a new address needs a new build.
 // BARKING_BOOTSTRAP_NODES = <identifier>@203.0.113.7:4433
+
+// Optional: the Klipy API key for GIFs (https://partner.klipy.com). Without
+// it, GIF search and display report the provider as not configured. Never
+// commit a real key: this file is the template, Local.xcconfig is ignored.
+BARKING_KLIPY_KEY =

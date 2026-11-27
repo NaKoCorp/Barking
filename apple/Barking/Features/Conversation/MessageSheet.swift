@@ -450,5 +450,18 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func inviteStatus(contact: String) throws -> InviteStatus { throw Never() }
     func setInviteNotifications(on: Bool) throws { throw Never() }
     func deviceChanges(since: UInt64) throws -> [DeviceChange] { throw Never() }
+    func configureGifs(klipyKey: String?) {}
+    func gifProvider() -> GifProviderInfo {
+        GifProviderInfo(id: 1, name: "Klipy", warningVersion: 1, privacyUrl: "https://klipy.com/support/privacy-policy")
+    }
+    func gifSettings() throws -> GifSettingsInfo { throw Never() }
+    func enableGifProvider(provider: UInt8, warningVersion: UInt16) throws { throw Never() }
+    func disableGifProvider(provider: UInt8) throws { throw Never() }
+    func setGifAutoLoad(on: Bool) throws { throw Never() }
+    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo { throw Never() }
+    func gifTrending(page: UInt32) throws -> GifPageInfo { throw Never() }
+    func gifData(provider: UInt8, id: String) throws -> GifMediaInfo { throw Never() }
+    func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws { throw Never() }
+    func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] { throw Never() }
 }
 #endif
