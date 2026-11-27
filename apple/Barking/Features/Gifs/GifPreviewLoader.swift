@@ -20,13 +20,14 @@ enum GifPreviewPolicy {
 /// that the user accepted in the warning. Nothing is kept on disk: an
 /// ephemeral session without cache, cookies or credentials; what a picker
 /// fetched lives in memory until that picker closes (`GifPreviewStore`).
-final class GifPreviewLoader: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+final class GifPreviewLoader: Sendable {
     static let shared = GifPreviewLoader()
     /// The core's bound for a GIF's media.
     static let maxBytes = 8 * 1024 * 1024
     static let timeout: TimeInterval = 15
 
-    private lazy var session = URLSession(configuration: Self.configuration(), delegate: self, delegateQueue: nil)
+    private let session = URLSession(configuration: GifPreviewLoader.configuration(), delegate: NoRedirects(),
+                                     delegateQueue: nil)
 
     /// Nothing kept, nothing that identifies the phone beyond its address:
     /// the constant user agent the core sends, no language list.
@@ -71,7 +72,10 @@ final class GifPreviewLoader: NSObject, URLSessionTaskDelegate, @unchecked Senda
         }
     }
 
-    /// No redirect is followed: the host would no longer be checked.
+}
+
+/// No redirect is followed: the host would no longer be checked.
+private final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest) async -> URLRequest? {
         nil

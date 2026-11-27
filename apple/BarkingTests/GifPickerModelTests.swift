@@ -46,20 +46,6 @@ final class GifPickerModelTests: XCTestCase {
         XCTAssertEqual(waits, [.milliseconds(400), .milliseconds(400), .milliseconds(400)])
     }
 
-    /// With real time: three keystrokes 100 ms apart, then one search.
-    func testDebounceInRealTime() async throws {
-        let d = FakeDevice()
-        let m = model(d)
-        for q in ["d", "do", "dog"] {
-            m.query = q
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        XCTAssertEqual(d.gifSearches, [], "searched before the pause")
-        await eventually({ !d.gifSearches.isEmpty }, timeout: 3)
-        try await Task.sleep(for: .milliseconds(500))
-        XCTAssertEqual(d.gifSearches, ["dog"])
-    }
-
     func testErrorStates() async {
         let d = FakeDevice()
         let m = model(d)
@@ -191,6 +177,35 @@ final class GifPickerModelTests: XCTestCase {
         XCTAssertGreaterThan(duration.seconds, 0)
     }
 
+    /// In a window: the layer gets a frame; playing, time runs; still, it
+    /// holds at the start (Reduce Motion, autoplay off).
+    func testPlayerShowsAFramePlayingOrStill() async throws {
+        let data = try await TinyMP4.make()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 128, height: 128))
+        window.isHidden = false
+        for playing in [true, false] {
+            let view = PlayerUIView(frame: window.bounds)
+            window.addSubview(view)
+            view.show(data, playing: playing)
+            let layer = try XCTUnwrap(view.layer as? AVPlayerLayer)
+            let end = Date().addingTimeInterval(5)
+            while !layer.isReadyForDisplay, Date() < end { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertTrue(layer.isReadyForDisplay, "no frame (playing: \(playing))")
+            let player = try XCTUnwrap(layer.player)
+            if playing {
+                XCTAssertGreaterThan(player.rate, 0)
+            } else {
+                try await Task.sleep(for: .milliseconds(300))
+                XCTAssertEqual(player.rate, 0)
+                XCTAssertEqual(player.currentTime().seconds, 0, accuracy: 0.05)
+            }
+            XCTAssertTrue(player.isMuted)
+            XCTAssertFalse(player.allowsExternalPlayback)
+            view.stop()
+            view.removeFromSuperview()
+        }
+    }
+
     // MARK: Sending from the conversation
 
     /// Bob's conversation with one received message (id 7).
@@ -248,8 +263,10 @@ private actor SleepGate {
         try Task.checkCancellation()
     }
 
+    /// Waits until `n` sleeps started; gives up after 2 s (the test then fails).
     func waitForSleepers(_ n: Int) async {
-        while durations.count < n { await Task.yield() }
+        let end = Date().addingTimeInterval(2)
+        while durations.count < n, Date() < end { try? await Task.sleep(for: .milliseconds(5)) }
     }
 
     func release() {
