@@ -81,6 +81,9 @@ struct ConversationView: View {
                     .accessibilityIdentifier("conversation.deviceChanged")
             }
             messages
+                .overlay {
+                    if model.loaded, model.items.isEmpty { EmptyConversation(name: model.name) }
+                }
             if let e = model.sendError {
                 Text(LocalizedStringKey(e)).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)
             }
@@ -412,6 +415,33 @@ struct ConversationView: View {
     /// On this iPhone only: never to the Universal Clipboard.
     private func copy(_ text: String) {
         UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: text]], options: [.localOnly: true])
+    }
+}
+
+/// A conversation without a message: who it is with, and that what is
+/// written here is end-to-end encrypted. Not tappable: the composer below
+/// is the action.
+private struct EmptyConversation: View {
+    let name: String
+
+    var body: some View {
+        VStack(spacing: Space.s2) {
+            Image(systemName: "lock").font(.bSymbol(20, weight: .semibold, maximum: 30))
+                .foregroundStyle(Color.fgSoft)
+                .frame(width: 48, height: 48)
+                .background(Color.wash, in: .circle)
+                .accessibilityHidden(true)
+            Text("No messages yet").font(BarkingFont.mono(.headline, size: 16, weight: .semibold))
+                .foregroundStyle(Color.fg)
+            Text("What you write to \(name) is end-to-end encrypted, post-quantum.")
+                .font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, Space.section)
+        .frame(maxWidth: 320)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("conversation.empty")
     }
 }
 

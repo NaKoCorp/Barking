@@ -15,6 +15,10 @@ struct ChatsView: View {
     @Environment(AppRouter.self) private var router
     @State private var model: ChatsModel
     @State private var adding = false
+    /// The "New message" picker is open.
+    @State private var composing = false
+    /// The picker asked to add a contact: the add sheet opens once it closes.
+    @State private var addAfterCompose = false
     @State private var pendingLink: String?
     /// The contact the add sheet just added: its conversation opens once the
     /// sheet closes, however it closes.
@@ -50,12 +54,17 @@ struct ChatsView: View {
                         .listRowSeparator(.hidden).listRowBackground(Color.surface)
                 }
                 if model.isEmpty {
-                    VStack(spacing: 16) {
-                        Text("No chats yet").font(BarkingFont.mono(.headline, size: 16, weight: .semibold))
-                            .foregroundStyle(Color.fg)
-                        PrimaryButton("Add a contact") { adding = true }
+                    Group {
+                        if model.hasContacts {
+                            ListEmptyState(title: "No chats yet",
+                                           message: "Pick a contact to write to. Your contacts stay under Contacts.",
+                                           action: "New message") { composing = true }
+                        } else {
+                            ListEmptyState(title: "No chats yet",
+                                           message: "Add someone from their code, or show them yours.",
+                                           action: "Add a contact") { adding = true }
+                        }
                     }
-                    .padding(.vertical, 40)
                     .listRowSeparator(.hidden).listRowBackground(Color.surface)
                 }
                 ForEach(model.items) { item in
@@ -94,6 +103,9 @@ struct ChatsView: View {
                 await model.reload()
             }
             .safeAreaInset(edge: .top, spacing: 0) { header }
+            .sheet(isPresented: $composing, onDismiss: afterCompose) {
+                NewMessageSheet(core: core, onPick: { addedContact = $0 }, onAdd: { addAfterCompose = true })
+            }
             .navigationTitle(Text("Chats"))
             .toolbarVisibility(.hidden, for: .navigationBar)
             .navigationDestination(for: ChatsRoute.self) { route in
@@ -109,12 +121,15 @@ struct ChatsView: View {
             .sheet(isPresented: $adding, onDismiss: openAdded) {
                 AddContactView(core: core, link: pendingLink, onAdded: { addedContact = $0 }) { adding = false }
             }
-            .confirmationDialog(Text("Delete this contact? The history is kept."),
-                                isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } }),
-                                titleVisibility: .visible) {
-                Button("Delete", role: .destructive) {
-                    if let row = confirmDelete { Task { await model.delete(row.contact) } }
-                }
+            // An alert, not a confirmation dialog: on iOS 26 the dialog of a
+            // swipe action floats as a popover at the foot of the list.
+            .alert(Text("Delete this conversation?"),
+                   isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } }),
+                   presenting: confirmDelete) { row in
+                Button("Delete", role: .destructive) { Task { await model.deleteConversation(row.contact) } }
+                Button("Cancel", role: .cancel) {}
+            } message: { row in
+                Text("The messages are erased on all your devices. \(row.name) stays in your contacts.")
             }
         }
         .task {
@@ -173,35 +188,19 @@ extension ChatsView {
     /// The mockup's header: title, compose button, search field.
     private var header: some View {
         @Bindable var model = model
-        return VStack(spacing: 12) {
-            HStack {
-                Text("Chats").font(BarkingFont.mono(.largeTitle, size: 30, weight: .semibold))
-                    .tracking(-0.5).foregroundStyle(Color.fg)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer()
-                Button { adding = true } label: {
-                    Image(systemName: "square.and.pencil").font(.bSymbol(18, maximum: 26))
-                        .foregroundStyle(Color.accent)
-                        .frame(width: 44, height: 44)
-                        .background(Color.wash, in: .circle)
-                }
-                .accessibilityLabel(Text("New message"))
-            }
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(Color.fgSoft).accessibilityHidden(true)
-                TextField(text: $model.query, prompt: Text("Search").foregroundStyle(Color.fgSoft)) { Text("Search") }
-                    .font(.bBody).foregroundStyle(Color.fg)
-                    .submitLabel(.search)
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 40)
-            .background(Color.field, in: .rect(cornerRadius: 10))
+        return ListHeader(title: "Chats", symbol: "square.and.pencil", actionLabel: "New message",
+                          query: $model.query) { composing = true }
+    }
+
+    /// After the "New message" picker: the picked conversation, or the add
+    /// sheet.
+    private func afterCompose() {
+        if addAfterCompose {
+            addAfterCompose = false
+            adding = true
+        } else {
+            openAdded()
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-        .background(Color.surfaceCard)
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.border).frame(height: 1) }
     }
 }
 

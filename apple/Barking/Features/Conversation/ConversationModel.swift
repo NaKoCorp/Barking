@@ -110,6 +110,9 @@ final class ConversationModel {
     let contact: String
     private let core: CoreService
     private(set) var items: [Item] = []
+    /// The history was read once: no message then means an empty
+    /// conversation, not one still loading.
+    private(set) var loaded = false
     private(set) var name = "" {
         // A renamed contact: the changed-device line says the new name too.
         didSet { if name != oldValue { deviceChangedText = deviceChangedLine(bundle: language.bundle, locale: language.locale) } }
@@ -407,6 +410,7 @@ final class ConversationModel {
     func reload() async {
         await refreshContact()
         let messages = (try? await core.messages(with: contact)) ?? []
+        loaded = true
         // A failed message with a later sent copy was retried the old way
         // (before Lot M, a new row): hide it, even after reopening.
         let resent = messages.filter { $0.failed && $0.outgoing }.filter { f in

@@ -47,12 +47,26 @@ final class ContactModel {
         return max(1, Int((retryAt.timeIntervalSince(now()) / 3600).rounded(.up)))
     }
 
-    /// No section without an invitation; "Accepted" only for a day.
-    var showsInvite: Bool {
+    /// The section is always there: an invitation can always be sent
+    /// (again), within the 24 h cap. A contact who deleted me is never
+    /// told to me, so "Accepted" must not close the door.
+    var showsInvite: Bool { true }
+
+    /// What the invitation button does, from the last invitation's state.
+    enum InviteAction: Equatable {
+        /// No invitation yet.
+        case send
+        /// Sent, answered or not: the same invitation again.
+        case resend
+        /// Accepted: for a contact who may have deleted me since.
+        case inviteAgain
+    }
+
+    var inviteAction: InviteAction {
         switch invite {
-        case .none: false
-        case .sent, .unanswered: true
-        case .accepted(let at): now() < Self.date(at + Self.inviteInterval)
+        case .none: .send
+        case .sent, .unanswered: .resend
+        case .accepted: .inviteAgain
         }
     }
 

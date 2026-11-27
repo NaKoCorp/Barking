@@ -228,6 +228,13 @@ final class AppRouter {
         return true
     }
 
+    /// "Send a message" on a contact's page, under Contacts: the chats
+    /// open its conversation, as a tapped notification does.
+    func openConversation(with contact: String) {
+        guard case .ready = state else { return }
+        pendingOpen = OpenTarget(contact: contact, messageId: nil)
+    }
+
     func takePendingOpen() -> OpenTarget? {
         defer { pendingOpen = nil }
         return pendingOpen

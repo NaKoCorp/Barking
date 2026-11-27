@@ -28,9 +28,11 @@ struct RootView: View {
     }
 }
 
-/// Chats, Network, Settings (screens 3, 7, 8). Filled by Tasks 8 to 11.
+/// Chats, Contacts, Network, Settings (screens 3, 7, 8). A conversation
+/// lives under Chats, a contact under Contacts: deleting one never
+/// deletes the other.
 struct MainTabView: View {
-    enum Tabs { case chats, network, settings }
+    enum Tabs { case chats, contacts, network, settings }
     let core: CoreService
     @State private var tab = Tabs.chats
     /// Syncs while the app is in front (spec iOS messaging §4.2).
@@ -49,6 +51,7 @@ struct MainTabView: View {
     var body: some View {
         TabView(selection: $tab) {
             Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: .chats) { ChatsView(core: core) }
+            Tab("Contacts", systemImage: "person.2", value: .contacts) { ContactsView(core: core) }
             Tab("Network", systemImage: "point.3.connected.trianglepath.dotted", value: .network) { NetworkView(core: core) }
             Tab("Settings", systemImage: "gearshape", value: .settings) {
                 SettingsView(core: core) { tab = .network }

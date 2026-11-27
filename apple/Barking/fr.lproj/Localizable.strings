@@ -731,3 +731,21 @@
 
 /* A contact's new device, in the conversation (design decision 7): the name, then how long ago. */
 "%@ changed device · %@" = "%1$@ a changé d’appareil · %2$@";
+
+/* Contacts tab and conversations kept apart: deleting a conversation keeps the contact. */
+"Contacts" = "Contacts";
+"No contacts yet" = "Aucun contact";
+"Add someone from their code, or show them yours." = "Ajoute quelqu’un depuis son code, ou montre-lui le tien.";
+"Pick a contact to write to. Your contacts stay under Contacts." = "Choisis un contact à qui écrire. Tes contacts restent dans Contacts.";
+"Delete %@?" = "Supprimer %@ ?";
+"%@ leaves your contacts on all your devices. They are not told." = "%@ quitte tes contacts sur tous tes appareils. Cette personne n’est pas prévenue.";
+"Delete this conversation?" = "Supprimer cette discussion ?";
+"The messages are erased on all your devices. %@ stays in your contacts." = "Les messages sont effacés sur tous tes appareils. %@ reste dans tes contacts.";
+"Send a message" = "Envoyer un message";
+"No messages yet" = "Aucun message";
+"What you write to %@ is end-to-end encrypted, post-quantum." = "Ce que tu écris à %@ est chiffré de bout en bout, post-quantique.";
+
+/* The invitation can always be sent again: a contact who deleted me is never told to me. */
+"No invitation sent" = "Aucune invitation envoyée";
+"Invite again" = "Inviter à nouveau";
+"If %@ deleted you, a new invitation lets them add you back." = "Si %@ ne t’a plus dans ses contacts, une nouvelle invitation lui permet de te rajouter.";

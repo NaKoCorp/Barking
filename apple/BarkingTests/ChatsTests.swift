@@ -246,7 +246,8 @@ final class ChatsModelTests: XCTestCase {
     }
 
     /// A request takes its place among the chats by date: seen a minute ago,
-    /// it comes before a chat of ten minutes ago; an undated chat stays last.
+    /// it comes before a chat of ten minutes ago; a contact without a
+    /// message has no conversation and stays out of the list.
     func testRequestsMergedByDate() async {
         let now = UInt64(Date().timeIntervalSince1970)
         let d = FakeDevice()
@@ -255,10 +256,36 @@ final class ChatsModelTests: XCTestCase {
         d.requestList = [request("r", "Sam", lastSeen: now - 60)]
         let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
         await m.reload()
-        XCTAssertEqual(m.items.map(\.id), ["request:r", "chat:a", "chat:z"])
+        XCTAssertEqual(m.items.map(\.id), ["request:r", "chat:a"])
         // The search filters requests too, on their declared name.
         m.query = "lea"
         XCTAssertEqual(m.items.map(\.id), ["chat:a"])
+    }
+
+    /// Contacts without a message: no conversation, but the empty list
+    /// knows there are contacts to write to.
+    func testContactsWithoutMessagesAreNotConversations() async {
+        let d = FakeDevice()
+        d.contactList = [contact("a", "Léa")]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        XCTAssertTrue(m.items.isEmpty)
+        XCTAssertTrue(m.isEmpty)
+        XCTAssertTrue(m.hasContacts)
+    }
+
+    /// Deleting a conversation erases its messages, never the contact.
+    func testDeleteConversationKeepsTheContact() async {
+        let d = FakeDevice()
+        d.contactList = [contact("a", "Léa")]
+        d.messageList = ["a": [Message(id: 1, outgoing: false, body: "hi", at: 100),
+                               Message(id: 2, outgoing: true, body: "yo", at: 200)]]
+        let m = ChatsModel(core: CoreService(device: d, runner: DirectRunner()))
+        await m.reload()
+        let ok = await m.deleteConversation("a")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(d.deleted, [[1, 2]])
+        XCTAssertTrue(d.removedContacts.isEmpty, "the contact stays")
     }
 
     /// The search finds a request by its declared name, ignoring case and
