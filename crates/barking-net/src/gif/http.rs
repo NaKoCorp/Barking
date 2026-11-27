@@ -15,6 +15,8 @@ pub const USER_AGENT: &str = "Barking";
 pub const TIMEOUT: Duration = Duration::from_secs(15);
 /// Wait before retrying after a `429` that gives no usable `Retry-After`.
 pub const DEFAULT_RETRY_AFTER_SECS: u32 = 60;
+/// Longest wait taken from a `Retry-After`.
+pub const MAX_RETRY_AFTER_SECS: u32 = 3600;
 
 /// Fetches a URL for a GIF provider. Used through generics
 /// (`t: &impl GifTransport`).
@@ -50,8 +52,11 @@ pub fn map_reply(reply: HttpReply) -> Result<Vec<u8>, GifError> {
         429 => Err(GifError::RateLimited {
             retry_after_secs: reply
                 .retry_after
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(DEFAULT_RETRY_AFTER_SECS),
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map_or(DEFAULT_RETRY_AFTER_SECS, |s| {
+                    u32::try_from(s.min(u64::from(MAX_RETRY_AFTER_SECS)))
+                        .unwrap_or(MAX_RETRY_AFTER_SECS)
+                }),
         }),
         401 | 403 => Err(GifError::NotConfigured),
         201..=299 | 400..=499 => Err(GifError::Malformed),
@@ -275,6 +280,9 @@ mod tests {
             rate_limited(Some("30")),
             rate_limited(None),
             rate_limited(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            rate_limited(Some("999999")),
+            rate_limited(Some("99999999999999999999")),
+            rate_limited(Some("3600")),
         ]);
         let url = klipy().search_url("KEY", "hello", 1);
         let expect = |secs| {
@@ -285,7 +293,11 @@ mod tests {
         assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(30));
         assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(60));
         assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(60));
-        assert_eq!(t.calls(), 3);
+        // Clamped to an hour, however large.
+        assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(3600));
+        assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(60));
+        assert_eq!(t.get(&url, MAX_GIF_BYTES).await, expect(3600));
+        assert_eq!(t.calls(), 6);
         assert_eq!(t.urls()[0], url);
     }
 
@@ -333,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn https_transport_caps_size() {
+    fn capped_body_refuses_more_than_max() {
         let chunk = vec![0u8; 1024 * 1024];
         let mut body = CappedBody::new(MAX_GIF_BYTES);
         for _ in 0..8 {

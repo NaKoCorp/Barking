@@ -20,12 +20,12 @@ With your own key, outside the repository (the key must never be committed):
 
 ```sh
 K=...  # your Klipy key
-curl -s "https://api.klipy.com/api/v1/$K/gifs/search?q=hello&page=1&per_page=8&format_filter=mp4&content_filter=medium" > search.json
-curl -s "https://api.klipy.com/api/v1/$K/gifs/trending?page=1&per_page=8&format_filter=mp4&content_filter=medium" > trending.json
+curl -s "https://api.klipy.com/api/v1/$K/gifs/search?q=hello&page=1&per_page=24&format_filter=mp4&content_filter=medium" > search.json
+curl -s "https://api.klipy.com/api/v1/$K/gifs/trending?page=1&per_page=24&format_filter=mp4&content_filter=medium" > trending.json
 curl -s "https://api.klipy.com/api/v1/$K/gifs/items?slugs=<a real slug>" > items.json
 curl -s "https://api.klipy.com/api/v1/$K/gifs/items?slugs=no-such-slug-zz9" > items_empty.json
 ```
 
 Check that the key appears in none of the files, then run
-`BARKING_KLIPY_KEY=$K cargo test -p barking-net klipy_live_smoke -- --ignored`,
+`BARKING_KLIPY_KEY=$K cargo test -p barking-net klipy_live_smoke -- --ignored --nocapture`,
 which calls search and items for real and checks that they still parse.
