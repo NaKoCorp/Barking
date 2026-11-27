@@ -10,7 +10,7 @@ use crate::contact::ContactCard;
 use crate::envelope::{MAX_TEXT_LEN, SyncOp};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::packet::Packet;
-use crate::store::{BlockState, ContactClock, ContactRow, Queries};
+use crate::store::{AvatarKind, BlockState, ContactClock, ContactRow, Queries};
 use crate::transparency::{RequestResolution, TransparencyEvent};
 use crate::{CoreError, Result};
 
@@ -27,6 +27,49 @@ pub struct ContactSummary {
     /// Blocked: hidden from the contact and chat lists, nothing sent to it,
     /// its messages dropped (see `block_contact`).
     pub blocked: bool,
+}
+
+/// Maximum size of an avatar emoji, in bytes: room for a long ZWJ
+/// sequence (a family, a flag), not for a sentence.
+pub const MAX_AVATAR_EMOJI_LEN: usize = 64;
+/// Maximum size of an avatar photo, in bytes: the app sends a small
+/// thumbnail, and the whole list is read on each refresh.
+pub const MAX_AVATAR_PHOTO_LEN: usize = 64 * 1024;
+
+/// The picture I gave a contact on this device. Never synchronized,
+/// logged, sent to the contact or copied by a link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContactAvatar {
+    Emoji(String),
+    /// A JPEG file.
+    Photo(Vec<u8>),
+}
+
+impl ContactAvatar {
+    /// Refuses what the apps could not show: a blank emoji, one with a
+    /// control character (a newline would break a list row), or a photo
+    /// that is not a JPEG. Too long: `TooLarge`.
+    fn check(&self) -> Result<()> {
+        match self {
+            ContactAvatar::Emoji(value) => {
+                if value.len() > MAX_AVATAR_EMOJI_LEN {
+                    return Err(CoreError::TooLarge);
+                }
+                if value.trim().is_empty() || value.chars().any(char::is_control) {
+                    return Err(CoreError::Malformed("invalid avatar emoji"));
+                }
+            }
+            ContactAvatar::Photo(jpeg) => {
+                if jpeg.len() > MAX_AVATAR_PHOTO_LEN {
+                    return Err(CoreError::TooLarge);
+                }
+                if !jpeg.starts_with(&[0xFF, 0xD8]) {
+                    return Err(CoreError::Malformed("avatar photo is not a JPEG"));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Stored alias: the empty string means "no alias".
@@ -195,6 +238,54 @@ impl Core {
     /// The draft kept for `contact`, if any.
     pub fn draft(&self, contact: &Fingerprint) -> Result<Option<String>> {
         self.store.draft(*contact)
+    }
+
+    /// Sets (`Some`) or clears (`None`) the avatar of a known contact,
+    /// replacing the previous one. Invalid: `Malformed` or `TooLarge`, the
+    /// previous avatar kept. Unknown: `UnknownContact`. Kept while the
+    /// contact is blocked, so that unblocking finds it; erased with the
+    /// contact. Local to this device: never synchronized, logged or noted
+    /// as a change.
+    pub fn set_contact_avatar(
+        &mut self,
+        contact: &Fingerprint,
+        avatar: Option<&ContactAvatar>,
+    ) -> Result<()> {
+        self.ensure_active()?;
+        if let Some(avatar) = avatar {
+            avatar.check()?;
+        }
+        self.store.transaction(|tx| {
+            tx.get_contact(*contact)?.ok_or(CoreError::UnknownContact)?;
+            match avatar {
+                None => tx.delete_contact_avatar(*contact),
+                Some(ContactAvatar::Emoji(value)) => {
+                    tx.put_contact_avatar(*contact, AvatarKind::Emoji, value.as_bytes())
+                }
+                Some(ContactAvatar::Photo(jpeg)) => {
+                    tx.put_contact_avatar(*contact, AvatarKind::Photo, jpeg)
+                }
+            }
+        })
+    }
+
+    /// Every contact's avatar on this device, by fingerprint. A read
+    /// only: it works on the read-only opening.
+    pub fn contact_avatars(&self) -> Result<Vec<(Fingerprint, ContactAvatar)>> {
+        self.store
+            .contact_avatars()?
+            .into_iter()
+            .map(|(fp, kind, data)| {
+                let avatar = match kind {
+                    AvatarKind::Emoji => ContactAvatar::Emoji(
+                        String::from_utf8(data)
+                            .map_err(|_| CoreError::Store("avatar emoji not UTF-8".into()))?,
+                    ),
+                    AvatarKind::Photo => ContactAvatar::Photo(data),
+                };
+                Ok((fp, avatar))
+            })
+            .collect()
     }
 
     /// Lifts the block of `contact`, known or not (a blocked contact may

@@ -1,6 +1,7 @@
 //! Contacts: card in binary (QR code), verification, alias, removal, safety code.
 
 use barking_core::contact::ContactCard;
+use barking_core::core::ContactAvatar as CoreAvatar;
 use barking_core::{CoreError, parse_fingerprint};
 
 use crate::device::{Device, now};
@@ -11,6 +12,41 @@ use crate::{BarkingError, guard};
 pub struct CardPreview {
     pub fingerprint: String,
     pub display_name: String,
+}
+
+/// The picture I gave a contact, on this device only: never synchronized
+/// with my other devices nor sent to the contact.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ContactAvatar {
+    /// At most 64 bytes, not blank, no control character.
+    Emoji { value: String },
+    /// A JPEG file of at most 64 KiB.
+    Photo { jpeg: Vec<u8> },
+}
+
+/// One contact's avatar, by the fingerprint `Contact.fingerprint` shows.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ContactAvatarEntry {
+    pub fingerprint: String,
+    pub avatar: ContactAvatar,
+}
+
+impl From<ContactAvatar> for CoreAvatar {
+    fn from(a: ContactAvatar) -> Self {
+        match a {
+            ContactAvatar::Emoji { value } => CoreAvatar::Emoji(value),
+            ContactAvatar::Photo { jpeg } => CoreAvatar::Photo(jpeg),
+        }
+    }
+}
+
+impl From<CoreAvatar> for ContactAvatar {
+    fn from(a: CoreAvatar) -> Self {
+        match a {
+            CoreAvatar::Emoji(value) => ContactAvatar::Emoji { value },
+            CoreAvatar::Photo(jpeg) => ContactAvatar::Photo { jpeg },
+        }
+    }
 }
 
 fn not_a_card(_: CoreError) -> BarkingError {
@@ -114,6 +150,40 @@ impl Device {
             self.with_core_read(|core| {
                 let fp = core.resolve(&contact)?;
                 Ok(core.draft(&fp)?)
+            })
+        })
+    }
+
+    /// Sets (Some) or clears (None) the avatar of a contact, on this device
+    /// only. Not an emoji or a JPEG the app can show, or too large:
+    /// `InvalidInput`; unknown contact: `NotFound`.
+    pub fn set_contact_avatar(
+        &self,
+        contact: String,
+        avatar: Option<ContactAvatar>,
+    ) -> Result<(), BarkingError> {
+        guard(|| {
+            let avatar = avatar.map(CoreAvatar::from);
+            self.with_core(|core| {
+                let fp = core.resolve(&contact)?;
+                Ok(core.set_contact_avatar(&fp, avatar.as_ref())?)
+            })
+        })
+    }
+
+    /// Every contact's avatar on this device (a read: it does not wait for
+    /// a sync in flight).
+    pub fn contact_avatars(&self) -> Result<Vec<ContactAvatarEntry>, BarkingError> {
+        guard(|| {
+            self.with_core_read(|core| {
+                Ok(core
+                    .contact_avatars()?
+                    .into_iter()
+                    .map(|(fp, avatar)| ContactAvatarEntry {
+                        fingerprint: fp.to_string(),
+                        avatar: avatar.into(),
+                    })
+                    .collect())
             })
         })
     }

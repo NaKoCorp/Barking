@@ -1,8 +1,8 @@
-//! SQL storage schema (v6) and migrations from v1, v2, v3, v4 and v5.
+//! SQL storage schema (v7) and migrations from v1, v2, v3, v4, v5 and v6.
 
 use rusqlite::{Connection, params};
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Schema v1 (batch 1A), kept for the migration and for its tests: a
 /// v1 database is opened with this schema, then migrated.
@@ -490,6 +490,27 @@ pub fn migrate_v5_to_v6(conn: &Connection) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(SCHEMA_V6_TABLES)?;
     set_version(&tx, 6)?;
+    tx.commit()
+}
+
+/// Schema v7 (contact avatars): the picture I gave a contact, at most one
+/// per fingerprint. `kind`: 0 emoji (`data` is its UTF-8 text), 1 JPEG
+/// photo. Local to this device: never synchronized, logged, sent or copied
+/// by a link; erased with the contact (`delete_contact`).
+const SCHEMA_V7_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS contact_avatars (
+    fp BLOB PRIMARY KEY NOT NULL,
+    kind INTEGER NOT NULL,
+    data BLOB NOT NULL
+);
+";
+
+/// Migrates a v6 database to v7 in a single transaction (DDL only): the
+/// `contact_avatars` table, then `schema_version` set to 7.
+pub fn migrate_v6_to_v7(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(SCHEMA_V7_TABLES)?;
+    set_version(&tx, 7)?;
     tx.commit()
 }
 
