@@ -250,6 +250,7 @@ impl GifProvider for Klipy {
             .ok_or(GifError::NotFound)?;
         let p = self.entry(first)?.ok_or(GifError::Malformed)?;
         Ok(GifItem {
+            id: p.id,
             mp4: p.mp4,
             width: p.width,
             height: p.height,
