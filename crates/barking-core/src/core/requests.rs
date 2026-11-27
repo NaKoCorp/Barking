@@ -859,7 +859,7 @@ pub(super) fn put_invite_at(q: &impl Queries, fp: Fingerprint, at: u64) -> Resul
 }
 
 /// Forgets the acceptance of the invite to `fp` (a new invite that no
-/// device of the contact answered yet).
+/// device of the contact answered yet, or one sent in new sessions).
 fn clear_invite_accepted(q: &impl Queries, fp: Fingerprint) -> Result<()> {
     q.conn()
         .execute(
@@ -918,7 +918,8 @@ pub(super) fn invite_packet_fp(
 /// The devices of contact `fp` an invite goes to: those whose session (the
 /// one `seal_for` would use: most recently received, otherwise most recently
 /// created) still waits for a first answer (`pending_initial`), and those
-/// with no session yet. A device that already answered is left out.
+/// with no session yet. A device that already answered is left out (none
+/// waiting: `invite` opens new sessions with all of them).
 struct Waiting {
     devices: Vec<DeviceId>,
     /// Every device of the card is waiting: none answered.
@@ -1579,14 +1580,22 @@ impl Core {
     /// date is shared with my other devices (`SyncInvite`), whose packets
     /// come after the contact's. Everything is written in one transaction.
     ///
+    /// When every device already answered, the contact may have removed me
+    /// since, and dropped our sessions without telling me: the invite then
+    /// opens a new session with each device (`Target::ContactAnew`), a
+    /// fresh Initial it can read as a first packet. Removed, it gets a
+    /// request; still my contact, it reads an invite from a contact (acked,
+    /// without effect). The earlier acceptance is forgotten: the state is
+    /// `Sent` until it answers again.
+    ///
     /// Refused, writing nothing: `UnknownContact`, `ContactBlocked`,
     /// `TooSoon` while the last invite (sent by any of my devices, even
     /// before the contact was removed and added again) is less than
     /// `INVITE_INTERVAL_SECS` old, `TooLarge` if my card does not fit in a
-    /// packet. When every device already answered, `Ok(vec![])` and nothing
-    /// is written. An acceptance that belongs to a former contact (removed
-    /// and added again, no device answered since: `acceptance_outlived`)
-    /// is forgotten: the state is `Sent`.
+    /// packet. No device reachable: `Ok(vec![])`, nothing written. An
+    /// acceptance that belongs to a former contact (removed and added
+    /// again, no device answered since: `acceptance_outlived`) is
+    /// forgotten too.
     pub fn invite(
         &mut self,
         to: &Fingerprint,
@@ -1616,14 +1625,17 @@ impl Core {
             return Err(CoreError::TooLarge);
         }
         let waiting = waiting_devices(&self.store, fp)?;
-        if waiting.devices.is_empty() {
-            return Ok(Vec::new());
-        }
-        let outlived = acceptance_outlived(&self.store, fp, &waiting)?;
+        // Every device answered: new sessions, and the acceptance goes.
+        let anew = waiting.devices.is_empty();
+        let forget = anew || acceptance_outlived(&self.store, fp, &waiting)?;
         let Core { store, device, .. } = self;
         store.transaction(|tx| {
             let message_id = random_message_id(rng);
-            let target = Target::ContactDevices(fp, waiting.devices);
+            let target = if anew {
+                Target::ContactAnew(fp)
+            } else {
+                Target::ContactDevices(fp, waiting.devices)
+            };
             let sealed = seal_for(
                 tx,
                 device,
@@ -1643,9 +1655,9 @@ impl Core {
                 insert_invite_packet(tx, packet.id, fp)?;
             }
             put_invite_at(tx, fp, now)?;
-            // The contact was removed and added again: an earlier
-            // acceptance no longer holds.
-            if outlived {
+            // A new invite in new sessions, or the contact was removed and
+            // added again: an earlier acceptance no longer holds.
+            if forget {
                 clear_invite_accepted(tx, fp)?;
             }
             log(

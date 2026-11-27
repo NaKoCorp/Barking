@@ -155,22 +155,32 @@ final class ContactModelTests: XCTestCase {
         XCTAssertFalse(m.resendFailed)
     }
 
-    func testAcceptedHiddenAfterADay() async {
-        let fresh = makeInvite(FakeDevice(), .accepted(at: nowSecs - 3600))
-        await fresh.load()
-        XCTAssertTrue(fresh.showsInvite)
-        XCTAssertNil(fresh.retryAt)
-        let old = makeInvite(FakeDevice(), .accepted(at: nowSecs - 86_400 - 1))
-        await old.load()
-        XCTAssertFalse(old.showsInvite)
+    /// Accepted long ago or not at all, the section stays: the contact may
+    /// have deleted me since, and an invitation brings them back.
+    func testInviteAlwaysOffered() async {
+        let accepted = makeInvite(FakeDevice(), .accepted(at: nowSecs - 30 * 86_400))
+        await accepted.load()
+        XCTAssertTrue(accepted.showsInvite)
+        XCTAssertNil(accepted.retryAt)
+        XCTAssertTrue(accepted.resendAllowed)
+        XCTAssertEqual(accepted.inviteAction, .inviteAgain)
+        let none = makeInvite(FakeDevice(), .none)
+        await none.load()
+        XCTAssertTrue(none.showsInvite)
+        XCTAssertEqual(none.inviteAction, .send)
+        let sent = makeInvite(FakeDevice(), .sent(at: nowSecs - 3600))
+        await sent.load()
+        XCTAssertEqual(sent.inviteAction, .resend)
     }
 
-    func testNoneHidesSection() async {
-        let m = makeInvite(FakeDevice(), .none)
+    /// Inviting again after an acceptance calls the core, which decides.
+    func testInviteAgainCallsTheCore() async {
+        let d = FakeDevice()
+        let m = makeInvite(d, .accepted(at: nowSecs - 30 * 86_400))
         await m.load()
-        XCTAssertFalse(m.showsInvite)
-        XCTAssertNil(m.retryAt)
-        XCTAssertTrue(m.resendAllowed)
+        await m.resend()
+        XCTAssertFalse(m.resendFailed)
+        XCTAssertEqual(d.invited.count, 1)
     }
 
     /// A card too large for an invitation is not a failure to retry: the

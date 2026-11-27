@@ -20,12 +20,17 @@ struct SafetyCodeView: View {
     @State private var resending = false
     /// The invitation sent with the add, when shown right after it.
     private let inviteResult: AddContactModel.InviteResult?
+    /// Opened from Contacts: "Send a message" opens the conversation.
+    /// Nil from the conversation itself, which is already open.
+    private let onMessage: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
 
-    init(core: CoreService, contact: String, inviteResult: AddContactModel.InviteResult? = nil) {
+    init(core: CoreService, contact: String, inviteResult: AddContactModel.InviteResult? = nil,
+         onMessage: (() -> Void)? = nil) {
         self.core = core
         self.inviteResult = inviteResult
+        self.onMessage = onMessage
         _model = State(initialValue: ContactModel(contact: contact, core: core))
     }
 
@@ -37,6 +42,12 @@ struct SafetyCodeView: View {
                 Text("Read the numbers aloud, in person or on a call you trust. If they match, nobody sits between you.")
                     .font(.bBody).foregroundStyle(Color.fgMuted)
                     .fixedSize(horizontal: false, vertical: true)
+                if let onMessage {
+                    // Secondary: "The numbers match" stays the page's one primary action.
+                    SecondaryButton("Send a message", action: onMessage)
+                        .accessibilityIdentifier("contact.message")
+                        .padding(.top, Space.s1)
+                }
             }
             inviteNotice
             verifySection
@@ -98,13 +109,17 @@ struct SafetyCodeView: View {
                 Task { await saveAlias() }
             }
         }
-        .confirmationDialog(Text("Delete this contact? The history is kept."), isPresented: $confirmDelete,
-                            titleVisibility: .visible) {
+        // Alerts, not confirmation dialogs: on iOS 26 a dialog floats as a
+        // popover at the foot of the screen, far from what it confirms.
+        .alert(Text("Delete \(model.name)?"), isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) { deleted = true; Task { await model.delete(); dismiss() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(model.name) leaves your contacts on all your devices. They are not told.")
         }
         // Blocked, the contact leaves the chats: the chats list closes its
         // conversation once the change is published.
-        .confirmationDialog(Text("Block \(model.name)?"), isPresented: $confirmBlock, titleVisibility: .visible) {
+        .alert(Text("Block \(model.name)?"), isPresented: $confirmBlock) {
             Button("Block", role: .destructive) {
                 Task {
                     if await model.block() {
@@ -117,6 +132,7 @@ struct SafetyCodeView: View {
                     }
                 }
             }
+            Button("Cancel", role: .cancel) {}
         } message: {
             Text("Their messages will no longer reach you and they leave your chats, on all your devices. They are not told. You can unblock them in Settings.")
         }
@@ -263,19 +279,19 @@ extension SafetyCodeView {
                     .font(.bBody).foregroundStyle(Color.fg)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("contact.invite.state")
-                switch model.invite {
-                case .sent, .unanswered:
-                    resendButton
-                    if model.resendTooLarge {
-                        Banner(kind: .info, title: "Your card is too large for an invitation",
-                               message: "Show them your code instead.",
-                               action: .init(label: "Show my code", hint: "Opens your code.") { showsMyCode = true })
-                            .accessibilityIdentifier("contact.invite.tooLarge")
-                    } else if model.resendFailed {
-                        Banner(kind: .danger, title: "Not sent. Try again in a moment.")
-                    }
-                case .none, .accepted:
-                    EmptyView()
+                if model.inviteAction == .inviteAgain {
+                    Text("If \(model.name) deleted you, a new invitation lets them add you back.")
+                        .font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                resendButton
+                if model.resendTooLarge {
+                    Banner(kind: .info, title: "Your card is too large for an invitation",
+                           message: "Show them your code instead.",
+                           action: .init(label: "Show my code", hint: "Opens your code.") { showsMyCode = true })
+                        .accessibilityIdentifier("contact.invite.tooLarge")
+                } else if model.resendFailed {
+                    Banner(kind: .danger, title: "Not sent. Try again in a moment.")
                 }
             }
         }
@@ -291,7 +307,7 @@ extension SafetyCodeView {
         case .sent(let at): Text("Invitation sent · \(ago(at))")
         case .unanswered(let at): Text("No answer · sent \(ago(at))")
         case .accepted: Text("Accepted")
-        case .none: EmptyView()
+        case .none: Text("No invitation sent")
         }
     }
 
@@ -304,7 +320,7 @@ extension SafetyCodeView {
                 .accessibilityValue(Text("Possible in \(hours) h"))
                 .accessibilityIdentifier("contact.invite.resend")
         } else {
-            SecondaryButton("Resend the invitation", enabled: !resending) {
+            SecondaryButton(inviteLabel, enabled: !resending) {
                 resending = true
                 Task {
                     await model.resend()
@@ -312,6 +328,14 @@ extension SafetyCodeView {
                 }
             }
             .accessibilityIdentifier("contact.invite.resend")
+        }
+    }
+
+    fileprivate var inviteLabel: LocalizedStringKey {
+        switch model.inviteAction {
+        case .send: "Send an invitation"
+        case .resend: "Resend the invitation"
+        case .inviteAgain: "Invite again"
         }
     }
 

@@ -138,9 +138,16 @@ final class RequestsUITests: XCTestCase {
     func testChangedDeviceLine() throws {
         let app = XCUIApplication.seeded(extra: ["-BarkingUITestDeviceChanged"])
         app.launch()
+        // Sam has no message yet: no conversation under Chats, so the
+        // conversation opens from his page under Contacts.
+        XCTAssertTrue(app.tabBars.buttons["Contacts"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Contacts"].tap()
         let sam = app.staticTexts["Sam"].firstMatch
         XCTAssertTrue(sam.waitForExistence(timeout: 10))
         sam.tap()
+        let message = app.buttons["contact.message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        message.tap()
         let line = app.staticTexts["conversation.deviceChanged"]
         XCTAssertTrue(line.waitForExistence(timeout: 10), "the changed-device line")
         XCTAssertTrue(line.label.hasPrefix("Sam changed device · "), line.label)

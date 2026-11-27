@@ -230,6 +230,25 @@ final class ConversationModelTests: XCTestCase {
         DeliveryUpdate(messageId: id, delivery: state.map { .state($0) }, removed: removed)
     }
 
+    /// The sync a send starts holds the core through its network round, and
+    /// a write (clearing the stored draft) waits for it. The send's own row
+    /// must stand for the bubble at once, not after that round: a local
+    /// bubble can be neither opened nor long-pressed.
+    func testSentRowReplacesTheLocalBubbleBeforeTheSyncEnds() async {
+        let d = FakeDevice()
+        d.sentRowsAppear = true
+        d.networkDelay = 3
+        let m = make(d)
+        await m.onAppear()
+        m.draft = "hello"
+        let start = Date()
+        await m.send()
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.5, "the send does not wait for the sync")
+        XCTAssertEqual(m.items.last?.text, "hello")
+        XCTAssertEqual(m.items.last?.local, false, "the core's row, which opens and has its menu")
+        XCTAssertEqual(m.items.filter { $0.text == "hello" }.count, 1)
+    }
+
     /// Spec Lot M §6.3: a state change patches the rows it names; only
     /// `.messages` of this contact reloads the conversation.
     func testDeliveryChangePatchesWithoutReload() async {

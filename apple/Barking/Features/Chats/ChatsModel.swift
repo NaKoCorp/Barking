@@ -80,14 +80,14 @@ final class ChatsModel {
         }
     }
 
-    /// The chats and the requests not hidden, both searched,
-    /// newest first: a chat by its last message, a request by its last
-    /// invitation. Chats without a message stay last, in their order.
+    /// The conversations and the requests not hidden, both searched,
+    /// newest first: a conversation by its last message, a request by its
+    /// last invitation. A contact without a message has no conversation:
+    /// it is listed under Contacts only.
     var items: [ListItem] {
         let dated = visibleRows.filter { $0.lastAt != nil }.map(ListItem.chat)
             + visibleRequests.map(ListItem.request)
-        let undated = visibleRows.filter { $0.lastAt == nil }.map(ListItem.chat)
-        return dated.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) } + undated
+        return dated.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
     }
 
     /// Hidden requests: the Invitations entry shows only when there is one.
@@ -97,8 +97,12 @@ final class ChatsModel {
 
     /// Nothing to show at all: no chat, no request in the list. Not the
     /// search's result, as with chats: a search without a match never
-    /// shows "No chats yet".
-    var isEmpty: Bool { rows.isEmpty && listedRequests.isEmpty }
+    /// shows "No chats yet". Contacts without a message do not count.
+    var isEmpty: Bool { !rows.contains { $0.lastAt != nil } && listedRequests.isEmpty }
+
+    /// Contacts exist, none with a conversation yet: the empty list offers
+    /// to pick one rather than to add one.
+    var hasContacts: Bool { !rows.isEmpty }
 
     /// The changes after which the list reads the core again. Request
     /// changes are published as `.contacts`.
@@ -136,9 +140,17 @@ final class ChatsModel {
         rows = out.sorted { ($0.lastAt ?? .distantPast) > ($1.lastAt ?? .distantPast) }
     }
 
-    func delete(_ contact: String) async {
-        try? await core.removeContact(contact)
+    /// Deletes the conversation, not the contact: every message with
+    /// `contact` goes, on my devices only (`deleteMessages`); the contact
+    /// stays under Contacts. False when the core refused.
+    @discardableResult
+    func deleteConversation(_ contact: String) async -> Bool {
+        var deleted = false
+        if let ids = try? await core.messages(with: contact).map(\.id) {
+            deleted = ids.isEmpty ? true : (try? await core.deleteMessages(ids)) != nil
+        }
         await reload()
+        return deleted
     }
 }
 

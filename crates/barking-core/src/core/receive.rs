@@ -1551,8 +1551,9 @@ fn reject_authenticated(
 }
 
 /// Keeps at most `MAX_SESSIONS_PER_DEVICE` sessions with the device of `new`,
-/// counting `new`: first deletes those without recent receipt.
-fn prune_sessions(q: &impl Queries, new: &SessionRow) -> Result<()> {
+/// counting `new`: first deletes those without recent receipt. Also run by
+/// `seal_for` for a session it opens anew (`Target::ContactAnew`).
+pub(super) fn prune_sessions(q: &impl Queries, new: &SessionRow) -> Result<()> {
     let mut others: Vec<SessionRow> = q
         .sessions_for(new.contact_fp, new.contact_device)?
         .into_iter()

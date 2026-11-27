@@ -29,6 +29,12 @@ pub(super) enum Target {
     /// Only these devices of the contact's card (its new
     /// devices, see `sync::send_own_card`).
     ContactDevices(Fingerprint, Vec<DeviceId>),
+    /// Every device in the contact's card, each through a new session (a
+    /// fresh Initial), even where one is established: a new invite to a
+    /// contact who may have dropped our sessions (`Core::invite`). The
+    /// older sessions are pruned as on receipt (`prune_sessions`) and no
+    /// longer chosen (`demote_others`).
+    ContactAnew(Fingerprint),
     /// Each of my other devices (my list, minus this device). The
     /// sessions are filed under my own fingerprint. Used by the
     /// sync contents (`Sync*`, see `sync.rs`).
@@ -99,7 +105,7 @@ pub(super) fn seal_for(
     let SealTime { now, sent_at } = time;
     let me = device.public();
     let (fp, peers): (Fingerprint, Vec<(DevicePublic, Option<PrekeyBundle>)>) = match target {
-        Target::Contact(fp) | Target::ContactDevices(fp, _) => {
+        Target::Contact(fp) | Target::ContactDevices(fp, _) | Target::ContactAnew(fp) => {
             let contact = q.get_contact(*fp)?.ok_or(CoreError::UnknownContact)?;
             // Card verified when added (`add_contact`): each key packet
             // is tied to a device certified by the contact's root.
@@ -132,11 +138,16 @@ pub(super) fn seal_for(
     let mut out = Vec::with_capacity(peers.len());
     for (peer, bundle) in peers {
         let peer_id = peer.id();
-        let sessions = q.sessions_for(fp, peer_id)?;
-        // Most recently received session, otherwise most recently created.
-        let chosen = sessions
-            .into_iter()
-            .max_by_key(|s| (s.last_rx, s.created_at));
+        let anew = matches!(target, Target::ContactAnew(_));
+        // Most recently received session, otherwise most recently created
+        // (none for `ContactAnew`: a new one is opened).
+        let chosen = if anew {
+            None
+        } else {
+            q.sessions_for(fp, peer_id)?
+                .into_iter()
+                .max_by_key(|s| (s.last_rx, s.created_at))
+        };
         let (mut row, mut ratchet, init, opened_here) = match chosen {
             Some(row) => {
                 let ratchet = de_state(&row.state)?;
@@ -224,6 +235,10 @@ pub(super) fn seal_for(
         }
         row.state = ser_state(&ratchet)?;
         q.put_session(&row)?;
+        if anew {
+            super::receive::prune_sessions(q, &row)?;
+            demote_others(q, &row)?;
+        }
         q.outbox_put(
             packet.id,
             &packet.encode(),
@@ -250,6 +265,21 @@ pub(super) fn seal_for(
         out.push((packet, peer_id));
     }
     Ok(out)
+}
+
+/// Makes the other sessions with the device of `new`, opened anew by a
+/// `ContactAnew` sealing, lose to it: their date of last receipt is
+/// cleared, so that the most recently created session (`new`) is chosen
+/// until one of them receives again. They stay readable: a contact who
+/// kept them may still write in them.
+fn demote_others(q: &impl Queries, new: &SessionRow) -> Result<()> {
+    for mut row in q.sessions_for(new.contact_fp, new.contact_device)? {
+        if row.session_id != new.session_id && row.last_rx != 0 {
+            row.last_rx = 0;
+            q.put_session(&row)?;
+        }
+    }
+    Ok(())
 }
 
 impl Core {
