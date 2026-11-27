@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::DeviceId;
 
+/// What a notification of a received GIF shows in place of a text.
+pub const GIF_PREVIEW: &str = "GIF";
+
 /// Longest GIF identifier, in bytes.
 pub const MAX_GIF_ID_LEN: usize = 64;
 

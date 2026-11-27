@@ -11894,3 +11894,360 @@ fn invalid_avatar_op_from_my_device_refused() {
     }
     assert_eq!(avatar_of(&a, &fp), Some(dog()));
 }
+
+// --- GIF, task 2: send, receive and store.
+
+use crate::gif::GifRef;
+
+fn hello_gif() -> GifRef {
+    GifRef {
+        provider: 1,
+        id: "hello-hi-662".into(),
+        width: 480,
+        height: 270,
+    }
+}
+
+/// The newest row of the conversation with `contact`, shown at `NOW`.
+fn last_row(c: &Core, contact: &Fingerprint) -> crate::store::MessageRow {
+    c.messages_with(contact, NOW).unwrap().pop().unwrap()
+}
+
+/// Rows of the conversation with `contact` that carry a GIF.
+fn gif_rows(c: &Core, contact: &Fingerprint) -> usize {
+    c.messages_with(contact, NOW)
+        .unwrap()
+        .iter()
+        .filter(|m| m.gif.is_some())
+        .count()
+}
+
+#[test]
+fn gif_send_receive_round_trip() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let out =
+        p.a.send_gif(&b, hello_gif(), None, None, NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(out.len(), 1);
+    let mine = last_row(&p.a, &b);
+    assert_eq!(mine.direction, Direction::Out);
+    assert_eq!(mine.gif, Some(hello_gif()));
+    assert_eq!(mine.body, "");
+    assert!(!mine.placeholder);
+    // The contact reads a GIF kind, never a text.
+    assert!(matches!(
+        peek_envelope(&p.b, &out[0]).body,
+        Body::Ext {
+            kind: crate::content::KIND_GIF,
+            ..
+        }
+    ));
+    let r = deliver(&mut p.b, &out[0], &mut p.rng);
+    assert!(
+        matches!(
+            &r,
+            ReceiveOutcome::Message {
+                text,
+                ephemeral: false,
+                ..
+            } if text == "GIF"
+        ),
+        "{r:?}"
+    );
+    let got = last_row(&p.b, &a);
+    assert_eq!(got.direction, Direction::In);
+    assert_eq!(got.gif, Some(hello_gif()));
+    assert_eq!(got.body, "");
+    assert!(!got.placeholder);
+    assert!(got.wire_id.is_some());
+    // A repeat adds nothing and shows as a stored message.
+    assert!(matches!(
+        deliver(&mut p.b, &out[0], &mut p.rng),
+        ReceiveOutcome::DuplicateMessage
+    ));
+    assert_eq!(gif_rows(&p.b, &a), 1);
+}
+
+#[test]
+fn gif_copy_reaches_my_other_device() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let first = b.send_text(&alice, "q", NOW, &mut rng).unwrap();
+    deliver_each(&first, &mut [&mut a, &mut t], &mut rng);
+    let sent = a
+        .send_gif(&bob, hello_gif(), None, None, NOW, &mut rng)
+        .unwrap();
+    assert_eq!(sent.len(), 2, "one for Bob, one copy for the tablet");
+    let got = t.receive(&sent[1].encode(), "t", NOW, &mut rng).unwrap();
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Sent,
+                contact: Some(c)
+            } if c == bob
+        ),
+        "{got:?}"
+    );
+    let row = last_row(&t, &bob);
+    let mine = last_row(&a, &bob);
+    assert_eq!(row.direction, Direction::Out);
+    assert_eq!(row.gif, Some(hello_gif()));
+    assert_eq!(row.body, "");
+    assert_eq!(row.message_id, mine.message_id);
+    assert_eq!(row.at, NOW);
+    assert!(matches!(
+        deliver(&mut b, &sent[0], &mut rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    assert_eq!(last_row(&b, &alice).gif, Some(hello_gif()));
+}
+
+#[test]
+fn gif_ephemeral_copy_is_seen_on_my_other_device() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a
+        .send_gif(&bob, hello_gif(), None, Some(300), NOW, &mut rng)
+        .unwrap();
+    assert_eq!(
+        sent.len(),
+        3,
+        "one for Bob, one copy and its \"seen\" for the tablet"
+    );
+    let mine = last_row(&a, &bob);
+    assert_eq!(
+        (mine.ttl_secs, mine.seen_at, mine.expire_at),
+        (Some(300), Some(NOW), Some(NOW + 300))
+    );
+    let r = NOW + 9;
+    t.receive(&sent[1].encode(), "t", r, &mut rng).unwrap();
+    let row = last_row(&t, &bob);
+    assert_eq!(row.gif, Some(hello_gif()));
+    assert_eq!(
+        (row.ttl_secs, row.seen_at, row.expire_at),
+        (Some(300), None, Some(r + UNSEEN_CEILING_SECS))
+    );
+}
+
+#[test]
+fn gif_unknown_provider_is_kept() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let other = GifRef {
+        provider: 2,
+        id: "x".into(),
+        width: 1,
+        height: 1,
+    };
+    let out =
+        p.a.send_gif(&b, other.clone(), None, None, NOW, &mut p.rng)
+            .unwrap();
+    assert!(matches!(
+        deliver(&mut p.b, &out[0], &mut p.rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    let got = last_row(&p.b, &a);
+    assert_eq!(got.gif.as_ref().map(|g| g.provider), Some(2));
+    assert_eq!(got.gif, Some(other));
+    assert!(!got.placeholder);
+}
+
+#[test]
+fn gif_invalid_reference_is_refused_on_send() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    for gif in [
+        GifRef {
+            provider: 0,
+            id: "x".into(),
+            width: 1,
+            height: 1,
+        },
+        GifRef {
+            provider: 1,
+            id: "Not-Klipy".into(),
+            width: 1,
+            height: 1,
+        },
+        GifRef {
+            provider: 1,
+            id: String::new(),
+            width: 1,
+            height: 1,
+        },
+    ] {
+        assert!(matches!(
+            p.a.send_gif(&b, gif, None, None, NOW, &mut p.rng),
+            Err(CoreError::Malformed(_))
+        ));
+    }
+    assert!(matches!(
+        p.a.send_gif(&b, hello_gif(), None, Some(1), NOW, &mut p.rng),
+        Err(CoreError::InvalidTtl)
+    ));
+    assert_eq!(gif_rows(&p.a, &b), 0);
+}
+
+#[test]
+fn sync_gif_from_contact_is_rejected() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let b = p.b.fingerprint();
+    let body = ExtContent::SyncGif {
+        to: a,
+        gif: hello_gif(),
+        reply_to: None,
+        ttl_secs: None,
+    }
+    .to_body();
+    let out = seal_body(
+        &mut p.b,
+        &send::Target::Contact(a),
+        &body,
+        MessageId([0x70; 16]),
+        &mut p.rng,
+    );
+    assert_eq!(reason(deliver(&mut p.a, &out[0].0, &mut p.rng)), NOT_MINE);
+    assert_eq!(gif_rows(&p.a, &b), 0);
+
+    // A `Gif` from one of my own devices is not a copy: refused too.
+    let (_d, mut a, mut t, mut rng) = linked();
+    let body = ExtContent::Gif {
+        gif: hello_gif(),
+        reply_to: None,
+        ttl_secs: None,
+    }
+    .to_body();
+    let out = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x71; 16]),
+        &mut rng,
+    );
+    let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(r), "unexpected content for this mailbox");
+}
+
+#[test]
+fn gif_from_blocked_contact_is_dropped() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let bob = p.a.resolve("bob").unwrap();
+    let out =
+        p.b.send_gif(&a, hello_gif(), None, None, NOW, &mut p.rng)
+            .unwrap();
+    p.a.block_contact(&bob, NOW, &mut p.rng).unwrap();
+    let r = p.a.receive(&out[0].encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), "blocked contact");
+    assert_eq!(acks_for(&mut p.a, &out[0]), 0);
+    assert_eq!(gif_rows(&p.a, &bob), 0);
+}
+
+#[test]
+fn gif_reply_and_ttl_preserved() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = p.a.send_text(&b, "18 h ?", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.b, &pk[0], &mut p.rng);
+    let quoted = full_row(&p.b, &a, "18 h ?");
+    let out =
+        p.b.send_gif(&a, hello_gif(), Some(quoted.id), Some(300), NOW, &mut p.rng)
+            .unwrap();
+    let mine = last_row(&p.b, &a);
+    assert_eq!(mine.reply_to, Some(quoted.message_id));
+    assert_eq!(
+        mine.reply_ref,
+        Some(MessageRef {
+            id: quoted.wire_id.unwrap(),
+            by_sender: false
+        })
+    );
+    assert_eq!(
+        (mine.ttl_secs, mine.seen_at, mine.expire_at),
+        (Some(300), Some(NOW), Some(NOW + 300))
+    );
+    let r = deliver(&mut p.a, &out[0], &mut p.rng);
+    assert!(
+        matches!(
+            r,
+            ReceiveOutcome::Message {
+                ephemeral: true,
+                ..
+            }
+        ),
+        "{r:?}"
+    );
+    let original = full_row(&p.a, &b, "18 h ?");
+    let got = last_row(&p.a, &b);
+    assert_eq!(got.gif, Some(hello_gif()));
+    assert_eq!(got.reply_to, Some(original.message_id));
+    assert_eq!(got.reply_ref, mine.reply_ref);
+    assert_eq!(
+        (got.ttl_secs, got.seen_at, got.expire_at),
+        (Some(300), None, Some(NOW + UNSEEN_CEILING_SECS))
+    );
+    // A missing quote writes nothing.
+    assert!(matches!(
+        p.b.send_gif(&a, hello_gif(), Some(i64::MAX), None, NOW, &mut p.rng),
+        Err(CoreError::MessageNotFound)
+    ));
+}
+
+#[test]
+fn gif_retry_sends_the_gif_again() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let sent =
+        p.a.send_gif(&b, hello_gif(), None, None, NOW, &mut p.rng)
+            .unwrap();
+    let row = last_row(&p.a, &b);
+    let late = NOW + 4;
+    assert!(p.a.drop_outbox_packet(&sent[0].encode(), late).unwrap());
+    assert_eq!(last_row(&p.a, &b).status, MessageStatus::NotDelivered);
+    let again = p.a.retry_message(row.id, late, &mut p.rng).unwrap();
+    assert!(matches!(
+        peek_envelope(&p.b, &again[0]).body,
+        Body::Ext {
+            kind: crate::content::KIND_GIF,
+            ..
+        }
+    ));
+    p.b.receive(&again[0].encode(), "t", late, &mut p.rng)
+        .unwrap();
+    let got = last_row(&p.b, &a);
+    assert_eq!(got.gif, Some(hello_gif()));
+    assert_eq!(got.body, "");
+}
+
+#[test]
+fn gif_survives_history_export() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let out =
+        p.b.send_gif(&a, hello_gif(), None, None, NOW, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &out[0], &mut p.rng);
+    p.a.send_gif(&b, hello_gif(), None, None, NOW, &mut p.rng)
+        .unwrap();
+    let contacts = std::collections::HashSet::from([b]);
+    let history = history::export(&p.a.store, &contacts).unwrap();
+    // Through the wire form, as a linked device reads it.
+    let bytes = postcard::to_allocvec(&history).unwrap();
+    let history: history::History = postcard::from_bytes(&bytes).unwrap();
+    let (_dt, t) = party("t", 9);
+    assert_eq!(history::import(&t.store, &history).unwrap(), 4);
+    let gifs: Vec<_> = t
+        .store
+        .all_messages()
+        .unwrap()
+        .into_iter()
+        .filter_map(|m| m.gif.map(|g| (m.direction, g)))
+        .collect();
+    assert_eq!(
+        gifs,
+        [(Direction::In, hello_gif()), (Direction::Out, hello_gif())]
+    );
+}

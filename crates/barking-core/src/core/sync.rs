@@ -1,5 +1,5 @@
 //! Synchronization between my own devices: copies of my sent
-//! messages (`SyncSent`, `SyncReply`, `SyncMessage`), operations on
+//! messages (`SyncSent`, `SyncReply`, `SyncMessage`, `SyncGif`), operations on
 //! contacts (`SyncContact`),
 //! new device list (`SyncDevices`), my deletions (`SyncDelete`), the
 //! ephemeral messages I saw (`SyncSeen`), and the date of my last invite
@@ -441,19 +441,27 @@ pub(super) fn apply(
         Body::Text(_) | Body::CardUpdate(_) => Ok(Err(R_SYNC_REFUSED)),
         Body::Ext { kind, data, .. } => {
             let own = OwnDevices::read(q)?.ok_or(CoreError::LinkPending)?;
-            // Only `SyncReply`, `SyncMessage`, `SyncReaction`,
-            // `SyncDelete`, `SyncSeen`, `SyncInvite` and `SyncRefused` are sync contents;
-            // any other kind is refused.
-            let (to, text, reply_to, ttl_secs) = match ExtContent::decode(*kind, data) {
+            // Only `SyncReply`, `SyncMessage`, `SyncGif`, `SyncReaction`,
+            // `SyncDelete`, `SyncSeen`, `SyncInvite` and `SyncRefused` are
+            // sync contents; any other kind (`SyncGifSettings` included, not
+            // applied yet) is refused.
+            let (to, text, reply_to, ttl_secs, gif) = match ExtContent::decode(*kind, data) {
                 Ok(Some(ExtContent::SyncReply { to, text, reply_to })) => {
-                    (to, text, Some(reply_to), None)
+                    (to, text, Some(reply_to), None, None)
                 }
                 Ok(Some(ExtContent::SyncMessage {
                     to,
                     text,
                     reply_to,
                     ttl_secs,
-                })) => (to, text, reply_to, ttl_secs),
+                })) => (to, text, reply_to, ttl_secs, None),
+                // A GIF: an empty body, the reference in its own column.
+                Ok(Some(ExtContent::SyncGif {
+                    to,
+                    gif,
+                    reply_to,
+                    ttl_secs,
+                })) => (to, String::new(), reply_to, ttl_secs, Some(gif)),
                 Ok(Some(ExtContent::SyncDelete { ids })) => {
                     // As a deletion here, without sending it on: each
                     // identifier is tombstoned even with no row yet.
@@ -535,6 +543,7 @@ pub(super) fn apply(
                 ttl_secs,
                 seen_at: None,
                 expire_at: ttl_secs.map(|_| now.saturating_add(UNSEEN_CEILING_SECS)),
+                gif,
             })?;
             Ok(Ok(Some(SyncKind::Sent)))
         }
@@ -590,8 +599,8 @@ pub(super) fn apply(
     }
 }
 
-/// The contact a `SyncSent`, `SyncReply`, `SyncMessage` or `SyncReaction`
-/// body was sent to.
+/// The contact a `SyncSent`, `SyncReply`, `SyncMessage`, `SyncGif` or
+/// `SyncReaction` body was sent to.
 /// `None` for a `SyncDelete` or a `SyncSeen`: its messages may be of
 /// several contacts.
 pub(super) fn sent_to(body: &Body) -> Option<Fingerprint> {
@@ -601,6 +610,7 @@ pub(super) fn sent_to(body: &Body) -> Option<Fingerprint> {
             Ok(Some(
                 ExtContent::SyncReply { to, .. }
                 | ExtContent::SyncMessage { to, .. }
+                | ExtContent::SyncGif { to, .. }
                 | ExtContent::SyncReaction { to, .. },
             )) => Some(to),
             Ok(Some(ExtContent::SyncDelete { .. } | ExtContent::SyncSeen { .. })) => None,

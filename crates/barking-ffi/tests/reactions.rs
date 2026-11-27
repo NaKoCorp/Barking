@@ -415,6 +415,7 @@ fn placeholder_row_is_unread_and_last() {
             ttl_secs: None,
             seen_at: None,
             expire_at: None,
+            gif: None,
         })
         .unwrap();
 

@@ -76,6 +76,7 @@ fn insert_ephemeral(
                 ttl_secs: Some(ttl),
                 seen_at,
                 expire_at: Some(expire_at),
+                gif: None,
             })
             .unwrap()
     );

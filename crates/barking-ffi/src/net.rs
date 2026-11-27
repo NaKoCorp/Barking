@@ -554,6 +554,7 @@ mod tests {
                 ttl_secs: None,
                 seen_at: None,
                 expire_at: None,
+                gif: None,
             })
             .unwrap();
         let core = Core::open(&pa, &key, 2_000).unwrap();
@@ -619,6 +620,7 @@ mod tests {
                 ttl_secs: Some(300),
                 seen_at: None,
                 expire_at: Some(u64::from(u32::MAX) * 2),
+                gif: None,
             })
             .unwrap();
         core = Core::open(&path, &[1u8; 32], 2_000).unwrap();

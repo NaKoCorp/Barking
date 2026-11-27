@@ -20,6 +20,7 @@ use serde::de::DeserializeOwned;
 use zeroize::Zeroize;
 
 use crate::content::MessageRef;
+use crate::gif::GifRef;
 use crate::identity::device::DeviceId;
 use crate::identity::root::Fingerprint;
 use crate::packet::{Kind, Packet, PacketId};
@@ -260,6 +261,9 @@ pub struct MessageRow {
     pub seen_at: Option<u64>,
     /// When this ephemeral message is erased from this device.
     pub expire_at: Option<u64>,
+    /// The GIF this message is (its `body` is then empty); `None` for a
+    /// text.
+    pub gif: Option<GifRef>,
 }
 
 /// A message row to insert (`Queries::insert_message_row`). Its body is
@@ -279,6 +283,7 @@ pub struct MessageInsert {
     pub ttl_secs: Option<u32>,
     pub seen_at: Option<u64>,
     pub expire_at: Option<u64>,
+    pub gif: Option<GifRef>,
 }
 
 impl Drop for MessageInsert {
@@ -394,6 +399,14 @@ impl fmt::Debug for MessageRow {
             .field("ttl_secs", &self.ttl_secs)
             .field("seen_at", &self.seen_at)
             .field("expire_at", &self.expire_at)
+            // Never the GIF's identifier: only its size.
+            .field(
+                "gif",
+                &self
+                    .gif
+                    .as_ref()
+                    .map(|g| format!("<{}x{}>", g.width, g.height)),
+            )
             .finish()
     }
 }
@@ -981,6 +994,9 @@ impl Store {
         if stored.is_none_or(|v| v < 8) {
             schema::migrate_v7_to_v8(&self.conn).map_err(map_err)?;
         }
+        if stored.is_none_or(|v| v < 9) {
+            schema::migrate_v8_to_v9(&self.conn).map_err(map_err)?;
+        }
         Ok(())
     }
 
@@ -1232,6 +1248,7 @@ pub trait Queries {
             ttl_secs: None,
             seen_at: None,
             expire_at: None,
+            gif: None,
         })
     }
 
@@ -1247,13 +1264,20 @@ pub trait Queries {
             .map(postcard::to_allocvec)
             .transpose()
             .map_err(|_| CoreError::Store("serialization".into()))?;
+        let gif = m
+            .gif
+            .as_ref()
+            .map(postcard::to_allocvec)
+            .transpose()
+            .map_err(|_| CoreError::Store("serialization".into()))?;
         let n = self
             .conn()
             .execute(
                 "INSERT OR IGNORE INTO messages(message_id, contact_fp, direction, body, \
                  status, at, wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, \
-                 expire_at) \
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13 WHERE NOT EXISTS \
+                 expire_at, gif) \
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14 \
+                 WHERE NOT EXISTS \
                  (SELECT 1 FROM deleted_messages WHERE message_id = ?1)",
                 params![
                     m.message_id.0.as_slice(),
@@ -1269,6 +1293,7 @@ pub trait Queries {
                     m.ttl_secs,
                     m.seen_at.map(to_i64),
                     m.expire_at.map(to_i64),
+                    gif,
                 ],
             )
             .map_err(map_err)?;
@@ -1845,7 +1870,7 @@ pub trait Queries {
             .conn()
             .prepare(&format!(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at, gif \
                  FROM messages m WHERE contact_fp = ?1 AND {} ORDER BY at, id",
                 live_sql(2)
             ))
@@ -1864,7 +1889,7 @@ pub trait Queries {
             .conn()
             .query_row(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at, gif \
                  FROM messages WHERE id = ?1",
                 params![id],
                 message_raw,
@@ -1888,7 +1913,7 @@ pub trait Queries {
             .query_row(
                 &format!(
                     "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                     wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
+                     wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at, gif \
                      FROM messages m WHERE message_id = ?1 AND contact_fp = ?2 AND {}",
                     live_sql(3)
                 ),
@@ -1910,7 +1935,7 @@ pub trait Queries {
             .conn()
             .prepare(
                 "SELECT id, contact_fp, direction, body, status, at, message_id, \
-                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at \
+                 wire_id, reply_to, reply_ref, placeholder, ttl_secs, seen_at, expire_at, gif \
                  FROM messages ORDER BY id",
             )
             .map_err(map_err)?;
@@ -2073,7 +2098,7 @@ pub trait Queries {
     fn message_by_packet(&self, packet_id: PacketId) -> Result<Option<MessageRow>> {
         const COLS: &str = "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, \
                             m.message_id, m.wire_id, m.reply_to, m.reply_ref, m.placeholder, \
-                            m.ttl_secs, m.seen_at, m.expire_at \
+                            m.ttl_secs, m.seen_at, m.expire_at, m.gif \
                             FROM messages m";
         let out = self
             .conn()
@@ -2895,11 +2920,12 @@ type MessageRaw = (
     Option<u32>,
     Option<i64>,
     Option<i64>,
+    Option<Vec<u8>>,
 );
 
 /// Columns `message_raw` reads, in order; the next one is the first after
 /// them.
-const MESSAGE_COLUMNS: usize = 14;
+const MESSAGE_COLUMNS: usize = 15;
 
 /// Ids per query of `Queries::deliveries_of`.
 pub const SUMMARY_CHUNK: usize = 200;
@@ -3099,7 +3125,7 @@ fn summaries(
     all.push(&now);
     let sql = format!(
         "SELECT m.id, m.contact_fp, m.direction, m.body, m.status, m.at, m.message_id, \
-         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, m.ttl_secs, m.seen_at, m.expire_at, \
+         m.wire_id, m.reply_to, m.reply_ref, m.placeholder, m.ttl_secs, m.seen_at, m.expire_at, m.gif, \
          {SUMMARY_AGG_SQL} \
          FROM messages m \
          LEFT JOIN deliveries d ON d.message_id = m.message_id AND d.own = 0 AND m.direction = 0 \
@@ -3139,11 +3165,28 @@ fn message_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRaw> {
         r.get(11)?,
         r.get(12)?,
         r.get(13)?,
+        r.get(14)?,
     ))
 }
 
 fn message_from_raw(
-    (id, fp, dir, body, st, at, mid, wire, reply_to, reply_ref, placeholder, ttl, seen, expire): MessageRaw,
+    (
+        id,
+        fp,
+        dir,
+        body,
+        st,
+        at,
+        mid,
+        wire,
+        reply_to,
+        reply_ref,
+        placeholder,
+        ttl,
+        seen,
+        expire,
+        gif,
+    ): MessageRaw,
 ) -> Result<MessageRow> {
     Ok(MessageRow {
         id,
@@ -3163,6 +3206,10 @@ fn message_from_raw(
         ttl_secs: ttl,
         seen_at: seen.map(to_u64),
         expire_at: expire.map(to_u64),
+        gif: gif
+            .map(|b| postcard::from_bytes(&b))
+            .transpose()
+            .map_err(|_| CoreError::Store("invalid GIF reference".into()))?,
     })
 }
 

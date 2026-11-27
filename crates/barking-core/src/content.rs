@@ -288,7 +288,7 @@ fn canonical(emojis: &[String]) -> Vec<String> {
 
 /// A GIF reference with a provider number other than 0 and an identifier of
 /// 1 to [`MAX_GIF_ID_LEN`] printable ASCII bytes; Klipy's are `[a-z0-9-]`.
-fn check_gif(gif: &GifRef) -> Result<()> {
+pub(crate) fn check_gif(gif: &GifRef) -> Result<()> {
     if gif.provider == 0 {
         return Err(CoreError::Malformed("GIF provider"));
     }
