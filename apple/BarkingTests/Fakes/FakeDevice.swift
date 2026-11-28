@@ -739,8 +739,21 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var gifPreviews: [String] { lock.withLock { _gifPreviews } }
     /// How long `gifPreview` takes (a request on the way).
     var gifPreviewDelay: TimeInterval = 0
+    private var _previewsNow = 0
+    private var _maxPreviewsAtOnce = 0
+    /// The most `gifPreview` calls running at the same time.
+    var maxPreviewsAtOnce: Int { lock.withLock { _maxPreviewsAtOnce } }
+    /// The UTC offsets the GIF calls were given, in order.
+    private var _gifOffsets: [Int32] = []
+    var gifOffsets: [Int32] { lock.withLock { _gifOffsets } }
     func gifPreview(url: String, utcOffsetSecs: Int32) throws -> Data {
-        lock.withLock { _gifPreviews.append(url) }
+        lock.withLock {
+            _gifPreviews.append(url)
+            _gifOffsets.append(utcOffsetSecs)
+            _previewsNow += 1
+            _maxPreviewsAtOnce = max(_maxPreviewsAtOnce, _previewsNow)
+        }
+        defer { lock.withLock { _previewsNow -= 1 } }
         if gifPreviewDelay > 0 { Thread.sleep(forTimeInterval: gifPreviewDelay) }
         if let gifPreviewError { throw gifPreviewError }
         return gifPreviewData

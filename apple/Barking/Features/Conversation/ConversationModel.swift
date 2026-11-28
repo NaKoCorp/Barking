@@ -55,9 +55,10 @@ final class ConversationModel {
         /// replied to, reacted to, nor copied.
         var canReplyOrReact: Bool { !local && !needsUpdate }
 
-        /// Copy is not offered on an ephemeral: the pasteboard would keep
-        /// its text after the message is erased.
-        var canCopy: Bool { canReplyOrReact && ttl == nil }
+        /// Copy is not offered on an ephemeral (the pasteboard would keep
+        /// its text after the message is erased), nor on a GIF (its text is
+        /// only the word "GIF").
+        var canCopy: Bool { canReplyOrReact && ttl == nil && gif == nil }
 
         /// The state under the bubble; nil shows the time only.
         var state: DeliveryState? { outgoing ? delivery?.state : nil }

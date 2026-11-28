@@ -58,10 +58,15 @@ final class GifPickerModelTests: XCTestCase {
         d.gifSearchError = BarkingError.Gif(kind: .unreachable, retryAfterSecs: 0)
         await m.run("cat")
         XCTAssertEqual(m.state, .unreachable)
-        // No key in this build, or a reply not understood: Klipy can't be used now.
-        d.gifSearchError = BarkingError.Gif(kind: .notConfigured, retryAfterSecs: 0)
+        // A reply not understood: Klipy can't be used now, a retry may help.
+        d.gifSearchError = BarkingError.Gif(kind: .malformed, retryAfterSecs: 0)
         await m.run("cat")
         XCTAssertEqual(m.state, .unreachable)
+        // No key in this build, or the key refused: no retry, it would get
+        // the same.
+        d.gifSearchError = BarkingError.Gif(kind: .notConfigured, retryAfterSecs: 0)
+        await m.run("cat")
+        XCTAssertEqual(m.state, .notConfigured)
         d.gifSearchError = nil
         d.gifPage = GifPageInfo(results: [], next: nil)
         await m.run("cat")
@@ -200,6 +205,66 @@ final class GifPickerModelTests: XCTestCase {
         // Done and kept for this page: scrolling back again sends nothing.
         _ = await m.preview(url)
         XCTAssertEqual(d.gifPreviews, [url])
+    }
+
+    /// Six turns at most; a cancelled waiter leaves the line without taking
+    /// a turn, and every turn comes back.
+    func testPreviewSlotsHoldSixAndSkipCancelledWaiters() async {
+        let slots = PreviewSlots(limit: 6)
+        for _ in 0..<6 {
+            let held = await slots.acquire()
+            XCTAssertTrue(held)
+        }
+        XCTAssertEqual(slots.running, 6)
+        let queued = Task { await slots.acquire() }
+        await eventually { slots.waiting == 1 }
+        let gone = Task { await slots.acquire() }
+        await eventually { slots.waiting == 2 }
+        gone.cancel()
+        let goneHeld = await gone.value
+        XCTAssertFalse(goneHeld)
+        XCTAssertEqual(slots.waiting, 1)
+        slots.release()
+        let queuedHeld = await queued.value
+        XCTAssertTrue(queuedHeld)
+        XCTAssertEqual(slots.running, 6)
+        for _ in 0..<6 { slots.release() }
+        XCTAssertEqual(slots.running, 0)
+        // Already cancelled: no turn taken.
+        let late = Task { await slots.acquire() }
+        late.cancel()
+        let lateHeld = await late.value
+        XCTAssertFalse(lateHeld)
+        XCTAssertEqual(slots.running, 0)
+    }
+
+    /// A fast scroll: at most six previews on the way at once, the rest in
+    /// line; cells gone while in line send nothing, and no turn is lost.
+    func testAtMostSixPreviewsAtOnce() async {
+        let d = FakeDevice()
+        d.gifPreviewDelay = 0.3
+        let m = model(d)
+        let urls = (0..<9).map { "https://static.klipy.com/p\($0).mp4" }
+        var cells: [Task<Data?, Never>] = []
+        for (i, url) in urls.enumerated() {
+            cells.append(Task { await m.preview(url) })
+            await eventually { m.previewSlots.running + m.previewSlots.waiting == i + 1 }
+        }
+        XCTAssertEqual(m.previewSlots.running, 6)
+        XCTAssertEqual(m.previewSlots.waiting, 3)
+        cells[7].cancel()
+        cells[8].cancel()
+        var got: [Data?] = []
+        for cell in cells { got.append(await cell.value) }
+        XCTAssertEqual(got.prefix(7).filter { $0 == Data("MP4".utf8) }.count, 7)
+        XCTAssertNil(got[7])
+        XCTAssertNil(got[8])
+        XCTAssertEqual(Set(d.gifPreviews), Set(urls.prefix(7)))
+        XCTAssertLessThanOrEqual(d.maxPreviewsAtOnce, 6)
+        XCTAssertEqual(m.previewSlots.running, 0)
+        XCTAssertEqual(m.previewSlots.waiting, 0)
+        // Every call carried the phone's UTC offset.
+        XCTAssertEqual(Set(d.gifOffsets), [GifDay.utcOffset()])
     }
 
     /// A new page forgets requests on the way too: the old reply is dropped

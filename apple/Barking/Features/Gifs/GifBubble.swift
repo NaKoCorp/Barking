@@ -24,6 +24,9 @@ enum GifLoad: Equatable {
     case cannotLoad
     /// The provider's quota: a retry is offered from `until`.
     case rateLimited(until: Date)
+    /// This build has no usable key for the provider (none, or refused):
+    /// no retry, it would get the same.
+    case notConfigured
 
     /// What a failed request shows. `notEnabled` means GIFs were turned
     /// off meanwhile (here or on another device).
@@ -34,7 +37,8 @@ enum GifLoad: Equatable {
         case .notFound: return .gone
         case .tooLarge, .malformed: return .cannotLoad
         case .rateLimited: return .rateLimited(until: now.addingTimeInterval(TimeInterval(max(secs, 1))))
-        case .offline, .unreachable, .notConfigured: return .failed
+        case .notConfigured: return .notConfigured
+        case .offline, .unreachable: return .failed
         }
     }
 
@@ -222,8 +226,8 @@ final class GifLoads {
 
 /// A GIF message: the slot its width and height reserve from the start
 /// (within the bubble's width), then the GIF, the author under it when the
-/// provider names one (spec GIF §7, §9.5). Its tap is `action`, except
-/// once loaded (the bubble's own tap then opens the message).
+/// provider names one (spec GIF §7, §9.5). Its tap is `action`, whatever
+/// the state; a loaded GIF's play button keeps its own tap.
 struct GifBubble: View {
     let gif: GifInfo
     let outgoing: Bool
@@ -234,7 +238,8 @@ struct GifBubble: View {
     var quote: QuoteLine?
     var highlighted = false
     var onQuote: () -> Void = {}
-    /// Load, retry, or open the warning.
+    /// The tap: load, retry or open the warning before the GIF is loaded,
+    /// open the message once it is.
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -387,7 +392,7 @@ struct GifBubble: View {
             line(text, color: Color.accent)
         case .rateLimited?:
             line(text, color: retryOpen ? Color.accent : muted)
-        case .unavailable?, .gone?, .cannotLoad?:
+        case .unavailable?, .gone?, .cannotLoad?, .notConfigured?:
             line(text, color: muted)
         }
     }
@@ -410,6 +415,7 @@ struct GifBubble: View {
         case .gone?: String(localized: "GIF no longer available", bundle: bundle, locale: locale)
         case .failed?: String(localized: "Couldn't load · Retry", bundle: bundle, locale: locale)
         case .cannotLoad?: String(localized: "Couldn't load", bundle: bundle, locale: locale)
+        case .notConfigured?: String(localized: "GIFs are unavailable in this version", bundle: bundle, locale: locale)
         case .rateLimited(let until)?:
             String(localized: "\(providerName) is busy · Retry in \(max(1, GifLoad.minutesLeft(until: until, now: now))) min",
                    bundle: bundle, locale: locale)
@@ -442,6 +448,7 @@ extension GifBubble {
         case .failed?: "failed"
         case .cannotLoad?: "cannotLoad"
         case .rateLimited?: "rateLimited"
+        case .notConfigured?: "notConfigured"
         }
         return "gifBubble.\(name)"
     }

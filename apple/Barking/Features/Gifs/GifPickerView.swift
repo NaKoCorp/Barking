@@ -91,6 +91,8 @@ struct GifPickerView: View {
             .accessibilityIdentifier("gifPicker.retry")
         case .rateLimited:
             message(Text("\(providerName) is busy · Try again in a minute"))
+        case .notConfigured:
+            message(Text("GIFs are unavailable in this version"))
         }
     }
 

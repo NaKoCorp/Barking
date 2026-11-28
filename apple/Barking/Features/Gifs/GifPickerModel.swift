@@ -11,9 +11,12 @@ enum GifPickerState: Equatable {
     /// "No GIFs for “{query}”".
     case empty(query: String)
     case offline
-    /// The provider could not be used now: unreachable, refused key, or a
-    /// reply this version does not understand. Offers a retry.
+    /// The provider could not be used now: unreachable, or a reply this
+    /// version does not understand. Offers a retry.
     case unreachable
+    /// This build has no usable key for the provider (none, or refused):
+    /// no retry, it would get the same.
+    case notConfigured
     /// The provider's quota.
     case rateLimited
 }
@@ -52,6 +55,9 @@ final class GifPickerModel {
     /// The latest request: an older reply arriving later is dropped (a
     /// device call cannot be cancelled).
     private var generation = 0
+    /// Preview requests at once: at most six, the others wait their turn
+    /// (a fast scroll is not a burst at the provider).
+    let previewSlots = PreviewSlots(limit: 6)
 
     /// `send` queues the GIF in the conversation (true once queued).
     init(core: CoreService, send: @escaping @MainActor (GifInfo) async -> Bool) {
@@ -85,25 +91,41 @@ final class GifPickerModel {
     /// started sends nothing; one gone during it lets the request finish
     /// (a device call cannot be cancelled) and the preview is kept for the
     /// page. Nil if it failed, or if the cell or the results it belongs to
-    /// went meanwhile. GIFs turned off meanwhile close the picker.
+    /// went meanwhile. GIFs turned off meanwhile close the picker. At most
+    /// six requests at once (`previewSlots`): a cell gone while waiting for
+    /// its turn sends nothing and gives its turn up.
     func preview(_ url: String) async -> Data? {
         if let d = previews[url] { return d }
         guard !done, !Task.isCancelled else { return nil }
-        let request = inFlight[url] ?? start(url)
+        if inFlight[url] == nil {
+            let mine = generation
+            guard await previewSlots.acquire() else { return nil }
+            // Things moved while it waited: give the turn back, then look
+            // again (a new page, a preview kept or on the way, the picker
+            // closed, the cell gone).
+            guard mine == generation, !done, !Task.isCancelled, previews[url] == nil, inFlight[url] == nil else {
+                previewSlots.release()
+                return Task.isCancelled ? nil : await preview(url)
+            }
+            start(url)
+        }
+        guard let request = inFlight[url] else { return previews[url] }
         let d = await request.value
         return Task.isCancelled ? nil : d
     }
 
-    private func start(_ url: String) -> Task<Data?, Never> {
+    /// Starts the request of `url`, holding a turn of `previewSlots` that
+    /// it gives back once the core answered.
+    private func start(_ url: String) {
         let mine = generation
         let core = core
-        let request = Task<Data?, Never> { [weak self] in
+        let slots = previewSlots
+        inFlight[url] = Task<Data?, Never> { [weak self] in
             let result: Result<Data, Error>
             do { result = .success(try await core.gifPreview(url)) } catch { result = .failure(error) }
+            slots.release()
             return self?.finish(url, result, generation: mine)
         }
-        inFlight[url] = request
-        return request
     }
 
     /// Keeps a preview of the page still shown; a failure may be retried
@@ -178,8 +200,59 @@ final class GifPickerModel {
         switch kind {
         case .offline: return .offline
         case .rateLimited: return .rateLimited
-        case .notEnabled, .notConfigured, .unreachable, .notFound, .tooLarge, .malformed: return .unreachable
+        case .notConfigured: return .notConfigured
+        case .notEnabled, .unreachable, .notFound, .tooLarge, .malformed: return .unreachable
         }
+    }
+}
+
+/// At most `limit` holders at once; the others wait in line, first come
+/// first served. A waiter whose task is cancelled leaves the line without
+/// ever holding a turn, so no turn is lost.
+@MainActor
+final class PreviewSlots {
+    let limit: Int
+    /// Turns held now.
+    private(set) var running = 0
+    private var line: [(id: Int, go: CheckedContinuation<Bool, Never>)] = []
+    private var lastID = 0
+
+    /// Waiters in line.
+    var waiting: Int { line.count }
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    /// True once a turn is held, to `release` after use; false if the task
+    /// was cancelled first (nothing to release then).
+    func acquire() async -> Bool {
+        if Task.isCancelled { return false }
+        if running < limit {
+            running += 1
+            return true
+        }
+        lastID += 1
+        let id = lastID
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { go in line.append((id, go)) }
+        } onCancel: {
+            Task { @MainActor in self.leave(id) }
+        }
+    }
+
+    /// Gives a turn back: to the first waiter, if any.
+    func release() {
+        if line.isEmpty {
+            running = max(0, running - 1)
+        } else {
+            line.removeFirst().go.resume(returning: true)
+        }
+    }
+
+    private func leave(_ id: Int) {
+        guard let i = line.firstIndex(where: { $0.id == id }) else { return }
+        line.remove(at: i).go.resume(returning: false)
     }
 }
 

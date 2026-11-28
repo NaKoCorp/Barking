@@ -75,7 +75,9 @@ final class GifBubbleStateTests: XCTestCase {
         XCTAssertEqual(after(.malformed), .cannotLoad)
         XCTAssertEqual(after(.offline), .failed)
         XCTAssertEqual(after(.unreachable), .failed)
-        XCTAssertEqual(after(.notConfigured), .failed)
+        // No usable key in this build: no retry.
+        XCTAssertEqual(after(.notConfigured), .notConfigured)
+        XCTAssertFalse(GifLoad.notConfigured.loadable)
         XCTAssertEqual(after(.rateLimited, 60), .rateLimited(until: Date(timeIntervalSince1970: 1_060)))
         XCTAssertEqual(after(.notEnabled), .off)
         XCTAssertEqual(GifLoad.after(BarkingError.Storage(detail: "disk"), now: now), .failed)
@@ -351,6 +353,22 @@ final class GifBubbleStateTests: XCTestCase {
         XCTAssertEqual(d.gifDataCalls.count, 1)
     }
 
+    /// No usable key in this build (none, or refused): "GIFs are
+    /// unavailable in this version", without Retry.
+    func testNotConfiguredOffersNoRetry() async {
+        let d = FakeDevice()
+        d.gifDataError = BarkingError.Gif(kind: .notConfigured, retryAfterSecs: 0)
+        let l = loads(d)
+        l.configure(enabled: true, autoLoad: false, provider: klipy)
+        l.appeared(1, gif: gif)
+        XCTAssertTrue(l.load(1))
+        await eventually { l.state(1) != .loading }
+        XCTAssertEqual(l.state(1), .notConfigured)
+        XCTAssertFalse(l.load(1))
+        XCTAssertEqual(d.gifDataCalls.count, 1)
+        XCTAssertEqual(GifBubble.identifier(.notConfigured), "gifBubble.notConfigured")
+    }
+
     func testUnknownProviderAsksNothing() async {
         let d = FakeDevice()
         let l = loads(d)
@@ -439,6 +457,7 @@ final class GifBubbleStateTests: XCTestCase {
         XCTAssertEqual(caption(.gone), "GIF no longer available")
         XCTAssertEqual(caption(.failed), "Couldn't load · Retry")
         XCTAssertEqual(caption(.cannotLoad), "Couldn't load")
+        XCTAssertEqual(caption(.notConfigured), "GIFs are unavailable in this version")
         XCTAssertEqual(caption(.rateLimited(until: now.addingTimeInterval(60))), "Klipy is busy · Retry in 1 min")
         XCTAssertEqual(caption(.tapToLoad), "Tap to load")
         XCTAssertNil(caption(.loading))
@@ -456,6 +475,7 @@ final class GifBubbleStateTests: XCTestCase {
         XCTAssertNil(GifBubble.hintKey(.cannotLoad, now: now))
         XCTAssertNil(GifBubble.hintKey(.gone, now: now))
         XCTAssertNil(GifBubble.hintKey(.unavailable, now: now))
+        XCTAssertNil(GifBubble.hintKey(.notConfigured, now: now))
     }
 
     func testBubbleStringsInFrench() throws {
@@ -463,7 +483,8 @@ final class GifBubbleStateTests: XCTestCase {
                                                 forLocalization: "fr").flatMap { NSDictionary(contentsOfFile: $0) })
         for key in ["GIF unavailable", "GIF · from %@, off", "Tap to load", "GIF no longer available",
                     "Couldn't load · Retry", "Couldn't load", "%@ is busy · Retry in %lld min", "Play GIFs automatically ›",
-                    "Double-tap to load", "GIFs are off", "GIF: %@", "Plays the GIF.", "Play"] {
+                    "Double-tap to load", "GIFs are off", "GIF: %@", "Plays the GIF.", "Play",
+                    "GIFs are unavailable in this version"] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }
     }
@@ -487,5 +508,8 @@ final class GifBubbleStateTests: XCTestCase {
         XCTAssertEqual(m.items.map(\.id), [1, 2, 3])
         XCTAssertEqual(m.items[0].gif, gif)
         XCTAssertNil(m.items[2].gif)
+        // Nothing to copy in a GIF; reply and react stay.
+        XCTAssertEqual(m.items.map(\.canCopy), [false, false, true])
+        XCTAssertEqual(m.items[1].canReplyOrReact, true)
     }
 }
