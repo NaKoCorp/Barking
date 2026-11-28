@@ -94,6 +94,14 @@ pub fn url_allowed(provider: &dyn GifProvider, url: &Url) -> bool {
         && matches!(url.host(), Some(url::Host::Domain(h)) if provider.hosts().contains(&h))
 }
 
+/// Whether `url` may be fetched as a picker preview: as [`url_allowed`],
+/// with the host one of the provider's media hosts, never its API host.
+#[must_use]
+pub fn media_url_allowed(provider: &dyn GifProvider, url: &Url) -> bool {
+    url_allowed(provider, url)
+        && matches!(url.host(), Some(url::Host::Domain(h)) if provider.media_hosts().contains(&h))
+}
+
 /// The provider used for search and trending.
 pub const ACTIVE_GIF_PROVIDER: GifProviderId = GifProviderId::Klipy;
 
@@ -175,7 +183,8 @@ pub async fn search(
     Ok(page)
 }
 
-/// One page of trending GIFs. Not counted as a search.
+/// One page of trending GIFs. Counted as a search once it succeeded, so
+/// Transparency's count of calls to the provider is exact.
 ///
 /// # Errors
 /// As [`search`].
@@ -190,7 +199,9 @@ pub async fn trending(
     let body = t
         .get(&provider.trending_url(&key, page), MAX_GIF_BYTES)
         .await?;
-    provider.parse_page(&body)
+    let page = provider.parse_page(&body)?;
+    g.record(GifUse::Search);
+    Ok(page)
 }
 
 /// Resolves the GIF `id` of `provider` and downloads its MP4. Consent is
@@ -238,8 +249,8 @@ pub async fn data(
 
 /// Fetches a picker preview (`GifResult::preview_mp4`, given back as a
 /// string by the app) from the active provider. Consent is checked right
-/// before the request; the URL must be one of the provider's hosts, HTTPS
-/// on 443 ([`url_allowed`]), and is used as given. Counts a preview on
+/// before the request; the URL must be on one of the provider's media
+/// hosts, HTTPS on 443 ([`media_url_allowed`]), and is used as given. Counts a preview on
 /// success. No key is needed: media hosts are public.
 ///
 /// # Errors
@@ -254,7 +265,7 @@ pub async fn preview(
 ) -> Result<Vec<u8>, GifError> {
     let provider = provider_of(ACTIVE_GIF_PROVIDER);
     let url = Url::parse(url).map_err(|_| GifError::Malformed)?;
-    if !url_allowed(provider, &url) {
+    if !media_url_allowed(provider, &url) {
         return Err(GifError::Malformed);
     }
     if !g.allowed(ACTIVE_GIF_PROVIDER.as_u8()) {
@@ -490,13 +501,15 @@ mod tests {
         let page = search(&g, &keys(), &t, "hi", 1).await.unwrap();
         assert!(!page.results.is_empty());
         assert_eq!(g.uses(), vec![GifUse::Search]);
-        // Trending is not a search; a failed search is not counted.
+        // Trending is a call to the provider too, counted as a search, so
+        // Transparency's total is exact; a failed search is not counted.
         trending(&g, &keys(), &t, 1).await.unwrap();
+        assert_eq!(g.uses(), vec![GifUse::Search, GifUse::Search]);
         assert_eq!(
             search(&g, &keys(), &t, "hi", 1).await.err(),
             Some(GifError::Unreachable)
         );
-        assert_eq!(g.uses(), vec![GifUse::Search]);
+        assert_eq!(g.uses(), vec![GifUse::Search, GifUse::Search]);
     }
 
     const PREVIEW: &str = "https://static.klipy.com/ii/abc/preview.mp4";
@@ -538,6 +551,9 @@ mod tests {
             "https://user@static.klipy.com/a.mp4",
             "https://static.klipy.com.evil.net/a.mp4",
             "https://cdn.example.com/a.mp4",
+            // The API host is the provider's, but never a preview's.
+            "https://api.klipy.com/a.mp4",
+            "https://api.klipy.com/api/v1/KEY/gifs/trending",
         ] {
             assert_eq!(
                 preview(&g, &t, bad).await.err(),

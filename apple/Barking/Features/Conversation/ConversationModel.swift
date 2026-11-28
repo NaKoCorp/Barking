@@ -552,7 +552,13 @@ final class ConversationModel {
     /// True once the core queued it; false while another send runs.
     @discardableResult
     func sendGif(_ gif: GifInfo) async -> Bool {
-        guard !sending, !removed else {
+        // Never "Try again" when it cannot work: a removed device or
+        // contact says so in the app's own words.
+        guard !removed else {
+            sendError = Self.deviceRemovedText
+            return false
+        }
+        guard !sending else {
             sendError = "Not sent. Try again in a moment."
             return false
         }
@@ -570,11 +576,21 @@ final class ConversationModel {
             if let rows { show(rows) }
             Task { await reload() }
             return true
+        } catch BarkingError.DeviceRemoved {
+            removed = true
+            sendError = Self.deviceRemovedText
+            return false
+        } catch BarkingError.NotFound {
+            notice = .contactRemoved
+            return false
         } catch {
             sendError = "Not sent. Try again in a moment."
             return false
         }
     }
+
+    /// The removed-device banner's title (Settings, Chats), localized by the view.
+    static let deviceRemovedText = "This device was removed from your account"
 
     /// "Use GIFs" was not stored (spec GIF §9.2): said where sends fail.
     func gifsNotSaved() { sendError = "Not saved. Try again." }

@@ -18,6 +18,9 @@ pub trait GifProvider: Send + Sync {
     fn privacy_url(&self) -> &'static str;
     /// The only hosts ever contacted for this provider, API and media.
     fn hosts(&self) -> &'static [&'static str];
+    /// The hosts serving media only (a subset of [`Self::hosts`]): the
+    /// only ones a picker preview may be fetched from.
+    fn media_hosts(&self) -> &'static [&'static str];
     /// Whether `id` has the format of an identifier of this provider.
     fn validate_id(&self, id: &str) -> bool;
     /// Search request. `key` is the app's key for this provider.

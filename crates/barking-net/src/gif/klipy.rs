@@ -200,6 +200,10 @@ impl GifProvider for Klipy {
         HOSTS
     }
 
+    fn media_hosts(&self) -> &'static [&'static str] {
+        &HOSTS[1..]
+    }
+
     fn warning_version(&self) -> u16 {
         WARNING_VERSION
     }
@@ -377,6 +381,10 @@ mod tests {
                 "static1.klipy.com",
                 "static2.klipy.com"
             ]
+        );
+        assert_eq!(
+            klipy().media_hosts(),
+            &["static.klipy.com", "static1.klipy.com", "static2.klipy.com"]
         );
         assert_eq!(klipy().id(), GifProviderId::Klipy);
         assert!(klipy().warning_version() >= barking_core::gif::MIN_GIF_WARNING_VERSION);

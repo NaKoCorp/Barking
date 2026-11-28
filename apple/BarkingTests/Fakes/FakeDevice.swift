@@ -735,8 +735,11 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _gifPreviews: [String] = []
     /// The URLs `gifPreview` was called with.
     var gifPreviews: [String] { lock.withLock { _gifPreviews } }
+    /// How long `gifPreview` takes (a request on the way).
+    var gifPreviewDelay: TimeInterval = 0
     func gifPreview(url: String) throws -> Data {
         lock.withLock { _gifPreviews.append(url) }
+        if gifPreviewDelay > 0 { Thread.sleep(forTimeInterval: gifPreviewDelay) }
         if let gifPreviewError { throw gifPreviewError }
         return gifPreviewData
     }

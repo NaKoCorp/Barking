@@ -45,6 +45,10 @@ final class GifPickerModel {
     /// The previews of the results shown now, in memory only; emptied at
     /// each new request and when the picker closes.
     private var previews: [String: Data] = [:]
+    /// The previews on the way, by URL: a cell that scrolls out and back
+    /// joins its request instead of starting a second one. Emptied with
+    /// `previews`.
+    private var inFlight: [String: Task<Data?, Never>] = [:]
     /// The latest request: an older reply arriving later is dropped (a
     /// device call cannot be cancelled).
     private var generation = 0
@@ -71,22 +75,47 @@ final class GifPickerModel {
         pending = nil
         generation += 1
         previews = [:]
+        inFlight = [:]
     }
 
     /// A result's preview, fetched by the core (spec GIF §6.2): consent is
     /// checked right before the request and the request is counted in
-    /// Transparency. Nil if it failed, or if the cell or the results it
-    /// belongs to went meanwhile. GIFs turned off meanwhile close the picker.
+    /// Transparency. One request per URL and page: a call while the same
+    /// URL is on the way waits for it. A cell gone before its request
+    /// started sends nothing; one gone during it lets the request finish
+    /// (a device call cannot be cancelled) and the preview is kept for the
+    /// page. Nil if it failed, or if the cell or the results it belongs to
+    /// went meanwhile. GIFs turned off meanwhile close the picker.
     func preview(_ url: String) async -> Data? {
         if let d = previews[url] { return d }
-        guard !done else { return nil }
+        guard !done, !Task.isCancelled else { return nil }
+        let request = inFlight[url] ?? start(url)
+        let d = await request.value
+        return Task.isCancelled ? nil : d
+    }
+
+    private func start(_ url: String) -> Task<Data?, Never> {
         let mine = generation
-        do {
-            let d = try await core.gifPreview(url)
-            guard mine == generation, !Task.isCancelled else { return nil }
+        let core = core
+        let request = Task<Data?, Never> { [weak self] in
+            let result: Result<Data, Error>
+            do { result = .success(try await core.gifPreview(url)) } catch { result = .failure(error) }
+            return self?.finish(url, result, generation: mine)
+        }
+        inFlight[url] = request
+        return request
+    }
+
+    /// Keeps a preview of the page still shown; a failure may be retried
+    /// when the cell comes back.
+    private func finish(_ url: String, _ result: Result<Data, Error>, generation mine: Int) -> Data? {
+        guard mine == generation else { return nil }
+        inFlight[url] = nil
+        switch result {
+        case .success(let d):
             previews[url] = d
             return d
-        } catch {
+        case .failure(let error):
             if case BarkingError.Gif(kind: .notEnabled, _) = error {
                 stop()
                 done = true
@@ -121,6 +150,7 @@ final class GifPickerModel {
         generation += 1
         // A new page: the previews of the last one are not kept.
         previews = [:]
+        inFlight = [:]
         let mine = generation
         guard isOnline() else {
             state = .offline

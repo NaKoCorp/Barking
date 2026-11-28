@@ -171,14 +171,49 @@ final class GifPickerModelTests: XCTestCase {
         XCTAssertEqual(d.gifPreviews.count, 1)
     }
 
-    /// A preview whose cell left meanwhile is not kept.
-    func testCancelledPreviewIsNotKept() async {
+    /// A cell gone before its preview started sends nothing.
+    func testCancelledBeforeStartSendsNothing() async {
         let d = FakeDevice()
         let m = model(d)
         let url = "https://static.klipy.com/a.mp4"
         let t = Task { await m.preview(url) }
         t.cancel()
-        _ = await t.value
+        let got = await t.value
+        XCTAssertNil(got)
+        XCTAssertEqual(d.gifPreviews, [])
+    }
+
+    /// A cell that scrolls out and back while its preview is on the way
+    /// joins that request: one call to the provider, not two.
+    func testPreviewInFlightIsShared() async {
+        let d = FakeDevice()
+        d.gifPreviewDelay = 0.3
+        let m = model(d)
+        let url = "https://static.klipy.com/a.mp4"
+        let first = Task { await m.preview(url) }
+        await eventually { d.gifPreviews.count == 1 }
+        // The first cell leaves; its request keeps going in the core.
+        first.cancel()
+        let again = await m.preview(url)
+        XCTAssertEqual(again, Data("MP4".utf8))
+        XCTAssertEqual(d.gifPreviews, [url])
+        // Done and kept for this page: scrolling back again sends nothing.
+        _ = await m.preview(url)
+        XCTAssertEqual(d.gifPreviews, [url])
+    }
+
+    /// A new page forgets requests on the way too: the old reply is dropped
+    /// and the URL is fetched again for the new page.
+    func testNewPageForgetsPreviewsInFlight() async {
+        let d = FakeDevice()
+        d.gifPreviewDelay = 0.2
+        let m = model(d)
+        let url = "https://static.klipy.com/a.mp4"
+        let old = Task { await m.preview(url) }
+        await eventually { d.gifPreviews.count == 1 }
+        await m.run("cat")
+        let stale = await old.value
+        XCTAssertNil(stale)
         _ = await m.preview(url)
         XCTAssertEqual(d.gifPreviews, [url, url])
     }
@@ -267,6 +302,41 @@ final class GifPickerModelTests: XCTestCase {
         XCTAssertFalse(ok)
         XCTAssertTrue(d.gifSent.isEmpty)
         XCTAssertEqual(m.sendError, "Not sent. Try again in a moment.")
+    }
+
+    /// This device was removed from the account: the GIF is refused with
+    /// the app's removed-device wording, never "Try again".
+    func testConversationGifOnRemovedDeviceSaysRemoved() async {
+        let d = FakeDevice()
+        d.contactList = [Contact(fingerprint: "b", alias: "bob", displayName: "Bob", verified: false)]
+        d.removedInfo = RemovedInfo(version: 3, at: 1)
+        let m = ConversationModel(contact: "b", core: CoreService(device: d, runner: DirectRunner()))
+        await m.onAppear()
+        let ok = await m.sendGif(GifInfo(provider: 1, id: "wave-9", width: 480, height: 270))
+        XCTAssertFalse(ok)
+        XCTAssertTrue(d.gifSent.isEmpty)
+        XCTAssertEqual(m.sendError, "This device was removed from your account")
+    }
+
+    /// Removed while the conversation was open: the core refuses it the
+    /// same way.
+    func testConversationGifRefusedAsRemovedByTheCore() async {
+        let (d, m) = await conversation()
+        d.sendError = BarkingError.DeviceRemoved
+        let ok = await m.sendGif(GifInfo(provider: 1, id: "wave-9", width: 480, height: 270))
+        XCTAssertFalse(ok)
+        XCTAssertEqual(m.sendError, "This device was removed from your account")
+    }
+
+    /// The contact was removed meanwhile: the conversation's own banner
+    /// says so, and no "Try again".
+    func testConversationGifToRemovedContactSaysSo() async {
+        let (d, m) = await conversation()
+        d.sendError = BarkingError.NotFound
+        let ok = await m.sendGif(GifInfo(provider: 1, id: "wave-9", width: 480, height: 270))
+        XCTAssertFalse(ok)
+        XCTAssertNil(m.sendError)
+        XCTAssertEqual(m.notice, .contactRemoved)
     }
 
     /// A refused send keeps the reply target and the delay, and says so.
