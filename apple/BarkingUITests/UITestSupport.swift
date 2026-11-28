@@ -90,14 +90,28 @@ extension XCUIElement {
     }
 }
 
-/// From the chats of a seeded app, opens the conversation with Sam and
-/// returns its message field.
+/// From a seeded app, opens the conversation with Sam through his page
+/// under Contacts, without waiting for anything in it. Chats lists only
+/// conversations with a message: a freshly seeded Sam is under Contacts only.
+@MainActor
+func openSamConversation(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+    let contacts = app.tabBars.buttons["Contacts"]
+    XCTAssertTrue(contacts.waitForExistence(timeout: 10), "no Contacts tab", file: file, line: line)
+    contacts.tap()
+    let sam = app.staticTexts["Sam"].firstMatch
+    XCTAssertTrue(sam.waitForExistence(timeout: 10), "Sam is not in the contacts", file: file, line: line)
+    sam.tap()
+    let message = app.buttons["contact.message"]
+    XCTAssertTrue(message.waitForExistence(timeout: 5), "no Send a message on Sam's page", file: file, line: line)
+    message.tap()
+}
+
+/// From a seeded app, opens the conversation with Sam and returns its
+/// message field.
 @MainActor
 @discardableResult
 func openSamChat(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
-    let sam = app.staticTexts["Sam"].firstMatch
-    XCTAssertTrue(sam.waitForExistence(timeout: 10), "Sam is not in the chats", file: file, line: line)
-    sam.tap()
+    openSamConversation(app, file: file, line: line)
     let field = app.textFields["Message"]
     XCTAssertTrue(field.waitForExistence(timeout: 5), "no message field", file: file, line: line)
     return field

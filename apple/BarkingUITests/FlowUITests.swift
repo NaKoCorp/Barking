@@ -256,9 +256,7 @@ final class ChatUITests: XCTestCase {
         let app = XCUIApplication.seeded(extra: ["-BarkingUITestEphemeral"])
         app.launch()
         // Not `openSamChat`: its wait for the field can outlast the bubble.
-        let sam = app.staticTexts["Sam"].firstMatch
-        XCTAssertTrue(sam.waitForExistence(timeout: 10), "Sam is not in the chats")
-        sam.tap()
+        openSamConversation(app)
         let bubble = app.staticTexts["This one disappears"]
         XCTAssertTrue(bubble.waitForExistence(timeout: 5), "the ephemeral shows first")
         XCTAssertTrue(bubble.waitUntil({ !$0.exists }, timeout: 15), "gone within 15 s")
