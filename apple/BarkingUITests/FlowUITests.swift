@@ -201,6 +201,32 @@ final class ChatUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["conversation.unverified"].exists)
     }
 
+    /// The mark waits for the core's lock while a sync holds it. The tap is
+    /// answered at once (spinner, "They don't match" off), past a second the
+    /// screen says why, more taps change nothing, and the mark lands once
+    /// the sync ends.
+    func testMatchDuringASyncSaysItWaits() throws {
+        let app = XCUIApplication.seeded(card: nil, extra: ["-BarkingUITestOpenCard", samCard, "-BarkingUITestSlowSync"])
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Sam"].waitForExistence(timeout: 10))
+        app.buttons["Add"].tap()
+        let match = app.buttons["contact.match"]
+        XCTAssertTrue(match.waitForExistence(timeout: 5))
+        for _ in 0..<6 where !match.isHittable { app.swipeUp() }
+        match.tap()
+        XCTAssertEqual(match.value as? String, "In progress")
+        XCTAssertFalse(app.buttons["They don't match"].isEnabled)
+        let waiting = app.staticTexts["contact.verify.waiting"]
+        XCTAssertTrue(waiting.waitForExistence(timeout: 4))
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "verify-waiting"
+        shot.lifetime = .keepAlways
+        add(shot)
+        match.tap()
+        XCTAssertTrue(app.textFields["Message"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.descendants(matching: .any)["conversation.unverified"].exists)
+    }
+
     /// Spec Lot M §6.4: a tap on a sent bubble opens its sheet; its delete
     /// asks first (§7.4), then the sheet closes and the bubble leaves. (The
     /// dialog's "Keep" is not exposed: iOS 26 hides the cancel action of an

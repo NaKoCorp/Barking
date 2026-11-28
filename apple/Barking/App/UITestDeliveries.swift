@@ -172,6 +172,8 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private var fakeRemoved: Set<String> = []
     /// `-BarkingUITestSlowSync`.
     private let slowSync: Bool
+    /// The core's lock under the slow sync: held for its whole run.
+    private let coreGate = NSLock()
     /// `-BarkingUITestRequests`: the faked requests, nil without the flag.
     private var fakeRequests: [ContactRequestInfo]?
     /// The requests accepted so far, as contacts.
@@ -665,8 +667,16 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func removeContact(contact: String) throws { try device.removeContact(contact: contact) }
     func setDraft(contact: String, text: String) throws { try device.setDraft(contact: contact, text: text) }
     func draft(contact: String) throws -> String? { try device.draft(contact: contact) }
-    func markVerified(contact: String) throws { try device.markVerified(contact: contact) }
-    func unmarkVerified(contact: String) throws { try device.unmarkVerified(contact: contact) }
+    /// Writes wait for the core's lock while the slow sync holds it, as in
+    /// barking-ffi (`with_core`).
+    func markVerified(contact: String) throws {
+        if slowSync { coreGate.lock(); coreGate.unlock() }
+        try device.markVerified(contact: contact)
+    }
+    func unmarkVerified(contact: String) throws {
+        if slowSync { coreGate.lock(); coreGate.unlock() }
+        try device.unmarkVerified(contact: contact)
+    }
     func blockContact(contact: String) throws { try device.blockContact(contact: contact) }
     func unblockContact(contact: String) throws {
         let faked = lock.withLock { () -> Bool in
@@ -691,6 +701,8 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func contactDevices(contact: String) throws -> [MyDeviceInfo] { try device.contactDevices(contact: contact) }
     func sync(deadlineMs: UInt64) throws -> SyncSummary {
         if slowSync {
+            coreGate.lock()
+            defer { coreGate.unlock() }
             Thread.sleep(forTimeInterval: Self.slowSyncSecs)
             return Self.offline
         }

@@ -285,6 +285,9 @@
 /* Buttons: VoiceOver value while the action runs. */
 "In progress" = "En cours";
 
+/* Safety code: the mark waits for the sync that holds the database. */
+"Saving once the sync in progress ends" = "Enregistrement dès la fin de la synchronisation en cours";
+
 /* UI review B2: forms and fields. */
 "Type your name to continue." = "Indiquez votre nom pour continuer.";
 "Name this device to continue." = "Nommez cet appareil pour continuer.";

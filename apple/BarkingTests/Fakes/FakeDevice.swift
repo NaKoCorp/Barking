@@ -132,11 +132,24 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         Thread.sleep(forTimeInterval: draftDelay)
         return lock.withLock { _drafts[contact] }
     }
+    /// Slows markVerified / unmarkVerified down.
+    var verifyDelay: TimeInterval = 0
+    private var _verifyCalls = 0
+    /// How many times markVerified / unmarkVerified ran, failed ones included.
+    var verifyCalls: Int { lock.withLock { _verifyCalls } }
+    /// Writes: they wait for the core's lock while a sync holds it
+    /// (`networkDelay`), as in barking-ffi.
     func markVerified(contact: String) throws {
+        if networkDelay > 0 { coreGate.lock(); coreGate.unlock() }
+        Thread.sleep(forTimeInterval: verifyDelay)
+        lock.withLock { _verifyCalls += 1 }
         if let verifyError { throw verifyError }
         verified.insert(contact)
     }
     func unmarkVerified(contact: String) throws {
+        if networkDelay > 0 { coreGate.lock(); coreGate.unlock() }
+        Thread.sleep(forTimeInterval: verifyDelay)
+        lock.withLock { _verifyCalls += 1 }
         if let verifyError { throw verifyError }
         verified.remove(contact)
     }
