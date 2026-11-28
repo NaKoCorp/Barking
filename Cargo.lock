@@ -242,7 +242,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "barking-cli"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "argon2",
  "assert_cmd",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "barking-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "barking-packet",
  "bip39",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "barking-dht"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "barking-packet",
  "barking-proto",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "barking-ffi"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "barking-core",
  "barking-net",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "barking-net"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "barking-core",
  "barking-dht",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "barking-node"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "barking-core",
  "barking-dht",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "barking-packet"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "blake3",
  "proptest",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "barking-proto"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "barking-packet",
  "blake3",
@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "barking-push"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "barking-proto",
  "barking-push",
