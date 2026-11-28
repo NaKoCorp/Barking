@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0](https://github.com/NaKoCorp/Barking/compare/v0.8.0...v0.9.0) (2026-11-28)
+
+
+### Features
+
+* GIFs from Klipy, off by default, called directly from the phone ([#98](https://github.com/NaKoCorp/Barking/issues/98)) ([c0632b3](https://github.com/NaKoCorp/Barking/commit/c0632b307cfef1540fa9039eaf85e533a50cad00))
+
+
+### Bug Fixes
+
+* **ios:** open Sam from Contacts in the localised tour ([#101](https://github.com/NaKoCorp/Barking/issues/101)) ([7146e88](https://github.com/NaKoCorp/Barking/commit/7146e88f939a77877bad9d5215c5b569add961e8))
+* **ios:** open Sam's conversation from Contacts in UI tests ([#99](https://github.com/NaKoCorp/Barking/issues/99)) ([316871b](https://github.com/NaKoCorp/Barking/commit/316871bf9ece17fff03cf267db8c9515d467e1b3))
+
 ## [0.8.0](https://github.com/NaKoCorp/Barking/compare/v0.7.0...v0.8.0) (2026-11-28)
 
 
