@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/NaKoCorp/Barking/compare/v0.9.0...v0.9.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **ios:** answer the verify tap at once and ignore repeat taps ([#102](https://github.com/NaKoCorp/Barking/issues/102)) ([7fc9fe0](https://github.com/NaKoCorp/Barking/commit/7fc9fe0008bd2cd5256326e3d7a57d13a6ea9246))
+
 ## [0.9.0](https://github.com/NaKoCorp/Barking/compare/v0.8.0...v0.9.0) (2026-11-28)
 
 
