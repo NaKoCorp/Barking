@@ -211,20 +211,31 @@ struct SafetyCodeView: View {
                 .accessibilityElement(children: .combine)
             } else if model.verified {
                 Text("✓ verified · safety code matched").font(.bBody).foregroundStyle(Color.ok)
-                SecondaryButton("Remove the verified mark") { Task { await model.undo(); feelFailure() } }
+                SecondaryButton("Remove the verified mark", isLoading: model.saving == .undo) {
+                    Task { await model.undo(); feelFailure() }
+                }
+                waitNote
             } else {
                 if model.mismatched {
                     // The advice stays once the sheet is closed.
                     Banner(kind: .danger, title: "The numbers do not match",
                            message: "Don't send anything sensitive yet. Compare again in person or on a call you trust.")
                 }
-                PrimaryButton("The numbers match") { Task { await model.match(); feelFailure() } }
-                SecondaryButton("They don't match") {
+                // The record can wait seconds behind a sync: the button
+                // answers the tap at once, and nothing else can be tapped.
+                PrimaryButton("The numbers match", isLoading: model.saving == .match, identifier: "contact.match") {
+                    Task { await model.match(); feelFailure() }
+                }
+                waitNote
+                SecondaryButton("They don't match", enabled: model.saving == nil) {
                     model.mismatch()
                     showsMismatch = true
                 }
             }
         }
+        // The tap is felt at once, before the record; success follows.
+        .sensoryFeedback(Haptic.send.feedback, trigger: model.saving) { _, now in now != nil }
+        .animation(.easeOut(duration: 0.2), value: model.waitingForSync)
     }
 }
 
@@ -259,6 +270,24 @@ private struct MismatchSheet: View {
 }
 
 extension SafetyCodeView {
+    /// Past a second behind a sync, why the spinner still turns: the tap
+    /// was taken, the record waits its turn. Said once to VoiceOver.
+    @ViewBuilder fileprivate var waitNote: some View {
+        if model.waitingForSync {
+            Text("Saving once the sync in progress ends")
+                .font(.bBodySmall).foregroundStyle(Color.fgMuted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
+                .transition(.opacity)
+                .onAppear {
+                    AccessibilityNotification.Announcement(
+                        String(localized: "Saving once the sync in progress ends")).post()
+                }
+                .accessibilityIdentifier("contact.verify.waiting")
+        }
+    }
+
     /// "Saved" only once the core holds the alias; otherwise say so.
     fileprivate func saveAlias() async {
         let wanted = aliasDraft.trimmingCharacters(in: .whitespaces)

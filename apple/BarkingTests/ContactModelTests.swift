@@ -42,6 +42,72 @@ final class ContactModelTests: XCTestCase {
         XCTAssertTrue(m.saveFailed)
     }
 
+    /// A write waits for the core's lock while a sync holds it, for seconds.
+    /// The tap is answered at once, and more taps record nothing more: each
+    /// call would send my other devices one more sync packet.
+    func testMatchIsSavingAtOnceAndTapsAgainAreIgnored() async {
+        let d = FakeDevice()
+        d.verifyDelay = 0.3
+        let m = make(d)
+        await m.load()
+        let first = Task { await m.match() }
+        await Task.yield()
+        XCTAssertEqual(m.saving, .match)
+        await m.match()
+        await m.undo()
+        await first.value
+        XCTAssertEqual(d.verifyCalls, 1)
+        XCTAssertNil(m.saving)
+        XCTAssertTrue(m.justVerified)
+    }
+
+    func testUndoIsSavingAndClearedEvenWhenItFails() async {
+        let d = FakeDevice()
+        let m = make(d)
+        await m.load()
+        await m.match()
+        d.verifyDelay = 0.2
+        d.verifyError = NSError(domain: "test", code: 1)
+        let undo = Task { await m.undo() }
+        await Task.yield()
+        XCTAssertEqual(m.saving, .undo)
+        await undo.value
+        XCTAssertNil(m.saving, "cleared when the call ends, even failed")
+        XCTAssertTrue(m.saveFailed)
+    }
+
+    /// Past `slowAfter`, a save stuck behind a sync says why; a slow save
+    /// with no sync running adds nothing to the spinner.
+    func testWaitingForSyncOnlyWhileASyncHoldsTheCore() async {
+        let d = FakeDevice()
+        d.networkDelay = 0.8
+        let core = CoreService(device: d, runner: DirectRunner())
+        d.contactList = [Contact(fingerprint: "zab2-2ccf-kzfa-fsms-5gfi", alias: nil, displayName: "Maya", verified: false)]
+        let m = ContactModel(contact: "zab2-2ccf-kzfa-fsms-5gfi", core: core, slowAfter: .milliseconds(100))
+        await m.load()
+        let sync = Task { await core.sync(reason: .pull) }
+        try? await Task.sleep(for: .milliseconds(100))
+        let match = Task { await m.match() }
+        try? await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(m.saving, .match)
+        XCTAssertTrue(m.waitingForSync)
+        _ = await sync.value
+        await match.value
+        XCTAssertFalse(m.waitingForSync)
+        XCTAssertTrue(m.verified)
+
+        let quiet = FakeDevice()
+        quiet.verifyDelay = 0.5
+        quiet.contactList = d.contactList
+        let n = ContactModel(contact: "zab2-2ccf-kzfa-fsms-5gfi", core: CoreService(device: quiet, runner: DirectRunner()),
+                             slowAfter: .milliseconds(100))
+        let slow = Task { await n.match() }
+        try? await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(n.saving, .match)
+        XCTAssertFalse(n.waitingForSync)
+        await slow.value
+    }
+
     func testMismatchDoesNotVerify() async {
         let d = FakeDevice()
         let m = make(d)

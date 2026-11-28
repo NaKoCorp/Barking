@@ -164,9 +164,9 @@ struct SecondaryButton: View {
     let state: ButtonState
     let action: () -> Void
 
-    init(_ title: LocalizedStringKey, enabled: Bool = true, action: @escaping () -> Void) {
+    init(_ title: LocalizedStringKey, enabled: Bool = true, isLoading: Bool = false, action: @escaping () -> Void) {
         self.title = title
-        self.state = ButtonState(enabled: enabled, isLoading: false)
+        self.state = ButtonState(enabled: enabled, isLoading: isLoading)
         self.action = action
     }
 
@@ -174,6 +174,7 @@ struct SecondaryButton: View {
         Button(action: action) { ButtonLabel(title: title, kind: .secondary, state: state) }
             .buttonStyle(BarkingButtonStyle(kind: .secondary, state: state))
             .disabled(!state.isInteractive)
+            .accessibilityValue(state == .loading ? Text("In progress") : Text(verbatim: ""))
     }
 }
 

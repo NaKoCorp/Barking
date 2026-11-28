@@ -27,12 +27,24 @@ final class ContactModel {
     /// The card is too large for an invitation: a retry cannot help, the
     /// contact must scan my code instead.
     private(set) var resendTooLarge = false
+    /// The mark or its removal being recorded. A write waits for the core's
+    /// lock while a sync holds it, for seconds: the screen answers the tap
+    /// at once, and further taps record nothing (each would send my other
+    /// devices one more sync packet).
+    private(set) var saving: Saving?
+    /// The save has waited `slowAfter` behind a sync: the screen says why.
+    private(set) var waitingForSync = false
     private let now: () -> Date
+    private let slowAfter: Duration
 
-    init(contact: String, core: CoreService, now: @escaping () -> Date = Date.init) {
+    enum Saving: Equatable { case match, undo }
+
+    init(contact: String, core: CoreService, now: @escaping () -> Date = Date.init,
+         slowAfter: Duration = .seconds(1)) {
         self.contact = contact
         self.core = core
         self.now = now
+        self.slowAfter = slowAfter
     }
 
     /// A day between two invitations, as the core counts it.
@@ -129,18 +141,36 @@ final class ContactModel {
     }
 
     func match() async {
-        guard (try? await core.markVerified(contact)) != nil else { saveFailed = true; return }
-        saveFailed = false
+        guard await save(.match, { try await $0.markVerified($1) }) else { return }
         verified = true
         justVerified = true
         mismatched = false
     }
 
     func undo() async {
-        guard (try? await core.unmarkVerified(contact)) != nil else { saveFailed = true; return }
-        saveFailed = false
+        guard await save(.undo, { try await $0.unmarkVerified($1) }) else { return }
         verified = false
         justVerified = false
+    }
+
+    /// Runs one mark or unmark at a time; false if another runs or the core
+    /// did not record it (`saveFailed`).
+    private func save(_ kind: Saving, _ write: @escaping (CoreService, String) async throws -> Void) async -> Bool {
+        guard saving == nil else { return false }
+        saving = kind
+        saveFailed = false
+        let watch = Task { [core, slowAfter] in
+            try? await Task.sleep(for: slowAfter)
+            guard !Task.isCancelled, await core.isSyncing else { return }
+            self.waitingForSync = true
+        }
+        defer {
+            watch.cancel()
+            saving = nil
+            waitingForSync = false
+        }
+        guard (try? await write(core, contact)) != nil else { saveFailed = true; return false }
+        return true
     }
 
     func mismatch() { mismatched = true }
