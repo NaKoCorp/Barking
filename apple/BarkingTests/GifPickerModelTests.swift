@@ -140,29 +140,47 @@ final class GifPickerModelTests: XCTestCase {
 
     // MARK: Previews
 
-    /// Only Klipy's media hosts, over HTTPS on 443, without user info.
-    func testPreviewURLPolicy() {
-        for ok in ["https://static.klipy.com/a.mp4", "https://static1.klipy.com/x/y.mp4",
-                   "https://static2.klipy.com/b.mp4", "https://static.klipy.com:443/c.mp4"] {
-            XCTAssertNotNil(GifPreviewPolicy.url(ok), ok)
-        }
-        for bad in ["", "http://static.klipy.com/a.mp4", "https://api.klipy.com/a.mp4",
-                    "https://static.klipy.com:8443/a.mp4", "https://user@static.klipy.com/a.mp4",
-                    "https://static.klipy.com.evil.net/a.mp4", "https://cdn.example.com/a.mp4",
-                    "file:///tmp/a.mp4", "https://STATIC.klipy.com.example/a.mp4"] {
-            XCTAssertNil(GifPreviewPolicy.url(bad), bad)
-        }
+    /// A preview comes from the core (consent, hosts and count are its
+    /// job), once per URL while the page is shown.
+    func testPreviewThroughTheCoreOncePerPage() async {
+        let d = FakeDevice()
+        let m = model(d)
+        let url = "https://static.klipy.com/a.mp4"
+        let first = await m.preview(url)
+        let again = await m.preview(url)
+        XCTAssertEqual(first, Data("MP4".utf8))
+        XCTAssertEqual(again, first)
+        XCTAssertEqual(d.gifPreviews, [url])
+        // A new request: the previews of the old page are not kept.
+        await m.run("cat")
+        _ = await m.preview(url)
+        XCTAssertEqual(d.gifPreviews, [url, url])
     }
 
-    /// No cookie, no cache, a fixed user agent.
-    func testPreviewSessionKeepsNothing() {
-        let c = GifPreviewLoader.configuration()
-        XCTAssertNil(c.urlCache)
-        XCTAssertNil(c.httpCookieStorage)
-        XCTAssertNil(c.urlCredentialStorage)
-        XCTAssertFalse(c.httpShouldSetCookies)
-        XCTAssertEqual(c.requestCachePolicy, .reloadIgnoringLocalCacheData)
-        XCTAssertEqual(c.httpAdditionalHeaders?["User-Agent"] as? String, "Barking")
+    /// GIFs turned off while the picker is open: the core refuses the
+    /// preview and the picker closes.
+    func testPreviewRefusedClosesThePicker() async {
+        let d = FakeDevice()
+        d.gifPreviewError = BarkingError.Gif(kind: .notEnabled, retryAfterSecs: 0)
+        let m = model(d)
+        let got = await m.preview("https://static.klipy.com/a.mp4")
+        XCTAssertNil(got)
+        XCTAssertTrue(m.done)
+        // Closed: no further request.
+        _ = await m.preview("https://static.klipy.com/b.mp4")
+        XCTAssertEqual(d.gifPreviews.count, 1)
+    }
+
+    /// A preview whose cell left meanwhile is not kept.
+    func testCancelledPreviewIsNotKept() async {
+        let d = FakeDevice()
+        let m = model(d)
+        let url = "https://static.klipy.com/a.mp4"
+        let t = Task { await m.preview(url) }
+        t.cancel()
+        _ = await t.value
+        _ = await m.preview(url)
+        XCTAssertEqual(d.gifPreviews, [url, url])
     }
 
     // MARK: Player
@@ -235,6 +253,20 @@ final class GifPickerModelTests: XCTestCase {
         XCTAssertNil(m.replyingTo)
         XCTAssertNil(m.ttl)
         XCTAssertEqual(m.draft, "half typed")
+    }
+
+    /// A GIF tapped while another send runs is not sent, and says so.
+    func testConversationGifRefusedWhileSendingSaysSo() async {
+        let (d, m) = await conversation()
+        d.syncDelay = 0.3
+        m.draft = "text first"
+        async let text: Void = m.send()
+        try? await Task.sleep(for: .milliseconds(50))
+        let ok = await m.sendGif(GifInfo(provider: 1, id: "wave-9", width: 480, height: 270))
+        await text
+        XCTAssertFalse(ok)
+        XCTAssertTrue(d.gifSent.isEmpty)
+        XCTAssertEqual(m.sendError, "Not sent. Try again in a moment.")
     }
 
     /// A refused send keeps the reply target and the delay, and says so.

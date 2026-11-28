@@ -72,7 +72,7 @@ import Foundation
 /// - `-BarkingUITestGifResults`: search and trending answer a fixed page of
 ///   four GIFs, without contacting any provider, and only while GIFs are on
 ///   in the real core (otherwise `notEnabled`, as the core answers). Their
-///   preview URLs are outside Klipy's hosts: no preview is fetched.
+///   preview URLs are outside Klipy's hosts: the core refuses to fetch them.
 ///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
@@ -845,6 +845,7 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         return GifPageInfo(results: results, next: nil)
     }
     func gifData(provider: UInt8, id: String) throws -> GifMediaInfo { try device.gifData(provider: provider, id: id) }
+    func gifPreview(url: String) throws -> Data { try device.gifPreview(url: url) }
     func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws {
         try device.sendGif(contact: contact, gif: gif, replyTo: replyTo, ttlSecs: ttlSecs)
     }

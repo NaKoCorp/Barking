@@ -120,6 +120,8 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func gifSearch(query: String, page: UInt32) throws -> GifPageInfo
     func gifTrending(page: UInt32) throws -> GifPageInfo
     func gifData(provider: UInt8, id: String) throws -> GifMediaInfo
+    /// A picker preview, fetched by the core with consent checked first.
+    func gifPreview(url: String) throws -> Data
     func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws
     func gifUsage(days: UInt8) throws -> [GifUsageDayInfo]
 }

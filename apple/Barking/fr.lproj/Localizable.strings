@@ -789,3 +789,4 @@
 "%@ is unreachable · Retry" = "%@ est injoignable · Réessayer";
 "%@ is busy · Try again in a minute" = "%@ est surchargé · Réessaie dans une minute";
 "Sends this GIF." = "Envoie ce GIF.";
+"No GIFs" = "Aucun GIF";

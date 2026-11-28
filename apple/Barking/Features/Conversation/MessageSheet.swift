@@ -461,6 +461,7 @@ final class PreviewSheetDevice: DeviceHandle, @unchecked Sendable {
     func gifSearch(query: String, page: UInt32) throws -> GifPageInfo { throw Never() }
     func gifTrending(page: UInt32) throws -> GifPageInfo { throw Never() }
     func gifData(provider: UInt8, id: String) throws -> GifMediaInfo { throw Never() }
+    func gifPreview(url: String) throws -> Data { throw Never() }
     func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws { throw Never() }
     func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] { throw Never() }
 }

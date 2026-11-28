@@ -552,7 +552,10 @@ final class ConversationModel {
     /// True once the core queued it; false while another send runs.
     @discardableResult
     func sendGif(_ gif: GifInfo) async -> Bool {
-        guard !sending, !removed else { return false }
+        guard !sending, !removed else {
+            sendError = "Not sent. Try again in a moment."
+            return false
+        }
         sending = true
         defer { sending = false }
         sendError = nil
@@ -572,6 +575,9 @@ final class ConversationModel {
             return false
         }
     }
+
+    /// "Use GIFs" was not stored (spec GIF §9.2): said where sends fail.
+    func gifsNotSaved() { sendError = "Not saved. Try again." }
 
     /// Starts answering the row `id`; ignored for a local row, a placeholder
     /// or a row not shown.

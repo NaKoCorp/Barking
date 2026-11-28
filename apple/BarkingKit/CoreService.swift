@@ -646,6 +646,10 @@ public actor CoreService {
     public func gifTrending(page: UInt32) async throws -> GifPageInfo {
         try await call("gif-trending") { try $0.gifTrending(page: page) }
     }
+    /// A picker preview's MP4, from the core (consent, hosts, counted).
+    public func gifPreview(_ url: String) async throws -> Data {
+        try await call("gif-preview") { try $0.gifPreview(url: url) }
+    }
     public func gifData(provider: UInt8, id: String) async throws -> GifMediaInfo {
         try await call("gif-data") { try $0.gifData(provider: provider, id: id) }
     }

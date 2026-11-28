@@ -267,7 +267,7 @@ struct ConversationView: View {
         guard let enabling else { return }
         self.enabling = nil
         Task {
-            if await enabling.value { gifSheet = .picker }
+            if await enabling.value { gifSheet = .picker } else { model.gifsNotSaved() }
         }
     }
 

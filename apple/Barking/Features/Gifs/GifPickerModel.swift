@@ -42,6 +42,9 @@ final class GifPickerModel {
     private let core: CoreService
     private let sendGif: @MainActor (GifInfo) async -> Bool
     private var pending: Task<Void, Never>?
+    /// The previews of the results shown now, in memory only; emptied at
+    /// each new request and when the picker closes.
+    private var previews: [String: Data] = [:]
     /// The latest request: an older reply arriving later is dropped (a
     /// device call cannot be cancelled).
     private var generation = 0
@@ -61,11 +64,35 @@ final class GifPickerModel {
         await run(query)
     }
 
-    /// Stops a search still waiting (the sheet closes).
+    /// Stops a search still waiting and forgets the previews (the sheet
+    /// closes, or GIFs were turned off).
     func stop() {
         pending?.cancel()
         pending = nil
         generation += 1
+        previews = [:]
+    }
+
+    /// A result's preview, fetched by the core (spec GIF §6.2): consent is
+    /// checked right before the request and the request is counted in
+    /// Transparency. Nil if it failed, or if the cell or the results it
+    /// belongs to went meanwhile. GIFs turned off meanwhile close the picker.
+    func preview(_ url: String) async -> Data? {
+        if let d = previews[url] { return d }
+        guard !done else { return nil }
+        let mine = generation
+        do {
+            let d = try await core.gifPreview(url)
+            guard mine == generation, !Task.isCancelled else { return nil }
+            previews[url] = d
+            return d
+        } catch {
+            if case BarkingError.Gif(kind: .notEnabled, _) = error {
+                stop()
+                done = true
+            }
+            return nil
+        }
     }
 
     /// Hands the GIF to the conversation, then closes; the conversation says
@@ -92,6 +119,8 @@ final class GifPickerModel {
     /// only if no later request started.
     func run(_ text: String) async {
         generation += 1
+        // A new page: the previews of the last one are not kept.
+        previews = [:]
         let mine = generation
         guard isOnline() else {
             state = .offline

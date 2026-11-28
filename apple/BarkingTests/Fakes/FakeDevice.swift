@@ -729,6 +729,17 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if let gifSearchError { throw gifSearchError }
         return gifPage
     }
+    /// What `gifPreview` answers; `gifPreviewError` is thrown first when set.
+    var gifPreviewData = Data("MP4".utf8)
+    var gifPreviewError: Error?
+    private var _gifPreviews: [String] = []
+    /// The URLs `gifPreview` was called with.
+    var gifPreviews: [String] { lock.withLock { _gifPreviews } }
+    func gifPreview(url: String) throws -> Data {
+        lock.withLock { _gifPreviews.append(url) }
+        if let gifPreviewError { throw gifPreviewError }
+        return gifPreviewData
+    }
     func gifData(provider: UInt8, id: String) throws -> GifMediaInfo {
         GifMediaInfo(mp4: Data(), author: nil, title: "")
     }

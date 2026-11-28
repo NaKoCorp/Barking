@@ -236,6 +236,38 @@ pub async fn data(
     })
 }
 
+/// Fetches a picker preview (`GifResult::preview_mp4`, given back as a
+/// string by the app) from the active provider. Consent is checked right
+/// before the request; the URL must be one of the provider's hosts, HTTPS
+/// on 443 ([`url_allowed`]), and is used as given. Counts a preview on
+/// success. No key is needed: media hosts are public.
+///
+/// # Errors
+/// `NotEnabled` without consent and `Malformed` for a URL this client may
+/// not fetch (nothing is sent in either case); `NotFound` for a preview
+/// the media host refuses or no longer serves; else what the transport
+/// gives.
+pub async fn preview(
+    g: &impl GifGate,
+    t: &impl GifTransport,
+    url: &str,
+) -> Result<Vec<u8>, GifError> {
+    let provider = provider_of(ACTIVE_GIF_PROVIDER);
+    let url = Url::parse(url).map_err(|_| GifError::Malformed)?;
+    if !url_allowed(provider, &url) {
+        return Err(GifError::Malformed);
+    }
+    if !g.allowed(ACTIVE_GIF_PROVIDER.as_u8()) {
+        return Err(GifError::NotEnabled);
+    }
+    let mp4 = t.get(&url, MAX_GIF_BYTES).await.map_err(|e| match e {
+        GifError::NotConfigured => GifError::NotFound,
+        e => e,
+    })?;
+    g.record(GifUse::Preview);
+    Ok(mp4)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -465,6 +497,70 @@ mod tests {
             Some(GifError::Unreachable)
         );
         assert_eq!(g.uses(), vec![GifUse::Search]);
+    }
+
+    const PREVIEW: &str = "https://static.klipy.com/ii/abc/preview.mp4";
+
+    #[tokio::test]
+    async fn gif_preview_fetches_and_counts() {
+        let g = FakeGate::on();
+        let t = FakeTransport::new([HttpReply::ok("MP4")]);
+        assert_eq!(preview(&g, &t, PREVIEW).await.unwrap(), b"MP4".to_vec());
+        assert_eq!(t.urls()[0].as_str(), PREVIEW);
+        assert_eq!(g.checks(), 1);
+        assert_eq!(g.uses(), vec![GifUse::Preview]);
+    }
+
+    /// GIFs turned off (by sync, in Settings) while the picker is open:
+    /// the next preview sends nothing.
+    #[tokio::test]
+    async fn gif_preview_refused_without_consent() {
+        let g = FakeGate::new(1);
+        let t = FakeTransport::new([HttpReply::ok("MP4"), HttpReply::ok("MP4")]);
+        preview(&g, &t, PREVIEW).await.unwrap();
+        assert_eq!(
+            preview(&g, &t, PREVIEW).await.err(),
+            Some(GifError::NotEnabled)
+        );
+        assert_eq!(t.calls(), 1);
+        assert_eq!(g.uses(), vec![GifUse::Preview]);
+    }
+
+    #[tokio::test]
+    async fn gif_preview_refuses_other_urls_without_call() {
+        let g = FakeGate::on();
+        let t = FakeTransport::new([HttpReply::ok("MP4")]);
+        for bad in [
+            "",
+            "not a url",
+            "http://static.klipy.com/a.mp4",
+            "https://static.klipy.com:8443/a.mp4",
+            "https://user@static.klipy.com/a.mp4",
+            "https://static.klipy.com.evil.net/a.mp4",
+            "https://cdn.example.com/a.mp4",
+        ] {
+            assert_eq!(
+                preview(&g, &t, bad).await.err(),
+                Some(GifError::Malformed),
+                "{bad}"
+            );
+        }
+        assert_eq!(t.calls(), 0);
+        assert_eq!(g.checks(), 0);
+    }
+
+    #[tokio::test]
+    async fn gif_preview_failure_is_not_counted() {
+        let g = FakeGate::on();
+        for (status, want) in [
+            (403, GifError::NotFound),
+            (404, GifError::NotFound),
+            (500, GifError::Unreachable),
+        ] {
+            let t = FakeTransport::new([HttpReply::status(status)]);
+            assert_eq!(preview(&g, &t, PREVIEW).await.err(), Some(want), "{status}");
+        }
+        assert!(g.uses().is_empty());
     }
 
     #[test]

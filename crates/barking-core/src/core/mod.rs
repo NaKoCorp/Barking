@@ -96,8 +96,12 @@ const META_LINKED_BUNDLES: &str = "linked_bundles";
 const META_LAST_POLLED: &str = "last_polled_day";
 /// GIF settings register (`gif.rs`): `(GifSettings, at, author device)`.
 const META_GIF_SETTINGS: &str = "gif/settings";
-/// Daily GIF usage counters (`gif.rs`): `Vec<GifUsageDay>`, device-local.
+/// Daily GIF usage counters (`gif.rs`), first format (four counters):
+/// read if [`META_GIF_USAGE_V2`] is absent, deleted at the next count.
 const META_GIF_USAGE: &str = "gif/usage";
+/// Daily GIF usage counters (`gif.rs`): `Vec<GifUsageDay>` with previews,
+/// device-local.
+const META_GIF_USAGE_V2: &str = "gif/usage/v2";
 /// Polling window: 8 days back, the current day and the next day = 10
 /// days, always. A packet's mailbox is fixed at its seal day, and a packet
 /// sealed offline may be deposited days later, up to its lifetime: the

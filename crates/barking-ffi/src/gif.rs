@@ -150,6 +150,8 @@ pub struct GifUsageDayInfo {
     pub searches: u32,
     pub shown: u32,
     pub sent: u32,
+    /// Picker previews fetched. Added last.
+    pub previews: u32,
 }
 
 /// Most GIF uses kept in memory while the database is busy; beyond it,
@@ -305,6 +307,16 @@ impl Device {
         Ok(gate.finish(r)?.into())
     }
 
+    pub(crate) fn preview_with(
+        &self,
+        t: &impl GifTransport,
+        url: &str,
+    ) -> Result<Vec<u8>, BarkingError> {
+        let gate = DeviceGate::new(self);
+        let r = crate::net::block_on(net::preview(&gate, t, url))?;
+        gate.finish(r)
+    }
+
     fn data_with(
         &self,
         t: &impl GifTransport,
@@ -417,6 +429,15 @@ impl Device {
         guard(|| self.data_with(&*self.gif_transport()?, provider, &id))
     }
 
+    /// The small MP4 of a picker result (`GifResultInfo::preview_mp4_url`,
+    /// as given), fetched by the core: consent checked right before the
+    /// request, the provider's hosts only, counted in `gif_usage`. Kept
+    /// nowhere. `Gif { NotEnabled }` without consent and
+    /// `Gif { Malformed }` for another URL: nothing is sent.
+    pub fn gif_preview(&self, url: String) -> Result<Vec<u8>, BarkingError> {
+        guard(|| self.preview_with(&*self.gif_transport()?, &url))
+    }
+
     /// Queues the GIF `gif` for `contact` (fingerprint or alias), as
     /// `send_text` a text: the same `reply_to` and `ttl_secs` rules. Only
     /// the reference leaves; no provider is contacted. An invalid reference:
@@ -453,6 +474,7 @@ impl Device {
                         searches: d.searches,
                         shown: d.shown,
                         sent: d.sent,
+                        previews: d.previews,
                     })
                     .collect())
             })
@@ -705,6 +727,57 @@ mod tests {
         assert!(d.gif_uncounted.lock().unwrap().is_empty());
         let day = d.gif_usage(1).unwrap()[0];
         assert_eq!((day.searches, day.shown), (1, 1));
+    }
+
+    /// A transport that answers every request with `body`, recording URLs.
+    struct Answer {
+        body: Vec<u8>,
+        urls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl GifTransport for Answer {
+        async fn get(&self, url: &Url, _max: usize) -> Result<Vec<u8>, GifError> {
+            self.urls.lock().unwrap().push(url.to_string());
+            Ok(self.body.clone())
+        }
+    }
+
+    const PREVIEW: &str = "https://static.klipy.com/ii/abc/preview.mp4";
+
+    /// A preview goes only with consent, and counts as a preview.
+    #[test]
+    fn ffi_gif_preview_gated_and_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = device(&dir, 1, "Alice");
+        let t = Answer {
+            body: b"MP4".to_vec(),
+            urls: std::sync::Mutex::default(),
+        };
+        assert!(is_gif_error(
+            d.preview_with(&t, PREVIEW),
+            GifErrorKind::NotEnabled
+        ));
+        assert!(is_gif_error(
+            d.gif_preview(PREVIEW.into()),
+            GifErrorKind::NotEnabled
+        ));
+        assert!(t.urls.lock().unwrap().is_empty());
+        d.enable_gif_provider(1, 1).unwrap();
+        assert_eq!(d.preview_with(&t, PREVIEW).unwrap(), b"MP4".to_vec());
+        assert!(is_gif_error(
+            d.preview_with(&t, "https://cdn.example.com/a.mp4"),
+            GifErrorKind::Malformed
+        ));
+        assert_eq!(t.urls.lock().unwrap().len(), 1);
+        let day = d.gif_usage(1).unwrap()[0];
+        assert_eq!((day.previews, day.searches), (1, 0));
+        // Turned off again: nothing more is sent.
+        d.disable_gif_provider(1).unwrap();
+        assert!(is_gif_error(
+            d.preview_with(&t, PREVIEW),
+            GifErrorKind::NotEnabled
+        ));
+        assert_eq!(t.urls.lock().unwrap().len(), 1);
     }
 
     fn my_device(id: u8, name: &str, this_device: bool) -> barking_core::MyDevice {

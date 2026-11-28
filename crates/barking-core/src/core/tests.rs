@@ -11969,6 +11969,7 @@ fn gif_send_receive_round_trip() {
             searches: 0,
             shown: 0,
             sent,
+            previews: 0,
         }]
     };
     assert_eq!(p.a.gif_usage(7).unwrap(), day(1));
@@ -12628,6 +12629,7 @@ fn usage_day(day: u32, searches: u32, shown: u32, sent: u32) -> GifUsageDay {
         searches,
         shown,
         sent,
+        previews: 0,
     }
 }
 
@@ -12669,7 +12671,7 @@ fn gif_usage_keeps_30_days() {
 fn gif_usage_saturates() {
     let (_d, mut a) = party("a", 1);
     a.store
-        .put_meta(META_GIF_USAGE, &vec![usage_day(0, u32::MAX, 0, 0)])
+        .put_meta(META_GIF_USAGE_V2, &vec![usage_day(0, u32::MAX, 0, 0)])
         .unwrap();
     a.record_gif_use(GifUse::Search, 1).unwrap();
     assert_eq!(a.gif_usage(1).unwrap(), [usage_day(0, u32::MAX, 0, 0)]);
@@ -12677,9 +12679,59 @@ fn gif_usage_saturates() {
 
 #[test]
 fn gif_usage_never_stores_content() {
-    // A row holds four numbers and nothing else.
+    // A row holds five numbers and nothing else.
     let (_d, mut a) = party("a", 1);
     a.record_gif_use(GifUse::Search, 1).unwrap();
-    let raw: Vec<GifUsageDay> = a.store.get_meta(META_GIF_USAGE).unwrap().unwrap();
-    assert_eq!(postcard::to_allocvec(&raw).unwrap().len(), 5);
+    let raw: Vec<GifUsageDay> = a.store.get_meta(META_GIF_USAGE_V2).unwrap().unwrap();
+    assert_eq!(postcard::to_allocvec(&raw).unwrap().len(), 6);
+}
+
+#[test]
+fn gif_usage_counts_previews() {
+    let (_d, mut a) = party("a", 1);
+    a.record_gif_use(GifUse::Preview, 10).unwrap();
+    a.record_gif_use(GifUse::Preview, 20).unwrap();
+    a.record_gif_use(GifUse::Search, 30).unwrap();
+    let rows = a.gif_usage(1).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].searches, rows[0].previews), (1, 2));
+}
+
+/// Rows stored before previews were counted (four counters, the first
+/// key) still read, with no previews, and are carried over at the next
+/// count.
+#[test]
+fn gif_usage_reads_rows_of_the_first_format() {
+    #[derive(serde::Serialize)]
+    struct Old {
+        day: u32,
+        searches: u32,
+        shown: u32,
+        sent: u32,
+    }
+    let (_d, mut a) = party("a", 1);
+    let old = vec![
+        Old {
+            day: 3,
+            searches: 4,
+            shown: 5,
+            sent: 6,
+        },
+        Old {
+            day: 1,
+            searches: 1,
+            shown: 0,
+            sent: 2,
+        },
+    ];
+    a.store.put_meta(META_GIF_USAGE, &old).unwrap();
+    assert_eq!(
+        a.gif_usage(7).unwrap(),
+        [usage_day(3, 4, 5, 6), usage_day(1, 1, 0, 2)]
+    );
+    a.record_gif_use(GifUse::Preview, 3 * 86_400 + 1).unwrap();
+    let mut today = usage_day(3, 4, 5, 6);
+    today.previews = 1;
+    assert_eq!(a.gif_usage(7).unwrap(), [today, usage_day(1, 1, 0, 2)]);
+    assert!(a.store.get_meta_raw(META_GIF_USAGE).unwrap().is_none());
 }

@@ -17,7 +17,9 @@
 use rand_core::CryptoRng;
 
 use super::send::SealTime;
-use super::{Core, MAX_FUTURE_SECS, META_GIF_SETTINGS, META_GIF_USAGE, log, sync};
+use super::{
+    Core, MAX_FUTURE_SECS, META_GIF_SETTINGS, META_GIF_USAGE, META_GIF_USAGE_V2, log, sync,
+};
 use crate::content::ExtContent;
 use crate::gif::{GifConsent, GifProviderId, GifSettings, MIN_GIF_WARNING_VERSION};
 use crate::identity::{DeviceId, DeviceKeys};
@@ -37,6 +39,8 @@ pub enum GifUse {
     Shown,
     /// A GIF sent in a conversation.
     Sent,
+    /// A picker preview fetched from the provider. Added last.
+    Preview,
 }
 
 /// The counters of one day (`day` is `now / 86_400`).
@@ -46,15 +50,50 @@ pub struct GifUsageDay {
     pub searches: u32,
     pub shown: u32,
     pub sent: u32,
+    /// Picker previews fetched. Added last: stored under
+    /// [`META_GIF_USAGE_V2`], rows of the first format read as 0.
+    pub previews: u32,
+}
+
+/// A row of the first stored format ([`META_GIF_USAGE`]), before previews
+/// were counted. Read only, then rewritten in the current format.
+#[derive(Clone, Copy, serde::Deserialize)]
+struct GifUsageDayV1 {
+    day: u32,
+    searches: u32,
+    shown: u32,
+    sent: u32,
+}
+
+impl From<GifUsageDayV1> for GifUsageDay {
+    fn from(r: GifUsageDayV1) -> Self {
+        GifUsageDay {
+            day: r.day,
+            searches: r.searches,
+            shown: r.shown,
+            sent: r.sent,
+            previews: 0,
+        }
+    }
+}
+
+/// The stored rows, newest first: the current format, else the first one.
+fn usage_rows(q: &impl Queries) -> Result<Vec<GifUsageDay>> {
+    if let Some(rows) = q.get_meta::<Vec<GifUsageDay>>(META_GIF_USAGE_V2)? {
+        return Ok(rows);
+    }
+    Ok(q.get_meta::<Vec<GifUsageDayV1>>(META_GIF_USAGE)?
+        .unwrap_or_default()
+        .into_iter()
+        .map(Into::into)
+        .collect())
 }
 
 /// Counts one use on the day of `now`: rows kept newest first, the oldest
 /// beyond [`USAGE_DAYS`] dropped, counters saturating. Read-modify-write:
 /// the caller holds the transaction.
 pub(super) fn record_use(q: &impl Queries, kind: GifUse, now: u64) -> Result<()> {
-    let mut rows = q
-        .get_meta::<Vec<GifUsageDay>>(META_GIF_USAGE)?
-        .unwrap_or_default();
+    let mut rows = usage_rows(q)?;
     let day = u32::try_from(now / 86_400).unwrap_or(u32::MAX);
     let at = match rows.iter().position(|r| r.day <= day) {
         Some(i) if rows[i].day == day => i,
@@ -81,10 +120,14 @@ pub(super) fn record_use(q: &impl Queries, kind: GifUse, now: u64) -> Result<()>
         GifUse::Search => &mut row.searches,
         GifUse::Shown => &mut row.shown,
         GifUse::Sent => &mut row.sent,
+        GifUse::Preview => &mut row.previews,
     };
     *counter = counter.saturating_add(1);
     rows.truncate(USAGE_DAYS);
-    q.put_meta(META_GIF_USAGE, &rows)
+    q.put_meta(META_GIF_USAGE_V2, &rows)?;
+    // The first format, now carried over: one source only.
+    q.delete_meta(META_GIF_USAGE)?;
+    Ok(())
 }
 
 /// The stored register: settings, date of the change, device that made it.
@@ -212,10 +255,7 @@ impl Core {
     /// The counters of the last `days` recorded days (30 at most), newest
     /// first. Days without a use have no row.
     pub fn gif_usage(&self, days: u8) -> Result<Vec<GifUsageDay>> {
-        let mut rows = self
-            .store
-            .get_meta::<Vec<GifUsageDay>>(META_GIF_USAGE)?
-            .unwrap_or_default();
+        let mut rows = usage_rows(&self.store)?;
         rows.truncate(usize::from(days));
         Ok(rows)
     }
