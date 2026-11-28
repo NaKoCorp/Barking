@@ -21,7 +21,9 @@ pub const MAX_RETRY_AFTER_SECS: u32 = 3600;
 /// Fetches a URL for a GIF provider. Used through generics
 /// (`t: &impl GifTransport`).
 pub trait GifTransport: Send + Sync {
-    /// `GET url`, body of at most `max_bytes` bytes.
+    /// `GET url`, body of at most `max_bytes` bytes. `Offline` only when
+    /// nothing left the phone (no network to connect over); a failure once
+    /// the request may have been sent is another error.
     fn get(
         &self,
         url: &Url,
@@ -111,7 +113,8 @@ impl CappedBody {
 }
 
 /// reqwest over rustls (`ring`, webpki roots), HTTP/1.1, no cookie, no
-/// redirect, no proxy, no connection kept between requests: nothing
+/// redirect, no proxy, no connection kept between requests and no TLS
+/// session resumed (a ticket would tie one request to the next): nothing
 /// outlives the call, and each call may run on its own runtime (the FFI
 /// builds one per call), which a pooled connection would not survive.
 pub struct HttpsTransport {
@@ -122,18 +125,8 @@ impl HttpsTransport {
     /// # Errors
     /// `Unreachable` if the HTTP client cannot be built.
     pub fn new() -> Result<Self, GifError> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let roots = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-        let mut tls = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .map_err(|_| GifError::Unreachable)?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
         let client = reqwest::Client::builder()
-            .tls_backend_preconfigured(tls)
+            .tls_backend_preconfigured(tls_config()?)
             .http1_only()
             .https_only(true)
             .user_agent(USER_AGENT)
@@ -147,6 +140,23 @@ impl HttpsTransport {
     }
 }
 
+/// The TLS client of [`HttpsTransport`]: `ring`, webpki roots, HTTP/1.1
+/// by ALPN, and no session resumption (neither tickets nor session IDs).
+fn tls_config() -> Result<rustls::ClientConfig, GifError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| GifError::Unreachable)?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    tls.resumption = rustls::client::Resumption::disabled();
+    Ok(tls)
+}
+
 impl GifTransport for HttpsTransport {
     // Neither the URL (it holds the key) nor a reqwest error (its text
     // holds the URL) is ever logged or returned.
@@ -154,12 +164,14 @@ impl GifTransport for HttpsTransport {
         if !transport_allows(url) {
             return Err(GifError::Malformed);
         }
-        let mut resp = self
-            .client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|e| classify_error(&e))?;
+        let mut resp = self.client.get(url.clone()).send().await.map_err(|e| {
+            // Past the connection, the request may have gone out.
+            if e.is_connect() {
+                classify_error(&e)
+            } else {
+                GifError::Unreachable
+            }
+        })?;
         let status = resp.status().as_u16();
         if status != 200 {
             let retry_after = resp
@@ -177,7 +189,8 @@ impl GifTransport for HttpsTransport {
             return Err(GifError::TooLarge);
         }
         let mut body = CappedBody::new(max_bytes);
-        while let Some(chunk) = resp.chunk().await.map_err(|e| classify_error(&e))? {
+        // The request went out: a network lost now is not `Offline`.
+        while let Some(chunk) = resp.chunk().await.map_err(|_| GifError::Unreachable)? {
             body.push(&chunk)?;
         }
         map_reply(HttpReply {
@@ -188,7 +201,7 @@ impl GifTransport for HttpsTransport {
     }
 }
 
-/// Classifies a failed request: no network at all is `Offline`, anything
+/// Classifies a failed connection: no network at all is `Offline`, anything
 /// else (DNS, refused, TLS, timeout) `Unreachable`.
 pub(crate) fn classify_error(err: &(dyn std::error::Error + 'static)) -> GifError {
     use std::io::ErrorKind;
@@ -405,6 +418,20 @@ mod tests {
                 GifError::Unreachable
             );
         }
+    }
+
+    /// No TLS session is stored, so none is resumed: each request starts
+    /// a full handshake, unlinkable to the one before.
+    #[test]
+    fn tls_resumption_is_disabled() {
+        let tls = tls_config().unwrap();
+        let resumption = format!("{:?}", tls.resumption);
+        assert!(
+            resumption.contains("NoClientSessionStorage"),
+            "{resumption}"
+        );
+        assert!(resumption.contains("Disabled"), "{resumption}");
+        assert_eq!(tls.alpn_protocols, [b"http/1.1".to_vec()]);
     }
 
     #[tokio::test]

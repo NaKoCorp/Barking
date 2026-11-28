@@ -136,9 +136,31 @@ pub trait GifGate {
     /// Whether this client may contact `provider` now. A caller that cannot
     /// tell answers `false`.
     fn allowed(&self, provider: u8) -> bool;
-    /// Counts one use, once the call succeeded. A count that cannot be
-    /// written never fails the call.
+    /// Counts one use, once its request was sent to the provider (see
+    /// `sent_get`). A count that cannot be written never fails the call.
     fn record(&self, use_: GifUse);
+}
+
+/// `GET url` through `t`, counting `use_` for every request sent to the
+/// provider, whatever its reply: Transparency shows every request sent
+/// (a GIF shown counts once, its resolution and download together). Not
+/// counted when nothing left the phone: a URL the transport would refuse
+/// (checked here first, so that a refusal is told apart from a `Malformed`
+/// reply), or `Offline`.
+async fn sent_get(
+    g: &impl GifGate,
+    t: &impl GifTransport,
+    url: &Url,
+    use_: GifUse,
+) -> Result<Vec<u8>, GifError> {
+    if !http::transport_allows(url) {
+        return Err(GifError::Malformed);
+    }
+    let body = t.get(url, MAX_GIF_BYTES).await;
+    if body != Err(GifError::Offline) {
+        g.record(use_);
+    }
+    body
 }
 
 fn provider_of(id: GifProviderId) -> &'static dyn GifProvider {
@@ -162,7 +184,7 @@ fn gate(g: &impl GifGate, keys: &GifKeys, id: GifProviderId) -> Result<String, G
 }
 
 /// One page of search results. Counts a search once the request was sent,
-/// whatever came back: Transparency shows every call to the provider.
+/// whatever came back (`sent_get`).
 ///
 /// # Errors
 /// `NotEnabled` without consent (nothing is sent), `NotConfigured` without
@@ -176,15 +198,13 @@ pub async fn search(
 ) -> Result<GifPage, GifError> {
     let provider = provider_of(ACTIVE_GIF_PROVIDER);
     let key = gate(g, keys, ACTIVE_GIF_PROVIDER)?;
-    let body = t
-        .get(&provider.search_url(&key, query, page), MAX_GIF_BYTES)
-        .await;
-    g.record(GifUse::Search);
-    provider.parse_page(&body?)
+    let url = provider.search_url(&key, query, page);
+    let body = sent_get(g, t, &url, GifUse::Search).await?;
+    provider.parse_page(&body)
 }
 
 /// One page of trending GIFs. Counted as a search once the request was
-/// sent, so Transparency's count of calls to the provider is exact.
+/// sent, as [`search`]: it is a request to the provider too.
 ///
 /// # Errors
 /// As [`search`].
@@ -196,11 +216,9 @@ pub async fn trending(
 ) -> Result<GifPage, GifError> {
     let provider = provider_of(ACTIVE_GIF_PROVIDER);
     let key = gate(g, keys, ACTIVE_GIF_PROVIDER)?;
-    let body = t
-        .get(&provider.trending_url(&key, page), MAX_GIF_BYTES)
-        .await;
-    g.record(GifUse::Search);
-    provider.parse_page(&body?)
+    let url = provider.trending_url(&key, page);
+    let body = sent_get(g, t, &url, GifUse::Search).await?;
+    provider.parse_page(&body)
 }
 
 /// Resolves the GIF `id` of `provider` and downloads its MP4. Consent is
@@ -227,9 +245,8 @@ pub async fn data(
         return Err(GifError::NotFound);
     }
     let key = gate(g, keys, pid)?;
-    let body = t.get(&p.resolve_url(&key, id), MAX_GIF_BYTES).await;
-    g.record(GifUse::Shown);
-    let item = p.parse_item(&body?)?;
+    let body = sent_get(g, t, &p.resolve_url(&key, id), GifUse::Shown).await?;
+    let item = p.parse_item(&body)?;
     if item.id != id {
         return Err(GifError::Malformed);
     }
@@ -272,8 +289,7 @@ pub async fn preview(
     if !g.allowed(ACTIVE_GIF_PROVIDER.as_u8()) {
         return Err(GifError::NotEnabled);
     }
-    let mp4 = t.get(&url, MAX_GIF_BYTES).await;
-    g.record(GifUse::Preview);
+    let mp4 = sent_get(g, t, &url, GifUse::Preview).await;
     mp4.map_err(|e| match e {
         GifError::NotConfigured => GifError::NotFound,
         e => e,
@@ -581,6 +597,71 @@ mod tests {
             assert_eq!(preview(&g, &t, PREVIEW).await.err(), Some(want), "{status}");
         }
         assert_eq!(g.uses(), vec![GifUse::Preview; 3]);
+    }
+
+    /// A transport that fails every request with its error.
+    struct Fails(GifError);
+
+    impl GifTransport for Fails {
+        async fn get(&self, _url: &Url, _max: usize) -> Result<Vec<u8>, GifError> {
+            Err(self.0)
+        }
+    }
+
+    /// Offline, nothing left the phone: nothing counts. Any other failure
+    /// may follow a request that reached the provider: it counts.
+    #[tokio::test]
+    async fn gif_offline_is_not_counted() {
+        let g = FakeGate::on();
+        let off = Fails(GifError::Offline);
+        assert_eq!(
+            search(&g, &keys(), &off, "hi", 1).await.err(),
+            Some(GifError::Offline)
+        );
+        assert_eq!(
+            trending(&g, &keys(), &off, 1).await.err(),
+            Some(GifError::Offline)
+        );
+        assert_eq!(
+            data(&g, &keys(), &off, 1, SLUG).await.err(),
+            Some(GifError::Offline)
+        );
+        assert_eq!(
+            preview(&g, &off, PREVIEW).await.err(),
+            Some(GifError::Offline)
+        );
+        assert!(g.uses().is_empty());
+        let lost = Fails(GifError::Unreachable);
+        search(&g, &keys(), &lost, "hi", 1).await.unwrap_err();
+        preview(&g, &lost, PREVIEW).await.unwrap_err();
+        assert_eq!(g.uses(), vec![GifUse::Search, GifUse::Preview]);
+    }
+
+    /// A URL the transport would refuse is refused before it: nothing is
+    /// sent, nothing counts. A `Malformed` reply (a request sent) counts.
+    #[tokio::test]
+    async fn gif_refused_url_is_not_counted_malformed_reply_is() {
+        let g = FakeGate::on();
+        let t = FakeTransport::new([HttpReply::status(400)]);
+        for bad in [
+            "https://cdn.example.com/a.mp4",
+            "http://api.klipy.com/api/v1/KEY/gifs/trending",
+        ] {
+            let url = Url::parse(bad).unwrap();
+            assert_eq!(
+                sent_get(&g, &t, &url, GifUse::Search).await.err(),
+                Some(GifError::Malformed),
+                "{bad}"
+            );
+        }
+        assert_eq!(t.calls(), 0);
+        assert!(g.uses().is_empty());
+        assert_eq!(
+            search(&g, &keys(), &t, "hi", 1).await.err(),
+            Some(GifError::Malformed)
+        );
+        assert_eq!(t.calls(), 1);
+        assert_eq!(g.uses(), vec![GifUse::Search]);
     }
 
     #[test]
