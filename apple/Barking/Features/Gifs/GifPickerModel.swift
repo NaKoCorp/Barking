@@ -183,21 +183,28 @@ final class GifPickerModel {
     }
 }
 
-/// Whether the phone has a network path at all, watched for the app's
-/// life. Unknown until the first update: taken as online then.
+/// Whether the phone has a network path at all, and whether it is in Low
+/// Data Mode, watched for the app's life. Unknown until the first update:
+/// taken as online and not constrained then.
 final class GifNetworkPath: @unchecked Sendable {
     static let shared = GifNetworkPath()
     private let monitor = NWPathMonitor()
     private let lock = NSLock()
     private var satisfied = true
+    private var constrained = false
 
     private init() {
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
-            self.lock.withLock { self.satisfied = path.status == .satisfied }
+            self.lock.withLock {
+                self.satisfied = path.status == .satisfied
+                self.constrained = path.isConstrained
+            }
         }
         monitor.start(queue: DispatchQueue(label: "barking.gif.path"))
     }
 
     var isOnline: Bool { lock.withLock { satisfied } }
+    /// Low Data Mode (`NWPath.isConstrained`): no GIF loads on its own.
+    var isConstrained: Bool { lock.withLock { constrained } }
 }

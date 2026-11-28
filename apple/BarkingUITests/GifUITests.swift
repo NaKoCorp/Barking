@@ -175,9 +175,116 @@ final class GifUITests: XCTestCase {
         XCTAssertTrue(first.waitForExistence(timeout: 5), "no result")
         first.tap()
         XCTAssertTrue(picker.waitForNonExistence(timeout: 5), "the picker stayed")
-        let bubble = app.staticTexts.matching(NSPredicate(format: "label == %@", "GIF")).firstMatch
+        // My GIF's bubble: auto-play is off, so it waits for a tap.
+        let bubble = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "gifBubble.", "GIF")).firstMatch
         XCTAssertTrue(bubble.waitForExistence(timeout: 5), "no GIF bubble")
         XCTAssertTrue(bubble.waitUntil({ ($0.value as? String ?? "").hasPrefix("Pending since") }),
                       "not my sent GIF: \(bubble.value ?? "nil")")
+    }
+
+    // MARK: Received GIFs (spec GIF §7, §6.7)
+
+    /// Sam's conversation with three received GIFs (`-BarkingUITestFakeGifs`).
+    private func launchWithGifs(extra: [String] = []) -> XCUIApplication {
+        launchWithSam(extra: ["-BarkingUITestFakeGifs"] + extra)
+    }
+
+    /// The GIF bubbles in a state (`gifBubble.<state>`).
+    private func bubbles(_ app: XCUIApplication, _ state: String) -> XCUIElementQuery {
+        app.descendants(matching: .any).matching(identifier: "gifBubble.\(state)")
+    }
+
+    /// Turns GIFs on in Settings › GIFs, then opens Sam's conversation.
+    private func enableInSettingsThenOpenSam(_ app: XCUIApplication) {
+        let toggle = openGifs(app)
+        _ = openSheet(app, toggle)
+        app.buttons["gifWarning.use"].tap()
+        XCTAssertTrue(toggle.waitUntil({ $0.value as? String == "1" }, timeout: 5), "GIFs stayed off")
+        app.tabBars.buttons["Chats"].tap()
+        openSamChat(app)
+    }
+
+    /// GIFs off (the default): three neutral bubbles, "GIF · from Klipy,
+    /// off" (their state), and Klipy is never asked: Transparency, which
+    /// counts each media request of this test device, has no Klipy line.
+    func testReceivedGifWhenOffMakesNoRequest() {
+        let app = launchWithGifs()
+        openSamChat(app)
+        let off = bubbles(app, "off")
+        XCTAssertTrue(off.firstMatch.waitForExistence(timeout: 5), "no GIF bubble off")
+        XCTAssertEqual(off.count, 3)
+        XCTAssertEqual(off.firstMatch.label, "GIF")
+        XCTAssertEqual(bubbles(app, "loading").count, 0)
+        app.navigationBars.buttons.firstMatch.tap()
+        app.tabBars.buttons["Settings"].tap()
+        let row = app.buttons["settings.transparency"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["transparency.data"].waitForExistence(timeout: 10))
+        let line = app.staticTexts["transparency.gifs.day"]
+        for _ in 0..<4 where !line.exists { app.swipeUp() }
+        XCTAssertFalse(line.waitForExistence(timeout: 2), "a request was made: \(line.label)")
+        XCTAssertFalse(app.descendants(matching: .any)["transparency.who.gifs"].exists, "Klipy listed while off")
+    }
+
+    /// A tap on a GIF that is off opens the warning (never anything else);
+    /// once on, that GIF loads and the picker stays closed.
+    func testTapOffBubbleOpensWarning() {
+        let app = launchWithGifs()
+        openSamChat(app)
+        let off = bubbles(app, "off").firstMatch
+        XCTAssertTrue(off.waitForExistence(timeout: 5), "no GIF bubble off")
+        off.tap()
+        let sheet = app.descendants(matching: .any)["gifWarning"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), "the bubble did not open the warning")
+        app.buttons["gifWarning.use"].tap()
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), "the warning stayed")
+        XCTAssertTrue(bubbles(app, "loaded").firstMatch.waitForExistence(timeout: 10), "the GIF did not load")
+        XCTAssertFalse(app.descendants(matching: .any)["gifPicker"].exists, "the picker opened")
+        XCTAssertEqual(bubbles(app, "loaded").count, 1, "more than the GIF tapped loaded")
+        XCTAssertEqual(bubbles(app, "tapToLoad").count, 2)
+    }
+
+    /// Auto-play off: one "Play GIFs automatically ›" for the conversation,
+    /// under the first GIF; it opens Settings › GIFs over the conversation.
+    func testAutoPlayHintOnlyUnderFirstGif() {
+        let app = launchWithGifs()
+        enableInSettingsThenOpenSam(app)
+        let tap = bubbles(app, "tapToLoad")
+        XCTAssertTrue(tap.firstMatch.waitForExistence(timeout: 5), "no GIF bubble to load")
+        XCTAssertEqual(tap.count, 3)
+        let hint = app.buttons.matching(identifier: "gif.autoPlayHint")
+        XCTAssertTrue(hint.firstMatch.waitForExistence(timeout: 5), "no auto-play line")
+        XCTAssertEqual(hint.count, 1)
+        XCTAssertEqual(hint.firstMatch.label, "Play GIFs automatically ›")
+        hint.firstMatch.tap()
+        let auto = app.switches["gifs.autoLoad"]
+        XCTAssertTrue(auto.waitForExistence(timeout: 5), "Settings › GIFs did not open")
+        XCTAssertTrue(app.textFields["Message"].exists, "left the conversation")
+        app.buttons["gifSettings.close"].tap()
+        XCTAssertTrue(auto.waitForNonExistence(timeout: 5), "the sheet stayed")
+        XCTAssertTrue(app.textFields["Message"].isHittable, "not back in the conversation")
+    }
+
+    /// Transparency once GIFs are on: Klipy in "Who sees what", and the
+    /// day's line counting every call.
+    func testTransparencyShowsKlipyWhenOn() {
+        let app = launch(extra: ["-BarkingUITestGifUsage"])
+        let toggle = openGifs(app)
+        _ = openSheet(app, toggle)
+        app.buttons["gifWarning.use"].tap()
+        XCTAssertTrue(toggle.waitUntil({ $0.value as? String == "1" }, timeout: 5), "GIFs stayed off")
+        let link = app.buttons["gifs.transparency"]
+        XCTAssertTrue(link.waitForExistence(timeout: 5))
+        link.tap()
+        let line = app.staticTexts["transparency.gifs.day"]
+        XCTAssertTrue(app.descendants(matching: .any)["transparency.data"].waitForExistence(timeout: 10))
+        for _ in 0..<6 where !line.exists { app.swipeUp() }
+        XCTAssertTrue(line.waitForExistence(timeout: 5), "no Klipy line")
+        XCTAssertEqual(line.label, "Klipy contacted 3 times · 2 searches, 0 previews, 1 GIF shown")
+        let who = app.descendants(matching: .any)["transparency.who.gifs"]
+        for _ in 0..<6 where !who.exists { app.swipeDown() }
+        XCTAssertTrue(who.exists, "Klipy is not in Who sees what")
     }
 }

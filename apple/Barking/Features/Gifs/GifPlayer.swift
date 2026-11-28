@@ -48,6 +48,8 @@ final class GifMemoryAsset: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
 /// (spec GIF §9.4). Never played on another screen (AirPlay).
 struct GifPlayer: View {
     let data: Data
+    /// Played even when it would be still: the user tapped its play button.
+    var play = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityPlayAnimatedImages) private var playAnimatedImages
 
@@ -56,8 +58,8 @@ struct GifPlayer: View {
 
     var body: some View {
         PlayerLayerView(data: data,
-                        playing: Self.plays(reduceMotion: reduceMotion || !playAnimatedImages,
-                                            videoAutoplay: UIAccessibility.isVideoAutoplayEnabled))
+                        playing: play || Self.plays(reduceMotion: reduceMotion || !playAnimatedImages,
+                                                    videoAutoplay: UIAccessibility.isVideoAutoplayEnabled))
             .accessibilityHidden(true)
     }
 }

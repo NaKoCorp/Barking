@@ -46,6 +46,10 @@ struct TransparencyView: View {
                 ForEach(model.days) { day in
                     SectionLabel(verbatim: model.title(of: day)).padding(.top, Space.section - Space.s2)
                     VStack(spacing: 0) {
+                        if let line = day.klipy {
+                            gifUsageRow(line)
+                            if !day.rows.isEmpty { Rectangle().fill(Color.border).frame(height: 1) }
+                        }
                         ForEach(Array(day.rows.enumerated()), id: \.element.id) { i, row in
                             if i > 0 { Rectangle().fill(Color.border).frame(height: 1) }
                             logRow(row).onAppear {
@@ -106,6 +110,12 @@ struct TransparencyView: View {
             .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
         Text("Limit: a node that cooperates with the relay or with Apple can link a mailbox to this iPhone. Turning instant notifications off prevents it.")
             .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
+        // Its own card, after the notes above: the GIF provider sees which
+        // GIFs are shown, so "none of them sees the content" is not said of it.
+        if let row = model.gifRow {
+            card(id: "transparency.who.gifs") { dataRow(row) }
+                .padding(.top, Space.s2)
+        }
 
         card(id: "transparency.wake.last") {
             dataRow(DataRow(id: "last", icon: "clock", title: String(localized: "Last wake handled"), detail: lastWakeText))
@@ -153,6 +163,19 @@ struct TransparencyView: View {
         }
         .padding(16)
         .accessibilityElement(children: .combine)
+    }
+
+    /// The day's calls to the GIF provider, counted, never what was
+    /// searched or shown (spec GIF §6.7).
+    private func gifUsageRow(_ line: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            icon("photo.on.rectangle", accent: false)
+            Text(verbatim: line).font(BarkingFont.sans(.subheadline, size: 15)).foregroundStyle(Color.fg)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("transparency.gifs.day")
+            Spacer(minLength: 0)
+        }
+        .padding(16)
     }
 
     /// A journal row (U-30): the title (one line), a Fira meta line led by

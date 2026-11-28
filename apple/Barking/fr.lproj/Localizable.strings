@@ -790,3 +790,18 @@
 "%@ is busy · Try again in a minute" = "%@ est surchargé · Réessaie dans une minute";
 "Sends this GIF." = "Envoie ce GIF.";
 "No GIFs" = "Aucun GIF";
+
+/* A GIF in a conversation and Transparency (spec GIF §7, §6.7). The provider name comes from the core. */
+"GIF unavailable" = "GIF indisponible";
+"GIF · from %@, off" = "GIF · de %@, désactivés";
+"Tap to load" = "Toucher pour charger";
+"GIF no longer available" = "GIF plus disponible";
+"Couldn't load · Retry" = "Chargement impossible · Réessayer";
+"%@ is busy · Retry in %lld min" = "%1$@ est surchargé · Réessayer dans %2$lld min";
+"Play GIFs automatically ›" = "Lire les GIF automatiquement ›";
+"Double-tap to load" = "Toucher deux fois pour charger";
+"GIFs are off" = "Les GIF sont désactivés";
+"GIF: %@" = "GIF : %@";
+"Play" = "Lire";
+"Plays the GIF." = "Lit le GIF.";
+"Your IP address, your GIF searches, and which GIFs you show. It can work out who you exchange GIFs with." = "Votre adresse IP, vos recherches de GIF et les GIF que vous affichez. Il peut deviner avec qui vous échangez des GIF.";

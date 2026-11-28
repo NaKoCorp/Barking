@@ -361,4 +361,97 @@ final class TransparencyModelTests: XCTestCase {
         XCTAssertFalse(JournalText.isCut(full: 40, clamped: 40))
         XCTAssertFalse(JournalText.isCut(full: 40.4, clamped: 40), "rounding is not a cut")
     }
+
+    // MARK: GIFs (spec GIF §6.7)
+
+    private var noonDay: UInt32 { UInt32(noon / 86_400) }
+
+    private func usage(_ day: UInt32, searches: UInt32 = 0, previews: UInt32 = 0, shown: UInt32 = 0,
+                       sent: UInt32 = 0) -> GifUsageDayInfo {
+        GifUsageDayInfo(day: day, searches: searches, shown: shown, sent: sent, previews: previews)
+    }
+
+    /// Every call to Klipy counts: searches (trending too), previews and
+    /// GIFs shown. A GIF sent asks Klipy nothing.
+    func testKlipyLineCountsEveryCall() async {
+        let d = FakeDevice()
+        d.logEntries = [entry(noon)]
+        d.gifUsageDays = [usage(noonDay, searches: 2, shown: 1, sent: 4)]
+        let m = model(d)
+        await m.load()
+        XCTAssertEqual(m.days.count, 1)
+        XCTAssertEqual(m.days[0].klipy, "Klipy contacted 3 times · 2 searches, 0 previews, 1 GIF shown")
+        XCTAssertEqual(m.days[0].rows.count, 1)
+    }
+
+    func testKlipyLinePlurals() {
+        let en = Locale(identifier: "en")
+        let fr = Locale(identifier: "fr")
+        func line(_ s: UInt32, _ p: UInt32, _ g: UInt32, _ locale: Locale) -> String {
+            TransparencyModel.klipyLine(name: "Klipy", searches: s, previews: p, shown: g,
+                                        bundle: .strings(for: locale), locale: locale)
+        }
+        XCTAssertEqual(line(1, 0, 0, en), "Klipy contacted 1 time · 1 search, 0 previews, 0 GIFs shown")
+        XCTAssertEqual(line(9, 2, 5, en), "Klipy contacted 16 times · 9 searches, 2 previews, 5 GIFs shown")
+        XCTAssertEqual(line(0, 1, 1, en), "Klipy contacted 2 times · 0 searches, 1 preview, 1 GIF shown")
+        XCTAssertEqual(line(1, 0, 0, fr), "Klipy contacté 1 fois · 1 recherche, 0 aperçu, 0 GIF affiché")
+        XCTAssertEqual(line(9, 2, 5, fr), "Klipy contacté 16 fois · 9 recherches, 2 aperçus, 5 GIF affichés")
+    }
+
+    /// A day with GIF calls and no journal entry still shows, in its place.
+    func testKlipyLineOnADayWithoutEntries() async {
+        let d = FakeDevice()
+        d.logEntries = [entry(noon), entry(noon - 3 * 86_400)]
+        d.gifUsageDays = [usage(noonDay - 1, searches: 1)]
+        let m = model(d)
+        await m.load()
+        XCTAssertEqual(m.days.count, 3)
+        XCTAssertEqual(m.days[1].date, utc.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(noon - 86_400))))
+        XCTAssertTrue(m.days[1].rows.isEmpty)
+        XCTAssertNotNil(m.days[1].klipy)
+        XCTAssertEqual(m.days.map(\.date), m.days.map(\.date).sorted(by: >))
+        // The usage line never drives the journal's pages.
+        XCTAssertEqual(m.oldestID, m.days[2].rows.last?.id)
+    }
+
+    /// Only sends, or nothing: no line.
+    func testNoKlipyLineWithoutACall() async {
+        let d = FakeDevice()
+        d.logEntries = [entry(noon)]
+        d.gifUsageDays = [usage(noonDay, sent: 3)]
+        let m = model(d)
+        await m.load()
+        XCTAssertNil(m.days[0].klipy)
+    }
+
+    /// "Keys and devices" lists the security events only.
+    func testNoKlipyLineUnderKeysAndDevices() async {
+        let d = FakeDevice()
+        d.logEntries = [entry(noon, security: true, key: "log.contact_key_changed", args: ["Bob", "a", "b"])]
+        d.gifUsageDays = [usage(noonDay, searches: 1)]
+        let m = model(d)
+        await m.load()
+        XCTAssertNotNil(m.days[0].klipy)
+        await m.setFilter(.keysAndDevices)
+        XCTAssertTrue(m.days.allSatisfy { $0.klipy == nil })
+    }
+
+    /// "Who sees what" names Klipy only while GIFs are on.
+    func testWhoSeesWhatNamesKlipyOnlyWhenOn() async {
+        let d = FakeDevice()
+        let m = model(d)
+        await m.load()
+        XCTAssertNil(m.gifRow)
+        d.gifSettingsInfo.enabled = true
+        await m.load()
+        XCTAssertEqual(m.gifRow?.title, "Klipy")
+        XCTAssertEqual(m.gifRow?.detail,
+                       "Your IP address, your GIF searches, and which GIFs you show. It can work out who you exchange GIFs with.")
+    }
+
+    func testGifTransparencyStringsInFrench() throws {
+        let fr = try XCTUnwrap(Bundle.main.path(forResource: "Localizable", ofType: "strings", inDirectory: nil,
+                                                forLocalization: "fr").flatMap { NSDictionary(contentsOfFile: $0) })
+        XCTAssertNotNil(fr["Your IP address, your GIF searches, and which GIFs you show. It can work out who you exchange GIFs with."])
+    }
 }

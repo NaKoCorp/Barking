@@ -743,8 +743,19 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if let gifPreviewError { throw gifPreviewError }
         return gifPreviewData
     }
+    /// What `gifData` answers; `gifDataError` is thrown first when set.
+    var gifMedia = GifMediaInfo(mp4: Data("MP4".utf8), author: nil, title: "")
+    var gifDataError: Error?
+    /// How long `gifData` takes (a request on the way).
+    var gifDataDelay: TimeInterval = 0
+    private var _gifDataCalls: [String] = []
+    /// The GIF ids `gifData` was called with, in order.
+    var gifDataCalls: [String] { lock.withLock { _gifDataCalls } }
     func gifData(provider: UInt8, id: String) throws -> GifMediaInfo {
-        GifMediaInfo(mp4: Data(), author: nil, title: "")
+        lock.withLock { _gifDataCalls.append(id) }
+        if gifDataDelay > 0 { Thread.sleep(forTimeInterval: gifDataDelay) }
+        if let gifDataError { throw gifDataError }
+        return gifMedia
     }
     func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws {
         if let sendError { throw sendError }

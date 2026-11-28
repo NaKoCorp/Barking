@@ -48,9 +48,16 @@ struct ConversationView: View {
     /// "Use GIFs" was tapped: once the warning has gone, the picker opens
     /// if the core stored the consent.
     @State private var enabling: Task<Bool, Never>?
+    /// The GIF bubble whose tap opened the warning: it loads once GIFs are
+    /// on, in place of the picker.
+    @State private var warningFor: Int64?
+    /// The GIFs of this conversation: their state while shown, their requests.
+    @State private var gifLoads: GifLoads
 
     private enum GifSheet: Identifiable {
-        case warning, picker
+        /// The warning, the picker, or Settings › GIFs (from "Play GIFs
+        /// automatically ›", over the conversation).
+        case warning, picker, settings
         var id: Self { self }
     }
 
@@ -59,6 +66,7 @@ struct ConversationView: View {
         self.focus = focus
         _model = State(initialValue: ConversationModel(contact: contact, core: core))
         _gifs = State(initialValue: GifSettingsModel(core: core))
+        _gifLoads = State(initialValue: GifLoads(core: core))
     }
 
     // In parts: as one expression, `body` went past the type checker's
@@ -233,8 +241,13 @@ struct ConversationView: View {
                 await model.onAppear()
                 // The first not delivered message, if it is still there.
                 if let focus, model.items.contains(where: { $0.id == focus }) { scrollTarget = focus }
+                gifLoads.onTurnedOff = { Task { await refreshGifs() } }
+                await refreshGifs()
                 for await change in await core.changes { await model.handle(change) }
             }
+            // GIFs turned on or off, auto-play changed (here or in the sheet).
+            .onChange(of: [gifs.enabled, gifs.autoLoad]) { syncGifs() }
+            .onChange(of: model.items.compactMap(\.gif)) { gifLoads.pinHint(gifItems) }
     }
 
     /// The GIF button: the picker when GIFs are on, otherwise the warning,
@@ -243,8 +256,49 @@ struct ConversationView: View {
     private func openGifs() {
         Task {
             await gifs.refresh()
+            syncGifs()
             guard gifs.provider != nil, gifSheet == nil else { return }
+            warningFor = nil
             gifSheet = gifs.enabled ? .picker : .warning
+        }
+    }
+
+    /// The GIF messages, in the conversation's order.
+    private var gifItems: [(id: Int64, gif: GifInfo)] {
+        model.items.compactMap { item in item.gif.map { (item.id, $0) } }
+    }
+
+    /// The bubbles follow the settings the core holds.
+    private func syncGifs() {
+        gifLoads.configure(enabled: gifs.enabled, autoLoad: gifs.autoLoad, provider: gifs.provider)
+        gifLoads.pinHint(gifItems)
+    }
+
+    private func refreshGifs() async {
+        await gifs.refresh()
+        syncGifs()
+    }
+
+    /// A tap on a GIF bubble (spec GIF §7): off, the warning, the only way
+    /// to turn GIFs on; loaded, the message; otherwise load or retry.
+    private func gifTapped(_ item: ConversationModel.Item) {
+        switch gifLoads.state(item.id) {
+        case .off?:
+            Task {
+                await refreshGifs()
+                guard gifs.provider != nil, gifSheet == nil else { return }
+                // Turned on meanwhile (another device): this one loads.
+                if gifs.enabled {
+                    gifLoads.load(item.id)
+                } else {
+                    warningFor = item.id
+                    gifSheet = .warning
+                }
+            }
+        case .loaded?:
+            if !item.local { sheetOf = SheetTarget(id: item.id) }
+        default:
+            gifLoads.load(item.id)
         }
     }
 
@@ -257,17 +311,39 @@ struct ConversationView: View {
                 }
             case .picker:
                 GifPickerView(core: core, providerName: provider.name) { gif in await model.sendGif(gif) }
+            case .settings:
+                NavigationStack {
+                    GifSettingsView(core: core, model: gifs)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Close") { gifSheet = nil }.accessibilityIdentifier("gifSettings.close")
+                            }
+                        }
+                }
+                .presentationBackground(Color.surface)
             }
         }
     }
 
-    /// After the warning: the picker opens in place once "Use GIFs" was
-    /// stored. A dismissal without it (Not now, a swipe) opens nothing.
+    /// After a GIF sheet: the bubbles follow what the core now holds. After
+    /// the warning, once "Use GIFs" was stored: the GIF tapped loads, or,
+    /// from the GIF button, the picker opens in place. A dismissal without
+    /// it (Not now, a swipe) opens nothing.
     private func gifSheetClosed() {
-        guard let enabling else { return }
+        let target = warningFor
+        warningFor = nil
+        guard let enabling else {
+            Task { await refreshGifs() }
+            return
+        }
         self.enabling = nil
         Task {
-            if await enabling.value { gifSheet = .picker } else { model.gifsNotSaved() }
+            if await enabling.value {
+                syncGifs()
+                if let target { gifLoads.load(target) } else { gifSheet = .picker }
+            } else {
+                model.gifsNotSaved()
+            }
         }
     }
 
@@ -303,6 +379,16 @@ struct ConversationView: View {
         let side: HorizontalAlignment = item.outgoing ? .trailing : .leading
         VStack(alignment: side, spacing: 4) {
             bubble(item)
+            if gifLoads.hintAnchor == item.id {
+                Button { gifSheet = .settings } label: {
+                    Text("Play GIFs automatically ›").font(BarkingFont.sans(.footnote, size: 13, weight: .semibold))
+                        .foregroundStyle(Color.accent)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("gif.autoPlayHint")
+                .bubbleRow(outgoing: item.outgoing)
+            }
             if !item.reactions.isEmpty {
                 ReactionChips(chips: item.reactions, outgoing: item.outgoing, myState: item.myReactionState) { react($0, on: item.id) }
                     .disabled(deleting)
@@ -337,16 +423,9 @@ struct ConversationView: View {
         // Not for a local row (not in the core yet) or a placeholder (§5.6).
         let acts = item.canReplyOrReact
         let strings = Bundle.strings(for: locale)
-        return Bubble(text: item.needsUpdate
-                        ? String(localized: "This message needs a newer version of Barking.", bundle: strings, locale: locale)
-                        : item.text,
-                      outgoing: item.outgoing,
-                      quote: model.quoteLine(for: item, bundle: strings, locale: locale),
-                      placeholder: item.needsUpdate,
-                      highlighted: model.highlighted == item.id) {
-            if let quote = item.quote { scrollTarget = model.jump(to: quote) }
-        }
-            .onTapGesture { if saved { sheetOf = SheetTarget(id: item.id) } }
+        let gifState = gifLoads.state(item.id)
+        return bubbleContent(item, strings: strings)
+            .onTapGesture { if saved, item.gif == nil { sheetOf = SheetTarget(id: item.id) } }
             .swipeToReply(enabled: acts, outgoing: item.outgoing) { model.startReply(item.id) }
             .contextMenu {
                 if acts {
@@ -374,7 +453,8 @@ struct ConversationView: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityValue(Text(verbatim: Self.spoken(item, now: .now, bundle: strings, locale: locale)))
-            .accessibilityHint(saved ? Text("Opens the message details.") : Text(verbatim: ""))
+            .accessibilityHint(bubbleHint(item, gif: gifState, saved: saved))
+            .accessibilityIdentifier(item.gif == nil ? "" : GifBubble.identifier(gifState))
             .accessibilityActions {
                 if acts {
                     Button("Reply") { model.startReply(item.id) }
@@ -394,6 +474,35 @@ struct ConversationView: View {
             // Seen once more than half of it is in the visible part of the list.
             .onScrollVisibilityChange(threshold: 0.5) { model.bubbleVisibility(item.id, shown: $0) }
             .bubbleRow(outgoing: item.outgoing)
+    }
+
+    /// The text bubble, or the GIF's, which loads only once on screen and
+    /// lets its media go when it leaves (spec GIF §7).
+    @ViewBuilder private func bubbleContent(_ item: ConversationModel.Item, strings: Bundle) -> some View {
+        let quote = model.quoteLine(for: item, bundle: strings, locale: locale)
+        let highlighted = model.highlighted == item.id
+        let onQuote = { if let quote = item.quote { scrollTarget = model.jump(to: quote) } }
+        if let gif = item.gif, !item.needsUpdate {
+            GifBubble(gif: gif, outgoing: item.outgoing, state: gifLoads.state(item.id),
+                      providerName: gifs.provider?.name ?? "", quote: quote, highlighted: highlighted,
+                      onQuote: onQuote) { gifTapped(item) }
+                .onAppear { gifLoads.appeared(item.id, gif: gif) }
+                .onDisappear { gifLoads.disappeared(item.id) }
+        } else {
+            Bubble(text: item.needsUpdate
+                    ? String(localized: "This message needs a newer version of Barking.", bundle: strings, locale: locale)
+                    : item.text,
+                   outgoing: item.outgoing, quote: quote, placeholder: item.needsUpdate,
+                   highlighted: highlighted, onQuote: onQuote)
+        }
+    }
+
+    /// What a double-tap does: a GIF's own hint until it is loaded, then
+    /// the message's, as any bubble.
+    private func bubbleHint(_ item: ConversationModel.Item, gif: GifLoad?, saved: Bool) -> Text {
+        if item.gif != nil, let hint = GifBubble.hint(gif) { return Text(hint) }
+        if item.gif != nil, gif?.media == nil { return Text(verbatim: "") }
+        return saved ? Text("Opens the message details.") : Text(verbatim: "")
     }
 
     /// The row above the menu: the six frequent emoji and "+" (§5.6). One of

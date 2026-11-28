@@ -74,6 +74,15 @@ import Foundation
 ///   in the real core (otherwise `notEnabled`, as the core answers). Their
 ///   preview URLs are outside Klipy's hosts: the core refuses to fetch them.
 ///
+/// - `-BarkingUITestFakeGifs`: three received GIFs from Sam. Their media
+///   comes from here, never from a provider, and only while GIFs are on in
+///   the real core (otherwise `notEnabled`). Each media request is counted
+///   and reported as today's "GIFs shown" in `gifUsage`, so Transparency
+///   shows whether the app asked for any.
+///
+/// - `-BarkingUITestGifUsage`: `gifUsage` reports today 2 searches, 0
+///   previews and 1 GIF shown (3 calls to the provider).
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -121,6 +130,13 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private let linkedDevices: Int
     /// `-BarkingUITestGifResults`.
     private let gifResults: Bool
+    /// `-BarkingUITestFakeGifs`.
+    private let fakeGifs: Bool
+    /// `-BarkingUITestGifUsage`.
+    private let fixedGifUsage: Bool
+    /// Media requests the app made for the faked GIFs.
+    private var gifDataCalls: UInt32 = 0
+    static let fakeGifIds = ["hello-hi-662", "thumbs-up-17", "dog-wave-3"]
     private let seed: Seed?
     private let fakeReceived: Bool
     /// `-BarkingUITestEphemeral`: the faked ephemeral, until it expires.
@@ -190,10 +206,12 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
          ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false, requests: Bool = false,
          deviceChanged: Bool = false, inviteFailure: BarkingError? = nil, inviteStatus: InviteStatus? = nil,
-         linkedDevices: Int = 0, gifResults: Bool = false) {
+         linkedDevices: Int = 0, gifResults: Bool = false, fakeGifs: Bool = false, gifUsage: Bool = false) {
         self.device = device
         self.linkedDevices = linkedDevices
         self.gifResults = gifResults
+        self.fakeGifs = fakeGifs
+        self.fixedGifUsage = gifUsage
         self.deviceChanged = deviceChanged
         self.inviteFailure = inviteFailure
         self.inviteStatusOverride = inviteStatus
@@ -260,14 +278,18 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             i + 1 < arguments.count ? Int(arguments[i + 1]) : nil
         } ?? 0
         let gifResults = arguments.contains("-BarkingUITestGifResults")
+        let fakeGifs = arguments.contains("-BarkingUITestFakeGifs")
+        let gifUsage = arguments.contains("-BarkingUITestGifUsage")
         guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync || requests
-            || deviceChanged || inviteFailure != nil || inviteStatus != nil || linkedDevices > 0 || gifResults else {
+            || deviceChanged || inviteFailure != nil || inviteStatus != nil || linkedDevices > 0 || gifResults
+            || fakeGifs || gifUsage else {
             return device
         }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
                                 reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync,
                                 requests: requests, deviceChanged: deviceChanged, inviteFailure: inviteFailure,
-                                inviteStatus: inviteStatus, linkedDevices: linkedDevices, gifResults: gifResults)
+                                inviteStatus: inviteStatus, linkedDevices: linkedDevices, gifResults: gifResults,
+                                fakeGifs: fakeGifs, gifUsage: gifUsage)
     }
 
     // MARK: The relays (`-BarkingUITestNodes`)
@@ -435,6 +457,13 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
                                     delivery: nil, route: "internet:1"))
         }
         if let m = fakeEphemeral(now: UInt64(Date().timeIntervalSince1970)) { messages.append(m) }
+        if fakeGifs, seed == nil || seed?.contact == contact {
+            let at = UInt64(Date().timeIntervalSince1970)
+            for (i, id) in Self.fakeGifIds.enumerated() {
+                messages.append(Message(id: 900_101 + Int64(i), outgoing: false, body: "GIF", at: at - 60 + UInt64(i),
+                                        delivery: nil, gif: GifInfo(provider: 1, id: id, width: 240, height: 135)))
+            }
+        }
         return messages
     }
 
@@ -844,11 +873,22 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         }
         return GifPageInfo(results: results, next: nil)
     }
-    func gifData(provider: UInt8, id: String) throws -> GifMediaInfo { try device.gifData(provider: provider, id: id) }
+    func gifData(provider: UInt8, id: String) throws -> GifMediaInfo {
+        guard fakeGifs, Self.fakeGifIds.contains(id) else { return try device.gifData(provider: provider, id: id) }
+        lock.withLock { gifDataCalls += 1 }
+        guard try device.gifSettings().enabled else { throw BarkingError.Gif(kind: .notEnabled, retryAfterSecs: 0) }
+        return GifMediaInfo(mp4: Data(), author: nil, title: id)
+    }
     func gifPreview(url: String) throws -> Data { try device.gifPreview(url: url) }
     func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws {
         try device.sendGif(contact: contact, gif: gif, replyTo: replyTo, ttlSecs: ttlSecs)
     }
-    func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] { try device.gifUsage(days: days) }
+    func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] {
+        let today = UInt32(Date().timeIntervalSince1970 / 86_400)
+        if fixedGifUsage { return [GifUsageDayInfo(day: today, searches: 2, shown: 1, sent: 0, previews: 0)] }
+        let calls = lock.withLock { gifDataCalls }
+        guard fakeGifs else { return try device.gifUsage(days: days) }
+        return calls == 0 ? [] : [GifUsageDayInfo(day: today, searches: 0, shown: calls, sent: 0, previews: 0)]
+    }
 }
 #endif

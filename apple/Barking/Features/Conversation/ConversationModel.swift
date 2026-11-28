@@ -35,6 +35,9 @@ final class ConversationModel {
         /// When the core erases it (Unix seconds). While unseen, only the
         /// 7-day ceiling.
         var expireAt: UInt64?
+        /// The GIF this message is (its `text` then reads "GIF"); nil for a
+        /// text. Its media is never here: the bubble holds it while shown.
+        var gif: GifInfo?
 
         /// Seconds left before it disappears at `now`: the whole delay while
         /// unseen (the countdown has not started), else until `expireAt`.
@@ -426,7 +429,7 @@ final class ConversationModel {
         // A failed message with a later sent copy was retried the old way
         // (before Lot M, a new row): hide it, even after reopening.
         let resent = messages.filter { $0.failed && $0.outgoing }.filter { f in
-            messages.contains { $0.outgoing && !$0.failed && $0.id > f.id && $0.body == f.body }
+            messages.contains { $0.outgoing && !$0.failed && $0.id > f.id && $0.body == f.body && $0.gif == f.gif }
         }.map(\.id)
         // The core writes the send's row (and says so) before the send
         // returns: from then on that row stands for the bubble, never both.
@@ -438,7 +441,8 @@ final class ConversationModel {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)), delivery: $0.delivery,
                  quote: $0.replyTo, reactions: $0.reactions, needsUpdate: $0.needsUpdate,
-                 myReactionState: $0.myReactionState, ttl: $0.ttlSecs, seenAt: $0.seenAt, expireAt: $0.expireAt)
+                 myReactionState: $0.myReactionState, ttl: $0.ttlSecs, seenAt: $0.seenAt, expireAt: $0.expireAt,
+                 gif: $0.gif)
         } + [shownAtSend].compactMap { $0 }
         // The row being answered left (deleted): nothing to answer any more.
         if let target = replyingTo, !items.contains(where: { $0.id == target.id }) { replyingTo = nil }
