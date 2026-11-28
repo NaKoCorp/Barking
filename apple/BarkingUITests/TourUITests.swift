@@ -160,10 +160,12 @@ final class TourUITests: XCTestCase {
             snap(app, "conversation-unverified-banner")
             back()
         }
-        _ = app.staticTexts["Sam"].waitForExistence(timeout: 10)
+        // Sam has no message yet: no conversation under Chats (#92).
+        _ = app.tabBars.buttons["Contacts"].waitForExistence(timeout: 10)
         snap(app, "chats-phrase-not-confirmed-banner")
-        // Conversation with a few messages and the route badge.
-        app.staticTexts["Sam"].firstMatch.tap()
+        // Conversation with a few messages and the route badge, opened
+        // from Sam's page under Contacts.
+        openSamConversation(app)
         if field.waitForExistence(timeout: 5) {
             for text in ["hello Sam", "Are you there?", "Meet at the market at six."] {
                 field.tap(); field.typeText(text); app.buttons[L.send].tap()
@@ -442,12 +444,13 @@ final class TourUITests: XCTestCase {
             "-BarkingUITestNoAutoUnlock", "-barking.appearance", scheme,
             "-BarkingUITestInviteStatus", status] + size)
         app.launch()
+        // Sam has no message: his page opens from Contacts, not from Chats (#92).
+        let contacts = app.tabBars.buttons["Contacts"]
+        XCTAssertTrue(contacts.waitForExistence(timeout: 10))
+        contacts.tap()
         let sam = app.staticTexts["Sam"].firstMatch
         XCTAssertTrue(sam.waitForExistence(timeout: 10))
         sam.tap()
-        let header = app.buttons["conversation.header"]
-        XCTAssertTrue(header.waitForExistence(timeout: 10))
-        header.tap()
         let state = app.staticTexts["contact.invite.state"]
         XCTAssertTrue(state.waitForExistence(timeout: 10), "the invitation section")
         let resend = app.buttons["contact.invite.resend"]
