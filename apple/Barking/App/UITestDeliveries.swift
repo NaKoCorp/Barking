@@ -855,12 +855,12 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     }
     func disableGifProvider(provider: UInt8) throws { try device.disableGifProvider(provider: provider) }
     func setGifAutoLoad(on: Bool) throws { try device.setGifAutoLoad(on: on) }
-    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo {
-        guard gifResults else { return try device.gifSearch(query: query, page: page) }
+    func gifSearch(query: String, page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo {
+        guard gifResults else { return try device.gifSearch(query: query, page: page, utcOffsetSecs: utcOffsetSecs) }
         return try fakeGifPage()
     }
-    func gifTrending(page: UInt32) throws -> GifPageInfo {
-        guard gifResults else { return try device.gifTrending(page: page) }
+    func gifTrending(page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo {
+        guard gifResults else { return try device.gifTrending(page: page, utcOffsetSecs: utcOffsetSecs) }
         return try fakeGifPage()
     }
 
@@ -873,18 +873,23 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
         }
         return GifPageInfo(results: results, next: nil)
     }
-    func gifData(provider: UInt8, id: String) throws -> GifMediaInfo {
-        guard fakeGifs, Self.fakeGifIds.contains(id) else { return try device.gifData(provider: provider, id: id) }
+    func gifData(provider: UInt8, id: String, utcOffsetSecs: Int32) throws -> GifMediaInfo {
+        guard fakeGifs, Self.fakeGifIds.contains(id) else {
+            return try device.gifData(provider: provider, id: id, utcOffsetSecs: utcOffsetSecs)
+        }
         lock.withLock { gifDataCalls += 1 }
         guard try device.gifSettings().enabled else { throw BarkingError.Gif(kind: .notEnabled, retryAfterSecs: 0) }
         return GifMediaInfo(mp4: Data(), author: nil, title: id)
     }
-    func gifPreview(url: String) throws -> Data { try device.gifPreview(url: url) }
-    func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws {
-        try device.sendGif(contact: contact, gif: gif, replyTo: replyTo, ttlSecs: ttlSecs)
+    func gifPreview(url: String, utcOffsetSecs: Int32) throws -> Data {
+        try device.gifPreview(url: url, utcOffsetSecs: utcOffsetSecs)
+    }
+    func sendGif(contact: String, gif: GifInfo, utcOffsetSecs: Int32, replyTo: Int64?, ttlSecs: UInt32?) throws {
+        try device.sendGif(contact: contact, gif: gif, utcOffsetSecs: utcOffsetSecs, replyTo: replyTo, ttlSecs: ttlSecs)
     }
     func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] {
-        let today = UInt32(Date().timeIntervalSince1970 / 86_400)
+        // Today as the core numbers it: the phone's own date.
+        let today = GifDay.number(of: Date())
         if fixedGifUsage { return [GifUsageDayInfo(day: today, searches: 2, shown: 1, sent: 0, previews: 0)] }
         let calls = lock.withLock { gifDataCalls }
         guard fakeGifs else { return try device.gifUsage(days: days) }

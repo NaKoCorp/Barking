@@ -664,7 +664,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
                                           privacyUrl: "https://klipy.com/support/privacy-policy")
     /// What `gifSettings` returns; enabling and disabling change it, as the core does.
     var gifSettingsInfo = GifSettingsInfo(enabled: false, autoLoad: false, enabledFromOtherDevice: nil, enabledAt: nil,
-                                          consentOutdated: false)
+                                          consentOutdated: false, enabledFromUnlistedDevice: false)
     /// Thrown by every GIF write when set (nothing changes then).
     var gifError: Error?
     private var _klipyKeys: [String?] = []
@@ -701,6 +701,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
             _gifEnabled.append((provider, warningVersion))
             gifSettingsInfo.enabled = true
             gifSettingsInfo.enabledFromOtherDevice = nil
+            gifSettingsInfo.enabledFromUnlistedDevice = false
             gifSettingsInfo.enabledAt = UInt64(Date().timeIntervalSince1970)
             gifSettingsInfo.consentOutdated = false
         }
@@ -711,6 +712,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
             _gifDisabled.append(provider)
             gifSettingsInfo.enabled = false
             gifSettingsInfo.enabledFromOtherDevice = nil
+            gifSettingsInfo.enabledFromUnlistedDevice = false
             gifSettingsInfo.enabledAt = nil
             gifSettingsInfo.consentOutdated = false
         }
@@ -719,12 +721,12 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         if let gifError { throw gifError }
         lock.withLock { _gifAutoLoad.append(on); gifSettingsInfo.autoLoad = on }
     }
-    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo {
+    func gifSearch(query: String, page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo {
         lock.withLock { _gifSearches.append(query) }
         if let gifSearchError { throw gifSearchError }
         return gifPage
     }
-    func gifTrending(page: UInt32) throws -> GifPageInfo {
+    func gifTrending(page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo {
         lock.withLock { _gifTrendingCalls += 1 }
         if let gifSearchError { throw gifSearchError }
         return gifPage
@@ -737,7 +739,7 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     var gifPreviews: [String] { lock.withLock { _gifPreviews } }
     /// How long `gifPreview` takes (a request on the way).
     var gifPreviewDelay: TimeInterval = 0
-    func gifPreview(url: String) throws -> Data {
+    func gifPreview(url: String, utcOffsetSecs: Int32) throws -> Data {
         lock.withLock { _gifPreviews.append(url) }
         if gifPreviewDelay > 0 { Thread.sleep(forTimeInterval: gifPreviewDelay) }
         if let gifPreviewError { throw gifPreviewError }
@@ -751,13 +753,13 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
     private var _gifDataCalls: [String] = []
     /// The GIF ids `gifData` was called with, in order.
     var gifDataCalls: [String] { lock.withLock { _gifDataCalls } }
-    func gifData(provider: UInt8, id: String) throws -> GifMediaInfo {
+    func gifData(provider: UInt8, id: String, utcOffsetSecs: Int32) throws -> GifMediaInfo {
         lock.withLock { _gifDataCalls.append(id) }
         if gifDataDelay > 0 { Thread.sleep(forTimeInterval: gifDataDelay) }
         if let gifDataError { throw gifDataError }
         return gifMedia
     }
-    func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws {
+    func sendGif(contact: String, gif: GifInfo, utcOffsetSecs: Int32, replyTo: Int64?, ttlSecs: UInt32?) throws {
         if let sendError { throw sendError }
         lock.withLock { _gifSent.append((contact, gif, replyTo, ttlSecs)) }
     }

@@ -39,11 +39,30 @@ final class GifSettingsModelTests: XCTestCase {
     func testEnabledFromOtherDeviceShown() async {
         let d = FakeDevice()
         d.gifSettingsInfo = GifSettingsInfo(enabled: true, autoLoad: false, enabledFromOtherDevice: "iPhone",
-                                            enabledAt: 1_795_000_000, consentOutdated: false)
+                                            enabledAt: 1_795_000_000, consentOutdated: false, enabledFromUnlistedDevice: false)
         let m = model(d)
         await m.load()
-        XCTAssertEqual(m.enabledFrom, "iPhone")
+        XCTAssertEqual(m.enabledFrom, .device("iPhone"))
         XCTAssertEqual(m.enabledAt, Date(timeIntervalSince1970: 1_795_000_000))
+    }
+
+    /// Turned on from a device no longer listed: the core says so as a
+    /// flag, and the app words it, in French too.
+    func testEnabledFromUnlistedDeviceIsLocalized() async throws {
+        let d = FakeDevice()
+        d.gifSettingsInfo = GifSettingsInfo(enabled: true, autoLoad: false, enabledFromOtherDevice: nil,
+                                            enabledAt: 1_795_000_000, consentOutdated: false,
+                                            enabledFromUnlistedDevice: true)
+        let m = model(d)
+        await m.load()
+        XCTAssertEqual(m.enabledFrom, .anotherDevice)
+        let fr = try XCTUnwrap(Bundle.main.path(forResource: "Localizable", ofType: "strings", inDirectory: nil,
+                                                forLocalization: "fr").flatMap { NSDictionary(contentsOfFile: $0) })
+        XCTAssertEqual(fr["another device"] as? String, "un autre appareil")
+        // Off: no origin, whatever the flag.
+        d.gifSettingsInfo.enabled = false
+        await m.load()
+        XCTAssertNil(m.enabledFrom)
     }
 
     /// The core stored the consent but the read that follows failed: the

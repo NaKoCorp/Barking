@@ -414,6 +414,33 @@ final class TransparencyModelTests: XCTestCase {
         XCTAssertEqual(m.oldestID, m.days[2].rows.last?.id)
     }
 
+    /// The core counts on the phone's own date: a search at 19:00 in
+    /// California (03:00 UTC the next day) shows on that evening's day, with
+    /// its journal entries, not on tomorrow's.
+    func testKlipyLineOnTheLocalDayWestOfUTC() async {
+        let la = TimeZone(identifier: "America/Los_Angeles")!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = la
+        // 2026-11-27 19:00 PST (UTC-8) = 2026-11-28 03:00 UTC.
+        let evening: UInt64 = 1_795_834_800
+        let at = Date(timeIntervalSince1970: TimeInterval(evening))
+        XCTAssertEqual(GifDay.utcOffset(at: at, in: la), -8 * 3_600)
+        let day = GifDay.number(of: at, in: la)
+        XCTAssertEqual(day, UInt32(evening / 86_400) - 1, "the UTC day is already the next one")
+        let d = FakeDevice()
+        d.logEntries = [entry(evening)]
+        d.gifUsageDays = [usage(day, searches: 1)]
+        let m = TransparencyModel(core: CoreService(device: d, runner: DirectRunner()), push: Self.push(.authorized),
+                                  protection: { "secure-enclave" }, calendar: calendar,
+                                  locale: Locale(identifier: "en_US_POSIX"))
+        await m.load()
+        XCTAssertEqual(m.days.count, 1)
+        XCTAssertEqual(m.days[0].date, calendar.startOfDay(for: at))
+        XCTAssertEqual(m.days[0].rows.count, 1)
+        XCTAssertNotNil(m.days[0].klipy)
+        XCTAssertEqual(GifDay.date(of: day, in: calendar), calendar.startOfDay(for: at))
+    }
+
     /// Only sends, or nothing: no line.
     func testNoKlipyLineWithoutACall() async {
         let d = FakeDevice()

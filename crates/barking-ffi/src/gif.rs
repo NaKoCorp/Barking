@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use barking_core::MyDevice;
 use barking_core::core::GifUse;
-use barking_core::gif::GifRef;
+use barking_core::gif::{GifRef, GifSettings};
 use barking_core::identity::DeviceId;
 use barking_net::gif::{
     self as net, ACTIVE_GIF_PROVIDER, GifError, GifGate, GifKeys, GifPage, GifTransport,
@@ -131,26 +131,33 @@ pub struct GifSettingsInfo {
     pub enabled: bool,
     /// Play GIFs automatically (kept while GIFs are off).
     pub auto_load: bool,
-    /// While enabled, the name of my other device it was turned on from;
-    /// "another device" if it is no longer in my device list; `None` when
-    /// turned on here. Never empty.
+    /// While enabled and turned on from another of my devices still listed
+    /// with a name: that name. `None` otherwise (turned on here, or see
+    /// `enabled_from_unlisted_device`). Never empty.
     pub enabled_from_other_device: Option<String>,
     /// While enabled, when it was turned on (Unix seconds).
     pub enabled_at: Option<u64>,
     /// A consent for the active provider is stored, but for a warning older
     /// than `MIN_GIF_WARNING_VERSION`: GIFs are off (`enabled` is false) and
-    /// the warning shows again marked "Updated". Added last.
+    /// the warning shows again marked "Updated".
     pub consent_outdated: bool,
+    /// While enabled: turned on from another device of mine that is no
+    /// longer listed (or has no name). The app says "another device" in its
+    /// own language. Added last.
+    pub enabled_from_unlisted_device: bool,
 }
 
-/// Counters of one day (`day` is Unix seconds / 86 400).
+/// Counters of one day. `day` is the device's local date when the uses
+/// happened, as days since 1970-01-01: `(unix + utc_offset_secs) / 86 400`,
+/// the offset given with each call. Read it as a calendar date (its UTC
+/// components), not as an instant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct GifUsageDayInfo {
     pub day: u32,
     pub searches: u32,
     pub shown: u32,
     pub sent: u32,
-    /// Picker previews fetched. Added last.
+    /// Picker previews fetched.
     pub previews: u32,
 }
 
@@ -158,27 +165,62 @@ pub struct GifUsageDayInfo {
 /// the oldest is dropped.
 const UNCOUNTED_MAX: usize = 256;
 
-/// What `enabled_from_other_device` names a device no longer in my list.
-const OTHER_DEVICE: &str = "another device";
-
-/// Where consent was given, for "Turned on from {name}": `None` on this
-/// device, else the name of the listed device, else [`OTHER_DEVICE`].
-fn consent_origin(devices: &[MyDevice], from: DeviceId) -> Option<String> {
-    if devices.iter().any(|d| d.this_device && d.id == from) {
-        return None;
-    }
-    Some(
-        devices
-            .iter()
-            .find(|d| d.id == from)
-            .map(|d| d.name.clone())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| OTHER_DEVICE.to_owned()),
-    )
+/// Where consent was given, for "Turned on from {name}".
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ConsentOrigin {
+    ThisDevice,
+    /// A listed device of mine, with its name.
+    Named(String),
+    /// A device no longer listed, or listed without a name.
+    Unlisted,
 }
 
+fn consent_origin(devices: &[MyDevice], from: DeviceId) -> ConsentOrigin {
+    if devices.iter().any(|d| d.this_device && d.id == from) {
+        return ConsentOrigin::ThisDevice;
+    }
+    devices
+        .iter()
+        .find(|d| d.id == from)
+        .map(|d| d.name.clone())
+        .filter(|n| !n.is_empty())
+        .map_or(ConsentOrigin::Unlisted, ConsentOrigin::Named)
+}
+
+/// What `gif_settings` gives for `provider`, `enabled` being the core's
+/// `gif_allowed`.
+fn settings_info(
+    settings: &GifSettings,
+    provider: u8,
+    enabled: bool,
+    devices: &[MyDevice],
+) -> GifSettingsInfo {
+    let stored = settings.enabled.get(&provider);
+    let consent_outdated =
+        stored.is_some_and(|c| c.warning_version < barking_core::gif::MIN_GIF_WARNING_VERSION);
+    let consent = stored.filter(|_| enabled);
+    let origin = consent.map(|c| consent_origin(devices, c.device));
+    let enabled_from_unlisted_device = origin == Some(ConsentOrigin::Unlisted);
+    let enabled_from_other_device = match origin {
+        Some(ConsentOrigin::Named(name)) => Some(name),
+        _ => None,
+    };
+    GifSettingsInfo {
+        enabled,
+        auto_load: settings.auto_load,
+        enabled_from_other_device,
+        enabled_at: consent.map(|c| c.at),
+        consent_outdated,
+        enabled_from_unlisted_device,
+    }
+}
+
+/// A use waiting to be counted: what, when (Unix seconds), and the
+/// device's UTC offset then (seconds), which picks its local day.
+type Uncounted = (GifUse, u64, i32);
+
 /// Adds a waiting use, dropping the oldest beyond [`UNCOUNTED_MAX`].
-fn push_uncounted(buf: &mut Vec<(GifUse, u64)>, item: (GifUse, u64)) {
+fn push_uncounted(buf: &mut Vec<Uncounted>, item: Uncounted) {
     if buf.len() >= UNCOUNTED_MAX {
         let extra = buf.len() + 1 - UNCOUNTED_MAX;
         buf.drain(..extra);
@@ -189,6 +231,9 @@ fn push_uncounted(buf: &mut Vec<(GifUse, u64)>, item: (GifUse, u64)) {
 /// Consent and counters of a GIF call, from the core opened for each one.
 struct DeviceGate<'a> {
     device: &'a Device,
+    /// The device's UTC offset at the call, in seconds: a use counts on
+    /// that local day.
+    utc_offset_secs: i32,
     /// Why the core could not answer a consent check, if it could not: the
     /// call is refused (fail closed) and reports this error rather than
     /// `NotEnabled`.
@@ -196,9 +241,10 @@ struct DeviceGate<'a> {
 }
 
 impl<'a> DeviceGate<'a> {
-    fn new(device: &'a Device) -> Self {
+    fn new(device: &'a Device, utc_offset_secs: i32) -> Self {
         Self {
             device,
+            utc_offset_secs,
             error: Mutex::default(),
         }
     }
@@ -235,7 +281,8 @@ impl GifGate for DeviceGate<'_> {
 
     /// Counts `use_` with the uses left waiting before (`flush_uncounted`).
     fn record(&self, use_: GifUse) {
-        self.device.flush_uncounted(Some((use_, now())));
+        self.device
+            .flush_uncounted(Some((use_, now(), self.utc_offset_secs)));
     }
 }
 
@@ -243,7 +290,7 @@ impl Device {
     /// Counts the waiting uses, `new` added. If the database stays busy
     /// past `COUNT_WAIT`, they keep waiting, in memory and capped. A use
     /// the core refuses to count is dropped: it never holds up the others.
-    fn flush_uncounted(&self, new: Option<(GifUse, u64)>) {
+    fn flush_uncounted(&self, new: Option<Uncounted>) {
         let mut uncounted = self
             .gif_uncounted
             .lock()
@@ -256,9 +303,9 @@ impl Device {
         }
         let todo = std::mem::take(&mut *uncounted);
         let done = self.with_core_within(COUNT_WAIT, |core| {
-            for (u, at) in &todo {
+            for (u, at, offset) in &todo {
                 // Best effort: counters never fail a call.
-                let _ = core.record_gif_use(*u, *at);
+                let _ = core.record_gif_use(*u, *at, *offset);
             }
             Ok(())
         });
@@ -293,16 +340,22 @@ impl Device {
         t: &impl GifTransport,
         query: &str,
         page: u32,
+        utc_offset_secs: i32,
     ) -> Result<GifPageInfo, BarkingError> {
         let keys = self.gif_keys();
-        let gate = DeviceGate::new(self);
+        let gate = DeviceGate::new(self, utc_offset_secs);
         let r = crate::net::block_on(net::search(&gate, &keys, t, query, page))?;
         Ok(gate.finish(r)?.into())
     }
 
-    fn trending_with(&self, t: &impl GifTransport, page: u32) -> Result<GifPageInfo, BarkingError> {
+    fn trending_with(
+        &self,
+        t: &impl GifTransport,
+        page: u32,
+        utc_offset_secs: i32,
+    ) -> Result<GifPageInfo, BarkingError> {
         let keys = self.gif_keys();
-        let gate = DeviceGate::new(self);
+        let gate = DeviceGate::new(self, utc_offset_secs);
         let r = crate::net::block_on(net::trending(&gate, &keys, t, page))?;
         Ok(gate.finish(r)?.into())
     }
@@ -311,8 +364,9 @@ impl Device {
         &self,
         t: &impl GifTransport,
         url: &str,
+        utc_offset_secs: i32,
     ) -> Result<Vec<u8>, BarkingError> {
-        let gate = DeviceGate::new(self);
+        let gate = DeviceGate::new(self, utc_offset_secs);
         let r = crate::net::block_on(net::preview(&gate, t, url))?;
         gate.finish(r)
     }
@@ -322,9 +376,10 @@ impl Device {
         t: &impl GifTransport,
         provider: u8,
         id: &str,
+        utc_offset_secs: i32,
     ) -> Result<GifMediaInfo, BarkingError> {
         let keys = self.gif_keys();
-        let gate = DeviceGate::new(self);
+        let gate = DeviceGate::new(self, utc_offset_secs);
         let r = crate::net::block_on(net::data(&gate, &keys, t, provider, id))?;
         let media = gate.finish(r)?;
         Ok(GifMediaInfo {
@@ -364,20 +419,12 @@ impl Device {
                 let provider = ACTIVE_GIF_PROVIDER.as_u8();
                 let settings = core.gif_settings()?;
                 let enabled = core.gif_allowed(provider)?;
-                let stored = settings.enabled.get(&provider);
-                let consent_outdated = stored.is_some_and(|c| {
-                    c.warning_version < barking_core::gif::MIN_GIF_WARNING_VERSION
-                });
-                let consent = stored.filter(|_| enabled);
-                let enabled_from_other_device =
-                    consent.and_then(|c| consent_origin(&core.my_devices(), c.device));
-                Ok(GifSettingsInfo {
+                Ok(settings_info(
+                    &settings,
+                    provider,
                     enabled,
-                    auto_load: settings.auto_load,
-                    enabled_from_other_device,
-                    enabled_at: consent.map(|c| c.at),
-                    consent_outdated,
-                })
+                    &core.my_devices(),
+                ))
             })
         })
     }
@@ -413,20 +460,37 @@ impl Device {
 
     /// One page of search results from the active provider. Refused
     /// (`Gif { NotEnabled }`) without consent: nothing is sent.
-    pub fn gif_search(&self, query: String, page: u32) -> Result<GifPageInfo, BarkingError> {
-        guard(|| self.search_with(&*self.gif_transport()?, &query, page))
+    /// `utc_offset_secs`, the device's UTC offset now (seconds east of
+    /// UTC), picks the local day the request counts on (`gif_usage`); the
+    /// same for every GIF call.
+    pub fn gif_search(
+        &self,
+        query: String,
+        page: u32,
+        utc_offset_secs: i32,
+    ) -> Result<GifPageInfo, BarkingError> {
+        guard(|| self.search_with(&*self.gif_transport()?, &query, page, utc_offset_secs))
     }
 
     /// One page of trending GIFs from the active provider, as `gif_search`.
-    pub fn gif_trending(&self, page: u32) -> Result<GifPageInfo, BarkingError> {
-        guard(|| self.trending_with(&*self.gif_transport()?, page))
+    pub fn gif_trending(
+        &self,
+        page: u32,
+        utc_offset_secs: i32,
+    ) -> Result<GifPageInfo, BarkingError> {
+        guard(|| self.trending_with(&*self.gif_transport()?, page, utc_offset_secs))
     }
 
     /// The MP4 of a received GIF, from the provider its message names.
     /// `NotEnabled` without consent for that provider (nothing is sent),
     /// `NotFound` for an unknown provider or a GIF gone.
-    pub fn gif_data(&self, provider: u8, id: String) -> Result<GifMediaInfo, BarkingError> {
-        guard(|| self.data_with(&*self.gif_transport()?, provider, &id))
+    pub fn gif_data(
+        &self,
+        provider: u8,
+        id: String,
+        utc_offset_secs: i32,
+    ) -> Result<GifMediaInfo, BarkingError> {
+        guard(|| self.data_with(&*self.gif_transport()?, provider, &id, utc_offset_secs))
     }
 
     /// The small MP4 of a picker result (`GifResultInfo::preview_mp4_url`,
@@ -434,33 +498,44 @@ impl Device {
     /// request, the provider's hosts only, counted in `gif_usage`. Kept
     /// nowhere. `Gif { NotEnabled }` without consent and
     /// `Gif { Malformed }` for another URL: nothing is sent.
-    pub fn gif_preview(&self, url: String) -> Result<Vec<u8>, BarkingError> {
-        guard(|| self.preview_with(&*self.gif_transport()?, &url))
+    pub fn gif_preview(&self, url: String, utc_offset_secs: i32) -> Result<Vec<u8>, BarkingError> {
+        guard(|| self.preview_with(&*self.gif_transport()?, &url, utc_offset_secs))
     }
 
     /// Queues the GIF `gif` for `contact` (fingerprint or alias), as
     /// `send_text` a text: the same `reply_to` and `ttl_secs` rules. Only
     /// the reference leaves; no provider is contacted. An invalid reference:
-    /// `InvalidInput`, nothing queued.
+    /// `InvalidInput`, nothing queued. Counted as sent on the local day
+    /// `utc_offset_secs` gives, as `gif_search`.
     #[uniffi::method(default(ttl_secs = None))]
     pub fn send_gif(
         &self,
         contact: String,
         gif: GifInfo,
+        utc_offset_secs: i32,
         reply_to: Option<i64>,
         ttl_secs: Option<u32>,
     ) -> Result<(), BarkingError> {
         guard(|| {
             self.with_core(|core| {
                 let fp = core.resolve(&contact)?;
-                core.send_gif(&fp, gif.into(), reply_to, ttl_secs, now(), &mut rand::rng())?;
+                let gif = gif.into();
+                core.send_gif(
+                    &fp,
+                    gif,
+                    reply_to,
+                    ttl_secs,
+                    now(),
+                    utc_offset_secs,
+                    &mut rand::rng(),
+                )?;
                 Ok(())
             })
         })
     }
 
-    /// Usage counters of the last `days` days with a use, newest first
-    /// (this device only). Counts the uses left waiting first, if the
+    /// Usage counters of the last `days` local days with a use, newest
+    /// first (this device only). Counts the uses left waiting first, if the
     /// database is free.
     pub fn gif_usage(&self, days: u8) -> Result<Vec<GifUsageDayInfo>, BarkingError> {
         guard(|| {
@@ -542,12 +617,12 @@ mod tests {
         let d = device(&dir, 1, "Alice");
         d.configure_gifs(Some("KEY".into()));
         assert!(is_gif_error(
-            d.gif_search("x".into(), 1),
+            d.gif_search("x".into(), 1, 0),
             GifErrorKind::NotEnabled
         ));
-        assert!(is_gif_error(d.gif_trending(1), GifErrorKind::NotEnabled));
+        assert!(is_gif_error(d.gif_trending(1, 0), GifErrorKind::NotEnabled));
         assert!(is_gif_error(
-            d.gif_data(1, "hello-hi-662".into()),
+            d.gif_data(1, "hello-hi-662".into(), 0),
             GifErrorKind::NotEnabled
         ));
         assert!(d.gif_usage(7).unwrap().is_empty());
@@ -559,11 +634,14 @@ mod tests {
         let d = device(&dir, 1, "Alice");
         d.enable_gif_provider(1, 1).unwrap();
         assert!(is_gif_error(
-            d.gif_search("x".into(), 1),
+            d.gif_search("x".into(), 1, 0),
             GifErrorKind::NotConfigured
         ));
         d.configure_gifs(Some(String::new()));
-        assert!(is_gif_error(d.gif_trending(1), GifErrorKind::NotConfigured));
+        assert!(is_gif_error(
+            d.gif_trending(1, 0),
+            GifErrorKind::NotConfigured
+        ));
     }
 
     #[test]
@@ -578,6 +656,7 @@ mod tests {
                 enabled_from_other_device: None,
                 enabled_at: None,
                 consent_outdated: false,
+                enabled_from_unlisted_device: false,
             }
         );
     }
@@ -592,6 +671,7 @@ mod tests {
         assert!(s.enabled && s.auto_load && !s.consent_outdated);
         // Turned on here: no other device to name.
         assert_eq!(s.enabled_from_other_device, None);
+        assert!(!s.enabled_from_unlisted_device);
         assert!(s.enabled_at.is_some());
         d.disable_gif_provider(1).unwrap();
         let s = d.gif_settings().unwrap();
@@ -630,7 +710,7 @@ mod tests {
     fn ffi_message_exposes_gif() {
         let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let (alice, fb) = paired(&da, &db);
-        alice.send_gif(fb.clone(), hello(), None, None).unwrap();
+        alice.send_gif(fb.clone(), hello(), 0, None, None).unwrap();
         let last = alice.messages_with(fb.clone()).unwrap().pop().unwrap();
         assert_eq!(last.gif, Some(hello()));
         assert_eq!(last.body, "GIF");
@@ -641,7 +721,7 @@ mod tests {
             ..hello()
         };
         assert!(matches!(
-            alice.send_gif(fb.clone(), bad, None, None),
+            alice.send_gif(fb.clone(), bad, 0, None, None),
             Err(BarkingError::InvalidInput { .. })
         ));
         assert_eq!(alice.messages_with(fb).unwrap().len(), 1);
@@ -653,7 +733,7 @@ mod tests {
     fn ffi_gif_reads_gif_in_summaries_and_quotes() {
         let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let (alice, fb) = paired(&da, &db);
-        alice.send_gif(fb.clone(), hello(), None, None).unwrap();
+        alice.send_gif(fb.clone(), hello(), 0, None, None).unwrap();
         let summaries = alice.chat_summaries().unwrap();
         let last = summaries[0].last.as_ref().unwrap();
         assert_eq!(last.body, "GIF");
@@ -705,7 +785,7 @@ mod tests {
         d.enable_gif_provider(1, 1).unwrap();
         d.configure_gifs(Some("KEY".into()));
         let t = CoreFreeTransport { device: d.clone() };
-        let page = d.search_with(&t, "hi", 1).unwrap();
+        let page = d.search_with(&t, "hi", 1, 0).unwrap();
         assert!(!page.results.is_empty());
         assert!(d.gif_settings().unwrap().auto_load);
         assert_eq!(d.gif_usage(1).unwrap()[0].searches, 1);
@@ -718,12 +798,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = device(&dir, 1, "Alice");
         d.with_core_sync(|_| {
-            DeviceGate::new(&d).record(GifUse::Search);
+            DeviceGate::new(&d, 0).record(GifUse::Search);
             Ok(())
         })
         .unwrap();
         assert_eq!(d.gif_uncounted.lock().unwrap().len(), 1);
-        DeviceGate::new(&d).record(GifUse::Shown);
+        DeviceGate::new(&d, 0).record(GifUse::Shown);
         assert!(d.gif_uncounted.lock().unwrap().is_empty());
         let day = d.gif_usage(1).unwrap()[0];
         assert_eq!((day.searches, day.shown), (1, 1));
@@ -754,18 +834,18 @@ mod tests {
             urls: std::sync::Mutex::default(),
         };
         assert!(is_gif_error(
-            d.preview_with(&t, PREVIEW),
+            d.preview_with(&t, PREVIEW, 0),
             GifErrorKind::NotEnabled
         ));
         assert!(is_gif_error(
-            d.gif_preview(PREVIEW.into()),
+            d.gif_preview(PREVIEW.into(), 0),
             GifErrorKind::NotEnabled
         ));
         assert!(t.urls.lock().unwrap().is_empty());
         d.enable_gif_provider(1, 1).unwrap();
-        assert_eq!(d.preview_with(&t, PREVIEW).unwrap(), b"MP4".to_vec());
+        assert_eq!(d.preview_with(&t, PREVIEW, 0).unwrap(), b"MP4".to_vec());
         assert!(is_gif_error(
-            d.preview_with(&t, "https://cdn.example.com/a.mp4"),
+            d.preview_with(&t, "https://cdn.example.com/a.mp4", 0),
             GifErrorKind::Malformed
         ));
         assert_eq!(t.urls.lock().unwrap().len(), 1);
@@ -774,7 +854,7 @@ mod tests {
         // Turned off again: nothing more is sent.
         d.disable_gif_provider(1).unwrap();
         assert!(is_gif_error(
-            d.preview_with(&t, PREVIEW),
+            d.preview_with(&t, PREVIEW, 0),
             GifErrorKind::NotEnabled
         ));
         assert_eq!(t.urls.lock().unwrap().len(), 1);
@@ -791,21 +871,84 @@ mod tests {
     }
 
     /// Turned on here: no name; on a listed device: its name; on a device
-    /// no longer listed: a text the interface shows as is, never empty.
+    /// no longer listed, or without a name: unlisted, which the app words
+    /// in its own language. No English text crosses the FFI.
     #[test]
     fn ffi_gif_consent_origin_names_the_device_or_falls_back() {
         use barking_core::identity::DeviceId;
+        let devices = [
+            my_device(1, "iPhone", true),
+            my_device(2, "iPad", false),
+            my_device(3, "", false),
+        ];
+        assert_eq!(
+            consent_origin(&devices, DeviceId([1; 16])),
+            ConsentOrigin::ThisDevice
+        );
+        assert_eq!(
+            consent_origin(&devices, DeviceId([2; 16])),
+            ConsentOrigin::Named("iPad".into())
+        );
+        for unlisted in [3, 9] {
+            assert_eq!(
+                consent_origin(&devices, DeviceId([unlisted; 16])),
+                ConsentOrigin::Unlisted
+            );
+        }
+    }
+
+    /// The settings carry the origin as data: a listed device by its
+    /// name, one no longer listed by the flag alone; neither while off.
+    #[test]
+    fn ffi_gif_settings_name_the_origin_as_data() {
+        use barking_core::gif::{GifConsent, MIN_GIF_WARNING_VERSION};
+        use barking_core::identity::DeviceId;
         let devices = [my_device(1, "iPhone", true), my_device(2, "iPad", false)];
-        assert_eq!(consent_origin(&devices, DeviceId([1; 16])), None);
+        let from = |id: u8| {
+            let mut s = GifSettings::default();
+            s.enabled.insert(
+                1,
+                GifConsent {
+                    warning_version: MIN_GIF_WARNING_VERSION,
+                    device: DeviceId([id; 16]),
+                    at: 5,
+                },
+            );
+            s
+        };
+        let named = settings_info(&from(2), 1, true, &devices);
+        assert_eq!(named.enabled_from_other_device.as_deref(), Some("iPad"));
+        assert!(!named.enabled_from_unlisted_device);
+        let gone = settings_info(&from(9), 1, true, &devices);
+        assert_eq!(gone.enabled_from_other_device, None);
+        assert!(gone.enabled_from_unlisted_device);
+        assert_eq!(gone.enabled_at, Some(5));
+        let here = settings_info(&from(1), 1, true, &devices);
+        assert_eq!(here.enabled_from_other_device, None);
+        assert!(!here.enabled_from_unlisted_device);
+        let off = settings_info(&from(9), 1, false, &devices);
+        assert!(!off.enabled_from_unlisted_device && off.enabled_at.is_none());
+    }
+
+    /// A use counts on the local day of the offset given with its call:
+    /// 19:00 at UTC-8 is the next day in UTC, still its own date here.
+    #[test]
+    fn ffi_gif_use_counts_on_the_local_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = device(&dir, 1, "Alice");
+        let pst = -8 * 3600;
+        let evening = 1_795_834_800;
+        d.flush_uncounted(Some((GifUse::Search, evening, pst)));
+        d.flush_uncounted(Some((GifUse::Shown, evening, 0)));
+        let days = d.gif_usage(7).unwrap();
+        let local = barking_core::core::local_day(evening, pst);
+        assert_eq!(local + 1, barking_core::core::local_day(evening, 0));
         assert_eq!(
-            consent_origin(&devices, DeviceId([2; 16])).as_deref(),
-            Some("iPad")
+            days.iter()
+                .map(|u| (u.day, u.searches, u.shown))
+                .collect::<Vec<_>>(),
+            [(local + 1, 0, 1), (local, 1, 0)]
         );
-        assert_eq!(
-            consent_origin(&devices, DeviceId([9; 16])).as_deref(),
-            Some(OTHER_DEVICE)
-        );
-        assert_eq!(OTHER_DEVICE, "another device");
     }
 
     /// `gif_usage` counts the uses left waiting before it reads.
@@ -814,7 +957,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = device(&dir, 1, "Alice");
         d.with_core_sync(|_| {
-            DeviceGate::new(&d).record(GifUse::Search);
+            DeviceGate::new(&d, 0).record(GifUse::Search);
             Ok(())
         })
         .unwrap();
@@ -827,15 +970,15 @@ mod tests {
     #[test]
     fn ffi_gif_uncounted_buffer_is_capped() {
         let mut buf = Vec::new();
-        push_uncounted(&mut buf, (GifUse::Sent, 0));
+        push_uncounted(&mut buf, (GifUse::Sent, 0, 0));
         for at in 1..=UNCOUNTED_MAX as u64 {
-            push_uncounted(&mut buf, (GifUse::Search, at));
+            push_uncounted(&mut buf, (GifUse::Search, at, 0));
         }
         assert_eq!(buf.len(), UNCOUNTED_MAX);
-        assert_eq!(buf[0], (GifUse::Search, 1));
+        assert_eq!(buf[0], (GifUse::Search, 1, 0));
         assert_eq!(
             buf[UNCOUNTED_MAX - 1],
-            (GifUse::Search, UNCOUNTED_MAX as u64)
+            (GifUse::Search, UNCOUNTED_MAX as u64, 0)
         );
         assert_eq!(UNCOUNTED_MAX, 256);
     }
@@ -852,16 +995,19 @@ mod tests {
         let wrong = Device::at(config(&dir, 2)).unwrap();
         wrong.configure_gifs(Some("KEY".into()));
         assert!(matches!(
-            wrong.gif_search("x".into(), 1),
+            wrong.gif_search("x".into(), 1, 0),
             Err(BarkingError::Storage { .. })
         ));
         assert!(matches!(
-            wrong.gif_data(1, "hello-hi-662".into()),
+            wrong.gif_data(1, "hello-hi-662".into(), 0),
             Err(BarkingError::Storage { .. })
         ));
         // Without consent it still reads NotEnabled.
         let dir2 = tempfile::tempdir().unwrap();
         let off = device(&dir2, 1, "Bob");
-        assert!(is_gif_error(off.gif_trending(1), GifErrorKind::NotEnabled));
+        assert!(is_gif_error(
+            off.gif_trending(1, 0),
+            GifErrorKind::NotEnabled
+        ));
     }
 }

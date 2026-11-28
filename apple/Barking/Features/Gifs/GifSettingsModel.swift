@@ -13,9 +13,9 @@ final class GifSettingsModel {
     private(set) var enabled = false
     /// Play GIFs automatically; off by default, kept while GIFs are off.
     private(set) var autoLoad = false
-    /// While on: the name of my other device they were turned on from
-    /// ("another device" for one no longer listed); nil when turned on here.
-    private(set) var enabledFrom: String?
+    /// While on: which of my other devices they were turned on from; nil
+    /// when turned on here.
+    private(set) var enabledFrom: GifConsentOrigin?
     /// When the consent in force was given.
     private(set) var enabledAt: Date?
     /// The active provider, as the core names it: what the warning names
@@ -103,9 +103,29 @@ final class GifSettingsModel {
     private func apply(_ s: GifSettingsInfo) {
         enabled = s.enabled
         autoLoad = s.autoLoad
-        enabledFrom = s.enabled ? s.enabledFromOtherDevice : nil
+        enabledFrom = s.enabled ? GifConsentOrigin(s) : nil
         enabledAt = s.enabledAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         updated = !s.enabled && s.consentOutdated
+    }
+}
+
+/// Where GIFs were turned on, when not on this phone.
+enum GifConsentOrigin: Equatable {
+    /// One of my devices, by its name.
+    case device(String)
+    /// A device no longer in my list (or without a name): "another device",
+    /// in the app's language.
+    case anotherDevice
+
+    /// Nil when turned on here.
+    init?(_ s: GifSettingsInfo) {
+        if let name = s.enabledFromOtherDevice, !name.isEmpty {
+            self = .device(name)
+        } else if s.enabledFromUnlistedDevice {
+            self = .anotherDevice
+        } else {
+            return nil
+        }
     }
 }
 

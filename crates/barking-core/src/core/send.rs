@@ -340,7 +340,8 @@ impl Core {
     /// The stored row carries `gif` and an empty body. A reference that is
     /// not valid (provider 0, identifier empty, too long, not printable
     /// ASCII, or not `[a-z0-9-]` for Klipy) gives `Malformed`, writing
-    /// nothing.
+    /// nothing. Counted as sent on the local day of `now`, the device being
+    /// `utc_offset_secs` ahead of UTC ([`super::gif::local_day`]).
     #[allow(clippy::too_many_arguments)]
     pub fn send_gif(
         &mut self,
@@ -349,6 +350,7 @@ impl Core {
         reply_to: Option<i64>,
         ttl_secs: Option<u32>,
         now: u64,
+        utc_offset_secs: i32,
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<Packet>> {
         self.ensure_active()?;
@@ -356,17 +358,19 @@ impl Core {
         if !content::ttl_in_bounds(ttl_secs) {
             return Err(CoreError::InvalidTtl);
         }
-        self.send_content(to, "", Some(&gif), reply_to, ttl_secs, now, rng)
+        let gif = (&gif, utc_offset_secs);
+        self.send_content(to, "", Some(gif), reply_to, ttl_secs, now, rng)
     }
 
     /// The common part of `send_message` and `send_gif`, once their
-    /// content is checked: a text (`gif` `None`) or a GIF (`text` empty).
+    /// content is checked: a text (`gif` `None`) or a GIF (`text` empty),
+    /// with the UTC offset its use is counted under.
     #[allow(clippy::too_many_arguments)]
     fn send_content(
         &mut self,
         to: &Fingerprint,
         text: &str,
-        gif: Option<&GifRef>,
+        gif: Option<(&GifRef, i32)>,
         reply_to: Option<i64>,
         ttl_secs: Option<u32>,
         now: u64,
@@ -380,7 +384,7 @@ impl Core {
             let reference = reply_to.map(|id| quote_ref(tx, to, id, now)).transpose()?;
             let message_id = new_message_id(rng);
             let (body, copy) = match gif {
-                Some(gif) => bodies_gif(*to, gif, reference, ttl_secs),
+                Some((gif, _)) => bodies_gif(*to, gif, reference, ttl_secs),
                 None => bodies(*to, text, reference, ttl_secs),
             };
             let (body, copy) = (Plain(body), Plain(copy));
@@ -412,7 +416,7 @@ impl Core {
                 ttl_secs,
                 seen_at: ttl_secs.map(|_| now),
                 expire_at: ttl_secs.map(|t| now.saturating_add(u64::from(t))),
-                gif: gif.cloned(),
+                gif: gif.map(|(g, _)| g.clone()),
             })? {
                 return Err(CoreError::Store("duplicate message identifier".into()));
             }
@@ -433,8 +437,8 @@ impl Core {
             )?;
             let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
             out.extend(mine);
-            if gif.is_some() {
-                super::gif::record_use(tx, super::gif::GifUse::Sent, now)?;
+            if let Some((_, utc_offset_secs)) = gif {
+                super::gif::record_use(tx, super::gif::GifUse::Sent, now, utc_offset_secs)?;
             }
             if ttl_secs.is_some() {
                 let seen = SeenEntry {

@@ -606,10 +606,6 @@ public actor CoreService {
 
     // MARK: GIFs (spec GIF §6.6)
 
-    /// The provider keys the app was built with; kept in memory by the core.
-    public func configureGifs(klipyKey: String?) async throws {
-        try await call("gif-keys") { $0.configureGifs(klipyKey: klipyKey) }
-    }
     public func gifProvider() async throws -> GifProviderInfo { try await call("gif-provider") { $0.gifProvider() } }
     public func gifSettings() async throws -> GifSettingsInfo { try await call("gif-settings") { try $0.gifSettings() } }
     /// After the warning was accepted. The change leaves for my other
@@ -640,33 +636,42 @@ public actor CoreService {
         Task { _ = await self.sync(reason: .afterSend) }
         return settings
     }
+    // Each call that may reach the provider, or sends a GIF, carries the
+    // phone's UTC offset at that moment: its use counts on the user's own
+    // date (`GifDay`), DST and travel included.
     public func gifSearch(_ query: String, page: UInt32) async throws -> GifPageInfo {
-        try await call("gif-search") { try $0.gifSearch(query: query, page: page) }
+        let offset = GifDay.utcOffset()
+        return try await call("gif-search") { try $0.gifSearch(query: query, page: page, utcOffsetSecs: offset) }
     }
     public func gifTrending(page: UInt32) async throws -> GifPageInfo {
-        try await call("gif-trending") { try $0.gifTrending(page: page) }
+        let offset = GifDay.utcOffset()
+        return try await call("gif-trending") { try $0.gifTrending(page: page, utcOffsetSecs: offset) }
     }
     /// A picker preview's MP4, from the core (consent, hosts, counted).
     public func gifPreview(_ url: String) async throws -> Data {
-        try await call("gif-preview") { try $0.gifPreview(url: url) }
+        let offset = GifDay.utcOffset()
+        return try await call("gif-preview") { try $0.gifPreview(url: url, utcOffsetSecs: offset) }
     }
     public func gifData(provider: UInt8, id: String) async throws -> GifMediaInfo {
-        try await call("gif-data") { try $0.gifData(provider: provider, id: id) }
+        let offset = GifDay.utcOffset()
+        return try await call("gif-data") { try $0.gifData(provider: provider, id: id, utcOffsetSecs: offset) }
     }
     /// Queues `gif` for `contact`, as `send` a text (same `replyTo` and
     /// `ttlSecs` rules); the conversation's rows, read in the same call.
     @discardableResult
     public func sendGif(_ gif: GifInfo, to contact: String, replyTo: Int64? = nil,
                         ttlSecs: UInt32? = nil) async throws -> [Message]? {
+        let offset = GifDay.utcOffset()
         let rows = try await call("send-gif") { device -> [Message]? in
-            try device.sendGif(contact: contact, gif: gif, replyTo: replyTo, ttlSecs: ttlSecs)
+            try device.sendGif(contact: contact, gif: gif, utcOffsetSecs: offset, replyTo: replyTo, ttlSecs: ttlSecs)
             return try? device.messagesWith(contact: contact)
         }
         publish(.messages(contact: contact))
         Task { _ = await self.sync(reason: .afterSend) }
         return rows
     }
-    /// Usage of the last `days` days with a use, newest first (this device).
+    /// Usage of the last `days` local days with a use, newest first (this
+    /// device). `day` is a date (`GifDay`), not an instant.
     public func gifUsage(days: UInt8) async throws -> [GifUsageDayInfo] {
         try await call("gif-usage") { try $0.gifUsage(days: days) }
     }

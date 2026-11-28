@@ -117,12 +117,14 @@ public protocol DeviceHandle: AnyObject, Sendable {
     func disableGifProvider(provider: UInt8) throws
     func setGifAutoLoad(on: Bool) throws
     /// Refused (`Gif(kind: .notEnabled)`) without consent: nothing is sent.
-    func gifSearch(query: String, page: UInt32) throws -> GifPageInfo
-    func gifTrending(page: UInt32) throws -> GifPageInfo
-    func gifData(provider: UInt8, id: String) throws -> GifMediaInfo
+    /// `utcOffsetSecs` (the phone's, now) picks the local day each call
+    /// counts on (`GifDay`).
+    func gifSearch(query: String, page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo
+    func gifTrending(page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo
+    func gifData(provider: UInt8, id: String, utcOffsetSecs: Int32) throws -> GifMediaInfo
     /// A picker preview, fetched by the core with consent checked first.
-    func gifPreview(url: String) throws -> Data
-    func sendGif(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?) throws
+    func gifPreview(url: String, utcOffsetSecs: Int32) throws -> Data
+    func sendGif(contact: String, gif: GifInfo, utcOffsetSecs: Int32, replyTo: Int64?, ttlSecs: UInt32?) throws
     func gifUsage(days: UInt8) throws -> [GifUsageDayInfo]
 }
 

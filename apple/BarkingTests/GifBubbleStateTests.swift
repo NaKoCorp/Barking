@@ -10,7 +10,7 @@ final class GifBubbleStateTests: XCTestCase {
 
     private func settings(enabled: Bool, autoLoad: Bool) -> GifSettingsInfo {
         GifSettingsInfo(enabled: enabled, autoLoad: autoLoad, enabledFromOtherDevice: nil, enabledAt: nil,
-                        consentOutdated: false)
+                        consentOutdated: false, enabledFromUnlistedDevice: false)
     }
 
     private let klipy = GifProviderInfo(id: 1, name: "Klipy", warningVersion: 1,

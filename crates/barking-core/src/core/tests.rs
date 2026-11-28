@@ -11928,7 +11928,7 @@ fn gif_send_receive_round_trip() {
     let mut p = pair();
     let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
     let out =
-        p.a.send_gif(&b, hello_gif(), None, None, NOW, &mut p.rng)
+        p.a.send_gif(&b, hello_gif(), None, None, NOW, 0, &mut p.rng)
             .unwrap();
     assert_eq!(out.len(), 1);
     let mine = last_row(&p.a, &b);
@@ -11989,7 +11989,7 @@ fn gif_copy_reaches_my_other_device() {
     let first = b.send_text(&alice, "q", NOW, &mut rng).unwrap();
     deliver_each(&first, &mut [&mut a, &mut t], &mut rng);
     let sent = a
-        .send_gif(&bob, hello_gif(), None, None, NOW, &mut rng)
+        .send_gif(&bob, hello_gif(), None, None, NOW, 0, &mut rng)
         .unwrap();
     assert_eq!(sent.len(), 2, "one for Bob, one copy for the tablet");
     let got = t.receive(&sent[1].encode(), "t", NOW, &mut rng).unwrap();
@@ -12022,7 +12022,7 @@ fn gif_ephemeral_copy_is_seen_on_my_other_device() {
     let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
     let bob = b.fingerprint();
     let sent = a
-        .send_gif(&bob, hello_gif(), None, Some(300), NOW, &mut rng)
+        .send_gif(&bob, hello_gif(), None, Some(300), NOW, 0, &mut rng)
         .unwrap();
     assert_eq!(
         sent.len(),
@@ -12055,7 +12055,7 @@ fn gif_unknown_provider_is_kept() {
         height: 1,
     };
     let out =
-        p.a.send_gif(&b, other.clone(), None, None, NOW, &mut p.rng)
+        p.a.send_gif(&b, other.clone(), None, None, NOW, 0, &mut p.rng)
             .unwrap();
     assert!(matches!(
         deliver(&mut p.b, &out[0], &mut p.rng),
@@ -12092,12 +12092,12 @@ fn gif_invalid_reference_is_refused_on_send() {
         },
     ] {
         assert!(matches!(
-            p.a.send_gif(&b, gif, None, None, NOW, &mut p.rng),
+            p.a.send_gif(&b, gif, None, None, NOW, 0, &mut p.rng),
             Err(CoreError::Malformed(_))
         ));
     }
     assert!(matches!(
-        p.a.send_gif(&b, hello_gif(), None, Some(1), NOW, &mut p.rng),
+        p.a.send_gif(&b, hello_gif(), None, Some(1), NOW, 0, &mut p.rng),
         Err(CoreError::InvalidTtl)
     ));
     assert_eq!(gif_rows(&p.a, &b), 0);
@@ -12150,7 +12150,7 @@ fn gif_from_blocked_contact_is_dropped() {
     let a = p.a.fingerprint();
     let bob = p.a.resolve("bob").unwrap();
     let out =
-        p.b.send_gif(&a, hello_gif(), None, None, NOW, &mut p.rng)
+        p.b.send_gif(&a, hello_gif(), None, None, NOW, 0, &mut p.rng)
             .unwrap();
     p.a.block_contact(&bob, NOW, &mut p.rng).unwrap();
     let r = p.a.receive(&out[0].encode(), "t", NOW, &mut p.rng).unwrap();
@@ -12167,8 +12167,16 @@ fn gif_reply_and_ttl_preserved() {
     deliver(&mut p.b, &pk[0], &mut p.rng);
     let quoted = full_row(&p.b, &a, "18 h ?");
     let out =
-        p.b.send_gif(&a, hello_gif(), Some(quoted.id), Some(300), NOW, &mut p.rng)
-            .unwrap();
+        p.b.send_gif(
+            &a,
+            hello_gif(),
+            Some(quoted.id),
+            Some(300),
+            NOW,
+            0,
+            &mut p.rng,
+        )
+        .unwrap();
     let mine = last_row(&p.b, &a);
     assert_eq!(mine.reply_to, Some(quoted.message_id));
     assert_eq!(
@@ -12211,7 +12219,7 @@ fn gif_reply_and_ttl_preserved() {
     assert_eq!(full_row(&p.b, &a, "yes").reply_to, Some(mine.message_id));
     // A missing quote writes nothing.
     assert!(matches!(
-        p.b.send_gif(&a, hello_gif(), Some(i64::MAX), None, NOW, &mut p.rng),
+        p.b.send_gif(&a, hello_gif(), Some(i64::MAX), None, NOW, 0, &mut p.rng),
         Err(CoreError::MessageNotFound)
     ));
 }
@@ -12221,7 +12229,7 @@ fn gif_retry_sends_the_gif_again() {
     let mut p = pair();
     let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
     let sent =
-        p.a.send_gif(&b, hello_gif(), None, None, NOW, &mut p.rng)
+        p.a.send_gif(&b, hello_gif(), None, None, NOW, 0, &mut p.rng)
             .unwrap();
     let row = last_row(&p.a, &b);
     let late = NOW + 4;
@@ -12247,10 +12255,10 @@ fn gif_survives_history_export() {
     let mut p = pair();
     let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
     let out =
-        p.b.send_gif(&a, hello_gif(), None, None, NOW, &mut p.rng)
+        p.b.send_gif(&a, hello_gif(), None, None, NOW, 0, &mut p.rng)
             .unwrap();
     deliver(&mut p.a, &out[0], &mut p.rng);
-    p.a.send_gif(&b, hello_gif(), None, None, NOW, &mut p.rng)
+    p.a.send_gif(&b, hello_gif(), None, None, NOW, 0, &mut p.rng)
         .unwrap();
     let contacts = std::collections::HashSet::from([b]);
     let history = history::export(&p.a.store, &contacts).unwrap();
@@ -12637,10 +12645,10 @@ fn usage_day(day: u32, searches: u32, shown: u32, sent: u32) -> GifUsageDay {
 fn gif_usage_counts_per_day() {
     let (_d, mut a) = party("a", 1);
     assert!(a.gif_usage(7).unwrap().is_empty());
-    a.record_gif_use(GifUse::Search, 10).unwrap();
-    a.record_gif_use(GifUse::Search, 20).unwrap();
-    a.record_gif_use(GifUse::Shown, 30).unwrap();
-    a.record_gif_use(GifUse::Sent, 86_400 + 5).unwrap();
+    a.record_gif_use(GifUse::Search, 10, 0).unwrap();
+    a.record_gif_use(GifUse::Search, 20, 0).unwrap();
+    a.record_gif_use(GifUse::Shown, 30, 0).unwrap();
+    a.record_gif_use(GifUse::Sent, 86_400 + 5, 0).unwrap();
     assert_eq!(
         a.gif_usage(7).unwrap(),
         [usage_day(1, 0, 0, 1), usage_day(0, 2, 1, 0)]
@@ -12648,7 +12656,7 @@ fn gif_usage_counts_per_day() {
     assert_eq!(a.gif_usage(1).unwrap(), [usage_day(1, 0, 0, 1)]);
     assert!(a.gif_usage(0).unwrap().is_empty());
     // An earlier day recorded late (clock moved back) lands in its place.
-    a.record_gif_use(GifUse::Shown, 40).unwrap();
+    a.record_gif_use(GifUse::Shown, 40, 0).unwrap();
     assert_eq!(
         a.gif_usage(7).unwrap(),
         [usage_day(1, 0, 0, 1), usage_day(0, 2, 2, 0)]
@@ -12659,7 +12667,7 @@ fn gif_usage_counts_per_day() {
 fn gif_usage_keeps_30_days() {
     let (_d, mut a) = party("a", 1);
     for day in 0..40u64 {
-        a.record_gif_use(GifUse::Search, day * 86_400).unwrap();
+        a.record_gif_use(GifUse::Search, day * 86_400, 0).unwrap();
     }
     let rows = a.gif_usage(255).unwrap();
     assert_eq!(rows.len(), 30);
@@ -12673,7 +12681,7 @@ fn gif_usage_saturates() {
     a.store
         .put_meta(META_GIF_USAGE_V2, &vec![usage_day(0, u32::MAX, 0, 0)])
         .unwrap();
-    a.record_gif_use(GifUse::Search, 1).unwrap();
+    a.record_gif_use(GifUse::Search, 1, 0).unwrap();
     assert_eq!(a.gif_usage(1).unwrap(), [usage_day(0, u32::MAX, 0, 0)]);
 }
 
@@ -12681,7 +12689,7 @@ fn gif_usage_saturates() {
 fn gif_usage_never_stores_content() {
     // A row holds five numbers and nothing else.
     let (_d, mut a) = party("a", 1);
-    a.record_gif_use(GifUse::Search, 1).unwrap();
+    a.record_gif_use(GifUse::Search, 1, 0).unwrap();
     let raw: Vec<GifUsageDay> = a.store.get_meta(META_GIF_USAGE_V2).unwrap().unwrap();
     assert_eq!(postcard::to_allocvec(&raw).unwrap().len(), 6);
 }
@@ -12689,49 +12697,54 @@ fn gif_usage_never_stores_content() {
 #[test]
 fn gif_usage_counts_previews() {
     let (_d, mut a) = party("a", 1);
-    a.record_gif_use(GifUse::Preview, 10).unwrap();
-    a.record_gif_use(GifUse::Preview, 20).unwrap();
-    a.record_gif_use(GifUse::Search, 30).unwrap();
+    a.record_gif_use(GifUse::Preview, 10, 0).unwrap();
+    a.record_gif_use(GifUse::Preview, 20, 0).unwrap();
+    a.record_gif_use(GifUse::Search, 30, 0).unwrap();
     let rows = a.gif_usage(1).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].searches, rows[0].previews), (1, 2));
 }
 
-/// Rows stored before previews were counted (four counters, the first
-/// key) still read, with no previews, and are carried over at the next
-/// count.
+/// A day is the device's local date: `(now + offset) / 86_400`. 19:00 at
+/// UTC-8 is 03:00 UTC the next day, and still counts on its own date.
 #[test]
-fn gif_usage_reads_rows_of_the_first_format() {
-    #[derive(serde::Serialize)]
-    struct Old {
-        day: u32,
-        searches: u32,
-        shown: u32,
-        sent: u32,
-    }
+fn gif_usage_counts_on_the_local_day() {
+    const PST: i32 = -8 * 3600;
+    // 2026-11-27 19:00 at UTC-8 = 2026-11-28 03:00 UTC.
+    let evening = 1_795_834_800;
+    let utc_day = u32::try_from(evening / 86_400).unwrap();
+    assert_eq!(local_day(evening, 0), utc_day);
+    assert_eq!(local_day(evening, PST), utc_day - 1);
+    // Ahead of UTC: 20:00 at UTC+2 on the 27th is 18:00 UTC, same date.
+    assert_eq!(local_day(evening - 9 * 3600, 2 * 3600), utc_day - 1);
+    // Past local midnight at UTC+14 while still the evening before in UTC.
+    assert_eq!(local_day(evening - 4 * 3600, 14 * 3600), utc_day);
+    // Before 1970 in local time: day 0, never a wrap.
+    assert_eq!(local_day(100, PST), 0);
+    assert_eq!(local_day(u64::MAX, i32::MAX), u32::MAX);
     let (_d, mut a) = party("a", 1);
-    let old = vec![
-        Old {
-            day: 3,
-            searches: 4,
-            shown: 5,
-            sent: 6,
-        },
-        Old {
-            day: 1,
-            searches: 1,
-            shown: 0,
-            sent: 2,
-        },
-    ];
-    a.store.put_meta(META_GIF_USAGE, &old).unwrap();
+    a.record_gif_use(GifUse::Search, evening, PST).unwrap();
+    // The next morning, local: a new day.
+    a.record_gif_use(GifUse::Shown, evening + 13 * 3600, PST)
+        .unwrap();
+    let rows = a.gif_usage(7).unwrap();
     assert_eq!(
-        a.gif_usage(7).unwrap(),
-        [usage_day(3, 4, 5, 6), usage_day(1, 1, 0, 2)]
+        rows.iter()
+            .map(|r| (r.day, r.searches, r.shown))
+            .collect::<Vec<_>>(),
+        [(utc_day, 0, 1), (utc_day - 1, 1, 0)]
     );
-    a.record_gif_use(GifUse::Preview, 3 * 86_400 + 1).unwrap();
-    let mut today = usage_day(3, 4, 5, 6);
-    today.previews = 1;
-    assert_eq!(a.gif_usage(7).unwrap(), [today, usage_day(1, 1, 0, 2)]);
-    assert!(a.store.get_meta_raw(META_GIF_USAGE).unwrap().is_none());
+}
+
+/// A GIF sent counts on the sender's local day.
+#[test]
+fn gif_sent_counts_on_the_local_day() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let evening = 1_795_834_800;
+    p.a.send_gif(&b, hello_gif(), None, None, evening, -8 * 3600, &mut p.rng)
+        .unwrap();
+    let rows = p.a.gif_usage(1).unwrap();
+    assert_eq!(rows[0].day, local_day(evening, -8 * 3600));
+    assert_eq!(rows[0].sent, 1);
 }

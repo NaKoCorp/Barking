@@ -75,9 +75,12 @@ struct GifSettingsView: View {
         }
     }
 
-    /// "Turned on from iPhone · 27 Nov".
-    private func origin(_ device: String) -> LocalizedStringKey {
-        let who = device == "another device" ? String(localized: "another device") : device
+    /// "Turned on from iPhone · 27 Nov", or "from another device".
+    private func origin(_ from: GifConsentOrigin) -> LocalizedStringKey {
+        let who = switch from {
+        case .device(let name): name
+        case .anotherDevice: String(localized: "another device")
+        }
         let day = model.enabledAt?.formatted(.dateTime.day().month(.abbreviated)) ?? ""
         return "Turned on from \(who) · \(day)"
     }

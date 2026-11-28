@@ -10,16 +10,15 @@
 //! A provider this client does not know is kept as received and sent on,
 //! never allowed.
 //!
-//! Also the daily usage counters (spec §6.6): searches, GIFs shown and GIFs
-//! sent, per day, for the last [`USAGE_DAYS`] days. Device-local, never
-//! synchronized, and never holding a query or a GIF identifier.
+//! Also the daily usage counters (spec §6.6): searches, previews, GIFs
+//! shown and GIFs sent, per day of the device's local calendar, for the
+//! last [`USAGE_DAYS`] days. Device-local, never synchronized, and never
+//! holding a query or a GIF identifier.
 
 use rand_core::CryptoRng;
 
 use super::send::SealTime;
-use super::{
-    Core, MAX_FUTURE_SECS, META_GIF_SETTINGS, META_GIF_USAGE, META_GIF_USAGE_V2, log, sync,
-};
+use super::{Core, MAX_FUTURE_SECS, META_GIF_SETTINGS, META_GIF_USAGE_V2, log, sync};
 use crate::content::ExtContent;
 use crate::gif::{GifConsent, GifProviderId, GifSettings, MIN_GIF_WARNING_VERSION};
 use crate::identity::{DeviceId, DeviceKeys};
@@ -43,58 +42,46 @@ pub enum GifUse {
     Preview,
 }
 
-/// The counters of one day (`day` is `now / 86_400`).
+/// The day number of `now` (Unix seconds) on a calendar `utc_offset_secs`
+/// ahead of UTC: `(now + offset) / 86_400`, rounded down, so that the
+/// counters of a day are those of the user's own date (19:00 at UTC-8 is
+/// still that day, although 03:00 the next day in UTC). Before 1970: 0.
+#[must_use]
+pub fn local_day(now: u64, utc_offset_secs: i32) -> u32 {
+    let local = i128::from(now) + i128::from(utc_offset_secs);
+    u32::try_from(local.div_euclid(86_400).max(0)).unwrap_or(u32::MAX)
+}
+
+/// The counters of one day (`day` is [`local_day`]: the device's local
+/// date when the use happened, as a number of days since 1970-01-01).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GifUsageDay {
     pub day: u32,
     pub searches: u32,
     pub shown: u32,
     pub sent: u32,
-    /// Picker previews fetched. Added last: stored under
-    /// [`META_GIF_USAGE_V2`], rows of the first format read as 0.
+    /// Picker previews fetched.
     pub previews: u32,
 }
 
-/// A row of the first stored format ([`META_GIF_USAGE`]), before previews
-/// were counted. Read only, then rewritten in the current format.
-#[derive(Clone, Copy, serde::Deserialize)]
-struct GifUsageDayV1 {
-    day: u32,
-    searches: u32,
-    shown: u32,
-    sent: u32,
-}
-
-impl From<GifUsageDayV1> for GifUsageDay {
-    fn from(r: GifUsageDayV1) -> Self {
-        GifUsageDay {
-            day: r.day,
-            searches: r.searches,
-            shown: r.shown,
-            sent: r.sent,
-            previews: 0,
-        }
-    }
-}
-
-/// The stored rows, newest first: the current format, else the first one.
+/// The stored rows, newest first.
 fn usage_rows(q: &impl Queries) -> Result<Vec<GifUsageDay>> {
-    if let Some(rows) = q.get_meta::<Vec<GifUsageDay>>(META_GIF_USAGE_V2)? {
-        return Ok(rows);
-    }
-    Ok(q.get_meta::<Vec<GifUsageDayV1>>(META_GIF_USAGE)?
-        .unwrap_or_default()
-        .into_iter()
-        .map(Into::into)
-        .collect())
+    Ok(q.get_meta::<Vec<GifUsageDay>>(META_GIF_USAGE_V2)?
+        .unwrap_or_default())
 }
 
-/// Counts one use on the day of `now`: rows kept newest first, the oldest
-/// beyond [`USAGE_DAYS`] dropped, counters saturating. Read-modify-write:
-/// the caller holds the transaction.
-pub(super) fn record_use(q: &impl Queries, kind: GifUse, now: u64) -> Result<()> {
+/// Counts one use on the local day of `now` ([`local_day`] with
+/// `utc_offset_secs`, the device's offset at that moment): rows kept
+/// newest first, the oldest beyond [`USAGE_DAYS`] dropped, counters
+/// saturating. Read-modify-write: the caller holds the transaction.
+pub(super) fn record_use(
+    q: &impl Queries,
+    kind: GifUse,
+    now: u64,
+    utc_offset_secs: i32,
+) -> Result<()> {
     let mut rows = usage_rows(q)?;
-    let day = u32::try_from(now / 86_400).unwrap_or(u32::MAX);
+    let day = local_day(now, utc_offset_secs);
     let at = match rows.iter().position(|r| r.day <= day) {
         Some(i) if rows[i].day == day => i,
         Some(i) => {
@@ -124,10 +111,7 @@ pub(super) fn record_use(q: &impl Queries, kind: GifUse, now: u64) -> Result<()>
     };
     *counter = counter.saturating_add(1);
     rows.truncate(USAGE_DAYS);
-    q.put_meta(META_GIF_USAGE_V2, &rows)?;
-    // The first format, now carried over: one source only.
-    q.delete_meta(META_GIF_USAGE)?;
-    Ok(())
+    q.put_meta(META_GIF_USAGE_V2, &rows)
 }
 
 /// The stored register: settings, date of the change, device that made it.
@@ -247,9 +231,11 @@ impl Core {
         Ok(read(&self.store)?.0)
     }
 
-    /// Counts one GIF use on the day of `now` (device-local).
-    pub fn record_gif_use(&mut self, kind: GifUse, now: u64) -> Result<()> {
-        self.store.transaction(|tx| record_use(tx, kind, now))
+    /// Counts one GIF use on the local day of `now`, the device being
+    /// `utc_offset_secs` ahead of UTC then (device-local).
+    pub fn record_gif_use(&mut self, kind: GifUse, now: u64, utc_offset_secs: i32) -> Result<()> {
+        self.store
+            .transaction(|tx| record_use(tx, kind, now, utc_offset_secs))
     }
 
     /// The counters of the last `days` recorded days (30 at most), newest
@@ -260,17 +246,15 @@ impl Core {
         Ok(rows)
     }
 
-    /// Whether this client may contact `provider`: known, enabled, and with
-    /// an accepted warning at least `MIN_GIF_WARNING_VERSION`.
+    /// Whether this client may contact `provider`: enabled with an
+    /// effective consent (known provider, accepted warning at least
+    /// `MIN_GIF_WARNING_VERSION`), the rule the log follows too.
     pub fn gif_allowed(&self, provider: u8) -> Result<bool> {
-        if GifProviderId::from_u8(provider).is_none() {
-            return Ok(false);
-        }
         Ok(self
             .gif_settings()?
             .enabled
             .get(&provider)
-            .is_some_and(|c| c.warning_version >= MIN_GIF_WARNING_VERSION))
+            .is_some_and(|c| effective(provider, c)))
     }
 
     /// Turns `provider` on, once the user accepted version

@@ -144,8 +144,9 @@ pub struct Device {
     /// The HTTPS client of the GIF calls, built at the first one.
     pub(crate) gif_transport: Mutex<Option<Arc<HttpsTransport>>>,
     /// GIF uses not counted yet: the database was busy (a sync) when the
-    /// call ended. Counted with the next use (`gif::DeviceGate`).
-    pub(crate) gif_uncounted: Mutex<Vec<(GifUse, u64)>>,
+    /// call ended. Counted with the next use (`gif::DeviceGate`): what,
+    /// when, and the UTC offset given with the call.
+    pub(crate) gif_uncounted: Mutex<Vec<(GifUse, u64, i32)>>,
 }
 
 /// Where the IP base is and, once opened, the base. An open that failed is

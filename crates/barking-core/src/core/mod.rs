@@ -60,7 +60,7 @@ pub use crate::transparency::{RequestResolution, SyncKind};
 pub use contacts::{ContactSummary, parse_fingerprint};
 pub use delivery::{AwaitingVerdict, DeleteOutcome, MAX_NOTED_CHANGES};
 pub use frames::{FRAME_REJECT_LOG_INTERVAL_SECS, FRAME_TTL_SECS, MAX_PENDING_FRAMES};
-pub use gif::{GifUsageDay, GifUse};
+pub use gif::{GifUsageDay, GifUse, local_day};
 pub use history::{HistoryArchive, MAX_ARCHIVE_BYTES};
 pub use link::{
     ContactSnapshot, LINK_OFFER_TTL_SECS, LinkBundle, LinkOffer, LinkOutcome, LinkRequest,
@@ -96,11 +96,9 @@ const META_LINKED_BUNDLES: &str = "linked_bundles";
 const META_LAST_POLLED: &str = "last_polled_day";
 /// GIF settings register (`gif.rs`): `(GifSettings, at, author device)`.
 const META_GIF_SETTINGS: &str = "gif/settings";
-/// Daily GIF usage counters (`gif.rs`), first format (four counters):
-/// read if [`META_GIF_USAGE_V2`] is absent, deleted at the next count.
-const META_GIF_USAGE: &str = "gif/usage";
-/// Daily GIF usage counters (`gif.rs`): `Vec<GifUsageDay>` with previews,
-/// device-local.
+/// Daily GIF usage counters (`gif.rs`): `Vec<GifUsageDay>`, device-local.
+/// Named v2: development builds stored a first format under "gif/usage",
+/// never read.
 const META_GIF_USAGE_V2: &str = "gif/usage/v2";
 /// Polling window: 8 days back, the current day and the next day = 10
 /// days, always. A packet's mailbox is fixed at its seal day, and a packet

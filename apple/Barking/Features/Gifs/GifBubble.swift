@@ -116,7 +116,7 @@ final class GifLoads {
         self.provider = provider
         settings = provider == nil ? nil : GifSettingsInfo(enabled: enabled, autoLoad: autoLoad,
                                                            enabledFromOtherDevice: nil, enabledAt: nil,
-                                                           consentOutdated: false)
+                                                           consentOutdated: false, enabledFromUnlistedDevice: false)
         for (id, gif) in shown { follow(id, gif) }
     }
 

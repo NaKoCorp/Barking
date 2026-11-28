@@ -201,7 +201,7 @@ final class TransparencyModel {
     private var cursor: Int64?
     /// "Who sees what" for the GIF provider, while GIFs are on.
     private(set) var gifRow: DataRow?
-    /// This phone's calls to the GIF provider, by day (UTC day numbers).
+    /// This phone's calls to the GIF provider, by local date (`GifDay`).
     private var gifUsage: [GifUsageDayInfo] = []
     private var gifProviderName = ""
 
@@ -255,12 +255,9 @@ final class TransparencyModel {
     private func withGifUsage(_ days: [LogDay]) -> [LogDay] {
         guard filter == .everything else { return days }
         var days = days
-        var utc = Calendar(identifier: .gregorian)
-        utc.timeZone = TimeZone(identifier: "UTC") ?? .gmt
         for u in gifUsage where u.searches + u.previews + u.shown > 0 {
-            let parts = utc.dateComponents([.year, .month, .day],
-                                           from: Date(timeIntervalSince1970: TimeInterval(u.day) * 86_400))
-            guard let date = calendar.date(from: parts).map(calendar.startOfDay(for:)) else { continue }
+            // The core counted on the phone's own date: the same date here.
+            guard let date = GifDay.date(of: u.day, in: calendar) else { continue }
             let line = Self.klipyLine(name: gifProviderName, searches: u.searches, previews: u.previews,
                                       shown: u.shown, locale: locale)
             if let i = days.firstIndex(where: { $0.date == date }) {
