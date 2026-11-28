@@ -746,6 +746,8 @@ impl Core {
             for (fp, avatar, at) in &deferred {
                 sync::send_avatar(tx, me, *fp, avatar.as_ref(), *at, SealTime::at(now), rng)?;
             }
+            // The GIF settings register too, once it was ever written.
+            super::gif::send_settings(tx, me, now, rng)?;
             log(tx, now, None, &event)?;
             // And for each of my contacts (spec §3.2).
             packets.extend(sync::send_card_update(tx, me, &card, now, rng)?);

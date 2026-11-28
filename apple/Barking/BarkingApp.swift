@@ -9,6 +9,8 @@ struct BarkingApp: App {
 
     init() {
         BarkingNavigationAppearance.apply()
+        // Low Data Mode is known before a GIF can load on its own.
+        GifNetworkPath.start()
         // Built here, not lazily by the view: a background wake launches
         // the app without showing it, and its delegate needs the router.
         let router = AppRouter.boot()

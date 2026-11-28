@@ -12,6 +12,7 @@ use barking_core::core::{
     R_UNREADABLE,
 };
 use barking_core::fragment::{REASON_BAD_HASH, REASON_CONTRADICTORY};
+use barking_core::gif::GifProviderId;
 use barking_core::identity::root::Fingerprint;
 use barking_core::packet::Tier;
 use barking_core::transparency::{AvoidReason, RequestResolution, SyncKind, TransparencyEvent};
@@ -41,7 +42,7 @@ pub struct LogEntry {
 
 /// Number of variants of `TransparencyEvent`: one more than the last
 /// position `index` gives.
-const VARIANTS: usize = 33;
+const VARIANTS: usize = 34;
 
 /// Every key `LogEntry::key` can take, one per `TransparencyEvent` variant,
 /// in the order of `index`. The key of an event is `KEYS[index(event)]`: there
@@ -80,6 +81,7 @@ const KEYS: [&str; VARIANTS] = [
     "log.invite_sent",
     "log.contact_request_received",
     "log.contact_request_resolved",
+    "log.gif_consent",
 ];
 
 /// Position of a variant in `KEYS`. No wildcard: a new variant does not
@@ -120,6 +122,7 @@ fn index(e: &TransparencyEvent) -> usize {
         E::InviteSent { .. } => 30,
         E::ContactRequestReceived { .. } => 31,
         E::ContactRequestResolved { .. } => 32,
+        E::GifConsent { .. } => 33,
     }
 }
 
@@ -170,6 +173,11 @@ const TOKENS: &[&str] = &[
     "request_blocked",
     "request_expired",
     "request_added_directly",
+    "sync_gif_settings",
+    "gif_on",
+    "gif_off",
+    "changed_here",
+    "changed_elsewhere",
 ];
 
 /// Keys of the log, for the app's translation check.
@@ -245,6 +253,7 @@ fn sync_token(k: SyncKind) -> String {
         SyncKind::Reaction => "sync_reaction",
         SyncKind::Delete => "sync_deletion",
         SyncKind::Seen => "sync_seen",
+        SyncKind::GifSettings => "sync_gif_settings",
     })
 }
 
@@ -406,6 +415,23 @@ fn parts(e: &TransparencyEvent, name: &dyn Fn(&Fingerprint) -> String) -> (Strin
         E::ContactRequestResolved { contact, how } => {
             ("session", vec![name(contact), resolution_token(*how)])
         }
+        E::GifConsent {
+            provider,
+            enabled,
+            remote,
+        } => (
+            "device",
+            vec![
+                GifProviderId::from_u8(*provider)
+                    .map_or_else(|| provider.to_string(), |p| p.name().to_owned()),
+                token(if *enabled { "gif_on" } else { "gif_off" }),
+                token(if *remote {
+                    "changed_elsewhere"
+                } else {
+                    "changed_here"
+                }),
+            ],
+        ),
     };
     (family.to_owned(), args)
 }
@@ -599,6 +625,11 @@ mod tests {
             E::ContactRequestResolved {
                 contact: fp(7),
                 how: RequestResolution::Accepted,
+            },
+            E::GifConsent {
+                provider: 1,
+                enabled: true,
+                remote: true,
             },
         ]
     }

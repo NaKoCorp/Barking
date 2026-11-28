@@ -2,6 +2,7 @@
 //! interface (spec §11.1): it holds no message content.
 
 use barking_core::CoreError;
+use barking_net::gif::GifError;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum BarkingError {
@@ -61,6 +62,53 @@ pub enum BarkingError {
     /// less than 24 hours after the last one. Added last.
     #[error("too soon")]
     TooSoon { retry_at: u64 },
+    /// A GIF call failed: `kind` says what the interface shows;
+    /// `retry_after_secs` is the wait for `RateLimited`, 0 otherwise.
+    /// Added last.
+    #[error("GIF error: {kind:?}")]
+    Gif {
+        kind: GifErrorKind,
+        retry_after_secs: u32,
+    },
+}
+
+/// Why a GIF call failed (spec GIF §6.6, §7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GifErrorKind {
+    /// GIFs are not turned on for this provider: nothing was sent.
+    NotEnabled,
+    /// No key for this provider in this build, or the provider refuses it.
+    NotConfigured,
+    Offline,
+    Unreachable,
+    /// The provider's quota: retry after `retry_after_secs`.
+    RateLimited,
+    /// Removed, above the content filter, or an unknown provider.
+    NotFound,
+    TooLarge,
+    /// A reply this client does not understand.
+    Malformed,
+}
+
+impl From<GifError> for BarkingError {
+    fn from(e: GifError) -> Self {
+        let (kind, retry_after_secs) = match e {
+            GifError::NotEnabled => (GifErrorKind::NotEnabled, 0),
+            GifError::NotConfigured => (GifErrorKind::NotConfigured, 0),
+            GifError::Offline => (GifErrorKind::Offline, 0),
+            GifError::Unreachable => (GifErrorKind::Unreachable, 0),
+            GifError::RateLimited { retry_after_secs } => {
+                (GifErrorKind::RateLimited, retry_after_secs)
+            }
+            GifError::NotFound => (GifErrorKind::NotFound, 0),
+            GifError::TooLarge => (GifErrorKind::TooLarge, 0),
+            GifError::Malformed => (GifErrorKind::Malformed, 0),
+        };
+        BarkingError::Gif {
+            kind,
+            retry_after_secs,
+        }
+    }
 }
 
 /// Why a link step was refused (spec iOS messaging §5.8).
@@ -152,6 +200,26 @@ impl From<CoreError> for BarkingError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gif_errors_keep_their_kind_and_wait() {
+        assert!(matches!(
+            BarkingError::from(GifError::RateLimited {
+                retry_after_secs: 42
+            }),
+            BarkingError::Gif {
+                kind: GifErrorKind::RateLimited,
+                retry_after_secs: 42
+            }
+        ));
+        assert!(matches!(
+            BarkingError::from(GifError::NotFound),
+            BarkingError::Gif {
+                kind: GifErrorKind::NotFound,
+                retry_after_secs: 0
+            }
+        ));
+    }
 
     /// The apps recognize a card too large for an invitation by this exact
     /// detail (Swift `BarkingError.isCardTooLarge`).

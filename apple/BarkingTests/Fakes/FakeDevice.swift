@@ -657,6 +657,126 @@ final class FakeDevice: DeviceHandle, @unchecked Sendable {
         lock.withLock { _inviteNotifications.append(on); prefs.invites = on }
     }
     func deviceChanges(since: UInt64) throws -> [DeviceChange] { deviceChangeList.filter { $0.at >= since } }
+
+    // MARK: GIFs
+
+    var gifProviderInfo = GifProviderInfo(id: 1, name: "Klipy", warningVersion: 1,
+                                          privacyUrl: "https://klipy.com/support/privacy-policy")
+    /// What `gifSettings` returns; enabling and disabling change it, as the core does.
+    var gifSettingsInfo = GifSettingsInfo(enabled: false, autoLoad: false, enabledFromOtherDevice: nil, enabledAt: nil,
+                                          consentOutdated: false, enabledFromUnlistedDevice: false)
+    /// Thrown by every GIF write when set (nothing changes then).
+    var gifError: Error?
+    private var _klipyKeys: [String?] = []
+    private var _gifEnabled: [(provider: UInt8, warningVersion: UInt16)] = []
+    private var _gifDisabled: [UInt8] = []
+    private var _gifAutoLoad: [Bool] = []
+    private var _gifSent: [(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?)] = []
+    private var _gifSearches: [String] = []
+    private var _gifTrendingCalls = 0
+    var klipyKeys: [String?] { lock.withLock { _klipyKeys } }
+    var gifEnabled: [(provider: UInt8, warningVersion: UInt16)] { lock.withLock { _gifEnabled } }
+    var gifDisabled: [UInt8] { lock.withLock { _gifDisabled } }
+    var gifAutoLoad: [Bool] { lock.withLock { _gifAutoLoad } }
+    var gifSent: [(contact: String, gif: GifInfo, replyTo: Int64?, ttlSecs: UInt32?)] { lock.withLock { _gifSent } }
+    /// The queries `gifSearch` was called with, in order.
+    var gifSearches: [String] { lock.withLock { _gifSearches } }
+    var gifTrendingCalls: Int { lock.withLock { _gifTrendingCalls } }
+    /// Thrown by `gifSearch` and `gifTrending` when set (the call is still recorded).
+    var gifSearchError: Error?
+    var gifPage = GifPageInfo(results: [], next: nil)
+    var gifUsageDays: [GifUsageDayInfo] = []
+
+    func configureGifs(klipyKey: String?) { lock.withLock { _klipyKeys.append(klipyKey) } }
+    func gifProvider() -> GifProviderInfo { gifProviderInfo }
+    /// Thrown by `gifSettings` when set (a read that fails, the write aside).
+    var gifSettingsError: Error?
+    func gifSettings() throws -> GifSettingsInfo {
+        if let gifSettingsError { throw gifSettingsError }
+        return lock.withLock { gifSettingsInfo }
+    }
+    func enableGifProvider(provider: UInt8, warningVersion: UInt16) throws {
+        if let gifError { throw gifError }
+        lock.withLock {
+            _gifEnabled.append((provider, warningVersion))
+            gifSettingsInfo.enabled = true
+            gifSettingsInfo.enabledFromOtherDevice = nil
+            gifSettingsInfo.enabledFromUnlistedDevice = false
+            gifSettingsInfo.enabledAt = UInt64(Date().timeIntervalSince1970)
+            gifSettingsInfo.consentOutdated = false
+        }
+    }
+    func disableGifProvider(provider: UInt8) throws {
+        if let gifError { throw gifError }
+        lock.withLock {
+            _gifDisabled.append(provider)
+            gifSettingsInfo.enabled = false
+            gifSettingsInfo.enabledFromOtherDevice = nil
+            gifSettingsInfo.enabledFromUnlistedDevice = false
+            gifSettingsInfo.enabledAt = nil
+            gifSettingsInfo.consentOutdated = false
+        }
+    }
+    func setGifAutoLoad(on: Bool) throws {
+        if let gifError { throw gifError }
+        lock.withLock { _gifAutoLoad.append(on); gifSettingsInfo.autoLoad = on }
+    }
+    func gifSearch(query: String, page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo {
+        lock.withLock { _gifSearches.append(query) }
+        if let gifSearchError { throw gifSearchError }
+        return gifPage
+    }
+    func gifTrending(page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo {
+        lock.withLock { _gifTrendingCalls += 1 }
+        if let gifSearchError { throw gifSearchError }
+        return gifPage
+    }
+    /// What `gifPreview` answers; `gifPreviewError` is thrown first when set.
+    var gifPreviewData = Data("MP4".utf8)
+    var gifPreviewError: Error?
+    private var _gifPreviews: [String] = []
+    /// The URLs `gifPreview` was called with.
+    var gifPreviews: [String] { lock.withLock { _gifPreviews } }
+    /// How long `gifPreview` takes (a request on the way).
+    var gifPreviewDelay: TimeInterval = 0
+    private var _previewsNow = 0
+    private var _maxPreviewsAtOnce = 0
+    /// The most `gifPreview` calls running at the same time.
+    var maxPreviewsAtOnce: Int { lock.withLock { _maxPreviewsAtOnce } }
+    /// The UTC offsets the GIF calls were given, in order.
+    private var _gifOffsets: [Int32] = []
+    var gifOffsets: [Int32] { lock.withLock { _gifOffsets } }
+    func gifPreview(url: String, utcOffsetSecs: Int32) throws -> Data {
+        lock.withLock {
+            _gifPreviews.append(url)
+            _gifOffsets.append(utcOffsetSecs)
+            _previewsNow += 1
+            _maxPreviewsAtOnce = max(_maxPreviewsAtOnce, _previewsNow)
+        }
+        defer { lock.withLock { _previewsNow -= 1 } }
+        if gifPreviewDelay > 0 { Thread.sleep(forTimeInterval: gifPreviewDelay) }
+        if let gifPreviewError { throw gifPreviewError }
+        return gifPreviewData
+    }
+    /// What `gifData` answers; `gifDataError` is thrown first when set.
+    var gifMedia = GifMediaInfo(mp4: Data("MP4".utf8), author: nil, title: "")
+    var gifDataError: Error?
+    /// How long `gifData` takes (a request on the way).
+    var gifDataDelay: TimeInterval = 0
+    private var _gifDataCalls: [String] = []
+    /// The GIF ids `gifData` was called with, in order.
+    var gifDataCalls: [String] { lock.withLock { _gifDataCalls } }
+    func gifData(provider: UInt8, id: String, utcOffsetSecs: Int32) throws -> GifMediaInfo {
+        lock.withLock { _gifDataCalls.append(id) }
+        if gifDataDelay > 0 { Thread.sleep(forTimeInterval: gifDataDelay) }
+        if let gifDataError { throw gifDataError }
+        return gifMedia
+    }
+    func sendGif(contact: String, gif: GifInfo, utcOffsetSecs: Int32, replyTo: Int64?, ttlSecs: UInt32?) throws {
+        if let sendError { throw sendError }
+        lock.withLock { _gifSent.append((contact, gif, replyTo, ttlSecs)) }
+    }
+    func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] { gifUsageDays }
 }
 
 /// Runs device calls directly (no background task) in tests.

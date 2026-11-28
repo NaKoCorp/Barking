@@ -29,9 +29,16 @@ extension CoreService {
         #if BARKING_DEV
         // A UI test never dials the nodes of a developer's Local.xcconfig: a
         // live launch sync holds the core for seconds, and the run would
-        // depend on the network (CI builds have none).
-        if UITestNetwork.isolated { info["BarkingBootstrapNodes"] = nil }
+        // depend on the network (CI builds have none). Nor Klipy, with the
+        // developer's key.
+        if UITestNetwork.isolated {
+            info["BarkingBootstrapNodes"] = nil
+            info["BarkingKlipyKey"] = nil
+        }
         #endif
+        // The GIF provider key, in the core's memory only (every device this
+        // app opens or creates comes through here; the extension never does).
+        device.configureGifs(klipyKey: GifKeys.klipy(info: info))
         Task { await BootstrapNodes.add(to: core, info: info) }
         // The push guard is applied by `SyncLoop`, before the launch sync and
         // each resume sync: one ordered path.

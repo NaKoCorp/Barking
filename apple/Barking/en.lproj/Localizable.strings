@@ -8,3 +8,5 @@
 "weak (reliability)" = "weak";
 /* The Invitations screen's section of hidden requests; the bare "Hidden" is a password field's state. */
 "Hidden (invitations)" = "Hidden";
+/* Subtitle of the GIFs row in Settings: GIFs are turned off. */
+"Off (GIFs)" = "Off";

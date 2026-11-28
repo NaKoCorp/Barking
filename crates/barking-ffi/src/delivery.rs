@@ -9,11 +9,12 @@
 //! `DeleteOutcome::changes`; for a retry the app reloads what it shows.
 
 use barking_core::core::ContactSummary;
+use barking_core::gif::GIF_PREVIEW;
 use barking_core::identity::root::Fingerprint;
 use barking_core::store::{self, DeliverySummary, MessageStatus};
 use barking_core::{Core, CoreError};
 
-use crate::device::{Device, now};
+use crate::device::{Device, now, shown_text};
 use crate::identity::to_hex;
 use crate::{BarkingError, guard};
 
@@ -465,7 +466,12 @@ fn pending_of(core: &Core, p: store::PendingPackets) -> Result<PendingPackets, B
                 message_id: m.row_id,
                 name: contact_name(&contacts, &m.contact),
                 contact: m.contact.to_string(),
-                body: m.body,
+                // A GIF reads "GIF", as in the conversation.
+                body: if m.gif {
+                    GIF_PREVIEW.to_owned()
+                } else {
+                    m.body
+                },
                 sealed_at: m.sealed_at,
                 expires_at: m.expires_at,
                 packets: m.packets,
@@ -599,7 +605,7 @@ impl Device {
                     .into_iter()
                     .map(|(m, s)| DeliveryRowInfo {
                         message_id: m.id,
-                        body: m.body,
+                        body: shown_text(&m),
                         at: m.at,
                         delivery: delivery_of(s),
                     })

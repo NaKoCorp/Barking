@@ -11,6 +11,7 @@ pub mod fragment {
     //! Fragmentation: re-exported from `barking-packet`.
     pub use barking_packet::fragment::*;
 }
+pub mod gif;
 pub mod handshake;
 pub mod identity;
 pub mod mailbox;

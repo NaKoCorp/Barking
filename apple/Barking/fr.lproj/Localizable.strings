@@ -756,3 +756,54 @@
 "Remove the avatar" = "Retirer l’avatar";
 "Avatar of %@" = "Avatar de %@";
 "Choose a photo or an emoji. Your linked devices get it, not the contact." = "Choisis une photo ou un emoji. Tes appareils liés le reçoivent, pas le contact.";
+
+/* Settings › GIFs and the GIF warning (spec GIF §9.2, §9.3). The provider name comes from the core. */
+"GIFs" = "GIF";
+"Off (GIFs)" = "Désactivés";
+"On · %@ sees your IP address" = "Activés · %@ voit ton adresse IP";
+"Use GIFs from %@" = "Utiliser les GIF de %@";
+"Off, Barking never contacts %@" = "Désactivés, Barking ne contacte jamais %@";
+"Turned on from %@ · %@" = "Activés depuis %1$@ · %2$@";
+"another device" = "un autre appareil";
+"Play GIFs automatically" = "Lire les GIF automatiquement";
+"Each GIF shown is requested from %@ from your address. Off, you choose GIF by GIF" = "Chaque GIF affiché est demandé à %@ depuis ton adresse. Désactivé, tu choisis GIF par GIF";
+"See what was sent in Transparency ›" = "Voir ce qui a été envoyé dans Transparence ›";
+"These settings apply to all your linked devices" = "Ces réglages s’appliquent à tous tes appareils liés";
+"Use GIFs from %@?" = "Utiliser les GIF de %@ ?";
+"Updated" = "Mis à jour";
+"To search and show GIFs, this phone connects directly to %@, a US company. %@ will receive:" = "Pour chercher et afficher des GIF, ce téléphone se connecte directement à %1$@, une entreprise américaine. %2$@ recevra :";
+"your IP address, which reveals your approximate location" = "ton adresse IP, qui révèle ta position approximative";
+"your GIF searches" = "tes recherches de GIF";
+"which GIFs you send and show, and when" = "les GIF que tu envoies et affiches, et quand";
+"By matching GIF requests, %@ can work out who you exchange GIFs with. Your messages and contacts stay encrypted and are never sent to %@. Barking doesn't control what %@ does with this data." = "En recoupant les demandes de GIF, %1$@ peut deviner avec qui tu échanges des GIF. Tes messages et tes contacts restent chiffrés et ne sont jamais envoyés à %2$@. Barking ne contrôle pas ce que %3$@ fait de ces données.";
+"You can turn it off anytime in Settings › GIFs." = "Tu peux les désactiver à tout moment dans Réglages › GIF.";
+"%@ privacy policy ›" = "Politique de confidentialité de %@ ›";
+"Not now" = "Pas maintenant";
+"Use GIFs" = "Utiliser les GIF";
+
+/* The GIF button and picker (spec GIF §9.1, §9.4). "Search KLIPY" is the placeholder Klipy's terms require, kept as is. */
+"GIF" = "GIF";
+"Search KLIPY" = "Search KLIPY";
+"No GIFs for “%@”" = "Aucun GIF pour « %@ »";
+"You're offline" = "Tu es hors ligne";
+"%@ is unreachable · Retry" = "%@ est injoignable · Réessayer";
+"%@ is busy · Try again in a minute" = "%@ est surchargé · Réessaie dans une minute";
+"Sends this GIF." = "Envoie ce GIF.";
+"No GIFs" = "Aucun GIF";
+
+/* A GIF in a conversation and Transparency (spec GIF §7, §6.7). The provider name comes from the core. */
+"GIF unavailable" = "GIF indisponible";
+"GIF · from %@, off" = "GIF · de %@, désactivés";
+"Tap to load" = "Toucher pour charger";
+"GIF no longer available" = "GIF plus disponible";
+"Couldn't load · Retry" = "Chargement impossible · Réessayer";
+"Couldn't load" = "Chargement impossible";
+"GIFs are unavailable in this version" = "Les GIF ne sont pas disponibles dans cette version";
+"%@ is busy · Retry in %lld min" = "%1$@ est surchargé · Réessayer dans %2$lld min";
+"Play GIFs automatically ›" = "Lire les GIF automatiquement ›";
+"Double-tap to load" = "Toucher deux fois pour charger";
+"GIFs are off" = "Les GIF sont désactivés";
+"GIF: %@" = "GIF : %@";
+"Play" = "Lire";
+"Plays the GIF." = "Lit le GIF.";
+"Your IP address, your GIF searches, and which GIFs you show. It can work out who you exchange GIFs with." = "Votre adresse IP, vos recherches de GIF et les GIF que vous affichez. Il peut deviner avec qui vous échangez des GIF.";

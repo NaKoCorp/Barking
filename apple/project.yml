@@ -98,6 +98,8 @@ targets:
         BarkingApnsEnvironment: $(BARKING_APS_ENVIRONMENT)
         # Nodes added at first start (empty: none); set in Local.xcconfig.
         BarkingBootstrapNodes: $(BARKING_BOOTSTRAP_NODES)
+        # Klipy API key for GIFs (empty: GIFs unavailable); set in Local.xcconfig, never committed.
+        BarkingKlipyKey: $(BARKING_KLIPY_KEY)
         UIBackgroundModes: [remote-notification, fetch]
         BGTaskSchedulerPermittedIdentifiers: [com.nakocorp.barking.refresh]
         UIAppFonts: [FiraCode-Regular.ttf, FiraCode-Medium.ttf, FiraCode-SemiBold.ttf]

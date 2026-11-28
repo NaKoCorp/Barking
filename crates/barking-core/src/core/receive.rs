@@ -15,6 +15,7 @@ use super::{
 use crate::contact::ContactCard;
 use crate::content::{ExtContent, MessageRef, UNSEEN_CEILING_SECS, UnknownPolicy};
 use crate::envelope::{self, Body, Envelope, Wire, parse_wire};
+use crate::gif::{GIF_PREVIEW, GifRef};
 use crate::handshake::PrekeySecrets;
 use crate::handshake::pqxdh::{self, InitialMessage};
 use crate::identity::{DeviceKeys, DeviceList, DevicePublic, Fingerprint, RootIdentity};
@@ -741,14 +742,16 @@ fn accept(
         }
     };
     record_message(
-        q, limiter, packet, o, &env, text, None, None, transport, now, rng,
+        q, limiter, packet, o, &env, text, None, None, None, transport, now, rng,
     )
 }
 
-/// A text (or a reply, `reply_ref`, or an ephemeral, `ttl_secs`) from a
-/// contact, once accepted: session written, message recorded, ack emitted.
-/// An ephemeral is not seen yet: it is erased `UNSEEN_CEILING_SECS` after
-/// `now` unless one of my devices shows it first.
+/// A text (or a reply, `reply_ref`, or an ephemeral, `ttl_secs`, or a GIF,
+/// `gif` with an empty `text`) from a contact, once accepted: session
+/// written, message recorded, ack emitted. An ephemeral is not seen yet: it
+/// is erased `UNSEEN_CEILING_SECS` after `now` unless one of my devices
+/// shows it first. A GIF's outcome text is [`GIF_PREVIEW`], what its
+/// notification shows.
 #[allow(clippy::too_many_arguments)]
 fn record_message(
     q: &impl Queries,
@@ -759,6 +762,7 @@ fn record_message(
     text: String,
     reply_ref: Option<MessageRef>,
     ttl_secs: Option<u32>,
+    gif: Option<GifRef>,
     transport: &str,
     now: u64,
     rng: &mut impl CryptoRng,
@@ -772,6 +776,7 @@ fn record_message(
     // A message already received once (`inbound`, never purged) stays as
     // it is: a resend or a retry of it, even one I deleted since, is a
     // duplicate.
+    let is_gif = gif.is_some();
     let inserted = !q.inbound_has_message(message_id)?
         && q.insert_message_row(&MessageInsert {
             contact_fp: row.contact_fp,
@@ -787,6 +792,7 @@ fn record_message(
             ttl_secs,
             seen_at: None,
             expire_at: ttl_secs.map(|_| now.saturating_add(UNSEEN_CEILING_SECS)),
+            gif,
         })?;
     // Packet → message: found again through the emitted ack (`delete_contact`).
     q.record_inbound(packet.id, message_id, row.contact_fp)?;
@@ -829,7 +835,7 @@ fn record_message(
         ReceiveOutcome::Message {
             from: row.contact_fp,
             alias,
-            text,
+            text: if is_gif { GIF_PREVIEW.to_owned() } else { text },
             ack,
             ephemeral: ttl_secs.is_some(),
         },
@@ -846,17 +852,17 @@ struct Ext<'a> {
 
 /// `Body::Ext` authenticated by a session. Sender x kind:
 ///
-/// | Sender | `Reply` / `Message` / `Reaction` | `SyncReply` / `SyncMessage` / `SyncReaction` / `SyncDelete` / `SyncSeen` / `SyncInvite` / `SyncRefused` | Unknown |
+/// | Sender | `Reply` / `Message` / `Reaction` / `Gif` | `SyncReply` / `SyncMessage` / `SyncReaction` / `SyncDelete` / `SyncSeen` / `SyncInvite` / `SyncRefused` / `SyncGif` / `SyncGifSettings` | Unknown |
 /// |---|---|---|---|
 /// | A contact | accepted | `R_NOT_MINE` | `unknown` policy |
 /// | One of my devices | `R_UNEXPECTED` | the sync path | `unknown` policy |
 ///
 /// Every `Ext` from my own fingerprint first requires the sending device to
-/// be in my current list. A `Reply` or a `Message` is recorded like a text,
-/// a `Reaction` applied as the contact's (`accept_reaction`); `SyncReply`,
-/// `SyncMessage`, `SyncReaction`, `SyncDelete`, `SyncSeen`, `SyncInvite` and `SyncRefused`
-/// go through the sync path
-/// (`accept_sync`).
+/// be in my current list. A `Reply`, a `Message` or a `Gif` is recorded like
+/// a text, a `Reaction` applied as the contact's (`accept_reaction`);
+/// `SyncReply`, `SyncMessage`, `SyncReaction`, `SyncDelete`, `SyncSeen`,
+/// `SyncInvite`, `SyncRefused`, `SyncGif` and `SyncGifSettings` go through
+/// the sync path (`accept_sync`).
 /// An unknown kind is acknowledged like a message (the sender stops
 /// resending it) and, per its `unknown` policy, ignored or shown as a
 /// placeholder asking for an update (never for my own devices: they would
@@ -903,6 +909,7 @@ fn accept_ext(
                 text,
                 Some(reply_to),
                 None,
+                None,
                 transport,
                 now,
                 rng,
@@ -921,7 +928,34 @@ fn accept_ext(
                 return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
             }
             return record_message(
-                q, limiter, packet, o, env, text, reply_to, ttl_secs, transport, now, rng,
+                q, limiter, packet, o, env, text, reply_to, ttl_secs, None, transport, now, rng,
+            );
+        }
+        (
+            ExtContent::Gif {
+                gif,
+                reply_to,
+                ttl_secs,
+            },
+            false,
+        ) => {
+            // Blocked: dropped like a text (ratchet kept, no ack).
+            if q.block_state(o.row.contact_fp)?.drops(env.sent_at) {
+                return reject_authenticated(q, limiter, packet, o, now, R_BLOCKED, id);
+            }
+            return record_message(
+                q,
+                limiter,
+                packet,
+                o,
+                env,
+                String::new(),
+                reply_to,
+                ttl_secs,
+                Some(gif),
+                transport,
+                now,
+                rng,
             );
         }
         (ExtContent::Reaction { target, emojis }, false) => {
@@ -957,7 +991,9 @@ fn accept_ext(
             | ExtContent::SyncDelete { .. }
             | ExtContent::SyncSeen { .. }
             | ExtContent::SyncInvite { .. }
-            | ExtContent::SyncRefused { .. },
+            | ExtContent::SyncRefused { .. }
+            | ExtContent::SyncGif { .. }
+            | ExtContent::SyncGifSettings { .. },
             true,
         ) => {
             return accept_sync(q, limiter, packet, o, env, device, admin, my_fp, now, rng);
@@ -969,7 +1005,9 @@ fn accept_ext(
             | ExtContent::SyncDelete { .. }
             | ExtContent::SyncSeen { .. }
             | ExtContent::SyncInvite { .. }
-            | ExtContent::SyncRefused { .. },
+            | ExtContent::SyncRefused { .. }
+            | ExtContent::SyncGif { .. }
+            | ExtContent::SyncGifSettings { .. },
             false,
         ) => sync::R_NOT_MINE,
         _ => R_UNEXPECTED,
@@ -1166,6 +1204,7 @@ fn accept_unknown(
             ttl_secs: None,
             seen_at: None,
             expire_at: None,
+            gif: None,
         })?;
     emit_ack(q, packet, env, now, rng)?;
     if !inserted {
