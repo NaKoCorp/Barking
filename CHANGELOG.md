@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.0](https://github.com/NaKoCorp/Barking/compare/v0.7.0...v0.8.0) (2026-11-28)
+
+
+### Features
+
+* **cli:** barking census, a public list of the network's nodes ([#95](https://github.com/NaKoCorp/Barking/issues/95)) ([8e80426](https://github.com/NaKoCorp/Barking/commit/8e80426282631396433958770751cbf704defa99))
+* contact avatars (photo or emoji) synced to my linked devices ([#94](https://github.com/NaKoCorp/Barking/issues/94)) ([b2ee383](https://github.com/NaKoCorp/Barking/commit/b2ee383809c9d73fcdb707e85fc4cf8355ad10ff))
+* **ios:** separate Contacts and Chats, invite again after removal ([#92](https://github.com/NaKoCorp/Barking/issues/92)) ([9f968a4](https://github.com/NaKoCorp/Barking/commit/9f968a410619045913caf95eb0b7ba6425ff9495))
+
 ## [0.7.0](https://github.com/NaKoCorp/Barking/compare/v0.6.0...v0.7.0) (2026-11-26)
 
 
