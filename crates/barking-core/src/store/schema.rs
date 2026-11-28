@@ -1,8 +1,8 @@
-//! SQL storage schema (v8) and migrations from v1, v2, v3, v4, v5, v6 and v7.
+//! SQL storage schema (v9) and migrations from v1, v2, v3, v4, v5, v6, v7 and v8.
 
 use rusqlite::{Connection, params};
 
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Schema v1 (batch 1A), kept for the migration and for its tests: a
 /// v1 database is opened with this schema, then migrated.
@@ -548,6 +548,20 @@ pub fn migrate_v7_to_v8(conn: &Connection) -> rusqlite::Result<()> {
         tx.execute_batch(SCHEMA_V8_AVATARS)?;
     }
     set_version(&tx, 8)?;
+    tx.commit()
+}
+
+/// Column v9 adds to `messages` (GIF messages): the postcard of the
+/// `GifRef` a GIF carries, NULL for any other message.
+const V9_MESSAGE_COLUMNS: [(&str, &str); 1] = [("gif", "BLOB")];
+
+/// Migrates a v8 database to v9 in a single transaction (DDL only): the
+/// `gif` column of `messages`, added only if missing, then
+/// `schema_version` set to 9.
+pub fn migrate_v8_to_v9(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    add_missing_columns(&tx, "messages", &V9_MESSAGE_COLUMNS)?;
+    set_version(&tx, 9)?;
     tx.commit()
 }
 

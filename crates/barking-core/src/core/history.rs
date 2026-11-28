@@ -49,6 +49,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::content::MessageRef;
 use crate::crypto::aead::{XNONCE_LEN, xopen, xseal};
 use crate::crypto::labels;
+use crate::gif::GifRef;
 use crate::identity::root::{Fingerprint, RootIdentity, RootPublic};
 use crate::store::{
     Direction, MessageId, MessageInsert, MessageRow, MessageStatus, Queries, ReactionRow,
@@ -144,6 +145,8 @@ pub(super) struct HistoryEntry {
     reply_to: Option<[u8; 16]>,
     reply_ref: Option<MessageRef>,
     placeholder: bool,
+    /// The GIF the message is (its body is then empty).
+    gif: Option<GifRef>,
 }
 
 /// A reaction of the archive, as stored: its target may not be received yet
@@ -192,6 +195,7 @@ impl core::fmt::Debug for HistoryEntry {
             .field("status", &self.status)
             .field("at", &self.at)
             .field("placeholder", &self.placeholder)
+            .field("gif", &self.gif.is_some())
             .finish()
     }
 }
@@ -209,6 +213,7 @@ impl HistoryEntry {
             reply_to,
             reply_ref,
             placeholder,
+            gif,
             ..
         } = row;
         HistoryEntry {
@@ -230,6 +235,7 @@ impl HistoryEntry {
             reply_to: reply_to.map(|id| id.0),
             reply_ref,
             placeholder,
+            gif,
         }
     }
 
@@ -395,11 +401,17 @@ pub(super) fn open_archive(
 
 /// Each entry and each reaction concerns a contact of `contacts` (those of
 /// the link packet), message identifiers are unique and every emoji set is
-/// valid; otherwise the whole archive is refused.
+/// valid, as is every GIF reference; otherwise the whole archive is refused.
 pub(super) fn check_entries(history: &History, contacts: &HashSet<Fingerprint>) -> Result<()> {
     let mut ids = HashSet::with_capacity(history.entries.len());
     for e in &history.entries {
         if !contacts.contains(&e.contact) || !ids.insert(e.message_id) {
+            return Err(BAD_HISTORY);
+        }
+        if e.gif
+            .as_ref()
+            .is_some_and(|g| crate::content::check_gif(g).is_err())
+        {
             return Err(BAD_HISTORY);
         }
     }
@@ -431,6 +443,7 @@ pub(super) fn import(q: &impl Queries, history: &History) -> Result<u32> {
             ttl_secs: None,
             seen_at: None,
             expire_at: None,
+            gif: e.gif.clone(),
         })? {
             inserted = inserted.saturating_add(1);
         }
@@ -479,6 +492,7 @@ mod tests {
             reply_to: None,
             reply_ref: None,
             placeholder: false,
+            gif: None,
         }
     }
 
@@ -652,6 +666,26 @@ mod tests {
         assert_eq!(check_entries(&ok, &known(&[1])), Err(BAD_HISTORY));
         let dup = of(vec![entry(1, 1, "a"), entry(1, 1, "b")]);
         assert_eq!(check_entries(&dup, &known(&[1])), Err(BAD_HISTORY));
+    }
+
+    #[test]
+    fn check_entries_refuses_a_bad_gif_reference() {
+        let gif = |provider: u8, id: &str| {
+            let mut e = entry(1, 1, "");
+            e.gif = Some(GifRef {
+                provider,
+                id: id.to_owned(),
+                width: 1,
+                height: 1,
+            });
+            of(vec![e])
+        };
+        assert_eq!(check_entries(&gif(1, "hi-1"), &known(&[1])), Ok(()));
+        assert_eq!(
+            check_entries(&gif(0, "hi-1"), &known(&[1])),
+            Err(BAD_HISTORY)
+        );
+        assert_eq!(check_entries(&gif(1, "Hi"), &known(&[1])), Err(BAD_HISTORY));
     }
 
     #[test]

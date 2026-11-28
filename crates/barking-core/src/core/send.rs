@@ -11,6 +11,7 @@ use super::{
 };
 use crate::content::{self, ExtContent, MessageRef, SeenEntry};
 use crate::envelope::{self, Body, Envelope, MAX_TEXT_LEN};
+use crate::gif::GifRef;
 use crate::handshake::{PrekeyBundle, pqxdh};
 use crate::identity::{DeviceId, DeviceKeys, DevicePublic, Fingerprint};
 use crate::mailbox::{day_of, intro_mailbox, session_mailbox};
@@ -330,6 +331,51 @@ impl Core {
         if !content::ttl_in_bounds(ttl_secs) {
             return Err(CoreError::InvalidTtl);
         }
+        self.send_content(to, text, None, reply_to, ttl_secs, now, rng)
+    }
+
+    /// Sends the GIF `gif` to `to`, as `send_message` sends a text: the same
+    /// quote (`reply_to`) and delay (`ttl_secs`) rules, the same sealing for
+    /// the contact's devices, then a copy (`SyncGif`) for my other devices.
+    /// The stored row carries `gif` and an empty body. A reference that is
+    /// not valid (provider 0, identifier empty, too long, not printable
+    /// ASCII, or not `[a-z0-9-]` for Klipy) gives `Malformed`, writing
+    /// nothing. Counted as sent on the local day of `now`, the device being
+    /// `utc_offset_secs` ahead of UTC ([`super::gif::local_day`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_gif(
+        &mut self,
+        to: &Fingerprint,
+        gif: GifRef,
+        reply_to: Option<i64>,
+        ttl_secs: Option<u32>,
+        now: u64,
+        utc_offset_secs: i32,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Packet>> {
+        self.ensure_active()?;
+        content::check_gif(&gif)?;
+        if !content::ttl_in_bounds(ttl_secs) {
+            return Err(CoreError::InvalidTtl);
+        }
+        let gif = (&gif, utc_offset_secs);
+        self.send_content(to, "", Some(gif), reply_to, ttl_secs, now, rng)
+    }
+
+    /// The common part of `send_message` and `send_gif`, once their
+    /// content is checked: a text (`gif` `None`) or a GIF (`text` empty),
+    /// with the UTC offset its use is counted under.
+    #[allow(clippy::too_many_arguments)]
+    fn send_content(
+        &mut self,
+        to: &Fingerprint,
+        text: &str,
+        gif: Option<(&GifRef, i32)>,
+        reply_to: Option<i64>,
+        ttl_secs: Option<u32>,
+        now: u64,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Packet>> {
         if self.store.block_state(*to)?.blocked {
             return Err(CoreError::ContactBlocked);
         }
@@ -337,7 +383,10 @@ impl Core {
         store.transaction(|tx| {
             let reference = reply_to.map(|id| quote_ref(tx, to, id, now)).transpose()?;
             let message_id = new_message_id(rng);
-            let (body, copy) = bodies(*to, text, reference, ttl_secs);
+            let (body, copy) = match gif {
+                Some((gif, _)) => bodies_gif(*to, gif, reference, ttl_secs),
+                None => bodies(*to, text, reference, ttl_secs),
+            };
             let (body, copy) = (Plain(body), Plain(copy));
             let (body, copy) = (&body.0, &copy.0);
             let sealed = seal_for(
@@ -367,6 +416,7 @@ impl Core {
                 ttl_secs,
                 seen_at: ttl_secs.map(|_| now),
                 expire_at: ttl_secs.map(|t| now.saturating_add(u64::from(t))),
+                gif: gif.map(|(g, _)| g.clone()),
             })? {
                 return Err(CoreError::Store("duplicate message identifier".into()));
             }
@@ -387,6 +437,9 @@ impl Core {
             )?;
             let mut out: Vec<Packet> = sealed.into_iter().map(|(p, _)| p).collect();
             out.extend(mine);
+            if let Some((_, utc_offset_secs)) = gif {
+                super::gif::record_use(tx, super::gif::GifUse::Sent, now, utc_offset_secs)?;
+            }
             if ttl_secs.is_some() {
                 let seen = SeenEntry {
                     id: message_id,
@@ -469,6 +522,29 @@ fn bodies(
             },
         ),
     }
+}
+
+/// The contact's body and my devices' copy for `gif`: `Gif` and `SyncGif`,
+/// with or without a quote or a delay.
+fn bodies_gif(
+    to: Fingerprint,
+    gif: &GifRef,
+    reply_to: Option<MessageRef>,
+    ttl_secs: Option<u32>,
+) -> (Body, Body) {
+    ext_bodies(
+        ExtContent::Gif {
+            gif: gif.clone(),
+            reply_to,
+            ttl_secs,
+        },
+        ExtContent::SyncGif {
+            to,
+            gif: gif.clone(),
+            reply_to,
+            ttl_secs,
+        },
+    )
 }
 
 /// The `Body::Ext` of `ext` and of `copy`, their texts wiped: the
@@ -620,9 +696,12 @@ fn reseal(
     let contact = row.contact_fp;
     let message_id = row.message_id;
     // A reply keeps its reference (the original may be deleted since), an
-    // ephemeral its delay. The stored text ends up in the two bodies only,
-    // both wiped on return.
-    let (body, copy) = bodies(contact, &row.body, row.reply_ref, row.ttl_secs);
+    // ephemeral its delay, a GIF its reference. The stored text ends up in
+    // the two bodies only, both wiped on return.
+    let (body, copy) = match &row.gif {
+        Some(gif) => bodies_gif(contact, gif, row.reply_ref, row.ttl_secs),
+        None => bodies(contact, &row.body, row.reply_ref, row.ttl_secs),
+    };
     row.body.zeroize();
     let (body, copy) = (Plain(body), Plain(copy));
     let (body, copy) = (&body.0, &copy.0);

@@ -66,6 +66,23 @@ import Foundation
 ///   invitation reads as unanswered (sent 8 days ago, so a resend is open)
 ///   or accepted an hour ago (`inviteStatus`).
 ///
+/// - `-BarkingUITestLinkedDevices n`: n other linked devices after the real
+///   ones in `myDevices` (the GIF warning counts them).
+///
+/// - `-BarkingUITestGifResults`: search and trending answer a fixed page of
+///   four GIFs, without contacting any provider, and only while GIFs are on
+///   in the real core (otherwise `notEnabled`, as the core answers). Their
+///   preview URLs are outside Klipy's hosts: the core refuses to fetch them.
+///
+/// - `-BarkingUITestFakeGifs`: three received GIFs from Sam. Their media
+///   comes from here, never from a provider, and only while GIFs are on in
+///   the real core (otherwise `notEnabled`). Each media request is counted
+///   and reported as today's "GIFs shown" in `gifUsage`, so Transparency
+///   shows whether the app asked for any.
+///
+/// - `-BarkingUITestGifUsage`: `gifUsage` reports today 2 searches, 0
+///   previews and 1 GIF shown (3 calls to the provider).
+///
 /// Never compiled into Release.
 final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     /// What the seed recorded: the contact, the four messages (Not
@@ -109,6 +126,17 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     private static let devices = [("5a3f9c21d4e8b706", "iPhone"), ("c90e14b7a2f65d38", "iPad")]
 
     private let device: any DeviceHandle
+    /// `-BarkingUITestLinkedDevices n`: other devices added to `myDevices`.
+    private let linkedDevices: Int
+    /// `-BarkingUITestGifResults`.
+    private let gifResults: Bool
+    /// `-BarkingUITestFakeGifs`.
+    private let fakeGifs: Bool
+    /// `-BarkingUITestGifUsage`.
+    private let fixedGifUsage: Bool
+    /// Media requests the app made for the faked GIFs.
+    private var gifDataCalls: UInt32 = 0
+    static let fakeGifIds = ["hello-hi-662", "thumbs-up-17", "dog-wave-3"]
     private let seed: Seed?
     private let fakeReceived: Bool
     /// `-BarkingUITestEphemeral`: the faked ephemeral, until it expires.
@@ -177,8 +205,13 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
 
     init(device: any DeviceHandle, seed: Seed?, fakeReceived: Bool, reactionState: DeliveryState? = nil,
          ephemeral: Bool = false, nodes: Bool = false, slowSync: Bool = false, requests: Bool = false,
-         deviceChanged: Bool = false, inviteFailure: BarkingError? = nil, inviteStatus: InviteStatus? = nil) {
+         deviceChanged: Bool = false, inviteFailure: BarkingError? = nil, inviteStatus: InviteStatus? = nil,
+         linkedDevices: Int = 0, gifResults: Bool = false, fakeGifs: Bool = false, gifUsage: Bool = false) {
         self.device = device
+        self.linkedDevices = linkedDevices
+        self.gifResults = gifResults
+        self.fakeGifs = fakeGifs
+        self.fixedGifUsage = gifUsage
         self.deviceChanged = deviceChanged
         self.inviteFailure = inviteFailure
         self.inviteStatusOverride = inviteStatus
@@ -241,14 +274,22 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
             default: nil
             }
         }
+        let linkedDevices = arguments.firstIndex(of: "-BarkingUITestLinkedDevices").flatMap { i -> Int? in
+            i + 1 < arguments.count ? Int(arguments[i + 1]) : nil
+        } ?? 0
+        let gifResults = arguments.contains("-BarkingUITestGifResults")
+        let fakeGifs = arguments.contains("-BarkingUITestFakeGifs")
+        let gifUsage = arguments.contains("-BarkingUITestGifUsage")
         guard seeded || fakeReceived || reactionState != nil || ephemeral || nodes || slowSync || requests
-            || deviceChanged || inviteFailure != nil || inviteStatus != nil else {
+            || deviceChanged || inviteFailure != nil || inviteStatus != nil || linkedDevices > 0 || gifResults
+            || fakeGifs || gifUsage else {
             return device
         }
         return UITestDeliveries(device: device, seed: seeded ? Seed.load() : nil, fakeReceived: fakeReceived,
                                 reactionState: reactionState, ephemeral: ephemeral, nodes: nodes, slowSync: slowSync,
                                 requests: requests, deviceChanged: deviceChanged, inviteFailure: inviteFailure,
-                                inviteStatus: inviteStatus)
+                                inviteStatus: inviteStatus, linkedDevices: linkedDevices, gifResults: gifResults,
+                                fakeGifs: fakeGifs, gifUsage: gifUsage)
     }
 
     // MARK: The relays (`-BarkingUITestNodes`)
@@ -416,6 +457,13 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
                                     delivery: nil, route: "internet:1"))
         }
         if let m = fakeEphemeral(now: UInt64(Date().timeIntervalSince1970)) { messages.append(m) }
+        if fakeGifs, seed == nil || seed?.contact == contact {
+            let at = UInt64(Date().timeIntervalSince1970)
+            for (i, id) in Self.fakeGifIds.enumerated() {
+                messages.append(Message(id: 900_101 + Int64(i), outgoing: false, body: "GIF", at: at - 60 + UInt64(i),
+                                        delivery: nil, gif: GifInfo(provider: 1, id: id, width: 240, height: 135)))
+            }
+        }
         return messages
     }
 
@@ -765,7 +813,16 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     }
     func noteWake(atSecs: UInt64) throws { try device.noteWake(atSecs: atSecs) }
     func wakeStatus() throws -> WakeStatus { try device.wakeStatus() }
-    func myDevices() throws -> [MyDeviceInfo] { try device.myDevices() }
+    /// `-BarkingUITestLinkedDevices n`: n other devices follow the real list.
+    func myDevices() throws -> [MyDeviceInfo] {
+        let real = try device.myDevices()
+        guard linkedDevices > 0 else { return real }
+        let now = UInt64(Date().timeIntervalSince1970)
+        return real + (0..<linkedDevices).map { i in
+            MyDeviceInfo(id: String(format: "%032x", 0xd00d_0000 + i), name: i == 0 ? "iPad" : "Mac \(i)",
+                         issuedAt: now - 86_400, thisDevice: false, admin: false)
+        }
+    }
     func linkOffer() throws -> Data { try device.linkOffer() }
     func linkDevice(request: Data, withHistory: Bool) throws -> Data {
         try device.linkDevice(request: request, withHistory: withHistory)
@@ -786,6 +843,57 @@ final class UITestDeliveries: DeviceHandle, @unchecked Sendable {
     func cancelAllPending() throws -> DeleteOutcome {
         guard seed != nil else { return try device.cancelAllPending() }
         return try device.deleteMessages(ids: try pendingPackets().messages.map(\.messageId))
+    }
+
+    // MARK: GIFs (the real core)
+
+    func configureGifs(klipyKey: String?) { device.configureGifs(klipyKey: klipyKey) }
+    func gifProvider() -> GifProviderInfo { device.gifProvider() }
+    func gifSettings() throws -> GifSettingsInfo { try device.gifSettings() }
+    func enableGifProvider(provider: UInt8, warningVersion: UInt16) throws {
+        try device.enableGifProvider(provider: provider, warningVersion: warningVersion)
+    }
+    func disableGifProvider(provider: UInt8) throws { try device.disableGifProvider(provider: provider) }
+    func setGifAutoLoad(on: Bool) throws { try device.setGifAutoLoad(on: on) }
+    func gifSearch(query: String, page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo {
+        guard gifResults else { return try device.gifSearch(query: query, page: page, utcOffsetSecs: utcOffsetSecs) }
+        return try fakeGifPage()
+    }
+    func gifTrending(page: UInt32, utcOffsetSecs: Int32) throws -> GifPageInfo {
+        guard gifResults else { return try device.gifTrending(page: page, utcOffsetSecs: utcOffsetSecs) }
+        return try fakeGifPage()
+    }
+
+    /// The fixed page, behind the real core's consent check.
+    private func fakeGifPage() throws -> GifPageInfo {
+        guard try device.gifSettings().enabled else { throw BarkingError.Gif(kind: .notEnabled, retryAfterSecs: 0) }
+        let results = ["hello-hi-662", "thumbs-up-17", "dog-wave-3", "party-time-41"].map { id in
+            GifResultInfo(gif: GifInfo(provider: 1, id: id, width: 480, height: 270), title: id,
+                          previewMp4Url: "https://preview.invalid/\(id).mp4")
+        }
+        return GifPageInfo(results: results, next: nil)
+    }
+    func gifData(provider: UInt8, id: String, utcOffsetSecs: Int32) throws -> GifMediaInfo {
+        guard fakeGifs, Self.fakeGifIds.contains(id) else {
+            return try device.gifData(provider: provider, id: id, utcOffsetSecs: utcOffsetSecs)
+        }
+        lock.withLock { gifDataCalls += 1 }
+        guard try device.gifSettings().enabled else { throw BarkingError.Gif(kind: .notEnabled, retryAfterSecs: 0) }
+        return GifMediaInfo(mp4: Data(), author: nil, title: id)
+    }
+    func gifPreview(url: String, utcOffsetSecs: Int32) throws -> Data {
+        try device.gifPreview(url: url, utcOffsetSecs: utcOffsetSecs)
+    }
+    func sendGif(contact: String, gif: GifInfo, utcOffsetSecs: Int32, replyTo: Int64?, ttlSecs: UInt32?) throws {
+        try device.sendGif(contact: contact, gif: gif, utcOffsetSecs: utcOffsetSecs, replyTo: replyTo, ttlSecs: ttlSecs)
+    }
+    func gifUsage(days: UInt8) throws -> [GifUsageDayInfo] {
+        // Today as the core numbers it: the phone's own date.
+        let today = GifDay.number(of: Date())
+        if fixedGifUsage { return [GifUsageDayInfo(day: today, searches: 2, shown: 1, sent: 0, previews: 0)] }
+        let calls = lock.withLock { gifDataCalls }
+        guard fakeGifs else { return try device.gifUsage(days: days) }
+        return calls == 0 ? [] : [GifUsageDayInfo(day: today, searches: 0, shown: calls, sent: 0, previews: 0)]
     }
 }
 #endif

@@ -41,10 +41,32 @@ struct ConversationView: View {
 
     private struct SheetTarget: Identifiable { let id: Int64 }
 
+    /// GIFs as the core holds them (spec GIF §9.1): read again at each tap.
+    @State private var gifs: GifSettingsModel
+    /// The GIF sheet open: the warning, or the picker. One sheet at a time.
+    @State private var gifSheet: GifSheet?
+    /// "Use GIFs" was tapped: once the warning has gone, the picker opens
+    /// if the core stored the consent.
+    @State private var enabling: Task<Bool, Never>?
+    /// The GIF bubble whose tap opened the warning: it loads once GIFs are
+    /// on, in place of the picker.
+    @State private var warningFor: Int64?
+    /// The GIFs of this conversation: their state while shown, their requests.
+    @State private var gifLoads: GifLoads
+
+    private enum GifSheet: Identifiable {
+        /// The warning, the picker, or Settings › GIFs (from "Play GIFs
+        /// automatically ›", over the conversation).
+        case warning, picker, settings
+        var id: Self { self }
+    }
+
     init(core: CoreService, contact: String, focus: Int64? = nil) {
         self.core = core
         self.focus = focus
         _model = State(initialValue: ConversationModel(contact: contact, core: core))
+        _gifs = State(initialValue: GifSettingsModel(core: core))
+        _gifLoads = State(initialValue: GifLoads(core: core))
     }
 
     // In parts: as one expression, `body` went past the type checker's
@@ -87,7 +109,7 @@ struct ConversationView: View {
             if let e = model.sendError {
                 Text(LocalizedStringKey(e)).font(.footnote).foregroundStyle(Color.danger).padding(.horizontal, 16)
             }
-            ComposerView(model: model)
+            ComposerView(model: model) { openGifs() }
         }
         .background(Color.surface)
         .navigationBarTitleDisplayMode(.inline)
@@ -162,6 +184,9 @@ struct ConversationView: View {
             .sheet(item: $reactingTo) { target in
                 EmojiPicker { emoji in react(emoji, on: target.id) }
             }
+            .sheet(item: $gifSheet, onDismiss: gifSheetClosed) { sheet in
+                gifSheetView(sheet)
+            }
             .confirmationDialog(Text(verbatim: confirmation?.title(otherDevices: confirmingDevices) ?? ""),
                                 isPresented: confirmingShown,
                                 titleVisibility: .visible, presenting: confirming) { item in
@@ -216,8 +241,114 @@ struct ConversationView: View {
                 await model.onAppear()
                 // The first not delivered message, if it is still there.
                 if let focus, model.items.contains(where: { $0.id == focus }) { scrollTarget = focus }
+                gifLoads.onTurnedOff = { Task { await refreshGifs() } }
+                await refreshGifs()
                 for await change in await core.changes { await model.handle(change) }
             }
+            // GIFs turned on or off, auto-play changed (here or in the sheet).
+            .onChange(of: [gifs.enabled, gifs.autoLoad]) { syncGifs() }
+            .onChange(of: model.items.compactMap(\.gif)) { gifLoads.pinHint(gifItems) }
+            // Low Data Mode on or off, or the path known at last.
+            .onReceive(NotificationCenter.default.publisher(for: GifNetworkPath.changed)) { _ in
+                gifLoads.pathChanged()
+            }
+    }
+
+    /// The GIF button: the picker when GIFs are on, otherwise the warning,
+    /// the only way to turn them on (spec GIF §9.1, §9.2). Nothing before
+    /// the core named its provider.
+    private func openGifs() {
+        Task {
+            await gifs.refresh()
+            syncGifs()
+            guard gifs.provider != nil, gifSheet == nil else { return }
+            warningFor = nil
+            gifSheet = gifs.enabled ? .picker : .warning
+        }
+    }
+
+    /// The GIF messages, in the conversation's order.
+    private var gifItems: [(id: Int64, gif: GifInfo)] {
+        model.items.compactMap { item in item.gif.map { (item.id, $0) } }
+    }
+
+    /// The bubbles follow the settings the core holds.
+    private func syncGifs() {
+        gifLoads.configure(enabled: gifs.enabled, autoLoad: gifs.autoLoad, provider: gifs.provider)
+        gifLoads.pinHint(gifItems)
+    }
+
+    private func refreshGifs() async {
+        await gifs.refresh()
+        syncGifs()
+    }
+
+    /// A tap on a GIF bubble (spec GIF §7): off, the warning, the only way
+    /// to turn GIFs on; loaded, the message; otherwise load or retry.
+    private func gifTapped(_ item: ConversationModel.Item) {
+        switch gifLoads.state(item.id) {
+        case .off?:
+            Task {
+                await refreshGifs()
+                guard gifs.provider != nil, gifSheet == nil else { return }
+                // Turned on meanwhile (another device): this one loads.
+                if gifs.enabled {
+                    gifLoads.load(item.id)
+                } else {
+                    warningFor = item.id
+                    gifSheet = .warning
+                }
+            }
+        case .loaded?:
+            if !item.local { sheetOf = SheetTarget(id: item.id) }
+        default:
+            gifLoads.load(item.id)
+        }
+    }
+
+    @ViewBuilder private func gifSheetView(_ sheet: GifSheet) -> some View {
+        if let provider = gifs.provider {
+            switch sheet {
+            case .warning:
+                GifWarningSheet(provider: provider, linkedDevices: gifs.linkedDevices, updated: gifs.updated) {
+                    enabling = Task { (try? await gifs.enable()) != nil }
+                }
+            case .picker:
+                GifPickerView(core: core, providerName: provider.name) { gif in await model.sendGif(gif) }
+            case .settings:
+                NavigationStack {
+                    GifSettingsView(core: core, model: gifs)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Close") { gifSheet = nil }.accessibilityIdentifier("gifSettings.close")
+                            }
+                        }
+                }
+                .presentationBackground(Color.surface)
+            }
+        }
+    }
+
+    /// After a GIF sheet: the bubbles follow what the core now holds. After
+    /// the warning, once "Use GIFs" was stored: the GIF tapped loads, or,
+    /// from the GIF button, the picker opens in place. A dismissal without
+    /// it (Not now, a swipe) opens nothing.
+    private func gifSheetClosed() {
+        let target = warningFor
+        warningFor = nil
+        guard let enabling else {
+            Task { await refreshGifs() }
+            return
+        }
+        self.enabling = nil
+        Task {
+            if await enabling.value {
+                syncGifs()
+                if let target { gifLoads.load(target) } else { gifSheet = .picker }
+            } else {
+                model.gifsNotSaved()
+            }
+        }
     }
 
     private var confirmation: DeleteConfirmation? {
@@ -252,6 +383,16 @@ struct ConversationView: View {
         let side: HorizontalAlignment = item.outgoing ? .trailing : .leading
         VStack(alignment: side, spacing: 4) {
             bubble(item)
+            if gifLoads.hintAnchor == item.id {
+                Button { gifSheet = .settings } label: {
+                    Text("Play GIFs automatically ›").font(BarkingFont.sans(.footnote, size: 13, weight: .semibold))
+                        .foregroundStyle(Color.accent)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("gif.autoPlayHint")
+                .bubbleRow(outgoing: item.outgoing)
+            }
             if !item.reactions.isEmpty {
                 ReactionChips(chips: item.reactions, outgoing: item.outgoing, myState: item.myReactionState) { react($0, on: item.id) }
                     .disabled(deleting)
@@ -286,16 +427,9 @@ struct ConversationView: View {
         // Not for a local row (not in the core yet) or a placeholder (§5.6).
         let acts = item.canReplyOrReact
         let strings = Bundle.strings(for: locale)
-        return Bubble(text: item.needsUpdate
-                        ? String(localized: "This message needs a newer version of Barking.", bundle: strings, locale: locale)
-                        : item.text,
-                      outgoing: item.outgoing,
-                      quote: model.quoteLine(for: item, bundle: strings, locale: locale),
-                      placeholder: item.needsUpdate,
-                      highlighted: model.highlighted == item.id) {
-            if let quote = item.quote { scrollTarget = model.jump(to: quote) }
-        }
-            .onTapGesture { if saved { sheetOf = SheetTarget(id: item.id) } }
+        let gifState = gifLoads.state(item.id)
+        return bubbleContent(item, strings: strings)
+            .onTapGesture { if saved, item.gif == nil { sheetOf = SheetTarget(id: item.id) } }
             .swipeToReply(enabled: acts, outgoing: item.outgoing) { model.startReply(item.id) }
             .contextMenu {
                 if acts {
@@ -322,8 +456,9 @@ struct ConversationView: View {
                 }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityValue(Text(verbatim: Self.spoken(item, now: .now, bundle: strings, locale: locale)))
-            .accessibilityHint(saved ? Text("Opens the message details.") : Text(verbatim: ""))
+            .accessibilityValue(Text(verbatim: spokenValue(item, gif: gifState, strings: strings)))
+            .accessibilityHint(bubbleHint(item, gif: gifState, saved: saved))
+            .accessibilityIdentifier(item.gif == nil ? "" : GifBubble.identifier(gifState))
             .accessibilityActions {
                 if acts {
                     Button("Reply") { model.startReply(item.id) }
@@ -343,6 +478,45 @@ struct ConversationView: View {
             // Seen once more than half of it is in the visible part of the list.
             .onScrollVisibilityChange(threshold: 0.5) { model.bubbleVisibility(item.id, shown: $0) }
             .bubbleRow(outgoing: item.outgoing)
+    }
+
+    /// The text bubble, or the GIF's, which loads only once on screen and
+    /// lets its media go when it leaves (spec GIF §7).
+    @ViewBuilder private func bubbleContent(_ item: ConversationModel.Item, strings: Bundle) -> some View {
+        let quote = model.quoteLine(for: item, bundle: strings, locale: locale)
+        let highlighted = model.highlighted == item.id
+        let onQuote = { if let quote = item.quote { scrollTarget = model.jump(to: quote) } }
+        if let gif = item.gif, !item.needsUpdate {
+            GifBubble(gif: gif, outgoing: item.outgoing, state: gifLoads.state(item.id),
+                      providerName: gifs.provider?.name ?? "", quote: quote, highlighted: highlighted,
+                      onQuote: onQuote) { gifTapped(item) }
+                .onAppear { gifLoads.appeared(item.id, gif: gif) }
+                .onDisappear { gifLoads.disappeared(item.id) }
+        } else {
+            Bubble(text: item.needsUpdate
+                    ? String(localized: "This message needs a newer version of Barking.", bundle: strings, locale: locale)
+                    : item.text,
+                   outgoing: item.outgoing, quote: quote, placeholder: item.needsUpdate,
+                   highlighted: highlighted, onQuote: onQuote)
+        }
+    }
+
+    /// What a double-tap does: a GIF's own hint until it is loaded, then
+    /// the message's, as any bubble.
+    private func bubbleHint(_ item: ConversationModel.Item, gif: GifLoad?, saved: Bool) -> Text {
+        if item.gif != nil, let hint = GifBubble.hintKey(gif, now: .now) { return Text(hint) }
+        if item.gif != nil, gif?.media == nil { return Text(verbatim: "") }
+        return saved ? Text("Opens the message details.") : Text(verbatim: "")
+    }
+
+    /// The bubble's value: a GIF's caption first (what is shown), then the
+    /// time and state as for any bubble.
+    private func spokenValue(_ item: ConversationModel.Item, gif: GifLoad?, strings: Bundle) -> String {
+        let base = Self.spoken(item, now: .now, bundle: strings, locale: locale)
+        guard item.gif != nil, let caption = GifBubble.caption(gif, providerName: gifs.provider?.name ?? "",
+                                                                now: .now, bundle: strings, locale: locale)
+        else { return base }
+        return "\(caption), \(base)"
     }
 
     /// The row above the menu: the six frequent emoji and "+" (§5.6). One of
@@ -468,9 +642,11 @@ private struct ChatHeader: View {
     }
 }
 
-/// Text field, byte counter, send button.
+/// Text field, byte counter, GIF and send buttons.
 struct ComposerView: View {
     @Bindable var model: ConversationModel
+    /// The GIF button: the same whether GIFs are on or off (spec GIF §9.1).
+    var onGif: () -> Void = {}
     @Environment(\.locale) private var locale
 
     var body: some View {
@@ -488,6 +664,17 @@ struct ComposerView: View {
             }
             HStack(spacing: 8) {
                 EphemeralMenu(model: model)
+                Button(action: onGif) {
+                    Text(verbatim: "GIF").font(BarkingFont.mono(.caption, size: 12, weight: .semibold))
+                        .foregroundStyle(Color.fgMuted)
+                        .padding(.horizontal, 5).padding(.vertical, 3)
+                        .overlay(RoundedRectangle(cornerRadius: Radius.tag).strokeBorder(Color.fgMuted, lineWidth: 1.5))
+                        .frame(width: 44, height: 44)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("GIF"))
+                .accessibilityIdentifier("composer.gif")
                 TextField("Message", text: $model.draft, axis: .vertical)
                     .lineLimit(1...5)
                     .padding(.horizontal, 16).padding(.vertical, 12)

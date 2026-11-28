@@ -31,6 +31,13 @@ struct TransparencyView: View {
 
                 wakeUps
 
+                // Its own section, outside the wake-ups and their notes: the
+                // GIF provider sees which GIFs are shown (spec GIF §6.7).
+                if let row = model.gifRow {
+                    heading("GIFs")
+                    card(id: "transparency.who.gifs") { dataRow(row) }
+                }
+
                 heading("Journal")
                 BarkingSegmented("Journal filter",
                                  selection: Binding(get: { model.filter }, set: { f in Task { await model.setFilter(f) } }),
@@ -46,6 +53,10 @@ struct TransparencyView: View {
                 ForEach(model.days) { day in
                     SectionLabel(verbatim: model.title(of: day)).padding(.top, Space.section - Space.s2)
                     VStack(spacing: 0) {
+                        if let line = day.klipy {
+                            gifUsageRow(line)
+                            if !day.rows.isEmpty { Rectangle().fill(Color.border).frame(height: 1) }
+                        }
                         ForEach(Array(day.rows.enumerated()), id: \.element.id) { i, row in
                             if i > 0 { Rectangle().fill(Color.border).frame(height: 1) }
                             logRow(row).onAppear {
@@ -153,6 +164,19 @@ struct TransparencyView: View {
         }
         .padding(16)
         .accessibilityElement(children: .combine)
+    }
+
+    /// The day's calls to the GIF provider, counted, never what was
+    /// searched or shown (spec GIF §6.7).
+    private func gifUsageRow(_ line: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            icon("photo.on.rectangle", accent: false)
+            Text(verbatim: line).font(BarkingFont.sans(.subheadline, size: 15)).foregroundStyle(Color.fg)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("transparency.gifs.day")
+            Spacer(minLength: 0)
+        }
+        .padding(16)
     }
 
     /// A journal row (U-30): the title (one line), a Fira meta line led by

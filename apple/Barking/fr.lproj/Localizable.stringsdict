@@ -847,5 +847,70 @@
 			<string>Possible dans %lld h</string>
 		</dict>
 	</dict>
+	<key>Applies to your %lld linked devices.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@n@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>S’applique à ton appareil lié.</string>
+			<key>other</key>
+			<string>S’applique à tes %lld appareils liés.</string>
+		</dict>
+	</dict>
+	<key>%@ contacted %lld times · %lld searches, %lld previews, %lld GIFs shown</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$@ a été contacté %2$#@n@ · %3$#@s@, %4$#@p@, %5$#@g@</string>
+		<key>n</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%2$lld fois</string>
+			<key>other</key>
+			<string>%2$lld fois</string>
+		</dict>
+		<key>s</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%3$lld recherche</string>
+			<key>other</key>
+			<string>%3$lld recherches</string>
+		</dict>
+		<key>p</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%4$lld aperçu</string>
+			<key>other</key>
+			<string>%4$lld aperçus</string>
+		</dict>
+		<key>g</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%5$lld GIF affiché</string>
+			<key>other</key>
+			<string>%5$lld GIF affichés</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

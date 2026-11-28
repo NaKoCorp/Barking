@@ -4570,6 +4570,7 @@ fn pending_kinds_are_classified() {
             row_id: row_of(&a, &bob, "m"),
             contact: bob,
             body: "m".into(),
+            gif: false,
             sealed_at: NOW,
             expires_at: u64::from(sent[0].expires_at),
             packets: 1,
@@ -8167,6 +8168,37 @@ fn sync_seen_cap_fits_tier_m() {
         ExtContent::decode(KIND_SYNC_SEEN, &empty),
         Err(CoreError::Malformed(_))
     ));
+}
+
+#[test]
+fn gif_with_reply_and_ttl_fits_tier_m() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    answer_own_session(&mut a, &mut t, &mut rng);
+    let content = ExtContent::SyncGif {
+        to: b.fingerprint(),
+        gif: crate::gif::GifRef {
+            provider: u8::MAX,
+            id: "-".repeat(crate::gif::MAX_GIF_ID_LEN),
+            width: u16::MAX,
+            height: u16::MAX,
+        },
+        reply_to: Some(MessageRef {
+            id: [0xff; 16],
+            by_sender: true,
+        }),
+        // The longest delay `seal` accepts (`u32::MAX` is refused as out of
+        // bounds).
+        ttl_secs: Some(crate::content::MAX_TTL_SECS),
+    };
+    let mut sealed = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &content.to_body(),
+        MessageId([0x52; 16]),
+        &mut rng,
+    );
+    assert_eq!(sealed.len(), 1);
+    assert_eq!(sealed.remove(0).0.tier, Tier::M);
 }
 
 #[test]
@@ -11862,4 +11894,857 @@ fn invalid_avatar_op_from_my_device_refused() {
         assert_eq!(reason(r), "synchronization refused", "case {i}");
     }
     assert_eq!(avatar_of(&a, &fp), Some(dog()));
+}
+
+// --- GIF, task 2: send, receive and store.
+
+use crate::gif::GifRef;
+
+fn hello_gif() -> GifRef {
+    GifRef {
+        provider: 1,
+        id: "hello-hi-662".into(),
+        width: 480,
+        height: 270,
+    }
+}
+
+/// The newest row of the conversation with `contact`, shown at `NOW`.
+fn last_row(c: &Core, contact: &Fingerprint) -> crate::store::MessageRow {
+    c.messages_with(contact, NOW).unwrap().pop().unwrap()
+}
+
+/// Rows of the conversation with `contact` that carry a GIF.
+fn gif_rows(c: &Core, contact: &Fingerprint) -> usize {
+    c.messages_with(contact, NOW)
+        .unwrap()
+        .iter()
+        .filter(|m| m.gif.is_some())
+        .count()
+}
+
+#[test]
+fn gif_send_receive_round_trip() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let out =
+        p.a.send_gif(&b, hello_gif(), None, None, NOW, 0, &mut p.rng)
+            .unwrap();
+    assert_eq!(out.len(), 1);
+    let mine = last_row(&p.a, &b);
+    assert_eq!(mine.direction, Direction::Out);
+    assert_eq!(mine.gif, Some(hello_gif()));
+    assert_eq!(mine.body, "");
+    assert!(!mine.placeholder);
+    // The contact reads a GIF kind, never a text.
+    assert!(matches!(
+        peek_envelope(&p.b, &out[0]).body,
+        Body::Ext {
+            kind: crate::content::KIND_GIF,
+            ..
+        }
+    ));
+    let r = deliver(&mut p.b, &out[0], &mut p.rng);
+    assert!(
+        matches!(
+            &r,
+            ReceiveOutcome::Message {
+                text,
+                ephemeral: false,
+                ..
+            } if text == "GIF"
+        ),
+        "{r:?}"
+    );
+    let got = last_row(&p.b, &a);
+    assert_eq!(got.direction, Direction::In);
+    assert_eq!(got.gif, Some(hello_gif()));
+    assert_eq!(got.body, "");
+    assert!(!got.placeholder);
+    assert!(got.wire_id.is_some());
+    // Only the sender counts a send; receiving counts nothing.
+    let day = |sent| {
+        [GifUsageDay {
+            day: (NOW / 86_400) as u32,
+            searches: 0,
+            shown: 0,
+            sent,
+            previews: 0,
+        }]
+    };
+    assert_eq!(p.a.gif_usage(7).unwrap(), day(1));
+    assert!(p.b.gif_usage(7).unwrap().is_empty());
+    // A repeat adds nothing and shows as a stored message.
+    assert!(matches!(
+        deliver(&mut p.b, &out[0], &mut p.rng),
+        ReceiveOutcome::DuplicateMessage
+    ));
+    assert_eq!(gif_rows(&p.b, &a), 1);
+}
+
+#[test]
+fn gif_copy_reaches_my_other_device() {
+    let (_d, mut a, mut t, mut b, _v1, mut rng) = alice_tablet_bob();
+    let (alice, bob) = (a.fingerprint(), b.fingerprint());
+    let first = b.send_text(&alice, "q", NOW, &mut rng).unwrap();
+    deliver_each(&first, &mut [&mut a, &mut t], &mut rng);
+    let sent = a
+        .send_gif(&bob, hello_gif(), None, None, NOW, 0, &mut rng)
+        .unwrap();
+    assert_eq!(sent.len(), 2, "one for Bob, one copy for the tablet");
+    let got = t.receive(&sent[1].encode(), "t", NOW, &mut rng).unwrap();
+    assert!(
+        matches!(
+            got,
+            ReceiveOutcome::Synced {
+                kind: SyncKind::Sent,
+                contact: Some(c)
+            } if c == bob
+        ),
+        "{got:?}"
+    );
+    let row = last_row(&t, &bob);
+    let mine = last_row(&a, &bob);
+    assert_eq!(row.direction, Direction::Out);
+    assert_eq!(row.gif, Some(hello_gif()));
+    assert_eq!(row.body, "");
+    assert_eq!(row.message_id, mine.message_id);
+    assert_eq!(row.at, NOW);
+    assert!(matches!(
+        deliver(&mut b, &sent[0], &mut rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    assert_eq!(last_row(&b, &alice).gif, Some(hello_gif()));
+}
+
+#[test]
+fn gif_ephemeral_copy_is_seen_on_my_other_device() {
+    let (_d, mut a, mut t, b, _v1, mut rng) = alice_tablet_bob();
+    let bob = b.fingerprint();
+    let sent = a
+        .send_gif(&bob, hello_gif(), None, Some(300), NOW, 0, &mut rng)
+        .unwrap();
+    assert_eq!(
+        sent.len(),
+        3,
+        "one for Bob, one copy and its \"seen\" for the tablet"
+    );
+    let mine = last_row(&a, &bob);
+    assert_eq!(
+        (mine.ttl_secs, mine.seen_at, mine.expire_at),
+        (Some(300), Some(NOW), Some(NOW + 300))
+    );
+    let r = NOW + 9;
+    t.receive(&sent[1].encode(), "t", r, &mut rng).unwrap();
+    let row = last_row(&t, &bob);
+    assert_eq!(row.gif, Some(hello_gif()));
+    assert_eq!(
+        (row.ttl_secs, row.seen_at, row.expire_at),
+        (Some(300), None, Some(r + UNSEEN_CEILING_SECS))
+    );
+}
+
+#[test]
+fn gif_unknown_provider_is_kept() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let other = GifRef {
+        provider: 2,
+        id: "x".into(),
+        width: 1,
+        height: 1,
+    };
+    let out =
+        p.a.send_gif(&b, other.clone(), None, None, NOW, 0, &mut p.rng)
+            .unwrap();
+    assert!(matches!(
+        deliver(&mut p.b, &out[0], &mut p.rng),
+        ReceiveOutcome::Message { .. }
+    ));
+    let got = last_row(&p.b, &a);
+    assert_eq!(got.gif.as_ref().map(|g| g.provider), Some(2));
+    assert_eq!(got.gif, Some(other));
+    assert!(!got.placeholder);
+}
+
+#[test]
+fn gif_invalid_reference_is_refused_on_send() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    for gif in [
+        GifRef {
+            provider: 0,
+            id: "x".into(),
+            width: 1,
+            height: 1,
+        },
+        GifRef {
+            provider: 1,
+            id: "Not-Klipy".into(),
+            width: 1,
+            height: 1,
+        },
+        GifRef {
+            provider: 1,
+            id: String::new(),
+            width: 1,
+            height: 1,
+        },
+    ] {
+        assert!(matches!(
+            p.a.send_gif(&b, gif, None, None, NOW, 0, &mut p.rng),
+            Err(CoreError::Malformed(_))
+        ));
+    }
+    assert!(matches!(
+        p.a.send_gif(&b, hello_gif(), None, Some(1), NOW, 0, &mut p.rng),
+        Err(CoreError::InvalidTtl)
+    ));
+    assert_eq!(gif_rows(&p.a, &b), 0);
+}
+
+#[test]
+fn sync_gif_from_contact_is_rejected() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let b = p.b.fingerprint();
+    let body = ExtContent::SyncGif {
+        to: a,
+        gif: hello_gif(),
+        reply_to: None,
+        ttl_secs: None,
+    }
+    .to_body();
+    let out = seal_body(
+        &mut p.b,
+        &send::Target::Contact(a),
+        &body,
+        MessageId([0x70; 16]),
+        &mut p.rng,
+    );
+    assert_eq!(reason(deliver(&mut p.a, &out[0].0, &mut p.rng)), NOT_MINE);
+    assert_eq!(gif_rows(&p.a, &b), 0);
+
+    // A `Gif` from one of my own devices is not a copy: refused too.
+    let (_d, mut a, mut t, mut rng) = linked();
+    let body = ExtContent::Gif {
+        gif: hello_gif(),
+        reply_to: None,
+        ttl_secs: None,
+    }
+    .to_body();
+    let out = seal_body(
+        &mut a,
+        &send::Target::OwnDevices,
+        &body,
+        MessageId([0x71; 16]),
+        &mut rng,
+    );
+    let r = t.receive(&out[0].0.encode(), "t", NOW, &mut rng).unwrap();
+    assert_eq!(reason(r), "unexpected content for this mailbox");
+}
+
+#[test]
+fn gif_from_blocked_contact_is_dropped() {
+    let mut p = pair();
+    let a = p.a.fingerprint();
+    let bob = p.a.resolve("bob").unwrap();
+    let out =
+        p.b.send_gif(&a, hello_gif(), None, None, NOW, 0, &mut p.rng)
+            .unwrap();
+    p.a.block_contact(&bob, NOW, &mut p.rng).unwrap();
+    let r = p.a.receive(&out[0].encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), "blocked contact");
+    assert_eq!(acks_for(&mut p.a, &out[0]), 0);
+    assert_eq!(gif_rows(&p.a, &bob), 0);
+}
+
+#[test]
+fn gif_reply_and_ttl_preserved() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let pk = p.a.send_text(&b, "18 h ?", NOW, &mut p.rng).unwrap();
+    deliver(&mut p.b, &pk[0], &mut p.rng);
+    let quoted = full_row(&p.b, &a, "18 h ?");
+    let out =
+        p.b.send_gif(
+            &a,
+            hello_gif(),
+            Some(quoted.id),
+            Some(300),
+            NOW,
+            0,
+            &mut p.rng,
+        )
+        .unwrap();
+    let mine = last_row(&p.b, &a);
+    assert_eq!(mine.reply_to, Some(quoted.message_id));
+    assert_eq!(
+        mine.reply_ref,
+        Some(MessageRef {
+            id: quoted.wire_id.unwrap(),
+            by_sender: false
+        })
+    );
+    assert_eq!(
+        (mine.ttl_secs, mine.seen_at, mine.expire_at),
+        (Some(300), Some(NOW), Some(NOW + 300))
+    );
+    let r = deliver(&mut p.a, &out[0], &mut p.rng);
+    assert!(
+        matches!(
+            r,
+            ReceiveOutcome::Message {
+                ephemeral: true,
+                ..
+            }
+        ),
+        "{r:?}"
+    );
+    let original = full_row(&p.a, &b, "18 h ?");
+    let got = last_row(&p.a, &b);
+    assert_eq!(got.gif, Some(hello_gif()));
+    assert_eq!(got.reply_to, Some(original.message_id));
+    assert_eq!(got.reply_ref, mine.reply_ref);
+    assert_eq!(
+        (got.ttl_secs, got.seen_at, got.expire_at),
+        (Some(300), None, Some(NOW + UNSEEN_CEILING_SECS))
+    );
+    // A text replying to the GIF resolves its quote on both sides.
+    let back =
+        p.a.send_message(&b, "yes", Some(got.id), None, NOW, &mut p.rng)
+            .unwrap();
+    assert_eq!(full_row(&p.a, &b, "yes").reply_to, Some(got.message_id));
+    deliver(&mut p.b, &back[0], &mut p.rng);
+    assert_eq!(full_row(&p.b, &a, "yes").reply_to, Some(mine.message_id));
+    // A missing quote writes nothing.
+    assert!(matches!(
+        p.b.send_gif(&a, hello_gif(), Some(i64::MAX), None, NOW, 0, &mut p.rng),
+        Err(CoreError::MessageNotFound)
+    ));
+}
+
+#[test]
+fn gif_retry_sends_the_gif_again() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let sent =
+        p.a.send_gif(&b, hello_gif(), None, None, NOW, 0, &mut p.rng)
+            .unwrap();
+    let row = last_row(&p.a, &b);
+    let late = NOW + 4;
+    assert!(p.a.drop_outbox_packet(&sent[0].encode(), late).unwrap());
+    assert_eq!(last_row(&p.a, &b).status, MessageStatus::NotDelivered);
+    let again = p.a.retry_message(row.id, late, &mut p.rng).unwrap();
+    assert!(matches!(
+        peek_envelope(&p.b, &again[0]).body,
+        Body::Ext {
+            kind: crate::content::KIND_GIF,
+            ..
+        }
+    ));
+    p.b.receive(&again[0].encode(), "t", late, &mut p.rng)
+        .unwrap();
+    let got = last_row(&p.b, &a);
+    assert_eq!(got.gif, Some(hello_gif()));
+    assert_eq!(got.body, "");
+}
+
+#[test]
+fn gif_survives_history_export() {
+    let mut p = pair();
+    let (a, b) = (p.a.fingerprint(), p.b.fingerprint());
+    let out =
+        p.b.send_gif(&a, hello_gif(), None, None, NOW, 0, &mut p.rng)
+            .unwrap();
+    deliver(&mut p.a, &out[0], &mut p.rng);
+    p.a.send_gif(&b, hello_gif(), None, None, NOW, 0, &mut p.rng)
+        .unwrap();
+    let contacts = std::collections::HashSet::from([b]);
+    let history = history::export(&p.a.store, &contacts).unwrap();
+    // Through the wire form, as a linked device reads it.
+    let bytes = postcard::to_allocvec(&history).unwrap();
+    let history: history::History = postcard::from_bytes(&bytes).unwrap();
+    let (_dt, t) = party("t", 9);
+    assert_eq!(history::import(&t.store, &history).unwrap(), 4);
+    let gifs: Vec<_> = t
+        .store
+        .all_messages()
+        .unwrap()
+        .into_iter()
+        .filter_map(|m| m.gif.map(|g| (m.direction, g)))
+        .collect();
+    assert_eq!(
+        gifs,
+        [(Direction::In, hello_gif()), (Direction::Out, hello_gif())]
+    );
+}
+
+// --- GIF, task 3: consent and synced settings.
+
+/// Delivers every packet queued by `from` to `to` at `now`.
+fn deliver_all_at(from: &mut Core, to: &mut Core, now: u64, rng: &mut StdRng) {
+    for b in from.pending_outbox(now).unwrap() {
+        to.receive(&b, "t", now, rng)
+            .expect("a queued packet is delivered");
+    }
+}
+
+/// A consent with every field set.
+fn consent(device: DeviceId, at: u64) -> crate::gif::GifConsent {
+    crate::gif::GifConsent {
+        warning_version: 1,
+        device,
+        at,
+    }
+}
+
+#[test]
+fn gif_disabled_by_default() {
+    let (_d, a) = party("a", 1);
+    let s = a.gif_settings().unwrap();
+    assert!(s.enabled.is_empty());
+    assert!(!s.auto_load);
+    assert!(!a.gif_allowed(1).unwrap());
+}
+
+#[test]
+fn enable_records_device_and_date() {
+    let (_d, mut a) = party("a", 1);
+    let mut rng = StdRng::seed_from_u64(1);
+    a.enable_gif_provider(1, 1, 1000, &mut rng).unwrap();
+    let s = a.gif_settings().unwrap();
+    assert_eq!(s.enabled.get(&1), Some(&consent(this_device(&a), 1000)));
+    assert!(a.gif_allowed(1).unwrap());
+    // Provider 0 is refused, and so is a provider this client does not know.
+    assert!(matches!(
+        a.enable_gif_provider(0, 1, 1001, &mut rng),
+        Err(CoreError::Malformed(_))
+    ));
+    assert!(matches!(
+        a.enable_gif_provider(7, 1, 1001, &mut rng),
+        Err(CoreError::Malformed(_))
+    ));
+    a.disable_gif_provider(1, 1002, &mut rng).unwrap();
+    assert!(!a.gif_allowed(1).unwrap());
+    assert!(a.gif_settings().unwrap().enabled.is_empty());
+}
+
+#[test]
+fn stale_warning_version_is_not_allowed() {
+    let (_d, mut a) = party("a", 1);
+    let mut rng = StdRng::seed_from_u64(1);
+    a.enable_gif_provider(1, 0, NOW, &mut rng).unwrap();
+    assert!(!a.gif_allowed(1).unwrap());
+    a.enable_gif_provider(1, crate::gif::MIN_GIF_WARNING_VERSION, NOW + 1, &mut rng)
+        .unwrap();
+    assert!(a.gif_allowed(1).unwrap());
+}
+
+#[test]
+fn gif_settings_sync_to_other_device() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    a.enable_gif_provider(1, 1, NOW + 10, &mut rng).unwrap();
+    a.set_gif_auto_load(true, NOW + 11, &mut rng).unwrap();
+    deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+    assert!(t.gif_allowed(1).unwrap());
+    let s = t.gif_settings().unwrap();
+    assert_eq!(s, a.gif_settings().unwrap());
+    assert_eq!(s.enabled[&1].device, this_device(&a));
+    assert!(s.auto_load);
+    // And back: a change on T reaches A.
+    t.disable_gif_provider(1, NOW + 40, &mut rng).unwrap();
+    deliver_all_at(&mut t, &mut a, NOW + 50, &mut rng);
+    assert!(!a.gif_allowed(1).unwrap());
+    assert!(a.gif_settings().unwrap().auto_load, "kept when disabled");
+}
+
+#[test]
+fn gif_settings_last_writer_wins() {
+    for a_first in [true, false] {
+        let (_d, mut a, mut t, mut rng) = linked();
+        a.enable_gif_provider(1, 1, NOW + 10, &mut rng).unwrap();
+        // Disabling a provider T never had is still a change, dated later.
+        t.disable_gif_provider(1, NOW + 20, &mut rng).unwrap();
+        if a_first {
+            deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+            deliver_all_at(&mut t, &mut a, NOW + 30, &mut rng);
+        } else {
+            deliver_all_at(&mut t, &mut a, NOW + 30, &mut rng);
+            deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+        }
+        assert!(!a.gif_allowed(1).unwrap(), "A, a_first {a_first}");
+        assert!(!t.gif_allowed(1).unwrap(), "T, a_first {a_first}");
+        assert_eq!(a.gif_settings().unwrap(), t.gif_settings().unwrap());
+    }
+}
+
+#[test]
+fn gif_settings_tie_breaks_on_device_id() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    a.enable_gif_provider(1, 1, NOW + 10, &mut rng).unwrap();
+    t.set_gif_auto_load(true, NOW + 10, &mut rng).unwrap();
+    let winner = if this_device(&a) > this_device(&t) {
+        a.gif_settings().unwrap()
+    } else {
+        t.gif_settings().unwrap()
+    };
+    deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+    deliver_all_at(&mut t, &mut a, NOW + 30, &mut rng);
+    assert_eq!(a.gif_settings().unwrap(), winner);
+    assert_eq!(t.gif_settings().unwrap(), winner);
+}
+
+/// `SyncGifSettings` carrying `settings` dated `at`, sealed by `from` for
+/// `target`.
+fn gif_settings_packet(
+    from: &mut Core,
+    target: &send::Target,
+    settings: crate::gif::GifSettings,
+    at: u64,
+    id: u8,
+    rng: &mut StdRng,
+) -> Packet {
+    let body = ExtContent::SyncGifSettings { settings, at }.to_body();
+    seal_body(from, target, &body, MessageId([id; 16]), rng)
+        .remove(0)
+        .0
+}
+
+#[test]
+fn gif_settings_from_contact_rejected() {
+    let mut p = pair();
+    let a_fp = p.a.fingerprint();
+    let settings = crate::gif::GifSettings {
+        enabled: [(1, consent(this_device(&p.b), NOW))].into(),
+        auto_load: true,
+    };
+    let pkt = gif_settings_packet(
+        &mut p.b,
+        &send::Target::Contact(a_fp),
+        settings,
+        NOW,
+        1,
+        &mut p.rng,
+    );
+    let r = p.a.receive(&pkt.encode(), "t", NOW, &mut p.rng).unwrap();
+    assert_eq!(reason(r), NOT_MINE);
+    assert_eq!(
+        p.a.gif_settings().unwrap(),
+        crate::gif::GifSettings::default()
+    );
+    assert!(!p.a.gif_allowed(1).unwrap());
+}
+
+#[test]
+fn gif_settings_unknown_provider_kept() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let td = this_device(&t);
+    let settings = crate::gif::GifSettings {
+        enabled: [(1, consent(td, NOW)), (7, consent(td, NOW))].into(),
+        auto_load: false,
+    };
+    let pkt = gif_settings_packet(
+        &mut t,
+        &send::Target::OwnDevices,
+        settings.clone(),
+        NOW + 5,
+        1,
+        &mut rng,
+    );
+    assert!(matches!(
+        a.receive(&pkt.encode(), "t", NOW + 5, &mut rng).unwrap(),
+        ReceiveOutcome::Synced {
+            kind: SyncKind::GifSettings,
+            ..
+        }
+    ));
+    assert_eq!(a.gif_settings().unwrap(), settings);
+    assert!(a.gif_allowed(1).unwrap());
+    assert!(!a.gif_allowed(7).unwrap());
+    // The next change on A sends provider 7 on, untouched.
+    a.set_gif_auto_load(true, NOW + 6, &mut rng).unwrap();
+    deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+    let got = t.gif_settings().unwrap();
+    assert_eq!(got.enabled, settings.enabled);
+    assert!(got.auto_load);
+}
+
+#[test]
+fn newly_linked_device_gets_gif_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(77);
+    let (mut a, _) = Core::create(&dir.path().join("a"), &[1; 32], "a", NOW, &mut rng).unwrap();
+    a.enable_gif_provider(1, 1, NOW, &mut rng).unwrap();
+    let offer = a.link_offer(NOW, &mut rng).unwrap();
+    let (mut c, req) =
+        Core::begin_link(&dir.path().join("c"), &[2; 32], &offer, "c", NOW, &mut rng).unwrap();
+    let out = a.link_device(&req, false, NOW, &mut rng).unwrap();
+    c.finish_link(&out.bundle, None, NOW).unwrap();
+    assert!(!c.gif_allowed(1).unwrap());
+    deliver_all_at(&mut a, &mut c, NOW + 1, &mut rng);
+    assert!(c.gif_allowed(1).unwrap());
+    assert_eq!(c.gif_settings().unwrap(), a.gif_settings().unwrap());
+}
+
+#[test]
+fn gif_consent_is_logged() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let consent_event = |enabled, remote| TransparencyEvent::GifConsent {
+        provider: 1,
+        enabled,
+        remote,
+    };
+    a.enable_gif_provider(1, 1, NOW + 10, &mut rng).unwrap();
+    assert_eq!(count_events(&a, |e| *e == consent_event(true, false)), 1);
+    deliver_all_at(&mut a, &mut t, NOW + 30, &mut rng);
+    assert_eq!(count_events(&t, |e| *e == consent_event(true, true)), 1);
+    assert_eq!(
+        count_events(&t, |e| *e
+            == TransparencyEvent::SyncApplied {
+                kind: SyncKind::GifSettings
+            }),
+        1
+    );
+    // A change that leaves the provider as it was logs no consent.
+    a.set_gif_auto_load(true, NOW + 31, &mut rng).unwrap();
+    deliver_all_at(&mut a, &mut t, NOW + 40, &mut rng);
+    assert_eq!(
+        count_events(&t, |e| matches!(e, TransparencyEvent::GifConsent { .. })),
+        1
+    );
+    a.disable_gif_provider(1, NOW + 41, &mut rng).unwrap();
+    assert_eq!(count_events(&a, |e| *e == consent_event(false, false)), 1);
+    deliver_all_at(&mut a, &mut t, NOW + 50, &mut rng);
+    assert_eq!(count_events(&t, |e| *e == consent_event(false, true)), 1);
+}
+
+#[test]
+fn gif_settings_fit_tier_m() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    answer_own_session(&mut a, &mut t, &mut rng);
+    let wide = crate::gif::GifConsent {
+        warning_version: u16::MAX,
+        device: DeviceId([0xff; 16]),
+        at: u64::MAX,
+    };
+    let settings = crate::gif::GifSettings {
+        enabled: (1..=8).map(|p| (p, wide.clone())).collect(),
+        auto_load: true,
+    };
+    let pkt = gif_settings_packet(
+        &mut a,
+        &send::Target::OwnDevices,
+        settings,
+        u64::MAX,
+        1,
+        &mut rng,
+    );
+    assert_eq!(pkt.tier, Tier::M);
+}
+
+#[test]
+fn stale_consent_logs_no_enabled_event() {
+    let (_d, mut a, _t, mut rng) = linked();
+    let on =
+        |e: &TransparencyEvent| matches!(e, TransparencyEvent::GifConsent { enabled: true, .. });
+    // A warning below the minimum does not make Klipy reachable: no claim.
+    a.enable_gif_provider(1, 0, NOW, &mut rng).unwrap();
+    assert!(!a.gif_allowed(1).unwrap());
+    assert_eq!(
+        count_events(&a, |e| matches!(e, TransparencyEvent::GifConsent { .. })),
+        0
+    );
+    a.enable_gif_provider(1, crate::gif::MIN_GIF_WARNING_VERSION, NOW + 1, &mut rng)
+        .unwrap();
+    assert_eq!(count_events(&a, on), 1);
+    // Back to a stale version: effectively off, logged as such.
+    a.enable_gif_provider(1, 0, NOW + 2, &mut rng).unwrap();
+    assert_eq!(count_events(&a, on), 1);
+    assert_eq!(
+        count_events(&a, |e| matches!(
+            e,
+            TransparencyEvent::GifConsent { enabled: false, .. }
+        )),
+        1
+    );
+}
+
+#[test]
+fn unknown_provider_by_sync_logs_no_consent() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let settings = crate::gif::GifSettings {
+        enabled: [(7, consent(this_device(&t), NOW))].into(),
+        auto_load: false,
+    };
+    let pkt = gif_settings_packet(
+        &mut t,
+        &send::Target::OwnDevices,
+        settings,
+        NOW + 5,
+        1,
+        &mut rng,
+    );
+    a.receive(&pkt.encode(), "t", NOW + 5, &mut rng).unwrap();
+    assert!(a.gif_settings().unwrap().enabled.contains_key(&7));
+    assert_eq!(
+        count_events(&a, |e| matches!(e, TransparencyEvent::GifConsent { .. })),
+        0
+    );
+}
+
+#[test]
+fn gif_settings_from_far_future_ignored() {
+    let (_d, mut a, mut t, mut rng) = linked();
+    let settings = crate::gif::GifSettings {
+        enabled: [(1, consent(this_device(&t), NOW))].into(),
+        auto_load: true,
+    };
+    let now = NOW + 5;
+    let too_far = now + super::MAX_FUTURE_SECS + 1;
+    let pkt = gif_settings_packet(
+        &mut t,
+        &send::Target::OwnDevices,
+        settings.clone(),
+        too_far,
+        1,
+        &mut rng,
+    );
+    let r = a.receive(&pkt.encode(), "t", now, &mut rng).unwrap();
+    assert!(!matches!(r, ReceiveOutcome::Synced { .. }), "{r:?}");
+    assert_eq!(
+        a.gif_settings().unwrap(),
+        crate::gif::GifSettings::default()
+    );
+    // At the tolerance it is still applied.
+    let pkt = gif_settings_packet(
+        &mut t,
+        &send::Target::OwnDevices,
+        settings.clone(),
+        now + super::MAX_FUTURE_SECS,
+        2,
+        &mut rng,
+    );
+    a.receive(&pkt.encode(), "t", now, &mut rng).unwrap();
+    assert_eq!(a.gif_settings().unwrap(), settings);
+}
+
+// --- GIF, task 4: daily usage counters.
+
+fn usage_day(day: u32, searches: u32, shown: u32, sent: u32) -> GifUsageDay {
+    GifUsageDay {
+        day,
+        searches,
+        shown,
+        sent,
+        previews: 0,
+    }
+}
+
+#[test]
+fn gif_usage_counts_per_day() {
+    let (_d, mut a) = party("a", 1);
+    assert!(a.gif_usage(7).unwrap().is_empty());
+    a.record_gif_use(GifUse::Search, 10, 0).unwrap();
+    a.record_gif_use(GifUse::Search, 20, 0).unwrap();
+    a.record_gif_use(GifUse::Shown, 30, 0).unwrap();
+    a.record_gif_use(GifUse::Sent, 86_400 + 5, 0).unwrap();
+    assert_eq!(
+        a.gif_usage(7).unwrap(),
+        [usage_day(1, 0, 0, 1), usage_day(0, 2, 1, 0)]
+    );
+    assert_eq!(a.gif_usage(1).unwrap(), [usage_day(1, 0, 0, 1)]);
+    assert!(a.gif_usage(0).unwrap().is_empty());
+    // An earlier day recorded late (clock moved back) lands in its place.
+    a.record_gif_use(GifUse::Shown, 40, 0).unwrap();
+    assert_eq!(
+        a.gif_usage(7).unwrap(),
+        [usage_day(1, 0, 0, 1), usage_day(0, 2, 2, 0)]
+    );
+}
+
+#[test]
+fn gif_usage_keeps_30_days() {
+    let (_d, mut a) = party("a", 1);
+    for day in 0..40u64 {
+        a.record_gif_use(GifUse::Search, day * 86_400, 0).unwrap();
+    }
+    let rows = a.gif_usage(255).unwrap();
+    assert_eq!(rows.len(), 30);
+    assert_eq!(rows[0].day, 39);
+    assert_eq!(rows[29].day, 10);
+}
+
+#[test]
+fn gif_usage_saturates() {
+    let (_d, mut a) = party("a", 1);
+    a.store
+        .put_meta(META_GIF_USAGE_V2, &vec![usage_day(0, u32::MAX, 0, 0)])
+        .unwrap();
+    a.record_gif_use(GifUse::Search, 1, 0).unwrap();
+    assert_eq!(a.gif_usage(1).unwrap(), [usage_day(0, u32::MAX, 0, 0)]);
+}
+
+#[test]
+fn gif_usage_never_stores_content() {
+    // A row holds five numbers and nothing else.
+    let (_d, mut a) = party("a", 1);
+    a.record_gif_use(GifUse::Search, 1, 0).unwrap();
+    let raw: Vec<GifUsageDay> = a.store.get_meta(META_GIF_USAGE_V2).unwrap().unwrap();
+    assert_eq!(postcard::to_allocvec(&raw).unwrap().len(), 6);
+}
+
+#[test]
+fn gif_usage_counts_previews() {
+    let (_d, mut a) = party("a", 1);
+    a.record_gif_use(GifUse::Preview, 10, 0).unwrap();
+    a.record_gif_use(GifUse::Preview, 20, 0).unwrap();
+    a.record_gif_use(GifUse::Search, 30, 0).unwrap();
+    let rows = a.gif_usage(1).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].searches, rows[0].previews), (1, 2));
+}
+
+/// A day is the device's local date: `(now + offset) / 86_400`. 19:00 at
+/// UTC-8 is 03:00 UTC the next day, and still counts on its own date.
+#[test]
+fn gif_usage_counts_on_the_local_day() {
+    const PST: i32 = -8 * 3600;
+    // 2026-11-27 19:00 at UTC-8 = 2026-11-28 03:00 UTC.
+    let evening = 1_795_834_800;
+    let utc_day = u32::try_from(evening / 86_400).unwrap();
+    assert_eq!(local_day(evening, 0), utc_day);
+    assert_eq!(local_day(evening, PST), utc_day - 1);
+    // Ahead of UTC: 20:00 at UTC+2 on the 27th is 18:00 UTC, same date.
+    assert_eq!(local_day(evening - 9 * 3600, 2 * 3600), utc_day - 1);
+    // Past local midnight at UTC+14 while still the evening before in UTC.
+    assert_eq!(local_day(evening - 4 * 3600, 14 * 3600), utc_day);
+    // Before 1970 in local time: day 0, never a wrap.
+    assert_eq!(local_day(100, PST), 0);
+    assert_eq!(local_day(u64::MAX, i32::MAX), u32::MAX);
+    let (_d, mut a) = party("a", 1);
+    a.record_gif_use(GifUse::Search, evening, PST).unwrap();
+    // The next morning, local: a new day.
+    a.record_gif_use(GifUse::Shown, evening + 13 * 3600, PST)
+        .unwrap();
+    let rows = a.gif_usage(7).unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| (r.day, r.searches, r.shown))
+            .collect::<Vec<_>>(),
+        [(utc_day, 0, 1), (utc_day - 1, 1, 0)]
+    );
+}
+
+/// A GIF sent counts on the sender's local day.
+#[test]
+fn gif_sent_counts_on_the_local_day() {
+    let mut p = pair();
+    let b = p.b.fingerprint();
+    let evening = 1_795_834_800;
+    p.a.send_gif(&b, hello_gif(), None, None, evening, -8 * 3600, &mut p.rng)
+        .unwrap();
+    let rows = p.a.gif_usage(1).unwrap();
+    assert_eq!(rows[0].day, local_day(evening, -8 * 3600));
+    assert_eq!(rows[0].sent, 1);
 }

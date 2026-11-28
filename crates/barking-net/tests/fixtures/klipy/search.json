@@ -1,0 +1,94 @@
+{
+  "result": true,
+  "data": {
+    "data": [
+      {
+        "id": 8041071659142944,
+        "slug": "hello-hi-662",
+        "title": "Hello",
+        "file": {
+          "hd": {
+            "mp4": {
+              "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/14/af/MCCBoQlZ.mp4",
+              "width": 498,
+              "height": 498,
+              "size": 119294
+            }
+          },
+          "md": {
+            "mp4": {
+              "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/14/af/V6da8Awi.mp4",
+              "width": 498,
+              "height": 498,
+              "size": 119294
+            }
+          },
+          "sm": {
+            "mp4": {
+              "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/14/af/3c2Tqd1S.mp4",
+              "width": 320,
+              "height": 320,
+              "size": 49565
+            }
+          },
+          "xs": {
+            "mp4": {
+              "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/14/af/La0HaAzw.mp4",
+              "width": 150,
+              "height": 150,
+              "size": 20257
+            }
+          }
+        },
+        "tags": [],
+        "type": "gif",
+        "blur_preview": "data:image/jpeg;base64,/9j//gAQTGF2YzU5LjM3LjEwMAD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcIC"
+      },
+      {
+        "id": 7310946257110385,
+        "slug": "happy-dance-cat-1k8",
+        "title": "Happy Dance",
+        "file": {
+          "hd": {
+            "mp4": {
+              "url": "https://static.klipy.com/ii/4e7bd4c2b8f0a91d3c5e6f708192a3b4/5c/1e/Qw3rTy7u.mp4",
+              "width": 480,
+              "height": 270,
+              "size": 402113
+            }
+          },
+          "md": {
+            "mp4": {
+              "url": "https://static.klipy.com/ii/4e7bd4c2b8f0a91d3c5e6f708192a3b4/5c/1e/Zx8cVb2n.mp4",
+              "width": 480,
+              "height": 270,
+              "size": 402113
+            }
+          },
+          "sm": {
+            "mp4": {
+              "url": "https://static.klipy.com/ii/4e7bd4c2b8f0a91d3c5e6f708192a3b4/5c/1e/Mn4bV6cX.mp4",
+              "width": 320,
+              "height": 180,
+              "size": 118540
+            }
+          },
+          "xs": {
+            "mp4": {
+              "url": "https://static.klipy.com/ii/4e7bd4c2b8f0a91d3c5e6f708192a3b4/5c/1e/Lk9jH3gF.mp4",
+              "width": 150,
+              "height": 84,
+              "size": 30172
+            }
+          }
+        },
+        "tags": [],
+        "type": "gif",
+        "blur_preview": "data:image/jpeg;base64,/9j//gAQTGF2YzU5LjM3LjEwMAD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcIC"
+      }
+    ],
+    "current_page": 1,
+    "per_page": 24,
+    "has_next": true
+  }
+}

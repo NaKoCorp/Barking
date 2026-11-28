@@ -4,7 +4,7 @@
 use barking_core::Core;
 use barking_core::store::{Direction, MessageRow};
 
-use crate::device::{Device, now};
+use crate::device::{Device, now, shown_text};
 use crate::{BarkingError, guard};
 
 /// Characters of the original a quote shows.
@@ -99,7 +99,7 @@ pub(crate) fn quote_of(core: &Core, m: &MessageRow) -> Result<Option<Quote>, Bar
     Ok(Some(Quote {
         id: found.as_ref().map(|row| row.id),
         author_is_me,
-        excerpt: found.map(|row| excerpt(&row.body, QUOTE_CHARS)),
+        excerpt: found.map(|row| excerpt(&shown_text(&row), QUOTE_CHARS)),
     }))
 }
 

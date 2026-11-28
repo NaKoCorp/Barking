@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::contact::ContactCard;
 use crate::emoji;
 use crate::envelope::{Body, MAX_TEXT_LEN};
+use crate::gif::{GifProviderId, GifRef, GifSettings, MAX_GIF_ID_LEN};
 use crate::identity::Fingerprint;
 use crate::store::MessageId;
 use crate::{CoreError, Result};
@@ -42,6 +43,12 @@ pub const KIND_REQUEST_ACCEPTED: u16 = 10;
 pub const KIND_SYNC_INVITE: u16 = 11;
 /// Kind number of [`ExtContent::SyncRefused`].
 pub const KIND_SYNC_REFUSED: u16 = 12;
+/// Kind number of [`ExtContent::Gif`].
+pub const KIND_GIF: u16 = 13;
+/// Kind number of [`ExtContent::SyncGif`].
+pub const KIND_SYNC_GIF: u16 = 14;
+/// Kind number of [`ExtContent::SyncGifSettings`].
+pub const KIND_SYNC_GIF_SETTINGS: u16 = 15;
 
 /// Shortest ephemeral delay: one minute.
 pub const MIN_TTL_SECS: u32 = 60;
@@ -204,6 +211,22 @@ pub enum ExtContent {
     /// A request from `fp` that I refused at `at` on another of my devices
     /// (kind 12).
     SyncRefused { fp: Fingerprint, at: u64 },
+    /// A GIF, answering `reply_to` or not, erased `ttl_secs` after it is
+    /// seen when that is set (kind 13).
+    Gif {
+        gif: GifRef,
+        reply_to: Option<MessageRef>,
+        ttl_secs: Option<u32>,
+    },
+    /// Copy of a `Gif` I sent to `to` from another of my devices (kind 14).
+    SyncGif {
+        to: Fingerprint,
+        gif: GifRef,
+        reply_to: Option<MessageRef>,
+        ttl_secs: Option<u32>,
+    },
+    /// My GIF settings as of `at`, copied to my other devices (kind 15).
+    SyncGifSettings { settings: GifSettings, at: u64 },
 }
 
 impl fmt::Debug for ExtContent {
@@ -230,6 +253,15 @@ impl fmt::Debug for ExtContent {
             }
             ExtContent::SyncInvite { .. } => write!(f, "SyncInvite"),
             ExtContent::SyncRefused { .. } => write!(f, "SyncRefused"),
+            ExtContent::Gif { gif, .. } => {
+                write!(f, "Gif(<{}x{}>)", gif.width, gif.height)
+            }
+            ExtContent::SyncGif { gif, .. } => {
+                write!(f, "SyncGif(<{}x{}>)", gif.width, gif.height)
+            }
+            ExtContent::SyncGifSettings { settings, .. } => {
+                write!(f, "SyncGifSettings(<{} providers>)", settings.enabled.len())
+            }
         }
     }
 }
@@ -252,6 +284,29 @@ fn parse<T: DeserializeOwned>(data: &[u8]) -> Result<T> {
 /// Each emoji of `emojis` in its canonical spelling.
 fn canonical(emojis: &[String]) -> Vec<String> {
     emojis.iter().map(|e| emoji::canonical(e)).collect()
+}
+
+/// A GIF reference with a provider number other than 0 and an identifier of
+/// 1 to [`MAX_GIF_ID_LEN`] printable ASCII bytes; Klipy's are `[a-z0-9-]`.
+pub(crate) fn check_gif(gif: &GifRef) -> Result<()> {
+    if gif.provider == 0 {
+        return Err(CoreError::Malformed("GIF provider"));
+    }
+    if gif.id.is_empty() || gif.id.len() > MAX_GIF_ID_LEN {
+        return Err(CoreError::Malformed("GIF identifier length"));
+    }
+    if !gif.id.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+        return Err(CoreError::Malformed("GIF identifier"));
+    }
+    if GifProviderId::from_u8(gif.provider) == Some(GifProviderId::Klipy)
+        && !gif
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(CoreError::Malformed("Klipy GIF identifier"));
+    }
+    Ok(())
 }
 
 fn check_text(text: &str) -> Result<()> {
@@ -342,6 +397,32 @@ impl ExtContent {
             ExtContent::SyncRefused { fp, at } => {
                 (KIND_SYNC_REFUSED, UnknownPolicy::Ignore, encode(&(fp, at)))
             }
+            ExtContent::Gif {
+                gif,
+                reply_to,
+                ttl_secs,
+            } => (
+                KIND_GIF,
+                UnknownPolicy::ShowUpdate,
+                encode(&(gif, reply_to, ttl_secs)),
+            ),
+            // Shown like the `Gif` it copies: an old client that cannot
+            // decode it must not lose track of my own message.
+            ExtContent::SyncGif {
+                to,
+                gif,
+                reply_to,
+                ttl_secs,
+            } => (
+                KIND_SYNC_GIF,
+                UnknownPolicy::ShowUpdate,
+                encode(&(to, gif, reply_to, ttl_secs)),
+            ),
+            ExtContent::SyncGifSettings { settings, at } => (
+                KIND_SYNC_GIF_SETTINGS,
+                UnknownPolicy::Ignore,
+                encode(&(settings, at)),
+            ),
         };
         Body::Ext {
             kind,
@@ -438,6 +519,27 @@ impl ExtContent {
                 let (fp, at) = parse(data)?;
                 ExtContent::SyncRefused { fp, at }
             }
+            KIND_GIF => {
+                let (gif, reply_to, ttl_secs) = parse(data)?;
+                ExtContent::Gif {
+                    gif,
+                    reply_to,
+                    ttl_secs,
+                }
+            }
+            KIND_SYNC_GIF => {
+                let (to, gif, reply_to, ttl_secs) = parse(data)?;
+                ExtContent::SyncGif {
+                    to,
+                    gif,
+                    reply_to,
+                    ttl_secs,
+                }
+            }
+            KIND_SYNC_GIF_SETTINGS => {
+                let (settings, at) = parse(data)?;
+                ExtContent::SyncGifSettings { settings, at }
+            }
             _ => return Ok(None),
         };
         content.validate()?;
@@ -478,6 +580,22 @@ impl ExtContent {
                     Ok(())
                 } else {
                     Err(CoreError::Malformed("number of replayed messages"))
+                }
+            }
+            ExtContent::Gif { gif, ttl_secs, .. } | ExtContent::SyncGif { gif, ttl_secs, .. } => {
+                check_gif(gif)?;
+                if ttl_in_bounds(*ttl_secs) {
+                    Ok(())
+                } else {
+                    Err(CoreError::Malformed("ephemeral delay"))
+                }
+            }
+            // Provider 0 is refused everywhere; an unknown one is kept.
+            ExtContent::SyncGifSettings { settings, .. } => {
+                if settings.enabled.contains_key(&0) {
+                    Err(CoreError::Malformed("GIF provider"))
+                } else {
+                    Ok(())
                 }
             }
             ExtContent::ContactRequest { .. }
@@ -769,5 +887,174 @@ mod tests {
         assert_eq!(format!("{accepted:?}"), "RequestAccepted(<2 ids>)");
         assert_eq!(format!("{invite:?}"), "SyncInvite");
         assert_eq!(format!("{refused:?}"), "SyncRefused");
+    }
+
+    fn gif_ref(provider: u8, id: &str) -> crate::gif::GifRef {
+        crate::gif::GifRef {
+            provider,
+            id: id.into(),
+            width: 480,
+            height: 270,
+        }
+    }
+
+    #[test]
+    fn gif_round_trips() {
+        let c = ExtContent::Gif {
+            gif: gif_ref(1, "hello-hi-662"),
+            reply_to: None,
+            ttl_secs: Some(3600),
+        };
+        let Body::Ext {
+            kind,
+            unknown,
+            data,
+        } = c.to_body()
+        else {
+            panic!()
+        };
+        assert_eq!((kind, unknown), (KIND_GIF, UnknownPolicy::ShowUpdate));
+        assert_eq!(ExtContent::decode(kind, &data).unwrap(), Some(c));
+    }
+
+    #[test]
+    fn sync_gif_is_show_update() {
+        let c = ExtContent::SyncGif {
+            to: Fingerprint([3; 32]),
+            gif: gif_ref(1, "hello-hi-662"),
+            reply_to: Some(MessageRef {
+                id: [4; 16],
+                by_sender: false,
+            }),
+            ttl_secs: None,
+        };
+        let Body::Ext {
+            kind,
+            unknown,
+            data,
+        } = c.to_body()
+        else {
+            panic!()
+        };
+        assert_eq!((kind, unknown), (KIND_SYNC_GIF, UnknownPolicy::ShowUpdate));
+        assert_eq!(ExtContent::decode(kind, &data).unwrap(), Some(c));
+    }
+
+    #[test]
+    fn sync_gif_settings_is_ignored_by_old_clients() {
+        let mut enabled = std::collections::BTreeMap::new();
+        enabled.insert(
+            1u8,
+            crate::gif::GifConsent {
+                warning_version: 1,
+                device: crate::identity::DeviceId([5; 16]),
+                at: 1_700_000_000,
+            },
+        );
+        let c = ExtContent::SyncGifSettings {
+            settings: crate::gif::GifSettings {
+                enabled,
+                auto_load: true,
+            },
+            at: 1_700_000_001,
+        };
+        let Body::Ext {
+            kind,
+            unknown,
+            data,
+        } = c.to_body()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (kind, unknown),
+            (KIND_SYNC_GIF_SETTINGS, UnknownPolicy::Ignore)
+        );
+        assert_eq!(ExtContent::decode(kind, &data).unwrap(), Some(c));
+    }
+
+    #[test]
+    fn gif_id_rules() {
+        let decode_id = |provider: u8, id: &str| {
+            let c = ExtContent::Gif {
+                gif: gif_ref(provider, id),
+                reply_to: None,
+                ttl_secs: None,
+            };
+            let Body::Ext { kind, data, .. } = c.to_body() else {
+                panic!()
+            };
+            ExtContent::decode(kind, &data)
+        };
+        let bad = |r: Result<Option<ExtContent>>| matches!(r, Err(CoreError::Malformed(_)));
+        assert!(bad(decode_id(0, "abc")), "provider 0");
+        assert!(bad(decode_id(1, "")), "empty id");
+        assert!(bad(decode_id(2, "")), "empty id, unknown provider");
+        assert!(bad(decode_id(1, &"a".repeat(65))), "65 bytes");
+        assert!(decode_id(1, &"a".repeat(64)).unwrap().is_some(), "64 bytes");
+        assert!(bad(decode_id(2, "ab\u{e9}")), "non ASCII");
+        assert!(bad(decode_id(2, "a b")), "space");
+        assert!(bad(decode_id(2, "a\u{7f}")), "DEL");
+        assert!(decode_id(2, "ABC_x").unwrap().is_some(), "unknown provider");
+        assert!(bad(decode_id(1, "ABC")), "Klipy is lowercase only");
+        assert!(bad(decode_id(1, "a_b")), "Klipy has no underscore");
+        assert!(decode_id(1, "a-b-9").unwrap().is_some());
+    }
+
+    #[test]
+    fn sync_gif_settings_refuses_provider_zero() {
+        let consent = crate::gif::GifConsent {
+            warning_version: 1,
+            device: crate::identity::DeviceId([5; 16]),
+            at: 1_700_000_000,
+        };
+        let decode = |providers: &[u8]| {
+            let c = ExtContent::SyncGifSettings {
+                settings: crate::gif::GifSettings {
+                    enabled: providers.iter().map(|p| (*p, consent.clone())).collect(),
+                    auto_load: false,
+                },
+                at: 1_700_000_001,
+            };
+            let Body::Ext { kind, data, .. } = c.to_body() else {
+                panic!()
+            };
+            ExtContent::decode(kind, &data)
+        };
+        assert!(matches!(decode(&[0]), Err(CoreError::Malformed(_))));
+        assert!(matches!(decode(&[0, 1]), Err(CoreError::Malformed(_))));
+        assert!(decode(&[1, 7]).unwrap().is_some(), "unknown provider kept");
+        assert!(decode(&[]).unwrap().is_some(), "nothing enabled");
+    }
+
+    #[test]
+    fn gif_ttl_out_of_bounds_is_malformed() {
+        for ttl in [0, MIN_TTL_SECS - 1, MAX_TTL_SECS + 1, u32::MAX] {
+            let c = ExtContent::Gif {
+                gif: gif_ref(1, "hello-hi-662"),
+                reply_to: None,
+                ttl_secs: Some(ttl),
+            };
+            let Body::Ext { kind, data, .. } = c.to_body() else {
+                panic!()
+            };
+            assert!(
+                matches!(
+                    ExtContent::decode(kind, &data),
+                    Err(CoreError::Malformed(_))
+                ),
+                "{ttl}"
+            );
+        }
+    }
+
+    #[test]
+    fn gif_debug_hides_the_id() {
+        let c = ExtContent::Gif {
+            gif: gif_ref(1, "secret-id"),
+            reply_to: None,
+            ttl_secs: None,
+        };
+        assert!(!format!("{c:?}").contains("secret"));
     }
 }

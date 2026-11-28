@@ -604,6 +604,78 @@ public actor CoreService {
     /// Packets no node accepted yet (the pending packets screen's count).
     public func pendingCount() async throws -> Int { Int(try await call("pending") { try $0.pendingCount() }) }
 
+    // MARK: GIFs (spec GIF §6.6)
+
+    public func gifProvider() async throws -> GifProviderInfo { try await call("gif-provider") { $0.gifProvider() } }
+    public func gifSettings() async throws -> GifSettingsInfo { try await call("gif-settings") { try $0.gifSettings() } }
+    /// After the warning was accepted. The change leaves for my other
+    /// devices with the next sync, started at once (as after a send).
+    /// Returns the settings read in the same call, before that sync holds
+    /// the core (nil if that read failed; the write stands).
+    @discardableResult
+    public func enableGifProvider(_ provider: UInt8, warningVersion: UInt16) async throws -> GifSettingsInfo? {
+        try await gifWrite("gif-enable") { try $0.enableGifProvider(provider: provider, warningVersion: warningVersion) }
+    }
+    /// As `enableGifProvider`.
+    @discardableResult
+    public func disableGifProvider(_ provider: UInt8) async throws -> GifSettingsInfo? {
+        try await gifWrite("gif-disable") { try $0.disableGifProvider(provider: provider) }
+    }
+    /// As `enableGifProvider`.
+    @discardableResult
+    public func setGifAutoLoad(_ on: Bool) async throws -> GifSettingsInfo? {
+        try await gifWrite("gif-auto-load") { try $0.setGifAutoLoad(on: on) }
+    }
+    /// A GIF settings write, the settings read back in the same call, then the sync.
+    private func gifWrite(_ name: String,
+                          _ body: @escaping @Sendable (any DeviceHandle) throws -> Void) async throws -> GifSettingsInfo? {
+        let settings = try await call(name) { device -> GifSettingsInfo? in
+            try body(device)
+            return try? device.gifSettings()
+        }
+        Task { _ = await self.sync(reason: .afterSend) }
+        return settings
+    }
+    // Each call that may reach the provider, or sends a GIF, carries the
+    // phone's UTC offset at that moment: its use counts on the user's own
+    // date (`GifDay`), DST and travel included.
+    public func gifSearch(_ query: String, page: UInt32) async throws -> GifPageInfo {
+        let offset = GifDay.utcOffset()
+        return try await call("gif-search") { try $0.gifSearch(query: query, page: page, utcOffsetSecs: offset) }
+    }
+    public func gifTrending(page: UInt32) async throws -> GifPageInfo {
+        let offset = GifDay.utcOffset()
+        return try await call("gif-trending") { try $0.gifTrending(page: page, utcOffsetSecs: offset) }
+    }
+    /// A picker preview's MP4, from the core (consent, hosts, counted).
+    public func gifPreview(_ url: String) async throws -> Data {
+        let offset = GifDay.utcOffset()
+        return try await call("gif-preview") { try $0.gifPreview(url: url, utcOffsetSecs: offset) }
+    }
+    public func gifData(provider: UInt8, id: String) async throws -> GifMediaInfo {
+        let offset = GifDay.utcOffset()
+        return try await call("gif-data") { try $0.gifData(provider: provider, id: id, utcOffsetSecs: offset) }
+    }
+    /// Queues `gif` for `contact`, as `send` a text (same `replyTo` and
+    /// `ttlSecs` rules); the conversation's rows, read in the same call.
+    @discardableResult
+    public func sendGif(_ gif: GifInfo, to contact: String, replyTo: Int64? = nil,
+                        ttlSecs: UInt32? = nil) async throws -> [Message]? {
+        let offset = GifDay.utcOffset()
+        let rows = try await call("send-gif") { device -> [Message]? in
+            try device.sendGif(contact: contact, gif: gif, utcOffsetSecs: offset, replyTo: replyTo, ttlSecs: ttlSecs)
+            return try? device.messagesWith(contact: contact)
+        }
+        publish(.messages(contact: contact))
+        Task { _ = await self.sync(reason: .afterSend) }
+        return rows
+    }
+    /// Usage of the last `days` local days with a use, newest first (this
+    /// device). `day` is a date (`GifDay`), not an instant.
+    public func gifUsage(days: UInt8) async throws -> [GifUsageDayInfo] {
+        try await call("gif-usage") { try $0.gifUsage(days: days) }
+    }
+
     // MARK: Linking
 
     public func linkOffer() async throws -> Data { try await call("offer") { try $0.linkOffer() } }

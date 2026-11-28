@@ -35,6 +35,9 @@ final class ConversationModel {
         /// When the core erases it (Unix seconds). While unseen, only the
         /// 7-day ceiling.
         var expireAt: UInt64?
+        /// The GIF this message is (its `text` then reads "GIF"); nil for a
+        /// text. Its media is never here: the bubble holds it while shown.
+        var gif: GifInfo?
 
         /// Seconds left before it disappears at `now`: the whole delay while
         /// unseen (the countdown has not started), else until `expireAt`.
@@ -52,9 +55,10 @@ final class ConversationModel {
         /// replied to, reacted to, nor copied.
         var canReplyOrReact: Bool { !local && !needsUpdate }
 
-        /// Copy is not offered on an ephemeral: the pasteboard would keep
-        /// its text after the message is erased.
-        var canCopy: Bool { canReplyOrReact && ttl == nil }
+        /// Copy is not offered on an ephemeral (the pasteboard would keep
+        /// its text after the message is erased), nor on a GIF (its text is
+        /// only the word "GIF").
+        var canCopy: Bool { canReplyOrReact && ttl == nil && gif == nil }
 
         /// The state under the bubble; nil shows the time only.
         var state: DeliveryState? { outgoing ? delivery?.state : nil }
@@ -426,7 +430,7 @@ final class ConversationModel {
         // A failed message with a later sent copy was retried the old way
         // (before Lot M, a new row): hide it, even after reopening.
         let resent = messages.filter { $0.failed && $0.outgoing }.filter { f in
-            messages.contains { $0.outgoing && !$0.failed && $0.id > f.id && $0.body == f.body }
+            messages.contains { $0.outgoing && !$0.failed && $0.id > f.id && $0.body == f.body && $0.gif == f.gif }
         }.map(\.id)
         // The core writes the send's row (and says so) before the send
         // returns: from then on that row stands for the bubble, never both.
@@ -438,7 +442,8 @@ final class ConversationModel {
             Item(id: $0.id, outgoing: $0.outgoing, text: $0.body,
                  at: Date(timeIntervalSince1970: TimeInterval($0.at)), delivery: $0.delivery,
                  quote: $0.replyTo, reactions: $0.reactions, needsUpdate: $0.needsUpdate,
-                 myReactionState: $0.myReactionState, ttl: $0.ttlSecs, seenAt: $0.seenAt, expireAt: $0.expireAt)
+                 myReactionState: $0.myReactionState, ttl: $0.ttlSecs, seenAt: $0.seenAt, expireAt: $0.expireAt,
+                 gif: $0.gif)
         } + [shownAtSend].compactMap { $0 }
         // The row being answered left (deleted): nothing to answer any more.
         if let target = replyingTo, !items.contains(where: { $0.id == target.id }) { replyingTo = nil }
@@ -545,6 +550,55 @@ final class ConversationModel {
             await reload()
         }
     }
+
+    /// Sends a GIF picked in the picker (spec GIF §9.4), as `send` a text:
+    /// to the message being answered and with the delay set, both dropped
+    /// once it is queued and kept if it is not. The draft stays as it is.
+    /// True once the core queued it; false while another send runs.
+    @discardableResult
+    func sendGif(_ gif: GifInfo) async -> Bool {
+        // Never "Try again" when it cannot work: a removed device or
+        // contact says so in the app's own words.
+        guard !removed else {
+            sendError = Self.deviceRemovedText
+            return false
+        }
+        guard !sending else {
+            sendError = "Not sent. Try again in a moment."
+            return false
+        }
+        sending = true
+        defer { sending = false }
+        sendError = nil
+        notice = nil
+        let replyId = replyingTo?.id
+        let delay = ttl
+        do {
+            let rows = try await core.sendGif(gif, to: contact, replyTo: replyId, ttlSecs: delay)
+            replyingTo = nil
+            ttl = nil
+            // Read in the send's own call, before the sync it starts.
+            if let rows { show(rows) }
+            Task { await reload() }
+            return true
+        } catch BarkingError.DeviceRemoved {
+            removed = true
+            sendError = Self.deviceRemovedText
+            return false
+        } catch BarkingError.NotFound {
+            notice = .contactRemoved
+            return false
+        } catch {
+            sendError = "Not sent. Try again in a moment."
+            return false
+        }
+    }
+
+    /// The removed-device banner's title (Settings, Chats), localized by the view.
+    static let deviceRemovedText = "This device was removed from your account"
+
+    /// "Use GIFs" was not stored (spec GIF §9.2): said where sends fail.
+    func gifsNotSaved() { sendError = "Not saved. Try again." }
 
     /// Starts answering the row `id`; ignored for a local row, a placeholder
     /// or a row not shown.

@@ -146,6 +146,9 @@ struct LogDay: Identifiable, Equatable {
     /// Start of the day.
     let date: Date
     let rows: [LogRow]
+    /// "Klipy contacted 14 times · …": the day's calls to the GIF
+    /// provider, counted by the core per day only (spec GIF §6.7).
+    var klipy: String?
 }
 
 /// A line of "Where my data is".
@@ -196,6 +199,11 @@ final class TransparencyModel {
     private var rows: [LogRow] = []
     /// Id of the oldest row loaded: the next page starts before it.
     private var cursor: Int64?
+    /// "Who sees what" for the GIF provider, while GIFs are on.
+    private(set) var gifRow: DataRow?
+    /// This phone's calls to the GIF provider, by local date (`GifDay`).
+    private var gifUsage: [GifUsageDayInfo] = []
+    private var gifProviderName = ""
 
     init(core: CoreService, push: PushToken = .shared,
          protection: @escaping () -> String = { KeyStore.live.protection },
@@ -214,7 +222,52 @@ final class TransparencyModel {
     func load() async {
         dataRows = Self.dataRows(protection: protection())
         await loadWakeUps()
+        await loadGifs()
         await reload()
+    }
+
+    /// The GIF provider's line in "Who sees what" (only while GIFs are on)
+    /// and its calls of the last 30 days with any (whether on now or not).
+    private func loadGifs() async {
+        let provider = try? await core.gifProvider()
+        gifProviderName = provider?.name ?? ""
+        var on = false
+        if provider != nil { on = (try? await core.gifSettings())?.enabled ?? false }
+        gifRow = on ? DataRow(id: "gifs", icon: "photo.on.rectangle", title: gifProviderName,
+                              detail: String(localized: "Your IP address, your GIF searches, and which GIFs you show. It can work out who you exchange GIFs with."))
+            : nil
+        gifUsage = provider == nil ? [] : ((try? await core.gifUsage(days: 30)) ?? [])
+    }
+
+    /// "Klipy contacted 14 times · 9 searches, 0 previews, 5 GIFs shown":
+    /// every call, so the total is the sum.
+    static func klipyLine(name: String, searches: UInt32, previews: UInt32, shown: UInt32,
+                          bundle: Bundle = .main, locale: Locale = .current) -> String {
+        let total = Int(searches) + Int(previews) + Int(shown)
+        return String(localized: "\(name) contacted \(total) times · \(Int(searches)) searches, \(Int(previews)) previews, \(Int(shown)) GIFs shown",
+                      bundle: bundle, locale: locale)
+    }
+
+    /// The journal's days with the provider's line of each day it was
+    /// called. A day with calls and no entry is added, but not beyond the
+    /// entries loaded while older pages remain (it comes with its page).
+    /// Not under "Keys and devices".
+    private func withGifUsage(_ days: [LogDay]) -> [LogDay] {
+        guard filter == .everything else { return days }
+        var days = days
+        for u in gifUsage where u.searches + u.previews + u.shown > 0 {
+            // The core counted on the phone's own date: the same date here.
+            guard let date = GifDay.date(of: u.day, in: calendar) else { continue }
+            let line = Self.klipyLine(name: gifProviderName, searches: u.searches, previews: u.previews,
+                                      shown: u.shown, locale: locale)
+            if let i = days.firstIndex(where: { $0.date == date }) {
+                days[i].klipy = line
+            } else if !canLoadMore || date >= (days.last?.date ?? .distantPast) {
+                let at = days.firstIndex { $0.date < date } ?? days.endIndex
+                days.insert(LogDay(date: date, rows: [], klipy: line), at: at)
+            }
+        }
+        return days
     }
 
     /// Reads the permission, the switch, the subscriptions and the last
@@ -297,7 +350,7 @@ final class TransparencyModel {
         }
         cursor = rows.last?.id
         canLoadMore = page.count == Int(Self.pageSize)
-        days = Self.group(rows, calendar: calendar)
+        days = withGifUsage(Self.group(rows, calendar: calendar))
     }
 
     /// Rows (newest first) by day. Rows are ordered by id, the day groups

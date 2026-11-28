@@ -7,6 +7,7 @@ mod contacts;
 mod delivery;
 mod device;
 mod error;
+mod gif;
 mod identity;
 mod link;
 mod lock;
@@ -33,7 +34,11 @@ pub use delivery::{
 pub use device::{
     Contact, CreatedDevice, Device, DeviceConfig, Message, create_device, device_exists,
 };
-pub use error::{BarkingError, LinkReason};
+pub use error::{BarkingError, GifErrorKind, LinkReason};
+pub use gif::{
+    GifInfo, GifMediaInfo, GifPageInfo, GifProviderInfo, GifResultInfo, GifSettingsInfo,
+    GifUsageDayInfo,
+};
 pub use identity::{MyDeviceInfo, RemovedInfo, bip39_words, recover_device};
 pub use link::{PendingLink, begin_link, inspect_link_request};
 pub use log::{LogEntry, log_arg_tokens, log_keys};

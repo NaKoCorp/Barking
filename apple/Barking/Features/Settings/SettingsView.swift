@@ -8,11 +8,14 @@ struct SettingsView: View {
     let openNetwork: () -> Void
     @Environment(\.openURL) private var openURL
     @State private var model: SettingsModel
+    /// Shared with Settings › GIFs: the row's subtitle follows the switch.
+    @State private var gifs: GifSettingsModel
 
     init(core: CoreService, openNetwork: @escaping () -> Void = {}) {
         self.core = core
         self.openNetwork = openNetwork
         _model = State(initialValue: SettingsModel(core: core))
+        _gifs = State(initialValue: GifSettingsModel(core: core))
     }
 
     var body: some View {
@@ -37,6 +40,12 @@ struct SettingsView: View {
                         FormRow("Notifications", subtitle: "Instant wake-ups and previews", icon: "bell") { RowGlyph() }
                     }
                     .accessibilityIdentifier("settings.notifications")
+                    NavigationLink { GifSettingsView(core: core, model: gifs) } label: {
+                        FormRow(title: Text("GIFs"),
+                                subtitle: gifSubtitle,
+                                icon: "photo.on.rectangle") { RowGlyph() }
+                    }
+                    .accessibilityIdentifier("settings.gifs")
                     NavigationLink { SecuritySettingsView() } label: {
                         FormRow("Security", subtitle: "Lock and erase", icon: "lock") { RowGlyph() }
                     }
@@ -83,7 +92,20 @@ struct SettingsView: View {
             .barkingScreen(tabRoot: true)
             .navigationTitle(Text("Settings"))
         }
-        .task { await model.load() }
+        .task {
+            await model.load()
+            await gifs.load()
+        }
+    }
+
+    /// "On · Klipy sees your IP address", the provider named by the core
+    /// (GIFs read as on only once it is known).
+    private var gifSubtitle: Text {
+        if gifs.enabled, let provider = gifs.provider {
+            Text("On · \(provider.name) sees your IP address")
+        } else {
+            Text("Off (GIFs)")
+        }
     }
 
     /// The language the app shows, in that language ("Français", "English").
