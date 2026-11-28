@@ -248,6 +248,10 @@ struct ConversationView: View {
             // GIFs turned on or off, auto-play changed (here or in the sheet).
             .onChange(of: [gifs.enabled, gifs.autoLoad]) { syncGifs() }
             .onChange(of: model.items.compactMap(\.gif)) { gifLoads.pinHint(gifItems) }
+            // Low Data Mode on or off, or the path known at last.
+            .onReceive(NotificationCenter.default.publisher(for: GifNetworkPath.changed)) { _ in
+                gifLoads.pathChanged()
+            }
     }
 
     /// The GIF button: the picker when GIFs are on, otherwise the warning,
@@ -452,7 +456,7 @@ struct ConversationView: View {
                 }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityValue(Text(verbatim: Self.spoken(item, now: .now, bundle: strings, locale: locale)))
+            .accessibilityValue(Text(verbatim: spokenValue(item, gif: gifState, strings: strings)))
             .accessibilityHint(bubbleHint(item, gif: gifState, saved: saved))
             .accessibilityIdentifier(item.gif == nil ? "" : GifBubble.identifier(gifState))
             .accessibilityActions {
@@ -500,9 +504,19 @@ struct ConversationView: View {
     /// What a double-tap does: a GIF's own hint until it is loaded, then
     /// the message's, as any bubble.
     private func bubbleHint(_ item: ConversationModel.Item, gif: GifLoad?, saved: Bool) -> Text {
-        if item.gif != nil, let hint = GifBubble.hint(gif) { return Text(hint) }
+        if item.gif != nil, let hint = GifBubble.hintKey(gif, now: .now) { return Text(hint) }
         if item.gif != nil, gif?.media == nil { return Text(verbatim: "") }
         return saved ? Text("Opens the message details.") : Text(verbatim: "")
+    }
+
+    /// The bubble's value: a GIF's caption first (what is shown), then the
+    /// time and state as for any bubble.
+    private func spokenValue(_ item: ConversationModel.Item, gif: GifLoad?, strings: Bundle) -> String {
+        let base = Self.spoken(item, now: .now, bundle: strings, locale: locale)
+        guard item.gif != nil, let caption = GifBubble.caption(gif, providerName: gifs.provider?.name ?? "",
+                                                                now: .now, bundle: strings, locale: locale)
+        else { return base }
+        return "\(caption), \(base)"
     }
 
     /// The row above the menu: the six frequent emoji and "+" (§5.6). One of

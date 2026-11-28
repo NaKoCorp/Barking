@@ -69,11 +69,13 @@ final class GifBubbleStateTests: XCTestCase {
             GifLoad.after(BarkingError.Gif(kind: kind, retryAfterSecs: secs), now: now)
         }
         XCTAssertEqual(after(.notFound), .gone)
-        XCTAssertEqual(after(.tooLarge), .gone)
+        // Too large or unreadable: a retry would get the same, and the GIF
+        // is not gone either.
+        XCTAssertEqual(after(.tooLarge), .cannotLoad)
+        XCTAssertEqual(after(.malformed), .cannotLoad)
         XCTAssertEqual(after(.offline), .failed)
         XCTAssertEqual(after(.unreachable), .failed)
         XCTAssertEqual(after(.notConfigured), .failed)
-        XCTAssertEqual(after(.malformed), .failed)
         XCTAssertEqual(after(.rateLimited, 60), .rateLimited(until: Date(timeIntervalSince1970: 1_060)))
         XCTAssertEqual(after(.notEnabled), .off)
         XCTAssertEqual(GifLoad.after(BarkingError.Storage(detail: "disk"), now: now), .failed)
@@ -85,6 +87,33 @@ final class GifBubbleStateTests: XCTestCase {
         XCTAssertEqual(GifLoad.minutesLeft(until: now.addingTimeInterval(60), now: now), 1)
         XCTAssertEqual(GifLoad.minutesLeft(until: now.addingTimeInterval(61), now: now), 2)
         XCTAssertEqual(GifLoad.minutesLeft(until: now.addingTimeInterval(-5), now: now), 0)
+    }
+
+    // MARK: Low Data Mode before the phone's path is known
+
+    /// No path reported yet counts as Low Data Mode: never fail open.
+    func testUnknownPathCountsAsConstrained() {
+        XCTAssertTrue(GifNetworkPath.isConstrained(known: false, constrained: false))
+        XCTAssertTrue(GifNetworkPath.isConstrained(known: true, constrained: true))
+        XCTAssertFalse(GifNetworkPath.isConstrained(known: true, constrained: false))
+    }
+
+    /// Auto-play on, path unknown at first: tap to load; once the path says
+    /// the phone is not constrained, the GIFs shown load.
+    func testAutoPlayWaitsForThePath() async {
+        let d = FakeDevice()
+        let l = loads(d)
+        var constrained = true
+        l.isConstrained = { constrained }
+        l.configure(enabled: true, autoLoad: true, provider: klipy)
+        l.appeared(1, gif: gif)
+        XCTAssertEqual(l.state(1), .tapToLoad)
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(d.gifDataCalls, [])
+        constrained = false
+        l.pathChanged()
+        await eventually { d.gifDataCalls.count == 1 }
+        XCTAssertEqual(d.gifDataCalls, ["wave-9"])
     }
 
     // MARK: When the provider is asked
@@ -308,6 +337,20 @@ final class GifBubbleStateTests: XCTestCase {
         XCTAssertEqual(d.gifDataCalls.count, 2)
     }
 
+    /// Too large or unreadable: "Couldn't load", without Retry.
+    func testCannotLoadOffersNoRetry() async {
+        let d = FakeDevice()
+        d.gifDataError = BarkingError.Gif(kind: .tooLarge, retryAfterSecs: 0)
+        let l = loads(d)
+        l.configure(enabled: true, autoLoad: false, provider: klipy)
+        l.appeared(1, gif: gif)
+        XCTAssertTrue(l.load(1))
+        await eventually { l.state(1) != .loading }
+        XCTAssertEqual(l.state(1), .cannotLoad)
+        XCTAssertFalse(l.load(1))
+        XCTAssertEqual(d.gifDataCalls.count, 1)
+    }
+
     func testUnknownProviderAsksNothing() async {
         let d = FakeDevice()
         let l = loads(d)
@@ -340,6 +383,34 @@ final class GifBubbleStateTests: XCTestCase {
         XCTAssertNil(l.hintAnchor, "the hint moved to another GIF")
     }
 
+    /// Never under a GIF that cannot load: gone, unknown, or failing for good.
+    func testAutoPlayHintOnlyUnderALoadableGif() async {
+        let d = FakeDevice()
+        d.gifDataError = BarkingError.Gif(kind: .notFound, retryAfterSecs: 0)
+        let l = loads(d)
+        l.configure(enabled: true, autoLoad: false, provider: klipy)
+        l.appeared(1, gif: gif)
+        XCTAssertTrue(l.load(1))
+        await eventually { l.state(1) != .loading }
+        XCTAssertEqual(l.state(1), .gone)
+        l.pinHint([(1, gif), (2, gif)])
+        XCTAssertEqual(l.hintAnchor, 2, "pinned under a GIF no longer available")
+    }
+
+    /// Pinned, then found gone: the hint leaves (and does not move on).
+    func testAutoPlayHintLeavesAGoneGif() async {
+        let d = FakeDevice()
+        d.gifDataError = BarkingError.Gif(kind: .notFound, retryAfterSecs: 0)
+        let l = loads(d)
+        l.configure(enabled: true, autoLoad: false, provider: klipy)
+        l.pinHint([(1, gif), (2, gif)])
+        XCTAssertEqual(l.hintAnchor, 1)
+        l.appeared(1, gif: gif)
+        XCTAssertTrue(l.load(1))
+        await eventually { l.state(1) != .loading }
+        XCTAssertNil(l.hintAnchor)
+    }
+
     /// Not while GIFs are off (that would be a nudge, spec §9.6), nor with
     /// auto-play on.
     func testNoAutoPlayHintWhenOffOrAlreadyOn() {
@@ -357,11 +428,41 @@ final class GifBubbleStateTests: XCTestCase {
 
     // MARK: Words
 
+    /// What VoiceOver reads as the bubble's value: the caption shown.
+    func testCaptionsForVoiceOver() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        func caption(_ s: GifLoad?) -> String? {
+            GifBubble.caption(s, providerName: "Klipy", now: now, bundle: .main, locale: Locale(identifier: "en"))
+        }
+        XCTAssertEqual(caption(.off), "GIF · from Klipy, off")
+        XCTAssertEqual(caption(.unavailable), "GIF unavailable")
+        XCTAssertEqual(caption(.gone), "GIF no longer available")
+        XCTAssertEqual(caption(.failed), "Couldn't load · Retry")
+        XCTAssertEqual(caption(.cannotLoad), "Couldn't load")
+        XCTAssertEqual(caption(.rateLimited(until: now.addingTimeInterval(60))), "Klipy is busy · Retry in 1 min")
+        XCTAssertEqual(caption(.tapToLoad), "Tap to load")
+        XCTAssertNil(caption(.loading))
+        XCTAssertNil(caption(nil))
+    }
+
+    /// "Double-tap to load" only where a tap loads.
+    func testHintOnlyWhereATapLoads() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(GifBubble.hintKey(.off, now: now), "GIFs are off")
+        XCTAssertEqual(GifBubble.hintKey(.tapToLoad, now: now), "Double-tap to load")
+        XCTAssertEqual(GifBubble.hintKey(.failed, now: now), "Double-tap to load")
+        XCTAssertNil(GifBubble.hintKey(.rateLimited(until: now.addingTimeInterval(30)), now: now))
+        XCTAssertEqual(GifBubble.hintKey(.rateLimited(until: now), now: now), "Double-tap to load")
+        XCTAssertNil(GifBubble.hintKey(.cannotLoad, now: now))
+        XCTAssertNil(GifBubble.hintKey(.gone, now: now))
+        XCTAssertNil(GifBubble.hintKey(.unavailable, now: now))
+    }
+
     func testBubbleStringsInFrench() throws {
         let fr = try XCTUnwrap(Bundle.main.path(forResource: "Localizable", ofType: "strings", inDirectory: nil,
                                                 forLocalization: "fr").flatMap { NSDictionary(contentsOfFile: $0) })
         for key in ["GIF unavailable", "GIF · from %@, off", "Tap to load", "GIF no longer available",
-                    "Couldn't load · Retry", "%@ is busy · Retry in %lld min", "Play GIFs automatically ›",
+                    "Couldn't load · Retry", "Couldn't load", "%@ is busy · Retry in %lld min", "Play GIFs automatically ›",
                     "Double-tap to load", "GIFs are off", "GIF: %@", "Plays the GIF.", "Play"] {
             XCTAssertNotNil(fr[key], "missing French for \(key)")
         }

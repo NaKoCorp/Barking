@@ -797,6 +797,7 @@
 "Tap to load" = "Toucher pour charger";
 "GIF no longer available" = "GIF plus disponible";
 "Couldn't load · Retry" = "Chargement impossible · Réessayer";
+"Couldn't load" = "Chargement impossible";
 "%@ is busy · Retry in %lld min" = "%1$@ est surchargé · Réessayer dans %2$lld min";
 "Play GIFs automatically ›" = "Lire les GIF automatiquement ›";
 "Double-tap to load" = "Toucher deux fois pour charger";

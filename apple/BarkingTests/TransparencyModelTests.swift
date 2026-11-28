@@ -394,8 +394,8 @@ final class TransparencyModelTests: XCTestCase {
         XCTAssertEqual(line(1, 0, 0, en), "Klipy contacted 1 time · 1 search, 0 previews, 0 GIFs shown")
         XCTAssertEqual(line(9, 2, 5, en), "Klipy contacted 16 times · 9 searches, 2 previews, 5 GIFs shown")
         XCTAssertEqual(line(0, 1, 1, en), "Klipy contacted 2 times · 0 searches, 1 preview, 1 GIF shown")
-        XCTAssertEqual(line(1, 0, 0, fr), "Klipy contacté 1 fois · 1 recherche, 0 aperçu, 0 GIF affiché")
-        XCTAssertEqual(line(9, 2, 5, fr), "Klipy contacté 16 fois · 9 recherches, 2 aperçus, 5 GIF affichés")
+        XCTAssertEqual(line(1, 0, 0, fr), "Klipy a été contacté 1 fois · 1 recherche, 0 aperçu, 0 GIF affiché")
+        XCTAssertEqual(line(9, 2, 5, fr), "Klipy a été contacté 16 fois · 9 recherches, 2 aperçus, 5 GIF affichés")
     }
 
     /// A day with GIF calls and no journal entry still shows, in its place.

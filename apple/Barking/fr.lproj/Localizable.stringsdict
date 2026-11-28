@@ -866,7 +866,7 @@
 	<key>%@ contacted %lld times · %lld searches, %lld previews, %lld GIFs shown</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>
-		<string>%1$@ contacté %2$#@n@ · %3$#@s@, %4$#@p@, %5$#@g@</string>
+		<string>%1$@ a été contacté %2$#@n@ · %3$#@s@, %4$#@p@, %5$#@g@</string>
 		<key>n</key>
 		<dict>
 			<key>NSStringFormatSpecTypeKey</key>

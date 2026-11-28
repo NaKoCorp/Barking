@@ -31,6 +31,13 @@ struct TransparencyView: View {
 
                 wakeUps
 
+                // Its own section, outside the wake-ups and their notes: the
+                // GIF provider sees which GIFs are shown (spec GIF §6.7).
+                if let row = model.gifRow {
+                    heading("GIFs")
+                    card(id: "transparency.who.gifs") { dataRow(row) }
+                }
+
                 heading("Journal")
                 BarkingSegmented("Journal filter",
                                  selection: Binding(get: { model.filter }, set: { f in Task { await model.setFilter(f) } }),
@@ -110,12 +117,6 @@ struct TransparencyView: View {
             .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
         Text("Limit: a node that cooperates with the relay or with Apple can link a mailbox to this iPhone. Turning instant notifications off prevents it.")
             .font(BarkingFont.sans(.caption, size: 12.5)).foregroundStyle(Color.fgMuted)
-        // Its own card, after the notes above: the GIF provider sees which
-        // GIFs are shown, so "none of them sees the content" is not said of it.
-        if let row = model.gifRow {
-            card(id: "transparency.who.gifs") { dataRow(row) }
-                .padding(.top, Space.s2)
-        }
 
         card(id: "transparency.wake.last") {
             dataRow(DataRow(id: "last", icon: "clock", title: String(localized: "Last wake handled"), detail: lastWakeText))

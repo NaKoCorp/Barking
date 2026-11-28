@@ -179,7 +179,8 @@ final class GifUITests: XCTestCase {
         let bubble = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "gifBubble.", "GIF")).firstMatch
         XCTAssertTrue(bubble.waitForExistence(timeout: 5), "no GIF bubble")
-        XCTAssertTrue(bubble.waitUntil({ ($0.value as? String ?? "").hasPrefix("Pending since") }),
+        // The value: the caption shown ("Tap to load"), then the state.
+        XCTAssertTrue(bubble.waitUntil({ ($0.value as? String ?? "").contains("Pending since") }),
                       "not my sent GIF: \(bubble.value ?? "nil")")
     }
 
@@ -215,6 +216,9 @@ final class GifUITests: XCTestCase {
         XCTAssertTrue(off.firstMatch.waitForExistence(timeout: 5), "no GIF bubble off")
         XCTAssertEqual(off.count, 3)
         XCTAssertEqual(off.firstMatch.label, "GIF")
+        // The caption shown, read as the bubble's value.
+        XCTAssertTrue((off.firstMatch.value as? String ?? "").hasPrefix("GIF · from Klipy, off"),
+                      "caption: \(off.firstMatch.value ?? "nil")")
         XCTAssertEqual(bubbles(app, "loading").count, 0)
         app.navigationBars.buttons.firstMatch.tap()
         app.tabBars.buttons["Settings"].tap()
@@ -244,6 +248,9 @@ final class GifUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["gifPicker"].exists, "the picker opened")
         XCTAssertEqual(bubbles(app, "loaded").count, 1, "more than the GIF tapped loaded")
         XCTAssertEqual(bubbles(app, "tapToLoad").count, 2)
+        // Loaded, a tap opens the message, as for any bubble.
+        bubbles(app, "loaded").firstMatch.tap()
+        XCTAssertTrue(app.buttons["sheet.delete"].waitForExistence(timeout: 5), "the message did not open")
     }
 
     /// Auto-play off: one "Play GIFs automatically ›" for the conversation,

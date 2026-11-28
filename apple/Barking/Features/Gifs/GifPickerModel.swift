@@ -184,13 +184,17 @@ final class GifPickerModel {
 }
 
 /// Whether the phone has a network path at all, and whether it is in Low
-/// Data Mode, watched for the app's life. Unknown until the first update:
-/// taken as online and not constrained then.
+/// Data Mode, watched for the app's life (started at launch). Until the
+/// first update: online (the picker tries, the core says if it fails), but
+/// constrained, so no GIF loads on its own before the path is known.
 final class GifNetworkPath: @unchecked Sendable {
     static let shared = GifNetworkPath()
+    /// Posted on the main queue when the path changed.
+    static let changed = Notification.Name("barking.gif.pathChanged")
     private let monitor = NWPathMonitor()
     private let lock = NSLock()
     private var satisfied = true
+    private var known = false
     private var constrained = false
 
     private init() {
@@ -199,12 +203,20 @@ final class GifNetworkPath: @unchecked Sendable {
             self.lock.withLock {
                 self.satisfied = path.status == .satisfied
                 self.constrained = path.isConstrained
+                self.known = true
             }
+            DispatchQueue.main.async { NotificationCenter.default.post(name: Self.changed, object: nil) }
         }
         monitor.start(queue: DispatchQueue(label: "barking.gif.path"))
     }
 
+    /// Starts watching, so the path is known by the time a GIF shows.
+    static func start() { _ = shared }
+
     var isOnline: Bool { lock.withLock { satisfied } }
     /// Low Data Mode (`NWPath.isConstrained`): no GIF loads on its own.
-    var isConstrained: Bool { lock.withLock { constrained } }
+    var isConstrained: Bool { lock.withLock { Self.isConstrained(known: known, constrained: constrained) } }
+
+    /// A path not known yet counts as constrained: never fail open.
+    static func isConstrained(known: Bool, constrained: Bool) -> Bool { !known || constrained }
 }

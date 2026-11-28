@@ -18,6 +18,10 @@ enum GifLoad: Equatable {
     case gone
     /// Offline, or the provider unreachable: a retry is offered.
     case failed
+    /// Too large, or a reply this version cannot read: "Couldn't load",
+    /// without Retry (it would get the same). Not "no longer available":
+    /// the GIF may well exist.
+    case cannotLoad
     /// The provider's quota: a retry is offered from `until`.
     case rateLimited(until: Date)
 
@@ -27,15 +31,24 @@ enum GifLoad: Equatable {
         guard case BarkingError.Gif(let kind, let secs) = error else { return .failed }
         switch kind {
         case .notEnabled: return .off
-        case .notFound, .tooLarge: return .gone
+        case .notFound: return .gone
+        case .tooLarge, .malformed: return .cannotLoad
         case .rateLimited: return .rateLimited(until: now.addingTimeInterval(TimeInterval(max(secs, 1))))
-        case .offline, .unreachable, .notConfigured, .malformed: return .failed
+        case .offline, .unreachable, .notConfigured: return .failed
         }
     }
 
     /// The wait before a retry, in whole minutes, rounded up.
     static func minutesLeft(until: Date, now: Date) -> Int {
         max(0, Int((until.timeIntervalSince(now) / 60).rounded(.up)))
+    }
+
+    /// A tap may still load it (now or once the quota's wait is over).
+    var loadable: Bool {
+        switch self {
+        case .tapToLoad, .loading, .failed, .rateLimited: true
+        default: false
+        }
     }
 
     /// The MP4, once loaded.
@@ -91,6 +104,12 @@ final class GifLoads {
     /// A request for `id` is on the way.
     func isLoading(_ id: Int64) -> Bool { inFlight[id] != nil }
 
+    /// The phone's path changed (Low Data Mode on or off, or known at
+    /// last): the bubbles on screen follow, as after a settings change.
+    func pathChanged() {
+        for (id, gif) in shown { follow(id, gif) }
+    }
+
     /// The settings as the core holds them. The bubbles on screen follow:
     /// GIFs off drops what was loaded; auto-play on loads what is shown.
     func configure(enabled: Bool, autoLoad: Bool, provider: GifProviderInfo?) {
@@ -141,14 +160,14 @@ final class GifLoads {
     /// GIFs are on and auto-play is off: never a nudge to turn GIFs on.
     func pinHint(_ gifs: [(id: Int64, gif: GifInfo)]) {
         guard hintPinned == nil, let settings, let provider, settings.enabled, !settings.autoLoad else { return }
-        hintPinned = gifs.first { $0.gif.provider == provider.id && states[$0.id]?.media == nil }?.id
+        hintPinned = gifs.first { $0.gif.provider == provider.id && states[$0.id]?.loadable ?? true }?.id
     }
 
-    /// The GIF the hint shows under now; nil once that GIF is loaded or
-    /// auto-play is on.
+    /// The GIF the hint shows under now: one a tap can still load. Nil once
+    /// that GIF is loaded or cannot load, or with auto-play on.
     var hintAnchor: Int64? {
         guard let id = hintPinned, let settings, settings.enabled, !settings.autoLoad,
-              states[id]?.media == nil else { return nil }
+              states[id]?.loadable ?? true else { return nil }
         return id
     }
 
@@ -302,6 +321,10 @@ struct GifBubble: View {
         if case .loaded(let data, _, let title) = state {
             neutral
                 .overlay { GifPlayer(data: data, play: playing) }
+                // Loaded, a tap opens the message (`action`), as a text
+                // bubble's does; the play button above keeps its own tap.
+                .contentShape(.rect)
+                .onTapGesture(perform: action)
                 .overlay {
                     if still && !playing {
                         Button { playing = true } label: {
@@ -342,48 +365,66 @@ struct GifBubble: View {
 
     @ViewBuilder private var caption: some View {
         let muted = Color.fgMuted
+        let text = Self.caption(state, providerName: providerName, now: .now, bundle: .strings(for: locale),
+                                locale: locale) ?? ""
         switch state {
         case nil, .loaded?:
             EmptyView()
         case .loading?:
             if spinner { ProgressView().controlSize(.small) }
-        case .unavailable?:
-            line("GIF unavailable", color: muted)
         case .off?:
             VStack(spacing: Space.s2) {
                 Text(verbatim: "GIF").font(BarkingFont.mono(.caption, size: 12)).fontWeight(.semibold)
                     .foregroundStyle(muted)
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .overlay(RoundedRectangle(cornerRadius: Radius.tag).stroke(muted, lineWidth: 1))
-                line("GIF · from \(providerName), off", color: muted)
+                line(text, color: muted)
             }
         case .tapToLoad?:
-            Label { Text("Tap to load") } icon: { Image(systemName: "arrow.down.circle") }
+            Label { Text(verbatim: text) } icon: { Image(systemName: "arrow.down.circle") }
                 .font(BarkingFont.sans(.footnote, size: 13, weight: .semibold)).foregroundStyle(Color.accent)
-        case .gone?:
-            line("GIF no longer available", color: muted)
         case .failed?:
-            line("Couldn't load · Retry", color: Color.accent)
-        case .rateLimited(let until)?:
-            let minutes = max(1, GifLoad.minutesLeft(until: until, now: .now))
-            line("\(providerName) is busy · Retry in \(minutes) min", color: retryOpen ? Color.accent : muted)
+            line(text, color: Color.accent)
+        case .rateLimited?:
+            line(text, color: retryOpen ? Color.accent : muted)
+        case .unavailable?, .gone?, .cannotLoad?:
+            line(text, color: muted)
         }
     }
 
-    private func line(_ text: LocalizedStringKey, color: Color) -> some View {
-        Text(text).font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(color)
+    private func line(_ text: String, color: Color) -> some View {
+        Text(verbatim: text).font(BarkingFont.sans(.footnote, size: 13)).foregroundStyle(color)
             .multilineTextAlignment(.center)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// The caption shown in `state` (spec GIF §7), also VoiceOver's value
+    /// for the bubble; nil when none shows.
+    static func caption(_ state: GifLoad?, providerName: String, now: Date, bundle: Bundle = .main,
+                        locale: Locale = .current) -> String? {
+        switch state {
+        case nil, .loading?, .loaded?: nil
+        case .off?: String(localized: "GIF · from \(providerName), off", bundle: bundle, locale: locale)
+        case .tapToLoad?: String(localized: "Tap to load", bundle: bundle, locale: locale)
+        case .unavailable?: String(localized: "GIF unavailable", bundle: bundle, locale: locale)
+        case .gone?: String(localized: "GIF no longer available", bundle: bundle, locale: locale)
+        case .failed?: String(localized: "Couldn't load · Retry", bundle: bundle, locale: locale)
+        case .cannotLoad?: String(localized: "Couldn't load", bundle: bundle, locale: locale)
+        case .rateLimited(let until)?:
+            String(localized: "\(providerName) is busy · Retry in \(max(1, GifLoad.minutesLeft(until: until, now: now))) min",
+                   bundle: bundle, locale: locale)
+        }
     }
 }
 
 extension GifBubble {
-    /// VoiceOver's hint for the bubble in `state` (spec GIF §7): nil when
-    /// nothing is to be done but open the message.
-    static func hint(_ state: GifLoad?) -> LocalizedStringKey? {
+    /// VoiceOver's hint for the bubble in `state` (spec GIF §7): "Double-tap
+    /// to load" only where a tap loads now; nil otherwise.
+    static func hintKey(_ state: GifLoad?, now: Date) -> LocalizedStringKey? {
         switch state {
         case .off?: "GIFs are off"
-        case .tapToLoad?, .failed?, .rateLimited?: "Double-tap to load"
+        case .tapToLoad?, .failed?: "Double-tap to load"
+        case .rateLimited(let until)? where now >= until: "Double-tap to load"
         default: nil
         }
     }
@@ -399,6 +440,7 @@ extension GifBubble {
         case .unavailable?: "unavailable"
         case .gone?: "gone"
         case .failed?: "failed"
+        case .cannotLoad?: "cannotLoad"
         case .rateLimited?: "rateLimited"
         }
         return "gifBubble.\(name)"
